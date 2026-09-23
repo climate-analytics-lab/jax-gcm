@@ -52,6 +52,12 @@ terms:
     _target_: jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection
   echam_1m_microphysics:
     _target_: jcm.physics.clouds.echam_1m.Echam1MMicrophysics
+  # Publishes the package-independent surface-exchange coupling struct
+  # (jax-gcm#754; docs/source/design/surface_exchange.md). Placed after the
+  # microphysics so the stratiform precipitation it reads is the same
+  # step's.
+  echam_surface_exchange:
+    _target_: jcm.physics.surface.echam.surface_exchange_publisher.EchamSurfaceExchange
   hines_gwd:
     _target_: jcm.physics.gravity_waves.hines.HinesGwd
   lott_miller_sso:

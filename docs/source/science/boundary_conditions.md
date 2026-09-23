@@ -14,9 +14,18 @@ in ``jcm/data/input_resolution.py``, driven by the Hydra ``forcing`` group
   ``jcm/config/forcing/era5.yaml`` are
   transient yearly bundles: one file per year, a ``years`` range, and
   ``align: by_date_interp`` (linear interpolation between month-start / mid-month
-  boundary samples). Plain single-file paths use ``align: auto``, which chooses
-  ``wrap_year`` (climatology, indexed by fraction-of-year) for ≤~1-year spans and
-  ``by_date`` otherwise.
+  boundary samples). Whether a file is a climatology or dated is **declared**,
+  never inferred from its time axis (``jcm/forcing.py::resolve_align``):
+  ``align: auto`` resolves only data-mirror / packaged products from the kind
+  the mirror manifest records, and a user file sets ``wrap_year`` /
+  ``by_date`` / ``by_date_interp``. A ``wrap_year`` climatology is replayed on
+  the real Gregorian calendar (``jcm/forcing.py::_select_time_series``): twelve
+  records are January–December, held from the 1st of each month; 365/366
+  records are a nominal-date daily table; other lengths keep equal fractions of
+  the actual year. A twelve-record surface climatology is first expanded to
+  daily values by periodic Dec/Jan linear interpolation
+  (``jcm/data/bc/interpolate.py::interpolate_to_daily``), as SPEEDY treats its
+  monthly boundary means.
 - **Per-product coverage clamping.** ``jcm/forcing.py::expand_yearly_files``
   pads the requested range by one year each side, **clipped to the product's
   ``available_years``**, so ``by_date_interp`` has bracketing samples across the

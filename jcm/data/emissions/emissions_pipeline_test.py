@@ -53,7 +53,8 @@ class ContractRoundTripTest(unittest.TestCase):
         self.assertIsNone(read_anthropogenic_emissions(ds))
 
     def test_reads_all_channels(self):
-        emis = read_anthropogenic_emissions(_synthetic_emissions_ds())
+        emis = read_anthropogenic_emissions(_synthetic_emissions_ds(),
+                                            align_mode="wrap_year")
         self.assertEqual(
             set(emis),
             {"emis_surface_combustion_so2", "emis_surface_combustion_bc",
@@ -63,7 +64,8 @@ class ContractRoundTripTest(unittest.TestCase):
     def test_select_slices_channels_to_grid(self):
         # After select(date), each per-channel TimeSeries collapses to the bare
         # (lon, lat) grid the term consumes (ravels to ncols = lon*lat).
-        emis = read_anthropogenic_emissions(_synthetic_emissions_ds())
+        emis = read_anthropogenic_emissions(_synthetic_emissions_ds(),
+                                            align_mode="wrap_year")
         forcing = ForcingData.zeros((_NLON, _NLAT)).copy(
             anthropogenic_emissions=emis)
         sliced = forcing.select(self._date())
@@ -86,7 +88,7 @@ class ContractRoundTripTest(unittest.TestCase):
         # A time-less emissions field is carried as a bare array, still sliced
         # to a no-op by select.
         ds = _synthetic_emissions_ds().isel(time=0)  # drop time dim
-        emis = read_anthropogenic_emissions(ds)
+        emis = read_anthropogenic_emissions(ds, align_mode="wrap_year")
         bc = emis["emis_surface_combustion_bc"]
         self.assertEqual(bc.shape, (_NLON, _NLAT))
 
@@ -123,11 +125,13 @@ class PreSpeciatedContractTest(unittest.TestCase):
         self.assertIsNone(read_prescribed_aerosol_emissions(ds))
 
     def test_keys_strip_prefix(self):
-        emis = read_prescribed_aerosol_emissions(_synthetic_speciated_ds())
+        emis = read_prescribed_aerosol_emissions(
+            _synthetic_speciated_ds(), align_mode="wrap_year")
         self.assertEqual(set(emis), {"m_bc_pcm", "m_so4_acc"})
 
     def test_select_slices_surface_and_volume(self):
-        emis = read_prescribed_aerosol_emissions(_synthetic_speciated_ds())
+        emis = read_prescribed_aerosol_emissions(
+            _synthetic_speciated_ds(), align_mode="wrap_year")
         forcing = ForcingData.zeros((_NLON, _NLAT)).copy(
             prescribed_aerosol_emissions=emis)
         sliced = forcing.select(self._date())
@@ -161,7 +165,8 @@ class EmissionsRaiseBurdenTest(unittest.TestCase):
             # A strong, uniform anthropogenic source so the signal is
             # unambiguous over the few-step run.
             emis = read_anthropogenic_emissions(
-                _synthetic_emissions_ds(bc=5.0e-9, oc=5.0e-9, so2=5.0e-9))
+                _synthetic_emissions_ds(bc=5.0e-9, oc=5.0e-9, so2=5.0e-9),
+                align_mode="wrap_year")
             forcing = forcing.copy(anthropogenic_emissions=emis)
         preds = model.run(forcing=forcing, save_interval=0.0625, total_time=0.0625)
         return preds
@@ -209,7 +214,8 @@ class PreSpeciatedRaisesBurdenTest(unittest.TestCase):
                         "lat": np.linspace(-87, 87, _NLAT),
                         "time": np.arange(12)})
             forcing = forcing.copy(
-                prescribed_aerosol_emissions=read_prescribed_aerosol_emissions(ds))
+                prescribed_aerosol_emissions=read_prescribed_aerosol_emissions(
+                    ds, align_mode="wrap_year"))
         return model.run(forcing=forcing, save_interval=0.0625, total_time=0.0625)
 
     def test_so4_burden_increases(self):

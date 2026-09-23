@@ -1527,7 +1527,7 @@ class TestUpdateTendencies_2M:
         """``preffl`` is bit-identical to the ECHAM law written out in place.
 
         The law lives in the shared ``eff_liquid_droplet_radius`` helper (also
-        used by the 1M scheme, #717); this pins the 2M numbers against an
+        used by the 1M scheme); this pins the 2M numbers against an
         independent transcription of the same expression.
         """
         n = 3
@@ -2039,10 +2039,16 @@ class TestColumnEnthalpyConservation2M:
         import jcm.constants as c
 
         tend, rain_sfc, snow_sfc = TestColumnEnthalpyConservation2M._run(cols)
-        _, _, _, _, _, _, _, _, rho, dz, _, _ = cols
+        _, q, _, _, _, _, _, _, rho, dz, _, _ = cols
         mass = np.asarray(rho * dz)                       # [kg/m²] per level
 
-        heating = mass * c.cpd * np.asarray(tend.dtedt)   # [W/m²] per level
+        # The scheme converts latent heat with the MOIST heat capacity
+        # cp = cpd·(1 + vtmpc2·q) evaluated at the step-start humidity (#706),
+        # so the enthalpy identity closes against cp·dT, not cpd·dT. The
+        # fixtures pass no step-start override, so q here IS the anchor
+        # humidity the scheme's cp uses.
+        cp_moist = c.cpd + (c.cpv - c.cpd) * np.maximum(np.asarray(q), 0.0)
+        heating = mass * cp_moist * np.asarray(tend.dtedt)   # [W/m²] per level
         dE = float(np.sum(
             heating
             - mass * c.alhc * np.asarray(tend.dqcdt)

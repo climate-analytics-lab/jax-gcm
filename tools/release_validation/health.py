@@ -183,8 +183,8 @@ def cloud_cover_fields(ds, speedy):
     # year of it. ``.values`` here would load the lot to answer a yes/no.
     if not bool((radiation_cover != 0.0).any()):
         return fields, ("radiation.total_cloud_cover is identically zero "
-                        "(grey two-stream publishes zero as it samples no "
-                        "sub-columns)")
+                        "(grey two-stream output written before #678 "
+                        "carries zeros, or the window is cloudless)")
     fields["cloud_cover_radiation"] = radiation_cover
     return fields, None
 

@@ -250,3 +250,30 @@ def grid_mean_to_in_cloud(x: jnp.ndarray,
     return jnp.where(cloud_fraction > eps,
                      x / jnp.maximum(cloud_fraction, eps),
                      0.0)
+
+
+def moist_isobaric_heat_capacity(specific_humidity: jnp.ndarray) -> jnp.ndarray:
+    """Isobaric specific heat of moist air ``cp = cpd·(1 + vtmpc2·max(q, 0))``.
+
+    ECHAM's humidity-weighted heat capacity, written exactly as the
+    reference forms it — ``zcpq = cpd·(1 + vtmpc2·MAX(pqm1, 0))``
+    (``mo_cumastr.f90:229``) for convection and ``zcair = cpd + cpd·vtmpc2·
+    MAX(qm1, 0)`` (``physc.f90:289``) for the cloud schemes; ``cpd·vtmpc2``
+    is ``cpv − cpd``. ECHAM evaluates it at the step-start humidity and
+    divides every latent-heat and static-energy conversion of those schemes
+    by it, so using dry ``cpd`` instead over-heats by ``vtmpc2·q``
+    (~1.5 % at 18 g/kg). The ``max(q, 0)`` clamp mirrors the Fortran and
+    keeps ``cp`` physical against spectral-ringing undershoots.
+
+    Parameters
+    ----------
+    specific_humidity : jnp.ndarray
+        Specific humidity [kg/kg]; any shape (broadcasting-native).
+
+    Returns
+    -------
+    jnp.ndarray
+        Moist isobaric specific heat [J/kg/K], same shape.
+
+    """
+    return c.cpd * (1.0 + c.vtmpc2 * jnp.maximum(specific_humidity, 0.0))

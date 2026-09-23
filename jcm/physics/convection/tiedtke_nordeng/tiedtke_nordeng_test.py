@@ -215,7 +215,7 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
         moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
-        layer_mass=None, use_updraft_cover=False,
+        layer_mass=None, humidity_m1=None, use_updraft_cover=False,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
@@ -226,7 +226,9 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
             # Probe: ride thvsig out on an otherwise-unused scalar. dtedt is
             # zero so cap_scale == 1 and it passes through unscaled.
             precip_conv=thvsig,
-            dqc_dt=zeros, dqi_dt=zeros,
+            # Probe: the humidity the moist ``cp`` is built from rides out
+            # on the (unscaled) qc tendency.
+            dqc_dt=humidity_m1, dqi_dt=zeros,
         ), None
 
     monkeypatch.setattr(
@@ -275,6 +277,12 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
     # prognostic theta_v variance (ECHAM pthvsig) — NOT the cu_thvsig
     # constant, which would give the same value in both columns.
     assert jnp.allclose(conv.precip_conv, jnp.array([0.35, 0.80]))
+    # The moist heat capacity is built from the STEP-START humidity (ECHAM
+    # ``zcpq`` uses ``pqm1``, mo_cumastr.f90:229), not the post-vdiff
+    # environment the plume sees (#872).
+    assert jnp.allclose(tendency.tracers["qc"], state.specific_humidity)
+    assert not jnp.allclose(
+        tendency.tracers["qc"], thermo_run["specific_humidity"])
 
     # Without a vdiff diagnostic (and without thermo_run): zeros profile and
     # the raw state as environment.
@@ -296,6 +304,72 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
     )
 
 
+def test_cap_scales_momentum_consistently_with_ledger(monkeypatch):
+    """The ``_DTDT_MAX`` cap scales dudt/dvdt by the SAME factor as T/q.
+
+    jax-gcm#676 item 2 (and the #641 doc follow-up): when the 5 K/hr safety
+    cap fires, ``TiedtkeConvection.__call__`` rescales the whole ledger by
+    ``cap_scale = _DTDT_MAX/|dtedt|``. Momentum transport shares the same
+    mass flux, so it must carry the same scaling; the previous code returned
+    dudt/dvdt UNSCALED, delivering a capped plume's momentum at full
+    amplitude. Here a fake scheme returns a heating 2× over the cap
+    (⇒ cap_scale = 0.5) and known dudt/dvdt; the wrapper must return them
+    halved, i.e. the momentum/heating ratio is preserved.
+    """
+    nlev, ncols = 4, 2
+    shape = (nlev, ncols)
+    dtedt_raw = 2.0 * convection_module._DTDT_MAX  # 2× over ⇒ cap_scale 0.5
+    dudt_raw, dvdt_raw = 3.0, -1.5
+
+    def fake_convection(
+        temperature, humidity, pressure, layer_thickness, air_density,
+        u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
+        moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
+        layer_mass=None, humidity_m1=None, use_updraft_cover=False,
+    ):
+        ones = jnp.ones_like(temperature)
+        zeros = jnp.zeros_like(temperature)
+        return ConvectionTendencies(
+            dtedt=ones * dtedt_raw, dqdt=zeros,
+            dudt=ones * dudt_raw, dvdt=ones * dvdt_raw,
+            qc_conv=zeros, qi_conv=zeros,
+            precip_formation=zeros, precip_flux=zeros,
+            precip_conv=jnp.zeros_like(temperature[0]),
+            dqc_dt=zeros, dqi_dt=zeros,
+        ), None
+
+    monkeypatch.setattr(
+        convection_module, "tiedtke_nordeng_convection", fake_convection,
+    )
+    state = PhysicsState.zeros(
+        shape,
+        temperature=jnp.ones(shape) * 280.0,
+        specific_humidity=jnp.ones(shape) * 1.0e-3,
+        tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape)},
+    )
+    diagnostics = {
+        "_dt_seconds": 900.0,
+        "pressure_full": jnp.ones(shape) * 80000.0,
+        "layer_thickness": jnp.ones(shape) * 500.0,
+        "air_density": jnp.ones(shape),
+        "clouds": CloudData.zeros((ncols,), nlev),
+    }
+    terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
+    tendency, _ = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+    # Heating is capped exactly at _DTDT_MAX (cap_scale = 0.5).
+    np.testing.assert_allclose(
+        np.asarray(tendency.temperature), convection_module._DTDT_MAX,
+        rtol=1e-6,
+    )
+    # Momentum carries the SAME 0.5 factor — not the raw amplitude.
+    np.testing.assert_allclose(
+        np.asarray(tendency.u_wind), 0.5 * dudt_raw, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(tendency.v_wind), 0.5 * dvdt_raw, rtol=1e-6)
+
+
 def test_wrapper_feeds_unfloored_pressure_thickness_to_the_scheme(monkeypatch):
     """The sub-cloud cover's taper weight is the UNFLOORED Δp/g.
 
@@ -314,7 +388,7 @@ def test_wrapper_feeds_unfloored_pressure_thickness_to_the_scheme(monkeypatch):
         temperature, humidity, pressure, layer_thickness, air_density,
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
         moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
-        layer_mass=None, use_updraft_cover=False,
+        layer_mass=None, humidity_m1=None, use_updraft_cover=False,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
@@ -883,10 +957,12 @@ class TestConvectionScheme:
         
         if state.ktype > 0:
             # Calculate energy changes
-            from jcm.constants import cpd, alhc
+            from jcm.constants import alhc
+            from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 
-            # Sensible heat change
-            dH_sensible = jnp.sum(tendencies.dtedt * cpd)
+            # Sensible heat change, with the scheme's moist cp (ECHAM pcpen)
+            cp = moist_isobaric_heat_capacity(atm['humidity'])
+            dH_sensible = jnp.sum(tendencies.dtedt * cp)
             
             # Latent heat change (condensation releases heat)
             dH_latent = -jnp.sum(tendencies.dqdt * alhc)
@@ -1444,6 +1520,7 @@ class TestConvectivePrecipitation:
             buoy=jnp.zeros(nlev),
             pdmfup=pdmfup,
             plude=jnp.zeros(nlev),
+            uu=jnp.zeros(nlev), vu=jnp.zeros(nlev),
         )
         config = ConvectionParameters.default()
 

@@ -442,6 +442,54 @@ plus ``aod_sw_per_band`` / ``aod_lw_per_band``). Note that
 ``jam_optics.aod_550`` is a band-centre approximation, distinct from the
 Mie-based ``od550aer`` of the ``aerocom_optics`` pass.
 
+.. _v3-align:
+
+Forcing files must declare climatology or dated
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+v2's ``align: auto`` looked at a file's time axis and treated anything
+spanning at most ~one year as a climatology, replaying it every model year. A
+year of monthly samples from one real year looks exactly like a monthly
+climatology, so a one-year transient archive was silently recycled. v3 does
+not guess (#884): ``auto`` resolves only data-mirror and packaged products,
+from the kind the mirror manifest records, and **raises for any other file**.
+
+What now errors, and the one-line fix:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - v2 usage
+     - v3 fix
+   * - ``forcing.file=/my/sst_clim.nc`` (align left ``auto``)
+     - add ``forcing.align=wrap_year`` (or ``by_date`` / ``by_date_interp``
+       for dated samples)
+   * - a user ``forcing.ozone_file`` / ``emissions_file`` / ``oxidants_file``
+     - add ``forcing.ozone_align=...`` / ``forcing.emissions_align=...``
+       (scalar, or one mode per list product) / ``forcing.oxidants_align=...``
+   * - ``forcing.prescribed_surface_flux.file`` with a time axis
+     - add ``forcing.prescribed_surface_flux.align=...``
+   * - ``forcing.prescribed_surface_flux`` with an interactive physics preset
+     - compose a forced-mode consumer (``physics=speedy-forced-flux`` /
+       ``echam-forced-flux``); without one the block is rejected, never
+       silently ignored
+   * - ``ForcingData.from_dataset(ds)`` with a time axis
+     - pass ``align_mode="wrap_year"`` (an in-memory dataset has no manifest
+       identity, so ``auto`` always raises)
+   * - ``ForcingData.from_file(path)`` / ``OzoneClimatology.from_file(path)``
+       / ``read_anthropogenic_emissions(ds)`` / ``read_prescribed_aerosol_emissions(ds)``
+       on a user file
+     - pass ``align_mode=...``
+
+``hf://`` mirror paths, their fetched Hugging Face cache files, and the files
+packaged under ``jcm/data/bc`` (the SPEEDY T30 and T63 climatologies) keep
+resolving under ``auto``; every shipped configuration and the ``amip`` /
+``era5`` presets are unchanged. The declared mode is also checked: a
+prescribed-flux file declared ``wrap_year`` must hold exactly twelve monthly
+samples January to December, a declared ozone climatology must have twelve
+months, and a date-aligned flux archive must cover the run window.
+
 Other config-surface changes
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -514,20 +562,23 @@ converted into interval means after the run. Observers keep their own
 sampling: this helper aggregates only the primary output stream. See
 :doc:`design/datetime_v3_scope` for the forcing and partial-month contracts.
 
-Input ``align_mode="auto"`` now treats a time axis as dated data. A short
-file is no longer assumed to repeat annually. Declare repeating monthly or
-daily climatologies explicitly (the product-specific readers do this for
-known climatology formats). A monthly climatology selects civil months;
-no-leap dated inputs retain their nominal date components on ingestion.
-
-Use ``monthly_climatology`` for January-through-December records and
-``daily_climatology`` for an ordered nominal year of daily records. A daily
-365-record climatology holds February 28 on February 29; March 1 still selects
-March 1. Dated ``by_date_interp`` input instead interpolates across its actual
-bracketing dates, including a missing leap day. Unsupported transient
-360-day and Julian axes are rejected at ingestion; preprocess those explicitly
-with xarray. Dated lookup currently holds endpoint values outside its axis;
-check forcing coverage when constructing an experiment.
+Whether an input repeats every year or is dated is always declared
+(:ref:`v3-align`); the clock decides what each declared mode selects. A
+``wrap_year`` climatology is replayed on the real calendar: twelve records are
+January to December, each held from the 1st of its month (#805); a 365/366
+record table is a nominal-date daily climatology, where a 365-record table
+holds February 28 on February 29 and March 1 still selects March 1; any other
+length (e.g. MACv2-SP's weekly annual cycle) keeps equal fractions of the
+actual year. A climatology's own stamps are read only for their month and day,
+so idealised-calendar climatologies still load. Dated ``by_date`` /
+``by_date_interp`` input is placed on the exact clock: no-leap dated inputs
+retain their nominal date components, and ``by_date_interp`` interpolates
+across the actual bracketing dates, including a missing leap day. Unsupported
+transient 360-day and Julian axes are rejected at ingestion; preprocess those
+explicitly with xarray. Dated lookup holds endpoint values outside its axis
+for the surface, ozone, emission and oxidant inputs; only prescribed surface
+fluxes are checked to cover the run window, so check forcing coverage when
+constructing an experiment.
 
 Coupled output must use the shared public conversion instead of multiplying
 floating epoch days into nanoseconds:

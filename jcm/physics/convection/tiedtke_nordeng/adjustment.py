@@ -28,7 +28,6 @@ existing call sites (cubase / cuasc / cudlfs) can pick the right one:
 """
 
 import jax.numpy as jnp
-import jax
 from jax import lax
 from typing import Tuple
 
@@ -76,7 +75,11 @@ def cuadjtq(
         # saturation table with L_s below the melting point — review
         # finding 2.7; a fixed L_v under-releases mixed-phase latent heat
         # by ~13 %). The es switch in the shared saturation module flips
-        # at tmelt, so L flips with it.
+        # at tmelt, so L flips with it. DRY ``cpd`` is the reference here:
+        # cuadjtq reads ``L/cp`` from the ``tlucub``/``tlucuc`` tables built
+        # with ``zalvdcp = alv/cpd``, ``zalsdcp = als/cpd``
+        # (mo_echam_convect_tables.f90:214-215, 254-258) — unlike the
+        # cumastr static-energy ledger, which uses the moist ``zcpq``.
         L_cp = jnp.where(T >= c.tmelt, c.alhc, c.alhs) / c.cpd
         qs, dqs_dT = _qsat_and_dqsat_dt(T, pressure)
         cond = (q - qs) / (1.0 + L_cp * dqs_dT)
@@ -106,158 +109,3 @@ def cuadjtq(
     T_final = jnp.where(pass1_active, T2, T1)
     q_final = jnp.where(pass1_active, q2, q1)
     return T_final, q_final, cond1 + cond2
-
-
-@jax.jit
-def saturation_adjustment(
-    temperature: jnp.ndarray,
-    specific_humidity: jnp.ndarray,
-    pressure: jnp.ndarray,
-    cloud_water: jnp.ndarray,
-    cloud_ice: jnp.ndarray,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Saturation adjustment with liquid / ice partitioning.
-
-    Wraps :func:`cuadjtq` (``kcall=1``, condensation-only) with a
-    temperature-based liquid / ice split for the resulting condensate.
-    The split mirrors what ECHAM's cloud scheme does outside cuadjtq.
-
-    Args:
-        temperature: Temperature after convective tendencies [K].
-        specific_humidity: Specific humidity after tendencies [kg/kg].
-        pressure: Pressure [Pa].
-        cloud_water: Cloud liquid water before adjustment [kg/kg].
-        cloud_ice: Cloud ice before adjustment [kg/kg].
-
-    Returns:
-        Adjusted ``(T, q, qc, qi)``.
-
-    """
-    # The proper Newton step uses specific humidity directly (matches
-    # what cuadjtq does); the previous mixing-ratio detour was unnecessary.
-    t_adj, q_adj, condensate = cuadjtq(
-        temperature, specific_humidity, pressure, kcall=1, refine=True,
-    )
-
-    # Liquid / ice split — mirrors what ECHAM cuasc does outside cuadjtq.
-    t_freeze = c.tmelt
-    t_ice = c.tmelt - 23.0
-    frac_liquid = jnp.clip((t_adj - t_ice) / (t_freeze - t_ice), 0, 1)
-    frac_ice = 1.0 - frac_liquid
-
-    # Add condensate to existing cloud water/ice. The latent heat
-    # adjustment in cuadjtq used L_water; correct for the ice-fraction
-    # difference (L_sub - L_water) so the ice condensate releases the
-    # full sublimation latent heat.
-    qc_adj = cloud_water + condensate * frac_liquid
-    qi_adj = cloud_ice + condensate * frac_ice
-    t_adj = t_adj + condensate * frac_ice * (c.alhs - c.alhc) / c.cpd
-
-    # Belt-and-braces clip to non-negative (cuadjtq guarantees this for
-    # ``kcall=1`` but downstream consumers expect it from the wrapper).
-    q_adj = jnp.maximum(q_adj, 0.0)
-    qc_adj = jnp.maximum(qc_adj, 0.0)
-    qi_adj = jnp.maximum(qi_adj, 0.0)
-
-    return t_adj, q_adj, qc_adj, qi_adj
-
-
-def energy_conservation_check(
-    temperature_old: jnp.ndarray,
-    specific_humidity_old: jnp.ndarray,
-    cloud_water_old: jnp.ndarray,
-    cloud_ice_old: jnp.ndarray,
-    temperature_new: jnp.ndarray,
-    specific_humidity_new: jnp.ndarray,
-    cloud_water_new: jnp.ndarray,
-    cloud_ice_new: jnp.ndarray,
-    precipitation: jnp.ndarray,
-    dt: float
-) -> jnp.ndarray:
-    """Check energy conservation in convective adjustment
-    
-    Args:
-        *_old: State before adjustment
-        *_new: State after adjustment
-        precipitation: Precipitation rate (kg/m²/s)
-        dt: Time step (s)
-        
-    Returns:
-        Energy imbalance (W/m²)
-
-    """
-    # Sensible heat change
-    dT = temperature_new - temperature_old
-    sensible = c.cpd * dT / dt
-    
-    # Latent heat changes
-    dq = specific_humidity_new - specific_humidity_old
-    dqc = cloud_water_new - cloud_water_old
-    dqi = cloud_ice_new - cloud_ice_old
-    
-    # Latent heat (vapor uses L at current temperature)
-    t_avg = 0.5 * (temperature_old + temperature_new)
-    lv = c.alhc + (c.alhs - c.alhc) * jnp.clip((c.tmelt - t_avg) / 23.0, 0, 1)
-    
-    latent_vapor = lv * dq / dt
-    latent_liquid = c.alhc * dqc / dt
-    latent_ice = c.alhs * dqi / dt
-    
-    # Precipitation removes energy
-    # Assume precipitation temperature is cloud temperature
-    precip_energy = precipitation * c.cpd * (t_avg - c.tmelt)
-    
-    # Total energy change
-    total_energy = sensible + latent_vapor + latent_liquid + latent_ice + precip_energy
-    
-    return total_energy
-
-
-@jax.jit
-def convective_adjustment(
-    temperature: jnp.ndarray,
-    specific_humidity: jnp.ndarray,
-    pressure: jnp.ndarray,
-    cloud_water: jnp.ndarray,
-    cloud_ice: jnp.ndarray,
-    convective_tendency_t: jnp.ndarray,
-    convective_tendency_q: jnp.ndarray,
-    convective_tendency_qc: jnp.ndarray,
-    convective_tendency_qi: jnp.ndarray,
-    dt: float
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Apply convective tendencies and perform saturation adjustment
-    
-    This is the main interface for applying convection results to the
-    model state, ensuring thermodynamic consistency.
-    
-    Args:
-        temperature: Temperature before convection (K)
-        specific_humidity: Specific humidity before (kg/kg)
-        pressure: Pressure (Pa)
-        cloud_water: Cloud water before (kg/kg)
-        cloud_ice: Cloud ice before (kg/kg)
-        convective_tendency_*: Tendencies from convection scheme
-        dt: Time step (s)
-        
-    Returns:
-        Tuple of adjusted (temperature, specific_humidity, cloud_water, cloud_ice)
-
-    """
-    # Apply convective tendencies
-    t_conv = temperature + convective_tendency_t * dt
-    q_conv = specific_humidity + convective_tendency_q * dt
-    qc_conv = cloud_water + convective_tendency_qc * dt
-    qi_conv = cloud_ice + convective_tendency_qi * dt
-    
-    # Ensure positive values before adjustment
-    q_conv = jnp.maximum(q_conv, 0.0)
-    qc_conv = jnp.maximum(qc_conv, 0.0)
-    qi_conv = jnp.maximum(qi_conv, 0.0)
-    
-    # Perform saturation adjustment
-    t_adj, q_adj, qc_adj, qi_adj = saturation_adjustment(
-        t_conv, q_conv, pressure, qc_conv, qi_conv
-    )
-    
-    return t_adj, q_adj, qc_adj, qi_adj

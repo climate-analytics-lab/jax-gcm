@@ -106,8 +106,9 @@ class TestEchamDialect:
         np.testing.assert_allclose(_scalar(fields["cloud_cover"]), _MAXRANDOM)
 
     def test_identically_zero_radiation_cover_is_omitted_not_reported(self):
-        # Grey two-stream writes zeros because it samples no sub-columns.
-        # Reporting 0.00 would read as a run with no cloud at all.
+        # Grey two-stream output written before #678 carries zeros (the grey
+        # scheme did not publish its cover). Reporting 0.00 would read as a
+        # run with no cloud at all.
         fields, note = H.cloud_cover_fields(echam_chunk(0.0), speedy=False)
         assert "cloud_cover_radiation" not in fields
         assert "identically zero" in note and "grey two-stream" in note

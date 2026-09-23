@@ -296,14 +296,15 @@ cancels and its below-cloud term acts on the grid mean.
   For the convective carrier the two references differ by the factor ``f_cu``
   (a few per cent). HAMMOZ's form is used because the updraft area is the
   footprint of the shaft and the in-plume sink already removes what is inside
-  it — the double counting of #781. The ambient tracer scavenged is the
+  it; applying CAM's cancellation on top would double-count that in-plume
+  removal. The ambient tracer scavenged is the
   grid-mean working copy, which stands in for HAMMOZ's environment value
   ``pxtenh`` to O(``f_cu``).
 - `science` (documented deviation) — HAMMOZ zeroes below-cloud scavenging in
   any layer with stratiform cloud (``paclc ≥ 1e-10`` in ``ham_wetdep``). jcm
   does not gate the convective carrier on the stratiform cover: its stratiform
   carrier carries no cover at all, and gating one carrier on the other's cover
-  is the cross-carrier coupling #781 removed.
+  would couple the two carriers, which jcm deliberately avoids.
 - `compute` (documented deviation) — HAMMOZ's updraft area divides by the
   **updraft** density ``zrhou = p/(rd·ptu)``; ``ConvectionData`` publishes no
   updraft temperature, so the environment density stands in and ``f_cu`` is

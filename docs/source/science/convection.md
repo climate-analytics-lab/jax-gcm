@@ -6,13 +6,30 @@
   (``jcm/physics/convection/tiedtke_nordeng/tiedtke_nordeng.py::TiedtkeConvection``)
   — the ECHAM/ICON scheme: deep, shallow and mid-level convection, convective
   momentum transport, and downdrafts (``updraft.py``, ``downdraft.py``,
-  ``flux_tendencies.py``). Moisture convergence *classifies* deep vs shallow
+  ``flux_tendencies.py``). Organized (Nordeng) entrainment and detrainment are
+  the **metre-based fractional rates** of ``mo_cuascent.f90`` — organized
+  entrainment carries the ``zbuoyz·0.5/(1+∫buoyancy) + zdrodz`` density-lapse
+  term and organized detrainment is the ``tan``-profile in height that scales
+  as 1/(cloud depth) — each clamped to ECHAM's hard cap ``centrmax = 3.0e-4
+  m⁻¹``, and per-layer detrained mass is capped at 0.75 of the plume
+  (``cu_asc`` line 500) so the detrained-condensate ledger can never exceed the
+  plume mass. Momentum transport is the ``cududv`` deviation-flux divergence
+  with SEPARATE updraft and downdraft fluxes, each carrying its own prognostic
+  plume wind (mass-weighted entrainment of the environment), the upstream
+  ``jk−1`` environment offset, the sub-cloud pressure-ratio taper, and the
+  explicit surface-layer closure. The ``cudtdq`` ledger keys its
+  condensate-flux latent heat to the phase (``alhs`` below the melting point,
+  ``alhc`` above) and writes a tendency to the surface layer (ECHAM's
+  ``jk == klev`` branch). Moisture convergence *classifies* deep vs shallow
   (ECHAM's ``mo_cumastr.f90`` test), while the cloud-base *closure* routes
   independently of that type: any active surface plume takes the
   moisture-budget flux ``E/(q_u−q_e)`` where it is valid (ECHAM's ``zlo1``
   test — near-saturated cloud bases and negligible evaporation fail it) and
-  the bounded CAPE flux otherwise, so surface evaporation, not CAPE, sets the
-  steady-state flux of a healthy plume. Mid-level (``cubasmc``) plumes take
+  ECHAM's constant fallback ``zmfub = 0.01 kg m⁻² s⁻¹``
+  (``mo_cumastr.f90:567``) otherwise, so surface evaporation, not CAPE, sets
+  the steady-state flux of a healthy plume; the deep amplitude is then set by
+  the Nordeng ``zmfub1 = zcape·zmfub/(zheat·tau)`` rescale, which is where the
+  CAPE-consumption timescale ``tau`` lives. Mid-level (``cubasmc``) plumes take
   neither: their base flux is the resolved ascent that triggered them. The saturation
   adjustment ``cuadjtq`` is a faithful linearised-Newton port of ``mo_cuadjust.f90``
   (``adjustment.py``) with the three ``kcall`` modes. The precipitation budget
@@ -66,23 +83,22 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   ``zmfmax = layer_mass/dt`` bounds the column-integrated flux but not per-level
   latent-heat spikes inside the updraft loop. Until the per-level limits land, an
   explicitly-labelled stopgap caps the convective T-tendency at 5 K/hr
-  (``_DTDT_MAX``) and rescales the thermodynamic ledger homogeneously — T, q,
-  qc/qi, precipitation, and the mass fluxes with the tracer transport they
-  drive — preserving column conservation by linearity, as ECHAM's ``zmfub1``
-  amplitude scaling does. The **momentum tendencies are the exception**:
-  ``dudt``/``dvdt`` are returned unscaled, so a capped plume's momentum
-  transport keeps full amplitude (tracked with the other ledger gaps in #676).
-  This cap is the documented cause of a cap-pinned single-layer heating
-  artifact in pathological columns.
+  (``_DTDT_MAX``) and rescales the **whole** ledger homogeneously — T, q,
+  qc/qi, precipitation, the mass fluxes with the tracer transport they drive,
+  **and the momentum tendencies** ``dudt``/``dvdt``, which share the same mass
+  flux — preserving column conservation by linearity, as ECHAM's ``zmfub1``
+  amplitude scaling does. This cap is the documented cause of a cap-pinned
+  single-layer heating artifact in pathological columns.
 
 **Status & known limitations.**
 - The 5 K/hr tendency cap is a **safety net, not physics**; it fires only where
   the parcel-vs-environment balance has gone pathological (healthy tropical deep
   convection is ~1 K/hr). It remains until the ``mo_cuadjust`` per-level limits are
   ported.
-- Cloud-base closure falls back to the bounded CAPE flux (rather than ECHAM's tiny
-  flux) when the moisture-budget denominator collapses under a near-saturated cloud
-  base or spectral supersaturation ringing.
+- Cloud-base closure falls back to ECHAM's constant ``zmfub = 0.01`` first
+  guess when the moisture-budget denominator collapses under a near-saturated
+  cloud base or spectral supersaturation ringing; deep columns then take the
+  Nordeng CAPE rescale, so ``tau`` still sets their amplitude.
 - SPEEDY and Betts-Miller are idealized alternatives; Betts-Miller is
   specific-humidity-formulated (Isca's mixing-ratio form differs at second order).
 
@@ -105,6 +121,47 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 ``rce_integration_test.py``, ``convection_units_test.py``,
 ``smooth_gradients_test.py``, ``cloud_depth_test.py``);
 ``betts_miller/betts_miller_test.py``; ``speedy_convection_test.py``.
+
+## Heat capacity of the Tiedtke plume and ledger
+
+**What we do.** Every static-energy and latent-heat conversion the Tiedtke
+port shares with ECHAM ``cumastr`` uses the **moist** isobaric heat capacity
+``cp = cpd·(1 + vtmpc2·max(q, 0))``
+(``jcm/physics/thermodynamics.py::moist_isobaric_heat_capacity``), evaluated
+per level from the **step-start** humidity: the cloud-base and mid-level parcel
+lifts (``find_cloud_base``, ``find_midlevel_cloud_base``, the ``calculate_updraft``
+seed), the updraft and downdraft dry-static-energy mixing
+(``calculate_updraft``, ``downdraft_step``), the Nordeng ``zheat`` lapse term,
+and the ``cudtdq`` ledger — the DSE deviation fluxes ``cp·(T_plume − T)·M`` and
+the conversion of the whole heat ledger to a temperature tendency. The column
+enthalpy the ledger deposits is therefore ``Σ cp·dT·Δp/g``. Three sites keep
+dry ``cpd`` because the reference does: the ``cuadjtq`` Newton step and the
+wet-bulb adjustment (``adjustment.py``, ``saturation.py``), and the ``cuflx``
+melting constant, which applies its own ``(1 + vtmpc2·q)`` factor with the
+provisional humidity. jcm's own trigger diagnostic ``calculate_cape_cin`` has no
+ECHAM counterpart and uses the textbook dry-``cpd`` parcel.
+
+**What ECHAM does.** ``mo_cumastr.f90:229`` builds ``zcpq = cpd·(1 +
+vtmpc2·MAX(pqm1, 0))`` from the step-start humidity ``pqm1`` (not the
+provisional ``zqp1`` the plume sees) and passes it as ``pcpen``; ``cuini``
+averages it to half levels (``pcpcu``). ``cubase``/``cuasc``/``cubasmc``/
+``cuddraf`` carry plume heat as ``pcpcu·T + pgeoh``; ``cuflx`` subtracts the
+environment's ``pcpcu·ptenh + pgeoh`` (``mo_cufluxdts.f90:198-204``);
+``cudtdq`` divides by ``pcpen`` (``zrcpm``, ``mo_cufluxdts.f90:648``); ``zheat``
+uses ``zcpcui = 1/zcpcu`` (``mo_cumastr.f90:598/849``). ``cuadjtq`` reads
+``L/cp`` from tables built with ``alv/cpd`` (``mo_echam_convect_tables.f90:214``).
+
+**Why we differ.** We do not: the port matches the reference's choice at every
+site. Because ``cp`` is the **environment's** at each level, a parcel lifted
+through an environment that dries with height gains ``≈ T·vtmpc2·Δq_env``
+relative to a dry-``cpd`` lift (the heat content is carried with the lower
+level's larger ``cp`` and divided by the upper level's smaller one). That is
+the reference's thermodynamics and ECHAM's convective parameters were tuned
+with it, so it is kept rather than replaced by the parcel's own heat capacity.
+
+**Status & known limitations.** ECHAM's ``pcpcu`` lives on half levels; jcm's
+convection is full-level throughout (#530), so the full-level ``cp`` serves
+both.
 
 ## Cloud-base trigger and the sub-cloud layer
 
@@ -143,8 +200,12 @@ before the parcel is compared against it.
 **Status & known limitations.**
 - The trigger is **strict by construction, and this is the reference's
   behaviour, not an approximation of it**: because ``zlift`` is capped at 1 K, a
-  sounding whose lapse rate runs to the surface loses more parcel buoyancy per
-  level than the excess can cover and never reaches its LCL. Convection in such
+  sounding whose sub-cloud layer is stably stratified loses more parcel
+  buoyancy per level than the excess can cover and never reaches its LCL. The
+  walk's moist heat capacity (see the heat-capacity section above) credits the parcel
+  ``≈ T·vtmpc2·Δq_env`` per level where the environment dries with height, so
+  a moist 6.5 K/km surface layer can still reach its LCL; a genuinely stable
+  (e.g. 4 K/km or inverted) one cannot. Convection in such
   a column is the job of ``cubasmc``, which needs resolved ascent and a nearly
   saturated environment.
 - It follows that **any prescribed or idealised column handed to Tiedtke assumes

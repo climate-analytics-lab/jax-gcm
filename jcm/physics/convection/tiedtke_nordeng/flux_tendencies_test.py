@@ -245,9 +245,11 @@ class TestTaperWeightPlumbing(unittest.TestCase):
             entr=zeros, detr=zeros, buoy=zeros,
             pdmfup=jnp.array([0.0, 2.0e-3, 2.0e-3, 0.0, 0.0]),
             plude=zeros,
+            uu=zeros, vu=zeros,
         )
         downdraft = DowndraftState(
             td=temperature, qd=zeros, mfd=zeros, pdmfdp=zeros,
+            ud=zeros, vd=zeros,
             lfs=0, active=False,
         )
         return calculate_tendencies(

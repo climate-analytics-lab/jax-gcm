@@ -149,18 +149,25 @@ years to continue from the previous state:
 
    year, year_ds = next(year_iter)
    model = Model(coords=coords, start_time=f'{year}-01-01')
-   forcing = ForcingData.from_dataset(year_ds, coords=coords)
+   forcing = ForcingData.from_dataset(year_ds, coords=coords,
+                                      align_mode='by_date')
    preds = model.run(forcing=forcing, save_interval='1 day',
                      end_time=f'{year + 1}-01-01')
    yearly_outputs.append(preds.to_xarray())
 
    for year, year_ds in year_iter:
-       forcing = ForcingData.from_dataset(year_ds, coords=coords)
+       forcing = ForcingData.from_dataset(year_ds, coords=coords,
+                                          align_mode='by_date')
        preds = model.resume(forcing=forcing, save_interval='1 day',
                             end_time=f'{year + 1}-01-01')
        yearly_outputs.append(preds.to_xarray())
 
    trajectory = xr.concat(yearly_outputs, dim='time')
+
+A file's time alignment is always declared — ``wrap_year`` for a
+climatology, ``by_date`` / ``by_date_interp`` for dated samples — because a
+year of monthly data looks exactly like a climatology; ``auto`` resolves only
+the data-mirror products, whose kind the mirror manifest records.
 
 xarray's lazy loading means each year's slice only pulls the data it
 actually needs from disk, so this stays memory-efficient even for very
@@ -188,8 +195,8 @@ that :meth:`~jcm.forcing.ForcingData.from_file` concatenates along ``time``:
        years=[1979, 1983],            # inclusive
        available=[1979, 2022],        # optional: product's source coverage
    )
-   forcing = ForcingData.from_file(
-       files, coords=coords, align_mode="by_date_interp")
+   forcing = ForcingData.from_file(files, coords=coords,
+                                   align_mode='by_date_interp')
 
 Passing ``available`` widens the expansion by one year on each side (clipped to
 coverage) so the mid-month samples bracket the run's start/end instead of
@@ -244,7 +251,8 @@ To wire it manually against any reference dataset:
    # slices it inside ``forcing.select(date)`` like every other
    # time-varying leaf, so the nudging term never sees the date.
    target = NudgingTarget.from_dataset(ref_ds)
-   forcing = ForcingData.from_file('boundary_conditions.nc', coords=coords)
+   forcing = ForcingData.from_file('boundary_conditions.nc', coords=coords,
+                                   align_mode='wrap_year')
    forcing = forcing.replace(nudging_target=target)
 
    config = NudgingConfig.winds_only(
@@ -427,6 +435,37 @@ clock is traced under an outer jit, build tables first with
 them as ``observer_xs``. The tables and exact clock can then vary between
 windows without making their values static compilation parameters.
 
+
+Coupling to an external surface component
+-----------------------------------------
+
+Use this when an external ocean / sea-ice / land / wave model exchanges
+fluxes with jcm — the coupled-model case where the surface fluxes are
+computed once, outside the individual components.
+
+Every physics package that resolves a surface publishes a
+package-independent :class:`jcm.physics.surface.surface_exchange.SurfaceExchange`
+struct under ``diagnostics["surface_exchange"]`` (SPEEDY and ECHAM do;
+Held-Suarez opts out). It carries the net downward heat flux, sensible and
+latent heat, evaporation, total precipitation, wind stress and the
+near-surface wind, with one documented sign convention regardless of
+package — so a coupler reads the same field names off any configuration
+instead of special-casing each package's private diagnostics. Call
+``physics.require_surface_exchange()`` once to fail fast if the composed
+package publishes nothing.
+
+The reverse direction — **forced mode** — has jcm accept externally
+prescribed turbulent fluxes instead of computing its own. Select
+``physics=speedy-forced-flux`` or ``physics=echam-forced-flux`` and supply
+the fluxes through ``forcing.prescribed_surface_flux`` (a ``constants``
+block for a uniform test field, or a ``file`` on the model grid); a coupler
+driving jcm in Python sets the ``prescribed_*`` fields on ``ForcingData``
+directly each coupling interval. Field names, units and signs are shared
+with the published struct, so a coupler can feed back exactly what it read.
+Prescribed fluxes need a forced-mode physics to consume them: supplied to an
+interactive preset (``physics=speedy`` / ``echam``) they are rejected at
+start rather than silently ignored.
+See :doc:`design/surface_exchange` for the full contract.
 
 Where to next
 -------------

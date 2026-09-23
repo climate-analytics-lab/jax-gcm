@@ -33,6 +33,7 @@ from jcm.physics.convection.saturation import (  # noqa: F401
     saturation_mixing_ratio,
     saturation_vapor_pressure,
 )
+from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 
 # Import updraft, downdraft and flux modules after they're defined
 # This avoids circular imports
@@ -158,6 +159,7 @@ def find_cloud_base(temperature: jnp.ndarray,
                    config: ConvectionParameters,
                    thvsig: jnp.ndarray | None = None,
                    layer_thickness: jnp.ndarray | None = None,
+                   cp_moist: jnp.ndarray | None = None,
                    ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Find cloud base by ECHAM ``cubase``'s ``klab`` walk.
 
@@ -166,7 +168,13 @@ def find_cloud_base(temperature: jnp.ndarray,
     humidity (ECHAM seeds ``ptu = ptenh``, ``pqu = pqenh`` in ``cuini``) and
     is walked UPWARD one level at a time, conserving dry static energy::
 
-        T_u(k) = ( cp·T_u(k+1) + geoh(k+1) - geoh(k) ) / cp
+        T_u(k) = ( cp(k+1)·T_u(k+1) + geoh(k+1) - geoh(k) ) / cp(k)
+
+    ``cp`` is ECHAM's MOIST heat capacity of the environment
+    (``pcpcu = cpd·(1 + vtmpc2·q)``, mo_cuinitialize.f90:294), not dry
+    ``cpd``. Because the walk conserves ``cp·T + φ`` level by level, it
+    telescopes to the closed form ``T_u(k) = (cp(0)·T(0) + φ(0) − φ(k))/cp(k)``
+    evaluated below.
 
     At each level, in order:
 
@@ -212,14 +220,19 @@ def find_cloud_base(temperature: jnp.ndarray,
             back to ``config.cu_thvsig``.
         layer_thickness: Layer thickness (m) [nlev], used to build the
             geopotential the DSE-conserving lift needs. When ``None`` the
-            lift falls back to the Exner form, which is equivalent for a
-            constant ``cp`` and keeps older callers working.
+            lift falls back to a dry Exner form (see below).
+        cp_moist: Moist heat capacity ``cpd·(1 + vtmpc2·q)`` [J/kg/K]
+            [nlev] — ECHAM's ``pcpcu``, evaluated at the step-start
+            humidity by the model wrapper. ``None`` builds it from
+            ``humidity``.
 
     Returns:
         Tuple of (cloud_base_level, cloud_base_exists)
 
     """
     nlev = len(temperature)
+    if cp_moist is None:
+        cp_moist = moist_isobaric_heat_capacity(humidity)
 
     # Work surface-first so the walk runs in its natural direction; flip back
     # at the end. ``flip`` is a no-op when the input is already surface-first.
@@ -228,11 +241,11 @@ def find_cloud_base(temperature: jnp.ndarray,
     t_env = flip(temperature)
     q_env = flip(humidity)
     p_env = flip(pressure)
+    cp_env = flip(cp_moist)
 
     # Geopotential of each level above the lowest one. ECHAM lifts the parcel
     # with ``(cp·T + geoh)`` conserved, so the walk needs a height coordinate;
-    # ``layer_thickness`` gives it directly. Without it, fall back to the
-    # equivalent Exner form.
+    # ``layer_thickness`` gives it directly.
     if layer_thickness is not None:
         dz = flip(layer_thickness)
         # Height of level k above level 0, integrating half a layer at each
@@ -240,8 +253,12 @@ def find_cloud_base(temperature: jnp.ndarray,
         geo = c.grav * jnp.concatenate(
             [jnp.zeros(1), jnp.cumsum(0.5 * (dz[:-1] + dz[1:]))],
         )
-        parcel_t_dry = t_env[0] + (geo[0] - geo) / c.cpd
+        parcel_t_dry = (cp_env[0] * t_env[0] + geo[0] - geo) / cp_env
     else:
+        # No height coordinate: a dry-adiabat Poisson lift. ECHAM has no
+        # such path (it always has ``pgeoh``); this serves only direct
+        # callers that pass no ``layer_thickness`` — the model path always
+        # supplies it and takes the moist-``cp`` DSE walk above.
         parcel_t_dry = t_env[0] * (p_env / p_env[0]) ** (c.rd / c.cpd)
 
     q_parcel = q_env[0]
@@ -305,6 +322,7 @@ def find_midlevel_cloud_base(temperature: jnp.ndarray,
                              layer_thickness: jnp.ndarray,
                              config: ConvectionParameters,
                              thvsig: jnp.ndarray | None = None,
+                             cp_moist: jnp.ndarray | None = None,
                              ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """ECHAM ``cubasmc``: the MID-LEVEL convection trigger.
 
@@ -367,12 +385,17 @@ def find_midlevel_cloud_base(temperature: jnp.ndarray,
         config: Convection configuration
         thvsig: σ(θ_v) [K] from vdiff, for the ``zlift`` in the survival
             test. ``None`` falls back to ``config.cu_thvsig``.
+        cp_moist: Moist heat capacity ``cpd·(1 + vtmpc2·q)`` [J/kg/K]
+            [nlev] (ECHAM ``pcpen``/``pcpcu``). ``None`` builds it from
+            ``humidity``.
 
     Returns:
         Tuple of (mid_level_base, mid_level_base_exists)
 
     """
     nlev = len(temperature)
+    if cp_moist is None:
+        cp_moist = moist_isobaric_heat_capacity(humidity)
 
     # Work surface-first, as in ``find_cloud_base``; flip back at the end.
     is_surface_first = pressure[0] >= pressure[-1]
@@ -382,6 +405,7 @@ def find_midlevel_cloud_base(temperature: jnp.ndarray,
     p_env = flip(pressure)
     w_env = flip(omega)
     dz = flip(layer_thickness)
+    cp_env = flip(cp_moist)
 
     qs_env = jax.vmap(saturation_mixing_ratio)(p_env, t_env)
     # ECHAM ``pgeoh(kk)/grav``: the height of the candidate layer's TOP
@@ -407,9 +431,16 @@ def find_midlevel_cloud_base(temperature: jnp.ndarray,
 
     # Survival of a seed at level k: one DSE-conserving lift to level k+1,
     # the damped Newton adjustment there, then the buoyancy test WITH the
-    # ``zlift`` bonus (klab == 1 below, mo_cuascent.f90:449).
+    # ``zlift`` bonus (klab == 1 below, mo_cuascent.f90:449). The lift
+    # conserves ``cp·T + φ`` with ECHAM's moist ``cp``. ECHAM takes two
+    # half-level steps: the seed brings the full-level environment to the
+    # layer's bottom interface with the source level's ``pcpen``
+    # (mo_cuascent.f90:641-642), then the first ``cuasc`` step divides by
+    # the destination's ``pcpcu`` (mo_cuascent.f90:411). On jcm's full-level
+    # grid (#530) those collapse into one lift: heat content carried by the
+    # source level's ``cp``, converted back with the destination level's.
     dz_mid = 0.5 * (dz[:-1] + dz[1:])
-    parcel_t_dry = t_env[:-1] - c.grav * dz_mid / c.cpd
+    parcel_t_dry = (cp_env[:-1] * t_env[:-1] - c.grav * dz_mid) / cp_env[1:]
     parcel_t, parcel_q, parcel_l = cuadjtq_newton(
         parcel_t_dry, q_env[:-1], p_env[1:],
     )
@@ -462,6 +493,12 @@ def calculate_cape_cin(temperature: jnp.ndarray,
     LFC. Stratospheric layers above the EL — where the parcel cools to
     absurdly low temperatures and gives massive bogus negative buoyancy
     — are not counted.
+
+    This is jcm's trigger diagnostic, not a port: ECHAM ``cumastr`` has no
+    surface-parcel CAPE (its trigger is the ``cubase`` buoyancy walk and its
+    closure CAPE is the in-plume ``zcape``, which involves no ``cp``). The
+    textbook dry-``cpd`` Poisson lift and pseudo-adiabat therefore stay as
+    they are; ECHAM's moist ``cp`` belongs to the ported plume and ledger.
 
     Works for either input ordering:
       * TOA-first (level 0 = TOA, ICON/ECHAM convention used by the
@@ -706,6 +743,36 @@ _MIN_MOISTURE_SUPPLY = 1.0e-7
 _MIN_CAPE_FOR_MOISTURE_TRIGGER = 10.0
 
 
+def shallow_reclosure_flux(zmfub, zqumqe, zdqmin, zdqpbl, mfu_cfl_max, config):
+    """ECHAM shallow re-closure cloud-base mass flux, with jcm's CFL cap.
+
+    Recomputes the ktype=2 cloud-base flux from the PBL moisture budget
+    (``zdqpbl/(g·max(zqumqe,zdqmin))``, ``zqumqe`` including the downdraft
+    moisture) and accepts it only when it moves less than 20% from the
+    first-guess ``zmfub`` — ECHAM ``mo_cumastr.f90:921-937``.
+
+    ECHAM's shallow branch does NOT re-apply ``MIN(zmfub1, zmfmax)`` after the
+    20% guard (unlike the deep branch at ``:904``), so a first guess just below
+    the CFL limit can be raised to as much as ``1.2·zmfmax``. jcm treats
+    ``mfu_cfl_max`` — the air mass of the cloud-base source layer per timestep —
+    as a HARD stability invariant (the documented T63L47 hot-cell-runaway
+    guard, applied to ``mass_flux_base`` and the deep ``zmfub1`` alike), so the
+    accepted value is clipped here to the same final limits (the CFL cap and
+    ``cmfcmax``). This is a small, deliberate deviation from ECHAM's 20%
+    overshoot tolerance, keeping the CFL invariant consistent across the deep
+    and shallow paths (Codex review on #874).
+    """
+    zmfub1 = jnp.where(
+        (zdqpbl > 0.0) & (zqumqe > zdqmin) & (zmfub < mfu_cfl_max),
+        zdqpbl / (c.grav * jnp.maximum(zqumqe, zdqmin)),
+        zmfub,
+    )
+    # 20% acceptance window around the first guess.
+    zmfub1 = jnp.where(jnp.abs(zmfub1 - zmfub) < 0.2 * zmfub, zmfub1, zmfub)
+    # Re-apply jcm's cloud-base mass-flux limits (CFL cap and cmfcmax).
+    return jnp.minimum(zmfub1, jnp.minimum(mfu_cfl_max, config.cmfcmax))
+
+
 def _tiedtke_convection_toa_first(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray,
@@ -725,6 +792,7 @@ def _tiedtke_convection_toa_first(
     omega: jnp.ndarray | None = None,
     qte_dynamics: jnp.ndarray | None = None,
     layer_mass: jnp.ndarray | None = None,
+    humidity_m1: jnp.ndarray | None = None,
     use_updraft_cover: bool = False,
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run Tiedtke-Nordeng convection scheme with fixed qc/qi transport
@@ -764,6 +832,12 @@ def _tiedtke_convection_toa_first(
             ``zdqcv`` drives the deep/shallow split. ``None`` (no host
             information) means the split sees no large-scale convergence
             and classifies by the surface budget alone.
+        humidity_m1: STEP-START specific humidity [kg/kg] [nlev] (ECHAM
+            ``pqm1``), from which the scheme's moist heat capacity
+            ``cp = cpd·(1 + vtmpc2·max(q, 0))`` is built — ECHAM's ``zcpq``
+            (mo_cumastr.f90:229), which uses ``pqm1`` rather than the
+            provisional ``pqen`` the plume sees. ``None`` (standalone column
+            callers with no separate step-start state) uses ``humidity``.
 
     Returns:
         Tuple of (tendencies, final_state) with fixed qc/qi transport
@@ -771,8 +845,21 @@ def _tiedtke_convection_toa_first(
     """
     if config is None:
         config = ConvectionParameters.default()
-    
+
     nlev = len(temperature)
+
+    # ECHAM's moist heat capacity ``zcpq = cpd·(1 + vtmpc2·MAX(pqm1, 0))``
+    # (mo_cumastr.f90:229): every static-energy and latent-heat conversion
+    # in the scheme divides by it — the cloud-base and mid-level parcel
+    # lifts (``pcpcu``, cubase/cubasmc), the plume and downdraft DSE mixing
+    # (cuasc/cuddraf), the Nordeng ``zheat`` (``zcpcui``), and the cudtdq
+    # ledger (``pmfus``/``pmfds`` built with ``pcpcu``, divided by
+    # ``pcpen``). ECHAM carries it at full levels (``pcpen``) and averages to
+    # half levels (``pcpcu``, cuini); jcm's convection runs on full levels
+    # throughout (#530), so the full-level value serves both.
+    cp_moist = moist_isobaric_heat_capacity(
+        humidity if humidity_m1 is None else humidity_m1
+    )
     
     # Initialize state
     state = initialize_convection(
@@ -789,12 +876,13 @@ def _tiedtke_convection_toa_first(
     # the surface path always wins when both would fire.
     cloud_base_sfc, has_cloud_base_sfc = find_cloud_base(
         temperature, humidity, pressure, config, thvsig, layer_thickness,
+        cp_moist=cp_moist,
     )
     if omega is None:
         omega = jnp.zeros_like(temperature)
     midlev_base, has_midlev_base = find_midlevel_cloud_base(
         temperature, humidity, pressure, omega, layer_thickness, config,
-        thvsig,
+        thvsig, cp_moist=cp_moist,
     )
     use_midlev = jnp.logical_and(~has_cloud_base_sfc, has_midlev_base)
     cloud_base = jnp.where(use_midlev, midlev_base, cloud_base_sfc)
@@ -1037,7 +1125,14 @@ def _tiedtke_convection_toa_first(
             moisture_supply / jnp.maximum(q_excess, zdqmin),
             config.cmfcmin, config.cmfcmax,
         )
-        mass_flux_cape = mass_flux_closure_blend(
+        # ECHAM's cloud-base first-guess FALLBACK when the PBL moisture-budget
+        # closure is invalid (mo_cumastr.f90:567): the constant
+        # zmfub = 0.01 kg/m²/s, bounded by the CFL cap applied to
+        # mass_flux_base below. A genuine mass flux — the previous
+        # cape/(g·tau) fallback had units of m/s (review finding 2.5). Deep
+        # columns get their CAPE dependence from the Nordeng zmfub1 rescale
+        # further down; shallow/mid keep this bounded constant, matching ECHAM.
+        mass_flux_fallback = mass_flux_closure_blend(
             cape, cin, jnp.array(0.0), type_weights, config
         )
         # Apply the moisture-anchored flux to any active convection (deep/
@@ -1050,7 +1145,9 @@ def _tiedtke_convection_toa_first(
         # evaporation 0 < E ≤ _MIN_MOISTURE_SUPPLY) keep the bounded CAPE
         # closure rather than a CFL-saturating or ~zero moisture flux.
         use_moisture = jnp.logical_and(conv_type >= 1, moisture_valid)
-        mass_flux_base = jnp.where(use_moisture, mass_flux_moisture, mass_flux_cape)
+        mass_flux_base = jnp.where(
+            use_moisture, mass_flux_moisture, mass_flux_fallback
+        )
 
         # A ``cubasmc`` plume takes neither closure: its cloud-base flux is
         # the resolved ascent that triggered it (mo_cuascent.f90:643).
@@ -1093,6 +1190,9 @@ def _tiedtke_convection_toa_first(
             # ECHAM's zlift, for the one ascent test that uses it: the
             # first step above a ``cubasmc`` (klab == 1) cloud base.
             lift=cloud_base_lift(config, thvsig),
+            # Environmental winds for the prognostic plume wind (cududv).
+            u_wind=u_wind, v_wind=v_wind,
+            cp_moist=cp_moist,
         )
         
         # --- ECHAM depth demotion (mo_cumastr.f90:750-753) ---------------
@@ -1130,7 +1230,8 @@ def _tiedtke_convection_toa_first(
         # Calculate downdraft (now properly implemented)
         downdraft_state = calculate_downdraft(
             temperature, humidity, pressure, layer_thickness, rho,
-            updraft_state, precip_rate, cloud_base, ktop, config
+            updraft_state, precip_rate, cloud_base, ktop, config,
+            u_wind=u_wind, v_wind=v_wind, cp_moist=cp_moist,
         )
         
         # --- Nordeng CAPE closure (deep convection; mo_cumastr.f90:812-906)
@@ -1148,6 +1249,9 @@ def _tiedtke_convection_toa_first(
         # rescale of the plume fluxes is equivalent to first order and
         # avoids the second ascent pass. The downdraft arrays are rescaled
         # by the same factor, exactly as mo_cumastr.f90:945-958.
+        # The dry-adiabatic lapse inside ``zheat`` is ``g·dz/zcpcu`` with
+        # ECHAM's MOIST heat capacity (``zcpcui = 1/zcpcu``,
+        # mo_cumastr.f90:598/849), the same ``cp`` the plume is lifted with.
         in_cloud = (jnp.arange(nlev) >= jnp.minimum(ktop, cloud_base)) & (
             jnp.arange(nlev) <= jnp.maximum(ktop, cloud_base)
         )
@@ -1158,7 +1262,7 @@ def _tiedtke_convection_toa_first(
         zheat = jnp.sum(
             jnp.where(
                 in_cloud,
-                ((-dT_up + c.grav * layer_thickness / c.cpd) / temperature
+                ((-dT_up + c.grav * layer_thickness / cp_moist) / temperature
                  + c.vtmpc1 * (-dq_up))
                 * (c.grav * net_mf) * zroi,
                 0.0,
@@ -1202,10 +1306,50 @@ def _tiedtke_convection_toa_first(
         # trigger (the closure fades in over smooth_trigger_j instead of
         # snapping), which also keeps gentle convective precip alive at
         # the near-neutral equilibrium the efficient rescale produces.
+        # ECHAM SHALLOW re-closure (mo_cumastr.f90:909-936): after the
+        # downdrafts, a ktype==2 column recomputes its cloud-base flux from
+        # the PBL moisture budget INCLUDING the downdraft moisture at cloud
+        # base (zqumqe = qu + lu − zeps·qd − (1−zeps)·qenh, with zeps = cmfdeps
+        # where a downdraft reaches the base) and applies it only when it
+        # moves less than 20% from the first guess. With the faithful
+        # deep/shallow split most columns are shallow, so this term (a
+        # NEGATIVE moisture correction from downdraft drying) matters. jcm
+        # previously applied the pre-downdraft moisture-anchored flux with no
+        # re-closure.
+        ikb = cloud_base
+        # ECHAM keys zeps on ``pmfd(ikb) < 0 .AND. loddraf``
+        # (mo_cumastr.f90:924). ``loddraf`` is "a downdraft was initiated"
+        # (an LFS was found) — it is NOT the scan-EXIT activity flag, which the
+        # surface taper always drives to False (and an early termination does
+        # the same). A negative downdraft mass flux AT CLOUD BASE already means
+        # a downdraft is present there (loddraf implied), so test that directly
+        # rather than ``downdraft_state.active`` (the final carry), which would
+        # zero ``zeps`` in exactly the LFS-above-base columns the shallow
+        # re-closure targets (Codex P2).
+        zeps = jnp.where(
+            downdraft_state.mfd[ikb] < 0.0, config.cmfdeps, 0.0,
+        )
+        zqumqe = (
+            updraft_state.qu[ikb] + updraft_state.lu[ikb]
+            - zeps * downdraft_state.qd[ikb]
+            - (1.0 - zeps) * humidity[ikb]
+        )
+        zdqmin_sh = jnp.maximum(0.01 * humidity[ikb], 1.0e-10)
+        zdqpbl = moisture_supply * c.grav  # zdqpbl = g·E
+        # The re-closed flux is accepted within a 20% window of the first
+        # guess and then clipped to jcm's CFL cap / cmfcmax (see
+        # ``shallow_reclosure_flux`` — ECHAM's shallow branch omits that final
+        # clip, so a near-cap first guess could otherwise be raised past the
+        # hard CFL limit the rest of the scheme enforces).
+        zmfub1_sh = shallow_reclosure_flux(
+            zmfub, zqumqe, zdqmin_sh, zdqpbl, mfu_cfl_max, config,
+        )
+        rescale_shallow = zmfub1_sh / zmfub
+
         rescale = jnp.where(
             (conv_type_final == 1) & (zheat > 1e-10) & (zcape_plume > 0.0),
             zmfub1 / zmfub,
-            1.0,
+            jnp.where(conv_type_final == 2, rescale_shallow, 1.0),
         )
         updraft_state = updraft_state._replace(
             mfu=updraft_state.mfu * rescale,
@@ -1223,7 +1367,7 @@ def _tiedtke_convection_toa_first(
             updraft_state, downdraft_state,
             cloud_base, ktop, dt, config,
             ktype=conv_type_final, use_updraft_cover=use_updraft_cover,
-            layer_mass=layer_mass,
+            layer_mass=layer_mass, cp_moist=cp_moist,
         )
         
         # qc/qi tendencies come from the cudtdq ledger's detrained
@@ -1281,12 +1425,18 @@ def _tiedtke_convection_toa_first(
             has_active, jnp.min(candidate).astype(jnp.int32), ktop,
         )
 
-        # Update state
+        # Update state. The prognostic plume winds computed for the cududv
+        # momentum transport (``uu``/``vu`` from cuasc, ``ud``/``vd`` from
+        # cuddraf) are carried out on the state so a standalone caller
+        # consuming it sees the actual in-plume winds rather than the
+        # environment. They are intensive (m/s), so — unlike the mass fluxes —
+        # they are NOT touched by the Nordeng amplitude rescale and carry no
+        # cap scaling; the momentum TENDENCY the cap scales is separate.
         new_state = ConvectionState(
             tu=updraft_state.tu, qu=updraft_state.qu, lu=updraft_state.lu,
-            uu=u_wind, vu=v_wind,  # Simplified - would update from momentum transport
+            uu=updraft_state.uu, vu=updraft_state.vu,
             td=downdraft_state.td, qd=downdraft_state.qd,
-            ud=u_wind, vd=v_wind,  # Simplified
+            ud=downdraft_state.ud, vd=downdraft_state.vd,
             mfu=updraft_state.mfu, mfd=downdraft_state.mfd,
             # Fractional entrainment (1/m) is rescale-invariant (a rate,
             # not a flux); the transport term rebuilds the absolute
@@ -1361,6 +1511,7 @@ def tiedtke_nordeng_convection(
     omega: jnp.ndarray | None = None,
     qte_dynamics: jnp.ndarray | None = None,
     layer_mass: jnp.ndarray | None = None,
+    humidity_m1: jnp.ndarray | None = None,
     use_updraft_cover: bool = False,
 ) -> Tuple[ConvectionTendencies, ConvectionState]:
     """Run the Tiedtke-Nordeng scheme in either vertical ordering.
@@ -1396,7 +1547,7 @@ def tiedtke_nordeng_convection(
         dt, config, land_fraction, moisture_supply,
         to_toa(moisture_tend_profile), thvsig,
         to_toa(omega), to_toa(qte_dynamics),
-        to_toa(layer_mass),
+        to_toa(layer_mass), to_toa(humidity_m1),
         use_updraft_cover,
     )
 
@@ -1729,7 +1880,7 @@ class TiedtkeConvection(PhysicsTerm):
 
         # ``use_updraft_cover`` is a static Python bool (a trace-time code-path
         # selector), so it is closed over here rather than threaded as a
-        # vmapped argument — the ``in_axes`` tuple stays aligned with the 18
+        # vmapped argument — the ``in_axes`` tuple stays aligned with the 19
         # mapped/broadcast array arguments.
         _use_updraft_cover = self._updraft_precip_cover
 
@@ -1739,7 +1890,8 @@ class TiedtkeConvection(PhysicsTerm):
 
         column_fn = jax.vmap(
             _column_scheme,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0, 0, 1, 0, 1, 1, 1),
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 0, 0, 1, 0, 1, 1, 1,
+                     1),
             out_axes=(0, 0),
         )
         tendencies_all, _state_all = column_fn(
@@ -1749,6 +1901,11 @@ class TiedtkeConvection(PhysicsTerm):
             dt, params, land_fraction, moisture_supply,
             moisture_tend_profile, thvsig, omega, qte_dynamics,
             layer_mass,
+            # Step-start humidity (ECHAM ``pqm1``) for the moist ``cp``
+            # (``zcpq``, mo_cumastr.f90:229) — NOT the post-vdiff
+            # ``humidity_env`` the plume sees, matching ECHAM's split
+            # between ``pqm1`` (heat capacity) and ``zqp1`` (environment).
+            state.specific_humidity,
         )
 
         # Hard limit on the convective T tendency: 5 K/hr, applied
@@ -1783,9 +1940,19 @@ class TiedtkeConvection(PhysicsTerm):
         cap_scale = _tendency_cap_scale(tendencies_all.dtedt)
         cap_scale_col = cap_scale[:, 0]
 
+        # Momentum transport carries the SAME per-column cap scaling as the
+        # rest of the ledger (jax-gcm#676 item 2 / the #641 doc's follow-up).
+        # cududv's u/v tendency is the divergence of a flux built from the
+        # SAME mass fluxes that drive T/q/qc/qi; when the ``_DTDT_MAX`` cap
+        # rescales the column, leaving dudt/dvdt unscaled would deliver a
+        # capped plume's momentum transport at full amplitude while its
+        # thermodynamics are held to ~9 %, breaking the proportionality the
+        # cap's comment claims. Neither ECHAM nor CAM has such a cap, so the
+        # only correct choice is to scale momentum consistently with the
+        # ledger it shares a mass flux with.
         tendency = PhysicsTendency(
-            u_wind=tendencies_all.dudt.T,
-            v_wind=tendencies_all.dvdt.T,
+            u_wind=(tendencies_all.dudt * cap_scale).T,
+            v_wind=(tendencies_all.dvdt * cap_scale).T,
             temperature=(tendencies_all.dtedt * cap_scale).T,
             specific_humidity=(tendencies_all.dqdt * cap_scale).T,
             tracers={

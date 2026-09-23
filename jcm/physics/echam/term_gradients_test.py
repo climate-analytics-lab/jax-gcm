@@ -170,6 +170,7 @@ _TERM_NAMES = (
     "echam_surface",
     "tiedtke_convection",
     "echam_1m_microphysics",
+    "echam_surface_exchange",
     "hines_gwd",
     "lott_miller_sso",
 )
@@ -256,25 +257,6 @@ _CHEMISTRY_RELAXATION_KINK = (
     "passes) and the production/loss split is the physics. (#843)"
 )
 
-_COVER_PHASE_JUMP = (
-    "jcm/physics/clouds/sundqvist.py:216-219 — _qs_cover picks the saturation "
-    "vapour pressure with a hard phase switch, es = jnp.where(lo2, es_ice, "
-    "es_water) with lo2 = (T < t_ice) | (T < tmelt & cloud_ice > 5e-6), ECHAM "
-    "mo_cover's ice-memory convention (a deliberate discontinuity, not a "
-    "smoothable one like the softplus/sigmoid/softmax the rest of the scheme "
-    "uses). es_ice and es_water differ below freezing, so qs — and the "
-    "diagnostic RH and cloud fraction built on it — jump where a level crosses "
-    "t_ice = 238.15 K. On the stable marine-stratocumulus column a level sits "
-    "beside that boundary and the RMS-relative temperature step (RMS ~ 250 K, so "
-    "~0.1 K at the top rung) straddles it: the central secant grows as jump/eps, "
-    "doubling as the step halves (-1.5e3 at eps 5e-4 to -1.6e4 at eps 8e-6), and "
-    "clears the boundary only below eps ~ 4e-6 where the projection is float32 "
-    "noise. Forcing es_water, or a smooth phase blend, restores a usable "
-    "reference — confirming the switch is the sole cause. The convecting column "
-    "does not cross it at a sensitive level and keeps its difference reference. "
-    "Both AD modes are finite (the finiteness case passes). (#843)"
-)
-
 
 @dataclasses.dataclass(frozen=True)
 class _Check:
@@ -320,11 +302,24 @@ _CHECKS: dict = {
     # holds, the two-sided reference does not. See ``_CHEMISTRY_RELAXATION_KINK``.
     "simple_chemistry": _Check(xfail_reference=_CHEMISTRY_RELAXATION_KINK),
 
-    # Only the stable marine-stratocumulus column places a level beside the
-    # ice/water phase boundary that _qs_cover switches across; the convecting
-    # column keeps its difference reference. See ``_COVER_PHASE_JUMP``.
-    ("sundqvist_cloud_fraction", "stable"): _Check(
-        xfail_reference=_COVER_PHASE_JUMP),
+    # ``sundqvist_cloud_fraction`` at both points takes the default difference
+    # reference. The stable column carried a strict xfail until #677: _qs_cover's
+    # ice-memory phase switch (es_ice vs es_water at t_ice = 238.15 K, a
+    # deliberate hard discontinuity — kept, see ``sundqvist.py`` _qs_cover) puts
+    # a jump in cloud_fraction where a level crosses that boundary, and along
+    # this test's fixed direction (seed 0) it defeated the central difference:
+    # the secant grew as jump/eps until the step no longer crossed t_ice, by
+    # which point it was float32 cancellation noise, so no rung was both past the
+    # jump and above the noise. #677 did not touch the switch, but its
+    # single-level tie-break and surface-interface height changed the
+    # stable-column cloud_fraction field enough that the seed-0 projection now
+    # resolves a converged reference in that gap (below the crossing step, above
+    # the noise) which AD matches. The reference is genuine but delicate: the
+    # switch is unchanged, so along other directions the jump can still defeat a
+    # difference (verified: the cell passes at some seeds and not others on both
+    # dev and this branch). If a future change re-crosses the boundary at seed 0
+    # this fails loudly rather than silently — the honest signal for a delicate
+    # reference — at which point it earns back an xfail naming the switch.
 
     # TTE-TKE, the 1M microphysics and Hines each cross an internal activation
     # boundary under this direction, and none of them has a central difference
@@ -388,8 +383,26 @@ _CHECKS: dict = {
     # the check can honestly assert. The plume on this column stays warm, so
     # it detrains no ice and the qi tendency is a structural zero rather than
     # a lost gradient.
+    #
+    # ``adjoint_rtol`` is relaxed to 3.0e-3 because the faithful #676/#669
+    # reformulation lengthened the convecting-plume float32 reduction: the
+    # cududv momentum tendency now sums SEPARATE updraft and downdraft
+    # deviation-flux divergences, each built from a prognostic plume wind
+    # mixed through the ascent/descent scans, plus the sub-cloud taper and the
+    # surface-layer closure; and the organized entrainment/detrainment add the
+    # ``zdrodz`` log-density term and the metre-based ``tan`` profile with
+    # their ``centrmax`` clips. In float64 the seed-0 jvp and vjp agree to
+    # 8.1e-13 (≤4e-14 over seeds 1-2), so the float32 gap is reduction order,
+    # not a jvp/vjp asymmetry — and there is no ``custom_jvp``, ``custom_vjp``
+    # or ``stop_gradient`` in the scheme for one to come from; the two float32
+    # modes straddle the float64 truth (-2527.3: jvp -2530.1, vjp -2528.9).
+    # The worst float32 spread over seeds 0-5 is 4.85e-4, all of it on seed 0
+    # (the smallest-magnitude projection, |Δ|≈1.2 on a value of 2530; the
+    # other five seeds are ≤2.6e-5). 3.0e-3 keeps ~6x headroom and still
+    # detects a 0.3 % asymmetry — far tighter than the 1.2e-1 the 1M
+    # convecting cell had to reject as unusable.
     ("tiedtke_convection", "convecting"): _Check(
-        reference="adjoint", outputs="tendency",
+        reference="adjoint", adjoint_rtol=3.0e-3, outputs="tendency",
         skip_outputs=("tracers/qi",), live_inputs=_ENVIRONMENT),
 }
 

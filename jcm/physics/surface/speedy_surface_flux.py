@@ -111,6 +111,23 @@ class SurfaceTypeFluxes(NamedTuple):
     hfluxn: jnp.ndarray  # net downward heat flux into the surface [W/m2]
 
 
+class PrescribedFluxes(NamedTuple):
+    """Externally prescribed turbulent surface fluxes (jax-gcm#301).
+
+    Carries the coupling-contract convention of
+    :mod:`jcm.physics.surface.surface_exchange` — turbulent fluxes positive
+    up, stress positive down (momentum into the surface), evaporation in
+    kg/m2/s — so a coupler feeds jcm the very numbers the publishing side
+    emits. Conversion to SPEEDY-internal units and signs happens inside
+    :func:`get_surface_fluxes`.
+    """
+
+    sensible_heat_flux: jnp.ndarray  # [W/m2], positive up
+    evaporation: jnp.ndarray         # [kg/m2/s], positive up
+    stress_u: jnp.ndarray            # [N/m2], positive down (into surface)
+    stress_v: jnp.ndarray            # [N/m2], positive down (into surface)
+
+
 class NearSurfaceAir(NamedTuple):
     """Air properties extrapolated to the surface layer (sigma = 0.99).
 
@@ -376,6 +393,7 @@ def get_surface_fluxes(
     parameters: Parameters,
     forcing: ForcingData,
     terrain: TerrainData,
+    prescribed: PrescribedFluxes | None = None,
 ) -> tuple[PhysicsTendency, PhysicsData]:
     """Surface fluxes and the tendencies they impose on the lowest level.
 
@@ -391,6 +409,14 @@ def get_surface_fluxes(
             temperature), land surface temperature ``stl_am`` and soil
             wetness ``soilw_am``.
         terrain: Orography, land fraction ``fmask``, and ``lfluxland``.
+        prescribed: Optional externally computed turbulent fluxes
+            (jax-gcm#301, coupling-contract units/signs — see
+            :class:`PrescribedFluxes`). When given, they REPLACE the bulk
+            formulae's merged grid-mean stress, sensible heat and
+            evaporation — land and sea alike — while the radiative and
+            skin-temperature bookkeeping stays interactive; ``hfluxn`` is
+            re-closed against the prescribed turbulent fluxes so the
+            published surface energy budget stays exact.
 
     Returns:
         The wind, temperature and humidity tendencies applied to the lowest
@@ -422,6 +448,31 @@ def get_surface_fluxes(
 
     merged = jax.tree.map(lambda over_land, over_sea:
                           over_sea + fmask * (over_land - over_sea), land, sea)
+
+    if prescribed is not None:
+        # Forced mode (#301): the coupler's turbulent fluxes replace the
+        # bulk-formula grid means at the SAME seam the interactive values
+        # occupy, so everything downstream — the bottom-level tendencies
+        # below, the published ``surface_flux`` diagnostics, the upward-LW
+        # term — sees prescribed and interactive fluxes through one code
+        # path. Contract -> SPEEDY conversions: evaporation kg -> g/m2/s;
+        # stress flips from "into the surface" (contract, positive down)
+        # to SPEEDY's "on the atmosphere". ``hfluxn`` is re-closed by
+        # swapping the turbulent terms of its energy budget
+        # (hfluxn = R_net - shf - alhc*evap, radiative part untouched), so
+        # the published net heat flux stays exactly consistent with what
+        # the surface medium now receives.
+        shf_new = prescribed.sensible_heat_flux
+        evap_new = prescribed.evaporation * 1000.0
+        merged = SurfaceTypeFluxes(
+            ustr=-prescribed.stress_u,
+            vstr=-prescribed.stress_v,
+            shf=shf_new,
+            evap=evap_new,
+            rlus=merged.rlus,
+            hfluxn=(merged.hfluxn + (merged.shf - shf_new)
+                    + alhc * (merged.evap - evap_new)),
+        )
 
     # ``tsea`` is the ice-weighted sea-surface temperature the sea fluxes were
     # evaluated at (open water blended with sea ice); publishing tsfc/tskin

@@ -16,6 +16,7 @@ from jax import lax
 from typing import Tuple
 
 import jcm.constants as c
+from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 from .tiedtke_nordeng import ConvectionParameters, ConvectionTendencies
 from .updraft import UpdatedraftState
 from .downdraft import DowndraftState
@@ -215,6 +216,9 @@ def convective_precip_fluxes(
 
     """
     nlev = len(temperature)
+    # ECHAM ``zcons1 = cpd/(alf·grav·dt)`` (mo_cufluxdts.f90:146); the moist
+    # factor ``(1 + vtmpc2·pqen)`` is applied per layer in ``zfac`` below
+    # (line 303), with the PROVISIONAL humidity ``pqen`` exactly as there.
     zcons1 = c.cpd / (c.alhf * c.grav * dt)
     zcons2 = 1.0 / (c.grav * dt)
     ztmelp2 = c.tmelt + 2.0
@@ -371,6 +375,7 @@ def calculate_tendencies(
     ktype: jnp.ndarray | None = None,
     use_updraft_cover: bool = False,
     layer_mass: jnp.ndarray | None = None,
+    cp_moist: jnp.ndarray | None = None,
 ) -> ConvectionTendencies:
     """Calculate final tendencies from convective fluxes
 
@@ -401,12 +406,19 @@ def calculate_tendencies(
             column callers that build their own columns); the composed
             model's ``layer_thickness`` carries a 10 m floor and MUST NOT
             reach the taper through that product.
+        cp_moist: Moist heat capacity ``cpd·(1 + vtmpc2·q)`` [J/kg/K]
+            [nlev] — ECHAM's ``pcpcu`` in the static-energy fluxes and
+            ``pcpen`` in the ``zrcpm = 1/pcpen`` tendency conversion
+            (mo_cufluxdts.f90:199-203, 648-656). ``None`` builds it from
+            ``humidity``.
 
     Returns:
         ConvectionTendencies with all tendency terms
 
     """
     nlev = len(temperature)
+    if cp_moist is None:
+        cp_moist = moist_isobaric_heat_capacity(humidity)
 
     # Calculate mass flux divergence at each level using JAX-compatible operations
 
@@ -420,8 +432,12 @@ def calculate_tendencies(
     heights_from_surface = jnp.cumsum(layer_thickness[::-1])[::-1]  # Reverse, cumsum, reverse back
     geopotential = c.grav * heights_from_surface
 
-    # Dry static energy = cp*T + geopotential
-    # The latent heat is handled separately through lh_source.
+    # Dry static energy = cp*T + geopotential, with ECHAM's MOIST ``cp``:
+    # cuasc/cuddraf build ``pmfus``/``pmfds`` from ``pcpcu·T + pgeoh`` and
+    # cuflx subtracts the environment's ``pcpcu·ptenh + pgeoh``
+    # (mo_cufluxdts.f90:198-204), all with the environment's
+    # ``pcpcu = cpd·(1 + vtmpc2·q)``. The latent heat is handled separately
+    # through the ledger source terms below.
     # Per Tiedtke (1989) eq. 3.8 and ECHAM ``mo_cuflx``, the convective
     # tendency in the environment is the divergence of the *deviation*
     # flux M·(s_par − s̄), NOT M·s_par. The deviation flux carries the
@@ -430,39 +446,54 @@ def calculate_tendencies(
     # subsides and warms adiabatically. Without the s̄ subtraction,
     # the absolute s_par (~3·10⁵ J/kg) dominates and any small dmfu/dz
     # from entrainment produces unphysical heating of ~10³–10⁴ K/day.
-    dse_env = c.cpd * temperature + geopotential
-    dse_up = c.cpd * updraft_state.tu + geopotential
-    dse_down = c.cpd * downdraft_state.td + geopotential
+    dse_env = cp_moist * temperature + geopotential
+    dse_up = cp_moist * updraft_state.tu + geopotential
+    dse_down = cp_moist * downdraft_state.td + geopotential
 
     # Deviation fluxes of dry static energy (W/m²)
     dse_flux_up = (dse_up - dse_env) * updraft_state.mfu
     dse_flux_down = (dse_down - dse_env) * downdraft_state.mfd
 
-    # ECHAM ``mo_cufluxdts.f90`` writes the convective tendency as
-    #     dT/dt = (g / Δp) · (F(k+1) − F(k)) / cp
-    # where Δp = p_half(k+1) − p_half(k) (signed) and F is the deviation
-    # flux M·(s_par − s̄). Both ``Δp`` and ``F(k+1) − F(k)`` flip sign
-    # together with vertical ordering, so leaving them signed keeps the
-    # formula ordering-agnostic — required because the running ICON physics
-    # feeds TOA-first columns (a signed Δp with ``-diff(F)`` would invert the
-    # tendency there and cool the cloud layer).
+    # ECHAM ``mo_cufluxdts.f90`` (``cudtdq``) writes the convective tendency
+    # as the divergence of the HALF-level deviation fluxes, with an explicit
+    # ``jk == klev`` SURFACE branch: there the below-surface half-level flux
+    # is zero, so ``div(klev) = −F(klev)`` (mo_cufluxdts.f90:707-736). jcm
+    # carries the fluxes at FULL levels (dual grid, #530); the divergence is
+    # therefore ``F(k+1) − F(k)`` between full-level centres for the interior
+    # and ``−F(surface)`` at the surface. Appending a zero "below-surface"
+    # flux and differencing produces exactly that: ``diff`` for the interior
+    # and ``0 − F(surface)`` at the last index. Surface = last index is the
+    # module's established top-first convention (the eta/cumsum precip passes
+    # above rely on it). This closes the surface-layer gap where the previous
+    # ``diff`` left ``dtedt[surface] == 0`` always (jax-gcm#676 item 4).
     dp_signed = jnp.diff(pressure, axis=0)
-    dse_flux_div = jnp.diff(dse_flux_up + dse_flux_down, axis=0)
-    # Moisture deviation flux: same logic — env q is what gets displaced
-    # by the updraft, so the convective drying tendency is governed by
-    # the difference between parcel and env q.
-    q_flux_div = jnp.diff(
+
+    def _divergence_to_surface(flux):
+        zero_below = jnp.zeros_like(flux[:1])
+        return jnp.diff(jnp.concatenate([flux, zero_below], axis=0), axis=0)
+
+    # Full-level deviation fluxes.
+    dse_flux_div = _divergence_to_surface(dse_flux_up + dse_flux_down)
+    # Moisture deviation flux: env q is what gets displaced by the drafts,
+    # so the drying tendency is governed by parcel-minus-env q.
+    q_flux_div = _divergence_to_surface(
         (updraft_state.qu - humidity) * updraft_state.mfu
-        + (downdraft_state.qd - humidity) * downdraft_state.mfd,
-        axis=0,
+        + (downdraft_state.qd - humidity) * downdraft_state.mfd
     )
-    # Condensate flux divergence (ECHAM pmful = mfu·lu). In cudtdq the
-    # T-ledger carries −Δ(L·pmful): moving condensate UP through a layer
-    # boundary removes the latent heat that was released making it — the
-    # previous code had this term with the OPPOSITE sign (+L·Δ(lu·mfu)),
-    # cooling the layers where condensate was produced and heating where
-    # it evaporated (review finding 0.1/PR-1.1).
-    pmful_div = jnp.diff(updraft_state.lu * updraft_state.mfu, axis=0)
+    # Condensate flux (ECHAM pmful = mfu·lu). The T-ledger carries the
+    # divergence of the PHASE-KEYED latent-condensate flux ``−Δ(zalv·pmful)``
+    # (cudtdq: ``−palvsh(k+1)·pmful(k+1) + palvsh(k)·pmful(k)``), while the
+    # q-ledger carries the RAW condensate-flux divergence ``+Δ(pmful)``.
+    # ``zalv`` is keyed to the full-level environment temperature — the SAME
+    # ``where`` as the per-level source term below (jax-gcm#676 item 3);
+    # using a fixed ``c.alhc`` here while the source used phase-keyed ``L``
+    # disagreed by ~12 % wherever ``T < tmelt``. (The T-ledger sign is
+    # negative: moving condensate UP through a boundary removes the latent
+    # heat that was released making it — review finding 0.1/PR-1.1.)
+    condensate_flux = updraft_state.lu * updraft_state.mfu
+    zalv_flux = jnp.where(temperature > c.tmelt, c.alhc, c.alhs)
+    pmful_div = _divergence_to_surface(condensate_flux)
+    pmful_lat_div = _divergence_to_surface(zalv_flux * condensate_flux)
 
     # Layer mass per unit area for the flux divergence. NOTE on staggering: the
     # convective fluxes above are evaluated at FULL levels, so ``diff(flux)``
@@ -475,13 +506,23 @@ def calculate_tendencies(
     # with a model-grid mass (inconsistent staggering) and empirically worsens
     # the cloud-base noise, so we keep the self-consistent dual-grid form. The
     # sign is carried so the heating comes out positive regardless of ordering.
-    layer_mass_per_area = dp_signed / c.grav  # kg/m² (signed), shape (nlev-1)
+    # Extended to the surface layer (nlev entries) by duplicating the last
+    # centre-to-centre spacing — the same extension the per-level ``dp_lev``
+    # uses below, so the divergence and source terms share one mass and the
+    # column budget telescopes exactly.
+    layer_mass_per_area = jnp.concatenate(
+        [dp_signed, dp_signed[-1:]], axis=0
+    ) / c.grav  # kg/m² (signed), shape (nlev,)
 
     # Flux-divergence parts of the cudtdq ledger (mo_cufluxdts.f90:649-662):
-    #   zdtdt ∝ Δpmfus + Δpmfds − Δ(L·pmful)  (+ per-level sources below)
-    #   zdqdt ∝ Δpmfuq + Δpmfdq + Δpmful      (− per-level sinks below)
-    dtedt_k_levels = (dse_flux_div - c.alhc * pmful_div) / (
-        c.cpd * layer_mass_per_area
+    #   zdtdt ∝ Δpmfus + Δpmfds − Δ(zalv·pmful)  (+ per-level sources below)
+    #   zdqdt ∝ Δpmfuq + Δpmfdq + Δpmful         (− per-level sinks below)
+    # The whole heat ledger is converted to a temperature tendency with the
+    # MOIST heat capacity of the layer, ``zrcpm = 1/pcpen``
+    # (mo_cufluxdts.f90:648/712), so the column enthalpy it deposits is
+    # ``Σ cp_moist·dT·m`` — the quantity the flux divergence telescopes in.
+    dtedt_k_levels = (dse_flux_div - pmful_lat_div) / (
+        cp_moist * layer_mass_per_area
     )
     dqdt_k_levels = (q_flux_div + pmful_div) / layer_mass_per_area
 
@@ -545,7 +586,8 @@ def calculate_tendencies(
     # environment temperature: sublimation heat below the melting point
     # (mo_cufluxdts.f90 — the palvsh/zalv pair), condensation heat above.
     zalv = jnp.where(temperature > c.tmelt, c.alhc, c.alhs)
-    dtedt_lev = (zalv * ledger_src - c.alhf * pdpmel) / (c.cpd * mass_lev)
+    # Same ``zrcpm = 1/pcpen`` moist conversion as the divergence terms.
+    dtedt_lev = (zalv * ledger_src - c.alhf * pdpmel) / (cp_moist * mass_lev)
     dqdt_lev = -ledger_src / mass_lev
 
     # Detrained condensate feeds the stratiform cloud tracers (ECHAM
@@ -561,54 +603,89 @@ def calculate_tendencies(
     factor = 1.0 / layer_mass_per_area
 
     def calculate_momentum_transport():
-        # ECHAM cududv (mo_cufluxdts.f90:874-960) deviation-flux form: the
-        # tendency is the divergence of ``M·(u_plume − ū_upstream)`` with
-        # the environment wind taken one level ABOVE the interface (the
-        # deliberate ik = jk−1 upstream offset). The port does not carry a
-        # prognostic plume wind (ECHAM builds puu/pvu in cubase/cuasc), so
-        # the plume wind is approximated by the cloud-base environment wind
-        # — the leading-order cududv behaviour (plume momentum is dominated
-        # by its sub-cloud source). There is no PGF-relaxation term: the
-        # momentum tendency is the cududv deviation-flux divergence alone,
-        # with no ECHAM-absent relaxation toward the cloud-base wind.
-        u_cloud_base = u_wind[kbase]
-        v_cloud_base = v_wind[kbase]
+        # ECHAM cududv (mo_cufluxdts.f90:874-960): the u/v tendency is the
+        # divergence of the deviation MOMENTUM flux, with FOUR features the
+        # previous ``net_mf·(u_base − ū)`` form lacked (jax-gcm#676 item 2):
+        #   1. SEPARATE updraft and downdraft fluxes, each with its OWN
+        #      prognostic plume wind (``puu``/``pud`` from cuasc/cuddraf,
+        #      carried here as ``updraft_state.uu`` / ``downdraft_state.ud``).
+        #      Folding ``mfd`` into the updraft with the cloud-base wind gave
+        #      the downdraft the wrong momentum-transport sign structure.
+        #   2. The environment wind taken one level ABOVE the interface (the
+        #      deliberate ``ik = jk−1`` upstream offset, lines 896/899).
+        #   3. A SUB-CLOUD taper (lines 911-918): below cloud base the flux
+        #      is the cloud-base value scaled by the pressure ratio ``zzp``
+        #      (squared for mid-level, ktype==3), so cumulus friction acts
+        #      through the sub-cloud layer to the surface.
+        #   4. The explicit surface closure (``−F(surface)``), via the same
+        #      ``_divergence_to_surface`` used by the thermodynamic ledger.
         u_up = jnp.roll(u_wind, 1)  # upstream (jk−1) environment wind
         v_up = jnp.roll(v_wind, 1)
-        net_mf = updraft_state.mfu + downdraft_state.mfd
-        zmfu_u = net_mf * (u_cloud_base - u_up)
-        zmfu_v = net_mf * (v_cloud_base - v_up)
-        dudt_transport = jnp.diff(zmfu_u, axis=0) * factor
-        dvdt_transport = jnp.diff(zmfu_v, axis=0) * factor
+        zmfuu = updraft_state.mfu * (updraft_state.uu - u_up)
+        zmfuv = updraft_state.mfu * (updraft_state.vu - v_up)
+        zmfdu = downdraft_state.mfd * (downdraft_state.ud - u_up)
+        zmfdv = downdraft_state.mfd * (downdraft_state.vd - v_up)
+        # Sub-cloud taper (cududv:913): ECHAM keys zzp to the SURFACE INTERFACE
+        # pressure ``paphp1(klevp1)`` and the layer TOP interfaces
+        # ``paphp1(jk)`` — ``zzp = (p_s − p_half(jk))/(p_s − p_half(kbase))`` —
+        # so at the LOWEST model layer ``p_half(jk)`` is that layer's top
+        # interface, NOT the surface, and ``zzp`` stays > 0 there: the surface
+        # layer still carries the tapered flux, and cududv's ``jk == klev``
+        # branch (``−(g/dp)(zmfuu(klev)+zmfdu(klev))``) deposits it. We
+        # reconstruct ``p_s − p_half(k) = g·Σ_{j≥k} Δp_j`` from the cumulative
+        # layer masses (the same true half-level Δp ``updraft_area_cover`` uses)
+        # — ``pressure[-1]`` is only the lowest FULL-level pressure, so a
+        # full-level ratio would force ``zzp[-1]`` and the entire surface-layer
+        # momentum tendency to zero and misplace the terminal flux convergence
+        # one level too high (Codex P2). Top-first: surface = last index,
+        # k > kbase is below cloud base.
+        taper_mass = (
+            layer_mass if layer_mass is not None else rho * layer_thickness
+        )
+        mass_below = jnp.cumsum(taper_mass[::-1], axis=0)[::-1]
+        zzp = mass_below / jnp.maximum(mass_below[kbase], _MASS_EPS)
+        ktype_taper = jnp.asarray(0) if ktype is None else ktype
+        zzp = jnp.where(ktype_taper == 3, zzp * zzp, zzp)
+        below_base = jnp.arange(nlev) > kbase
+        zmfuu = jnp.where(below_base, zmfuu[kbase] * zzp, zmfuu)
+        zmfuv = jnp.where(below_base, zmfuv[kbase] * zzp, zmfuv)
+        zmfdu = jnp.where(below_base, zmfdu[kbase] * zzp, zmfdu)
+        zmfdv = jnp.where(below_base, zmfdv[kbase] * zzp, zmfdv)
+        dudt_transport = _divergence_to_surface(zmfuu + zmfdu) * factor
+        dvdt_transport = _divergence_to_surface(zmfuv + zmfdv) * factor
         return dudt_transport, dvdt_transport
 
     dudt_k_levels, dvdt_k_levels = lax.cond(
         config.lmfdudv,
         calculate_momentum_transport,
-        lambda: (jnp.zeros(nlev-1), jnp.zeros(nlev-1)),
+        lambda: (jnp.zeros(nlev), jnp.zeros(nlev)),
     )
-    
-    # Mask ONLY the flux-divergence parts to the cloud column (ECHAM's
-    # ``IF(ldcum .AND. jk.GE.kctop-1)`` guard — its cudtdq loop then runs
-    # all the way DOWN TO THE SURFACE, jk = ktopm2..klev, never truncating
-    # at cloud base). The per-level ledger terms (plude, pdmfup, pdmfdp,
-    # pdpmel) are already zero wherever the physics is inactive and MUST
-    # flow through below cloud base: the sub-cloud Kessler evaporation
-    # writes negative pdmfup there, and zeroing its cooling/moistening
-    # while the surface precip is still depleted opens the water/energy
-    # budgets and dries sub-cloud layers (Codex review on #550).
+
+    # Mask ONLY the flux-divergence parts to the cloud column and the
+    # SUB-CLOUD layer below it (ECHAM's ``IF(ldcum .AND. jk.GE.kctop-1)``
+    # guard — its cudtdq/cududv loops then run all the way DOWN TO THE
+    # SURFACE, jk = ktopm2..klev, never truncating at cloud base). The
+    # divergence terms are zero wherever ``mfu = mfd = 0`` (above cloud top
+    # and, for the thermodynamic ledger, below the drafts), but must flow
+    # through below cloud base where the downdraft descends, the sub-cloud
+    # Kessler evaporation writes negative pdmfup, and the momentum taper
+    # carries cumulus friction to the surface. Zeroing those while the
+    # surface precip is still depleted opens the water/energy budgets and
+    # dries sub-cloud layers (Codex review on #550); truncating at cloud
+    # base also discarded the surface-layer tendency entirely
+    # (jax-gcm#676 item 4).
     k_indices = jnp.arange(nlev)
-    cloud_bottom = jnp.maximum(ktop, kbase)
+    cloud_bottom = nlev - 1
     cloud_top = jnp.minimum(ktop, kbase)
     # Include one level above cloud top for flux divergence (ktop-1 in ECHAM)
     conv_mask = (k_indices >= cloud_top - 1) & (k_indices <= cloud_bottom)
 
-    div_dt = jnp.where(conv_mask, jnp.zeros(nlev).at[:-1].set(dtedt_k_levels), 0.0)
-    div_dq = jnp.where(conv_mask, jnp.zeros(nlev).at[:-1].set(dqdt_k_levels), 0.0)
+    div_dt = jnp.where(conv_mask, dtedt_k_levels, 0.0)
+    div_dq = jnp.where(conv_mask, dqdt_k_levels, 0.0)
     dtedt = div_dt + dtedt_lev
     dqdt = div_dq + dqdt_lev
-    dudt = jnp.where(conv_mask, jnp.zeros(nlev).at[:-1].set(dudt_k_levels), 0.0)
-    dvdt = jnp.where(conv_mask, jnp.zeros(nlev).at[:-1].set(dvdt_k_levels), 0.0)
+    dudt = jnp.where(conv_mask, dudt_k_levels, 0.0)
+    dvdt = jnp.where(conv_mask, dvdt_k_levels, 0.0)
 
     # Surface precipitation = rain + snow after the full cuflx budget
     # (generation − downdraft consumption − sub-cloud evaporation, with the
@@ -647,67 +724,52 @@ def calculate_tendencies(
     )
 
 
+#: ECHAM's constant cloud-base first-guess mass flux, used when the PBL
+#: moisture-budget closure is invalid (``mo_cumastr.f90:567``:
+#: ``zmfub = FSEL(-zlo1, 0.01_wp, zdqpbl/(grav·MAX(zqumqe,zdqmin)))`` — the
+#: literal ``0.01 kg m⁻² s⁻¹`` fallback). It is a genuine mass flux; the CAPE
+#: dependence of DEEP convection is supplied afterwards by the Nordeng
+#: ``zmfub1`` rescale, and shallow/mid keep this bounded constant.
+ECHAM_MFUB_FALLBACK = 0.01
+
+
 def mass_flux_closure(
     cape: jnp.ndarray,
     cin: jnp.ndarray,
     moisture_conv: jnp.ndarray,
     ktype: int,
-    config: ConvectionParameters
+    config: ConvectionParameters,
 ) -> jnp.ndarray:
-    """Determine cloud base mass flux using appropriate closure
-    
+    """ECHAM constant cloud-base first-guess mass flux (fallback path).
+
+    Returns ECHAM's constant fallback ``zmfub = 0.01 kg m⁻² s⁻¹``
+    (``mo_cumastr.f90:567``), floored/capped to ``[cmfcmin, cmfcmax]``. This
+    is the value ECHAM uses for the cloud-base mass flux when the boundary-
+    layer moisture-budget closure ``zdqpbl/(g·Δq)`` is not applicable; the
+    live scheme (``tiedtke_nordeng_convection``) applies that moisture
+    closure directly and the Nordeng ``zmfub1`` rescale for deep columns, so
+    this function supplies only the constant fallback.
+
+    It replaces the former ``cape/(g·τ)`` "closure", which had units of
+    m s⁻¹ — dimensionally a velocity, not a mass flux (review finding 2.5).
+    ``cape``, ``cin``, ``moisture_conv`` and ``ktype`` are accepted for
+    backward compatibility with existing call sites but are not used: ECHAM's
+    fallback is a single constant independent of type.
+
     Args:
-        cape: Convective available potential energy (J/kg)
-        cin: Convective inhibition (J/kg)
-        moisture_conv: Low-level moisture convergence (kg/m²/s)
-        ktype: Convection type (1=deep, 2=shallow, 3=mid)
-        config: Convection configuration
-        
+        cape: CAPE (J/kg) — unused.
+        cin: CIN (J/kg) — unused.
+        moisture_conv: Low-level moisture convergence (kg/m²/s) — unused.
+        ktype: Convection type (1=deep, 2=shallow, 3=mid) — unused.
+        config: Convection configuration (supplies the clip bounds).
+
     Returns:
-        Cloud base mass flux (kg/m²/s)
+        Cloud base mass flux (kg/m²/s).
 
     """
-    # Deep convection: CAPE closure
-    def deep_closure():
-        # Timescale for CAPE removal
-        tau = config.tau
-        
-        # Mass flux to remove CAPE over timescale
-        # Simplified - full version would iterate
-        mf_cape = cape / (c.grav * tau)
-        
-        # Apply limits
-        return jnp.clip(mf_cape, config.cmfcmin, config.cmfcmax)
-    
-    # Shallow convection: moisture convergence closure
-    def shallow_closure():
-        # Balance low-level moisture convergence
-        # For shallow convection, also use CAPE but with different scaling
-        # If no moisture convergence, use CAPE-based trigger for shallow convection
-        cape_flux = cape / (c.grav * config.tau * 10.0)  # Weaker than deep convection
-        moisture_flux = moisture_conv * 0.1  # Efficiency factor
-        
-        # Use the larger of the two triggers
-        base_flux = jnp.maximum(cape_flux, moisture_flux)
-        
-        return jnp.clip(
-            base_flux,
-            config.cmfcmin * 10.0,  # Minimum for shallow convection
-            config.cmfcmax * 0.3    # Lower limit for shallow
-        )
-    
-    # Mid-level convection: hybrid closure
-    def mid_closure():
-        # Combination of CAPE and moisture
-        return 0.5 * (deep_closure() + shallow_closure())
-
-    # Select closure based on convection type using clipped index
-    # Ensure index is in valid range [0, 2] for switch
-    switch_index = jnp.clip(ktype - 1, 0, 2)
-
-    return lax.switch(
-        switch_index,
-        [deep_closure, shallow_closure, mid_closure],
+    del cape, cin, moisture_conv, ktype
+    return jnp.clip(
+        jnp.asarray(ECHAM_MFUB_FALLBACK), config.cmfcmin, config.cmfcmax,
     )
 
 
@@ -718,38 +780,27 @@ def mass_flux_closure_blend(
     type_weights: jnp.ndarray,
     config: ConvectionParameters,
 ) -> jnp.ndarray:
-    """Type-weighted cloud-base mass-flux closure.
+    """Type-weighted cloud-base mass-flux fallback.
 
-    Smooth counterpart of :func:`mass_flux_closure`: instead of a hard
-    ``lax.switch`` on the discrete convection type (which makes ``tau``
-    and the type thresholds unlearnable — the maintainability review's
-    B.1 BLOCKER), all three per-type closures are evaluated and combined
-    with the differentiable ``type_weights`` from the softmax type
-    selection. With one weight at 1 and the others at 0 this reproduces
-    :func:`mass_flux_closure` exactly.
+    Type-weighted counterpart of :func:`mass_flux_closure`. Because ECHAM's
+    fallback (``mo_cumastr.f90:567``) is the SAME constant ``0.01 kg m⁻² s⁻¹``
+    for all convection types, the type weighting is degenerate and this
+    returns the same faithful constant as :func:`mass_flux_closure`. Kept as
+    a separate entry point for the (differentiable) live call site.
 
     Args:
-        cape: CAPE (J/kg).
-        cin: CIN (J/kg) — unused by the current closures, kept for parity.
-        moisture_conv: Low-level moisture convergence (kg/m2/s).
-        type_weights: ``(3,)`` weights for (deep, shallow, mid), summing
-            to 1 for an active column.
-        config: Convection configuration.
+        cape: CAPE (J/kg) — unused.
+        cin: CIN (J/kg) — unused.
+        moisture_conv: Low-level moisture convergence (kg/m2/s) — unused.
+        type_weights: ``(3,)`` (deep, shallow, mid) weights — unused (the
+            fallback constant is type-independent).
+        config: Convection configuration (supplies the clip bounds).
 
     Returns:
         Cloud base mass flux (kg/m2/s).
 
     """
-    del cin
-    tau = config.tau
-    mf_deep = jnp.clip(cape / (c.grav * tau), config.cmfcmin, config.cmfcmax)
-    cape_flux = cape / (c.grav * tau * 10.0)
-    moisture_flux = moisture_conv * 0.1
-    mf_shallow = jnp.clip(
-        jnp.maximum(cape_flux, moisture_flux),
-        config.cmfcmin * 10.0, config.cmfcmax * 0.3,
+    del cape, cin, moisture_conv, type_weights
+    return jnp.clip(
+        jnp.asarray(ECHAM_MFUB_FALLBACK), config.cmfcmin, config.cmfcmax,
     )
-    mf_mid = 0.5 * (mf_deep + mf_shallow)
-    return (type_weights[0] * mf_deep
-            + type_weights[1] * mf_shallow
-            + type_weights[2] * mf_mid)

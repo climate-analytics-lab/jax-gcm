@@ -5,7 +5,13 @@
 
 - **Sundqvist diagnostic cloud fraction**
   (``jcm/physics/clouds/sundqvist.py::SundqvistCloudFraction``) — RH-based cloud
-  fraction with a stratocumulus inversion enhancement (``mo_cover.f90``). It is
+  fraction with a stratocumulus inversion enhancement (``mo_cover.f90``). The
+  enhancement boosts the apparent RH at a **single** boundary-layer-top level
+  over ice-free ocean with no active convection, chosen as ECHAM's ``zknvb``
+  scan does — the most inversion-like BL level, resolving to the *lowest*
+  (nearest-surface) one on a tie; the differentiable softmax surrogate keeps
+  that single-level behaviour rather than smearing the boost across the tied
+  levels. It is
   a **pure diagnostic** — the term emits zero T/q/qc/qi tendencies; the
   saturation adjustment lives downstream in each microphysics scheme (the 2M
   path's ``mixed_phase_deposition_and_corrections``, and ``echam_1m.py``'s own
@@ -15,7 +21,9 @@
   top-down column sweep: autoconversion (Beheng 1994 default or KK2000),
   accretion, ice→snow aggregation (Levkov 1992), riming, snow/ice melt, ice
   sedimentation, Rotstayn (1997) rain evaporation. Ports the ECHAM6/ICON
-  ``mo_cloud.f90`` single-moment branch.
+  ``mo_cloud.f90`` single-moment branch. The ice/snow fall-speed factor
+  ``cvtfall = 2.5`` is ECHAM's value for jcm's default T63 grid
+  (``mo_echam_cloud_params.f90``, ``nn == 63``), the same the 2M scheme uses.
 - **Lohmann 2-moment microphysics**
   (``jcm/physics/clouds/lohmann_2m/scheme.py`` — ``cloud_microphysics_2m`` and its
   ``Lohmann2MMicrophysics`` term) — the full two-moment process chain (droplet and
@@ -30,6 +38,15 @@
   (``jcm/physics/clouds/lohmann_2m_params.py::CloudParams2M``), with no CAM
   ``micro_mg`` / PUMAS ``qsmall`` / ``mincld`` / ``dcs`` constants. See
   {doc}`../design/lohmann_2m_column_processes`.
+
+Both schemes convert a condensed/evaporated/frozen mixing-ratio increment to a
+temperature increment with ``L / cp`` where ``cp`` is the **moist** isobaric
+heat capacity ``cpd·(1 + vtmpc2·q)`` evaluated per-level at the step-start
+humidity — ECHAM's ``zlvdcp = alv/pcair`` / ``zlsdcp = als/pcair``
+(``mo_cloud.f90``, ``mo_cloud_micro_2m.f90``), shared through
+``cloud_utils.latent_heat_over_cp``. Dry ``cpd`` would over-heat every
+condensation event by ``vtmpc2·q`` (~1.5 % in the moist tropics); the column
+enthalpy budget closes against this same moist ``cp``.
 
 Cloud parameters are ``flax.struct.dataclass`` leaves (differentiable), threaded
 through the scheme via ``nnx.Param``; only genuine code-path switches
@@ -89,9 +106,18 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   divides by a tiny cube (`differentiability`; the bare ``C/r³`` form's
   ``1/r⁶`` gradient overflowed float32 below r ≈ 3e-7 m, and using the
   parameter itself as the scale put the same overflow on its own gradient).
-- The 1M ``physics=echam`` path has no LWC dependence in its radiative liquid
-  radius (#717) — live on the release-validated ``t63-echam-1m`` /
-  ``t106-echam-1m`` configurations; 2M paths use microphysical radii.
+- Both the 1M and 2M paths publish an LWC-dependent radiative liquid radius
+  from the shared ECHAM Martin/Bower law (``eff_liquid_droplet_radius``);
+  radiation reads it from the carried ``clouds`` state one step lagged, because
+  the ECHAM term order runs radiation before microphysics. The constant
+  ``effective_radius_liquid`` fallback therefore survives only where that carry
+  is still zero, resolved **cell by cell** — the cold-start first step, and
+  thereafter any cloudy cell that was clear the previous step (a level newly
+  turning cloudy falls back even mid-rollout in an otherwise-cloudy column) —
+  not the steady state the 1M ``physics=echam`` path used to run on. The
+  radiative **ice** radius remains limited: mixed-phase ICNC is
+  INP-limited (~1e3 m⁻³), pinning most warm-branch ``r_eff_ice`` at the 150 µm
+  clip (#728).
 - Clear-sky evaporation of decorrelated condensate (the radiation-side contract in
   ``mcica.in_cloud_path``) is owned by the 2M scheme's clear-sky evaporation step.
 

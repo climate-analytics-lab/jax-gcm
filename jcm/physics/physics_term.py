@@ -306,6 +306,57 @@ class PhysicsTerm(nnx.Module):
         """
         raise NotImplementedError
 
+    def augment_probe_forcing(self, forcing: ForcingData) -> ForcingData:
+        """Complete the shape-probe ``ForcingData`` for this term.
+
+        ``ComposablePhysics.get_empty_data`` traces ``__call__`` abstractly
+        against a zero-filled ``ForcingData`` to discover the diagnostics
+        pytree. A term that reads an *optional* forcing field (default
+        ``None``) it genuinely REQUIRES for a given configuration — e.g. a
+        forced-surface-flux term reading ``prescribed_*`` — overrides this
+        to fill that field with a zero array of the right shape, so the
+        probe traces the real code path instead of a ``None``-guard.
+
+        This is the forcing analogue of the probe seeding tracers from
+        :meth:`required_tracers`: it makes the probe structurally match a
+        live step WITHOUT weakening the term's own run-time validation
+        (:meth:`validate_forcing`), which still fires on the real,
+        un-augmented forcing. Default: identity (most terms need nothing).
+        """
+        return forcing
+
+    def consumed_forcing_fields(self) -> tuple[str, ...]:
+        """Return the optional ``ForcingData`` fields this term reads as configured.
+
+        The capability marker for inputs that only SOME configurations
+        consume (default ``None`` on :class:`~jcm.forcing.ForcingData`), e.g.
+        the forced-mode surface-flux terms reading ``prescribed_*``. It lets
+        the composition answer "does anything here honour this input?" by
+        declared capability rather than by class name, so replacing or
+        removing terms keeps the answer correct
+        (:func:`jcm.physics.surface.prescribed_flux.
+        check_prescribed_flux_consumers` rejects a supplied input nothing
+        consumes instead of letting the run silently ignore it). Report
+        fields per the term's CURRENT configuration: a flag-selected mode that
+        does not read a field must not declare it. Default: none.
+        """
+        return ()
+
+    def validate_forcing(self, forcing: ForcingData, run_window=None) -> None:
+        """Raise if the run's forcing cannot serve this term over the run.
+
+        Called once by :meth:`~jcm.physics.composable_physics.
+        ComposablePhysics.validate_forcing` on the concrete run forcing
+        (not the abstract shape probe), so a term configured to read an
+        optional field it cannot run without — e.g. forced-mode surface
+        fluxes — fails loudly at run start rather than silently applying a
+        zero. ``run_window`` is ``(start_seconds, end_seconds)`` since
+        1970-01-01 when the model knows it concretely (``None``
+        inside a JAX transformation with a traced initial state), so a term
+        can also check that a date-aligned series covers the run rather than
+        clamping to its end sample. Default: no-op.
+        """
+
     def __add__(self, other):
         """Compose two terms (or a term and a ComposablePhysics).
 

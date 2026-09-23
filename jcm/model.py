@@ -42,6 +42,7 @@ from jcm.dycore.base import DynamicalCore, Predictions
 from jcm.dycore.dinosaur.dycore import DinosaurDycore
 
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -115,6 +116,23 @@ def _datetime_pair(start: jdt.Datetime, end: jdt.Datetime) -> jdt.Datetime:
         days=jnp.stack((start.delta.days, end.delta.days)),
         seconds=jnp.stack((start.delta.seconds, end.delta.seconds)),
     ))
+
+
+def _run_window_seconds(initial_time: jdt.Datetime, total_seconds: int):
+    """``(start, end)`` of a run window in seconds since 1970-01-01.
+
+    Computed on the host from the exact clock (integer days/seconds, so the
+    float64 result is exact to the second) — the representation
+    :func:`jcm.forcing.by_date_coverage_error` compares a date-aligned forcing
+    axis against. ``None`` when ``initial_time`` is traced (``run`` inside a
+    JAX transformation): there is no concrete window to check, and validation
+    must never force a host read of a tracer.
+    """
+    if _contains_tracers(initial_time):
+        return None
+    start = (int(initial_time.delta.days) * SECONDS_PER_DAY
+             + int(initial_time.delta.seconds))
+    return float(start), float(start + int(total_seconds))
 
 
 def _neutralize_mesh_typing(physics) -> None:
@@ -1520,6 +1538,24 @@ class Model:
                 "initial_step; pass a complete RunState clock.")
         parse_duration_seconds(save_interval)
         total_seconds = parse_duration_seconds(total_time)
+        # Fail loudly on the CONCRETE run forcing before compiling — the
+        # single choke point EVERY public entry point funnels through (``run``
+        # → ``resume`` → here; ``run_from_state`` → here). A term that
+        # requires an optional forcing field for its configuration (e.g.
+        # forced-mode surface fluxes reading ``prescribed_*``) reports the
+        # missing field here rather than reaching its ``None`` fallback and
+        # silently running with zero fluxes. Both directions of the forced-mode
+        # contract (#301) are checked: supplied fluxes need a consumer, and a
+        # consumer needs its fluxes covering this run window. The window is
+        # the exact clock's ``[initial_time, initial_time + total_time]``, so
+        # a date-aligned forcing series is checked against the same instants
+        # the scan will select it at. A traced clock (``run`` inside a JAX
+        # transformation) yields no window and value checks skip tracers, so
+        # this never forces a host read of a tracer.
+        from jcm.physics.surface.prescribed_flux import validate_run_forcing
+        validate_run_forcing(
+            self.physics, forcing,
+            run_window=_run_window_seconds(initial_time, total_seconds))
         snapshot_stride = 0
         if snapshot_interval is not None and snapshot_variables:
             snap_seconds = parse_duration_seconds(snapshot_interval)

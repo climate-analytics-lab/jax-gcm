@@ -457,10 +457,27 @@ part of this first implementation. Streaming accumulator persistence is exposed
 through ``state_dict`` / ``from_state_dict``; the chunked CLI does not yet
 persist or publish a separate monthly stream automatically.
 
-Dated lookup currently preserves endpoint holding outside the supplied axis.
-The stricter input contract above (validate the requested window and require
-explicit persistence) remains a release gate, as does replacing the existing
-monthly-to-daily reconstruction with direct dated interpolation anchors.
+Repetition is declared through the one forcing alignment vocabulary
+(``wrap_year`` / ``by_date`` / ``by_date_interp``, with ``auto`` resolved only
+from the data-mirror manifest; see ``surface_exchange.md`` and #884), and the
+exact clock defines what each mode selects. A ``wrap_year`` leaf is a
+climatology on the real calendar: twelve records select the Gregorian month
+(held from the 1st), 365/366 records select by nominal month/day, and any
+other length keeps equal fractions of the actual year. Its labels are nominal
+month/day positions on a reference year, built from the decoded calendar
+fields, so an idealised-calendar climatology (``noleap`` year 0, ``360_day``)
+still loads; only ``by_date`` / ``by_date_interp`` axes are placed on the exact
+Gregorian clock. There is deliberately no separate "monthly/daily
+climatology" mode: with the order validation in ``make_time_series`` those
+would select exactly what ``wrap_year`` selects.
+
+Dated lookup preserves endpoint holding outside the supplied axis for the
+surface, ozone, emission and oxidant inputs. Prescribed surface fluxes are the
+exception: their run-start check compares the exact axis (or the file's CF
+bounds) with the exact run window, in whole seconds. Extending that
+requested-window contract (and explicit persistence) to every dated input
+remains a release gate, as does replacing the existing monthly-to-daily
+reconstruction with direct dated interpolation anchors.
 
 Before a v3 release, finish the coordinated JEM API migration against PR #125,
 run representative multi-year SPEEDY/ECHAM climate comparisons, and benchmark

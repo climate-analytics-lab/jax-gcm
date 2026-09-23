@@ -15,7 +15,7 @@ import unittest
 import numpy as np
 import xarray as xr
 
-from jcm.forcing import BY_DATE, ForcingData, TimeSeries, MONTHLY_CLIMATOLOGY, WRAP_YEAR
+from jcm.forcing import BY_DATE, ForcingData, TimeSeries, WRAP_YEAR
 
 # Tiny source grid and a handful of scattered "columns" inside it.
 _LON = np.arange(0.0, 360.0, 45.0)            # 8
@@ -29,6 +29,10 @@ _TIME = np.array([np.datetime64(f"2014-{m:02d}-15") for m in range(1, 13)])
 def _attach(**kwargs):
     from jcm.dycore.pyses.forcing import attach_jam_forcing
 
+    # The synthetic files are user files, so each declares its time alignment
+    # (#884: ``auto`` resolves only data-mirror/packaged products).
+    for key in ("emissions_align", "oxidants_align", "ozone_align"):
+        kwargs.setdefault(key, "wrap_year")
     forcing = ForcingData.zeros(nodal_shape=(1, _NCOL))
     return attach_jam_forcing(forcing, _COL_LON, _COL_LAT, nlev=4, **kwargs)
 
@@ -49,11 +53,12 @@ class AttachJamForcingTest(unittest.TestCase):
             coords={"time": _TIME, "lon": _LON, "lat": _LAT},
         )
         with tempfile.TemporaryDirectory() as tmp:
-            forcing = _attach(emissions_file=_write(tmp, "emis.nc", ds))
+            forcing = _attach(emissions_file=_write(tmp, "emis.nc", ds),
+                              emissions_align="by_date")
         leaf = forcing.anthropogenic_emissions["emis_surface_combustion_so2"]
         self.assertIsInstance(leaf, TimeSeries)
         self.assertEqual(leaf.values.shape, (12, 1, _NCOL))
-        # Twelve real dates describe a transient year, not a climatology.
+        # Twelve real dates declared transient stay dated on the columns.
         self.assertEqual(int(leaf.align_mode), BY_DATE)
         np.testing.assert_allclose(np.asarray(leaf.values), 2.0e-12)
         self.assertIsNone(forcing.prescribed_aerosol_emissions)
@@ -190,7 +195,7 @@ class AttachJamForcingTest(unittest.TestCase):
             rtol=1e-6, atol=0.0))
 
     def test_single_year_oxidant_list_is_explicitly_dated(self):
-        """A one-file yearly product remains BY_DATE despite having 12 rows."""
+        """A one-file product declared dated stays BY_DATE with 12 rows."""
         nlev = 4
         data = np.full((12, nlev, _LAT.size, _LON.size), 1.0e-9)
         ds = xr.Dataset(
@@ -203,15 +208,15 @@ class AttachJamForcingTest(unittest.TestCase):
         ds["hybm"] = ("mlev", np.array([0.0, 0.1, 0.5, 1.0]))
         with tempfile.TemporaryDirectory() as tmp:
             path = _write(tmp, "oxid_2014.nc", ds)
-            forcing = _attach(oxidants_file=[path])
+            forcing = _attach(oxidants_file=[path], oxidants_align="by_date")
         self.assertEqual(int(forcing.oxidant_vmr["oh"].align_mode), BY_DATE)
 
     def test_oxidants_year_list_concatenated_on_columns(self):
         # A ``{year}`` expansion hands attach_jam_forcing the yearly files of ONE
         # transient product as a list; they must open together (open_mfdataset,
-        # by-coords) into a single concatenated time axis and read BY_DATE
-        # (align_mode="by_date"), mirroring the spectral _attach_oxidants — not a
-        # 24-month wrap-year climatology. Two 12-month yearly files -> 24 steps.
+        # by-coords) into a single concatenated time axis and read BY_DATE (the
+        # declared oxidants_align), mirroring the spectral _attach_oxidants.
+        # Two 12-month yearly files -> 24 steps.
         from jcm.forcing import BY_DATE
         nlev = 4
         base = np.arange(1, nlev + 1, dtype=float).reshape(1, nlev, 1, 1)
@@ -234,7 +239,7 @@ class AttachJamForcingTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             paths = [_write(tmp, f"oxid_{y}.nc", _year_ds(y))
                      for y in (2000, 2001)]
-            forcing = _attach(oxidants_file=paths)
+            forcing = _attach(oxidants_file=paths, oxidants_align="by_date")
         oh = forcing.oxidant_vmr["oh"]
         self.assertEqual(oh.values.shape, (24, nlev, 1, _NCOL))
         self.assertEqual(int(oh.align_mode), BY_DATE)
@@ -270,7 +275,7 @@ class AttachJamForcingTest(unittest.TestCase):
         # then died in the radiation halo padder with
         # "arr_shape=(1, 47) shape=(47,)".
         self.assertEqual(leaf.values.shape, (12, nlev, _NCOL))
-        self.assertEqual(int(leaf.align_mode), MONTHLY_CLIMATOLOGY)
+        self.assertEqual(int(leaf.align_mode), WRAP_YEAR)
         np.testing.assert_allclose(                      # ppmv, per level
             np.asarray(leaf.values[0, :, 0]),
             np.arange(1, nlev + 1, dtype=float), rtol=1e-6)
@@ -330,6 +335,58 @@ class AttachJamForcingTest(unittest.TestCase):
         leaf = sliced.anthropogenic_emissions["emis_biomass_burning_bc"]
         self.assertEqual(leaf.shape, (1, _NCOL))
         np.testing.assert_allclose(np.asarray(leaf), 3.0e-12)
+
+
+class PysesAlignmentRuleTest(unittest.TestCase):
+    """The pySES column readers follow the shared #884 alignment rule."""
+
+    def test_surface_file_auto_raises_for_a_user_file(self):
+        from jcm.dycore.pyses.forcing import build_forcing
+        with self.assertRaisesRegex(ValueError, "forcing.align=auto"):
+            build_forcing("/scratch/me/forcing.nc", dycore=None)
+
+    def test_surface_file_transient_is_refused(self):
+        from jcm.dycore.pyses.forcing import build_forcing
+        with self.assertRaisesRegex(ValueError, "only a 12-month climatology"):
+            build_forcing("/scratch/me/forcing.nc", dycore=None,
+                          align_mode="by_date")
+
+    def test_ozone_auto_raises_and_transient_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "forcing.ozone_align=auto"):
+            _attach(ozone_file="/scratch/me/ozone.nc", ozone_align="auto")
+        with self.assertRaisesRegex(ValueError, "transient ozone"):
+            _attach(ozone_file="/scratch/me/ozone.nc", ozone_align="by_date")
+
+    def test_static_emissions_load_under_auto(self):
+        # Codex #877 P2: a time-less user emissions file needs no alignment.
+        ds = xr.Dataset(
+            {"emis_biomass_burning_bc": (
+                ("lon", "lat"), np.full((_LON.size, _LAT.size), 3.0e-12))},
+            coords={"lon": _LON, "lat": _LAT},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            forcing = _attach(emissions_file=_write(tmp, "static.nc", ds),
+                              emissions_align="auto")
+        leaf = forcing.anthropogenic_emissions["emis_biomass_burning_bc"]
+        self.assertNotIsInstance(leaf, TimeSeries)
+        np.testing.assert_allclose(np.asarray(leaf), 3.0e-12)
+
+    def test_emissions_modes_must_agree_on_one_open(self):
+        ds = xr.Dataset(
+            {"emis_biomass_burning_bc": (
+                ("time", "lon", "lat"),
+                np.full((12, _LON.size, _LAT.size), 3.0e-12))},
+            coords={"time": _TIME, "lon": _LON, "lat": _LAT},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "need one mode"):
+                _attach(emissions_file=_write(tmp, "emis.nc", ds),
+                        emissions_align=["wrap_year", "by_date"])
+            # One agreed mode in list form is accepted.
+            forcing = _attach(emissions_file=_write(tmp, "emis2.nc", ds),
+                              emissions_align=["wrap_year"])
+        leaf = forcing.anthropogenic_emissions["emis_biomass_burning_bc"]
+        self.assertEqual(int(leaf.align_mode), WRAP_YEAR)
 
 
 if __name__ == "__main__":

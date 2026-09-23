@@ -13,6 +13,13 @@
 kind: from_file
 file: ???
 
+# Forced-mode surface fluxes (jax-gcm#301) are documented with the block in
+# forcing/default.yaml; this group does not declare the key, so add it with
+# ``+forcing.prescribed_surface_flux...``. It requires a forced-mode physics
+# (physics=speedy-forced-flux / echam-forced-flux): with an interactive preset
+# nothing reads the fluxes, so the run is rejected rather than silently
+# ignoring them.
+
 # Yearly transient bundles (issue #610): the surface ``file`` and the
 # ``emissions_file`` / ``oxidants_file`` / ``ozone_file`` keys may be a {year}
 # pattern, expanded over the inclusive range below and concatenated along
@@ -43,13 +50,25 @@ ozone_available_years: null
 emissions_available_years: null
 oxidants_available_years: null
 
-# Time alignment for ``file``: auto (default) means dated data. Select
-# wrap_year explicitly for a repeating monthly/daily climatology, or choose
-# by_date / by_date_interp for transient data.
-# ``by_date_interp`` linearly interpolates between samples — the correct
-# mode for AMIP mid-month boundary values (tosbcs), which are constructed
-# so linear interpolation reconstructs observed monthly means.
+# Time alignment for ``file``: wrap_year (a climatology replayed every model
+# year), by_date (aligned on the file's absolute timestamps) or by_date_interp
+# (linearly interpolated between them — the correct mode for AMIP mid-month
+# boundary values (tosbcs), which are constructed so linear interpolation
+# reconstructs observed monthly means). ``auto`` (default) resolves ONLY a
+# data-mirror or packaged product, from the kind the mirror manifest records
+# (climatology -> wrap_year, transient -> by_date); for any other file it
+# RAISES — jcm does not guess whether a file is a climatology, because a
+# one-year transient archive and a monthly climatology have identical time
+# axes (#884). So a user file needs e.g. ``forcing.align=wrap_year``.
 align: auto
+# The same rule for the other time-resolved inputs, each declared separately
+# because a run mixes kinds (e.g. transient SST with a present-day emission
+# climatology). ``auto`` resolves mirror/packaged products (a transient ozone
+# product -> by_date_interp, its mid-month means interpolated) and raises for a
+# user file. An explicit value applies to every product of that key.
+ozone_align: auto
+emissions_align: auto
+oxidants_align: auto
 
 # Ozone climatology netCDF, pre-interpolated to model levels (see
 # ``jcm.data.bc.interpolate_ozone``). ``auto`` (default) resolves the packaged

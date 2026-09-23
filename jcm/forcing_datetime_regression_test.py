@@ -13,8 +13,6 @@ import xarray as xr
 from jcm.date import DateData
 from jcm.forcing import (
     BY_DATE,
-    DAILY_CLIMATOLOGY,
-    MONTHLY_CLIMATOLOGY,
     WRAP_YEAR,
     ForcingData,
     make_time_series,
@@ -28,7 +26,7 @@ def _date(value, *, step=0, dt_seconds=1800):
         dt_seconds=dt_seconds)
 
 
-def _monthly(values=None, mode=MONTHLY_CLIMATOLOGY):
+def _monthly(values=None, mode=WRAP_YEAR):
     values = jnp.arange(12, dtype=jnp.float32) if values is None else values
     return make_time_series(
         values,
@@ -38,10 +36,9 @@ def _monthly(values=None, mode=MONTHLY_CLIMATOLOGY):
 
 
 @pytest.mark.parametrize("year", [2005, 2000, 1900, 2100])
-@pytest.mark.parametrize("mode", [WRAP_YEAR, MONTHLY_CLIMATOLOGY])
-def test_issue_805_all_civil_month_boundaries_under_jit(year, mode):
+def test_issue_805_all_civil_month_boundaries_under_jit(year):
     """#805: all 12 records switch on month starts, including century years."""
-    series = _monthly(mode=mode)
+    series = _monthly()
 
     @jax.jit
     def select(date):
@@ -144,7 +141,7 @@ def test_365_day_climatology_holds_feb29_without_stretching_the_year():
     """A 365-record nominal calendar holds leap day and wraps after Dec 31."""
     times = np.arange("2001-01-01", "2002-01-01", dtype="datetime64[D]")
     series = make_time_series(
-        jnp.arange(365, dtype=jnp.float32), times, DAILY_CLIMATOLOGY)
+        jnp.arange(365, dtype=jnp.float32), times, WRAP_YEAR)
     forcing = ForcingData.zeros((1, 1), co2_vmr=series)
     select = jax.jit(lambda date: forcing.select(date).co2_vmr)
 
@@ -160,7 +157,7 @@ def test_366_day_climatology_common_year_skips_feb29_without_march_shift(year):
     """A 366-record source keeps March on its named date in common years."""
     times = np.arange("2000-01-01", "2001-01-01", dtype="datetime64[D]")
     series = make_time_series(
-        jnp.arange(366, dtype=jnp.float32), times, DAILY_CLIMATOLOGY)
+        jnp.arange(366, dtype=jnp.float32), times, WRAP_YEAR)
     forcing = ForcingData.zeros((1, 1), co2_vmr=series)
     select = jax.jit(lambda date: forcing.select(date).co2_vmr)
 

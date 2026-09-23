@@ -6,6 +6,39 @@ from math import pi
 import jcm.constants as c
 from .lohmann_2m_params import CloudParams2M
 
+
+def moist_isobaric_heat_capacity(specific_humidity: jnp.ndarray) -> jnp.ndarray:
+    """Isobaric specific heat of moist air ``cp = cpd·(1 + vtmpc2·q)`` [J/kg/K].
+
+    Expanded to ``cpd + (cpv - cpd)·max(q, 0)`` because ``cpd·vtmpc2 = cpv - cpd``
+    (``vtmpc2 = cpv/cpd - 1``). This is ECHAM's ``pcair`` /
+    ``zcair = cpd + cpd·vtmpc2·max(qm1, 0)`` (physc.f90:289, with
+    ``zcons1 = cpd·vtmpc2``, mo_cloud_micro_2m.f90:534) — the humidity-weighted
+    heat capacity the cloud latent-heat conversions divide by, evaluated at the
+    step-start humidity. The negative-humidity clamp mirrors the Fortran
+    ``MAX(pqm1, 0)`` and keeps ``cp`` physical against spectral-ringing
+    undershoots.
+    """
+    return c.cpd + (c.cpv - c.cpd) * jnp.maximum(specific_humidity, 0.0)
+
+
+def latent_heat_over_cp(
+    specific_humidity: jnp.ndarray,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Moist ``(Lv/cp, Ls/cp)`` latent-heat-to-heat-capacity ratios [K/(kg/kg)].
+
+    The ECHAM cloud ledgers convert a condensed/evaporated mixing-ratio
+    increment to a temperature increment with ``L / cp`` where ``cp`` is the
+    MOIST heat capacity, not dry ``cpd`` — ``zlvdcp = alv/pcair``,
+    ``zlsdcp = als/pcair`` (mo_cloud.f90:412-414,
+    mo_cloud_micro_2m.f90:844-848). Building them from dry ``cpd`` over-heats
+    every condensation event by ``vtmpc2·q`` (~1.3 % in the moist tropics);
+    both cloud ports now share this construction (#706).
+    """
+    inv_cp = 1.0 / moist_isobaric_heat_capacity(specific_humidity)
+    return c.alhc * inv_cp, c.alhs * inv_cp
+
+
 def eff_ice_crystal_radius(
     pxice: jnp.ndarray, picnc: jnp.ndarray, params: CloudParams2M,
 ) -> jnp.ndarray:
@@ -252,11 +285,16 @@ def eff_liquid_droplet_radius(
     # these radii from the cloud carry, i.e. from the second step of a rollout
     # onwards.
     has_liquid = jnp.logical_and(liquid_cloud_flag, liquid_in_cloud > 0.0)
-    radius_base = jnp.where(
-        has_liquid,
-        (3.0 / (4.0 * pi * c.rhow)) * liquid_in_cloud * air_density / jnp.maximum(cdnc, eps),
-        1.0,
+    radius_base = (
+        (3.0 / (4.0 * pi * c.rhow)) * liquid_in_cloud * air_density
+        / jnp.maximum(cdnc, eps)
     )
+    # Positive liquid can still underflow to a zero base in the arithmetic
+    # above. Guard the computed base too: preserve its zero forward radius,
+    # but never differentiate the cube root at zero. Use != 0 rather than
+    # > 0 so invalid negative/NaN bases remain visible, not silently masked.
+    has_liquid = jnp.logical_and(has_liquid, radius_base != 0.0)
+    radius_base = jnp.where(has_liquid, radius_base, 1.0)
     liq_eff_radius = 1.0e6 * breadth * radius_base ** (1.0 / 3.0)
     return jnp.where(has_liquid, liq_eff_radius, 0.0)
 

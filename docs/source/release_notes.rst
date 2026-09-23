@@ -29,10 +29,12 @@ One exact Gregorian clock and real monthly output
   ``end_time``; month/year duration aliases and silently truncated intervals
   are rejected. The exact datetime and step counter travel with the resumable
   ``RunState`` and schema-2 checkpoints.
-- Monthly climatologies switch at civil month boundaries, including leap
-  years (#805). Noleap input dates preserve their nominal date components on
-  the Gregorian clock (#449). Generic short dated files no longer repeat
-  annually without an explicit climatology declaration.
+- ``wrap_year`` climatologies select by real calendar position: twelve
+  monthly records switch at civil month boundaries, including leap years
+  (#805), and 365/366-record tables select by nominal month/day. Noleap input
+  dates preserve their nominal date components on the Gregorian clock (#449).
+  Whether a file repeats annually is declared, never inferred (see the #884
+  entry below).
 - ``ModelPredictions.monthly_means()`` reduces bounded interval means by
   real month; save daily means with ``output_averages=True`` first. Observer
   sampling stays independent. Exact shared ``output_time_labels`` replaces
@@ -185,6 +187,27 @@ Packaged config-tree contract; the ``experiment`` group is renamed
   ``+experiment@<node>=<name>`` to ``+configuration@<node>=<name>``; JAX-ESM in
   particular composes ``+experiment@atmosphere=<name>`` and must update in the
   same release cycle.
+
+Forcing time alignment is declared, never inferred
+""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- **``align: auto`` no longer guesses from a file's time axis** (#884). v2
+  treated any file spanning at most ~one year as a climatology and replayed it
+  every model year, so a one-year *transient* archive (a year of monthly SST,
+  ozone, emissions or fluxes) was silently recycled. Now ``auto`` resolves
+  only a data-mirror or packaged product, from the ``alignment`` the mirror
+  manifest records (``climatology`` → ``wrap_year``, ``transient`` →
+  ``by_date``; ``by_date_interp`` for transient ozone). **For any other file
+  ``auto`` raises**, naming the knob to set. One rule covers every
+  time-resolved input on both backends: ``forcing.align`` (SST/sea-ice file),
+  the new ``forcing.ozone_align`` / ``forcing.emissions_align`` (a scalar, or
+  one mode per ``emissions_file`` product) / ``forcing.oxidants_align``,
+  ``forcing.prescribed_surface_flux.align``, and the Python readers'
+  ``align_mode`` (``ForcingData.from_dataset`` has no file identity, so its
+  ``auto`` always raises). **Fix:** declare the file's kind, e.g.
+  ``forcing.align=wrap_year`` for a climatology or ``forcing.align=by_date``
+  for dated samples. Every shipped configuration and the ``amip`` / ``era5``
+  presets resolve unchanged. See :doc:`v2_to_v3`.
 
 MACv2-SP removed from JAM; namespaced aerosol output
 """"""""""""""""""""""""""""""""""""""""""""""""""""
@@ -464,6 +487,35 @@ Radiation, clouds and gravity waves
   ``gw_scheme="frontal"`` or ``gw_scheme="both"`` to run it alongside Hines.
 - **Per-level precipitation flux profiles** and a CloudSat COSP warm-rain
   hook.
+
+Coupling to an external surface component
+"""""""""""""""""""""""""""""""""""""""""
+
+- **A package-independent surface-exchange contract.** Every physics package
+  that resolves a surface publishes a
+  :class:`~jcm.physics.surface.surface_exchange.SurfaceExchange` struct under
+  ``diagnostics["surface_exchange"]`` — net downward heat flux, sensible and
+  latent heat, evaporation, total precipitation, wind stress, near-surface
+  wind, and lowest-level air density / potential temperature, with one
+  documented sign convention (turbulent fluxes positive up, net heat flux
+  positive down). Grid-mean fields are guaranteed; per-tile and rain/snow-split
+  fields are optional and absent (not zero) where a package cannot fill them
+  faithfully. SPEEDY and ECHAM publish it; Held-Suarez opts out;
+  ``ComposablePhysics.require_surface_exchange()`` fails a coupler fast at
+  composition time (#754).
+- **Forced surface mode.** ``physics=speedy-forced-flux`` /
+  ``physics=echam-forced-flux`` deliver externally prescribed sensible-heat,
+  evaporation and momentum fluxes in place of the package's own surface
+  exchange, entering the same tendency pathways (SPEEDY's bottom-level source;
+  ECHAM's ``TteTkeVerticalDiffusion(couple_surface=False)`` plus an explicit
+  ``PrescribedSurfaceFlux`` term). Fluxes ride
+  ``forcing.prescribed_surface_flux`` (a ``constants`` block or a grid file
+  whose climatology-vs-dated alignment is declared by its ``align`` key) or the
+  ``ForcingData.prescribed_*`` fields a coupler sets directly, in the
+  published contract's units and signs (#301). Prescribed fluxes supplied to a
+  composition with no forced-mode consumer are rejected rather than silently
+  ignored, and a date-aligned flux archive must cover the run (its CF
+  ``time_bnds`` when present). See :doc:`design/surface_exchange`.
 
 Mechanisms
 """"""""""

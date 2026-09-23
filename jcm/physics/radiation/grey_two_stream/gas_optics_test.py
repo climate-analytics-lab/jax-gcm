@@ -6,6 +6,7 @@ including H2O, CO2, and O3 in both longwave and shortwave bands.
 Date: 2025-01-10
 """
 
+import pytest
 import jax.numpy as jnp
 from jcm.physics.radiation.grey_two_stream.gas_optics import (
     water_vapor_continuum,
@@ -15,6 +16,55 @@ from jcm.physics.radiation.grey_two_stream.gas_optics import (
     gas_optical_depth_lw,
     gas_optical_depth_sw
 )
+from jcm.physics.radiation.cloud_optics import (
+    get_band_wavelength,
+    surface_albedo_by_sw_band,
+)
+from jcm.physics.radiation.constants import N_SW_BANDS
+
+
+def test_grey_sw_band_inputs_are_all_aligned_to_band_order():
+    """Every grey SW band-indexed input agrees on which band is near-IR.
+
+    End-to-end guard against the #678 family trap: the SW band order lives in
+    ``SW_BAND_LIMITS`` (band 0 = near-IR, band 1 = UV/visible), and four
+    band-indexed inputs must all follow it -- the cloud-optics wavelength, the
+    surface albedo, ozone absorption (strong in UV/visible), and water-vapour
+    absorption (near-IR). A future reorder that touches only some of them
+    (as the original fix did) fails this test.
+
+    For each band it pins the whole tuple: wavelength band ⇒ albedo component ⇒
+    dominant gas absorber.
+    """
+    assert N_SW_BANDS == 2
+    temperature = jnp.array([250.0])
+    o3 = jnp.array([1e-6])
+    # Distinct albedos so the ordering is observable.
+    albedo = surface_albedo_by_sw_band(jnp.array(0.10), jnp.array(0.90))
+    # Water-vapour-only SW optical depth per band.
+    h2o_tau = gas_optical_depth_sw(
+        temperature, jnp.array([5.0e4]), jnp.array([0.01]),
+        jnp.zeros(1), jnp.array([1000.0]), jnp.array([0.7]), jnp.array(0.5),
+    )[0]
+    ozone_k = jnp.array(
+        [float(ozone_absorption_sw(o3, temperature, b)[0])
+         for b in range(N_SW_BANDS)]
+    )
+
+    near_ir_bands = [b for b in range(N_SW_BANDS)
+                     if float(get_band_wavelength(b, True)) > 0.7]
+    vis_bands = [b for b in range(N_SW_BANDS)
+                 if float(get_band_wavelength(b, True)) <= 0.7]
+    assert len(near_ir_bands) == 1 and len(vis_bands) == 1
+    nir, vis = near_ir_bands[0], vis_bands[0]
+
+    # Near-IR band: near-IR albedo, water-vapour absorption, weak ozone.
+    assert float(albedo[nir]) == pytest.approx(0.90)
+    assert float(h2o_tau[nir]) > 0.0
+    # UV/visible band: visible albedo, no water vapour, strong ozone.
+    assert float(albedo[vis]) == pytest.approx(0.10)
+    assert float(h2o_tau[vis]) == 0.0
+    assert float(ozone_k[vis]) > float(ozone_k[nir])
 
 
 def test_water_vapor_continuum():
@@ -73,18 +123,18 @@ def test_ozone_absorption_sw():
     o3_vmr = jnp.ones(nlev) * 1e-6
     temperature = jnp.ones(nlev) * 273.15  # Standard temperature
     
-    # Test visible band (band 0) vs near-IR (band 1)
-    k_vis = ozone_absorption_sw(o3_vmr, temperature, 0)
-    k_nir = ozone_absorption_sw(o3_vmr, temperature, 1)
-    
-    # O3 should absorb in UV/visible more than near-IR
+    # Band order follows SW_BAND_LIMITS: band 0 = near-IR, band 1 = UV/visible
+    # (#678). Ozone absorbs in the UV/visible far more than the near-IR.
+    k_nir = ozone_absorption_sw(o3_vmr, temperature, 0)
+    k_vis = ozone_absorption_sw(o3_vmr, temperature, 1)
+
     assert jnp.all(k_vis > 0)
-    assert jnp.all(k_nir > 0)  # NIR band still has some absorption
-    assert jnp.all(k_vis > k_nir)  # UV/visible should be stronger
-    
+    assert jnp.all(k_nir > 0)  # near-IR band still has some absorption
+    assert jnp.all(k_vis > k_nir)  # UV/visible (band 1) should be stronger
+
     # Should be proportional to O3 VMR
     o3_vmr_double = o3_vmr * 2
-    k_vis_double = ozone_absorption_sw(o3_vmr_double, temperature, 0)
+    k_vis_double = ozone_absorption_sw(o3_vmr_double, temperature, 1)
     assert jnp.allclose(k_vis_double, k_vis * 2, rtol=1e-10)
 
 

@@ -55,9 +55,11 @@ def melting_snow_and_ice(
     icncq : jnp.ndarray
         Temporary ice crystal number concentration to be transferred to droplets during melting [1/m^3].
     lsdcp : jnp.ndarray
-        Ratio of sublimation heat to specific heat capacity of dry air (Ls/cpd).
+        Ratio of sublimation heat to the MOIST heat capacity (Ls/cp), per-level
+        (ECHAM zlsdcp = als/pcair, #706).
     lvdcp : jnp.ndarray
-        Ratio of latent heat of vaporization to specific heat capacity of dry air (Lv/cpd).
+        Ratio of latent heat of vaporization to the MOIST heat capacity (Lv/cp),
+        per-level (ECHAM zlvdcp = alv/pcair, #706).
     icnc : jnp.ndarray
         Ice crystal number concentration [1/m^3] (INOUT).
     qmel : jnp.ndarray

@@ -466,6 +466,13 @@ class SingleColumnModel:
         """
         if forcing is None:
             forcing = self.forcing
+        # The same two-way forced-mode contract every run entry point
+        # enforces (#301): a forced-mode term without its ``prescribed_*``
+        # fields must not run on a zero flux, and prescribed fluxes no term
+        # consumes must not be silently ignored. No run window: the column
+        # has no absolute start date, only a relative time axis.
+        from jcm.physics.surface.prescribed_flux import validate_run_forcing
+        validate_run_forcing(self.physics, forcing, run_window=None)
 
         if isinstance(prescribed_states, list):
             prescribed_states = self._stack_states(prescribed_states)
