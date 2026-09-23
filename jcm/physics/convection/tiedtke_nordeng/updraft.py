@@ -92,8 +92,10 @@ class UpdatedraftState(NamedTuple):
                          # flux ``mfu·(uu − ū)``.
     vu: jnp.ndarray      # Updraft meridional wind (m/s) — ECHAM ``pvu``.
     dmfen: jnp.ndarray | None = None  # Absolute entrainment into the plume
-                         # in layer k (kg/m²/s) — ECHAM ``zdmfen + zoentr``;
-                         # the ledger the convective tracer transport reads.
+                         # in layer k (kg/m²/s) — ECHAM ``zdmfen + zoentr``,
+                         # including the layer the cloud-top overshoot
+                         # crosses; the ledger the convective tracer
+                         # transport reads.
     kctop: jnp.ndarray | None = None  # Highest interface where the plume
                          # passed ECHAM's ascent test (``kctop``); ``nlev − 2``
                          # (``klevm1``) when it passed none.
@@ -859,7 +861,12 @@ def calculate_updraft(
                 plude=st_dep.plude.at[k].add(plude_k),
                 uu=st.uu.at[k].set(uu_pub),
                 vu=st.vu.at[k].set(vu_pub),
-                dmfen=st.dmfen.at[k].set(s * ent),
+                # The whole entrainment of the layer, also where the plume
+                # terminates: the overshoot carries the mixed air (cuasc
+                # forms ``pxtu`` before the ascent test and section 5 moves
+                # it up), so the tracer ledger must see the environmental
+                # air that went into it.
+                dmfen=st.dmfen.at[k].set(ent),
             )
             # The continuing plume carries on; its momentum flux scales with
             # the continuing fraction.

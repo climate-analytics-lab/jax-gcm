@@ -67,6 +67,14 @@ def _ascent(cfg, T, q, p, p_half, dz, rho, kb, ktop, ktype, weights, **kw):
         type_weights=weights, pressure_half=p_half, **kw)
 
 
+def _dz_p(env, k):
+    """Return cuentr's layer depth ``Δp·zrrho/g`` of layer ``k``."""
+    paph = np.asarray(env.paph)
+    tenh, qenh = np.asarray(env.tenh), np.asarray(env.qenh)
+    zrrho = c.rd * tenh[k + 1] * (1 + c.vtmpc1 * qenh[k + 1]) / paph[k + 1]
+    return (paph[k + 1] - paph[k]) * zrrho / c.grav
+
+
 class TestMaxAscentLevel:
     """``klwmin`` (mo_cuinitialize.f90:189-196)."""
 
@@ -284,6 +292,13 @@ class TestAscentStops:
         assert float(up.tu[k]) > float(env_d.tenh[k])
         # And it did not condense: no condensate gained above the base.
         assert float(up.pdmfup[k]) == 0.0
+        # The overshoot carries the air mixed in that layer (cuasc forms the
+        # plume's tracer mixture before the test), so the tracer ledger
+        # sees the layer's whole entrainment, and none above it.
+        dmfen = np.asarray(up.dmfen)
+        np.testing.assert_allclose(
+            dmfen[k], float(up.entr[k]) * mfu[kb] * _dz_p(env_d, k), rtol=1e-4)
+        assert np.all(dmfen[:k] == 0.0)
 
     def test_ascent_never_passes_the_cloud_top_bound(self):
         cfg, T, q, p, p_half, dz, rho, env, kb = _column()

@@ -562,6 +562,8 @@ class TestCloudTopOvershoot:
         assert plude[kt - 2] > 0.0
         # The overshoot does not precipitate.
         assert float(upd.pdmfup[kt - 1]) == pytest.approx(0.0, abs=1e-12)
+        # Nothing entrains above the overshoot.
+        assert np.all(np.asarray(upd.dmfen)[:kt - 1] == 0.0)
 
     def test_column_water_conserved_when_plume_reaches_ceiling(self):
         cfg, T, q, p, rho, dz, u, cb, ktop, upd = (
