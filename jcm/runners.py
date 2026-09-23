@@ -1836,6 +1836,16 @@ def _load_states_from_cfg(cfg: DictConfig, physics):
     )
 
 
+#: Units a NUMERIC state-file ``time`` axis may carry, as elapsed time → the
+#: factor to days. ``"d"`` is what :func:`jcm.cf_metadata._time_attrs` writes
+#: for a numeric elapsed-simulation-time axis; the spelled-out and seconds
+#: forms are the same quantity in the other units a backend may emit.
+_ELAPSED_TIME_UNITS_TO_DAYS = {
+    "d": 1.0, "day": 1.0, "days": 1.0,
+    "s": 1.0 / 86400.0, "second": 1.0 / 86400.0, "seconds": 1.0 / 86400.0,
+}
+
+
 def _prescribed_state_times_days(ds, n_states: int, source: str):
     """Days since the FIRST snapshot at which each state of ``ds`` is valid.
 
@@ -1844,17 +1854,24 @@ def _prescribed_state_times_days(ds, n_states: int, source: str):
     step is hours, so synthesising ``arange(n) * dt`` would select and
     coverage-check date-aligned forcing on the wrong dates. The offsets are
     relative to the first sample, which ``run.start_date`` dates (a JCM
-    output's ``time`` axis counts simulated days, not calendar dates, so the
-    absolute date is the config's, never inferred from the file). Rules:
+    output's ``time`` axis counts simulated time, not calendar dates, so the
+    absolute date is the config's, never inferred from the file).
 
-    - a single state needs no time axis (offset 0);
-    - several states need a ``time`` coordinate of that length that decodes
-      to dates (``datetime64`` or ``cftime``; a cftime calendar is placed on
-      the Gregorian clock by its nominal date, as every forcing axis is);
-    - the stamps must be strictly increasing and present (no ``NaT``) — an
-      unordered or duplicated series has no well-defined snapshot clock.
+    Accepted ``time`` axes — exactly the forms JCM writers emit:
 
-    Any irregular cadence is honoured as given.
+    - decoded dates (``datetime64`` or ``cftime``; a cftime calendar is
+      placed on the Gregorian clock by its nominal date, as every forcing
+      axis is) — what ``ModelPredictions`` / the pySES backend write;
+    - elapsed time: ``timedelta64``, or a NUMERIC axis whose ``units`` are
+      days (``"d"``/``"day"``/``"days"``; ``"d"`` is what
+      ``cf_metadata._time_attrs`` labels a numeric elapsed-simulation-time
+      axis) or seconds (``"s"``/``"second"``/``"seconds"``). A numeric axis
+      with no or other units is rejected: its unit would have to be guessed.
+
+    Common rules: a single state needs no time axis (offset 0); otherwise
+    the axis must have one entry per state, all present/finite, strictly
+    increasing (an unordered or duplicated series has no well-defined
+    snapshot clock). Any irregular cadence is honoured as given.
     """
     import numpy as np
     import pandas as pd
@@ -1872,20 +1889,42 @@ def _prescribed_state_times_days(ds, n_states: int, source: str):
         raise ValueError(
             f"{source}: the 'time' coordinate has {raw.size} entries for "
             f"{n_states} states.")
-    if not _is_datetime_axis(raw):
+    accepted = ("decoded dates (datetime64/cftime), timedelta64, or a numeric "
+                "elapsed-time axis with units 'd'/'days' or 's'/'seconds'")
+    if _is_datetime_axis(raw):
+        if bool(np.any(pd.isnull(raw))):
+            raise ValueError(f"{source}: the 'time' coordinate has missing "
+                             "(NaT) entries.")
+        seconds = np.asarray(
+            _time_axis_seconds_from_ds(ds), dtype=float).reshape(-1)
+        days = seconds / 86400.0
+    elif np.issubdtype(raw.dtype, np.timedelta64):
+        if bool(np.any(pd.isnull(raw))):
+            raise ValueError(f"{source}: the 'time' coordinate has missing "
+                             "(NaT) entries.")
+        days = raw / np.timedelta64(1, "D")
+    elif np.issubdtype(raw.dtype, np.number):
+        units = str(ds["time"].attrs.get(
+            "units", ds["time"].encoding.get("units", ""))).strip().lower()
+        if units not in _ELAPSED_TIME_UNITS_TO_DAYS:
+            raise ValueError(
+                f"{source}: the numeric 'time' coordinate has units "
+                f"{units or '(none)'!r}, so its unit is unknown. Accepted: "
+                f"{accepted}.")
+        if not bool(np.all(np.isfinite(raw))):
+            raise ValueError(f"{source}: the 'time' coordinate has missing "
+                             "(non-finite) entries.")
+        days = raw.astype(float) * _ELAPSED_TIME_UNITS_TO_DAYS[units]
+    else:
         raise ValueError(
-            f"{source}: the 'time' coordinate does not decode to dates (dtype "
-            f"{raw.dtype}); give it CF units such as 'days since 2000-01-01'.")
-    if bool(np.any(pd.isnull(raw))):
-        raise ValueError(f"{source}: the 'time' coordinate has missing (NaT) "
-                         "entries.")
-    seconds = np.asarray(
-        _time_axis_seconds_from_ds(ds), dtype=float).reshape(-1)
-    if seconds.size > 1 and not bool(np.all(np.diff(seconds) > 0)):
+            f"{source}: the 'time' coordinate (dtype {raw.dtype}) is not a "
+            f"time axis. Accepted: {accepted}.")
+    days = np.asarray(days, dtype=float)
+    if days.size > 1 and not bool(np.all(np.diff(days) > 0)):
         raise ValueError(
             f"{source}: the 'time' coordinate is not strictly increasing; "
             "the states must be ordered in time with distinct stamps.")
-    return (seconds - seconds[0]) / 86400.0
+    return days - days[0]
 
 
 def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:

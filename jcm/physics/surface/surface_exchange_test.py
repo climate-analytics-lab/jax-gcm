@@ -1606,7 +1606,8 @@ class TestPrescribedModeStateClock:
     @pytest.mark.parametrize("case,match", [
         ("missing", "no 'time' coordinate"),
         ("length", "entries for 3 states"),
-        ("numeric", "does not decode to dates"),
+        ("numeric", "unit is unknown"),
+        ("numeric_nan", "non-finite"),
         ("nat", "missing"),
         ("unordered", "not strictly increasing"),
         ("duplicate", "not strictly increasing"),
@@ -1620,6 +1621,8 @@ class TestPrescribedModeStateClock:
             "missing": xr.Dataset(),
             "length": _daily_state_ds(2),
             "numeric": xr.Dataset(coords={"time": [0.0, 1.0, 2.0]}),
+            "numeric_nan": xr.Dataset(coords={"time": (
+                "time", [0.0, np.nan, 2.0], {"units": "d"})}),
             "nat": xr.Dataset(coords={"time": d("1970-01-01", "NaT",
                                                 "1970-01-03")}),
             "unordered": xr.Dataset(coords={"time": d(
@@ -1629,6 +1632,60 @@ class TestPrescribedModeStateClock:
         }[case]
         with pytest.raises(ValueError, match=match):
             _prescribed_state_times_days(ds, 3, "f")
+
+    @pytest.mark.parametrize("units,scale", [
+        ("d", 1.0), ("days", 1.0), ("s", 86400.0), ("seconds", 86400.0)])
+    def test_numeric_elapsed_axis_matches_datetime_axis(self, units, scale):
+        """A numeric elapsed-time axis gives the same offsets as the
+        equivalent datetime axis (seconds are converted).
+        """
+        import numpy as np
+        import xarray as xr
+        from jcm.runners import _prescribed_state_times_days
+        elapsed = np.array([0.0, 1.0, 4.0]) * scale
+        numeric = xr.Dataset(coords={"time": ("time", elapsed,
+                                              {"units": units})})
+        t = np.array(["1970-01-01", "1970-01-02", "1970-01-05"],
+                     dtype="datetime64[ns]")
+        assert list(_prescribed_state_times_days(numeric, 3, "f")) == list(
+            _prescribed_state_times_days(_daily_state_ds(3, times=t), 3, "f"))
+
+    def test_timedelta_axis_accepted(self):
+        import numpy as np
+        import xarray as xr
+        from jcm.runners import _prescribed_state_times_days
+        td = np.array([0, 12, 36], dtype="timedelta64[h]").astype(
+            "timedelta64[ns]")
+        days = _prescribed_state_times_days(
+            xr.Dataset(coords={"time": td}), 3, "f")
+        assert list(days) == [0.0, 0.5, 1.5]
+
+    @pytest.mark.parametrize("units", [None, "hours", "days since 2000-01-01",
+                                       "months"])
+    def test_numeric_axis_without_known_units_rejected(self, units):
+        import xarray as xr
+        from jcm.runners import _prescribed_state_times_days
+        attrs = {} if units is None else {"units": units}
+        ds = xr.Dataset(coords={"time": ("time", [0.0, 1.0], attrs)})
+        with pytest.raises(ValueError, match="numeric 'time' coordinate"):
+            _prescribed_state_times_days(ds, 2, "f")
+
+    def test_numeric_axis_round_trips_the_writer_convention(self, tmp_path):
+        """What ``cf_metadata`` writes for a numeric elapsed axis (``units:
+        "d"``) survives netCDF and is read back as elapsed days.
+        """
+        import numpy as np
+        import xarray as xr
+        from jcm import cf_metadata
+        from jcm.runners import _prescribed_state_times_days
+        ds = cf_metadata.apply_cf_attributes(
+            xr.Dataset(coords={"time": np.array([10.0, 11.0, 13.0])}))
+        assert ds["time"].attrs["units"] == "d"
+        p = tmp_path / "numeric_time.nc"
+        ds.to_netcdf(p)
+        with xr.open_dataset(p) as opened:
+            days = _prescribed_state_times_days(opened, 3, str(p))
+        assert list(days) == [0.0, 1.0, 3.0]
 
     def test_times_length_must_match_states(self):
         from jcm.prescribed_state_model import PrescribedStateModel
