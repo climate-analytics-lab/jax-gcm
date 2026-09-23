@@ -363,7 +363,12 @@ def convective_precip_fluxes(
     # --- pass 3: proportional depletion (cuflx 486-491) -------------------
     zrsum = prfl + psfl
     zdpevap_tot = zpsubcl_final - zrsum  # ≤ 0
-    inv = 1.0 / jnp.maximum(zrsum, 1e-20)
+    # ``1/MAX(1e-20, zrsum)``. At or below that floor the depletion terms
+    # scale with a precipitation flux of at most 1e-20 (exactly zero without
+    # precipitation), so the factor is zeroed there instead: the
+    # safe-denominator form keeps the reverse pass off ``0·inf``.
+    has_rain = zrsum > 1e-20
+    inv = jnp.where(has_rain, 1.0 / jnp.where(has_rain, zrsum, 1.0), 0.0)
     rain_sfc = jnp.maximum(prfl + zdpevap_tot * prfl * inv, 0.0)
     snow_sfc = jnp.maximum(psfl + zdpevap_tot * psfl * inv, 0.0)
 
