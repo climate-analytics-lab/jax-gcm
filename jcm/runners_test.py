@@ -1574,7 +1574,10 @@ class TestModeDispatch(unittest.TestCase):
         """
         from jcm.runners import _run_prescribed
 
-        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=null"])
+        # A single state with no time axis carries no date: start_time is
+        # required for it (see TestPrescribedStartTime).
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=null",
+                        "run.start_time=2000-01-01"])
         expected = object()
 
         with mock.patch("jcm.runners.build_model") as build, \
@@ -1604,7 +1607,7 @@ class TestModeDispatch(unittest.TestCase):
 
         from jcm.runners import _run_prescribed
 
-        cfg = _compose(["run.time_step=12"])
+        cfg = _compose(["run.time_step=12", "run.start_time=2000-01-01"])
         owner = types.SimpleNamespace(dt_si=types.SimpleNamespace(m=1800.0))
         expected = object()
 
@@ -1887,6 +1890,13 @@ class TestModeDispatch(unittest.TestCase):
             ])
             preds = run(cfg)
             self.assertEqual(preds.tendencies.temperature.shape[0], 2)
+            # No run.start_time: the dated (v3) state file dates itself, so
+            # the diagnosed states carry the file's own exact times.
+            with xr.open_dataset(state_file) as written:
+                file_times = written.time.values.astype("datetime64[s]")
+            np.testing.assert_array_equal(
+                np.asarray(preds.to_xarray().time.values).astype(
+                    "datetime64[s]"), file_times)
 
     def test_scm_mode_picks_column_from_state_file(self):
         import tempfile
@@ -2225,6 +2235,79 @@ class TestRunDispatchErrorPaths(unittest.TestCase):
         cfg.run.column = None
         with self.assertRaisesRegex(ValueError, "run.column"):
             _run_scm(cfg)
+
+
+class TestPrescribedStartTime(unittest.TestCase):
+    """Where ``run.mode=prescribed`` places its first state.
+
+    A dated (v3) state file dates itself; ``run.start_time`` overrides it
+    with a warning, and is required for an elapsed-time axis.
+    """
+
+    def _run(self, ds, overrides=()):
+        from jcm.runners import _run_prescribed
+
+        cfg = _compose(["run.time_step=12", *overrides])
+        n = int(ds.sizes.get("time", 1))
+        states = types.SimpleNamespace(u_wind=np.zeros((n,)))
+        with mock.patch("jcm.runners.build_coords", return_value=object()), \
+                mock.patch("jcm.runners.build_physics", return_value=object()), \
+                mock.patch("jcm.runners.build_terrain", return_value=object()), \
+                mock.patch("jcm.runners.build_forcing", return_value=object()), \
+                mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
+                mock.patch("jcm.runners.warn_on_config_traps"), \
+                mock.patch("jcm.runners.validate_run_forcing"), \
+                mock.patch("jcm.runners._load_states_from_cfg",
+                           return_value=(ds, states)), \
+                mock.patch(
+                    "jcm.prescribed_state_model.PrescribedStateModel",
+                ) as prescribed_cls:
+            _run_prescribed(cfg)
+        kwargs = prescribed_cls.call_args.kwargs
+        times = prescribed_cls.return_value.run.call_args.kwargs["times"]
+        start = np.asarray(kwargs["start_time"].to_datetime64()).astype(
+            "datetime64[s]").reshape(-1)[0]
+        return start, np.asarray(times)
+
+    @staticmethod
+    def _dated(start="1990-07-01T12:00:00", n=3):
+        t = np.datetime64(start, "s") + np.arange(n) * np.timedelta64(1, "D")
+        return xr.Dataset(coords={"time": t})
+
+    def test_dated_file_without_start_time_uses_its_first_time(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            start, times = self._run(self._dated())
+        self.assertEqual(start, np.datetime64("1990-07-01T12:00:00", "s"))
+        np.testing.assert_array_equal(times, [0.0, 1.0, 2.0])
+
+    def test_matching_start_time_does_not_warn(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            start, _ = self._run(self._dated(),
+                                 ["run.start_time=1990-07-01T12:00:00"])
+        self.assertEqual(start, np.datetime64("1990-07-01T12:00:00", "s"))
+
+    def test_differing_start_time_warns_and_the_config_wins(self):
+        with self.assertWarns(UserWarning) as caught:
+            start, _ = self._run(self._dated(),
+                                 ["run.start_time=2000-01-01"])
+        message = str(caught.warning)
+        self.assertIn("2000-01-01T00:00:00", message)
+        self.assertIn("1990-07-01T12:00:00", message)
+        self.assertIn("configured run.start_time is used", message)
+        self.assertEqual(start, np.datetime64("2000-01-01T00:00:00", "s"))
+
+    def test_elapsed_time_file_without_start_time_raises(self):
+        ds = xr.Dataset(coords={"time": ("time", [0.0, 1.0, 2.0],
+                                         {"units": "d"})})
+        with self.assertRaisesRegex(ValueError, "run.start_time"):
+            self._run(ds)
+        start, times = self._run(ds, ["run.start_time=1979-01-01"])
+        self.assertEqual(start, np.datetime64("1979-01-01T00:00:00", "s"))
+        np.testing.assert_array_equal(times, [0.0, 1.0, 2.0])
 
 
 class TestPrescribedStateTracerLoading(unittest.TestCase):

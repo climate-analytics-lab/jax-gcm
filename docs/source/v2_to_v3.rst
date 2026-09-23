@@ -606,6 +606,11 @@ explicitly to ``restore_state``. Dycore ``sim_time`` alone is insufficient.
 ``initial_step`` and returns ``(RunState, ModelPredictions)``; continue with
 all four fields of ``RunState`` (``dynamics``, ``physics``, ``time``, ``step``).
 See :doc:`advanced_features` for a complete external-stepper example.
+``run.mode=prescribed`` places each state at its own time. A dated state
+file (every v3 output) supplies the first state's time itself, so
+``run.start_time`` may be omitted; if it is set and differs, the config wins
+with a warning naming both times. An older output whose ``time`` axis is
+elapsed time carries no date and requires ``run.start_time``.
 Checkpoints predating the exact clock can only be imported as initial
 conditions (``as_initial_condition=True``), starting at the new model's
 ``start_time``. Unstamped files additionally require the unit assertion

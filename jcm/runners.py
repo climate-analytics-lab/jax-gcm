@@ -1873,11 +1873,9 @@ def _prescribed_state_times_days(ds, n_states: int, source: str):
     run's states are typically daily (``save_interval``) while the physics
     step is hours, so synthesising ``arange(n) * dt`` would select and
     coverage-check date-aligned forcing on the wrong dates. The offsets are
-    relative to the first sample, which ``run.start_time`` dates: only the
-    file's *spacing* is read, never its absolute dates, so an older output
-    whose axis counts elapsed simulated time from 1970 and a current output
-    labelled with real dates are placed on the model clock the same way —
-    by the config, never inferred from the file.
+    relative to the first sample; which instant that first sample is placed
+    at is :func:`_prescribed_start_time`'s decision (the file's own first
+    date for a dated axis, ``run.start_time`` for an elapsed-time axis).
 
     Accepted ``time`` axes — exactly the forms JCM writers emit:
 
@@ -1951,6 +1949,73 @@ def _prescribed_state_times_days(ds, n_states: int, source: str):
     return days - days[0]
 
 
+def _prescribed_state_first_time(ds):
+    """Return the state file's first time as exact ``datetime64[s]`` or ``None``.
+
+    Only a decoded date axis (``datetime64`` / ``cftime``, what v3 outputs
+    write) carries an absolute date; ``cftime`` noleap dates are placed on
+    the Gregorian clock by their nominal date, as every forcing axis is. An
+    elapsed-time axis (``timedelta64``, numeric ``d``/``s``, the form older
+    outputs wrote) or a missing axis has none, so this returns ``None``.
+    """
+    import numpy as np
+
+    from jcm.forcing import _is_datetime_axis, _time_axis_from_ds
+    if "time" not in ds.coords and "time" not in ds.dims:
+        return None
+    raw = np.asarray(ds["time"].values).reshape(-1)
+    if raw.size == 0 or not _is_datetime_axis(raw):
+        return None
+    first = _time_axis_from_ds(ds.isel(time=[0]))
+    return np.asarray(first.to_datetime64()).astype("datetime64[s]").reshape(-1)[0]
+
+
+def _prescribed_start_time(configured, file_first, source: str):
+    """Resolve the time of the first prescribed state.
+
+    - A dated state file (v3 output) dates itself: its first time is the
+      default, so ``run.start_time`` may be left unset.
+    - A ``run.start_time`` that is also set is used — the config wins — but
+      a warning names both values when it differs from the file's first
+      time, since every state is then evaluated away from its own date.
+    - An elapsed-time or missing axis carries no absolute date, so
+      ``run.start_time`` is required.
+
+    ``configured`` is ``_resolve_start_time(cfg)`` (a ``jax_datetime``
+    value, or ``None`` when unset); ``file_first`` is
+    :func:`_prescribed_state_first_time`'s result.
+    """
+    import warnings
+
+    import numpy as np
+
+    if configured is None:
+        if file_first is None:
+            raise ValueError(
+                f"{source}: the state file's time axis is elapsed time (or "
+                "absent), so it carries no absolute date to place the first "
+                "state at. Set run.start_time to the first state's time "
+                "(e.g. run.start_time=2000-01-01T12:00:00). Only a decoded "
+                "date axis (datetime64/cftime, what v3 outputs write) dates "
+                "itself; elapsed axes are timedelta64 or numeric with units "
+                "'d'/'days' or 's'/'seconds'.")
+        from jcm.date import to_datetime
+        return to_datetime(str(file_first), name="start_time")
+    if file_first is not None:
+        configured64 = np.asarray(configured.to_datetime64()).astype(
+            "datetime64[s]").reshape(-1)[0]
+        if configured64 != file_first:
+            warnings.warn(
+                f"run.start_time={configured64} differs from the first time "
+                f"of {source} ({file_first}); the configured run.start_time "
+                "is used, so every state is evaluated "
+                f"{(configured64 - file_first) / np.timedelta64(1, 'D'):+g} "
+                "days from its own date. Unset run.start_time to use the "
+                "file's dates.",
+                UserWarning, stacklevel=3)
+    return configured
+
+
 def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
     """Refuse integration-only run knobs in a diagnostic run mode.
 
@@ -1974,11 +2039,13 @@ def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
 def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
     """Diagnose physics tendencies from a JCM state-file time series.
 
-    Each state is evaluated at its OWN time — the state file's ``time``
-    coordinate, offset from ``run.start_time`` (the time of the first state;
-    :func:`_prescribed_state_times_days`) — on the exact Gregorian clock a
-    full run uses, and the forced-mode contract is checked over exactly that
-    window before any physics runs.
+    Each state is evaluated at its OWN time on the exact Gregorian clock a
+    full run uses: the state file's ``time`` offsets
+    (:func:`_prescribed_state_times_days`) from the first state's time, which
+    a dated file supplies itself and ``run.start_time`` overrides (and must
+    supply for an elapsed-time axis; :func:`_prescribed_start_time`). The
+    forced-mode contract is checked over exactly that window before any
+    physics runs.
     """
     from jcm.prescribed_state_model import PrescribedStateModel
 
@@ -1994,12 +2061,14 @@ def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
     guard_emulator_ghg_forcing(physics, forcing)
     warn_on_config_traps(cfg, physics, forcing, coords=coords)
     ds, states = _load_states_from_cfg(cfg, physics)
+    source = f"run.state_file={cfg.run.state_file!r}"
     times = _prescribed_state_times_days(
-        ds, int(states.u_wind.shape[0]),
-        source=f"run.state_file={cfg.run.state_file!r}")
+        ds, int(states.u_wind.shape[0]), source=source)
+    start_time = _prescribed_start_time(
+        _resolve_start_time(cfg), _prescribed_state_first_time(ds), source)
 
     model = PrescribedStateModel(
-        start_time=_resolve_start_time(cfg),
+        start_time=start_time,
         physics=physics,
         coords=coords,
         terrain=terrain,

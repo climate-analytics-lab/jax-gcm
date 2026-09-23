@@ -52,12 +52,18 @@ carries it. Pass an explicit mapping to rename variables, or
 ``run.tracer_vars={}`` to load none.
 
 ``run.mode=prescribed`` evaluates each state at its own time: the file's
-``time`` coordinate gives the offsets from the first state, which
-``run.start_time`` dates, so date-aligned forcing is selected (and its
-coverage checked) at the snapshot dates, not at synthetic model steps. Only
-the file's spacing is read, never its absolute dates: set ``run.start_time``
-to the first state's time (an interval-mean file labels it at the midpoint). The
-state file must be a single netCDF whose ``time`` axis increases strictly and
+``time`` coordinate gives the offsets from the first state, so date-aligned
+forcing is selected (and its coverage checked) at the snapshot dates, not at
+synthetic model steps. Where the first state sits:
+
+* a file with a decoded date axis (``datetime64``/``cftime`` — any v3 output)
+  dates itself, so ``run.start_time`` may be left unset;
+* a ``run.start_time`` that is set anyway is used, with a warning naming both
+  times when it differs from the file's first time;
+* an elapsed-time axis (older outputs) carries no date, so ``run.start_time``
+  is required and its absence is an error.
+
+The state file must be a single netCDF whose ``time`` axis increases strictly and
 is either decoded dates (``datetime64``/``cftime``) or elapsed time (a
 ``timedelta64`` axis, or a numeric one with ``units`` ``d``/``days`` or
 ``s``/``seconds`` — ``d`` is what jcm writes for a numeric axis); a numeric
