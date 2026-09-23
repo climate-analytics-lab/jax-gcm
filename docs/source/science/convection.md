@@ -6,7 +6,8 @@
   (``jcm/physics/convection/tiedtke_nordeng/tiedtke_nordeng.py::TiedtkeConvection``)
   — the ECHAM/ICON scheme: deep, shallow and mid-level convection, convective
   momentum transport, and downdrafts (``updraft.py``, ``downdraft.py``,
-  ``flux_tendencies.py``). Organized (Nordeng) entrainment and detrainment are
+  ``flux_tendencies.py``), a finite-volume scheme on the model's half levels
+  (see the section below). Organized (Nordeng) entrainment and detrainment are
   the **metre-based fractional rates** of ``mo_cuascent.f90`` — organized
   entrainment carries the ``zbuoyz·0.5/(1+∫buoyancy) + zdrodz`` density-lapse
   term and organized detrainment is the ``tan``-profile in height that scales
@@ -116,11 +117,99 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   chain — see {doc}`aerosol`.
 
 **Validation evidence.** ``jcm/physics/convection/tiedtke_nordeng/`` test suite
-(``tiedtke_nordeng_test.py``, ``adjustment_test.py``, ``updraft_test.py``,
+(``tiedtke_nordeng_test.py``, ``half_level_ledger_test.py``,
+``adjustment_test.py``, ``updraft_test.py``,
 ``downdraft_test.py``, ``deep_shallow_test.py``, ``midlevel_trigger_test.py``,
 ``rce_integration_test.py``, ``convection_units_test.py``,
 ``smooth_gradients_test.py``, ``cloud_depth_test.py``);
 ``betts_miller/betts_miller_test.py``; ``speedy_convection_test.py``.
+
+## The Tiedtke ledger on half levels
+
+**What we do.** The Tiedtke scheme is ECHAM's finite-volume scheme on the
+model's own layers. ``half_levels.py::half_level_environment`` is ``cuini``:
+it builds, from the host's interface pressures (``pressure_half``), the
+hydrostatic half-level geopotential ``pgeoh`` (virtual temperature loaded with
+the cloud condensate), the half-level heat capacity ``pcpcu`` (mean of the two
+adjacent ``pcpen``), and the half-level environment ``ptenh``/``pqenh`` — the
+larger adjacent dry static energy carried to the interface, saturation
+adjusted (``cuadjtq`` ``kcall = 0``) with the saturation humidity of the level
+above, then monotonised so the interface dry static energy never decreases
+upward; the humidity is the level above's plus the change of saturation
+humidity to the interface. Every plume property and mass flux lives on those
+interfaces — in the physics-internal top-first frame, entry ``k`` is the value
+at the TOP interface of layer ``k``, exactly ECHAM's ``klev``-long half-level
+arrays, and the surface interface carries no flux:
+
+- ``cubase`` walks the parcel up the interfaces from the lowest one;
+  ``cubasmc`` seeds a mid-level plume at the bottom interface of its layer.
+- ``cuasc`` (``updraft.py``) carries the plume from interface ``k+1`` to ``k``
+  across layer ``k``: the flux entering from below plus the entrained
+  half-level environment of interface ``k+1`` minus the detrained plume air
+  (detrainment leaves at the properties of the plume that entered the layer),
+  condensation-only ``cuadjtq`` at the interface pressure with the plume's
+  condensate carried separately from its vapour, buoyancy against the
+  half-level environment, precipitation over the layer's geopotential depth,
+  and the ``zmfmax`` entrainment limiter (the flux leaving an interface cannot
+  exceed the air mass of the layer above per step). The prognostic plume wind
+  is ECHAM's running momentum flux with the ``zz`` detrainment enhancement.
+- ``cudlfs``/``cuddraf`` (``downdraft.py``) search the interfaces strictly
+  inside the realized cloud for the level of free sinking and descend
+  interface to interface, charging the rain the downdraft evaporates to the
+  layer it crossed; below ``itopde`` the downdraft detrains linearly in
+  pressure to zero at the surface.
+- ``cuflx`` forms deviation fluxes against the half-level environment
+  (``pcpcu·(T_plume − ptenh)·M`` etc.) and, below the cloud-base interface,
+  replaces the updraft fluxes by the cloud-base values scaled by
+  ``(p_s − p_half)/(p_s − p_half(kcbot))`` (squared for mid-level plumes), so
+  the plume draws its air from, and deposits the cloud-base flux divergence
+  through, the whole sub-cloud layer.
+- ``cudtdq``/``cududv`` give each layer the difference of the fluxes through
+  its two interfaces plus its per-layer sources, divided by its true air mass
+  ``Δp/g`` — the same mass the host applies the tendencies with. The flux
+  differences telescope, so the column water changes by exactly minus the
+  surface convective precipitation and the column enthalpy by the latent heat
+  of the vapour removed.
+- The closure quantities are the reference's half-level ones: the moisture
+  budget's ``q_u − q_e`` is ``pqu + plu − pqenh`` at the cloud-base interface,
+  the CFL cap is the air mass of the layer above it per step, the Nordeng
+  ``zheat``/``zcape`` integrals run over the interfaces
+  ``kctop < jk ≤ kcbot``, and the depth demotion uses interface pressures.
+
+**What ECHAM does.** ``mo_cuinitialize.f90::cuini``/``cubase``,
+``mo_cuascent.f90::cuasc``/``cubasmc``/``cuentr``,
+``mo_cudescent.f90::cudlfs``/``cuddraf``,
+``mo_cufluxdts.f90::cuflx``/``cudtdq``/``cududv``, driven by
+``mo_cumastr.f90::cumastr``.
+
+**Why we differ.**
+- `science` — both plume seeds carry the dry static energy they are defined
+  with: the lowest interface's (``pcpen·pten + pgeo`` of the bottom level, from
+  which ``ptenh(klev)`` is built) and the ``cubasmc`` seed's (``pcpen·pten +
+  pgeo`` of its level). ECHAM re-forms each seed's flux with a different heat
+  capacity (``pcpcu(klev)``; ``pcpen(kk+1)`` of the level below), which does
+  not conserve that energy and shifts the first step by ``Δcp/cp`` of two
+  levels — about 0.1 K for ``cubase``, over a kelvin across a humidity jump
+  for ``cubasmc``.
+- `science` — the ``cubase`` sub-cloud plume wind is the pressure-weighted
+  mean over ALL sub-cloud layers; ECHAM's loop accumulates only the layers it
+  visits after the cloud base is set, so for a base above the lowest two
+  interfaces its weights do not sum to one.
+- `differentiability` — plume termination remains the smooth survival
+  sigmoid (buoyancy and the 1 % mass-flux floor), and the organized
+  entrainment/detrainment are jcm's simplified single-pass forms (onset at
+  cloud base rather than ``khmin``); see the section above.
+
+**Status & known limitations.**
+- In a prescribed (re-imposed) column the deep/shallow split can only see
+  large-scale convergence one step late (the lagged ``pqte``), and the
+  strongly entraining ECHAM shallow plume is non-precipitating in a warm
+  tropical column, so such a column stays shallow unless it starts under
+  convergence — ``jcm/rce.py::convergent_initial_physics_data`` supplies that
+  for the JAM aerosol-pathway checks.
+- Near the model top (a few Pa) ``cuini``'s saturation adjustment works with a
+  saturation humidity capped at 0.5 and its interface values are not
+  physical, as in the reference; no plume reaches them.
 
 ## Heat capacity of the Tiedtke plume and ledger
 
@@ -131,7 +220,7 @@ port shares with ECHAM ``cumastr`` uses the **moist** isobaric heat capacity
 per level from the **step-start** humidity: the cloud-base and mid-level parcel
 lifts (``find_cloud_base``, ``find_midlevel_cloud_base``, the ``calculate_updraft``
 seed), the updraft and downdraft dry-static-energy mixing
-(``calculate_updraft``, ``downdraft_step``), the Nordeng ``zheat`` lapse term,
+(``calculate_updraft``, ``calculate_downdraft``), the Nordeng ``zheat`` lapse term,
 and the ``cudtdq`` ledger — the DSE deviation fluxes ``cp·(T_plume − T)·M`` and
 the conversion of the whole heat ledger to a temperature tendency. The column
 enthalpy the ledger deposits is therefore ``Σ cp·dT·Δp/g``. Three sites keep
@@ -159,16 +248,17 @@ level's larger ``cp`` and divided by the upper level's smaller one). That is
 the reference's thermodynamics and ECHAM's convective parameters were tuned
 with it, so it is kept rather than replaced by the parcel's own heat capacity.
 
-**Status & known limitations.** ECHAM's ``pcpcu`` lives on half levels; jcm's
-convection is full-level throughout (#530), so the full-level ``cp`` serves
-both.
+**Status & known limitations.** As in the reference, ``pcpen`` is the
+full-level value and ``pcpcu`` its half-level mean (``cuini``); the plume and
+the deviation fluxes use ``pcpcu``, the tendency conversion ``pcpen``.
 
 ## Cloud-base trigger and the sub-cloud layer
 
 **What we do.** Tiedtke's cloud base is ECHAM's ``cubase`` ``klab`` walk
 (``jcm/physics/convection/tiedtke_nordeng/tiedtke_nordeng.py::find_cloud_base``):
-a parcel starts at the lowest level with the environment's temperature and
-humidity and is lifted upward conserving dry static energy. At each level a dry
+a parcel starts at the lowest half level (the top of the bottom layer) with the
+half-level environment's temperature and humidity and is lifted up the
+interfaces conserving dry static energy. At each interface a dry
 buoyancy test ``zbuo = Tv_u - Tv_e + zlift`` decides whether the walk continues;
 the first level at which the parcel condenses is the LCL, where a second test —
 the same buoyancy with condensate loading — decides whether a cloud base exists.
@@ -187,15 +277,14 @@ from ``pthvsig``) and ``mo_cuascent.f90::cubasmc`` (the mid-level trigger).
 ECHAM evaluates the walk on half levels whose environment temperature is the
 **dry-static-energy upper envelope** of the two adjacent full levels
 (``mo_cuinitialize.f90::cuini``: ``ptenh = (MAX(s(jk-1), s(jk)) - geoh)/cpm``,
-then monotonized upward), which flattens any dry-neutral or dry-unstable layer
-before the parcel is compared against it.
+saturation adjusted with the humidity of the level above, then monotonized
+upward), which flattens any dry-neutral or dry-unstable layer before the
+parcel is compared against it.
 
-**Why we differ.**
-- `compute` — the walk runs on **full levels**, since jcm's convection path is
-  full-level throughout (the scheme-wide staggering approximation, #530). For a
-  stably stratified profile the DSE-envelope half level carries the full level
-  above it, so the dry test is equivalent up to one level index; the
-  condensation test is evaluated half a layer higher than the reference's.
+**Why we differ.** We do not: the walk runs on the reference's half levels
+(see the half-level section above). jcm's own trigger diagnostic, the
+surface-parcel CAPE of ``calculate_cape_cin``, stays on full levels and starts
+its moist ascent at the first full level above the cloud-base interface.
 
 **Status & known limitations.**
 - The trigger is **strict by construction, and this is the reference's
