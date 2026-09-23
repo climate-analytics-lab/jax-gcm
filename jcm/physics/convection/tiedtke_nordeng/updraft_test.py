@@ -337,19 +337,25 @@ class TestCloudBaseInitialisation(unittest.TestCase):
     def test_cloud_base_warming_matches_condensate(self):
         """ΔT at cloud base is exactly L/cp times the condensate formed.
 
-        The dry parcel is ECHAM ``cubase``'s DSE walk, ``cp·T + φ`` conserved
-        with the environment's MOIST ``pcpcu = cpd·(1 + vtmpc2·q)``
-        (mo_cuinitialize.f90:294), built here by hand from the column's
-        humidity and the uniform 500 m layers ``_run`` uses. The condensation
-        warming itself is ``cuadjtq``'s, whose ``L/cp`` table is DRY
-        (``alv/cpd``, mo_echam_convect_tables.f90:214), hence ``cpd`` below.
+        The dry parcel is ECHAM ``cubase``'s DSE walk up the half levels,
+        ``pcpcu·T + pgeoh`` conserved with the environment's MOIST heat
+        capacity (mo_cuinitialize.f90:294) from the bottom full level's dry
+        static energy ``pcpen·T + pgeo`` to the cloud-base interface — built
+        here by hand from the column's hydrostatic half-level geopotential.
+        The condensation warming itself is ``cuadjtq``'s, whose ``L/cp``
+        table is DRY (``alv/cpd``, mo_echam_convect_tables.f90:214), hence
+        ``cpd`` below.
         """
+        from jcm.physics.convection.tiedtke_nordeng.updraft import (
+            column_environment,
+        )
         kbase = self.NLEV - 4
         state, pressure, temperature, q_surf = self._run(kbase, surf_rh=1.0)
         _, _, humidity = self._column(surf_rh=1.0)
+        env = column_environment(temperature, humidity, pressure)
         cp = c.cpd * (1.0 + c.vtmpc2 * np.asarray(humidity))
-        lift = 500.0 * (self.NLEV - 1 - kbase)
-        t_dry = (cp[-1] * float(temperature[-1]) - c.grav * lift) / cp[kbase]
+        s0 = cp[-1] * float(temperature[-1]) + float(env.geo[-1])
+        t_dry = (s0 - float(env.geoh[kbase])) / float(env.cpcu[kbase])
         dT = float(state.tu[kbase]) - t_dry
         expected = c.alhc * float(state.lu[kbase]) / c.cpd
         self.assertAlmostEqual(dT / expected, 1.0, delta=0.005)
@@ -363,9 +369,14 @@ class TestCloudBaseInitialisation(unittest.TestCase):
         from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
             saturation_mixing_ratio,
         )
+        from jcm.physics.convection.tiedtke_nordeng.half_levels import (
+            reconstruct_pressure_half,
+        )
         kbase = self.NLEV - 4
         state, pressure, _, _ = self._run(kbase, surf_rh=1.0)
-        qs = float(saturation_mixing_ratio(pressure[kbase], state.tu[kbase]))
+        # Saturated at the cloud-base INTERFACE pressure (cuadjtq at paphp1).
+        p_base = reconstruct_pressure_half(pressure)[kbase]
+        qs = float(saturation_mixing_ratio(p_base, state.tu[kbase]))
         self.assertAlmostEqual(float(state.qu[kbase]) / qs, 1.0, delta=0.005)
 
 
@@ -639,11 +650,19 @@ class TestCloudBaseBuoyancyGate(unittest.TestCase):
             flux[surf] + gen_sfc, float(tend.precip_conv), rtol=2e-3,
             err_msg="precip_flux does not telescope to precip_conv",
         )
-        # ...and it only accumulates downward (generation adds, sub-cloud
-        # evaporation removes, melting only moves mass between the legs).
-        top_first = np.asarray(p)[0] < np.asarray(p)[-1]
-        prof = flux if top_first else flux[::-1]
-        self.assertGreaterEqual(float(np.min(np.diff(prof))), -1e-12)
+        # ...and it only decreases downward where the ledger has a sink:
+        # generation adds, melting only moves mass between the legs, and rain
+        # is removed only by the downdraft's uptake in the layers it descends
+        # through (those whose BOTTOM interface carries mfd < 0) and by the
+        # sub-cloud evaporation (layers at and below the cloud-base
+        # interface). The column is top-first, so layer k's net source is
+        # flux[k+1] − flux[k].
+        self.assertTrue(np.asarray(p)[0] < np.asarray(p)[-1])
+        source = np.diff(flux)
+        mfd = np.asarray(state.mfd)
+        layers = np.arange(nlev - 1)
+        has_sink = (mfd[1:] < 0.0) | (layers >= int(state.kbase))
+        self.assertGreaterEqual(float(np.min(source[~has_sink])), -1e-12)
 
 
 if __name__ == "__main__":

@@ -32,21 +32,24 @@ def _plume(nlev=10, ncols=1, base=8, top=3, mf=0.05):
 
 
 def _downdraft(nlev=10, ncols=1, lfs=4, mf=0.02, entrdd=2.0e-4, dz=400.0):
-    """Synthetic downdraft mirroring the Tiedtke scan's conventions.
+    """Synthetic downdraft mirroring the Tiedtke (ECHAM half-level) conventions.
 
-    ``mfd[k]`` (≤ 0) is the flux leaving layer k through its BOTTOM
-    interface: the LFS seed at ``lfs``, constant through the bulk, halved
-    in the second-to-last layer and zero in the last (the cuddraf
-    ``itopde`` taper). ``entrain_down`` is the cuddraf turbulent ledger
-    ``entrdd·|mfd_in|·dz`` in the bulk, zero in the taper.
+    ``mfd[k]`` (≤ 0) is the flux through the TOP interface of layer k (the
+    same interface as ``mfu[k]``): the LFS seed at interface ``lfs``,
+    constant through the bulk down to ``itopde = nlev − 3``, then the
+    cuddraf taper, linear towards zero at the surface interface (which
+    carries no flux). ``entrain_down`` is the cuddraf turbulent ledger
+    ``entrdd·|mfd|·dz`` of the layers the descent crosses in the bulk,
+    zero in the taper.
     """
     lev = jnp.arange(nlev)[:, None]
-    mfd = jnp.where((lev >= lfs) & (lev < nlev - 2), -mf, 0.0)
-    mfd = mfd.at[nlev - 2].set(-0.5 * mf)
+    mfd = jnp.where((lev >= lfs) & (lev <= nlev - 3), -mf, 0.0)
+    mfd = mfd.at[nlev - 2].set(-mf * 2.0 / 3.0).at[nlev - 1].set(-mf / 3.0)
     mfd = jnp.broadcast_to(mfd, (nlev, ncols))
-    mfd_in = jnp.concatenate([jnp.zeros((1, ncols)), mfd[:-1]], axis=0)
+    mfd_out = jnp.concatenate([mfd[1:], jnp.zeros((1, ncols))], axis=0)
     e_dn = jnp.where(
-        (mfd < 0) & (lev < nlev - 2), entrdd * jnp.abs(mfd_in) * dz, 0.0
+        (mfd < 0) & (mfd_out < 0) & (lev < nlev - 3),
+        entrdd * jnp.abs(mfd) * dz, 0.0,
     )
     return mfd, e_dn
 
@@ -219,17 +222,19 @@ class DowndraftLegTest(unittest.TestCase):
         self.assertLessEqual(abs(net), 1e-6 * gross)
 
     def test_downdraft_carries_lfs_air_into_subcloud(self):
-        # A tracer confined to the LFS layer must appear in the two
-        # sub-cloud taper layers (where the descent detrains) and be
-        # reduced at the LFS (where the seed mass is entrained).
+        # The LFS interface is the top of layer 4, so the seed mass is drawn
+        # from the layer above it (3) — the layer ECHAM's flux-form ledger
+        # debits through that interface. A tracer confined there must be
+        # reduced and must appear in the sub-cloud taper layers, where the
+        # descent detrains.
         rho, dz = self._grid()
         mfd, e_dn = _downdraft(lfs=4)
-        q = jnp.zeros((1, 10, 1)).at[0, 4].set(1.0e-9)
+        q = jnp.zeros((1, 10, 1)).at[0, 3].set(1.0e-9)
         dq, _ = convective_tracer_tendency(
             q, jnp.zeros((10, 1)), jnp.zeros((10, 1)), rho, dz, 1800.0,
             mfd=mfd, entrain_down=e_dn,
         )
-        self.assertLess(float(dq[0, 4, 0]), 0.0)
+        self.assertLess(float(dq[0, 3, 0]), 0.0)
         self.assertGreater(float(dq[0, 8, 0]), 0.0)
         self.assertGreater(float(dq[0, 9, 0]), 0.0)
 
@@ -252,7 +257,7 @@ class DowndraftLegTest(unittest.TestCase):
         rho, dz = self._grid()
         lev = jnp.arange(10)[:, None]
         mfd = jnp.where((lev >= 3) & (lev <= 5), -0.02, 0.0)
-        e_dn = jnp.where((lev > 3) & (lev <= 5), 2.0e-4 * 0.02 * 400.0, 0.0)
+        e_dn = jnp.where((lev >= 3) & (lev < 5), 2.0e-4 * 0.02 * 400.0, 0.0)
         q = jnp.stack([jnp.linspace(0.5, 1.5, 10)[:, None] * 1e-9])
         dq, _ = convective_tracer_tendency(
             q, jnp.zeros((10, 1)), jnp.zeros((10, 1)), rho, dz, 1800.0,
@@ -535,7 +540,11 @@ class ComposedColumnScavengingTest(unittest.TestCase):
     def test_soluble_tracer_is_scavenged_out_of_the_convective_column(self):
         from jcm.physics.echam.echam_levels import get_echam_levels
         from jcm.physics.echam.echam_terms import echam_physics
-        from jcm.rce import JAM_COLUMN_FT_WINDOW, jam_scavenging_column
+        from jcm.rce import (
+            JAM_COLUMN_FT_WINDOW,
+            convergent_initial_physics_data,
+            jam_scavenging_column,
+        )
         from jcm.single_column_model import SingleColumnModel
 
         nlev, dt, nsteps = 47, 900.0, 96          # one day
@@ -552,6 +561,8 @@ class ComposedColumnScavengingTest(unittest.TestCase):
         )
 
         preds = scm.run(states, initial_tracers=seed,
+                        initial_physics_data=convergent_initial_physics_data(
+                            scm, state),
                         times=jnp.arange(nsteps) * dt / 86400.0)
 
         conv = preds.physics_data["convection"]

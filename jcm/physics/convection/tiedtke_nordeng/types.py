@@ -181,7 +181,13 @@ class ConvectionParameters:
 
 
 class ConvectionState(NamedTuple):
-    """State variables for convection scheme"""
+    """State variables for convection scheme.
+
+    The plume profiles live on HALF levels, as in ECHAM: entry ``k`` is the
+    value at the TOP interface of layer ``k`` (``kbase``/``ktop`` are
+    interface indices in that sense), and the per-layer ledgers
+    (``entrain_up``/``entrain_down``) belong to layer ``k``.
+    """
     
     # Updraft properties
     tu: jnp.ndarray          # Updraft temperature (K)
@@ -208,6 +214,12 @@ class ConvectionState(NamedTuple):
     
     # Precipitation
     prate: jnp.ndarray       # Precipitation rate (kg/m²/s)
+
+    # Absolute per-layer entrainment into the updraft / downdraft
+    # [kg/m²/s] (ECHAM ``zdmfen + zoentr`` / ``|zdmfen|``) — the ledgers the
+    # convective tracer transport reads.
+    entrain_up: jnp.ndarray
+    entrain_down: jnp.ndarray
 
 
 class ConvectionTendencies(NamedTuple):
@@ -247,11 +259,11 @@ class ConvectionData:
     diagnostics; they are zero-filled today. ``mass_flux_up``/``down`` and
     ``entrain_up``/``entrain_down`` are populated (post-rescale, post-cap —
     the same ledger scaling as the tendencies) for the convective tracer
-    transport (#602, #622): the updraft flux at each layer's TOP
-    interface, the downdraft flux at each layer's BOTTOM interface (the
-    downdraft scan's convention), and the absolute per-layer entrainment
-    fluxes; per-layer detrainment follows from plume continuity, so it is
-    not stored separately.
+    transport (#602, #622): the updraft and downdraft fluxes at each
+    layer's TOP interface (ECHAM's half-level ``pmfu``/``pmfd``; the
+    surface interface carries none), and the absolute per-layer
+    entrainment fluxes; per-layer detrainment follows from plume
+    continuity, so it is not stored separately.
     """
 
     mass_flux_up: jnp.ndarray        # Updraft mass flux [kg/m²/s] (nlev, ncols)

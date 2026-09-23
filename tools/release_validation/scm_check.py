@@ -2,7 +2,8 @@
 
 A warm tropical column is PRESCRIBED (re-imposed every step, so convection
 fires repeatedly — RCE-style forcing without the bare-scheme feedback
-instabilities) while the JAM tracers evolve freely through vdiff,
+instabilities), starting under large-scale moisture convergence so the
+plume is ECHAM's deep one, while the JAM tracers evolve freely through vdiff,
 convective transport (updraft + downdraft + in-plume scavenging, #621/#622),
 microphysics and wet deposition.
 
@@ -43,6 +44,7 @@ from jcm.physics.echam.echam_levels import get_echam_levels  # noqa: E402
 from jcm.physics.echam.echam_terms import echam_physics  # noqa: E402
 from jcm.rce import (  # noqa: E402
     JAM_COLUMN_FT_WINDOW,
+    convergent_initial_physics_data,
     jam_scavenging_column,
 )
 from jcm.single_column_model import SingleColumnModel  # noqa: E402
@@ -64,7 +66,11 @@ state, seed, p = jam_scavenging_column(vertical, physics, sst=302.0,
                                        relative_humidity=0.8)
 states = tree_map(lambda x: jnp.broadcast_to(x, (N,) + jnp.shape(x)), state)
 
+# The column starts under large-scale moisture convergence, which is what
+# selects ECHAM's DEEP plume (see ``convergent_initial_physics_data``).
 preds = scm.run(states, initial_tracers=seed,
+                initial_physics_data=convergent_initial_physics_data(
+                    scm, state),
                 times=jnp.arange(N) * DT / 86400.0)
 
 tr = {k: np.asarray(v) for k, v in preds.tracer_states.items()}

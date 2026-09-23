@@ -32,13 +32,14 @@ def _moist_tropical_column(nlev=20, t_sfc=300.0):
     return t, q, p, jnp.abs(dz), rho
 
 
-def _precip(params, t_sfc=300.0, supply=2e-5, convergence=0.5):
+def _precip(params, t_sfc=300.0, supply=2e-5, convergence=1.5):
     t, q, p, dz, rho = _moist_tropical_column(t_sfc=t_sfc)
-    # Resolved moisture convergence of ``convergence``*supply beyond the
-    # surface flux: since #699 the deep/shallow split is ECHAM's zdqcv
-    # test, so a column that should exercise the DEEP path (entrpen, the
-    # Nordeng closure) has to be fed convergence the way the atmosphere
-    # would feed it — a CAPE value no longer selects deep by itself.
+    # Resolved moisture convergence of ``convergence``*supply: since #699
+    # the deep/shallow split is ECHAM's zdqcv test (deep iff the column
+    # convergence exceeds 1.1x the surface flux), so a column that should
+    # exercise the DEEP path (entrpen, the Nordeng closure) has to be fed
+    # convergence beyond that the way the atmosphere would feed it — a CAPE
+    # value no longer selects deep by itself.
     nlev = t.shape[0]
     sl = slice(nlev // 2, nlev - 4)
     conv = jnp.zeros(nlev).at[sl].set(
@@ -140,7 +141,9 @@ class TestSmoothTriggerGradients:
         t, q, p, dz, _ = _moist_tropical_column()
         cfg = ConvectionParameters.default()
         cb, _has = find_cloud_base(t, q, p, cfg)
-        cape, _ = calculate_cape_cin(t, q, p, dz, cb, cfg)
+        # The scheme's trigger CAPE starts its moist ascent at the first full
+        # level above the cloud-base INTERFACE ``cb`` (that of layer cb − 1).
+        cape, _ = calculate_cape_cin(t, q, p, dz, cb - 1, cfg)
         # supply=0: with a moisture supply the OR-branch floor weight
         # saturates the trigger for any buoyant column (by design — the
         # #529 continuous-convection path), so the main threshold only

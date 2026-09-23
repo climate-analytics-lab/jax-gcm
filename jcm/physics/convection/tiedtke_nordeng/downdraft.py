@@ -6,15 +6,18 @@ This module implements the downdraft calculations including:
 - Evaporative cooling
 - Moist descent
 
-Based on ICON mo_cudescent.f90
+Based on ECHAM ``mo_cudescent.f90`` (``cudlfs``, ``cuddraf``).
 
+Like the updraft, every profile lives on HALF levels: entry ``j`` is the
+value at the TOP interface of layer ``j`` (physics-internal top-first frame,
+see :mod:`~jcm.physics.convection.tiedtke_nordeng.half_levels`). The descent
+to interface ``j`` crosses layer ``j - 1``, so the per-layer ledgers
+(``pdmfdp``, ``dmfen``) of that step belong to layer ``j - 1``.
 """
 
 import jax.numpy as jnp
-import jax
 from jax import lax
 from typing import NamedTuple, Tuple
-from functools import partial
 
 import jcm.constants as c
 from jcm.physics.convection.saturation import cuadjtq_newton_evap
@@ -22,15 +25,17 @@ from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 from .tiedtke_nordeng import (
     ConvectionParameters
 )
+from .half_levels import HalfLevelEnvironment
+from .adjustment import cuadjtq
 
 
 class DowndraftState(NamedTuple):
-    """State variables for downdraft calculation"""
+    """Half-level downdraft profiles (entry ``j`` = top interface of layer ``j``)."""
 
-    td: jnp.ndarray      # Downdraft temperature (K)
-    qd: jnp.ndarray      # Downdraft specific humidity (kg/kg)
-    mfd: jnp.ndarray     # Downdraft mass flux (kg/m²/s) - negative values
-    pdmfdp: jnp.ndarray  # Downdraft precip sink per layer (kg/m²/s, ≤ 0) —
+    td: jnp.ndarray      # Downdraft temperature (K) — ECHAM ``ptd``
+    qd: jnp.ndarray      # Downdraft specific humidity (kg/kg) — ``pqd``
+    mfd: jnp.ndarray     # Downdraft mass flux (kg/m²/s), ≤ 0 — ``pmfd``
+    pdmfdp: jnp.ndarray  # Downdraft precip sink of layer j (kg/m²/s, ≤ 0) —
                          # ECHAM ``pdmfdp = −pmfd·zcond``: rain evaporated
                          # into the descending parcel, debited from the rain
                          # flux and credited back to the environment through
@@ -40,8 +45,11 @@ class DowndraftState(NamedTuple):
                          # descends. Consumed by cududv's SEPARATE downdraft
                          # momentum flux ``mfd·(ud − ū)``.
     vd: jnp.ndarray      # Downdraft meridional wind (m/s) — ECHAM ``pvd``.
-    lfs: int             # Level of free sinking
-    active: bool         # Whether downdraft is active
+    lfs: int             # Level of free sinking (interface index, ``kdtop``)
+    active: bool         # Whether a downdraft was initiated (``lddraf``)
+    dmfen: jnp.ndarray | None = None  # Magnitude of the environmental air
+                         # entrained into the downdraft in layer j (kg/m²/s)
+                         # — ECHAM ``|zdmfen|``; the tracer-transport ledger.
 
 
 def wetbulb_temperature(
@@ -55,9 +63,7 @@ def wetbulb_temperature(
     adjustment (see :func:`~jcm.physics.convection.saturation.
     cuadjtq_newton_evap`). Conserves moist static energy exactly
     (``cp·ΔT + L·Δq = 0``), and already-saturated air comes back unchanged
-    because the evaporation-only clip zeroes the step. This replaced a
-    hand-rolled ``T − 0.3·(L/cp)·(qs − q)`` + unconditional re-saturation
-    that broke MSE by up to 5 kJ/kg with a height-dependent sign (#694).
+    because the evaporation-only clip zeroes the step.
 
     Args:
         temperature: Environmental temperature (K)
@@ -72,6 +78,17 @@ def wetbulb_temperature(
     return twb.astype(temperature.dtype), qwb.astype(humidity.dtype)
 
 
+def _env_or_build(env, temperature, humidity, pressure, layer_mass=None,
+                  cp_moist=None, pressure_half=None):
+    if env is not None:
+        return env
+    from .updraft import column_environment
+    return column_environment(
+        temperature, humidity, pressure, cp_moist, pressure_half,
+        layer_mass=layer_mass,
+    )
+
+
 def find_lfs(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray,
@@ -82,87 +99,61 @@ def find_lfs(
     precip_rate: jnp.ndarray,
     kbase: int,
     ktop: int,
-    config: ConvectionParameters
+    config: ConvectionParameters,
+    env: HalfLevelEnvironment | None = None,
+    pressure_half: jnp.ndarray | None = None,
 ) -> Tuple[int, bool]:
-    """Find level of free sinking for downdraft initiation
-    
+    """Find the level of free sinking (ECHAM ``cudlfs``).
+
+    Faithful port of mo_cudescent.f90:62-160 on half levels. At each
+    interface ``j`` strictly inside the realized cloud (``kctop < j < kcbot``)
+    and within ``3 ≤ jk ≤ klev − 3`` (0-based ``2 ≤ j ≤ nlev − 4``), the
+    half-level environment is brought to its wet bulb (``cuadjtq`` kcall = 2
+    at the interface pressure) and mixed 50/50 with the plume there. The
+    highest interface where that mixture is negatively buoyant against the
+    half-level environment, and where
+
+        ``prfl > 10·zmftop·zcond``,  ``zmftop = −cmfdeps·pmfub``,
+
+    holds, is the LFS. ``zmftop`` is negative and ``zcond = pqenh − q_wb``
+    non-negative, so in the reference this test is met by any column that is
+    raining at all; it is kept literally so the downdraft switches on under
+    exactly the reference conditions.
+
     Args:
-        temperature: Environmental temperature (K) [nlev]
-        humidity: Environmental humidity (kg/kg) [nlev]
-        pressure: Pressure (Pa) [nlev]
-        updraft_temp: Updraft temperature (K) [nlev]
-        updraft_humid: Updraft humidity (kg/kg) [nlev]
-        updraft_mf: Updraft mass flux (kg/m²/s) [nlev]
-        precip_rate: Precipitation rate (kg/m²/s)
-        kbase: Cloud base level
-        ktop: Cloud top level
-        config: Convection configuration
-        
+        temperature, humidity, pressure: Full-level environment.
+        updraft_temp, updraft_humid: Half-level plume ``ptu``/``pqu``.
+        updraft_mf: Half-level plume mass flux (``pmfub`` is its value at
+            ``kbase``).
+        precip_rate: Column precipitation generated by the updraft
+            (``zrfl``) [kg/m²/s].
+        kbase: Cloud-base interface ``kcbot``.
+        ktop: Realized cloud-top interface ``kctop``.
+        config: Convection configuration.
+        env: Precomputed half-level environment; built when ``None``.
+        pressure_half: Interface pressures used to build ``env``.
+
     Returns:
-        Tuple of (lfs_level, found_lfs)
+        ``(lfs_interface, found)``.
 
     """
-    nlev = len(temperature)
-    
-    # Scan from cloud top down to find LFS
-    def check_lfs(k):
-        # Cloud-bound checks (k within [ktop, kbase]) are the calling
-        # function's responsibility.
-        # Calculate wet-bulb values for environment
-        twb, qwb = wetbulb_temperature(temperature[k], humidity[k], pressure[k])
-        
-        # Mix 50% cloud air with 50% environmental air at wet-bulb
-        t_mix = 0.5 * (updraft_temp[k] + twb)
-        q_mix = 0.5 * (updraft_humid[k] + qwb)
-        
-        # Calculate buoyancy
-        vt_mix = t_mix * (1.0 + 0.608 * q_mix)
-        vt_env = temperature[k] * (1.0 + 0.608 * humidity[k])
-        buoyancy = (vt_mix - vt_env) / vt_env
-        
-        # Condensation in downdraft
-        condensation = humidity[k] - qwb
-        
-        # Minimum mass flux threshold (Fortran: zmftop = -cmfdeps*pmfub)
-        min_flux = config.cmfdeps * updraft_mf[kbase]
-        
-        # Check LFS criteria:
-        # 1. Negative buoyancy
-        # 2. Sufficient precipitation to maintain downdraft
-        is_lfs = jnp.logical_and(
-            buoyancy < 0.0,
-            precip_rate > 10.0 * min_flux * condensation
-        )
-        
-        return is_lfs, buoyancy
-    
-    # Find first level that satisfies LFS criteria using JAX-compatible operations
-    # Check all possible levels and find the first one that satisfies LFS
-    nlev = len(temperature)
-    
-    # Create a function to check LFS at each level
-    def check_all_levels(k):
-        # Only check if k is in valid range
-        in_range = (k >= ktop) & (k <= kbase)
-        is_lfs, buoy = lax.cond(
-            in_range,
-            lambda: check_lfs(k),
-            lambda: (False, 0.0)
-        )
-        return is_lfs
-    
-    # Check all levels from top to base
-    all_levels = jnp.arange(nlev)
-    lfs_conditions = jax.vmap(check_all_levels)(all_levels)
-    
-    # Find first level where LFS is satisfied
-    lfs_found = jnp.any(lfs_conditions)
-    
-    # Get the first level index where condition is met
-    first_lfs_idx = jnp.argmax(lfs_conditions)  # argmax returns first True
-    lfs_level = jnp.where(lfs_found, first_lfs_idx, ktop)
-    
-    return lfs_level, lfs_found
+    nlev = temperature.shape[0]
+    env = _env_or_build(env, temperature, humidity, pressure,
+                        pressure_half=pressure_half)
+    twb, qwb = wetbulb_temperature(env.tenh, env.qenh, env.paph[:-1])
+    t_mix = 0.5 * (updraft_temp + twb)
+    q_mix = 0.5 * (updraft_humid + qwb)
+    zbuo = (t_mix * (1.0 + c.vtmpc1 * q_mix)
+            - env.tenh * (1.0 + c.vtmpc1 * env.qenh))
+    zcond = env.qenh - qwb
+    zmftop = -config.cmfdeps * updraft_mf[kbase]
+    levels = jnp.arange(nlev)
+    in_range = ((levels >= 2) & (levels <= nlev - 4)
+                & (levels > ktop) & (levels < kbase) & (precip_rate > 0.0))
+    is_lfs = in_range & (zbuo < 0.0) & (precip_rate > 10.0 * zmftop * zcond)
+    found = jnp.any(is_lfs)
+    lfs = jnp.where(found, jnp.argmax(is_lfs), ktop)
+    return lfs, found
 
 
 def downdraft_entrainment_ledger(
@@ -170,181 +161,27 @@ def downdraft_entrainment_ledger(
     layer_thickness: jnp.ndarray,
     entrdd: float,
 ) -> jnp.ndarray:
-    """Absolute per-layer downdraft entrainment flux [kg/m²/s] (#622).
+    """Per-layer downdraft entrainment magnitude [kg/m²/s] from a flux profile.
 
-    ECHAM ``cuddraf`` entrains ``zentr = entrdd·|mfd(k-1)|·dz`` into each
-    descent layer (matched by an equal detrainment in the bulk, so
-    |mfd| is conserved going down); entrainment is shut off in the two
-    surface-taper layers. ``mfd[k]`` is the flux leaving layer k through
-    its BOTTOM interface, so the flux entering from above is
-    ``mfd[k-1]`` — zero at and above the LFS, which zeroes the ledger
-    there without an explicit LFS index. Where the downdraft died
-    mid-descent (``mfd[k] == 0`` with inflow above), the ledger is also
-    zero so plume continuity dumps the arriving flux as pure
-    detrainment, matching the Fortran's buoyancy shut-off.
+    Rebuilds ECHAM ``cuddraf``'s ``|zdmfen| = entrdd·|pmfd(top of layer)|·
+    Δz`` for callers that hold only a half-level downdraft profile (``mfd[j]``
+    at the TOP interface of layer ``j``): layer ``j`` entrains while the
+    downdraft enters it from above (``mfd[j] < 0``) and leaves it through
+    its bottom interface (``mfd[j + 1] < 0``); where the descent died inside
+    the layer the ledger is zero, so plume continuity dumps the arriving flux
+    as pure detrainment, matching the Fortran's buoyancy shut-off. The three
+    lowest layers are the surface taper (``itopde = klev − 2``), where
+    ECHAM does not entrain. The scheme itself returns its exact ledger
+    (:attr:`DowndraftState.dmfen`); this helper serves column callers.
 
     Vertical on axis 0; trailing axes broadcast (a ``(nlev,)`` column and
     a ``(nlev, ncols)`` block agree per column).
     """
     nlev = mfd.shape[0]
-    mfd_in = jnp.concatenate(
-        [jnp.zeros_like(mfd[:1]), mfd[:-1]], axis=0
-    )
+    mfd_out = jnp.concatenate([mfd[1:], jnp.zeros_like(mfd[:1])], axis=0)
     levels = jnp.arange(nlev).reshape((nlev,) + (1,) * (mfd.ndim - 1))
-    in_bulk = (mfd < 0.0) & (levels < nlev - 2)
-    return jnp.where(
-        in_bulk, entrdd * jnp.abs(mfd_in) * layer_thickness, 0.0
-    )
-
-
-def downdraft_step(
-    carry_and_rain: Tuple,
-    level_inputs: Tuple
-) -> Tuple[Tuple, DowndraftState]:
-    """Single step of downdraft calculation for use with lax.scan
-
-    Mirrors ECHAM ``mo_cudescent.f90::cuddraf``: in the bulk of the
-    downdraft column the fractional entrainment ``entrdd`` is matched
-    by an equal detrainment, so the downdraft mass flux is conserved
-    going down. In the lowest two layers, entrainment is shut off and
-    detrainment is set to a linear ramp that drives the mass flux to
-    zero at the surface. Without these, the prior implementation only
-    entrained (no matching detrainment), so |mfd| ran away by ~50x as
-    the downdraft descended a deep RCE column.
-
-    Args:
-        carry: Current downdraft state
-        level_inputs: Environment variables at current level
-
-    Returns:
-        Tuple of (updated_carry, output_state)
-
-    """
-    carry, rain_flux = carry_and_rain
-    (k, env_temp, env_q, pressure, dz, rho, precip,
-     entrdd, cmfcmin, cevapcu, klev_m2, p_taper_frac,
-     env_u, env_v, cp_here, cp_above) = level_inputs
-
-    # Surface-first index convention: k=0 = TOA, k=nlev-1 = surface.
-    # Downdraft is active from carry.lfs (somewhere in cloud, lower index)
-    # downward. Skip levels at or above the LFS — those are handled by
-    # the LFS-init step before the scan.
-    skip = jnp.logical_or(~carry.active, k <= carry.lfs)
-
-    def compute_downdraft():
-        # State from immediately above (towards LFS).
-        prev_mfd = carry.mfd[k - 1]
-        prev_td = carry.td[k - 1]
-        prev_qd = carry.qd[k - 1]
-        prev_ud = carry.ud[k - 1]
-        prev_vd = carry.vd[k - 1]
-
-        # 1) Dry-adiabatic descent, in dry static energy. ECHAM ``cuddraf``
-        # mixes DSE (mo_cudescent.f90:275-284): ``pmfds`` carries
-        # ``(pcpcu·ptd + pgeoh)``, ``zseen`` the entrained air, and
-        # ``ptd = (zmfdsk/pmfd − pgeoh)/pcpcu``. ``cp`` is ECHAM's MOIST
-        # heat capacity of the environment (``pcpcu = cpd·(1 + vtmpc2·q)``):
-        # the descending air's heat content is carried by the ``cp`` of the
-        # level it leaves and converted back with the ``cp`` of the level it
-        # reaches. Written relative to this level's geopotential, the
-        # descended parcel's DSE is ``cp_above·T_above + g·dz`` (~1.95 K of
-        # warming per 200 m).
-        dse_desc = cp_above * prev_td + c.grav * dz
-        qd_desc = prev_qd
-
-        # 2) Entrainment / detrainment magnitude (mass flux per layer,
-        # kg/m²/s). ECHAM cuddraf: zentr = entrdd*|mfd(k-1)|*Rd*T/p*pmref;
-        # with pmref/rho≈dz this reduces to entrdd*|mfd|*dz.
-        zentr = entrdd * jnp.abs(prev_mfd) * dz
-
-        # 3) Surface taper. Fortran ``itopde=klev-2``: in the lowest two
-        # layers, shut off entrainment and apply a linear detrainment
-        # ramp so the mass flux reaches zero at the surface. In the bulk
-        # of the column, entrainment is matched by detrainment so mfd is
-        # conserved going down.
-        in_surface_taper = k > klev_m2
-        # In bulk, zdmfen and zdmfde cancel; mass flux is unchanged.
-        # In taper, zdmfde ramps |mfd| down to zero in the lowest layer.
-        extra_detr = jnp.where(
-            in_surface_taper,
-            jnp.abs(prev_mfd) * p_taper_frac,
-            0.0,
-        )
-        # ``prev_mfd`` is negative; detrainment (extra_detr ≥ 0) makes
-        # it less negative.
-        mfd_new = prev_mfd + extra_detr
-
-        # 4) Mixing: in the bulk, fraction ``zentr/|mfd|`` of environment
-        # air is mixed in (matched by the same fraction detrained out
-        # of the downdraft). In the surface taper there is no entrainment
-        # so no mixing — the parcel just retains its previous-level
-        # properties, modified only by adiabatic warming.
-        mix_fraction = jnp.where(
-            in_surface_taper,
-            0.0,
-            zentr / jnp.maximum(jnp.abs(prev_mfd), cmfcmin),
-        )
-        # Entrained air is taken at this level (the scheme-wide full-level
-        # staggering, #530), so its DSE relative to this level is
-        # ``cp_here·T_env``.
-        td_mix = (
-            (1.0 - mix_fraction) * dse_desc
-            + mix_fraction * cp_here * env_temp
-        ) / cp_here
-        qd_mix = (1.0 - mix_fraction) * qd_desc + mix_fraction * env_q
-        # Downdraft wind (ECHAM cuddraf ``pud``/``pvd``): passive, mixed
-        # toward the entrained environment with the same fraction as td/qd.
-        ud_new = (1.0 - mix_fraction) * prev_ud + mix_fraction * env_u
-        vd_new = (1.0 - mix_fraction) * prev_vd + mix_fraction * env_v
-
-        # 5) Saturate the descending parcel by evaporating rain into it —
-        # ECHAM cuddraf lines 286-316: cuadjtq(kcall=2) drives (T,q) to
-        # saturation (evaporation-only Newton step), and the vapour taken
-        # up is debited from the rain flux as ``pdmfdp = −pmfd·zcond`` (a
-        # NEGATIVE per-layer precip increment: the environment gets the
-        # cooling + moistening back through the cudtdq ledger). A
-        # cevapcu-scaled pseudo-evaporation would instead warm the parcel
-        # nearly dry-adiabatically, killing its negative buoyancy within a
-        # level or two; cevapcu belongs to the sub-cloud Kessler chain in
-        # cuflx, not here.
-        from .adjustment import cuadjtq
-        td_clipped = jnp.clip(td_mix, 100.0, 400.0)
-        td_new, qd_new, zcond = cuadjtq(
-            td_clipped, qd_mix, pressure, kcall=2,
-        )
-        # zcond ≤ 0 is the vapour ADDED to the parcel (q_before − q_after).
-        # Rain consumed per layer: zdmfdp = −mfd·zcond ≤ 0 (mfd < 0).
-        zdmfdp = -mfd_new * zcond
-
-        # 6) Termination (cuddraf line 310): keep the downdraft only while
-        # negatively buoyant AND the rain it would consume is available
-        # (rain_flux − mfd·zcond > 0).
-        vt_down = td_new * (1.0 + 0.608 * qd_new)
-        vt_env = env_temp * (1.0 + 0.608 * env_q)
-        rain_available = rain_flux + zdmfdp > 0.0
-        keep = jnp.logical_and(vt_down < vt_env, rain_available)
-        mfd_final = jnp.where(keep, mfd_new, 0.0)
-        zdmfdp = jnp.where(keep, zdmfdp, 0.0)
-        rain_flux_new = rain_flux + zdmfdp
-
-        new_state = carry._replace(
-            td=carry.td.at[k].set(td_new),
-            qd=carry.qd.at[k].set(qd_new),
-            mfd=carry.mfd.at[k].set(mfd_final),
-            pdmfdp=carry.pdmfdp.at[k].set(zdmfdp),
-            ud=carry.ud.at[k].set(ud_new),
-            vd=carry.vd.at[k].set(vd_new),
-            active=jnp.abs(mfd_final) > cmfcmin,
-        )
-        return new_state, rain_flux_new
-
-    def keep_state():
-        return carry, rain_flux
-
-    (updated_state, rain_flux_out) = lax.cond(
-        skip, keep_state, compute_downdraft,
-    )
-    return (updated_state, rain_flux_out), updated_state
+    in_bulk = (mfd < 0.0) & (mfd_out < 0.0) & (levels < nlev - 3)
+    return jnp.where(in_bulk, entrdd * jnp.abs(mfd) * layer_thickness, 0.0)
 
 
 def calculate_downdraft(
@@ -361,138 +198,176 @@ def calculate_downdraft(
     u_wind: jnp.ndarray | None = None,
     v_wind: jnp.ndarray | None = None,
     cp_moist: jnp.ndarray | None = None,
+    pressure_half: jnp.ndarray | None = None,
+    env: HalfLevelEnvironment | None = None,
 ) -> DowndraftState:
-    """Calculate full downdraft profile
-    
+    """Calculate the downdraft on half levels (ECHAM ``cudlfs`` + ``cuddraf``).
+
     Args:
-        temperature: Environmental temperature (K) [nlev]
+        temperature: Environmental temperature (K) [nlev], top-first.
         humidity: Environmental humidity (kg/kg) [nlev]
-        pressure: Pressure (Pa) [nlev]
-        layer_thickness: Layer thickness (m) [nlev]
-        rho: Air density (kg/m³) [nlev]
-        updraft_state: Computed updraft state
-        precip_rate: Column precipitation rate (kg/m²/s)
-        kbase: Cloud base level
-        ktop: Cloud top level
+        pressure: Full-level pressure (Pa) [nlev]
+        layer_thickness: Layer thickness (m) [nlev]; accepted for call
+            compatibility (layer geometry comes from the half-level
+            environment).
+        rho: Air density (kg/m³) [nlev]; accepted for call compatibility.
+        updraft_state: Half-level updraft (:class:`~.updraft.UpdatedraftState`).
+        precip_rate: Column precipitation generated by the updraft (kg/m²/s)
+        kbase: Cloud-base interface ``kcbot``.
+        ktop: Realized cloud-top interface ``kctop``.
         config: Convection configuration
-        cp_moist: Moist heat capacity ``cpd·(1 + vtmpc2·q)`` [J/kg/K]
-            [nlev] — ECHAM's ``pcpcu``, with which ``cuddraf`` forms the
-            downdraft and entrained dry static energy. ``None`` builds it
-            from ``humidity``.
+        u_wind, v_wind: Full-level environmental winds (m/s).
+        cp_moist: Full-level moist heat capacity (``pcpen``); only used to
+            build the environment when ``env`` is not given.
+        pressure_half: Interface pressures [Pa] for building ``env``.
+        env: Precomputed :class:`~.half_levels.HalfLevelEnvironment`.
 
     Returns:
-        DowndraftState with computed profiles
+        :class:`DowndraftState` of half-level profiles.
 
     """
-    nlev = len(temperature)
+    nlev = temperature.shape[0]
+    dtype = temperature.dtype
     if cp_moist is None:
         cp_moist = moist_isobaric_heat_capacity(humidity)
+    del layer_thickness, rho
+    env = _env_or_build(env, temperature, humidity, pressure,
+                        cp_moist=cp_moist, pressure_half=pressure_half)
     if u_wind is None:
-        u_wind = jnp.zeros(nlev)
+        u_wind = jnp.zeros(nlev, dtype)
     if v_wind is None:
-        v_wind = jnp.zeros(nlev)
+        v_wind = jnp.zeros(nlev, dtype)
 
-    # Find level of free sinking
     lfs, has_lfs = find_lfs(
         temperature, humidity, pressure,
         updraft_state.tu, updraft_state.qu, updraft_state.mfu,
-        precip_rate, kbase, ktop, config
-    )
-    
-    # Initialize downdraft state
-    td_init = temperature.copy()
-    qd_init = humidity.copy()
-    mfd_init = jnp.zeros(nlev)
-    # Downdraft wind starts from the environment; at the LFS it is the
-    # cloud/environment mix (below), mirroring td/qd.
-    ud_init = u_wind.copy()
-    vd_init = v_wind.copy()
-
-    # Initialize downdraft conditionally using JAX-compatible operations
-    def initialize_downdraft():
-        # Mix cloud and environmental air at LFS
-        twb, qwb = wetbulb_temperature(
-            temperature[lfs], humidity[lfs], pressure[lfs]
-        )
-        td_new = td_init.at[lfs].set(0.5 * (updraft_state.tu[lfs] + twb))
-        qd_new = qd_init.at[lfs].set(0.5 * (updraft_state.qu[lfs] + qwb))
-        # ECHAM cudlfs seeds the downdraft wind from the 50/50 updraft/
-        # environment mix at the LFS (mirrors the td/qd wet-bulb mix).
-        ud_new = ud_init.at[lfs].set(
-            0.5 * (updraft_state.uu[lfs] + u_wind[lfs])
-        )
-        vd_new = vd_init.at[lfs].set(
-            0.5 * (updraft_state.vu[lfs] + v_wind[lfs])
-        )
-
-        # Initial downdraft mass flux: ECHAM cudlfs uses
-        #   zmftop = -cmfdeps * pmfub
-        # where pmfub = mfu(kcbot) is the cloud-base mass flux. Do NOT use
-        # an updraft cloud-top mass-flux fraction (~0.2) here: it is
-        # numerically similar to ``cmfdeps`` but conceptually a different,
-        # updraft-side quantity.
-        mfd_new = mfd_init.at[lfs].set(
-            -config.cmfdeps * updraft_state.mfu[kbase]
-        )
-        return td_new, qd_new, mfd_new, ud_new, vd_new
-
-    def no_downdraft():
-        return td_init, qd_init, mfd_init, ud_init, vd_init
-
-    # Apply Pattern 2: Conditional Computation
-    td_final, qd_final, mfd_final, ud_final, vd_final = lax.cond(
-        has_lfs,
-        initialize_downdraft,
-        no_downdraft
+        precip_rate, kbase, ktop, config, env=env,
     )
 
+    # --- cudlfs seed at the LFS interface (mo_cudescent.f90:121-150) -------
+    # 50/50 mixture of plume air and the wet-bulb half-level environment,
+    # the flux ``zmftop = −cmfdeps·pmfub``, and the rain evaporated to reach
+    # that wet bulb charged to the layer ABOVE the interface
+    # (``pdmfdp(jk−1) = −0.5·pmfd·zcond``). The seed wind mixes the plume
+    # wind with the environment of that layer above.
+    twb, qwb = wetbulb_temperature(
+        env.tenh[lfs], env.qenh[lfs], env.paph[lfs])
+    zcond0 = env.qenh[lfs] - qwb
+    mftop = -config.cmfdeps * updraft_state.mfu[kbase]
+    mfd_seed = jnp.where(has_lfs, mftop, 0.0)
+    pdmfdp_seed = -0.5 * mfd_seed * zcond0
+    above = jnp.maximum(lfs - 1, 0)
+    td_init = env.tenh.at[lfs].set(
+        jnp.where(has_lfs, 0.5 * (updraft_state.tu[lfs] + twb), env.tenh[lfs]))
+    qd_init = env.qenh.at[lfs].set(
+        jnp.where(has_lfs, 0.5 * (updraft_state.qu[lfs] + qwb), env.qenh[lfs]))
+    ud_init = jnp.zeros(nlev, dtype).at[lfs].set(
+        0.5 * (updraft_state.uu[lfs] + u_wind[above]))
+    vd_init = jnp.zeros(nlev, dtype).at[lfs].set(
+        0.5 * (updraft_state.vu[lfs] + v_wind[above]))
     initial_state = DowndraftState(
-        td=td_final,
-        qd=qd_final,
-        mfd=mfd_final,
-        pdmfdp=jnp.zeros(nlev),
-        ud=ud_final,
-        vd=vd_final,
+        td=td_init,
+        qd=qd_init,
+        mfd=jnp.zeros(nlev, dtype).at[lfs].set(mfd_seed),
+        pdmfdp=jnp.zeros(nlev, dtype).at[above].set(pdmfdp_seed),
+        ud=ud_init,
+        vd=vd_init,
         lfs=lfs,
-        active=has_lfs
+        active=has_lfs,
+        dmfen=jnp.zeros(nlev, dtype),
     )
+    rain0 = precip_rate + pdmfdp_seed
 
-    # Surface-taper geometry (mirrors ``itopde = klev-2`` in cuddraf):
-    # in the bottom two layers, entrainment is shut off and detrainment
-    # is split linearly across the layers so the mass flux reaches zero
-    # at the surface. ``p_taper_frac`` is the fraction of the residual
-    # mass-flux to detrain in each surface-taper layer; the simplest
-    # uniform split is 0.5 in the second-to-last layer and 1.0 in the
-    # last (which fully zeroes mfd at the surface).
-    klev_m2 = jnp.array(nlev - 3, dtype=jnp.int32)  # Fortran ``itopde``-equivalent (0-indexed: nlev-3 = top of taper)
-    p_taper_frac = jnp.zeros(nlev)
-    p_taper_frac = p_taper_frac.at[nlev - 2].set(0.5)
-    p_taper_frac = p_taper_frac.at[nlev - 1].set(1.0)
+    # Surface taper (``itopde = klev − 2``, lines 206-216): below interface
+    # itopde the downdraft stops entraining and detrains linearly in pressure,
+    # ``zdmfde = pmfd(itopde)·Δp/(p_s − p(itopde))``, so its flux reaches zero
+    # at the surface.
+    itopde = nlev - 3
+    ps = env.paph[-1]
+    taper_depth = jnp.maximum(ps - env.paph[itopde], 1e-6)
 
-    # Prepare inputs for scan (extract config parameters to avoid passing object)
-    k_levels = jnp.arange(nlev)
+    levels = jnp.arange(nlev)
+    up = jnp.maximum(levels - 1, 0)
     level_inputs = (
-        k_levels, temperature, humidity, pressure,
-        layer_thickness, rho, jnp.full(nlev, precip_rate),
-        jnp.full(nlev, config.entrdd),
-        jnp.full(nlev, config.cmfcmin),
-        jnp.full(nlev, config.cevapcu),
-        jnp.full(nlev, klev_m2),
-        p_taper_frac,
-        u_wind, v_wind,
-        # Moist heat capacity at this level and at the level the downdraft
-        # descends FROM (one index smaller, top-first; the model top is
-        # never a descent destination).
-        cp_moist, jnp.concatenate([cp_moist[:1], cp_moist[:-1]]),
-    )
-    
-    # Use scan to compute downdraft from LFS downward. The carry threads
-    # the remaining rain flux so per-layer cuadjtq evaporation depletes it
-    # (cuddraf's ``prfl`` accumulation).
-    (final_state, _rain_left), all_states = lax.scan(
-        partial(downdraft_step),
-        (initial_state, precip_rate),
-        level_inputs
+        levels,
+        env.tenh[up], env.qenh[up], env.geoh[up], env.cpcu[up],
+        env.paph[up], env.dp[up],
+        env.tenh, env.qenh, env.geoh, env.cpcu, env.paph[:-1],
+        u_wind[up], v_wind[up],
     )
 
+    def downdraft_step(carry_and_rain, inputs):
+        carry, rain_flux = carry_and_rain
+        (j, tenh_a, qenh_a, geoh_a, cpcu_a, paph_a, dp_a,
+         tenh_j, qenh_j, geoh_j, cpcu_j, paph_j, u_a, v_a) = inputs
+        a = jnp.maximum(j - 1, 0)
+        mfd_a = carry.mfd[a]
+        active = carry.active & (j > carry.lfs) & (j >= 2) & (mfd_a < 0.0)
+
+        def compute():
+            # Entrainment into the descent through layer j−1 (line 199):
+            # entrdd·pmfd·(R_d·T/p at the layer's top interface)·Δp/g — the
+            # fractional rate over the layer's geometric thickness. In the
+            # bulk it is matched by an equal detrainment.
+            # (The model-top interface, at zero pressure, is never a descent
+            # origin; the floor only keeps that traced-but-unused lane finite.)
+            zentr = (entrdd_ * mfd_a * c.rd * tenh_a
+                     / (c.grav * jnp.maximum(paph_a, 1.0)) * dp_a)
+            in_taper = j > itopde
+            zdmfen = jnp.where(in_taper, 0.0, zentr)
+            zdmfde = jnp.where(
+                in_taper, carry.mfd[itopde] * dp_a / taper_depth, zentr)
+            mfd_new = mfd_a + zdmfen - zdmfde
+            # Flux-form mixing (lines 222-233): static energy and moisture of
+            # the arriving flux plus the entrained environment of the layer's
+            # top interface minus the detrained downdraft air.
+            s_a = cpcu_a * carry.td[a] + geoh_a
+            s_e = cpcu_a * tenh_a + geoh_a
+            div = jnp.minimum(-cmfcmin_, mfd_new)
+            s_new = (mfd_a * s_a + zdmfen * s_e - zdmfde * s_a) / div
+            q_new = (mfd_a * carry.qd[a] + zdmfen * qenh_a
+                     - zdmfde * carry.qd[a]) / div
+            td_new = jnp.clip((s_new - geoh_j) / cpcu_j, 100.0, 400.0)
+            # Evaporate rain into the descending air toward saturation
+            # (cuadjtq kcall = 2 at the interface pressure, line 272).
+            td_adj, qd_adj, zcond = cuadjtq(td_new, q_new, paph_j, kcall=2)
+            # ``zcond`` ≤ 0 is the vapour taken up; the rain it consumes is
+            # ``zdmfdp = −pmfd·zcond`` ≤ 0.
+            zbuo = (td_adj * (1.0 + c.vtmpc1 * qd_adj)
+                    - tenh_j * (1.0 + c.vtmpc1 * qenh_j))
+            keep = (zbuo < 0.0) & (rain_flux - mfd_new * zcond > 0.0)
+            mfd_fin = jnp.where(keep, mfd_new, 0.0)
+            zdmfdp = -mfd_fin * zcond
+            ud_new = jnp.where(
+                keep,
+                (mfd_a * carry.ud[a] + zdmfen * u_a - zdmfde * carry.ud[a])
+                / div,
+                carry.ud[j])
+            vd_new = jnp.where(
+                keep,
+                (mfd_a * carry.vd[a] + zdmfen * v_a - zdmfde * carry.vd[a])
+                / div,
+                carry.vd[j])
+            new = carry._replace(
+                td=carry.td.at[j].set(td_adj),
+                qd=carry.qd.at[j].set(qd_adj),
+                mfd=carry.mfd.at[j].set(mfd_fin),
+                pdmfdp=carry.pdmfdp.at[a].set(zdmfdp),
+                ud=carry.ud.at[j].set(ud_new),
+                vd=carry.vd.at[j].set(vd_new),
+                # Layer j−1 entrains only while the descent continues through
+                # it; where it died the arriving flux detrains there entirely.
+                dmfen=carry.dmfen.at[a].set(jnp.where(keep, -zdmfen, 0.0)),
+            )
+            return new, rain_flux + zdmfdp
+
+        new_carry, new_rain = lax.cond(
+            active, compute, lambda: (carry, rain_flux))
+        return (new_carry, new_rain), None
+
+    entrdd_ = config.entrdd
+    cmfcmin_ = config.cmfcmin
+    (final_state, _rain_left), _ = lax.scan(
+        downdraft_step, (initial_state, rain0), level_inputs,
+    )
     return final_state
