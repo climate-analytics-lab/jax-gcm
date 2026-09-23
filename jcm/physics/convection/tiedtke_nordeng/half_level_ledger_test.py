@@ -23,6 +23,7 @@ import numpy as np
 import jcm.constants as c
 from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import (
     calculate_tendencies,
+    subcloud_taper,
 )
 from jcm.physics.convection.tiedtke_nordeng.half_levels import (
     half_level_environment,
@@ -194,6 +195,60 @@ class TestSubCloudTaper(unittest.TestCase):
         for h in (heating, h3):
             np.testing.assert_allclose(
                 np.sum(h[kbase:] * mass[kbase:]), -flux_cb, rtol=1e-5)
+
+
+class TestFinalAscentRespectsZmfmax(unittest.TestCase):
+    """The closure's amplitude is applied by a second ascent (cumastr), so
+    ECHAM's ``zmfmax`` limiter — no interface may pass more than the air
+    mass of the layer above it per step — holds for the FINAL plume. A
+    linear rescale of the first ascent would not keep it.
+    """
+
+    def test_interface_fluxes_within_layer_mass_per_step(self):
+        T, q, p, p_half, dz, rho = _l47_tropical_column()
+        dt = 3600.0
+        for supply in (1.5e-4, 5.0e-4):
+            _, state = _run(T, q, p, p_half, dz, rho, deep=True,
+                            supply=supply, dt=dt)
+            mfu = np.asarray(state.mfu, dtype=np.float64)
+            kb = int(state.kbase)
+            self.assertGreater(mfu.max(), 0.0)
+            dp = np.diff(np.asarray(p_half, dtype=np.float64))
+            cap = dp[:-1] / (c.grav * dt)          # layer above interface k
+            ratio = mfu[1:kb + 1] / cap[:kb]
+            self.assertLessEqual(float(ratio.max()), 1.0 + 1e-4,
+                                 f"supply {supply}: {ratio.max():.3f}")
+
+
+class TestPublishedSubCloudTaper(unittest.TestCase):
+    """``subcloud_taper`` — the cuflx taper the ledger applies and the term
+    publishes on ``mass_flux_up`` — is broadcasting-native and exact.
+    """
+
+    def test_column_and_block_agree_and_match_cuflx(self):
+        nlev, ncols = 6, 3
+        p_half = jnp.array([0.0, 2.0e4, 4.0e4, 6.0e4, 8.0e4, 9.0e4, 1.0e5])
+        flux = jnp.array([0.0, 0.1, 0.2, 0.3, 0.0, 0.0])
+        kbase = 3
+        col = np.asarray(subcloud_taper(flux, kbase, 1, p_half))
+        # At and above the base: unchanged. Below: F(kb)·(ps−p)/(ps−p_kb).
+        np.testing.assert_allclose(col[:4], np.asarray(flux)[:4])
+        np.testing.assert_allclose(
+            col[4:], 0.3 * np.array([2.0e4, 1.0e4]) / 4.0e4, rtol=1e-6)
+        mid = np.asarray(subcloud_taper(flux, kbase, 3, p_half))
+        np.testing.assert_allclose(
+            mid[4:], 0.3 * (np.array([2.0e4, 1.0e4]) / 4.0e4) ** 2,
+            rtol=1e-6)
+        block = np.asarray(subcloud_taper(
+            jnp.tile(flux[:, None], (1, ncols)),
+            jnp.array([kbase, kbase, nlev - 1]),
+            jnp.array([1, 3, 0]),
+            jnp.tile(p_half[:, None], (1, ncols)),
+        ))
+        np.testing.assert_allclose(block[:, 0], col, rtol=1e-6)
+        np.testing.assert_allclose(block[:, 1], mid, rtol=1e-6)
+        # A column without a plume base (kbase = nlev − 1) is untouched.
+        np.testing.assert_allclose(block[:, 2], np.asarray(flux))
 
 
 class TestHalfLevelEnvironment(unittest.TestCase):

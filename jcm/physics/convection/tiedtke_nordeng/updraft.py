@@ -288,14 +288,34 @@ def calculate_updraft(
     uu_init = jnp.zeros(nlev, dtype).at[kseed_safe].set(uu_seed)
     vu_init = jnp.zeros(nlev, dtype).at[kseed_safe].set(vu_seed)
     # ``zbuoyz`` at the seed (cuasc evaluates it at kcbot after the
-    # adjustment there), and the Nordeng accumulator's starting value, the
-    # cloud-base buoyancy without condensate (mo_cuascent.f90:225-229).
+    # adjustment there) for the first step's organized entrainment.
     buoy_seed = (
         c.grav * (tu_seed - env.tenh[kseed_safe]) / env.tenh[kseed_safe]
         + c.grav * c.vtmpc1 * (qu_seed - env.qenh[kseed_safe])
     )
     buoy_init = jnp.zeros(nlev, dtype).at[kseed_safe].set(
         buoy_seed - c.grav * lu_seed)
+    # The Nordeng integrated buoyancy ``zbuoy`` as cuasc has it when the
+    # plume leaves cloud base: initialised to the condensate-free cloud-base
+    # buoyancy (mo_cuascent.f90:250-251), then — because cuasc's level loop
+    # also visits the sub-cloud interfaces, where the plume is the dry
+    # cubase parcel carrying the lowest interface's static energy and
+    # humidity — incremented by ``max(zbuoyz, 0)·zdz`` at every interface
+    # from ``klevm1`` down to ``kcbot + 1`` (lines 516-520), with
+    # ``zdz = (pgeo(jk−1) − pgeo(jk))/g``. The cloud-base interface's own
+    # term is added by the first ascent step below. ECHAM forms it for deep
+    # (cubase) plumes; the smooth deep weight scales its use.
+    geo_above = jnp.concatenate([env.geo[:1], env.geo[:-1]])
+    zdz_above = (geo_above - env.geo) / c.grav
+    t_sub = (env.dse[-1] - env.geoh) / env.cpcu
+    zbuoyz_sub = jnp.maximum(
+        c.grav * (t_sub - env.tenh) / env.tenh
+        + c.grav * c.vtmpc1 * (env.qenh[-1] - env.qenh),
+        0.0,
+    )
+    below_base = (levels > kbase) & (levels <= nlev - 2)
+    zbuoy_sub = jnp.sum(jnp.where(below_base, zbuoyz_sub * zdz_above, 0.0))
+    zbuoy_init = jnp.where(is_midlevel, 0.0, buoy_seed + zbuoy_sub)
 
     updraft_init = UpdatedraftState(
         tu=tu_init, qu=qu_init, lu=lu_init,
@@ -311,7 +331,7 @@ def calculate_updraft(
     # running plume momentum fluxes ``zmfuu``/``zmfuv``).
     initial_state = (
         updraft_init,
-        jnp.asarray(buoy_seed, dtype),
+        jnp.asarray(zbuoy_init, dtype),
         jnp.asarray(mass_flux_base * uu_seed, dtype),
         jnp.asarray(mass_flux_base * vu_seed, dtype),
     )
@@ -391,9 +411,15 @@ def calculate_updraft(
             # step of a mid-level plume crosses layer kcbot unmixed.
             mixes = k < kbase
 
-            # Turbulent entrainment is the PLAIN fractional rate ECHAM's
-            # cuentr uses (mo_cuascent.f90:746), with no humidity dependence,
-            # and turbulent detrainment equals it (δ = ε).
+            # Turbulent entrainment is ECHAM cuentr's fractional rate
+            # (mo_cuascent.f90:746) and turbulent detrainment equals it
+            # (δ = ε). jcm applies both over the whole cloud: cuentr's
+            # vertical gating of the ENTRAINMENT (deep: below the
+            # maximum-ascent level or in the lower half of the cloud; shallow:
+            # within 200 hPa of the base or in the lower half) and its
+            # mid-level moisture-convergence enhancement ``zentest``
+            # (lines 756-760) are not ported — documented in the science
+            # description as open deviations.
             entr_turb = jnp.clip(entr_base_blend, 0.0, 0.01)
             # Nordeng (1994) organized entrainment for deep convection
             # (mo_cuascent.f90:517-526): the positive plume buoyancy at the
@@ -423,14 +449,14 @@ def calculate_updraft(
             dmf_entr = jnp.where(
                 mixes, entr_turb * mfu_b * dzp + entr_org * mfu_b * dzg, 0.0)
             # cuasc caps the detrained mass at 0.75 of the plume entering the
-            # layer (line 500), so plude can never exceed the plume.
+            # layer (line 360), so plude can never exceed the plume.
             dmf_detr = jnp.where(
                 mixes,
                 jnp.minimum((entr_turb + detr_org) * mfu_b * dzp,
                             0.75 * mfu_b),
                 0.0,
             )
-            # ``zmfmax`` limiter (lines 492-497): entrainment is cut so the
+            # ``zmfmax`` limiter (lines 354-358): entrainment is cut so the
             # flux leaving the interface never exceeds the air mass of the
             # layer above per step.
             mfu_test = mfu_b + dmf_entr - dmf_detr
@@ -520,7 +546,7 @@ def calculate_updraft(
             plude_layer = plude_layer + lu_new * mfu_new * (1.0 - survival)
             mfu_final = mfu_new * survival
 
-            # Prognostic plume wind (cuasc lines 579-600): a running momentum
+            # Prognostic plume wind (cuasc lines 486-506): a running momentum
             # flux that entrains environmental momentum and detrains plume
             # momentum, both enhanced by ``zz·zdmfde`` — zz = 2 (3 when the
             # layer does not entrain) for deep and mid-level plumes, 0 (1) for
@@ -537,7 +563,7 @@ def calculate_updraft(
             vu_new = jnp.where(mfu_final > 0.0, zmfuv_new / mfu_div, carry.vu[b])
 
             # ``zbuoyz`` for the organized entrainment of the next layer up,
-            # after the precipitation (mo_cuascent.f90:516).
+            # after the precipitation (mo_cuascent.f90:517-518).
             zbuoyz_here = (
                 c.grav * (tu_new - tenh_k) / tenh_k
                 + c.grav * c.vtmpc1 * (qu_new - qenh_k)

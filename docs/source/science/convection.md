@@ -152,7 +152,13 @@ arrays, and the surface interface carries no flux:
   half-level environment, precipitation over the layer's geopotential depth,
   and the ``zmfmax`` entrainment limiter (the flux leaving an interface cannot
   exceed the air mass of the layer above per step). The prognostic plume wind
-  is ECHAM's running momentum flux with the ``zz`` detrainment enhancement.
+  is ECHAM's running momentum flux with the ``zz`` detrainment enhancement,
+  and the Nordeng integrated buoyancy starts from the cloud-base buoyancy plus
+  the sub-cloud parcel's, as cuasc's level loop accumulates it. As in
+  ``cumastr``, a first ascent at the first-guess flux feeds the closure and
+  the downdraft, and a second ascent at the closed flux (with the entrainment
+  of the demoted type, where a thin deep cloud is relabelled shallow)
+  produces the final plume; the downdraft is scaled, not re-run.
 - ``cudlfs``/``cuddraf`` (``downdraft.py``) search the interfaces strictly
   inside the realized cloud for the level of free sinking and descend
   interface to interface, charging the rain the downdraft evaporates to the
@@ -163,7 +169,10 @@ arrays, and the surface interface carries no flux:
   replaces the updraft fluxes by the cloud-base values scaled by
   ``(p_s − p_half)/(p_s − p_half(kcbot))`` (squared for mid-level plumes), so
   the plume draws its air from, and deposits the cloud-base flux divergence
-  through, the whole sub-cloud layer.
+  through, the whole sub-cloud layer. The updraft mass flux the term
+  publishes (``ConvectionData.mass_flux_up``) carries the same taper, so the
+  convective tracer transport draws the cloud-base supply from the same
+  layers, as ECHAM's ``pmfuxt`` does.
 - ``cudtdq``/``cududv`` give each layer the difference of the fluxes through
   its two interfaces plus its per-layer sources, divided by its true air mass
   ``Δp/g`` — the same mass the host applies the tendencies with. The flux
@@ -195,18 +204,37 @@ arrays, and the surface interface carries no flux:
   mean over ALL sub-cloud layers; ECHAM's loop accumulates only the layers it
   visits after the cloud base is set, so for a base above the lowest two
   interfaces its weights do not sum to one.
-- `differentiability` — plume termination remains the smooth survival
-  sigmoid (buoyancy and the 1 % mass-flux floor), and the organized
-  entrainment/detrainment are jcm's simplified single-pass forms (onset at
-  cloud base rather than ``khmin``); see the section above.
+- `differentiability` — plume termination is the smooth survival sigmoid
+  (buoyancy and the 1 % mass-flux floor) evaluated at every ascent step; the
+  organized detrainment starts at cloud base rather than ``khmin`` (see the
+  section above).
 
-**Status & known limitations.**
+**Status & known limitations.** Parts of ``cuasc``/``cuentr`` that are not
+ported and change the plume:
+- turbulent ENTRAINMENT acts over the whole cloud; ``cuentr`` gates it
+  (deep: below the maximum-ascent level ``klwmin`` or in the lower half of the
+  cloud; shallow: within 200 hPa of cloud base or in the lower half), while
+  the matching detrainment acts everywhere, so ECHAM's upper cloud dilutes
+  less;
+- the mid-level moisture-convergence entrainment ``zentest``;
+- the cloud-top overshoot (``cmfctop``: a fraction of the top flux continues
+  one interface higher, where its condensate detrains, with no
+  precipitation formed at the overshoot level); jcm precipitates and
+  detrains at the terminating level;
+- the stop at a non-condensing interface (ECHAM's ``klab`` stays 0 there and
+  the ascent ends one level higher); jcm tests buoyancy at every step;
+- the ``kctop0`` bound on the termination test (the first-pass cloud-top
+  estimate); jcm's ceiling is a target pressure (150 hPa deep, 700 hPa
+  shallow).
+
+Operational notes:
 - In a prescribed (re-imposed) column the deep/shallow split can only see
   large-scale convergence one step late (the lagged ``pqte``), and the
-  strongly entraining ECHAM shallow plume is non-precipitating in a warm
-  tropical column, so such a column stays shallow unless it starts under
-  convergence — ``jcm/rce.py::convergent_initial_physics_data`` supplies that
-  for the JAM aerosol-pathway checks.
+  strongly entraining shallow plume (``entrscv``, detrainment at the incoming
+  plume's properties) does not precipitate in the warm tropical check column,
+  so such a column stays shallow unless it starts under convergence —
+  ``jcm/rce.py::convergent_initial_physics_data`` supplies that for the JAM
+  aerosol-pathway checks.
 - Near the model top (a few Pa) ``cuini``'s saturation adjustment works with a
   saturation humidity capped at 0.5 and its interface values are not
   physical, as in the reference; no plume reaches them.

@@ -915,7 +915,8 @@ def _tiedtke_convection_toa_first(
         has_cloud_base_sfc,
         lambda: calculate_cape_cin(temperature, humidity, pressure, layer_thickness,
                                  jnp.maximum(cloud_base_sfc - 1, 0), config),
-        lambda: (jnp.array(0.0), jnp.array(0.0))
+        lambda: (jnp.zeros((), temperature.dtype),
+                 jnp.zeros((), temperature.dtype)),
     )
 
     # Convection type: 0 = none, 1 = deep, 2 = shallow, 3 = mid-level.
@@ -1207,13 +1208,9 @@ def _tiedtke_convection_toa_first(
         #     zpbmpt = paphp1(kcbot) - paphp1(kctop)
         #     IF (ldcum .AND. ktype==1 .AND. zpbmpt < 2.e4) ktype = 2
         #
-        # One-pass limitation, documented: ECHAM demotes BEFORE its second
-        # cuasc, so the demoted column re-ascends with entrscv; jcm runs one
-        # ascent, so the demotion changes the label (which gates the Nordeng
-        # rescale below and the downstream ktype consumers — the Sundqvist Sc
-        # guard, the tracer transport) but not the already-computed
-        # entrainment. The entrainment consequence of a systematic mislabel
-        # is what the moisture-convergence split above fixes at the source.
+        # The demotion precedes the closure, and the final ascent below runs
+        # with the demoted type's entrainment (ECHAM sets ``zentr = entrscv``
+        # before its second cuasc).
         zpbmpt = env.paph[cloud_base] - env.paph[actual_ktop]
         conv_type_final = jnp.where(
             (conv_type == 1) & (zpbmpt < 2.0e4),
@@ -1230,6 +1227,7 @@ def _tiedtke_convection_toa_first(
             temperature, humidity, pressure, layer_thickness, rho,
             updraft_state, precip_rate, cloud_base, actual_ktop, config,
             u_wind=u_wind, v_wind=v_wind, cp_moist=cp_moist, env=env,
+            mass_flux_base=mass_flux_base,
         )
 
         # --- Nordeng CAPE closure (deep convection; mo_cumastr.f90:812-906)
@@ -1245,13 +1243,8 @@ def _tiedtke_convection_toa_first(
         #   zcape += [g·(ptu − ptenh)/ptenh + g·vtmpc1·(pqu − pqenh)
         #             − g·plu](jk)·zdz
         # — the CAPE-consumption rate per unit net convective mass flux and
-        # the plume CAPE with virtual-T and condensate loading. ECHAM applies
-        # the rescale by re-running cuasc with the corrected base flux;
-        # because the parcel properties are independent of the flux magnitude
-        # (fractional entrainment) and every flux is linear in it, an
-        # in-place linear rescale of the plume fluxes is equivalent to first
-        # order and avoids the second ascent pass. The downdraft arrays are
-        # rescaled by the same factor, exactly as mo_cumastr.f90:945-958.
+        # the plume CAPE with virtual-T and condensate loading. Both come
+        # from this first ascent; the final amplitude is applied below.
         in_cloud = (levels > actual_ktop) & (levels <= cloud_base)
         up = jnp.maximum(levels - 1, 0)
         zroi = (c.rd * env.tenh * (1.0 + c.vtmpc1 * env.qenh)
@@ -1332,12 +1325,41 @@ def _tiedtke_convection_toa_first(
             zmfub1 / zmfub,
             jnp.where(conv_type_final == 2, rescale_shallow, 1.0),
         )
-        updraft_state = updraft_state._replace(
-            mfu=updraft_state.mfu * rescale,
-            pdmfup=updraft_state.pdmfup * rescale,
-            plude=updraft_state.plude * rescale,
-            dmfen=updraft_state.dmfen * rescale,
+
+        # The final ascent (mo_cumastr.f90:974-1007): ECHAM re-runs cuasc with
+        # the closed cloud-base flux ``zmfub1`` and the (possibly demoted)
+        # final type, rather than scaling the first ascent. The ascent is not
+        # linear in its base flux — the ``zmfmax`` limiter caps the flux
+        # leaving each interface at the air mass of the layer above per step
+        # — so only a re-run keeps that cap at the final amplitude. A deep
+        # plume demoted to shallow re-ascends with the shallow entrainment.
+        demoted = (conv_type == 1) & (conv_type_final == 2)
+        type_weights_final = jnp.where(
+            demoted,
+            jnp.stack([jnp.zeros_like(type_weights[0]),
+                       type_weights[0] + type_weights[1],
+                       type_weights[2]]),
+            type_weights,
         )
+        updraft_state = calculate_updraft(
+            temperature, humidity, pressure, layer_thickness, rho,
+            cloud_base, ktop, conv_type_final, mass_flux_base * rescale,
+            config,
+            land_fraction=land_fraction,
+            type_weights=type_weights_final,
+            lift=cloud_base_lift(config, thvsig),
+            u_wind=u_wind, v_wind=v_wind,
+            cp_moist=cp_moist,
+            env=env, dt=dt,
+        )
+        mfu_active = updraft_state.mfu > config.cmfcmin
+        actual_ktop = jnp.where(
+            jnp.any(mfu_active),
+            jnp.min(jnp.where(mfu_active, levels, nlev)).astype(jnp.int32),
+            ktop,
+        )
+        # The downdraft is not re-run: ECHAM scales its fluxes and rain uptake
+        # by the same factor (mo_cumastr.f90:944-972).
         downdraft_state = downdraft_state._replace(
             mfd=downdraft_state.mfd * rescale,
             pdmfdp=downdraft_state.pdmfdp * rescale,
@@ -1926,11 +1948,20 @@ class TiedtkeConvection(PhysicsTerm):
         # scheme's own absolute per-layer entrainment ledgers (#602, #622)
         # carry the SAME per-column cap scaling as the tendency ledger, so
         # the tracer transport they drive stays proportional to the heat and
-        # moisture transport actually applied. Custom/test schemes may return
-        # no state — zeros then (like ktype), meaning no convective tracer
-        # transport.
+        # moisture transport actually applied. The updraft flux is published
+        # with cuflx's sub-cloud taper, exactly as the heat and moisture
+        # ledger (and ECHAM's tracer flux ``pmfuxt``) use it, so every
+        # transported quantity draws the cloud-base supply from the whole
+        # sub-cloud layer. Custom/test schemes may return no state — zeros
+        # then (like ktype), meaning no convective tracer transport.
         if _state_all is not None:
-            _mfu = (_state_all.mfu * cap_scale).T          # (nlev, ncols)
+            from .flux_tendencies import subcloud_taper
+            _mfu = subcloud_taper(
+                (_state_all.mfu * cap_scale).T,              # (nlev, ncols)
+                jnp.reshape(_state_all.kbase, (ncols,)),
+                jnp.reshape(_state_all.ktype, (ncols,)),
+                pressure_half,
+            )
             _mfd = (_state_all.mfd * cap_scale).T
             _entrain = (_state_all.entrain_up * cap_scale).T
             _entrain_dn = (_state_all.entrain_down * cap_scale).T

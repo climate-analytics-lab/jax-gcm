@@ -261,8 +261,9 @@ class ConvectionData:
     the same ledger scaling as the tendencies) for the convective tracer
     transport (#602, #622): the updraft and downdraft fluxes at each
     layer's TOP interface (ECHAM's half-level ``pmfu``/``pmfd``; the
-    surface interface carries none), and the absolute per-layer
-    entrainment fluxes; per-layer detrainment follows from plume
+    surface interface carries none — the updraft flux includes cuflx's
+    linear-in-pressure sub-cloud taper below cloud base), and the absolute
+    per-layer entrainment fluxes; per-layer detrainment follows from plume
     continuity, so it is not stored separately.
     """
 

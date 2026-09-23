@@ -110,6 +110,35 @@ def updraft_area_cover(
     return mfu_eff / (w_u * density)
 
 
+def subcloud_taper(
+    flux: jnp.ndarray,           # (nlev, *horiz) half-level flux, top-first
+    kbase: jnp.ndarray,          # (*horiz) cloud-base interface kcbot
+    ktype: jnp.ndarray,          # (*horiz) convection type (3 = mid-level)
+    pressure_half: jnp.ndarray,  # (nlev + 1, *horiz) interface pressures
+) -> jnp.ndarray:
+    """ECHAM ``cuflx``'s sub-cloud taper of an updraft flux.
+
+    Below the cloud-base interface the flux is its cloud-base value times
+    ``zzp = (p_s − p_half(k))/(p_s − p_half(kcbot))``, squared for mid-level
+    convection (mo_cufluxdts.f90:237-248): the plume draws its air from the
+    whole sub-cloud layer, reaching zero at the surface. Entry ``k`` of the
+    flux is its value at the TOP interface of layer ``k``; everything at and
+    above ``kbase`` is returned unchanged. Broadcasting-native (vertical on
+    axis 0), so the scheme's single columns and the term's ``(nlev, ncols)``
+    blocks share it.
+    """
+    nlev = flux.shape[0]
+    shape = (nlev,) + (1,) * (flux.ndim - 1)
+    levels = jnp.arange(nlev).reshape(shape)
+    kb = jnp.asarray(kbase)[jnp.newaxis]
+    ps = pressure_half[-1:]
+    p_base = jnp.take_along_axis(pressure_half, kb, axis=0)
+    zzp = (ps - pressure_half[:-1]) / jnp.maximum(ps - p_base, _MASS_EPS)
+    zzp = jnp.where(jnp.asarray(ktype)[jnp.newaxis] == 3, zzp * zzp, zzp)
+    flux_base = jnp.take_along_axis(flux, kb, axis=0)
+    return jnp.where(levels > kb, flux_base * zzp, flux)
+
+
 def calculate_precipitation_rate(
     updraft_state: UpdatedraftState,
     kbase: int,
@@ -439,7 +468,6 @@ def calculate_tendencies(
             layer_mass=layer_mass,
         )
     ktype_eff = jnp.asarray(0) if ktype is None else ktype
-    levels = jnp.arange(nlev)
 
     # True layer air mass per unit area — the ``g/(paphp1(jk+1)−paphp1(jk))``
     # of every cudtdq/cududv tendency — and the same mass the host applies
@@ -468,13 +496,8 @@ def calculate_tendencies(
     # (squared for mid-level convection): the plume draws its air from the
     # whole sub-cloud layer, so the cloud-base flux divergence is spread
     # through it down to zero at the surface instead of landing on one layer.
-    ps = env.paph[-1]
-    zzp = (ps - env.paph[:-1]) / jnp.maximum(ps - env.paph[kbase], _MASS_EPS)
-    zzp = jnp.where(ktype_eff == 3, zzp * zzp, zzp)
-    sub_cloud = levels > kbase
-
     def _taper(flux):
-        return jnp.where(sub_cloud, flux[kbase] * zzp, flux)
+        return subcloud_taper(flux, kbase, ktype_eff, env.paph)
 
     pmfus = _taper(pmfus)
     pmfuq = _taper(pmfuq)

@@ -20,8 +20,9 @@ subsidence, plus the mirrored downdraft leg (jax-gcm#622):
   ``D_k = max(E_raw_k − (M_k − M_{k+1}), 0)`` with the effective
   entrainment ``E_k = D_k + (M_k − M_{k+1})`` — this absorbs everything
   the mass-flux profile actually did (survival cuts, cloud-base supply:
-  at cloud base the mass-flux jump appears as entrainment of that
-  layer's air, which is exactly the physical picture).
+  below cloud base the published flux carries cuflx's linear-in-pressure
+  sub-cloud taper, so each sub-cloud layer supplies air in proportion to
+  its mass — ECHAM's ``pmfuxt`` taper).
 * Updraft tracer concentration from an upward scan:
   ``q_up_k = (M_{k+1}·q_up_{k+1} + E_k·q_k) / (M_{k+1} + E_k)`` — a
   convex mix, so the plume concentration is bounded by the environment

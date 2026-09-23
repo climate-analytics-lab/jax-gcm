@@ -371,9 +371,22 @@ _CHECKS: dict = {
         skip_outputs=("specific_humidity",),
         live_inputs=("[0]/u_wind", "[0]/temperature")),
 
-    # Tiedtke differentiates cleanly on the stable column (no plume, and the
-    # 5 K/hr cap no longer poisons the inactive levels). On the convecting one
-    # the column sits on the trigger: the minus secant is ~4e5 and the plus
+    # On the stable column Tiedtke runs a one-layer shallow plume at the top
+    # of the capped boundary layer (7e-9 kg/m²/s of precipitation) that sits
+    # on its own existence boundary: along the seed-0 direction the plume
+    # dies between +1e-3 and +1e-2 of the tangent and the one-sided secants
+    # disagree between −1e-3 and 0 (a kink — the half-level environment's
+    # dry-static-energy envelope is a max over the near-equal energies of the
+    # well-mixed layer), so float32 finds no usable difference rung. In
+    # float64 the central difference is usable and agrees with AD, and jvp
+    # and vjp agree to 3.9e-13; float32 leaves them 4.4e-4 apart on this
+    # small projection (|value| ≈ 89), the same reduction-order gap as the
+    # convecting cell's. So the adjoint is the reference here too, at 1e-3.
+    ("tiedtke_convection", "stable"): _Check(
+        reference="adjoint", adjoint_rtol=1.0e-3, outputs="tendency",
+        skip_outputs=("tracers/qi",), live_inputs=_ENVIRONMENT),
+
+    # On the convecting column the column sits on the trigger: the minus secant is ~4e5 and the plus
     # secant ~0 at every rung, i.e. the perturbation switches the plume off.
     # That boundary is the documented discrete part of the scheme — ECHAM's
     # ``cubasmc`` mid-level conditions ARE the activation, and the deep/shallow
