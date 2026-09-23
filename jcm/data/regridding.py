@@ -294,3 +294,83 @@ def conservative_to_gaussian(field: np.ndarray, src_lats, src_lons,
     flat = field.reshape(*lead, -1)
     out = rg(flat)                                   # (..., nlon, nlat)
     return np.swapaxes(out, -2, -1)                  # (..., nlat, nlon)
+
+
+def latitude_bounds(lats) -> np.ndarray:
+    """Cell edges ``(nlat + 1,)`` in degrees for ascending cell-centre latitudes.
+
+    A Gaussian grid gets its exact quadrature cells: the edges in ``μ = sin φ``
+    are the cumulative Gauss–Legendre weights, so each cell's area is exactly
+    its quadrature weight — the cell definition ECHAM and CDO's ``remapcon``
+    use for Gaussian grids. Any other grid gets centre midpoints closed at ±90°.
+    """
+    lats = np.asarray(lats, float)
+    n = lats.size
+    gauss = gaussian_latlon(n)[0]
+    if np.allclose(lats, gauss, atol=1e-6):
+        weights = np.polynomial.legendre.leggauss(n)[1]
+        mu = np.concatenate([[-1.0], -1.0 + np.cumsum(weights)])
+        return np.rad2deg(np.arcsin(np.clip(mu, -1.0, 1.0)))
+    mid = 0.5 * (lats[1:] + lats[:-1])
+    return np.concatenate([[-90.0], mid, [90.0]])
+
+
+def _latitude_overlap(src_lats, dst_lats) -> np.ndarray:
+    """``(ndst, nsrc)`` overlap of latitude bands in ``μ = sin φ`` (∝ area)."""
+    s = np.sin(np.deg2rad(latitude_bounds(src_lats)))
+    d = np.sin(np.deg2rad(latitude_bounds(dst_lats)))
+    lo = np.maximum(d[:-1, None], s[None, :-1])
+    hi = np.minimum(d[1:, None], s[None, 1:])
+    return np.clip(hi - lo, 0.0, None)
+
+
+def _longitude_overlap(src_lons, dst_lons) -> np.ndarray:
+    """``(ndst, nsrc)`` overlap of periodic longitude intervals, in degrees.
+
+    Both grids are regular in longitude; each cell spans ± half a spacing about
+    its centre. The source intervals are tried at −360/0/+360 so an interval
+    straddling the date line overlaps correctly.
+    """
+    def edges(lons):
+        lons = np.asarray(lons, float)
+        half = 0.5 * 360.0 / lons.size
+        return lons - half, lons + half
+    s_lo, s_hi = edges(src_lons)
+    d_lo, d_hi = edges(dst_lons)
+    total = np.zeros((d_lo.size, s_lo.size))
+    for shift in (-360.0, 0.0, 360.0):
+        lo = np.maximum(d_lo[:, None], s_lo[None, :] + shift)
+        hi = np.minimum(d_hi[:, None], s_hi[None, :] + shift)
+        total += np.clip(hi - lo, 0.0, None)
+    return total
+
+
+def conservative_overlap(field: np.ndarray, src_lats, src_lons,
+                         lats, lons) -> np.ndarray:
+    """Exact first-order conservative remap between two rectilinear grids.
+
+    Every target cell receives the area-weighted mean of the source cells it
+    overlaps, weighted by the exact overlap area — CDO ``remapcon``'s scheme,
+    and the one the HAMMOZ boundary files were themselves produced with. Unlike
+    :func:`conservative_to_gaussian` (nearest-centre binning, built for fine
+    0.25° sources onto much coarser model grids) it stays accurate when source
+    and target resolutions are close (e.g. T127 → T106, ratio 1.2) and gives the
+    correct piecewise-constant answer when *refining*.
+
+    Rectilinear lat/lon grids make the overlap separable — a latitude-band
+    overlap in ``sin φ`` times a longitude-interval overlap — so the operator is
+    two small dense matrices, not a sparse polygon intersection.
+
+    ``field`` is ``(..., nlat_src, nlon_src)`` with ascending latitudes; the
+    result is ``(..., nlat, nlon)``. NaN marks missing source data and is
+    excluded with the normalisation renormalised over the valid overlap (CDO's
+    ``fracarea``); a target cell with no valid overlap is NaN.
+    """
+    field = np.asarray(field, dtype=np.float64)
+    w_lat = _latitude_overlap(src_lats, lats)            # (nlat, nlat_src)
+    w_lon = _longitude_overlap(src_lons, lons)           # (nlon, nlon_src)
+    valid = np.isfinite(field)
+    num = w_lat @ np.where(valid, field, 0.0) @ w_lon.T
+    den = w_lat @ valid.astype(np.float64) @ w_lon.T
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(den > 0.0, num / den, np.nan)

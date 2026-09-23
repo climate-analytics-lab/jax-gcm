@@ -138,3 +138,57 @@ class BilinearTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConservativeOverlapTest(unittest.TestCase):
+    """The exact-overlap remap the dust products are coarsened/refined with."""
+
+    def _field(self, lats, lons):
+        la, lo = np.meshgrid(np.deg2rad(lats), np.deg2rad(lons), indexing="ij")
+        return 1.0 + np.cos(la) ** 2 * np.cos(3 * lo) + 0.5 * np.sin(la)
+
+    def test_gaussian_bounds_reproduce_the_quadrature_weights(self):
+        from jcm.data.regridding import latitude_bounds
+        lats, _ = gaussian_latlon(48)
+        edges = np.sin(np.deg2rad(latitude_bounds(lats)))
+        np.testing.assert_allclose(
+            np.diff(edges), np.polynomial.legendre.leggauss(48)[1], atol=1e-12)
+        self.assertTrue(np.all((edges[:-1] < np.sin(np.deg2rad(lats)))
+                               & (np.sin(np.deg2rad(lats)) < edges[1:])))
+
+    def test_constant_is_preserved_coarsening_and_refining(self):
+        from jcm.data.regridding import conservative_overlap
+        fine, coarse = gaussian_latlon(192), gaussian_latlon(160)
+        for (sl, so), (dl, do) in ((fine, coarse), (coarse, fine)):
+            out = conservative_overlap(np.full((2, sl.size, so.size), 2.5),
+                                       sl, so, dl, do)
+            self.assertEqual(out.shape, (2, dl.size, do.size))
+            np.testing.assert_allclose(out, 2.5, rtol=1e-12)
+
+    def test_global_integral_is_conserved(self):
+        from jcm.data.regridding import conservative_overlap
+        weights = lambda n: np.polynomial.legendre.leggauss(n)[1]  # noqa: E731
+        for src_n, dst_n in ((192, 160), (96, 192), (384, 192)):
+            (sl, so), (dl, do) = gaussian_latlon(src_n), gaussian_latlon(dst_n)
+            f = self._field(sl, so)
+            out = conservative_overlap(f, sl, so, dl, do)
+            total_src = (weights(src_n)[:, None] * f).sum() / so.size
+            total_dst = (weights(dst_n)[:, None] * out).sum() / do.size
+            self.assertAlmostEqual(total_src, total_dst, places=12)
+
+    def test_identity_on_the_same_grid(self):
+        from jcm.data.regridding import conservative_overlap
+        lats, lons = gaussian_latlon(96)
+        f = self._field(lats, lons)
+        np.testing.assert_allclose(
+            conservative_overlap(f, lats, lons, lats, lons), f, atol=1e-12)
+
+    def test_missing_source_is_renormalised_not_diluted(self):
+        from jcm.data.regridding import conservative_overlap
+        (sl, so), (dl, do) = gaussian_latlon(192), gaussian_latlon(96)
+        f = np.full((sl.size, so.size), np.nan)
+        f[100:120, 40:80] = 0.03              # a valid patch, NaN elsewhere
+        out = conservative_overlap(f, sl, so, dl, do)
+        finite = np.isfinite(out)
+        self.assertTrue(finite.any() and (~finite).any())
+        np.testing.assert_allclose(out[finite], 0.03, rtol=1e-12)
