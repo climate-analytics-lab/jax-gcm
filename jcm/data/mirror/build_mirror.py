@@ -68,7 +68,7 @@ PUBLISHED_VERTICALS = frozenset({"hybrid"})
 #: The grids that also carry the yearly ``{year}`` transient series
 #: (``forcing_amip``/``emissions_amip``/``ozone_amip``/``forcing_era5``), a
 #: subset of :data:`PUBLISHED_GRIDS`. Transient bundles are tens of GB per grid
-#: and are staged per grid deliberately; t127/t255 have not been (#TRANSIENT_ISSUE).
+#: and are staged per grid deliberately; t127/t255 have not been (#888).
 TRANSIENT_GRIDS = frozenset({"t63", "t106"})
 
 # Per-grid Gaussian latitude count. The *set* of published grids is
