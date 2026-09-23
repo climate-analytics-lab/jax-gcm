@@ -55,6 +55,26 @@ class TestGetCoords(unittest.TestCase):
         coords = get_coords(sigma_boundaries, spectral_truncation=63)
         self.assertEqual(coords.horizontal.nodal_shape, (192, 96))
 
+    def test_get_coords_echam_high_resolution_grids(self):
+        """T127/T255 take the same Grid.construct branch as T63.
+
+        dinosaur has no Grid.T127/T255 factory; built at ECHAM's node count
+        they are the 384x192 / 768x384 grids of ECHAM's T127GR15 / T255
+        boundary files, with the standard Gaussian latitudes.
+        """
+        from jcm.data.regridding import gaussian_latlon
+        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        for trunc, shape in ((127, (384, 192)), (255, (768, 384))):
+            coords = get_coords(sigma_boundaries, spectral_truncation=trunc)
+            self.assertEqual(coords.horizontal.nodal_shape, shape)
+            self.assertEqual(coords.horizontal.total_wavenumbers, trunc + 2)
+            lats = np.rad2deg(np.asarray(coords.horizontal.latitudes))
+            np.testing.assert_allclose(np.sort(lats),
+                                       gaussian_latlon(shape[1])[0], atol=1e-4)
+            self.assertEqual(
+                get_coords(sigma_boundaries, nodal_shape=shape)
+                .horizontal.nodal_shape, shape)
+
     def test_get_coords_builds_spmd_mesh(self):
         """A 1x1x1 spmd_mesh exercises the mesh-build path on one device.
 
