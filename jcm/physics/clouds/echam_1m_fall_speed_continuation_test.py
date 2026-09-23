@@ -91,7 +91,7 @@ def _cold_column(cloud_ice):
 
 
 def test_full_sweep_default_and_resolved_continuation_are_identical():
-    """Refactoring is default-neutral and the joined law is exact above x0."""
+    """The default is unchanged and the joined law is exact above x0."""
     config = MicrophysicsParameters.default()
     column = _cold_column(jnp.full(6, 1.0e-5))
     default = cloud_microphysics_column_sweep(
@@ -114,6 +114,9 @@ def test_trace_ice_full_sweep_closes_column_water_budget():
     column = _cold_column(cloud_ice)
     tendency, state = cloud_microphysics_column_sweep(
         *column, 900.0, config, None, _CUTOFF)
+    legacy_tendency, _ = cloud_microphysics_column_sweep(
+        *column, 900.0, config, None, 0.0)
+    assert jnp.any(tendency.dqidt != legacy_tendency.dqidt)
     layer_mass = column[6] * column[7]
     water_tendency = jnp.sum(
         (tendency.dqdt + tendency.dqcdt + tendency.dqidt) * layer_mass)
