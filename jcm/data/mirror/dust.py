@@ -42,6 +42,7 @@ nearest-neighbour choice.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -185,6 +186,11 @@ def build_dust_product(name: str, nlat: int, out_path, source_dir=None) -> None:
     """
     if name not in DUST_PRODUCTS:
         raise KeyError(f"unknown dust product {name!r}")
+    if os.environ.get("JCM_HAMMOZ_DUST_DIR"):
+        # The retired variable pointed at a flat T63-only directory; the pool
+        # layout differs, so silently ignoring it would read other files.
+        raise ValueError("JCM_HAMMOZ_DUST_DIR is retired: set JCM_HAMMOZ_DIR to "
+                         "a directory laid out like /pool/data/ECHAM6-HAMMOZ.")
     root = Path(source_dir or sites.current().hammoz or "")
     lats, lons = gaussian_latlon(nlat)
     trunc = _truncation_for(nlat)

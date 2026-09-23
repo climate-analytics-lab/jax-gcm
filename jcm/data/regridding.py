@@ -366,6 +366,10 @@ def conservative_overlap(field: np.ndarray, src_lats, src_lons,
     excluded with the normalisation renormalised over the valid overlap (CDO's
     ``fracarea``); a target cell with no valid overlap is NaN.
     """
+    for name, axis in (("source", src_lats), ("target", lats)):
+        if np.any(np.diff(np.asarray(axis, float)) <= 0.0):
+            raise ValueError(f"conservative_overlap: {name} latitudes must be "
+                             "strictly ascending (flip the field first)")
     field = np.asarray(field, dtype=np.float64)
     w_lat = _latitude_overlap(src_lats, lats)            # (nlat, nlat_src)
     w_lon = _longitude_overlap(src_lons, lons)           # (nlon, nlon_src)

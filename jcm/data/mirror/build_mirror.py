@@ -502,6 +502,8 @@ def stage_amip() -> None:
     from jcm.data.regridding import gaussian_latlon
 
     first, last = _AMIP_YEARS
+    if not _grids(transient=True):
+        return
     era5 = BUILD / "era5_land_climo_2005-2014_0p25.nc"
     scratch = BUILD / "ozone_amip"
     scratch.mkdir(parents=True, exist_ok=True)
@@ -556,6 +558,8 @@ def stage_era5_transient() -> None:
     from jcm.data.regridding import gaussian_latlon
 
     first, last = _AMIP_YEARS
+    if not _grids(transient=True):
+        return
     clim = BUILD / "era5_land_climo_2005-2014_0p25.nc"
     tiers = {"era5_sstice": build_sstice_year,
              "era5_land_transient": build_land_year}
@@ -820,10 +824,10 @@ def stage_registry() -> None:
     """Stage Tier A into the upload tree and write ``registry.json``.
 
     Tier A products that were *pulled* from the mirror (symlinks into
-    ``build/pulled``) are already published and are not re-staged. When the
-    published registry was pulled (a ``--grids`` build), the new hashes are
-    merged onto it — the upload tree then holds only the new grids, and a
-    registry built from it alone would drop every other file's entry.
+    ``build/pulled``) are already published and are not re-staged. A
+    ``--grids`` build merges its hashes onto the pulled published registry —
+    its upload tree holds only the selected grids, and a registry built from
+    it alone would drop every other file's entry.
     """
     from jcm.data.mirror.registry import write_registry
 
@@ -842,56 +846,86 @@ def stage_registry() -> None:
         # staging may have hardlinked build -> upload already
         if not (dst.exists() and dst.samefile(f)):
             shutil.copy(f, dst)
-    base = (json.loads(_REMOTE_REGISTRY.read_text())
-            if _REMOTE_REGISTRY.exists() else None)
+    base = None
+    if _SELECTED is not None:
+        # A --grids upload tree is partial: without the published registry to
+        # merge onto, the written registry.json would drop every other file.
+        # A full build writes the registry from its own tree alone, so a file
+        # it no longer produces is dropped rather than kept stale.
+        if not _REMOTE_REGISTRY.exists():
+            sys.exit("registry: a --grids build must merge onto the published "
+                     "registry.json — run --stage pull first.")
+        base = json.loads(_REMOTE_REGISTRY.read_text())
     print(write_registry(str(UPLOAD), base=base), flush=True)
 
 
 def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
-    """Source paths each stage streams from on ``site`` (default: this one).
+    """``{stage: ((label, path | None), ...)}`` — what each stage reads on ``site``.
 
-    Checked up front so a wrong machine or an unmounted filesystem fails in
-    seconds with a clear list, not hours in with an obscure I/O error. A
-    ``None`` entry is a source the site does not provide at all.
+    Checked so a wrong machine or an unmounted filesystem fails in seconds with
+    a clear list, not hours in with an obscure I/O error. ``None`` is a source
+    the site does not provide at all. Paths under the mirror root (``build/``)
+    are produced by earlier stages and are checked just before their consumer
+    runs (see :func:`check_sources`), so a one-shot ``--stage pull,...,bundles``
+    on a fresh root is not refused up front.
     """
     site = site or SITE
     i4m = f"{site.input4mips}/CMIP7/CMIP"
     rda = site.rda
     era5_moda = f"{rda}/d633001/e5.moda.an.sfc" if rda else None
     hammoz = site.hammoz
-    dust = ([f"{hammoz}/{rel}" for rel in _dust_source_files()]
-            if hammoz else [None])
-    aux_decades = [f"{site.waccm_oxidants}/oxid_ozone_WACCM_CCMI_REFC1_"
-                   f"f.e11.FWTREFC1.{d}-{d + 9}.f19_f19.ccmi34.001_monthly.nc"
-                   for d in (1850, 2000)]
+    dust = ([("ECHAM-HAMMOZ pool", f"{hammoz}/{rel}")
+             for rel in _dust_source_files()]
+            if hammoz else [("ECHAM-HAMMOZ pool", None)])
+    oxid = [(f"WACCM CCMI REFC1 oxidants {d}-{d + 9}",
+             f"{site.waccm_oxidants}/oxid_ozone_WACCM_CCMI_REFC1_"
+             f"f.e11.FWTREFC1.{d}-{d + 9}.f19_f19.ccmi34.001_monthly.nc")
+            for d in (1850, 2000)]
+    era5_climo = ("Tier A ERA5 land climatology",
+                  str(BUILD / "era5_land_climo_2005-2014_0p25.nc"))
+    ceds = ("Tier A CEDS store", str(BUILD / "ceds_anthro.zarr"))
+    bb = ("Tier A BB4CMIP7 store", str(BUILD / "bb4cmip7.zarr"))
     return {
         "pull": (),
-        "sso": (str(GMTED),) + ((NE30_TOPO,) if _column_selected() else ()),
-        "era5": (era5_moda,),
-        "ozone": (f"{i4m}/FZJ/FZJ-CMIP-ozone-1-0",),
-        "emissions": (f"{i4m}/PNNL-JGCRI/CEDS-CMIP-2025-04-18",
-                      f"{i4m}/DRES/DRES-CMIP-BB4CMIP7-2-0"),
-        "aux": (f"{site.cesm_inputdata}/atm/cam/chem/ocnexch/"
-                "Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc",
-                *aux_decades),
+        "sso": (("GMTED2010 DEM", str(GMTED)),
+                *((("CESM ne30 topography", NE30_TOPO),)
+                  if _column_selected() else ())),
+        "era5": (("RDA ERA5 monthly means", era5_moda),),
+        "ozone": (("FZJ ozone (input4MIPs)", f"{i4m}/FZJ/FZJ-CMIP-ozone-1-0"),),
+        "emissions": (
+            ("CEDS (input4MIPs)", f"{i4m}/PNNL-JGCRI/CEDS-CMIP-2025-04-18"),
+            ("BB4CMIP7 (input4MIPs)", f"{i4m}/DRES/DRES-CMIP-BB4CMIP7-2-0")),
+        "aux": (("Lana DMS (CESM inputdata)",
+                 f"{site.cesm_inputdata}/atm/cam/chem/ocnexch/"
+                 "Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc"), *oxid),
         "dust": tuple(dust),
-        "bundles": (str(BUILD),),
-        "amip": (f"{i4m}/PCMDI/PCMDI-AMIP-1-1-10",
-                 f"{i4m}/FZJ/FZJ-CMIP-ozone-1-0",
-                 f"{i4m}/CR/CR-CMIP-1-0-0",
-                 str(BUILD / "ceds_anthro.zarr"),
-                 str(BUILD / "era5_land_climo_2005-2014_0p25.nc")),
+        "bundles": (("PCMDI AMIP SST/ice (input4MIPs)",
+                     f"{i4m}/PCMDI/PCMDI-AMIP-1-1-10"),
+                    era5_climo, ceds, bb,
+                    ("SSO statistics", str(BUILD / "sso")),
+                    ("ozone stage output", str(BUILD / "ozone")),
+                    ("aux stage output", str(BUILD / "aux"))),
+        "amip": (("PCMDI AMIP SST/ice (input4MIPs)",
+                  f"{i4m}/PCMDI/PCMDI-AMIP-1-1-10"),
+                 ("FZJ ozone (input4MIPs)", f"{i4m}/FZJ/FZJ-CMIP-ozone-1-0"),
+                 ("CR-CMIP GHGs (input4MIPs)", f"{i4m}/CR/CR-CMIP-1-0-0"),
+                 ceds, bb, era5_climo),
         "era5-transient": (
-            f"{rda}/d633000/e5.oper.an.sfc" if rda else None,
-            era5_moda,
-            f"{i4m}/CR/CR-CMIP-1-0-0",
-            str(BUILD / "era5_land_climo_2005-2014_0p25.nc")),
-        "registry": (str(UPLOAD),),
+            ("RDA ERA5 6-hourly analyses",
+             f"{rda}/d633000/e5.oper.an.sfc" if rda else None),
+            ("RDA ERA5 monthly means", era5_moda),
+            ("CR-CMIP GHGs (input4MIPs)", f"{i4m}/CR/CR-CMIP-1-0-0"),
+            era5_climo),
+        "registry": (("upload tree", str(UPLOAD)),),
     }
 
 
 def _dust_source_files() -> list[str]:
-    """Pool-relative HAMMOZ files the dust stage reads for the selected grids."""
+    """Every pool-relative HAMMOZ file the dust stage may read.
+
+    Not narrowed by ``--grids``: a grid HAMMOZ does not ship reads the finest
+    native file, so checking the whole set is the simple, safe superset.
+    """
     from jcm.data.mirror.dust import NATIVE_SOURCES
 
     return sorted({rel for table in NATIVE_SOURCES.values()
@@ -899,27 +933,67 @@ def _dust_source_files() -> list[str]:
                    for rel, _ in product.values()})
 
 
-def check_sources(stage_names) -> None:
-    """Fail fast when the sources for the requested stages are absent here.
+#: Where to point a user whose site lacks a source, by source label prefix.
+_UNAVAILABLE_HINTS = {
+    "RDA ERA5": "--stage pull fetches the published ERA5 Tier A instead",
+    "ECHAM-HAMMOZ": ("build dust where the HAMMOZ pool is mounted (Levante) "
+                     "or set JCM_HAMMOZ_DIR to a copy of it"),
+    "CESM ne30": "exclude ne30pg3 with --grids",
+}
 
-    Source-free stages (``manifest`` — pure metadata; ``pull`` — network) run
-    anywhere. A source the site does not provide at all (e.g. the RDA ERA5
-    archive on Levante) is reported as such, pointing at ``--stage pull``.
-    """
+
+def _unavailable(stage_names) -> dict[str, list[str]]:
+    """``{stage: [labels]}`` of sources this site does not provide at all."""
     table = _stage_sources()
-    unavailable = sorted({name for name in stage_names
-                          for p in table.get(name, ()) if p is None})
+    out = {}
+    for name in stage_names:
+        labels = [label for label, p in table.get(name, ()) if p is None]
+        if labels:
+            out[name] = labels
+    return out
+
+
+def check_sources(stage_names, *, include_build: bool = False) -> None:
+    """Fail when the sources for the requested stages are absent here.
+
+    Up front (``include_build=False``) only external sources are checked;
+    each stage re-checks with ``include_build=True`` just before it runs, when
+    the build-tree outputs of earlier stages must exist. Source-free stages
+    (``manifest``; ``pull`` — network) run anywhere.
+    """
+    unavailable = _unavailable(stage_names)
     if unavailable:
-        sys.exit(f"Stage(s) {unavailable} need sources site {SITE.name!r} does "
-                 "not provide (see jcm/data/mirror/sites.py). On Levante, "
-                 "fetch the published Tier A products with --stage pull "
-                 "instead of rebuilding them.")
-    missing = [p for name in stage_names for p in table.get(name, ())
-               if not Path(p).exists()]
+        lines = []
+        for stage, labels in sorted(unavailable.items()):
+            for label in labels:
+                hint = next((h for k, h in _UNAVAILABLE_HINTS.items()
+                             if label.startswith(k)), "")
+                lines.append(f"{stage}: {label}" + (f" — {hint}" if hint else ""))
+        sys.exit(f"Site {SITE.name!r} does not provide (see "
+                 "jcm/data/mirror/sites.py):\n  " + "\n  ".join(lines))
+    table = _stage_sources()
+    root = str(ROOT)
+    missing = [f"{name}: {label} ({p})" for name in stage_names
+               for label, p in table.get(name, ())
+               if (include_build or not str(p).startswith(root))
+               and not Path(p).exists()]
     if missing:
-        sys.exit(f"Missing source paths on site {SITE.name!r} "
+        sys.exit(f"Missing sources on site {SITE.name!r} "
                  "(see jcm/data/mirror/SOURCES.md):\n  "
                  + "\n  ".join(sorted(set(missing))))
+    if "amip" in stage_names and include_build and _pulled_emissions():
+        sys.exit("amip: build/ceds_anthro.zarr is the --stage pull copy, which "
+                 "carries only the PI/PD climatology arrays; the yearly slices "
+                 "would read unfilled chunks. Build the stores with --stage "
+                 "emissions (or pull them whole) first.")
+
+
+def _pulled_emissions() -> bool:
+    """Whether the build tree's emissions stores are the partial pulled copies."""
+    pulled = (BUILD / "pulled").resolve()
+    return any((BUILD / n).is_symlink()
+               and pulled in (BUILD / n).resolve().parents
+               for n in ("ceds_anthro.zarr", "bb4cmip7.zarr"))
 
 
 #: Tier A products the per-grid bundles regrid from. ``stage_pull`` fetches
@@ -1044,9 +1118,27 @@ def main() -> None:
     unknown = [n for n in names if n not in STAGES]
     if unknown:
         sys.exit(f"Unknown stage(s) {unknown}; valid: {', '.join(STAGES)}")
+    if args.stage == "all":
+        # 'all' means everything THIS site can build; an explicitly named stage
+        # whose sources are absent still fails in check_sources below.
+        for name, labels in sorted(_unavailable(names).items()):
+            print(f"skipping stage {name}: site {SITE.name!r} does not "
+                  f"provide {', '.join(labels)}", flush=True)
+            names.remove(name)
+    transient = [n for n in names if n in ("amip", "era5-transient")]
+    if transient and _SELECTED is not None \
+            and not TRANSIENT_GRIDS <= _SELECTED:
+        # Staged coverage is recorded per product, not per grid: a partial
+        # transient build would advertise year files on the grids it skipped.
+        sys.exit(f"{transient} must build every transient grid "
+                 f"({', '.join(sorted(TRANSIENT_GRIDS))}) — include them all "
+                 "in --grids or omit --grids.")
+    BUILD.mkdir(parents=True, exist_ok=True)
+    UPLOAD.mkdir(parents=True, exist_ok=True)
     check_sources(names)
     for name in names:
         print(f"=== stage: {name} ===", flush=True)
+        check_sources([name], include_build=True)
         STAGES[name]()
     if args.verify_remote:
         print("=== verify-remote ===", flush=True)

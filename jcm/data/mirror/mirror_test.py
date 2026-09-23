@@ -76,9 +76,6 @@ class RegistryTest(unittest.TestCase):
             self.assertNotIn("registry.json", reg2["files"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class DustProductTest(unittest.TestCase):
     """The dust bundle builder on a synthetic stand-in for the HAMMOZ pool.
@@ -397,11 +394,63 @@ class SitesTest(unittest.TestCase):
         with patch.dict(os.environ, {"JCM_MIRROR_SITE": "levante"}):
             levante = sites.current()
         with patch.object(build_mirror, "SITE", levante):
-            self.assertIn(None, build_mirror._stage_sources()["era5"])
+            self.assertEqual(build_mirror._unavailable(["era5", "ozone"]),
+                             {"era5": ["RDA ERA5 monthly means"]})
             with self.assertRaises(SystemExit) as ctx:
                 build_mirror.check_sources(["era5"])
             self.assertIn("--stage pull", str(ctx.exception))
             build_mirror.check_sources(["manifest", "pull"])   # source-free
+        with patch.dict(os.environ, {"JCM_MIRROR_SITE": "glade"}):
+            glade = sites.current()
+        with patch.object(build_mirror, "SITE", glade):
+            # Glade lacks the HAMMOZ pool: the dust stage names it and says
+            # where it can be built.
+            with self.assertRaises(SystemExit) as ctx:
+                build_mirror.check_sources(["dust"])
+            self.assertIn("ECHAM-HAMMOZ pool", str(ctx.exception))
+            self.assertIn("JCM_HAMMOZ_DIR", str(ctx.exception))
+
+    def test_build_tree_inputs_are_checked_only_before_their_stage(self):
+        # A one-shot pull,...,bundles on a fresh root must not be refused up
+        # front for build/ outputs an earlier stage in the same run produces.
+        from jcm.data.mirror import build_mirror
+        with tempfile.TemporaryDirectory() as d:
+            from pathlib import Path
+            root = Path(d)
+            i4m = root / "i4m"
+            (i4m / "CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10").mkdir(parents=True)
+            site = build_mirror.SITE.__class__(**{
+                **build_mirror.SITE.__dict__, "input4mips": str(i4m)})
+            with patch.object(build_mirror, "SITE", site), \
+                    patch.object(build_mirror, "ROOT", root), \
+                    patch.object(build_mirror, "BUILD", root / "build"), \
+                    patch.object(build_mirror, "UPLOAD", root / "upload"):
+                build_mirror.check_sources(["bundles"])
+                with self.assertRaises(SystemExit) as ctx:
+                    build_mirror.check_sources(["bundles"], include_build=True)
+                self.assertIn("Tier A ERA5 land climatology", str(ctx.exception))
+
+    def test_a_partial_transient_build_is_refused(self):
+        from jcm.data.mirror import build_mirror as bm
+        argv = ["build_mirror", "--grids", "t63", "--stage", "amip"]
+        with patch("sys.argv", argv), self.assertRaises(SystemExit) as ctx:
+            bm.main()
+        self.assertIn("every transient grid", str(ctx.exception))
+
+    def test_a_grids_registry_needs_the_pulled_registry(self):
+        from jcm.data.mirror import build_mirror as bm
+        with tempfile.TemporaryDirectory() as d:
+            from pathlib import Path
+            root = Path(d)
+            with patch.object(bm, "_SELECTED", frozenset({"t127"})), \
+                    patch.object(bm, "BUILD", root / "build"), \
+                    patch.object(bm, "UPLOAD", root / "upload"), \
+                    patch.object(bm, "_REMOTE_REGISTRY",
+                                 root / "build" / "remote_registry.json"):
+                (root / "upload").mkdir()
+                with self.assertRaises(SystemExit) as ctx:
+                    bm.stage_registry()
+                self.assertIn("--stage pull", str(ctx.exception))
 
 
 class GridSelectionTest(unittest.TestCase):
@@ -416,3 +465,7 @@ class GridSelectionTest(unittest.TestCase):
             self.assertEqual(bm._grids(transient=True), {})
             self.assertFalse(bm._column_selected())
         self.assertEqual(bm._truncation("t255"), 255)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -136,9 +136,6 @@ class BilinearTest(unittest.TestCase):
         self.assertEqual(out[0, 1, 2], 6.0)     # untouched cells identical
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ConservativeOverlapTest(unittest.TestCase):
     """The exact-overlap remap the dust products are coarsened/refined with."""
@@ -183,6 +180,12 @@ class ConservativeOverlapTest(unittest.TestCase):
         np.testing.assert_allclose(
             conservative_overlap(f, lats, lons, lats, lons), f, atol=1e-12)
 
+    def test_descending_latitudes_are_refused(self):
+        from jcm.data.regridding import conservative_overlap
+        lats, lons = gaussian_latlon(32)
+        with self.assertRaisesRegex(ValueError, "ascending"):
+            conservative_overlap(np.ones((32, 64)), lats[::-1], lons, lats, lons)
+
     def test_missing_source_is_renormalised_not_diluted(self):
         from jcm.data.regridding import conservative_overlap
         (sl, so), (dl, do) = gaussian_latlon(192), gaussian_latlon(96)
@@ -192,3 +195,7 @@ class ConservativeOverlapTest(unittest.TestCase):
         finite = np.isfinite(out)
         self.assertTrue(finite.any() and (~finite).any())
         np.testing.assert_allclose(out[finite], 0.03, rtol=1e-12)
+
+
+if __name__ == "__main__":
+    unittest.main()
