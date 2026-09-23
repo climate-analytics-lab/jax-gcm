@@ -470,6 +470,10 @@ What now errors, and the one-line fix:
        (scalar, or one mode per list product) / ``forcing.oxidants_align=...``
    * - ``forcing.prescribed_surface_flux.file`` with a time axis
      - add ``forcing.prescribed_surface_flux.align=...``
+   * - ``forcing.prescribed_surface_flux`` with an interactive physics preset
+     - compose a forced-mode consumer (``physics=speedy-forced-flux`` /
+       ``echam-forced-flux``); without one the block is rejected, never
+       silently ignored
    * - ``ForcingData.from_dataset(ds)`` with a time axis
      - pass ``align_mode="wrap_year"`` (an in-memory dataset has no manifest
        identity, so ``auto`` always raises)

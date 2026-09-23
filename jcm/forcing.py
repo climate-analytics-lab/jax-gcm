@@ -372,6 +372,12 @@ class ForcingData:
     prescribed_evaporation: Any = None
     prescribed_stress_u: Any = None
     prescribed_stress_v: Any = None
+    # The ``[start, end]`` seconds since ``MODEL_EPOCH`` a date-aligned
+    # prescribed-flux archive declares it covers, from its CF ``time_bnds``
+    # (``None``: no bounds, so coverage is inferred from the end samples'
+    # cadence). Read only by the run-start coverage check
+    # (:func:`by_date_coverage_error`), never by physics.
+    prescribed_flux_time_bounds: Any = None
 
     @classmethod
     def zeros(cls,nodal_shape,
@@ -796,7 +802,8 @@ class ForcingData:
              prescribed_sensible_heat_flux=None,
              prescribed_evaporation=None,
              prescribed_stress_u=None,
-             prescribed_stress_v=None):
+             prescribed_stress_v=None,
+             prescribed_flux_time_bounds=None):
         # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
         # the natural value for "no nudging target wired" — falling back to
         # ``self.nudging_target`` only when the caller didn't supply the
@@ -862,6 +869,11 @@ class ForcingData:
                 prescribed_stress_v
                 if prescribed_stress_v is not None
                 else self.prescribed_stress_v
+            ),
+            prescribed_flux_time_bounds=(
+                prescribed_flux_time_bounds
+                if prescribed_flux_time_bounds is not None
+                else self.prescribed_flux_time_bounds
             ),
         )
 
@@ -1939,7 +1951,49 @@ def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
         else:
             out[field] = make_time_series(
                 np.asarray(values)[order], time_seconds, mode)
+    if mode in (BY_DATE, BY_DATE_INTERP):
+        bounds = _prescribed_flux_time_bounds(ds, order, time_seconds, source)
+        if bounds is not None:
+            out["prescribed_flux_time_bounds"] = bounds
     return out
+
+
+def _prescribed_flux_time_bounds(ds, order, time_seconds, source):
+    """``[start, end]`` seconds a date-aligned archive's CF bounds declare.
+
+    Looks for the variable the ``time`` coordinate's ``bounds`` attribute
+    names (the CF convention), else a ``time_bnds``/``time_bounds``
+    variable; returns ``None`` when there is none, and the run-start coverage
+    check then infers coverage from the end samples' cadence
+    (:func:`by_date_coverage_error`). The bounds are validated — shape
+    ``(time, 2)``, each sample inside its own interval — because a declared
+    coverage that disagrees with the stamps is a malformed file, not a hint.
+    """
+    import xarray as xr
+    name = ds["time"].attrs.get("bounds") or ds["time"].encoding.get("bounds")
+    if name is None:
+        name = next((n for n in ("time_bnds", "time_bounds") if n in ds), None)
+    if name is None or name not in ds:
+        return None
+    bnds = ds[name]
+    if bnds.ndim != 2 or bnds.shape[0] != ds.sizes["time"] or bnds.shape[1] != 2:
+        raise ValueError(
+            f"{source}: time bounds {name!r} must be shaped (time, 2); got "
+            f"{dict(bnds.sizes)}.")
+    edges = []
+    for k in (0, 1):
+        edge = xr.Dataset(coords={"time": ("time", np.asarray(
+            bnds.isel({bnds.dims[1]: k}).values)[order])})
+        edges.append(np.asarray(_time_axis_seconds_from_ds(edge), dtype=float))
+    lo, hi = edges
+    t = np.asarray(time_seconds, dtype=float)
+    bad = np.flatnonzero(~((lo <= t) & (t <= hi) & (lo < hi)))
+    if bad.size:
+        raise ValueError(
+            f"{source}: time bounds {name!r} do not bracket their samples "
+            f"(e.g. sample {int(bad[0])}); each interval must satisfy "
+            "start <= time <= end with start < end.")
+    return jnp.asarray([float(lo.min()), float(hi.max())])
 
 
 def _prescribed_flux_time_axis(ds, align_mode, source):
@@ -2004,30 +2058,53 @@ def _prescribed_flux_time_axis(ds, align_mode, source):
 
 
 def by_date_coverage_error(ts: "TimeSeries", start_seconds: float,
-                           end_seconds: float, name: str = "") -> str | None:
+                           end_seconds: float, name: str = "",
+                           bounds=None) -> str | None:
     """Message if a date-aligned ``ts`` does not cover ``[start, end]``, else None.
 
     ``BY_DATE``/``BY_DATE_INTERP`` selection (:func:`_select_time_series`) clamps
     to the first/last sample outside the axis, so running past the end of a
     transient archive would otherwise silently hold its last sample forever.
-    Each sample stands for the interval up to the next, and a sample's
-    timestamp may sit at the start (month-start stamps) or the middle
-    (mid-month stamps) of the interval it represents, so the axis is taken to
-    cover ``[t_first - Δ, t_last + Δ]`` with ``Δ`` its LARGEST sample spacing —
-    e.g. a Jan-1..Dec-1 monthly archive covers the whole of that calendar year
-    (Dec-1 + 31 days) and a mid-month one the same year. ``WRAP_YEAR`` leaves
-    (a climatology covers every date) and axes with fewer than two samples
-    return ``None``. Times are seconds since ``MODEL_EPOCH``.
+
+    The usable window is, in order of preference:
+
+    - ``bounds = (start, end)`` — the archive's own declared coverage (its CF
+      ``time_bnds``, see :func:`read_prescribed_surface_fluxes`), exact for
+      any stamp placement;
+    - otherwise one END interval beyond each end sample — the first interval
+      repeated before the first sample, the last after the last
+      (:func:`_repeat_cadence`; a calendar-month cadence steps by calendar
+      months). Each end sample may stand for the interval before or after its
+      stamp (month-start vs mid-month stamps), so the slack at each edge is
+      THAT edge's own spacing — e.g. a Jan-1..Dec-1 monthly archive covers its
+      calendar year.
+      An interior gap never widens an edge: the largest spacing anywhere
+      would let a daily archive with one long gap validate a run months past
+      its last sample.
+
+    ``WRAP_YEAR`` leaves (a climatology covers every date) and axes with fewer
+    than two samples (and no bounds) return ``None``. Times are seconds since
+    ``MODEL_EPOCH``.
     """
     mode = int(np.asarray(ts.align_mode))
     if mode not in (BY_DATE, BY_DATE_INTERP):
         return None
     t = np.asarray(ts.time_seconds, dtype=float)
-    if t.size < 2:
+    if bounds is not None:
+        lo, hi = (float(v) for v in np.asarray(bounds, dtype=float))
+        what = "its declared time_bnds"
+    elif t.size < 2:
         return None
-    tol = float(np.max(np.diff(t)))
-    lo, hi = t[0] - tol, t[-1] + tol
-    if start_seconds >= lo and end_seconds <= hi:
+    else:
+        lo = _repeat_cadence(t[1], t[0], t[0])
+        hi = _repeat_cadence(t[-2], t[-1], t[-1])
+        what = "one end-sample interval either side"
+    # Tolerate the stored axis' own rounding (float32 epoch seconds resolve
+    # only to ~2 min), so a run ending exactly on the covered edge passes.
+    stored = np.asarray(ts.time_seconds)
+    res = (2.0 * float(np.spacing(np.abs(stored).max()))
+           if stored.size and np.issubdtype(stored.dtype, np.floating) else 0.0)
+    if start_seconds >= lo - res and end_seconds <= hi + res:
         return None
     import pandas as pd
 
@@ -2035,12 +2112,37 @@ def by_date_coverage_error(ts: "TimeSeries", start_seconds: float,
         return str(pd.Timestamp(float(s), unit="s"))[:19]
     return (
         f"{name}: the date-aligned (BY_DATE) time axis spans {_d(t[0])} .. "
-        f"{_d(t[-1])} (usable {_d(lo)} .. {_d(hi)}, one sample interval "
-        f"either side), but the run covers {_d(start_seconds)} .. "
-        f"{_d(end_seconds)}. Outside its axis a date-aligned series would "
-        "silently hold its end sample. Supply fluxes covering the whole run; "
-        "if the file is a monthly climatology meant to repeat every year, "
-        "set forcing.prescribed_surface_flux.align=wrap_year.")
+        f"{_d(t[-1])} (usable {_d(lo)} .. {_d(hi)}, {what}), but the run "
+        f"covers {_d(start_seconds)} .. {_d(end_seconds)}. Outside its axis a "
+        "date-aligned series would silently hold its end sample. Supply "
+        "fluxes covering the whole run; if the file is a monthly climatology "
+        "meant to repeat every year, set "
+        "forcing.prescribed_surface_flux.align=wrap_year.")
+
+
+def _repeat_cadence(a: float, b: float, origin: float) -> float:
+    """Step ``origin`` by the interval ``a → b`` (seconds since the epoch).
+
+    A calendar-month cadence (``a`` and ``b`` on the same day-of-month and
+    time of day, whole months apart) is repeated as calendar months, so the
+    interval after a Dec-1 sample of a month-start archive ends on Jan-1 —
+    December's 31 days, not November's 30. Any other cadence is repeated as
+    its length in seconds. ``b < a`` steps backwards.
+    """
+    import pandas as pd
+
+    # Axes are often stored in float32 (~1-2 min resolution at present-day
+    # epoch seconds), so the calendar test works on stamps snapped to a
+    # 5-minute grid, which recovers any stamp that lies on one exactly.
+    def _snap(x):
+        return pd.Timestamp(float(x), unit="s").round("5min")
+    ta, tb = _snap(a), _snap(b)
+    if ta.day == tb.day and ta.time() == tb.time():
+        months = (tb.year - ta.year) * 12 + (tb.month - ta.month)
+        if months != 0:
+            stepped = _snap(origin) + pd.DateOffset(months=months)
+            return float((stepped - pd.Timestamp(0)).total_seconds())
+    return float(origin) + (float(b) - float(a))
 
 
 # ``expand_yearly_files`` is re-exported from the top-of-module import of the

@@ -1412,6 +1412,12 @@ class Model:
         # (or a non-ComposablePhysics) is tolerated.
         save_interval_days = parse_duration_days(save_interval, calendar=self.calendar)
         total_time_days = parse_duration_days(total_time, calendar=self.calendar)
+        # The converse check: prescribed surface fluxes on the forcing with no
+        # forced-mode consumer would be silently ignored (#301).
+        from jcm.physics.surface.prescribed_flux import (
+            check_prescribed_flux_consumers,
+        )
+        check_prescribed_flux_consumers(self.physics, forcing)
         if hasattr(self.physics, "validate_forcing"):
             self.physics.validate_forcing(
                 forcing,

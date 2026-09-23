@@ -102,6 +102,11 @@ def check_prescribed_flux_forcing(forcing: ForcingData, owner: str,
     if run_window is None:
         return
     start_s, end_s = run_window
+    # The archive's declared coverage (CF ``time_bnds``) wins over the
+    # end-sample cadence when the reader found one.
+    bounds = getattr(forcing, "prescribed_flux_time_bounds", None)
+    if isinstance(bounds, jax.core.Tracer):
+        bounds = None
     for name in PRESCRIBED_FLUX_FORCING_FIELDS:
         leaf = getattr(forcing, name)
         if not isinstance(leaf, TimeSeries) or any(
@@ -109,9 +114,52 @@ def check_prescribed_flux_forcing(forcing: ForcingData, owner: str,
                 for x in (leaf.time_seconds, leaf.align_mode)):
             continue
         err = by_date_coverage_error(leaf, start_s, end_s,
-                                     name=f"{owner}: forcing.{name}")
+                                     name=f"{owner}: forcing.{name}",
+                                     bounds=bounds)
         if err is not None:
             raise ValueError(err)
+
+
+def check_prescribed_flux_consumers(physics, forcing) -> None:
+    """Reject prescribed surface fluxes that no composed term consumes.
+
+    The converse of :func:`check_prescribed_flux_forcing`. The interactive
+    surface schemes (``SpeedySurfaceFlux`` without ``prescribed_fluxes``, the
+    surface-coupled ``TteTkeVerticalDiffusion``) compute their own fluxes and
+    never read ``prescribed_*``, so fluxes supplied to such a composition
+    would be silently ignored while the run looks forced. Consumers are found
+    by the declared capability
+    (:meth:`jcm.physics.physics_term.PhysicsTerm.consumed_forcing_fields`,
+    aggregated by ``physics.consumed_forcing_fields()``), never by class name,
+    so a user-replaced or removed term is judged by what it actually reads. A
+    physics object without the hook (e.g. Held-Suarez) consumes nothing.
+
+    Called where the physics and the concrete forcing first meet: by the CLI
+    runners right after forcing assembly, and by ``Model.run`` (the choke
+    point every Python entry point funnels through). Only presence is
+    inspected (``is None``), so it is safe on traced forcing.
+    """
+    supplied = [name for name in PRESCRIBED_FLUX_FORCING_FIELDS
+                if getattr(forcing, name, None) is not None]
+    if not supplied:
+        return
+    consumed_fn = getattr(physics, "consumed_forcing_fields", None)
+    consumed = set(consumed_fn()) if consumed_fn is not None else set()
+    if consumed.intersection(supplied):
+        return
+    raise ValueError(
+        "forcing.prescribed_surface_flux is set (ForcingData carries "
+        f"{supplied}), but no term in the composed physics consumes "
+        "prescribed surface fluxes: the interactive surface schemes "
+        "(SpeedySurfaceFlux, surface-coupled TteTkeVerticalDiffusion) compute "
+        "their own fluxes, so the run would silently ignore the prescribed "
+        "ones. Enable forced mode (jax-gcm#301): on the CLI use "
+        "physics=speedy-forced-flux or physics=echam-forced-flux; in Python "
+        "compose SpeedySurfaceFlux(prescribed_fluxes=True) (SPEEDY) or "
+        "TteTkeVerticalDiffusion(couple_surface=False) followed by "
+        "PrescribedSurfaceFlux() (ECHAM). Otherwise drop the "
+        "prescribed_surface_flux block / leave the prescribed_* fields None. "
+        "See docs/source/design/surface_exchange.md.")
 
 
 class PrescribedSurfaceFlux(PhysicsTerm):
@@ -144,6 +192,10 @@ class PrescribedSurfaceFlux(PhysicsTerm):
             prescribed_stress_u=zeros,
             prescribed_stress_v=zeros,
         )
+
+    def consumed_forcing_fields(self) -> tuple[str, ...]:
+        """Return the four ``prescribed_*`` fields, which this term always reads."""
+        return PRESCRIBED_FLUX_FORCING_FIELDS
 
     def validate_forcing(self, forcing: ForcingData,
                          run_window=None) -> None:

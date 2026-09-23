@@ -325,6 +325,23 @@ class PhysicsTerm(nnx.Module):
         """
         return forcing
 
+    def consumed_forcing_fields(self) -> tuple[str, ...]:
+        """Return the optional ``ForcingData`` fields this term reads as configured.
+
+        The capability marker for inputs that only SOME configurations
+        consume (default ``None`` on :class:`~jcm.forcing.ForcingData`), e.g.
+        the forced-mode surface-flux terms reading ``prescribed_*``. It lets
+        the composition answer "does anything here honour this input?" by
+        declared capability rather than by class name, so replacing or
+        removing terms keeps the answer correct
+        (:func:`jcm.physics.surface.prescribed_flux.
+        check_prescribed_flux_consumers` rejects a supplied input nothing
+        consumes instead of letting the run silently ignore it). Report
+        fields per the term's CURRENT configuration: a flag-selected mode that
+        does not read a field must not declare it. Default: none.
+        """
+        return ()
+
     def validate_forcing(self, forcing: ForcingData, run_window=None) -> None:
         """Raise if the run's forcing cannot serve this term over the run.
 

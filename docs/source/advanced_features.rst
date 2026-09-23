@@ -458,6 +458,9 @@ block for a uniform test field, or a ``file`` on the model grid); a coupler
 driving jcm in Python sets the ``prescribed_*`` fields on ``ForcingData``
 directly each coupling interval. Field names, units and signs are shared
 with the published struct, so a coupler can feed back exactly what it read.
+Prescribed fluxes need a forced-mode physics to consume them: supplied to an
+interactive preset (``physics=speedy`` / ``echam``) they are rejected at
+start rather than silently ignored.
 See :doc:`design/surface_exchange` for the full contract.
 
 Where to next

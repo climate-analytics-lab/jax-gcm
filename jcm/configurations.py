@@ -209,6 +209,7 @@ def load(name: str, **overrides) -> LoadedConfiguration:
     forcing = runners._maybe_attach_nudging_target(forcing, cfg, model)
     # Same guards/warnings the CLI runs after model+forcing construction.
     runners.guard_emulator_ghg_forcing(model.physics, forcing)
+    runners.check_prescribed_flux_consumers(model.physics, forcing)
     runners.warn_on_config_traps(cfg, model.physics, forcing,
                                  coords=model.coords, dycore=dycore)
 

@@ -13,6 +13,13 @@
 kind: from_file
 file: ???
 
+# Forced-mode surface fluxes (jax-gcm#301) are documented with the block in
+# forcing/default.yaml; this group does not declare the key, so add it with
+# ``+forcing.prescribed_surface_flux...``. It requires a forced-mode physics
+# (physics=speedy-forced-flux / echam-forced-flux): with an interactive preset
+# nothing reads the fluxes, so the run is rejected rather than silently
+# ignoring them.
+
 # Yearly transient bundles (issue #610): the surface ``file`` and the
 # ``emissions_file`` / ``oxidants_file`` / ``ozone_file`` keys may be a {year}
 # pattern, expanded over the inclusive range below and concatenated along

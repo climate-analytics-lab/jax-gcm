@@ -87,8 +87,9 @@ oxidants_file: auto
 #               as a climatology every model year and REQUIRES exactly 12
 #               samples, one per month Jan..Dec. ``by_date`` aligns samples on
 #               their absolute timestamps (``by_date_interp`` interpolates
-#               between them) and the run must lie within the archive (one
-#               sample interval of slack either end) or it fails at start.
+#               between them) and the run must lie within the archive (its
+#               CF ``time_bnds`` if present, else the first/last sample
+#               interval of slack at each end) or it fails at start.
 #               The default ``auto`` resolves only data-mirror products and no
 #               mirror product carries fluxes, so it raises: the timestamps
 #               alone cannot tell a monthly climatology from a one-year
@@ -97,7 +98,10 @@ oxidants_file: auto
 #               (#884).
 # Units/signs are the surface-exchange coupling contract's
 # (docs/source/design/surface_exchange.md): sensible heat and evaporation
-# positive UP, stress positive DOWN (momentum into the surface). ``null``
-# leaves the ``prescribed_*`` ForcingData fields absent, which is an error
-# only if a forced-mode physics preset is composed.
+# positive UP, stress positive DOWN (momentum into the surface). The block
+# REQUIRES a forced-mode physics (speedy-forced-flux / echam-forced-flux):
+# the interactive presets compute their own fluxes and never read these, so
+# a block with no consumer is rejected at start rather than silently
+# ignored. ``null`` leaves the ``prescribed_*`` ForcingData fields absent,
+# which is an error only if a forced-mode physics preset is composed.
 prescribed_surface_flux: null

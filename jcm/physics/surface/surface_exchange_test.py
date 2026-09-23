@@ -1058,3 +1058,283 @@ def test_speedy_forced_constant_flux_aquaplanet_smoke():
     # No NaNs anywhere in the published contract.
     for leaf in jax.tree_util.tree_leaves(se):
         assert not bool(jnp.any(jnp.isnan(leaf)))
+
+
+# ---------------------------------------------------------------------------
+# Prescribed fluxes need a forced-mode consumer (never silently ignored)
+# ---------------------------------------------------------------------------
+
+class TestPrescribedFluxNeedsConsumer:
+    """Supplied ``prescribed_*`` fields with no term that reads them are
+    rejected, judged by the declared ``consumed_forcing_fields`` capability.
+    """
+
+    def _forcing(self, with_fluxes=True):
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        forcing = default_forcing(coords.horizontal)
+        if not with_fluxes:
+            return forcing
+        nodal = coords.horizontal.nodal_shape
+        return forcing.copy(
+            prescribed_sensible_heat_flux=jnp.full(nodal, 10.0),
+            prescribed_evaporation=jnp.full(nodal, 3e-5),
+            prescribed_stress_u=jnp.full(nodal, 0.05),
+            prescribed_stress_v=jnp.zeros(nodal))
+
+    def test_speedy_interactive_preset_rejects_fluxes(self):
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        from jcm.physics.surface.prescribed_flux import (
+            check_prescribed_flux_consumers,
+        )
+        with pytest.raises(ValueError, match="forcing.prescribed_surface_flux"
+                           ".*speedy-forced-flux"):
+            check_prescribed_flux_consumers(speedy_physics(), self._forcing())
+
+    def test_echam_interactive_preset_rejects_fluxes(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.surface.prescribed_flux import (
+            check_prescribed_flux_consumers,
+        )
+        with pytest.raises(ValueError, match="echam-forced-flux"):
+            check_prescribed_flux_consumers(echam_physics(), self._forcing())
+
+    def test_forced_compositions_accept_fluxes(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.speedy.speedy_terms import (
+            SpeedySurfaceFlux, speedy_physics,
+        )
+        from jcm.physics.surface.prescribed_flux import (
+            PRESCRIBED_FLUX_FORCING_FIELDS, check_prescribed_flux_consumers,
+        )
+        speedy_forced = speedy_physics().replace(
+            "surface", SpeedySurfaceFlux(prescribed_fluxes=True))
+        echam_forced = echam_physics(prescribed_surface_fluxes=True)
+        for physics in (speedy_forced, echam_forced):
+            assert set(PRESCRIBED_FLUX_FORCING_FIELDS) <= set(
+                physics.consumed_forcing_fields())
+            check_prescribed_flux_consumers(physics, self._forcing())
+
+    def test_no_fluxes_is_unchanged(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        from jcm.physics.surface.prescribed_flux import (
+            check_prescribed_flux_consumers,
+        )
+        bare = self._forcing(with_fluxes=False)
+        for physics in (speedy_physics(), echam_physics(), object()):
+            check_prescribed_flux_consumers(physics, bare)
+        check_prescribed_flux_consumers(speedy_physics(), None)
+
+    def test_capability_survives_composition_edits(self):
+        """Removing the consumer re-arms the check; a user-defined term that
+        DECLARES the fields is honoured without any class-name matching.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.physics_term import PhysicsTerm
+        from jcm.physics.surface.prescribed_flux import (
+            PRESCRIBED_FLUX_FORCING_FIELDS, check_prescribed_flux_consumers,
+        )
+        forced = echam_physics(prescribed_surface_fluxes=True)
+        stripped = forced.remove("prescribed_surface_flux")
+        with pytest.raises(ValueError, match="no term"):
+            check_prescribed_flux_consumers(stripped, self._forcing())
+
+        class MyCouplerFlux(PhysicsTerm):
+            name = "my_coupler_flux"
+            category = "my_coupler_flux"
+
+            def consumed_forcing_fields(self):
+                return PRESCRIBED_FLUX_FORCING_FIELDS
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                raise NotImplementedError
+
+        check_prescribed_flux_consumers(stripped + MyCouplerFlux(),
+                                        self._forcing())
+
+    def test_physics_without_hook_rejects_fluxes(self):
+        from jcm.physics.surface.prescribed_flux import (
+            check_prescribed_flux_consumers,
+        )
+        with pytest.raises(ValueError, match="no term"):
+            check_prescribed_flux_consumers(object(), self._forcing())
+
+    def test_model_run_rejects_unconsumed_fluxes(self):
+        """End to end through the Python door: ``Model.run`` refuses before
+        compiling instead of running interactive SPEEDY on ignored fluxes.
+        """
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        from jcm.terrain import TerrainData
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        model = Model(coords=coords, terrain=TerrainData.aquaplanet(coords),
+                      physics=speedy_physics(), time_step=20)
+        with pytest.raises(ValueError, match="no term in the composed"):
+            model.run(forcing=self._forcing(), save_interval=(1 / 24.0),
+                      total_time=(1 / 24.0))
+
+    def test_cli_assembly_rejects_block_with_interactive_preset(self):
+        """The CLI door: the block assembled for an interactive preset is
+        refused right after forcing assembly (``runners`` guard).
+        """
+        from omegaconf import OmegaConf
+
+        from jcm import runners
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        cfg = OmegaConf.create({"prescribed_surface_flux": {"constants": {
+            "sensible_heat_flux": 10.0, "evaporation": 3e-5,
+            "stress_u": 0.05, "stress_v": 0.0}}})
+        forcing = _attach_prescribed_surface_fluxes(
+            default_forcing(coords.horizontal), cfg, coords)
+        with pytest.raises(ValueError, match="forcing.prescribed_surface_flux"):
+            runners.check_prescribed_flux_consumers(speedy_physics(), forcing)
+
+    def test_scm_cli_refuses_forced_flux(self):
+        from omegaconf import OmegaConf
+
+        from jcm.physics.speedy.speedy_terms import (
+            SpeedySurfaceFlux, speedy_physics,
+        )
+        from jcm.runners import _reject_forced_flux_in_scm
+        block = OmegaConf.create({"forcing": {"prescribed_surface_flux": {
+            "constants": {"sensible_heat_flux": 1.0}}}})
+        with pytest.raises(ValueError, match="run.mode=scm"):
+            _reject_forced_flux_in_scm(block, speedy_physics())
+        forced = speedy_physics().replace(
+            "surface", SpeedySurfaceFlux(prescribed_fluxes=True))
+        none_block = OmegaConf.create(
+            {"forcing": {"prescribed_surface_flux": None}})
+        with pytest.raises(ValueError, match="forced mode"):
+            _reject_forced_flux_in_scm(none_block, forced)
+        _reject_forced_flux_in_scm(none_block, speedy_physics())
+        _reject_forced_flux_in_scm(OmegaConf.create({}), speedy_physics())
+
+
+# ---------------------------------------------------------------------------
+# Coverage slack comes from the END intervals (or declared time_bnds)
+# ---------------------------------------------------------------------------
+
+class TestByDateCoverageEndIntervals:
+    """An interior gap never widens the usable window (Codex #877)."""
+
+    def _gappy_daily(self):
+        """Daily Jan 1..10 2000, a ~year-long gap, then daily Dec 1..31."""
+        import numpy as np
+
+        from jcm.forcing import BY_DATE, make_time_series
+        days = ([f"2000-01-{d:02d}" for d in range(1, 11)]
+                + [f"2000-12-{d:02d}" for d in range(1, 32)])
+        t = np.array([_secs(d) for d in days])
+        return make_time_series(jnp.zeros((t.size, 2, 2)), jnp.asarray(t),
+                                BY_DATE)
+
+    def test_run_past_end_cadence_is_rejected(self):
+        from jcm.forcing import by_date_coverage_error
+        ts = self._gappy_daily()
+        # Last sample Dec 31 00:00, daily cadence: usable to Jan 1 00:00.
+        assert by_date_coverage_error(
+            ts, _secs("2000-12-15"), _secs("2001-01-03")) is not None
+        assert by_date_coverage_error(
+            ts, _secs("2000-12-15"), _secs("2001-06-01")) is not None
+        # Leading edge: one day before Jan 1, not the gap's ~325 days.
+        assert by_date_coverage_error(
+            ts, _secs("1999-12-25"), _secs("2000-01-05")) is not None
+
+    def test_run_within_end_interval_is_accepted(self):
+        from jcm.forcing import by_date_coverage_error
+        ts = self._gappy_daily()
+        assert by_date_coverage_error(
+            ts, _secs("2000-12-15"), _secs("2001-01-01")) is None
+        assert by_date_coverage_error(
+            ts, _secs("1999-12-31"), _secs("2000-01-05")) is None
+
+    def test_declared_bounds_win(self):
+        from jcm.forcing import BY_DATE, by_date_coverage_error
+        from jcm.forcing import make_time_series
+        # Mid-month stamps: the cadence rule would allow to ~Jan 14 2001.
+        ts = make_time_series(jnp.zeros((12, 2, 2)),
+                              jnp.asarray(_monthly_seconds(2000, 15)), BY_DATE)
+        late = (_secs("2000-12-20"), _secs("2001-01-10"))
+        assert by_date_coverage_error(ts, *late) is None
+        bounds = (_secs("2000-01-01"), _secs("2001-01-01"))
+        err = by_date_coverage_error(ts, *late, bounds=bounds)
+        assert err is not None and "time_bnds" in err
+        assert by_date_coverage_error(
+            ts, _secs("2000-01-01"), _secs("2001-01-01"),
+            bounds=bounds) is None
+
+    def _write_bounded(self, path, coords, bounds_ok=True):
+        import numpy as np
+        import pandas as pd
+        import xarray as xr
+        nlon, nlat = coords.horizontal.nodal_shape
+        lat = np.degrees(np.asarray(coords.horizontal.latitudes))
+        lon = np.degrees(np.asarray(coords.horizontal.longitudes))
+        starts = pd.date_range("2000-01-01", periods=12, freq="MS")
+        ends = pd.date_range("2000-02-01", periods=12, freq="MS")
+        mids = starts + (ends - starts) / 2
+        if not bounds_ok:
+            ends = starts  # zero-length intervals that miss their samples
+        data = {v: (("time", "lat", "lon"), np.ones((12, nlat, nlon)))
+                for v in ("sensible_heat_flux", "evaporation",
+                          "stress_u", "stress_v")}
+        data["time_bnds"] = (("time", "nv"),
+                             np.stack([starts.values, ends.values], axis=1))
+        ds = xr.Dataset(data, coords={"time": mids.values, "lat": lat,
+                                      "lon": lon})
+        ds["time"].attrs["bounds"] = "time_bnds"
+        # One units encoding for time and its bounds, as CF requires.
+        ds["time"].encoding["units"] = "hours since 2000-01-01"
+        ds.to_netcdf(path)
+
+    def test_reader_carries_time_bnds_to_the_run_check(self, tmp_path):
+        import xarray as xr
+
+        from jcm.forcing import read_prescribed_surface_fluxes
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import SpeedySurfaceFlux
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        p = tmp_path / "bounded.nc"
+        self._write_bounded(p, coords)
+        import numpy as np
+        lat = np.degrees(np.asarray(coords.horizontal.latitudes))
+        lon = np.degrees(np.asarray(coords.horizontal.longitudes))
+        with xr.open_dataset(p) as ds:
+            fields = read_prescribed_surface_fluxes(
+                ds, lat, lon, align_mode="by_date", source=str(p))
+        lo, hi = (float(v) for v in fields["prescribed_flux_time_bounds"])
+        assert lo == pytest.approx(_secs("2000-01-01"))
+        assert hi == pytest.approx(_secs("2001-01-01"))
+        forcing = default_forcing(coords.horizontal).copy(**fields)
+        term = SpeedySurfaceFlux(prescribed_fluxes=True)
+        term.validate_forcing(
+            forcing, run_window=(_secs("2000-01-01"), _secs("2001-01-01")))
+        with pytest.raises(ValueError, match="time_bnds"):
+            term.validate_forcing(
+                forcing, run_window=(_secs("2000-12-20"), _secs("2001-01-10")))
+        # A climatology has no absolute coverage, so no bounds are carried.
+        with xr.open_dataset(p) as ds:
+            clim = read_prescribed_surface_fluxes(
+                ds, lat, lon, align_mode="wrap_year", source=str(p))
+        assert "prescribed_flux_time_bounds" not in clim
+
+    def test_reader_rejects_bounds_that_miss_their_samples(self, tmp_path):
+        import numpy as np
+        import xarray as xr
+
+        from jcm.forcing import read_prescribed_surface_fluxes
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        p = tmp_path / "bad_bounds.nc"
+        self._write_bounded(p, coords, bounds_ok=False)
+        lat = np.degrees(np.asarray(coords.horizontal.latitudes))
+        lon = np.degrees(np.asarray(coords.horizontal.longitudes))
+        with xr.open_dataset(p) as ds, pytest.raises(
+                ValueError, match="do not bracket"):
+            read_prescribed_surface_fluxes(
+                ds, lat, lon, align_mode="by_date", source=str(p))

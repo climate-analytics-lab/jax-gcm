@@ -22,7 +22,10 @@ from jcm.physics.surface.surface_exchange import (
     SURFACE_EXCHANGE_OUTPUT_ATTRS,
     SurfaceExchange,
 )
-from jcm.physics.surface.prescribed_flux import check_prescribed_flux_forcing
+from jcm.physics.surface.prescribed_flux import (
+    PRESCRIBED_FLUX_FORCING_FIELDS,
+    check_prescribed_flux_forcing,
+)
 from jcm.physics.speedy.physics_data import (
     PhysicsData,
 )
@@ -546,6 +549,10 @@ class SpeedySurfaceFlux(SpeedyTermBase):
             prescribed_stress_u=zeros,
             prescribed_stress_v=zeros,
         )
+
+    def consumed_forcing_fields(self):
+        """Return the ``prescribed_*`` fields in forced mode, nothing interactively."""
+        return PRESCRIBED_FLUX_FORCING_FIELDS if self.prescribed_fluxes else ()
 
     def validate_forcing(self, forcing, run_window=None):
         """Fail loudly at run start if forced mode lacks its forcing fields

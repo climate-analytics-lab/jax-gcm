@@ -736,6 +736,16 @@ class ComposablePhysics(nnx.Module, Physics):
             for term in self.terms
         )
 
+    def consumed_forcing_fields(self) -> tuple[str, ...]:
+        """Union of the composed terms' :meth:`PhysicsTerm.consumed_forcing_fields`."""
+        fields: list[str] = []
+        for term in self.terms:
+            hook = getattr(term, "consumed_forcing_fields", None)
+            for name in (hook() if hook is not None else ()):
+                if name not in fields:
+                    fields.append(name)
+        return tuple(fields)
+
     def validate_forcing(self, forcing, run_window=None) -> None:
         """Run every term's :meth:`PhysicsTerm.validate_forcing` once.
 

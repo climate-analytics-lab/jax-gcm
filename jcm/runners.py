@@ -403,6 +403,12 @@ _band_config_for_terms = RadiationBandConfig.for_terms
 from jcm.physics.radiation.nn_emulator_scheme import (  # noqa: E402
     guard_ghg_forcing as guard_emulator_ghg_forcing,
 )
+# Prescribed surface fluxes nothing consumes are rejected right after forcing
+# assembly (the first point physics and forcing meet on the CLI), naming the
+# config key and how to enable forced mode (#301).
+from jcm.physics.surface.prescribed_flux import (  # noqa: E402
+    check_prescribed_flux_consumers as check_prescribed_flux_consumers,
+)
 
 
 def maybe_add_sponge(physics, cfg: DictConfig):
@@ -1722,6 +1728,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
     forcing = _maybe_attach_nudging_target(forcing, cfg, model)
     guard_emulator_ghg_forcing(model.physics, forcing)
+    check_prescribed_flux_consumers(model.physics, forcing)
     warn_on_config_traps(cfg, model.physics, forcing, coords=model.coords,
                          dycore=getattr(model, "dycore", None))
     # After model + forcing construction: config-selected libraries are
@@ -1826,6 +1833,7 @@ def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
     terrain = build_terrain(cfg, coords)
     forcing = build_forcing(cfg, coords)
     guard_emulator_ghg_forcing(physics, forcing)
+    check_prescribed_flux_consumers(physics, forcing)
     warn_on_config_traps(cfg, physics, forcing, coords=coords)
     _, states = _load_states_from_cfg(cfg, physics)
 
@@ -1869,6 +1877,7 @@ def _run_scm(cfg: DictConfig, time_step_model: Model | None = None):
     # ``warn_on_config_traps``. ``coords`` is still passed for symmetry with the
     # other run paths (the scm branch does not use it).
     warn_on_config_traps(cfg, physics, None, coords=coords)
+    _reject_forced_flux_in_scm(cfg, physics)
     ds, states = _load_states_from_cfg(cfg, physics)
     column_states, (i_lon, i_lat, actual_lat, actual_lon) = _select_column(
         states, ds, lat_deg=lat_deg, lon_deg=lon_deg,
@@ -1887,6 +1896,32 @@ def _run_scm(cfg: DictConfig, time_step_model: Model | None = None):
         dt_seconds=dt_seconds,
     )
     return scm.run(column_states)
+
+
+def _reject_forced_flux_in_scm(cfg: DictConfig, physics) -> None:
+    """Refuse forced surface fluxes (#301) on the SCM CLI path.
+
+    Forced fluxes are a gridded ``ForcingData`` input, which ``run.mode=scm``
+    never assembles: a ``prescribed_surface_flux`` block would be dropped
+    silently and a forced-mode physics would have nothing to read.
+    """
+    forcing_cfg = cfg.get("forcing", None)
+    if forcing_cfg is not None and forcing_cfg.get(
+            "prescribed_surface_flux", None) not in (None, "", "null"):
+        raise ValueError(
+            "forcing.prescribed_surface_flux is not supported with "
+            "run.mode=scm: the single-column runner builds no ForcingData, so "
+            "the prescribed fluxes would be ignored. Drive forced mode from "
+            "Python (SingleColumnModel.run(..., forcing=ForcingData with the "
+            "prescribed_* fields)) or run it on the full model.")
+    consumed = getattr(physics, "consumed_forcing_fields", lambda: ())()
+    if consumed:
+        raise ValueError(
+            f"run.mode=scm with a physics package that reads {list(consumed)} "
+            "(forced mode, #301): the single-column runner builds no "
+            "ForcingData to supply them. Use an interactive physics preset for "
+            "the SCM CLI, or drive forced mode from Python "
+            "(SingleColumnModel.run(..., forcing=...)).")
 
 
 def run_chunked(

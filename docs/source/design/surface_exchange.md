@@ -158,6 +158,24 @@ this bookkeeping choice does not touch the delivered column budgets.
 
 ### Doors
 
+Prescribed fluxes require a forced-mode consumer, and the converse holds
+too. A composition's consumers are the terms whose
+`PhysicsTerm.consumed_forcing_fields()` declares the `prescribed_*`
+fields: `SpeedySurfaceFlux(prescribed_fluxes=True)` and
+`PrescribedSurfaceFlux`. The interactive schemes (`SpeedySurfaceFlux`,
+the surface-coupled `TteTkeVerticalDiffusion`) compute their own fluxes and
+never read them. Supplying prescribed fluxes to a composition with no
+consumer is rejected (`check_prescribed_flux_consumers`: by the CLI
+runners right after forcing assembly, and by `Model.run` /
+`SingleColumnModel.run` for the Python door) rather than silently ignored;
+the error names `forcing.prescribed_surface_flux` and how to enable forced
+mode. The check is by declared capability, not class name, so a
+composition edited with `replace`/`remove` is judged by what its terms
+actually read. A forced-mode consumer without the fields raises at run
+start in the same places. The SCM CLI (`run.mode=scm`) builds no
+`ForcingData`, so it refuses both a `prescribed_surface_flux` block and a
+forced-mode physics; drive a forced column from Python instead.
+
 - **CLI**: `forcing.prescribed_surface_flux` with either
   `constants: {sensible_heat_flux, evaporation, stress_u, stress_v}`
   (uniform maps — the smoke-test door) or `file:` (a netCDF on the model
@@ -215,10 +233,16 @@ load or run start rather than silently mis-phasing the fluxes:
 - `BY_DATE` selection clamps to the end samples outside its axis, so at run
   start (`validate_forcing` of the forced-mode terms, which `Model`
   calls with the run window) a date-aligned archive must cover the whole
-  run, with one sample interval of slack at each end (its largest sample
-  spacing: a sample may be stamped at the start or the middle of the
-  interval it represents, so a Jan-1…Dec-1 or a Jan-15…Dec-15 monthly
-  archive both cover their calendar year). A run outside it raises and
+  run. The covered window is the file's CF time bounds when it carries
+  them (the variable the `time` coordinate's `bounds` attribute names, or
+  `time_bnds`/`time_bounds`; validated to bracket each sample), which is
+  exact for any stamp placement. Without bounds it is the end samples plus
+  each END's own spacing (first interval before the first sample, last
+  interval after the last): a sample may be stamped at the start or the
+  middle of the interval it represents, so a Jan-1…Dec-1 or a Jan-15…Dec-15
+  monthly archive both cover their calendar year. An interior gap never
+  widens that slack, so a daily archive with a long internal gap still ends
+  one day after its last sample. A run outside it raises and
   names both remedies — supply covering fluxes, or declare the file a
   climatology. The check is skipped only when the window or the series is
   traced (a run inside a JAX transformation).

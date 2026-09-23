@@ -487,8 +487,10 @@ Coupling to an external surface component
   ``forcing.prescribed_surface_flux`` (a ``constants`` block or a grid file
   whose climatology-vs-dated alignment is declared by its ``align`` key) or the
   ``ForcingData.prescribed_*`` fields a coupler sets directly, in the
-  published contract's units and signs (#301). See
-  :doc:`design/surface_exchange`.
+  published contract's units and signs (#301). Prescribed fluxes supplied to a
+  composition with no forced-mode consumer are rejected rather than silently
+  ignored, and a date-aligned flux archive must cover the run (its CF
+  ``time_bnds`` when present). See :doc:`design/surface_exchange`.
 
 Mechanisms
 """"""""""
