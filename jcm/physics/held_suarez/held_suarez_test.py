@@ -1,5 +1,7 @@
 import unittest
+
 import jax.numpy as jnp
+import pytest
 
 
 class TestHeldSuarezUnit(unittest.TestCase):
@@ -35,7 +37,15 @@ class TestHeldSuarezUnit(unittest.TestCase):
         # temperature tendency must be non-trivial somewhere on the grid.
         self.assertTrue(jnp.any(physics_tendency.temperature != 0))
 
+    @pytest.mark.slow
     def test_held_suarez_model(self):
+        """A full Held-Suarez integration leaves every prognostic finite.
+
+        Slow because the 36-step run takes ~3 min — the largest single test in
+        the suite. The forcing itself is covered by the unit test above and
+        ``model.run`` by ``model_test``/``runners_test``, so the fast gate
+        loses no unique lines to the move.
+        """
         from jcm.model import Model
         from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
         from jcm.physics.held_suarez.utils import get_held_suarez_coords
