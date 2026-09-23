@@ -25,7 +25,7 @@ from functools import partial
 import logging
 
 from jcm import profiling, provenance
-from jcm.date import DateData, parse_duration_days
+from jcm.date import DateData, absolute_seconds_since_epoch, parse_duration_days
 from jcm.forcing import ForcingData, default_forcing
 from jcm.predictions import ModelPredictions
 from jcm.physics_interface import (
@@ -35,6 +35,12 @@ from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.terrain import TerrainData
 from jcm.dycore.base import DynamicalCore, Predictions
 from jcm.dycore.dinosaur.dycore import DinosaurDycore
+
+#: The calendar a :class:`Model` runs on unless told otherwise — and so the
+#: one every CLI run mode uses (no config knob selects another), which the
+#: diagnostic ``run.mode=prescribed`` driver must share to place its states
+#: on the same fraction-of-year clock as the full integration.
+DEFAULT_MODEL_CALENDAR = "365_day"
 
 
 logger = logging.getLogger(__name__)
@@ -386,7 +392,7 @@ class Model:
                  terrain: TerrainData = None,
                  physics: Physics = None,
                  start_date: jdt.Datetime | None = None,
-                 calendar: str = "365_day",
+                 calendar: str = DEFAULT_MODEL_CALENDAR,
                  observers=()) -> None:
         """Initialise the model.
 
@@ -1345,6 +1351,23 @@ class Model:
             + float(jax.device_get(sim_time)) / 86400.0
         )
 
+    def _run_window_seconds(self, initial_state, total_time_days):
+        """``(start, end)`` of this run window in seconds since ``MODEL_EPOCH``.
+
+        The absolute clock :func:`jcm.date.absolute_seconds_since_epoch` puts
+        both the model date and ``BY_DATE`` forcing axes on, so terms'
+        ``validate_forcing`` can check a date-aligned series covers the run.
+        ``None`` when the initial state's ``sim_time`` is traced (``run``
+        inside a JAX transformation): there is no concrete window to check,
+        and validation must never force a host read of a tracer.
+        """
+        sim_time = self.dycore.sim_time(initial_state)
+        if isinstance(sim_time, jax.core.Tracer):
+            return None
+        start = (float(absolute_seconds_since_epoch(self.start_date))
+                 + float(jax.device_get(sim_time)))
+        return start, start + float(total_time_days) * 86400.0
+
     def run_from_state_with_carry(self,
                                   initial_state,
                                   forcing: ForcingData,
@@ -1380,8 +1403,29 @@ class Model:
         *different* windows reuse one compilation, where a concrete
         ``observer_t0_days`` per window cannot.
         """
+        # Fail loudly on the CONCRETE run forcing before compiling — the
+        # single choke point EVERY public entry point funnels through (``run``
+        # → ``resume`` → here; ``run_from_state`` → here). A term that
+        # requires an optional forcing field for its configuration (e.g.
+        # forced-mode surface fluxes reading ``prescribed_*``) reports the
+        # missing field here rather than reaching its ``None`` fallback and
+        # silently running with zero fluxes. It also receives this window's
+        # absolute (start, end) so a date-aligned forcing series can be checked
+        # to cover the run instead of clamping to its end sample. Traced
+        # forcing leaves / a traced sim_time are never read (the window is
+        # ``None`` then and value checks skip tracers), so this is safe inside
+        # a JAX transformation. Guarded so a physics package predating the hook
+        # (or a non-ComposablePhysics) is tolerated.
         save_interval_days = parse_duration_days(save_interval, calendar=self.calendar)
         total_time_days = parse_duration_days(total_time, calendar=self.calendar)
+        # Both directions of the forced-mode contract (#301), shared with
+        # every other run entry point: supplied fluxes need a consumer, and a
+        # consumer needs its fluxes covering this run window.
+        from jcm.physics.surface.prescribed_flux import validate_run_forcing
+        validate_run_forcing(
+            self.physics, forcing,
+            run_window=self._run_window_seconds(initial_state,
+                                                total_time_days))
         snapshot_stride = 0
         if snapshot_interval is not None and snapshot_variables:
             snap_days = parse_duration_days(snapshot_interval,

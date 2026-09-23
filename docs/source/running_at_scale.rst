@@ -51,6 +51,18 @@ plus ``qnc``/``qni`` for the two-moment one — is loaded from the file when it
 carries it. Pass an explicit mapping to rename variables, or
 ``run.tracer_vars={}`` to load none.
 
+``run.mode=prescribed`` evaluates each state at its own time: the file's
+``time`` coordinate gives the offsets from the first state, which
+``run.start_date`` dates, so date-aligned forcing is selected (and its
+coverage checked) at the snapshot dates, not at synthetic model steps. The
+state file must be a single netCDF whose ``time`` axis increases strictly and
+is either decoded dates (``datetime64``/``cftime``) or elapsed time (a
+``timedelta64`` axis, or a numeric one with ``units`` ``d``/``days`` or
+``s``/``seconds`` — ``d`` is what jcm writes for a numeric axis); a numeric
+axis with other or no units is rejected. ``run.chunk_days`` and
+``run.checkpoint_path`` belong to ``run.mode=full`` and are rejected in the
+state-file modes.
+
 Config groups
 -------------
 

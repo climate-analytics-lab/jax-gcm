@@ -29,6 +29,14 @@ class HeldSuarez(PhysicsTerm):
     construction against specs built from the live
     :data:`jcm.constants.physical_constants`, so a prior ``set_constants``
     override is honoured (consistent with the dynamical core).
+
+    Held-Suarez deliberately does NOT publish the ``surface_exchange``
+    coupling struct (jax-gcm#754): the forcing is a bulk relaxation with no
+    surface fluxes, precipitation or hydrology to report, so opting out
+    (rather than publishing zeros a coupler could mistake for a calm, dry
+    atmosphere) is the honest contract.
+    ``ComposablePhysics.require_surface_exchange()`` fails loudly for this
+    package; see docs/source/design/surface_exchange.md.
     """
 
     name: ClassVar[str] = "held_suarez"

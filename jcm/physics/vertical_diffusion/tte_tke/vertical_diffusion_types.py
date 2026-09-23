@@ -218,8 +218,13 @@ class VDiffSurfaceFluxes(NamedTuple):
     evaporation: jnp.ndarray     # E [kg/m²/s] (ncol,), positive up (into column)
     sensible_heat: jnp.ndarray   # SH [W/m²] (ncol,), positive up (into column)
     latent_heat: jnp.ndarray     # LH = alhc·E [W/m²] (ncol,)
-    stress_u: jnp.ndarray        # τ_u on the atmosphere [N/m²] (ncol,)
-    stress_v: jnp.ndarray        # τ_v on the atmosphere [N/m²] (ncol,)
+    # Downward momentum flux INTO the surface (positive with the wind);
+    # the delivered column momentum change is its negative (verified
+    # against the column-integrated tendency; see
+    # matrix_solver.diagnose_surface_fluxes). Matches the #754
+    # surface-exchange contract sign as-is.
+    stress_u: jnp.ndarray        # τ_u into the surface [N/m²] (ncol,)
+    stress_v: jnp.ndarray        # τ_v into the surface [N/m²] (ncol,)
 
     @classmethod
     def zeros(cls, ncol):
@@ -367,8 +372,10 @@ class VerticalDiffusionData:
     surface_evaporation: jnp.ndarray     # E [kg/m²/s] (ncols,), positive up
     surface_sensible_heat: jnp.ndarray   # SH [W/m²] (ncols,), positive up
     surface_latent_heat: jnp.ndarray     # LH [W/m²] (ncols,)
-    surface_stress_u: jnp.ndarray        # τ_u on the atmosphere [N/m²] (ncols,)
-    surface_stress_v: jnp.ndarray        # τ_v on the atmosphere [N/m²] (ncols,)
+    # Positive-down: the momentum flux INTO the surface (see
+    # VDiffSurfaceFluxes.stress_u above).
+    surface_stress_u: jnp.ndarray        # τ_u into the surface [N/m²] (ncols,)
+    surface_stress_v: jnp.ndarray        # τ_v into the surface [N/m²] (ncols,)
 
     @classmethod
     def zeros(cls, nodal_shape, nlev):

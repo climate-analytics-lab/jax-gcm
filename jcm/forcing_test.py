@@ -472,7 +472,8 @@ class TestForcingDataFromFileValidation(unittest.TestCase):
             },
             coords={'time': times},
         )
-        forcing = ForcingData.from_dataset(ds, validate=False)
+        forcing = ForcingData.from_dataset(ds, align_mode="wrap_year",
+                                           validate=False)
         self.assertAlmostEqual(float(forcing.co2_vmr), 700.0)
         self.assertAlmostEqual(float(forcing.ch4_vmr), 2.5)
         self.assertAlmostEqual(float(forcing.n2o_vmr), 0.5)
@@ -500,7 +501,8 @@ class TestForcingDataFromFileValidation(unittest.TestCase):
 
         try:
             with self.assertRaises(ValueError) as context:
-                ForcingData.from_file(temp_file, validate=False)
+                ForcingData.from_file(temp_file, align_mode="wrap_year",
+                                      validate=False)
             self.assertIn("Invalid nodal shape", str(context.exception))
         finally:
             os.remove(temp_file)
@@ -541,11 +543,12 @@ class TestForcingDataFromFileValidation(unittest.TestCase):
             # Synthetic zero-filled fixture — bypass the BC sanity check
             # that ``from_file`` runs on real data (would reject all-zero
             # ``stl``/``sst``).
-            forcing = ForcingData.from_file(temp_file, validate=False)
+            forcing = ForcingData.from_file(temp_file, align_mode="by_date",
+                                             validate=False)
             # Time axis preserved at full length, leading dimension.
             self.assertEqual(forcing.sst if False else forcing.sea_surface_temperature.values.shape,
                              (n_times, *valid_shape))
-            # Span > 1 year -> should auto-select BY_DATE alignment.
+            # A user file declares its alignment (#884).
             from jcm.forcing import BY_DATE
             self.assertEqual(int(forcing.sea_surface_temperature.align_mode), BY_DATE)
         finally:
@@ -575,7 +578,8 @@ class TestForcingDataFromFileValidation(unittest.TestCase):
 
         try:
             with self.assertRaises(ValueError) as context:
-                ForcingData.from_file(temp_file, validate=False)
+                ForcingData.from_file(temp_file, align_mode="wrap_year",
+                                      validate=False)
             self.assertIn("Missing variables", str(context.exception))
         finally:
             os.remove(temp_file)
@@ -872,7 +876,8 @@ class TestForcingNonMonthlyTimeAxis(unittest.TestCase):
         # 5 daily steps at the target grid: previously raised in
         # interpolate_to_daily ("expected 12 monthly timestamps").
         ds, coords, (nlon, nlat) = self._same_grid_dataset(5)
-        forcing = ForcingData.from_dataset(ds, coords=coords, validate=False)
+        forcing = ForcingData.from_dataset(ds, coords=coords, align_mode="by_date",
+                                           validate=False)
         self.assertEqual(forcing.alb0.shape, (nlon, nlat))
 
     def test_same_grid_multiyear_axis_loads(self):
@@ -989,6 +994,29 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         for key in ("dust_preferential_file", "dust_soil_types_file",
                     "dust_regions_file", "dust_roughness_file"):
             self.assertIsNone(out.get(key), key)
+
+    def test_roughness_reader_accepts_static_map(self):
+        # A time-invariant roughness map needs no alignment (#884 applies to
+        # time axes only): a bare (lon, lat) array comes back.
+        import xarray as xr
+        from jcm.forcing import TimeSeries, read_dust_roughness
+        ds = xr.Dataset(
+            {"surfrough": (("lat", "lon"),
+                           np.full((self.NLAT, self.NLON), 0.5),
+                           {"units": "cm"})},
+            coords={"lat": np.linspace(60, -60, self.NLAT),
+                    "lon": np.linspace(0, 270, self.NLON)})
+        out = read_dust_roughness(ds, align_mode="auto")
+        self.assertNotIsInstance(out, TimeSeries)
+        self.assertEqual(out.shape, (self.NLON, self.NLAT))
+
+    def test_static_oxidant_file_is_rejected_clearly(self):
+        # Oxidants are a time-resolved contract; a static file is refused
+        # with that reason, not with an alignment error.
+        from jcm.forcing import read_oxidant_vmr
+        ds = self._oxidant_ds().isel(time=0)
+        with self.assertRaisesRegex(ValueError, "must carry a time axis"):
+            read_oxidant_vmr(ds, nlev=5, align_mode="auto")
 
     def test_dust_reader_rejects_a_non_monthly_time_axis(self):
         from jcm.forcing import read_dust_source
@@ -1601,6 +1629,53 @@ class TestForcingFromBundles(unittest.TestCase):
             mock.patch.object(runners, "warn_emission_config_traps"),
         ], captured
 
+    def test_custom_fetch_keeps_the_manifest_alignment(self):
+        # Codex #877 P2 / #884: a custom ``fetch`` may return a path anywhere,
+        # which no longer names the manifest product. The alignment decided on
+        # the ORIGINAL ``hf://`` spec is carried forward, so a climatology
+        # bundle stays wrap_year and a transient one keeps its mode.
+        import contextlib
+
+        coords = _t63l47_coords()
+        shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
+
+        def fetch(rel):
+            return "/elsewhere/" + rel.replace("/", "_")
+
+        for surface, years, expected in (("pd", None, "wrap_year"),
+                                         ("pi", None, "wrap_year"),
+                                         ("amip", [2000, 2000],
+                                          "by_date_interp")):
+            patches, captured = self._capture_forcing_cfg(shape)
+            with contextlib.ExitStack() as stack:
+                for p in patches:
+                    stack.enter_context(p)
+                ForcingData.from_bundles(coords, surface=surface, years=years,
+                                         fetch=fetch)
+            fc = captured["forcing"]
+            files = fc["file"] if isinstance(fc["file"], list) else [fc["file"]]
+            self.assertTrue(all(f.startswith("/elsewhere/") for f in files))
+            self.assertEqual(fc["align"], expected, surface)
+
+    def test_custom_fetch_climatology_builds_end_to_end(self):
+        # The same through the real engine: the fetched copy of a climatology
+        # loads as WRAP_YEAR (it raised "forcing.align=auto" before the fix).
+        import shutil
+        import tempfile
+        from importlib import resources
+        from pathlib import Path
+
+        from jcm.forcing import WRAP_YEAR
+        coords = _t63l47_coords()
+        src = resources.files("jcm.data.bc.t63") / "forcing.nc"
+        with tempfile.TemporaryDirectory() as d:
+            def fetch(rel):
+                dst = Path(d) / "fetched_surface.nc"
+                shutil.copy(str(src), dst)
+                return str(dst)
+            f = ForcingData.from_bundles(coords, surface="pd", fetch=fetch)
+        self.assertEqual(int(f.sea_surface_temperature.align_mode), WRAP_YEAR)
+
     def test_pi_surface_composes_pi_ancillaries(self):
         import contextlib
 
@@ -1711,14 +1786,16 @@ class TestRelativeSoilWetnessChannel(unittest.TestCase):
         return ds
 
     def test_absent_stays_none_rather_than_a_fabricated_dry_soil(self):
-        forcing = ForcingData.from_dataset(self._ds(with_wetness=False))
+        forcing = ForcingData.from_dataset(self._ds(with_wetness=False),
+                                           align_mode="wrap_year")
         self.assertIsNone(forcing.soilw_rel)
 
     def test_read_and_sliced_to_a_bare_field(self):
         import jax_datetime as jdt
 
         from jcm.date import DateData
-        forcing = ForcingData.from_dataset(self._ds(with_wetness=True))
+        forcing = ForcingData.from_dataset(self._ds(with_wetness=True),
+                                           align_mode="wrap_year")
         self.assertIsNotNone(forcing.soilw_rel)
         date = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(
@@ -1739,6 +1816,270 @@ class TestRelativeSoilWetnessChannel(unittest.TestCase):
             _validate_bc_fields(ds)
         self.assertIn("'soilw_rel' is out of physical range",
                       str(ctx.exception))
+
+
+class TestStaticEmissionsNeedNoAlignment(unittest.TestCase):
+    """A static (time-less) user emissions file loads under ``auto`` (#884
+    concerns time axes only; Codex #877 P2 regression guard).
+    """
+
+    def test_readers_and_predicate(self):
+        import xarray as xr
+        from jcm.forcing import (TimeSeries, emissions_have_time,
+                                 read_anthropogenic_emissions,
+                                 read_prescribed_aerosol_emissions)
+        ds = xr.Dataset({
+            "emis_surface_combustion_bc": (("lon", "lat"), np.ones((4, 3))),
+            "aero_emis_m_so4_acc": (("lon", "lat"), np.ones((4, 3))),
+        })
+        self.assertFalse(emissions_have_time(ds))
+        a = read_anthropogenic_emissions(ds)            # default auto
+        s = read_prescribed_aerosol_emissions(ds)
+        self.assertNotIsInstance(a["emis_surface_combustion_bc"], TimeSeries)
+        self.assertNotIsInstance(s["m_so4_acc"], TimeSeries)
+        timed = ds.expand_dims(time=3)
+        self.assertTrue(emissions_have_time(timed))
+
+
+class TestAlignmentDecidedBeforeFetch(unittest.TestCase):
+    """Every spec→path substitution keeps the alignment the ORIGINAL spec's
+    manifest product decided (Codex #877 P2 / #884).
+    """
+
+    @staticmethod
+    def _fetch(rel):
+        return "/elsewhere/" + rel.replace("/", "_")
+
+    def test_resolve_input_explicit_spec_carries_its_kind(self):
+        from jcm.data import input_resolution as ir
+        clim = ir.resolve_input("file", "hf://bundles/t63/forcing_pd.nc",
+                                grid_token="t63", fetch=self._fetch)
+        self.assertTrue(clim.paths[0].startswith("/elsewhere/"))
+        self.assertEqual(clim.alignment, ir.WRAP_YEAR)
+        tr = ir.resolve_input("file", "hf://bundles/t63/forcing_amip/{year}.nc",
+                              grid_token="t63", years=[2000, 2001],
+                              fetch=self._fetch)
+        self.assertEqual(tr.alignment, ir.BY_DATE)
+        user = ir.resolve_input("file", "/scratch/me/sst.nc", grid_token="t63")
+        self.assertEqual(user.alignment, ir.AUTO)
+
+    def test_declare_manifest_align(self):
+        from jcm.forcing import declare_manifest_align as d
+        self.assertEqual(d("auto", "hf://bundles/t63_l47/ozone_pd.nc"),
+                         "wrap_year")
+        self.assertEqual(d("auto", ["hf://bundles/t63_l47/ozone_amip/1999.nc"],
+                           transient="by_date_interp"), "by_date_interp")
+        # Explicit, user file, per-product list and None pass through.
+        self.assertEqual(d("by_date", "hf://bundles/t63/forcing_pd.nc"),
+                         "by_date")
+        self.assertEqual(d("auto", "/scratch/me/o3.nc"), "auto")
+        self.assertEqual(d(["wrap_year"], "hf://bundles/t63/emissions_pd.nc"),
+                         ["wrap_year"])
+        self.assertEqual(d("auto", None), "auto")
+
+    def test_auto_emission_keys_declare_their_product_mode(self):
+        # ``auto`` emissions/oxidants resolve to FETCHED paths; their align
+        # keys are declared from the product ``auto`` picked.
+        from unittest import mock
+
+        from omegaconf import OmegaConf
+
+        from jcm import forcing_assembly as fa
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.utils import get_coords
+        coords = get_coords(vertical_coords=get_echam_levels(47),
+                            spectral_truncation=63)
+        cfg = OmegaConf.create({"physics": {"aerosol_module": "jam"}})
+        fcfg = OmegaConf.create({
+            "emissions_file": "auto", "oxidants_file": "auto",
+            "dms_file": None, "dust_file": None,
+            "dust_preferential_file": None, "dust_soil_types_file": None,
+            "dust_regions_file": None, "dust_roughness_file": None,
+            "emissions_align": "auto", "oxidants_align": "auto"})
+        with mock.patch.object(fa, "_resolve_data_path",
+                               side_effect=lambda p: "/elsewhere/x.nc"):
+            out = fa._resolve_emission_inputs(fcfg, cfg, coords,
+                                              is_pyses=False)
+        self.assertEqual(out.emissions_file, "/elsewhere/x.nc")
+        self.assertEqual(out.emissions_align, "wrap_year")
+        self.assertEqual(out.oxidants_align, "wrap_year")
+        # An explicit user choice is never overwritten.
+        fcfg.emissions_align = "by_date"
+        with mock.patch.object(fa, "_resolve_data_path",
+                               side_effect=lambda p: "/elsewhere/x.nc"):
+            out = fa._resolve_emission_inputs(fcfg, cfg, coords,
+                                              is_pyses=False)
+        self.assertEqual(out.emissions_align, "by_date")
+
+    def test_oxidant_align_uses_the_prefetch_spec(self):
+        from omegaconf import OmegaConf
+
+        from jcm import forcing_assembly as fa
+        fcfg = OmegaConf.create({
+            "oxidants_file": "hf://bundles/t63_l47/oxidants_pd.nc",
+            "oxidants_align": "auto"})
+        self.assertEqual(fa.oxidant_align(fcfg, ["/elsewhere/ox.nc"]),
+                         "wrap_year")
+
+    def test_ozone_attach_uses_the_prefetch_spec(self):
+        from unittest import mock
+
+        from omegaconf import OmegaConf
+
+        from jcm import forcing_assembly as fa
+        from jcm.ozone_climatology import OzoneClimatology
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.utils import get_coords
+        coords = get_coords(vertical_coords=get_echam_levels(47),
+                            spectral_truncation=63)
+        seen = {}
+
+        def _capture(path, **kw):
+            seen.update(path=path, align=kw["align_mode"])
+            return OzoneClimatology.empty()
+
+        for spec, expected in (
+                ("hf://bundles/t63_l47/ozone_pd.nc", "wrap_year"),
+                ("hf://bundles/t63_l47/ozone_amip/{year}.nc",
+                 "by_date_interp")):
+            fcfg = OmegaConf.create({"ozone_file": spec, "ozone_align": "auto",
+                                     "years": [2000, 2000]})
+            with mock.patch.object(fa, "_resolve_data_path",
+                                   side_effect=lambda p: "/elsewhere/o3.nc"), \
+                    mock.patch.object(OzoneClimatology, "from_file",
+                                      side_effect=_capture):
+                fa._attach_ozone(None, fcfg, coords)
+            self.assertEqual(seen["path"], "/elsewhere/o3.nc")
+            self.assertEqual(seen["align"], expected, spec)
+
+    def test_pyses_modes_use_the_prefetch_specs(self):
+        from omegaconf import OmegaConf
+
+        from jcm.runners import _pyses_align_modes
+        fcfg = OmegaConf.create({
+            "align": "auto", "emissions_align": "auto",
+            "oxidants_align": "auto", "ozone_align": "auto",
+            "emissions_file": "hf://bundles/t63/emissions_pd.nc",
+            "oxidants_file": "hf://bundles/t63_l47/oxidants_pd.nc"})
+        modes = _pyses_align_modes(fcfg, "hf://bundles/t63/forcing_pd.nc",
+                                   "hf://bundles/t63_l47/ozone_pd.nc")
+        self.assertEqual(modes, {"align_mode": "wrap_year",
+                                 "emissions_align": "wrap_year",
+                                 "oxidants_align": "wrap_year",
+                                 "ozone_align": "wrap_year"})
+        # User files keep ``auto`` for the readers to reject if timed.
+        fcfg.emissions_file = "/scratch/me/e.nc"
+        self.assertEqual(_pyses_align_modes(fcfg, "/me/f.nc", None)[
+            "emissions_align"], "auto")
+
+
+class TestResolveAlign(unittest.TestCase):
+    """The one time-alignment rule every forcing input shares (#884)."""
+
+    def test_explicit_modes_pass_through(self):
+        from jcm.forcing import resolve_align
+        for mode in ("wrap_year", "by_date", "by_date_interp"):
+            self.assertEqual(resolve_align(mode, paths="/me/x.nc"), mode)
+            self.assertEqual(resolve_align(mode), mode)
+
+    def test_unknown_mode_raises(self):
+        from jcm.forcing import resolve_align
+        with self.assertRaisesRegex(ValueError, "unknown time alignment"):
+            resolve_align("climatology", paths="/me/x.nc")
+
+    def test_auto_resolves_mirror_products_from_the_manifest(self):
+        from jcm.forcing import resolve_align
+        self.assertEqual(resolve_align(
+            "auto", paths="hf://bundles/t63/forcing_pd.nc"), "wrap_year")
+        self.assertEqual(resolve_align(
+            "auto", paths="hf://bundles/t63/forcing_amip/{year}.nc"), "by_date")
+        # A loader whose transient product is mid-month means asks for interp.
+        self.assertEqual(resolve_align(
+            "auto", paths="hf://bundles/t63_l47/ozone_amip/{year}.nc",
+            transient="by_date_interp"), "by_date_interp")
+
+    def test_auto_raises_for_a_user_file_naming_the_knob(self):
+        from jcm.forcing import resolve_align
+        with self.assertRaisesRegex(ValueError, r"forcing\.ozone_align=auto.*"
+                                    r"wrap_year.*by_date.*#884"):
+            resolve_align("auto", paths="/scratch/me/ozone.nc",
+                          config_key="forcing.ozone_align")
+
+    def test_auto_raises_for_an_in_memory_dataset(self):
+        from jcm.forcing import resolve_align
+        with self.assertRaisesRegex(ValueError, "in-memory dataset"):
+            resolve_align("auto")
+
+    def test_from_dataset_auto_raises(self):
+        """A one-year transient SST archive is never replayed as a climatology
+        by default: an in-memory dataset has no manifest identity.
+        """
+        import pandas as pd
+        import xarray as xr
+        shape = (96, 48)
+        ds = xr.Dataset(
+            {v: (("lon", "lat", "time"), np.full((*shape, 12), 280.0))
+             for v in ("stl", "icec", "sst", "soilw_am", "snowc")},
+            coords={"time": pd.date_range("1990-01-01", periods=12,
+                                          freq="MS")})
+        ds["alb"] = (("lon", "lat"), np.full(shape, 0.1))
+        with self.assertRaisesRegex(ValueError, "forcing.align=auto"):
+            ForcingData.from_dataset(ds, validate=False)
+
+    def test_from_file_auto_resolves_the_packaged_climatology(self):
+        from importlib import resources
+
+        from jcm.forcing import WRAP_YEAR
+        data_dir = resources.files('jcm.data.bc.t30.clim')
+        f = ForcingData.from_file(data_dir / 'forcing.nc',
+                                  coords=get_speedy_coords(layers=8, spectral_truncation=31))
+        self.assertEqual(int(f.sea_surface_temperature.align_mode), WRAP_YEAR)
+
+    def test_from_file_auto_raises_for_a_user_copy(self):
+        import shutil
+        import tempfile
+        from importlib import resources
+        from pathlib import Path
+        src = resources.files('jcm.data.bc.t30.clim') / 'forcing.nc'
+        with tempfile.TemporaryDirectory() as d:
+            dst = Path(d) / "forcing.nc"
+            shutil.copy(str(src), dst)
+            with self.assertRaisesRegex(ValueError, "forcing.align=auto"):
+                ForcingData.from_file(dst, coords=get_speedy_coords(layers=8, spectral_truncation=31))
+
+
+class TestWrapYearSkipsEpochConversion(unittest.TestCase):
+    """A WRAP_YEAR reader never converts times to Gregorian epoch seconds, so a
+    climatology stamped in an idealised calendar year 0 loads (Codex #877 P2,
+    applied to every reader that can wrap).
+    """
+
+    def test_dms_reader_year_zero_noleap(self):
+        import cftime
+        import xarray as xr
+        from jcm.forcing import WRAP_YEAR, read_dms_seawater
+        times = [cftime.DatetimeNoLeap(0, m, 15) for m in range(1, 13)]
+        ds = xr.Dataset(
+            {"DMS_sea": (("time", "lat", "lon"), np.ones((12, 3, 4)),
+                         {"units": "nanomol l-1"})},
+            coords={"time": times, "lat": [-30.0, 0.0, 30.0],
+                    "lon": [0.0, 90.0, 180.0, 270.0]})
+        ts = read_dms_seawater(ds)
+        self.assertEqual(int(ts.align_mode), WRAP_YEAR)
+        self.assertTrue(bool(np.all(np.diff(np.asarray(ts.time_seconds)) > 0)))
+
+    def test_emissions_reader_year_zero_noleap(self):
+        import cftime
+        import xarray as xr
+        from jcm.forcing import WRAP_YEAR, read_anthropogenic_emissions
+        times = [cftime.DatetimeNoLeap(0, m, 15) for m in range(1, 13)]
+        ds = xr.Dataset(
+            {"emis_surface_combustion_bc": (("time", "lon", "lat"),
+                                            np.ones((12, 4, 3)))},
+            coords={"time": times})
+        out = read_anthropogenic_emissions(ds, align_mode="wrap_year")
+        self.assertEqual(
+            int(out["emis_surface_combustion_bc"].align_mode), WRAP_YEAR)
 
 
 if __name__ == '__main__':

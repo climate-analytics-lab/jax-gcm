@@ -163,6 +163,27 @@ Packaged config-tree contract; the ``experiment`` group is renamed
   particular composes ``+experiment@atmosphere=<name>`` and must update in the
   same release cycle.
 
+Forcing time alignment is declared, never inferred
+""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- **``align: auto`` no longer guesses from a file's time axis** (#884). v2
+  treated any file spanning at most ~one year as a climatology and replayed it
+  every model year, so a one-year *transient* archive (a year of monthly SST,
+  ozone, emissions or fluxes) was silently recycled. Now ``auto`` resolves
+  only a data-mirror or packaged product, from the ``alignment`` the mirror
+  manifest records (``climatology`` → ``wrap_year``, ``transient`` →
+  ``by_date``; ``by_date_interp`` for transient ozone). **For any other file
+  ``auto`` raises**, naming the knob to set. One rule covers every
+  time-resolved input on both backends: ``forcing.align`` (SST/sea-ice file),
+  the new ``forcing.ozone_align`` / ``forcing.emissions_align`` (a scalar, or
+  one mode per ``emissions_file`` product) / ``forcing.oxidants_align``,
+  ``forcing.prescribed_surface_flux.align``, and the Python readers'
+  ``align_mode`` (``ForcingData.from_dataset`` has no file identity, so its
+  ``auto`` always raises). **Fix:** declare the file's kind, e.g.
+  ``forcing.align=wrap_year`` for a climatology or ``forcing.align=by_date``
+  for dated samples. Every shipped configuration and the ``amip`` / ``era5``
+  presets resolve unchanged. See :doc:`v2_to_v3`.
+
 MACv2-SP removed from JAM; namespaced aerosol output
 """"""""""""""""""""""""""""""""""""""""""""""""""""
 
@@ -441,6 +462,35 @@ Radiation, clouds and gravity waves
   ``gw_scheme="frontal"`` or ``gw_scheme="both"`` to run it alongside Hines.
 - **Per-level precipitation flux profiles** and a CloudSat COSP warm-rain
   hook.
+
+Coupling to an external surface component
+"""""""""""""""""""""""""""""""""""""""""
+
+- **A package-independent surface-exchange contract.** Every physics package
+  that resolves a surface publishes a
+  :class:`~jcm.physics.surface.surface_exchange.SurfaceExchange` struct under
+  ``diagnostics["surface_exchange"]`` — net downward heat flux, sensible and
+  latent heat, evaporation, total precipitation, wind stress, near-surface
+  wind, and lowest-level air density / potential temperature, with one
+  documented sign convention (turbulent fluxes positive up, net heat flux
+  positive down). Grid-mean fields are guaranteed; per-tile and rain/snow-split
+  fields are optional and absent (not zero) where a package cannot fill them
+  faithfully. SPEEDY and ECHAM publish it; Held-Suarez opts out;
+  ``ComposablePhysics.require_surface_exchange()`` fails a coupler fast at
+  composition time (#754).
+- **Forced surface mode.** ``physics=speedy-forced-flux`` /
+  ``physics=echam-forced-flux`` deliver externally prescribed sensible-heat,
+  evaporation and momentum fluxes in place of the package's own surface
+  exchange, entering the same tendency pathways (SPEEDY's bottom-level source;
+  ECHAM's ``TteTkeVerticalDiffusion(couple_surface=False)`` plus an explicit
+  ``PrescribedSurfaceFlux`` term). Fluxes ride
+  ``forcing.prescribed_surface_flux`` (a ``constants`` block or a grid file
+  whose climatology-vs-dated alignment is declared by its ``align`` key) or the
+  ``ForcingData.prescribed_*`` fields a coupler sets directly, in the
+  published contract's units and signs (#301). Prescribed fluxes supplied to a
+  composition with no forced-mode consumer are rejected rather than silently
+  ignored, and a date-aligned flux archive must cover the run (its CF
+  ``time_bnds`` when present). See :doc:`design/surface_exchange`.
 
 Mechanisms
 """"""""""
@@ -729,6 +779,63 @@ Accepted limitations (proposed)
   L95 needs L95 oxidant and ozone inputs staged, and the single-column
   JAM check (``scm_check.py``) composes grey radiation against the matrix's own
   RRTMGP-for-ECHAM pairing policy (#638).
+
+Regression fixtures follow the supported matrix
+"""""""""""""""""""""""""""""""""""""""""""""""
+
+
+- The GPU-gated climatology regression is now
+  ``test_release_matrix_default_statistics``, one sub-test per member of
+  ``tools/release_validation/matrix.yaml``, each built through that member's
+  **validated preset** rather than a composition written for the test.
+  Per-member bands live in ``jcm/data/test/release_matrix/`` (tens to a few
+  hundred KB, so a change is reviewable as a diff); the init state each member resumes from is
+  hosted on the data mirror under ``bundles/<grid>_<levels>/init_states/`` and
+  fetched cache-first. A member's bands and its state are regenerated together
+  by ``jcm.data.test.release_matrix.generate_stats.generate(<member>)`` — they
+  describe the same window and are only meaningful as a pair. Set
+  ``JCM_FIXTURE_STATE_DIR`` to validate freshly generated states before
+  publishing them.
+- Every band is an **area-weighted global mean** (per level for 3-D fields),
+  weighted by the grid's own Gauss-Legendre quadrature weights through
+  :func:`jcm.analysis.global_mean`, not an arithmetic mean over latitude
+  rings, which would over-weight the small polar rings. Generation and the
+  regression's own check share the one reduction.
+- Band widths are floored so a regression band can never be narrower than
+  the computation's own noise, and never so wide it cannot fail. Each band is
+  ``3 * std`` of the daily global means, widened (widest wins) by four
+  floors: a few float32 ULP of the field magnitude (``1e-6 * |mean|``, ~8 ULP,
+  so the bit-reproducible pure-a ``pressure_full`` levels get a few-ULP band);
+  ``1e-6 * max|mean|`` over the variable's **own** profile, for the near-zero
+  tail (humidity and condensate aloft) — scaled per variable because a single
+  absolute floor sized for humidity would be wider than every aerosol mass
+  signal (global means of 1e-10 to 3e-9 kg/kg); ``1e-30``, which pins a
+  species with no source in the window to exactly zero, so a source appearing
+  for it fails; and ``3 x <var>.noise``, the measured peak-to-peak spread of
+  the same window across independent repeats in separate processes. The JAM
+  members measure ``noise`` from six repeats, the others from three
+  (``REPRODUCIBILITY_REPEATS``).
+- Each member is banded on its defining prognostic state, not just core
+  meteorology: ``qc``/``qi`` and the MACv2-SP or JAM aerosol optical depth for
+  every ECHAM member, and for the JAM members every interstitial and
+  cloud-borne aerosol mass and the precursor gases. Number concentrations are
+  banded as mass-weighted **column integrals** (``qnc_column``,
+  ``qni_column``, and for JAM ``n_total_column`` summed over modes and both
+  phases), each layer weighted by its air mass ``dp/g`` — not by
+  ``air_density * layer_thickness``, whose thickness is floored at 10 m for
+  the physics that divides by it and so overstates thin layers; per-level numbers are not banded, because
+  near-threshold activation and nucleation cells make them jump between runs
+  of identical code.
+- Every reduction behind a band propagates NaN, on both the generating and the
+  checking side: a run that goes non-finite in even one cell fails its member
+  as non-finite (and ``generate`` refuses to write bands from it), rather than
+  averaging the surviving cells into a plausible mean.
+- Each band file records the environment its bands were drawn under
+  (``bands_environment``: python, jax, jax-rrtmgp, dinosaur, flax, mam4-jax,
+  ...), the one its init state was spun up under
+  (``init_state_environment``) and its ``reproducibility_repeats``. Bands must
+  be generated in a CI-parity environment: bands drawn under a different
+  jax-rrtmgp release fail a correct model across the whole column.
 
 Calibration and capability gaps
 """""""""""""""""""""""""""""""

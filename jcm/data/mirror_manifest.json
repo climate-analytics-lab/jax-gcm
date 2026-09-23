@@ -354,6 +354,30 @@
       "auto": false,
       "staged": true
     },
+    "forcing_packaged": {
+      "path": "data/bc/*/forcing.nc",
+      "source": "packaged",
+      "grids": null,
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "file",
+      "auto": false,
+      "staged": true
+    },
+    "forcing_packaged_t30": {
+      "path": "data/bc/t30/clim/forcing.nc",
+      "source": "packaged",
+      "grids": null,
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "climatology",
+      "key": "file",
+      "auto": false,
+      "staged": true
+    },
     "terrain_packaged": {
       "path": "data/bc/*/terrain.nc",
       "source": "packaged",

@@ -49,8 +49,10 @@ _DMS_SRC = f"{_INPUTDATA}/atm/cam/chem/ocnexch/Csw_DMS_Lana2011_f09f09_1750_2100
 _OXID_SRC = (f"{_INPUTDATA}/atm/cam/chem/trop_mozart_aero/oxid/"
              "oxid_1.9x2.5_L26_1850-2015_c20181106.nc")
 
-# 12 monthly mid-month timestamps: gives the readers a clean one-year span so
-# ``align_mode='auto'`` resolves to WRAP_YEAR (climatology) indexing.
+# 12 monthly mid-month timestamps, one per calendar month: the one-year
+# climatology layout the WRAP_YEAR readers index by month position (these
+# products are published as manifest ``climatology`` products, which is what
+# ``align: auto`` resolves from — never the time axis, #884).
 _CLIMO_TIME = np.array([np.datetime64(f"2014-{m:02d}-15") for m in range(1, 13)])
 
 

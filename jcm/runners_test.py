@@ -8,12 +8,14 @@ T85x47 grid here.
 
 import logging
 import os
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import numpy as np
 import pytest
+import xarray as xr
 from hydra import compose, initialize_config_dir
 
 # Path/auto resolution lives in the forcing-side engine; tests stub it THERE
@@ -34,6 +36,11 @@ from jcm.runners import (
 
 
 CONFIG_DIR = str(Path(__file__).parent / "config")
+
+
+#: A stand-in ``(dataset, states)`` for ``_load_states_from_cfg``: one state
+#: (so no time axis is needed) with the leading-axis shape the runner reads.
+_ONE_STATE_FILE = (xr.Dataset(), types.SimpleNamespace(u_wind=np.zeros((1,))))
 
 
 def _compose(overrides=None):
@@ -558,6 +565,7 @@ class TestAttachOzonePreservesAquaplanetSST(unittest.TestCase):
             ).to_netcdf(ozone_path)
             cfg.forcing.kind = "default"
             cfg.forcing.ozone_file = str(ozone_path)
+            cfg.forcing.ozone_align = "wrap_year"
 
             forcing_with_ozone = build_forcing(cfg, coords)
 
@@ -860,7 +868,8 @@ class TestEmissionsConfig(unittest.TestCase):
                                   (("lon", "lat", "time"),
                                    np.full((nlon, nlat, 12), 1e-11))}, nlon, nlat)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
-                            f"forcing.emissions_file={p}"])
+                            f"forcing.emissions_file={p}",
+                            "forcing.emissions_align=wrap_year"])
             f = build_forcing(cfg, coords)
         self.assertIn("emis_surface_combustion_bc", f.anthropogenic_emissions)
         self.assertIsNone(f.prescribed_aerosol_emissions)
@@ -875,7 +884,8 @@ class TestEmissionsConfig(unittest.TestCase):
                                   (("lon", "lat", "time"),
                                    np.full((nlon, nlat, 12), 1e-11))}, nlon, nlat)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
-                            f"forcing.emissions_file={p}"])
+                            f"forcing.emissions_file={p}",
+                            "forcing.emissions_align=wrap_year"])
             f = build_forcing(cfg, coords)
         self.assertIn("m_so4_acc", f.prescribed_aerosol_emissions)
         self.assertIsNone(f.anthropogenic_emissions)
@@ -902,7 +912,8 @@ class TestEmissionsConfig(unittest.TestCase):
                          np.full((nlon, nlat, 12), 2e-11))},
                        coords=base).to_netcdf(p2)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
-                            f"forcing.emissions_file=[{p1},{p2}]"])
+                            f"forcing.emissions_file=[{p1},{p2}]",
+                            "forcing.emissions_align=wrap_year"])
             f = build_forcing(cfg, coords)
         self.assertIn("emis_surface_combustion_bc", f.anthropogenic_emissions)
         self.assertIn("emis_biomass_burning_bc", f.anthropogenic_emissions)
@@ -932,7 +943,8 @@ class TestEmissionsConfig(unittest.TestCase):
                        coords=base).to_netcdf(p2)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
                             "grid=echam_t42_l8_sigma",
-                            f"forcing.emissions_file=[{p1},{p2}]"])
+                            f"forcing.emissions_file=[{p1},{p2}]",
+                            "forcing.emissions_align=wrap_year"])
             with self.assertRaises(ValueError) as ctx:
                 build_forcing(cfg, coords)
         msg = str(ctx.exception)
@@ -959,7 +971,8 @@ class TestEmissionsConfig(unittest.TestCase):
                            coords=base).to_netcdf(p)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
                             "grid=echam_t42_l8_sigma",
-                            f"forcing.emissions_file=[{p1},{p2}]"])
+                            f"forcing.emissions_file=[{p1},{p2}]",
+                            "forcing.emissions_align=wrap_year"])
             with self.assertRaises(ValueError) as ctx:
                 build_forcing(cfg, coords)
         msg = str(ctx.exception)
@@ -1016,6 +1029,8 @@ class TestEmissionsConfig(unittest.TestCase):
             with open_dict(cfg):
                 cfg.forcing.emissions_file = [str(Path(tmp) / "bb_{year}.nc"),
                                               str(anthro_path)]
+                # User files: each product declares its own mode (#884).
+                cfg.forcing.emissions_align = ["by_date", "wrap_year"]
                 cfg.forcing.years = [2000, 2001]
             f = build_forcing(cfg, coords)
 
@@ -1075,6 +1090,7 @@ class TestEmissionsConfig(unittest.TestCase):
             with open_dict(cfg):
                 cfg.forcing.emissions_file = [str(Path(tmp) / "bb_{year}.nc"),
                                               str(Path(tmp) / "an_{year}.nc")]
+                cfg.forcing.emissions_align = "by_date"
                 cfg.forcing.years = [2000, 2001]
             f = build_forcing(cfg, coords)
         em = f.anthropogenic_emissions
@@ -1082,6 +1098,88 @@ class TestEmissionsConfig(unittest.TestCase):
             self.assertIsInstance(em[var], TimeSeries)
             self.assertEqual(int(em[var].align_mode), BY_DATE)
             self.assertEqual(em[var].values.shape[0], 24)
+
+    def test_static_user_file_loads_under_auto(self):
+        # Codex #877 P2: a user emissions file whose fields have no time axis
+        # needs no alignment, so the default ``emissions_align=auto`` must not
+        # reject it (alignment is resolved only for a timed product).
+        import tempfile
+
+        import xarray as xr
+        from jcm.forcing import TimeSeries
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "static.nc"
+            xr.Dataset(
+                {"emis_surface_combustion_bc": (("lon", "lat"),
+                                                np.full((nlon, nlat), 1e-11))},
+                coords={"lon": np.linspace(0, 360, nlon, endpoint=False),
+                        "lat": np.linspace(-87, 87, nlat)},
+            ).to_netcdf(p)
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file={p}"])
+            f = build_forcing(cfg, coords)
+        leaf = f.anthropogenic_emissions["emis_surface_combustion_bc"]
+        self.assertNotIsInstance(leaf, TimeSeries)
+        self.assertTrue(np.allclose(np.asarray(leaf), 1e-11))
+
+    def test_user_file_align_auto_raises_naming_the_knob(self):
+        # #884: a user emission file is not a mirror product, so ``auto``
+        # cannot resolve its time alignment and must raise, not guess.
+        import tempfile
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, {"emis_surface_combustion_bc":
+                                  (("lon", "lat", "time"),
+                                   np.full((nlon, nlat, 12), 1e-11))}, nlon, nlat)
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file={p}"])
+            with self.assertRaisesRegex(ValueError,
+                                        "forcing.emissions_align=auto"):
+                build_forcing(cfg, coords)
+
+    def test_per_product_align_list_must_match_products(self):
+        import tempfile
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, {"emis_surface_combustion_bc":
+                                  (("lon", "lat", "time"),
+                                   np.full((nlon, nlat, 12), 1e-11))}, nlon, nlat)
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file={p}",
+                            "forcing.emissions_align=[wrap_year,by_date]"])
+            with self.assertRaisesRegex(ValueError, "one mode per product"):
+                build_forcing(cfg, coords)
+
+    def test_user_surface_file_align_auto_raises(self):
+        # The SST/sea-ice boundary file follows the same rule: a user copy of
+        # even a packaged climatology must declare ``forcing.align``.
+        import shutil
+        import tempfile
+        from importlib import resources
+        from jcm.runners import build_forcing
+        src = resources.files("jcm.data.bc.t30.clim") / "forcing.nc"
+        with tempfile.TemporaryDirectory() as tmp:
+            dst = Path(tmp) / "forcing.nc"
+            shutil.copy(str(src), dst)
+            cfg = _compose(["forcing=from_file", f"forcing.file={dst}"])
+            from jcm.runners import build_coords
+            coords = build_coords(cfg)
+            with self.assertRaisesRegex(ValueError, "forcing.align=auto"):
+                build_forcing(cfg, coords)
+            # Declared, it loads.
+            cfg = _compose(["forcing=from_file", f"forcing.file={dst}",
+                            "forcing.align=wrap_year"])
+            self.assertIsNotNone(build_forcing(cfg, coords))
 
     def test_grid_mismatch_raises(self):
         import tempfile
@@ -1095,7 +1193,8 @@ class TestEmissionsConfig(unittest.TestCase):
                                    np.full((nlon + 2, nlat, 12), 1e-11))},
                             nlon + 2, nlat)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
-                            f"forcing.emissions_file={p}"])
+                            f"forcing.emissions_file={p}",
+                            "forcing.emissions_align=wrap_year"])
             with self.assertRaisesRegex(ValueError, "model grid"):
                 build_forcing(cfg, coords)
 
@@ -1108,7 +1207,8 @@ class TestEmissionsConfig(unittest.TestCase):
             p = self._write(tmp, {"sst": (("lon", "lat", "time"),
                                           np.zeros((nlon, nlat, 12)))}, nlon, nlat)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
-                            f"forcing.emissions_file={p}"])
+                            f"forcing.emissions_file={p}",
+                            "forcing.emissions_align=wrap_year"])
             with self.assertRaisesRegex(ValueError, "no emissions variables"):
                 build_forcing(cfg, coords)
 
@@ -1209,6 +1309,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
                 f"forcing.dust_file={dust}",
                 *companions,
                 f"forcing.oxidants_file={ox}",
+                "forcing.oxidants_align=wrap_year",
             ])
             f = build_forcing(cfg, coords)
         nlon, nlat = coords.horizontal.nodal_shape
@@ -1282,7 +1383,8 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
             _, _, ox, _ = self._write_files(tmp, coords,
                                          nlev=coords.nodal_shape[0] + 3)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
-                            f"forcing.oxidants_file={ox}"])
+                            f"forcing.oxidants_file={ox}",
+                            "forcing.oxidants_align=wrap_year"])
             with self.assertRaisesRegex(ValueError, "levels"):
                 build_forcing(cfg, coords)
 
@@ -1481,7 +1583,7 @@ class TestModeDispatch(unittest.TestCase):
                 mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
                 mock.patch("jcm.runners.warn_on_config_traps"), \
                 mock.patch("jcm.runners._load_states_from_cfg",
-                           return_value=(None, object())), \
+                           return_value=_ONE_STATE_FILE), \
                 mock.patch(
                     "jcm.prescribed_state_model.PrescribedStateModel",
                 ) as prescribed_cls:
@@ -1512,7 +1614,7 @@ class TestModeDispatch(unittest.TestCase):
                 mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
                 mock.patch("jcm.runners.warn_on_config_traps"), \
                 mock.patch("jcm.runners._load_states_from_cfg",
-                           return_value=(None, object())), \
+                           return_value=_ONE_STATE_FILE), \
                 mock.patch(
                     "jcm.prescribed_state_model.PrescribedStateModel",
                 ) as prescribed_cls:
@@ -3772,6 +3874,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         # ``years`` is likewise not in the base forcing struct.
         OmegaConf.set_struct(cfg, False)
         cfg.forcing.emissions_file = "hf://bundles/t42/emis/{year}.nc"
+        cfg.forcing.emissions_align = "by_date"
         cfg.forcing.years = [2000, 2001]
         coords = build_coords(cfg)
 
@@ -3820,6 +3923,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         OmegaConf.set_struct(cfg, False)
         cfg.forcing.oxidants_file = \
             "hf://bundles/t42_l8/oxidants_{year}.nc"
+        cfg.forcing.oxidants_align = "by_date"
         cfg.forcing.years = [2000, 2001]
         coords = build_coords(cfg)
 
@@ -3852,8 +3956,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             seen["paths"],
             ["hf://bundles/t42_l8/oxidants_2000.nc",
              "hf://bundles/t42_l8/oxidants_2001.nc"])
-        # Multi-year axis → "auto" alignment (BY_DATE for the transient run).
-        self.assertEqual(read_mock.call_args.kwargs["align_mode"], "auto")
+        # Not a mirror product, so the declared mode is passed through (#884).
+        self.assertEqual(read_mock.call_args.kwargs["align_mode"], "by_date")
 
     def test_oxidants_explicit_list_is_one_product(self):
         """An explicit-list oxidants_file is ONE product, opened together (F2).
@@ -3877,6 +3981,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         ])
         OmegaConf.set_struct(cfg, False)
         cfg.forcing.oxidants_file = ["/ox_a.nc", "/ox_b.nc"]
+        cfg.forcing.oxidants_align = "by_date"
         coords = build_coords(cfg)
 
         seen = {}
@@ -4227,6 +4332,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         ])
         OmegaConf.set_struct(cfg, False)
         cfg.forcing.oxidants_file = ["/ox_2000.nc", "/ox_2001.nc"]
+        cfg.forcing.oxidants_align = "by_date"
         coords = build_coords(cfg)
         seen = {}
 

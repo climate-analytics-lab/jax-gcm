@@ -1,0 +1,37 @@
+# ECHAM physics forced by externally prescribed surface fluxes (jax-gcm#301).
+#
+# Factory-built (like ``echam-jam.yaml``): ``echam_physics(
+# prescribed_surface_fluxes=true)`` composes
+# ``TteTkeVerticalDiffusion(couple_surface=false)`` — the implicit solve's
+# surface Robin boundary condition is OFF, interior mixing only — plus a
+# ``PrescribedSurfaceFlux`` term between vdiff and the surface term that
+# delivers the coupler's fluxes as explicit bottom-layer sources. A flat
+# term-list yaml cannot express this preset because Hydra's dict merge
+# appends new term keys at the END of the list, and the prescribed-flux
+# term must sit exactly where the interactive delivery happened (before
+# ``echam_surface``, so the Tiedtke moisture-budget closure anchors to the
+# prescribed evaporation same-step).
+#
+# The fluxes come from the ``forcing.prescribed_surface_flux`` block —
+# units/signs are the surface-exchange coupling contract's
+# (docs/source/design/surface_exchange.md): sensible heat [W/m2] and
+# evaporation [kg/m2/s] positive up, stress [N/m2] positive down (into the
+# surface). Example, a constant-flux aquaplanet:
+#
+#     python -m jcm.main physics=echam-forced-flux grid=echam_t63_l47_hybrid \
+#         +forcing.prescribed_surface_flux.constants.sensible_heat_flux=10.0 \
+#         +forcing.prescribed_surface_flux.constants.evaporation=3.0e-5 \
+#         +forcing.prescribed_surface_flux.constants.stress_u=0.05 \
+#         +forcing.prescribed_surface_flux.constants.stress_v=0.0
+#
+# A coupler driving jcm programmatically instead sets the ``prescribed_*``
+# fields on its ``ForcingData`` directly and composes
+# ``echam_physics(prescribed_surface_fluxes=True)``.
+
+builder: echam_physics
+
+# RRTMGP is the supported ECHAM radiation (same rule as echam.yaml: no
+# CLI route to a grey-ECHAM composition).
+radiation_scheme: rrtmgp
+
+prescribed_surface_fluxes: true

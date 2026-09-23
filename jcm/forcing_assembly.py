@@ -27,6 +27,7 @@ import logging
 from jcm import provenance
 from jcm.data import input_resolution as ir
 from jcm.data import mirror_manifest as mm
+from jcm.forcing import PRESCRIBED_FLUX_FILE_VARS
 from jcm.forcing import expand_yearly_files as _expand_years
 
 logger = logging.getLogger(__name__)
@@ -397,7 +398,35 @@ def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
             continue
         updates[key] = (None if key in companions and dust is None
                         else resolve(forcing_cfg.get(key, None), key))
+    # ``auto`` became a FETCHED local path, which need not name its product
+    # any more; declare the alignment from the product ``auto`` picked, so the
+    # path substitution cannot change it (#884). Only a still-``auto`` align
+    # key is declared — an explicit one is the user's.
+    for key, align_key in _AUTO_ALIGN_KEYS.items():
+        if (forcing_cfg.get(key, None) == "auto"
+                and updates.get(key) is not None
+                and forcing_cfg.get(align_key, "auto") == "auto"):
+            mode = _auto_product_mode(key)
+            if mode is not None:
+                updates[align_key] = mode
     return OmegaConf.merge(forcing_cfg, updates)
+
+
+#: The ``auto``-resolvable time-resolved inputs and their alignment keys (dms /
+#: dust readers declare ``wrap_year`` themselves: climatology-only keys).
+_AUTO_ALIGN_KEYS = {"emissions_file": "emissions_align",
+                    "oxidants_file": "oxidants_align"}
+
+
+def _auto_product_mode(key, transient="by_date"):
+    """Explicit mode of the manifest product ``forcing.<key>=auto`` picks."""
+    from jcm.forcing import manifest_mode_for_kind
+    manifest = mm.load_manifest()
+    name = mm.product_for_key(manifest, key)
+    if name is None:
+        return None
+    return manifest_mode_for_kind(mm.product(manifest, name)["alignment"],
+                                  transient)
 
 
 # ---------------------------------------------------------------------------
@@ -445,9 +474,14 @@ def assemble_spectral_forcing(forcing_cfg, coords):
         from jcm.forcing import ForcingData
         files = _expand_years(forcing_cfg.file, forcing_cfg.get("years", None),
                               forcing_cfg.get("available_years", None))
+        # ``auto`` resolves from the UNFETCHED spec (an ``hf://`` URL or a
+        # packaged path names its manifest product); a user file must declare
+        # its mode (#884, :func:`jcm.forcing.resolve_align`).
+        from jcm.forcing import resolve_align
+        align = resolve_align(forcing_cfg.get("align", "auto"), paths=files,
+                              config_key="forcing.align")
         forcing = ForcingData.from_file(
-            _resolve_data_path(files), coords=coords,
-            align_mode=str(forcing_cfg.get("align", "auto")))
+            _resolve_data_path(files), coords=coords, align_mode=align)
     else:
         raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
     forcing = _attach_ozone(forcing, forcing_cfg, coords)
@@ -456,6 +490,7 @@ def assemble_spectral_forcing(forcing_cfg, coords):
     forcing = _attach_dust(forcing, forcing_cfg, coords)
     forcing = _attach_oxidants(forcing, forcing_cfg, coords)
     forcing = _attach_macv2_weights(forcing, forcing_cfg, coords)
+    forcing = _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords)
     return forcing
 
 
@@ -484,10 +519,14 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    ozone_file = _resolve_data_path(_expand_years(
+    # The pre-fetch spec (``hf://`` / pattern expansion / packaged path) names
+    # the manifest product; alignment is decided on it, not on the fetched
+    # path (#884).
+    ozone_raw = _expand_years(
         forcing_cfg.get("ozone_file", None),
         forcing_cfg.get("years", None),
-        _product_available_years(forcing_cfg, "ozone_available_years")))
+        _product_available_years(forcing_cfg, "ozone_available_years"))
+    ozone_file = _resolve_data_path(ozone_raw)
     if isinstance(ozone_file, (list, tuple)):
         ozone_file = [str(p) for p in ozone_file]
     if ozone_file in (None, "", "null"):
@@ -499,8 +538,17 @@ def _attach_ozone(forcing, forcing_cfg, coords):
         # records a choice rather than an omission.
         provenance.record_fact("ozone_source", "analytic (explicit)")
         return forcing
+    from jcm.forcing import declare_manifest_align
+    ozone_align = declare_manifest_align(
+        forcing_cfg.get("ozone_align", "auto"), ozone_raw,
+        transient="by_date_interp")
     if ozone_file == "auto":
         ozone_file = _resolve_auto_ozone(coords)
+        # ``auto`` picked the key's manifest product (packaged or mirrored
+        # present-day ozone), so its kind is known without the path.
+        if ozone_align == "auto":
+            ozone_align = _auto_product_mode(
+                "ozone_file", transient="by_date_interp") or "auto"
         if ozone_file is None:      # sigma grid; _resolve_auto_ozone warned
             provenance.record_fact(
                 "ozone_source", "analytic (auto: no product for a sigma grid)")
@@ -518,10 +566,16 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     # latitudes silently. Dinosaur stores both in radians.
     lat_deg = np.asarray(coords.horizontal.latitudes) * 180.0 / np.pi
     lon_deg = np.asarray(coords.horizontal.longitudes) * 180.0 / np.pi
+    # Ozone's transient mirror product (``ozone_amip``) holds mid-month
+    # monthly means, which the ECHAM treatment interpolates linearly between.
+    from jcm.forcing import resolve_align
+    align = resolve_align(ozone_align, paths=ozone_file,
+                          config_key="forcing.ozone_align",
+                          transient="by_date_interp")
     climatology = OzoneClimatology.from_file(
         ozone_file,
         nlon=int(nlon), nlat=int(nlat), nlev=int(nlev),
-        lat_deg=lat_deg, lon_deg=lon_deg,
+        lat_deg=lat_deg, lon_deg=lon_deg, align_mode=align,
     )
     provenance.record_fact("ozone_source", f"prescribed:{ozone_file}")
     provenance.record_input(ozone_file)
@@ -564,6 +618,25 @@ def _merge_disjoint_emissions(acc, acc_src, new, path):
         )
     acc.update(new)
     acc_src.update({v: str(path) for v in new})
+
+
+def _per_product_align(spec, n_products):
+    """Expand ``forcing.emissions_align`` to one spec per emission product.
+
+    A scalar applies to every product; a list gives one mode per
+    ``emissions_file`` element, in order — the way to declare a list that mixes
+    a user transient product with a user climatology (#884: neither can be
+    inferred).
+    """
+    if ir._is_seq(spec):
+        specs = [str(v) for v in spec]
+        if len(specs) != n_products:
+            raise ValueError(
+                f"forcing.emissions_align has {len(specs)} entries but "
+                f"forcing.emissions_file has {n_products} products; give one "
+                "mode per product, or a single mode for all of them.")
+        return specs
+    return [str(spec)] * n_products
 
 
 def _attach_emissions(forcing, forcing_cfg, coords):
@@ -633,14 +706,25 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     # already-merged variable, for a precise collision message (F1).
     anthro_src: dict = {}
     speciated_src: dict = {}
-    for product in _forcing_products(raw, years, available):
+    from jcm.forcing import emissions_have_time, resolve_align
+    products = list(_forcing_products(raw, years, available))
+    aligns = _per_product_align(forcing_cfg.get("emissions_align", "auto"),
+                                len(products))
+    for product, align_spec in zip(products, aligns):
         path = _resolve_data_path(product)
         if path in (None, "", "null"):
             continue
         ds = _open_forcing_dataset(path)
         try:
-            a = read_anthropogenic_emissions(ds)
-            s = read_prescribed_aerosol_emissions(ds)
+            # Per product, and only for a TIMED product: a mirror product
+            # resolves ``auto`` from its manifest kind (the UNFETCHED spec
+            # names it), a user file must declare (#884); an all-static
+            # product has no time axis to align and loads under ``auto``.
+            align = (resolve_align(align_spec, paths=product,
+                                   config_key="forcing.emissions_align")
+                     if emissions_have_time(ds) else align_spec)
+            a = read_anthropogenic_emissions(ds, align_mode=align)
+            s = read_prescribed_aerosol_emissions(ds, align_mode=align)
         finally:
             ds.close()
         if a is None and s is None:
@@ -885,6 +969,37 @@ def _resolve_pyses_emission_paths(forcing_cfg):
     return [p for product in products for p in product]
 
 
+def oxidant_align(forcing_cfg, paths) -> str:
+    """Resolve ``forcing.oxidants_align`` for the oxidant file set ``paths``.
+
+    Shared by the spectral (:func:`_attach_oxidants`) and pySES paths so both
+    apply the same #884 rule (:func:`jcm.forcing.resolve_align`). ``paths``
+    are the RESOLVED local files: an ``auto`` spec was already fetched into
+    the Hugging Face cache (whose snapshot path still names the mirror
+    product) or points at a packaged file; any other file must declare.
+    """
+    from jcm.forcing import declare_manifest_align, resolve_align
+    spec = (forcing_cfg.get("oxidants_align", "auto")
+            if forcing_cfg is not None else "auto")
+    # Decide on the ORIGINAL spec first (a fetched path need not name the
+    # product), then fall back to the resolved paths (#884).
+    spec = declare_manifest_align(spec, _oxidant_spec(forcing_cfg))
+    return resolve_align(spec, paths=paths,
+                         config_key="forcing.oxidants_align")
+
+
+def _oxidant_spec(forcing_cfg):
+    """Return the pre-fetch (year-expanded, unfetched) ``oxidants_file`` spec."""
+    if forcing_cfg is None:
+        return None
+    raw = forcing_cfg.get("oxidants_file", None)
+    if raw in (None, "", "null"):
+        return None
+    return _expand_years(
+        raw, forcing_cfg.get("years", None),
+        _product_available_years(forcing_cfg, "oxidants_available_years"))
+
+
 def _attach_oxidants(forcing, forcing_cfg, coords):
     """Attach the oxidant climatology from ``cfg.forcing.oxidants_file``.
 
@@ -905,8 +1020,9 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     (``oxidants_file=.../{year}.nc`` with ``forcing.years``) actually loads: a
     ``{year}`` pattern expands to one file per year, which are concatenated
     along the time axis (``open_mfdataset``, by-coords) and read with ``auto``
-    alignment — a single 12-month climatology stays ``WRAP_YEAR`` while a
-    multi-year axis becomes ``BY_DATE``. The level-for-level vertical mapping
+    alignment set by ``forcing.oxidants_align`` (``auto`` resolves only a
+    data-mirror product, from its manifest kind — #884; see
+    :func:`oxidant_align`). The level-for-level vertical mapping
     is unchanged (the yearly files share the model's hybrid grid).
 
     Oxidants are handled as **one product**, unlike the per-product emissions
@@ -945,8 +1061,9 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
           if len(paths) > 1 else xr.open_dataset(paths[0]))
     ref = paths if len(paths) > 1 else paths[0]
     try:
-        mapping = read_oxidant_vmr(ds, nlev=nlev, lat_deg=lat_deg,
-                                   lon_deg=lon_deg, align_mode="auto")
+        mapping = read_oxidant_vmr(
+            ds, nlev=nlev, lat_deg=lat_deg, lon_deg=lon_deg,
+            align_mode=oxidant_align(forcing_cfg, paths))
         validate_oxidant_levels(ds, coords, ref)
     finally:
         ds.close()
@@ -1008,3 +1125,90 @@ def _attach_macv2_weights(forcing, forcing_cfg, coords):
     forcing = _ensure_parent_forcing(forcing, coords)
     return forcing.copy(aerosol_year_weight=year_weight,
                         aerosol_ann_cycle=ann_cycle)
+
+
+# ---------------------------------------------------------------------------
+# prescribed surface fluxes (forced mode, jax-gcm#301)
+# ---------------------------------------------------------------------------
+
+
+def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
+    """Attach forced-mode surface fluxes from ``cfg.forcing.prescribed_surface_flux``.
+
+    No-op when the block is unset. Two mutually exclusive sources:
+
+    - ``constants``: a mapping with all four flux names to scalar values,
+      broadcast to uniform ``(nlon, nlat)`` maps — the constant-flux
+      aquaplanet / smoke-test door;
+    - ``file``: a netCDF already on the model grid carrying all four as
+      variables dimensioned ``(lat, lon)`` (static) or with a leading
+      ``time`` axis (a ``TimeSeries``) — the archived-coupler-flux door, read
+      by :func:`jcm.forcing.read_prescribed_surface_fluxes` (the same reader a
+      Python caller uses). A time-resolved file must declare its alignment
+      with the block's ``align`` key (``wrap_year`` | ``by_date`` |
+      ``by_date_interp``): the default ``auto`` resolves only data-mirror
+      products and no mirror product carries fluxes, so it raises — the
+      timestamps alone cannot tell a monthly climatology from a one-year
+      transient archive (#884, :func:`jcm.forcing.resolve_align`).
+
+    All four fields are required together: a partially prescribed surface
+    is not a defined mode (the forced terms deliver nothing interactively),
+    so a missing variable raises here rather than surfacing as a confusing
+    ``None``-field error at physics composition. A coupler driving jcm
+    programmatically bypasses this and sets the ``prescribed_*`` fields on
+    ``ForcingData`` directly.
+    """
+    if forcing_cfg is None:
+        return forcing
+    block = forcing_cfg.get("prescribed_surface_flux", None)
+    if block in (None, "", "null"):
+        return forcing
+    constants = block.get("constants", None)
+    path = block.get("file", None)
+    if (constants is None) == (path in (None, "", "null")):
+        raise ValueError(
+            "forcing.prescribed_surface_flux needs exactly one of "
+            "'constants' or 'file'."
+        )
+
+    import jax.numpy as jnp
+
+    align = str(block.get("align", "auto"))
+    if constants is not None:
+        if align != "auto":
+            # Constants have no time axis; an explicit align is a config
+            # mistake (probably meant for a file), not something to ignore.
+            raise ValueError(
+                "forcing.prescribed_surface_flux.align applies only to a "
+                f"'file' source; got align={align!r} with 'constants'.")
+        missing = [v for v in PRESCRIBED_FLUX_FILE_VARS if v not in constants]
+        if missing:
+            raise ValueError(
+                "forcing.prescribed_surface_flux.constants is missing "
+                f"{missing}; all of {tuple(PRESCRIBED_FLUX_FILE_VARS)} are "
+                "required (contract units/signs: "
+                "docs/source/design/surface_exchange.md)."
+            )
+        nlon, nlat = coords.horizontal.nodal_shape
+        fields = {field: jnp.full((nlon, nlat), float(constants[var]))
+                  for var, field in PRESCRIBED_FLUX_FILE_VARS.items()}
+        provenance.record_fact("prescribed_surface_flux", "constants")
+    else:
+        import xarray as xr
+
+        from jcm.forcing import read_prescribed_surface_fluxes
+
+        # Validate/reorient against the model's OWN lat/lon, exactly like the
+        # other gridded forcing loaders (dms/dust/ozone): see the reader.
+        lat_deg, lon_deg = _model_latlon_deg(coords)
+        path = str(_resolve_data_path(path))
+        with xr.open_dataset(path) as ds:
+            fields = read_prescribed_surface_fluxes(
+                ds, lat_deg, lon_deg,
+                align_mode=align,
+                source=f"prescribed_surface_flux file {path}")
+        provenance.record_fact("prescribed_surface_flux", f"file:{path}")
+        provenance.record_input(path)
+
+    forcing = _ensure_parent_forcing(forcing, coords)
+    return forcing.copy(**fields)

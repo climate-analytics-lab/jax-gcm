@@ -53,6 +53,16 @@ class TestManifestLoads(unittest.TestCase):
             mm.bundle_path(self.manifest, "oxidants_pd", "t106", 47),
             "bundles/t106_l47/oxidants_pd.nc")
 
+    def test_bundle_path_keeps_the_year_pattern(self):
+        # A transient product's year set is a run property, so ``{year}`` is
+        # left for the caller's expansion instead of raising KeyError.
+        self.assertEqual(
+            mm.bundle_path(self.manifest, "forcing_amip", "t63"),
+            "bundles/t63/forcing_amip/{year}.nc")
+        self.assertEqual(
+            mm.bundle_path(self.manifest, "ozone_amip", "t63", 47),
+            "bundles/t63_l47/ozone_amip/{year}.nc")
+
     def test_yearly_products_carry_coverage(self):
         # The span actually staged on the mirror (verified via list_repo_files),
         # not the wider raw-source series — see build_mirror._MANIFEST_PRODUCTS.

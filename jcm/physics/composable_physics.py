@@ -571,6 +571,13 @@ class ComposablePhysics(nnx.Module, Physics):
             },
         )
         probe_forcing = ForcingData.zeros(nodal_shape)
+        # Let terms complete the probe forcing the same way it seeds tracers
+        # (above): a term that requires an optional forcing field for its
+        # configuration — e.g. a forced-surface-flux term reading
+        # ``prescribed_*`` — fills it here so the abstract trace follows the
+        # real code path instead of a ``None``-guard.
+        for term in self.terms:
+            probe_forcing = term.augment_probe_forcing(probe_forcing)
         probe_terrain = TerrainData.aquaplanet(coords)
 
         diagnostics = jax.eval_shape(
@@ -713,6 +720,64 @@ class ComposablePhysics(nnx.Module, Physics):
     #: explicit namespace (e.g. MACv2-SP's ``aerosol.*`` → ``macsp.*``, #640)
     #: without renaming the internal struct radiation/microphysics read.
     _output_key_map: Mapping[str, str] = {}
+
+    def publishes_surface_exchange(self) -> bool:
+        """Whether some term publishes the #754 surface-exchange contract.
+
+        True when a composed term declares the package-independent
+        ``"surface_exchange"`` diagnostics key (see
+        :mod:`jcm.physics.surface.surface_exchange`) in ``provides`` —
+        SPEEDY's surface-flux term and the ECHAM publisher do; Held-Suarez
+        deliberately opts out (it resolves no surface fluxes).
+        """
+        from jcm.physics.surface.surface_exchange import SURFACE_EXCHANGE_KEY
+        return any(
+            SURFACE_EXCHANGE_KEY in getattr(term, "provides", ())
+            for term in self.terms
+        )
+
+    def consumed_forcing_fields(self) -> tuple[str, ...]:
+        """Union of the composed terms' :meth:`PhysicsTerm.consumed_forcing_fields`."""
+        fields: list[str] = []
+        for term in self.terms:
+            hook = getattr(term, "consumed_forcing_fields", None)
+            for name in (hook() if hook is not None else ()):
+                if name not in fields:
+                    fields.append(name)
+        return tuple(fields)
+
+    def validate_forcing(self, forcing, run_window=None) -> None:
+        """Run every term's :meth:`PhysicsTerm.validate_forcing` once.
+
+        :class:`~jcm.model.Model` calls this on the concrete run forcing
+        before compiling, so a term that requires an optional field it
+        cannot run without (e.g. forced-mode surface fluxes) fails loudly
+        at run start rather than silently applying a zero. ``run_window``
+        (``(start_seconds, end_seconds)`` since ``MODEL_EPOCH``, or ``None``
+        when not concretely known) is passed through so a term can check a
+        date-aligned series covers the run.
+        """
+        for term in self.terms:
+            term.validate_forcing(forcing, run_window=run_window)
+
+    def require_surface_exchange(self) -> None:
+        """Fail loudly at composition time if no surface exchange is published.
+
+        A coupler (JAX-ESM, an ocean/land component) calls this once on the
+        composed package instead of discovering a missing
+        ``diagnostics["surface_exchange"]`` key mid-run — the
+        composition-time loudness #754 asks for.
+        """
+        if not self.publishes_surface_exchange():
+            names = [getattr(term, "name", type(term).__name__)
+                     for term in self.terms]
+            raise ValueError(
+                "No composed term publishes the 'surface_exchange' "
+                f"coupling struct (terms: {names}). SPEEDY and ECHAM "
+                "packages publish it; Held-Suarez opts out because it "
+                "resolves no surface fluxes. See "
+                "docs/source/design/surface_exchange.md."
+            )
 
     def units_table_paths(self) -> tuple:
         """Units/description CSVs of every term in this package, deduplicated.
