@@ -75,14 +75,23 @@ class ContractRoundTripTest(unittest.TestCase):
         self.assertTrue(np.allclose(np.asarray(bc), 1.0e-11))
 
     def test_single_year_dated_axis_is_transient(self):
-        """Twelve real dates must not be inferred to repeat as climatology."""
+        """Twelve real dates are never inferred to be a climatology (#884).
+
+        ``auto`` refuses an in-memory dataset outright; declared dated, the
+        year keeps its exact dates rather than repeating annually.
+        """
         from jcm.forcing import BY_DATE
 
         ds = _synthetic_emissions_ds().assign_coords(
             time=np.arange("2001-01", "2002-01", dtype="datetime64[M]"))
-        emissions = read_anthropogenic_emissions(ds)
-        self.assertEqual(
-            int(emissions["emis_surface_combustion_bc"].align_mode), BY_DATE)
+        with self.assertRaisesRegex(ValueError, "emissions_align=auto"):
+            read_anthropogenic_emissions(ds)
+        emissions = read_anthropogenic_emissions(ds, align_mode="by_date")
+        leaf = emissions["emis_surface_combustion_bc"]
+        self.assertEqual(int(leaf.align_mode), BY_DATE)
+        np.testing.assert_array_equal(
+            leaf.times.to_datetime64().astype("datetime64[M]"),
+            np.arange("2001-01", "2002-01", dtype="datetime64[M]"))
 
     def test_static_field_passthrough(self):
         # A time-less emissions field is carried as a bare array, still sliced
