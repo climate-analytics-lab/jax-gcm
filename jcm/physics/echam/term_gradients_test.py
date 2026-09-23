@@ -751,13 +751,22 @@ def test_package_tendency_is_finite_per_state_field(point_name):
             state_, replay.forcing, replay.terrain, carry)
         return tendency
 
+    # One compiled jvp, reused for every direction (all have the state's
+    # shapes). Run eagerly, each direction dispatched the package op by op,
+    # and the per-primitive executables alone took an xdist worker past the
+    # kernel's memory-map limit (65,499 of vm.max_map_count's 65,530), where
+    # the CPU JIT fails with "Failed to materialize symbols".
+    jvp_tendencies = jax.jit(
+        lambda state_, direction_: jax.jvp(
+            tendencies, (state_,), (direction_,))[1])
+
     leaves, treedef = jax.tree_util.tree_flatten(state)
     names = _leaf_names(state)
     for index, name in enumerate(names):
         direction = jax.tree_util.tree_unflatten(treedef, [
             jnp.ones_like(leaf) if position == index else jnp.zeros_like(leaf)
             for position, leaf in enumerate(leaves)])
-        _, forward = jax.jvp(tendencies, (state,), (direction,))
+        forward = jvp_tendencies(state, direction)
         for leaf in jax.tree.leaves(forward):
             assert np.all(np.isfinite(np.asarray(leaf))), (
                 f"{point_name}: the package tendency has a non-finite "
