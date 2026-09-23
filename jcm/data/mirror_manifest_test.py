@@ -81,14 +81,14 @@ class TestIsPublishedMatrix(unittest.TestCase):
 
     The manifest view is the ONE availability predicate (#751), so the matrix
     is pinned directly against the intended rule: a
-    grid must be published (t63/t106); a level-resolved product (oxidants)
+    grid must be published (t63/t106/t127/t255); a level-resolved product (oxidants)
     additionally needs a published layer count AND a hybrid vertical (its bundle
     is on hybrid-level pressures); level-free products (emissions/dms/dust) are
     purely horizontal.
     """
 
     def _expected(self, product, grid, nlev, vertical):
-        if grid not in ("t63", "t106"):
+        if grid not in ("t63", "t106", "t127", "t255"):
             return False
         if product == "oxidants_pd":
             return nlev in (47, 95) and vertical == "hybrid"
@@ -100,7 +100,7 @@ class TestIsPublishedMatrix(unittest.TestCase):
                         "dust_preferential_sources", "dust_soil_types",
                         "dust_regions", "dust_surface_roughness",
                         "oxidants_pd"):
-            for grid in ("t42", "t63", "t106"):
+            for grid in ("t42", "t63", "t106", "t119", "t127", "t255"):
                 for nlev in (8, 47, 95):
                     for vertical in ("hybrid", "sigma"):
                         self.assertEqual(
@@ -108,6 +108,28 @@ class TestIsPublishedMatrix(unittest.TestCase):
                                             vertical),
                             self._expected(product, grid, nlev, vertical),
                             (product, grid, nlev, vertical))
+
+
+    def test_transient_series_are_scoped_to_the_transient_grids(self):
+        # t127/t255 carry every climatological/static input but no yearly
+        # series: advertising them would send the resolver after files that
+        # were never staged.
+        from jcm.data.mirror.build_mirror import TRANSIENT_GRIDS
+        manifest = mm.load_manifest()
+        self.assertEqual(TRANSIENT_GRIDS, {"t63", "t106"})
+        for product in ("forcing_amip", "emissions_amip", "ozone_amip",
+                        "forcing_era5"):
+            for grid in ("t127", "t255"):
+                self.assertFalse(
+                    mm.is_published(manifest, product, grid, 47, "hybrid"),
+                    (product, grid))
+            self.assertTrue(
+                mm.is_published(manifest, product, "t63", 47, "hybrid"))
+        for product in ("terrain", "forcing_pd", "ozone_pd", "oxidants_pi"):
+            for grid in ("t127", "t255"):
+                self.assertTrue(
+                    mm.is_published(manifest, product, grid, 95, "hybrid"),
+                    (product, grid))
 
 
 class TestManifestRegen(unittest.TestCase):

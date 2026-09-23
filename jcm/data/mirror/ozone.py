@@ -17,8 +17,9 @@ from __future__ import annotations
 import numpy as np
 import xarray as xr
 
-_ROOT = ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/CMIP7/"
-         "CMIP/FZJ/FZJ-CMIP-ozone-1-0/atmos")
+from jcm.data.mirror import sites
+
+_ROOT = sites.input4mips("CMIP7/CMIP/FZJ/FZJ-CMIP-ozone-1-0/atmos")
 PI_CLIM = (f"{_ROOT}/monC/vmro3/gn/v20250904/"
            "vmro3_input4MIPs_ozone_CMIP_FZJ-CMIP-ozone-1-0_gn_"
            "185001-185012-clim.nc")
