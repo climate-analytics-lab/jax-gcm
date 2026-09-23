@@ -403,11 +403,13 @@ _band_config_for_terms = RadiationBandConfig.for_terms
 from jcm.physics.radiation.nn_emulator_scheme import (  # noqa: E402
     guard_ghg_forcing as guard_emulator_ghg_forcing,
 )
-# Prescribed surface fluxes nothing consumes are rejected right after forcing
-# assembly (the first point physics and forcing meet on the CLI), naming the
-# config key and how to enable forced mode (#301).
+# Both directions of the forced-mode contract (#301) are checked right after
+# forcing assembly, the first point physics and forcing meet on the CLI:
+# supplied fluxes need a consumer (the error names the config key and how to
+# enable forced mode) and a forced-mode physics needs its fluxes. The model
+# call re-applies the same helper with the concrete run window.
 from jcm.physics.surface.prescribed_flux import (  # noqa: E402
-    check_prescribed_flux_consumers as check_prescribed_flux_consumers,
+    validate_run_forcing as validate_run_forcing,
 )
 
 
@@ -1728,7 +1730,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
     forcing = _maybe_attach_nudging_target(forcing, cfg, model)
     guard_emulator_ghg_forcing(model.physics, forcing)
-    check_prescribed_flux_consumers(model.physics, forcing)
+    validate_run_forcing(model.physics, forcing)
     warn_on_config_traps(cfg, model.physics, forcing, coords=model.coords,
                          dycore=getattr(model, "dycore", None))
     # After model + forcing construction: config-selected libraries are
@@ -1833,7 +1835,7 @@ def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
     terrain = build_terrain(cfg, coords)
     forcing = build_forcing(cfg, coords)
     guard_emulator_ghg_forcing(physics, forcing)
-    check_prescribed_flux_consumers(physics, forcing)
+    validate_run_forcing(physics, forcing)
     warn_on_config_traps(cfg, physics, forcing, coords=coords)
     _, states = _load_states_from_cfg(cfg, physics)
 

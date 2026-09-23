@@ -1192,7 +1192,7 @@ class TestPrescribedFluxNeedsConsumer:
         forcing = _attach_prescribed_surface_fluxes(
             default_forcing(coords.horizontal), cfg, coords)
         with pytest.raises(ValueError, match="forcing.prescribed_surface_flux"):
-            runners.check_prescribed_flux_consumers(speedy_physics(), forcing)
+            runners.validate_run_forcing(speedy_physics(), forcing)
 
     def test_scm_cli_refuses_forced_flux(self):
         from omegaconf import OmegaConf
@@ -1338,3 +1338,138 @@ class TestByDateCoverageEndIntervals:
                 ValueError, match="do not bracket"):
             read_prescribed_surface_fluxes(
                 ds, lat, lon, align_mode="by_date", source=str(p))
+
+
+# ---------------------------------------------------------------------------
+# Every run entry point enforces BOTH directions of the forced-mode contract
+# ---------------------------------------------------------------------------
+
+def _entry_setup(forced, fluxes):
+    """(coords, physics, forcing) for one scenario of the entry-point matrix.
+
+    ``fluxes``: ``None`` (no prescribed fields), ``"static"`` (uniform maps)
+    or ``"archive2000"`` (a BY_DATE monthly archive of the year 2000).
+    """
+    from jcm.forcing import BY_DATE, make_time_series
+    from jcm.physics.speedy.speedy_coords import get_speedy_coords
+    from jcm.physics.speedy.speedy_terms import (
+        SpeedySurfaceFlux, speedy_physics,
+    )
+    coords = get_speedy_coords(layers=8, spectral_truncation=21)
+    physics = (speedy_physics().replace(
+        "surface", SpeedySurfaceFlux(prescribed_fluxes=True))
+        if forced else speedy_physics())
+    forcing = default_forcing(coords.horizontal)
+    nodal = coords.horizontal.nodal_shape
+    if fluxes == "static":
+        leaf = jnp.full(nodal, 1.0)
+    elif fluxes == "archive2000":
+        leaf = make_time_series(jnp.ones((12, *nodal)),
+                                jnp.asarray(_monthly_seconds(2000)), BY_DATE)
+    else:
+        return coords, physics, forcing
+    return coords, physics, forcing.copy(
+        prescribed_sensible_heat_flux=leaf, prescribed_evaporation=leaf,
+        prescribed_stress_u=leaf, prescribed_stress_v=leaf)
+
+
+def _door_model(method):
+    def call(coords, physics, forcing, start):
+        import jax_datetime as jdt
+        from jcm.model import Model
+        from jcm.terrain import TerrainData
+        model = Model(coords=coords, terrain=TerrainData.aquaplanet(coords),
+                      physics=physics, time_step=20,
+                      start_date=jdt.to_datetime(start))
+        kw = dict(save_interval=(1 / 24.0), total_time=(1 / 24.0))
+        if method == "run":
+            return model.run(forcing=forcing, **kw)
+        state = model._prepare_initial_dycore_state()
+        return getattr(model, method)(state, forcing, **kw)
+    return call
+
+
+def _door_scm(coords, physics, forcing, start):
+    from jcm.single_column_model import SingleColumnModel
+    scm = SingleColumnModel(physics=physics, vertical=coords.vertical,
+                            dt_seconds=1200.0)
+    # The contract is checked before the states are touched.
+    return scm.run(None, forcing=forcing)
+
+
+def _door_prescribed(coords, physics, forcing, start):
+    import jax_datetime as jdt
+    from jcm.prescribed_state_model import PrescribedStateModel
+    from jcm.prescribed_state_model_test import _make_test_state
+    model = PrescribedStateModel(physics=physics, coords=coords,
+                                 start_date=jdt.to_datetime(start))
+    return model.run([_make_test_state(coords)], forcing=forcing)
+
+
+def _door_cli(coords, physics, forcing, start):
+    # The CLI/recipe doors (_run_full, _run_prescribed, configurations) call
+    # this re-export right after assembly; the window is not known there.
+    from jcm import runners
+    runners.validate_run_forcing(physics, forcing)
+    raise AssertionError("reached: no contract violation raised")
+
+
+#: (door, has a concrete run window)
+_DOORS = {
+    "Model.run": (_door_model("run"), True),
+    "Model.run_from_state": (_door_model("run_from_state"), True),
+    "Model.run_from_state_with_carry": (
+        _door_model("run_from_state_with_carry"), True),
+    "SingleColumnModel.run": (_door_scm, False),
+    "PrescribedStateModel.run": (_door_prescribed, True),
+    "runners/configurations (CLI)": (_door_cli, False),
+}
+
+
+@pytest.mark.parametrize("door", list(_DOORS))
+def test_entry_point_rejects_unconsumed_fluxes(door):
+    """Direction (a): fluxes supplied to an interactive composition."""
+    coords, physics, forcing = _entry_setup(forced=False, fluxes="static")
+    with pytest.raises(ValueError, match="no term in the composed physics"):
+        _DOORS[door][0](coords, physics, forcing, "2000-03-01")
+
+
+@pytest.mark.parametrize("door", list(_DOORS))
+def test_entry_point_rejects_forced_physics_without_fluxes(door):
+    """Direction (b): a forced consumer with no prescribed fields."""
+    coords, physics, forcing = _entry_setup(forced=True, fluxes=None)
+    with pytest.raises(ValueError, match="are None"):
+        _DOORS[door][0](coords, physics, forcing, "2000-03-01")
+
+
+@pytest.mark.parametrize(
+    "door", [d for d, (_, windowed) in _DOORS.items() if windowed])
+def test_entry_point_rejects_uncovered_archive(door):
+    """Direction (b), coverage: a 2000 BY_DATE archive cannot drive 2001."""
+    coords, physics, forcing = _entry_setup(forced=True, fluxes="archive2000")
+    with pytest.raises(ValueError, match="BY_DATE"):
+        _DOORS[door][0](coords, physics, forcing, "2001-06-01")
+
+
+def test_every_entry_point_calls_the_shared_contract_helper():
+    """Structural guard: each door that steps physics on a forcing calls
+    ``validate_run_forcing``, and the ``Model`` doors funnel into the one
+    that does, so a new door cannot silently skip the contract.
+    """
+    import inspect
+
+    from jcm import configurations, runners
+    from jcm.model import Model
+    from jcm.prescribed_state_model import PrescribedStateModel
+    from jcm.single_column_model import SingleColumnModel
+    for fn in (Model.run_from_state_with_carry, SingleColumnModel.run,
+               PrescribedStateModel.run, runners._run_full,
+               runners._run_prescribed, configurations.load):
+        assert "validate_run_forcing(" in inspect.getsource(fn), fn
+    for fn in (Model.run_from_state, Model.resume):
+        assert "run_from_state_with_carry(" in inspect.getsource(fn), fn
+    assert "self.resume(" in inspect.getsource(Model.run)
+    # The SCM CLI builds no ForcingData, so it refuses forced flux outright.
+    assert "_reject_forced_flux_in_scm(" in inspect.getsource(runners._run_scm)
+    # run_chunked steps through model.run (checked above).
+    assert "model.run(" in inspect.getsource(runners.run_chunked)

@@ -162,6 +162,36 @@ def check_prescribed_flux_consumers(physics, forcing) -> None:
         "See docs/source/design/surface_exchange.md.")
 
 
+def validate_run_forcing(physics, forcing, run_window=None) -> None:
+    """Enforce both directions of the forced-mode forcing contract (#301).
+
+    The ONE check every run entry point applies to its concrete forcing
+    before stepping, so no door can run a forced composition on a silent
+    zero flux or an interactive one on silently ignored fluxes:
+
+    (a) prescribed fluxes supplied → some composed term must consume them
+        (:func:`check_prescribed_flux_consumers`);
+    (b) a consumer composed → ``physics.validate_forcing(forcing,
+        run_window)`` runs every term's own check: the forced-mode terms
+        raise if the fluxes are absent or, given a concrete ``run_window``
+        ``(start_s, end_s)`` in seconds since ``MODEL_EPOCH``, if a
+        date-aligned archive does not cover it
+        (:func:`check_prescribed_flux_forcing`).
+
+    Callers: ``Model.run_from_state_with_carry`` (the choke point of
+    ``run`` / ``resume`` / ``run_from_state``), ``SingleColumnModel.run``,
+    ``PrescribedStateModel.run`` (window = its state times), and the CLI /
+    recipe doors right after forcing assembly (window unknown there, so
+    presence only; the model call then checks coverage). A physics object
+    without ``validate_forcing`` is tolerated. Presence checks never read a
+    tracer, so this is safe inside a JAX transformation.
+    """
+    check_prescribed_flux_consumers(physics, forcing)
+    validate = getattr(physics, "validate_forcing", None)
+    if validate is not None:
+        validate(forcing, run_window=run_window)
+
+
 class PrescribedSurfaceFlux(PhysicsTerm):
     """Deliver externally prescribed turbulent surface fluxes (#301).
 

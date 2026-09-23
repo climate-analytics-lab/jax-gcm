@@ -214,6 +214,21 @@ class PrescribedStateModel:
         if hasattr(self.physics, "dt_seconds"):
             self.physics.dt_seconds = self.dt_seconds
 
+    def _run_window_seconds(self, times):
+        """``(start, end)`` seconds since ``MODEL_EPOCH`` the states span.
+
+        ``times`` is days since ``start_date`` (the clock ``run`` evaluates
+        each state on). ``None`` when ``times`` is traced: there is then no
+        concrete window, and validation must not force a host read.
+        """
+        if isinstance(times, jax.core.Tracer):
+            return None
+        from jcm.date import absolute_seconds_since_epoch
+        days = jnp.asarray(jax.device_get(times), dtype=float)
+        base = float(absolute_seconds_since_epoch(self.start_date))
+        return (base + float(days.min()) * 86400.0,
+                base + float(days.max()) * 86400.0)
+
     def run(
         self,
         states: list[PhysicsState] | PhysicsState,
@@ -241,6 +256,12 @@ class PrescribedStateModel:
         n_times = states.u_wind.shape[0]
         if times is None:
             times = jnp.arange(n_times) * (self.dt_seconds / 86400.0)
+
+        # Both directions of the forced-mode contract (#301), as at every run
+        # entry point, over the window the prescribed states actually span.
+        from jcm.physics.surface.prescribed_flux import validate_run_forcing
+        validate_run_forcing(self.physics, forcing,
+                             run_window=self._run_window_seconds(times))
 
         physics = self.physics
         terrain = self.terrain

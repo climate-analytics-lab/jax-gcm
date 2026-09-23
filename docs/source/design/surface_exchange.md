@@ -164,17 +164,27 @@ too. A composition's consumers are the terms whose
 fields: `SpeedySurfaceFlux(prescribed_fluxes=True)` and
 `PrescribedSurfaceFlux`. The interactive schemes (`SpeedySurfaceFlux`,
 the surface-coupled `TteTkeVerticalDiffusion`) compute their own fluxes and
-never read them. Supplying prescribed fluxes to a composition with no
-consumer is rejected (`check_prescribed_flux_consumers`: by the CLI
-runners right after forcing assembly, and by `Model.run` /
-`SingleColumnModel.run` for the Python door) rather than silently ignored;
-the error names `forcing.prescribed_surface_flux` and how to enable forced
-mode. The check is by declared capability, not class name, so a
-composition edited with `replace`/`remove` is judged by what its terms
-actually read. A forced-mode consumer without the fields raises at run
-start in the same places. The SCM CLI (`run.mode=scm`) builds no
-`ForcingData`, so it refuses both a `prescribed_surface_flux` block and a
-forced-mode physics; drive a forced column from Python instead.
+never read them. Both directions of that contract are enforced by ONE
+helper, `validate_run_forcing(physics, forcing, run_window)`, which every
+run entry point applies to its concrete forcing before stepping:
+
+| entry point | window passed |
+| --- | --- |
+| `Model.run_from_state_with_carry` (so `run`, `resume`, `run_from_state`) | the run's absolute start/end |
+| `PrescribedStateModel.run` (`run.mode=prescribed`) | the span of the prescribed state times |
+| `SingleColumnModel.run` | none (a column has no absolute date) |
+| CLI runners and `jcm.configurations.load`, right after forcing assembly | none (presence only; the model call then checks coverage) |
+
+(a) Prescribed fluxes with no consumer are rejected rather than silently
+ignored; the error names `forcing.prescribed_surface_flux` and how to
+enable forced mode. The check is by declared capability, not class name,
+so a composition edited with `replace`/`remove` is judged by what its terms
+actually read. (b) With a consumer composed, every term's
+`validate_forcing` runs: the forced-mode terms raise if their fields are
+absent or, given a window, if a date-aligned archive does not cover it.
+The SCM CLI (`run.mode=scm`) builds no `ForcingData`, so it refuses both a
+`prescribed_surface_flux` block and a forced-mode physics; drive a forced
+column from Python instead.
 
 - **CLI**: `forcing.prescribed_surface_flux` with either
   `constants: {sensible_heat_flux, evaporation, stress_u, stress_v}`
@@ -231,8 +241,9 @@ load or run start rather than silently mis-phasing the fluxes:
   mid-month stamps, any year). Anything else — a July→June span, a
   four-weekly axis, a seasonal climatology — raises.
 - `BY_DATE` selection clamps to the end samples outside its axis, so at run
-  start (`validate_forcing` of the forced-mode terms, which `Model`
-  calls with the run window) a date-aligned archive must cover the whole
+  start (`validate_forcing` of the forced-mode terms, which
+  `validate_run_forcing` calls with the run window — the model run's, or
+  the prescribed states' span) a date-aligned archive must cover the whole
   run. The covered window is the file's CF time bounds when it carries
   them (the variable the `time` coordinate's `bounds` attribute names, or
   `time_bnds`/`time_bounds`; validated to bracket each sample), which is
