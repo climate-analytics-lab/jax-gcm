@@ -766,9 +766,15 @@ Regression fixtures follow the supported matrix
   cloud-borne aerosol mass and the precursor gases. Number concentrations are
   banded as mass-weighted **column integrals** (``qnc_column``,
   ``qni_column``, and for JAM ``n_total_column`` summed over modes and both
-  phases); per-level numbers are not banded, because near-threshold
-  activation and nucleation cells make them jump between runs of identical
-  code.
+  phases), each layer weighted by its air mass ``dp/g`` — not by
+  ``air_density * layer_thickness``, whose thickness is floored at 10 m for
+  the physics that divides by it and so overstates thin layers; per-level numbers are not banded, because
+  near-threshold activation and nucleation cells make them jump between runs
+  of identical code.
+- Every reduction behind a band propagates NaN, on both the generating and the
+  checking side: a run that goes non-finite in even one cell fails its member
+  as non-finite (and ``generate`` refuses to write bands from it), rather than
+  averaging the surviving cells into a plausible mean.
 - Each band file records the environment its bands were drawn under
   (``bands_environment``: python, jax, jax-rrtmgp, dinosaur, flax, mam4-jax,
   ...), the one its init state was spun up under

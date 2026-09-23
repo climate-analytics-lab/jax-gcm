@@ -1508,6 +1508,30 @@ class TestObserversUnderJit(unittest.TestCase):
             np.asarray(explicit.observations[0]["temperature"]))
 
 
+def _held_state_skip_reason(member, bands):
+    """Why ``member`` must be skipped as held, or ``None`` to validate it.
+
+    A band file marked ``hosted_state="pending"`` pairs with a state that is
+    deliberately not on the mirror yet, so fetching it would 404. It is
+    skipped — naming the reason the file records — ONLY when the state is not
+    available locally either: ``JCM_FIXTURE_STATE_DIR`` holding the exact
+    file the band file names (digest and all) is precisely how such a pair is
+    validated before it is published, and skipping there would make a held
+    member unverifiable until after it had been published.
+    """
+    import os
+    from pathlib import Path
+
+    if bands.attrs.get("hosted_state") != "pending":
+        return None
+    override = os.environ.get("JCM_FIXTURE_STATE_DIR")
+    if override and (Path(override)
+                     / Path(bands.attrs["init_state"]).name).exists():
+        return None
+    return (f"{member}: init state not published — "
+            f"{bands.attrs.get('hosted_state_reason', 'no reason recorded')}")
+
+
 def _assert_within_release_bands(member, bands_file, bands, pred):
     """Assert every band variable's global mean in ``pred`` sits in its band.
 
@@ -1604,6 +1628,21 @@ def _assert_within_release_bands(member, bands_file, bands, pred):
                 "regenerate the fixture with "
                 "jcm.data.test.release_matrix.generate_stats.generate"
                 f"({member!r}) if the new grid is intentional.") from exc
+        # The window's reductions propagate NaN (``skipna=False`` in
+        # ``generate_stats``), so a run that blew up in even one cell reaches
+        # this point as a NaN rather than as a finite mean of the surviving
+        # cells. Say so directly: a NaN compared against a band is merely
+        # "not inside it", which would misreport a crash as a drift.
+        assert np.isfinite(prediction.values).all(), (
+            f"{member}: {var} is not finite in the run "
+            f"({int((~np.isfinite(prediction.values)).sum())} of "
+            f"{prediction.size} global-mean values are NaN/inf) — the model "
+            "produced non-finite output somewhere in the stats window.")
+        for name, arr in ((f"{var}.mean", mean), (f"{var}.std", std),
+                          (f"{var}.noise", bands[f"{var}.noise"])):
+            assert np.isfinite(arr.values).all(), (
+                f"{bands_file}: {name} is not finite — the band file is "
+                "corrupt; regenerate it")
         half_width = np.maximum(tol * std, ulp_floor * np.abs(mean))
         half_width = np.maximum(
             half_width, profile_floor * float(np.abs(mean).max()))
@@ -1736,12 +1775,15 @@ class TestReleaseMatrixStatistics(unittest.TestCase):
                 # override is to validate the pair before publishing it.
                 # A member whose state is deliberately not published yet is
                 # a declared gap, not a pass: skip it, with the reason the
-                # band file itself carries. Every other member's 404 stays a
-                # hard failure — a missing state must never read as success.
-                if bands.attrs.get("hosted_state") == "pending":
-                    self.skipTest(
-                        f"{member}: init state not published — "
-                        f"{bands.attrs.get('hosted_state_reason', 'no reason recorded')}")
+                # band file itself carries — unless that very state is in
+                # JCM_FIXTURE_STATE_DIR, which is how an unpublished pair is
+                # validated before publishing (see
+                # ``_held_state_skip_reason``). Every other member's 404
+                # stays a hard failure — a missing state must never read as
+                # success.
+                held = _held_state_skip_reason(member, bands)
+                if held:
+                    self.skipTest(held)
                 state = resolve_state(bands.attrs["init_state"])
                 if state is None:
                     # Absent from JCM_FIXTURE_STATE_DIR — expected when
@@ -1885,29 +1927,93 @@ class TestReleaseMatrixBandCheck(unittest.TestCase):
 class TestReleaseMatrixColumnNumberBurdens(unittest.TestCase):
     """The derived column-number band variables, on a synthetic run."""
 
-    def _run(self, **numbers):
+    # Layer pressure thicknesses [Pa], surface-first. With g from the live
+    # constants, the layer air masses are dp/g.
+    _DP = (1200.0, 3000.0)
+
+    def _run(self, dp=_DP, **numbers):
         import xarray as xr
 
         dims = ("time", "level", "lon", "lat")
-        shape = (1, 2, 1, 1)
+        shape = (1, len(dp), 1, 1)
         ones = np.ones(shape)
         return xr.Dataset({
-            "air_density": (dims, np.array([1.2, 0.5]).reshape(shape)),
-            "layer_thickness": (dims, np.array([100.0, 400.0]).reshape(shape)),
+            "pressure_thickness": (dims, np.array(dp).reshape(shape)),
             **{k: (dims, v * ones) for k, v in numbers.items()},
         })
 
-    def test_column_integral_is_mass_weighted_sum_over_levels(self):
+    def _column_mass(self, dp=_DP):
+        import jcm.constants as c
+
+        return sum(dp) / c.grav
+
+    def test_column_integral_is_pressure_weighted_sum_over_levels(self):
         from jcm.data.test.release_matrix.generate_stats import (
             _with_column_number_burdens,
         )
 
         out = _with_column_number_burdens(self._run(qnc=1e8, qni=1e4))
-        # Layer air masses are 120 and 200 kg m-2: 320 kg m-2 in the column.
-        np.testing.assert_allclose(out["qnc_column"].values, 320 * 1e8)
-        np.testing.assert_allclose(out["qni_column"].values, 320 * 1e4)
+        np.testing.assert_allclose(out["qnc_column"].values,
+                                   self._column_mass() * 1e8, rtol=1e-12)
+        np.testing.assert_allclose(out["qni_column"].values,
+                                   self._column_mass() * 1e4, rtol=1e-12)
         self.assertNotIn("n_total_column", out)
         self.assertEqual(out["qnc_column"].dims, ("time", "lon", "lat"))
+
+    def test_floored_layer_thickness_does_not_inflate_the_burden(self):
+        # A 5 Pa layer at near-surface density (rho = 1.2 kg m-3) is
+        # 5 / (g * 1.2) ~ 0.42 m thick, but the diagnostic floors
+        # layer_thickness at 10 m, so rho*dz would weigh it at 12 kg m-2
+        # against its real 5/g ~ 0.51 kg m-2 (~24x). The burden must follow
+        # dp/g and ignore the floored thickness, even when both are present.
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_number_burdens,
+        )
+
+        dp = (3000.0, 5.0)
+        run = self._run(dp=dp, qnc=1e8)
+        run["air_density"] = (("time", "level", "lon", "lat"),
+                              np.array([1.2, 1.2]).reshape(1, 2, 1, 1))
+        run["layer_thickness"] = (("time", "level", "lon", "lat"),
+                                  np.array([255.0, 10.0]).reshape(1, 2, 1, 1))
+        out = _with_column_number_burdens(run)
+        np.testing.assert_allclose(out["qnc_column"].values,
+                                   self._column_mass(dp) * 1e8, rtol=1e-12)
+
+    def test_falls_back_to_differenced_pressure_half(self):
+        import xarray as xr
+
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_number_burdens,
+        )
+
+        run = self._run(qnc=1e8).drop_vars("pressure_thickness")
+        # Surface-first interfaces whose differences are _DP.
+        ph = np.array([1e5, 1e5 - 1200.0, 1e5 - 4200.0]).reshape(1, 3, 1, 1)
+        run["pressure_half"] = xr.DataArray(
+            ph, dims=("time", "level_i", "lon", "lat"))
+        out = _with_column_number_burdens(run)
+        np.testing.assert_allclose(out["qnc_column"].values,
+                                   self._column_mass() * 1e8, rtol=1e-9)
+
+    def test_number_tracers_without_pressure_thickness_raise(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_number_burdens,
+        )
+
+        run = self._run(qnc=1e8).drop_vars("pressure_thickness")
+        with self.assertRaisesRegex(ValueError, "pressure thickness"):
+            _with_column_number_burdens(run)
+
+    def test_nan_cell_propagates_into_the_burden(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            _with_column_number_burdens,
+        )
+
+        run = self._run(qnc=1e8)
+        run["qnc"][0, 1, 0, 0] = np.nan
+        out = _with_column_number_burdens(run)
+        self.assertTrue(np.isnan(out["qnc_column"].values).all())
 
     def test_jam_total_number_sums_modes_and_both_phases(self):
         from jcm.data.test.release_matrix.generate_stats import (
@@ -1917,15 +2023,86 @@ class TestReleaseMatrixColumnNumberBurdens(unittest.TestCase):
         run = self._run(n_ait=1.0, n_acc=2.0,
                         **{"jam_cloud_borne.nc_acc": 4.0})
         out = _with_column_number_burdens(run)
-        np.testing.assert_allclose(out["n_total_column"].values, 320 * 7.0)
+        np.testing.assert_allclose(out["n_total_column"].values,
+                                   self._column_mass() * 7.0, rtol=1e-12)
 
-    def test_member_without_air_mass_diagnostics_is_unchanged(self):
+    def test_member_without_number_tracers_is_unchanged(self):
         from jcm.data.test.release_matrix.generate_stats import (
             _with_column_number_burdens,
         )
 
-        run = self._run(qnc=1e8).drop_vars("layer_thickness")
-        self.assertNotIn("qnc_column", _with_column_number_burdens(run))
+        run = self._run(temperature=280.0).drop_vars("pressure_thickness")
+        self.assertEqual(set(_with_column_number_burdens(run).data_vars),
+                         {"temperature"})
+
+
+class TestReleaseMatrixNonFiniteAndHeldStates(unittest.TestCase):
+    """A NaN must fail a member; a held state must still be locally checkable."""
+
+    def test_nan_in_prediction_fails_the_member(self):
+        bands, pred = TestReleaseMatrixBandCheck()._fixture()
+        pred["temperature"][1] = np.nan
+        with self.assertRaisesRegex(AssertionError, "not finite in the run"):
+            _assert_within_release_bands("m", "bands.nc", bands, pred)
+
+    def test_window_reduction_does_not_skip_nan(self):
+        # The reduction the test and the generator share must not average
+        # a partially-NaN window into a finite value.
+        import xarray as xr
+
+        from jcm.data.test.release_matrix import generate_stats
+
+        class _Pred:
+            def to_xarray(self):
+                t = np.full((2, 1, 2, 2), 280.0)
+                t[1, 0, 1, 1] = np.nan
+                return xr.Dataset({"temperature": (
+                    ("time", "level", "lon", "lat"), t)})
+
+        means = generate_stats._global_mean(_Pred())
+        self.assertTrue(np.isnan(means["temperature"].values).all())
+
+    def _held_bands(self, state_name="m_fixture_abc123.msgpack"):
+        import xarray as xr
+
+        return xr.Dataset(attrs={
+            "hosted_state": "pending",
+            "hosted_state_reason": "awaiting upload",
+            "init_state": f"bundles/t63_l47/init_states/{state_name}",
+        })
+
+    def test_held_member_skips_without_a_local_state(self):
+        import os
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+                os.environ, {"JCM_FIXTURE_STATE_DIR": tmp}):
+            reason = _held_state_skip_reason("m", self._held_bands())
+        self.assertIn("awaiting upload", reason)
+        env = {k: v for k, v in os.environ.items()
+               if k != "JCM_FIXTURE_STATE_DIR"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertIn("awaiting upload",
+                          _held_state_skip_reason("m", self._held_bands()))
+
+    def test_held_member_is_validated_when_its_state_is_local(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "m_fixture_abc123.msgpack").write_bytes(b"x")
+            with mock.patch.dict(os.environ, {"JCM_FIXTURE_STATE_DIR": tmp}):
+                self.assertIsNone(
+                    _held_state_skip_reason("m", self._held_bands()))
+
+    def test_published_member_is_never_held(self):
+        import xarray as xr
+
+        self.assertIsNone(_held_state_skip_reason(
+            "m", xr.Dataset(attrs={"hosted_state": "published"})))
 
 
 class TestReleaseMatrixGenerationProvenance(unittest.TestCase):

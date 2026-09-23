@@ -223,29 +223,53 @@ COLUMN_NUMBER_BURDENS = {
 def _with_column_number_burdens(ds):
     """``ds`` plus the :data:`COLUMN_NUMBER_BURDENS` it can supply.
 
-    Each column integral is ``sum_k N_k * rho_k * dz_k`` over the mid-level
-    axis — the layer air mass from the run's own ``air_density`` [kg m-3]
-    and ``layer_thickness`` [m] diagnostics — taken per column, before any
-    horizontal mean, so the band compares the global mean of a burden and
-    not a burden of global means. A variable whose sources the member does
-    not carry (no 2M scheme, no JAM) is simply not added, and so is not
-    banded for that member.
+    Each column integral is ``sum_k N_k * dp_k / g`` over the mid-level axis:
+    the layer air mass [kg m-2] from the run's own layer pressure thickness,
+    taken per column before any horizontal mean, so the band compares the
+    global mean of a burden and not a burden of global means. ``dp`` comes
+    from :func:`jcm.analysis.layer_pressure_thickness`, which reads the
+    ``pressure_thickness`` diagnostic and falls back to differencing
+    ``pressure_half``.
+
+    It is deliberately NOT ``air_density * layer_thickness``: the
+    ``layer_thickness`` diagnostic is floored at 10 m for the physics that
+    divides by it (see :mod:`jcm.physics.diagnostics.moist_air_state`), so
+    wherever the floor binds, that product overstates the layer mass. No path
+    falls back to it. A member that carries number tracers but no pressure
+    thickness raises instead, because a burden it cannot weigh correctly must
+    not be banded.
+
+    A variable whose sources the member does not carry (no 2M scheme, no JAM)
+    is simply not added, and so is not banded for that member.
     """
-    if "air_density" not in ds or "layer_thickness" not in ds:
-        return ds
-    air_mass = ds["air_density"] * ds["layer_thickness"]      # kg m-2
-    derived = {}
+    import jcm.constants as c
+    from jcm.analysis import layer_pressure_thickness
+
+    wanted = {}
     for out_name, selects in COLUMN_NUMBER_BURDENS.items():
         sources = [v for v in ds.data_vars
                    if selects(v) and "level" in ds[v].dims]
         if sources:
-            number = sum(ds[v] for v in sources)
-            derived[out_name] = (number * air_mass).sum("level")
-            derived[out_name].attrs = {
-                "units": "m-2",
-                "long_name": "column-integrated number: "
-                             + " + ".join(sorted(sources)),
-            }
+            wanted[out_name] = sources
+    if not wanted:
+        return ds
+    if "pressure_thickness" not in ds and "pressure_half" not in ds:
+        raise ValueError(
+            "column number burdens need the layer pressure thickness "
+            "(pressure_thickness or pressure_half) to weight "
+            f"{sorted(v for s in wanted.values() for v in s)}; the run "
+            "carries neither, and the floored layer_thickness is not a mass "
+            "weight")
+    air_mass = layer_pressure_thickness(ds) / c.grav            # kg m-2
+    derived = {}
+    for out_name, sources in wanted.items():
+        number = sum(ds[v] for v in sources)
+        derived[out_name] = (number * air_mass).sum("level", skipna=False)
+        derived[out_name].attrs = {
+            "units": "m-2",
+            "long_name": "column-integrated number: "
+                         + " + ".join(sorted(sources)),
+        }
     return ds.assign(derived)
 
 
@@ -478,7 +502,7 @@ def _from_state_overrides(file_path: str) -> dict:
 def _global_mean(predictions):
     """``(time, lon, lat)``-mean of the candidate variables a run produced."""
     ds = _with_column_number_burdens(predictions.to_xarray())
-    means = ds.mean(dim={"time", "lon", "lat"})
+    means = ds.mean(dim={"time", "lon", "lat"}, skipna=False)
     present = [v for v in CANDIDATE_STAT_VARS if v in means]
     return means[present]
 
@@ -507,7 +531,7 @@ def write_stats_window_global_mean(member: str, state_path: str, out: str):
     predictions = exp.model.run(**{**exp.run_kwargs, "forcing": exp.forcing})
     ds = _with_column_number_burdens(predictions.to_xarray())
     present = [v for v in CANDIDATE_STAT_VARS if v in ds]
-    ds[present].mean(dim={"lon", "lat"}).to_netcdf(out)
+    ds[present].mean(dim={"lon", "lat"}, skipna=False).to_netcdf(out)
 
 
 def report_backend() -> None:
@@ -597,7 +621,7 @@ def stats_window_global_mean_isolated(member: str, state_path: str,
     _run_worker(
         "write_stats_window_global_mean as w; "
         f"w({member!r}, {state_path!r}, {str(out)!r})", env=env)
-    return xr.open_dataset(out).load().mean(dim="time")
+    return xr.open_dataset(out).load().mean(dim="time", skipna=False)
 
 
 def _stats_windows(member, state_path, n_runs, tmp_dir):
@@ -681,6 +705,7 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
     import os
     import tempfile
 
+    import numpy as np
     import xarray as xr
 
     # The orchestrator must never hold a device pool (see :func:`_run_worker`)
@@ -752,14 +777,30 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
 
     daily_global = runs[0]
     present = list(daily_global.data_vars)
-    pred_mean = daily_global.mean(dim="time")
-    pred_std = daily_global.std(dim="time")
+    pred_mean = daily_global.mean(dim="time", skipna=False)
+    pred_std = daily_global.std(dim="time", skipna=False)
 
     noise = None
     if n_reproducibility_repeats:
-        stacked = xr.concat([r.mean(dim="time") for r in runs],
+        stacked = xr.concat([r.mean(dim="time", skipna=False) for r in runs],
                             dim="_repeat")
-        noise = stacked.max(dim="_repeat") - stacked.min(dim="_repeat")
+        noise = (stacked.max(dim="_repeat", skipna=False)
+                 - stacked.min(dim="_repeat", skipna=False))
+
+    # Every reduction above propagates NaN (``skipna=False``): xarray's
+    # default would average a partially-NaN window into a finite number, so a
+    # run that had blown up in some cells could be written as a band. Refuse
+    # to write one instead.
+    nonfinite = sorted(
+        v for v in present
+        if not np.isfinite(pred_mean[v].values).all()
+        or not np.isfinite(pred_std[v].values).all()
+        or (noise is not None and not np.isfinite(noise[v].values).all()))
+    if nonfinite:
+        raise ValueError(
+            f"{member}: non-finite values in the stats window for "
+            f"{nonfinite}; refusing to write bands from a run that is not "
+            "finite everywhere")
 
     out = {}
     for var in present:

@@ -60,6 +60,20 @@ and `jcm.data.remote.fetch` resolves cache-first without revalidating, so a
 stable name could not be republished without leaving already-warm caches
 pairing an old state with new bands.
 
+Before uploading, validate the new pair locally: point
+`JCM_FIXTURE_STATE_DIR` at the directory holding the generated state(s) and
+run the test. With it set, each member reads its state from there (digest
+checked) and never from the mirror; a member whose state is absent is skipped,
+named. A band file marked `hosted_state="pending"` (a state deliberately not
+published yet) is skipped for the same reason when its state is not local, but
+is validated like any other member when `JCM_FIXTURE_STATE_DIR` holds it.
+
+Band number concentrations are column burdens weighted by the layer air mass
+`dp/g` (the `pressure_thickness` diagnostic): `air_density * layer_thickness`
+is not a mass weight, because `layer_thickness` is floored at 10 m. Every
+reduction propagates NaN, so a partially non-finite run fails its member
+rather than averaging the finite cells into a band-sized mean.
+
 Both are built through the member's **validated preset**, the same recipe this
 directory's `matrix.yaml` names, so the regression covers what the project
 claims to support rather than a composition invented for the test.
