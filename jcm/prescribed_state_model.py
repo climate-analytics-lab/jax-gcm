@@ -241,7 +241,10 @@ class PrescribedStateModel:
             states: List of ``PhysicsState`` snapshots, or a single
                 ``PhysicsState`` whose leading axis is time.
             forcing: Surface forcing; defaults to aquaplanet from ``coords``.
-            times: Optional days-since-start array.
+            times: Days since ``start_date`` at which each state is valid,
+                one per state. Date-aligned forcing is selected, and its
+                coverage checked, at these times; ``None`` means consecutive
+                ``dt_seconds`` steps from ``start_date``.
 
         Returns:
             ``PrescribedStatePredictions``.
@@ -255,7 +258,16 @@ class PrescribedStateModel:
 
         n_times = states.u_wind.shape[0]
         if times is None:
+            # No time axis given: the states are taken as consecutive model
+            # steps. A caller holding real snapshot times (e.g. the state
+            # file's own time coordinate) must pass them, or date-aligned
+            # forcing is selected on this synthetic step clock.
             times = jnp.arange(n_times) * (self.dt_seconds / 86400.0)
+        elif int(jnp.shape(times)[0]) != n_times:
+            raise ValueError(
+                f"PrescribedStateModel.run: {int(jnp.shape(times)[0])} times "
+                f"for {n_times} states; pass one time (days since start_date) "
+                "per state.")
 
         # Both directions of the forced-mode contract (#301), as at every run
         # entry point, over the window the prescribed states actually span.

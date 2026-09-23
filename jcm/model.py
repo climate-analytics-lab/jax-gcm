@@ -36,6 +36,12 @@ from jcm.terrain import TerrainData
 from jcm.dycore.base import DynamicalCore, Predictions
 from jcm.dycore.dinosaur.dycore import DinosaurDycore
 
+#: The calendar a :class:`Model` runs on unless told otherwise — and so the
+#: one every CLI run mode uses (no config knob selects another), which the
+#: diagnostic ``run.mode=prescribed`` driver must share to place its states
+#: on the same fraction-of-year clock as the full integration.
+DEFAULT_MODEL_CALENDAR = "365_day"
+
 
 logger = logging.getLogger(__name__)
 
@@ -386,7 +392,7 @@ class Model:
                  terrain: TerrainData = None,
                  physics: Physics = None,
                  start_date: jdt.Datetime | None = None,
-                 calendar: str = "365_day",
+                 calendar: str = DEFAULT_MODEL_CALENDAR,
                  observers=()) -> None:
         """Initialise the model.
 

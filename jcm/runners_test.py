@@ -8,12 +8,14 @@ T85x47 grid here.
 
 import logging
 import os
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import numpy as np
 import pytest
+import xarray as xr
 from hydra import compose, initialize_config_dir
 
 # Path/auto resolution lives in the forcing-side engine; tests stub it THERE
@@ -34,6 +36,11 @@ from jcm.runners import (
 
 
 CONFIG_DIR = str(Path(__file__).parent / "config")
+
+
+#: A stand-in ``(dataset, states)`` for ``_load_states_from_cfg``: one state
+#: (so no time axis is needed) with the leading-axis shape the runner reads.
+_ONE_STATE_FILE = (xr.Dataset(), types.SimpleNamespace(u_wind=np.zeros((1,))))
 
 
 def _compose(overrides=None):
@@ -1576,7 +1583,7 @@ class TestModeDispatch(unittest.TestCase):
                 mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
                 mock.patch("jcm.runners.warn_on_config_traps"), \
                 mock.patch("jcm.runners._load_states_from_cfg",
-                           return_value=(None, object())), \
+                           return_value=_ONE_STATE_FILE), \
                 mock.patch(
                     "jcm.prescribed_state_model.PrescribedStateModel",
                 ) as prescribed_cls:
@@ -1607,7 +1614,7 @@ class TestModeDispatch(unittest.TestCase):
                 mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
                 mock.patch("jcm.runners.warn_on_config_traps"), \
                 mock.patch("jcm.runners._load_states_from_cfg",
-                           return_value=(None, object())), \
+                           return_value=_ONE_STATE_FILE), \
                 mock.patch(
                     "jcm.prescribed_state_model.PrescribedStateModel",
                 ) as prescribed_cls:

@@ -85,7 +85,9 @@ bail_on_unhealthy: true
 mode: full
 
 # State file (xarray netCDF written by a previous JCM run) — required when
-# ``mode`` is ``prescribed`` or ``scm``.
+# ``mode`` is ``prescribed`` or ``scm``. ONE file; in ``prescribed`` mode its
+# ``time`` coordinate is the snapshot clock (offsets from the first state,
+# which ``start_date`` dates), so date-aligned forcing follows the states.
 state_file: null
 
 # Tracer variables to load from the state file (mapping tracer name →

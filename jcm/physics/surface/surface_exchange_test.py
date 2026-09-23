@@ -1307,9 +1307,10 @@ class TestByDateCoverageEndIntervals:
         with xr.open_dataset(p) as ds:
             fields = read_prescribed_surface_fluxes(
                 ds, lat, lon, align_mode="by_date", source=str(p))
-        lo, hi = (float(v) for v in fields["prescribed_flux_time_bounds"])
-        assert lo == pytest.approx(_secs("2000-01-01"))
-        assert hi == pytest.approx(_secs("2001-01-01"))
+        b = np.asarray(fields["prescribed_flux_time_bounds"])
+        assert b.shape == (12, 2)
+        assert float(b.min()) == pytest.approx(_secs("2000-01-01"))
+        assert float(b.max()) == pytest.approx(_secs("2001-01-01"))
         forcing = default_forcing(coords.horizontal).copy(**fields)
         term = SpeedySurfaceFlux(prescribed_fluxes=True)
         term.validate_forcing(
@@ -1473,3 +1474,325 @@ def test_every_entry_point_calls_the_shared_contract_helper():
     assert "_reject_forced_flux_in_scm(" in inspect.getsource(runners._run_scm)
     # run_chunked steps through model.run (checked above).
     assert "model.run(" in inspect.getsource(runners.run_chunked)
+
+
+# ---------------------------------------------------------------------------
+# Declared time_bnds gaps (Codex #877): kept per interval, never collapsed
+# ---------------------------------------------------------------------------
+
+class TestDeclaredBoundsGaps:
+    """Disjoint CF bounds are a declared gap the run window may not cross."""
+
+    def _ts(self):
+        from jcm.forcing import BY_DATE, make_time_series
+        t = jnp.asarray([_secs("2000-01-15"), _secs("2000-02-15"),
+                         _secs("2000-06-15"), _secs("2000-07-15")])
+        return make_time_series(jnp.zeros((4, 2, 2)), t, BY_DATE)
+
+    def _bounds(self, contiguous):
+        """Four monthly intervals; the gappy set has no March-May coverage."""
+        if contiguous:
+            edges = [("2000-01-01", "2000-02-01"), ("2000-02-01", "2000-06-01"),
+                     ("2000-06-01", "2000-07-01"), ("2000-07-01", "2000-08-01")]
+        else:
+            edges = [("2000-01-01", "2000-02-01"), ("2000-02-01", "2000-03-01"),
+                     ("2000-06-01", "2000-07-01"), ("2000-07-01", "2000-08-01")]
+        return jnp.asarray([[_secs(a), _secs(b)] for a, b in edges])
+
+    def test_contiguous_bounds_accepted(self):
+        from jcm.forcing import by_date_coverage_error
+        assert by_date_coverage_error(
+            self._ts(), _secs("2000-01-01"), _secs("2000-08-01"),
+            bounds=self._bounds(True)) is None
+
+    def test_gap_inside_window_rejected(self):
+        from jcm.forcing import by_date_coverage_error
+        err = by_date_coverage_error(
+            self._ts(), _secs("2000-02-10"), _secs("2000-06-20"),
+            bounds=self._bounds(False))
+        assert err is not None and "declare a gap from 2000-03-01" in err
+        # A run starting INSIDE the gap is rejected too.
+        assert by_date_coverage_error(
+            self._ts(), _secs("2000-04-01"), _secs("2000-06-20"),
+            bounds=self._bounds(False)) is not None
+
+    def test_gap_outside_window_accepted(self):
+        from jcm.forcing import by_date_coverage_error
+        gappy = self._bounds(False)
+        assert by_date_coverage_error(
+            self._ts(), _secs("2000-01-05"), _secs("2000-02-25"),
+            bounds=gappy) is None
+        assert by_date_coverage_error(
+            self._ts(), _secs("2000-06-05"), _secs("2000-07-31"),
+            bounds=gappy) is None
+
+    def test_reader_keeps_the_intervals(self, tmp_path):
+        import numpy as np
+        import pandas as pd
+        import xarray as xr
+
+        from jcm.forcing import read_prescribed_surface_fluxes
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        nlon, nlat = coords.horizontal.nodal_shape
+        lat = np.degrees(np.asarray(coords.horizontal.latitudes))
+        lon = np.degrees(np.asarray(coords.horizontal.longitudes))
+        starts = pd.to_datetime(["2000-01-01", "2000-06-01"])
+        ends = pd.to_datetime(["2000-02-01", "2000-07-01"])
+        mids = starts + (ends - starts) / 2
+        data = {v: (("time", "lat", "lon"), np.ones((2, nlat, nlon)))
+                for v in ("sensible_heat_flux", "evaporation",
+                          "stress_u", "stress_v")}
+        data["time_bnds"] = (("time", "nv"),
+                             np.stack([starts.values, ends.values], axis=1))
+        ds = xr.Dataset(data, coords={"time": mids.values, "lat": lat,
+                                      "lon": lon})
+        ds["time"].attrs["bounds"] = "time_bnds"
+        ds["time"].encoding["units"] = "hours since 2000-01-01"
+        p = tmp_path / "gappy.nc"
+        ds.to_netcdf(p)
+        with xr.open_dataset(p) as opened:
+            fields = read_prescribed_surface_fluxes(
+                opened, lat, lon, align_mode="by_date", source=str(p))
+        b = np.asarray(fields["prescribed_flux_time_bounds"])
+        assert b.shape == (2, 2)
+        assert b[0, 1] == pytest.approx(_secs("2000-02-01"))
+        assert b[1, 0] == pytest.approx(_secs("2000-06-01"))
+
+
+# ---------------------------------------------------------------------------
+# run.mode=prescribed end to end: the state file's own clock drives forcing
+# ---------------------------------------------------------------------------
+
+def _daily_state_ds(n, start="1970-01-01", times=None):
+    """Return a state-file stand-in carrying only its ``time`` coordinate."""
+    import pandas as pd
+    import xarray as xr
+    t = (pd.date_range(start, periods=n, freq="D").values
+         if times is None else times)
+    return xr.Dataset(coords={"time": t})
+
+
+class TestPrescribedModeStateClock:
+    """``_prescribed_state_times_days`` and the prescribed driver's clock."""
+
+    def test_daily_snapshots_give_day_offsets(self):
+        from jcm.runners import _prescribed_state_times_days
+        days = _prescribed_state_times_days(_daily_state_ds(3), 3, "f")
+        assert list(days) == [0.0, 1.0, 2.0]
+
+    def test_irregular_cadence_is_honoured(self):
+        import numpy as np
+        from jcm.runners import _prescribed_state_times_days
+        t = np.array(["1970-01-01", "1970-01-02", "1970-01-05"],
+                     dtype="datetime64[ns]")
+        days = _prescribed_state_times_days(_daily_state_ds(3, times=t), 3, "f")
+        assert list(days) == [0.0, 1.0, 4.0]
+
+    def test_cftime_axis_uses_nominal_dates(self):
+        import cftime
+        import numpy as np
+        from jcm.runners import _prescribed_state_times_days
+        t = np.array([cftime.DatetimeNoLeap(2001, 2, 28),
+                      cftime.DatetimeNoLeap(2001, 3, 1)], dtype=object)
+        days = _prescribed_state_times_days(_daily_state_ds(2, times=t), 2, "f")
+        assert list(days) == [0.0, 1.0]
+
+    def test_single_state_needs_no_time_axis(self):
+        import xarray as xr
+        from jcm.runners import _prescribed_state_times_days
+        assert list(_prescribed_state_times_days(xr.Dataset(), 1, "f")) == [0.0]
+
+    @pytest.mark.parametrize("case,match", [
+        ("missing", "no 'time' coordinate"),
+        ("length", "entries for 3 states"),
+        ("numeric", "does not decode to dates"),
+        ("nat", "missing"),
+        ("unordered", "not strictly increasing"),
+        ("duplicate", "not strictly increasing"),
+    ])
+    def test_bad_time_axis_rejected(self, case, match):
+        import numpy as np
+        import xarray as xr
+        from jcm.runners import _prescribed_state_times_days
+        d = lambda *x: np.array(x, dtype="datetime64[ns]")  # noqa: E731
+        ds = {
+            "missing": xr.Dataset(),
+            "length": _daily_state_ds(2),
+            "numeric": xr.Dataset(coords={"time": [0.0, 1.0, 2.0]}),
+            "nat": xr.Dataset(coords={"time": d("1970-01-01", "NaT",
+                                                "1970-01-03")}),
+            "unordered": xr.Dataset(coords={"time": d(
+                "1970-01-01", "1970-01-03", "1970-01-02")}),
+            "duplicate": xr.Dataset(coords={"time": d(
+                "1970-01-01", "1970-01-01", "1970-01-02")}),
+        }[case]
+        with pytest.raises(ValueError, match=match):
+            _prescribed_state_times_days(ds, 3, "f")
+
+    def test_times_length_must_match_states(self):
+        from jcm.prescribed_state_model import PrescribedStateModel
+        from jcm.prescribed_state_model_test import _make_test_state
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        model = PrescribedStateModel(physics=speedy_physics(), coords=coords)
+        with pytest.raises(ValueError, match="2 times for 1 states"):
+            model.run([_make_test_state(coords)], times=jnp.asarray([0., 1.]))
+
+    def test_traced_times_give_no_window(self):
+        import jax
+        from jcm.prescribed_state_model import PrescribedStateModel
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        model = PrescribedStateModel(physics=speedy_physics(), coords=coords)
+        seen = []
+
+        @jax.jit
+        def f(t):
+            seen.append(model._run_window_seconds(t))
+            return t
+        f(jnp.asarray([0.0, 1.0]))
+        assert seen == [None]
+        start, end = model._run_window_seconds(jnp.asarray([0.0, 2.0]))
+        assert (start, end) == (pytest.approx(_secs("2000-01-01")),
+                                pytest.approx(_secs("2000-01-03")))
+
+    def test_full_mode_only_knobs_rejected(self):
+        from omegaconf import OmegaConf
+        from jcm.runners import _reject_full_mode_only_knobs
+        for extra in ({"chunk_days": 5}, {"checkpoint_path": "x.ckpt"}):
+            cfg = OmegaConf.create({"run": {"mode": "prescribed", **extra}})
+            with pytest.raises(ValueError, match="apply only to run.mode=full"):
+                _reject_full_mode_only_knobs(cfg)
+        _reject_full_mode_only_knobs(OmegaConf.create(
+            {"run": {"mode": "prescribed", "chunk_days": 0,
+                     "checkpoint_path": None}}))
+
+    @pytest.mark.parametrize("state_file", [["a.nc", "b.nc"], "s_{year}.nc"])
+    def test_single_state_file_required(self, state_file):
+        from omegaconf import OmegaConf
+        from jcm.runners import _load_states_from_cfg
+        cfg = OmegaConf.create({"run": {"mode": "prescribed",
+                                        "state_file": state_file}})
+        with pytest.raises(ValueError, match="ONE netCDF state file"):
+            _load_states_from_cfg(cfg, None)
+
+
+class TestPrescribedModeForcedFlux:
+    """Forced fluxes in ``run.mode=prescribed`` follow the state times."""
+
+    def _archive_forcing(self, coords, n_days=5):
+        from jcm.forcing import BY_DATE, make_time_series
+        nodal = coords.horizontal.nodal_shape
+        t = jnp.asarray([_secs(f"2000-01-{d + 1:02d}") for d in range(n_days)])
+        vals = jnp.stack([jnp.full(nodal, float(k + 1)) for k in range(n_days)])
+        leaf = make_time_series(vals, t, BY_DATE)
+        return default_forcing(coords.horizontal).copy(
+            prescribed_sensible_heat_flux=leaf, prescribed_evaporation=leaf,
+            prescribed_stress_u=leaf, prescribed_stress_v=leaf)
+
+    def _model(self, coords):
+        import jax_datetime as jdt
+        from jcm.physics.speedy.speedy_terms import (
+            SpeedySurfaceFlux, speedy_physics,
+        )
+        from jcm.prescribed_state_model import PrescribedStateModel
+        physics = speedy_physics().replace(
+            "surface", SpeedySurfaceFlux(prescribed_fluxes=True))
+        return PrescribedStateModel(
+            physics=physics, coords=coords, dt_seconds=3 * 3600.0,
+            start_date=jdt.to_datetime("2000-01-01"))
+
+    def test_daily_snapshots_select_daily_archive_samples(self):
+        """Daily snapshots on a 3-hour step: snapshot k sees day-k fluxes."""
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.prescribed_state_model_test import _make_test_state
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        state = _make_test_state(coords)
+        preds = self._model(coords).run(
+            [state, state, state], forcing=self._archive_forcing(coords),
+            times=jnp.asarray([0.0, 1.0, 2.0]))
+        shf = preds.physics_data[SURFACE_EXCHANGE_KEY].sensible_heat_flux
+        for k in range(3):
+            assert float(jnp.mean(shf[k])) == pytest.approx(k + 1.0)
+
+    def test_coverage_checked_against_the_state_span(self):
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.prescribed_state_model_test import _make_test_state
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        state = _make_test_state(coords)
+        # States span 30 days; the archive covers 5 (+1 cadence day).
+        with pytest.raises(ValueError, match="BY_DATE"):
+            self._model(coords).run(
+                [state, state], forcing=self._archive_forcing(coords),
+                times=jnp.asarray([0.0, 30.0]))
+
+    def test_cli_driver_passes_file_times_start_date_and_calendar(self):
+        """``_run_prescribed`` hands the file's own times (not arange*dt), the
+        configured start date and the full-run calendar to the model, and
+        validates the forced contract over that window before physics.
+        """
+        from unittest import mock
+
+        from hydra import compose, initialize_config_module
+
+        from jcm import runners
+        from jcm.model import DEFAULT_MODEL_CALENDAR
+        from jcm.prescribed_state_model_test import _make_test_state
+        with initialize_config_module("jcm.config", version_base=None):
+            cfg = compose("config", overrides=[
+                "physics=speedy-forced-flux", "forcing.ozone_file=analytic",
+                "run.mode=prescribed", "run.time_step=180",
+                "run.start_date=2000-01-01", "run.state_file=unused.nc"])
+        coords = runners.build_coords(cfg)
+        state = _make_test_state(coords)
+        from jax.tree_util import tree_map
+        states = tree_map(lambda *a: jnp.stack(a), state, state, state)
+        archive = self._archive_forcing(coords)
+        seen = {}
+        from jcm.prescribed_state_model import PrescribedStateModel
+        real_run = PrescribedStateModel.run
+
+        def spy_run(self, states, forcing=None, times=None):
+            seen.update(times=times, start=self.start_date,
+                        calendar=self.calendar)
+            return real_run(self, states, forcing=forcing, times=times)
+
+        with mock.patch.object(runners, "build_forcing",
+                               return_value=archive), \
+                mock.patch.object(runners, "_load_states_from_cfg",
+                                  return_value=(_daily_state_ds(3), states)), \
+                mock.patch.object(PrescribedStateModel, "run", spy_run):
+            preds = runners._run_prescribed(cfg)
+        assert list(seen["times"]) == [0.0, 1.0, 2.0]
+        assert seen["calendar"] == DEFAULT_MODEL_CALENDAR
+        shf = preds.physics_data[SURFACE_EXCHANGE_KEY].sensible_heat_flux
+        assert float(jnp.mean(shf[2])) == pytest.approx(3.0)
+        # An archive that stops before the last snapshot fails BEFORE physics.
+        with mock.patch.object(runners, "build_forcing",
+                               return_value=self._archive_forcing(coords, 1)), \
+                mock.patch.object(runners, "_load_states_from_cfg",
+                                  return_value=(_daily_state_ds(3), states)), \
+                mock.patch.object(PrescribedStateModel, "run") as never:
+            with pytest.raises(ValueError, match="BY_DATE"):
+                runners._run_prescribed(cfg)
+            never.assert_not_called()
+
+    def test_cli_forced_preset_with_nothing_attached_raises_value_error(self):
+        """``kind: default`` + ``ozone_file: analytic`` assembles ``None``
+        forcing; a forced preset then gets the actionable ValueError, not an
+        AttributeError.
+        """
+        from hydra import compose, initialize_config_module
+
+        from jcm import runners
+        with initialize_config_module("jcm.config", version_base=None):
+            cfg = compose("config", overrides=[
+                "physics=speedy-forced-flux", "forcing.ozone_file=analytic"])
+        coords = runners.build_coords(cfg)
+        forcing = runners.build_forcing(cfg, coords)
+        assert forcing is None
+        with pytest.raises(ValueError, match="forcing.prescribed_surface_flux"):
+            runners.validate_run_forcing(runners.build_physics(cfg), forcing)

@@ -247,7 +247,14 @@ load or run start rather than silently mis-phasing the fluxes:
   run. The covered window is the file's CF time bounds when it carries
   them (the variable the `time` coordinate's `bounds` attribute names, or
   `time_bnds`/`time_bounds`; validated to bracket each sample), which is
-  exact for any stamp placement. Without bounds it is the end samples plus
+  exact for any stamp placement. The bounds are kept per interval, so
+  disjoint ones are a declared gap: the run must lie inside one contiguous
+  stretch, because inside a gap a neighbouring sample would silently stand
+  in for data the file says it lacks. Rejecting such files at read time
+  would refuse archives with a declared outage that a run avoiding it can
+  use; without bounds no gap is ever inferred from the stamps. A single
+  dated sample without bounds covers only its own instant. Without bounds
+  it is otherwise the end samples plus
   each END's own spacing (first interval before the first sample, last
   interval after the last): a sample may be stamped at the start or the
   middle of the interval it represents, so a Jan-1…Dec-1 or a Jan-15…Dec-15

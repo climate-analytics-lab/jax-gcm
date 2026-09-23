@@ -60,10 +60,17 @@ PRESCRIBED_FLUX_FORCING_FIELDS = (
 )
 
 
-def missing_prescribed_flux_fields(forcing: ForcingData) -> list[str]:
-    """Names of the forced-mode forcing fields that are ``None``."""
+def missing_prescribed_flux_fields(forcing: ForcingData | None) -> list[str]:
+    """Names of the forced-mode forcing fields that are ``None``.
+
+    ``forcing=None`` — what the CLI assembly returns when the forcing config
+    attaches nothing (``kind: default`` with every optional input off) —
+    has every field missing, so a forced-mode physics gets the actionable
+    "supply forcing.prescribed_surface_flux" error rather than an
+    ``AttributeError``.
+    """
     return [name for name in PRESCRIBED_FLUX_FORCING_FIELDS
-            if getattr(forcing, name) is None]
+            if getattr(forcing, name, None) is None]
 
 
 def check_prescribed_flux_forcing(forcing: ForcingData, owner: str,

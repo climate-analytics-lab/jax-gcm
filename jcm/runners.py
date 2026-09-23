@@ -1798,7 +1798,21 @@ def _load_states_from_cfg(cfg: DictConfig, physics):
     against a clear sky — the second half of #718. ``run.tracer_vars: {}``
     opts out explicitly; an explicit mapping still wins outright.
     """
-    state_file = _resolve_data_path(cfg.run.get("state_file", None))
+    from jcm.data import input_resolution as ir
+
+    raw_state_file = cfg.run.get("state_file", None)
+    # ONE file: the state series is opened with a single ``open_dataset``
+    # and its time coordinate is the snapshot clock, so a list or a
+    # ``{year}`` pattern (which the forcing keys accept) is rejected here
+    # rather than reaching ``open_dataset`` as a confusing error.
+    if ir._is_seq(raw_state_file) or (
+            isinstance(raw_state_file, str) and "{year}" in raw_state_file):
+        raise ValueError(
+            f"run.state_file={raw_state_file!r}: give ONE netCDF state file "
+            "(a single JCM output); lists and {year} patterns are not "
+            "supported for the state series. Concatenate the files along "
+            "time first (e.g. xarray.open_mfdataset(...).to_netcdf(...)).")
+    state_file = _resolve_data_path(raw_state_file)
     if not state_file:
         raise ValueError(
             f"run.mode={cfg.run.mode!r} requires run.state_file to point "
@@ -1822,10 +1836,91 @@ def _load_states_from_cfg(cfg: DictConfig, physics):
     )
 
 
+def _prescribed_state_times_days(ds, n_states: int, source: str):
+    """Days since the FIRST snapshot at which each state of ``ds`` is valid.
+
+    The state file's own ``time`` coordinate is the snapshot clock: a saved
+    run's states are typically daily (``save_interval``) while the physics
+    step is hours, so synthesising ``arange(n) * dt`` would select and
+    coverage-check date-aligned forcing on the wrong dates. The offsets are
+    relative to the first sample, which ``run.start_date`` dates (a JCM
+    output's ``time`` axis counts simulated days, not calendar dates, so the
+    absolute date is the config's, never inferred from the file). Rules:
+
+    - a single state needs no time axis (offset 0);
+    - several states need a ``time`` coordinate of that length that decodes
+      to dates (``datetime64`` or ``cftime``; a cftime calendar is placed on
+      the Gregorian clock by its nominal date, as every forcing axis is);
+    - the stamps must be strictly increasing and present (no ``NaT``) — an
+      unordered or duplicated series has no well-defined snapshot clock.
+
+    Any irregular cadence is honoured as given.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from jcm.forcing import _is_datetime_axis, _time_axis_seconds_from_ds
+    if "time" not in ds.coords and "time" not in ds.dims:
+        if n_states == 1:
+            return np.zeros(1)
+        raise ValueError(
+            f"{source}: {n_states} states but no 'time' coordinate, so the "
+            "snapshot clock is unknown. Save the states with their time axis "
+            "(any JCM output has one).")
+    raw = np.asarray(ds["time"].values).reshape(-1)
+    if raw.size != n_states:
+        raise ValueError(
+            f"{source}: the 'time' coordinate has {raw.size} entries for "
+            f"{n_states} states.")
+    if not _is_datetime_axis(raw):
+        raise ValueError(
+            f"{source}: the 'time' coordinate does not decode to dates (dtype "
+            f"{raw.dtype}); give it CF units such as 'days since 2000-01-01'.")
+    if bool(np.any(pd.isnull(raw))):
+        raise ValueError(f"{source}: the 'time' coordinate has missing (NaT) "
+                         "entries.")
+    seconds = np.asarray(
+        _time_axis_seconds_from_ds(ds), dtype=float).reshape(-1)
+    if seconds.size > 1 and not bool(np.all(np.diff(seconds) > 0)):
+        raise ValueError(
+            f"{source}: the 'time' coordinate is not strictly increasing; "
+            "the states must be ordered in time with distinct stamps.")
+    return (seconds - seconds[0]) / 86400.0
+
+
+def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
+    """Refuse integration-only run knobs in a diagnostic run mode.
+
+    ``run.chunk_days`` / ``run.checkpoint_path`` drive the chunked,
+    resumable ``full`` integration; ``prescribed`` and ``scm`` evaluate a
+    state file in one pass with nothing to checkpoint, so a set value would
+    be silently ignored.
+    """
+    mode = cfg.run.get("mode", "full")
+    chunk = float(cfg.run.get("chunk_days", 0) or 0)
+    ckpt = cfg.run.get("checkpoint_path", None)
+    if chunk > 0 or ckpt not in (None, "", "null"):
+        raise ValueError(
+            f"run.mode={mode!r} evaluates run.state_file in one pass: "
+            "run.chunk_days and run.checkpoint_path apply only to "
+            "run.mode=full (got chunk_days="
+            f"{cfg.run.get('chunk_days', 0)!r}, checkpoint_path={ckpt!r}). "
+            "Unset them for this mode.")
+
+
 def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
-    """Diagnose physics tendencies from a JCM state-file time series."""
+    """Diagnose physics tendencies from a JCM state-file time series.
+
+    Each state is evaluated at its OWN time — the state file's ``time``
+    coordinate, offset from ``run.start_date`` (the date of the first state;
+    :func:`_prescribed_state_times_days`) — on the calendar a full run uses,
+    and the forced-mode contract is checked over exactly that window before
+    any physics runs.
+    """
+    from jcm.model import DEFAULT_MODEL_CALENDAR
     from jcm.prescribed_state_model import PrescribedStateModel
 
+    _reject_full_mode_only_knobs(cfg)
     # A null runner timestep is resolved from the dycore group's own value;
     # there is no need to construct the backend just to read a number.
     dt_seconds = resolve_effective_time_step_seconds(cfg, time_step_model)
@@ -1835,17 +1930,26 @@ def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
     terrain = build_terrain(cfg, coords)
     forcing = build_forcing(cfg, coords)
     guard_emulator_ghg_forcing(physics, forcing)
-    validate_run_forcing(physics, forcing)
     warn_on_config_traps(cfg, physics, forcing, coords=coords)
-    _, states = _load_states_from_cfg(cfg, physics)
+    ds, states = _load_states_from_cfg(cfg, physics)
+    times = _prescribed_state_times_days(
+        ds, int(states.u_wind.shape[0]),
+        source=f"run.state_file={cfg.run.state_file!r}")
 
     model = PrescribedStateModel(
         physics=physics,
         coords=coords,
         terrain=terrain,
         dt_seconds=dt_seconds,
+        start_date=_resolve_start_date(cfg),
+        calendar=getattr(time_step_model, "calendar", None)
+        or DEFAULT_MODEL_CALENDAR,
     )
-    return model.run(states, forcing=forcing)
+    # Both directions of the forced-mode contract over the states' own
+    # window, before any physics runs (``model.run`` re-applies it).
+    validate_run_forcing(physics, forcing,
+                         run_window=model._run_window_seconds(times))
+    return model.run(states, forcing=forcing, times=times)
 
 
 #: Nearest-column selection; the science lives in
@@ -1869,6 +1973,7 @@ def _run_scm(cfg: DictConfig, time_step_model: Model | None = None):
     # the configured backend's group rather than building that backend.
     dt_seconds = resolve_effective_time_step_seconds(cfg, time_step_model)
 
+    _reject_full_mode_only_knobs(cfg)
     physics = build_physics(cfg)
     # Build coords just to grab the vertical coord; horizontal grid is unused.
     coords = build_coords(cfg)

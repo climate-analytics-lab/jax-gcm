@@ -372,11 +372,12 @@ class ForcingData:
     prescribed_evaporation: Any = None
     prescribed_stress_u: Any = None
     prescribed_stress_v: Any = None
-    # The ``[start, end]`` seconds since ``MODEL_EPOCH`` a date-aligned
-    # prescribed-flux archive declares it covers, from its CF ``time_bnds``
-    # (``None``: no bounds, so coverage is inferred from the end samples'
-    # cadence). Read only by the run-start coverage check
-    # (:func:`by_date_coverage_error`), never by physics.
+    # The ``(n, 2)`` per-sample ``[start, end]`` intervals (seconds since
+    # ``MODEL_EPOCH``) a date-aligned prescribed-flux archive declares it
+    # covers, from its CF ``time_bnds``. Kept per interval, not collapsed to
+    # an envelope, so a gap the file declares stays a gap. ``None``: no
+    # bounds, so coverage comes from the end samples' cadence. Read only by
+    # the run-start coverage check (:func:`by_date_coverage_error`).
     prescribed_flux_time_bounds: Any = None
 
     @classmethod
@@ -1959,15 +1960,21 @@ def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
 
 
 def _prescribed_flux_time_bounds(ds, order, time_seconds, source):
-    """``[start, end]`` seconds a date-aligned archive's CF bounds declare.
+    """Per-sample ``(n, 2)`` ``[start, end]`` seconds a file's CF bounds declare.
 
     Looks for the variable the ``time`` coordinate's ``bounds`` attribute
     names (the CF convention), else a ``time_bnds``/``time_bounds``
     variable; returns ``None`` when there is none, and the run-start coverage
-    check then infers coverage from the end samples' cadence
+    check then takes coverage from the end samples' cadence
     (:func:`by_date_coverage_error`). The bounds are validated — shape
     ``(time, 2)``, each sample inside its own interval — because a declared
     coverage that disagrees with the stamps is a malformed file, not a hint.
+    The intervals are returned as declared (sorted with the samples), NOT
+    collapsed to an envelope: disjoint bounds are the file saying it has no
+    data between them, and the run-start check honours that gap rather than
+    letting a neighbouring sample silently stand in for it. Rejecting
+    disjoint bounds outright would refuse legitimate archives (a campaign
+    record with a declared outage) that a run avoiding the gap can use.
     """
     import xarray as xr
     name = ds["time"].attrs.get("bounds") or ds["time"].encoding.get("bounds")
@@ -1993,7 +2000,7 @@ def _prescribed_flux_time_bounds(ds, order, time_seconds, source):
             f"{source}: time bounds {name!r} do not bracket their samples "
             f"(e.g. sample {int(bad[0])}); each interval must satisfy "
             "start <= time <= end with start < end.")
-    return jnp.asarray([float(lo.min()), float(hi.max())])
+    return jnp.asarray(np.stack([lo, hi], axis=1))
 
 
 def _prescribed_flux_time_axis(ds, align_mode, source):
@@ -2068,9 +2075,15 @@ def by_date_coverage_error(ts: "TimeSeries", start_seconds: float,
 
     The usable window is, in order of preference:
 
-    - ``bounds = (start, end)`` — the archive's own declared coverage (its CF
-      ``time_bnds``, see :func:`read_prescribed_surface_fluxes`), exact for
-      any stamp placement;
+    - ``bounds`` — the archive's own declared coverage (its CF ``time_bnds``,
+      see :func:`read_prescribed_surface_fluxes`): an ``(n, 2)`` array of
+      per-sample ``[start, end]`` intervals (a single ``(2,)`` pair is one
+      interval). Exact for any stamp placement, and DISJOINT intervals are
+      honoured as declared gaps: the run must lie inside one contiguous
+      stretch of the union, because inside a gap the selection would hold a
+      neighbouring sample the file itself says does not apply there. Bounds
+      are the only way a gap is known — without them the axis is taken as
+      contiguous, since gaps are never inferred from the stamps (#884);
     - otherwise one END interval beyond each end sample — the first interval
       repeated before the first sample, the last after the last
       (:func:`_repeat_cadence`; a calendar-month cadence steps by calendar
@@ -2082,19 +2095,24 @@ def by_date_coverage_error(ts: "TimeSeries", start_seconds: float,
       would let a daily archive with one long gap validate a run months past
       its last sample.
 
-    ``WRAP_YEAR`` leaves (a climatology covers every date) and axes with fewer
-    than two samples (and no bounds) return ``None``. Times are seconds since
-    ``MODEL_EPOCH``.
+    ``WRAP_YEAR`` leaves (a climatology covers every date) return ``None``;
+    a single dated sample without bounds covers only its own instant. Times
+    are seconds since ``MODEL_EPOCH``.
     """
     mode = int(np.asarray(ts.align_mode))
     if mode not in (BY_DATE, BY_DATE_INTERP):
         return None
     t = np.asarray(ts.time_seconds, dtype=float)
     if bounds is not None:
-        lo, hi = (float(v) for v in np.asarray(bounds, dtype=float))
+        lo, hi, gap = _declared_coverage(bounds, start_seconds)
         what = "its declared time_bnds"
+        if gap is not None:
+            what += f", which declare a gap from {_iso(gap[0])} to {_iso(gap[1])}"
     elif t.size < 2:
-        return None
+        # One dated sample and no bounds: there is no cadence to extend it
+        # by, so it covers only its own instant (never an assumed span).
+        lo = hi = float(t[0])
+        what = "a single sample with no declared bounds"
     else:
         lo = _repeat_cadence(t[1], t[0], t[0])
         hi = _repeat_cadence(t[-2], t[-1], t[-1])
@@ -2106,18 +2124,46 @@ def by_date_coverage_error(ts: "TimeSeries", start_seconds: float,
            if stored.size and np.issubdtype(stored.dtype, np.floating) else 0.0)
     if start_seconds >= lo - res and end_seconds <= hi + res:
         return None
-    import pandas as pd
-
-    def _d(s):
-        return str(pd.Timestamp(float(s), unit="s"))[:19]
+    _d = _iso
     return (
         f"{name}: the date-aligned (BY_DATE) time axis spans {_d(t[0])} .. "
         f"{_d(t[-1])} (usable {_d(lo)} .. {_d(hi)}, {what}), but the run "
-        f"covers {_d(start_seconds)} .. {_d(end_seconds)}. Outside its axis a "
-        "date-aligned series would silently hold its end sample. Supply "
-        "fluxes covering the whole run; if the file is a monthly climatology "
-        "meant to repeat every year, set "
+        f"covers {_d(start_seconds)} .. {_d(end_seconds)}. Outside its "
+        "coverage a date-aligned series would silently hold a neighbouring "
+        "sample. Supply fluxes covering the whole run; if the file is a "
+        "monthly climatology meant to repeat every year, set "
         "forcing.prescribed_surface_flux.align=wrap_year.")
+
+
+def _iso(seconds: float) -> str:
+    """Seconds since ``MODEL_EPOCH`` as an ISO date-time string."""
+    import pandas as pd
+    return str(pd.Timestamp(float(seconds), unit="s"))[:19]
+
+
+def _declared_coverage(bounds, start_seconds):
+    """Return the contiguous declared stretch a run starting at ``start`` can use.
+
+    ``bounds`` is ``(n, 2)`` (or one ``(2,)`` pair) of ``[start, end]``
+    intervals. They are merged where they touch or overlap; the result is
+    ``(lo, hi, gap)`` for the merged stretch containing ``start_seconds``
+    (else the first stretch after it, else the last), where ``gap`` is the
+    ``(end, next_start)`` of a declared gap that bounds it on the right, or
+    ``None``.
+    """
+    iv = np.asarray(bounds, dtype=float).reshape(-1, 2)
+    iv = iv[np.argsort(iv[:, 0], kind="stable")]
+    merged = [list(iv[0])]
+    for a, b in iv[1:]:
+        if a <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], b)
+        else:
+            merged.append([a, b])
+    k = next((i for i, (a, b) in enumerate(merged) if start_seconds <= b),
+             len(merged) - 1)
+    lo, hi = merged[k]
+    gap = (hi, merged[k + 1][0]) if k + 1 < len(merged) else None
+    return lo, hi, gap
 
 
 def _repeat_cadence(a: float, b: float, origin: float) -> float:
