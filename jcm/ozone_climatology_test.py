@@ -64,7 +64,7 @@ class TestOzoneClimatology(unittest.TestCase):
             nlon, nlat, nlev = 8, 4, 16
             _write_pre_interpolated_ozone(path, nlon, nlat, nlev)
             clim = OzoneClimatology.from_file(
-                path, nlon=nlon, nlat=nlat, nlev=nlev,
+                path, nlon=nlon, nlat=nlat, nlev=nlev, align_mode="wrap_year"
             )
 
         # ``from_file`` returns a 12-month ``TimeSeries`` (WRAP_YEAR
@@ -80,21 +80,21 @@ class TestOzoneClimatology(unittest.TestCase):
             path = Path(tmp) / "o3.nc"
             _write_pre_interpolated_ozone(path, nlon=8, nlat=4, nlev=16)
             with self.assertRaises(ValueError):
-                OzoneClimatology.from_file(path, nlon=16, nlat=8, nlev=16)
+                OzoneClimatology.from_file(path, nlon=16, nlat=8, nlev=16, align_mode="wrap_year")
 
     def test_vertical_grid_mismatch_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "o3.nc"
             _write_pre_interpolated_ozone(path, nlon=8, nlat=4, nlev=16)
             with self.assertRaises(ValueError):
-                OzoneClimatology.from_file(path, nlon=8, nlat=4, nlev=47)
+                OzoneClimatology.from_file(path, nlon=8, nlat=4, nlev=47, align_mode="wrap_year")
 
     def test_missing_variable_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "bad.nc"
             xr.Dataset({"foo": (("x",), np.zeros(3))}).to_netcdf(path)
             with self.assertRaises(ValueError):
-                OzoneClimatology.from_file(path, nlon=1, nlat=1, nlev=1)
+                OzoneClimatology.from_file(path, nlon=1, nlat=1, nlev=1, align_mode="wrap_year")
 
     def test_empty_sentinel(self):
         clim = OzoneClimatology.empty()
@@ -110,7 +110,7 @@ class TestOzoneClimatology(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "o3.nc"
             _write_pre_interpolated_ozone(path, nlon=1, nlat=1, nlev=8)
-            clim = OzoneClimatology.from_file(path, nlon=1, nlat=1, nlev=8)
+            clim = OzoneClimatology.from_file(path, nlon=1, nlat=1, nlev=8, align_mode="wrap_year")
         self.assertTrue(clim.is_loaded())
         self.assertEqual(clim.o3_ppmv.values.shape, (12, 8, 1))
 
@@ -125,7 +125,7 @@ class TestOzoneClimatology(unittest.TestCase):
             nlon, nlat, nlev = 8, 4, 4
             _write_pre_interpolated_ozone(path, nlon, nlat, nlev)
             clim = OzoneClimatology.from_file(
-                path, nlon=nlon, nlat=nlat, nlev=nlev,
+                path, nlon=nlon, nlat=nlat, nlev=nlev, align_mode="wrap_year"
             )
 
             ds = xr.open_dataset(path, decode_times=False)
@@ -177,7 +177,7 @@ class TestOzoneClimatology(unittest.TestCase):
             ds.to_netcdf(path)
 
             clim = OzoneClimatology.from_file(
-                path, nlon=nlon, nlat=nlat, nlev=nlev,
+                path, nlon=nlon, nlat=nlat, nlev=nlev, align_mode="by_date"
             )
 
         self.assertEqual(clim.o3_ppmv.values.shape, (ntime, nlev, nlon * nlat))
@@ -197,7 +197,7 @@ class TestOzoneClimatology(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "latitudes don't match"):
                 OzoneClimatology.from_file(
                     path, nlon=nlon, nlat=nlat, nlev=nlev,
-                    lat_deg=model_lat_descending,
+                    lat_deg=model_lat_descending, align_mode="wrap_year"
                 )
 
     def test_lon_mismatch_raises_value_error(self):
@@ -212,7 +212,7 @@ class TestOzoneClimatology(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "longitudes don't match"):
                 OzoneClimatology.from_file(
                     path, nlon=nlon, nlat=nlat, nlev=nlev,
-                    lon_deg=shifted_lon,
+                    lon_deg=shifted_lon, align_mode="wrap_year"
                 )
 
     def test_matching_coords_pass_validation(self):
@@ -226,7 +226,7 @@ class TestOzoneClimatology(unittest.TestCase):
             model_lon = np.linspace(0.0, 360.0, nlon, endpoint=False)
             clim = OzoneClimatology.from_file(
                 path, nlon=nlon, nlat=nlat, nlev=nlev,
-                lat_deg=model_lat, lon_deg=model_lon,
+                lat_deg=model_lat, lon_deg=model_lon, align_mode="wrap_year"
             )
         self.assertTrue(clim.is_loaded())
 
@@ -264,7 +264,7 @@ class TestOzoneClimatology(unittest.TestCase):
             ds.to_netcdf(path)
 
             clim = OzoneClimatology.from_file(
-                path, nlon=nlon, nlat=nlat, nlev=nlev,
+                path, nlon=nlon, nlat=nlat, nlev=nlev, align_mode="wrap_year"
             )
 
         forcing = default_forcing(
@@ -318,6 +318,39 @@ def _write_yearly_ozone(path: Path, year: int, nlon: int, nlat: int,
     ds.to_netcdf(path)
 
 
+class TestOzoneAlignmentRule(unittest.TestCase):
+    """Ozone's time alignment is declared, never inferred (#884)."""
+
+    def test_auto_raises_for_a_user_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "o3.nc"
+            _write_pre_interpolated_ozone(path, 8, 4, 16)
+            with self.assertRaisesRegex(ValueError, "forcing.ozone_align=auto"):
+                OzoneClimatology.from_file(path, nlon=8, nlat=4, nlev=16)
+
+    def test_auto_resolves_the_packaged_climatology(self):
+        from jcm.forcing import WRAP_YEAR
+        root = Path(__file__).resolve().parent / "data" / "bc" / "t63"
+        with xr.open_dataset(root / "ozone.nc") as ds:
+            nlev, nlat, nlon = (ds.sizes["level"], ds.sizes["lat"],
+                                ds.sizes["lon"])
+        clim = OzoneClimatology.from_file(root / "ozone.nc", nlon=nlon,
+                                          nlat=nlat, nlev=nlev)
+        self.assertEqual(int(clim.o3_ppmv.align_mode), WRAP_YEAR)
+
+    def test_declared_climatology_must_have_twelve_months(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "o3.nc"
+            _write_pre_interpolated_ozone(path, 8, 4, 16)
+            with xr.open_dataset(path) as ds:
+                short = ds.isel(time=slice(0, 6)).load()
+            short.to_netcdf(Path(tmp) / "o3_6.nc")
+            with self.assertRaisesRegex(ValueError, "12 monthly means"):
+                OzoneClimatology.from_file(Path(tmp) / "o3_6.nc", nlon=8,
+                                           nlat=4, nlev=16,
+                                           align_mode="wrap_year")
+
+
 class TestYearlyOzoneFiles(unittest.TestCase):
     """Multi-file (yearly transient) ozone loading (#610)."""
 
@@ -332,7 +365,7 @@ class TestYearlyOzoneFiles(unittest.TestCase):
             _write_yearly_ozone(p79, 1979, 8, 4, 16, 4.0e-6)
             _write_yearly_ozone(p80, 1980, 8, 4, 16, 8.0e-6)
             clim = OzoneClimatology.from_file([p79, p80], nlon=8, nlat=4,
-                                              nlev=16)
+                                              nlev=16, align_mode="by_date_interp")
         ts = clim.o3_ppmv
         self.assertEqual(ts.values.shape, (24, 16, 32))
         self.assertEqual(int(ts.align_mode), BY_DATE_INTERP)
@@ -355,7 +388,7 @@ class TestYearlyOzoneFiles(unittest.TestCase):
             _write_yearly_ozone(p79, 1979, 8, 4, 16, 4.0e-6)
             _write_yearly_ozone(p80, 1980, 8, 4, 16, 8.0e-6)
             clim = OzoneClimatology.from_file([p79, p80], nlon=8, nlat=4,
-                                              nlev=16)
+                                              nlev=16, align_mode="by_date_interp")
         forcing = ForcingData.zeros((8, 4)).copy(ozone_climatology=clim)
         date = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(
@@ -376,7 +409,7 @@ class TestYearlyOzoneFiles(unittest.TestCase):
                                 units="days since 1900-01-01")
             with self.assertRaisesRegex(ValueError, "time units"):
                 OzoneClimatology.from_file([p79, p80], nlon=8, nlat=4,
-                                           nlev=16)
+                                           nlev=16, align_mode="by_date_interp")
 
     def test_noleap_calendar_transient_decodes(self):
         # The FZJ ozone product uses a 365_day calendar; the transient
@@ -391,7 +424,7 @@ class TestYearlyOzoneFiles(unittest.TestCase):
             _write_yearly_ozone(p80, 1980, 8, 4, 16, 8.0e-6,
                                 calendar="365_day")
             clim = OzoneClimatology.from_file([p79, p80], nlon=8, nlat=4,
-                                              nlev=16)
+                                              nlev=16, align_mode="by_date_interp")
         ts = clim.o3_ppmv
         self.assertEqual(int(ts.align_mode), BY_DATE_INTERP)
         self.assertTrue(np.all(np.isfinite(np.asarray(ts.time_seconds))))

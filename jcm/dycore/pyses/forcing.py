@@ -43,7 +43,9 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
                   emissions_file=None, dms_file=None, dust_file=None,
                   dust_preferential_file=None, dust_soil_types_file=None,
                   dust_regions_file=None, dust_roughness_file=None,
-                  oxidants_file=None, ozone_file=None) -> ForcingData:
+                  oxidants_file=None, ozone_file=None, align_mode="auto",
+                  emissions_align="auto", oxidants_align="auto",
+                  ozone_align="auto") -> ForcingData:
     """Interpolate a monthly lon/lat forcing climatology onto the physics columns.
 
     Args:
@@ -53,6 +55,13 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
             optional ``soilw_rel`` relative soil wetness (#787).
         dycore: A :class:`~jcm.dycore.pyses.dycore.PysesCamSEDycore` (only
             its ``colmap`` column coordinates are read).
+        align_mode: ``forcing.align`` for ``forcing_file``. The column reader
+            supports only a climatology, so it must resolve to ``wrap_year``
+            — explicitly, or via ``auto`` for a data-mirror/packaged
+            climatology (:func:`jcm.forcing.resolve_align`, #884); anything
+            else raises.
+        emissions_align, oxidants_align, ozone_align: the per-input
+            alignment specs forwarded to :func:`attach_jam_forcing`.
         validate: Run the host-side physical-range sanity check jcm applies
             to boundary data (``jcm.forcing._validate_bc_fields``). Disable
             only for synthetic test fixtures.
@@ -87,8 +96,14 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
     """
     import xarray as xr
 
-    from jcm.forcing import _validate_bc_fields
+    from jcm.forcing import _validate_bc_fields, resolve_align
 
+    if resolve_align(align_mode, paths=forcing_file,
+                     config_key="forcing.align") != "wrap_year":
+        raise ValueError(
+            f"forcing.align={align_mode!r}: the pySES column forcing reader "
+            "supports only a 12-month climatology (wrap_year); transient "
+            "surface forcing needs the spectral dinosaur backend.")
     ds = xr.open_dataset(forcing_file)
     if validate:
         _validate_bc_fields(ds)
@@ -163,6 +178,9 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
         dust_roughness_file=dust_roughness_file,
         oxidants_file=oxidants_file,
         ozone_file=ozone_file,
+        emissions_align=emissions_align,
+        oxidants_align=oxidants_align,
+        ozone_align=ozone_align,
     )
 
 
@@ -222,7 +240,9 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
                        emissions_file=None, dms_file=None, dust_file=None,
                        dust_preferential_file=None, dust_soil_types_file=None,
                        dust_regions_file=None, dust_roughness_file=None,
-                       oxidants_file=None, ozone_file=None) -> ForcingData:
+                       oxidants_file=None, ozone_file=None,
+                       emissions_align="auto", oxidants_align="auto",
+                       ozone_align="auto") -> ForcingData:
     """Attach JAM emission/oxidant fields to a column-layout ``ForcingData``.
 
     The column analogue of ``jcm.runners``' ``_attach_emissions`` /
@@ -234,10 +254,17 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
     runner path there is no exact-grid requirement, because interpolation
     onto scattered columns happens here anyway (same rationale as the met
     forcing downscale). All-``None`` files make this a no-op.
+
+    The ``*_align`` specs follow the one rule every forcing input shares
+    (:func:`jcm.forcing.resolve_align`, #884): explicit modes as given,
+    ``auto`` only for a data-mirror/packaged product (from its manifest kind),
+    an error for any other file. Ozone on this path is climatology-only.
     """
     import xarray as xr
 
     from jcm.forcing import (
+        emissions_have_time,
+        resolve_align,
         read_anthropogenic_emissions,
         read_dms_seawater,
         read_dust_preferential,
@@ -276,8 +303,25 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
                         )
             lon = np.asarray(ds["lon"].values, dtype=float)
             lat = np.asarray(ds["lat"].values, dtype=float)
-            anthro = read_anthropogenic_emissions(ds)
-            speciated = read_prescribed_aerosol_emissions(ds)
+            # One combined open means one time axis, so a per-product list of
+            # modes must agree (the runner already rejects mixed axes).
+            spec = emissions_align
+            if isinstance(spec, (list, tuple)) or (
+                    hasattr(spec, "__iter__") and not isinstance(spec, str)):
+                modes = {str(v) for v in spec}
+                if len(modes) != 1:
+                    raise ValueError(
+                        f"forcing.emissions_align={list(spec)!r}: the pySES "
+                        "path opens every emission product as ONE dataset "
+                        "along a shared time axis, so they need one mode.")
+                spec = modes.pop()
+            # Only a timed product needs (or may ask for) an alignment; an
+            # all-static user file loads under ``auto`` (#884).
+            align = (resolve_align(spec, paths=paths,
+                                   config_key="forcing.emissions_align")
+                     if emissions_have_time(ds) else spec)
+            anthro = read_anthropogenic_emissions(ds, align_mode=align)
+            speciated = read_prescribed_aerosol_emissions(ds, align_mode=align)
         if anthro is None and speciated is None:
             raise ValueError(
                 f"emissions_file {emissions_file!r} has no emissions variables "
@@ -354,11 +398,11 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
               if len(paths) > 1 else xr.open_dataset(paths[0]))
         with ds:
             lon, lat = _reader_grid(ds)
-            # ``auto`` (matching the spectral ``_attach_oxidants``) keeps a lone
-            # 12-month file WRAP_YEAR but reads a concatenated multi-year
-            # transient set BY_DATE — without it the yearly ``{year}`` product
-            # would be mis-indexed as a 24-month wrap-year climatology.
-            vmr = read_oxidant_vmr(ds, nlev=nlev, align_mode="auto")
+            # Same resolution as the spectral ``_attach_oxidants``.
+            vmr = read_oxidant_vmr(
+                ds, nlev=nlev,
+                align_mode=resolve_align(oxidants_align, paths=paths,
+                                         config_key="forcing.oxidants_align"))
             forcing = forcing.copy(
                 oxidant_vmr={k: to_cols(v, lon, lat) for k, v in vmr.items()})
 
@@ -370,6 +414,12 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
         # requirement.
         from jcm.ozone_climatology import OzoneClimatology
 
+        if resolve_align(ozone_align, paths=str(ozone_file),
+                         config_key="forcing.ozone_align") != "wrap_year":
+            raise ValueError(
+                f"forcing.ozone_align={ozone_align!r}: transient ozone is not "
+                "supported on the pySES path (the column ozone leaf is a "
+                "12-month climatology); declare wrap_year for a climatology.")
         with xr.open_dataset(str(ozone_file)) as ds:
             file_nlev = int(ds.sizes.get("level", -1))
             if file_nlev != int(nlev):

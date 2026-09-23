@@ -50,7 +50,11 @@ from jcm.physics.radiation.band_config import RadiationBandConfig
 from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 from jcm.physics.surface.echam.surface_physics import EchamSurface
+from jcm.physics.surface.echam.surface_exchange_publisher import (
+    EchamSurfaceExchange,
+)
 from jcm.physics.surface.echam.surface_types import SurfaceParameters
+from jcm.physics.surface.prescribed_flux import PrescribedSurfaceFlux
 from jcm.physics.vertical_diffusion.tte_tke import TteTkeVerticalDiffusion
 from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
     VDiffParameters,
@@ -101,6 +105,7 @@ def echam_physics(
     aerocom_optics: bool = False,
     diagnose_omega: bool = False,
     cu_lmfmid: bool | None = None,
+    prescribed_surface_fluxes: bool = False,
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
 
@@ -241,6 +246,15 @@ def echam_physics(
             experiments turn it off (#715). Mutually exclusive with an
             explicit ``convection`` override (set the field on that object
             instead).
+        prescribed_surface_fluxes: Forced surface mode (jax-gcm#301):
+            compose ``TteTkeVerticalDiffusion(couple_surface=False)``
+            (interior-only mixing — the implicit solve's surface Robin BC
+            is off) plus a :class:`~jcm.physics.surface.prescribed_flux.
+            PrescribedSurfaceFlux` term that delivers the ``prescribed_*``
+            fields of the run's ``ForcingData`` as explicit bottom-layer
+            fluxes in place of the interactive surface exchange. Units and
+            signs follow the surface-exchange coupling contract
+            (``docs/source/design/surface_exchange.md``).
         enable_aerocom: Attach the AeroCom phase-4 derived
             diagnostics term (cloud-top sampling, column
             integrals, pressure-level fields, aerosol number
@@ -573,6 +587,16 @@ def echam_physics(
         aerocom_terms = [AerocomDiagnostics(
             groups=tuple(aerocom_groups), overlap=aerocom_overlap)]
 
+    # Forced surface mode (#301): the vdiff implicit solve runs
+    # interior-only (its surface Robin BC off) and the prescribed fluxes
+    # are delivered explicitly by the PrescribedSurfaceFlux term sitting
+    # exactly where the interactive delivery happened — between vdiff and
+    # EchamSurface, so the surface term (and Tiedtke's moisture-budget
+    # closure behind it) republishes the prescribed values same-step.
+    prescribed_terms: list[PhysicsTerm] = (
+        [PrescribedSurfaceFlux()] if prescribed_surface_fluxes else []
+    )
+
     return ComposablePhysics(
         terms=[
             MoistAirColumnState(),
@@ -581,7 +605,11 @@ def echam_physics(
             SimpleChemistry(),
             SundqvistCloudFraction(params=clouds_p),
             rad_term,
-            TteTkeVerticalDiffusion(params=vertical_diffusion_p),
+            TteTkeVerticalDiffusion(
+                params=vertical_diffusion_p,
+                couple_surface=not prescribed_surface_fluxes,
+            ),
+            *prescribed_terms,
             EchamSurface(params=surface_p),
             TiedtkeConvection(
                 params=convection_p,
@@ -597,6 +625,10 @@ def echam_physics(
                 ),
             ),
             micro_term,
+            # Publishes the package-independent surface-exchange coupling
+            # struct (#754). After the microphysics so the stratiform
+            # precipitation it reads is the SAME step's.
+            EchamSurfaceExchange(),
             *cosp_terms,
             *jam_post_cloud_terms,
             *nonoro_gw_terms,

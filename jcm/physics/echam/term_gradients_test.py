@@ -170,6 +170,7 @@ _TERM_NAMES = (
     "echam_surface",
     "tiedtke_convection",
     "echam_1m_microphysics",
+    "echam_surface_exchange",
     "hines_gwd",
     "lott_miller_sso",
 )
