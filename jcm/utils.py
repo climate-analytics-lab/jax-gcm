@@ -544,7 +544,7 @@ def _check_top_first_pressures(ds, surface_pressure_var: str) -> None:
     detector, not a precision check on the vertical grid.
 
     Skipped when the file has no ``pressure_full`` (a trimmed restart file
-    holding only the prognostic fields, e.g. ``spinup_state.nc``) or when the
+    holding only the prognostic fields) or when the
     sampled column is not finite; those fall back to the ``level``-coordinate
     inference alone.
 

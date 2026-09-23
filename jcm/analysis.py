@@ -83,8 +83,8 @@ def area_weights(lat) -> xr.DataArray:
     return xr.DataArray(weights, dims=("lat",))
 
 
-def global_mean(da: xr.DataArray, weights: xr.DataArray | None = None
-                ) -> xr.DataArray:
+def global_mean(da: xr.DataArray, weights: xr.DataArray | None = None,
+                skipna: bool | None = None) -> xr.DataArray:
     """Area-weighted mean of ``da`` over its horizontal dims.
 
     Horizontal dims are all dims except time/level/level_i/mode (see
@@ -92,13 +92,19 @@ def global_mean(da: xr.DataArray, weights: xr.DataArray | None = None
     computes :func:`area_weights` from ``da``'s ``lat`` coordinate when one
     exists, otherwise takes an unweighted mean. Uses
     :meth:`xarray.DataArray.weighted`.
+
+    ``skipna`` is passed through to the reduction. xarray's default skips
+    NaN cells and renormalises by the weights of the finite ones, which is
+    right for a masked field but hides a partial blow-up; pass
+    ``skipna=False`` where one NaN cell must make the mean NaN (a regression
+    band, a health gate).
     """
     dims = _horizontal_dims(da)
     if weights is None and "lat" in da.coords:
         weights = area_weights(da)
     if weights is not None and "lat" in dims:
-        return da.weighted(weights).mean(dims)
-    return da.mean(dims)
+        return da.weighted(weights).mean(dims, skipna=skipna)
+    return da.mean(dims, skipna=skipna)
 
 
 def layer_pressure_thickness(ds: xr.Dataset) -> xr.DataArray:
