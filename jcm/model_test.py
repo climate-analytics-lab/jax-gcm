@@ -1544,7 +1544,8 @@ def _assert_within_release_bands(member, bands_file, bands, pred):
         member: Matrix member name, for failure messages.
         bands_file: Where ``bands`` came from, for failure messages.
         bands: The member's band Dataset (``<var>.mean/.std/.noise``).
-        pred: Dataset of the fresh run's ``(time, lon, lat)``-mean variables.
+        pred: Dataset of the fresh run's time-mean, area-weighted
+            global-mean variables.
 
     """
     import xarray as xr
@@ -2052,15 +2053,54 @@ class TestReleaseMatrixNonFiniteAndHeldStates(unittest.TestCase):
 
         from jcm.data.test.release_matrix import generate_stats
 
+        lat = np.rad2deg(np.arcsin(np.polynomial.legendre.leggauss(2)[0]))
+
         class _Pred:
             def to_xarray(self):
                 t = np.full((2, 1, 2, 2), 280.0)
                 t[1, 0, 1, 1] = np.nan
-                return xr.Dataset({"temperature": (
-                    ("time", "level", "lon", "lat"), t)})
+                return xr.Dataset(
+                    {"temperature": (("time", "level", "lon", "lat"), t)},
+                    coords={"lat": lat})
 
         means = generate_stats._global_mean(_Pred())
         self.assertTrue(np.isnan(means["temperature"].values).all())
+
+    def test_window_reduction_is_gauss_legendre_area_weighted(self):
+        # ``sin(lat)**2`` is 1 at the poles and 0 at the equator; its true
+        # global mean is exactly 1/3, which Gauss-Legendre quadrature on any
+        # grid of >= 2 rings reproduces to rounding. An arithmetic lat mean
+        # over-weights the small polar rings (the nodes cluster poleward) and
+        # reads well above that — the statistic the bands must not describe.
+        import xarray as xr
+
+        from jcm.data.test.release_matrix import generate_stats
+
+        nodes, gauss_w = np.polynomial.legendre.leggauss(8)
+        lat = np.rad2deg(np.arcsin(nodes))
+        field = np.broadcast_to(nodes ** 2, (1, 1, 4, 8)).copy()
+
+        class _Pred:
+            def to_xarray(self):
+                return xr.Dataset(
+                    {"temperature": (("time", "level", "lon", "lat"), field)},
+                    coords={"lat": lat, "lon": np.arange(4) * 90.0})
+
+        means = generate_stats._global_mean(_Pred())
+        weighted = float(means["temperature"].squeeze())
+        np.testing.assert_allclose(weighted, 1.0 / 3.0, rtol=1e-12)
+        # The hand-computed quadrature reference, and the equal-ring mean it
+        # replaces.
+        np.testing.assert_allclose(
+            weighted, np.sum(gauss_w * nodes ** 2) / np.sum(gauss_w),
+            rtol=1e-12)
+        self.assertLess(weighted, 0.5)
+        self.assertGreater(float(np.mean(nodes ** 2)), weighted + 0.05)
+        # And the cos(lat) weight Gauss-Legendre refines agrees to the order
+        # of an 8-ring grid.
+        cos_w = np.cos(np.deg2rad(lat))
+        np.testing.assert_allclose(
+            weighted, np.sum(cos_w * nodes ** 2) / np.sum(cos_w), rtol=0.05)
 
     def _held_bands(self, state_name="m_fixture_abc123.msgpack"):
         import xarray as xr

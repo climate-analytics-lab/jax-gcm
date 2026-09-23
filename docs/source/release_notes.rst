@@ -746,6 +746,11 @@ Regression fixtures follow the supported matrix
   describe the same window and are only meaningful as a pair. Set
   ``JCM_FIXTURE_STATE_DIR`` to validate freshly generated states before
   publishing them.
+- Every band is an **area-weighted global mean** (per level for 3-D fields),
+  weighted by the grid's own Gauss-Legendre quadrature weights through
+  :func:`jcm.analysis.global_mean`, not an arithmetic mean over latitude
+  rings, which would over-weight the small polar rings. Generation and the
+  regression's own check share the one reduction.
 - Band widths are floored so a regression band can never be narrower than
   the computation's own noise, and never so wide it cannot fail. Each band is
   ``3 * std`` of the daily global means, widened (widest wins) by four

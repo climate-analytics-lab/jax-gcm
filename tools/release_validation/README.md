@@ -68,7 +68,10 @@ named. A band file marked `hosted_state="pending"` (a state deliberately not
 published yet) is skipped for the same reason when its state is not local, but
 is validated like any other member when `JCM_FIXTURE_STATE_DIR` holds it.
 
-Band number concentrations are column burdens weighted by the layer air mass
+Every band is an area-weighted global mean — the grid's Gauss-Legendre
+quadrature weights, via `jcm.analysis.global_mean`, never an equal-weight mean
+over latitude rings — computed by the one reduction that both `generate` and
+the test use. Band number concentrations are column burdens weighted by the layer air mass
 `dp/g` (the `pressure_thickness` diagnostic): `air_density * layer_thickness`
 is not a mass weight, because `layer_thickness` is floored at 10 m. Every
 reduction propagates NaN, so a partially non-finite run fails its member

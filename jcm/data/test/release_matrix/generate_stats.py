@@ -499,12 +499,38 @@ def _from_state_overrides(file_path: str) -> dict:
     return {"init": "from_state", "init.file": file_path}
 
 
-def _global_mean(predictions):
-    """``(time, lon, lat)``-mean of the candidate variables a run produced."""
+def _area_mean(predictions):
+    """Area-weighted global mean, per output time, of the band variables.
+
+    The ONE horizontal reduction behind every band: the stats-window worker
+    applies it for both generation and the regression's own check, so the two
+    cannot drift apart.
+
+    The weights are the grid's own Gauss-Legendre quadrature weights
+    (:func:`jcm.analysis.global_mean` via :func:`jcm.analysis.area_weights`,
+    which falls back to ``cos(lat)`` only off a Gaussian grid). An arithmetic
+    ``lat`` mean would give every latitude ring equal weight, over-counting
+    the small polar rings by up to ~1/cos(lat), so the bands would describe
+    a polar-weighted statistic rather than the global mean or global-mean
+    column burden they are named for.
+
+    ``skipna=False`` throughout: one non-finite cell must make the mean
+    non-finite, not be averaged away (see :func:`generate`).
+    """
+    import xarray as xr
+
+    from jcm.analysis import area_weights, global_mean
+
     ds = _with_column_number_burdens(predictions.to_xarray())
-    means = ds.mean(dim={"time", "lon", "lat"}, skipna=False)
-    present = [v for v in CANDIDATE_STAT_VARS if v in means]
-    return means[present]
+    present = [v for v in CANDIDATE_STAT_VARS if v in ds]
+    weights = area_weights(ds)
+    return xr.Dataset({v: global_mean(ds[v], weights, skipna=False)
+                       for v in present})
+
+
+def _global_mean(predictions):
+    """``(time, area)``-mean of the candidate variables a run produced."""
+    return _area_mean(predictions).mean(dim="time", skipna=False)
 
 
 def stats_window_global_mean(member: str, state_path: str):
@@ -529,9 +555,7 @@ def write_stats_window_global_mean(member: str, state_path: str, out: str):
     exp = _load_member(
         member, _from_state_overrides(state_path), STATS_DAYS)
     predictions = exp.model.run(**{**exp.run_kwargs, "forcing": exp.forcing})
-    ds = _with_column_number_burdens(predictions.to_xarray())
-    present = [v for v in CANDIDATE_STAT_VARS if v in ds]
-    ds[present].mean(dim={"lon", "lat"}, skipna=False).to_netcdf(out)
+    _area_mean(predictions).to_netcdf(out)
 
 
 def report_backend() -> None:
@@ -606,8 +630,8 @@ def stats_window_global_mean_isolated(member: str, state_path: str,
                                       tmp_dir, env=None) -> "object":
     """One stats window in a fresh interpreter, reduced as the bands are.
 
-    The regression compares ``(time, lon, lat)``-mean values, and this returns
-    exactly that — but computed in a child process, for the same reason
+    The regression compares time-mean, area-weighted global-mean values,
+    and this returns exactly that — but computed in a child process, for the same reason
     :func:`_run_worker` exists. A single process that walks the whole matrix
     accumulates a device pool JAX never gives back, and the members are not
     equal: T63 L95 with JAM is several times the footprint of T31 L8, so it is
