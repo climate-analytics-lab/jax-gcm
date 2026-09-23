@@ -151,6 +151,24 @@ def _rss_bytes():
     return maxrss if sys.platform == "darwin" else maxrss * 1024
 
 
+def _memory_map_count():
+    """Return the number of memory mappings of this process, or None off Linux."""
+    try:
+        with open("/proc/self/maps") as f:
+            return sum(1 for _ in f)
+    except OSError:
+        return None
+
+
+# The kernel caps the mappings a process may hold (``vm.max_map_count``,
+# 65,530 by default on older kernels), and every compiled XLA CPU executable
+# holds several. A worker running op-by-op derivative checks compiles one
+# executable per primitive and can reach the cap long before its RSS grows
+# much, at which point the CPU JIT fails with "Failed to materialize symbols"
+# and the worker aborts. Past this many mappings the caches are dropped at the
+# next test boundary, whatever its group.
+_MAX_MAP_COUNT = int(os.environ.get("JCM_TEST_MAX_MAPS", "40000"))
+
 # How far the process may grow between cache clears. Clearing is not free —
 # it forces later tests to recompile — so it is worth doing only once the
 # retained executables are actually costing memory. Zero disables the gate
@@ -171,13 +189,22 @@ def pytest_runtest_teardown(item, nextitem):
     ``JCM_TEST_CACHE_GROWTH_MB`` since the last drop. A zero budget, or a
     platform whose RSS we cannot read, drops at every boundary instead.
 
+    Memory mappings are the second budget: past ``JCM_TEST_MAX_MAPS``
+    mappings the caches are dropped at once, even inside a class, because the
+    kernel's map-count cap aborts the worker outright.
+
     Runs ``trylast`` so pytest's own teardown has already dropped the
     class-scoped fixtures' references by the time the GC runs.
     """
     global _rss_at_last_clear
-    if nextitem is not None and _memory_group(item) == _memory_group(nextitem):
+    maps = _memory_map_count()
+    over_maps = maps is not None and maps > _MAX_MAP_COUNT
+    if (not over_maps and nextitem is not None
+            and _memory_group(item) == _memory_group(nextitem)):
         return
     rss = _rss_bytes()
+    if over_maps:
+        rss = None      # clear now, whatever the growth budget says
     if _MAX_GROWTH_BYTES > 0 and rss is not None:
         if _rss_at_last_clear is None:
             # First boundary: everything collected is imported, so this is the

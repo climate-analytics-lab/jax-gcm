@@ -59,6 +59,18 @@ all of the memory back for no measurable time anywhere.
 The clear applies to every suite, not just the `slow` one: the fast xdist
 suite hits the same ceiling, and a worker that dies takes its tests with it.
 
+Memory mappings are a second ceiling, independent of RSS. Every compiled XLA
+CPU executable holds several mappings, and the kernel caps a process at
+`vm.max_map_count` of them (65,530 on kernels that keep the old default). The
+op-by-op derivative checks in `jcm/physics/echam/term_gradients_test.py`
+compile one executable per primitive, so a slow-suite worker reached the cap
+while its RSS was still modest; the CPU JIT then fails with "Failed to
+materialize symbols" and the worker aborts. The hook therefore also counts
+`/proc/self/maps` at every test boundary and, past `JCM_TEST_MAX_MAPS`
+(default 40,000), clears at once, even inside a class. A clear releases the
+mappings: six Tiedtke derivative checks took a process from 4,171 to 22,436
+mappings, and the clear brought it back to 5,459.
+
 ## Derecho login nodes: a 10 GiB cgroup, not a slow CPU
 
 Interactive work on a Derecho login node runs inside a per-user memory
