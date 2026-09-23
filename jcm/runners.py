@@ -1069,6 +1069,39 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
     return forcing_assembly.build_forcing(cfg, coords)
 
 
+def _pyses_align_modes(forcing_cfg, surface_spec, ozone_spec):
+    """Return the pySES readers' alignment specs, declared from pre-fetch specs.
+
+    Each ``auto`` becomes the explicit mode of the manifest product its
+    ORIGINAL spec names (:func:`jcm.forcing.declare_manifest_align`), before
+    ``_resolve_data_path`` substitutes a fetched local path that need not name
+    it any more (#884). Anything else (explicit modes; ``auto`` on a user file)
+    passes through to the readers, which apply the same rule.
+    """
+    from jcm.forcing import declare_manifest_align
+    from jcm.forcing_assembly import _oxidant_spec
+    emissions_raw = forcing_cfg.get("emissions_file", None)
+    emissions_spec = None
+    if emissions_raw not in (None, "", "null"):
+        emissions_spec = [
+            e for p in _forcing_products(
+                emissions_raw, forcing_cfg.get("years", None),
+                _product_available_years(forcing_cfg,
+                                         "emissions_available_years"))
+            for e in (p if isinstance(p, (list, tuple)) else [p])]
+    return {
+        "align_mode": declare_manifest_align(
+            forcing_cfg.get("align", "auto"), surface_spec),
+        "emissions_align": declare_manifest_align(
+            forcing_cfg.get("emissions_align", "auto"), emissions_spec),
+        "oxidants_align": declare_manifest_align(
+            forcing_cfg.get("oxidants_align", "auto"),
+            _oxidant_spec(forcing_cfg)),
+        "ozone_align": declare_manifest_align(
+            forcing_cfg.get("ozone_align", "auto"), ozone_spec),
+    }
+
+
 def _build_pyses_forcing(_forcing_cfg, dycore, coords):
     """Build pySES-backend forcing: bilinear column sampling of the inputs.
 
@@ -1140,6 +1173,7 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
             "Provide a single 12-month climatology file, or use the "
             "spectral dinosaur backend for transient ozone."
         )
+    ozone_spec = ozone_file  # pre-fetch spec: names a manifest product
     provenance.record_fact(
         "ozone_source",
         f"prescribed:{ozone_file}" if ozone_file
@@ -1198,11 +1232,9 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
         oxidants_file=_resolve_oxidant_paths(_forcing_cfg),
         ozone_file=_resolve_data_path(ozone_file),
         # Time alignment follows the one #884 rule (jcm.forcing.resolve_align):
-        # ``auto`` resolves only data-mirror/packaged products.
-        align_mode=_forcing_cfg.get("align", "auto"),
-        emissions_align=_forcing_cfg.get("emissions_align", "auto"),
-        oxidants_align=_forcing_cfg.get("oxidants_align", "auto"),
-        ozone_align=_forcing_cfg.get("ozone_align", "auto"),
+        # ``auto`` resolves only data-mirror/packaged products, decided on the
+        # ORIGINAL (pre-fetch) specs so a fetched path cannot change it.
+        **_pyses_align_modes(_forcing_cfg, raw_file or file, ozone_spec),
     )
     # MACv2-SP plume weights are the one dycore-agnostic attachment the
     # spectral tail below also performs that ``pyses_build_forcing`` does

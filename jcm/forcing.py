@@ -598,6 +598,12 @@ class ForcingData:
                     manifest=manifest, fetch=fetch)
                 file_spec = (list(sr.paths) if len(sr.paths) > 1
                              else sr.paths[0])
+                # The fetched path may not name the product any more, so carry
+                # the alignment ``resolve_input`` decided on the ORIGINAL spec
+                # (#884): a path substitution never changes the alignment.
+                if (forcing_dict["align"] == "auto"
+                        and sr.alignment in (ir.WRAP_YEAR, ir.BY_DATE)):
+                    forcing_dict["align"] = sr.alignment
             forcing_dict["file"] = file_spec
 
         physics_dict = {"aerosol_module": "jam"} if aerosol == "jam" else {}
@@ -1014,10 +1020,9 @@ def resolve_align(align_mode, *, paths=None, config_key: str = "forcing.align",
     if paths is not None:
         from jcm.data import input_resolution as ir
         kind = ir.manifest_alignment_for_paths(paths)
-    if kind == "climatology":
-        return "wrap_year"
-    if kind == "transient":
-        return transient
+    mode = manifest_mode_for_kind(kind, transient)
+    if mode is not None:
+        return mode
     what = ("an in-memory dataset" if paths is None
             else f"{paths!r} (not a data-mirror or packaged product)")
     raise ValueError(
@@ -1027,6 +1032,40 @@ def resolve_align(align_mode, *, paths=None, config_key: str = "forcing.align",
         "(interpolated between them) — jcm does not guess whether a file is a "
         "climatology (#884). 'auto' resolves only data-mirror / packaged "
         "products, whose kind the manifest records.")
+
+
+def manifest_mode_for_kind(kind, transient: str = "by_date"):
+    """Map a manifest ``alignment`` kind to an explicit mode (``None`` if none).
+
+    ``climatology`` → ``wrap_year``, ``transient`` → ``transient``; ``static``
+    or unknown → ``None``. The single mapping :func:`resolve_align` and the
+    spec-time declarations (:func:`declare_manifest_align`) share.
+    """
+    if kind == "climatology":
+        return "wrap_year"
+    if kind == "transient":
+        return transient
+    return None
+
+
+def declare_manifest_align(align_mode, spec, transient: str = "by_date"):
+    """Turn ``auto`` into the explicit mode of a manifest product ``spec``.
+
+    Call this on the ORIGINAL input spec (an ``hf://`` URL / ``{year}``
+    pattern / packaged path), BEFORE any fetch or cache callback substitutes a
+    local path: a fetched file may live anywhere, so its path can no longer
+    name the product, and a path substitution must never change an alignment
+    decision (#884). Returns ``align_mode`` unchanged when it is already
+    explicit (or a per-product list) or when ``spec`` is not a manifest
+    product — the reader then applies :func:`resolve_align` as usual (and
+    raises for a timed user file under ``auto``). Never raises.
+    """
+    if not isinstance(align_mode, str) or align_mode != "auto" or spec is None:
+        return align_mode
+    from jcm.data import input_resolution as ir
+    mode = manifest_mode_for_kind(ir.manifest_alignment_for_paths(spec),
+                                  transient)
+    return mode if mode is not None else align_mode
 
 
 def _seconds_and_mode(ds, align_mode, config_key):

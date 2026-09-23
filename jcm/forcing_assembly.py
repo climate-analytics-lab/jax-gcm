@@ -398,7 +398,35 @@ def _resolve_emission_inputs(forcing_cfg, cfg, coords, is_pyses):
             continue
         updates[key] = (None if key in companions and dust is None
                         else resolve(forcing_cfg.get(key, None), key))
+    # ``auto`` became a FETCHED local path, which need not name its product
+    # any more; declare the alignment from the product ``auto`` picked, so the
+    # path substitution cannot change it (#884). Only a still-``auto`` align
+    # key is declared — an explicit one is the user's.
+    for key, align_key in _AUTO_ALIGN_KEYS.items():
+        if (forcing_cfg.get(key, None) == "auto"
+                and updates.get(key) is not None
+                and forcing_cfg.get(align_key, "auto") == "auto"):
+            mode = _auto_product_mode(key)
+            if mode is not None:
+                updates[align_key] = mode
     return OmegaConf.merge(forcing_cfg, updates)
+
+
+#: The ``auto``-resolvable time-resolved inputs and their alignment keys (dms /
+#: dust readers declare ``wrap_year`` themselves: climatology-only keys).
+_AUTO_ALIGN_KEYS = {"emissions_file": "emissions_align",
+                    "oxidants_file": "oxidants_align"}
+
+
+def _auto_product_mode(key, transient="by_date"):
+    """Explicit mode of the manifest product ``forcing.<key>=auto`` picks."""
+    from jcm.forcing import manifest_mode_for_kind
+    manifest = mm.load_manifest()
+    name = mm.product_for_key(manifest, key)
+    if name is None:
+        return None
+    return manifest_mode_for_kind(mm.product(manifest, name)["alignment"],
+                                  transient)
 
 
 # ---------------------------------------------------------------------------
@@ -491,10 +519,14 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     """
     if forcing_cfg is None:
         return forcing
-    ozone_file = _resolve_data_path(_expand_years(
+    # The pre-fetch spec (``hf://`` / pattern expansion / packaged path) names
+    # the manifest product; alignment is decided on it, not on the fetched
+    # path (#884).
+    ozone_raw = _expand_years(
         forcing_cfg.get("ozone_file", None),
         forcing_cfg.get("years", None),
-        _product_available_years(forcing_cfg, "ozone_available_years")))
+        _product_available_years(forcing_cfg, "ozone_available_years"))
+    ozone_file = _resolve_data_path(ozone_raw)
     if isinstance(ozone_file, (list, tuple)):
         ozone_file = [str(p) for p in ozone_file]
     if ozone_file in (None, "", "null"):
@@ -506,9 +538,17 @@ def _attach_ozone(forcing, forcing_cfg, coords):
         # records a choice rather than an omission.
         provenance.record_fact("ozone_source", "analytic (explicit)")
         return forcing
-    ozone_spec = ozone_file
+    from jcm.forcing import declare_manifest_align
+    ozone_align = declare_manifest_align(
+        forcing_cfg.get("ozone_align", "auto"), ozone_raw,
+        transient="by_date_interp")
     if ozone_file == "auto":
-        ozone_file = ozone_spec = _resolve_auto_ozone(coords)
+        ozone_file = _resolve_auto_ozone(coords)
+        # ``auto`` picked the key's manifest product (packaged or mirrored
+        # present-day ozone), so its kind is known without the path.
+        if ozone_align == "auto":
+            ozone_align = _auto_product_mode(
+                "ozone_file", transient="by_date_interp") or "auto"
         if ozone_file is None:      # sigma grid; _resolve_auto_ozone warned
             provenance.record_fact(
                 "ozone_source", "analytic (auto: no product for a sigma grid)")
@@ -529,8 +569,8 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     # Ozone's transient mirror product (``ozone_amip``) holds mid-month
     # monthly means, which the ECHAM treatment interpolates linearly between.
     from jcm.forcing import resolve_align
-    align = resolve_align(forcing_cfg.get("ozone_align", "auto"),
-                          paths=ozone_spec, config_key="forcing.ozone_align",
+    align = resolve_align(ozone_align, paths=ozone_file,
+                          config_key="forcing.ozone_align",
                           transient="by_date_interp")
     climatology = OzoneClimatology.from_file(
         ozone_file,
@@ -938,11 +978,26 @@ def oxidant_align(forcing_cfg, paths) -> str:
     the Hugging Face cache (whose snapshot path still names the mirror
     product) or points at a packaged file; any other file must declare.
     """
-    from jcm.forcing import resolve_align
-    return resolve_align(
-        (forcing_cfg.get("oxidants_align", "auto")
-         if forcing_cfg is not None else "auto"),
-        paths=paths, config_key="forcing.oxidants_align")
+    from jcm.forcing import declare_manifest_align, resolve_align
+    spec = (forcing_cfg.get("oxidants_align", "auto")
+            if forcing_cfg is not None else "auto")
+    # Decide on the ORIGINAL spec first (a fetched path need not name the
+    # product), then fall back to the resolved paths (#884).
+    spec = declare_manifest_align(spec, _oxidant_spec(forcing_cfg))
+    return resolve_align(spec, paths=paths,
+                         config_key="forcing.oxidants_align")
+
+
+def _oxidant_spec(forcing_cfg):
+    """Return the pre-fetch (year-expanded, unfetched) ``oxidants_file`` spec."""
+    if forcing_cfg is None:
+        return None
+    raw = forcing_cfg.get("oxidants_file", None)
+    if raw in (None, "", "null"):
+        return None
+    return _expand_years(
+        raw, forcing_cfg.get("years", None),
+        _product_available_years(forcing_cfg, "oxidants_available_years"))
 
 
 def _attach_oxidants(forcing, forcing_cfg, coords):

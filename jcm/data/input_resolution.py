@@ -32,11 +32,11 @@ from dataclasses import dataclass
 #: ``ResolvedInput.alignment`` values. A product's manifest ``alignment`` maps
 #: onto the time-series indexing mode the readers use: a climatology wraps within
 #: the year (``WRAP_YEAR``), a transient series indexes by absolute date
-#: (``BY_DATE``), a static field has no time axis. ``AUTO`` defers the choice to
-#: :func:`manifest_alignment_for_paths` at read time — an explicit path is a
-#: mirror/packaged product only if it matches a manifest path template, and a
-#: user file whose alignment is ``auto`` is rejected there, never inferred from
-#: its contents (#884).
+#: (``BY_DATE``), a static field has no time axis. An explicit spec gets its
+#: product's kind when it matches a manifest path template
+#: (:func:`manifest_alignment_for_paths`, decided on the spec BEFORE fetching);
+#: ``AUTO`` marks a user file, whose alignment must then be declared — it is
+#: never inferred from its contents (#884).
 STATIC = "static"
 WRAP_YEAR = "wrap_year"
 BY_DATE = "by_date"
@@ -533,6 +533,13 @@ def resolve_input(key, value, *, grid_token, nlev=None, vertical="hybrid",
 
     # EXPLICIT
     products = forcing_products(spec.raw, years, available, expand=expand)
+    # The manifest kind is decided on the ORIGINAL (pre-fetch) spec: a fetch
+    # callback may return a path anywhere, which no longer names the product,
+    # and a path substitution must never change the alignment (#884).
+    kind = manifest_alignment_for_paths(
+        [e for p in products for e in (p if _is_seq(p) else [p])],
+        manifest=manifest)
+    alignment = _ALIGNMENT_FROM_MANIFEST.get(kind, AUTO)
     resolved_products = []
     flat = []
     provenance = []
@@ -555,5 +562,6 @@ def resolve_input(key, value, *, grid_token, nlev=None, vertical="hybrid",
     if not flat:
         return ResolvedInput(key=key, is_none=True, source="none")
     return ResolvedInput(key=key, products=tuple(resolved_products),
-                         paths=tuple(flat), alignment=AUTO, source="explicit",
+                         paths=tuple(flat), alignment=alignment,
+                         source="explicit",
                          provenance=tuple(provenance))

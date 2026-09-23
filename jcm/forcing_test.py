@@ -1629,6 +1629,53 @@ class TestForcingFromBundles(unittest.TestCase):
             mock.patch.object(runners, "warn_emission_config_traps"),
         ], captured
 
+    def test_custom_fetch_keeps_the_manifest_alignment(self):
+        # Codex #877 P2 / #884: a custom ``fetch`` may return a path anywhere,
+        # which no longer names the manifest product. The alignment decided on
+        # the ORIGINAL ``hf://`` spec is carried forward, so a climatology
+        # bundle stays wrap_year and a transient one keeps its mode.
+        import contextlib
+
+        coords = _t63l47_coords()
+        shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
+
+        def fetch(rel):
+            return "/elsewhere/" + rel.replace("/", "_")
+
+        for surface, years, expected in (("pd", None, "wrap_year"),
+                                         ("pi", None, "wrap_year"),
+                                         ("amip", [2000, 2000],
+                                          "by_date_interp")):
+            patches, captured = self._capture_forcing_cfg(shape)
+            with contextlib.ExitStack() as stack:
+                for p in patches:
+                    stack.enter_context(p)
+                ForcingData.from_bundles(coords, surface=surface, years=years,
+                                         fetch=fetch)
+            fc = captured["forcing"]
+            files = fc["file"] if isinstance(fc["file"], list) else [fc["file"]]
+            self.assertTrue(all(f.startswith("/elsewhere/") for f in files))
+            self.assertEqual(fc["align"], expected, surface)
+
+    def test_custom_fetch_climatology_builds_end_to_end(self):
+        # The same through the real engine: the fetched copy of a climatology
+        # loads as WRAP_YEAR (it raised "forcing.align=auto" before the fix).
+        import shutil
+        import tempfile
+        from importlib import resources
+        from pathlib import Path
+
+        from jcm.forcing import WRAP_YEAR
+        coords = _t63l47_coords()
+        src = resources.files("jcm.data.bc.t63") / "forcing.nc"
+        with tempfile.TemporaryDirectory() as d:
+            def fetch(rel):
+                dst = Path(d) / "fetched_surface.nc"
+                shutil.copy(str(src), dst)
+                return str(dst)
+            f = ForcingData.from_bundles(coords, surface="pd", fetch=fetch)
+        self.assertEqual(int(f.sea_surface_temperature.align_mode), WRAP_YEAR)
+
     def test_pi_surface_composes_pi_ancillaries(self):
         import contextlib
 
@@ -1792,6 +1839,138 @@ class TestStaticEmissionsNeedNoAlignment(unittest.TestCase):
         self.assertNotIsInstance(s["m_so4_acc"], TimeSeries)
         timed = ds.expand_dims(time=3)
         self.assertTrue(emissions_have_time(timed))
+
+
+class TestAlignmentDecidedBeforeFetch(unittest.TestCase):
+    """Every spec→path substitution keeps the alignment the ORIGINAL spec's
+    manifest product decided (Codex #877 P2 / #884).
+    """
+
+    @staticmethod
+    def _fetch(rel):
+        return "/elsewhere/" + rel.replace("/", "_")
+
+    def test_resolve_input_explicit_spec_carries_its_kind(self):
+        from jcm.data import input_resolution as ir
+        clim = ir.resolve_input("file", "hf://bundles/t63/forcing_pd.nc",
+                                grid_token="t63", fetch=self._fetch)
+        self.assertTrue(clim.paths[0].startswith("/elsewhere/"))
+        self.assertEqual(clim.alignment, ir.WRAP_YEAR)
+        tr = ir.resolve_input("file", "hf://bundles/t63/forcing_amip/{year}.nc",
+                              grid_token="t63", years=[2000, 2001],
+                              fetch=self._fetch)
+        self.assertEqual(tr.alignment, ir.BY_DATE)
+        user = ir.resolve_input("file", "/scratch/me/sst.nc", grid_token="t63")
+        self.assertEqual(user.alignment, ir.AUTO)
+
+    def test_declare_manifest_align(self):
+        from jcm.forcing import declare_manifest_align as d
+        self.assertEqual(d("auto", "hf://bundles/t63_l47/ozone_pd.nc"),
+                         "wrap_year")
+        self.assertEqual(d("auto", ["hf://bundles/t63_l47/ozone_amip/1999.nc"],
+                           transient="by_date_interp"), "by_date_interp")
+        # Explicit, user file, per-product list and None pass through.
+        self.assertEqual(d("by_date", "hf://bundles/t63/forcing_pd.nc"),
+                         "by_date")
+        self.assertEqual(d("auto", "/scratch/me/o3.nc"), "auto")
+        self.assertEqual(d(["wrap_year"], "hf://bundles/t63/emissions_pd.nc"),
+                         ["wrap_year"])
+        self.assertEqual(d("auto", None), "auto")
+
+    def test_auto_emission_keys_declare_their_product_mode(self):
+        # ``auto`` emissions/oxidants resolve to FETCHED paths; their align
+        # keys are declared from the product ``auto`` picked.
+        from unittest import mock
+
+        from omegaconf import OmegaConf
+
+        from jcm import forcing_assembly as fa
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.utils import get_coords
+        coords = get_coords(vertical_coords=get_echam_levels(47),
+                            spectral_truncation=63)
+        cfg = OmegaConf.create({"physics": {"aerosol_module": "jam"}})
+        fcfg = OmegaConf.create({
+            "emissions_file": "auto", "oxidants_file": "auto",
+            "dms_file": None, "dust_file": None,
+            "dust_preferential_file": None, "dust_soil_types_file": None,
+            "dust_regions_file": None, "dust_roughness_file": None,
+            "emissions_align": "auto", "oxidants_align": "auto"})
+        with mock.patch.object(fa, "_resolve_data_path",
+                               side_effect=lambda p: "/elsewhere/x.nc"):
+            out = fa._resolve_emission_inputs(fcfg, cfg, coords,
+                                              is_pyses=False)
+        self.assertEqual(out.emissions_file, "/elsewhere/x.nc")
+        self.assertEqual(out.emissions_align, "wrap_year")
+        self.assertEqual(out.oxidants_align, "wrap_year")
+        # An explicit user choice is never overwritten.
+        fcfg.emissions_align = "by_date"
+        with mock.patch.object(fa, "_resolve_data_path",
+                               side_effect=lambda p: "/elsewhere/x.nc"):
+            out = fa._resolve_emission_inputs(fcfg, cfg, coords,
+                                              is_pyses=False)
+        self.assertEqual(out.emissions_align, "by_date")
+
+    def test_oxidant_align_uses_the_prefetch_spec(self):
+        from omegaconf import OmegaConf
+
+        from jcm import forcing_assembly as fa
+        fcfg = OmegaConf.create({
+            "oxidants_file": "hf://bundles/t63_l47/oxidants_pd.nc",
+            "oxidants_align": "auto"})
+        self.assertEqual(fa.oxidant_align(fcfg, ["/elsewhere/ox.nc"]),
+                         "wrap_year")
+
+    def test_ozone_attach_uses_the_prefetch_spec(self):
+        from unittest import mock
+
+        from omegaconf import OmegaConf
+
+        from jcm import forcing_assembly as fa
+        from jcm.ozone_climatology import OzoneClimatology
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.utils import get_coords
+        coords = get_coords(vertical_coords=get_echam_levels(47),
+                            spectral_truncation=63)
+        seen = {}
+
+        def _capture(path, **kw):
+            seen.update(path=path, align=kw["align_mode"])
+            return OzoneClimatology.empty()
+
+        for spec, expected in (
+                ("hf://bundles/t63_l47/ozone_pd.nc", "wrap_year"),
+                ("hf://bundles/t63_l47/ozone_amip/{year}.nc",
+                 "by_date_interp")):
+            fcfg = OmegaConf.create({"ozone_file": spec, "ozone_align": "auto",
+                                     "years": [2000, 2000]})
+            with mock.patch.object(fa, "_resolve_data_path",
+                                   side_effect=lambda p: "/elsewhere/o3.nc"), \
+                    mock.patch.object(OzoneClimatology, "from_file",
+                                      side_effect=_capture):
+                fa._attach_ozone(None, fcfg, coords)
+            self.assertEqual(seen["path"], "/elsewhere/o3.nc")
+            self.assertEqual(seen["align"], expected, spec)
+
+    def test_pyses_modes_use_the_prefetch_specs(self):
+        from omegaconf import OmegaConf
+
+        from jcm.runners import _pyses_align_modes
+        fcfg = OmegaConf.create({
+            "align": "auto", "emissions_align": "auto",
+            "oxidants_align": "auto", "ozone_align": "auto",
+            "emissions_file": "hf://bundles/t63/emissions_pd.nc",
+            "oxidants_file": "hf://bundles/t63_l47/oxidants_pd.nc"})
+        modes = _pyses_align_modes(fcfg, "hf://bundles/t63/forcing_pd.nc",
+                                   "hf://bundles/t63_l47/ozone_pd.nc")
+        self.assertEqual(modes, {"align_mode": "wrap_year",
+                                 "emissions_align": "wrap_year",
+                                 "oxidants_align": "wrap_year",
+                                 "ozone_align": "wrap_year"})
+        # User files keep ``auto`` for the readers to reject if timed.
+        fcfg.emissions_file = "/scratch/me/e.nc"
+        self.assertEqual(_pyses_align_modes(fcfg, "/me/f.nc", None)[
+            "emissions_align"], "auto")
 
 
 class TestResolveAlign(unittest.TestCase):
