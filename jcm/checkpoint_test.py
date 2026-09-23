@@ -505,7 +505,13 @@ class TestUnstampedCheckpoints(unittest.TestCase):
             target.bootstrap_state()
             elapsed = load_checkpoint(target, path, unstamped_scale={},
                                       as_initial_condition=True)
+        # Documented return contract: the donor's recorded elapsed days,
+        # while the imported state's clock restarts at start_time.
         self.assertAlmostEqual(elapsed, 7.0)
+        run_state = target.run_state
+        restarted = run_state.time - target.start_time
+        self.assertEqual((int(restarted.days), int(restarted.seconds)), (0, 0))
+        self.assertEqual(int(run_state.step), 0)
         self.assertEqual(
             _max_abs_diff(self.model.dycore_state, target.dycore_state), 0.0)
 

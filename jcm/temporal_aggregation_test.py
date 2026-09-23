@@ -133,6 +133,53 @@ def test_streaming_chunk_resume_matches_batch_and_retains_only_statistics():
         changed.update(shifted)
 
 
+def _ten_minute_float32_means(n_days=31, seed=0):
+    """Build a month of 10-minute float32 interval means (model output dtype)."""
+    n = n_days * 144
+    starts = (np.datetime64("2000-01-01T00:00:00", "ms")
+              + np.arange(n) * np.timedelta64(600, "s"))
+    values = (287.3 + np.random.default_rng(seed).normal(0.0, 5.0, (n, 4))
+              ).astype(np.float32)
+    ds = xr.Dataset(
+        {"t": (("time", "x"), values, {"cell_methods": "time: mean"})},
+        coords={"time": starts + np.timedelta64(300, "s")})
+    ds["time_bounds"] = (("time", "bounds"),
+                         np.stack([starts, starts + np.timedelta64(600, "s")], 1))
+    ds.time.attrs["bounds"] = "time_bounds"
+    return ds, values
+
+
+def test_float32_stream_is_exact_and_resume_is_bit_identical():
+    """Running sums are float64: exact for float32 inputs, restart-independent.
+
+    A float32 running sum of 4464 ten-minute means drifts ~2e-4 K from the
+    exact monthly mean, and ``state_dict`` restores the sums as float64, so a
+    resumed stream would not reproduce an uninterrupted one. Both properties
+    are part of the design's restart-independent-sums criterion.
+    """
+    ds, values = _ten_minute_float32_means()
+    exact = values.astype(np.float64).mean(axis=0)
+
+    whole = temporal_aggregation.MonthlyMeanAccumulator()
+    assert whole.update(ds) is None
+    uninterrupted = whole.finish()
+    np.testing.assert_allclose(uninterrupted.t.values[0], exact,
+                               rtol=1e-12, atol=0.0)
+    batch = temporal_aggregation.monthly_means(ds)
+    np.testing.assert_allclose(uninterrupted.t.values, batch.t.values,
+                               rtol=1e-12, atol=0.0)
+
+    # Resume through the checkpointable state at an arbitrary seam.
+    split = 1000
+    first = temporal_aggregation.MonthlyMeanAccumulator()
+    assert first.update(ds.isel(time=slice(0, split))) is None
+    resumed = temporal_aggregation.MonthlyMeanAccumulator.from_state_dict(
+        first.state_dict())
+    assert resumed.update(ds.isel(time=slice(split, None))) is None
+    np.testing.assert_array_equal(resumed.finish().t.values,
+                                  uninterrupted.t.values)
+
+
 def test_rejected_streaming_chunk_does_not_mutate_pending_statistics():
     daily = _daily("2000-01-01", "2000-01-05")
     daily["zzz"] = ("time", np.arange(daily.sizes["time"], dtype=float),

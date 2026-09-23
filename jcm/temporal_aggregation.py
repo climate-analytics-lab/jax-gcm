@@ -289,7 +289,14 @@ class MonthlyMeanAccumulator:
             for name in variables:
                 value = ds[name].isel(time=i, drop=True)
                 valid = value.notnull()
-                contribution = value.fillna(0) * duration_ms
+                # Accumulate in float64 whatever the field's dtype: a float32
+                # running sum drifts with the number of intervals (~2e-4 K
+                # over a month of 10-minute means), and ``state_dict`` stores
+                # the sums as Python floats, so float64 is also the only
+                # dtype in which a resumed stream is bit-identical to an
+                # uninterrupted one. The batch ``monthly_means`` reduces in
+                # float64 too.
+                contribution = value.fillna(0).astype(np.float64) * duration_ms
                 valid_duration = valid.astype(np.int64) * duration_ms
                 if name not in self._sums:
                     self._sums[name] = contribution

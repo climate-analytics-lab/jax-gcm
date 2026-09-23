@@ -592,8 +592,10 @@ floating epoch days into nanoseconds:
    ocean = ocean.assign_coords(time=labels)
 
 The result is exact ``datetime64[ms]``; integer-second model labels are
-preserved, and interval midpoint labels can also represent half seconds.
-Floating days-since-epoch input is rejected. The trajectory serializer uses
+preserved. A ``Model`` run's interval midpoints are always whole seconds,
+because averaged save intervals must span an even number of seconds; the
+millisecond unit exists only so an external caller's own half-second
+midpoints convert exactly. Floating days-since-epoch input is rejected. The trajectory serializer uses
 the same conversion, preventing tiny timestamp differences from expanding
 an xarray merge into two interleaved axes (#862).
 

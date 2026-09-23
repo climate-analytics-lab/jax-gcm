@@ -672,8 +672,14 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
             cannot be continued as a v3 run.
 
     Returns:
-        The ``elapsed_days`` count recorded when the checkpoint was
-        saved.
+        The ``elapsed_days`` recorded in the file, i.e. the *donor's*
+        elapsed time. On a resume this equals the restored clock's elapsed
+        time (the two are cross-checked), so a chunked loop may use it to
+        skip completed chunks. With ``as_initial_condition=True`` the clock
+        restarts at this model's ``start_time`` (elapsed zero, step zero)
+        and the value describes the donor only — for logging/provenance,
+        as :func:`jcm.initial_states.checkpoint_state` uses it; schedule
+        any further run from ``model.run_state.time`` instead.
 
     """
     if model.dycore_state is None or model.physics_carry is None:
