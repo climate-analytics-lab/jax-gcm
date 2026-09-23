@@ -24,6 +24,18 @@
   ``mo_cloud.f90`` single-moment branch. The ice/snow fall-speed factor
   ``cvtfall = 2.5`` is ECHAM's value for jcm's default T63 grid
   (``mo_echam_cloud_params.f90``, ``nn == 63``), the same the 2M scheme uses.
+  Its cloud-ice fall speed normally retains ECHAM's density power
+  ``v = cvtfall (rho q_i)^0.16``. For differentiability experiments,
+  ``Echam1MMicrophysics(ice_fall_speed_continuation_cutoff=x0)`` supports an
+  opt-in C1 continuation below a positive density-weighted cutoff ``x0``
+  [kg m-3]: with ``t = rho q_i / x0``, the power becomes
+  ``x0^0.16 [1.84 t - 0.84 t^2]`` below the join and is exactly the original
+  power at and above it. This continuation is zero and has finite right slope
+  at the origin, is positive and monotone, and matches both value and slope at
+  ``x0``. The default cutoff is zero, so ordinary configurations use the
+  original ECHAM law. A positive cutoff is a static, non-trainable expert
+  option: no universal physically justified value is prescribed, and users
+  must verify forward sensitivity and conservation for their application.
 - **Lohmann 2-moment microphysics**
   (``jcm/physics/clouds/lohmann_2m/scheme.py`` — ``cloud_microphysics_2m`` and its
   ``Lohmann2MMicrophysics`` term) — the full two-moment process chain (droplet and
@@ -72,6 +84,12 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   default parameter instance (that would sever gradients / overrides).
 
 **Status & known limitations (stated openly).**
+- The 1M low-ice fall-speed continuation is a differentiability-driven
+  numerical option related to the gradient-regularisation work in #843. It
+  bounds the formal ``q_i -> 0+`` slope without deleting ice or changing the
+  resolved-ice law, but it does not establish that a particular cutoff is a
+  physical cloud-ice threshold or that every coupled multi-step gradient is
+  useful.
 - **Ice treatment is much unresolved** and depends on choices that exist in no
   single reference. The live heterogeneous ice-nucleating-particle path is a
   prognostic JAM ``ice_nuclei`` field where an online dust/BC source exists —

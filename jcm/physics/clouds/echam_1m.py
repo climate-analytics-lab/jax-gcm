@@ -703,6 +703,99 @@ def _qsat_water(pressure: jnp.ndarray, temperature: jnp.ndarray):
     return qsw, es_safe
 
 
+def _ice_fall_speed_density_power(
+    ice_density: jnp.ndarray,
+    d_epsilon: float,
+    continuation_cutoff: float = 0.0,
+) -> jnp.ndarray:
+    """Return the 0.16 density power with an optional C1 low-end join.
+
+    ``continuation_cutoff`` has units kg/m3. A zero cutoff preserves the
+    ECHAM law, including its dead-branch floor. A positive cutoff replaces
+    ``x**0.16`` below the cutoff by the unique quadratic that is zero at the
+    origin and matches both value and slope at the join.
+    """
+    if continuation_cutoff < 0.0:
+        raise ValueError("continuation_cutoff must be nonnegative [kg/m3]")
+    if continuation_cutoff > 0.0:
+        exponent = 0.16
+        cutoff = jnp.asarray(continuation_cutoff, dtype=ice_density.dtype)
+        below = ice_density < cutoff
+        # Bound both inactive branches: this avoids fractional powers at zero
+        # and overflow in t**2 for resolved float32 ice densities.
+        safe_high = jnp.where(below, cutoff, ice_density)
+        safe_low = jnp.where(below, ice_density, cutoff)
+        t = safe_low / cutoff
+        low = cutoff ** exponent * (
+            (2.0 - exponent) * t + (exponent - 1.0) * t * t)
+        return jnp.where(below, low, safe_high ** exponent)
+    return jnp.maximum(ice_density, d_epsilon) ** 0.16
+
+
+def _ice_sedimentation_layer(
+    cloud_ice: jnp.ndarray,
+    incoming_ice_flux: jnp.ndarray,
+    air_density: jnp.ndarray,
+    layer_mass: jnp.ndarray,
+    dt: float,
+    is_bottom: jnp.ndarray,
+    config: MicrophysicsParameters,
+    continuation_cutoff: float = 0.0,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Sediment cloud ice through one layer with an exact mass ledger.
+
+    Returns updated ice [kg/kg], its tendency [kg/kg/s], private ice outflux
+    [kg/m2/s], and the bottom ice flux folded into surface snow [kg/m2/s].
+    The private outflux makes conservation directly testable without widening
+    ``MicrophysicsState``, whose public frozen flux combines snow and ice.
+    """
+    zdp = layer_mass * c.grav
+    ice = jnp.maximum(cloud_ice, 0.0)
+    ice_density = air_density * ice
+    fall_speed_power = _ice_fall_speed_density_power(
+        ice_density, config.d_epsilon, continuation_cutoff)
+    if continuation_cutoff > 0.0:
+        fall_speed = config.cvtfall * fall_speed_power
+    else:
+        fall_speed = config.cvtfall * jnp.where(
+            ice_density > 0.0, fall_speed_power, 0.0)
+
+    sed_x = (
+        fall_speed * c.grav * air_density * dt
+        / jnp.maximum(zdp, config.epsilon)
+    )
+    retained_fraction = jnp.exp(-sed_x)
+    sed_x_safe = jnp.maximum(sed_x, 1.0e-8)
+    sed_phi = jnp.where(
+        sed_x > 1.0e-8,
+        -jnp.expm1(-sed_x_safe) / sed_x_safe,
+        1.0 - 0.5 * sed_x,
+    )
+    influx_gain = (
+        incoming_ice_flux * c.grav * dt
+        / jnp.maximum(zdp, config.epsilon) * sed_phi
+    )
+    ice_provisional = jnp.maximum(
+        0.0, ice * retained_fraction + influx_gain)
+    mixing_ratio_change = ice_provisional - ice
+    flux_per_mixing_ratio = zdp / (dt * c.grav)
+    outgoing_ice_flux = jnp.maximum(
+        0.0, incoming_ice_flux - mixing_ratio_change * flux_per_mixing_ratio)
+    mixing_ratio_change = (
+        (incoming_ice_flux - outgoing_ice_flux)
+        / jnp.maximum(flux_per_mixing_ratio, config.epsilon)
+    )
+    cloud_ice_out = ice + mixing_ratio_change
+    surface_ice_flux = jnp.where(is_bottom, outgoing_ice_flux, 0.0)
+    outgoing_ice_flux = jnp.where(is_bottom, 0.0, outgoing_ice_flux)
+    return (
+        cloud_ice_out,
+        mixing_ratio_change / dt,
+        outgoing_ice_flux,
+        surface_ice_flux,
+    )
+
+
 def cloud_microphysics_column_sweep(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
@@ -716,6 +809,7 @@ def cloud_microphysics_column_sweep(
     dt: float,
     config: Optional[MicrophysicsParameters] = None,
     specific_humidity_m1: Optional[jnp.ndarray] = None,
+    ice_fall_speed_continuation_cutoff: float = 0.0,
 ) -> Tuple[MicrophysicsTendencies, MicrophysicsState]:
     """ECHAM ``mo_cloud.f90`` column-sweep cloud + microphysics routine.
 
@@ -831,56 +925,14 @@ def cloud_microphysics_column_sweep(
         # ECHAM 6.3's 1M does NOT sublimate the falling ice on the way down.
         # This was entirely absent from the sweep — cirrus had no sink and
         # never precipitated (review finding 2.9).
-        zdp = mref * c.grav  # layer Δp [Pa]
-        zxip1 = jnp.maximum(qi0, 0.0)
-        # Double-where guard: ``x ** 0.16`` at ``x == 0`` (an ice-free layer,
-        # the common case) has an infinite derivative, so the reverse pass
-        # NaNs even though the forward is 0. The ``where`` keeps the forward
-        # exactly 0 where there is no ice; the inner floor only has to make the
-        # base strictly positive for the differentiated branch — hence the
-        # negligible ``d_epsilon`` (NOT ``epsilon``: a 1e-12 floor would
-        # inflate the fall speed of tiny-but-nonzero ice by orders of
-        # magnitude, opening the water budget; see the ``epsilon`` /
-        # ``d_epsilon`` note on MicrophysicsParameters). Issue #558.
-        zxifall = config.cvtfall * jnp.where(
-            rho * zxip1 > 0.0,
-            jnp.maximum(rho * zxip1, config.d_epsilon) ** 0.16,
-            0.0,
+        qi0, dqidt_sed, zxiflux_out, surface_ice_flux = (
+            _ice_sedimentation_layer(
+                qi0, zxiflux, rho, mref, dt, is_bottom, config,
+                ice_fall_speed_continuation_cutoff,
+            )
         )
-        zal1 = jnp.exp(-zxifall * c.grav * rho * dt / jnp.maximum(zdp, config.epsilon))
-        # Influx contribution ``zal2 * (1 - zal1)`` with
-        # ``zal2 = zxiflux / (rho * v)``: analytically this has a REMOVABLE
-        # 0/0 limit as the fall speed v -> 0 (it tends to
-        # ``zxiflux * k / rho`` with ``k = g * rho * dt / dp``), but the
-        # factored form with an epsilon floor destroys the cancellation in
-        # reverse mode: d(zal2)/d(zxiflux) = 1/max(rho*v, eps) is up to 1e12
-        # per level, and ``zxiflux`` is the scan carry, so these factors
-        # COMPOUND across levels and overflow the backward pass to inf (the
-        # first saturated min/max VJP then turns the inf into NaN — the
-        # convection-parameter NaN gradients). Rewrite via the stable
-        # phi(x) = (1 - exp(-x))/x with its series limit at small x, so both
-        # the value and every partial derivative stay O(1).
-        sed_x = zxifall * c.grav * rho * dt / jnp.maximum(zdp, config.epsilon)
-        sed_x_safe = jnp.maximum(sed_x, 1.0e-8)
-        sed_phi = jnp.where(
-            sed_x > 1.0e-8,
-            -jnp.expm1(-sed_x_safe) / sed_x_safe,
-            1.0 - 0.5 * sed_x,
-        )
-        influx_gain = (
-            zxiflux * c.grav * dt / jnp.maximum(zdp, config.epsilon) * sed_phi
-        )
-        zxised = jnp.maximum(0.0, zxip1 * zal1 + influx_gain)
-        zqsed = zxised - zxip1
-        zcons2_lev = 1.0 / (dt * c.grav)
-        zxibot = jnp.maximum(0.0, zxiflux - zqsed * zcons2_lev * zdp)
-        zqsed = (zxiflux - zxibot) / jnp.maximum(zcons2_lev * zdp, config.epsilon)
-        qi0 = zxip1 + zqsed
-        dqidt_sed = zqsed / dt
-        # Bottom level: the remaining ice flux exits as snow (folded into
-        # the snow flux below, before this layer's melt runs on it).
-        zsfl = zsfl + jnp.where(is_bottom, zxibot, 0.0)
-        zxiflux_out = jnp.where(is_bottom, 0.0, zxibot)
+        # Bottom-level private ice flux joins the public snow ledger.
+        zsfl = zsfl + surface_ice_flux
 
         # ---------- (1) snow melt at T > tmelt ----------
         # ICON ``mo_cloud.f90:319-323``. Uses the input T (pre-condensation)
@@ -1329,10 +1381,28 @@ class Echam1MMicrophysics(PhysicsTerm):
     # the cover term; this term fills the precip/process-rate fields.
     output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS
 
-    def __init__(self, params: MicrophysicsParameters | None = None):
-        """Hold the scheme-native :class:`MicrophysicsParameters`."""
+    def __init__(
+        self,
+        params: MicrophysicsParameters | None = None,
+        *,
+        ice_fall_speed_continuation_cutoff: float = 0.0,
+    ):
+        """Hold scheme parameters and optional low-ice fall-speed cutoff.
+
+        Args:
+            params: Scheme-native microphysics parameters.
+            ice_fall_speed_continuation_cutoff: Density-weighted cloud-ice
+                cutoff [kg/m3] for the differentiable C1 continuation. The
+                default 0 preserves the ECHAM fall-speed law. Positive values
+                are an expert numerical option and require case-specific
+                validation.
+
+        """
         self.params = nnx.Param(
             params or MicrophysicsParameters.default(),
+        )
+        self.ice_fall_speed_continuation_cutoff = (
+            ice_fall_speed_continuation_cutoff
         )
 
     @classmethod
@@ -1408,7 +1478,7 @@ class Echam1MMicrophysics(PhysicsTerm):
         # :class:`~jcm.physics.clouds.sundqvist.SundqvistCloudFraction`.
         micro_tend, micro_state = jax.vmap(
             cloud_microphysics_column_sweep,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 1),
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 1, None),
             out_axes=(0, 0),
         )(
             temperature_in, specific_humidity_in, pressure_full,
@@ -1417,6 +1487,7 @@ class Echam1MMicrophysics(PhysicsTerm):
             droplet_number_per_kg, dt, params,
             # Step-start q (ECHAM qm1) anchors the moist-cp L/cp factors.
             state.specific_humidity,
+            self.ice_fall_speed_continuation_cutoff,
         )
 
         tendency = PhysicsTendency(
