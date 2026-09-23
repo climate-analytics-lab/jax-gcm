@@ -221,8 +221,11 @@ def find_cloud_base(temperature: jnp.ndarray,
     ``zlift`` is the sub-grid thermal excess from vdiff's prognostic θ_v
     variance (ECHAM ``pthvsig``); see :func:`cloud_base_lift`. Elevated
     convection is ``cubasmc``, ported in :func:`find_midlevel_cloud_base`.
-    ECHAM can also re-seed above a ``cubase`` plume that dies partway up,
-    which jcm cannot — it fixes one cloud base per column per step (#700).
+    ``cubasmc`` fires only in a column that is not yet convective
+    (``.NOT.ldcum``, mo_cuascent.f90:631), and a surface plume that passes
+    cuasc's first cloud-level test makes it convective, so no second plume
+    is seeded above it; one that takes no hold leaves the column to
+    ``cubasmc`` in the second ascent, which the scheme's driver reproduces.
 
     The returned level is the cloud-base INTERFACE ``kcbot``, expressed as
     the index of the layer whose TOP interface it is (in the caller's
@@ -345,7 +348,8 @@ def find_midlevel_cloud_base(temperature: jnp.ndarray,
     ``klab = 0`` there, and the next loop iteration lets ``cubasmc`` seed one
     layer higher. The net rule is therefore *the lowest qualifying layer
     whose plume survives its first step*, which is what the ``survives``
-    term encodes — the DSE lift across the layer (the seed's static energy,
+    term encodes — the DSE lift across the layer to an interface at or below
+    the first ascent's 400 hPa cloud-top bound (the seed's static energy,
     ``pcpen(kk)·pten(kk) + pgeo(kk)``, converted back with the top
     interface's ``pcpcu``; see ``updraft.calculate_updraft`` for why the
     seed carries that energy rather than ECHAM's ``pcpen(kk+1)·ptu`` re-form,
@@ -354,10 +358,9 @@ def find_midlevel_cloud_base(temperature: jnp.ndarray,
     environment with the ``zlift`` bonus that applies because the interface
     below is ``klab == 1`` (mo_cuascent.f90:449).
 
-    Remaining departure: ECHAM re-seeds above a mid-level plume that took
-    hold and then died several levels up, because its cloud base is a
-    per-level quantity inside the ascent loop. jcm picks one cloud base per
-    column before the scan (#700, with the discrete level picks #665).
+    Once a seeded plume passes its first step the column is convective
+    (``ldcum``) and ``cubasmc`` fires no more, so a plume that dies higher up
+    is that column's convection, as in the reference.
 
     Args:
         temperature: Environmental temperature (K) [nlev]
@@ -421,7 +424,12 @@ def find_midlevel_cloud_base(temperature: jnp.ndarray,
         - env.tenh * (1.0 + c.vtmpc1 * env.qenh)
         + zlift
     )
-    survives = (parcel_l > 0.0) & (buoy > 0.0)
+    # The first step must also lie at or below the first ascent's cloud-top
+    # bound for a column without a surface plume — the interface just above
+    # 400 hPa (``jk ≥ kctop0``, mo_cuascent.f90:191, 450-451).
+    from .updraft import no_cubase_cloud_top_bound
+    kctop0 = no_cubase_cloud_top_bound(env.paph)
+    survives = (parcel_l > 0.0) & (buoy > 0.0) & (levels >= kctop0)
 
     ok = eligible & survives
     found = jnp.any(ok)
@@ -605,83 +613,6 @@ def calculate_cape_cin(temperature: jnp.ndarray,
     cin = jnp.where(has_lfc, jnp.sum(cin_contrib), 0.0)
 
     return cape, cin
-
-
-def cloud_depth_for_target_top(
-    pressure: jnp.ndarray,
-    cloud_base: jnp.ndarray,
-    target_top_pa: float,
-    min_layers: int = 2,
-) -> jnp.ndarray:
-    """Return the number of model levels between ``cloud_base`` and the
-    level closest to ``target_top_pa`` from above — used as the updraft
-    scan ceiling.
-
-    The scan ceiling is a *maximum* depth the updraft is allowed to
-    extend to, NOT the actual cloud top. The actual termination is
-    decided dynamically inside ``calculate_updraft`` (negative
-    buoyancy, or mfu < 1 % of mfb). ``cloud_depth`` only needs to give
-    the scan enough headroom to reach physically plausible cloud tops;
-    too small a value silently truncates real convection, too large
-    just wastes compute on levels that would terminate dynamically
-    anyway.
-
-    A fixed level-count value would be vertical-resolution-dependent in
-    surprising ways:
-
-    * On the 47-level ICON hybrid grid we run T85×L47 on, layers are
-      ~22 hPa thick in the mid-troposphere; ``cloud_depth=35`` ≈ a
-      surface-to-200-hPa scan range.
-    * On a coarser 8-level sigma grid (used in some bisection tests),
-      ``cloud_depth=35`` would be silently clamped to ``nlev-2`` —
-      the cloud is allowed to reach the model top, which both wastes
-      compute and risks unphysical extension into the stratosphere.
-    * On a 90-level grid, the same ``35`` would only let the cloud
-      reach ~700 hPa, cutting off real deep convection.
-
-    Deriving from a target *pressure* makes the value
-    resolution-independent. Recommended targets:
-
-    * Deep convection: 15000 Pa (150 hPa) — tropical Cb tops typically
-      reach the tropopause around this pressure.
-    * Shallow convection: 70000 Pa (700 hPa) — trade-cumulus cloud
-      tops at ~3 km.
-
-    Implementation: for any pressure index ordering, find the level
-    closest to ``target_top_pa`` from above (i.e. the level with the
-    HIGHEST pressure among levels whose pressure ≤ target). That's
-    the level we want the scan to reach. ``cloud_depth`` is then the
-    integer index distance ``|cloud_base - target_top_idx|``. The
-    result is clipped to ``[min_layers, nlev-2]`` so the scan always
-    has at least ``min_layers`` levels of headroom and stops short of
-    TOA.
-
-    Args:
-        pressure: Full-level pressure profile (Pa) [nlev]
-        cloud_base: Cloud-base level index (0-indexed)
-        target_top_pa: Scan should reach (at least) this pressure level
-        min_layers: Minimum scan depth (≥ 2 to avoid degenerate scans)
-
-    Returns:
-        Scan-ceiling depth in *levels* (int32), clipped to
-        ``[min_layers, nlev-2]``.
-
-    """
-    nlev = pressure.shape[0]
-    above_target = pressure <= target_top_pa
-    # Among levels at or above target, pick the HIGHEST-pressure one —
-    # that's the level closest to ``target_top_pa`` from above, where we
-    # want the scan to reach. ``argmax`` of ``-inf`` outside the mask
-    # returns 0 if no level is above target (clipped to ``min_layers``
-    # so it doesn't matter for the result).
-    masked_p = jnp.where(
-        above_target,
-        pressure,
-        jnp.array(-jnp.inf, dtype=pressure.dtype),
-    )
-    target_top_idx = jnp.argmax(masked_p)
-    depth = jnp.abs(cloud_base.astype(jnp.int32) - target_top_idx.astype(jnp.int32))
-    return jnp.clip(depth, min_layers, nlev - 2)
 
 
 # Minimum boundary-layer moisture supply [kg/m²/s] that counts as a real
@@ -1023,10 +954,10 @@ def _tiedtke_convection_toa_first(
     ])
 
     # Discrete diagnostic ktype (consumed by the Sundqvist guard and the
-    # cloud-depth ceiling): argmax of the type weights when active. The
-    # ceiling is a scan bound, not the physical cloud top (dynamic
-    # termination governs), so keeping it discrete costs no gradients
-    # that matter.
+    # type-dependent discrete choices downstream — the sub-cloud taper, the
+    # depth demotion): argmax of the type weights when active. The plume
+    # itself is blended by the smooth weights, so keeping the label
+    # discrete costs no gradients that matter.
     convection_active = jnp.logical_and(has_cloud_base, trigger_weight > 1e-3)
     conv_type = jnp.where(
         convection_active,
@@ -1046,7 +977,11 @@ def _tiedtke_convection_toa_first(
     precip_conv = jnp.zeros((), dtype=temperature.dtype)
     
     # Import modules here to avoid circular imports
-    from .updraft import calculate_updraft, cubase_parcel
+    from .updraft import (
+        calculate_updraft, cloud_base_mse, cubase_parcel, estimate_cloud_top,
+        max_ascent_level, mse_minimum_level, no_cubase_cloud_top_bound,
+        saturated_mse_hat,
+    )
     from .downdraft import calculate_downdraft
     from .flux_tendencies import (
         calculate_tendencies, mass_flux_closure_blend
@@ -1054,35 +989,14 @@ def _tiedtke_convection_toa_first(
     
     # Apply full convection scheme if active (with tracer transport)
     def apply_full_convection():
-        # Cloud-top scan ceiling. The ceiling is a *maximum* depth, not
-        # the actual cloud top — actual termination is decided
-        # dynamically inside ``calculate_updraft`` (negative buoyancy or
-        # mfu < 1 % of mfb). Derive the ceiling from a target cloud-top
-        # PRESSURE rather than a fixed level count so the value is
-        # vertical-resolution-independent. Targets:
-        #   * Deep:    150 hPa (tropical Cb tops near the tropopause)
-        #   * Shallow: 700 hPa (trade-cumulus tops at ~3 km)
-        # See ``cloud_depth_for_target_top`` for the derivation and a
-        # detailed discussion of why a fixed level count is wrong.
-        cloud_depth = lax.cond(
-            conv_type == 2,
-            lambda: cloud_depth_for_target_top(pressure, cloud_base, 70_000.0),
-            lambda: cloud_depth_for_target_top(pressure, cloud_base, 15_000.0),
-        )
+        levels = jnp.arange(nlev)
+        # cuini's level of maximum resolved ascent ``klwmin``, which gates
+        # cuentr's turbulent entrainment (mo_cuinitialize.f90:183-196).
+        klwmin = max_ascent_level(omega)
+        # cuasc's cloud-top bound for a column without a surface plume: the
+        # interface just above 400 hPa (mo_cuascent.f90:191).
+        kctop0_no_cubase = no_cubase_cloud_top_bound(env.paph)
 
-        # Handle level ordering properly
-        pressure_increasing = pressure[0] < pressure[-1]
-
-        # Ensure cloud depth is at least 2 levels and doesn't extend to TOA
-        # Cloud base must be at least 2 levels from the top to allow for updraft development
-        min_top_level = 2  # Don't allow clouds to extend above this level
-
-        ktop = lax.cond(
-            pressure_increasing,
-            lambda: jnp.maximum(cloud_base - cloud_depth, min_top_level),      # Standard: top = lower index, but not TOA
-            lambda: jnp.minimum(cloud_base + cloud_depth, nlev-1-min_top_level)  # Reverse: top = higher index
-        )
-        
         # --- Cloud-base mass-flux closure -------------------------------------
         # ECHAM anchors the DEEP cloud-base mass flux to the boundary-layer
         # MOISTURE SUPPLY, not to instantaneous CAPE (mo_cumastr.f90 ``zmfub`` =
@@ -1172,34 +1086,42 @@ def _tiedtke_convection_toa_first(
         mfu_cfl_max = layer_air_mass[jnp.maximum(cloud_base - 1, 0)] / dt
         mass_flux_base = jnp.minimum(mass_flux_base, mfu_cfl_max)
         
-        # Calculate updraft (cuasc, on half levels)
-        updraft_state = calculate_updraft(
-            temperature, humidity, pressure, layer_thickness, rho,
-            cloud_base, ktop, conv_type, mass_flux_base, config,
-            land_fraction=land_fraction,
-            type_weights=type_weights,
-            # ECHAM's zlift, for the one ascent test that uses it: the
-            # first step above a ``cubasmc`` (klab == 1) cloud base.
-            lift=cloud_base_lift(config, thvsig),
-            # Environmental winds for the prognostic plume wind (cududv).
-            u_wind=u_wind, v_wind=v_wind,
-            cp_moist=cp_moist,
-            env=env, dt=dt,
-        )
+        # --- First-pass cloud top and organized-detrainment onset -----------
+        # cumastr (mo_cumastr.f90:591-715): the cloud-base parcel's moist
+        # static energy ``zhcbase`` against the environment's reduced
+        # saturation value ``zhhatt`` gives the first ascent's cloud-top bound
+        # ``ictop0``, and the moist-static-energy-lapse search gives the level
+        # ``khmin`` above which deep plumes detrain in an organized way.
+        hhatt = saturated_mse_hat(env)
+        hcbase = cloud_base_mse(env, cloud_base, tu_cb, qu_cb)
+        ictop0 = estimate_cloud_top(hhatt, hcbase, cloud_base)
+        khmin = mse_minimum_level(
+            env, temperature, humidity, cp_moist, cloud_base, ictop0)
+        kctop0_first = jnp.where(use_midlev, kctop0_no_cubase, ictop0)
 
-        # Realized cloud top ``kctop``: the highest interface the updraft
-        # actually reached (mfu above the numerical floor). It bounds the
-        # LFS search (cudlfs), the Nordeng integrals and the depth demotion,
-        # exactly where ECHAM uses ``kctop``; with no active interface it
-        # falls back to the scan ceiling.
-        levels = jnp.arange(nlev)
-        mfu_active = updraft_state.mfu > config.cmfcmin
-        has_active = jnp.any(mfu_active)
-        actual_ktop = jnp.where(
-            has_active,
-            jnp.min(jnp.where(mfu_active, levels, nlev)).astype(jnp.int32),
-            ktop,
-        )
+        def ascent(kcbot, kctop0, ktype_, mfub, weights):
+            return calculate_updraft(
+                temperature, humidity, pressure, layer_thickness, rho,
+                kcbot, kctop0, ktype_, mfub, config,
+                land_fraction=land_fraction,
+                type_weights=weights,
+                # ECHAM's zlift, for the one ascent test that uses it: the
+                # first step above a ``cubasmc`` (klab == 1) cloud base.
+                lift=cloud_base_lift(config, thvsig),
+                # Environmental winds for the prognostic plume wind (cududv).
+                u_wind=u_wind, v_wind=v_wind,
+                cp_moist=cp_moist,
+                env=env, dt=dt,
+                moisture_tendency=pqte, klwmin=klwmin, khmin=khmin,
+            )
+
+        # First ascent (cuasc), at the first-guess cloud-base flux.
+        updraft_state = ascent(
+            cloud_base, kctop0_first, conv_type, mass_flux_base, type_weights)
+        # ``kctop`` and ``ldcum``: a plume that passed no ascent test above
+        # ``klevm1`` is not convection (mo_cuascent.f90:541).
+        actual_ktop = updraft_state.kctop
+        ldcum_first = actual_ktop != nlev - 2
 
         # --- ECHAM depth demotion (mo_cumastr.f90:750-753) ---------------
         # A "deep" plume whose realized cloud turns out thinner than
@@ -1213,16 +1135,17 @@ def _tiedtke_convection_toa_first(
         # before its second cuasc).
         zpbmpt = env.paph[cloud_base] - env.paph[actual_ktop]
         conv_type_final = jnp.where(
-            (conv_type == 1) & (zpbmpt < 2.0e4),
+            ldcum_first & (conv_type == 1) & (zpbmpt < 2.0e4),
             jnp.asarray(2, conv_type.dtype), conv_type,
         )
 
         # Column precipitation generated by the ascent (ECHAM ``zrfl`` =
         # Σ zdmfup), the rain the downdraft can evaporate into.
-        precip_rate = jnp.sum(updraft_state.pdmfup)
+        precip_rate = jnp.where(
+            ldcum_first, jnp.sum(updraft_state.pdmfup), 0.0)
 
         # Downdraft (cudlfs + cuddraf, on half levels), searched inside the
-        # realized cloud.
+        # realized cloud of a convective column.
         downdraft_state = calculate_downdraft(
             temperature, humidity, pressure, layer_thickness, rho,
             updraft_state, precip_rate, cloud_base, actual_ktop, config,
@@ -1272,12 +1195,14 @@ def _tiedtke_convection_toa_first(
         )
         zmfub = jnp.maximum(mass_flux_base, config.cmfcmin)
         zmfub1 = zcape_plume * zmfub / (jnp.maximum(zheat, 1e-10) * config.tau)
-        # Bounds: the CFL cap above, cmfcmin (1e-10) below. ECHAM floors at
-        # 0.001; that floor would bind on weak first guesses, and a BOUND
-        # rescale target (rescale = const/zmfub) would erase the
-        # closure/trigger dependence of the amplitude, deadening
-        # d/d(trigger_cape) everywhere.
-        zmfub1 = jnp.clip(zmfub1, config.cmfcmin, mfu_cfl_max)
+        # Bounds (mo_cumastr.f90:902-904): at least ``0.001`` kg/m²/s — also
+        # where the plume CAPE is not positive — and at most the CFL cap
+        # above. The floor is applied scaled by the trigger weight, so a
+        # column fading in through the smooth trigger fades in its floor with
+        # it (at full weight it is ECHAM's literal).
+        zmfub1 = jnp.minimum(
+            jnp.maximum(zmfub1, config.cu_mfub1_min * trigger_weight),
+            mfu_cfl_max)
         # ECHAM rescales EVERY deep column (mo_cumastr.f90:812-906): the
         # moisture-budget flux is only the FIRST GUESS; Nordeng's
         # zmfub1 = zcape·zmfub/(zheat·cmftau) sets the final amplitude.
@@ -1321,7 +1246,7 @@ def _tiedtke_convection_toa_first(
         rescale_shallow = zmfub1_sh / zmfub
 
         rescale = jnp.where(
-            (conv_type_final == 1) & (zheat > 1e-10) & (zcape_plume > 0.0),
+            conv_type_final == 1,
             zmfub1 / zmfub,
             jnp.where(conv_type_final == 2, rescale_shallow, 1.0),
         )
@@ -1332,7 +1257,9 @@ def _tiedtke_convection_toa_first(
         # linear in its base flux — the ``zmfmax`` limiter caps the flux
         # leaving each interface at the air mass of the layer above per step
         # — so only a re-run keeps that cap at the final amplitude. A deep
-        # plume demoted to shallow re-ascends with the shallow entrainment.
+        # plume demoted to shallow re-ascends with the shallow entrainment,
+        # and the first ascent's realized top becomes the cloud-top bound
+        # (``ictop0 = kctop``, line 753).
         demoted = (conv_type == 1) & (conv_type_final == 2)
         type_weights_final = jnp.where(
             demoted,
@@ -1341,29 +1268,41 @@ def _tiedtke_convection_toa_first(
                        type_weights[2]]),
             type_weights,
         )
-        updraft_state = calculate_updraft(
-            temperature, humidity, pressure, layer_thickness, rho,
-            cloud_base, ktop, conv_type_final, mass_flux_base * rescale,
-            config,
-            land_fraction=land_fraction,
-            type_weights=type_weights_final,
-            lift=cloud_base_lift(config, thvsig),
-            u_wind=u_wind, v_wind=v_wind,
-            cp_moist=cp_moist,
-            env=env, dt=dt,
+        # A surface plume that took no hold in the first ascent leaves the
+        # column non-convective there, and the second ascent's ``cubasmc`` may
+        # then seed a mid-level plume in it (cuasc resets ``klab`` for a
+        # non-convective column, line 190): omega-driven, bounded at 400 hPa,
+        # with no downdraft and no rescale.
+        switch_mid = has_cloud_base_sfc & ~ldcum_first & has_midlev_base
+        base_final = jnp.where(switch_mid, midlev_base, cloud_base)
+        type_final = jnp.where(
+            switch_mid, jnp.asarray(3, conv_type_final.dtype), conv_type_final)
+        weights_final = jnp.where(
+            switch_mid,
+            jnp.stack([jnp.zeros_like(type_weights[0]),
+                       jnp.zeros_like(type_weights[0]),
+                       jnp.ones_like(type_weights[0])]),
+            type_weights_final,
         )
-        mfu_active = updraft_state.mfu > config.cmfcmin
-        actual_ktop = jnp.where(
-            jnp.any(mfu_active),
-            jnp.min(jnp.where(mfu_active, levels, nlev)).astype(jnp.int32),
-            ktop,
-        )
+        mfub_mid = jnp.minimum(
+            midlevel_mass_flux(omega[midlev_base], config),
+            layer_air_mass[jnp.maximum(midlev_base - 1, 0)] / dt)
+        mfub_final = jnp.where(
+            switch_mid, mfub_mid, mass_flux_base * rescale)
+        kctop0_final = jnp.where(ldcum_first, actual_ktop, kctop0_no_cubase)
+        updraft_state = ascent(
+            base_final, kctop0_final, type_final, mfub_final, weights_final)
+        actual_ktop = updraft_state.kctop
+        ldcum = actual_ktop != nlev - 2
         # The downdraft is not re-run: ECHAM scales its fluxes and rain uptake
-        # by the same factor (mo_cumastr.f90:944-972).
+        # by the same factor (mo_cumastr.f90:944-972). It exists only under a
+        # plume that took hold in the first ascent (cudlfs requires
+        # ``ldcum``), so a column that turned to a mid-level plume has none.
+        dd_scale = jnp.where(ldcum_first, rescale, 0.0)
         downdraft_state = downdraft_state._replace(
-            mfd=downdraft_state.mfd * rescale,
-            pdmfdp=downdraft_state.pdmfdp * rescale,
-            dmfen=downdraft_state.dmfen * rescale,
+            mfd=downdraft_state.mfd * dd_scale,
+            pdmfdp=downdraft_state.pdmfdp * dd_scale,
+            dmfen=downdraft_state.dmfen * dd_scale,
         )
 
         # cuflx + cudtdq + cududv: the finite-volume ledger on the true
@@ -1371,10 +1310,13 @@ def _tiedtke_convection_toa_first(
         tendencies = calculate_tendencies(
             temperature, humidity, u_wind, v_wind, pressure, rho, layer_thickness,
             updraft_state, downdraft_state,
-            cloud_base, actual_ktop, dt, config,
-            ktype=conv_type_final, use_updraft_cover=use_updraft_cover,
+            base_final, actual_ktop, dt, config,
+            ktype=type_final, use_updraft_cover=use_updraft_cover,
             cp_moist=cp_moist, env=env,
         )
+        # cuflx/cudtdq act only on convective columns (``ldcum``).
+        tendencies = jax.tree.map(
+            lambda x: jnp.where(ldcum, x, jnp.zeros_like(x)), tendencies)
 
         # NOTE: ECHAM applies NO grid-mean saturation adjustment after
         # cudtdq (mo_cumastr.f90 — after the tendencies only cududv and the
@@ -1398,12 +1340,17 @@ def _tiedtke_convection_toa_first(
             # Fractional entrainment (1/m) is rescale-invariant (a rate,
             # not a flux).
             entr=updraft_state.entr,
-            ktype=jnp.asarray(conv_type_final, dtype=jnp.int32),
-            kbase=jnp.array(cloud_base),
+            ktype=jnp.where(ldcum, type_final, 0).astype(jnp.int32),
+            kbase=jnp.array(base_final),
             ktop=actual_ktop, prate=tendencies.precip_conv,
             entrain_up=updraft_state.dmfen,
             entrain_down=downdraft_state.dmfen,
         )
+        # A non-convective column publishes no plume.
+        new_state = new_state._replace(**{
+            f: jnp.where(ldcum, getattr(new_state, f),
+                         jnp.zeros_like(getattr(new_state, f)))
+            for f in ("mfu", "mfd", "entrain_up", "entrain_down")})
 
         return tendencies, new_state
     

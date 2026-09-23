@@ -1,261 +1,320 @@
-"""Tests for ``cloud_depth_for_target_top``.
+"""The ECHAM ``cuasc``/``cuentr``/``cumastr`` ascent rules, one test per rule.
 
-The updraft scan ceiling used by ``tiedtke_nordeng_convection`` is
-computed from a target cloud-top *pressure* rather than a fixed level
-count, so the same physics runs unchanged across vertical resolutions.
-These tests guard against three regression modes:
+Each test pins one piece of the reference ascent against a value computed
+from its Fortran definition (mo_cuascent.f90, mo_cumastr.f90,
+mo_cuinitialize.f90):
 
-1. **Resolution dependence.** A fixed ``cloud_depth=35`` would silently
-   clamp deep convection on coarse grids (e.g. 8-level sigma) and
-   under-cap it on fine grids (e.g. 90-level).
-2. **Wrong target.** Picking the wrong level near the target pressure
-   (e.g. one above instead of just below) shifts the scan range by
-   ~22 hPa and biases reported cloud tops.
-3. **Edge cases.** Targets above the surface or below the model top
-   should not crash or produce nonsensical depths.
+* ``klwmin`` — the level of maximum resolved ascent;
+* the cloud-top bounds ``kctop0``: the 400 hPa bound of a column without a
+  surface plume, and ``cumastr``'s first-pass estimate ``ictop0``;
+* ``khmin`` — where organized detrainment may start;
+* the vertical gating of turbulent entrainment for deep, shallow and
+  mid-level plumes, and the mid-level ``zentest`` enhancement;
+* organized detrainment acting only from ``khmin`` up;
+* the ascent stopping at the first interface where the plume does not
+  condense, even when it is still buoyant;
+* the ascent never passing ``kctop0``, and the deep scheme reaching the
+  upper troposphere when nothing bounds it lower.
+
+The cloud-top overshoot (``cmfctop``) is pinned in
+``ledger_entrainment_test.TestCloudTopOvershoot``.
 """
-
-import unittest
 
 import jax.numpy as jnp
 import numpy as np
 
+import jcm.constants as c
+from jcm.physics.convection.tiedtke_nordeng.half_level_ledger_test import (
+    _l47_tropical_column,
+)
 from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
-    cloud_depth_for_target_top,
+    ConvectionParameters,
+    find_cloud_base,
+    tiedtke_nordeng_convection,
+)
+from jcm.physics.convection.tiedtke_nordeng.updraft import (
+    calculate_updraft,
+    cloud_base_mse,
+    column_environment,
+    cubase_parcel,
+    estimate_cloud_top,
+    max_ascent_level,
+    mse_minimum_level,
+    no_cubase_cloud_top_bound,
+    saturated_mse_hat,
 )
 
-
-def _logspace_pressure(nlev: int, p_top_hpa: float = 10.0,
-                       p_surf_hpa: float = 1000.0) -> jnp.ndarray:
-    """TOA-first pressure profile spanning ``[p_top_hpa, p_surf_hpa]``."""
-    p_pa = jnp.logspace(
-        jnp.log10(p_top_hpa * 100.0),
-        jnp.log10(p_surf_hpa * 100.0),
-        nlev,
-    )
-    return p_pa
+DEEP = jnp.array([1.0, 0.0, 0.0])
+SHALLOW = jnp.array([0.0, 1.0, 0.0])
+MID = jnp.array([0.0, 0.0, 1.0])
+#: A mid-level cloud base on the L47 column (~830 hPa): a ``cubasmc`` plume
+#: seeded there condenses and rises.
+MID_BASE = 41
 
 
-class TestCloudDepthForTargetTop(unittest.TestCase):
-    """Resolution-independent scan-ceiling derivation."""
-
-    def test_47_level_deep_reaches_above_200_hPa(self):
-        """On a 47-level ICON-like grid, the deep target (150 hPa) should
-        give a depth that lets the scan reach pressures < 200 hPa from a
-        surface cloud base — matching the ECHAM cumastr reach observed
-        in the harness on the same RCE column.
-        """
-        p = _logspace_pressure(47)
-        cloud_base = jnp.array(46)  # surface
-        depth = cloud_depth_for_target_top(p, cloud_base, 15_000.0)
-        # ktop = cloud_base - depth
-        ktop = int(cloud_base) - int(depth)
-        self.assertLess(
-            float(p[ktop]) / 100.0, 200.0,
-            f"Scan ceiling at p={float(p[ktop])/100:.1f} hPa is below 200 hPa; "
-            "deep convection scan range too shallow."
-        )
-
-    def test_8_level_does_not_exceed_nlev_minus_2(self):
-        """On a coarse 8-level grid, the depth must clamp to ``nlev-2``
-        (= 6) even though the full pressure range is much smaller per
-        level. Otherwise the scan extends to TOA, wasting compute and
-        risking unphysical extension into the stratosphere.
-        """
-        p = _logspace_pressure(8)
-        cloud_base = jnp.array(7)  # surface
-        depth = cloud_depth_for_target_top(p, cloud_base, 15_000.0)
-        self.assertLessEqual(
-            int(depth), 8 - 2,
-            f"depth={int(depth)} on an 8-level grid exceeds nlev-2=6.",
-        )
-
-    def test_90_level_scales_up(self):
-        """A 90-level grid should produce a much larger ``cloud_depth``
-        than 47 levels, since each level is finer in pressure. Using a
-        fixed 35 here would cap the scan at ~700 hPa, missing real deep
-        convection.
-        """
-        p_47 = _logspace_pressure(47)
-        p_90 = _logspace_pressure(90)
-        depth_47 = int(cloud_depth_for_target_top(
-            p_47, jnp.array(46), 15_000.0,
-        ))
-        depth_90 = int(cloud_depth_for_target_top(
-            p_90, jnp.array(89), 15_000.0,
-        ))
-        # 90-level grid has ~roughly twice the pressure resolution.
-        self.assertGreater(
-            depth_90, depth_47,
-            f"90-level depth ({depth_90}) should exceed 47-level depth "
-            f"({depth_47}) since each level is finer in pressure."
-        )
-
-    def test_shallow_target_is_smaller_than_deep_target(self):
-        """A 700 hPa shallow target should give a smaller depth than a
-        150 hPa deep target on the same column.
-        """
-        p = _logspace_pressure(47)
-        cloud_base = jnp.array(46)
-        deep = int(cloud_depth_for_target_top(p, cloud_base, 15_000.0))
-        shallow = int(cloud_depth_for_target_top(p, cloud_base, 70_000.0))
-        self.assertLess(
-            shallow, deep,
-            f"shallow depth ({shallow}) should be smaller than deep depth "
-            f"({deep}) — they're using a more permissive (shallower) target."
-        )
-
-    def test_min_layers_clamp(self):
-        """Even if the target is very close to the cloud base, ``depth``
-        must be at least ``min_layers`` (default 2) so the updraft has a
-        non-degenerate column to scan.
-        """
-        p = _logspace_pressure(47)
-        cloud_base = jnp.array(46)
-        # Target close to cloud_base pressure
-        target_close = float(p[44])  # only 2 levels above kbase
-        depth = cloud_depth_for_target_top(
-            p, cloud_base, target_close, min_layers=5,
-        )
-        self.assertGreaterEqual(
-            int(depth), 5,
-            f"depth={int(depth)} below the requested min_layers=5.",
-        )
-
-    def test_target_below_surface_does_not_crash(self):
-        """A target pressure higher than the surface (nonsensical) should
-        not crash; depth gracefully falls back to ``min_layers``.
-        """
-        p = _logspace_pressure(47)
-        cloud_base = jnp.array(46)
-        # Target = 1500 hPa is below all model levels
-        depth = cloud_depth_for_target_top(p, cloud_base, 150_000.0)
-        # Either ``min_layers`` or the level closest to surface
-        # (cloud_base itself, depth=0 → clamped to min_layers).
-        self.assertGreaterEqual(int(depth), 2)
-        self.assertLess(int(depth), 47 - 1)
-
-    def test_target_above_TOA_does_not_crash(self):
-        """A target pressure below the model top (zero or below) should
-        give a depth that lets the scan reach near-TOA, capped at
-        ``nlev-2``.
-        """
-        p = _logspace_pressure(47)
-        cloud_base = jnp.array(46)
-        # Target = 0 Pa is below all model levels (above TOA)
-        depth = cloud_depth_for_target_top(p, cloud_base, 0.0)
-        # Should be allowed up to nlev-2
-        self.assertLessEqual(int(depth), 47 - 2)
-
-    def test_cloud_base_at_mid_column(self):
-        """Cloud base above the surface — depth should be measured
-        relative to ``cloud_base``, not the surface.
-        """
-        p = _logspace_pressure(47)
-        cloud_base = jnp.array(30)  # mid-column (~600 hPa on this grid)
-        # Deep target should still allow the scan to reach 150 hPa
-        depth = cloud_depth_for_target_top(p, cloud_base, 15_000.0)
-        ktop = int(cloud_base) - int(depth)
-        self.assertGreaterEqual(ktop, 0)
-        self.assertLess(
-            float(p[ktop]) / 100.0, 200.0,
-            "Scan ceiling didn't reach 200 hPa from a mid-column "
-            "cloud base."
-        )
-
-    def test_jit_compatible(self):
-        """The function must compose with ``jax.jit`` so it can be called
-        inside the convection scheme's compiled scan.
-        """
-        import jax
-        jit_depth = jax.jit(
-            cloud_depth_for_target_top,
-            static_argnames=("min_layers",),
-        )
-        p = _logspace_pressure(47)
-        cloud_base = jnp.array(46)
-        depth = jit_depth(p, cloud_base, 15_000.0)
-        self.assertGreater(int(depth), 0)
+def _column(rh=0.95):
+    """Build the L47 hybrid tropical column, its environment and cloud base."""
+    T, q, p, p_half, dz, rho = _l47_tropical_column(rh=rh)
+    cfg = ConvectionParameters.default()
+    env = column_environment(T, q, p, pressure_half=p_half)
+    kb, _ = find_cloud_base(T, q, p, cfg, pressure_half=p_half)
+    return cfg, T, q, p, p_half, dz, rho, env, int(kb)
 
 
-class TestCloudDepthIntegration(unittest.TestCase):
-    """End-to-end: the resolution-independent depth lets the convection
-    scheme actually run on different grids without artificial truncation.
+def _ascent(cfg, T, q, p, p_half, dz, rho, kb, ktop, ktype, weights, **kw):
+    return calculate_updraft(
+        T, q, p, dz, rho, kb, ktop, ktype, jnp.array(0.02), cfg,
+        type_weights=weights, pressure_half=p_half, **kw)
+
+
+class TestMaxAscentLevel:
+    """``klwmin`` (mo_cuinitialize.f90:189-196)."""
+
+    def test_level_of_most_negative_omega(self):
+        omega = jnp.zeros(10).at[6].set(-0.3).at[4].set(-0.1)
+        assert int(max_ascent_level(omega)) == 6
+
+    def test_ties_keep_the_lowest_level(self):
+        # The walk runs upward with a strict ``<``: the lowest of equal
+        # minima wins.
+        omega = jnp.zeros(10).at[3].set(-0.2).at[7].set(-0.2)
+        assert int(max_ascent_level(omega)) == 7
+
+    def test_top_two_levels_are_not_searched(self):
+        omega = jnp.zeros(10).at[1].set(-5.0).at[5].set(-0.1)
+        assert int(max_ascent_level(omega)) == 5
+
+    def test_no_ascent_gives_the_lowest_level(self):
+        assert int(max_ascent_level(jnp.full(10, 0.2))) == 9
+
+
+class TestCloudTopBounds:
+    """The first-pass cloud-top bounds ``kctop0``."""
+
+    def test_no_cubase_bound_is_lowest_interface_above_400hpa(self):
+        p_half = jnp.array([0.0, 1.0e4, 2.5e4, 3.9e4, 4.1e4, 6.0e4, 8.0e4,
+                            1.0e5])
+        # Interface 3 (390 hPa) is the lowest with p < 400 hPa
+        # (mo_cuascent.f90:191).
+        assert int(no_cubase_cloud_top_bound(p_half)) == 3
+
+    def test_ictop0_is_highest_interface_the_parcel_exceeds(self):
+        nlev = 12
+        kcbot = 10
+        hhatt = jnp.full(nlev, 3.5e5)
+        # The parcel (3.4e5) exceeds the reduced saturation MSE at 4 and 6;
+        # 1 is above the search range (interfaces ≥ 3, 1-based) and 9 is
+        # within two interfaces of cloud base.
+        hhatt = hhatt.at[jnp.array([1, 4, 6, 9])].set(3.3e5)
+        assert int(estimate_cloud_top(hhatt, 3.4e5, kcbot)) == 4
+
+    def test_ictop0_without_a_crossing_is_just_above_cloud_base(self):
+        hhatt = jnp.full(12, 3.5e5)
+        assert int(estimate_cloud_top(hhatt, 3.4e5, 10)) == 9
+
+    def test_khmin_lies_between_ictop0_and_cloud_base(self):
+        cfg, T, q, p, p_half, dz, rho, env, kb = _column()
+        tu, qu, _ = cubase_parcel(env, kb)
+        ictop0 = int(estimate_cloud_top(
+            saturated_mse_hat(env), cloud_base_mse(env, kb, tu, qu), kb))
+        khmin = int(mse_minimum_level(env, T, q, env.cpcu, kb, ictop0))
+        assert ictop0 < kb
+        assert ictop0 <= khmin <= kb
+
+
+class TestEntrainmentGating:
+    """cuentr's vertical gating of turbulent entrainment (lines 719-765).
+
+    Turbulent DETRAINMENT acts at every layer above cloud base; turbulent
+    ENTRAINMENT only in each plume type's band. With the organized rates
+    switched off (``cu_centrmax = 0``) and no step limiter, the diagnostic
+    entrainment rate is exactly the plume type's rate inside its band and
+    zero outside it.
     """
 
-    def test_47_level_rce_reaches_above_650_hPa(self):
-        """The whole tiedtke_nordeng_convection pipeline on an RCE column
-        should produce an updraft whose top is above 650 hPa. The
-        regression mode this guards against is the original
-        ``cloud_depth=15`` cap that limited deep convection to ~750 hPa
-        on the 47-level grid (the dynamic termination then often kicks
-        in above that, so 650 hPa leaves room for normal termination
-        while still flagging the cap regression).
+    def _rates(self, ktype, weights, ktop, kb=None, **kw):
+        cfg, T, q, p, p_half, dz, rho, env, kb_surface = _column()
+        kb = kb_surface if kb is None else kb
+        cfg = cfg.replace(cu_centrmax=jnp.array(0.0))
+        up = _ascent(cfg, T, q, p, p_half, dz, rho, kb, ktop, ktype,
+                     weights, **kw)
+        alive = np.asarray(up.mfu) > 0.0
+        # Layers the continuing plume crossed: above cloud base, below the
+        # last passing interface (the overshoot layer detrains only).
+        layers = np.arange(T.shape[0])
+        crossed = (layers < kb) & (layers >= int(up.kctop)) & alive
+        return cfg, np.asarray(p_half), kb, up, crossed, env
+
+    def test_shallow_entrains_within_200hpa_or_the_lower_half(self):
+        ktop = 20
+        cfg, p_half, kb, up, crossed, env = self._rates(2, SHALLOW, ktop)
+        entr = np.asarray(up.entr)
+        detr = np.asarray(up.detr)
+        zpmid = 0.5 * (p_half[kb] + p_half[ktop])
+        band = ((p_half[kb] - p_half[:-1]) <= 2.0e4) | (p_half[:-1] > zpmid)
+        above = crossed & ~band
+        assert above.any() and (crossed & band).any(), "fixture"
+        np.testing.assert_allclose(entr[crossed & band], float(cfg.entrscv),
+                                   rtol=1e-5)
+        np.testing.assert_array_equal(entr[above], 0.0)
+        # Detrainment is not gated: ``pentr·pmfu·Δz_p`` capped at 0.75 of
+        # the entering flux (cuasc line 360).
+        tenh, qenh = np.asarray(env.tenh), np.asarray(env.qenh)
+        kp1 = np.minimum(np.arange(entr.shape[0]) + 1, entr.shape[0] - 1)
+        zrrho = c.rd * tenh[kp1] * (1 + c.vtmpc1 * qenh[kp1]) / p_half[1:]
+        dz_p = np.diff(p_half) * zrrho / c.grav
+        expected = np.minimum(float(cfg.entrscv), 0.75 / dz_p)
+        np.testing.assert_allclose(detr[above], expected[above], rtol=1e-4)
+
+    def test_deep_entrains_below_max_ascent_or_the_lower_half(self):
+        ktop = 12
+        klwmin = 30
+        cfg, p_half, kb, up, crossed, _ = self._rates(
+            1, DEEP, ktop, klwmin=jnp.array(klwmin))
+        entr = np.asarray(up.entr)
+        zpmid = 0.5 * (p_half[kb] + p_half[ktop])
+        layers = np.arange(entr.shape[0])
+        band = (layers >= max(klwmin, ktop + 2)) | (p_half[:-1] > zpmid)
+        above = crossed & ~band
+        assert above.any() and (crossed & band).any(), "fixture"
+        np.testing.assert_allclose(entr[crossed & band], float(cfg.entrpen),
+                                   rtol=1e-5)
+        np.testing.assert_array_equal(entr[above], 0.0)
+
+    def test_mid_level_entrains_only_below_max_ascent(self):
+        ktop = 12
+        klwmin = 34
+        cfg, p_half, kb, up, crossed, _ = self._rates(
+            3, MID, ktop, kb=MID_BASE, klwmin=jnp.array(klwmin),
+            lift=jnp.array(0.5))
+        entr = np.asarray(up.entr)
+        layers = np.arange(entr.shape[0])
+        # The first step of a mid-level plume crosses layer kcbot unmixed.
+        mixing = crossed & (layers < kb)
+        band = layers >= klwmin
+        assert (mixing & band).any() and (mixing & ~band).any(), "fixture"
+        np.testing.assert_allclose(entr[mixing & band], float(cfg.entrmid),
+                                   rtol=1e-5)
+        np.testing.assert_array_equal(entr[mixing & ~band], 0.0)
+
+    def test_mid_level_zentest_adds_the_moisture_convergence(self):
+        """``zentest = min(centrmax, max(pqte,0)/pqenh(k+1)/(pmfu·zrrho))``
+        (lines 756-760), added where the half-level humidity below the
+        layer exceeds 1e-5 kg/kg.
         """
-        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
-            tiedtke_nordeng_convection, ConvectionParameters,
-            saturation_mixing_ratio,
-        )
+        ktop = 12
+        klwmin = 34
+        cfg, T, q, p, p_half, dz, rho, env, _ = _column()
+        kb = MID_BASE
+        cfg = cfg.replace(cu_centrmax=jnp.array(1.0))
+        nlev = T.shape[0]
+        qte = jnp.zeros(nlev).at[36:kb].set(2.0e-8)
+        up = _ascent(cfg, T, q, p, p_half, dz, rho, kb, ktop, 3, MID,
+                     klwmin=jnp.array(klwmin), moisture_tendency=qte,
+                     lift=jnp.array(0.5))
+        up0 = _ascent(cfg, T, q, p, p_half, dz, rho, kb, ktop, 3, MID,
+                      klwmin=jnp.array(klwmin), lift=jnp.array(0.5))
+        # zentest is formed with the flux entering the layer, which the
+        # enhanced entrainment itself changes further up; compare the
+        # lowest layer that mixes (the first step of a mid-level plume
+        # crosses layer kcbot unmixed), where both ascents arrive with the
+        # same flux.
+        k = kb - 1
+        assert k >= klwmin and float(qte[k]) > 0.0, "fixture"
+        np.testing.assert_allclose(float(up.mfu[kb]), float(up0.mfu[kb]))
+        mfu_b = float(up.mfu[kb])
+        paph = np.asarray(env.paph)
+        tenh, qenh = np.asarray(env.tenh), np.asarray(env.qenh)
+        zrrho = c.rd * tenh[k + 1] * (1 + c.vtmpc1 * qenh[k + 1]) / paph[k + 1]
+        zentest = min(1.0, 2.0e-8 / qenh[k + 1] / (mfu_b * zrrho))
+        np.testing.assert_allclose(float(up0.entr[k]), float(cfg.entrmid),
+                                   rtol=1e-5)
+        np.testing.assert_allclose(
+            float(up.entr[k]) - float(up0.entr[k]), zentest, rtol=1e-4)
 
-        nlev = 47
-        rd = 287.04
-        grav = 9.80665
-        p0 = 101325.0
-        sigma_bnds = jnp.linspace(1000.0 / p0, 1.0, nlev + 1)
-        p_half = sigma_bnds * p0
-        p_full = 0.5 * (p_half[:-1] + p_half[1:])
 
-        # Tropical RCE-like sounding: 305 K surface, 7 K/km lapse,
-        # 90 % RH (clipped to small at top).
-        z = -8400.0 * jnp.log(p_full / p0)
-        T = jnp.maximum(305.0 - 7.0e-3 * z, 200.0)
-        qs = jnp.array([
-            float(saturation_mixing_ratio(jnp.asarray(p_full[k]),
-                                           jnp.asarray(T[k])))
-            for k in range(nlev)
-        ])
-        q = 0.9 * qs
-        Tv = T * (1.0 + 0.608 * q)
-        rho = p_full / (rd * Tv)
-        dlnp = jnp.diff(jnp.log(p_half))
-        dz = rd * Tv / grav * dlnp
+class TestOrganizedDetrainmentOnset:
+    """Organized detrainment acts only from ``khmin`` up to ``kctop0``
+    (cuentr lines 767-788): below ``khmin`` a deep plume detrains at the
+    turbulent rate alone.
+    """
 
-        cfg = ConvectionParameters.default(
-            entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
-            entrdd=2.0e-4, tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10,
-            cprcon=2.5e-4, cevapcu=2.0e-5, cmfdeps=0.30,
-        )
-        # Deep via ECHAM's zdqcv moisture-convergence route (#699): the
-        # scan-ceiling regression this test guards is a property of the
-        # DEEP path (150 hPa target top); a no-information column now
-        # correctly classifies shallow with a 700 hPa ceiling, which is
-        # exactly the truncation this test would misread as the bug.
-        e_sfc = 3.0e-5
+    def test_detrainment_is_turbulent_below_khmin(self):
+        cfg, T, q, p, p_half, dz, rho, env, kb = _column()
+        ktop = 12
+        khmin = 30
+        up = _ascent(cfg, T, q, p, p_half, dz, rho, kb, ktop, 1, DEEP,
+                     khmin=jnp.array(khmin))
+        detr = np.asarray(up.detr)
+        layers = np.arange(detr.shape[0])
+        crossed = (layers < kb) & (layers >= int(up.kctop))
+        below = crossed & (layers > khmin)
+        onset = crossed & (layers <= khmin)
+        assert below.any() and onset.any(), "fixture"
+        np.testing.assert_allclose(detr[below], float(cfg.entrpen),
+                                   rtol=1e-5)
+        assert detr[onset].max() > float(cfg.entrpen)
+
+
+class TestAscentStops:
+    """The ascent test (mo_cuascent.f90:442-466)."""
+
+    def test_stops_at_first_non_condensing_interface_while_buoyant(self):
+        """Above a saturated boundary layer the environment is warm-bottomed
+        but very dry: the plume, diluted by the shallow entrainment, no
+        longer condenses at the first interface above cloud base — and
+        stops there, although it is still warmer than its surroundings.
+        """
+        cfg, T, q, p, p_half, dz, rho, env, kb = _column()
+        dry = jnp.arange(T.shape[0]) < kb
+        q_dry = jnp.where(dry, 0.05 * q, q)
+        env_d = column_environment(T, q_dry, p, pressure_half=p_half)
+        up = calculate_updraft(
+            T, q_dry, p, dz, rho, kb, 2, 2, jnp.array(0.02), cfg,
+            type_weights=SHALLOW, pressure_half=p_half)
+        mfu = np.asarray(up.mfu)
+        k = kb - 1
+        # No interface above cloud base passed: the plume's top is its base
+        # and only the overshoot reaches the next interface.
+        assert int(up.kctop) == kb
+        np.testing.assert_allclose(
+            mfu[k], float(cfg.cu_cmfctop) * mfu[kb], rtol=1e-6)
+        assert np.all(mfu[:k] == 0.0)
+        # ... although the mixed parcel there is still buoyant.
+        assert float(up.tu[k]) > float(env_d.tenh[k])
+        # And it did not condense: no condensate gained above the base.
+        assert float(up.pdmfup[k]) == 0.0
+
+    def test_ascent_never_passes_the_cloud_top_bound(self):
+        cfg, T, q, p, p_half, dz, rho, env, kb = _column()
+        for ktop in (38, 30, 20):
+            up = _ascent(cfg, T, q, p, p_half, dz, rho, kb, ktop, 1, DEEP)
+            mfu = np.asarray(up.mfu)
+            assert int(up.kctop) >= ktop
+            # Only the overshoot may reach the interface above the top.
+            assert np.all(mfu[:int(up.kctop) - 1] == 0.0)
+
+
+class TestDeepPlumeReachesUpperTroposphere:
+    """End to end: on a moist tropical L47 column with resolved convergence
+    the deep plume rises well into the upper troposphere — the ascent is
+    bounded only by ECHAM's cloud-top estimates, not by a level count.
+    """
+
+    def test_l47_deep_cloud_top_above_300hpa(self):
+        T, q, p, p_half, dz, rho = _l47_tropical_column(rh=0.8)
+        nlev = T.shape[0]
+        mass = jnp.diff(p_half) / c.grav
+        supply = 1.5e-4
         sl = slice(nlev // 2, nlev - 4)
-        conv = jnp.zeros(nlev).at[sl].set(
-            1.3 * e_sfc / jnp.sum(rho[sl] * dz[sl]))
-        tend, state = tiedtke_nordeng_convection(
-            T, q, p_full, dz, rho,
-            jnp.zeros(nlev), jnp.zeros(nlev),
-            jnp.zeros(nlev), jnp.zeros(nlev),
-            1800.0, cfg,
-            moisture_supply=jnp.array(e_sfc),
-            qte_dynamics=conv,
+        conv = jnp.zeros(nlev).at[sl].set(1.5 * supply / jnp.sum(mass[sl]))
+        z = jnp.zeros(nlev)
+        _, state = tiedtke_nordeng_convection(
+            T, q, p, dz, rho, z, z, z, z, 900.0,
+            ConvectionParameters.default(), pressure_half=p_half,
+            moisture_supply=jnp.asarray(supply), qte_dynamics=conv,
         )
-        # Find topmost level with nonzero updraft mass flux
+        assert int(state.ktype) == 1
         mfu = np.asarray(state.mfu)
-        active = mfu > 1e-10
-        if not np.any(active):
-            self.skipTest("convection didn't fire on this RCE column")
-        top_idx = int(np.where(active)[0].min())
-        top_p_hpa = float(p_full[top_idx]) / 100.0
-        self.assertLess(
-            top_p_hpa, 650.0,
-            f"Cloud top reached only {top_p_hpa:.1f} hPa; the deep cloud "
-            "scan ceiling is artificially truncating updraft (Bug B "
-            "regression — original cloud_depth=15 cap put it at ~750 hPa)."
-        )
-
-
-if __name__ == "__main__":
-    unittest.main()
+        top = int(np.nonzero(mfu > 0.0)[0].min())
+        assert float(p_half[top]) < 3.0e4, float(p_half[top])

@@ -1174,15 +1174,21 @@ class TestIdealizedConvection:
         # (ECHAM's ``klab`` walk) let it appear to. 290 K makes the layer
         # near-dry-adiabatic — a well-developed convective boundary layer,
         # which is what a "should trigger deep convection" fixture needs.
+        # Above the boundary layer the column runs slightly colder than the
+        # moist adiabat from 290 K at 835 hPa (≈283 K at 685 hPa, 271 K at
+        # 510 hPa), so a saturated plume is buoyant all the way up — the
+        # conditional instability the fixture's name promises. cuasc stops
+        # a plume at the first interface where it is not buoyant, so a
+        # layer as stable as 290 → 285 K over 1.4 km admits no plume.
         temperature = jnp.array([
             300.0,   # Surface (warm)
             290.0,   # 850 hPa — well-mixed boundary layer
-            285.0,   # 700 hPa (dry anomaly region starts)
-            275.0,   # 500 hPa
-            265.0,   # 350 hPa
-            250.0,   # 200 hPa
-            230.0,   # 100 hPa
-            210.0    # Top
+            281.0,   # 700 hPa (dry anomaly region starts)
+            268.0,   # 500 hPa
+            250.0,   # 350 hPa
+            226.0,   # 200 hPa
+            205.0,   # 100 hPa
+            205.0    # Top
         ])
 
         # Height from hydrostatic relation
@@ -1284,6 +1290,15 @@ class TestIdealizedConvection:
         qc = jnp.zeros(nlev)
         qi = jnp.zeros(nlev)
 
+        # Deep convection is ECHAM's moisture-budget classification: a
+        # resolved convergence beyond 1.1x the surface supply (``zdqcv``).
+        # Without it the column is shallow, and the shallow entrainment rate
+        # ``entrscv`` over this grid's 1.4 km layers dilutes the plume below
+        # saturation in its first layer, which ends the ascent there.
+        supply = 1.0e-4
+        mass = atm['rho'] * atm['layer_thickness']
+        convergence = jnp.zeros(nlev).at[0:4].set(
+            1.5 * supply / jnp.sum(mass[0:4]))
         tendencies, state = tiedtke_nordeng_convection(
             atm['temperature'],
             atm['humidity'],
@@ -1295,7 +1310,9 @@ class TestIdealizedConvection:
             qc,
             qi,
             dt=3600.0,
-            config=config
+            config=config,
+            moisture_supply=jnp.array(supply),
+            qte_dynamics=convergence,
         )
 
         # Verify convection is triggered

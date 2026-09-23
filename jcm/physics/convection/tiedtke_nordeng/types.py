@@ -62,6 +62,14 @@ class ConvectionParameters:
                              # washout footprint the JAM wet deposition uses
                              # (jax-gcm#812).
 
+    # Cloud top and closure (mo_echam_conv_constants.f90, ``cmfctop`` 0.2 at
+    # T31/T63, 0.23 at T127+; the ``zmfub1`` floor is cumastr's literal).
+    cu_cmfctop: float        # Relative mass flux of the cloud-top overshoot
+                             # above the level of non-buoyancy (``cmfctop``)
+    cu_mfub1_min: float      # Floor on the Nordeng deep cloud-base mass flux
+                             # ``zmfub1`` [kg/m²/s] (mo_cumastr.f90:902,
+                             # ``0.001``), applied scaled by the trigger weight
+
     # Downdraft parameters
     cmfdeps: float           # Downdraft mass flux fraction for LFS threshold
     entrdd: float            # Downdraft fractional entrainment rate (m⁻¹)
@@ -85,6 +93,10 @@ class ConvectionParameters:
     smooth_term_buoy: float  # Updraft-termination buoyancy width (m/s²; ~3e-4 ≈ 0.01 K)
     smooth_term_mf: float    # Updraft-termination mass-flux-ratio width
     smooth_precip_pa: float  # zdnoprc precip-onset width (Pa)
+    smooth_term_cond: float  # Updraft-termination condensation width
+                             # (kg/kg): the ascent continues only where the
+                             # plume condenses (``pqu < zqold``); the gate is
+                             # exactly zero without condensation
 
     # Cloud-base sub-grid buoyancy excess — ECHAM ``cubase``
     # (mo_cuinitialize.f90:291) ``zlift = MAX(cminbuoy, MIN(cmaxbuoy,
@@ -135,11 +147,12 @@ class ConvectionParameters:
                  tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10, cprcon=2.5e-4,
                  cu_dnoprc_ocean=1.5e4, cu_dnoprc_land=3.0e4,
                  cevapcu=2.0e-5, cu_updraft_velocity=2.0,
+                 cu_cmfctop=0.2, cu_mfub1_min=1.0e-3,
                  cmfdeps=0.3, entrdd=2.0e-4,
                  trigger_cape=100.0, smooth_trigger_j=25.0,
                  cu_dqcv_width=2.0e-7, smooth_rh=0.02,
                  smooth_term_buoy=3.0e-4, smooth_term_mf=2.0e-3,
-                 smooth_precip_pa=2.0e3,
+                 smooth_precip_pa=2.0e3, smooth_term_cond=1.0e-8,
                  cu_cminbuoy=0.2, cu_cmaxbuoy=1.0, cu_cbfac=1.0,
                  cu_thvsig=1.0,
                  cu_midlev_rh=0.90, cu_midlev_zmin=1500.0,
@@ -159,6 +172,8 @@ class ConvectionParameters:
             cu_dnoprc_land=jnp.array(cu_dnoprc_land),
             cevapcu=jnp.array(cevapcu),
             cu_updraft_velocity=jnp.array(cu_updraft_velocity),
+            cu_cmfctop=jnp.array(cu_cmfctop),
+            cu_mfub1_min=jnp.array(cu_mfub1_min),
             cmfdeps=jnp.array(cmfdeps),
             entrdd=jnp.array(entrdd),
             trigger_cape=jnp.array(trigger_cape),
@@ -168,6 +183,7 @@ class ConvectionParameters:
             smooth_term_buoy=jnp.array(smooth_term_buoy),
             smooth_term_mf=jnp.array(smooth_term_mf),
             smooth_precip_pa=jnp.array(smooth_precip_pa),
+            smooth_term_cond=jnp.array(smooth_term_cond),
             cu_cminbuoy=jnp.array(cu_cminbuoy),
             cu_cmaxbuoy=jnp.array(cu_cmaxbuoy),
             cu_cbfac=jnp.array(cu_cbfac),

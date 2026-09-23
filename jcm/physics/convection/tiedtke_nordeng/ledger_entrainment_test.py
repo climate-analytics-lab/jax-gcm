@@ -499,14 +499,17 @@ class TestReturnedStateCarriesPlumeWinds:
         assert not np.allclose(np.asarray(state.ud), un)
 
 
-class TestCloudTopForcedDetrainment:
-    """#676 a plume reaching the scan ceiling fully detrains (water conserved).
+class TestCloudTopOvershoot:
+    """cuasc's cloud-top overshoot (mo_cuascent.f90:540-565).
 
-    ECHAM forces total detrainment at cloud top (mo_cuasc.f90:540-563,
-    ``plude(jk-1)=pmful(jk)``). With the metre-based capped detrainment a
-    still-buoyant plume can reach the supplied ``ktop`` with positive mfu/lu;
-    its residual condensate must go to ``plude``/the stratiform dqc-dqi ledger,
-    not vanish as a flux-boundary loss (Codex P2).
+    A plume still alive at its last passing interface ``kctop`` does not
+    stop dead: a fraction ``cmfctop`` of the flux there carries on to the
+    interface above, ``kctop − 1``, with the properties the ascent gave it
+    there and no precipitation; the rest, ``(1 − cmfctop)·pmfu(kctop)``,
+    detrains in layer ``kctop − 1`` with the plume's condensate, and the
+    overshooting condensate ``pmful(kctop − 1)`` detrains in the layer above
+    that. Here the cloud-top bound ``kctop0`` ends a still-buoyant plume, so
+    every one of those is non-trivial.
     """
 
     def _deep_column_reaching_ceiling(self):
@@ -525,7 +528,7 @@ class TestCloudTopForcedDetrainment:
         rho = p / (c.rd * Tv)
         dz = c.rd * Tv / c.grav * jnp.diff(jnp.log(ph))
         cb, _ = find_cloud_base(T, q, p, cfg, pressure_half=ph)
-        # Ceiling BELOW the plume's natural top, so it reaches ktop buoyant.
+        # The bound BELOW the plume's natural top, so it reaches it buoyant.
         ktop = jnp.array(8)
         u = jnp.zeros(nlev)
         upd = calculate_updraft(T, q, p, dz, rho, cb, ktop, 1, jnp.array(0.05),
@@ -534,17 +537,31 @@ class TestCloudTopForcedDetrainment:
         self.ph = ph
         return cfg, T, q, p, rho, dz, u, cb, ktop, upd
 
-    def test_residual_condensate_detrained_at_ceiling(self):
-        _, _, _, _, _, _, _, _, ktop, upd = self._deep_column_reaching_ceiling()
+    def test_overshoot_flux_and_detrainment(self):
+        cfg, _, _, _, _, _, _, _, ktop, upd = (
+            self._deep_column_reaching_ceiling())
         kt = int(ktop)
-        mfu = np.asarray(upd.mfu)
-        plude = np.asarray(upd.plude)
-        # The plume is alive just below the ceiling ...
-        assert mfu[kt + 1] > 1e-6, "fixture: plume did not reach the ceiling"
-        # ... fully terminates AT the ceiling (forced detrainment) ...
-        assert mfu[kt] == 0.0, "plume not terminated at the scan ceiling"
-        # ... and its residual condensate is detrained, not lost.
-        assert plude[kt] > 0.0, "residual plume condensate not detrained to plude"
+        cmfctop = float(cfg.cu_cmfctop)
+        mfu = np.asarray(upd.mfu, dtype=np.float64)
+        lu = np.asarray(upd.lu, dtype=np.float64)
+        plude = np.asarray(upd.plude, dtype=np.float64)
+        # The plume passes the ascent test up to the bound ...
+        assert int(upd.kctop) == kt
+        assert mfu[kt] > 1e-6, "fixture: plume did not reach the bound"
+        # ... a fraction cmfctop of its flux overshoots one interface ...
+        np.testing.assert_allclose(mfu[kt - 1], cmfctop * mfu[kt], rtol=1e-3)
+        # ... and nothing rises further.
+        assert np.all(mfu[:kt - 1] == 0.0)
+        # The rest detrains in the overshoot layer with the condensate of
+        # the plume leaving kctop; the overshoot's own condensate detrains
+        # in the layer above it.
+        np.testing.assert_allclose(
+            plude[kt - 1], (1.0 - cmfctop) * mfu[kt] * lu[kt], rtol=1e-3)
+        np.testing.assert_allclose(
+            plude[kt - 2], mfu[kt - 1] * lu[kt - 1], rtol=1e-3)
+        assert plude[kt - 2] > 0.0
+        # The overshoot does not precipitate.
+        assert float(upd.pdmfup[kt - 1]) == pytest.approx(0.0, abs=1e-12)
 
     def test_column_water_conserved_when_plume_reaches_ceiling(self):
         cfg, T, q, p, rho, dz, u, cb, ktop, upd = (
@@ -566,9 +583,10 @@ class TestCloudTopForcedDetrainment:
         assert abs(residual) / max(abs(precip), 1e-20) < 1e-5, (
             f"column water budget open: residual {residual:.3e} vs "
             f"precip {precip:.3e}")
-        # The anvil condensate at the ceiling feeds the stratiform ledger.
+        # The overshoot's condensate, detrained above the cloud top, feeds
+        # the stratiform ledger.
         kt = int(ktop)
-        assert (float(tend.dqc_dt[kt]) + float(tend.dqi_dt[kt])) > 0.0
+        assert (float(tend.dqc_dt[kt - 2]) + float(tend.dqi_dt[kt - 2])) > 0.0
 
 
 class TestShallowReclosureCflCap:

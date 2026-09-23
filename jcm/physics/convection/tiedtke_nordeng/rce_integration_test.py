@@ -128,8 +128,12 @@ class TestRCEConvection(unittest.TestCase):
         correctly: shallow on its own surface flux, deep with resolved
         convergence beyond 0.1*E.
         """
+        # 90 % boundary-layer humidity: a shallow plume entrains at
+        # ``entrscv`` and ends its ascent at the first interface where the
+        # diluted parcel no longer condenses, so at 85 % the supply-only
+        # plume dies in its first layer (non-convective, as in ECHAM).
         atm_args = _tropical_sounding(
-            surface_T=298.0, surface_rh=0.85, lapse_K_per_km=5.5,
+            surface_T=298.0, surface_rh=0.9, lapse_K_per_km=5.5,
         )
         T, q, p, dz, rho = atm_args
         nlev = T.shape[0]
