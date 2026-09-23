@@ -2169,11 +2169,33 @@ def _declared_coverage(bounds, start_seconds):
 def _repeat_cadence(a: float, b: float, origin: float) -> float:
     """Step ``origin`` by the interval ``a → b`` (seconds since the epoch).
 
-    A calendar-month cadence (``a`` and ``b`` on the same day-of-month and
-    time of day, whole months apart) is repeated as calendar months, so the
-    interval after a Dec-1 sample of a month-start archive ends on Jan-1 —
-    December's 31 days, not November's 30. Any other cadence is repeated as
-    its length in seconds. ``b < a`` steps backwards.
+    Used for the edge slack of a date-aligned archive's coverage
+    (:func:`by_date_coverage_error`): ``a → b`` is the archive's end interval
+    and ``origin`` the end sample, so the slack is that interval repeated.
+    ``b < a`` steps backwards. The stamps are on the model's Gregorian clock
+    (a ``cftime`` axis is placed there by its nominal date), and the forms
+    recognised as a CALENDAR cadence are, in order:
+
+    1. **Month-end monthly / yearly** — ``a`` and ``b`` both the last day of
+       their month (a Feb 28 also counts, being the noleap/365-day month end
+       even in a Gregorian leap year) at the same time of day, whole months
+       apart. Stepped by calendar months and re-anchored to the target
+       month's last day: before Jan 31 is Dec 31, after Feb 28/29 is Mar 31.
+       A noleap archive stepped into a leap February ends on Feb 29, the
+       month's end on the model clock.
+    2. **Same-day monthly / yearly** — ``a`` and ``b`` on the same
+       day-of-month and time of day, whole months apart (month-start, fixed
+       mid-month day 15, a yearly Jan-1 series): stepped by calendar months,
+       so the interval after a Dec-1 sample ends on Jan-1 (December's 31
+       days, not November's 30). A day past the target month's end is
+       clamped to it.
+
+    Everything else is repeated as its **elapsed length in seconds**, which
+    is exact for fixed-length cadences (sub-daily, daily, weekly, any
+    constant step) and the documented fallback for irregular calendar ones:
+    mid-month stamps whose day varies (CMIP-style Jan 16 12:00 / Feb 15
+    00:00), month-end stamps at differing times of day, and a month-end
+    sample next to a non-month-end one.
     """
     import pandas as pd
 
@@ -2182,12 +2204,21 @@ def _repeat_cadence(a: float, b: float, origin: float) -> float:
     # 5-minute grid, which recovers any stamp that lies on one exactly.
     def _snap(x):
         return pd.Timestamp(float(x), unit="s").round("5min")
+
+    def _month_end(t):
+        return t.is_month_end or (t.month == 2 and t.day == 28)
+
+    def _seconds(t):
+        return float((t - pd.Timestamp(0)).total_seconds())
+
     ta, tb = _snap(a), _snap(b)
-    if ta.day == tb.day and ta.time() == tb.time():
-        months = (tb.year - ta.year) * 12 + (tb.month - ta.month)
-        if months != 0:
+    months = (tb.year - ta.year) * 12 + (tb.month - ta.month)
+    if months != 0 and ta.time() == tb.time():
+        if _month_end(ta) and _month_end(tb):
             stepped = _snap(origin) + pd.DateOffset(months=months)
-            return float((stepped - pd.Timestamp(0)).total_seconds())
+            return _seconds(stepped + pd.offsets.MonthEnd(0))
+        if ta.day == tb.day:
+            return _seconds(_snap(origin) + pd.DateOffset(months=months))
     return float(origin) + (float(b) - float(a))
 
 

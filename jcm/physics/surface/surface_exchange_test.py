@@ -1853,3 +1853,107 @@ class TestPrescribedModeForcedFlux:
         assert forcing is None
         with pytest.raises(ValueError, match="forcing.prescribed_surface_flux"):
             runners.validate_run_forcing(runners.build_physics(cfg), forcing)
+
+
+# ---------------------------------------------------------------------------
+# Edge-slack cadence forms (_repeat_cadence), incl. month-end stamps
+# ---------------------------------------------------------------------------
+
+class TestEdgeCadenceForms:
+    """Each cadence form the edge slack recognises, and the documented
+    elapsed-seconds fallback for the rest.
+    """
+
+    def _ts(self, dates):
+        from jcm.forcing import BY_DATE, make_time_series
+        t = jnp.asarray([_secs(d) for d in dates])
+        return make_time_series(jnp.zeros((len(dates), 2, 2)), t, BY_DATE)
+
+    @pytest.mark.parametrize("dates", [
+        # Gregorian month ends through a leap February.
+        ["2000-01-31", "2000-02-29"],
+        # A noleap (365-day) archive's month ends: Feb 28 even in 2000.
+        ["2000-01-31", "2000-02-28"],
+    ])
+    def test_month_end_monthly_archive(self, dates):
+        from jcm.forcing import by_date_coverage_error
+        ts = self._ts(dates)
+        assert by_date_coverage_error(
+            ts, _secs("1999-12-31"), _secs("2000-03-31")) is None
+        assert by_date_coverage_error(
+            ts, _secs("1999-12-30"), _secs("2000-03-01")) is not None
+        assert by_date_coverage_error(
+            ts, _secs("2000-01-15"), _secs("2000-04-01")) is not None
+
+    def test_month_end_from_a_cftime_noleap_file(self, tmp_path):
+        """A real cftime noleap axis (read through the flux reader) gets the
+        month-end slack on the model clock.
+        """
+        import cftime
+        import numpy as np
+        import xarray as xr
+
+        from jcm.forcing import (
+            by_date_coverage_error, read_prescribed_surface_fluxes,
+        )
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        nlon, nlat = coords.horizontal.nodal_shape
+        lat = np.degrees(np.asarray(coords.horizontal.latitudes))
+        lon = np.degrees(np.asarray(coords.horizontal.longitudes))
+        t = [cftime.DatetimeNoLeap(2001, 1, 31), cftime.DatetimeNoLeap(2001, 2, 28),
+             cftime.DatetimeNoLeap(2001, 3, 31)]
+        data = {v: (("time", "lat", "lon"), np.ones((3, nlat, nlon)))
+                for v in ("sensible_heat_flux", "evaporation",
+                          "stress_u", "stress_v")}
+        ds = xr.Dataset(data, coords={"time": t, "lat": lat, "lon": lon})
+        fields = read_prescribed_surface_fluxes(
+            ds, lat, lon, align_mode="by_date", source="noleap")
+        ts = fields["prescribed_sensible_heat_flux"]
+        assert by_date_coverage_error(
+            ts, _secs("2000-12-31"), _secs("2001-04-30")) is None
+        assert by_date_coverage_error(
+            ts, _secs("2000-12-30"), _secs("2001-04-30")) is not None
+
+    def test_same_day_monthly_still_steps_calendar_months(self):
+        from jcm.forcing import by_date_coverage_error
+        ts = self._ts(["2000-11-01", "2000-12-01"])
+        # One December (31 days) after Dec 1; one October before Nov 1.
+        assert by_date_coverage_error(
+            ts, _secs("2000-10-01"), _secs("2001-01-01")) is None
+        assert by_date_coverage_error(
+            ts, _secs("2000-09-30"), _secs("2000-12-15")) is not None
+
+    def test_yearly_same_day_cadence(self):
+        from jcm.forcing import by_date_coverage_error
+        ts = self._ts(["2000-01-01", "2001-01-01"])
+        assert by_date_coverage_error(
+            ts, _secs("1999-01-01"), _secs("2002-01-01")) is None
+
+    @pytest.mark.parametrize("a,b,origin,expected", [
+        # Varying mid-month day (CMIP style): elapsed seconds, 29.5 days.
+        ("2000-01-16 12:00", "2000-02-15 00:00", "2000-02-15 00:00",
+         "2000-03-15 12:00"),
+        # Month end next to a non-month-end: elapsed seconds.
+        ("2000-01-30", "2000-01-31", "2000-01-31", "2000-02-01"),
+        # Month ends at different times of day: elapsed seconds.
+        ("2000-01-31 00:00", "2000-02-29 06:00", "2000-02-29 06:00",
+         "2000-03-29 12:00"),
+        # Daily: exact in seconds.
+        ("2000-01-01", "2000-01-02", "2000-01-02", "2000-01-03"),
+    ])
+    def test_other_cadences_fall_back_to_elapsed_seconds(
+            self, a, b, origin, expected):
+        from jcm.forcing import _repeat_cadence
+        assert _repeat_cadence(_secs(a), _secs(b), _secs(origin)) == \
+            pytest.approx(_secs(expected))
+
+    def test_month_end_steps_reanchor_to_month_end(self):
+        from jcm.forcing import _repeat_cadence
+        # Backwards from Jan 31 → Dec 31; forwards from Feb 29 → Mar 31.
+        assert _repeat_cadence(_secs("2000-02-29"), _secs("2000-01-31"),
+                               _secs("2000-01-31")) == pytest.approx(
+            _secs("1999-12-31"))
+        assert _repeat_cadence(_secs("2000-01-31"), _secs("2000-02-29"),
+                               _secs("2000-02-29")) == pytest.approx(
+            _secs("2000-03-31"))

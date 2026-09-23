@@ -258,7 +258,14 @@ load or run start rather than silently mis-phasing the fluxes:
   each END's own spacing (first interval before the first sample, last
   interval after the last): a sample may be stamped at the start or the
   middle of the interval it represents, so a Jan-1…Dec-1 or a Jan-15…Dec-15
-  monthly archive both cover their calendar year. An interior gap never
+  monthly archive both cover their calendar year. Calendar cadences are
+  stepped in calendar months: same-day-of-month series (monthly or yearly)
+  and month-END series (Jan 31, Feb 28/29, …; a noleap Feb 28 counts),
+  which stay anchored at month end (Dec 31 before a Jan-31 first sample,
+  Mar 31 after a Feb-28/29 last one). Any other cadence — including
+  mid-month stamps whose day varies — is extended by its elapsed length in
+  seconds, exact for fixed steps (`jcm.forcing._repeat_cadence` lists the
+  forms). An interior gap never
   widens that slack, so a daily archive with a long internal gap still ends
   one day after its last sample. A run outside it raises and
   names both remedies — supply covering fluxes, or declare the file a
