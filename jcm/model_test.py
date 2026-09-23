@@ -2165,5 +2165,69 @@ class TestReleaseMatrixGeneratePreallocationGuard(unittest.TestCase):
                     RuntimeError, "XLA_PYTHON_CLIENT_PREALLOCATE"):
                 generate("speedy-t31")
 
+    def test_generate_refuses_an_explicit_true(self):
+        """The guard requires ``false``; it does not merely default it.
+
+        An exported ``true`` is exactly the preallocated parent the guard
+        exists to stop, so it must be refused like an unset variable.
+        """
+        import os
+        from unittest import mock
+
+        from jcm.data.test.release_matrix.generate_stats import generate
+
+        with mock.patch.dict(os.environ,
+                             {"XLA_PYTHON_CLIENT_PREALLOCATE": "true"}):
+            with self.assertRaisesRegex(
+                    RuntimeError, "XLA_PYTHON_CLIENT_PREALLOCATE"):
+                generate("speedy-t31")
+
+
+class TestReleaseMatrixReusedStateDigest(unittest.TestCase):
+    """``write_state=False`` must verify, not trust, the state's digest."""
+
+    def _generate(self, tmp, contents, name_digest):
+        from pathlib import Path
+        from unittest import mock
+
+        from jcm.data.test.release_matrix import generate_stats
+
+        state = Path(tmp) / f"speedy-t31_fixture_{name_digest}.msgpack"
+        state.write_bytes(contents)
+        with mock.patch.object(generate_stats, "_run_worker"), \
+                mock.patch.object(
+                    generate_stats, "_stats_windows",
+                    side_effect=AssertionError("stats windows launched")):
+            generate_stats.generate("speedy-t31", out_dir=tmp,
+                                    write_state=False)
+
+    def test_wrong_digest_name_fails_before_any_stats_window(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError,
+                                        "hashes to .* filename claims"):
+                self._generate(tmp, b"not the state that name belongs to",
+                               "000000000000")
+
+    def test_matching_digest_passes_the_check(self):
+        import tempfile
+
+        from jcm.data.test.release_matrix.generate_stats import state_digest
+
+        contents = b"a tiny stand-in state"
+        with tempfile.TemporaryDirectory() as tmp:
+            import os
+            from pathlib import Path
+
+            probe = Path(tmp) / "probe"
+            probe.write_bytes(contents)
+            digest = state_digest(probe)
+            os.remove(probe)
+            # Verified, so generate proceeds to the (patched) stats windows.
+            with self.assertRaisesRegex(AssertionError,
+                                        "stats windows launched"):
+                self._generate(tmp, contents, digest)
+
 
 

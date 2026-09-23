@@ -29,6 +29,38 @@ _X64_BASELINE = False
 _LOGGING_BASELINE = {}
 
 
+def _disable_gpu_preallocation():
+    """Force ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` for the test session.
+
+    XLA's default claims 75 % of the card at backend initialisation, and
+    merely *importing* a test module that reaches jcm triggers that (#859:
+    the SPEEDY lookup tables are built on jcm's import chain) — measured at
+    61,214 MiB of an 80 GB A100 for a process whose test then does no device
+    work at all. On a shared box that locks out colleagues; worse, it starves
+    this session's own subprocesses: the release-matrix regression integrates
+    each member in a worker process, and a worker can only use what the
+    parent pytest process left on the card. The worker's own
+    ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` governs the worker's pool, not
+    the parent's, so it cannot give back memory the parent already holds —
+    which is how the T106 and JAM members came to OOM under pytest while
+    passing when run directly.
+
+    This therefore OVERRIDES any inherited value rather than defaulting it:
+    an operator's exported ``XLA_PYTHON_CLIENT_PREALLOCATE=true`` would
+    otherwise survive and reproduce exactly that failure. No test needs a
+    preallocated pool (it only changes when memory is claimed, not what a
+    test computes), so there is no explicit choice worth preserving. The
+    variable is read at backend initialisation, not at jax import, so setting
+    it before collection imports anything takes effect; it is applied both at
+    this module's import (the earliest point pytest runs repo code) and in
+    ``pytest_configure``.
+    """
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
+
+_disable_gpu_preallocation()
+
+
 def pytest_configure(config):
     """Record the session's starting global config (#729, #815).
 
@@ -38,18 +70,7 @@ def pytest_configure(config):
     ``jax_enable_x64`` — or builds a quiet ``Model`` — would otherwise define
     the baseline meant to detect it.
     """
-    # Never preallocate the GPU for a test session. XLA's default is to claim
-    # 75 % of the card at backend initialisation, and merely *importing* a
-    # test module that reaches jcm is enough to trigger that (#859: the
-    # SPEEDY lookup tables are built on jcm's import chain) — measured at
-    # 61,214 MiB of an 80 GB A100 for a process whose test then does no device
-    # work at all. On a shared box that locks out colleagues; worse, it
-    # starves this session's own subprocesses, which is how the T106 members
-    # of the release-matrix regression came to fail under pytest while passing
-    # when run directly. Read at backend init rather than at jax import, so
-    # setting it here — before collection imports anything — takes effect.
-    # ``setdefault`` leaves an operator's explicit choice alone.
-    os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
+    _disable_gpu_preallocation()
 
     global _X64_BASELINE
     import jax

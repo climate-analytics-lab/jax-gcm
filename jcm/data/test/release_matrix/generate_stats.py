@@ -763,7 +763,24 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
             f"{SPIN_UP_DAYS:g}-day spin-up from the preset's own init "
             f"({members()[member]}); state reused from an earlier generate() "
             "call rather than re-spun")
-    print(f"  state: {state_path}", flush=True)
+    # The band file names its state by the digest in the state's filename,
+    # and the regression later checks the fetched state against that digest.
+    # So the digest recorded here must be the file's actual content hash,
+    # not merely what its name claims: a reused state renamed, copied over or
+    # truncated under a matching name would otherwise yield bands that point
+    # at a state they were never drawn from, and that mismatch would only
+    # surface when someone published the pair. Re-hash before any stats
+    # window runs, and record only the verified digest.
+    claimed = Path(state_path).stem.rsplit("_", 1)[-1]
+    digest = state_digest(state_path)
+    if digest != claimed:
+        raise ValueError(
+            f"{member}: state {state_path} hashes to {digest!r} but its "
+            f"filename claims {claimed!r}; refusing to draw bands against a "
+            "state whose name does not identify its contents. Regenerate the "
+            "state (write_state=True) or restore the file that name belongs "
+            "to.")
+    print(f"  state: {state_path} (digest {digest} verified)", flush=True)
 
     # One window seeds the bands; the rest size ``noise``. All of them run
     # in their own process, including the first — see :func:`_run_worker`.
@@ -814,8 +831,7 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
     # The exact path this fixture was generated against, digest and all, so
     # the regression reads back the state these bands describe rather than
     # whatever currently sits at a reconstructed name.
-    stats_ds.attrs["init_state"] = state_mirror_path(
-        member, Path(state_path).stem.rsplit("_", 1)[-1])
+    stats_ds.attrs["init_state"] = state_mirror_path(member, digest)
     stats_ds.attrs["init_state_provenance"] = provenance
     stats_ds.attrs["stats_days"] = STATS_DAYS
     stats_ds.attrs["reproducibility_repeats"] = n_reproducibility_repeats
