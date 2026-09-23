@@ -16,6 +16,7 @@ from jax import lax
 from typing import Tuple
 
 import jcm.constants as c
+from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 from .tiedtke_nordeng import ConvectionParameters, ConvectionTendencies
 from .updraft import UpdatedraftState
 from .downdraft import DowndraftState
@@ -215,6 +216,9 @@ def convective_precip_fluxes(
 
     """
     nlev = len(temperature)
+    # ECHAM ``zcons1 = cpd/(alf·grav·dt)`` (mo_cufluxdts.f90:146); the moist
+    # factor ``(1 + vtmpc2·pqen)`` is applied per layer in ``zfac`` below
+    # (line 303), with the PROVISIONAL humidity ``pqen`` exactly as there.
     zcons1 = c.cpd / (c.alhf * c.grav * dt)
     zcons2 = 1.0 / (c.grav * dt)
     ztmelp2 = c.tmelt + 2.0
@@ -371,6 +375,7 @@ def calculate_tendencies(
     ktype: jnp.ndarray | None = None,
     use_updraft_cover: bool = False,
     layer_mass: jnp.ndarray | None = None,
+    cp_moist: jnp.ndarray | None = None,
 ) -> ConvectionTendencies:
     """Calculate final tendencies from convective fluxes
 
@@ -401,12 +406,19 @@ def calculate_tendencies(
             column callers that build their own columns); the composed
             model's ``layer_thickness`` carries a 10 m floor and MUST NOT
             reach the taper through that product.
+        cp_moist: Moist heat capacity ``cpd·(1 + vtmpc2·q)`` [J/kg/K]
+            [nlev] — ECHAM's ``pcpcu`` in the static-energy fluxes and
+            ``pcpen`` in the ``zrcpm = 1/pcpen`` tendency conversion
+            (mo_cufluxdts.f90:199-203, 648-656). ``None`` builds it from
+            ``humidity``.
 
     Returns:
         ConvectionTendencies with all tendency terms
 
     """
     nlev = len(temperature)
+    if cp_moist is None:
+        cp_moist = moist_isobaric_heat_capacity(humidity)
 
     # Calculate mass flux divergence at each level using JAX-compatible operations
 
@@ -420,8 +432,12 @@ def calculate_tendencies(
     heights_from_surface = jnp.cumsum(layer_thickness[::-1])[::-1]  # Reverse, cumsum, reverse back
     geopotential = c.grav * heights_from_surface
 
-    # Dry static energy = cp*T + geopotential
-    # The latent heat is handled separately through lh_source.
+    # Dry static energy = cp*T + geopotential, with ECHAM's MOIST ``cp``:
+    # cuasc/cuddraf build ``pmfus``/``pmfds`` from ``pcpcu·T + pgeoh`` and
+    # cuflx subtracts the environment's ``pcpcu·ptenh + pgeoh``
+    # (mo_cufluxdts.f90:198-204), all with the environment's
+    # ``pcpcu = cpd·(1 + vtmpc2·q)``. The latent heat is handled separately
+    # through the ledger source terms below.
     # Per Tiedtke (1989) eq. 3.8 and ECHAM ``mo_cuflx``, the convective
     # tendency in the environment is the divergence of the *deviation*
     # flux M·(s_par − s̄), NOT M·s_par. The deviation flux carries the
@@ -430,9 +446,9 @@ def calculate_tendencies(
     # subsides and warms adiabatically. Without the s̄ subtraction,
     # the absolute s_par (~3·10⁵ J/kg) dominates and any small dmfu/dz
     # from entrainment produces unphysical heating of ~10³–10⁴ K/day.
-    dse_env = c.cpd * temperature + geopotential
-    dse_up = c.cpd * updraft_state.tu + geopotential
-    dse_down = c.cpd * downdraft_state.td + geopotential
+    dse_env = cp_moist * temperature + geopotential
+    dse_up = cp_moist * updraft_state.tu + geopotential
+    dse_down = cp_moist * downdraft_state.td + geopotential
 
     # Deviation fluxes of dry static energy (W/m²)
     dse_flux_up = (dse_up - dse_env) * updraft_state.mfu
@@ -501,8 +517,12 @@ def calculate_tendencies(
     # Flux-divergence parts of the cudtdq ledger (mo_cufluxdts.f90:649-662):
     #   zdtdt ∝ Δpmfus + Δpmfds − Δ(zalv·pmful)  (+ per-level sources below)
     #   zdqdt ∝ Δpmfuq + Δpmfdq + Δpmful         (− per-level sinks below)
+    # The whole heat ledger is converted to a temperature tendency with the
+    # MOIST heat capacity of the layer, ``zrcpm = 1/pcpen``
+    # (mo_cufluxdts.f90:648/712), so the column enthalpy it deposits is
+    # ``Σ cp_moist·dT·m`` — the quantity the flux divergence telescopes in.
     dtedt_k_levels = (dse_flux_div - pmful_lat_div) / (
-        c.cpd * layer_mass_per_area
+        cp_moist * layer_mass_per_area
     )
     dqdt_k_levels = (q_flux_div + pmful_div) / layer_mass_per_area
 
@@ -566,7 +586,8 @@ def calculate_tendencies(
     # environment temperature: sublimation heat below the melting point
     # (mo_cufluxdts.f90 — the palvsh/zalv pair), condensation heat above.
     zalv = jnp.where(temperature > c.tmelt, c.alhc, c.alhs)
-    dtedt_lev = (zalv * ledger_src - c.alhf * pdpmel) / (c.cpd * mass_lev)
+    # Same ``zrcpm = 1/pcpen`` moist conversion as the divergence terms.
+    dtedt_lev = (zalv * ledger_src - c.alhf * pdpmel) / (cp_moist * mass_lev)
     dqdt_lev = -ledger_src / mass_lev
 
     # Detrained condensate feeds the stratiform cloud tracers (ECHAM

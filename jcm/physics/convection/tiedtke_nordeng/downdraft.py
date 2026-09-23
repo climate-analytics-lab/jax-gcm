@@ -18,6 +18,7 @@ from functools import partial
 
 import jcm.constants as c
 from jcm.physics.convection.saturation import cuadjtq_newton_evap
+from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 from .tiedtke_nordeng import (
     ConvectionParameters
 )
@@ -222,7 +223,7 @@ def downdraft_step(
     carry, rain_flux = carry_and_rain
     (k, env_temp, env_q, pressure, dz, rho, precip,
      entrdd, cmfcmin, cevapcu, klev_m2, p_taper_frac,
-     env_u, env_v) = level_inputs
+     env_u, env_v, cp_here, cp_above) = level_inputs
 
     # Surface-first index convention: k=0 = TOA, k=nlev-1 = surface.
     # Downdraft is active from carry.lfs (somewhere in cloud, lower index)
@@ -238,13 +239,17 @@ def downdraft_step(
         prev_ud = carry.ud[k - 1]
         prev_vd = carry.vd[k - 1]
 
-        # 1) Dry-adiabatic descent: a parcel falling by dz warms by g·dz/cp
-        # (~1.95 K per 200 m). ECHAM ``cuddraf`` builds this into the DSE
-        # update implicitly through the (pgeoh(k-1)-pgeoh(k))/cp term;
-        # we apply it explicitly so the temperature mixing step is just
-        # a linear interpolation toward the environment.
-        adiabatic_warming = c.grav * dz / c.cpd
-        td_desc = prev_td + adiabatic_warming
+        # 1) Dry-adiabatic descent, in dry static energy. ECHAM ``cuddraf``
+        # mixes DSE (mo_cudescent.f90:275-284): ``pmfds`` carries
+        # ``(pcpcu·ptd + pgeoh)``, ``zseen`` the entrained air, and
+        # ``ptd = (zmfdsk/pmfd − pgeoh)/pcpcu``. ``cp`` is ECHAM's MOIST
+        # heat capacity of the environment (``pcpcu = cpd·(1 + vtmpc2·q)``):
+        # the descending air's heat content is carried by the ``cp`` of the
+        # level it leaves and converted back with the ``cp`` of the level it
+        # reaches. Written relative to this level's geopotential, the
+        # descended parcel's DSE is ``cp_above·T_above + g·dz`` (~1.95 K of
+        # warming per 200 m).
+        dse_desc = cp_above * prev_td + c.grav * dz
         qd_desc = prev_qd
 
         # 2) Entrainment / detrainment magnitude (mass flux per layer,
@@ -279,7 +284,13 @@ def downdraft_step(
             0.0,
             zentr / jnp.maximum(jnp.abs(prev_mfd), cmfcmin),
         )
-        td_mix = (1.0 - mix_fraction) * td_desc + mix_fraction * env_temp
+        # Entrained air is taken at this level (the scheme-wide full-level
+        # staggering, #530), so its DSE relative to this level is
+        # ``cp_here·T_env``.
+        td_mix = (
+            (1.0 - mix_fraction) * dse_desc
+            + mix_fraction * cp_here * env_temp
+        ) / cp_here
         qd_mix = (1.0 - mix_fraction) * qd_desc + mix_fraction * env_q
         # Downdraft wind (ECHAM cuddraf ``pud``/``pvd``): passive, mixed
         # toward the entrained environment with the same fraction as td/qd.
@@ -349,6 +360,7 @@ def calculate_downdraft(
     config: ConvectionParameters,
     u_wind: jnp.ndarray | None = None,
     v_wind: jnp.ndarray | None = None,
+    cp_moist: jnp.ndarray | None = None,
 ) -> DowndraftState:
     """Calculate full downdraft profile
     
@@ -363,12 +375,18 @@ def calculate_downdraft(
         kbase: Cloud base level
         ktop: Cloud top level
         config: Convection configuration
-        
+        cp_moist: Moist heat capacity ``cpd·(1 + vtmpc2·q)`` [J/kg/K]
+            [nlev] — ECHAM's ``pcpcu``, with which ``cuddraf`` forms the
+            downdraft and entrained dry static energy. ``None`` builds it
+            from ``humidity``.
+
     Returns:
         DowndraftState with computed profiles
 
     """
     nlev = len(temperature)
+    if cp_moist is None:
+        cp_moist = moist_isobaric_heat_capacity(humidity)
     if u_wind is None:
         u_wind = jnp.zeros(nlev)
     if v_wind is None:
@@ -462,6 +480,10 @@ def calculate_downdraft(
         jnp.full(nlev, klev_m2),
         p_taper_frac,
         u_wind, v_wind,
+        # Moist heat capacity at this level and at the level the downdraft
+        # descends FROM (one index smaller, top-first; the model top is
+        # never a descent destination).
+        cp_moist, jnp.concatenate([cp_moist[:1], cp_moist[:-1]]),
     )
     
     # Use scan to compute downdraft from LFS downward. The carry threads

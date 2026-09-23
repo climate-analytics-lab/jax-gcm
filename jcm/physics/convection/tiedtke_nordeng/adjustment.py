@@ -75,7 +75,11 @@ def cuadjtq(
         # saturation table with L_s below the melting point — review
         # finding 2.7; a fixed L_v under-releases mixed-phase latent heat
         # by ~13 %). The es switch in the shared saturation module flips
-        # at tmelt, so L flips with it.
+        # at tmelt, so L flips with it. DRY ``cpd`` is the reference here:
+        # cuadjtq reads ``L/cp`` from the ``tlucub``/``tlucuc`` tables built
+        # with ``zalvdcp = alv/cpd``, ``zalsdcp = als/cpd``
+        # (mo_echam_convect_tables.f90:214-215, 254-258) — unlike the
+        # cumastr static-energy ledger, which uses the moist ``zcpq``.
         L_cp = jnp.where(T >= c.tmelt, c.alhc, c.alhs) / c.cpd
         qs, dqs_dT = _qsat_and_dqsat_dt(T, pressure)
         cond = (q - qs) / (1.0 + L_cp * dqs_dT)

@@ -24,6 +24,7 @@ from .tiedtke_nordeng import ConvectionParameters
 from jcm.physics.convection.saturation import (
     cuadjtq_newton as saturation_adjustment,
 )
+from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 
 
 #: Ceiling on the organized-detrainment tan-profile fractional height
@@ -74,6 +75,7 @@ def calculate_updraft(
     lift: jnp.ndarray = jnp.array(0.0),
     u_wind: jnp.ndarray | None = None,
     v_wind: jnp.ndarray | None = None,
+    cp_moist: jnp.ndarray | None = None,
 ) -> UpdatedraftState:
     """Calculate full updraft profile
 
@@ -100,12 +102,18 @@ def calculate_updraft(
             ONLY for a mid-level (``ktype == 3``) plume — see the
             termination comment below for why that is the reference's one
             legitimate site for it.
+        cp_moist: Moist heat capacity ``cpd·(1 + vtmpc2·q)`` [J/kg/K]
+            [nlev] — ECHAM's ``pcpcu``, with which ``cuasc`` forms the
+            plume and entrained dry static energy. ``None`` builds it from
+            ``humidity``.
 
     Returns:
         UpdatedraftState with computed profiles
 
     """
     nlev = len(temperature)
+    if cp_moist is None:
+        cp_moist = moist_isobaric_heat_capacity(humidity)
     # Environmental winds for the prognostic plume wind (cududv). Column
     # callers that do not transport momentum (older tests) pass none; a
     # zero wind then makes the plume wind identically zero, which is inert.
@@ -153,12 +161,25 @@ def calculate_updraft(
     # up to saturation with no latent-heat debit at all; the Newton step
     # leaves such a parcel untouched, which is the correct behaviour and
     # matches CAM's UW scheme setting ``qv = qt`` when unsaturated.
+    #
+    # The dry lift to the base is ECHAM ``cubase``'s DSE walk
+    # (mo_cuinitialize.f90:294), ``cp·T + φ`` conserved with the moist
+    # ``pcpcu``. It telescopes to ``(cp_s·T_s + φ_s − φ_cb)/cp_cb`` — the SAME
+    # parcel :func:`~.tiedtke_nordeng.find_cloud_base` tested for buoyancy, so
+    # the plume starts from the parcel that triggered it (a dry-``cpd``
+    # Poisson lift here would start it from a different one). The lift height
+    # is the full-level separation along the column — half a layer at each
+    # end plus the full layers between, the integral ``find_cloud_base``
+    # uses — measured ordering-agnostically from the cumulative thickness.
     surf_idx = jnp.argmax(pressure)
     surf_temp = temperature[surf_idx]
     surf_humid = humidity[surf_idx]
-    surf_press = pressure[surf_idx]
 
-    parcel_T_dry_at_cb = surf_temp * (pressure[kbase] / surf_press) ** (c.rd / c.cpd)
+    z_along = jnp.cumsum(layer_thickness) - 0.5 * layer_thickness
+    lift_height = jnp.abs(z_along[kbase] - z_along[surf_idx])
+    parcel_T_dry_at_cb = (
+        cp_moist[surf_idx] * surf_temp - c.grav * lift_height
+    ) / cp_moist[kbase]
     tu_cb, qu_cb, lu_cb = saturation_adjustment(
         parcel_T_dry_at_cb, surf_humid, pressure[kbase],
     )
@@ -252,6 +273,10 @@ def calculate_updraft(
         jnp.full(nlev, zdnoprc_col),
         u_wind, v_wind, temp_above, heights, z_base_const, z_top_const,
         jnp.full(nlev, config.cu_centrmax),
+        # Moist heat capacity at this level and at the level the plume
+        # rises FROM (one index larger, top-first; the surface level has no
+        # level below and is never an ascent destination).
+        cp_moist, jnp.concatenate([cp_moist[1:], cp_moist[-1:]]),
     )
 
     # Create specialized step function with config parameters
@@ -260,7 +285,8 @@ def calculate_updraft(
         (k, env_temp, env_q, pressure, dz, rho, kbase, ktop, ktype,
          entr_base_in, w_deep_in, w_term_buoy, w_term_mf, w_precip,
          cprcon, p_at_base, zdnoprc,
-         env_u, env_v, env_temp_above, z_k, z_base, z_top, centrmax) = inputs
+         env_u, env_v, env_temp_above, z_k, z_base, z_top, centrmax,
+         cp_here, cp_below) = inputs
 
         # Skip if outside cloud layer or at cloud base (boundary condition)
         in_cloud_interior = jnp.logical_and(
@@ -373,12 +399,23 @@ def calculate_updraft(
                 # from the level below) and entrained environmental air.
                 #
                 # Dry static energy (DSE = cp·T + g·z) is conserved during
-                # adiabatic ascent. Equivalently, a parcel rising by dz cools
-                # by g·dz/cp (~9.8 K/km), so mixing is done in DSE, not T
-                # directly: mixing T without the adiabatic cooling leaves the
-                # parcel ~10 K too warm at each level, the saturation
-                # adjustment never sees supersaturation, and no liquid or
-                # precipitation forms.
+                # adiabatic ascent and is what ``cuasc`` mixes
+                # (mo_cuascent.f90:388-411): ``pmfus = (pcpcu·ptu + pgeoh)·pmfu``
+                # carries the plume, ``zseen`` the entrained air, and
+                # ``ptu = (zmfusk/pmfu − pgeoh)/pcpcu``. Mixing T without the
+                # g·dz lift leaves the parcel ~10 K too warm at each level, the
+                # saturation adjustment never sees supersaturation, and no
+                # liquid or precipitation forms.
+                #
+                # ``cp`` is ECHAM's MOIST heat capacity ``pcpcu`` of the
+                # ENVIRONMENT at each level (``cpd·(1 + vtmpc2·q)``): the
+                # plume's heat content is carried by the ``cp`` of the level
+                # it rises from and converted back to temperature with the
+                # ``cp`` of the level it arrives at, exactly as the Fortran
+                # does. DSE is written relative to this level's geopotential,
+                # so the lifted plume contributes ``cp_below·T_below − g·dz``
+                # and the entrained air (taken at this level, the scheme-wide
+                # full-level staggering, #530) ``cp_here·T_env``.
                 #
                 # Detrainment removes mass at *updraft* properties, so the
                 # correct denominator for mixing is the pre-detrainment mass
@@ -386,9 +423,8 @@ def calculate_updraft(
                 mfu_mix = jnp.maximum(
                     carry.mfu[next_level] + dmf_entr, 1e-10
                 )
-                # Adiabatic cooling of the updraft air as it rises by dz
-                adiabatic_cooling = c.grav * dz / c.cpd
-                tu_lifted = carry.tu[next_level] - adiabatic_cooling
+                # DSE of the updraft air lifted by dz, relative to this level.
+                dse_lifted = cp_below * carry.tu[next_level] - c.grav * dz
 
                 total_water = (
                     (carry.qu[next_level] + carry.lu[next_level])
@@ -396,9 +432,9 @@ def calculate_updraft(
                     + env_q * dmf_entr
                 ) / mfu_mix
                 temp_mix = (
-                    tu_lifted * carry.mfu[next_level]
-                    + env_temp * dmf_entr
-                ) / mfu_mix
+                    dse_lifted * carry.mfu[next_level]
+                    + cp_here * env_temp * dmf_entr
+                ) / (mfu_mix * cp_here)
 
                 # Saturation adjustment (iterative Newton; cuadjtq kcall=1)
                 return saturation_adjustment(temp_mix, total_water, pressure)

@@ -335,16 +335,23 @@ class TestCloudBaseInitialisation(unittest.TestCase):
         self.assertAlmostEqual(float(state.lu[kbase]), 0.0, places=9)
 
     def test_cloud_base_warming_matches_condensate(self):
-        """ΔT at cloud base is exactly L/cp times the condensate formed."""
-        from jcm.constants import alhc, cpd, rd
+        """ΔT at cloud base is exactly L/cp times the condensate formed.
 
+        The dry parcel is ECHAM ``cubase``'s DSE walk, ``cp·T + φ`` conserved
+        with the environment's MOIST ``pcpcu = cpd·(1 + vtmpc2·q)``
+        (mo_cuinitialize.f90:294), built here by hand from the column's
+        humidity and the uniform 500 m layers ``_run`` uses. The condensation
+        warming itself is ``cuadjtq``'s, whose ``L/cp`` table is DRY
+        (``alv/cpd``, mo_echam_convect_tables.f90:214), hence ``cpd`` below.
+        """
         kbase = self.NLEV - 4
         state, pressure, temperature, q_surf = self._run(kbase, surf_rh=1.0)
-        t_dry = float(temperature[-1]) * (
-            float(pressure[kbase]) / float(pressure[-1])
-        ) ** (rd / cpd)
+        _, _, humidity = self._column(surf_rh=1.0)
+        cp = c.cpd * (1.0 + c.vtmpc2 * np.asarray(humidity))
+        lift = 500.0 * (self.NLEV - 1 - kbase)
+        t_dry = (cp[-1] * float(temperature[-1]) - c.grav * lift) / cp[kbase]
         dT = float(state.tu[kbase]) - t_dry
-        expected = alhc * float(state.lu[kbase]) / cpd
+        expected = c.alhc * float(state.lu[kbase]) / c.cpd
         self.assertAlmostEqual(dT / expected, 1.0, delta=0.005)
 
     def test_cloud_base_parcel_is_saturated_not_supersaturated(self):
@@ -446,34 +453,69 @@ class TestCloudBaseBuoyancyGate(unittest.TestCase):
         cb = int(cb)
         # The returned level is the LOWEST one at which the lifted parcel
         # condenses; every level below it must be subsaturated for the parcel.
-        theta_surf = float(T[-1])
+        # The parcel is ECHAM's cubase DSE walk, ``cp·T + φ`` conserved with
+        # the environment's moist ``pcpcu = cpd·(1 + vtmpc2·q)``
+        # (mo_cuinitialize.f90:294), rebuilt here by hand: TOA-first, so the
+        # lowest level is the last index and heights accumulate upward.
+        cp = c.cpd * (1.0 + c.vtmpc2 * np.asarray(q))
+        dzn = np.asarray(dz)
+        z_up = np.zeros(len(p))
+        for k in range(len(p) - 2, -1, -1):
+            z_up[k] = z_up[k + 1] + 0.5 * (dzn[k] + dzn[k + 1])
         for k in range(len(p) - 1, cb, -1):
-            t_dry = theta_surf * (float(p[k]) / float(p[-1])) ** (c.rd / c.cpd)
+            t_dry = (cp[-1] * float(T[-1]) - c.grav * z_up[k]) / cp[k]
             qs_k = float(saturation_mixing_ratio(p[k], jnp.asarray(t_dry)))
             self.assertLess(float(q[-1]), qs_k,
                             f"level {k} below the returned base already saturates")
 
-    def test_unmixed_boundary_layer_gets_no_convection(self):
+    def test_stable_sub_cloud_layer_gets_no_convection(self):
         """The sub-cloud dry-buoyancy gate — ECHAM's ``klab`` falling to 0.
 
-        With no mixed layer the dry parcel loses ~0.43 K per layer, more than
-        any physical zlift, so the walk stops below the LCL and the column is
-        dropped. This test is the reason the gate exists: before it, such a
-        column happily convected off a cloud base its parcel could not reach.
+        Under a 4 K/km environment the dry parcel falls ~1 K per ~190 m layer
+        behind it — more than any physical zlift, even after the moist-``cp``
+        credit (see the next test) — so the walk stops below the LCL and the
+        column is dropped. This gate is what stops a column convecting off a
+        cloud base its parcel could not reach.
+        """
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            ConvectionParameters, find_cloud_base,
+        )
+        p, T, q, dz, _rho = self._sounding(bl_top_m=0.0, lapse=4.0e-3)
+        cfg = ConvectionParameters.default(cu_thvsig=0.3)
+        _cb, found = find_cloud_base(T, q, p, cfg, None, dz)
+        self.assertFalse(bool(found))
+
+    def test_moist_cp_walk_credits_the_humidity_lapse(self):
+        """ECHAM's moist-``cp`` walk lets an unmixed 6.5 K/km column trigger.
+
+        ``cubase`` conserves ``pcpcu·T + φ`` with the ENVIRONMENT's moist heat
+        capacity at each level (mo_cuinitialize.f90:294), so where the
+        environment dries with height the parcel is credited
+        ``≈ T·vtmpc2·Δq_env`` per layer — here ~0.3 K of the ~0.43 K per layer
+        the dry-adiabatic lift loses to a 6.5 K/km environment. That leaves
+        this unmixed column within ``zlift`` of its LCL: it triggers under the
+        faithful thermodynamics, and would NOT with a dry ``cpd``. (The
+        stricter dry-``cp`` behaviour is what this sounding used to pin as
+        "no convection"; the discriminating case is now the stable layer
+        above.)
         """
         from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
             ConvectionParameters, find_cloud_base,
         )
         p, T, q, dz, _rho = self._sounding(bl_top_m=0.0)
         cfg = ConvectionParameters.default(cu_thvsig=0.3)
-        _cb, found = find_cloud_base(T, q, p, cfg, None, dz)
-        self.assertFalse(bool(found))
+        _cb, found_moist = find_cloud_base(T, q, p, cfg, None, dz)
+        _cb, found_dry = find_cloud_base(
+            T, q, p, cfg, None, dz, cp_moist=jnp.full_like(T, c.cpd),
+        )
+        self.assertTrue(bool(found_moist))
+        self.assertFalse(bool(found_dry))
 
     def test_well_mixed_layer_convects_at_the_echam_minimum_lift(self):
         """The same column WITH a mixed layer triggers at cminbuoy = 0.2 K.
 
-        Together with the previous test this pins the discriminator: it is the
-        boundary layer's mixing, not the lift constant, that decides.
+        Together with the stable-layer test this pins the discriminator: it
+        is the sub-cloud stability, not the lift constant, that decides.
         """
         from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
             ConvectionParameters, find_cloud_base, tiedtke_nordeng_convection,
