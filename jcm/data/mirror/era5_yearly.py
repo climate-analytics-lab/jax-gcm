@@ -44,6 +44,7 @@ import xarray as xr
 
 from jcm.data.mirror.amip_yearly import _TIME_ENC, ghg_ppmv
 from jcm.data.mirror.bundles import (_to_lonlat, land_cover_fields,
+                                     snow_cover_of_non_glacier_land,
                                      translate_land)
 from jcm.data.mirror.era5_land import FIELDS, RDA_MODA, _open_year
 from jcm.data.regridding import fill_nearest, interp_to
@@ -259,6 +260,8 @@ def build_forcing_year(clim_path: str, sstice_path: str, year: int,
         # for the same reason as the ice-sheet mask.
         **land_cover_fields(clim, permanent_snow, lats, lons),
     }
+    fields["snowc"] = snow_cover_of_non_glacier_land(fields["snowc"],
+                                                     fields["glac"])
     ds = xr.Dataset(coords={"lat": lats, "lon": lons, "time": times})
     for name, da in fields.items():
         ds[name] = _to_lonlat(da)

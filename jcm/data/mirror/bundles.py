@@ -26,6 +26,11 @@ Unit translations into the conventions the packaged t63 files establish
 * ``alb``   = per-cell minimum monthly ERA5 fal — the snow-free
   background albedo (snow brightening is applied dynamically from
   ``snowc``; an annual mean would double-count it)
+* ``snowc`` on the target grid is the snow-covered fraction of the
+  NON-glacier land: the zeroed ice-sheet source points dilute the regridded
+  share in a cell that is partly ice sheet, so it is divided by ``1 - glac``
+  (:func:`snow_cover_of_non_glacier_land`). Total snow cover of the land is
+  ``glac + (1 - glac)·snowc`` (``jcm.forcing.land_snow_cover``)
 * ``forest`` = ERA5 high-vegetation cover ``cvh`` as a fraction of the
   land — the forest fraction JSBACH's broadband land albedo masks the snow
   albedo with (static)
@@ -181,6 +186,22 @@ def land_cover_fields(era5: xr.Dataset, permanent_snow: xr.DataArray,
     }
 
 
+def snow_cover_of_non_glacier_land(snowc: xr.DataArray,
+                                   glac: xr.DataArray) -> xr.DataArray:
+    """Regridded ``snowc`` -> snow-covered fraction of the non-glacier land.
+
+    :func:`translate_land` zeroes ``snowc`` on permanent-snow source points,
+    so after regridding a cell that is partly ice sheet carries its seasonal
+    snow as a share of ALL its land. The jcm convention (``ForcingData``) is
+    the share of the non-glacier land, JSBACH's tiling, so divide by
+    ``1 - glac``; an all-glacier cell has no such land and gets 0.
+    """
+    open_land = 1.0 - glac
+    has_open = open_land > 1e-6
+    return (snowc / open_land.where(has_open, 1.0)).where(
+        has_open, 0.0).clip(0.0, 1.0)
+
+
 _EMIS_SPECIES = ("so2", "bc", "oc")
 _ANTHRO_SECTORS = ("surface_combustion", "elevated_industrial", "shipping")
 
@@ -275,6 +296,8 @@ def build_forcing(era5_path: str, era: str, lats, lons,
         "alb": interp_to(era5.fal.min("time"), lats, lons),
         **land_cover_fields(era5, permanent_snow, lats, lons),
     }
+    fields["snowc"] = snow_cover_of_non_glacier_land(fields["snowc"],
+                                                     fields["glac"])
     ds = xr.Dataset(coords={"lat": lats, "lon": lons,
                             "time": CLIMO_TIME})
     for name, da in fields.items():

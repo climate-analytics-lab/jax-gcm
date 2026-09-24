@@ -29,7 +29,9 @@ import xarray as xr
 
 from jcm.data.mirror.bundles import (AMIP_ROOT, _ANTHRO_SECTORS,
                                      _EMIS_SPECIES, _to_lonlat,
-                                     land_cover_fields, translate_land)
+                                     land_cover_fields,
+                                     snow_cover_of_non_glacier_land,
+                                     translate_land)
 from jcm.data.regridding import (conservative_to_gaussian, fill_nearest,
                                  interp_to)
 
@@ -134,6 +136,8 @@ def build_forcing_year(era5_path: str, year: int, lats, lons,
         "alb": interp_to(era5.fal.min("time"), lats, lons),
         **land_cover_fields(era5, permanent_snow, lats, lons),
     }
+    fields["snowc"] = snow_cover_of_non_glacier_land(fields["snowc"],
+                                                     fields["glac"])
     ds = xr.Dataset(coords={"lat": lats, "lon": lons, "time": times})
     for name, da in fields.items():
         ds[name] = _to_lonlat(da)

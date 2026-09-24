@@ -11,6 +11,7 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
+from jcm.forcing import land_snow_cover
 from jcm.physics.surface.echam.albedo import CTFREEZ
 from jcm.physics.thermodynamics import saturation_specific_humidity
 from .vertical_diffusion_types import (
@@ -779,12 +780,13 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         z0_land = roughness[:, 2]
         roughness_heat = jnp.stack([z0_water, z0_ice, z0_land], axis=1)
 
-        # Snow-covered share of the land: the prescribed ``snowc_am`` cover,
-        # with glaciers fully snow covered as JSBACH sets them (#672).
-        snow_col = jnp.clip(forcing.snowc_am.reshape(ncols), 0.0, 1.0)
-        if forcing.glacier_fraction is not None:
-            glac_col = forcing.glacier_fraction.reshape(ncols)
-            snow_col = glac_col + (1.0 - glac_col) * snow_col
+        # Snow-covered share of the land: the prescribed ``snowc_am`` cover
+        # of the non-glacier land plus the glaciers, fully snow covered as
+        # JSBACH sets them (#672; convention on ``ForcingData``).
+        snow_col = land_snow_cover(
+            forcing.snowc_am.reshape(ncols),
+            None if forcing.glacier_fraction is None
+            else forcing.glacier_fraction.reshape(ncols))
 
         # Land wetness in JSBACH's form (mo_soil.f90 ``qsat_fact``): the
         # snow-covered part evaporates at the potential rate, the snow-free

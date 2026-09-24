@@ -278,6 +278,18 @@ class LandChannelCoverageTest(unittest.TestCase):
             self.assertTrue(spliced, f"{name}.py never writes forest/glac")
 
 
+    def test_every_writer_normalises_snow_to_the_non_glacier_land(self):
+        """``snowc`` is re-expressed per non-glacier land in every writer."""
+        import inspect
+        import importlib
+
+        for name in self._WRITERS:
+            module = importlib.import_module(f"jcm.data.mirror.{name}")
+            self.assertIn("snow_cover_of_non_glacier_land(",
+                          inspect.getsource(module),
+                          f"{name}.py writes snowc as a share of all land")
+
+
 class LandCoverFieldsTest(unittest.TestCase):
     """``forest`` = ERA5 ``cvh``; ``glac`` = the permanent-snow mask (#672)."""
 
@@ -306,6 +318,33 @@ class LandCoverFieldsTest(unittest.TestCase):
                                    [[0.6, 0.6, 0.0], [0.6, 0.6, 0.0]])
         np.testing.assert_allclose(out["glac"].values,
                                    [[1.0, 1.0, 0.0], [0.0, 0.0, 0.0]])
+
+
+
+class SnowConventionTest(unittest.TestCase):
+    """``snowc`` is the snow share of the NON-glacier land (#672)."""
+
+    def test_half_glacier_half_snow_is_fully_covered(self):
+        import xarray as xr
+
+        from jcm.data.mirror.bundles import snow_cover_of_non_glacier_land
+        from jcm.forcing import land_snow_cover
+
+        # A cell half ice sheet, the other half snow covered: regridding
+        # the zeroed-on-glacier snowc gives 0.5 of ALL the land.
+        regridded = xr.DataArray([0.5, 0.3, 0.0])
+        glac = xr.DataArray([0.5, 0.0, 1.0])
+        s = snow_cover_of_non_glacier_land(regridded, glac)
+        np.testing.assert_allclose(s.values, [1.0, 0.3, 0.0])
+        total = np.asarray(land_snow_cover(s.values, glac.values))
+        # Full cover; a glacier-free cell unchanged; all-glacier covered.
+        np.testing.assert_allclose(total, [1.0, 0.3, 1.0])
+
+    def test_no_glacier_map_reads_as_no_glacier(self):
+        from jcm.forcing import land_snow_cover
+
+        np.testing.assert_allclose(
+            np.asarray(land_snow_cover(np.array([0.2, 1.7]))), [0.2, 1.0])
 
 
 def _translate_land_keys():

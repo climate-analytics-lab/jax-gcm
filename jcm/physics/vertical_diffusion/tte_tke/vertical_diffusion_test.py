@@ -1636,11 +1636,13 @@ class TestSurfaceTilePhase:
         terrain = TerrainData.single_column(fmask=1.0)
         soil, snow = 0.2, 0.5
 
-        def fluxes(snow_cover):
+        def fluxes(snow_cover, glacier=None):
             forcing = ForcingData.zeros((1, 1)).copy(
                 stl_am=jnp.full((1, 1), t_land),
                 soilw_am=jnp.full((1, 1), soil),
                 snowc_am=jnp.full((1, 1), snow_cover),
+                glacier_fraction=(None if glacier is None
+                                  else jnp.full((1, 1), glacier)),
             )
             _, diag = TteTkeVerticalDiffusion()(state, diagnostics, forcing,
                                                 terrain)
@@ -1660,3 +1662,8 @@ class TestSurfaceTilePhase:
             lh_snow / e_snow,
             PHYS_CONST.alhc + (PHYS_CONST.alhs - PHYS_CONST.alhc) * snow / wet,
             rtol=1e-5)
+        # Half glacier, the rest fully snow covered (``snowc`` is the share
+        # of the NON-glacier land): all snow — potential rate, all sublimated.
+        e_full, lh_full = fluxes(1.0, glacier=0.5)
+        assert e_full > e_snow  # wetness 1 > 0.6
+        np.testing.assert_allclose(lh_full / e_full, PHYS_CONST.alhs, rtol=1e-5)

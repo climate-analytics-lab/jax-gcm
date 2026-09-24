@@ -241,6 +241,22 @@ _EPOCH_ANCILLARY_KEYS = ("ozone_file", "emissions_file", "oxidants_file")
 # ---------------------------------------------------------------------------
 
 
+def land_snow_cover(snow_cover, glacier_fraction=None):
+    """Snow-covered share of the land from ``snowc`` and ``glac``.
+
+    ``snow_cover`` is the snow-covered fraction of the non-glacier land
+    (clipped to [0, 1]); glaciers are fully snow covered, so the total is
+    ``g + (1 - g)·s``. ``glacier_fraction=None`` (a product without the
+    glacier map) reads as no glacier. Broadcasting-native.
+    """
+    s = jnp.clip(snow_cover, 0.0, 1.0)
+    if glacier_fraction is None:
+        return s
+    g = jnp.clip(glacier_fraction, 0.0, 1.0)
+    return g + (1.0 - g) * s
+
+
+
 @tree_math.struct
 class ForcingData:
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
@@ -323,6 +339,12 @@ class ForcingData:
     # (bundles built before #672) means "no forest, no glacier", which is
     # what ECHAM computes from zero maps — the albedo then falls back to the
     # snow-free background ``alb0`` plus open snow.
+    #
+    # Snow convention shared by every product and consumer: ``glac`` is the
+    # glacier share of the land and ``snowc`` the snow-covered fraction of
+    # the NON-glacier land (JSBACH's tiling: a glacier tile, and seasonal
+    # snow on the other tiles). The total snow-covered share of the land is
+    # therefore ``g + (1 - g)·min(1, s)`` — :func:`land_snow_cover`.
     forest_fraction: Any = None
     glacier_fraction: Any = None
 
