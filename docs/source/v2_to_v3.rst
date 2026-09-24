@@ -706,6 +706,27 @@ Per-species ``budget_mass_<sp>`` / ``budget_ptend_<sp>`` / ``budget_dyn_<sp>``
 diagnostics and one greppable log line per species per chunk make the residual
 visible.
 
+ECHAM surface albedo follows ECHAM 6.3
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The ECHAM land albedo was a constant 0.15 (visible) / 0.25 (near-IR)
+everywhere, ice sheets included, and ignored the background albedo and snow
+cover the forcing carries. It is now ECHAM 6.3's per-tile albedo (background
+plus prescribed snow cover, forest masking and glaciers over land;
+temperature-dependent sea ice; zenith-dependent open water; see
+:doc:`science/surface`). Over a 5-day January ``t63-echam-1m`` run the global
+planetary albedo rises **0.274 → 0.300-0.302** and TOA absorbed solar falls
+**251.2 → 241.6-242.1 W/m²**; ice-sheet surface albedo goes **0.22 → 0.85** and
+snow-covered Northern-Hemisphere land **0.22 → 0.50-0.64** (the range spans
+bundles with and without the new forest map). Any tuning of the TOA balance
+or shortwave cloud radiative effect done before this change absorbed that
+bias and should be redone.
+
+Code that built ``SurfaceOpticsParameters(land_albedo_vis=...)`` must move
+the value to the new structure, e.g.
+``SurfaceOpticsParameters(albedo=EchamSurfaceAlbedoParameters(snow_albedo_max=0.75))``;
+the emissivities are unchanged.
+
 SPEEDY shortwave heating is applied every step
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

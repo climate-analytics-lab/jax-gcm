@@ -28,7 +28,7 @@ carries water/ice/land tile machinery (``ocean.py``, ``sea_ice.py``,
 and discarded**: the tile state is re-initialised from prescribed forcing every
 call (no prognostic memory — no precipitation input, snow, or soil moisture;
 #672), and the active surface albedos come from ``EchamBoundaryConditions``
-instead. The ECHAM turbulent surface fluxes are *delivered* by the vdiff term
+instead (see *Surface albedo* below). The ECHAM turbulent surface fluxes are *delivered* by the vdiff term
 (which carries the surface exchange as the bottom-row Robin BC of its implicit
 solve, see {doc}`vertical_diffusion`), so ``EchamSurface`` returns zero
 u/v/T/qᵥ tendencies and republishes the vdiff-delivered fluxes as the public
@@ -46,10 +46,13 @@ sea-ice tiles return zero prognostic temperature tendencies (SST and ice are
 prescribed from boundary forcing); slab / mixed-layer evolution lives outside the
 repo.
 
-**Status & known limitations.** The ECHAM land tile is simplified (no
-frozen-soil / snow-sublimation model); ocean/sea-ice are diagnostic-flux-only
-over prescribed surface temperatures — any prognostic slab-ocean or interactive
-sea-ice configuration is out of scope.
+**Status & known limitations.** The ECHAM land tile is simplified: snow cover
+is prescribed (snow-covered land evaporates at the potential rate and the
+latent heat of the land moisture flux takes the sublimation share of the
+snow-covered fraction, see {doc}`vertical_diffusion`, but there is no snow
+mass, melt or frozen-soil model — #672); ocean/sea-ice are
+diagnostic-flux-only over prescribed surface temperatures — any prognostic
+slab-ocean or interactive sea-ice configuration is out of scope.
 
 **Code pointers.**
 - ``jcm/physics/surface/speedy_surface_flux.py`` — ``get_surface_fluxes``, the
@@ -62,3 +65,100 @@ sea-ice configuration is out of scope.
 ``jcm/physics/surface/echam/surface_physics_test.py``, ``ocean_test.py``,
 ``turbulent_fluxes_test.py``, ``surface_types_test.py``. The ``pev_vdiff``
 delivered-equals-reported identity is exercised through the vdiff column tests.
+
+## Surface albedo
+
+**What we do.** ``EchamBoundaryConditions``
+(``jcm/physics/forcing/echam_boundary_conditions.py``) hands the radiation a visible and a near-IR
+surface albedo per column, the land / sea-ice / open-water tile average of three
+per-tile schemes in ``jcm/physics/surface/echam/albedo.py`` (fractions
+``fmask``, ``clip(sice_am, 0, 1 − fmask)`` and the remainder):
+
+- **Land** — ``land_albedo``, JSBACH's broadband scheme
+  ``mo_land_surface.f90::update_land_surface_fast``. The snow-free background
+  is ``forcing.alb0``; the snow cover is ``forcing.snowc_am``; snow on the
+  ground brightens it towards ``0.4 → 0.8`` as the land temperature
+  ``stl_am`` falls from the melting point to 5 K below it; forest
+  (``forcing.forest_fraction``) hides the ground snow behind a canopy
+  fraction ``forest·(1 − exp(−max(LAI, 2)))``; glacier cells
+  (``forcing.glacier_fraction``) take the glacier albedo ``0.75 → 0.85`` over
+  the same ramp; the result never falls below the background. It is broadband
+  and enters both bands, as JSBACH writes it to ``albedo_vis`` and
+  ``albedo_nir``.
+- **Sea ice** — ``sea_ice_albedo``, ``mo_surface_ice.f90::update_albedo_ice``:
+  bare ice ``calbmni = 0.60`` at the melting point to ``calbmxi = 0.75`` 1 K
+  below it (``calbmns``/``calbmxs`` = 0.70/0.85 with more than 1 cm of snow),
+  at the ice tile's temperature ``min(SST, ctfreez)``; broadband.
+- **Open water** — ``ocean_albedo``,
+  ``mo_surface_ocean.f90::update_albedo_ocean``: the direct beam follows the zenith-angle fit
+  ``0.026/(μ₀^1.7 + 0.065) + 0.015(μ₀−0.1)(μ₀−0.5)(μ₀−1)`` (+0.0082 visible,
+  −0.007 near-IR), diffuse light ``calbsea = 0.07``; the RCE column uses
+  ECHAM's ``lrce`` constant 0.07 for the direct beam.
+
+Every constant is a differentiable leaf of ``EchamSurfaceAlbedoParameters``
+(held in ``SurfaceOpticsParameters``), at the ECHAM 6.3 T63/T127/T255 values;
+``EchamSurfaceAlbedoParameters.echam_t31`` carries ECHAM's T31 sea-ice set.
+
+**What ECHAM/CAM does.** ECHAM 6.3 evaluates the same three routines each step
+in ``mo_surface.f90`` and averages the tile albedos band by band. Its land
+albedo comes from JSBACH, which offers two schemes: the broadband
+``update_land_surface_fast`` above (``use_albedo=.FALSE.``) and, by default, the
+per-band ``update_albedo_snowage_temp``, which needs per-band soil and canopy
+albedo maps, the land-cover-type composition, LAI, a canopy snow store and a
+prognostic snow age. Its default sea-ice path is the melt-pond scheme
+(``update_albedo_ice_meltpond``, ``lmeltpond=.TRUE.``), which needs prognostic
+ice thickness, pond depth and snow age. Its snow cover is diagnosed from a
+prognostic snow depth (Roesch et al. 2002: ``0.95·tanh(100 S)·√(1000 S/(1000 S
++ 0.15 σ_oro))``). The land-cover constants are those of the JSBACH land-cover
+library ``lctlib_nlct21.def``, identical for every non-glacier type.
+
+**Why we differ.**
+- `science` — jcm's land surface is prescribed: a broadband snow-free
+  background ``alb`` (the minimum monthly ERA5 forecast albedo), a cover
+  fraction ``snowc = min(1, SWE/60 mm)``, a forest fraction (ERA5 high
+  vegetation cover ``cvh``) and a glacier mask (the cells whose ERA5 snow
+  never melts), built by ``jcm/data/mirror/bundles.py``. The broadband
+  ``use_albedo=.FALSE.`` scheme is the JSBACH path those inputs support
+  exactly; the per-band default would need maps that do not exist here. For
+  the same reason sea ice uses ``lmeltpond=.FALSE.``. Snow cover is the
+  prescribed climatology rather than ECHAM's Roesch fraction of a prognostic
+  snow depth: without prognostic snow there is no depth to apply it to. With
+  no LAI the canopy fraction uses JSBACH's own ``MAX(LAI, 2)`` floor
+  (``forest·0.865``, at most 13 % of the forest fraction below a dense
+  canopy's), and with no canopy snow store the canopy is snow-free — so
+  snow-covered forest shows its background albedo, the lowest value
+  JSBACH's canopy term can give (the snow-covered canopy albedo is 0.20).
+  Sea ice carries no snow and sits at ``min(SST, ctfreez) = 271.38 K``,
+  below the ramp, so it stays at the cold bare-ice value 0.75.
+- `compute` — the RRTMGP surface boundary takes one albedo per column for
+  both the direct beam and diffuse light (see {doc}`radiation`), so the
+  open-water direct and diffuse albedos are merged with equal weights
+  (``OCEAN_DIRECT_WEIGHT``) instead of ECHAM's weighting by the previous
+  step's direct/diffuse downward irradiance, which the library does not
+  return. The even split halves the worst-case error of either pure choice
+  (all-direct clear sky, all-diffuse overcast). A column whose sun is down
+  reports the diffuse value; its albedo never enters a shortwave solve.
+- `differentiability` — the temperature ramps are single clipped linear
+  interpolations, so every constant and the surface temperature carry
+  gradients everywhere except exactly at the ramp ends.
+
+**Status & known limitations.** Prognostic snow — snow mass, the Roesch
+cover fraction, snow age, canopy snow and snow on sea ice — is the open half
+of #672; until it lands, snow albedo follows the climatological cover. A
+forcing bundle built before ``forest``/``glac`` were published loads with both
+``None``, which the albedo reads as no forest and no glacier: ice sheets then
+take their ERA5 background albedo (≈0.8) instead of the glacier ramp, and snow
+under forest is not masked.
+
+**Code pointers.**
+- ``jcm/physics/surface/echam/albedo.py`` — ``land_albedo``,
+  ``sea_ice_albedo``, ``ocean_albedo``, ``ocean_albedo_per_band``,
+  ``EchamSurfaceAlbedoParameters``.
+- ``jcm/physics/forcing/echam_boundary_conditions.py`` —
+  ``EchamBoundaryConditions``, ``SurfaceOpticsParameters``.
+- ``jcm/data/mirror/bundles.py`` — ``land_cover_fields`` (the forest and
+  glacier maps), ``translate_land`` (the snow cover).
+
+**Validation evidence.** ``jcm/physics/surface/echam/albedo_test.py`` pins each
+scheme at hand-evaluated ECHAM points; ``jcm/physics/forcing/echam_boundary_conditions_test.py`` checks that ``alb0``, ``snowc_am`` and the
+land-cover maps reach the radiation input.

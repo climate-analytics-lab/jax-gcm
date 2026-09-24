@@ -177,6 +177,9 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
 - `compute` — the SW spectrum is collapsed to a single broadband albedo
   (``0.46·vis + 0.54·nir``) at the RRTMGP surface BC; a true per-band /
   direct-diffuse albedo needs a g-point→band map in the library (deferred).
+  The same single value serves the direct beam and diffuse light, so the
+  open-water direct and diffuse albedos are merged before they reach it (see
+  {doc}`surface`, *Surface albedo*).
   Radiation sub-stepping and the frozen-McICA-step option are compute affordances
   with no ECHAM analogue.
 - `differentiability` — cloud-optics SSA/asymmetry combination uses double-

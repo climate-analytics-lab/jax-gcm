@@ -55,6 +55,60 @@ block in the ECHAM ordering.
 - ``jcm/physics/vertical_diffusion/tracer_diffusion.py`` —
   ``TracerVerticalDiffusion``, ``diffuse_tracers_implicit``.
 
+## Surface saturation and latent heat
+
+**What we do.** The saturation specific humidity of every surface tile, and of
+the air at the lowest level in the surface-layer Richardson number, is taken
+over water at or above the melting point and over ice below it
+(``jcm/physics/thermodynamics.py::saturation_specific_humidity``,
+``phase="auto"``): the sea-ice tile (at ``min(SST, 271.38 K)``) always
+saturates over ice, frozen land does below 273.15 K. The latent heat in the
+surface-layer buoyancy is the condensation heat when the lowest-level air is at
+or above the melting point and the sublimation heat below, and the
+liquid-water potential temperature subtracts ``(L/c_p)·(θ/T)·q_x`` with the same
+``L``. The latent heat of the delivered moisture flux is assembled per tile:
+``alhc·E`` over open water, ``alhs·E`` over sea ice, and over land
+``alhc·E + (alhs − alhc)·s·E_pot`` with ``s`` the snow-covered fraction (the
+prescribed ``snowc_am``, glaciers fully covered) and ``E_pot`` the flux at full
+wetness. The land wetness itself takes JSBACH's form ``s + (1 − s)·w``: the
+snow-covered part evaporates at the potential rate and the snow-free part at
+the soil availability ``w`` (``soilw_am``), so the land flux always covers the
+snow share the sublimation heat is charged to. Every tile flux is linear in
+the one implicit bottom value, so the per-tile latent heats fold into one
+exchange pair and the reported latent heat stays exactly consistent with the
+delivered moisture flux.
+
+**What ECHAM/CAM does.** ECHAM's ``precalc_ocean``/``precalc_ice``/
+``precalc_land`` read the tile saturation from the ``tlucua`` table
+(``mo_echam_convect_tables``), which switches from water to ice at the melting
+point with no mixed-phase blend, as does the lowest-level ``zqss`` in
+``vdiff.f90``; ``zfaxe = FSEL(T − tmelt, alv, als)`` sets the latent heat in the
+buoyancy and in ``zlteta1``. ``postproc_ice`` reports ``als·E`` and JSBACH
+(``mo_soil.f90``) reports ``alv·E_T + (als − alv)·snow_fract·E_pot``, with the
+snow fraction entering the land ``csat``/``cair`` as
+``snow_fract + (1 − snow_fract)·(…)`` (``qsat_fact``).
+
+**Why we differ.** The snow-covered fraction is the prescribed climatology
+until snow is prognostic (#672), and the snow-free land wetness is the
+prescribed soil availability rather than JSBACH's wet-skin / relative-humidity
+/ canopy-resistance composite (see {doc}`surface`).
+
+**Code pointers.**
+- ``jcm/physics/vertical_diffusion/tte_tke/surface_layer.py`` —
+  ``compute_surface_exchange_coefficients_echam_louis``.
+- ``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion.py`` —
+  ``vertical_diffusion_column`` (tile collapse and latent-heat pair),
+  ``TteTkeVerticalDiffusion`` (sublimation fractions).
+- ``jcm/physics/vertical_diffusion/tte_tke/matrix_solver.py`` —
+  ``diagnose_surface_fluxes``.
+
+**Validation evidence.**
+``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion_test.py`` —
+``TestSurfaceTilePhase``: ``LH/E`` equals ``alhs`` over sea ice, ``alhc`` over
+open water and ``alhc + (alhs − alhc)·s/w`` over snow-covered land, the term
+wets snowy land as ``s + (1 − s)·w``, and a column at the ice saturation of a
+260 K tile exchanges no moisture.
+
 ## Ten-metre wind diagnostic
 
 **What we do.** The term publishes a grid-mean 10 m wind speed,

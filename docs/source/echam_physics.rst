@@ -640,14 +640,20 @@ The ECHAM physics package consumes two NetCDF files at run time. T63 versions si
      - 12-month climatology
      - Sea-ice tile fraction (clipped to ``[0, 1 − fmask]`` at apply time).
    * - ``alb`` (forcing.nc) → ``forcing.alb0``
-     - Static (annual mean)
-     - Bare-land surface albedo for the radiation backends.
+     - Static
+     - Snow-free background of the land albedo (JSBACH ``update_land_surface_fast``, see :doc:`science/surface`).
    * - ``soilw_am`` (forcing.nc)
      - 12-month climatology
      - Soil-moisture initial state for the land-tile column.
    * - ``snowc`` (forcing.nc) → ``forcing.snowc_am``
      - 12-month climatology
-     - Snow cover (clipped to plausible range at load time).
+     - Prescribed snow-cover fraction: brightens the land albedo towards the temperature-dependent snow albedo and sets the sublimating share of the land latent heat flux.
+   * - ``forest`` (forcing.nc) → ``forcing.forest_fraction``
+     - Static (optional)
+     - Forest fraction masking the snow albedo under a canopy. ``None`` (no forest) if absent.
+   * - ``glac`` (forcing.nc) → ``forcing.glacier_fraction``
+     - Static (optional)
+     - Glacier fraction: the ECHAM glacier albedo and a fully snow-covered (sublimating) surface. ``None`` (no glacier) if absent.
 
 Generating BC files from ECHAM input
 """"""""""""""""""""""""""""""""""""
@@ -835,7 +841,7 @@ Forcing and Boundary Conditions
 - **Sea Ice Concentration**: Prescribed from climatology
 - **Snow Cover**: Prescribed from climatology
 - **Soil Moisture**: Prescribed from climatology
-- **Surface Albedo**: Annual-mean bare-land albedo
+- **Surface Albedo**: ECHAM 6.3 tile albedos — land from the background ``alb`` with prescribed snow cover, forest masking and glaciers; temperature-dependent sea ice; zenith-dependent open water (:doc:`science/surface`)
 - **Aerosol Temporal Weights**: Per-plume year and seasonal cycle weights for MACv2-SP
 
 The forcing data system supports both realistic (from netCDF files with 365 daily time steps) and idealized (aquaplanet with cos2 SST profile) configurations.

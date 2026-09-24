@@ -661,6 +661,44 @@ Fixes that change the climate of a configuration you did not otherwise touch.
 :doc:`v2_to_v3` quotes the measured direction and magnitude for each, where one
 was measured.
 
+ECHAM surface albedo and frozen-surface saturation
+""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The ECHAM surface albedo now follows ECHAM 6.3 tile by tile instead of fixed
+  per-type constants (#672). Land is JSBACH's broadband scheme
+  (``update_land_surface_fast``): the snow-free background ``alb``, brightened
+  by the prescribed ``snowc`` snow cover towards a temperature-dependent snow
+  albedo (0.4 at the melting point to 0.8 five kelvin below), snow masked by
+  forest, and a glacier albedo (0.75-0.85) on ice sheets — where the constant
+  0.15/0.25 used to put Antarctica and Greenland at ~0.2. Sea ice is
+  ``update_albedo_ice`` (0.60-0.75 bare ice); open water carries ECHAM's
+  zenith-angle-dependent direct-beam albedo with the 0.07 diffuse albedo.
+  Over a 5-day January ``t63-echam-1m`` A/B the global planetary albedo rises
+  **0.274 → 0.300-0.302** and the absorbed solar radiation at TOA falls by
+  **9.1-9.6 W/m²** (ice sheets 0.22 → 0.85 surface albedo; snow-covered NH land
+  0.22 → 0.50-0.64). See :doc:`science/surface`.
+- The surface saturation humidity of every ECHAM tile (and of the
+  lowest-level air in the surface-layer Richardson number) is taken over ice
+  below the melting point and over water above, as ECHAM's ``tlucua`` table
+  does, instead of the Sundqvist mixed-phase blend; the latent heat in the
+  surface-layer buoyancy switches with the air temperature. The reported
+  latent heat flux is ``alhs·E`` over sea ice and carries the sublimation share
+  of the snow-covered fraction over land, and snow-covered land evaporates at
+  the potential rate (JSBACH's land wetness ``s + (1 − s)·w``).
+- New optional static forcing fields ``forest`` and ``glac``
+  (``ForcingData.forest_fraction`` / ``glacier_fraction``) carry the land
+  cover the land albedo reads; the bundle builders write them from ERA5
+  ``cvh`` and the permanent-snow mask. Bundles published before this change
+  lack them and load with both ``None`` (no forest masking; ice sheets keep
+  their ERA5 background albedo of ≈0.8).
+- **Breaking:** ``SurfaceOpticsParameters`` holds the albedo constants in a
+  nested ``EchamSurfaceAlbedoParameters`` (``albedo=``) and keeps only the
+  three emissivities at the top level; the six ``*_albedo_vis``/``*_albedo_nir``
+  fields are gone. The packaged ``jcm/data/bc/t63/forcing.nc`` stores
+  ``snowc`` as the jcm cover fraction ``min(1, SWE/sd2sc)`` (it held the ECHAM
+  snow water equivalent in metres) and gains ``forest``/``glac`` from the ECHAM
+  surface file.
+
 Moist dynamics: condensate loading and one tracer contract
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
