@@ -142,7 +142,9 @@ library ``lctlib_nlct21.def``, identical for every non-glacier type.
   (``OCEAN_DIRECT_WEIGHT``) instead of ECHAM's weighting by the previous
   step's direct/diffuse downward irradiance, which the library does not
   return. The even split halves the worst-case error of either pure choice
-  (all-direct clear sky, all-diffuse overcast). A column whose sun is down
+  (all-direct clear sky, all-diffuse overcast). It is a stopgap until the
+  library accepts separate direct/diffuse and per-band surface albedos
+  ([jax-rrtmgp issue 38](https://github.com/climate-analytics-lab/jax-rrtmgp/issues/38)). A column whose sun is down
   reports the diffuse value; its albedo never enters a shortwave solve.
 - `differentiability` — the temperature ramps are single clipped linear
   interpolations, so every constant and the surface temperature carry

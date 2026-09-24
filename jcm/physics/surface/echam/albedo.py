@@ -284,8 +284,9 @@ def ocean_albedo(
 #: Weight of the direct-beam albedo when the ocean's direct and diffuse
 #: albedos are merged into the single per-band value the radiation accepts.
 #:
-#: STOPGAP, to be removed when the radiation takes separate direct and
-#: diffuse surface albedos. ECHAM weights each by that band's downward
+#: STOPGAP until the radiation takes separate direct and diffuse surface
+#: albedos (climate-analytics-lab/jax-rrtmgp issue 38,
+#: https://github.com/climate-analytics-lab/jax-rrtmgp/issues/38). ECHAM weights each by that band's downward
 #: direct/diffuse irradiance from the previous radiation call. jax-rrtmgp's
 #: surface boundary applies ONE albedo to both the direct beam
 #: (``sw_cell_source``) and the diffuse field (``sw_transport``) and does not
