@@ -1,10 +1,10 @@
 [run]
 omit =
     *_test.py
-    # Offline data-mirror builders: they stream multi-GB Glade sources
+    # Offline data-mirror builders: they stream multi-GB Glade/Levante sources
     # (GMTED DEM, ERA5, input4MIPs) that cannot exist in CI. Their pure
-    # math (SSO statistics, regridding, registry) is covered via
-    # jcm/data/mirror/mirror_test.py; the I/O drivers run only on Glade.
+    # math (SSO statistics, regridding, registry, dust, sites) is covered via
+    # jcm/data/mirror/mirror_test.py; the I/O drivers run only on those sites.
     jcm/data/mirror/sso.py
     jcm/data/mirror/era5_land.py
     jcm/data/mirror/ozone.py

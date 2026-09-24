@@ -112,6 +112,21 @@ scientific gap, so treat results with care:
   on the combination. Reachable from either door: ``echam_physics(
   aerosol_module="jam", radiation_scheme="grey", ...)`` or the CLI's
   factory-backed ``physics=echam-jam physics.radiation_scheme=grey``.
+- **The ECHAM T127 and T255 grids** (``grid=echam_t{127,255}_l{47,95}_hybrid``;
+  384×192 and 768×384, node-for-node ECHAM's ``T127GR15`` / ``T255`` grids,
+  built with ``Grid.construct`` as T63 is) — *supported, not validated*. The
+  data mirror carries every climatological and static input for them (terrain,
+  present-day and pre-industrial SST/ice and land, emissions, DMS, the five dust
+  inputs — native HAMMOZ files — ozone and oxidants at L47/L95), so the ``auto``
+  and ``hf://bundles/t{127,255}/...`` inputs resolve exactly as at T63; the
+  yearly AMIP/ERA5 transient series are not published for them (#888). Nothing
+  is tuned for these grids: the physics runs with its T63-calibrated parameters
+  (including the dust ``nduscale_reg``, see {doc}`aerosol`), horizontal
+  diffusion takes ECHAM's tabulated T127/T255 e-folding times, and the time step
+  must be chosen by the user — the validated 12 min is not expected to hold; the
+  grid files suggest the advective-CFL scaling of the T106 step (≈10 min at
+  T127, ≈5 min at T255) as a starting point. No named configuration composes
+  them and they are not in the release matrix.
 - **Untabulated hybrid level counts with ``diffusion=auto``** — the ECHAM
   ``lmidatm`` hyperdiffusion profiles exist only for L47/L95; any other hybrid
   level count falls back to the uniform SPEEDY del² profile with a warning, which
