@@ -171,7 +171,7 @@ between the gridpoint state supplied by the dycore and a physics package:
                state: Current atmospheric state (temperature, winds, etc.)
                forcing: Boundary conditions for the *current step*. The
                    Model collapses every `TimeSeries` leaf and populates
-                   `forcing.solar` via ``forcing.select(date, calendar)``
+                   `forcing.solar` via ``forcing.select(date)``
                    before this call, so physics terms see only flat 2-D
                    spatial fields and a precomputed `SolarGeometry` —
                    no time axis, no `DateData`.
@@ -387,7 +387,7 @@ The default configuration provides a working model out of the box:
 
    # Just works - sensible defaults for everything
    model = Model(coords=get_speedy_coords())
-   predictions = model.run()
+   predictions = model.run(total_time="10 days")
 
 For Experts
 ^^^^^^^^^^^

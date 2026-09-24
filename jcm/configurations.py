@@ -131,6 +131,7 @@ def _run_kwargs(cfg, model) -> dict:
         # reject the string form the CLI accepts and break door equivalence.
         "save_interval": run.save_interval,
         "total_time": run.total_time,
+        "end_time": run.get("end_time"),
         "output_averages": bool(run.output_averages),
         "snapshot_interval": run.get("snapshot_interval"),
         "snapshot_variables": tuple(run.get("snapshot_variables") or ()),

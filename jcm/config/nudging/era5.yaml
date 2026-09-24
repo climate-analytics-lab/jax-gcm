@@ -1,11 +1,11 @@
 # Newtonian relaxation toward ERA5 reanalysis (WeatherBench2 cloud
 # store, #610). Adds a NudgingTerm to the physics and attaches a
-# time-varying target windowed to [run.start_date, start + total_time].
+# time-varying target windowed to [run.start_time, start + total_time].
 # Requires internet or a warm cache — prefetch on a login node:
 #   python -m jcm.data.era5 --grid <grid> --start <d0> --end <d1>
 #
 # Example:
-#   python -m jcm.main nudging=era5 run.start_date=2010-01-01 \
+#   python -m jcm.main nudging=era5 run.start_time=2010-01-01 \
 #       run.total_time=30 grid=echam_t63_l47_hybrid physics=echam
 #
 # Memory: the target stays resident — ~15 GB per 6-hourly year at

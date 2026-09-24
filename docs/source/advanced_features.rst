@@ -88,41 +88,39 @@ The CLI exposes the same override through the ``constants`` config group
    sets, run each in a **separate process** (e.g. a fresh interpreter or a
    separate CLI invocation).
 
-Calendar-aware durations and resampling
----------------------------------------
+Real dates and monthly interval means
+-------------------------------------
 
-Use this when you want to say "one year" instead of counting days, or when
-you need monthly or annual statistics aligned to real calendar boundaries.
-The distinction matters: the integrator's own cadence is fixed-length, so
-calendar-aligned averages are a post-processing step rather than a run
-setting.
+``Model`` uses one real Gregorian clock. Set ``start_time`` when constructing
+it, then supply either a fixed ``total_time`` (numeric days or a string such
+as ``"24h"``) or an absolute ``end_time``. Months and years are not duration
+aliases: use an endpoint when their varying lengths matter.
 
-``Model.run`` and ``Model.resume`` accept either a numeric day count or a
-calendar-string for ``save_interval`` and ``total_time``. Strings like
-``'1 month'`` and ``'1 year'`` are resolved against the model's calendar
-(``'365_day'`` by default; pass ``Model(calendar='gregorian')`` for the
-365.2425-day approximation). The integrator itself stays fixed-cadence —
-each "month" is a fixed 365/12-day chunk, not aligned to calendar month
-boundaries — so this is mostly an ergonomic shortcut.
-
-For *calendar-aligned* monthly / annual statistics, run the model at a
-daily ``save_interval`` and post-resample the trajectory using xarray's
-standard ``resample`` API. The trajectory's ``time`` coord is real
-``datetime64``, so xarray's resampler does the calendar bookkeeping:
+For monthly output, save daily interval means and aggregate their bounds:
 
 .. code-block:: python
 
-   predictions = model.run(save_interval='1 day', total_time='1 year')
-   ds = predictions.to_xarray()
+   model = Model(..., start_time="2000-01-01")
+   daily = model.run(end_time="2001-01-01", save_interval="1D",
+                     output_averages=True)
+   monthly = daily.monthly_means()
 
-   # Calendar-aligned monthly means.
-   monthly = ds.resample(time='1MS').mean()
+The helper returns an xarray Dataset with duration-weighted means, bounds
+and coverage. It rejects snapshots and intervals crossing month boundaries,
+because their monthly means cannot be reconstructed. A daily grid should
+therefore start at midnight. Observer datasets remain separate and retain
+their sampling cadence.
 
-   # Daily total precipitation summed into calendar months, etc.
-   monthly_precip = ds['precipitation'].resample(time='1MS').sum()
+Categorical integer and boolean diagnostics have no defined arithmetic mean.
+They are omitted from interval-mean primary output and named in the Dataset's
+``omitted_interval_mean_variables`` attribute. Instantaneous output retains
+them.
 
-The cost of this pattern is keeping daily output in memory for the
-duration of the run.
+Long runs can feed each chunk's daily Dataset to
+``jcm.temporal_aggregation.MonthlyMeanAccumulator.update``. Write any returned
+completed months, then call ``finish()`` for the last, possibly partial month.
+Its resumable state contains sums and valid durations per variable; it does
+not retain a month of daily fields.
 
 Long forcing time-series and chunked runs
 -----------------------------------------
@@ -150,17 +148,18 @@ years to continue from the previous state:
    year_iter = iter(ds.groupby('time.year'))
 
    year, year_ds = next(year_iter)
+   model = Model(coords=coords, start_time=f'{year}-01-01')
    forcing = ForcingData.from_dataset(year_ds, coords=coords,
                                       align_mode='by_date')
    preds = model.run(forcing=forcing, save_interval='1 day',
-                     total_time='1 year')
+                     end_time=f'{year + 1}-01-01')
    yearly_outputs.append(preds.to_xarray())
 
    for year, year_ds in year_iter:
        forcing = ForcingData.from_dataset(year_ds, coords=coords,
                                           align_mode='by_date')
        preds = model.resume(forcing=forcing, save_interval='1 day',
-                            total_time='1 year')
+                            end_time=f'{year + 1}-01-01')
        yearly_outputs.append(preds.to_xarray())
 
    trajectory = xr.concat(yearly_outputs, dim='time')
@@ -249,7 +248,7 @@ To wire it manually against any reference dataset:
 
    # The target is loaded straight off the netCDF in gridpoint space and
    # attached to forcing — it's just another per-step input. The Model
-   # slices it inside ``forcing.select(date, calendar)`` like every other
+   # slices it inside ``forcing.select(date)`` like every other
    # time-varying leaf, so the nudging term never sees the date.
    target = NudgingTarget.from_dataset(ref_ds)
    forcing = ForcingData.from_file('boundary_conditions.nc', coords=coords,
@@ -264,7 +263,7 @@ To wire it manually against any reference dataset:
 
    nudged_physics = with_nudging(physics, config)
    nudged = Model(coords=coords, terrain=terrain, physics=nudged_physics)
-   predictions = nudged.run(forcing=forcing, save_interval='1 day', total_time='1 month')
+   predictions = nudged.run(forcing=forcing, save_interval='1 day', total_time='30 days')
 
 The reference data can be a single climatology (passed with
 ``time_var=None``) or a multi-year time series; the latter aligns
@@ -368,20 +367,26 @@ the state retained by ``model``:
 
    state = model.initial_state()
    physics_carry = model.initial_physics_carry()
-   state, physics_carry, predictions = model.run_from_state_with_carry(
+   run_state, predictions = model.run_from_state_with_carry(
        initial_state=state,
        initial_physics_state=physics_carry,
+       initial_time=model.start_time,
+       initial_step=0,
        forcing=forcing,
        total_time=1.0,
        save_interval=1.0,
    )
 
+For the next window, pass ``run_state.dynamics``, ``run_state.physics``,
+``run_state.time`` and ``run_state.step`` together. The exact clock is part
+of the resumable state; do not reconstruct it from a floating elapsed counter.
+
 ``model.bootstrap_state()`` is the stateful alternative: it installs and
 returns a matched ``(state, physics_carry)`` pair for a later ``resume()``.
 The installed pair is available through the read-only ``model.dycore_state``
 and ``model.physics_carry`` properties. Checkpoint readers replace both values
-atomically through ``model.restore_state(...)`` so a dycore state cannot be
-paired accidentally with stale radiation or turbulence carry state.
+atomically through ``model.restore_state(state, physics_carry, time=..., step=...)``.
+The complete installed state is available as ``model.run_state``.
 
 ``ModelPredictions`` deliberately drops coordinate and physics objects when it
 crosses a JAX pytree boundary. Reattach that static context before converting a
@@ -405,7 +410,7 @@ model yourself:
 :func:`~jcm.initial_states.checkpoint_state` returns
 ``(state, physics_carry, donor_days)``. Unlike a checkpoint *resume* the
 donor's elapsed-day count is discarded, so the clock starts at the model's
-``start_date`` — that is what lets a hosted equilibrated state skip the
+``start_time`` — that is what lets a hosted equilibrated state skip the
 ~9-month from-cold spin-up without inheriting the donor run's calendar. Pass
 the carry through, or the run resets the radiation sub-cycle cache and
 prior-step TKE at the seam:
@@ -418,18 +423,17 @@ prior-step TKE at the seam:
        model, 'bundles/echam_t63_l47_hybrid/init_states/spun_up.msgpack')
    predictions = model.run(
        initial_state=state, initial_physics_state=physics_carry,
-       forcing=forcing, total_time='1 year', save_interval='1 day')
+       forcing=forcing, total_time='365 days', save_interval='1 day')
 
 (Restoring a checkpoint to continue a preempted run of your own — keeping the
 elapsed clock — is :func:`jcm.checkpoint.load_checkpoint`, in
 :doc:`running_at_scale`.)
 
-**Observers need one extra argument under an outer jit**, because their
-sampling tables are built on the host from the window's start time, which is
-a tracer there. Pass a concrete ``observer_t0_days``; or, to reuse one
-compilation across *different* windows, pass tables from
-``model.prepare_observers(t0_days, save_interval, total_time)`` as
-``observer_xs``.
+**Observers prepare sampling tables on the host.** When the window's exact
+clock is traced under an outer jit, build tables first with
+``model.prepare_observers(start_time, save_interval, total_time)`` and pass
+them as ``observer_xs``. The tables and exact clock can then vary between
+windows without making their values static compilation parameters.
 
 
 Coupling to an external surface component

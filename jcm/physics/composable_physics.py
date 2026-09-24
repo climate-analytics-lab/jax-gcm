@@ -770,7 +770,7 @@ class ComposablePhysics(nnx.Module, Physics):
         before compiling, so a term that requires an optional field it
         cannot run without (e.g. forced-mode surface fluxes) fails loudly
         at run start rather than silently applying a zero. ``run_window``
-        (``(start_seconds, end_seconds)`` since ``MODEL_EPOCH``, or ``None``
+        (``(start_seconds, end_seconds)`` since 1970-01-01, or ``None``
         when not concretely known) is passed through so a term can check a
         date-aligned series covers the run.
         """

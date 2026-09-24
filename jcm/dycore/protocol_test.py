@@ -149,6 +149,7 @@ class TestNonModalTrajectoryAppliesTermAttrs(unittest.TestCase):
 
     def test_delegated_path_stamps_output_attrs(self):
         import numpy as np
+        import jax_datetime as jdt
         import xarray as xr
 
         from jcm.dycore.base import Predictions
@@ -177,7 +178,10 @@ class TestNonModalTrajectoryAppliesTermAttrs(unittest.TestCase):
                     "long_name": "upward longwave flux"}}
 
         preds = Predictions(dynamics=None, physics=None,
-                            times=np.array([0.0]))
+                            times=jax.tree.map(
+                                lambda value: value[None],
+                                jdt.Datetime.from_isoformat(
+                                    "1970-01-01T00:00:00")))
         mp = ModelPredictions(preds, _FakeCoords(), _FakePhysics(),
                               dycore=_FakeDycore())
         ds = mp._trajectory_dataset()

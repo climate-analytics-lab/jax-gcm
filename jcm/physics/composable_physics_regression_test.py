@@ -192,6 +192,17 @@ class TestEchamReferenceTrajectory(_Float32ReferenceTest):
     convention (the dry-mass rows opened the composed column water budget
     by up to ~15 % of E in post-burst profiles). Both legitimately shift
     the 1-day integration, so the old fingerprint no longer applies.
+
+    Regenerated 2026-09-23 for the v3 Gregorian clock (#449, #876), on top
+    of the physics of dev 46eb3fc1. The old default evaluated 2000-01-01 at
+    seasonal day 7 because it took elapsed days from the 1970 epoch modulo
+    365. The exact Gregorian clock evaluates January 1 at phase zero. A
+    controlled run of the v3 integrator with the legacy phase patched into
+    ``jcm.date.fraction_of_year_elapsed`` reproduced the dev 46eb3fc1
+    fingerprint bit-for-bit (0.0 normalized RMS in every field), isolating
+    this reference shift (9.7 % in v, 7.5 % in u) to the corrected seasonal
+    forcing rather than integration or output changes. The 3% cross-runner
+    tolerance remains unchanged.
     """
 
     @pytest.mark.slow

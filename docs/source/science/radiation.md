@@ -245,3 +245,18 @@ sub-step caching + carry wiring), ``cloud_optics_test.py``, ``mcica_test.py``
 ``rte-rrtmgp-nn`` checkpoint). Design references:
 {doc}`../design/aerocom_erfari_sampling`, {doc}`../design/radiation_nn_emulator`,
 {doc}`../design/aerosol_optics_diagnostics`.
+
+## Seasonal timing in v3
+
+The forcing interface derives the annual phase from the elapsed fraction of
+**the current Gregorian year**, including the fractional day. January 1 is
+phase zero; a leap year has 366 days. SPEEDY's solar Fourier coefficients and
+its empirical ozone offset `10 / 365` remain unchanged: that denominator is a
+local empirical constant, not the model's date arithmetic. Monthly forcing
+uses civil months rather than twelve equal fractions of a nominal year.
+
+This changes the seasonal forcing relative to the former epoch-based 365-day
+clock, so old climate baselines are not numerically interchangeable. The
+calendar-boundary tests establish date alignment; multi-year SPEEDY and ECHAM
+climate comparisons remain a release validation requirement. The full rationale
+and downstream coupling migration are tracked in [issue #876](https://github.com/climate-analytics-lab/jax-gcm/issues/876).

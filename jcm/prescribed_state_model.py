@@ -18,16 +18,18 @@ depends on the previous one), use ``SingleColumnModel`` instead.
 from __future__ import annotations
 
 from typing import Any
+import math
 
 import jax
 import jax.numpy as jnp
 import jax_datetime as jdt
+import numpy as np
 import tree_math
 from jax.tree_util import tree_map
 
 from dinosaur.coordinate_systems import CoordinateSystem
 
-from jcm.date import DEFAULT_CALENDAR, DateData
+from jcm.date import DateData, SECONDS_PER_DAY, to_datetime
 from jcm.forcing import ForcingData, default_forcing
 from jcm.physics_interface import (
     Physics,
@@ -105,6 +107,8 @@ class PrescribedStatePredictions:
 
         from jcm import cf_metadata
         from jcm import constants as c
+        from jcm.predictions import output_time_labels
+        from jcm.temporal_aggregation import set_cf_datetime_encoding
 
         # Hardcoded positional dim names matching the prescribed-mode
         # vmap layout: (time, level, lon, lat) for column variables,
@@ -144,9 +148,10 @@ class PrescribedStatePredictions:
                     arr = np.asarray(v)
                     data_vars[f"diag.{k}"] = (_dims_for(arr), arr)
 
+        host_times = output_time_labels(self.times)
         ds = xr.Dataset(
             data_vars=data_vars,
-            coords={"time": np.asarray(self.times)},
+            coords={"time": np.asarray(host_times)},
         )
 
         # Data is still top-first here. Bring it into the file convention.
@@ -166,7 +171,7 @@ class PrescribedStatePredictions:
             # self-describing.
             ds = cf_metadata.orient_surface_first(ds)
             ds = cf_metadata.apply_cf_attributes(ds)
-        return ds
+        return set_cf_datetime_encoding(ds, "time")
 
 
 class PrescribedStateModel:
@@ -187,15 +192,14 @@ class PrescribedStateModel:
         coords: CoordinateSystem,
         terrain: TerrainData | None = None,
         dt_seconds: float = 1800.0,
-        start_date: jdt.Datetime | None = None,
-        calendar: str = DEFAULT_CALENDAR,
+        start_time: jdt.Datetime | str | None = None,
     ) -> None:
         """Initialise (see class docstring for argument descriptions).
 
-        ``start_date`` and ``calendar`` mirror :class:`jcm.model.Model` so
+        ``start_time`` mirrors :class:`jcm.model.Model` so
         each prescribed state can collapse ``TimeSeries`` forcing leaves
         (sea ice, SST, ozone climatology, ...) to the slice valid at that
-        state's ``sim_time`` before physics is evaluated. Without this,
+        state's time before physics is evaluated. Without this,
         from-file forcings stay as ``TimeSeries`` structs and physics
         terms that arithmetic-combine them with plain arrays raise
         ``TypeError: non-tree_math.VectorMixin argument is not a
@@ -204,9 +208,14 @@ class PrescribedStateModel:
         self.physics = physics
         self.coords = coords
         self.terrain = terrain if terrain is not None else TerrainData.aquaplanet(coords)
-        self.dt_seconds = float(dt_seconds)
-        self.start_date = start_date if start_date is not None else jdt.to_datetime("2000-01-01")
-        self.calendar = calendar
+        if not math.isfinite(float(dt_seconds)) or float(dt_seconds) <= 0:
+            raise ValueError("dt_seconds must be finite and positive.")
+        if float(dt_seconds) != round(float(dt_seconds)):
+            raise ValueError("dt_seconds must be representable as whole seconds.")
+        self.dt_seconds = int(dt_seconds)
+        self.start_time = to_datetime(
+            "2000-01-01" if start_time is None else start_time,
+            name="start_time")
         self.physics.cache_coords(coords)
         # Hand the timestep down to the composable-physics container so its
         # terms read a single ``dt`` source — mirrors the wiring in ``Model``
@@ -214,20 +223,45 @@ class PrescribedStateModel:
         if hasattr(self.physics, "dt_seconds"):
             self.physics.dt_seconds = self.dt_seconds
 
-    def _run_window_seconds(self, times):
-        """``(start, end)`` seconds since ``MODEL_EPOCH`` the states span.
+    @staticmethod
+    def _exact_offsets(times):
+        """Integer ``(days, seconds)`` offsets from ``start_time`` of ``times``.
 
-        ``times`` is days since ``start_date`` (the clock ``run`` evaluates
-        each state on). ``None`` when ``times`` is traced: there is then no
-        concrete window, and validation must not force a host read.
+        ``times`` is fixed-duration days since ``start_time``. A concrete axis
+        is rounded to whole seconds on the host in float64, so a state ten
+        years into a run is still placed on its exact second (a float32
+        ``days * 86400`` would resolve only ~32 s there). A traced axis falls
+        back to the same arithmetic in JAX. Returns ``(days, seconds, exact)``
+        where ``exact`` is ``False`` for the traced fallback.
         """
         if isinstance(times, jax.core.Tracer):
+            sim = jnp.asarray(times) * SECONDS_PER_DAY
+            return (jnp.floor(sim / SECONDS_PER_DAY).astype(jnp.int32),
+                    jnp.round(sim % SECONDS_PER_DAY).astype(jnp.int32), False)
+        seconds = np.rint(np.asarray(jax.device_get(times), dtype=np.float64)
+                          * SECONDS_PER_DAY).astype(np.int64)
+        days, secs = np.divmod(seconds, SECONDS_PER_DAY)
+        return (jnp.asarray(days, dtype=jnp.int32),
+                jnp.asarray(secs, dtype=jnp.int32), True)
+
+    def _run_window_seconds(self, times):
+        """``(start, end)`` seconds since 1970-01-01 the states span.
+
+        ``times`` is days since ``start_time`` (the clock ``run`` evaluates
+        each state on); the window is computed from the same exact offsets,
+        in the representation :func:`jcm.forcing.by_date_coverage_error`
+        compares date-aligned forcing axes against. ``None`` when ``times``
+        is traced: there is then no concrete window, and validation must not
+        force a host read.
+        """
+        days, secs, exact = self._exact_offsets(times)
+        if not exact:
             return None
-        from jcm.date import absolute_seconds_since_epoch
-        days = jnp.asarray(jax.device_get(times), dtype=float)
-        base = float(absolute_seconds_since_epoch(self.start_date))
-        return (base + float(days.min()) * 86400.0,
-                base + float(days.max()) * 86400.0)
+        base = (int(self.start_time.delta.days) * SECONDS_PER_DAY
+                + int(self.start_time.delta.seconds))
+        offsets = (np.asarray(days, dtype=np.int64) * SECONDS_PER_DAY
+                   + np.asarray(secs, dtype=np.int64))
+        return float(base + offsets.min()), float(base + offsets.max())
 
     def run(
         self,
@@ -241,10 +275,12 @@ class PrescribedStateModel:
             states: List of ``PhysicsState`` snapshots, or a single
                 ``PhysicsState`` whose leading axis is time.
             forcing: Surface forcing; defaults to aquaplanet from ``coords``.
-            times: Days since ``start_date`` at which each state is valid,
-                one per state. Date-aligned forcing is selected, and its
-                coverage checked, at these times; ``None`` means consecutive
-                ``dt_seconds`` steps from ``start_date``.
+            times: Fixed-duration days since ``start_time`` at which each
+                state is valid, one per state. Date-aligned forcing is
+                selected, and its coverage checked, at these times (rounded
+                to whole seconds); ``None`` means consecutive ``dt_seconds``
+                steps from ``start_time``. Output labels are the exact
+                :class:`jax_datetime.Datetime` values of these instants.
 
         Returns:
             ``PrescribedStatePredictions``.
@@ -266,7 +302,7 @@ class PrescribedStateModel:
         elif int(jnp.shape(times)[0]) != n_times:
             raise ValueError(
                 f"PrescribedStateModel.run: {int(jnp.shape(times)[0])} times "
-                f"for {n_times} states; pass one time (days since start_date) "
+                f"for {n_times} states; pass one time (days since start_time) "
                 "per state.")
 
         # Both directions of the forced-mode contract (#301), as at every run
@@ -277,39 +313,39 @@ class PrescribedStateModel:
 
         physics = self.physics
         terrain = self.terrain
-        start_date = self.start_date
-        calendar = self.calendar
+        start_time = self.start_time
         dt_seconds = self.dt_seconds
 
-        # ``times`` is days-since-``start_date``; convert to sim_time
-        # seconds so ``_date_for`` matches ``Model.date_from_sim_time``.
-        sim_times = jnp.asarray(times) * 86400.0
+        # ``times`` is days-since-``start_time``; place each state on its
+        # exact whole-second offset (the same instants the coverage window
+        # above was computed from).
+        day_offsets, second_offsets, _ = self._exact_offsets(times)
 
-        def _date_for(sim_time):
-            sim_time = jax.lax.stop_gradient(sim_time)
+        def _date_for(day_offset, second_offset):
+            model_time = start_time + jdt.Timedelta(days=day_offset,
+                                                    seconds=second_offset)
+            elapsed = (day_offset.astype(jnp.float32) * SECONDS_PER_DAY
+                       + second_offset)
             return DateData.set_date(
-                model_time=start_date + jdt.Timedelta(
-                    days=jnp.floor(sim_time / 86400).astype(jnp.int32),
-                    seconds=jnp.round(sim_time % 86400).astype(jnp.int32),
-                ),
-                model_step=jnp.int32(sim_time / dt_seconds),
+                model_time=model_time,
+                model_step=jnp.int32(elapsed / dt_seconds),
                 dt_seconds=dt_seconds,
-                calendar=calendar,
             )
 
-        def step(state, sim_time):
+        def step(state, day_offset, second_offset):
             clamped = verify_state(state)
             # Collapse any TimeSeries forcing leaves to the slice valid
-            # at this state's sim_time (same clock as
-            # Model.date_from_sim_time).
-            forcing_now = forcing.select(_date_for(sim_time), calendar=calendar)
+            # at this state's exact time.
+            forcing_now = forcing.select(_date_for(day_offset, second_offset))
             return physics.compute_tendencies(clamped, forcing_now, terrain)
 
         @jax.jit
         def vmapped():
-            return jax.vmap(step)(states, sim_times)
+            return jax.vmap(step)(states, day_offsets, second_offsets)
 
         tendencies, physics_data = vmapped()
+        exact_times = start_time + jdt.Timedelta(days=day_offsets,
+                                                 seconds=second_offsets)
         # Carry the TOA-first hybrid (a, b) interface tables so ``to_xarray``
         # can write real surface-first sigma coordinates + CF metadata (#739).
         from jcm import cf_metadata
@@ -318,7 +354,7 @@ class PrescribedStateModel:
             states=states,
             tendencies=tendencies,
             physics_data=physics_data,
-            times=times,
+            times=exact_times,
             a_boundaries_pa=a_half,
             b_boundaries=b_half,
         )

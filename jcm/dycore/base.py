@@ -67,12 +67,21 @@ class Predictions:
         physics: Diagnostic physics dict for this frame (per-step snapshot or
             inner-step running mean, depending on the integration mode).
         times: Frame timestamps (filled in by :class:`Model` after the scan).
+        time_bounds: Exact lower/upper interval bounds with shape
+            ``(n_frames, 2)``.
+        time_cell_method: JAX boolean; true when frames are interval means,
+            false for instantaneous samples. Serialization maps true to the
+            CF ``"time: mean"`` cell method.
+        time_bounds: Exact lower/upper interval bounds for every frame.
+        time_cell_method: JAX scalar boolean; true identifies interval means.
 
     """
 
     dynamics: Any
     physics: Any
     times: Any
+    time_bounds: Any = None
+    time_cell_method: Any = None
 
 
 class DynamicalCore(abc.ABC):

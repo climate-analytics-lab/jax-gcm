@@ -45,8 +45,10 @@ import dataclasses
 
 import jax
 import jax.numpy as jnp
+import jax_datetime as jdt
 import pytest
 
+from jcm.date import DateData
 from jcm.forcing import default_forcing
 from jcm.model import Model
 from jcm.physics.echam.echam_levels import get_echam_levels
@@ -100,8 +102,12 @@ def _mean_temperature_after_two_steps(solar_constant, *, cloud_scheme, aerosol_m
     step = model._get_op_split_step_fn(forcing)
     state = model._final_dycore_state
     physics_state = model._final_physics_state
-    for _ in range(_STEPS):
-        state, physics_state = step(state, physics_state)
+    clock = model.start_time
+    for model_step in range(_STEPS):
+        date = DateData(
+            clock, jnp.int32(model_step), int(model.dt_si.m))
+        state, physics_state = step(state, physics_state, date)
+        clock = clock + jdt.Timedelta(seconds=jnp.int32(model.dt_si.m))
     return jnp.mean(model.dycore.to_physics_state(state).temperature)
 
 

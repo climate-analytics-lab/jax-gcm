@@ -12,15 +12,15 @@ Two routing modes, chosen by the declared ``align_mode`` (never by the
 file's time axis — :func:`jcm.forcing.resolve_align`, #884; ``auto``
 resolves only data-mirror/packaged products, from their manifest kind):
 
-* ``wrap_year`` — a 12-month climatology. Year wraps to itself; the same
-  January slice gets returned every January regardless of year. Files
-  like ``T63L47_ozone_picontrol.nc``.
-* ``by_date`` / ``by_date_interp`` — transient. The file's ``time``
-  coordinate is decoded to absolute seconds since ``1970-01-01`` and
-  ``ForcingData.select(date)`` looks up the date-aligned slice (e.g. an
-  SSP / historical multi-year run gets the right monthly value for
-  *that* year); ``by_date_interp`` interpolates linearly between the
-  mid-month means (the mirror's ``ozone_amip`` resolves to it).
+* ``wrap_year`` — a 12-month climatology. Year wraps to itself: the
+  record of the model clock's Gregorian calendar month is held, switching
+  on the 1st, so the same January slice is returned every January
+  regardless of year. Files like ``T63L47_ozone_picontrol.nc``.
+* ``by_date`` / ``by_date_interp`` — transient. The file's exact ``time``
+  coordinate and ``ForcingData.select(date)`` provide the date-aligned
+  slice (e.g. an SSP / historical multi-year run gets the right monthly
+  value for *that* year); ``by_date_interp`` interpolates linearly between
+  the mid-month means (the mirror's ``ozone_amip`` resolves to it).
 
 In both cases ``ForcingData.select(date)`` descends into
 ``OzoneClimatology`` (it is a ``tree_math.struct``, i.e. a pytree) and
@@ -226,9 +226,10 @@ class OzoneClimatology:
         o3_cols = o3_t.reshape(ntime, nlev, nlon * nlat)
 
         # Routing by the declared mode. A climatology is the 12-month
-        # contract WRAP_YEAR's month-position index assumes; its samples are
-        # placed at mid-month (the stamps are informational under WRAP_YEAR).
-        # A transient file keeps its decoded absolute dates.
+        # contract WRAP_YEAR's calendar-month selection assumes; its records
+        # carry nominal month-start labels (the source stamps are not read,
+        # so idealised-calendar climatologies load). A transient file keeps
+        # its decoded exact dates.
         if align == WRAP_YEAR:
             if ntime != 12:
                 raise ValueError(
@@ -237,17 +238,14 @@ class OzoneClimatology:
                     "climatology is 12 monthly means. Set "
                     "forcing.ozone_align=by_date / by_date_interp for a "
                     "transient series.")
-            seconds_per_month = 30.4375 * 86400.0  # 365.25/12 days
-            time_seconds = jnp.asarray(
-                (np.arange(ntime) + 0.5) * seconds_per_month,
-                dtype=jnp.float32,
-            )
+            times = np.arange("2001-01", "2002-01",
+                              dtype="datetime64[M]").astype("datetime64[s]")
         else:
-            time_seconds = _decode_time_axis_seconds(ds, path)
+            times = _decode_time_axis(ds, path)
 
         ts = make_time_series(
             jnp.asarray(o3_cols, dtype=jnp.float32),
-            time_seconds,
+            times,
             align_mode=align,
         )
         return cls(o3_ppmv=ts)
@@ -280,42 +278,24 @@ class OzoneClimatology:
         return bool(arr.size > 0)
 
 
-def _decode_time_axis_seconds(ds, path: Path) -> jnp.ndarray:
-    """Decode a transient ozone file's time axis to seconds since 1970.
+def _decode_time_axis(ds, path: Path):
+    """Decode a transient ozone file's exact Gregorian time axis.
 
-    Mirrors ``jcm.forcing._time_axis_seconds_from_ds`` but works on the
-    raw ``(values, units)`` pair (we opened with ``decode_times=False``
-    above so the climatology branch could keep month indices as plain
-    integers).
+    Mirrors ``jcm.forcing._time_axis_from_ds`` but works on the
+    raw ``(values, units)`` pair (the file is opened with
+    ``decode_times=False`` so a climatology's stamps, which may use an
+    idealised calendar, are never decoded).
     """
-    import pandas as pd
     import xarray as xr
+    from jcm.forcing import _time_axis_from_ds
 
     # Re-decode just the time coord. ``xr.decode_cf`` on the whole
     # dataset would also try to re-encode masked O3 values etc., which
     # is unnecessary here.
     if "time" not in ds.coords:
         raise ValueError(
-            f"Transient ozone file {path} has ntime>{12} but no decodable "
-            f"``time`` coordinate."
+            f"Date-aligned ozone file {path} has no decodable ``time`` "
+            "coordinate."
         )
     time_da = xr.decode_cf(ds[["time"]])["time"]
-    vals = np.asarray(time_da.values)
-    if vals.dtype == object:
-        # cftime axis (e.g. the FZJ ozone's 365_day calendar): map each
-        # date by its calendar components onto the Gregorian clock, the
-        # same convention as ``jcm.forcing._time_axis_seconds_from_ds``
-        # (noleap day-counting would drift ~7 days by 2000 against the
-        # model's leap-aware lookup target).
-        import datetime as _dt
-        times = pd.DatetimeIndex([
-            _dt.datetime(d.year, d.month, d.day,
-                         getattr(d, "hour", 0), getattr(d, "minute", 0),
-                         getattr(d, "second", 0))
-            for d in np.ravel(vals)
-        ])
-    else:
-        times = pd.DatetimeIndex(vals)
-    epoch = pd.Timestamp("1970-01-01")
-    delta_s = (times - epoch).total_seconds().to_numpy()
-    return jnp.asarray(delta_s, dtype=jnp.float32)
+    return _time_axis_from_ds(xr.Dataset(coords={"time": time_da}))
