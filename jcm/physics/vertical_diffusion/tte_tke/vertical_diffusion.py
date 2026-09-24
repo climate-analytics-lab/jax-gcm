@@ -11,7 +11,7 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
-from jcm.forcing import land_snow_cover
+from jcm.forcing import land_snow_cover, land_wetness
 from jcm.physics.surface.echam.albedo import CTFREEZ
 from jcm.physics.thermodynamics import saturation_specific_humidity
 from .vertical_diffusion_types import (
@@ -793,11 +793,15 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # part at the soil's availability. That keeps the land flux at least
         # the snow part's potential flux, which the sublimation latent heat
         # below is charged against.
-        soilw_col = jnp.clip(forcing.soilw_am.reshape(ncols), 0.0, 1.0)
+        glac_col = (None if forcing.glacier_fraction is None
+                    else forcing.glacier_fraction.reshape(ncols))
         surface_wetness = jnp.stack([
             jnp.ones(ncols),
             jnp.ones(ncols),
-            snow_col + (1.0 - snow_col) * soilw_col,
+            land_wetness(
+                jnp.clip(forcing.soilw_am.reshape(ncols), 0.0, 1.0),
+                glac_col,
+                snow_cover=jnp.clip(forcing.snowc_am.reshape(ncols), 0.0, 1.0)),
         ], axis=1)
 
         # Share of each tile's potential evaporation that sublimates (sets

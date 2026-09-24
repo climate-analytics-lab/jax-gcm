@@ -757,7 +757,10 @@ ECHAM surface albedo and frozen-surface saturation
   land — so
   coastal and ice-margin cells are no longer diluted by their ocean or
   glacier neighbours. On pySES this changes the coastal columns of every
-  run on the packaged T63 forcing.
+  run on the packaged T63 forcing. SPEEDY reads the same fields through the
+  same helpers (``jcm.forcing.land_snow_cover`` / ``land_wetness``): with a
+  glacier map its land tile counts the glacier as fully snow covered and
+  fully wet; without one (the T30 climatology) nothing changes.
 - The radiation solves with the surface albedo and emissivity of its solve
   step and publishes those in ``radiation.surface_*``, held between solves,
   so the published albedo, reflected flux and heating stay one solve's

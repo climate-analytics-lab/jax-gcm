@@ -1912,9 +1912,8 @@ class TestLandCoverChannels(unittest.TestCase):
                                            align_mode="wrap_year")
         date = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(
-                jdt.to_datetime('1981-07-02')),
-            calendar='gregorian')
-        sliced = forcing.select(date, calendar='gregorian')
+                jdt.to_datetime('1981-07-02')))
+        sliced = forcing.select(date)
         np.testing.assert_allclose(sliced.forest_fraction, 0.4)
         self.assertEqual(sliced.glacier_fraction.shape, (96, 48))
         self.assertEqual(float(sliced.glacier_fraction[:, :4].min()), 1.0)

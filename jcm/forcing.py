@@ -304,6 +304,25 @@ def land_snow_cover(snow_cover, glacier_fraction=None):
     return g + (1.0 - g) * s
 
 
+def land_wetness(soil_wetness, glacier_fraction=None, snow_cover=0.0):
+    """Evaporative wetness of the whole land tile.
+
+    ``soil_wetness`` (``soilw_am``) and ``snow_cover`` (``snowc``) describe
+    the non-glacier land. The glacier share and, when passed, the
+    snow-covered share evaporate at the potential rate, the rest at the soil
+    wetness: ``g + (1 - g)·(s + (1 - s)·w)``. The ECHAM vertical diffusion
+    passes the snow cover (JSBACH's ``qsat_fact``); SPEEDY, whose bulk
+    formula has no snow term in the soil availability, passes only the
+    glacier. With neither it is the soil wetness itself. Broadcasting-native.
+    """
+    s = jnp.clip(snow_cover, 0.0, 1.0)
+    wet = s + (1.0 - s) * soil_wetness
+    if glacier_fraction is None:
+        return wet
+    g = jnp.clip(glacier_fraction, 0.0, 1.0)
+    return g + (1.0 - g) * wet
+
+
 
 @tree_math.struct
 class ForcingData:
@@ -397,8 +416,11 @@ class ForcingData:
     # background albedo on the others), as do ``soilw_am`` / ``soilw_rel``
     # (the glacier counts as fully wet); ``stl`` is conditional on the land. Consumers combine them once: total snow cover
     # of the land ``g + (1 - g)·min(1, s)`` (:func:`land_snow_cover`),
-    # effective forest ``(1 - g)·f`` and the background albedo on the
-    # non-glacier tile only (``jcm.physics.surface.echam.albedo``).
+    # effective forest ``(1 - g)·f``, the background albedo on the
+    # non-glacier tile only (``jcm.physics.surface.echam.albedo``; SPEEDY's
+    # ``alb0 + S·(albsn - alb0)`` with the whole-land snow cover S is the
+    # same tile average, a glacier being fully snow covered), and the whole
+    # land's wetness :func:`land_wetness`.
     forest_fraction: Any = None
     glacier_fraction: Any = None
 

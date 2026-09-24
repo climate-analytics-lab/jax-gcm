@@ -118,9 +118,13 @@ sampler — weights each by its own mask
 (``jcm/data/regridding.py::regrid_land_surface``), so ocean or glacier
 neighbours never dilute a coastal or ice-margin cell. Consumers combine them
 once: the snow-covered share of the land is ``glac + (1 − glac)·snowc``
-(``jcm/forcing.py::land_snow_cover``, used by the land wetness and sublimation
-and by the dust snow gate), the effective forest ``(1 − glac)·forest``, and the
-background albedo applies to the non-glacier tile only (``land_albedo``'s tile
+(``jcm/forcing.py::land_snow_cover``, used by the land wetness and sublimation,
+by the dust snow gate and as SPEEDY's whole-land snow cover), the whole-land
+wetness is ``jcm/forcing.py::land_wetness`` (glacier, and for ECHAM the
+snow-covered share, at the potential rate; ECHAM and SPEEDY both call it), the
+effective forest ``(1 − glac)·forest``, and the background albedo applies to
+the non-glacier tile only (``land_albedo``'s tile average; SPEEDY's
+``alb0 + S·(albsn − alb0)`` with the whole-land snow cover is the same
 average).
 
 Every constant is a differentiable leaf of ``EchamSurfaceAlbedoParameters``
