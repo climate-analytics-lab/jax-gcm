@@ -111,6 +111,19 @@ Specific humidity has one kg/kg contract
   magnitude does: a near-surface ``specific_humidity`` above 0.1 is g/kg, and
   is impossible in kg/kg.
 
+``relative_humidity`` has one definition
+""""""""""""""""""""""""""""""""""""""""
+
+- **Breaking for readers of** ``relative_humidity`` **from ECHAM runs:** the
+  saved field is now always ``MoistAirColumnState``'s water-saturation RH
+  (``e/e_s,w``, WMO; what ``tools/aerocom_cmor.py`` writes as ``hur``) and
+  carries CF ``standard_name = relative_humidity``. Previously the Sundqvist
+  cloud-cover term overwrote it with its own ``q/q_s``, whose ``q_s`` switches
+  to ice saturation where a cold cell holds cloud ice — up to ~25 % higher in
+  icy cold cells, and discontinuous across the ice threshold. That closure
+  humidity is now published separately as ``cover_relative_humidity``
+  (#615).
+
 ``ChemistryData`` uses ppmv consistently
 """"""""""""""""""""""""""""""""""""""""
 
