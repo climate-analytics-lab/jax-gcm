@@ -385,6 +385,17 @@ class SitesTest(unittest.TestCase):
                 "/pool/data/INPUT4MIP/data/input4MIPs/"))
         with patch.dict(os.environ, {"JCM_MIRROR_SITE": "glade"}):
             self.assertIsNotNone(sites.current().rda)
+        # An inputdata override carries the WACCM oxidant root with it; the
+        # dedicated oxidant override wins over both.
+        with patch.dict(os.environ, {"JCM_MIRROR_SITE": "levante",
+                                     "JCM_CESM_INPUTDATA": "/my/inputdata"}):
+            site = sites.current()
+            self.assertEqual(site.cesm_inputdata, "/my/inputdata")
+            self.assertEqual(site.waccm_oxidants, "/my/inputdata/atm/cam/ozone")
+        with patch.dict(os.environ, {"JCM_MIRROR_SITE": "glade",
+                                     "JCM_CESM_INPUTDATA": "/my/inputdata",
+                                     "JCM_WACCM_OXIDANTS_DIR": "/cseg/ozone"}):
+            self.assertEqual(sites.current().waccm_oxidants, "/cseg/ozone")
         with patch.dict(os.environ, {"JCM_MIRROR_SITE": "nowhere"}):
             with self.assertRaisesRegex(ValueError, "known sites"):
                 sites.current()

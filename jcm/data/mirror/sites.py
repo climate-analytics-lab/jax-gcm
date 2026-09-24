@@ -22,7 +22,10 @@ Selection: ``JCM_MIRROR_SITE`` if set, else auto-detection by mount point, else
 ``glade`` (so module-level path constants still form, e.g. for unit tests on a
 laptop, and the source check reports what is missing).
 Individual roots can be overridden with ``JCM_HAMMOZ_DIR`` (a directory laid out
-like ``/pool/data/ECHAM6-HAMMOZ``) and ``JCM_CESM_INPUTDATA``.
+like ``/pool/data/ECHAM6-HAMMOZ``), ``JCM_CESM_INPUTDATA`` (a CESM inputdata
+tree — the WACCM oxidants then resolve under its ``atm/cam/ozone`` too, as in
+the standard layout) and ``JCM_WACCM_OXIDANTS_DIR`` (the oxidant directory on
+its own, e.g. Glade's separate ``cseg`` tree; it wins over the inputdata one).
 """
 
 from __future__ import annotations
@@ -121,7 +124,14 @@ def current() -> Site:
     if os.environ.get("JCM_HAMMOZ_DIR"):
         overrides["hammoz"] = os.environ["JCM_HAMMOZ_DIR"]
     if os.environ.get("JCM_CESM_INPUTDATA"):
-        overrides["cesm_inputdata"] = os.environ["JCM_CESM_INPUTDATA"]
+        # The oxidant files sit in the inputdata tree's atm/cam/ozone, so an
+        # inputdata override moves them too; leaving the site default in place
+        # would check (and read) oxidants from a tree the user replaced.
+        inputdata = os.environ["JCM_CESM_INPUTDATA"]
+        overrides["cesm_inputdata"] = inputdata
+        overrides["waccm_oxidants"] = f"{inputdata}/atm/cam/ozone"
+    if os.environ.get("JCM_WACCM_OXIDANTS_DIR"):
+        overrides["waccm_oxidants"] = os.environ["JCM_WACCM_OXIDANTS_DIR"]
     return replace(site, **overrides) if overrides else site
 
 

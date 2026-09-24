@@ -9,7 +9,10 @@ Levante the input4MIPs products below live under
 `/pool/data/INPUT4MIP/data/input4MIPs/CMIP7/CMIP/...` (same tree below `CMIP7`),
 the HAMMOZ and ECHAM6 input pools under `/pool/data/ECHAM6-HAMMOZ` and
 `/pool/data/ECHAM6`; there is no RDA ERA5 archive, so Tier A is pulled from the
-published mirror (`--stage pull`) instead of rebuilt.
+published mirror (`--stage pull`) instead of rebuilt. Roots can be overridden
+per build: `JCM_HAMMOZ_DIR` (HAMMOZ pool layout), `JCM_CESM_INPUTDATA` (a CESM
+inputdata tree; the WACCM oxidants then resolve under its `atm/cam/ozone`) and
+`JCM_WACCM_OXIDANTS_DIR` (the oxidant directory alone).
 
 | product | path | resolution |
 |---|---|---|
