@@ -47,9 +47,13 @@ Produces, in ``--out-dir``:
   12-month axis, plus the static ``alb`` (``ALB``, the snow-free background
   albedo), ``forest`` (``FOREST``) and ``glac`` (``GLAC``) the ECHAM land
   albedo reads (#672). ``snowc`` is the jcm snow-cover fraction
-  ``min(1, SWE/sd2sc)`` of the ECHAM snow water equivalent, zero on glaciers
-  (whose snow is the glacier itself) — the same definition the data-mirror
-  bundles use, so the field means one thing whichever product supplies it.
+  ``min(1, SWE/sd2sc)``, zero on glaciers (whose snow is the glacier itself)
+  — the same definition the data-mirror bundles use, so the field means one
+  thing whichever product supplies it. The ECHAM files carry a single snow
+  snapshot; ``--snow-cover`` takes the monthly ``snowc`` of a jcm forcing
+  file on the same grid instead (the packaged T63 file uses the data-mirror
+  ERA5 climatology this way), since the land albedo reads the cover every
+  month.
 
 Either ``--surface`` (terrain only) or ``--sst`` + ``--sic`` +
 ``--surface`` (terrain + forcing) is required.
@@ -149,6 +153,7 @@ def _build_forcing(
     sic_ds: xr.Dataset,
     surface_ds: xr.Dataset,
     land_ds: xr.Dataset | None = None,
+    snow_cover_ds: xr.Dataset | None = None,
 ) -> xr.Dataset:
     # Force shared (lat, lon) coords from SST so xarray doesn't mask rows
     # where the three files disagree in the last few bits.
@@ -194,8 +199,16 @@ def _build_forcing(
         sn = surface_ds["SN"] if "SN" in surface_ds else surface_ds["lsm"] * 0.0
     cover = land_cover_fields(surface_ds)
     soilw_t = (ws * ones_t).transpose("lon", "lat", "time")
-    snowc_t = (snow_cover_fraction(sn, cover["glac"])
-               * ones_t).transpose("lon", "lat", "time")
+    if snow_cover_ds is not None:
+        # A monthly jcm snow-cover climatology on this grid, month by month
+        # onto the SST axis; glacier cells zeroed as above.
+        monthly = snow_cover_ds["snowc"].transpose("lon", "lat", "time")
+        monthly = monthly.assign_coords(
+            lat=sst_ds["lat"], lon=sst_ds["lon"], time=time)
+        snowc_t = monthly.clip(0.0, 1.0).where(cover["glac"] < 0.5, 0.0)
+    else:
+        snowc_t = (snow_cover_fraction(sn, cover["glac"])
+                   * ones_t).transpose("lon", "lat", "time")
 
     ds = xr.Dataset({
         "sst":      sst_ds["sst"].transpose("lon", "lat", "time").astype("float32"),
@@ -224,6 +237,10 @@ def main() -> None:
                         "real monthly land T climatology + initial soil "
                         "moisture. Optional but strongly recommended; without "
                         "it ``stl`` falls back to AMIP-SST extrapolation.")
+    p.add_argument("--snow-cover", type=Path,
+                   help="jcm forcing file whose 12-month ``snowc`` cover "
+                        "fraction (same grid) replaces the single ECHAM snow "
+                        "snapshot, e.g. the data-mirror forcing_pd.nc.")
     p.add_argument("--out-dir", required=True, type=Path,
                    help="Output directory (created if missing)")
     args = p.parse_args()
@@ -250,7 +267,10 @@ def main() -> None:
             else None
         )
         forcing_path = args.out_dir / "forcing.nc"
-        _build_forcing(sst_ds, sic_ds, surface_ds, land_ds).to_netcdf(forcing_path)
+        snow_cover_ds = (_normalize(xr.open_dataset(args.snow_cover))
+                         if args.snow_cover is not None else None)
+        _build_forcing(sst_ds, sic_ds, surface_ds, land_ds,
+                       snow_cover_ds).to_netcdf(forcing_path)
         print(f"wrote {forcing_path}")
 
 

@@ -26,8 +26,9 @@ Unit translations into the conventions the packaged t63 files establish
 * ``alb``   = per-cell minimum monthly ERA5 fal — the snow-free
   background albedo (snow brightening is applied dynamically from
   ``snowc``; an annual mean would double-count it)
-* ``forest`` = ERA5 high-vegetation cover ``cvh`` — the forest fraction
-  JSBACH's broadband land albedo masks the snow albedo with (static)
+* ``forest`` = ERA5 high-vegetation cover ``cvh`` as a fraction of the
+  land — the forest fraction JSBACH's broadband land albedo masks the snow
+  albedo with (static)
 * ``glac``  = the permanent-snow (ice-sheet) mask above, as a cell fraction
   — the glacier tiles whose albedo is the ECHAM glacier albedo (static).
   Same mask that zeroes ``snowc``, so a cell's snow is either seasonal
@@ -158,11 +159,25 @@ def land_cover_fields(era5: xr.Dataset, permanent_snow: xr.DataArray,
     glacier mask is the same ``permanent_snow`` definition
     :func:`translate_land` zeroes ``snowc`` with, so the two channels
     partition the snow. The single source for every bundle builder (#672).
+
+    Both are fractions *of the land*, as JSBACH's are: ERA5 carries ``cvh``
+    on its land points (``lsm > 0.5``) and zero at sea, so a plain regrid of
+    a coastal target cell would dilute the land value with sea zeros. Each
+    field is therefore regridded together with the ERA5 land mask and
+    divided by it.
     """
+    land = (era5.lsm > 0.5).astype(np.float64)
+    land_frac = interp_to(land, lats, lons)
+    has_land = land_frac > 1e-6
+
+    def per_land(field):
+        frac = interp_to(field.astype(np.float64) * land, lats, lons)
+        return (frac / land_frac.where(has_land, 1.0)).where(
+            has_land, 0.0).clip(0.0, 1.0)
+
     return {
-        "forest": interp_to(era5.cvh.clip(0.0, 1.0), lats, lons).clip(0.0, 1.0),
-        "glac": interp_to(permanent_snow.astype(np.float64), lats,
-                          lons).clip(0.0, 1.0),
+        "forest": per_land(era5.cvh.clip(0.0, 1.0)),
+        "glac": per_land(permanent_snow),
     }
 
 

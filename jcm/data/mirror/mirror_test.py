@@ -290,16 +290,22 @@ class LandCoverFieldsTest(unittest.TestCase):
         lon = np.arange(0.0, 360.0, 60.0)
         grid = dict(dims=("latitude", "longitude"),
                     coords={"latitude": lat, "longitude": lon})
-        cvh = xr.DataArray(np.full((7, 6), 0.6), **grid)
+        lsm = np.ones((7, 6))
+        lsm[:, 3:] = 0.0             # the eastern half is sea
+        cvh = np.where(lsm > 0.5, 0.6, 0.0)   # ERA5: cvh is zero at sea
         snow = np.zeros((7, 6), dtype=bool)
-        snow[0] = True   # south-pole row: an ice sheet
-        era5 = xr.Dataset({"cvh": cvh})
+        snow[0] = True               # south-pole row: an ice sheet
+        era5 = xr.Dataset({"cvh": xr.DataArray(cvh, **grid),
+                           "lsm": xr.DataArray(lsm, **grid)})
+        # Targets: pure land, a coastal cell half-way to the sea, pure sea.
         out = land_cover_fields(era5, xr.DataArray(snow, **grid),
                                 lats=np.array([-90.0, 0.0]),
-                                lons=np.array([0.0, 120.0]))
-        np.testing.assert_allclose(out["forest"].values, 0.6)
-        np.testing.assert_allclose(out["glac"].values, [[1.0, 1.0],
-                                                        [0.0, 0.0]])
+                                lons=np.array([60.0, 150.0, 240.0]))
+        # Per LAND: the coastal cell keeps its land's 0.6, not a diluted 0.3.
+        np.testing.assert_allclose(out["forest"].values,
+                                   [[0.6, 0.6, 0.0], [0.6, 0.6, 0.0]])
+        np.testing.assert_allclose(out["glac"].values,
+                                   [[1.0, 1.0, 0.0], [0.0, 0.0, 0.0]])
 
 
 def _translate_land_keys():
