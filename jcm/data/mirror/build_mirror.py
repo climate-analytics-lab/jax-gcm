@@ -306,8 +306,34 @@ def _want(product: str) -> bool:
 
 
 def _column_selected() -> bool:
-    """Whether this run builds the column-grid (ne30pg3) bundle."""
+    """Whether this run's grid selection includes the column grid (ne30pg3)."""
     return _SELECTED is None or any(g in _SELECTED for g in _COLUMN_GRIDS)
+
+
+def _column_requested() -> bool:
+    """Whether ``--grids`` names the column grid explicitly."""
+    return _SELECTED is not None and any(g in _SELECTED for g in _COLUMN_GRIDS)
+
+
+def _column_buildable() -> bool:
+    """Whether the ne30pg3 part of sso/bundles runs here.
+
+    Selected and its CESM topography on this site. Without ``--grids`` a site
+    lacking the topography (Levante) builds the Gaussian grids and skips only
+    ne30pg3; naming ne30pg3 in ``--grids`` there is refused in check_sources.
+    """
+    return _column_selected() and NE30_TOPO is not None
+
+
+def _partial_build() -> bool:
+    """Whether this run's upload tree covers only part of the mirror.
+
+    True for a ``--grids`` or ``--products`` build, and for any build whose
+    Tier A came from ``--stage pull`` (published already, never re-staged).
+    Such a tree must merge its registry onto the published one.
+    """
+    return (_SELECTED is not None or _PRODUCTS is not None
+            or _pulled_tier_a())
 
 
 def _truncation(grid: str) -> int:
@@ -338,7 +364,10 @@ def stage_sso() -> None:
                    ).to_netcdf(out / f"sso_gmted2010_{grid}.nc")
         print("sso:", grid, flush=True)
 
-    if not _column_selected():
+    if not _column_buildable():
+        if _column_selected():
+            print("sso: skipping ne30pg3 — no CESM ne30 topography on site "
+                  f"{SITE.name!r}", flush=True)
         return
     topo = xr.open_dataset(NE30_TOPO)
     fields = column_grid_sso(str(GMTED), topo.lat.values, topo.lon.values)
@@ -398,6 +427,12 @@ def stage_emissions() -> None:
     from jcm.data.mirror.emissions import (SPECIES, build_store,
                                            load_bb_species,
                                            load_ceds_species)
+    # A --stage pull symlink points at the climatology-only copy; writing
+    # through it would find every species "already built" and skip. Replace
+    # it with a real store (the pulled copy stays under build/pulled).
+    for name in ("ceds_anthro.zarr", "bb4cmip7.zarr"):
+        if (BUILD / name).is_symlink():
+            (BUILD / name).unlink()
     build_store(load_ceds_species, SPECIES, str(BUILD / "ceds_anthro.zarr"),
                 "CEDS-CMIP-2025-04-18 (input4MIPs CMIP7), sector-summed, "
                 "0.5 deg")
@@ -483,7 +518,7 @@ def stage_bundles() -> None:
             shutil.copy(BUILD / "aux" /
                         f"dms_lana2011_climo_t{trunc[grid]}.nc", g / "dms.nc")
 
-    if not _column_selected() or not _want("terrain"):
+    if not _column_buildable() or not _want("terrain"):
         print("bundles: done", flush=True)
         return
     d = UPLOAD / "bundles" / "ne30pg3"
@@ -522,6 +557,10 @@ def stage_amip() -> None:
 
     first, last = _AMIP_YEARS
     if not _grids(transient=True):
+        return
+    if not any(_want(p) for p in ("forcing", "emissions", "ozone")):
+        print("amip: --products names no yearly series (forcing, emissions, "
+              "ozone); nothing to build", flush=True)
         return
     era5 = BUILD / "era5_land_climo_2005-2014_0p25.nc"
     scratch = BUILD / "ozone_amip"
@@ -846,38 +885,44 @@ def verify_remote_coverage(manifest: dict = None, repo_id: str = None) -> dict:
 def stage_registry() -> None:
     """Stage Tier A into the upload tree and write ``registry.json``.
 
-    Tier A products that were *pulled* from the mirror (symlinks into
-    ``build/pulled``) are already published and are not re-staged. A
-    ``--grids`` build merges its hashes onto the pulled published registry —
-    its upload tree holds only the selected grids, and a registry built from
-    it alone would drop every other file's entry.
+    A full build (every grid and product, Tier A built here) stages Tier A
+    and writes the registry from its own tree, so a file it no longer produces
+    drops out. A partial build (``_partial_build``: ``--grids``,
+    ``--products`` or pulled Tier A) stages no Tier A — it is what the new
+    bundles were regridded *from*, already published, and restaging a locally
+    rebuilt copy would republish GB of unchanged data — and merges its hashes
+    onto the pulled published registry, since a registry built from a partial
+    tree alone would drop every other file's entry. SSO statistics (the
+    terrain product's Tier A) are staged for the selected grids when terrain is
+    among the products built.
     """
     from jcm.data.mirror.registry import write_registry
 
-    for name in ("ceds_anthro.zarr", "bb4cmip7.zarr",
-                 "era5_land_climo_2005-2014_0p25.nc"):
-        src, dst = BUILD / name, UPLOAD / "products" / name
-        if src.exists() and not src.is_symlink() and not dst.exists():
-            shutil.copytree(src, dst) if src.is_dir() else shutil.copy(src,
-                                                                       dst)
-    sso_dst = UPLOAD / "products" / "sso"
-    sso_dst.mkdir(parents=True, exist_ok=True)
-    for f in (BUILD / "sso").glob("*.nc"):
-        if _SELECTED is not None and f.stem.rsplit("_", 1)[-1] not in _SELECTED:
-            continue
-        dst = sso_dst / f.name
-        # staging may have hardlinked build -> upload already
-        if not (dst.exists() and dst.samefile(f)):
-            shutil.copy(f, dst)
+    partial = _partial_build()
+    if not partial:
+        for name in ("ceds_anthro.zarr", "bb4cmip7.zarr",
+                     "era5_land_climo_2005-2014_0p25.nc"):
+            src, dst = BUILD / name, UPLOAD / "products" / name
+            if src.exists() and not dst.exists():
+                shutil.copytree(src, dst) if src.is_dir() else shutil.copy(
+                    src, dst)
+    if _want("terrain"):
+        sso_dst = UPLOAD / "products" / "sso"
+        sso_dst.mkdir(parents=True, exist_ok=True)
+        for f in (BUILD / "sso").glob("*.nc"):
+            if (_SELECTED is not None
+                    and f.stem.rsplit("_", 1)[-1] not in _SELECTED):
+                continue
+            dst = sso_dst / f.name
+            # staging may have hardlinked build -> upload already
+            if not (dst.exists() and dst.samefile(f)):
+                shutil.copy(f, dst)
     base = None
-    if _SELECTED is not None:
-        # A --grids upload tree is partial: without the published registry to
-        # merge onto, the written registry.json would drop every other file.
-        # A full build writes the registry from its own tree alone, so a file
-        # it no longer produces is dropped rather than kept stale.
+    if partial:
         if not _REMOTE_REGISTRY.exists():
-            sys.exit("registry: a --grids build must merge onto the published "
-                     "registry.json — run --stage pull first.")
+            sys.exit("registry: a partial build (--grids / --products / pulled "
+                     "Tier A) must merge onto the published registry.json — "
+                     "run --stage pull first.")
         base = json.loads(_REMOTE_REGISTRY.read_text())
     print(write_registry(str(UPLOAD), base=base), flush=True)
 
@@ -912,8 +957,9 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
     return {
         "pull": (),
         "sso": (("GMTED2010 DEM", str(GMTED)),
-                *((("CESM ne30 topography", NE30_TOPO),)
-                  if _column_selected() else ())),
+                *((("CESM ne30 topography", site.ne30_topo),)
+                  if _column_requested()
+                  or (_column_selected() and site.ne30_topo) else ())),
         "era5": (("RDA ERA5 monthly means", era5_moda),),
         "ozone": (("FZJ ozone (input4MIPs)", f"{i4m}/FZJ/FZJ-CMIP-ozone-1-0"),),
         "emissions": (
@@ -1004,10 +1050,14 @@ def check_sources(stage_names, *, include_build: bool = False) -> None:
         sys.exit(f"Site {SITE.name!r} does not provide (see "
                  "jcm/data/mirror/sites.py):\n  " + "\n  ".join(lines))
     table = _stage_sources()
-    root = str(ROOT)
+
+    def produced_here(p) -> bool:
+        path = Path(p)
+        return path.is_relative_to(BUILD) or path.is_relative_to(UPLOAD)
+
     missing = [f"{name}: {label} ({p})" for name in stage_names
                for label, p in table.get(name, ())
-               if (include_build or not str(p).startswith(root))
+               if (include_build or not produced_here(p))
                and not Path(p).exists()]
     if missing:
         sys.exit(f"Missing sources on site {SITE.name!r} "
@@ -1021,12 +1071,22 @@ def check_sources(stage_names, *, include_build: bool = False) -> None:
                  "emissions (or pull them whole) first.")
 
 
-def _pulled_emissions() -> bool:
-    """Whether the build tree's emissions stores are the partial pulled copies."""
+def _pulled(names) -> bool:
+    """Whether any of the build-tree Tier A ``names`` is a --stage pull copy."""
     pulled = (BUILD / "pulled").resolve()
     return any((BUILD / n).is_symlink()
-               and pulled in (BUILD / n).resolve().parents
-               for n in ("ceds_anthro.zarr", "bb4cmip7.zarr"))
+               and pulled in (BUILD / n).resolve().parents for n in names)
+
+
+def _pulled_emissions() -> bool:
+    """Whether the build tree's emissions stores are the partial pulled copies."""
+    return _pulled(("ceds_anthro.zarr", "bb4cmip7.zarr"))
+
+
+def _pulled_tier_a() -> bool:
+    """Whether any build-tree Tier A product came from --stage pull."""
+    return _pulled(("ceds_anthro.zarr", "bb4cmip7.zarr",
+                    "era5_land_climo_2005-2014_0p25.nc"))
 
 
 #: Tier A products the per-grid bundles regrid from. ``stage_pull`` fetches
@@ -1165,8 +1225,11 @@ def main() -> None:
         # 'all' means everything THIS site can build; an explicitly named stage
         # whose sources are absent still fails in check_sources below.
         for name, labels in sorted(_unavailable(names).items()):
+            hints = sorted({h for k, h in _UNAVAILABLE_HINTS.items()
+                            for label in labels if label.startswith(k)})
             print(f"skipping stage {name}: site {SITE.name!r} does not "
-                  f"provide {', '.join(labels)}", flush=True)
+                  f"provide {', '.join(labels)}"
+                  + (f" ({'; '.join(hints)})" if hints else ""), flush=True)
             names.remove(name)
     transient = [n for n in names if n in ("amip", "era5-transient")]
     if transient and _SELECTED is not None \

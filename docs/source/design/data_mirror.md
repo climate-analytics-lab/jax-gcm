@@ -246,10 +246,13 @@ and the port was checked by rebuilding the t63 SSO, ozone, oxidant, DMS,
 terrain, forcing and emissions bundles the same way and comparing them with the
 published Glade-built files (identical up to ~3e-8 relative, float round-off).
 The t63/t106 emission bundles were then rebuilt with the exact conservative
-remap — `--stage emissions` from the Levante input4MIPs tree, then
+remap — `--stage emissions` from the Levante input4MIPs tree (it replaces the
+pulled climatology-only stores with full ones; their climatology arrays came
+out identical to the published Tier A), then
 `--grids t63,t106 --products emissions --stage bundles,amip`; `--products`
 limits those stages to the named bundle products so unchanged files are not
-republished.
+republished. Any partial build — `--grids`, `--products`, or pulled Tier A —
+stages no Tier A and merges its registry onto the published one.
 
 - `sso.py` — streams the GMTED2010 DEM in latitude strips, accumulating
   Lott–Miller gradient-tensor statistics onto Gaussian bins or, for

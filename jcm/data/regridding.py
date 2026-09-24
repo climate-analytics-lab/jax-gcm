@@ -11,7 +11,8 @@ JIT'd model:
   gets area-weighted binning by nearest cell centre, ``Σ fₛ Aₛ / Σ Aₛ`` per
   target cell, mass-conserving to binning accuracy when coarsening; target
   cells no source centre lands in (a target finer than the source) take the
-  nearest source cell's value instead of being left empty.
+  nearest source cell's value when within the source's footprint, instead of
+  being left empty. A regional source leaves everything outside it empty.
 * **Bilinear sampling** (:func:`interp_to`): periodic-longitude wrap and
   constant pole extension for smooth climatology fields (SST, soil, ozone).
   Not conservative — do not use it for fluxes.
@@ -39,7 +40,9 @@ class Regridder:
     Built once from the source/target geometry, then applied to any field on the
     same source grid (e.g. every month/level of an emission time series) via
     :meth:`__call__`. Internally a sparse ``(n_target, n_source)`` matrix whose
-    rows are the source-area weights of the cells assigned to each target cell.
+    rows are the area weights of the source cells contributing to each target
+    cell: exact overlap areas for a rectilinear source, the source cells' own
+    areas for a binned (unstructured) one.
     """
 
     def __init__(self, matrix: sp.csr_matrix, target_shape: tuple[int, int],
@@ -47,9 +50,9 @@ class Regridder:
                  source_grid: tuple[int, int] | None = None,
                  source_latlon: bool = False):
         """Hold the prebuilt remap matrix, target shape, and area normaliser."""
-        self._matrix = matrix              # (n_target, n_source), data = src area
+        self._matrix = matrix              # (n_target, n_source), area weights
         self._target_shape = target_shape  # (nlon, nlat)
-        # Σ source-area landing in each target cell; the normaliser that turns
+        # Σ weight landing in each target cell; the normaliser that turns
         # accumulated mass back into an (area-weighted mean) flux.
         self._covered_area = covered_area  # (n_target,)
         # Rectilinear source (#533): fields arrive with the two spatial axes
@@ -72,8 +75,8 @@ class Regridder:
         layout) or ``(..., nlon_src, nlat_src)``; they are flattened here in
         the matrix's ordering.
 
-        Leading axes (time, level, …) are preserved. Target cells that received
-        no source cell (only possible when *refining*) come back as zero.
+        Leading axes (time, level, …) are preserved. Target cells no source
+        cell covers (outside a regional source's footprint) come back as zero.
         """
         values = np.asarray(values, dtype=np.float64)
         if self._source_grid is not None:
@@ -129,8 +132,13 @@ def build_regridder(
         src_lon, src_lat: 1-D source cell-centre coordinates, length ``n_source``
             (e.g. the flattened lat/lon mesh, or the ``ncol`` arrays of an
             unstructured file).
-        src_area: 1-D per-source-cell area weight (any consistent units — only
-            ratios matter), length ``n_source``.
+        src_area: per-source-cell area weight (any consistent units — only
+            ratios matter): 1-D of length ``n_source`` for an unstructured
+            source, or 2-D ``(nlon, nlat)``/``(nlat, nlon)`` for a rectilinear
+            one given as 1-D axes. For a rectilinear source with uniformly
+            spaced longitudes it only identifies the layout: the operator uses
+            exact spherical overlap areas, so a masked or re-weighted area is
+            not honoured there (mask the field instead).
         dst_lon, dst_lat: 1-D target grid coordinates (the model's
             ``horizontal.longitudes`` / ``.latitudes``), lengths ``nlon`` /
             ``nlat``. The target is the tensor-product grid ``(nlon, nlat)``.
@@ -143,11 +151,13 @@ def build_regridder(
         ``(..., nlon, nlat)``.
 
     """
-    to_rad = np.deg2rad
-    sl = to_rad(src_lon) if src_in_degrees else np.asarray(src_lon, float)
-    sb = to_rad(src_lat) if src_in_degrees else np.asarray(src_lat, float)
-    dl = to_rad(dst_lon) if dst_in_degrees else np.asarray(dst_lon, float)
-    db = to_rad(dst_lat) if dst_in_degrees else np.asarray(dst_lat, float)
+    # float64 throughout: float32 file axes carry ~1e-5 relative round-off,
+    # enough to fail the uniform-spacing test and lose the exact operator.
+    def _rad(x, in_degrees):
+        x = np.asarray(x, dtype=np.float64)
+        return np.deg2rad(x) if in_degrees else x
+    sl, sb = _rad(src_lon, src_in_degrees), _rad(src_lat, src_in_degrees)
+    dl, db = _rad(dst_lon, dst_in_degrees), _rad(dst_lat, dst_in_degrees)
     sl = np.mod(sl, 2.0 * np.pi)
     dl = np.mod(dl, 2.0 * np.pi)
 
@@ -194,18 +204,26 @@ def build_regridder(
     # A target cell finer than the source can receive no source centre at all;
     # left empty it would read as zero flux (holes in an emission field). Give
     # each such cell the value of its nearest source cell — the first-order
-    # (piecewise-constant) answer when refining. The global integral is then
-    # conserved only approximately in that regime.
+    # (piecewise-constant) answer when refining — but only within the
+    # source's own footprint (1.5x its typical point spacing), so the area
+    # outside a regional source stays empty rather than being painted with
+    # its edge values. The global integral is conserved only approximately
+    # for the filled cells.
     hit = np.zeros(nlon * nlat, dtype=bool)
     hit[target_idx] = True
-    if not hit.all():
+    if not hit.all() and n_src > 1:
+        from scipy.spatial import cKDTree
         empty = np.flatnonzero(~hit)
         e_lon, e_lat = dl[empty // nlat], db[empty % nlat]
-        nearest = nearest_index(np.rad2deg(sb), np.rad2deg(sl),
-                                np.rad2deg(e_lat), np.rad2deg(e_lon))
-        target_idx = np.concatenate([target_idx, empty])
-        src_idx = np.concatenate([src_idx, nearest])
-        weights = np.concatenate([weights, area[nearest]])
+        src_xyz = unit_sphere_vectors(np.rad2deg(sb), np.rad2deg(sl))
+        tree = cKDTree(src_xyz)
+        spacing = np.median(tree.query(src_xyz, k=2)[0][:, 1])
+        dist, nearest = tree.query(
+            unit_sphere_vectors(np.rad2deg(e_lat), np.rad2deg(e_lon)))
+        near = dist <= 1.5 * spacing
+        target_idx = np.concatenate([target_idx, empty[near]])
+        src_idx = np.concatenate([src_idx, nearest[near]])
+        weights = np.concatenate([weights, area[nearest[near]]])
 
     matrix = sp.coo_matrix(
         (weights, (target_idx, src_idx)),
@@ -223,17 +241,15 @@ def _rectilinear_overlap_matrix(src_lon, src_lat, dst_lon, dst_lat):
     :class:`Regridder`'s lon-major flattening. The overlap is separable, so the
     matrix is the Kronecker product of the longitude- and latitude-overlap
     matrices. Axes may be in any order (they are sorted for the overlap and the
-    weights mapped back). ``None`` when either longitude axis is not uniformly
-    spaced — the overlap helpers assume regular longitude cells — and the caller
-    falls back to binning.
+    weights mapped back) and may be regional. ``None`` when a longitude axis is
+    not uniformly spaced — the overlap helpers need regular longitude cells —
+    and the caller falls back to binning (logged).
     """
-    def uniform(lons):
-        if lons.size < 2:
-            return False
-        d = np.diff(np.sort(np.mod(lons, 360.0)))
-        return np.allclose(d, 360.0 / lons.size, rtol=1e-6)
-
-    if not (uniform(src_lon) and uniform(dst_lon)):
+    if _longitude_spacing(src_lon) is None or _longitude_spacing(dst_lon) is None:
+        import logging
+        logging.getLogger(__name__).warning(
+            "build_regridder: rectilinear source/target longitudes are not "
+            "uniformly spaced; falling back to nearest-centre binning")
         return None
 
     def sorted_overlap(fn, src, dst):
@@ -247,6 +263,28 @@ def _rectilinear_overlap_matrix(src_lon, src_lat, dst_lon, dst_lat):
     w_lon = sorted_overlap(_longitude_overlap, np.mod(src_lon, 360.0),
                            np.mod(dst_lon, 360.0))
     return sp.kron(sp.csr_matrix(w_lon), sp.csr_matrix(w_lat), format="csr")
+
+
+def _longitude_spacing(lons) -> float | None:
+    """Uniform spacing of a (possibly regional) longitude axis, or ``None``.
+
+    A global axis has spacing 360/n. A regional one has uniform interior steps
+    and one large wrap-around gap, which is excluded from the test, so a box
+    straddling the date line is recognised too.
+    """
+    lons = np.sort(np.mod(np.asarray(lons, dtype=np.float64), 360.0))
+    if lons.size < 2:
+        return None
+    steps = np.diff(np.concatenate([lons, lons[:1] + 360.0]))
+    if np.allclose(steps, 360.0 / lons.size, rtol=0.0,
+                   atol=1e-3 * 360.0 / lons.size):
+        return 360.0 / lons.size
+    interior = np.delete(steps, np.argmax(steps))
+    spacing = float(np.median(interior))
+    if spacing > 0 and np.allclose(interior, spacing, rtol=0.0,
+                                   atol=1e-3 * spacing):
+        return spacing
+    return None
 
 
 def model_grid(coords) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -362,17 +400,25 @@ def latitude_bounds(lats) -> np.ndarray:
     A Gaussian grid gets its exact quadrature cells: the edges in ``μ = sin φ``
     are the cumulative Gauss–Legendre weights, so each cell's area is exactly
     its quadrature weight — the cell definition ECHAM and CDO's ``remapcon``
-    use for Gaussian grids. Any other grid gets centre midpoints closed at ±90°.
+    use for Gaussian grids. Any other grid gets centre midpoints, with the
+    outer edges half the adjacent spacing beyond the outermost centres,
+    clipped to ±90°: a global regular grid closes at the poles (a pole-centred
+    finite-volume row, e.g. CESM f09, becomes the half-width polar cap), and a
+    regional one keeps its own footprint instead of stretching to the poles.
     """
-    lats = np.asarray(lats, float)
+    lats = np.asarray(lats, dtype=np.float64)
     n = lats.size
     gauss = gaussian_latlon(n)[0]
     if np.allclose(lats, gauss, atol=1e-6):
         weights = np.polynomial.legendre.leggauss(n)[1]
         mu = np.concatenate([[-1.0], -1.0 + np.cumsum(weights)])
         return np.rad2deg(np.arcsin(np.clip(mu, -1.0, 1.0)))
+    if n == 1:
+        return np.array([-90.0, 90.0])
     mid = 0.5 * (lats[1:] + lats[:-1])
-    return np.concatenate([[-90.0], mid, [90.0]])
+    lo = lats[0] - 0.5 * (lats[1] - lats[0])
+    hi = lats[-1] + 0.5 * (lats[-1] - lats[-2])
+    return np.clip(np.concatenate([[lo], mid, [hi]]), -90.0, 90.0)
 
 
 def _latitude_overlap(src_lats, dst_lats) -> np.ndarray:
@@ -387,13 +433,14 @@ def _latitude_overlap(src_lats, dst_lats) -> np.ndarray:
 def _longitude_overlap(src_lons, dst_lons) -> np.ndarray:
     """``(ndst, nsrc)`` overlap of periodic longitude intervals, in degrees.
 
-    Both grids are regular in longitude; each cell spans ± half a spacing about
-    its centre. The source intervals are tried at −360/0/+360 so an interval
+    Both grids are regular in longitude (a regional axis included); each cell
+    spans ± half a spacing about its centre. The source intervals are tried at −360/0/+360 so an interval
     straddling the date line overlaps correctly.
     """
     def edges(lons):
-        lons = np.asarray(lons, float)
-        half = 0.5 * 360.0 / lons.size
+        lons = np.asarray(lons, dtype=np.float64)
+        spacing = _longitude_spacing(lons)
+        half = 0.5 * (spacing if spacing is not None else 360.0 / lons.size)
         return lons - half, lons + half
     s_lo, s_hi = edges(src_lons)
     d_lo, d_hi = edges(dst_lons)

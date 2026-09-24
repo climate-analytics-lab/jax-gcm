@@ -466,6 +466,52 @@ class GridSelectionTest(unittest.TestCase):
             self.assertFalse(bm._column_selected())
         self.assertEqual(bm._truncation("t255"), 255)
 
+    def test_a_products_only_registry_is_partial_too(self):
+        # --products without --grids still leaves a partial upload tree.
+        from jcm.data.mirror import build_mirror as bm
+        with tempfile.TemporaryDirectory() as d:
+            from pathlib import Path
+            root = Path(d)
+            with patch.object(bm, "_SELECTED", None), \
+                    patch.object(bm, "_PRODUCTS", frozenset({"emissions"})), \
+                    patch.object(bm, "BUILD", root / "build"), \
+                    patch.object(bm, "UPLOAD", root / "upload"), \
+                    patch.object(bm, "_REMOTE_REGISTRY",
+                                 root / "build" / "remote_registry.json"):
+                (root / "upload").mkdir()
+                self.assertTrue(bm._partial_build())
+                with self.assertRaises(SystemExit) as ctx:
+                    bm.stage_registry()
+                self.assertIn("partial build", str(ctx.exception))
+
+    def test_pulled_tier_a_marks_the_build_partial(self):
+        from jcm.data.mirror import build_mirror as bm
+        with tempfile.TemporaryDirectory() as d:
+            from pathlib import Path
+            build = Path(d) / "build"
+            (build / "pulled" / "products" / "ceds_anthro.zarr").mkdir(
+                parents=True)
+            (build / "ceds_anthro.zarr").symlink_to(
+                build / "pulled" / "products" / "ceds_anthro.zarr")
+            with patch.object(bm, "BUILD", build), \
+                    patch.object(bm, "_SELECTED", None), \
+                    patch.object(bm, "_PRODUCTS", None):
+                self.assertTrue(bm._pulled_emissions())
+                self.assertTrue(bm._partial_build())
+
+    def test_a_missing_ne30_topography_skips_only_ne30(self):
+        from jcm.data.mirror import build_mirror as bm, sites
+        with patch.dict(os.environ, {"JCM_MIRROR_SITE": "levante"}):
+            levante = sites.current()
+        with patch.object(bm, "SITE", levante), \
+                patch.object(bm, "NE30_TOPO", None):
+            with patch.object(bm, "_SELECTED", None):
+                self.assertNotIn("sso", bm._unavailable(["sso"]))
+                self.assertFalse(bm._column_buildable())
+            with patch.object(bm, "_SELECTED", frozenset({"ne30pg3"})):
+                self.assertEqual(bm._unavailable(["sso"]),
+                                 {"sso": ["CESM ne30 topography"]})
+
     def test_products_filter_narrows_what_bundles_reads(self):
         from jcm.data.mirror import build_mirror as bm
         with patch.object(bm, "_PRODUCTS", frozenset({"emissions"})):

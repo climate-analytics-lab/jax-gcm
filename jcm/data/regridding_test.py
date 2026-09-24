@@ -142,6 +142,68 @@ class RefinementTest(unittest.TestCase):
         self.assertTrue(set(np.unique(out)) <= set(values))
 
 
+class RegionalAndPrecisionTest(unittest.TestCase):
+    """Inputs outside the global-float64 case must keep the exact operator."""
+
+    def _europe(self):
+        lats = np.arange(35.25, 70.0, 0.5)             # regional in both axes
+        lons = np.arange(-10.75, 30.0, 0.5)
+        return lats, lons
+
+    def test_regional_rectilinear_source_stays_inside_its_box(self):
+        lats, lons = self._europe()
+        dlat, dlon = gaussian_latlon(192)
+        rg = build_regridder(lons, lats, np.ones((lons.size, lats.size)),
+                             dlon, dlat, dst_in_degrees=True)
+        out = rg(np.full((lats.size, lons.size), 1.0)).T   # (lat, lon)
+        wrapped = np.where(dlon >= 180.0, dlon - 360.0, dlon)
+        inside = ((dlat[:, None] > 36.0) & (dlat[:, None] < 69.0)
+                  & (wrapped[None, :] > -10.0) & (wrapped[None, :] < 29.0))
+        far = ((dlat[:, None] < 30.0) | (dlat[:, None] > 75.0)
+               | (wrapped[None, :] < -15.0) | (wrapped[None, :] > 35.0))
+        np.testing.assert_allclose(out[inside], 1.0, rtol=1e-12)
+        np.testing.assert_array_equal(out[far], 0.0)
+
+    def test_regional_latitude_edges_keep_the_footprint(self):
+        from jcm.data.regridding import latitude_bounds
+        lats, _ = self._europe()
+        edges = latitude_bounds(lats)
+        self.assertAlmostEqual(edges[0], 35.0)
+        self.assertAlmostEqual(edges[-1], 70.0)
+        # A global regular grid still closes at the poles, and a pole-centred
+        # finite-volume row (CESM f09) becomes the half-width polar cap.
+        self.assertEqual(latitude_bounds(np.linspace(-89.75, 89.75, 360))[0],
+                         -90.0)
+        f09 = np.linspace(-90.0, 90.0, 192)
+        b = latitude_bounds(f09)
+        self.assertEqual((b[0], b[-1]), (-90.0, 90.0))
+        self.assertAlmostEqual(b[1], -90.0 + 0.5 * (f09[1] - f09[0]))
+
+    def test_float32_axes_keep_the_exact_operator(self):
+        from jcm.data.regridding import conservative_overlap
+        src_lats = np.linspace(-90.0, 90.0, 192)
+        src_lons = np.arange(288) * 1.25
+        dlat, dlon = gaussian_latlon(192)
+        field = np.random.default_rng(5).random((192, 288))
+        exact = conservative_overlap(field, src_lats, src_lons, dlat, dlon)
+        rg = build_regridder(src_lons.astype(np.float32),
+                             src_lats.astype(np.float32),
+                             np.ones((288, 192)), dlon, dlat,
+                             dst_in_degrees=True)
+        # float32 rounding of the cell positions moves edges by ~1e-5 deg;
+        # a fallback to binning would be off by O(0.1).
+        np.testing.assert_allclose(rg(field).T, exact, atol=1e-4)
+
+    def test_unstructured_regional_source_is_not_painted_outside(self):
+        lats, lons = self._europe()
+        glat, glon = np.meshgrid(lats, lons, indexing="ij")
+        dlat, dlon = gaussian_latlon(192)
+        rg = build_regridder(glon.ravel(), glat.ravel(), np.ones(glat.size),
+                             dlon, dlat, dst_in_degrees=True)
+        out = rg(np.ones(glat.size)).T
+        self.assertEqual(out[dlat < 20.0].max(), 0.0)
+
+
 class BilinearTest(unittest.TestCase):
     def test_interp_to_wraps_longitude(self):
         import xarray as xr
