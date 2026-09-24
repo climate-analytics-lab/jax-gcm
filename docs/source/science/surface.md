@@ -107,12 +107,20 @@ The hand-off is step-local: it is dropped before the cross-step carry, so it is
 never checkpointed, and a restart replays the held ``radiation.surface_*`` of
 the last solve bit for bit.
 
-The snow maps follow one convention across products and consumers: ``glac`` is
-the glacier share of the land and ``snowc`` the snow-covered fraction of the
-**non-glacier** land (JSBACH's tiling), so the snow-covered share of the land
-is ``glac + (1 − glac)·snowc`` (``jcm/forcing.py::land_snow_cover``, used by
-the land wetness and sublimation and by the dust snow gate; the albedo takes
-the two tiles separately).
+The land-surface maps follow one convention across products, regrids and
+consumers (``jcm/data/regridding.py::CONDITIONAL_FIELDS``): ``lsm`` is the land
+share of the cell, ``glac`` the glacier share of the **land**, and ``forest``,
+``snowc`` and ``alb`` describe the **non-glacier** land (JSBACH's tiling); the
+soil fields and ``stl`` are conditional on the land. Every regrid of these
+fields — the bundle builders, the runtime upsampler and the pySES column
+sampler — weights each by its own mask
+(``jcm/data/regridding.py::regrid_land_surface``), so ocean or glacier
+neighbours never dilute a coastal or ice-margin cell. Consumers combine them
+once: the snow-covered share of the land is ``glac + (1 − glac)·snowc``
+(``jcm/forcing.py::land_snow_cover``, used by the land wetness and sublimation
+and by the dust snow gate), the effective forest ``(1 − glac)·forest``, and the
+background albedo applies to the non-glacier tile only (``land_albedo``'s tile
+average).
 
 Every constant is a differentiable leaf of ``EchamSurfaceAlbedoParameters``
 (held in ``SurfaceOpticsParameters``), at the ECHAM 6.3 T63/T127/T255 values;
@@ -183,8 +191,11 @@ under forest is not masked.
   ``EchamSurfaceAlbedoParameters``.
 - ``jcm/physics/forcing/echam_boundary_conditions.py`` —
   ``EchamBoundaryConditions``, ``SurfaceOpticsParameters``.
-- ``jcm/data/mirror/bundles.py`` — ``land_cover_fields`` (the forest and
-  glacier maps), ``translate_land`` (the snow cover).
+- ``jcm/data/mirror/bundles.py`` — ``land_surface_fields`` (every
+  land-surface channel under the convention), ``translate_land`` (the snow
+  cover).
+- ``jcm/data/regridding.py`` — ``regrid_land_surface``,
+  ``regrid_conditional_fraction``, ``CONDITIONAL_FIELDS``.
 
 **Validation evidence.** ``jcm/physics/surface/echam/albedo_test.py`` pins each
 scheme at hand-evaluated ECHAM points; ``jcm/physics/forcing/echam_boundary_conditions_test.py`` checks that ``alb0``, ``snowc_am`` and the

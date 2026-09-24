@@ -694,7 +694,14 @@ ECHAM surface albedo and frozen-surface saturation
   their ERA5 background albedo of ≈0.8). ``snowc`` is the snow-covered
   fraction of the non-glacier land, so the snow-covered share of the land
   is ``glac + (1 − glac)·snowc`` (``jcm.forcing.land_snow_cover``, also
-  read by the JAM dust snow gate).
+  read by the JAM dust snow gate). Forcing files now also carry ``lsm``, the
+  land share, and every regrid of the land-surface channels (bundle
+  builders, runtime upsampler, pySES column sampler) weights each by the
+  part of the cell it describes — ``glac``, ``stl`` and the soil fields by
+  the land, ``forest``, ``snowc`` and ``alb`` by the non-glacier land — so
+  coastal and ice-margin cells are no longer diluted by their ocean or
+  glacier neighbours. On pySES this changes the coastal columns of every
+  run on the packaged T63 forcing.
 - The radiation solves with the surface albedo and emissivity of its solve
   step and publishes those in ``radiation.surface_*``, held between solves,
   so the published albedo, reflected flux and heating stay one solve's

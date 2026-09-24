@@ -641,7 +641,7 @@ The ECHAM physics package consumes two NetCDF files at run time. T63 versions si
      - Sea-ice tile fraction (clipped to ``[0, 1 − fmask]`` at apply time).
    * - ``alb`` (forcing.nc) → ``forcing.alb0``
      - Static
-     - Snow-free background of the land albedo (JSBACH ``update_land_surface_fast``, see :doc:`science/surface`).
+     - Snow-free background albedo of the non-glacier land (JSBACH ``update_land_surface_fast``, see :doc:`science/surface`).
    * - ``soilw_am`` (forcing.nc)
      - 12-month climatology
      - Soil-moisture initial state for the land-tile column.
@@ -650,10 +650,13 @@ The ECHAM physics package consumes two NetCDF files at run time. T63 versions si
      - Prescribed snow-cover fraction of the non-glacier land (total cover ``glac + (1 − glac)·snowc``): brightens the land albedo towards the temperature-dependent snow albedo and sets the sublimating share of the land latent heat flux.
    * - ``forest`` (forcing.nc) → ``forcing.forest_fraction``
      - Static (optional)
-     - Forest fraction masking the snow albedo under a canopy. ``None`` (no forest) if absent.
+     - Forest share of the non-glacier land, masking the snow albedo under a canopy. ``None`` (no forest) if absent.
+   * - ``lsm`` (forcing.nc)
+     - Static (optional)
+     - Land share of the cell: the weight any regrid of the file gives the land-conditional channels (``jcm.data.regridding.CONDITIONAL_FIELDS``).
    * - ``glac`` (forcing.nc) → ``forcing.glacier_fraction``
      - Static (optional)
-     - Glacier fraction: the ECHAM glacier albedo and a fully snow-covered (sublimating) surface. ``None`` (no glacier) if absent.
+     - Glacier share of the land: the ECHAM glacier albedo and a fully snow-covered (sublimating) surface. ``None`` (no glacier) if absent.
 
 Generating BC files from ECHAM input
 """"""""""""""""""""""""""""""""""""
