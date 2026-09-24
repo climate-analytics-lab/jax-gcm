@@ -176,8 +176,11 @@ forcing = forcing.copy(anthropogenic_emissions=emis)
 
 `jcm.data.emissions` regrids an arbitrary source onto the model grid and writes
 contract variables. The regridder (`regrid.py`) is light and **first-order
-conservative** (area-weighted nearest-cell binning), handling both regular
-lat/lon and unstructured `ncol` sources (e.g. CESM ne30). `prepare.py` maps
+conservative**: a regular lat/lon source gets the exact-overlap operator (CDO
+`remapcon`'s scheme, exact at any resolution ratio), an unstructured `ncol`
+source (e.g. CESM ne30) area-weighted nearest-cell binning, with target cells
+no source centre reaches (a target finer than the source) taking the nearest
+source value rather than a zero-flux hole. `prepare.py` maps
 source variables → contract variables via `Channel` records; shipped adapters
 `cesm_cmip_anthro(dir)` and `cesm_bb4cmip7(dir)` consume the CESM CMIP7 CEDS /
 biomass-burning files. `downloader.fetch` resolves a local path or arbitrary URL

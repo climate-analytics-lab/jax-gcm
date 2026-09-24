@@ -763,7 +763,7 @@ class TestAutoOzoneDefault(unittest.TestCase):
         from jcm.runners import _resolve_auto_ozone
 
         # T85 hybrid: no packaged bc/*/ozone.nc matches and the mirror
-        # publishes ozone for t63/t106 only. The fetch is still attempted
+        # publishes no t85 ozone. The fetch is still attempted
         # (the manifest's grid list can lag what is staged) and fails.
         cfg = _compose(["physics=echam", "grid=echam_t85_l47_hybrid"])
         coords = build_coords(cfg)

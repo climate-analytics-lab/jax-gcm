@@ -27,6 +27,7 @@ from __future__ import annotations
 import numpy as np
 import xarray as xr
 
+from jcm.data.mirror import sites
 from jcm.data.mirror.bundles import (AMIP_ROOT, _ANTHRO_SECTORS,
                                      _EMIS_SPECIES, _to_lonlat,
                                      translate_land)
@@ -40,16 +41,14 @@ SICONCBCS = (f"{AMIP_ROOT}/seaIce/mon/siconcbcs/gn/v20250807/"
              "siconcbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-10_gn_"
              "187001-202212.nc")
 
-_GHG_ROOT = ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
-             "CMIP7/CMIP/CR/CR-CMIP-1-0-0/atmos/yr")
+_GHG_ROOT = sites.input4mips("CMIP7/CMIP/CR/CR-CMIP-1-0-0/atmos/yr")
 _GHG_FILE = (_GHG_ROOT + "/{gas}/gm/v20250228/{gas}_input4MIPs_"
              "GHGConcentrations_CMIP_CR-CMIP-1-0-0_gm_1750-2022.nc")
 #: unit -> ppmv conversion for the CR global-mean files.
 _TO_PPMV = {"ppm": 1.0, "ppb": 1e-3, "ppt": 1e-6}
 
-_FZJ_ROOT = ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
-             "CMIP7/CMIP/FZJ/FZJ-CMIP-ozone-1-0/atmos/mon/vmro3/gn/"
-             "v20250904")
+_FZJ_ROOT = sites.input4mips(
+    "CMIP7/CMIP/FZJ/FZJ-CMIP-ozone-1-0/atmos/mon/vmro3/gn/v20250904")
 #: (first_year, last_year) -> transient vmro3 chunk file.
 _FZJ_CHUNKS = {
     (1829, 1849): "182901-184912", (1850, 1899): "185001-189912",

@@ -22,7 +22,7 @@ omit =
     jcm/physics/clouds/icon/cloud_microphysics_2m.py
     jcm/physics/clouds/icon/cloud_utils.py
     # Offline data-mirror builders (also omitted in the base rc): they
-    # stream multi-GB Glade sources CI cannot have.
+    # stream multi-GB Glade/Levante sources CI cannot have.
     jcm/data/mirror/sso.py
     jcm/data/mirror/era5_land.py
     jcm/data/mirror/ozone.py
