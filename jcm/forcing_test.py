@@ -904,6 +904,75 @@ class TestForcingNonMonthlyTimeAxis(unittest.TestCase):
         self.assertEqual(forcing.alb0.shape, (nlon, nlat))
 
 
+class TestWrapYearMonthlyClimatologyAxes(unittest.TestCase):
+    """A 12-record wrap_year surface climatology loads from any axis kind.
+
+    ``from_dataset(coords=None)`` interpolates it to daily values. Numeric
+    and non-Gregorian cftime axes are put on WRAP_YEAR's nominal month
+    labels first, so they reach the same interpolation as a datetime64 axis
+    and select the same months.
+    """
+
+    _NLON, _NLAT = 64, 32
+
+    def _dataset(self, time):
+        import xarray as xr
+        # SST of month m (1..12) is 280 + m, held flat over the month's
+        # mid-point so the daily interpolation passes through it exactly.
+        sst = np.stack([np.full((self._NLON, self._NLAT), 280.0 + m,
+                                dtype="float32") for m in range(1, 13)], -1)
+
+        def f3(value):
+            return (("lon", "lat", "time"),
+                    np.full((self._NLON, self._NLAT, 12), value, "float32"))
+
+        return xr.Dataset(
+            {"stl": f3(280.0), "icec": f3(0.0),
+             "sst": (("lon", "lat", "time"), sst), "soilw_am": f3(0.5),
+             "snowc": f3(0.0),
+             "alb": (("lon", "lat"),
+                     np.full((self._NLON, self._NLAT), 0.1, "float32"))},
+            coords={"time": time})
+
+    def _sst_on(self, forcing, date):
+        import jax_datetime as jdt
+        from jcm.date import DateData
+        selected = forcing.select(DateData.set_date(jdt.to_datetime(date)))
+        return float(np.asarray(selected.sea_surface_temperature).mean())
+
+    def _check(self, time, n_daily=365):
+        forcing = ForcingData.from_dataset(
+            self._dataset(time), coords=None, align_mode="wrap_year",
+            validate=False)
+        self.assertEqual(forcing.sea_surface_temperature.values.shape[0],
+                         n_daily)
+        # Month starts are the interpolation knots: exactly that month's value.
+        for month in (1, 2, 7, 12):
+            self.assertAlmostEqual(
+                self._sst_on(forcing, f"2003-{month:02d}-01"), 280.0 + month,
+                places=4)
+        return forcing
+
+    def test_numeric_month_index(self):
+        self._check(np.arange(1, 13))
+
+    def test_360_day_cftime(self):
+        import cftime
+        self._check([cftime.Datetime360Day(1, m, 1) for m in range(1, 13)])
+
+    def test_noleap_year_zero_cftime(self):
+        import cftime
+        self._check([cftime.DatetimeNoLeap(0, m, 1) for m in range(1, 13)])
+
+    def test_datetime64_axis_is_interpolated_on_its_own_year(self):
+        # Unchanged path: a common-year source gives 365 daily records, a
+        # leap-year source keeps its Feb 29 (366).
+        self._check(np.arange("1979-01", "1980-01", dtype="datetime64[M]")
+                    .astype("datetime64[ns]"))
+        self._check(np.arange("2000-01", "2001-01", dtype="datetime64[M]")
+                    .astype("datetime64[ns]"), n_daily=366)
+
+
 class TestNaturalEmissionReaders(unittest.TestCase):
     """Readers for the HAMMOZ-style DMS / dust / oxidant climatology files.
 

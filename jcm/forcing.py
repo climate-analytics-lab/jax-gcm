@@ -739,7 +739,19 @@ class ForcingData:
         if is_wrap_year_monthly:
             # Surface climatologies are continuous boundary conditions. Expand
             # them with periodic Dec/Jan interpolation regardless of whether
-            # horizontal regridding is also needed.
+            # horizontal regridding is also needed. The interpolation works on
+            # a Gregorian month-start axis, so a climatology whose axis is
+            # not datetime64 — a numeric month index, or cftime labels in an
+            # idealised calendar (360_day, noleap year 0) that pandas cannot
+            # hold — is first put on the nominal month labels WRAP_YEAR uses
+            # anyway (``_wrap_year_times``). One interpolation path then
+            # serves every axis kind; a datetime64 axis is interpolated on its
+            # own year exactly as before (a leap-year source keeps Feb 29).
+            if not np.issubdtype(np.asarray(ds["time"].values).dtype,
+                                 np.datetime64):
+                nominal = np.asarray(
+                    _wrap_year_times(ds).to_datetime64()).astype("datetime64[ns]")
+                ds = ds.assign_coords(time=("time", nominal))
             ds = interpolate_to_daily(ds)
 
         if target_resolution is None:
