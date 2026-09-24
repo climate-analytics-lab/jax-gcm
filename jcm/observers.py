@@ -54,7 +54,7 @@ import xarray as xr
 import jax
 import jax.numpy as jnp
 
-from jcm import cf_metadata
+from jcm import cf_metadata, temporal_aggregation
 
 _EPOCH = np.datetime64("1970-01-01", "ns")
 _DAY = np.timedelta64(1, "D") / np.timedelta64(1, "ns")
@@ -75,8 +75,14 @@ def _times_to_days(times) -> np.ndarray:
     return (arr - _EPOCH) / np.timedelta64(1, "D")
 
 
-def _days_to_datetime64(t_days: np.ndarray) -> np.ndarray:
-    return (np.asarray(t_days) * _DAY).astype("int64").view("datetime64[ns]")
+def _exact_datetime64(value) -> np.ndarray:
+    host = jax.device_get(value)
+    if hasattr(host, "to_datetime64"):
+        return np.asarray(host.to_datetime64()).astype("datetime64[ms]")
+    array = np.asarray(host)
+    if np.issubdtype(array.dtype, np.datetime64):
+        return array.astype("datetime64[ms]")
+    raise TypeError("Observer start time must be an exact datetime value.")
 
 
 def _to_degrees(values: np.ndarray, max_radians: float) -> np.ndarray:
@@ -431,20 +437,27 @@ class Observer:
     # Output assembly (post-run, numpy/xarray)
     # ------------------------------------------------------------------
 
-    def to_dataset(self, samples: dict, t0_days: float,
-                   dt_seconds: float) -> xr.Dataset:
+    def to_dataset(self, samples: dict, start_time,
+                   dt_seconds: int) -> xr.Dataset:
         """Convert stacked per-step samples into an ``xarray.Dataset``.
 
         Args:
             samples: Dict ``{variable: (n_steps, npts)}`` (profile mode:
                 ``(n_steps, nlev, npts)``) as returned by the run.
-            t0_days / dt_seconds: The window the samples were taken over
+            start_time / dt_seconds: The exact window start and sample cadence
                 (recorded on :class:`~jcm.predictions.ModelPredictions`).
 
         """
         first = np.asarray(next(iter(samples.values())))
         n_steps = first.shape[0]
-        t_days = t0_days + np.arange(n_steps) * (dt_seconds / 86400.0)
+        start = _exact_datetime64(start_time).reshape(())
+        # The sampled diagnostics are produced by physics from the step-input
+        # state.  The scan emits them after dynamics advances, but their valid
+        # instant is the beginning of that step.
+        times = start + np.arange(n_steps) * np.timedelta64(int(dt_seconds), "s")
+        # Geometry preparation still consumes its historical epoch-day axis;
+        # output labels remain the exact integer-second datetimes above.
+        t_days = _times_to_days(times)
         lat, lon, target, valid = self._positions_for_times(t_days)
 
         data_vars = {}
@@ -462,7 +475,7 @@ class Observer:
             data_vars[name.replace(".", "_")] = (dims, arr)
 
         coords = {
-            "time": ("time", _days_to_datetime64(t_days)),
+            "time": ("time", times),
             "latitude": (("time", "point"), lat),
             "longitude": (("time", "point"), lon),
             "valid": (("time", "point"), valid),
@@ -479,10 +492,11 @@ class Observer:
         # ``cache_grid`` was never called, in which case there is no vertical
         # table to describe.
         a_half = getattr(self, "_a_half", None)
-        return cf_metadata.finalize_output(
+        ds = cf_metadata.finalize_output(
             ds, a_boundaries_pa=a_half, b_boundaries=getattr(self, "_b_half",
                                                              None),
             flip_vertical=False)
+        return temporal_aggregation.set_cf_datetime_encoding(ds, "time")
 
 
 def _interpolate_columns(target, coord_profile, field_profile, increasing):

@@ -36,5 +36,6 @@ physics:
   cu_lmfmid: false
 
 forcing:
+  align: wrap_year
   file: hf://bundles/t63/forcing_pd.nc
   ozone_file: hf://bundles/t63_l47/ozone_pd.nc

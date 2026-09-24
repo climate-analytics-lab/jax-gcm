@@ -37,7 +37,7 @@ interpolation and an on-calendar start date:
 
 ```bash
 python -m jcm.main forcing=amip forcing.years=[1979,1983] \
-    run.start_date=1979-01-01 grid=echam_t63_l47_hybrid ...
+    run.start_time=1979-01-01 grid=echam_t63_l47_hybrid ...
 ```
 
 Built with `python -m jcm.data.mirror.build_mirror --stage amip

@@ -3,39 +3,36 @@ from __future__ import annotations
 import jax.numpy as jnp
 import tree_math
 import jax_datetime as jdt
+import math
+import numbers
+import datetime as pydt
+import re
 
 
-# `gregorian` carries true Y/M/D arithmetic with leap years (Fliegel & Van
-# Flandern below); `365_day` is the no-leap calendar SPEEDY's climatologies
-# and solar tables assume by construction. Full CFTime calendars are out of
-# scope (#287).
-SUPPORTED_CALENDARS = ("gregorian", "365_day")
-# Days-per-year used for `365_day`-mode arithmetic and for any caller that
-# wants a single number (e.g. parsing `'1 year'` to days).
-_DAYS_PER_YEAR_BY_CALENDAR = {
-    "gregorian": 365.2425,
-    "365_day":   365.0,
-}
-# Module-level default. `Model.__init__` overrides this to `365_day` for
-# SPEEDY; ad-hoc callers (tests, notebooks) get gregorian.
-DEFAULT_CALENDAR = "gregorian"
+SECONDS_PER_DAY = 86_400
 
-# Reference epoch for converting absolute model dates to seconds for forcing
-# alignment. Picked to match jax_datetime's own zero (`1970-01-01 UTC`).
-MODEL_EPOCH = jdt.to_datetime('1970-01-01')
-
-# Backwards-compatible single-value alias still imported elsewhere.
-_DAYS_YEAR = _DAYS_PER_YEAR_BY_CALENDAR["gregorian"]
-
-
-def days_per_year(calendar: str = DEFAULT_CALENDAR) -> float:
-    """Return the days-per-year used by `calendar`."""
-    try:
-        return _DAYS_PER_YEAR_BY_CALENDAR[calendar]
-    except KeyError as exc:
-        raise ValueError(
-            f"Unknown calendar {calendar!r}; expected one of {SUPPORTED_CALENDARS}"
-        ) from exc
+def to_datetime(value, *, name: str = "time") -> jdt.Datetime:
+    """Normalize one scalar timestamp to the whole-second model clock."""
+    if isinstance(value, jdt.Datetime):
+        if value.delta.days.shape or value.delta.seconds.shape:
+            raise ValueError(f"{name} must be a scalar datetime.")
+        return value
+    if isinstance(value, str):
+        if value.strip().lower() == "nat":
+            raise ValueError(f"{name} cannot be NaT.")
+        match = re.search(r"\.(\d+)", value)
+        if match and int(match.group(1)) != 0:
+            raise ValueError(f"{name} must have whole-second precision.")
+        parsed = pydt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    elif isinstance(value, pydt.datetime):
+        parsed = value
+    else:
+        raise TypeError(f"{name} must be a datetime or ISO datetime string.")
+    if parsed.microsecond:
+        raise ValueError(f"{name} must have whole-second precision.")
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(pydt.timezone.utc).replace(tzinfo=None)
+    return jdt.to_datetime(parsed.isoformat(sep=" "))
 
 
 # ---------------------------------------------------------------------------
@@ -115,11 +112,7 @@ class DateData:
         )
 
     @classmethod
-    def set_date(cls, model_time, model_step=None, dt_seconds=None, calendar=DEFAULT_CALENDAR):
-        # `calendar` is accepted for backward compatibility but is not used at
-        # construction time — `tyear`/`model_year` are derived from `dt` on
-        # demand and take their own calendar argument.
-        del calendar  # unused
+    def set_date(cls, model_time, model_step=None, dt_seconds=None):
         return cls(
             dt=model_time,
             model_step=model_step if model_step is not None else jnp.int32(0),
@@ -134,17 +127,19 @@ class DateData:
             dt_seconds=dt_seconds if dt_seconds is not None else 1800.0,
         )
 
-    def tyear(self, calendar: str = DEFAULT_CALENDAR) -> jnp.ndarray:
-        """Fraction of the year elapsed at `self.dt` under `calendar`."""
-        return fraction_of_year_elapsed(self.dt, calendar=calendar)
+    def tyear(self) -> jnp.ndarray:
+        """Fraction of the proleptic Gregorian year elapsed."""
+        return fraction_of_year_elapsed(self.dt)
 
-    def model_year(self, calendar: str = DEFAULT_CALENDAR) -> jnp.ndarray:
-        """Year extracted from `self.dt` under `calendar`."""
-        return get_year(self.dt, calendar=calendar)
+    def model_year(self) -> jnp.ndarray:
+        """Proleptic Gregorian year containing ``self.dt``."""
+        return get_year(self.dt)
 
-    def model_day(self, calendar: str = DEFAULT_CALENDAR):
-        """Integer day-of-year (rounded) under `calendar`."""
-        return jnp.round(self.tyear(calendar) * days_per_year(calendar)).astype(jnp.int32)
+    def model_day(self):
+        """Zero-based Gregorian day of year (rounded for compatibility)."""
+        year, month, day = gregorian_ymd_from_days(self.dt.delta.days)
+        fraction = self.dt.delta.seconds / SECONDS_PER_DAY
+        return jnp.round(_gregorian_day_of_year(year, month, day) + fraction).astype(jnp.int32)
 
     def copy(self, dt=None, model_step=None, dt_seconds=None):
         return DateData(
@@ -159,51 +154,19 @@ class DateData:
 # ---------------------------------------------------------------------------
 
 
-def get_year(dt: jdt.Datetime, calendar: str = DEFAULT_CALENDAR) -> jnp.ndarray:
-    """Year of `dt` under `calendar`."""
-    if calendar == "gregorian":
-        year, _, _ = gregorian_ymd_from_days(dt.delta.days)
-        return year.astype(jnp.int32)
-    if calendar == "365_day":
-        return jnp.int32(1970 + dt.delta.days // 365)
-    raise ValueError(
-        f"Unknown calendar {calendar!r}; expected one of {SUPPORTED_CALENDARS}"
-    )
+def get_year(dt: jdt.Datetime) -> jnp.ndarray:
+    """Proleptic Gregorian year of ``dt``."""
+    year, _, _ = gregorian_ymd_from_days(dt.delta.days)
+    return year.astype(jnp.int32)
 
 
-def fraction_of_year_elapsed(dt: jdt.Datetime, calendar: str = DEFAULT_CALENDAR) -> jnp.ndarray:
-    """Fraction of the year elapsed at `dt` under the given calendar.
-
-    Under ``'gregorian'`` this is the *true* day-of-year divided by the
-    actual length of the year (365 or 366) — leap years are honoured (#410).
-    Under ``'365_day'`` every year is exactly 365 days, no leap days exist,
-    and `tyear = (days_since_year_start) / 365`.
-    """
-    fraction_of_day = dt.delta.seconds / 86400.0
-
-    if calendar == "gregorian":
-        year, month, day = gregorian_ymd_from_days(dt.delta.days)
-        doy = _gregorian_day_of_year(year, month, day)
-        days_in_year = jnp.where(is_leap_year(year), 366, 365)
-        return (doy + fraction_of_day) / days_in_year
-
-    if calendar == "365_day":
-        days_into_year = dt.delta.days % 365
-        return (days_into_year + fraction_of_day) / 365.0
-
-    raise ValueError(
-        f"Unknown calendar {calendar!r}; expected one of {SUPPORTED_CALENDARS}"
-    )
-
-
-def absolute_seconds_since_epoch(dt: jdt.Datetime) -> jnp.ndarray:
-    """Total seconds between `dt` and `MODEL_EPOCH` (1970-01-01).
-
-    Used to align forcing time axes with the model clock under
-    ``align_mode='by_date'``. Returns a JAX-traceable scalar.
-    """
-    delta = dt - jdt.Datetime.from_pydatetime(MODEL_EPOCH)
-    return delta.days * 86400.0 + delta.seconds
+def fraction_of_year_elapsed(dt: jdt.Datetime) -> jnp.ndarray:
+    """Fraction of the actual proleptic Gregorian year elapsed at ``dt``."""
+    fraction_of_day = dt.delta.seconds / SECONDS_PER_DAY
+    year, month, day = gregorian_ymd_from_days(dt.delta.days)
+    doy = _gregorian_day_of_year(year, month, day)
+    days_in_year = jnp.where(is_leap_year(year), 366, 365)
+    return (doy + fraction_of_day) / days_in_year
 
 
 # ---------------------------------------------------------------------------
@@ -211,53 +174,65 @@ def absolute_seconds_since_epoch(dt: jdt.Datetime) -> jnp.ndarray:
 # ---------------------------------------------------------------------------
 
 
-# Mapping of accepted unit aliases to their conversion factor in days. Months
-# and years are calendar-dependent so they're handled separately.
-_FIXED_UNIT_DAYS: dict[str, float] = {
-    "sec": 1.0 / 86400.0, "secs": 1.0 / 86400.0,
-    "second": 1.0 / 86400.0, "seconds": 1.0 / 86400.0,
-    "min": 1.0 / 1440.0, "mins": 1.0 / 1440.0,
-    "minute": 1.0 / 1440.0, "minutes": 1.0 / 1440.0,
-    "h": 1.0 / 24.0, "hr": 1.0 / 24.0, "hrs": 1.0 / 24.0,
-    "hour": 1.0 / 24.0, "hours": 1.0 / 24.0,
-    "d": 1.0, "day": 1.0, "days": 1.0,
-    "w": 7.0, "wk": 7.0, "wks": 7.0, "week": 7.0, "weeks": 7.0,
+_FIXED_UNIT_SECONDS: dict[str, float] = {
+    "sec": 1.0, "secs": 1.0,
+    "second": 1.0, "seconds": 1.0,
+    "min": 60.0, "mins": 60.0,
+    "minute": 60.0, "minutes": 60.0,
+    "h": 3600.0, "hr": 3600.0, "hrs": 3600.0,
+    "hour": 3600.0, "hours": 3600.0,
+    "d": SECONDS_PER_DAY, "day": SECONDS_PER_DAY, "days": SECONDS_PER_DAY,
+    "w": 7 * SECONDS_PER_DAY, "wk": 7 * SECONDS_PER_DAY,
+    "wks": 7 * SECONDS_PER_DAY, "week": 7 * SECONDS_PER_DAY,
+    "weeks": 7 * SECONDS_PER_DAY,
 }
 _MONTH_ALIASES = {"mo", "mon", "mons", "month", "months"}
 _YEAR_ALIASES = {"y", "yr", "yrs", "year", "years"}
 
 
-def parse_duration_days(value, calendar: str = DEFAULT_CALENDAR) -> float:
-    """Parse a duration spec into a float number of days.
+def parse_duration_seconds(value) -> int:
+    """Parse a fixed duration and return an exact whole-second count.
 
-    Numeric input (int / float) is returned as-is — assumed to be days.
-    Strings are parsed as `<number> <unit>`, e.g. `'1 month'`,
-    `'5 years'`, `'30 days'`, `'12 hours'`. Months and years are mapped
-    via the chosen `calendar` (so under ``'365_day'``, '1 month' is
-    365/12 ≈ 30.4167 days; under ``'gregorian'`` it's 365.2425/12).
+    Numeric input remains days for compatibility. Strings accept only fixed
+    seconds, minutes, hours, days, and weeks. Calendar months and years are
+    scheduling concepts and are deliberately rejected.
     """
-    if isinstance(value, (int, float)):
-        return float(value)
+    if isinstance(value, numbers.Real):
+        seconds = float(value) * SECONDS_PER_DAY
+        source = repr(value)
+    else:
+        import re
+        s = str(value).strip().lower()
+        m = re.match(r"^\s*([+-]?\d+(?:\.\d+)?)\s*([a-z]+)\s*$", s)
+        if not m:
+            raise ValueError(
+                f"Cannot parse duration {value!r}. Expected '<number> <unit>' "
+                "with a fixed unit in {seconds, minutes, hours, days, weeks}."
+            )
+        n = float(m.group(1))
+        unit = m.group(2)
+        if unit in _MONTH_ALIASES | _YEAR_ALIASES:
+            raise ValueError(
+                f"Calendar duration {value!r} is not fixed; use end_time for "
+                "named month/year boundaries."
+            )
+        if unit not in _FIXED_UNIT_SECONDS:
+            raise ValueError(f"Unknown duration unit {unit!r} in {value!r}.")
+        seconds = n * _FIXED_UNIT_SECONDS[unit]
+        source = repr(value)
 
-    import re
-    s = str(value).strip().lower()
-    m = re.match(r"^\s*([+-]?\d+(?:\.\d+)?)\s*([a-z]+)\s*$", s)
-    if not m:
+    if not math.isfinite(seconds):
+        raise ValueError(f"Duration must be finite, got {source}.")
+    rounded = round(seconds)
+    if seconds <= 0:
+        raise ValueError(f"Duration must be positive, got {source}.")
+    if abs(seconds - rounded) > 1e-9:
         raise ValueError(
-            f"Cannot parse duration {value!r}. Expected '<number> <unit>' "
-            "with unit in {seconds, minutes, hours, days, weeks, months, years}."
+            f"Duration {source} is not representable at whole-second precision."
         )
-    n = float(m.group(1))
-    unit = m.group(2)
+    return int(rounded)
 
-    if unit in _FIXED_UNIT_DAYS:
-        return n * _FIXED_UNIT_DAYS[unit]
-    if unit in _MONTH_ALIASES:
-        return n * days_per_year(calendar) / 12.0
-    if unit in _YEAR_ALIASES:
-        return n * days_per_year(calendar)
 
-    raise ValueError(
-        f"Unknown duration unit {unit!r} in {value!r}. "
-        f"Accepted units: {sorted(_FIXED_UNIT_DAYS) + sorted(_MONTH_ALIASES) + sorted(_YEAR_ALIASES)}"
-    )
+def parse_duration_days(value) -> float:
+    """Compatibility adapter returning fixed duration days."""
+    return parse_duration_seconds(value) / SECONDS_PER_DAY

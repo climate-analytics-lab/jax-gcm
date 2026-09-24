@@ -288,7 +288,7 @@ class TestPysesDycoreProtocol(unittest.TestCase):
                          (12, 1, self.ncol))
         self.assertEqual(forcing.alb0.shape, (1, self.ncol))
         date = DateData.set_date(model_time=jdt.to_datetime("2000-07-15"))
-        sliced = forcing.select(date, calendar="365_day")
+        sliced = forcing.select(date)
         sst = np.asarray(sliced.sea_surface_temperature)
         self.assertEqual(sst.shape, (1, self.ncol))
         self.assertGreater(sst.min(), 200.0)
@@ -469,7 +469,7 @@ class TestCoupledEchamSmoke(unittest.TestCase):
             date = DateData.set_date(
                 model_time=jdt.to_datetime("2000-01-01")
                 + jdt.Timedelta(seconds=int(dycore.sim_time(state))))
-            forcing_now = forcing_all.select(date, calendar="365_day")
+            forcing_now = forcing_all.select(date)
             tend, carry = compute_physics_step_gridpoint(
                 ps, forcing_now, dycore.terrain, carry,
                 physics=physics, time_step=dycore.dt_seconds,

@@ -1,4 +1,4 @@
-from jcm.model import Model, ModelPredictions
+from jcm.model import Model, ModelPredictions, RunState
 from jcm.prescribed_state_model import (
     PrescribedStateModel,
     PrescribedStatePredictions,
@@ -24,6 +24,7 @@ __version__ = "3.0.0rc1"
 __all__ = [
     "Model",
     "ModelPredictions",
+    "RunState",
     "PrescribedStateModel",
     "PrescribedStatePredictions",
     "SCMPredictions",

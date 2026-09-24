@@ -156,8 +156,12 @@ checkpoint deserializers replace a pair atomically through `restore_state()`.
 The two public properties are deliberately read-only so a dycore state cannot
 be paired accidentally with a stale radiation/TKE carry.
 
-`run_from_state_with_carry` exposes the carry seed and final carry
-directly for callers that need explicit control.
+`run_from_state_with_carry` requires an exact `initial_time` and integer
+`initial_step` alongside the dycore and physics carry. It returns
+`(RunState, ModelPredictions)`; `RunState` contains `dynamics`, `physics`,
+`time` and `step`. Preserve all four across coupling windows. Checkpoint
+restoration also supplies `time` and `step` to `restore_state`; floating
+dycore elapsed time does not define the date.
 
 ### Initial physics carry
 

@@ -148,8 +148,7 @@ def main(macv2_path: Path) -> None:
             terrain=terrain,
             physics=physics,
             time_step=20.0,                              # minutes
-            start_date=jdt.to_datetime(start),
-            calendar="gregorian",                        # MACv2 years are gregorian
+            start_time=jdt.to_datetime(start),
         )
         preds = model.run(forcing=forcing,
                           save_interval="1 day",

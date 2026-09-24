@@ -21,6 +21,30 @@ Breaking changes
 Every item here requires a change to code, a config, a saved file, or a reader
 of the output. :doc:`v2_to_v3` has the migration for each.
 
+One exact Gregorian clock and real monthly output
+"""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``Model(start_time=...)`` replaces ``start_date`` and removes the
+  ``calendar`` switch. Runs use exactly one fixed ``total_time`` or absolute
+  ``end_time``; month/year duration aliases and silently truncated intervals
+  are rejected. The exact datetime and step counter travel with the resumable
+  ``RunState`` and schema-2 checkpoints.
+- ``wrap_year`` climatologies select by real calendar position: twelve
+  monthly records switch at civil month boundaries, including leap years
+  (#805), and 365/366-record tables select by nominal month/day. Noleap input
+  dates preserve their nominal date components on the Gregorian clock (#449).
+  Whether a file repeats annually is declared, never inferred (see the #884
+  entry below).
+- ``ModelPredictions.monthly_means()`` reduces bounded interval means by
+  real month; save daily means with ``output_averages=True`` first. Observer
+  sampling stays independent. Exact shared ``output_time_labels`` replaces
+  floating epoch-day conversion for coupled output (#862).
+- SPEEDY seasonal phase follows the actual Gregorian year. This changes
+  seasonal timing and requires climate validation; empirical local constants
+  using 365 days do not define a separate clock. See :ref:`v3-datetime` and
+  `issue #876 <https://github.com/climate-analytics-lab/jax-gcm/issues/876>`_
+  for migration and release gates.
+
 Checkpoints carry a schema stamp and migrate by field name
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
@@ -39,7 +63,9 @@ Checkpoints carry a schema stamp and migrate by field name
   stored mass mixing ratio means, and #666 changed what a gridpoint humidity
   means, differently per physics package) — start from a fresh initial state,
   or assert the file's convention explicitly with
-  ``load_checkpoint(..., unstamped_scale=...)`` / ``init.unstamped_scale``.
+  ``load_checkpoint(..., unstamped_scale=..., as_initial_condition=True)`` /
+  ``init.unstamped_scale``. Files predating schema 2 can supply initial
+  conditions but cannot resume an exact v3 clock.
   The policy, its evidence and the rule for bumping the schema are in
   :doc:`design/checkpoint_compatibility`.
 
