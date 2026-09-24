@@ -524,14 +524,26 @@ class ModelPredictions:
             # The traced whole-second clock cannot represent a half-second
             # midpoint for odd-duration intervals.  Bounds are authoritative
             # and datetime64[ms] preserves the exact midpoint on the host.
+            # Replacing the coordinate drops its attributes, so the CF time
+            # attributes the backend's ``finalize_output`` stamped are carried
+            # over: averaged and instantaneous files describe their time axis
+            # identically apart from ``bounds``.
+            time_attrs = dict(ds["time"].attrs)
             ds["time"] = ("time", bounds[:, 0]
                           + (bounds[:, 1] - bounds[:, 0]) // 2)
+            ds["time"].attrs.update(time_attrs)
             ds["time"].attrs["bounds"] = "time_bounds"
             cell_method = "time: mean"
+            # Categorical is decided on the RAW prediction dtypes as well as
+            # the Dataset's: a backend that regrids (pySES boxes columns onto
+            # lat/lon, in float64) has already turned an integer diagnostic
+            # such as Tiedtke's ``ktype`` into a float by now.
+            raw_categorical = self._raw_categorical_names()
             categorical = sorted(
                 name for name, var in ds.data_vars.items()
                 if (name != "time_bounds" and "time" in var.dims
-                    and (np.issubdtype(var.dtype, np.integer)
+                    and (name in raw_categorical
+                         or np.issubdtype(var.dtype, np.integer)
                          or np.issubdtype(var.dtype, np.bool_)))
             )
             if categorical:
@@ -555,6 +567,32 @@ class ModelPredictions:
             ds, "time", "time_bounds")
         ds.attrs.update(provenance.params_attrs(self._params))
         return ds
+
+    def _raw_categorical_names(self) -> set[str]:
+        """Names of integer/boolean diagnostics in the raw predictions.
+
+        Physics leaves are named by their dotted pytree path, the name a
+        backend that flattens ``predictions.physics`` itself gives them
+        (``PysesCamSEDycore.to_xarray``). The dinosaur path keeps each
+        field's dtype in its Dataset, so the dtype check in :meth:`to_xarray`
+        already catches its categorical fields; both backends therefore omit
+        the same diagnostics.
+        """
+        from jax.tree_util import tree_flatten_with_path
+
+        physics = getattr(self._predictions, "physics", None)
+        if physics is None:
+            return set()
+        names = set()
+        leaves, _ = tree_flatten_with_path(physics)
+        for path, leaf in leaves:
+            dtype = getattr(leaf, "dtype", None)
+            if dtype is None or not (np.issubdtype(dtype, np.integer)
+                                     or np.issubdtype(dtype, np.bool_)):
+                continue
+            names.add(".".join(
+                str(getattr(p, "key", getattr(p, "name", p))) for p in path))
+        return names
 
     def monthly_means(self):
         """Return bounds-aware Gregorian monthly means as an xarray Dataset.

@@ -318,6 +318,76 @@ class ModelPredictionsWithContextTest(unittest.TestCase):
                          "seconds since 1970-01-01 00:00:00")
         self.assertEqual(ds.time_bounds.encoding, ds.time.encoding)
 
+    def _regridding_dycore(self):
+        """Build a pySES-shaped backend that regrids every field to float64."""
+        from jax.tree_util import tree_flatten_with_path
+
+        class _Regridding:
+            dt_seconds = 21600.0
+
+            def to_xarray(self, predictions, times):
+                data = {"temperature": (
+                    ("time", "level", "x", "y"),
+                    np.asarray(predictions.dynamics.temperature))}
+                leaves, _ = tree_flatten_with_path(predictions.physics)
+                for path, leaf in leaves:
+                    name = ".".join(str(getattr(p, "key", p)) for p in path)
+                    data[name] = (("time", "x", "y"),
+                                  np.asarray(leaf).astype(np.float64))
+                ds = xr.Dataset(data, coords={"time": np.asarray(times)})
+                from jcm import cf_metadata
+                cf_metadata.apply_cf_attributes(ds)
+                return ds
+
+        return _Regridding()
+
+    def _with_interval(self, predictions, mean):
+        start = jdt.Datetime.from_isoformat("2000-01-01T00:00:00")
+        end = jdt.Datetime.from_isoformat("2000-01-01T06:00:00")
+        bounds = jax.tree.map(
+            lambda left, right: jnp.stack([left[None], right[None]], axis=1),
+            start, end,
+        )
+        return predictions.replace(
+            times=jax.tree.map(lambda value: value[None], end),
+            time_bounds=bounds,
+            time_cell_method=jnp.asarray(mean),
+        )
+
+    def test_regridded_integer_diagnostic_is_omitted_from_means(self):
+        """An integer ktype stays categorical after a float64 regrid."""
+        physics = {"convection": {
+            "ktype": jnp.ones((1, 2, 3), dtype=jnp.int32),
+            "precip": jnp.ones((1, 2, 3)),
+        }}
+        dycore = self._regridding_dycore()
+        mean = ModelPredictions(
+            self._with_interval(_predictions().replace(physics=physics), True),
+            self.coords, self.physics, dycore=dycore).to_xarray()
+        self.assertNotIn("convection.ktype", mean)
+        self.assertEqual(mean.attrs["omitted_interval_mean_variables"],
+                         "convection.ktype")
+        self.assertEqual(mean["convection.precip"].attrs["cell_methods"],
+                         "time: mean")
+        snapshot = ModelPredictions(
+            self._with_interval(_predictions().replace(physics=physics), False),
+            self.coords, self.physics, dycore=dycore).to_xarray()
+        self.assertIn("convection.ktype", snapshot)
+
+    def test_mean_and_snapshot_time_axes_carry_the_same_cf_attrs(self):
+        dycore = self._regridding_dycore()
+        mean = ModelPredictions(
+            self._with_interval(_predictions(), True),
+            self.coords, self.physics, dycore=dycore).to_xarray()
+        snapshot = ModelPredictions(
+            self._with_interval(_predictions(), False),
+            self.coords, self.physics, dycore=dycore).to_xarray()
+        self.assertIn("standard_name", snapshot.time.attrs)
+        strip = lambda attrs: {k: v for k, v in attrs.items()
+                               if k not in ("bounds", "cell_methods")}
+        self.assertEqual(strip(mean.time.attrs), strip(snapshot.time.attrs))
+        self.assertEqual(mean.time.attrs["bounds"], "time_bounds")
+
     def test_raw_predictions_remain_differentiable(self):
         def loss(temperature):
             predictions = _predictions().replace(
