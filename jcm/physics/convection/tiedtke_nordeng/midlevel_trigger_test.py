@@ -37,10 +37,17 @@ def _elevated_column(rh_mid=0.95, w_mid=-0.3, mid_slice=slice(12, 15)):
 
     The strong low-level inversion is the point: it guarantees ``cubase``
     finds nothing, so anything that convects here came from ``cubasmc``.
+    Above the inversion the column is statically stable (6.5 K/km on the
+    column's own hydrostatic heights): the half-level environment ECHAM's
+    ``cuini`` builds enforces a non-decreasing dry static energy upward, so a
+    dry-unstable jump above the inversion would carry the inversion's warmth
+    up the whole column.
     """
     p = np.linspace(101325.0, 5000.0, NLEV)
-    t = 300.0 - 6.5e-3 * DZ * np.arange(NLEV)
+    z = -7.6e3 * np.log(p / p[0])               # hypsometric height [m]
+    t = np.empty(NLEV)
     t[:4] = 300.0 + 2.0 * np.arange(4)          # capping inversion
+    t[4:] = t[3] - 6.5e-3 * (z[4:] - z[3])
     qs, _ = saturation_specific_humidity_and_derivative(jnp.array(t), jnp.array(p))
     qs = np.asarray(qs)
     q = 0.5 * qs
@@ -147,15 +154,14 @@ class TestMidLevelSurvivalRetry(unittest.TestCase):
         self.assertTrue(bool(found_ref))
         self.assertEqual(int(base_ref), 12)
 
-        # Bury level 13 under a sharp warm cap so a plume seeded at 12
-        # cannot be buoyant one level up. Level 13's humidity is raised with
-        # it to hold RH at 0.95, so level 13 stays an eligible SEED (it is
-        # tested against level 14) — otherwise warming alone would drop its
-        # RH below the 0.90 gate and we would be testing the wrong thing.
-        t_cap = t.at[13].add(+12.0)
-        qs_cap, _ = saturation_specific_humidity_and_derivative(t_cap, p)
-        q_cap = q.at[13].set(0.95 * qs_cap[13])
-        base, found = find_midlevel_cloud_base(t_cap, q_cap, p, w, dz, cfg)
+        # Hold layer 12 at 91 % RH: still an eligible seed (> 0.90), but the
+        # one-layer lift of its first ascent step (to the layer's top
+        # interface) cools it too little to condense, so ECHAM sets
+        # ``klab = 0`` there and ``cubasmc`` re-seeds in the next layer up,
+        # which at 95 % RH does condense and is buoyant.
+        qs, _ = saturation_specific_humidity_and_derivative(t, p)
+        q_dry12 = q.at[12].set(0.91 * qs[12])
+        base, found = find_midlevel_cloud_base(t, q_dry12, p, w, dz, cfg)
         self.assertTrue(bool(found), "the trigger should retry, not give up")
         self.assertEqual(int(base), 13)
 
@@ -216,17 +222,23 @@ class TestMidLevelEndToEnd(unittest.TestCase):
         """``pqu = pqen(kk)`` — the plume has no surface connection.
 
         Seeding from the surface would hand this plume the boundary layer's
-        much larger mixing ratio — water it never had.
+        much larger mixing ratio — water it never had. ``cubasmc`` seeds at
+        the BOTTOM interface of the seeding layer ``kk = kcbot``, which in
+        this surface-first column is the top interface of layer ``kk − 1``;
+        the seed temperature is layer kk's brought dry-adiabatically down
+        that half layer.
         """
         t, q, p, _, _ = _elevated_column()
         _, state = self._run(omega=None)
         kb = int(state.kbase)
-        self.assertAlmostEqual(float(state.qu[kb]), float(q[kb]), places=9)
-        self.assertAlmostEqual(float(state.tu[kb]), float(t[kb]), places=5)
+        seed = kb - 1
+        self.assertAlmostEqual(float(state.qu[seed]), float(q[kb]), places=9)
+        self.assertGreater(float(state.tu[seed]), float(t[kb]))
+        self.assertLess(float(state.tu[seed]), float(t[kb]) + 2.0)
         # Not a tautology: the two candidate parcels are far apart, so the
         # assertions above genuinely discriminate between them.
-        self.assertLess(float(q[kb]), 0.5 * float(q[0]))
-        self.assertLess(float(t[kb]), float(t[0]) - 20.0)
+        self.assertGreater(abs(float(q[kb]) - float(q[0])), 0.3 * float(q[0]))
+        self.assertLess(float(t[kb]), float(t[0]) - 5.0)
 
     def test_mass_flux_comes_from_omega_not_a_cape_closure(self):
         """Halving the ascent halves the cloud-base mass flux exactly.
@@ -268,8 +280,9 @@ class TestSurfacePathUnaffected(unittest.TestCase):
         # Well-mixed boundary layer under a moist, rising mid-level layer:
         # both triggers would fire, and the surface one must win.
         p = np.linspace(101325.0, 5000.0, NLEV)
-        t = 300.0 - 9.7e-3 * DZ * np.arange(NLEV)     # near-dry-adiabatic PBL
-        t[3:] = t[3] - 6.0e-3 * DZ * np.arange(NLEV - 3)
+        z = -7.6e3 * np.log(p / p[0])                  # hypsometric height
+        t = 300.0 - 9.7e-3 * z                         # near-dry-adiabatic PBL
+        t[3:] = t[3] - 6.0e-3 * (z[3:] - z[3])
         qs, _ = saturation_specific_humidity_and_derivative(
             jnp.array(t), jnp.array(p))
         qs = np.asarray(qs)

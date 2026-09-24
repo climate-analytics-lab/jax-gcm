@@ -219,9 +219,16 @@ class TestRceColumnConstruction(unittest.TestCase):
         dp = jnp.asarray(np.abs(np.diff(ph)))
         rho = pfull / (c.rd * ic.temperature)
         dz = dp / (rho * c.grav)
-        cfg = ConvectionParameters.default(cu_thvsig=1.0)
+        # A modest sub-grid excess (zlift = 0.5 K). The half-level walk
+        # tests the parcel against ``cuini``'s interface environment, whose
+        # moist-adiabatic interpolation from the level above is cooler than
+        # the full levels in a conditionally unstable layer; with ECHAM's
+        # maximum 1 K excess even the unmixed sounding just reaches its LCL,
+        # so the control below would not discriminate.
+        cfg = ConvectionParameters.default(cu_thvsig=0.5)
         _cb, found = find_cloud_base(ic.temperature, ic.specific_humidity,
-                                     pfull, cfg, None, dz)
+                                     pfull, cfg, None, dz,
+                                     pressure_half=jnp.asarray(ph))
         self.assertTrue(bool(found), "no cloud base in the seeded RCE column")
         # ...because the sub-cloud layer is well mixed. Compare the
         # potential-temperature spread through it against the unmixed
@@ -240,6 +247,7 @@ class TestRceColumnConstruction(unittest.TestCase):
         self.assertLess(spread, 0.5 * spread_unmixed)
         _cb2, found_unmixed = find_cloud_base(
             unmixed.temperature, unmixed.specific_humidity, pfull, cfg, None, dz,
+            pressure_half=jnp.asarray(ph),
         )
         self.assertFalse(bool(found_unmixed),
                          "the unmixed profile should not trigger cubase")
@@ -444,13 +452,19 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     fixed-RH closure is incompatible with the model's own moisture physics).
 
     The assertions are on the **time mean**: a single-column mass-flux scheme in
-    RCE has an intrinsic high-frequency convective cycle (a residual cloud-base
-    flicker remains — fully removing it needs the half-level flux re-stagger of
-    ``cuasc``/``cudtdq``, tracked separately), but the time-mean column must be a
-    physical radiative-convective equilibrium with continuously active
-    convection. This is the regression guard for the closure fix that anchors the
-    cloud-base mass flux to the surface moisture supply (ECHAM ``zmfub``) so
-    convection runs continuously instead of switching fully on/off.
+    RCE has an intrinsic high-frequency convective cycle, but the time-mean
+    column must be a physical radiative-convective equilibrium whose
+    convection never dies out and whose high-frequency scatter stays bounded.
+    It guards the finite-volume convective ledger on the model's half levels
+    and the column water budget.
+
+    With no large-scale convergence the column never classifies deep (ECHAM's
+    ``zdqcv`` test), so its convection is the shallow plume. That plume
+    entrains at ``entrscv`` and, as in ``cuasc``, stops at the first interface
+    where it no longer condenses or is not buoyant, which in this column is
+    within a layer or two of cloud base: it moistens the boundary layer and
+    precipitates little, and it switches on and off with the saturation of
+    the lowest layers.
 
     The column is **aerosol-free** (``AerosolFree`` replaces MACv2-SP). The
     MACv2-SP plumes are a geographic climatology, and this column at 0°N/0°E
@@ -463,13 +477,13 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     AOD is scaled at the solar-weighted band wavelength. An RCE test means
     the idealised clear-air column, not a smoke plume.
 
+    The column water budget IS pinned: every term's ledger is conservative in
+    the host's own layer mass, so over the averaging window the change of
+    column water equals evaporation minus precipitation.
+
     What it does NOT pin, and why: even aerosol-free the grey column is not a
-    true RCE. Grey water-vapour SW absorption plus opaque grey LW leave no net
-    atmospheric radiative cooling, so P/E ≈ 8 % and column water vapour keeps
-    rising (#883); E ≈ P is therefore not asserted. Nor is the column water
-    budget: Tiedtke's flux divergence is conservative only in its own
-    dual-grid layer mass, which leaks ~0.04 mm/d against the host's true
-    layer mass (#530).
+    true RCE — its column water vapour keeps rising (#883), so E ≈ P is not
+    asserted.
     """
 
     def test_whole_model_column_reaches_physical_time_mean_rce(self):
@@ -519,13 +533,12 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         self.assertGreater(float(q[-1, -1]) * 1e3, 5.0)
         self.assertLess(float(q[-1, -1]) * 1e3, 30.0)
 
-        # Convection stays active through the averaging window. Aerosol-free,
-        # the time-mean convective precipitation over the last 40 days is
-        # 0.021 mm/d (convection on in ~49 % of steps) and the total is
-        # 0.028 mm/d. Both are small against evaporation (0.36 mm/d, the
-        # no-net-cooling gap of #883), but strictly positive: the hard-trigger
-        # extinction these pins guard against drives the equilibrium
-        # convective precipitation to exactly zero.
+        # Convection stays alive through the averaging window: over the last
+        # 40 days the time-mean convective precipitation is 0.024 mm/d
+        # (convection on in 31 % of the steps) of a 0.027 mm/d total against
+        # 0.27 mm/d of evaporation. The pins are strict positivity: the hard-trigger
+        # extinction they guard against drives the equilibrium convective
+        # precipitation to exactly zero.
         precip = np.asarray(
             preds.physics_data["convection"].precip_conv
         ).reshape(len(preds.times), -1)[:, 0]
@@ -541,39 +554,29 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         self.assertGreater(float(precip[-40 * spd:].mean()), 0.0)
         self.assertGreater(float(total[-40 * spd:].mean()), 0.0)
 
-        # The high-frequency convective flicker is bounded. History of this
-        # pin: the bare-CAPE on/off closure gave ≈14 K/day per-level
-        # temporal scatter; the moisture-supply closure fix halved it to
-        # ≈7; the faithful cuflx/cudtdq ledger raises it to ≈12.3 — the
-        # per-level L·pdmfup/plude heating is genuinely localized where the
-        # removed grid-mean saturation adjustment used to smear it. The
-        # on/off closure pathology this bound originally guarded is now
-        # pinned directly by the closure dt-invariance test
-        # (rce_integration_test), so the bound tracks the measured faithful
-        # value + margin. It should tighten again once the half-level flux
-        # re-stagger (#530) lands. The unconditional ECHAM Nordeng rescale
-        # (mo_cumastr.f90:812-906; restored after the gated variant locked
-        # coupled runs in a desiccated fixed point) raises the measured
-        # value to ~15.2: the amplitude now tracks the plume-CAPE
-        # consumption cycle, and the smoothed trigger keeps convection
-        # continuously ON through it (the sustained-precip assertion
-        # above) instead of flipping off — pulsing amplitude, not the
-        # on/off pathology this bound originally guarded.
-        #
-        # ...and #661 (the cloud-base water-conservation fix) raises the
-        # measured value to 28.6, because it removed the inflated CAPE that
-        # was keeping this column above its trigger. Measured three ways to
-        # attribute it: dev 9.9 / #661 alone 29.2 / #661 + the cubase zlift
-        # gate 28.6 — so it is the conservation fix, and the zlift work
-        # slightly REDUCES it. In this closed column convection is now ON
-        # 9.4 % of steps against 99.1 % before, i.e. the on/off character
-        # HAS returned here. It has not returned globally: a 3-day T63L47
-        # run puts the convecting-column fraction at 0.445 vs 0.448 on dev,
-        # with convective precip 0.78 → 0.95 mm/day and total precip +2 %.
-        # This bound therefore tracks a single closed column sitting on its
-        # 100 J/kg trigger, and retuning that trigger/closure against the
-        # corrected CAPE — after which this should come back down — is #682.
-        # In the aerosol-free column this test now runs, the measured value is
-        # 22.4 K/day, with convection on in ~49 % of steps.
+        # The high-frequency convective flicker is bounded: the largest
+        # per-level temporal standard deviation of the total heating over the
+        # window. The measured value is 23.7 K/day, at the lowest level, where
+        # the shallow plume's on/off cycle with the boundary layer's
+        # saturation (see the class docstring) deposits its sub-cloud flux
+        # divergence; the bound leaves a third of margin.
         max_temporal_std = float(np.max(tot[-40 * spd:].std(axis=0)))
         self.assertLess(max_temporal_std, 32.0)  # K/day
+
+        # Column water budget over the window: Δ(column water)/Δt = E − P on
+        # the host's own layer mass (measured residual ~1e-5 mm/d, against
+        # E ≈ 1.5 mm/d; a dual-grid convective ledger leaked ~0.06 mm/d here).
+        vertical = scm.coords.vertical
+        ps = float(np.asarray(ic.normalized_surface_pressure) * c.p0)
+        mass = np.diff(np.asarray(vertical.a_boundaries)
+                       + np.asarray(vertical.b_boundaries) * ps) / c.grav
+        qc = np.asarray(preds.tracer_states["qc"])
+        qi = np.asarray(preds.tracer_states["qi"])
+        water = ((q + qc + qi) * mass).sum(axis=-1)
+        evap = np.asarray(
+            preds.physics_data["surface"].effective_evaporation
+        ).reshape(len(preds.times), -1)[:, 0]
+        window = slice(-40 * spd, None)
+        dwater_dt = (water[-1] - water[-40 * spd - 1]) / (40 * spd * 900.0)
+        residual = float(evap[window].mean() - total[window].mean() - dwater_dt)
+        self.assertLess(abs(residual), 1e-2 * float(evap[window].mean()))

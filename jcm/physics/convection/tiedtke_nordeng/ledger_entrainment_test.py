@@ -33,6 +33,10 @@ from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import (
 from jcm.physics.convection.tiedtke_nordeng.updraft import (
     UpdatedraftState,
     calculate_updraft,
+    column_environment,
+)
+from jcm.physics.convection.tiedtke_nordeng.half_levels import (
+    reconstruct_pressure_half,
 )
 from jcm.physics.convection.tiedtke_nordeng.downdraft import (
     DowndraftState,
@@ -94,13 +98,16 @@ class TestConstantFallbackClosure:
 class TestCondensateFluxLedger:
     """Isolate the condensate-flux heating term.
 
-    Setting ``tu == env T`` (zero DSE deviation flux) and ``qu == env q``
-    (zero moisture deviation flux) with ``mfd = plude = pdmfup = pdmfdp = 0``
-    leaves the condensate flux ``L·lu·mfu`` as the ONLY nonzero divergence,
-    so ``dtedt`` is exactly ``−Δ(zalv·lu·mfu)/(cp·Δp/g)`` and can be
+    Setting the plume to the HALF-level environment, ``tu == ptenh`` (zero
+    DSE deviation flux) and ``qu == pqenh`` (zero moisture deviation flux),
+    with ``mfd = plude = pdmfup = pdmfdp = 0`` leaves the condensate flux
+    ``L·lu·mfu`` as the ONLY nonzero divergence, so ``dtedt`` is exactly
+    ``−Δ(palvsh·lu·mfu)/(cp·Δp/g)`` — the latent heat keyed to the
+    half-level temperature ``ptenh`` the flux crosses — and can be
     hand-computed. ``cp`` is ECHAM's moist ``pcpen = cpd·(1 + vtmpc2·q)``
-    (``zrcpm``, mo_cufluxdts.f90:648), built here by hand from the column's
-    uniform 5 g/kg.
+    (``zrcpm``, mo_cufluxdts.f90:654), built here by hand from the column's
+    uniform 5 g/kg; ``Δp`` is the true layer thickness between the column's
+    interfaces (the full-level midpoints, 200 hPa for every layer here).
     """
 
     Q = 5.0e-3
@@ -114,26 +121,34 @@ class TestCondensateFluxLedger:
         humidity = jnp.full(nlev, self.Q)
         rho = pressure / (c.rd * temperature)
         dz = jnp.full(nlev, 1000.0)
-        # Condensate flux lu·mfu = [0, 1e-4, 2e-4, 3e-4, 4e-4] — nonzero at
-        # the surface (last index) so the surface-layer closure is exercised.
+        p_half = reconstruct_pressure_half(pressure)
+        env = column_environment(temperature, humidity, pressure,
+                                 pressure_half=p_half)
+        # Condensate flux lu·mfu = [0, 1e-4, 2e-4, 3e-4, 4e-4] through each
+        # layer's TOP interface — nonzero at the top of the surface layer
+        # (last index) so the surface-layer closure is exercised.
         mfu = jnp.array([0.0, 0.1, 0.1, 0.1, 0.1])
         lu = jnp.array([0.0, 1.0e-3, 2.0e-3, 3.0e-3, 4.0e-3])
         up = _zero_updraft(nlev)._replace(
-            tu=temperature, qu=humidity, lu=lu, mfu=mfu,
+            tu=env.tenh, qu=env.qenh, lu=lu, mfu=mfu,
         )
         dn = _zero_downdraft(nlev)
         tend = calculate_tendencies(
             temperature, humidity, jnp.zeros(nlev), jnp.zeros(nlev),
             pressure, rho, dz, up, dn, kbase=4, ktop=1, dt=1800.0,
             config=ConvectionParameters.default(), ktype=jnp.array(1),
+            pressure_half=p_half,
         )
-        dp = float(pressure[1] - pressure[0])
-        mass = dp / c.grav
+        mass = np.diff(np.asarray(p_half)) / c.grav
+        np.testing.assert_allclose(mass, 2.0e4 / c.grav, rtol=1e-6)
         cond_flux = np.asarray(lu * mfu)
+        self.alvsh = np.asarray(env.alvsh)
         return tend, cond_flux, mass
 
     def test_phase_keyed_latent_heat_cold_uses_alhs(self):
         tend, cond_flux, mass = self._setup(250.0)  # below tmelt
+        # Every interface is below the melting point, so palvsh = alhs.
+        assert np.all(self.alvsh == c.alhs)
         # div = diff([cond_flux, 0]) ; dtedt = -alhs*div/(cp*mass)
         div = np.diff(np.append(cond_flux, 0.0))
         expected = -c.alhs * div / (self.CP * mass)
@@ -147,6 +162,7 @@ class TestCondensateFluxLedger:
 
     def test_phase_keyed_latent_heat_warm_uses_alhc(self):
         tend, cond_flux, mass = self._setup(290.0)  # above tmelt
+        assert np.all(self.alvsh == c.alhc)
         div = np.diff(np.append(cond_flux, 0.0))
         expected = -c.alhc * div / (self.CP * mass)
         np.testing.assert_allclose(np.asarray(tend.dtedt), expected, rtol=1e-5)
@@ -157,7 +173,7 @@ class TestCondensateFluxLedger:
         # nonzero, where the old diff-into-[:-1] left it exactly 0.
         tend, cond_flux, mass = self._setup(290.0)
         surf = float(tend.dtedt[-1])
-        expected_surf = -(-c.alhc * cond_flux[-1]) / (self.CP * mass)
+        expected_surf = -(-c.alhc * cond_flux[-1]) / (self.CP * mass[-1])
         assert surf != 0.0
         assert surf == pytest.approx(expected_surf, rel=1e-5)
 
@@ -168,13 +184,15 @@ class TestCondensateFluxLedger:
 class TestMoistHeatCapacityLedger:
     """``pmfus``/``pmfds`` carry ``pcpcu·T + φ`` and ``zrcpm = 1/pcpen``.
 
-    A warm plume (``tu = T + 1 K``) with no condensate, in a column whose
-    humidity falls with height, isolates the dry-static-energy deviation
-    flux ``F_k = cp_k·(tu_k − T_k)·mfu_k``. Its divergence telescopes over
-    the column, so the enthalpy the ledger deposits, ``Σ cp_k·dT_k·m_k``,
-    vanishes to round-off with the SAME moist ``cp`` the ledger divides by
-    (mo_cufluxdts.f90:198-204, 648-656) — and is open by ``~vtmpc2·Δq``
-    when integrated with dry ``cpd``.
+    A plume 1 K warmer than the HALF-level environment (``tu = ptenh + 1``)
+    with no condensate, in a column whose humidity falls with height,
+    isolates the dry-static-energy deviation flux through each layer's top
+    interface, ``F_k = pcpcu_k·(tu_k − ptenh_k)·mfu_k``. Its divergence
+    telescopes over the column, so the enthalpy the ledger deposits on the
+    true layer mass, ``Σ pcpen_k·dT_k·m_k``, vanishes to round-off with the
+    SAME moist ``cp`` the ledger divides by (mo_cufluxdts.f90:198-204,
+    654-656) — and is open by ``~vtmpc2·Δq`` when integrated with dry
+    ``cpd``.
     """
 
     def _run(self):
@@ -184,19 +202,22 @@ class TestMoistHeatCapacityLedger:
         humidity = jnp.linspace(1.0e-3, 1.8e-2, nlev)
         rho = pressure / (c.rd * temperature)
         dz = jnp.full(nlev, 1000.0)
+        p_half = reconstruct_pressure_half(pressure)
+        env = column_environment(temperature, humidity, pressure,
+                                 pressure_half=p_half)
         mfu = jnp.array([0.0, 0.02, 0.05, 0.08, 0.06, 0.03])
         up = _zero_updraft(nlev)._replace(
-            tu=temperature + 1.0, qu=humidity, mfu=mfu,
+            tu=env.tenh + 1.0, qu=env.qenh, mfu=mfu,
         )
         tend = calculate_tendencies(
             temperature, humidity, jnp.zeros(nlev), jnp.zeros(nlev),
             pressure, rho, dz, up, _zero_downdraft(nlev), kbase=nlev - 1,
             ktop=1, dt=1800.0, config=ConvectionParameters.default(),
-            ktype=jnp.array(1),
+            ktype=jnp.array(1), pressure_half=p_half,
         )
-        dpa = np.abs(np.diff(np.asarray(pressure)))
-        mass = np.concatenate([dpa, dpa[-1:]]) / c.grav
+        mass = np.diff(np.asarray(p_half)) / c.grav
         cp = c.cpd * (1.0 + c.vtmpc2 * np.asarray(humidity))
+        self.cpcu = np.asarray(env.cpcu)
         return np.asarray(tend.dtedt, dtype=np.float64), mass, cp, np.asarray(mfu)
 
     def test_column_enthalpy_closes_with_moist_cp(self):
@@ -215,7 +236,7 @@ class TestMoistHeatCapacityLedger:
 
     def test_level_tendency_hand_computed(self):
         dtedt, mass, cp, mfu = self._run()
-        flux = cp * 1.0 * mfu
+        flux = self.cpcu * 1.0 * mfu
         div = np.diff(np.append(flux, 0.0))
         expected = div / (cp * mass)
         np.testing.assert_allclose(dtedt, expected, rtol=2e-5, atol=1e-12)
@@ -381,11 +402,10 @@ class TestShallowReclosureDowndraftDetection:
     """#676 shallow re-closure keys the cloud-base downdraft on ``mfd[ikb]<0``.
 
     ECHAM (mo_cumastr.f90:924) uses ``pmfd(ikb) < 0 .AND. loddraf`` — where
-    ``loddraf`` is "an LFS was found", never reset by the surface taper. The
-    port must NOT gate on ``DowndraftState.active``, which is the scan-EXIT
-    carry: the surface taper zeroes ``mfd`` in the lowest layers and drives
-    ``active`` to False, so a downdraft that reaches cloud base is still
-    ``active == False`` at exit (Codex P2).
+    ``loddraf`` is "an LFS was found", never reset by the surface taper,
+    which drives the flux itself to zero at the surface. A downdraft that
+    reaches the cloud-base interface must therefore be seen there, with
+    ``DowndraftState.active`` carrying ``loddraf`` (Codex P2).
     """
 
     def _deep_downdraft_column(self):
@@ -402,7 +422,10 @@ class TestShallowReclosureDowndraftDetection:
             jnp.where(z <= mlt, 302.0 - dry * z,
                       302.0 - dry * mlt - 6.0e-3 * (z - mlt)), 200.0)
         qs = jax.vmap(saturation_mixing_ratio)(p, T)
-        q = (0.7 + 0.25 * jnp.exp(-(z / 9000.0) ** 2)) * qs
+        # A moist boundary layer under a dry (50 % RH) free troposphere: the
+        # wet-bulb depression of the dry air is what makes cudlfs' 50/50
+        # plume/environment mixture negatively buoyant inside the cloud.
+        q = jnp.where(z < 1500.0, 0.92, 0.5) * qs
         Tv = T * (1 + 0.608 * q)
         rho = p / (c.rd * Tv)
         dz = c.rd * Tv / c.grav * jnp.diff(jnp.log(ph))
@@ -411,22 +434,20 @@ class TestShallowReclosureDowndraftDetection:
         upd = calculate_updraft(T, q, p, dz, rho, cb, ktop, 1, jnp.array(0.05),
                                 cfg, type_weights=jnp.array([1.0, 0.0, 0.0]))
         prec = jnp.sum(upd.pdmfup)
-        dwn = calculate_downdraft(T, q, p, dz, rho, upd, prec, cb, ktop, cfg)
+        # cudlfs searches inside the REALIZED cloud (kctop < jk < kcbot).
+        kctop = int(np.min(np.where(np.asarray(upd.mfu) > 0.0)[0]))
+        dwn = calculate_downdraft(T, q, p, dz, rho, upd, prec, cb, kctop, cfg)
         return int(cb), dwn
 
-    def test_downdraft_at_cloud_base_detected_despite_scan_exit_inactive(self):
+    def test_downdraft_at_cloud_base_detected_despite_surface_taper(self):
         cb, dwn = self._deep_downdraft_column()
-        mfd_cb = float(np.asarray(dwn.mfd)[cb])
-        active_exit = bool(dwn.active)
-        # A downdraft IS present at cloud base ...
-        assert mfd_cb < 0.0, f"fixture built no cloud-base downdraft (mfd={mfd_cb})"
-        # ... but the scan-exit activity flag is False (surface taper), so the
-        # OLD ``mfd<0 & active`` gate would wrongly exclude it, while the
-        # faithful ``mfd[ikb] < 0`` detection includes it.
-        assert active_exit is False, (
-            "fixture must reproduce the taper-inactivated exit state")
-        assert not (mfd_cb < 0.0 and active_exit), "old gate should miss it"
-        assert mfd_cb < 0.0, "new gate (mfd[ikb] < 0) detects the downdraft"
+        mfd = np.asarray(dwn.mfd)
+        # A downdraft IS present at the cloud-base interface ...
+        assert mfd[cb] < 0.0, f"fixture built no cloud-base downdraft (mfd={mfd[cb]})"
+        # ... the surface taper has driven it to (near) zero at the lowest
+        # interface, yet ``active`` still records that an LFS was found.
+        assert abs(mfd[-1]) < abs(mfd[cb])
+        assert bool(dwn.active), "active must carry ECHAM's loddraf"
 
 
 class TestReturnedStateCarriesPlumeWinds:
@@ -478,14 +499,17 @@ class TestReturnedStateCarriesPlumeWinds:
         assert not np.allclose(np.asarray(state.ud), un)
 
 
-class TestCloudTopForcedDetrainment:
-    """#676 a plume reaching the scan ceiling fully detrains (water conserved).
+class TestCloudTopOvershoot:
+    """cuasc's cloud-top overshoot (mo_cuascent.f90:540-565).
 
-    ECHAM forces total detrainment at cloud top (mo_cuasc.f90:540-563,
-    ``plude(jk-1)=pmful(jk)``). With the metre-based capped detrainment a
-    still-buoyant plume can reach the supplied ``ktop`` with positive mfu/lu;
-    its residual condensate must go to ``plude``/the stratiform dqc-dqi ledger,
-    not vanish as a flux-boundary loss (Codex P2).
+    A plume still alive at its last passing interface ``kctop`` does not
+    stop dead: a fraction ``cmfctop`` of the flux there carries on to the
+    interface above, ``kctop − 1``, with the properties the ascent gave it
+    there and no precipitation; the rest, ``(1 − cmfctop)·pmfu(kctop)``,
+    detrains in layer ``kctop − 1`` with the plume's condensate, and the
+    overshooting condensate ``pmful(kctop − 1)`` detrains in the layer above
+    that. Here the cloud-top bound ``kctop0`` ends a still-buoyant plume, so
+    every one of those is non-trivial.
     """
 
     def _deep_column_reaching_ceiling(self):
@@ -503,37 +527,55 @@ class TestCloudTopForcedDetrainment:
         Tv = T * (1 + 0.608 * q)
         rho = p / (c.rd * Tv)
         dz = c.rd * Tv / c.grav * jnp.diff(jnp.log(ph))
-        cb, _ = find_cloud_base(T, q, p, cfg)
-        # Ceiling BELOW the plume's natural top, so it reaches ktop buoyant.
+        cb, _ = find_cloud_base(T, q, p, cfg, pressure_half=ph)
+        # The bound BELOW the plume's natural top, so it reaches it buoyant.
         ktop = jnp.array(8)
         u = jnp.zeros(nlev)
         upd = calculate_updraft(T, q, p, dz, rho, cb, ktop, 1, jnp.array(0.05),
                                 cfg, type_weights=jnp.array([1.0, 0.0, 0.0]),
-                                u_wind=u, v_wind=u)
+                                u_wind=u, v_wind=u, pressure_half=ph)
+        self.ph = ph
         return cfg, T, q, p, rho, dz, u, cb, ktop, upd
 
-    def test_residual_condensate_detrained_at_ceiling(self):
-        _, _, _, _, _, _, _, _, ktop, upd = self._deep_column_reaching_ceiling()
+    def test_overshoot_flux_and_detrainment(self):
+        cfg, _, _, _, _, _, _, _, ktop, upd = (
+            self._deep_column_reaching_ceiling())
         kt = int(ktop)
-        mfu = np.asarray(upd.mfu)
-        plude = np.asarray(upd.plude)
-        # The plume is alive just below the ceiling ...
-        assert mfu[kt + 1] > 1e-6, "fixture: plume did not reach the ceiling"
-        # ... fully terminates AT the ceiling (forced detrainment) ...
-        assert mfu[kt] == 0.0, "plume not terminated at the scan ceiling"
-        # ... and its residual condensate is detrained, not lost.
-        assert plude[kt] > 0.0, "residual plume condensate not detrained to plude"
+        cmfctop = float(cfg.cu_cmfctop)
+        mfu = np.asarray(upd.mfu, dtype=np.float64)
+        lu = np.asarray(upd.lu, dtype=np.float64)
+        plude = np.asarray(upd.plude, dtype=np.float64)
+        # The plume passes the ascent test up to the bound ...
+        assert int(upd.kctop) == kt
+        assert mfu[kt] > 1e-6, "fixture: plume did not reach the bound"
+        # ... a fraction cmfctop of its flux overshoots one interface ...
+        np.testing.assert_allclose(mfu[kt - 1], cmfctop * mfu[kt], rtol=1e-3)
+        # ... and nothing rises further.
+        assert np.all(mfu[:kt - 1] == 0.0)
+        # The rest detrains in the overshoot layer with the condensate of
+        # the plume leaving kctop; the overshoot's own condensate detrains
+        # in the layer above it.
+        np.testing.assert_allclose(
+            plude[kt - 1], (1.0 - cmfctop) * mfu[kt] * lu[kt], rtol=1e-3)
+        np.testing.assert_allclose(
+            plude[kt - 2], mfu[kt - 1] * lu[kt - 1], rtol=1e-3)
+        assert plude[kt - 2] > 0.0
+        # The overshoot does not precipitate.
+        assert float(upd.pdmfup[kt - 1]) == pytest.approx(0.0, abs=1e-12)
+        # Nothing entrains above the overshoot.
+        assert np.all(np.asarray(upd.dmfen)[:kt - 1] == 0.0)
 
     def test_column_water_conserved_when_plume_reaches_ceiling(self):
         cfg, T, q, p, rho, dz, u, cb, ktop, upd = (
             self._deep_column_reaching_ceiling())
         prec = jnp.sum(upd.pdmfup)
         dn = calculate_downdraft(T, q, p, dz, rho, upd, prec, cb, ktop, cfg,
-                                 u_wind=u, v_wind=u)
+                                 u_wind=u, v_wind=u, pressure_half=self.ph)
         tend = calculate_tendencies(T, q, u, u, p, rho, dz, upd, dn, cb, ktop,
-                                    1800.0, cfg, ktype=jnp.array(1))
-        dp_abs = np.abs(np.diff(np.asarray(p)))
-        mass = np.concatenate([dp_abs, dp_abs[-1:]]) / c.grav
+                                    1800.0, cfg, ktype=jnp.array(1),
+                                    pressure_half=self.ph)
+        # The true layer mass between the column's interfaces.
+        mass = np.diff(np.asarray(self.ph)) / c.grav
         water_tend = np.sum(
             (np.asarray(tend.dqdt) + np.asarray(tend.dqc_dt)
              + np.asarray(tend.dqi_dt)) * mass)
@@ -543,9 +585,10 @@ class TestCloudTopForcedDetrainment:
         assert abs(residual) / max(abs(precip), 1e-20) < 1e-5, (
             f"column water budget open: residual {residual:.3e} vs "
             f"precip {precip:.3e}")
-        # The anvil condensate at the ceiling feeds the stratiform ledger.
+        # The overshoot's condensate, detrained above the cloud top, feeds
+        # the stratiform ledger.
         kt = int(ktop)
-        assert (float(tend.dqc_dt[kt]) + float(tend.dqi_dt[kt])) > 0.0
+        assert (float(tend.dqc_dt[kt - 2]) + float(tend.dqi_dt[kt - 2])) > 0.0
 
 
 class TestShallowReclosureCflCap:
@@ -608,10 +651,11 @@ if __name__ == "__main__":
 # #872 — the plume DSE mixing pairs each level with the right moist cp
 # --------------------------------------------------------------------------
 class TestPlumeHeatCapacityIndexing:
-    """cuasc/cuddraf carry heat with the SOURCE level's ``pcpcu`` and convert
-    back with the DESTINATION level's (mo_cuascent.f90:388-411,
-    mo_cudescent.f90:275-284). An artificial ``cp`` gradient makes a wrong
-    or dropped index shift measurable (it moves ``tu`` by tenths of a K).
+    """cuasc/cuddraf carry heat across a layer with the half-level ``pcpcu`` of
+    the interface the air leaves and convert back with that of the interface
+    it reaches (mo_cuascent.f90:388-411, mo_cudescent.f90:222-233). An
+    artificial ``cp`` gradient makes a wrong or dropped index shift
+    measurable (it moves the plume temperature by tenths of a K).
     """
 
     NLEV = 8
@@ -626,10 +670,11 @@ class TestPlumeHeatCapacityIndexing:
         rho = pressure / (c.rd * temperature)
         # Strongly level-dependent cp (a stand-in for a humidity lapse).
         cp = c.cpd * (1.0 + 0.03 * jnp.linspace(0.0, 1.0, nlev) ** 2)
-        return pressure, temperature, humidity, dz, rho, cp
+        env = column_environment(temperature, humidity, pressure, cp)
+        return pressure, temperature, humidity, dz, rho, cp, env
 
     def test_updraft_lift_uses_source_and_destination_cp(self):
-        p, T, q, dz, rho, cp = self._column()
+        p, T, q, dz, rho, cp, env = self._column()
         cfg = ConvectionParameters.default(
             entrpen=0.0, entrscv=0.0, entrmid=0.0, cu_centrmax=0.0)
         kbase = self.NLEV - 2
@@ -638,33 +683,45 @@ class TestPlumeHeatCapacityIndexing:
             type_weights=jnp.array([0.0, 1.0, 0.0]), cp_moist=cp,
         )
         k = kbase - 1
-        expected = (cp[kbase] * up.tu[kbase] - c.grav * dz[k]) / cp[k]
-        np.testing.assert_allclose(float(up.tu[k]), float(expected), rtol=1e-6)
-        unshifted = up.tu[kbase] - c.grav * dz[k] / cp[k]
-        assert abs(float(up.tu[k] - unshifted)) > 0.1
+        cpcu = np.asarray(env.cpcu)
+        geoh = np.asarray(env.geoh)
+        expected = (cpcu[kbase] * float(up.tu[kbase]) + geoh[kbase]
+                    - geoh[k]) / cpcu[k]
+        np.testing.assert_allclose(float(up.tu[k]), expected, rtol=1e-6)
+        # A single (destination) cp for both ends is measurably different.
+        unshifted = float(up.tu[kbase]) - (geoh[k] - geoh[kbase]) / cpcu[k]
+        assert abs(float(up.tu[k]) - unshifted) > 0.1
 
     def test_downdraft_descent_uses_source_and_destination_cp(self):
-        from jcm.physics.convection.tiedtke_nordeng.downdraft import downdraft_step
-        p, T, q, dz, rho, cp = self._column()
-        nlev, k = self.NLEV, 3
-        td0 = jnp.full(nlev, 285.0)
-        carry = DowndraftState(
-            td=td0, qd=jnp.full(nlev, 1.0e-7), mfd=jnp.full(nlev, -0.01),
-            pdmfdp=jnp.zeros(nlev), ud=jnp.zeros(nlev), vd=jnp.zeros(nlev),
-            lfs=jnp.array(0), active=jnp.array(True),
+        from jcm.physics.convection.tiedtke_nordeng.updraft import (
+            UpdatedraftState,
         )
-        inputs = (
-            jnp.array(k), T[k], q[k], p[k], dz[k], rho[k], jnp.array(1.0),
-            jnp.array(0.0), jnp.array(1e-10), jnp.array(0.0),
-            jnp.array(nlev - 3), jnp.array(0.0), jnp.array(0.0),
-            jnp.array(0.0), cp[k], cp[k - 1],
+        p, T, q, dz, rho, cp, env = self._column()
+        nlev = self.NLEV
+        # No entrainment, so the descent below the LFS is a pure dry lift
+        # down one layer followed by cuadjtq's evaporation into the parcel.
+        cfg = ConvectionParameters.default(entrdd=0.0)
+        kbase, ktop = nlev - 2, 1
+        # A cold plume makes the LFS the first eligible interface (2).
+        z = jnp.zeros(nlev)
+        up = UpdatedraftState(
+            tu=jnp.full(nlev, 200.0), qu=q, lu=z,
+            mfu=jnp.zeros(nlev).at[kbase].set(0.05), entr=z, detr=z, buoy=z,
+            pdmfup=z, plude=z, uu=z, vu=z,
         )
-        (state, _), _ = downdraft_step((carry, jnp.array(1.0)), inputs)
-        # cuadjtq(kcall=2) then moistens the parcel toward saturation with
-        # DRY L/cpd (the reference table), so undo that to recover the lift.
-        td_new, qd_new = float(state.td[k]), float(state.qd[k])
-        td_lift = td_new + c.alhc / c.cpd * (qd_new - 1.0e-7)
-        expected = (cp[k - 1] * td0[k - 1] + c.grav * dz[k]) / cp[k]
-        np.testing.assert_allclose(td_lift, float(expected), rtol=1e-5)
-        unshifted = td0[k - 1] + c.grav * dz[k] / cp[k]
-        assert abs(td_lift - float(unshifted)) > 0.1
+        dn = calculate_downdraft(T, q, p, dz, rho, up, jnp.array(1.0),
+                                 kbase, ktop, cfg, cp_moist=cp, env=env)
+        lfs = int(dn.lfs)
+        assert lfs == 2 and bool(dn.active)
+        j = lfs + 1
+        td, qd = np.asarray(dn.td), np.asarray(dn.qd)
+        # Undo cuadjtq(kcall=2)'s moistening, whose L/cp is DRY (the
+        # reference table), to recover the dry descent.
+        L = c.alhc if td[j] >= c.tmelt else c.alhs
+        td_lift = td[j] + L / c.cpd * (qd[j] - qd[j - 1])
+        cpcu = np.asarray(env.cpcu)
+        geoh = np.asarray(env.geoh)
+        expected = (cpcu[j - 1] * td[j - 1] + geoh[j - 1] - geoh[j]) / cpcu[j]
+        np.testing.assert_allclose(td_lift, expected, rtol=1e-5)
+        unshifted = td[j - 1] + (geoh[j - 1] - geoh[j]) / cpcu[j]
+        assert abs(td_lift - unshifted) > 0.1

@@ -7,6 +7,7 @@ import jax.numpy as jnp
 import numpy as np
 import jax
 from types import SimpleNamespace
+import jcm.constants as c
 
 import jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng as convection_module
 from jcm.physics.clouds.cloud_data import CloudData
@@ -34,15 +35,27 @@ def deep_convection_drivers(atm, fraction=0.5, e_sfc=3.0e-5):
     surface flux is shallow too. Tests that need a deep plume must say so
     the way the atmosphere would — surface evaporation plus a resolved
     moisture-convergence profile exceeding 0.1*E.
+
+    The profiles integrate to their targets over the layer mass the scheme
+    itself integrates ``pqte`` with — ``Δp/g`` between the column's
+    interfaces: ``atm['pressure_half']`` when the column is run with them,
+    else the interfaces the scheme rebuilds from ``atm['pressure']``
+    (top-first columns).
     """
-    rho = np.asarray(atm['rho'])
-    dz = np.asarray(atm['layer_thickness'])
-    nlev = rho.shape[0]
+    from jcm.physics.convection.tiedtke_nordeng.half_levels import (
+        reconstruct_pressure_half,
+    )
+    if 'pressure_half' in atm:
+        p_half = np.asarray(atm['pressure_half'])
+    else:
+        p_half = np.asarray(reconstruct_pressure_half(jnp.asarray(atm['pressure'])))
+    mass = np.abs(np.diff(p_half)) / c.grav
+    nlev = mass.shape[0]
     prof = np.zeros(nlev)
-    prof[-4:] = e_sfc / (rho[-4:] * dz[-4:]).sum()
+    prof[-4:] = e_sfc / mass[-4:].sum()
     conv = np.zeros(nlev)
     sl = slice(nlev // 2, nlev - 8)
-    conv[sl] = fraction * e_sfc / (rho[sl] * dz[sl]).sum()
+    conv[sl] = fraction * e_sfc / mass[sl].sum()
     return dict(
         moisture_supply=jnp.array(e_sfc),
         moisture_tend_profile=jnp.array(prof),
@@ -216,6 +229,7 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
         moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
         layer_mass=None, humidity_m1=None, use_updraft_cover=False,
+        pressure_half=None,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
@@ -326,6 +340,7 @@ def test_cap_scales_momentum_consistently_with_ledger(monkeypatch):
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
         moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
         layer_mass=None, humidity_m1=None, use_updraft_cover=False,
+        pressure_half=None,
     ):
         ones = jnp.ones_like(temperature)
         zeros = jnp.zeros_like(temperature)
@@ -370,16 +385,22 @@ def test_cap_scales_momentum_consistently_with_ledger(monkeypatch):
         np.asarray(tendency.v_wind), 0.5 * dvdt_raw, rtol=1e-6)
 
 
-def test_wrapper_feeds_unfloored_pressure_thickness_to_the_scheme(monkeypatch):
-    """The sub-cloud cover's taper weight is the UNFLOORED Δp/g.
+def test_wrapper_feeds_true_layer_mass_and_interfaces_to_the_scheme(monkeypatch):
+    """The scheme gets the host's interfaces and the UNFLOORED Δp/g.
 
-    ``moist_air_state`` floors ``layer_thickness`` at 10 m and documents it
-    as unusable for mass weighting, so the wrapper must hand the scheme
-    ``pressure_thickness / g`` when that diagnostic is present (the composed
-    model always has it), falling back to ρ·Δz only for hand-built stacks
-    without it — where the thickness is unfloored by construction.
+    The finite-volume ledger divides by the true layer mass between the
+    host's interfaces, so the wrapper hands the scheme ``pressure_half``
+    (and the matching ``pressure_thickness / g``) when the diagnostics carry
+    them — the composed model always does. ``moist_air_state`` floors
+    ``layer_thickness`` at 10 m and documents it as unusable for mass
+    weighting, so it never enters: hand-built stacks without the half-level
+    diagnostics get interfaces rebuilt from ``pressure_thickness`` or, lacking
+    that too, from the full-level pressures.
     """
     import jcm.constants as c
+    from jcm.physics.convection.tiedtke_nordeng.half_levels import (
+        reconstruct_pressure_half,
+    )
 
     nlev, ncols = 4, 2
     shape = (nlev, ncols)
@@ -389,15 +410,18 @@ def test_wrapper_feeds_unfloored_pressure_thickness_to_the_scheme(monkeypatch):
         u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
         moisture_supply, moisture_tend_profile, thvsig, omega, qte_dynamics,
         layer_mass=None, humidity_m1=None, use_updraft_cover=False,
+        pressure_half=None,
     ):
         zeros = jnp.zeros_like(temperature)
         return ConvectionTendencies(
-            # Probe: ride the received taper weight out on dqdt (dtedt is
-            # zero, so cap_scale == 1 and it passes through unscaled).
+            # Probe: ride the received layer mass out on dqdt and the
+            # received interfaces' Δp/g on dqc_dt (dtedt is zero, so
+            # cap_scale == 1 and both pass through unscaled).
             dtedt=zeros, dqdt=layer_mass, dudt=zeros, dvdt=zeros,
             qc_conv=zeros, qi_conv=zeros,
             precip_formation=zeros, precip_flux=zeros,
-            precip_conv=jnp.zeros(()), dqc_dt=zeros, dqi_dt=zeros,
+            precip_conv=jnp.zeros(()),
+            dqc_dt=jnp.diff(pressure_half) / c.grav, dqi_dt=zeros,
         ), None
 
     monkeypatch.setattr(
@@ -415,9 +439,14 @@ def test_wrapper_feeds_unfloored_pressure_thickness_to_the_scheme(monkeypatch):
     pressure_thickness = (
         jnp.arange(nlev * ncols, dtype=float).reshape(shape) + 1.0
     ) * 100.0
+    pressure_half = jnp.concatenate(
+        [jnp.full((1, ncols), 1000.0),
+         1000.0 + jnp.cumsum(pressure_thickness, axis=0)], axis=0)
+    pressure_full = 0.5 * (pressure_half[1:] + pressure_half[:-1])
     diagnostics = {
         "_dt_seconds": 60.0,
-        "pressure_full": jnp.ones(shape) * 80000.0,
+        "pressure_full": pressure_full,
+        "pressure_half": pressure_half,
         "layer_thickness": jnp.ones(shape) * 10.0,
         "air_density": jnp.ones(shape),
         "pressure_thickness": pressure_thickness,
@@ -431,16 +460,26 @@ def test_wrapper_feeds_unfloored_pressure_thickness_to_the_scheme(monkeypatch):
     assert jnp.allclose(
         tendency.specific_humidity, pressure_thickness / c.grav,
     )
+    assert jnp.allclose(tendency.tracers["qc"], pressure_thickness / c.grav)
 
-    # Hand-built stack without the diagnostic: the ρ·Δz fallback.
-    diagnostics_no_dp = {
-        k: v for k, v in diagnostics.items() if k != "pressure_thickness"
-    }
+    # Without ``pressure_half``: interfaces rebuilt from the true Δp.
+    no_ph = {k: v for k, v in diagnostics.items() if k != "pressure_half"}
     tendency2, _ = TiedtkeConvection()(
-        state, diagnostics_no_dp, forcing=None, terrain=terrain,
+        state, no_ph, forcing=None, terrain=terrain,
     )
-    assert jnp.allclose(
-        tendency2.specific_humidity,
+    assert jnp.allclose(tendency2.specific_humidity, pressure_thickness / c.grav)
+    assert jnp.allclose(tendency2.tracers["qc"], pressure_thickness / c.grav,
+                        rtol=1e-5)
+
+    # Without either: interfaces from the full-level pressures, never ρ·Δz.
+    bare = {k: v for k, v in no_ph.items() if k != "pressure_thickness"}
+    tendency3, _ = TiedtkeConvection()(
+        state, bare, forcing=None, terrain=terrain,
+    )
+    rebuilt = jnp.diff(reconstruct_pressure_half(pressure_full), axis=0) / c.grav
+    assert jnp.allclose(tendency3.specific_humidity, rebuilt)
+    assert not jnp.allclose(
+        tendency3.specific_humidity,
         diagnostics["air_density"] * diagnostics["layer_thickness"],
     )
 
@@ -1135,15 +1174,21 @@ class TestIdealizedConvection:
         # (ECHAM's ``klab`` walk) let it appear to. 290 K makes the layer
         # near-dry-adiabatic — a well-developed convective boundary layer,
         # which is what a "should trigger deep convection" fixture needs.
+        # Above the boundary layer the column runs slightly colder than the
+        # moist adiabat from 290 K at 835 hPa (≈283 K at 685 hPa, 271 K at
+        # 510 hPa), so a saturated plume is buoyant all the way up — the
+        # conditional instability the fixture's name promises. cuasc stops
+        # a plume at the first interface where it is not buoyant, so a
+        # layer as stable as 290 → 285 K over 1.4 km admits no plume.
         temperature = jnp.array([
             300.0,   # Surface (warm)
             290.0,   # 850 hPa — well-mixed boundary layer
-            285.0,   # 700 hPa (dry anomaly region starts)
-            275.0,   # 500 hPa
-            265.0,   # 350 hPa
-            250.0,   # 200 hPa
-            230.0,   # 100 hPa
-            210.0    # Top
+            281.0,   # 700 hPa (dry anomaly region starts)
+            268.0,   # 500 hPa
+            250.0,   # 350 hPa
+            226.0,   # 200 hPa
+            205.0,   # 100 hPa
+            205.0    # Top
         ])
 
         # Height from hydrostatic relation
@@ -1245,6 +1290,15 @@ class TestIdealizedConvection:
         qc = jnp.zeros(nlev)
         qi = jnp.zeros(nlev)
 
+        # Deep convection is ECHAM's moisture-budget classification: a
+        # resolved convergence beyond 1.1x the surface supply (``zdqcv``).
+        # Without it the column is shallow, and the shallow entrainment rate
+        # ``entrscv`` over this grid's 1.4 km layers dilutes the plume below
+        # saturation in its first layer, which ends the ascent there.
+        supply = 1.0e-4
+        mass = atm['rho'] * atm['layer_thickness']
+        convergence = jnp.zeros(nlev).at[0:4].set(
+            1.5 * supply / jnp.sum(mass[0:4]))
         tendencies, state = tiedtke_nordeng_convection(
             atm['temperature'],
             atm['humidity'],
@@ -1256,7 +1310,9 @@ class TestIdealizedConvection:
             qc,
             qi,
             dt=3600.0,
-            config=config
+            config=config,
+            moisture_supply=jnp.array(supply),
+            qte_dynamics=convergence,
         )
 
         # Verify convection is triggered

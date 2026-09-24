@@ -55,14 +55,25 @@ def _unstable_column(cap_hpa=None):
             jnp.array(rho))
 
 
+def _layer_mass(p):
+    """Return the true per-layer air mass Δp/g [kg/m²] of the column — the
+    mass the scheme integrates ``pqte`` with (its interfaces are the
+    full-level midpoints for a column that supplies no ``pressure_half``).
+    """
+    from jcm.physics.convection.tiedtke_nordeng.half_levels import (
+        reconstruct_pressure_half,
+    )
+    return np.abs(np.diff(np.asarray(reconstruct_pressure_half(p)))) / c.grav
+
+
 def _run(column, qte_dynamics=None, config=None):
     t, q, p, dz, rho = column
-    rho_np = np.asarray(rho)
+    mass = _layer_mass(p)
     # The vdiff-supply profile lives in the lowest layers, wherever the
     # SURFACE is in this column's ordering (highest pressure).
     prof = np.zeros(NLEV)
     sfc = slice(-4, None) if float(p[-1]) >= float(p[0]) else slice(0, 4)
-    prof[sfc] = E_SFC / (rho_np[sfc] * np.asarray(dz)[sfc]).sum()
+    prof[sfc] = E_SFC / mass[sfc].sum()
     zeros = jnp.zeros(NLEV)
     return tiedtke_nordeng_convection(
         t, q, p, dz, rho, zeros, zeros, zeros, zeros,
@@ -73,12 +84,11 @@ def _run(column, qte_dynamics=None, config=None):
     )
 
 
-def _convergence_profile(rho, dz, fraction_of_e):
+def _convergence_profile(p, fraction_of_e):
     """Build a mid-level moisture-convergence profile integrating to f*E."""
     conv = np.zeros(NLEV)
     sl = slice(20, 32)
-    conv[sl] = fraction_of_e * E_SFC / (
-        np.asarray(rho)[sl] * np.asarray(dz)[sl]).sum()
+    conv[sl] = fraction_of_e * E_SFC / _layer_mass(p)[sl].sum()
     return jnp.array(conv)
 
 
@@ -99,7 +109,7 @@ class TestMoistureConvergenceSplit(unittest.TestCase):
         """
         col = _unstable_column()
         _, s_sh = _run(col)
-        _, s_dp = _run(col, qte_dynamics=_convergence_profile(col[4], col[3], 0.5))
+        _, s_dp = _run(col, qte_dynamics=_convergence_profile(col[2], 0.5))
         self.assertEqual(int(s_dp.ktype), 1)
         p = np.asarray(col[2])
         def depth(s):
@@ -114,8 +124,8 @@ class TestMoistureConvergenceSplit(unittest.TestCase):
         stays shallow, 0.2*E goes deep (width 2e-7 << 0.05*E here).
         """
         col = _unstable_column()
-        _, s_below = _run(col, qte_dynamics=_convergence_profile(col[4], col[3], 0.05))
-        _, s_above = _run(col, qte_dynamics=_convergence_profile(col[4], col[3], 0.2))
+        _, s_below = _run(col, qte_dynamics=_convergence_profile(col[2], 0.05))
+        _, s_above = _run(col, qte_dynamics=_convergence_profile(col[2], 0.2))
         self.assertEqual(int(s_below.ktype), 2)
         self.assertEqual(int(s_above.ktype), 1)
 
@@ -124,7 +134,7 @@ class TestMoistureConvergenceSplit(unittest.TestCase):
         is relabelled shallow, however strong the convergence.
         """
         col = _unstable_column(cap_hpa=900.0)
-        _, state = _run(col, qte_dynamics=_convergence_profile(col[4], col[3], 0.5))
+        _, state = _run(col, qte_dynamics=_convergence_profile(col[2], 0.5))
         p = np.asarray(col[2])
         mfu = np.asarray(state.mfu)
         top = np.where(mfu > 1e-6)[0]
@@ -147,7 +157,7 @@ class TestOrientationCanonicalization(unittest.TestCase):
     def test_surface_first_mirrors_toa_first(self):
         col = _unstable_column()          # TOA-first
         t, q, p, dz, rho = col
-        conv = _convergence_profile(rho, dz, 0.5)
+        conv = _convergence_profile(p, 0.5)
         tend_a, state_a = _run(col, qte_dynamics=conv)
         flip = lambda a: a[::-1]
         col_sf = tuple(flip(a) for a in col)
@@ -195,7 +205,8 @@ class TestLaggedDynamicsReconstruction(unittest.TestCase):
                             moisture_tend_profile, thvsig, omega,
                             qte_dynamics, layer_mass=None,
                             humidity_m1=None,
-                            use_updraft_cover=False):
+                            use_updraft_cover=False,
+                            pressure_half=None):
             zeros = jnp.zeros_like(temperature)
             return ConvectionTendencies(
                 dtedt=zeros, dqdt=qte_dynamics, dudt=zeros, dvdt=zeros,

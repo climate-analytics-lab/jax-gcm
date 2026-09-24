@@ -64,6 +64,16 @@ def _tropical_sounding(nlev: int = 47, surface_T: float = 302.0,
     return T, q, p, dz, rho
 
 
+def _interfaces(p):
+    """Interface pressures for a sounding: full-level midpoints inside, the
+    top and bottom extrapolated by half a layer (top clamped at 0 Pa).
+    """
+    from jcm.physics.convection.tiedtke_nordeng.half_levels import (
+        reconstruct_pressure_half,
+    )
+    return reconstruct_pressure_half(p)
+
+
 class TestRCEConvection(unittest.TestCase):
     """Full-scheme RCE-style integration tests."""
 
@@ -118,13 +128,17 @@ class TestRCEConvection(unittest.TestCase):
         correctly: shallow on its own surface flux, deep with resolved
         convergence beyond 0.1*E.
         """
+        # 90 % boundary-layer humidity: a shallow plume entrains at
+        # ``entrscv`` and ends its ascent at the first interface where the
+        # diluted parcel no longer condenses, so at 85 % the supply-only
+        # plume dies in its first layer (non-convective, as in ECHAM).
         atm_args = _tropical_sounding(
-            surface_T=298.0, surface_rh=0.85, lapse_K_per_km=5.5,
+            surface_T=298.0, surface_rh=0.9, lapse_K_per_km=5.5,
         )
         T, q, p, dz, rho = atm_args
         nlev = T.shape[0]
         cfg = ConvectionParameters.default()
-        atm = {"rho": rho, "layer_thickness": dz}
+        atm = {"rho": rho, "layer_thickness": dz, "pressure": p}
 
         drivers = deep_convection_drivers(atm)
         _, s_supply_only = tiedtke_nordeng_convection(
@@ -206,7 +220,8 @@ class TestRCEConvection(unittest.TestCase):
             1800.0, cfg,
             # Deep via ECHAM's zdqcv route (#699): the mid-troposphere heating
             # peak this test pins is a DEEP plume property.
-            **deep_convection_drivers({'rho': rho, 'layer_thickness': dz}),
+            **deep_convection_drivers(
+                {'rho': rho, 'layer_thickness': dz, 'pressure': p}),
         )
         dtedt = np.asarray(tendencies.dtedt)
         peak_pos = float(np.max(dtedt))
@@ -265,13 +280,14 @@ class TestRCEConvection(unittest.TestCase):
 
             Σ (dq/dt + dqc/dt + dqi/dt)·Δp/g + P  =  0,
 
-        using the scheme's own per-level layer-mass convention (edge Δp at
-        the boundaries, centred spacing inside).
+        with ``Δp/g`` the TRUE layer mass between the column's interfaces —
+        the mass a host integrates the tendencies with (#530).
         """
         T, q, p, dz, rho = _tropical_sounding(surface_T=302.0, surface_rh=0.85)
         nlev = T.shape[0]
         cfg = ConvectionParameters.default()
         dt = 1800.0
+        p_half = _interfaces(p)
 
         tendencies, _ = tiedtke_nordeng_convection(
             T, q, p, dz, rho,
@@ -279,14 +295,11 @@ class TestRCEConvection(unittest.TestCase):
             jnp.zeros(nlev), jnp.zeros(nlev),
             dt, cfg,
             moisture_supply=jnp.array(5e-5),
+            pressure_half=p_half,
         )
         import numpy as np
         import jcm.constants as c
-        dpa = np.abs(np.diff(np.asarray(p)))
-        # The scheme's own layer-mass convention: the dual-grid spacing the
-        # divergence terms use, extended to the last level.
-        dp_lev = np.concatenate([dpa, dpa[-1:]])
-        mass = dp_lev / c.grav
+        mass = np.diff(np.asarray(p_half)) / c.grav
         dwater = np.asarray(
             tendencies.dqdt + tendencies.dqc_dt + tendencies.dqi_dt
         )
@@ -324,20 +337,21 @@ class TestRCEConvection(unittest.TestCase):
         # Deep classification via the zdqcv route (#699): the elevated
         # cloud base + rain-through-dry-layer configuration needs a deep
         # plume; supply-only is now (correctly) shallow with little rain.
+        p_half = _interfaces(p)
         drivers = deep_convection_drivers(
-            {"rho": rho, "layer_thickness": dz}, e_sfc=5e-5)
+            {"rho": rho, "layer_thickness": dz, "pressure_half": p_half},
+            e_sfc=5e-5)
         tendencies, state = tiedtke_nordeng_convection(
             T, q, p, dz, rho,
             jnp.zeros(nlev), jnp.zeros(nlev),
             jnp.zeros(nlev), jnp.zeros(nlev),
             1800.0, cfg,
+            pressure_half=p_half,
             **drivers,
         )
         precip = float(tendencies.precip_conv)
 
-        dpa = np.abs(np.diff(np.asarray(p)))
-        dp_lev = np.concatenate([dpa, dpa[-1:]])
-        mass = dp_lev / c.grav
+        mass = np.diff(np.asarray(p_half)) / c.grav
         dwater = np.asarray(
             tendencies.dqdt + tendencies.dqc_dt + tendencies.dqi_dt
         )
@@ -355,17 +369,33 @@ class TestRCEConvection(unittest.TestCase):
             f"evaporation active (precip {precip:.3e}, gross {gross:.3e}) "
             f"— the evaporation's moistening is being masked out",
         )
-        # And the evaporation genuinely moistens below cloud base somewhere
-        # (the pre-fix mask zeroed exactly these levels).
-        kbase = int(state.kbase)
-        below = np.arange(nlev) > kbase
-        if below.any():
-            dq_below = np.asarray(tendencies.dqdt)[below]
-            self.assertGreater(
-                float(dq_below.max()), 0.0,
-                "no sub-cloud moistening despite rain falling through a "
-                "dry layer",
-            )
+        # And the evaporation genuinely moistens the sub-cloud layer (the
+        # pre-fix mask zeroed exactly these levels). ``kbase`` is the
+        # cloud-base INTERFACE — the top of layer kbase — so the sub-cloud
+        # layers are kbase and below. Their water budget is the total-water
+        # flux they export upward through that interface (plume vapour and
+        # condensate against the half-level environment, plus the downdraft
+        # it receives) plus the rain evaporated into them, so the sum of the
+        # sub-cloud water change and that export IS the evaporation, which
+        # must be positive. (The cuflx sub-cloud taper spreads the plume's
+        # cloud-base export through these layers, so their own tendency can
+        # still be net drying.)
+        from jcm.physics.convection.tiedtke_nordeng.updraft import (
+            column_environment,
+        )
+        env = column_environment(T, q, p, pressure_half=p_half)
+        kb = int(state.kbase)
+        export = float(
+            state.mfu[kb] * (state.qu[kb] + state.lu[kb] - env.qenh[kb])
+            + state.mfd[kb] * (state.qd[kb] - env.qenh[kb])
+        )
+        sub_cloud = np.arange(nlev) >= kb
+        evaporated = float(np.sum((dwater * mass)[sub_cloud])) + export
+        self.assertGreater(
+            evaporated, 0.0,
+            "no sub-cloud moistening despite rain falling through a dry "
+            "layer",
+        )
 
     def test_column_energy_budget_closes(self):
         """Column enthalpy change balances the latent-heat exchange.
@@ -386,6 +416,7 @@ class TestRCEConvection(unittest.TestCase):
         nlev = T.shape[0]
         cfg = ConvectionParameters.default()
         dt = 1800.0
+        p_half = _interfaces(p)
 
         tendencies, _ = tiedtke_nordeng_convection(
             T, q, p, dz, rho,
@@ -393,14 +424,12 @@ class TestRCEConvection(unittest.TestCase):
             jnp.zeros(nlev), jnp.zeros(nlev),
             dt, cfg,
             moisture_supply=jnp.array(5e-5),
+            pressure_half=p_half,
         )
         import numpy as np
         import jcm.constants as c
-        dpa = np.abs(np.diff(np.asarray(p)))
-        # The scheme's own layer-mass convention: the dual-grid spacing the
-        # divergence terms use, extended to the last level.
-        dp_lev = np.concatenate([dpa, dpa[-1:]])
-        mass = dp_lev / c.grav
+        # The true layer mass between the column's interfaces.
+        mass = np.diff(np.asarray(p_half)) / c.grav
         zalv = np.where(np.asarray(T) > c.tmelt, c.alhc, c.alhs)
         # The ledger converts heat to temperature with ECHAM's MOIST
         # ``pcpen = cpd·(1 + vtmpc2·q)`` (``zrcpm``, mo_cufluxdts.f90:648),
