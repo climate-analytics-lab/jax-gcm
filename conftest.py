@@ -185,6 +185,37 @@ def _rss_bytes():
     return maxrss if sys.platform == "darwin" else maxrss * 1024
 
 
+def _load_malloc_trim():
+    """Return glibc's ``malloc_trim``, or ``None`` where there is no glibc.
+
+    ``malloc_trim(0)`` hands the free pages at the top of every malloc arena
+    back to the OS. Without it a pytest process's RSS only ratchets up: the
+    per-test arrays, traces and the executables ``jax.clear_caches()`` drops
+    are freed to the allocator, which keeps them mapped, so the next test's
+    differently-sized allocations grow the heap again instead of reusing
+    them.
+    """
+    import ctypes
+    import ctypes.util
+
+    name = ctypes.util.find_library("c")
+    if not name or sys.platform == "darwin":
+        return None
+    try:
+        return getattr(ctypes.CDLL(name), "malloc_trim", None)
+    except OSError:
+        return None
+
+
+_malloc_trim = _load_malloc_trim()
+
+
+def _release_freed_heap():
+    """Return freed heap pages to the OS (no-op without glibc)."""
+    if _malloc_trim is not None:
+        _malloc_trim(0)
+
+
 # How far the process may grow between cache clears. Clearing is not free —
 # it forces later tests to recompile — so it is worth doing only once the
 # retained executables are actually costing memory. Zero disables the gate
@@ -211,6 +242,11 @@ def pytest_runtest_teardown(item, nextitem):
     global _rss_at_last_clear
     if nextitem is not None and _memory_group(item) == _memory_group(nextitem):
         return
+    # At every boundary, not only when the caches are dropped: most of what
+    # a finished class leaves behind is already free, just not returned to
+    # the OS, and it is that retained heap that drives a long xdist worker
+    # into the runner's memory ceiling.
+    _release_freed_heap()
     rss = _rss_bytes()
     if _MAX_GROWTH_BYTES > 0 and rss is not None:
         if _rss_at_last_clear is None:
@@ -223,4 +259,5 @@ def pytest_runtest_teardown(item, nextitem):
     import jax
     jax.clear_caches()
     gc.collect()
+    _release_freed_heap()
     _rss_at_last_clear = _rss_bytes()
