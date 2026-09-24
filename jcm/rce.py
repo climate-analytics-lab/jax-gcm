@@ -73,11 +73,15 @@ from jcm.physics.convection.betts_miller import (
 )
 from jcm.physics.diagnostics.moist_air_state import MoistAirColumnState
 from jcm.physics.echam.echam_levels import get_echam_levels
-from jcm.physics.forcing.echam_boundary_conditions import EchamBoundaryConditions
+from jcm.physics.forcing.echam_boundary_conditions import (
+    EchamBoundaryConditions,
+    SurfaceOpticsParameters,
+)
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.radiation.band_config import RadiationBandConfig
 from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.physics.radiation.rrtmgp import RRTMGPRadiation, _ensure_rrtmgp
+from jcm.physics.surface.echam.albedo import EchamSurfaceAlbedoParameters
 from jcm.single_column_model import SCMPredictions, SingleColumnModel
 from jcm.utils import create_initial_tracers
 
@@ -296,7 +300,11 @@ def rce_physics(
     return ComposablePhysics(
         terms=[
             MoistAirColumnState(),
-            EchamBoundaryConditions(),
+            # ECHAM ``lrce``: the open-water direct-beam albedo is the
+            # constant 0.07 rather than the zenith-angle fit
+            # (mo_surface_ocean.f90::update_albedo_ocean).
+            EchamBoundaryConditions(surface_optics=SurfaceOpticsParameters(
+                albedo=EchamSurfaceAlbedoParameters(rce=True))),
             _ClearSky(),
             radiation,
             convection,
