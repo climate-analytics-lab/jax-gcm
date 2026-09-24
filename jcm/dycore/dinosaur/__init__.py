@@ -9,8 +9,13 @@ outside this subpackage, the rest of jax-gcm only sees the gridpoint
 :class:`PhysicsState` projection.
 """
 
+from jcm.dycore.dinosaur.dot_precision import apply_dot_precision_workaround
 from jcm.dycore.dinosaur.dycore import DinosaurDycore
 from jcm.dycore.registry import register_dycore
+
+# Applied at import, before anything dinosaur can be traced (it reads the dot
+# algorithm at trace time); see jcm.dycore.dinosaur.dot_precision.
+apply_dot_precision_workaround()
 
 
 @register_dycore("dinosaur")

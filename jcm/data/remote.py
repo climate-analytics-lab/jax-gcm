@@ -3,7 +3,7 @@
 The mirror (dataset ``climate-analytics-lab/jax-gcm-data``) hosts
 per-grid bundles assembled by ``jcm.data.mirror`` — terrain, forcing,
 ozone, oxidants, emissions, DMS and dust files for the supported grids
-(t63, t106 at L47/L95; ne30pg3 native columns). ``registry.json`` at the
+(t63, t106, t127, t255 at L47/L95; ne30pg3 native columns). ``registry.json`` at the
 dataset root lists every file with its sha256.
 
 Files download once into the local Hugging Face cache and resolve to a
@@ -59,9 +59,10 @@ def bundle_file(grid: str, name: str, repo_id: str = DEFAULT_REPO,
                 revision: str | None = None) -> str:
     """Resolve ``bundles/<grid>/<name>`` to a local path.
 
-    ``grid`` is one of ``t63``, ``t106``, ``t63_l47``, ``t63_l95``,
-    ``t106_l47``, ``t106_l95``, ``ne30pg3`` — level-suffixed grids hold
-    the level-resolved products (ozone, oxidants).
+    ``grid`` is a Gaussian grid (``t63``, ``t106``, ``t127``, ``t255``), one
+    of those with a level suffix (``t63_l47``, ``t255_l95``, …), or
+    ``ne30pg3`` — level-suffixed grids hold the level-resolved products
+    (ozone, oxidants). ``jcm/data/mirror_manifest.json`` lists what exists.
     """
     return fetch(f"bundles/{grid}/{name}", repo_id=repo_id,
                  revision=revision)

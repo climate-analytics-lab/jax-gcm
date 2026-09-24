@@ -3,6 +3,8 @@
   "repo": "climate-analytics-lab/jax-gcm-data",
   "grids": {
     "t106": 160,
+    "t127": 192,
+    "t255": 384,
     "t63": 96,
     "ne30pg3": null
   },
@@ -19,6 +21,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63",
         "ne30pg3"
       ],
@@ -35,6 +39,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": null,
@@ -50,6 +56,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": null,
@@ -65,6 +73,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": null,
@@ -80,6 +90,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": null,
@@ -95,6 +107,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": null,
@@ -110,6 +124,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": null,
@@ -125,6 +141,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": null,
@@ -140,6 +158,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": null,
@@ -155,6 +175,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": null,
@@ -170,6 +192,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": null,
@@ -185,6 +209,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": [
@@ -203,6 +229,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": [
@@ -221,6 +249,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": [
@@ -239,6 +269,8 @@
       "source": "mirror",
       "grids": [
         "t106",
+        "t127",
+        "t255",
         "t63"
       ],
       "levels": [

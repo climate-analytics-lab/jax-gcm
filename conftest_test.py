@@ -66,3 +66,46 @@ class TestGpuPreallocationDisabled:
         import os
 
         assert os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE") == "false"
+
+
+class TestFreedHeapIsReturned:
+    """Class/module boundaries hand freed heap back to the OS.
+
+    A worker whose RSS only ratchets up reaches the CI runner's ceiling and
+    is SIGTERM'd mid-suite (exit 143), which never reads as a test failure.
+    """
+
+    class _Item:
+        def __init__(self, cls):
+            self._cls = cls
+
+        def getparent(self, kind):
+            import pytest
+            return self._cls if kind is pytest.Class else None
+
+    class _Parent:
+        def __init__(self, nodeid):
+            self.nodeid = nodeid
+
+    def _teardown(self, monkeypatch, same_group):
+        conftest = sys.modules["conftest"]
+        calls = []
+        monkeypatch.setattr(conftest, "_malloc_trim", calls.append)
+        # A budget the boundary cannot reach, so only the trim can fire.
+        monkeypatch.setattr(conftest, "_MAX_GROWTH_BYTES", 2**62)
+        monkeypatch.setattr(conftest, "_rss_at_last_clear", 0)
+        a = self._Item(self._Parent("m.py::A"))
+        b = self._Item(self._Parent("m.py::A" if same_group else "m.py::B"))
+        conftest.pytest_runtest_teardown(a, b)
+        return calls
+
+    def test_trimmed_at_a_class_boundary(self, monkeypatch):
+        assert self._teardown(monkeypatch, same_group=False) == [0]
+
+    def test_not_trimmed_within_a_class(self, monkeypatch):
+        assert self._teardown(monkeypatch, same_group=True) == []
+
+    def test_release_is_safe_without_glibc(self, monkeypatch):
+        conftest = sys.modules["conftest"]
+        monkeypatch.setattr(conftest, "_malloc_trim", None)
+        conftest._release_freed_heap()
