@@ -883,6 +883,17 @@ dinosaur is pinned to a release
   1.5.0 also fixes the hybrid-coordinate temperature equation
   (neuralgcm/dinosaur#144), so results on ECHAM hybrid levels differ from
   runs made with earlier dinosaur builds; sigma-level runs are unchanged.
+- jcm runs dinosaur's float32 GPU matmuls at ``Precision.HIGHEST`` instead of
+  1.5.0's bfloat16-emulation defaults. On jaxlib < 0.11.2, an XLA miscompile
+  of the default corrupts the inverse transform of log surface pressure, and
+  hybrid-level GPU runs drift mass from the northern to the southern
+  hemisphere within weeks (a −116 hPa NH−SH surface-pressure asymmetry on a
+  Held-Suarez aquaplanet, ~938 hPa at 40–60°N with ECHAM physics). The
+  3-pass default used with ``spmd_mesh`` also visibly alters the solution on
+  GPU. **GPU runs made with dinosaur 1.5.0 before this fix should be
+  repeated**; CPU runs are unaffected. The cost is +2 % per simulated day
+  single-device and +8 % with SPMD on a dycore-only case
+  (neuralgcm/dinosaur#147).
 
 Other floors that are floors for a reason:
 
