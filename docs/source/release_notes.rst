@@ -123,6 +123,9 @@ Specific humidity has one kg/kg contract
   ECHAM/RRTMGP ppmv convention are unchanged. Field-specific
   ``ozone_mole_fraction()`` / ``methane_mole_fraction()`` helpers make the
   conversion to gas-optics mol/mol explicit (#749).
+- **Breaking for direct callers:** ``ChemistryParameters.ozone_stratosphere_coeff``
+  is removed. The analytic ozone profile never read it, so it had an exactly
+  zero gradient; drop it from any constructor call (#799).
 
 Delegated timesteps have one effective value
 """"""""""""""""""""""""""""""""""""""""""""

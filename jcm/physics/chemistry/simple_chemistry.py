@@ -24,11 +24,14 @@ def ppmv_to_mole_fraction(vmr_ppmv: jnp.ndarray) -> jnp.ndarray:
 class ChemistryParameters:
     """Configuration parameters for chemistry schemes"""
     
-    # Ozone parameters
+    # Ozone parameters: the three shape parameters of the analytic
+    # ``fixed_ozone_distribution`` profile, which is a jcm interim (not a
+    # port of a SPEEDY/ECHAM formula), so these are its complete set. Every
+    # field here must enter the profile — a declared-but-unread tunable has an
+    # exactly-zero gradient and silently misleads calibration.
     ozone_scale_height: float      # Ozone scale height (m)
     ozone_max_vmr: float          # Maximum ozone volume mixing ratio (ppmv)
     ozone_tropopause_height: float # Height of ozone maximum (m)
-    ozone_stratosphere_coeff: float # Stratospheric ozone coefficient
     
     # Methane parameters
     methane_surface_vmr: float     # Surface methane VMR (ppmv)
@@ -46,7 +49,6 @@ class ChemistryParameters:
             ozone_scale_height=jnp.array(7000.0),      # 7 km
             ozone_max_vmr=jnp.array(8.0),              # 8 ppmv
             ozone_tropopause_height=jnp.array(20000.0), # 20 km
-            ozone_stratosphere_coeff=jnp.array(0.1),
             methane_surface_vmr=jnp.array(1.9),        # 1.9 ppmv
             methane_lifetime=jnp.array(9.0 * 365.25 * 24 * 3600), # 9 years
             methane_oh_scaling=jnp.array(1.0),
