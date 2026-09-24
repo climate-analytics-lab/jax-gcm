@@ -42,7 +42,8 @@ One exact Gregorian clock and real monthly output
 - SPEEDY seasonal phase follows the actual Gregorian year. This changes
   seasonal timing and requires climate validation; empirical local constants
   using 365 days do not define a separate clock. See :ref:`v3-datetime` and
-  :doc:`design/datetime_v3_scope` for migration and release gates (#876).
+  `issue #876 <https://github.com/climate-analytics-lab/jax-gcm/issues/876>`_
+  for migration and release gates.
 
 Checkpoints carry a schema stamp and migrate by field name
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""

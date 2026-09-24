@@ -256,4 +256,4 @@ This changes the seasonal forcing relative to the former epoch-based 365-day
 clock, so old climate baselines are not numerically interchangeable. The
 calendar-boundary tests establish date alignment; multi-year SPEEDY and ECHAM
 climate comparisons remain a release validation requirement. The full rationale
-and downstream coupling migration are in {doc}`../design/datetime_v3_scope`.
+and downstream coupling migration are tracked in [issue #876](https://github.com/climate-analytics-lab/jax-gcm/issues/876).

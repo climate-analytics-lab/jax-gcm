@@ -555,13 +555,14 @@ default instead inherited an epoch-dependent offset (seven days on
 2000-01-01), so one-day ECHAM and longer climate fingerprints change even
 though the physics equations do not. The ECHAM regression shift was isolated
 by running the v3 integrator with the legacy phase before updating that
-reference; see :doc:`design/datetime_v3_scope`.
+reference; see `issue #876 <https://github.com/climate-analytics-lab/jax-gcm/issues/876>`_.
 
 Interval means include ``time_bounds`` and midpoint labels. Monthly means
 weight each contributing interval by its duration; snapshots cannot be
 converted into interval means after the run. Observers keep their own
 sampling: this helper aggregates only the primary output stream. See
-:doc:`design/datetime_v3_scope` for the forcing and partial-month contracts.
+`issue #876 <https://github.com/climate-analytics-lab/jax-gcm/issues/876>`_
+for the forcing and partial-month contracts.
 
 Whether an input repeats every year or is dated is always declared
 (:ref:`v3-align`); the clock decides what each declared mode selects. A
