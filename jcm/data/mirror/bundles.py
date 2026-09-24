@@ -26,6 +26,12 @@ Unit translations into the conventions the packaged t63 files establish
 * ``alb``   = per-cell minimum monthly ERA5 fal — the snow-free
   background albedo (snow brightening is applied dynamically from
   ``snowc``; an annual mean would double-count it)
+* ``forest`` = ERA5 high-vegetation cover ``cvh`` — the forest fraction
+  JSBACH's broadband land albedo masks the snow albedo with (static)
+* ``glac``  = the permanent-snow (ice-sheet) mask above, as a cell fraction
+  — the glacier tiles whose albedo is the ECHAM glacier albedo (static).
+  Same mask that zeroes ``snowc``, so a cell's snow is either seasonal
+  (``snowc``) or glacier (``glac``), never both
 * ``soilw_am`` = SPEEDY availability fraction in [0, 1] per
   ``jcm.data.bc.compile``:
   ``min(1, (swvl1 + veg·3·max(0, swvl2 − swwil)) / (swcap + 3·(swcap − swwil)))``
@@ -142,6 +148,24 @@ def translate_land(era5: xr.Dataset, permanent_snow: xr.DataArray) -> dict:
 
 
 
+def land_cover_fields(era5: xr.Dataset, permanent_snow: xr.DataArray,
+                      lats, lons) -> dict:
+    """Build the static ``forest`` / ``glac`` fractions on the Gaussian grid.
+
+    The ECHAM land albedo (JSBACH ``update_land_surface_fast``) needs a
+    forest fraction and a glacier mask besides ``alb``/``snowc``. ERA5's
+    invariant high-vegetation cover ``cvh`` is the forest fraction; the
+    glacier mask is the same ``permanent_snow`` definition
+    :func:`translate_land` zeroes ``snowc`` with, so the two channels
+    partition the snow. The single source for every bundle builder (#672).
+    """
+    return {
+        "forest": interp_to(era5.cvh.clip(0.0, 1.0), lats, lons).clip(0.0, 1.0),
+        "glac": interp_to(permanent_snow.astype(np.float64), lats,
+                          lons).clip(0.0, 1.0),
+    }
+
+
 _EMIS_SPECIES = ("so2", "bc", "oc")
 _ANTHRO_SECTORS = ("surface_combustion", "elevated_industrial", "shipping")
 
@@ -223,7 +247,8 @@ def build_forcing(era5_path: str, era: str, lats, lons,
 
     # For a climatology the ice-sheet mask comes from its own window (a
     # fixed multi-year period, as translate_land requires).
-    land = translate_land(era5, permanent_snow=era5.sd.min("time") >= 0.1)
+    permanent_snow = era5.sd.min("time") >= 0.1
+    land = translate_land(era5, permanent_snow=permanent_snow)
 
     fields = {
         "sst": interp_to(sst_da, lats, lons),
@@ -233,6 +258,7 @@ def build_forcing(era5_path: str, era: str, lats, lons,
         "soilw_rel": interp_to(land["soilw_rel"], lats, lons).clip(0.0, 1.0),
         "snowc": interp_to(land["snowc"], lats, lons).clip(0.0, 1.0),
         "alb": interp_to(era5.fal.min("time"), lats, lons),
+        **land_cover_fields(era5, permanent_snow, lats, lons),
     }
     ds = xr.Dataset(coords={"lat": lats, "lon": lons,
                             "time": CLIMO_TIME})

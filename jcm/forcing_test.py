@@ -1818,6 +1818,50 @@ class TestRelativeSoilWetnessChannel(unittest.TestCase):
                       str(ctx.exception))
 
 
+
+class TestLandCoverChannels(unittest.TestCase):
+    """``forest`` / ``glac``: optional static maps for the ECHAM albedo (#672)."""
+
+    def _ds(self, with_cover):
+        ds = TestRelativeSoilWetnessChannel()._ds(with_wetness=False)
+        if with_cover:
+            shape = ds["alb"].shape
+            ds["forest"] = (["lon", "lat"], np.full(shape, 0.4))
+            ds["glac"] = (["lon", "lat"], np.zeros(shape))
+            ds["glac"].values[:, :4] = 1.0
+        return ds
+
+    def test_absent_stays_none(self):
+        forcing = ForcingData.from_dataset(self._ds(False),
+                                           align_mode="wrap_year")
+        self.assertIsNone(forcing.forest_fraction)
+        self.assertIsNone(forcing.glacier_fraction)
+
+    def test_read_as_static_fields_that_survive_select(self):
+        import jax_datetime as jdt
+
+        from jcm.date import DateData
+        forcing = ForcingData.from_dataset(self._ds(True),
+                                           align_mode="wrap_year")
+        date = DateData.set_date(
+            model_time=jdt.Datetime.from_pydatetime(
+                jdt.to_datetime('1981-07-02')),
+            calendar='gregorian')
+        sliced = forcing.select(date, calendar='gregorian')
+        np.testing.assert_allclose(sliced.forest_fraction, 0.4)
+        self.assertEqual(sliced.glacier_fraction.shape, (96, 48))
+        self.assertEqual(float(sliced.glacier_fraction[:, :4].min()), 1.0)
+        self.assertEqual(float(sliced.glacier_fraction[:, 4:].max()), 0.0)
+
+    def test_out_of_range_is_rejected(self):
+        from jcm.forcing import _validate_bc_fields
+        ds = self._ds(True)
+        ds["forest"].values[:] = 40.0   # a percentage written by mistake
+        with self.assertRaises(ValueError) as ctx:
+            _validate_bc_fields(ds)
+        self.assertIn("'forest' is out of physical range", str(ctx.exception))
+
+
 class TestStaticEmissionsNeedNoAlignment(unittest.TestCase):
     """A static (time-less) user emissions file loads under ``auto`` (#884
     concerns time axes only; Codex #877 P2 regression guard).

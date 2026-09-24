@@ -72,7 +72,14 @@ def _validate_bc_fields(ds) -> None:
         # anything outside [0, 1] means it was written as a volumetric content
         # or a water depth instead (#787).
         "soilw_rel": (0.0, 1.0),
-        "snowc":    (0.0, 20000.0),  # mm snow depth (we clip > 20000 to 0 anyway, but reject negatives)
+        # Static land-cover fractions for the ECHAM land albedo (#672).
+        "forest": (0.0, 1.0),
+        "glac": (0.0, 1.0),
+        # Snow cover in the SPEEDY convention SWE/sd2sc, whose min(1, .) is
+        # the cover fraction: the mirror bundles and the packaged T63 file
+        # store it already clipped to [0, 1]; the SPEEDY T30 file stores the
+        # unclipped ratio (up to ~170). Reject negatives and absurd values.
+        "snowc":    (0.0, 20000.0),
     }
     for name, (lo, hi) in HARD_RANGES.items():
         if name not in ds.data_vars:
@@ -239,7 +246,7 @@ class ForcingData:
     alb0: jnp.ndarray # bare-land annual mean albedo (ix,il)
 
     sice_am: jnp.ndarray # sea ice concentration (or TimeSeries thereof)
-    snowc_am: jnp.ndarray # snow cover (used to be snowcl_ob in fortran - but one day of that was snowc_am)
+    snowc_am: jnp.ndarray # snow cover SWE/sd2sc; min(1, .) is the cover fraction (SPEEDY snowcl_ob; ECHAM land albedo, #672)
     soilw_am: jnp.ndarray # soil moisture (used to be soilwcl_ob in fortran - but one day of that was soilw_am)
     stl_am: jnp.ndarray # temperature over land
     sea_surface_temperature: jnp.ndarray # SST, should come from sea_model.py or some default value
@@ -306,6 +313,18 @@ class ForcingData:
     # construction, blending the 7-28 cm layer) and stays the field SPEEDY's
     # land evaporation reads.
     soilw_rel: Any = None
+
+    # Static land-cover fractions of the land part of a cell, read by the
+    # ECHAM land albedo (JSBACH ``update_land_surface_fast``, #672):
+    # ``forest_fraction`` masks the snow albedo under a canopy and
+    # ``glacier_fraction`` switches to the glacier albedo. Built into the
+    # mirror bundles from ERA5 high-vegetation cover ``cvh`` and the
+    # permanent-snow ice-sheet mask (``jcm.data.mirror.bundles``). ``None``
+    # (bundles built before #672) means "no forest, no glacier", which is
+    # what ECHAM computes from zero maps — the albedo then falls back to the
+    # snow-free background ``alb0`` plus open snow.
+    forest_fraction: Any = None
+    glacier_fraction: Any = None
 
     # Prescribed natural-aerosol emission surface fields (or TimeSeries
     # thereof), read from the forcing file when present and ``None`` otherwise
@@ -385,6 +404,8 @@ class ForcingData:
               alb0=None,sice_am=None,snowc_am=None,
               soilw_am=None,stl_am=None,sea_surface_temperature=None,
               soilw_rel=None,
+              forest_fraction=None,
+              glacier_fraction=None,
               co2_vmr=None,
               aerosol_year_weight=None,aerosol_ann_cycle=None,
               solar=None,
@@ -406,6 +427,8 @@ class ForcingData:
             # No zeros default: absence has to stay distinguishable from a dry
             # soil (see the field's declaration).
             soilw_rel=soilw_rel,
+            forest_fraction=forest_fraction,
+            glacier_fraction=glacier_fraction,
             stl_am=stl_am if stl_am is not None else jnp.full(nodal_shape, T_default),
             sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else jnp.full(nodal_shape, T_default),
             co2_vmr=co2_vmr if co2_vmr is not None else jnp.array(DEFAULT_CO2_VMR_PPMV),
@@ -425,6 +448,8 @@ class ForcingData:
              alb0=None,sice_am=None,snowc_am=None,
              soilw_am=None,stl_am=None,sea_surface_temperature=None,
              soilw_rel=None,
+             forest_fraction=None,
+             glacier_fraction=None,
              co2_vmr=None,
              aerosol_year_weight=None,aerosol_ann_cycle=None,
              solar=None,
@@ -441,6 +466,8 @@ class ForcingData:
             # globally saturated soil, which would silently switch dust
             # emission off in every test built from ``ones``.
             soilw_rel=soilw_rel,
+            forest_fraction=forest_fraction,
+            glacier_fraction=glacier_fraction,
             stl_am =stl_am if stl_am is not None else jnp.ones((nodal_shape)),
             sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else jnp.ones((nodal_shape)),
             co2_vmr=co2_vmr if co2_vmr is not None else jnp.array(DEFAULT_CO2_VMR_PPMV),
@@ -665,6 +692,10 @@ class ForcingData:
         # silently transposed by the TimeSeries wrapper.
         if "soilw_rel" in ds.data_vars:
             expected_structure["soilw_rel"] = ("lon", "lat", "time")
+        # Optional static land-cover maps for the ECHAM land albedo (#672).
+        for name in ("forest", "glac"):
+            if name in ds.data_vars:
+                expected_structure[name] = ("lon", "lat")
 
         validate_ds(ds, expected_structure)
         # Sanity-check the loaded BC values once on the host before
@@ -734,7 +765,8 @@ class ForcingData:
         # as NaNs.
         sice_am = _ts(jnp.clip(jnp.asarray(ds["icec"]), 0.0, 1.0))
 
-        # snow depth (clip implausible values, same as before)
+        # Snow cover ``SWE/sd2sc`` (consumers take ``min(1, .)`` as the cover
+        # fraction); implausible values are zeroed.
         snowc_raw = jnp.asarray(ds["snowc"])
         snowc_valid = (0.0 <= snowc_raw) & (snowc_raw <= 20000.0)
         snowc_clean = jnp.where(snowc_valid, snowc_raw, 0.0)
@@ -748,6 +780,14 @@ class ForcingData:
         # warn rather than read a fabricated dry soil.
         soilw_rel = (_ts(ds["soilw_rel"]) if "soilw_rel" in ds.data_vars
                      else None)
+
+        # Static land-cover fractions (#672), optional like ``soilw_rel``:
+        # absent on bundles built before the ECHAM land albedo read them.
+        # Clipped for the same interpolation-noise reason as ``icec``.
+        forest_fraction = (jnp.clip(jnp.asarray(ds["forest"]), 0.0, 1.0)
+                           if "forest" in ds.data_vars else None)
+        glacier_fraction = (jnp.clip(jnp.asarray(ds["glac"]), 0.0, 1.0)
+                            if "glac" in ds.data_vars else None)
 
         stl_am = _ts(ds["stl"])
 
@@ -777,6 +817,8 @@ class ForcingData:
             alb0=alb0, sice_am=sice_am, snowc_am=snowc_am, stl_am=stl_am,
             soilw_am=soilw_am, sea_surface_temperature=sea_surface_temperature,
             soilw_rel=soilw_rel,
+            forest_fraction=forest_fraction,
+            glacier_fraction=glacier_fraction,
             co2_vmr=co2_vmr, ch4_vmr=ch4_vmr, n2o_vmr=n2o_vmr,
         )
 
@@ -784,6 +826,8 @@ class ForcingData:
              sice_am=None,snowc_am=None,soilw_am=None, stl_am=None,
              sea_surface_temperature=None,
              soilw_rel=None,
+             forest_fraction=None,
+             glacier_fraction=None,
              co2_vmr=None,
              aerosol_year_weight=None,aerosol_ann_cycle=None,
              solar=None,
@@ -815,6 +859,10 @@ class ForcingData:
             snowc_am=snowc_am if snowc_am is not None else self.snowc_am,
             soilw_am = soilw_am if soilw_am is not None else self.soilw_am,
             soilw_rel=soilw_rel if soilw_rel is not None else self.soilw_rel,
+            forest_fraction=(forest_fraction if forest_fraction is not None
+                             else self.forest_fraction),
+            glacier_fraction=(glacier_fraction if glacier_fraction is not None
+                              else self.glacier_fraction),
             stl_am =stl_am if stl_am is not None else self.stl_am,
             sea_surface_temperature=sea_surface_temperature if sea_surface_temperature is not None else self.sea_surface_temperature,
             co2_vmr=co2_vmr if co2_vmr is not None else self.co2_vmr,

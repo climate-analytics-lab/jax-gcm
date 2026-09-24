@@ -43,8 +43,13 @@ Produces, in ``--out-dir``:
 - ``terrain.nc`` — ``orog``, ``lsm``, plus the six SSO descriptors if
   present in the surface file (``orostd``/``orosig``/``orogam``/
   ``orothe``/``oropic``/``oroval``).
-- ``forcing.nc`` — ``sst``, ``icec``, ``stl``, ``alb``, ``soilw_am``,
-  ``snowc`` on a 12-month axis.
+- ``forcing.nc`` — ``sst``, ``icec``, ``stl``, ``soilw_am``, ``snowc`` on a
+  12-month axis, plus the static ``alb`` (``ALB``, the snow-free background
+  albedo), ``forest`` (``FOREST``) and ``glac`` (``GLAC``) the ECHAM land
+  albedo reads (#672). ``snowc`` is the jcm snow-cover fraction
+  ``min(1, SWE/sd2sc)`` of the ECHAM snow water equivalent, zero on glaciers
+  (whose snow is the glacier itself) — the same definition the data-mirror
+  bundles use, so the field means one thing whichever product supplies it.
 
 Either ``--surface`` (terrain only) or ``--sst`` + ``--sic`` +
 ``--surface`` (terrain + forcing) is required.
@@ -68,6 +73,8 @@ from pathlib import Path
 
 import pandas as pd
 import xarray as xr
+
+from jcm.physics.speedy.physical_constants import sd2sc
 
 
 # ECHAM uppercase → JCM lowercase. ``SLF`` (fractional, 0..1) is preferred
@@ -114,6 +121,27 @@ def _build_terrain(surface_ds: xr.Dataset) -> xr.Dataset:
         if name in surface_ds:
             out[name] = surface_ds[name].astype("float32")
     return out
+
+
+def snow_cover_fraction(snow_water_equivalent_m, glacier_fraction):
+    """Convert an ECHAM snow water equivalent [m] to the jcm ``snowc``.
+
+    ``min(1, 1000·SWE/sd2sc)`` (``sd2sc`` = 60 kg/m² for full cover, the
+    ``jcm.data.bc.compile`` / ``jcm.data.mirror.bundles`` convention), zeroed
+    on glacier cells.
+    """
+    cover = (snow_water_equivalent_m * 1000.0 / sd2sc).clip(0.0, 1.0)
+    return cover.where(glacier_fraction < 0.5, 0.0)
+
+
+def land_cover_fields(surface_ds: xr.Dataset) -> dict:
+    """Read the static ``forest`` / ``glac`` fractions of the ECHAM surface file."""
+    zeros = surface_ds["lsm"] * 0.0
+    return {
+        name: (surface_ds[src] if src in surface_ds else zeros)
+        .clip(0.0, 1.0).transpose("lon", "lat").astype("float32")
+        for name, src in (("forest", "FOREST"), ("glac", "GLAC"))
+    }
 
 
 def _build_forcing(
@@ -164,8 +192,10 @@ def _build_forcing(
         sn = land_ds["snow"]
     else:
         sn = surface_ds["SN"] if "SN" in surface_ds else surface_ds["lsm"] * 0.0
+    cover = land_cover_fields(surface_ds)
     soilw_t = (ws * ones_t).transpose("lon", "lat", "time")
-    snowc_t = (sn * ones_t).transpose("lon", "lat", "time")
+    snowc_t = (snow_cover_fraction(sn, cover["glac"])
+               * ones_t).transpose("lon", "lat", "time")
 
     ds = xr.Dataset({
         "sst":      sst_ds["sst"].transpose("lon", "lat", "time").astype("float32"),
@@ -174,6 +204,7 @@ def _build_forcing(
         "soilw_am": soilw_t.astype("float32"),
         "snowc":    snowc_t.astype("float32"),
         "alb":      alb.transpose("lon", "lat").astype("float32"),
+        **cover,
     })
     snapped = pd.to_datetime(ds["time"].values).to_period("M").to_timestamp()
     return ds.assign_coords(time=snapped)

@@ -43,7 +43,8 @@ import numpy as np
 import xarray as xr
 
 from jcm.data.mirror.amip_yearly import _TIME_ENC, ghg_ppmv
-from jcm.data.mirror.bundles import _to_lonlat, translate_land
+from jcm.data.mirror.bundles import (_to_lonlat, land_cover_fields,
+                                     translate_land)
 from jcm.data.mirror.era5_land import FIELDS, RDA_MODA, _open_year
 from jcm.data.regridding import fill_nearest, interp_to
 
@@ -235,7 +236,8 @@ def build_forcing_year(clim_path: str, sstice_path: str, year: int,
 
     # Land: translate the 13 monthly means with the climatological
     # ice-sheet mask, then blend onto the month-start axis.
-    tl = translate_land(land, permanent_snow=clim.sd.min("month") >= 0.1)
+    permanent_snow = clim.sd.min("month") >= 0.1
+    tl = translate_land(land, permanent_snow=permanent_snow)
     fields = {
         "sst": interp_to(sst_da, lats, lons),
         "icec": interp_to(icec_da, lats, lons).clip(0.0, 1.0),
@@ -253,6 +255,9 @@ def build_forcing_year(clim_path: str, sstice_path: str, year: int,
         # Background albedo stays climatological, like the ice-sheet
         # mask: a per-year minimum drifts with how snowy the year was.
         "alb": interp_to(clim.fal.min("month"), lats, lons),
+        # Static land cover for the ECHAM land albedo (#672), climatological
+        # for the same reason as the ice-sheet mask.
+        **land_cover_fields(clim, permanent_snow, lats, lons),
     }
     ds = xr.Dataset(coords={"lat": lats, "lon": lons, "time": times})
     for name, da in fields.items():

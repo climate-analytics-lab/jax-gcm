@@ -52,7 +52,8 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
         forcing_file: jcm-canonical forcing netCDF: monthly ``sst`` /
             ``icec`` / ``stl`` / ``soilw_am`` / ``snowc`` shaped
             ``(lon, lat, time)`` plus static ``alb`` ``(lon, lat)``, and the
-            optional ``soilw_rel`` relative soil wetness (#787).
+            optional ``soilw_rel`` relative soil wetness (#787) and static
+            ``forest`` / ``glac`` land-cover fractions (#672).
         dycore: A :class:`~jcm.dycore.pyses.dycore.PysesCamSEDycore` (only
             its ``colmap`` column coordinates are read).
         align_mode: ``forcing.align`` for ``forcing_file``. The column reader
@@ -154,6 +155,17 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
         0.0, 1.0,
     ).reshape(1, ncol)
 
+    # Optional static land-cover fractions for the ECHAM land albedo (#672),
+    # absent on bundles built before it read them (then ``None`` = none).
+    def static_fraction(name):
+        if name not in ds.data_vars:
+            return None
+        values = interp_grid_to_points(
+            lon, lat, np.asarray(ds[name].transpose("lon", "lat").values),
+            col_lon, col_lat,
+        )
+        return jnp.asarray(np.clip(values, 0.0, 1.0).reshape(1, ncol))
+
     def ts(values):
         return make_time_series(jnp.asarray(values), time_seconds,
                                 align_mode=WRAP_YEAR)
@@ -167,6 +179,8 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
         soilw_am=ts(fields["soilw_am"]),
         snowc_am=ts(fields["snowc_am"]),
         soilw_rel=(ts(fields["soilw_rel"]) if "soilw_rel" in fields else None),
+        forest_fraction=static_fraction("forest"),
+        glacier_fraction=static_fraction("glac"),
     )
     return attach_jam_forcing(
         forcing, col_lon, col_lat, nlev=dycore.nlev,

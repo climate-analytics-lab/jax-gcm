@@ -255,6 +255,52 @@ class LandChannelCoverageTest(unittest.TestCase):
             missing = sorted(translated - written)
             self.assertEqual(missing, [], f"{name}.py never names {missing}")
 
+    def test_every_writer_carries_the_land_cover_maps(self):
+        """``forest``/``glac`` reach every surface-forcing file (#672).
+
+        They come from :func:`land_cover_fields` rather than
+        ``translate_land`` (static, not monthly), so the dict-key check above
+        cannot see them: each writer must splice that helper into the dict it
+        serializes.
+        """
+        import ast
+        import inspect
+        import importlib
+
+        for name in self._WRITERS:
+            module = importlib.import_module(f"jcm.data.mirror.{name}")
+            spliced = any(
+                key is None and isinstance(value, ast.Call)
+                and getattr(value.func, "id", None) == "land_cover_fields"
+                for node in ast.walk(ast.parse(inspect.getsource(module)))
+                if isinstance(node, ast.Dict)
+                for key, value in zip(node.keys, node.values))
+            self.assertTrue(spliced, f"{name}.py never writes forest/glac")
+
+
+class LandCoverFieldsTest(unittest.TestCase):
+    """``forest`` = ERA5 ``cvh``; ``glac`` = the permanent-snow mask (#672)."""
+
+    def test_values_on_the_target_grid(self):
+        import xarray as xr
+
+        from jcm.data.mirror.bundles import land_cover_fields
+
+        lat = np.linspace(-90.0, 90.0, 7)
+        lon = np.arange(0.0, 360.0, 60.0)
+        grid = dict(dims=("latitude", "longitude"),
+                    coords={"latitude": lat, "longitude": lon})
+        cvh = xr.DataArray(np.full((7, 6), 0.6), **grid)
+        snow = np.zeros((7, 6), dtype=bool)
+        snow[0] = True   # south-pole row: an ice sheet
+        era5 = xr.Dataset({"cvh": cvh})
+        out = land_cover_fields(era5, xr.DataArray(snow, **grid),
+                                lats=np.array([-90.0, 0.0]),
+                                lons=np.array([0.0, 120.0]))
+        np.testing.assert_allclose(out["forest"].values, 0.6)
+        np.testing.assert_allclose(out["glac"].values, [[1.0, 1.0],
+                                                        [0.0, 0.0]])
+
 
 def _translate_land_keys():
     """Return the channel names ``translate_land`` produces on a minimal input."""
