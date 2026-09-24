@@ -36,6 +36,7 @@ init:
 terrain:
   file: hf://bundles/t63/terrain.nc
 forcing:
+  align: wrap_year
   file: hf://bundles/t63/forcing_pd.nc
   ozone_file: hf://bundles/t63_l47/ozone_pd.nc
 sl_off_centering: 0.2

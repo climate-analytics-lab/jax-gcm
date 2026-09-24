@@ -52,10 +52,18 @@ carries it. Pass an explicit mapping to rename variables, or
 ``run.tracer_vars={}`` to load none.
 
 ``run.mode=prescribed`` evaluates each state at its own time: the file's
-``time`` coordinate gives the offsets from the first state, which
-``run.start_date`` dates, so date-aligned forcing is selected (and its
-coverage checked) at the snapshot dates, not at synthetic model steps. The
-state file must be a single netCDF whose ``time`` axis increases strictly and
+``time`` coordinate gives the offsets from the first state, so date-aligned
+forcing is selected (and its coverage checked) at the snapshot dates, not at
+synthetic model steps. Where the first state sits:
+
+* a file with a decoded date axis (``datetime64``/``cftime`` — any v3 output)
+  dates itself, so ``run.start_time`` may be left unset;
+* a ``run.start_time`` that is set anyway is used, with a warning naming both
+  times when it differs from the file's first time;
+* an elapsed-time axis (older outputs) carries no date, so ``run.start_time``
+  is required and its absence is an error.
+
+The state file must be a single netCDF whose ``time`` axis increases strictly and
 is either decoded dates (``datetime64``/``cftime``) or elapsed time (a
 ``timedelta64`` axis, or a numeric one with ``units`` ``d``/``days`` or
 ``s``/``seconds`` — ``d`` is what jcm writes for a numeric axis); a numeric
@@ -372,7 +380,7 @@ and ``init=era5`` starts the run from the ERA5 state at the same date.
 Cloud access needs the ``jcm[era5]`` extra (``gcsfs`` + ``zarr``)::
 
    python -m jcm.main +configuration=t63-echam-rrtmgp \
-       init=era5 nudging=era5 run.start_date=2010-01-01 run.total_time=30
+       init=era5 nudging=era5 run.start_time=2010-01-01 run.total_time=30
 
 Prefetch on a login node first when compute nodes lack internet
 (``python -m jcm.data.era5 --grid echam_t63_l47_hybrid --start 2010-01-01 --end

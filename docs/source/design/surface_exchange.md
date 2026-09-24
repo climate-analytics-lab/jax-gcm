@@ -198,7 +198,8 @@ column from Python instead.
   with `jcm.forcing.read_prescribed_surface_fluxes(ds, lat, lon,
   align_mode=...)` — the reader the CLI door calls — whose result
   `ForcingData.copy(**...)` attaches; an in-memory time series is a
-  `make_time_series(values, time_seconds, align_mode)` leaf with the mode
+  `make_time_series(values, times, align_mode)` leaf (`times` exact
+  dates, e.g. `datetime64[s]`) with the mode
   chosen explicitly.
 
 ### Time alignment of a flux archive
@@ -215,7 +216,7 @@ time-resolved forcing input shares (`jcm.forcing.resolve_align`, #884):
 
 | `align` | behaviour |
 | --- | --- |
-| `wrap_year` | replay by month position every model year |
+| `wrap_year` | replay every model year, the record of the model's calendar month held from the 1st |
 | `by_date` | piecewise-constant on the absolute timestamps |
 | `by_date_interp` | linear in time between the absolute timestamps |
 | `auto` (default) | resolves only a data-mirror or packaged product, from the `alignment` the mirror manifest records; no mirror product carries fluxes, so for a flux file it raises and names the knob |
@@ -229,17 +230,18 @@ load or run start rather than silently mis-phasing the fluxes:
   `searchsorted` needs ascending time; `WRAP_YEAR`'s position 0 is
   January). A length-1 time axis is a static field. Sorting and the
   climatology checks work on the decoded calendar values themselves;
-  only a date-aligned axis is converted to the model's Gregorian epoch
+  only a date-aligned axis is placed on the model's exact Gregorian
   clock. So a climatology stamped with idealised calendar dates (CF
   `noleap` year 0, a `360_day` calendar) loads as `wrap_year` (every
-  forcing reader gives a `WRAP_YEAR` leaf informational time bins rather
-  than decoded dates), while declaring such an axis `by_date` fails,
-  because it has no place on the model's clock.
-- `WRAP_YEAR` selects sample `floor(fraction_of_year × 12)`, a
-  January-anchored month position, so a climatology must be exactly twelve
-  samples, one per calendar month January→December (month-start or
-  mid-month stamps, any year). Anything else — a July→June span, a
-  four-weekly axis, a seasonal climatology — raises.
+  forcing reader gives a `WRAP_YEAR` leaf nominal month/day labels on a
+  reference year, read from the decoded calendar fields, never the source
+  year), while declaring such an axis `by_date` fails, because it has no
+  place on the model's clock.
+- `WRAP_YEAR` selects record `month − 1` for the model clock's Gregorian
+  month, so a climatology must be exactly twelve samples, one per calendar
+  month January→December (month-start or mid-month stamps, any year).
+  Anything else — a July→June span, a four-weekly axis, a seasonal
+  climatology — raises.
 - `BY_DATE` selection clamps to the end samples outside its axis, so at run
   start (`validate_forcing` of the forced-mode terms, which
   `validate_run_forcing` calls with the run window — the model run's, or

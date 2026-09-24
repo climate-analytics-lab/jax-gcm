@@ -221,12 +221,12 @@ class TestCheckpointSchemaStamp(unittest.TestCase):
     def test_stamp_and_migration_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(self.model, path, elapsed_days=1.5)
+            save_checkpoint(self.model, path, elapsed_days=0.0)
             payload = _read_payload(path)
 
         self.assertEqual(int(payload["schema_version"]), SCHEMA_VERSION)
         self.assertIsInstance(payload["jcm_version"], str)
-        self.assertAlmostEqual(float(payload["elapsed_days"]), 1.5)
+        self.assertAlmostEqual(float(payload["elapsed_days"]), 0.0)
         # Arrays are keyed by their pytree NAME, which is what makes a
         # field-set change migratable rather than fatal.
         self.assertIn("vorticity", payload["dycore"])
@@ -268,11 +268,11 @@ class TestPhysicsCarryFieldMigration(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(donor, path, elapsed_days=3.0)
+            save_checkpoint(donor, path, elapsed_days=0.0)
             with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
                 elapsed = load_checkpoint(upgraded, path)
 
-        self.assertAlmostEqual(elapsed, 3.0)
+        self.assertAlmostEqual(elapsed, 0.0)
         restored = upgraded.physics_carry["extra_carry"].counter
         self.assertEqual(restored.shape, expected.shape)
         np.testing.assert_array_equal(np.asarray(restored), np.asarray(expected))
@@ -306,11 +306,12 @@ class TestPhysicsCarryFieldMigration(unittest.TestCase):
         evolved = dict(carry)
         evolved["extra_carry"] = _ExtraCarryData(
             counter=jnp.full_like(carry["extra_carry"].counter, 7.0))
-        upgraded.restore_state(state, evolved)
+        upgraded.restore_state(state, evolved, time=upgraded.run_state.time,
+                               step=upgraded.run_state.step)
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(donor, path, elapsed_days=1.0)
+            save_checkpoint(donor, path, elapsed_days=0.0)
             load_checkpoint(upgraded, path)
 
         restored = np.asarray(upgraded.physics_carry["extra_carry"].counter)
@@ -325,11 +326,11 @@ class TestPhysicsCarryFieldMigration(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(donor, path, elapsed_days=4.0)
+            save_checkpoint(donor, path, elapsed_days=0.0)
             with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
                 elapsed = load_checkpoint(target, path)
 
-        self.assertAlmostEqual(elapsed, 4.0)
+        self.assertAlmostEqual(elapsed, 0.0)
         self.assertNotIn("extra_carry", target.physics_carry)
         self.assertTrue(
             any("extra_carry.counter" in line and "dropped" in line
@@ -347,7 +348,7 @@ class TestPhysicsCarryFieldMigration(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(donor, path, elapsed_days=1.0)
+            save_checkpoint(donor, path, elapsed_days=0.0)
             with self.assertRaises(ValueError) as ctx:
                 load_checkpoint(upgraded, path)
         message = str(ctx.exception)
@@ -364,7 +365,7 @@ class TestPhysicsCarryFieldMigration(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(donor, path, elapsed_days=1.0)
+            save_checkpoint(donor, path, elapsed_days=0.0)
             payload = _read_payload(path)
             self.assertIn(
                 "reservoir",
@@ -492,9 +493,9 @@ class TestUnstampedCheckpoints(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 load_checkpoint(target, path)
         message = str(ctx.exception)
-        self.assertIn("no schema_version stamp", message)
+        self.assertIn("no exact Gregorian clock", message)
         self.assertIn("unstamped_scale", message)
-        self.assertIn("#824", message)
+        self.assertIn("as_initial_condition", message)
 
     def test_unstamped_loads_on_an_explicit_no_op_assertion(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -502,8 +503,15 @@ class TestUnstampedCheckpoints(unittest.TestCase):
             _write_unstamped(self.model, path, elapsed_days=7.0)
             target = _build_model()
             target.bootstrap_state()
-            elapsed = load_checkpoint(target, path, unstamped_scale={})
+            elapsed = load_checkpoint(target, path, unstamped_scale={},
+                                      as_initial_condition=True)
+        # Documented return contract: the donor's recorded elapsed days,
+        # while the imported state's clock restarts at start_time.
         self.assertAlmostEqual(elapsed, 7.0)
+        run_state = target.run_state
+        restarted = run_state.time - target.start_time
+        self.assertEqual((int(restarted.days), int(restarted.seconds)), (0, 0))
+        self.assertEqual(int(run_state.step), 0)
         self.assertEqual(
             _max_abs_diff(self.model.dycore_state, target.dycore_state), 0.0)
 
@@ -517,16 +525,18 @@ class TestUnstampedCheckpoints(unittest.TestCase):
             "specific_humidity": jnp.full_like(
                 state.tracers["specific_humidity"], 2.0),
         })
-        donor.restore_state(moist, donor.physics_carry)
+        donor.restore_state(moist, donor.physics_carry, time=donor.run_state.time,
+                            step=donor.run_state.step)
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "legacy.msgpack"
-            _write_unstamped(donor, path, elapsed_days=1.0)
+            _write_unstamped(donor, path, elapsed_days=0.0)
             target = _build_model()
             target.bootstrap_state()
             with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
                 load_checkpoint(target, path,
-                                unstamped_scale={self.q_name: 1000.0})
+                                unstamped_scale={self.q_name: 1000.0},
+                                as_initial_condition=True)
 
         restored = np.asarray(target.dycore_state.tracers["specific_humidity"])
         np.testing.assert_allclose(restored, 2000.0, rtol=1e-6)
@@ -548,7 +558,8 @@ class TestUnstampedCheckpoints(unittest.TestCase):
             target.bootstrap_state()
             with self.assertRaises(ValueError) as ctx:
                 load_checkpoint(target, path,
-                                unstamped_scale={"tracers.nope": 1000.0})
+                                unstamped_scale={"tracers.nope": 1000.0},
+                                as_initial_condition=True)
         self.assertIn("tracers.nope", str(ctx.exception))
 
     def test_unstamped_scale_is_refused_for_a_stamped_file(self):
@@ -559,7 +570,8 @@ class TestUnstampedCheckpoints(unittest.TestCase):
             target.bootstrap_state()
             with self.assertRaises(ValueError) as ctx:
                 load_checkpoint(target, path,
-                                unstamped_scale={self.q_name: 1000.0})
+                                unstamped_scale={self.q_name: 1000.0},
+                                as_initial_condition=True)
         self.assertIn("stamped schema", str(ctx.exception))
 
     def test_unstamped_structural_mismatch_cannot_be_migrated(self):
@@ -572,7 +584,8 @@ class TestUnstampedCheckpoints(unittest.TestCase):
             target = _build_model()
             target.bootstrap_state()
             with self.assertRaises(ValueError) as ctx:
-                load_checkpoint(target, path, unstamped_scale={})
+                load_checkpoint(target, path, unstamped_scale={},
+                                      as_initial_condition=True)
         self.assertIn("carries no field names", str(ctx.exception))
 
 
@@ -617,10 +630,10 @@ class TestCompositionCoverage(unittest.TestCase):
         target.bootstrap_state()
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(donor, path, elapsed_days=2.0)
+            save_checkpoint(donor, path, elapsed_days=0.0)
             payload = _read_payload(path)
             elapsed = load_checkpoint(target, path)
-        self.assertAlmostEqual(elapsed, 2.0)
+        self.assertAlmostEqual(elapsed, 0.0)
         self.assertEqual(
             _max_abs_diff(donor.dycore_state, target.dycore_state), 0.0)
         self.assertEqual(
@@ -655,7 +668,8 @@ class TestCompositionCoverage(unittest.TestCase):
             _write_unstamped(donor, path, elapsed_days=0.0)
             with self.assertRaises(ValueError) as ctx:
                 load_checkpoint(target, path,
-                                unstamped_scale={integer_leaf: 1000.0})
+                                unstamped_scale={integer_leaf: 1000.0},
+                                as_initial_condition=True)
         self.assertIn("floating-point", str(ctx.exception))
 
     def test_echam_round_trip_and_condensate_metadata(self):
@@ -686,3 +700,50 @@ class TestCompositionCoverage(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExactCheckpointClock(unittest.TestCase):
+    """Resumes preserve exact dates; legacy fields are initialization only."""
+
+    def test_clock_round_trip_and_reject_inconsistent_elapsed_metadata(self):
+        import jax_datetime as jdt
+
+        donor = _build_model()
+        state, carry = donor.bootstrap_state()
+        # An exact sub-day offset must survive without an epoch float.
+        donor.restore_state(state, carry,
+                            time=donor.start_time + jdt.Timedelta(seconds=10800),
+                            step=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "clock.msgpack"
+            with self.assertRaisesRegex(ValueError, "elapsed_days"):
+                save_checkpoint(donor, path, elapsed_days=1.0)
+            save_checkpoint(donor, path, elapsed_days=0.125)
+            target = _build_model()
+            target.bootstrap_state()
+            load_checkpoint(target, path)
+            self.assertEqual(int(target.run_state.step), 1)
+            self.assertEqual(int((target.run_state.time - donor.run_state.time).seconds), 0)
+            self.assertEqual(int((target.run_state.time - donor.run_state.time).days), 0)
+            payload = _read_payload(path)
+            payload["clock"]["step"] = np.int32(2)
+            _write_payload(path, payload)
+            with self.assertRaisesRegex(ValueError, "disagree"):
+                load_checkpoint(target, path)
+
+    def test_schema_one_requires_new_experiment(self):
+        donor = _build_model()
+        donor.bootstrap_state()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.msgpack"
+            save_checkpoint(donor, path, elapsed_days=0.0)
+            payload = _read_payload(path)
+            payload["schema_version"] = 1
+            del payload["clock"]
+            _write_payload(path, payload)
+            target = _build_model()
+            target.bootstrap_state()
+            with self.assertRaisesRegex(ValueError, "as_initial_condition"):
+                load_checkpoint(target, path)
+            load_checkpoint(target, path, as_initial_condition=True)
+            self.assertEqual(int(target.run_state.step), 0)

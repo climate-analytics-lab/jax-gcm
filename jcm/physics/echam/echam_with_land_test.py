@@ -76,6 +76,7 @@ def _t31l47_forcing():
     data_dir = resources.files("jcm.data.bc.t30.clim")
     return ForcingData.from_file(
         Path(data_dir / "forcing.nc"), coords=_t31l47_coords(),
+        align_mode="wrap_year",
     )
 
 

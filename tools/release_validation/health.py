@@ -2,7 +2,7 @@
 
 Usage:
     python tools/release_validation/health.py <run_dir with *_dayNNN.nc chunks>
-        [--last-n N] [--log FILE]
+        [--last-n N] [--log FILE] [--json FILE]
 
 Computes annual, area-weighted global means from the saved chunks and
 checks loose climatological ranges (spin-up tolerant — this is a
@@ -17,7 +17,9 @@ checks loose climatological ranges (spin-up tolerant — this is a
 
 Also scans every saved variable for NaN/Inf and, with --log, reports the
 settled sim-days/hr (last chunk wall) for runtime-regression tracking.
-Exit code 0 = all checks pass.
+Exit code 0 = all checks pass. ``--json FILE`` also writes every printed
+gate, reported value and aerosol statistic as JSON, for dashboards that must
+score a run with exactly these definitions.
 
 Cloud cover
 -----------
@@ -69,6 +71,7 @@ either. Rationale, measured magnitudes and the #782 decomposition:
 ``docs/source/design/cloud_cover_gate.md``.
 """
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
@@ -195,7 +198,12 @@ def main():
     ap.add_argument("--log")
     ap.add_argument("--last-n", type=positive_int, default=None,
                     help="use only the last N chunks (default: all)")
+    ap.add_argument("--json", metavar="FILE",
+                    help="also write the gates and reported values as JSON")
     a = ap.parse_args()
+    # Everything printed below, as records, for --json.
+    report = {"run_dir": str(a.run_dir), "gates": [], "info": {},
+              "unscored": {}, "aerosol_stats": {}}
 
     # Same discovery as aerosol_stats.run_files, so the two cannot disagree
     # about which files are chunks (``run.snapshot_interval`` writes a
@@ -203,6 +211,8 @@ def main():
     files = run_files(a.run_dir)
     if not files:
         print(f"FAIL  no chunk files in {a.run_dir}")
+        report["overall"] = "FAIL"
+        _write_json(a.json, report)
         return 1
     # The label of the chunk before a ``--last-n`` slice is the retained
     # window's start; ``chunk_centres`` needs it to place the first node.
@@ -221,6 +231,8 @@ def main():
         good = lo <= value <= hi
         print(f"{'PASS' if good else 'FAIL'}  {name} = {value:.2f} "
               f"(expected [{lo:g}, {hi:g}])")
+        report["gates"].append({"name": name, "value": value, "lo": lo,
+                                "hi": hi, "pass": good})
         ok = ok and good
 
     # NaN scan over everything saved, across the WHOLE opened window —
@@ -236,6 +248,8 @@ def main():
     print(f"{'PASS' if not bad else 'FAIL'}  NaN scan: "
           f"{len(bad)}/{len(ds.data_vars)} variables non-finite "
           f"{bad[:5] if bad else ''}")
+    report["gates"].append({"name": "nan_scan", "value": len(bad), "lo": 0,
+                            "hi": 0, "pass": not bad, "bad": bad})
     ok = ok and not bad
 
     speedy = "longwave_rad.ftop" in ds       # SPEEDY field dialect
@@ -269,7 +283,8 @@ def main():
     # module docstring).
     for name in ("cloud_cover_colmax", "cloud_cover_radiation"):
         if name in cover:
-            print(f"INFO  {name} = {wmean(cover[name], weights):.2f} "
+            report["info"][name] = wmean(cover[name], weights)
+            print(f"INFO  {name} = {report['info'][name]:.2f} "
                   "(reported, not gated)")
     if radiation_note:
         print(f"NOTE  {radiation_note}; no radiation-view cover to report")
@@ -319,15 +334,19 @@ def main():
                                          + physics_gates(stats)):
             print(f"{'PASS' if good else 'FAIL'}  {name} = {value:.4g} "
                   f"(expected {limit})")
+            report["gates"].append({"name": name, "value": value,
+                                    "limit": str(limit), "pass": good})
             ok = ok and good
         unscored = unscored_gates(days, series, dt, window_start)
         for name, reason in unscored:
             print(f"UNSCORED  {name}: {reason}")
+            report["unscored"][name] = reason
         if unscored:
             print(f"NOTE  {len(unscored)} aerosol gate(s) could not be "
                   "evaluated; they have passed nothing")
         print()
         print(format_table(stats, []))
+        report["aerosol_stats"] = stats
     else:
         print("NOTE  no m_<species>_<mode> aerosol tracers in the output — "
               "not a JAM run; skipping the aerosol statistics")
@@ -342,12 +361,40 @@ def main():
         if len(walls) >= 2 and len(spacings) == 1:
             w = float(walls[-1])
             chunk_days = spacings.pop()
+            report["info"]["sim_days_per_hour"] = chunk_days * 3600 / w
             print(f"INFO  settled rate ~ {chunk_days * 3600 / w:.0f} "
                   f"sim-days/hr (last chunk {w:.0f}s, {chunk_days}-day "
                   "chunks; compare vs the recorded baselines)")
 
     print("OVERALL:", "PASS" if ok else "FAIL")
+    report["overall"] = "PASS" if ok else "FAIL"
+    _write_json(a.json, report)
     return 0 if ok else 1
+
+
+def _write_json(path, report):
+    """Write ``report`` to ``path`` (no-op without --json).
+
+    numpy scalars/arrays in the aerosol statistics become plain numbers and
+    lists; non-finite values become null, since JSON has no NaN.
+    """
+    if not path:
+        return
+
+    def plain(x):
+        if isinstance(x, dict):
+            return {str(k): plain(v) for k, v in x.items()}
+        if isinstance(x, (list, tuple, np.ndarray)):
+            return [plain(v) for v in x]
+        if isinstance(x, (np.bool_, bool)):
+            return bool(x)
+        if isinstance(x, (np.integer, int)):
+            return int(x)
+        if isinstance(x, (np.floating, float)):
+            return float(x) if np.isfinite(x) else None
+        return x
+
+    Path(path).write_text(json.dumps(plain(report), indent=1))
 
 
 if __name__ == "__main__":

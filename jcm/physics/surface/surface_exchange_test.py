@@ -626,7 +626,7 @@ class TestPrescribedFluxForcingAttach:
         ts = self._load(tmp_path, times, "desc_clim.nc",
                         tag_per_time=months_desc, align="wrap_year")
         assert int(ts.align_mode) == WRAP_YEAR
-        assert bool(np.all(np.diff(np.asarray(ts.time_seconds)) > 0))
+        assert bool(np.all(np.diff(_bound_seconds(ts.times)) > 0))
         vals = np.asarray(ts.values)  # (time, lon, lat), ascending time
         assert float(vals[0].mean()) == 1.0    # January
         assert float(vals[-1].mean()) == 12.0  # December
@@ -643,7 +643,7 @@ class TestPrescribedFluxForcingAttach:
         ts = self._load(tmp_path, times, "desc_daily.nc",
                         tag_per_time=days_desc, align="by_date")
         assert int(ts.align_mode) == BY_DATE
-        assert bool(np.all(np.diff(np.asarray(ts.time_seconds)) > 0))
+        assert bool(np.all(np.diff(_bound_seconds(ts.times)) > 0))
         vals = np.asarray(ts.values)
         assert float(vals[0].mean()) == 0.0
         assert float(vals[-1].mean()) == 11.0
@@ -681,7 +681,7 @@ class TestPrescribedFluxForcingAttach:
         ts = self._load(tmp_path, times, f"y0_{calendar}.nc",
                         tag_per_time=months_desc, align="wrap_year")
         assert int(ts.align_mode) == WRAP_YEAR
-        assert bool(np.all(np.diff(np.asarray(ts.time_seconds)) > 0))
+        assert bool(np.all(np.diff(_bound_seconds(ts.times)) > 0))
         vals = np.asarray(ts.values)
         assert float(vals[0].mean()) == 1.0 and float(vals[-1].mean()) == 12.0
 
@@ -867,7 +867,8 @@ class TestForcedForcingValidation:
         bare = default_forcing(model.coords.horizontal)
         with pytest.raises(ValueError, match="prescribed"):
             model.run_from_state_with_carry(
-                state, bare, save_interval=(1 / 24.0), total_time=(1 / 24.0))
+                state, bare, save_interval=(1 / 24.0), total_time=(1 / 24.0),
+                initial_time=model.start_time, initial_step=0)
 
 
 # ---------------------------------------------------------------------------
@@ -887,13 +888,28 @@ def _secs(date):
     return (pd.Timestamp(date) - pd.Timestamp("1970-01-01")).total_seconds()
 
 
+def _dates(seconds):
+    """Convert seconds since 1970 to the exact ``datetime64[s]`` labels a
+    ``TimeSeries`` axis takes.
+    """
+    import numpy as np
+    return np.rint(np.asarray(seconds, dtype=float)).astype(
+        "int64").astype("datetime64[s]")
+
+
+def _bound_seconds(bounds):
+    """Return exact ``Datetime`` bounds or times as seconds since 1970."""
+    from jcm.forcing import _host_epoch_seconds
+    return _host_epoch_seconds(bounds).astype(float)
+
+
 class TestByDateCoverage:
     """``by_date_coverage_error`` and its run-start wiring."""
 
     def _ts(self, align, day=1, year=2000):
         from jcm.forcing import make_time_series
         t = _monthly_seconds(year, day)
-        return make_time_series(jnp.zeros((12, 2, 2)), jnp.asarray(t), align)
+        return make_time_series(jnp.zeros((12, 2, 2)), _dates(t), align)
 
     @pytest.mark.parametrize("day", [1, 15])
     def test_monthly_archive_covers_its_calendar_year(self, day):
@@ -962,7 +978,6 @@ class TestByDateCoverage:
         SpeedySurfaceFlux().validate_forcing(forcing, run_window=outside)
 
     def _forced_model(self, start):
-        import jax_datetime as jdt
         from jcm.model import Model
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
         from jcm.physics.speedy.speedy_terms import (
@@ -974,12 +989,12 @@ class TestByDateCoverage:
             "surface", SpeedySurfaceFlux(prescribed_fluxes=True))
         return Model(coords=coords, terrain=TerrainData.aquaplanet(coords),
                      physics=physics, time_step=20,
-                     start_date=jdt.to_datetime(start))
+                     start_time=start)
 
     def test_model_run_window_is_absolute(self):
+        from jcm.model import _run_window_seconds
         model = self._forced_model("2000-03-01")
-        state = model._prepare_initial_dycore_state()
-        start, end = model._run_window_seconds(state, 10.0)
+        start, end = _run_window_seconds(model.start_time, 10 * 86400)
         assert start == pytest.approx(_secs("2000-03-01"))
         assert end == pytest.approx(_secs("2000-03-11"))
 
@@ -991,7 +1006,7 @@ class TestByDateCoverage:
         model = self._forced_model("2001-06-01")
         nodal = model.coords.horizontal.nodal_shape
         leaf = make_time_series(jnp.zeros((12, *nodal)),
-                                jnp.asarray(_monthly_seconds(2000)), BY_DATE)
+                                _dates(_monthly_seconds(2000)), BY_DATE)
         forcing = default_forcing(model.coords.horizontal).copy(
             prescribed_sensible_heat_flux=leaf, prescribed_evaporation=leaf,
             prescribed_stress_u=leaf, prescribed_stress_v=leaf)
@@ -1230,7 +1245,7 @@ class TestByDateCoverageEndIntervals:
         days = ([f"2000-01-{d:02d}" for d in range(1, 11)]
                 + [f"2000-12-{d:02d}" for d in range(1, 32)])
         t = np.array([_secs(d) for d in days])
-        return make_time_series(jnp.zeros((t.size, 2, 2)), jnp.asarray(t),
+        return make_time_series(jnp.zeros((t.size, 2, 2)), _dates(t),
                                 BY_DATE)
 
     def test_run_past_end_cadence_is_rejected(self):
@@ -1258,7 +1273,7 @@ class TestByDateCoverageEndIntervals:
         from jcm.forcing import make_time_series
         # Mid-month stamps: the cadence rule would allow to ~Jan 14 2001.
         ts = make_time_series(jnp.zeros((12, 2, 2)),
-                              jnp.asarray(_monthly_seconds(2000, 15)), BY_DATE)
+                              _dates(_monthly_seconds(2000, 15)), BY_DATE)
         late = (_secs("2000-12-20"), _secs("2001-01-10"))
         assert by_date_coverage_error(ts, *late) is None
         bounds = (_secs("2000-01-01"), _secs("2001-01-01"))
@@ -1307,7 +1322,7 @@ class TestByDateCoverageEndIntervals:
         with xr.open_dataset(p) as ds:
             fields = read_prescribed_surface_fluxes(
                 ds, lat, lon, align_mode="by_date", source=str(p))
-        b = np.asarray(fields["prescribed_flux_time_bounds"])
+        b = _bound_seconds(fields["prescribed_flux_time_bounds"])
         assert b.shape == (12, 2)
         assert float(b.min()) == pytest.approx(_secs("2000-01-01"))
         assert float(b.max()) == pytest.approx(_secs("2001-01-01"))
@@ -1366,7 +1381,7 @@ def _entry_setup(forced, fluxes):
         leaf = jnp.full(nodal, 1.0)
     elif fluxes == "archive2000":
         leaf = make_time_series(jnp.ones((12, *nodal)),
-                                jnp.asarray(_monthly_seconds(2000)), BY_DATE)
+                                _dates(_monthly_seconds(2000)), BY_DATE)
     else:
         return coords, physics, forcing
     return coords, physics, forcing.copy(
@@ -1376,16 +1391,18 @@ def _entry_setup(forced, fluxes):
 
 def _door_model(method):
     def call(coords, physics, forcing, start):
-        import jax_datetime as jdt
         from jcm.model import Model
         from jcm.terrain import TerrainData
         model = Model(coords=coords, terrain=TerrainData.aquaplanet(coords),
                       physics=physics, time_step=20,
-                      start_date=jdt.to_datetime(start))
+                      start_time=start)
         kw = dict(save_interval=(1 / 24.0), total_time=(1 / 24.0))
         if method == "run":
             return model.run(forcing=forcing, **kw)
         state = model._prepare_initial_dycore_state()
+        if method == "run_from_state_with_carry":
+            # The low-level door takes the complete RunState clock.
+            kw.update(initial_time=model.start_time, initial_step=0)
         return getattr(model, method)(state, forcing, **kw)
     return call
 
@@ -1399,11 +1416,10 @@ def _door_scm(coords, physics, forcing, start):
 
 
 def _door_prescribed(coords, physics, forcing, start):
-    import jax_datetime as jdt
     from jcm.prescribed_state_model import PrescribedStateModel
     from jcm.prescribed_state_model_test import _make_test_state
     model = PrescribedStateModel(physics=physics, coords=coords,
-                                 start_date=jdt.to_datetime(start))
+                                 start_time=start)
     return model.run([_make_test_state(coords)], forcing=forcing)
 
 
@@ -1485,8 +1501,8 @@ class TestDeclaredBoundsGaps:
 
     def _ts(self):
         from jcm.forcing import BY_DATE, make_time_series
-        t = jnp.asarray([_secs("2000-01-15"), _secs("2000-02-15"),
-                         _secs("2000-06-15"), _secs("2000-07-15")])
+        t = _dates([_secs("2000-01-15"), _secs("2000-02-15"),
+                    _secs("2000-06-15"), _secs("2000-07-15")])
         return make_time_series(jnp.zeros((4, 2, 2)), t, BY_DATE)
 
     def _bounds(self, contiguous):
@@ -1497,7 +1513,8 @@ class TestDeclaredBoundsGaps:
         else:
             edges = [("2000-01-01", "2000-02-01"), ("2000-02-01", "2000-03-01"),
                      ("2000-06-01", "2000-07-01"), ("2000-07-01", "2000-08-01")]
-        return jnp.asarray([[_secs(a), _secs(b)] for a, b in edges])
+        import numpy as np
+        return np.asarray([[_secs(a), _secs(b)] for a, b in edges])
 
     def test_contiguous_bounds_accepted(self):
         from jcm.forcing import by_date_coverage_error
@@ -1554,7 +1571,7 @@ class TestDeclaredBoundsGaps:
         with xr.open_dataset(p) as opened:
             fields = read_prescribed_surface_fluxes(
                 opened, lat, lon, align_mode="by_date", source=str(p))
-        b = np.asarray(fields["prescribed_flux_time_bounds"])
+        b = _bound_seconds(fields["prescribed_flux_time_bounds"])
         assert b.shape == (2, 2)
         assert b[0, 1] == pytest.approx(_secs("2000-02-01"))
         assert b[1, 0] == pytest.approx(_secs("2000-06-01"))
@@ -1743,7 +1760,7 @@ class TestPrescribedModeForcedFlux:
     def _archive_forcing(self, coords, n_days=5):
         from jcm.forcing import BY_DATE, make_time_series
         nodal = coords.horizontal.nodal_shape
-        t = jnp.asarray([_secs(f"2000-01-{d + 1:02d}") for d in range(n_days)])
+        t = _dates([_secs(f"2000-01-{d + 1:02d}") for d in range(n_days)])
         vals = jnp.stack([jnp.full(nodal, float(k + 1)) for k in range(n_days)])
         leaf = make_time_series(vals, t, BY_DATE)
         return default_forcing(coords.horizontal).copy(
@@ -1751,7 +1768,6 @@ class TestPrescribedModeForcedFlux:
             prescribed_stress_u=leaf, prescribed_stress_v=leaf)
 
     def _model(self, coords):
-        import jax_datetime as jdt
         from jcm.physics.speedy.speedy_terms import (
             SpeedySurfaceFlux, speedy_physics,
         )
@@ -1760,7 +1776,7 @@ class TestPrescribedModeForcedFlux:
             "surface", SpeedySurfaceFlux(prescribed_fluxes=True))
         return PrescribedStateModel(
             physics=physics, coords=coords, dt_seconds=3 * 3600.0,
-            start_date=jdt.to_datetime("2000-01-01"))
+            start_time="2000-01-01")
 
     def test_daily_snapshots_select_daily_archive_samples(self):
         """Daily snapshots on a 3-hour step: snapshot k sees day-k fluxes."""
@@ -1786,23 +1802,22 @@ class TestPrescribedModeForcedFlux:
                 [state, state], forcing=self._archive_forcing(coords),
                 times=jnp.asarray([0.0, 30.0]))
 
-    def test_cli_driver_passes_file_times_start_date_and_calendar(self):
-        """``_run_prescribed`` hands the file's own times (not arange*dt), the
-        configured start date and the full-run calendar to the model, and
-        validates the forced contract over that window before physics.
+    def test_cli_driver_passes_file_times_and_start_time(self):
+        """``_run_prescribed`` hands the file's own times (not arange*dt) and
+        the configured start time to the model, and validates the forced
+        contract over that window before physics.
         """
         from unittest import mock
 
         from hydra import compose, initialize_config_module
 
         from jcm import runners
-        from jcm.model import DEFAULT_MODEL_CALENDAR
         from jcm.prescribed_state_model_test import _make_test_state
         with initialize_config_module("jcm.config", version_base=None):
             cfg = compose("config", overrides=[
                 "physics=speedy-forced-flux", "forcing.ozone_file=analytic",
                 "run.mode=prescribed", "run.time_step=180",
-                "run.start_date=2000-01-01", "run.state_file=unused.nc"])
+                "run.start_time=2000-01-01", "run.state_file=unused.nc"])
         coords = runners.build_coords(cfg)
         state = _make_test_state(coords)
         from jax.tree_util import tree_map
@@ -1813,8 +1828,7 @@ class TestPrescribedModeForcedFlux:
         real_run = PrescribedStateModel.run
 
         def spy_run(self, states, forcing=None, times=None):
-            seen.update(times=times, start=self.start_date,
-                        calendar=self.calendar)
+            seen.update(times=times, start=self.start_time)
             return real_run(self, states, forcing=forcing, times=times)
 
         with mock.patch.object(runners, "build_forcing",
@@ -1824,7 +1838,7 @@ class TestPrescribedModeForcedFlux:
                 mock.patch.object(PrescribedStateModel, "run", spy_run):
             preds = runners._run_prescribed(cfg)
         assert list(seen["times"]) == [0.0, 1.0, 2.0]
-        assert seen["calendar"] == DEFAULT_MODEL_CALENDAR
+        assert str(seen["start"].to_datetime64()).startswith("2000-01-01")
         shf = preds.physics_data[SURFACE_EXCHANGE_KEY].sensible_heat_flux
         assert float(jnp.mean(shf[2])) == pytest.approx(3.0)
         # An archive that stops before the last snapshot fails BEFORE physics.
@@ -1866,7 +1880,7 @@ class TestEdgeCadenceForms:
 
     def _ts(self, dates):
         from jcm.forcing import BY_DATE, make_time_series
-        t = jnp.asarray([_secs(d) for d in dates])
+        t = _dates([_secs(d) for d in dates])
         return make_time_series(jnp.zeros((len(dates), 2, 2)), t, BY_DATE)
 
     @pytest.mark.parametrize("dates", [

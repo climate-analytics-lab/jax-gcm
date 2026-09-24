@@ -45,7 +45,6 @@ class ContractRoundTripTest(unittest.TestCase):
         import jax_datetime as jdt
         return DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime("2001-07-02")),
-            calendar="gregorian",
         )
 
     def test_returns_none_without_emis_vars(self):
@@ -69,11 +68,30 @@ class ContractRoundTripTest(unittest.TestCase):
                                             align_mode="wrap_year")
         forcing = ForcingData.zeros((_NLON, _NLAT)).copy(
             anthropogenic_emissions=emis)
-        sliced = forcing.select(self._date(), calendar="gregorian")
+        sliced = forcing.select(self._date())
         bc = sliced.anthropogenic_emissions["emis_surface_combustion_bc"]
         self.assertEqual(bc.shape, (_NLON, _NLAT))
         self.assertEqual(jnp.ravel(bc).size, _NLON * _NLAT)
         self.assertTrue(np.allclose(np.asarray(bc), 1.0e-11))
+
+    def test_single_year_dated_axis_is_transient(self):
+        """Twelve real dates are never inferred to be a climatology (#884).
+
+        ``auto`` refuses an in-memory dataset outright; declared dated, the
+        year keeps its exact dates rather than repeating annually.
+        """
+        from jcm.forcing import BY_DATE
+
+        ds = _synthetic_emissions_ds().assign_coords(
+            time=np.arange("2001-01", "2002-01", dtype="datetime64[M]"))
+        with self.assertRaisesRegex(ValueError, "emissions_align=auto"):
+            read_anthropogenic_emissions(ds)
+        emissions = read_anthropogenic_emissions(ds, align_mode="by_date")
+        leaf = emissions["emis_surface_combustion_bc"]
+        self.assertEqual(int(leaf.align_mode), BY_DATE)
+        np.testing.assert_array_equal(
+            leaf.times.to_datetime64().astype("datetime64[M]"),
+            np.arange("2001-01", "2002-01", dtype="datetime64[M]"))
 
     def test_static_field_passthrough(self):
         # A time-less emissions field is carried as a bare array, still sliced
@@ -108,8 +126,7 @@ class PreSpeciatedContractTest(unittest.TestCase):
         from jcm.date import DateData
         import jax_datetime as jdt
         return DateData.set_date(
-            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime("2001-07-02")),
-            calendar="gregorian")
+            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime("2001-07-02")))
 
     def test_returns_none_without_vars(self):
         ds = xr.Dataset({"emis_surface_combustion_so2":
@@ -126,7 +143,7 @@ class PreSpeciatedContractTest(unittest.TestCase):
             _synthetic_speciated_ds(), align_mode="wrap_year")
         forcing = ForcingData.zeros((_NLON, _NLAT)).copy(
             prescribed_aerosol_emissions=emis)
-        sliced = forcing.select(self._date(), calendar="gregorian")
+        sliced = forcing.select(self._date())
         got = sliced.prescribed_aerosol_emissions
         # 2-D surface channel → (lon, lat); 3-D volume channel → (lev, lon, lat).
         self.assertEqual(got["m_bc_pcm"].shape, (_NLON, _NLAT))

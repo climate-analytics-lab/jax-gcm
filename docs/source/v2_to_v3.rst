@@ -521,6 +521,103 @@ Other config-surface changes
   MACv2-SP on default all-ones weights; and transient by-date forcing composed
   with present-day JAM emission bundles.
 
+.. _v3-datetime:
+
+One real datetime clock
+-----------------------
+
+Model time now follows Gregorian dates, including February 29, at whole-second
+precision. Timezone-aware inputs are normalized to UTC; naive inputs use the
+same timeline. Days contain 86,400 seconds; leap-second timestamps are not
+supported. Replace
+``start_date`` with ``start_time`` and remove the ``calendar`` argument.
+Use exactly one of a fixed ``total_time`` or an absolute ``end_time``:
+
+.. code-block:: python
+
+   model = Model(..., start_time="2000-01-01")
+   daily = model.run(forcing=forcing, end_time="2001-01-01",
+                     save_interval="1D", output_averages=True)
+   monthly = daily.monthly_means()
+
+Numeric run durations remain days. Strings such as ``"6h"`` and ``"1D"``
+are fixed durations; ``"1 month"`` and ``"1 year"`` are rejected because
+months and years have different lengths. In Hydra, select an endpoint with
+``run.total_time=null run.end_time=2001-01-01``.
+
+Run and save durations must divide exactly into model steps, and the run must
+contain complete save intervals. An interval mean is labelled at the midpoint
+of its exact bounds, which may fall on a half second for an odd-length
+interval (e.g. a 1 s step with ``save_interval="3 seconds"``).
+
+Seasonal physics now evaluates January 1 at phase zero in every year. The v2
+default instead inherited an epoch-dependent offset (seven days on
+2000-01-01), so one-day ECHAM and longer climate fingerprints change even
+though the physics equations do not. The ECHAM regression shift was isolated
+by running the v3 integrator with the legacy phase before updating that
+reference; see `issue #876 <https://github.com/climate-analytics-lab/jax-gcm/issues/876>`_.
+
+Interval means include ``time_bounds`` and midpoint labels. Monthly means
+weight each contributing interval by its duration; snapshots cannot be
+converted into interval means after the run. Observers keep their own
+sampling: this helper aggregates only the primary output stream. See
+`issue #876 <https://github.com/climate-analytics-lab/jax-gcm/issues/876>`_
+for the forcing and partial-month contracts.
+
+Whether an input repeats every year or is dated is always declared
+(:ref:`v3-align`); the clock decides what each declared mode selects. A
+``wrap_year`` climatology is replayed on the real calendar: twelve records are
+January to December, each held from the 1st of its month (#805); a 365/366
+record table is a nominal-date daily climatology, where a 365-record table
+holds February 28 on February 29 and March 1 still selects March 1; any other
+length (e.g. MACv2-SP's weekly annual cycle) keeps equal fractions of the
+actual year. A climatology's own stamps are read only for their month and day,
+so idealised-calendar climatologies still load. Dated ``by_date`` /
+``by_date_interp`` input is placed on the exact clock: no-leap dated inputs
+retain their nominal date components, and ``by_date_interp`` interpolates
+across the actual bracketing dates, including a missing leap day. Unsupported
+transient 360-day and Julian axes are rejected at ingestion; preprocess those
+explicitly with xarray. Dated lookup holds endpoint values outside its axis
+for the surface, ozone, emission and oxidant inputs; only prescribed surface
+fluxes are checked to cover the run window, so check forcing coverage when
+constructing an experiment.
+
+Coupled output must use the shared public conversion instead of multiplying
+floating epoch days into nanoseconds:
+
+.. code-block:: python
+
+   from jcm.predictions import output_time_labels
+
+   # exact_times is a jax_datetime.Datetime axis shared by the components.
+   labels = output_time_labels(exact_times)
+   ocean = ocean.assign_coords(time=labels)
+
+The result is exact ``datetime64[ms]``; integer-second model labels are
+preserved, and interval midpoints are exact to the millisecond: an
+odd-length interval's midpoint falls on a half second and is represented
+exactly (``ModelPredictions.time_labels`` and ``to_xarray`` compute it from
+the exact bounds). Floating days-since-epoch input is rejected. The trajectory serializer uses
+the same conversion, preventing tiny timestamp differences from expanding
+an xarray merge into two interleaved axes (#862).
+
+A saved run now includes its exact datetime and integer step count. External
+couplers must preserve the complete ``RunState`` or pass ``time`` and ``step``
+explicitly to ``restore_state``. Dycore ``sim_time`` alone is insufficient.
+``run_from_state_with_carry`` now requires ``initial_time`` and
+``initial_step`` and returns ``(RunState, ModelPredictions)``; continue with
+all four fields of ``RunState`` (``dynamics``, ``physics``, ``time``, ``step``).
+See :doc:`advanced_features` for a complete external-stepper example.
+``run.mode=prescribed`` places each state at its own time. A dated state
+file (every v3 output) supplies the first state's time itself, so
+``run.start_time`` may be omitted; if it is set and differs, the config wins
+with a warning naming both times. An older output whose ``time`` axis is
+elapsed time carries no date and requires ``run.start_time``.
+Checkpoints predating the exact clock can only be imported as initial
+conditions (``as_initial_condition=True``), starting at the new model's
+``start_time``. Unstamped files additionally require the unit assertion
+explained below.
+
 .. _v3-checkpoints:
 
 Checkpoint compatibility
@@ -564,14 +661,14 @@ convention yourself, per leaf:
    from jcm.checkpoint import load_checkpoint
 
    # a pre-#824 ECHAM donor: its stored mass mixing ratios are 1000x small
-   load_checkpoint(model, path, unstamped_scale={
+   load_checkpoint(model, path, as_initial_condition=True, unstamped_scale={
        "tracers.specific_humidity": 1000.0,
        "tracers.qc": 1000.0,
        "tracers.qi": 1000.0,
    })
 
    # or, having checked the file is already in the current convention:
-   load_checkpoint(model, path, unstamped_scale={})
+   load_checkpoint(model, path, as_initial_condition=True, unstamped_scale={})
 
 and, for a *fresh start from* a saved state, from the CLI through the ``init``
 group:
