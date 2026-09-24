@@ -520,6 +520,7 @@ def diagnose_surface_fluxes(
     params: VDiffParameters,
     surface_exchange: tuple,
     surface_target: tuple,
+    latent_heat_exchange: tuple = None,
 ) -> VDiffSurfaceFluxes:
     """Diagnose the delivered surface fluxes from the implicit solution.
 
@@ -530,7 +531,7 @@ def diagnose_surface_fluxes(
 
         E  = ρ_s·C_q·(q_s_eff − X̂_K)         [kg/m²/s, positive up]
         SH = ρ_s·cpd·C_h·(T_s_eff − T̂_K)     [W/m²,   positive up]
-        LH = alhc·E
+        LH = ρ_s·C_L·(q_L − X̂_K)              [W/m², per-tile latent heats]
         τ  = ρ_s·C_m·(Û_K − û_s)             [N/m², momentum flux into the
                                               surface, positive with the wind]
 
@@ -556,7 +557,12 @@ def diagnose_surface_fluxes(
 
     evaporation = rho_s * c_moist * tp1 * (tp2 * q_s_eff - bb_qv)
     sensible_heat = rho_s * c.cpd * c_heat * tp1 * (tp2 * t_s_eff - bb_t)
-    latent_heat = c.alhc * evaporation
+    if latent_heat_exchange is None:
+        # No per-tile latent heats supplied: all condensation (open water).
+        latent_heat = c.alhc * evaporation
+    else:
+        c_lh, q_lh = latent_heat_exchange
+        latent_heat = rho_s * c_lh * tp1 * (tp2 * q_lh - bb_qv)
     # Stress the atmosphere exerts (positive with the wind); the delivered
     # column momentum change is −τ (drag), matching the old surface-term
     # convention of publishing τ = ρ·C_M·u and applying −τ/(ρ·dz).
@@ -583,6 +589,7 @@ def vertical_diffusion_step(
     tke_exchange_coeff: jnp.ndarray = None,
     surface_exchange: tuple = None,
     surface_target: tuple = None,
+    latent_heat_exchange: tuple = None,
 ) -> tuple:
     """Perform one vertical diffusion time step.
 
@@ -599,6 +606,10 @@ def vertical_diffusion_step(
             :func:`setup_matrix_system`). ``None`` keeps the legacy
             zero-flux bottom boundary.
         surface_target: Optional ``(u_s, v_s, T_s_eff, q_s_eff)`` targets.
+        latent_heat_exchange: Optional ``(C_L, q_L)`` pair giving the latent
+            heat of the delivered moisture flux as ``ρ_s·C_L·(q_L − X̂_K)``
+            (per-tile condensation/sublimation heats folded in by the
+            caller). ``None`` reports ``alhc·E``.
 
     Returns:
         ``(tendencies, surface_fluxes)`` — tendencies for all variables and
@@ -633,6 +644,7 @@ def vertical_diffusion_step(
     if surface_exchange is not None:
         surface_fluxes = diagnose_surface_fluxes(
             solution, state, params, surface_exchange, surface_target,
+            latent_heat_exchange,
         )
     else:
         surface_fluxes = VDiffSurfaceFluxes.zeros(state.u.shape[0])

@@ -45,7 +45,7 @@ import jax
 import jax.numpy as jnp
 
 import jcm.constants as c
-from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+from jcm.physics.thermodynamics import saturation_specific_humidity
 from .vertical_diffusion_types import VDiffParameters, VDiffState
 
 
@@ -88,7 +88,6 @@ def compute_surface_exchange_coefficients_echam_louis(
     Rd = c.rd
     cp = c.cpd
     grav = c.grav
-    Lv = c.alhc
     p0 = c.p0     # 1.0e5 Pa — same as ECHAM's p0ref
     rv_over_rd = c.rv / Rd
     rd_over_rv = Rd / c.rv
@@ -114,14 +113,24 @@ def compute_surface_exchange_coefficients_echam_louis(
     qx_air = state.qc[:, -1] + state.qi[:, -1]    # total cloud water
     z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
 
+    # Phase of the latent heat in the surface-layer buoyancy: vdiff.f90's
+    # ``zfaxe = FSEL(T - tmelt, alv, als)`` on the lowest-level air
+    # temperature — condensation above the melting point, sublimation below,
+    # the same value for every tile.
+    Lv = jnp.where(T_air >= c.tmelt, c.alhc, c.alhs)
+
     exner_air = (p0 / jnp.maximum(p_air, 1.0)) ** (Rd / cp)
     theta_air = T_air * exner_air                                  # ptheta_b
     thetav_air = theta_air * (1.0 + vtmpc1 * qv_air - qx_air)      # pthetav_b
-    # θ_l ≈ θ here (no ice at surface layer; ECHAM also subtracts
-    # (Lv/cp)·θ/T·qx but with qx≈0 this is a few×10⁻³ K correction).
-    thetal_air = theta_air
+    # Liquid-water potential temperature, vdiff.f90's
+    # ``zlteta1 = θ − (zfaxe/cpd)·θ/T·zx`` with the same phase-switched L.
+    thetal_air = theta_air - (Lv / cp) * theta_air / T_air * qx_air
 
-    qsat_air = saturation_specific_humidity(p_air, T_air)
+    # Saturation over water at/above tmelt and over ice below, for the air
+    # (``zqss``) and every tile surface: ECHAM reads both from the ``tlucua``
+    # table (``lookup_ua_list_spline`` in precalc_ocean/_ice/_land), which
+    # switches phase at the melting point with no mixed-phase blend.
+    qsat_air = saturation_specific_humidity(T_air, p_air)
     qtl = qv_air + qx_air                                          # zqtl
 
     # --- Per-tile loop -------------------------------------------------
@@ -138,8 +147,9 @@ def compute_surface_exchange_coefficients_echam_louis(
         # Tile saturation q at the surface — open water / ice are fully
         # saturated, land is wetness-weighted between qsat and ambient
         # ``qv_air`` (mirrors the JSBACH ``cair·qsat + (1-cair)·qair``
-        # form in mo_turbulence_diag).
-        qsat_s = saturation_specific_humidity(p_sfc, T_s)
+        # form in mo_turbulence_diag). Ice saturation below tmelt (the sea
+        # ice tile always, frozen land), water above.
+        qsat_s = saturation_specific_humidity(T_s, p_sfc)
         qts = wetness * qsat_s + (1.0 - wetness) * qv_air
 
         exner_sfc = (p0 / jnp.maximum(p_sfc, 1.0)) ** (Rd / cp)

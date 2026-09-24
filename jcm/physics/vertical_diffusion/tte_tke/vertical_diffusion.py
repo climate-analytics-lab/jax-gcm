@@ -11,7 +11,7 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
-from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+from jcm.physics.thermodynamics import saturation_specific_humidity
 from .vertical_diffusion_types import (
     VDiffState, VDiffParameters, VDiffTendencies, VDiffDiagnostics
 )
@@ -86,6 +86,7 @@ def prepare_vertical_diffusion_state(
     thv_variance: jnp.ndarray,
     roughness_heat: jnp.ndarray = None,
     surface_wetness: jnp.ndarray = None,
+    surface_sublimation_fraction: jnp.ndarray = None,
 ) -> VDiffState:
     """Prepare the vertical diffusion state from input variables.
 
@@ -118,6 +119,10 @@ def prepare_vertical_diffusion_state(
             every tile (open-water / saturated-leaf assumption); the
             ECHAM-Louis scheme uses this to scale land latent flux from
             the JSBACH-equivalent ``cair``.
+        surface_sublimation_fraction: Fraction of each tile's potential
+            evaporation that sublimates (ncol, nsfc_type), see
+            :class:`VDiffState`. When ``None``: 1 for the sea-ice tile
+            (index 1 of the water/ice/land ordering) and 0 elsewhere.
 
     Returns:
         Complete vertical diffusion state
@@ -132,6 +137,11 @@ def prepare_vertical_diffusion_state(
         roughness_heat = 0.1 * roughness_length
     if surface_wetness is None:
         surface_wetness = jnp.ones_like(roughness_length)
+    if surface_sublimation_fraction is None:
+        surface_sublimation_fraction = jnp.zeros_like(roughness_length)
+        if roughness_length.shape[1] > 1:
+            surface_sublimation_fraction = (
+                surface_sublimation_fraction.at[:, 1].set(1.0))
 
     return VDiffState(
         u=u,
@@ -154,7 +164,8 @@ def prepare_vertical_diffusion_state(
         tke=tke,
         thv_variance=thv_variance,
         ocean_u=ocean_u,
-        ocean_v=ocean_v
+        ocean_v=ocean_v,
+        surface_sublimation_fraction=surface_sublimation_fraction,
     )
 
 
@@ -331,10 +342,11 @@ def vertical_diffusion_column(
         c_moist = jnp.sum(frac * wet * ce_t, axis=1)
 
         # Per-tile saturation humidity at the surface pressure — the same
-        # thermodynamics the ECHAM-Louis surface layer uses for its qts.
+        # thermodynamics the ECHAM-Louis surface layer uses for its qts
+        # (ECHAM ``tlucua``: over ice below tmelt, over water above).
         p_sfc = state.pressure_half[:, -1]
         qsat_tiles = saturation_specific_humidity(
-            p_sfc[:, None], state.surface_temperature,
+            state.surface_temperature, p_sfc[:, None],
         )
         tiny = 1.0e-12  # C floors at 1e-6 per tile; guard the 0-fraction limit
         q_s_eff = (
@@ -349,9 +361,26 @@ def vertical_diffusion_column(
 
         surface_exchange = (c_mom, c_heat, c_moist)
         surface_target = (state.ocean_u, state.ocean_v, t_s_eff, q_s_eff)
+
+        # Latent heat of the delivered moisture flux, per tile as ECHAM
+        # reports it: ``alv·E`` over open water, ``als·E`` over sea ice
+        # (postproc_ice ``pahfli = als·zqhfli``) and JSBACH's
+        # ``alv·E + (als − alv)·snow_fract·E_pot`` over land (mo_soil.f90),
+        # E_pot being the flux at full wetness. Every tile flux is linear in
+        # the one implicit bottom value, so the sum collapses exactly like
+        # the moisture row: LH = ρ·C_L·tp1·(tp2·q_L − X̂_K).
+        sub = state.surface_sublimation_fraction
+        if sub is None:
+            sub = jnp.zeros_like(wet).at[:, 1].set(1.0)
+        k_lh = ce_t * (c.alhc * wet + (c.alhs - c.alhc) * sub)
+        c_lh = jnp.sum(frac * k_lh, axis=1)
+        q_lh = (jnp.sum(frac * k_lh * qsat_tiles, axis=1)
+                / jnp.maximum(c_lh, tiny))
+        latent_heat_exchange = (c_lh, q_lh)
     else:
         surface_exchange = None
         surface_target = None
+        latent_heat_exchange = None
 
     # The matrix solver returns ``tke_tendency = (matrix_tke_new -
     # state_for_solver.tke) / dt``. Since the caller computes
@@ -367,6 +396,7 @@ def vertical_diffusion_column(
         exchange_coeff_momentum, exchange_coeff_heat, exchange_coeff_moisture,
         dt, tke_exchange_coeff,
         surface_exchange=surface_exchange, surface_target=surface_target,
+        latent_heat_exchange=latent_heat_exchange,
     )
     tke_tend_rebased = (
         tendencies.tke_tendency + (post_source_tke - state.tke) / dt
@@ -741,11 +771,32 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         z0_land = roughness[:, 2]
         roughness_heat = jnp.stack([z0_water, z0_ice, z0_land], axis=1)
 
+        # Snow-covered share of the land: the prescribed ``snowc_am`` cover,
+        # with glaciers fully snow covered as JSBACH sets them (#672).
+        snow_col = jnp.clip(forcing.snowc_am.reshape(ncols), 0.0, 1.0)
+        if forcing.glacier_fraction is not None:
+            glac_col = forcing.glacier_fraction.reshape(ncols)
+            snow_col = glac_col + (1.0 - glac_col) * snow_col
+
+        # Land wetness in JSBACH's form (mo_soil.f90 ``qsat_fact``): the
+        # snow-covered part evaporates at the potential rate, the snow-free
+        # part at the soil's availability. That keeps the land flux at least
+        # the snow part's potential flux, which the sublimation latent heat
+        # below is charged against.
         soilw_col = jnp.clip(forcing.soilw_am.reshape(ncols), 0.0, 1.0)
         surface_wetness = jnp.stack([
             jnp.ones(ncols),
             jnp.ones(ncols),
-            soilw_col,
+            snow_col + (1.0 - snow_col) * soilw_col,
+        ], axis=1)
+
+        # Share of each tile's potential evaporation that sublimates (sets
+        # the reported latent heat only): all of it over sea ice, the
+        # snow-covered part over land.
+        surface_sublimation_fraction = jnp.stack([
+            jnp.zeros(ncols),
+            jnp.ones(ncols),
+            snow_col,
         ], axis=1)
 
         ocean_u = jnp.zeros(ncols)
@@ -771,6 +822,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             roughness_length=roughness,
             roughness_heat=roughness_heat,
             surface_wetness=surface_wetness,
+            surface_sublimation_fraction=surface_sublimation_fraction,
             ocean_u=ocean_u,
             ocean_v=ocean_v,
             tke=tke.T,
