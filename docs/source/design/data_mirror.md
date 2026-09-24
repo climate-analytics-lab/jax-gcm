@@ -265,7 +265,9 @@ inventory):
   cover `cvh`, `glac` the same permanent-snow mask
   (ERA5 snow depth never below 0.1 m w.e. in the climatology) that zeroes
   `snowc`, so a cell's snow is either seasonal (`snowc`) or glacier
-  (`glac`). Both come from fields the Tier A `era5` product already
+  (`glac`). After regridding, `snowc` is divided by `1 − glac`, making it
+  the snow-covered fraction of the **non-glacier** land (the convention
+  every consumer reads; total cover `glac + (1 − glac)·snowc`). Both come from fields the Tier A `era5` product already
   carries, so re-running `--stage bundles` (and the transient stages)
   adds them without a new ERA5 download. Bundles built before the
   channels existed load with both `None`: no forest masking, and ice

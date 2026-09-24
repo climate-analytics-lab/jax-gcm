@@ -691,7 +691,14 @@ ECHAM surface albedo and frozen-surface saturation
   cover the land albedo reads; the bundle builders write them from ERA5
   ``cvh`` and the permanent-snow mask. Bundles published before this change
   lack them and load with both ``None`` (no forest masking; ice sheets keep
-  their ERA5 background albedo of ≈0.8).
+  their ERA5 background albedo of ≈0.8). ``snowc`` is the snow-covered
+  fraction of the non-glacier land, so the snow-covered share of the land
+  is ``glac + (1 − glac)·snowc`` (``jcm.forcing.land_snow_cover``, also
+  read by the JAM dust snow gate).
+- The radiation solves with the surface albedo and emissivity of its solve
+  step and publishes those in ``radiation.surface_*``, held between solves,
+  so the published albedo, reflected flux and heating stay one solve's
+  under ``radiation_interval`` sub-stepping.
 - **Breaking:** ``SurfaceOpticsParameters`` holds the albedo constants in a
   nested ``EchamSurfaceAlbedoParameters`` (``albedo=``) and keeps only the
   three emissivities at the top level; the six ``*_albedo_vis``/``*_albedo_nir``

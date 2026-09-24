@@ -647,7 +647,7 @@ The ECHAM physics package consumes two NetCDF files at run time. T63 versions si
      - Soil-moisture initial state for the land-tile column.
    * - ``snowc`` (forcing.nc) → ``forcing.snowc_am``
      - 12-month climatology
-     - Prescribed snow-cover fraction: brightens the land albedo towards the temperature-dependent snow albedo and sets the sublimating share of the land latent heat flux.
+     - Prescribed snow-cover fraction of the non-glacier land (total cover ``glac + (1 − glac)·snowc``): brightens the land albedo towards the temperature-dependent snow albedo and sets the sublimating share of the land latent heat flux.
    * - ``forest`` (forcing.nc) → ``forcing.forest_fraction``
      - Static (optional)
      - Forest fraction masking the snow albedo under a canopy. ``None`` (no forest) if absent.

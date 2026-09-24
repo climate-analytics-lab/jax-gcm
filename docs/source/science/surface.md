@@ -95,6 +95,22 @@ per-tile schemes in ``jcm/physics/surface/echam/albedo.py`` (fractions
   −0.007 near-IR), diffuse light ``calbsea = 0.07``; the RCE column uses
   ECHAM's ``lrce`` constant 0.07 for the direct beam.
 
+The term evaluates these every step and hands them to the radiation as that
+step's input (``jcm/physics/radiation/__init__.py::SURFACE_OPTICS_KEY``); the
+radiation reads them only when it solves and publishes the values it solved
+with in ``radiation.surface_albedo_*``, holding them between solves. The
+published albedo, the reflected flux and the heating therefore always describe
+one solve, and the zenith-dependent open-water albedo enters at the solve-time
+sun, as in ECHAM, whose radiation reads the surface albedo at a radiation step
+(``trigrad``) and replays the transmissivities in between (``radheat``).
+
+The snow maps follow one convention across products and consumers: ``glac`` is
+the glacier share of the land and ``snowc`` the snow-covered fraction of the
+**non-glacier** land (JSBACH's tiling), so the snow-covered share of the land
+is ``glac + (1 − glac)·snowc`` (``jcm/forcing.py::land_snow_cover``, used by
+the land wetness and sublimation and by the dust snow gate; the albedo takes
+the two tiles separately).
+
 Every constant is a differentiable leaf of ``EchamSurfaceAlbedoParameters``
 (held in ``SurfaceOpticsParameters``), at the ECHAM 6.3 T63/T127/T255 values;
 ``EchamSurfaceAlbedoParameters.echam_t31`` carries ECHAM's T31 sea-ice set.
