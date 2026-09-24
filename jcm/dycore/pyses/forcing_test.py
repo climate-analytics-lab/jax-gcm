@@ -15,7 +15,7 @@ import unittest
 import numpy as np
 import xarray as xr
 
-from jcm.forcing import ForcingData, TimeSeries, WRAP_YEAR
+from jcm.forcing import BY_DATE, ForcingData, TimeSeries, WRAP_YEAR
 
 # Tiny source grid and a handful of scattered "columns" inside it.
 _LON = np.arange(0.0, 360.0, 45.0)            # 8
@@ -53,11 +53,13 @@ class AttachJamForcingTest(unittest.TestCase):
             coords={"time": _TIME, "lon": _LON, "lat": _LAT},
         )
         with tempfile.TemporaryDirectory() as tmp:
-            forcing = _attach(emissions_file=_write(tmp, "emis.nc", ds))
+            forcing = _attach(emissions_file=_write(tmp, "emis.nc", ds),
+                              emissions_align="by_date")
         leaf = forcing.anthropogenic_emissions["emis_surface_combustion_so2"]
         self.assertIsInstance(leaf, TimeSeries)
         self.assertEqual(leaf.values.shape, (12, 1, _NCOL))
-        self.assertEqual(int(leaf.align_mode), WRAP_YEAR)
+        # Twelve real dates declared transient stay dated on the columns.
+        self.assertEqual(int(leaf.align_mode), BY_DATE)
         np.testing.assert_allclose(np.asarray(leaf.values), 2.0e-12)
         self.assertIsNone(forcing.prescribed_aerosol_emissions)
 
@@ -157,7 +159,8 @@ class AttachJamForcingTest(unittest.TestCase):
         # Distinct per-level values so we can check levels stay level-for-level
         # through the horizontal interpolation.
         base = np.arange(1, nlev + 1, dtype=float).reshape(1, nlev, 1, 1)
-        data = np.broadcast_to(base * 1.0e-9,
+        month = np.arange(1, 13, dtype=float).reshape(12, 1, 1, 1)
+        data = np.broadcast_to(month * base * 1.0e-9,
                                (12, nlev, _LAT.size, _LON.size)).copy()
         ds = xr.Dataset(
             {f"{n}_VMR_avrg": (("time", "mlev", "lat", "lon"), data,
@@ -172,9 +175,41 @@ class AttachJamForcingTest(unittest.TestCase):
         self.assertEqual(sorted(forcing.oxidant_vmr), ["h2o2", "no3", "o3", "oh"])
         oh = forcing.oxidant_vmr["oh"]
         self.assertEqual(oh.values.shape, (12, nlev, 1, _NCOL))
+        self.assertEqual(int(oh.align_mode), WRAP_YEAR)
         np.testing.assert_allclose(
             np.asarray(oh.values[0, :, 0, 0]),
             np.arange(1, nlev + 1) * 1.0e-9, rtol=1e-6)
+        # A scalar oxidant file is the standard monthly climatology even when
+        # its coordinate contains real dates. It must repeat seasonally rather
+        # than clamp after the source year.
+        from jcm.model import DateData
+        import jax_datetime as jdt
+        jan_2014 = DateData.set_date(jdt.to_datetime("2014-01-15"))
+        jan_2015 = DateData.set_date(jdt.to_datetime("2015-01-15"))
+        jul_2015 = DateData.set_date(jdt.to_datetime("2015-07-15"))
+        jan_source = np.asarray(forcing.select(jan_2014).oxidant_vmr["oh"])
+        np.testing.assert_allclose(
+            np.asarray(forcing.select(jan_2015).oxidant_vmr["oh"]), jan_source)
+        self.assertFalse(np.allclose(
+            np.asarray(forcing.select(jul_2015).oxidant_vmr["oh"]), jan_source,
+            rtol=1e-6, atol=0.0))
+
+    def test_single_year_oxidant_list_is_explicitly_dated(self):
+        """A one-file product declared dated stays BY_DATE with 12 rows."""
+        nlev = 4
+        data = np.full((12, nlev, _LAT.size, _LON.size), 1.0e-9)
+        ds = xr.Dataset(
+            {f"{name}_VMR_avrg": (("time", "mlev", "lat", "lon"), data,
+                                  {"units": "mole/mole"})
+             for name in ("OH", "NO3", "O3", "H2O2")},
+            coords={"time": _TIME, "mlev": np.arange(1, nlev + 1),
+                    "lat": _LAT, "lon": _LON},
+        )
+        ds["hybm"] = ("mlev", np.array([0.0, 0.1, 0.5, 1.0]))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write(tmp, "oxid_2014.nc", ds)
+            forcing = _attach(oxidants_file=[path], oxidants_align="by_date")
+        self.assertEqual(int(forcing.oxidant_vmr["oh"].align_mode), BY_DATE)
 
     def test_oxidants_year_list_concatenated_on_columns(self):
         # A ``{year}`` expansion hands attach_jam_forcing the yearly files of ONE
@@ -295,9 +330,8 @@ class AttachJamForcingTest(unittest.TestCase):
             forcing = _attach(emissions_file=_write(tmp, "emis.nc", ds_e))
         date = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime("2014-07-01")),
-            calendar="gregorian",
         )
-        sliced = forcing.select(date, calendar="gregorian")
+        sliced = forcing.select(date)
         leaf = sliced.anthropogenic_emissions["emis_biomass_burning_bc"]
         self.assertEqual(leaf.shape, (1, _NCOL))
         np.testing.assert_allclose(np.asarray(leaf), 3.0e-12)

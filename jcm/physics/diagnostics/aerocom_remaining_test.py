@@ -338,7 +338,7 @@ class PlevOmegaTest(unittest.TestCase):
                                   enable_aerocom=True,
                                   aerocom_groups=("plev",)),
         )
-        ds = model.run(total_time=0.05, save_interval=0.05).to_xarray()
+        ds = model.run(total_time="1 hour", save_interval="1 hour").to_xarray()
         for key in ("aerocom_wap", "aerocom_w500", "aerocom_w700"):
             arr = np.asarray(ds[key])
             self.assertTrue(np.isfinite(arr).all(), f"{key} not finite")

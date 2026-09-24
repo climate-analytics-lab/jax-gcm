@@ -198,7 +198,7 @@ class TestRunnerWiring(unittest.TestCase):
     def test_config_presets_compose(self):
         from jcm.runners_test import _compose
         cfg = _compose(["nudging=era5", "init=era5",
-                        "run.start_date=2010-01-01"])
+                        "run.start_time=2010-01-01"])
         self.assertTrue(cfg.nudging.enabled)
         self.assertEqual(cfg.nudging.source, "era5")
         self.assertEqual(cfg.init.kind, "era5")

@@ -85,7 +85,7 @@ def check_prescribed_flux_forcing(forcing: ForcingData, owner: str,
     1. every ``prescribed_*`` field is present (absence is a composition
        error, not a zero flux);
     2. when ``run_window = (start_s, end_s)`` (seconds since
-       ``MODEL_EPOCH``) is known, every date-aligned (``BY_DATE``/
+       1970-01-01) is known, every date-aligned (``BY_DATE``/
        ``BY_DATE_INTERP``) ``TimeSeries`` field covers it — outside its axis
        the selection clamps and would silently hold the archive's end sample
        (see :func:`jcm.forcing.by_date_coverage_error`). Skipped when the
@@ -112,13 +112,15 @@ def check_prescribed_flux_forcing(forcing: ForcingData, owner: str,
     # The archive's declared coverage (CF ``time_bnds``) wins over the
     # end-sample cadence when the reader found one.
     bounds = getattr(forcing, "prescribed_flux_time_bounds", None)
-    if isinstance(bounds, jax.core.Tracer):
+    if any(isinstance(x, jax.core.Tracer)
+           for x in jax.tree_util.tree_leaves(bounds)):
         bounds = None
     for name in PRESCRIBED_FLUX_FORCING_FIELDS:
         leaf = getattr(forcing, name)
         if not isinstance(leaf, TimeSeries) or any(
                 isinstance(x, jax.core.Tracer)
-                for x in (leaf.time_seconds, leaf.align_mode)):
+                for x in jax.tree_util.tree_leaves(
+                    (leaf.times, leaf.align_mode))):
             continue
         err = by_date_coverage_error(leaf, start_s, end_s,
                                      name=f"{owner}: forcing.{name}",
@@ -181,7 +183,7 @@ def validate_run_forcing(physics, forcing, run_window=None) -> None:
     (b) a consumer composed → ``physics.validate_forcing(forcing,
         run_window)`` runs every term's own check: the forced-mode terms
         raise if the fluxes are absent or, given a concrete ``run_window``
-        ``(start_s, end_s)`` in seconds since ``MODEL_EPOCH``, if a
+        ``(start_s, end_s)`` in seconds since 1970-01-01, if a
         date-aligned archive does not cover it
         (:func:`check_prescribed_flux_forcing`).
 

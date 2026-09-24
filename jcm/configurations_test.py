@@ -144,6 +144,14 @@ class TestConfigurationsDoor(unittest.TestCase):
         self.assertAlmostEqual(
             parse_duration_days(exp.run_kwargs["save_interval"]), 0.5)
 
+    def test_end_time_override_passes_through(self):
+        exp = configurations.load(
+            "speedy-t31",
+            **{"terrain": "aquaplanet", "forcing": "default",
+               "run.total_time": None, "run.end_time": "2001-01-01"})
+        self.assertIsNone(exp.run_kwargs["total_time"])
+        self.assertEqual(exp.run_kwargs["end_time"], "2001-01-01")
+
     def test_module_imports_no_hydra_or_omegaconf_at_top_level(self):
         # The door's whole point: a caller (this file) never imports hydra.
         tree = ast.parse(Path(__file__).read_text())
@@ -325,6 +333,18 @@ class TestConfigurationsAcceptance(unittest.TestCase):
 
 @pytest.mark.slow
 class TestConfigurationsSmoke(unittest.TestCase):
+    def test_end_time_run_kwargs_stop_at_configured_endpoint(self):
+        exp = configurations.load(
+            "speedy-t31",
+            **{"terrain": "aquaplanet", "forcing": "default",
+               "run.total_time": None,
+               "run.end_time": "2000-01-01T00:30:00",
+               "run.save_interval": "30 minutes"})
+        ds = exp.model.run(**exp.run_kwargs).to_xarray()
+        self.assertEqual(ds.time.values[-1],
+                         np.datetime64("2000-01-01T00:30:00"))
+        self.assertTrue(bool(np.isfinite(ds.temperature.values).all()))
+
     def test_speedy_run_kwargs_produce_finite_output(self):
         # No mocks: SPEEDY needs no network. Run one save interval and confirm
         # model.run accepts **run_kwargs and yields finite output.

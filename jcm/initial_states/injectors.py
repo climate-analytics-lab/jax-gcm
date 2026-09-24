@@ -196,7 +196,7 @@ def checkpoint_state(model: Model, path: str, *, unstamped_scale=None):
     :func:`jcm.checkpoint.save_checkpoint` (e.g. the hosted equilibrated
     states under ``bundles/<grid>_<levels>/init_states/``). Unlike a
     checkpoint *resume*, the recorded elapsed-day count is DISCARDED —
-    the clock starts at zero / the model's ``start_date`` — so a hosted
+    the clock starts at zero / the model's ``start_time`` — so a hosted
     state skips the ~9-month from-cold spin-up (#638) without inheriting
     the donor run's calendar. The state's pytree must match the composed
     model (grid, levels, physics tracer set); ``load_checkpoint`` fails
@@ -238,15 +238,11 @@ def checkpoint_state(model: Model, path: str, *, unstamped_scale=None):
     # bootstrap_state builds both state pytrees, which load_checkpoint
     # needs as deserialization templates (their values are overwritten).
     model.bootstrap_state()
-    days = load_checkpoint(model, path, unstamped_scale=unstamped_scale)
-    # The checkpoint's dycore state carries the donor's sim_time, and dates,
-    # forcing time-interpolation and output timestamps all derive from it
-    # (Model.date_from_sim_time) — without this reset a day-730 donor
-    # would run with forcing at start_date + 730 d.
-    state = model.dycore.with_sim_time(
-        model.dycore_state,
-        jnp.zeros_like(model.dycore.sim_time(model.dycore_state)),
-    )
+    days = load_checkpoint(model, path, unstamped_scale=unstamped_scale,
+                           as_initial_condition=True)
+    # Initial-condition mode resets both the exact clock and the dycore's
+    # elapsed counter while preserving the donor's physical fields.
+    state = model.dycore_state
     # The restored donor carry, to be re-seeded through
     # ``model.run(initial_physics_state=...)``. Without this the warm start's
     # run would rebuild a fresh carry and silently lose the donor's radiation

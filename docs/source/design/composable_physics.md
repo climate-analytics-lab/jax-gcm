@@ -123,7 +123,7 @@ mutate in place.
 Two key conventions:
 
 - **Public keys** (no leading underscore): exposed as user-facing
-  diagnostic output. Flatten directly into `model.run().to_xarray()`
+  diagnostic output. Flatten directly into `predictions.to_xarray()`
   via `Physics.data_struct_to_dict`. Example: `radiation`, `convection`,
   `cloud_fraction`.
 - **Internal keys** (leading underscore): cross-step or transient

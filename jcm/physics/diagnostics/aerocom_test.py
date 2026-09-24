@@ -257,7 +257,7 @@ class EndToEndTest(unittest.TestCase):
 
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
-            coords=coords, terrain=TerrainData.aquaplanet(coords), time_step=900.0,
+            coords=coords, terrain=TerrainData.aquaplanet(coords), time_step=15.0,
             physics=echam_physics(
                 radiation_scheme="grey", cloud_scheme="2m",
                 enable_aerocom=True,
@@ -268,7 +268,7 @@ class EndToEndTest(unittest.TestCase):
         # The diagnostics term must be terminal — nothing may depend on it.
         self.assertEqual(names[-1], "aerocom_diagnostics")
 
-        ds = model.run(total_time=0.05, save_interval=0.05).to_xarray()
+        ds = model.run(total_time="1 hour", save_interval="1 hour").to_xarray()
         emitted = [k for k in ds.data_vars if "aerocom" in k]
         self.assertTrue(emitted,
                         f"no aerocom_* diagnostics in output: {list(ds.data_vars)[:5]}")
@@ -293,11 +293,11 @@ class EndToEndTest(unittest.TestCase):
         def run(enable):
             coords = get_coords(get_echam_levels(47), spectral_truncation=21)
             m = Model(coords=coords, terrain=TerrainData.aquaplanet(coords),
-                      time_step=900.0,
+                      time_step=15.0,
                       physics=echam_physics(radiation_scheme="grey",
                                             cloud_scheme="2m",
                                             enable_aerocom=enable))
-            return m.run(total_time=0.05, save_interval=0.05).to_xarray()
+            return m.run(total_time="1 hour", save_interval="1 hour").to_xarray()
 
         off, on = run(False), run(True)
         np.testing.assert_allclose(
@@ -612,12 +612,12 @@ class AerosolGroupEndToEndTest(unittest.TestCase):
 
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
-            coords=coords, terrain=TerrainData.aquaplanet(coords), time_step=900.0,
+            coords=coords, terrain=TerrainData.aquaplanet(coords), time_step=15.0,
             physics=echam_physics(
                 radiation_scheme="grey", cloud_scheme="2m", aerosol_module="jam",
                 enable_aerocom=True, aerocom_groups=("aerosol",)),
         )
-        ds = model.run(total_time=0.05, save_interval=0.05).to_xarray()
+        ds = model.run(total_time="1 hour", save_interval="1 hour").to_xarray()
         for key in ("aerocom_N70", "aerocom_N100", "aerocom_PM1", "aerocom_PM10"):
             self.assertIn(key, ds.data_vars)
             self.assertTrue(np.isfinite(np.asarray(ds[key])).all(), key)
@@ -649,11 +649,11 @@ class PerBandOpticsSerializationTest(unittest.TestCase):
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
             coords=coords, terrain=TerrainData.aquaplanet(coords),
-            time_step=900.0,
+            time_step=15.0,
             physics=echam_physics(cloud_scheme="2m", aerosol_module="jam",
                                   radiation_scheme="rrtmgp"),
         )
-        ds = model.run(total_time=0.02, save_interval=0.02).to_xarray()
+        ds = model.run(total_time="15 minutes", save_interval="15 minutes").to_xarray()
         sw = "jam_optics.aod_sw_per_band"
         lw = "jam_optics.aod_lw_per_band"
         self.assertIn(sw, ds.data_vars)
@@ -686,11 +686,11 @@ class Macv2NamespaceOutputTest(unittest.TestCase):
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
             coords=coords, terrain=TerrainData.aquaplanet(coords),
-            time_step=900.0,
+            time_step=15.0,
             physics=echam_physics(aerosol_module="macv2sp",
                                   radiation_scheme="rrtmgp"),
         )
-        ds = model.run(total_time=0.02, save_interval=0.02).to_xarray()
+        ds = model.run(total_time="15 minutes", save_interval="15 minutes").to_xarray()
         # Namespaced, CF-named MACv2-SP output present...
         self.assertIn("macsp.od550aer", ds.data_vars)
         self.assertIn("macsp.aod_anthropogenic", ds.data_vars)

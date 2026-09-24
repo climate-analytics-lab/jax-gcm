@@ -2,7 +2,8 @@
 
 A checkpoint written by `jcm.checkpoint.save_checkpoint` holds exactly the
 pair a run needs to continue — the backend-native dycore state and the
-cross-step physics carry — plus the elapsed sim-day count. It is restored
+cross-step physics carry — plus an exact Gregorian datetime, integer step
+count, run origin, timestep and elapsed sim-day count. It is restored
 against a *destination* model that has already been bootstrapped, so the
 model, not the file, supplies the pytree structure the arrays are poured
 back into.
@@ -22,6 +23,7 @@ Every checkpoint records:
 | `schema_version` | integer on-disk layout version (`jcm.checkpoint.SCHEMA_VERSION`) |
 | `jcm_version` | the writing installation's version, for provenance |
 | `elapsed_days` | sim-days the donor run had completed |
+| `clock` | normalized integer days/seconds, origin, step count and timestep (schema 2) |
 | `dycore`, `physics` | the state arrays, each keyed by its **pytree name** |
 | `physics_fields` | the ordered child names of each physics-carry struct/group |
 | `dycore_tracers` | the saved tracer names, each with its `nondimensionalize` flag |
@@ -39,6 +41,16 @@ a checkpoint from the exact field set of the jcm that wrote it.
 the names already do that. They record what the *writing* model declared,
 which is the only thing a future unit migration can key on (see below)
 and the first thing to read when a restore is refused.
+
+## Exact-clock restart boundary
+
+Schema 2 checkpoints resume only with the same `start_time` and timestep.
+The loader validates that datetime, step count and elapsed duration agree.
+Files predating schema 2 cannot continue a v3 run: their old seasonal
+interpretation is not recoverable from the dynamical state. Import their
+fields with `as_initial_condition=True`, which resets both clocks to the new
+experiment origin. Unstamped files still require the explicit unit assertion
+below. The `init=from_state` importer selects this initialization mode.
 
 ## What migrates automatically
 
@@ -150,7 +162,7 @@ gas mass for a JAM composition — all by 1000, with the physics carry left
 alone, because ECHAM's gridpoint values were already kg/kg:
 
 ```python
-load_checkpoint(model, path, unstamped_scale={
+load_checkpoint(model, path, as_initial_condition=True, unstamped_scale={
     "tracers.specific_humidity": 1000.0,
     "tracers.qc": 1000.0,
     "tracers.qi": 1000.0,

@@ -584,6 +584,7 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
         # otherwise be the one output unable to say what produced it.
         import numpy as np
         import xarray as xr
+        import jax_datetime as jdt
 
         from jcm.predictions import ModelPredictions
 
@@ -596,7 +597,9 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
         preds = ModelPredictions(
             None, None, self._physics(),
             observations=([1.0, 2.0],), observers=(_Observer(),),
-            obs_t0_days=0.0, obs_dt_seconds=1800.0)
+            observer_start_time=jdt.Datetime.from_isoformat(
+                "1970-01-01T00:00:00"),
+            obs_dt_seconds=1800)
         ds = preds.observation_datasets()["stations"]
         recorded = json.loads(ds.attrs["jcm_prov_params"])
         self.assertIn("speedy_convection.params.entmax", recorded)

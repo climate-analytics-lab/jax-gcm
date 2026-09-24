@@ -10,13 +10,17 @@
 # pySES (run/pyses_year, time_step null) adopts the dycore's dt_seconds.
 time_step: 12              # minutes
 save_interval: 10          # days
-total_time: 10             # days
+total_time: 10             # days; set null when using end_time
+end_time: null            # exclusive absolute endpoint, e.g. 2001-01-01
 
-# Model start date (ISO string, e.g. "1979-01-01"). Null keeps the
+# Model start time (ISO string, e.g. "1979-01-01"). Null keeps the
 # default 2000-01-01. Transient (by-date) forcing files are sampled at
 # the absolute model date, so historical/AMIP runs must set this to sit
-# on the forcing calendar (issue #610).
-start_date: null
+# at the dates covered by the forcing (issue #610). In ``mode: prescribed``
+# null means "the state file's own first time" for a dated (v3) file; a set
+# value overrides it with a warning, and is required for an elapsed-time
+# state axis, which carries no date.
+start_time: null
 
 output_averages: false
 output: model_state.nc
@@ -87,7 +91,8 @@ mode: full
 # State file (xarray netCDF written by a previous JCM run) — required when
 # ``mode`` is ``prescribed`` or ``scm``. ONE file; in ``prescribed`` mode its
 # ``time`` coordinate is the snapshot clock (offsets from the first state,
-# which ``start_date`` dates), so date-aligned forcing follows the states.
+# which a dated file dates itself or ``start_time`` sets), so date-aligned
+# forcing follows the states.
 # Accepted time axes: decoded dates (datetime64/cftime) or elapsed time
 # (timedelta64, or numeric with units d/days or s/seconds); a numeric axis
 # with other or no units is rejected rather than guessed.

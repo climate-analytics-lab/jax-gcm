@@ -50,7 +50,8 @@ def run_default_speedy_model(save_interval=None):
 
     coords = get_speedy_coords()
     realistic_terrain = TerrainData.from_file(forcing_dir / 'terrain.nc', coords=coords)
-    realistic_forcing = ForcingData.from_file(forcing_dir / 'forcing.nc', coords=coords)
+    realistic_forcing = ForcingData.from_file(
+        forcing_dir / 'forcing.nc', coords=coords, align_mode="wrap_year")
 
     # in the default scenario output every timestep and don't average
     # in the test scenario, output as designated and average

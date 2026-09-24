@@ -33,7 +33,8 @@ flax>=0.12.1
 # once jcm is validated on jax 0.11+ (needs flax to also gain a jax upper bound or
 # the hijax API to stabilise). See #853.
 jax>=0.10,<0.11
-jax-datetime
+# Exact integer day/second clocks, comparisons and interpolation.
+jax-datetime>=0.1.0
 tree-math
 hydra-core
 
