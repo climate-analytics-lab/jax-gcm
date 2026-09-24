@@ -37,6 +37,39 @@ import jcm.constants as c
 _SIGMA_ACC_LO = 1.4
 _SIGMA_ACC_HI = 2.1
 
+# CAM ``ndrop.F90``'s reference state for its droplet-growth fits: its local
+# ``tmelt = 273._r8`` (NOT the 273.15 K melting point in ``jcm.constants``) and
+# ``p0 = 1013.25e2_r8``. Part of the fits' definition, so kept with the scheme.
+_T_REF = 273.0
+_P_REF = 101325.0
+# Pruppacher & Klett (13.18) slope of the dry-air conductivity fit,
+# ``k = (5.69 + 0.017·(T − T_ref))·1e-5 cal/cm/s/K``, as a fraction of the
+# 273 K value ``c.air_thermal_conductivity``.
+_KA_SLOPE = 0.017 / 5.69
+
+
+def vapor_diffusivity(temperature: jnp.ndarray, pressure: jnp.ndarray) -> jnp.ndarray:
+    """Water-vapour diffusivity in air [m²/s] at the local T, p.
+
+    CAM ``ndrop.F90::activate_modal``
+    ``diff0 = 0.211e-4·(p0/pres)·(tair/tmelt)**1.94`` (Pruppacher & Klett
+    13.3; the same form as ECHAM-HAM ``mo_ham_activ`` ``zdif``). At 500 hPa
+    and 260 K it is ~1.8x the sea-level value.
+    """
+    return (c.vapor_diffusivity * (_P_REF / pressure)
+            * (temperature / _T_REF) ** 1.94)
+
+
+def air_thermal_conductivity(temperature: jnp.ndarray) -> jnp.ndarray:
+    """Thermal conductivity of (dry) air [W/m/K] at the local T.
+
+    CAM ``ndrop.F90::activate_modal``
+    ``conduct0 = (5.69 + 0.017·(tair − tmelt))·4.186e2·1e-5`` (Pruppacher &
+    Klett 13.18). CAM takes the dry-air value; ECHAM-HAM's ``zk`` adds a
+    moist-air correction, which the CAM form this scheme ports omits.
+    """
+    return c.air_thermal_conductivity * (1.0 + _KA_SLOPE * (temperature - _T_REF))
+
 
 def _saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
     """Saturation vapour pressure over liquid water [Pa].
@@ -132,19 +165,29 @@ def arg_activation(
     # ARG formulae below readable while still reading the live constants (see
     # the import note). _RGAS is the *universal* gas constant (J/mol/K),
     # distinct from the per-mass dry-air constant.
-    _KA, _LV, _CP, _G = c.air_thermal_conductivity, c.alhc, c.cpd, c.grav
+    _LV, _CP, _G = c.alhc, c.cpd, c.grav
     _MA, _MW, _RGAS, _RHOW = c.m_air, c.m_water, c.r_universal, c.rhow
-    _SIGMA_W, _TINY, _DV = c.surface_tension_water, c.tiny, c.vapor_diffusivity
+    _SIGMA_W, _TINY = c.surface_tension_water, c.tiny
     t = temperature
     p = pressure
     es = _saturation_vapor_pressure(t)
     w = jnp.maximum(updraft, 1.0e-3)
+    # Local-state transport coefficients (CAM diff0/conduct0): the constant
+    # sea-level values under-state Dv aloft (1/p) and so over-state the growth
+    # resistance, biasing activation high by ~4 % at 900 hPa to ~20 % at
+    # 500 hPa (#679).
+    dv = vapor_diffusivity(t, p)
+    ka = air_thermal_conductivity(t)
 
     # Kelvin coefficient A [m] and condensation growth coefficient G [m²/s].
-    a_kelvin = 2.0 * _SIGMA_W * _MW / (_RHOW * _RGAS * t)
+    # A is CAM's ``aten = 2·mwh2o·surften/(r_universal·tmelt·rhoh2o)``: the
+    # surface tension and the temperature are both CAM's fixed reference
+    # values, so A — and every mode's critical supersaturation — is the same
+    # at every level, exactly as in ``ndrop.F90``.
+    a_kelvin = 2.0 * _SIGMA_W * _MW / (_RHOW * _RGAS * _T_REF)
     g_growth = 1.0 / (
-        (_RHOW * _RGAS * t) / (es * _DV * _MW)
-        + (_LV * _RHOW / (_KA * t)) * (_LV * _MW / (_RGAS * t) - 1.0)
+        (_RHOW * _RGAS * t) / (es * dv * _MW)
+        + (_LV * _RHOW / (ka * t)) * (_LV * _MW / (_RGAS * t) - 1.0)
     )
 
     alpha = (_G * _MW * _LV) / (_CP * _RGAS * t ** 2) - (_G * _MA) / (_RGAS * t)

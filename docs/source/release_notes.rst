@@ -706,6 +706,15 @@ Moist dynamics: condensate loading and one tracer contract
   inside a jitted term is fixed when that term is traced), and constants
   internal to ``mam4-jax`` remain outside jcm's control.
 
+ARG activation with local-state transport coefficients
+""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ARG droplet activation uses CAM ``ndrop.F90``'s temperature- and
+  pressure-dependent vapour diffusivity and air conductivity, and CAM's fixed
+  Kelvin coefficient, in place of sea-level constants that over-activated by
+  ~4 % at 900 hPa rising to ~18 % at 500 hPa. **Changes results** for every
+  JAM configuration (fewer activated droplets aloft) (#679).
+
 RCE initial state seeds a mixed sub-cloud layer
 """""""""""""""""""""""""""""""""""""""""""""""
 
