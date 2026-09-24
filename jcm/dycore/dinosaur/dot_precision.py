@@ -30,8 +30,11 @@ therefore not version-gated.
 
 Measured cost for the dycore-only Held-Suarez case on one A100 (the worst
 case, as physics dilutes it in full runs): +2 % per simulated day
-single-device, +8 % with SPMD. See
-``docs/source/design/dinosaur_gpu_dot_precision.md`` and neuralgcm/dinosaur#147.
+single-device, +8 % with SPMD. Upstream report: neuralgcm/dinosaur#147.
+
+``dot_precision_test.py`` has a GPU-only regression test of the triggering
+shape, which fails if the override is removed on an affected jaxlib. CI runs
+on CPU and skips it, so run it on a GPU host when changing the jax pin.
 """
 
 from __future__ import annotations

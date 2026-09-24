@@ -893,7 +893,7 @@ dinosaur is pinned to a release
   GPU. **GPU runs made with dinosaur 1.5.0 before this fix should be
   repeated**; CPU runs are unaffected. The cost is +2 % per simulated day
   single-device and +8 % with SPMD on a dycore-only case
-  (:doc:`design/dinosaur_gpu_dot_precision`, neuralgcm/dinosaur#147).
+  (neuralgcm/dinosaur#147).
 
 Other floors that are floors for a reason:
 
