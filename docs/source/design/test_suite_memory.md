@@ -59,6 +59,29 @@ all of the memory back for no measurable time anywhere.
 The clear applies to every suite, not just the `slow` one: the fast xdist
 suite hits the same ceiling, and a worker that dies takes its tests with it.
 
+Dropping the caches frees memory to the allocator, not to the OS. glibc keeps
+freed heap mapped, so without further help a worker's RSS only ratchets up:
+the per-test arrays and traces of a finished class, and the executables a
+clear drops, stay resident, and the next class's differently-sized
+allocations extend the heap instead of reusing them. The same hook therefore
+calls glibc's `malloc_trim(0)` at every class/module boundary (a no-op where
+there is no glibc), which returns the free pages to the OS. Measured with the
+CI fast-suite command on a 2-worker run (`-n 2 --dist loadscope -m "not
+slow"`, `JCM_TEST_CACHE_GROWTH_MB=256`) of the v3 datetime branch, peak worker
+RSS on this workstation:
+
+| | worker 0 | worker 1 | wall time |
+| --- | --- | --- | --- |
+| without the trim | 12.53 GB | 10.89 GB | 47.5 min |
+| with the trim | 7.81 GB | 6.83 GB | 43.1 min |
+
+Without it, the CI fast job (2 workers on a 7 GB runner) was SIGTERM'd at
+86-93 % (exit 143); dev at the time peaked at 12.47 GB in the same local
+measurement, so the retained heap, not any one test, was what brought the
+job to the ceiling. The remaining high-water marks come from single
+heavy tests (the ECHAM forced-mode budget checks and the 2M gradient tests),
+not from accumulation.
+
 ## Derecho login nodes: a 10 GiB cgroup, not a slow CPU
 
 Interactive work on a Derecho login node runs inside a per-user memory
