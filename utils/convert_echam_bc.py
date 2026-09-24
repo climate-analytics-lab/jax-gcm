@@ -46,7 +46,9 @@ Produces, in ``--out-dir``:
 - ``forcing.nc`` — ``sst``, ``icec``, ``stl``, ``soilw_am``, ``snowc`` on a
   12-month axis, plus the static ``alb`` (``ALB``, the snow-free background
   albedo), ``forest`` (``FOREST``) and ``glac`` (``GLAC``) the ECHAM land
-  albedo reads (#672). ``snowc`` is the jcm snow-cover fraction
+  albedo reads (#672), and the land share ``lsm`` (``SLF``) a later
+  regrid weights the land-conditional channels with. ``snowc`` is the jcm
+  snow-cover fraction
   ``min(1, SWE/sd2sc)``, zero on glaciers (whose snow is the glacier itself)
   — the same definition the data-mirror bundles use, so the field means one
   thing whichever product supplies it. The ECHAM files carry a single snow
@@ -218,6 +220,10 @@ def _build_forcing(
         "snowc":    snowc_t.astype("float32"),
         "alb":      alb.transpose("lon", "lat").astype("float32"),
         **cover,
+        # Land share of the cell: the weight a later regrid of this file
+        # applies to its land-conditional channels (jcm.data.regridding).
+        "lsm":      surface_ds["lsm"].clip(0.0, 1.0).transpose(
+            "lon", "lat").astype("float32"),
     })
     snapped = pd.to_datetime(ds["time"].values).to_period("M").to_timestamp()
     return ds.assign_coords(time=snapped)

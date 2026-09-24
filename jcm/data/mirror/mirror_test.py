@@ -255,13 +255,12 @@ class LandChannelCoverageTest(unittest.TestCase):
             missing = sorted(translated - written)
             self.assertEqual(missing, [], f"{name}.py never names {missing}")
 
-    def test_every_writer_carries_the_land_cover_maps(self):
-        """``forest``/``glac`` reach every surface-forcing file (#672).
+    def test_every_writer_regrids_land_through_the_convention_helper(self):
+        """Every writer splices :func:`land_surface_fields` into its dict.
 
-        They come from :func:`land_cover_fields` rather than
-        ``translate_land`` (static, not monthly), so the dict-key check above
-        cannot see them: each writer must splice that helper into the dict it
-        serializes.
+        It is the one place the land-conditional channels (and ``glac``,
+        ``forest``, ``lsm``) are regridded with their masks (#672); a writer
+        that interpolated them itself would dilute them at coasts again.
         """
         import ast
         import inspect
@@ -271,80 +270,11 @@ class LandChannelCoverageTest(unittest.TestCase):
             module = importlib.import_module(f"jcm.data.mirror.{name}")
             spliced = any(
                 key is None and isinstance(value, ast.Call)
-                and getattr(value.func, "id", None) == "land_cover_fields"
+                and getattr(value.func, "id", None) == "land_surface_fields"
                 for node in ast.walk(ast.parse(inspect.getsource(module)))
                 if isinstance(node, ast.Dict)
                 for key, value in zip(node.keys, node.values))
-            self.assertTrue(spliced, f"{name}.py never writes forest/glac")
-
-
-    def test_every_writer_normalises_snow_to_the_non_glacier_land(self):
-        """``snowc`` is re-expressed per non-glacier land in every writer."""
-        import inspect
-        import importlib
-
-        for name in self._WRITERS:
-            module = importlib.import_module(f"jcm.data.mirror.{name}")
-            self.assertIn("snow_cover_of_non_glacier_land(",
-                          inspect.getsource(module),
-                          f"{name}.py writes snowc as a share of all land")
-
-
-class LandCoverFieldsTest(unittest.TestCase):
-    """``forest`` = ERA5 ``cvh``; ``glac`` = the permanent-snow mask (#672)."""
-
-    def test_values_on_the_target_grid(self):
-        import xarray as xr
-
-        from jcm.data.mirror.bundles import land_cover_fields
-
-        lat = np.linspace(-90.0, 90.0, 7)
-        lon = np.arange(0.0, 360.0, 60.0)
-        grid = dict(dims=("latitude", "longitude"),
-                    coords={"latitude": lat, "longitude": lon})
-        lsm = np.ones((7, 6))
-        lsm[:, 3:] = 0.0             # the eastern half is sea
-        cvh = np.where(lsm > 0.5, 0.6, 0.0)   # ERA5: cvh is zero at sea
-        snow = np.zeros((7, 6), dtype=bool)
-        snow[0] = True               # south-pole row: an ice sheet
-        era5 = xr.Dataset({"cvh": xr.DataArray(cvh, **grid),
-                           "lsm": xr.DataArray(lsm, **grid)})
-        # Targets: pure land, a coastal cell half-way to the sea, pure sea.
-        out = land_cover_fields(era5, xr.DataArray(snow, **grid),
-                                lats=np.array([-90.0, 0.0]),
-                                lons=np.array([60.0, 150.0, 240.0]))
-        # Per LAND: the coastal cell keeps its land's 0.6, not a diluted 0.3.
-        np.testing.assert_allclose(out["forest"].values,
-                                   [[0.6, 0.6, 0.0], [0.6, 0.6, 0.0]])
-        np.testing.assert_allclose(out["glac"].values,
-                                   [[1.0, 1.0, 0.0], [0.0, 0.0, 0.0]])
-
-
-
-class SnowConventionTest(unittest.TestCase):
-    """``snowc`` is the snow share of the NON-glacier land (#672)."""
-
-    def test_half_glacier_half_snow_is_fully_covered(self):
-        import xarray as xr
-
-        from jcm.data.mirror.bundles import snow_cover_of_non_glacier_land
-        from jcm.forcing import land_snow_cover
-
-        # A cell half ice sheet, the other half snow covered: regridding
-        # the zeroed-on-glacier snowc gives 0.5 of ALL the land.
-        regridded = xr.DataArray([0.5, 0.3, 0.0])
-        glac = xr.DataArray([0.5, 0.0, 1.0])
-        s = snow_cover_of_non_glacier_land(regridded, glac)
-        np.testing.assert_allclose(s.values, [1.0, 0.3, 0.0])
-        total = np.asarray(land_snow_cover(s.values, glac.values))
-        # Full cover; a glacier-free cell unchanged; all-glacier covered.
-        np.testing.assert_allclose(total, [1.0, 0.3, 1.0])
-
-    def test_no_glacier_map_reads_as_no_glacier(self):
-        from jcm.forcing import land_snow_cover
-
-        np.testing.assert_allclose(
-            np.asarray(land_snow_cover(np.array([0.2, 1.7]))), [0.2, 1.0])
+            self.assertTrue(spliced, f"{name}.py bypasses land_surface_fields")
 
 
 def _translate_land_keys():

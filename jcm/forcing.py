@@ -72,9 +72,11 @@ def _validate_bc_fields(ds) -> None:
         # anything outside [0, 1] means it was written as a volumetric content
         # or a water depth instead (#787).
         "soilw_rel": (0.0, 1.0),
-        # Static land-cover fractions for the ECHAM land albedo (#672).
+        # Static land-cover fractions for the ECHAM land albedo (#672), and
+        # the land share the conditional fields are regridded with.
         "forest": (0.0, 1.0),
         "glac": (0.0, 1.0),
+        "lsm": (0.0, 1.0),
         # Snow cover in the SPEEDY convention SWE/sd2sc, whose min(1, .) is
         # the cover fraction: the mirror bundles and the packaged T63 file
         # store it already clipped to [0, 1]; the SPEEDY T30 file stores the
@@ -340,11 +342,17 @@ class ForcingData:
     # what ECHAM computes from zero maps — the albedo then falls back to the
     # snow-free background ``alb0`` plus open snow.
     #
-    # Snow convention shared by every product and consumer: ``glac`` is the
-    # glacier share of the land and ``snowc`` the snow-covered fraction of
-    # the NON-glacier land (JSBACH's tiling: a glacier tile, and seasonal
-    # snow on the other tiles). The total snow-covered share of the land is
-    # therefore ``g + (1 - g)·min(1, s)`` — :func:`land_snow_cover`.
+    # Land-surface convention shared by every product, regrid and consumer
+    # (``jcm.data.regridding.CONDITIONAL_FIELDS``): the terrain ``lsm`` is
+    # the land share of the cell; ``glac`` (``glacier_fraction``) is the
+    # glacier share of the LAND; ``forest`` (``forest_fraction``), ``snowc``
+    # (``snowc_am``) and ``alb`` (``alb0``) describe the NON-glacier land
+    # (JSBACH's tiling: a glacier tile, and vegetation / seasonal snow /
+    # background albedo on the others); ``stl`` and the soil moisture are
+    # conditional on the land. Consumers combine them once: total snow cover
+    # of the land ``g + (1 - g)·min(1, s)`` (:func:`land_snow_cover`),
+    # effective forest ``(1 - g)·f`` and the background albedo on the
+    # non-glacier tile only (``jcm.physics.surface.echam.albedo``).
     forest_fraction: Any = None
     glacier_fraction: Any = None
 
@@ -715,7 +723,7 @@ class ForcingData:
         if "soilw_rel" in ds.data_vars:
             expected_structure["soilw_rel"] = ("lon", "lat", "time")
         # Optional static land-cover maps for the ECHAM land albedo (#672).
-        for name in ("forest", "glac"):
+        for name in ("forest", "glac", "lsm"):
             if name in ds.data_vars:
                 expected_structure[name] = ("lon", "lat")
 

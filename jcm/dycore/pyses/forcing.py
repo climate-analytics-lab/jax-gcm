@@ -39,6 +39,62 @@ _TIME_FIELDS = {
 }
 
 
+def sample_forcing_to_columns(ds, lon, lat, col_lon, col_lat):
+    """Sample a jcm-canonical forcing climatology onto physics columns.
+
+    Returns ``(monthly, static)``: ``monthly`` maps each time-varying source
+    variable to a ``(12, ncol)`` array, ``static`` maps ``alb`` / ``forest``
+    / ``glac`` to ``(ncol,)``. Bilinear (:func:`interp_grid_to_points`); a
+    file that carries its land share ``lsm`` has its land-conditional
+    channels (``jcm.data.regridding.CONDITIONAL_FIELDS``) sampled with their
+    land / non-glacier-land weights, so an ocean or glacier neighbour does
+    not dilute a coastal or ice-margin column (#672) — the same helper the
+    bundle builders and the spectral upsampler use. Files without ``lsm``
+    keep the plain bilinear sample.
+    """
+    from jcm.data.regridding import CONDITIONAL_FIELDS, regrid_land_surface
+
+    n_time = int(ds.sizes["time"])
+
+    def lonlat(name):
+        dims = ("lon", "lat") + (("time",) if "time" in ds[name].dims else ())
+        return np.asarray(ds[name].transpose(*dims).values, dtype=np.float64)
+
+    def regrid(arr):
+        arr = np.asarray(arr, dtype=np.float64)
+        if arr.ndim == 2:
+            return interp_grid_to_points(lon, lat, arr, col_lon, col_lat)
+        return np.stack([interp_grid_to_points(lon, lat, arr[:, :, m],
+                                               col_lon, col_lat)
+                         for m in range(arr.shape[-1])], axis=-1)
+
+    monthly_names = [name for name in (*_TIME_FIELDS, "soilw_rel")
+                     if name in ds.data_vars]
+    static_names = [name for name in ("alb", "forest", "glac")
+                    if name in ds.data_vars]
+    raw = {name: lonlat(name) for name in (*monthly_names, *static_names)}
+    if "lsm" in ds.data_vars:
+        glac = raw["glac"] if "glac" in raw else None
+        out = regrid_land_surface(raw, np.clip(lonlat("lsm"), 0.0, 1.0),
+                                  regrid, glac=glac)
+        out = {k: (v if k in CONDITIONAL_FIELDS else regrid(v))
+               for k, v in out.items()}
+    else:
+        out = {name: regrid(value) for name, value in raw.items()}
+
+    # Fraction fields pick up interpolation noise at coast/ice edges; clip.
+    bounds = {"icec": (0.0, 1.0),
+              "snowc": (0.0, 20000.0), "soilw_rel": (0.0, 1.0),
+              "alb": (0.0, 1.0), "forest": (0.0, 1.0), "glac": (0.0, 1.0)}
+    for name, (lo, hi) in bounds.items():
+        if name in out:
+            out[name] = np.clip(out[name], lo, hi)
+    monthly = {name: np.moveaxis(out[name], -1, 0).reshape(n_time, -1)
+               for name in monthly_names}
+    static = {name: out[name].reshape(-1) for name in static_names}
+    return monthly, static
+
+
 def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
                   emissions_file=None, dms_file=None, dust_file=None,
                   dust_preferential_file=None, dust_soil_types_file=None,
@@ -127,44 +183,17 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
     month_days = np.array([0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334])
     time_seconds = month_days * 86400.0
 
-    def monthly_to_columns(name):
-        arr = np.asarray(ds[name].transpose("lon", "lat", "time").values)
-        months = np.stack(
-            [interp_grid_to_points(lon, lat, arr[:, :, m], col_lon, col_lat)
-             for m in range(n_time)],
-            axis=0,
-        )                                                  # (12, ncol)
-        return months.reshape(n_time, 1, ncol)
+    fields, static = sample_forcing_to_columns(ds, lon, lat, col_lon, col_lat)
+    fields = {dest: fields[src].reshape(n_time, 1, ncol)
+              for src, dest in {**_TIME_FIELDS, "soilw_rel": "soilw_rel"}.items()
+              if src in fields}
+    alb0 = static["alb"].reshape(1, ncol)
 
-    fields = {dest: monthly_to_columns(src) for src, dest in _TIME_FIELDS.items()}
-    # Fraction fields pick up interpolation noise at coast/ice edges; clip.
-    fields["sice_am"] = np.clip(fields["sice_am"], 0.0, 1.0)
-    fields["snowc_am"] = np.clip(fields["snowc_am"], 0.0, 20000.0)
-    # Relative soil wetness, the dust saturation cut-off's field (#787).
-    # Optional on this door as on the spectral one: a bundle built before the
-    # channel existed simply leaves it out, and DustEmissions warns that the
-    # cut-off is inert rather than reading a fabricated dry soil.
-    if "soilw_rel" in ds.data_vars:
-        fields["soilw_rel"] = np.clip(monthly_to_columns("soilw_rel"), 0.0, 1.0)
-
-    alb0 = np.clip(
-        interp_grid_to_points(
-            lon, lat, np.asarray(ds["alb"].transpose("lon", "lat").values),
-            col_lon, col_lat,
-        ),
-        0.0, 1.0,
-    ).reshape(1, ncol)
-
-    # Optional static land-cover fractions for the ECHAM land albedo (#672),
-    # absent on bundles built before it read them (then ``None`` = none).
     def static_fraction(name):
-        if name not in ds.data_vars:
+        # Optional static land cover (#672); absent -> ``None`` = none.
+        if name not in static:
             return None
-        values = interp_grid_to_points(
-            lon, lat, np.asarray(ds[name].transpose("lon", "lat").values),
-            col_lon, col_lat,
-        )
-        return jnp.asarray(np.clip(values, 0.0, 1.0).reshape(1, ncol))
+        return jnp.asarray(static[name].reshape(1, ncol))
 
     def ts(values):
         return make_time_series(jnp.asarray(values), time_seconds,

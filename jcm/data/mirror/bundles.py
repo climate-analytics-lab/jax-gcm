@@ -26,18 +26,22 @@ Unit translations into the conventions the packaged t63 files establish
 * ``alb``   = per-cell minimum monthly ERA5 fal — the snow-free
   background albedo (snow brightening is applied dynamically from
   ``snowc``; an annual mean would double-count it)
-* ``snowc`` on the target grid is the snow-covered fraction of the
-  NON-glacier land: the zeroed ice-sheet source points dilute the regridded
-  share in a cell that is partly ice sheet, so it is divided by ``1 - glac``
-  (:func:`snow_cover_of_non_glacier_land`). Total snow cover of the land is
-  ``glac + (1 - glac)·snowc`` (``jcm.forcing.land_snow_cover``)
-* ``forest`` = ERA5 high-vegetation cover ``cvh`` as a fraction of the
-  land — the forest fraction JSBACH's broadband land albedo masks the snow
-  albedo with (static)
-* ``glac``  = the permanent-snow (ice-sheet) mask above, as a cell fraction
-  — the glacier tiles whose albedo is the ECHAM glacier albedo (static).
+* ``forest`` = ERA5 high-vegetation cover ``cvh`` — the forest fraction
+  JSBACH's broadband land albedo masks the snow albedo with (static)
+* ``lsm``   = ERA5 land fraction, the land share of the cell (static; the
+  regrid weight for the conditional channels, see below)
+* ``glac``  = the permanent-snow (ice-sheet) mask above, as the glacier
+  share of the land — the glacier tiles whose albedo is the ECHAM glacier albedo (static).
   Same mask that zeroes ``snowc``, so a cell's snow is either seasonal
   (``snowc``) or glacier (``glac``), never both
+
+Land-surface channels are CONDITIONAL on part of the cell and are regridded
+with that part as the weight (:func:`land_surface_fields`,
+``jcm.data.regridding.CONDITIONAL_FIELDS``): ``glac``, ``stl``, ``soilw_am``
+and ``soilw_rel`` on the land; ``forest``, ``snowc`` and ``alb`` on the
+non-glacier land. So ``glac`` is the glacier share of the land and
+``snowc``/``forest``/``alb`` describe the non-glacier land, and a coastal or
+ice-sheet-margin cell is not diluted by its ocean or glacier neighbours.
 * ``soilw_am`` = SPEEDY availability fraction in [0, 1] per
   ``jcm.data.bc.compile``:
   ``min(1, (swvl1 + veg·3·max(0, swvl2 − swwil)) / (swcap + 3·(swcap − swwil)))``
@@ -60,7 +64,7 @@ import numpy as np
 import xarray as xr
 
 from jcm.data.regridding import (conservative_to_gaussian, fill_nearest,
-                                 interp_to)
+                                 interp_to, regrid_land_surface)
 
 AMIP_ROOT = ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
              "CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10")
@@ -154,52 +158,30 @@ def translate_land(era5: xr.Dataset, permanent_snow: xr.DataArray) -> dict:
 
 
 
-def land_cover_fields(era5: xr.Dataset, permanent_snow: xr.DataArray,
-                      lats, lons) -> dict:
-    """Build the static ``forest`` / ``glac`` fractions on the Gaussian grid.
+def land_surface_fields(era5: xr.Dataset, permanent_snow: xr.DataArray,
+                        sources: dict, lats, lons) -> dict:
+    """Regrid the land-surface channels under the bundle convention (#672).
 
-    The ECHAM land albedo (JSBACH ``update_land_surface_fast``) needs a
-    forest fraction and a glacier mask besides ``alb``/``snowc``. ERA5's
-    invariant high-vegetation cover ``cvh`` is the forest fraction; the
-    glacier mask is the same ``permanent_snow`` definition
-    :func:`translate_land` zeroes ``snowc`` with, so the two channels
-    partition the snow. The single source for every bundle builder (#672).
-
-    Both are fractions *of the land*, as JSBACH's are: ERA5 carries ``cvh``
-    on its land points (``lsm > 0.5``) and zero at sea, so a plain regrid of
-    a coastal target cell would dilute the land value with sea zeros. Each
-    field is therefore regridded together with the ERA5 land mask and
-    divided by it.
+    ``sources`` maps channel name to its 0.25-degree field (``stl``,
+    ``soilw_am``, ``soilw_rel``, ``snowc``, ``alb``, ``forest``, any subset).
+    Every channel, plus ``glac`` built from ``permanent_snow``, is
+    conditional on part of the cell and is regridded with that part as its
+    weight (:func:`jcm.data.regridding.regrid_land_surface`): ``glac`` and
+    the soil / land-temperature fields on the land, ``forest``, ``snowc``
+    and ``alb`` on the non-glacier land. The source land is ERA5's land
+    points (``lsm > 0.5``), the points its land fields are defined on.
+    ``lsm`` itself — the land share of each target cell, as in
+    ``terrain.nc`` — is written too, so a later regrid of the file (the
+    runtime upsampler, the pySES column sampler) can apply the same
+    weights. The single land-surface translation for every bundle builder.
     """
     land = (era5.lsm > 0.5).astype(np.float64)
-    land_frac = interp_to(land, lats, lons)
-    has_land = land_frac > 1e-6
-
-    def per_land(field):
-        frac = interp_to(field.astype(np.float64) * land, lats, lons)
-        return (frac / land_frac.where(has_land, 1.0)).where(
-            has_land, 0.0).clip(0.0, 1.0)
-
-    return {
-        "forest": per_land(era5.cvh.clip(0.0, 1.0)),
-        "glac": per_land(permanent_snow),
-    }
-
-
-def snow_cover_of_non_glacier_land(snowc: xr.DataArray,
-                                   glac: xr.DataArray) -> xr.DataArray:
-    """Regridded ``snowc`` -> snow-covered fraction of the non-glacier land.
-
-    :func:`translate_land` zeroes ``snowc`` on permanent-snow source points,
-    so after regridding a cell that is partly ice sheet carries its seasonal
-    snow as a share of ALL its land. The jcm convention (``ForcingData``) is
-    the share of the non-glacier land, JSBACH's tiling, so divide by
-    ``1 - glac``; an all-glacier cell has no such land and gets 0.
-    """
-    open_land = 1.0 - glac
-    has_open = open_land > 1e-6
-    return (snowc / open_land.where(has_open, 1.0)).where(
-        has_open, 0.0).clip(0.0, 1.0)
+    glac = permanent_snow.astype(np.float64)
+    out = regrid_land_surface(
+        {**sources, "glac": glac}, lsm=land, glac=glac,
+        regrid=lambda da: interp_to(da, lats, lons))
+    out["lsm"] = interp_to(era5.lsm, lats, lons).clip(0.0, 1.0)
+    return out
 
 
 _EMIS_SPECIES = ("so2", "bc", "oc")
@@ -289,15 +271,15 @@ def build_forcing(era5_path: str, era: str, lats, lons,
     fields = {
         "sst": interp_to(sst_da, lats, lons),
         "icec": interp_to(icec_da, lats, lons).clip(0.0, 1.0),
-        "stl": interp_to(land["stl"], lats, lons),
-        "soilw_am": interp_to(land["soilw_am"], lats, lons).clip(0.0, 1.0),
-        "soilw_rel": interp_to(land["soilw_rel"], lats, lons).clip(0.0, 1.0),
-        "snowc": interp_to(land["snowc"], lats, lons).clip(0.0, 1.0),
-        "alb": interp_to(era5.fal.min("time"), lats, lons),
-        **land_cover_fields(era5, permanent_snow, lats, lons),
+        **land_surface_fields(era5, permanent_snow, {
+            "stl": land["stl"],
+            "soilw_am": land["soilw_am"],
+            "soilw_rel": land["soilw_rel"],
+            "snowc": land["snowc"],
+            "alb": era5.fal.min("time"),
+            "forest": era5.cvh.clip(0.0, 1.0),
+        }, lats, lons),
     }
-    fields["snowc"] = snow_cover_of_non_glacier_land(fields["snowc"],
-                                                     fields["glac"])
     ds = xr.Dataset(coords={"lat": lats, "lon": lons,
                             "time": CLIMO_TIME})
     for name, da in fields.items():
