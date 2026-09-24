@@ -342,7 +342,10 @@ SPEEDY output flattening, hyperdiffusion coverage, and backlog fixes
   than the model grid (deriving them instead) rather than crashing later
   in physics (#578).
 - The conservative regridder accepts rectilinear sources (1-D lon/lat
-  axes + 2-D area, #533).
+  axes + 2-D area, #533) and remaps them with the exact-overlap first-order
+  conservative operator (CDO ``remapcon``'s scheme), exact at any resolution
+  ratio; unstructured sources keep nearest-cell binning, but a target cell no
+  source centre reaches takes the nearest source value instead of zero.
 - **JAX persistent compilation cache on by default** (#592):
   ``$SCRATCH/jcm-jax-cache`` (else ``~/.cache/jcm/jax``), relocatable
   via ``JCM_CACHE_DIR``, disable with ``JCM_CACHE_DIR=off``. Entries
@@ -665,6 +668,13 @@ corrections, listed here because they change climate:
   cells change region along box edges). The builder runs on NCAR Glade or DKRZ
   Levante (``jcm/data/mirror/sites.py``) and adds a grid with ``--grids``
   without rebuilding the others.
+- **The t63/t106 emission bundles change** (``emissions_{pi,pd}`` and every
+  ``emissions_amip`` year): they are remapped with the exact-overlap
+  conservative operator instead of nearest-centre binning, which carried
+  1-3 % global-mean flux errors and misplaced point sources by a cell (up to
+  ~55 % of a field's maximum locally). Global-mean fluxes now agree across
+  every published grid to round-off; the release-validated T63 JAM
+  configurations see correspondingly changed emissions.
 - The native ne30pg3 terrain published as ``bundles/ne30pg3/sso.nc``
   carried a DEM-validity placeholder ``lsm`` (99.8 % land) instead of a
   land-sea mask; it is replaced by the assembled

@@ -466,6 +466,17 @@ class GridSelectionTest(unittest.TestCase):
             self.assertFalse(bm._column_selected())
         self.assertEqual(bm._truncation("t255"), 255)
 
+    def test_products_filter_narrows_what_bundles_reads(self):
+        from jcm.data.mirror import build_mirror as bm
+        with patch.object(bm, "_PRODUCTS", frozenset({"emissions"})):
+            self.assertTrue(bm._want("emissions"))
+            self.assertFalse(bm._want("terrain"))
+            labels = {label for label, _ in bm._stage_sources()["bundles"]}
+            self.assertEqual(labels, {"Tier A CEDS store",
+                                      "Tier A BB4CMIP7 store"})
+        with patch.object(bm, "_PRODUCTS", None):
+            self.assertTrue(all(bm._want(p) for p in bm.BUNDLE_PRODUCTS))
+
 
 if __name__ == "__main__":
     unittest.main()

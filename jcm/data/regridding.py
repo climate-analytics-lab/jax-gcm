@@ -4,11 +4,14 @@ One module for every offline remap in jcm — nothing here runs inside the
 JIT'd model:
 
 * **Conservative flux remap** (:class:`Regridder` / :func:`build_regridder`
-  / :func:`conservative_to_gaussian`): first-order area-weighted binning by
-  nearest cell centre, ``Σ fₛ Aₛ / Σ Aₛ`` per target cell. Mass-conserving
-  to binning accuracy — what emission fluxes need. Handles structured and
-  unstructured (``ncol``) sources via per-cell ``(lon, lat, area)`` triples.
-  Coarsening only; refinement would alias.
+  / :func:`conservative_to_gaussian` / :func:`conservative_overlap`). A
+  rectilinear (1-D lon/lat axes) source gets the exact-overlap first-order
+  conservative operator — CDO ``remapcon``'s scheme — which is exact at any
+  resolution ratio, refinement included. An unstructured (``ncol``) source
+  gets area-weighted binning by nearest cell centre, ``Σ fₛ Aₛ / Σ Aₛ`` per
+  target cell, mass-conserving to binning accuracy when coarsening; target
+  cells no source centre lands in (a target finer than the source) take the
+  nearest source cell's value instead of being left empty.
 * **Bilinear sampling** (:func:`interp_to`): periodic-longitude wrap and
   constant pole extension for smooth climatology fields (SST, soil, ozone).
   Not conservative — do not use it for fluxes.
@@ -167,6 +170,15 @@ def build_regridder(
                 f"src_area shape {area.shape} matches neither the flattened "
                 f"source ({sl.size} cells) nor a (lon, lat)/(lat, lon) "
                 f"rectilinear mesh of the 1-D axes ({sl.size}x{sb.size})")
+        # The exact-overlap operator: the file's area only confirmed the
+        # layout above — spherical overlap areas supersede it.
+        overlap = _rectilinear_overlap_matrix(
+            np.rad2deg(sl), np.rad2deg(sb), np.rad2deg(dl), np.rad2deg(db))
+        if overlap is not None:
+            covered_area = np.asarray(overlap.sum(axis=1)).ravel()
+            return Regridder(overlap, (dl.size, db.size), covered_area,
+                             source_grid=source_grid,
+                             source_latlon=source_latlon)
         sl, sb = (m.ravel() for m in np.meshgrid(sl, sb, indexing="ij"))
     area = area.ravel()
     n_src = area.size
@@ -176,14 +188,65 @@ def build_regridder(
     i_lat = _nearest_lat_index(sb, db)
     # Row-major (lon, lat) flattening — matches numpy reshape((nlon, nlat)).
     target_idx = i_lon * nlat + i_lat
+    src_idx = np.arange(n_src)
+    weights = area
+
+    # A target cell finer than the source can receive no source centre at all;
+    # left empty it would read as zero flux (holes in an emission field). Give
+    # each such cell the value of its nearest source cell — the first-order
+    # (piecewise-constant) answer when refining. The global integral is then
+    # conserved only approximately in that regime.
+    hit = np.zeros(nlon * nlat, dtype=bool)
+    hit[target_idx] = True
+    if not hit.all():
+        empty = np.flatnonzero(~hit)
+        e_lon, e_lat = dl[empty // nlat], db[empty % nlat]
+        nearest = nearest_index(np.rad2deg(sb), np.rad2deg(sl),
+                                np.rad2deg(e_lat), np.rad2deg(e_lon))
+        target_idx = np.concatenate([target_idx, empty])
+        src_idx = np.concatenate([src_idx, nearest])
+        weights = np.concatenate([weights, area[nearest]])
 
     matrix = sp.coo_matrix(
-        (area, (target_idx, np.arange(n_src))),
+        (weights, (target_idx, src_idx)),
         shape=(nlon * nlat, n_src),
     ).tocsr()
     covered_area = np.asarray(matrix.sum(axis=1)).ravel()
     return Regridder(matrix, (nlon, nlat), covered_area,
                      source_grid=source_grid, source_latlon=source_latlon)
+
+
+def _rectilinear_overlap_matrix(src_lon, src_lat, dst_lon, dst_lat):
+    """Exact-overlap operator between two rectilinear grids, or ``None``.
+
+    Degrees in, ``(nlon*nlat, nlon_src*nlat_src)`` CSR out in the
+    :class:`Regridder`'s lon-major flattening. The overlap is separable, so the
+    matrix is the Kronecker product of the longitude- and latitude-overlap
+    matrices. Axes may be in any order (they are sorted for the overlap and the
+    weights mapped back). ``None`` when either longitude axis is not uniformly
+    spaced — the overlap helpers assume regular longitude cells — and the caller
+    falls back to binning.
+    """
+    def uniform(lons):
+        if lons.size < 2:
+            return False
+        d = np.diff(np.sort(np.mod(lons, 360.0)))
+        return np.allclose(d, 360.0 / lons.size, rtol=1e-6)
+
+    if not (uniform(src_lon) and uniform(dst_lon)):
+        return None
+
+    def sorted_overlap(fn, src, dst):
+        s_ord, d_ord = np.argsort(src), np.argsort(dst)
+        w_sorted = fn(src[s_ord], dst[d_ord])
+        w = np.empty_like(w_sorted)
+        w[np.ix_(d_ord, s_ord)] = w_sorted
+        return w
+
+    w_lat = sorted_overlap(_latitude_overlap, src_lat, dst_lat)
+    w_lon = sorted_overlap(_longitude_overlap, np.mod(src_lon, 360.0),
+                           np.mod(dst_lon, 360.0))
+    return sp.kron(sp.csr_matrix(w_lon), sp.csr_matrix(w_lat), format="csr")
 
 
 def model_grid(coords) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -278,22 +341,19 @@ def conservative_to_gaussian(field: np.ndarray, src_lats, src_lons,
                              lats, lons) -> np.ndarray:
     """Conservatively remap a regular-grid flux onto a Gaussian grid.
 
-    Thin adapter over :func:`build_regridder` for ``(..., lat, lon)``
-    structured sources: the source mesh is flattened to ``(lon, lat,
-    cos-lat-area)`` triples and the result reshaped back to
-    ``(..., nlat, nlon)``.
+    ``(..., nlat_src, nlon_src)`` -> ``(..., nlat, nlon)`` with the
+    exact-overlap scheme (:func:`conservative_overlap`), so it holds at any
+    resolution ratio — a 0.5° source onto T255's 0.47° cells included, where
+    nearest-centre binning leaves target rows no source centre lands in. A
+    descending source latitude axis is flipped first.
     """
     src_lats = np.asarray(src_lats, float)
-    src_lons = np.asarray(src_lons, float)
-    glat, glon = np.meshgrid(src_lats, src_lons, indexing="ij")
-    area = np.cos(np.deg2rad(glat)).ravel()
-    rg = build_regridder(glon.ravel(), glat.ravel(), area,
-                         np.asarray(lons, float), np.asarray(lats, float),
-                         dst_in_degrees=True)
-    lead = field.shape[:-2]
-    flat = field.reshape(*lead, -1)
-    out = rg(flat)                                   # (..., nlon, nlat)
-    return np.swapaxes(out, -2, -1)                  # (..., nlat, nlon)
+    field = np.asarray(field)
+    if src_lats[0] > src_lats[-1]:
+        src_lats, field = src_lats[::-1], field[..., ::-1, :]
+    return conservative_overlap(field, src_lats, np.asarray(src_lons, float),
+                                np.asarray(lats, float),
+                                np.asarray(lons, float))
 
 
 def latitude_bounds(lats) -> np.ndarray:

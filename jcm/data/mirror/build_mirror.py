@@ -292,6 +292,19 @@ def _grids(transient: bool = False) -> dict:
             if g in pool and (_SELECTED is None or g in _SELECTED)}
 
 
+#: Bundle products the ``bundles``/``amip`` stages can (re)build; ``--products``
+#: narrows them (e.g. re-deriving only ``emissions`` after a regridding change,
+#: without re-publishing files whose content did not change).
+BUNDLE_PRODUCTS = ("terrain", "forcing", "emissions", "dms", "ozone",
+                   "oxidants")
+_PRODUCTS: frozenset | None = None
+
+
+def _want(product: str) -> bool:
+    """Whether this run (re)builds bundle ``product`` (see ``--products``)."""
+    return _PRODUCTS is None or product in _PRODUCTS
+
+
 def _column_selected() -> bool:
     """Whether this run builds the column-grid (ne30pg3) bundle."""
     return _SELECTED is None or any(g in _SELECTED for g in _COLUMN_GRIDS)
@@ -437,14 +450,17 @@ def stage_bundles() -> None:
         lats, lons = gaussian_latlon(nlat)
         d = UPLOAD / "bundles" / grid
         d.mkdir(parents=True, exist_ok=True)
-        build_terrain(str(BUILD / "sso" / f"sso_gmted2010_{grid}.nc"),
-                      str(era5), str(d / "terrain.nc"))
+        if _want("terrain"):
+            build_terrain(str(BUILD / "sso" / f"sso_gmted2010_{grid}.nc"),
+                          str(era5), str(d / "terrain.nc"))
         for era in ("pd", "pi"):
-            build_forcing(str(era5), era, lats, lons,
-                          str(d / f"forcing_{era}.nc"))
-            build_emissions_nc(str(BUILD / "ceds_anthro.zarr"),
-                               str(BUILD / "bb4cmip7.zarr"), era, lats,
-                               lons, str(d / f"emissions_{era}.nc"))
+            if _want("forcing"):
+                build_forcing(str(era5), era, lats, lons,
+                              str(d / f"forcing_{era}.nc"))
+            if _want("emissions"):
+                build_emissions_nc(str(BUILD / "ceds_anthro.zarr"),
+                                   str(BUILD / "bb4cmip7.zarr"), era, lats,
+                                   lons, str(d / f"emissions_{era}.nc"))
 
     trunc = {grid: _truncation(grid) for grid in _grids()}
     for grid in _grids():
@@ -452,19 +468,22 @@ def stage_bundles() -> None:
             d = UPLOAD / "bundles" / f"{grid}_l{nlev}"
             d.mkdir(parents=True, exist_ok=True)
             for era, tag in (("pi", "pi1850"), ("pd", "pd2005-2014")):
-                shutil.copy(BUILD / "ozone" /
-                            f"ozone_fzj_cmip7_{tag}_{grid}_l{nlev}.nc",
-                            d / f"ozone_{era}.nc")
+                if _want("ozone"):
+                    shutil.copy(BUILD / "ozone" /
+                                f"ozone_fzj_cmip7_{tag}_{grid}_l{nlev}.nc",
+                                d / f"ozone_{era}.nc")
             for era, year in (("pi", 1850), ("pd", 2005)):
-                shutil.copy(
-                    BUILD / "aux" /
-                    f"oxidants_waccm_echam_l{nlev}_{year}_t{trunc[grid]}.nc",
-                    d / f"oxidants_{era}.nc")
+                if _want("oxidants"):
+                    shutil.copy(
+                        BUILD / "aux" / f"oxidants_waccm_echam_l{nlev}_"
+                        f"{year}_t{trunc[grid]}.nc",
+                        d / f"oxidants_{era}.nc")
         g = UPLOAD / "bundles" / grid
-        shutil.copy(BUILD / "aux" / f"dms_lana2011_climo_t{trunc[grid]}.nc",
-                    g / "dms.nc")
+        if _want("dms"):
+            shutil.copy(BUILD / "aux" /
+                        f"dms_lana2011_climo_t{trunc[grid]}.nc", g / "dms.nc")
 
-    if not _column_selected():
+    if not _column_selected() or not _want("terrain"):
         print("bundles: done", flush=True)
         return
     d = UPLOAD / "bundles" / "ne30pg3"
@@ -516,25 +535,29 @@ def stage_amip() -> None:
             (UPLOAD / "bundles" / f"{grid}_l{nlev}"
              / "ozone_amip").mkdir(parents=True, exist_ok=True)
         for year in range(first, last + 1):
-            build_forcing_year(str(era5), year, lats, lons,
-                               str(g / "forcing_amip" / f"{year}.nc"))
-            build_emissions_year(str(BUILD / "ceds_anthro.zarr"),
-                                 str(BUILD / "bb4cmip7.zarr"), year, lats,
-                                 lons,
-                                 str(g / "emissions_amip" / f"{year}.nc"))
-            plev = scratch / f"ozone_{grid}_{year}_plev.nc"
-            regrid_ozone_year(load_ozone_year(year), lats,
-                              lons).to_netcdf(plev, encoding=_TIME_ENC)
-            for nlev in (47, 95):
-                interpolate_ozone(
-                    plev,
-                    UPLOAD / "bundles" / f"{grid}_l{nlev}" / "ozone_amip"
-                    / f"{year}.nc", nlev)
+            if _want("forcing"):
+                build_forcing_year(str(era5), year, lats, lons,
+                                   str(g / "forcing_amip" / f"{year}.nc"))
+            if _want("emissions"):
+                build_emissions_year(str(BUILD / "ceds_anthro.zarr"),
+                                     str(BUILD / "bb4cmip7.zarr"), year,
+                                     lats, lons,
+                                     str(g / "emissions_amip" / f"{year}.nc"))
+            if _want("ozone"):
+                plev = scratch / f"ozone_{grid}_{year}_plev.nc"
+                regrid_ozone_year(load_ozone_year(year), lats,
+                                  lons).to_netcdf(plev, encoding=_TIME_ENC)
+                for nlev in (47, 95):
+                    interpolate_ozone(
+                        plev,
+                        UPLOAD / "bundles" / f"{grid}_l{nlev}" / "ozone_amip"
+                        / f"{year}.nc", nlev)
             print("amip:", grid, year, flush=True)
-    # Record the span actually staged (all three amip series share it) so the
-    # manifest coverage names files that exist, not the wider source series.
-    _record_staged_coverage(("forcing_amip", "emissions_amip", "ozone_amip"),
-                            first, last)
+    # Record the span actually staged for each series built, so the manifest
+    # coverage names files that exist, not the wider source series.
+    _record_staged_coverage(
+        tuple(f"{p}_amip" for p in ("forcing", "emissions", "ozone")
+              if _want(p)), first, last)
 
 
 def stage_era5_transient() -> None:
@@ -884,6 +907,7 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
     era5_climo = ("Tier A ERA5 land climatology",
                   str(BUILD / "era5_land_climo_2005-2014_0p25.nc"))
     ceds = ("Tier A CEDS store", str(BUILD / "ceds_anthro.zarr"))
+    pcmdi = ("PCMDI AMIP SST/ice (input4MIPs)", f"{i4m}/PCMDI/PCMDI-AMIP-1-1-10")
     bb = ("Tier A BB4CMIP7 store", str(BUILD / "bb4cmip7.zarr"))
     return {
         "pull": (),
@@ -899,17 +923,25 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
                  f"{site.cesm_inputdata}/atm/cam/chem/ocnexch/"
                  "Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc"), *oxid),
         "dust": tuple(dust),
-        "bundles": (("PCMDI AMIP SST/ice (input4MIPs)",
-                     f"{i4m}/PCMDI/PCMDI-AMIP-1-1-10"),
-                    era5_climo, ceds, bb,
-                    ("SSO statistics", str(BUILD / "sso")),
-                    ("ozone stage output", str(BUILD / "ozone")),
-                    ("aux stage output", str(BUILD / "aux"))),
-        "amip": (("PCMDI AMIP SST/ice (input4MIPs)",
-                  f"{i4m}/PCMDI/PCMDI-AMIP-1-1-10"),
-                 ("FZJ ozone (input4MIPs)", f"{i4m}/FZJ/FZJ-CMIP-ozone-1-0"),
-                 ("CR-CMIP GHGs (input4MIPs)", f"{i4m}/CR/CR-CMIP-1-0-0"),
-                 ceds, bb, era5_climo),
+        "bundles": tuple(
+            src for product, srcs in (
+                ("terrain", (era5_climo,
+                             ("SSO statistics", str(BUILD / "sso")))),
+                ("forcing", (pcmdi, era5_climo)),
+                ("emissions", (ceds, bb)),
+                ("ozone", (("ozone stage output", str(BUILD / "ozone")),)),
+                ("oxidants", (("aux stage output", str(BUILD / "aux")),)),
+                ("dms", (("aux stage output", str(BUILD / "aux")),)))
+            if _want(product) for src in srcs),
+        "amip": tuple(
+            src for product, srcs in (
+                ("forcing", (pcmdi, era5_climo,
+                             ("CR-CMIP GHGs (input4MIPs)",
+                              f"{i4m}/CR/CR-CMIP-1-0-0"))),
+                ("emissions", (ceds, bb)),
+                ("ozone", (("FZJ ozone (input4MIPs)",
+                            f"{i4m}/FZJ/FZJ-CMIP-ozone-1-0"),)))
+            if _want(product) for src in srcs),
         "era5-transient": (
             ("RDA ERA5 6-hourly analyses",
              f"{rda}/d633000/e5.oper.an.sfc" if rda else None),
@@ -981,7 +1013,8 @@ def check_sources(stage_names, *, include_build: bool = False) -> None:
         sys.exit(f"Missing sources on site {SITE.name!r} "
                  "(see jcm/data/mirror/SOURCES.md):\n  "
                  + "\n  ".join(sorted(set(missing))))
-    if "amip" in stage_names and include_build and _pulled_emissions():
+    if ("amip" in stage_names and include_build and _want("emissions")
+            and _pulled_emissions()):
         sys.exit("amip: build/ceds_anthro.zarr is the --stage pull copy, which "
                  "carries only the PI/PD climatology arrays; the yearly slices "
                  "would read unfilled chunks. Build the stores with --stage "
@@ -1095,6 +1128,10 @@ def main() -> None:
                     help="comma-separated subset of the published grids to "
                          f"build ({', '.join(sorted({**GRIDS, **_COLUMN_GRIDS}))}"
                          "); default all")
+    ap.add_argument("--products", default=None,
+                    help="comma-separated subset of the bundle products the "
+                         f"bundles/amip stages build ({', '.join(BUNDLE_PRODUCTS)}"
+                         "); default all")
     ap.add_argument("--years", default="1950,2022",
                     help="inclusive year range for --stage amip, "
                          "e.g. 1950,2022")
@@ -1104,7 +1141,7 @@ def main() -> None:
                          "per variant + existence of every staged static "
                          "artifact; exit non-zero on any drift")
     args = ap.parse_args()
-    global _AMIP_YEARS, _SELECTED
+    global _AMIP_YEARS, _SELECTED, _PRODUCTS
     first, last = (int(y) for y in args.years.split(","))
     _AMIP_YEARS = (first, last)
     if args.grids:
@@ -1113,6 +1150,12 @@ def main() -> None:
         if unknown:
             sys.exit(f"Unknown grid(s) {unknown}; published: "
                      f"{', '.join(sorted({**GRIDS, **_COLUMN_GRIDS}))}")
+    if args.products:
+        _PRODUCTS = frozenset(args.products.split(","))
+        unknown = sorted(_PRODUCTS - set(BUNDLE_PRODUCTS))
+        if unknown:
+            sys.exit(f"Unknown product(s) {unknown}; valid: "
+                     f"{', '.join(BUNDLE_PRODUCTS)}")
     names = ([n for n in STAGES if n not in _NOT_IN_ALL]
              if args.stage == "all" else args.stage.split(","))
     unknown = [n for n in names if n not in STAGES]

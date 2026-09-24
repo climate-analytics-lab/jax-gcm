@@ -244,7 +244,12 @@ python -m jcm.data.mirror.build_mirror --grids t106,t127,t255 --stage registry
 
 and the port was checked by rebuilding the t63 SSO, ozone, oxidant, DMS,
 terrain, forcing and emissions bundles the same way and comparing them with the
-published Glade-built files.
+published Glade-built files (identical up to ~3e-8 relative, float round-off).
+The t63/t106 emission bundles were then rebuilt with the exact conservative
+remap — `--stage emissions` from the Levante input4MIPs tree, then
+`--grids t63,t106 --products emissions --stage bundles,amip`; `--products`
+limits those stages to the named bundle products so unchanged files are not
+republished.
 
 - `sso.py` — streams the GMTED2010 DEM in latitude strips, accumulating
   Lott–Miller gradient-tensor statistics onto Gaussian bins or, for
@@ -256,8 +261,13 @@ published Glade-built files.
   levels.
 - `emissions.py` — CEDS sector sums and BB4CMIP7 fluxes streamed to zarr.
 - `bundles.py` — per-grid assembly: bilinear for smooth fields,
-  cos-lat-weighted conservative binning for emissions fluxes,
-  nearest-ocean fill for AMIP SST under land.
+  exact-overlap first-order conservative remapping for emission fluxes
+  (`jcm.data.regridding.conservative_to_gaussian`; area means conserved to
+  round-off on every grid), nearest-ocean fill for AMIP SST under land.
+  Nearest-centre binning, used before, left whole latitude rows of T255
+  empty (its 0.47° cells are finer than the 0.5° CEDS source) and carried
+  1-3 % global-mean errors on t63/t106; those emission bundles were rebuilt
+  with the exact scheme.
 - `dust.py` — the five Tegen inputs from the ECHAM-HAMMOZ pool: native at
   T63, T127 and T255 (the T255 files are the older `v01_001` lineage, verified
   to be the same products where both lineages exist), exact-overlap

@@ -38,44 +38,41 @@ class ConservativeTest(unittest.TestCase):
         np.testing.assert_allclose(out, 3.5)
 
     def test_preserves_global_integral(self):
+        # Exact cell areas on both sides: regular 0.5° source bands in sin(lat),
+        # Gaussian target cells = quadrature weights.
         rng = np.random.default_rng(0)
         src_lats = np.linspace(-89.75, 89.75, 360)
         src_lons = np.arange(720) * 0.5
         field = rng.random((360, 720))
-        lats, lons = gaussian_latlon(24)
-        out = conservative_to_gaussian(field, src_lats, src_lons, lats, lons)
-        w_src = np.cos(np.deg2rad(src_lats))[:, None]
-        src_int = (field * w_src).sum()
-        # weight each target cell by the source area it received
-        glat, glon = np.meshgrid(src_lats, src_lons, indexing="ij")
-        rg = build_regridder(glon.ravel(), glat.ravel(),
-                             np.cos(np.deg2rad(glat)).ravel(),
-                             lons, lats, dst_in_degrees=True)
-        w_tgt = rg._covered_area.reshape(lons.size, lats.size).T
-        tgt_int = (out * w_tgt).sum()
-        self.assertAlmostEqual(tgt_int / src_int, 1.0, places=10)
+        edges = np.sin(np.deg2rad(np.linspace(-90.0, 90.0, 361)))
+        src_int = (field * np.diff(edges)[:, None]).sum() / 720
+        for nlat in (24, 384):           # coarsening, and T255 (a refinement)
+            lats, lons = gaussian_latlon(nlat)
+            out = conservative_to_gaussian(field, src_lats, src_lons, lats, lons)
+            w = np.polynomial.legendre.leggauss(nlat)[1]
+            tgt_int = (out * w[:, None]).sum() / lons.size
+            self.assertAlmostEqual(tgt_int / src_int, 1.0, places=10)
 
-    def test_rectilinear_axes_match_flattened_mesh(self):
-        # 1-D lon/lat axes with a 2-D area (#533) must build the identical
-        # operator as the pre-flattened mesh, for both (lon, lat) and
-        # (lat, lon) area layouts — and apply directly to native
-        # unflattened fields, e.g. a (time, lat, lon) input4MIPs series.
+    def test_rectilinear_axes_are_the_exact_overlap_operator(self):
+        # 1-D lon/lat axes with a 2-D area (#533) build the exact-overlap
+        # operator (conservative_overlap), for both (lon, lat) and (lat, lon)
+        # area layouts, and apply directly to native unflattened fields, e.g.
+        # a (time, lat, lon) input4MIPs series.
+        from jcm.data.regridding import conservative_overlap
         rng = np.random.default_rng(3)
         src_lats = np.linspace(-85.0, 85.0, 18)
         src_lons = np.arange(36) * 10.0
         mlon, mlat = np.meshgrid(src_lons, src_lats, indexing="ij")
         area = np.cos(np.deg2rad(mlat))                  # (nlon, nlat)
         lats, lons = gaussian_latlon(8)
-        ref = build_regridder(mlon.ravel(), mlat.ravel(), area.ravel(),
-                              lons, lats, dst_in_degrees=True)
         field = rng.random((3, 36, 18))                  # (time, lon, lat)
-        expect = ref(field.reshape(3, -1))
+        expect = np.swapaxes(conservative_overlap(
+            np.swapaxes(field, -1, -2), src_lats, src_lons, lats, lons),
+            -1, -2)                                      # (time, lon, lat)
         for rect_area, f in ((area, field),
                              (area.T, np.swapaxes(field, -1, -2))):
             rg = build_regridder(src_lons, src_lats, rect_area,
                                  lons, lats, dst_in_degrees=True)
-            np.testing.assert_allclose(rg._matrix.toarray(),
-                                       ref._matrix.toarray())
             # Both trailing layouts are recognized by shape.
             np.testing.assert_allclose(rg(field), expect)
             np.testing.assert_allclose(rg(np.swapaxes(field, -1, -2)), expect)
@@ -91,14 +88,19 @@ class ConservativeTest(unittest.TestCase):
             build_regridder(src_lons, src_lats, np.ones((7, 5)),
                             lons, lats, dst_in_degrees=True)
 
-    def test_matches_bruteforce_binning(self):
-        # independent reference: loop-based nearest-center area-weighted mean
+    def test_unstructured_source_matches_bruteforce_binning(self):
+        # A flattened (ncol-style) source is binned by nearest centre;
+        # independent reference: loop-based area-weighted mean.
         rng = np.random.default_rng(1)
         src_lats = np.linspace(-85.0, 85.0, 40)
         src_lons = np.arange(80) * 4.5
         field = rng.random((40, 80))
         lats, lons = gaussian_latlon(8)
-        out = conservative_to_gaussian(field, src_lats, src_lons, lats, lons)
+        glat, glon = np.meshgrid(src_lats, src_lons, indexing="ij")
+        rg = build_regridder(glon.ravel(), glat.ravel(),
+                             np.cos(np.deg2rad(glat)).ravel(),
+                             lons, lats, dst_in_degrees=True)
+        out = rg(field.ravel()).T
         ref_num = np.zeros((lats.size, lons.size))
         ref_den = np.zeros((lats.size, lons.size))
         for j, la in enumerate(src_lats):
@@ -111,6 +113,33 @@ class ConservativeTest(unittest.TestCase):
                 ref_den[i_lat, i_lon] += w
         ref = np.where(ref_den > 0, ref_num / np.maximum(ref_den, 1e-30), 0.0)
         np.testing.assert_allclose(out, ref, rtol=1e-12)
+
+
+class RefinementTest(unittest.TestCase):
+    """A target finer than the source must not come back with empty cells."""
+
+    def test_rectilinear_refinement_has_no_holes(self):
+        # 0.5° source onto T255's 0.47° cells: binning left whole latitude
+        # rows empty (zero flux); the overlap operator covers every cell.
+        src_lats = np.linspace(-89.75, 89.75, 360)
+        src_lons = np.arange(720) * 0.5
+        lats, lons = gaussian_latlon(384)
+        rg = build_regridder(src_lons, src_lats, np.ones((720, 360)),
+                             lons, lats, dst_in_degrees=True)
+        out = rg(np.full((360, 720), 2.0))
+        np.testing.assert_allclose(out, 2.0, rtol=1e-12)
+
+    def test_unstructured_refinement_takes_the_nearest_source(self):
+        src_lats = np.linspace(-80.0, 80.0, 9)
+        src_lons = np.arange(18) * 20.0
+        glat, glon = np.meshgrid(src_lats, src_lons, indexing="ij")
+        lats, lons = gaussian_latlon(32)
+        rg = build_regridder(glon.ravel(), glat.ravel(), np.ones(glat.size),
+                             lons, lats, dst_in_degrees=True)
+        values = 1.0 + np.arange(glat.size, dtype=float)
+        out = rg(values)
+        self.assertTrue(np.all(out >= 1.0))              # no empty (zero) cell
+        self.assertTrue(set(np.unique(out)) <= set(values))
 
 
 class BilinearTest(unittest.TestCase):
