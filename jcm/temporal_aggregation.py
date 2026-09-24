@@ -61,10 +61,23 @@ def _validated_intervals(ds: xr.Dataset) -> tuple[np.ndarray, np.ndarray]:
         )
     if not np.issubdtype(bounds.dtype, np.datetime64):
         raise TypeError("time bounds must be exact datetime64 values.")
-    bounds = bounds.astype("datetime64[ms]")
-    starts, ends = bounds[:, 0], bounds[:, 1]
     if np.any(np.isnat(bounds)) or np.any(np.isnat(ds.time.values)):
         raise ValueError("time and time bounds may not contain NaT.")
+    # Durations and midpoints are computed in milliseconds (the output label
+    # precision, as in ``jcm.predictions.output_time_labels``). A finer
+    # bound that is not millisecond-aligned would be silently shifted by the
+    # conversion — or collapse an interval to zero length — so refuse it.
+    as_ms = bounds.astype("datetime64[ms]")
+    if not np.array_equal(as_ms.astype(bounds.dtype), bounds):
+        bad = int(np.flatnonzero(
+            np.any(as_ms.astype(bounds.dtype) != bounds, axis=1))[0])
+        raise ValueError(
+            f"{bounds_name!r} must be exactly representable at millisecond "
+            f"precision; interval {bad} is [{bounds[bad, 0]}, "
+            f"{bounds[bad, 1]}]. Round the bounds to whole milliseconds "
+            "before aggregating.")
+    bounds = as_ms
+    starts, ends = bounds[:, 0], bounds[:, 1]
     if np.any(ends <= starts):
         raise ValueError("Every output interval must have positive duration.")
     if len(starts) > 1 and (np.any(starts[1:] < starts[:-1])

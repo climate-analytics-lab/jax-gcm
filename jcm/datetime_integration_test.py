@@ -38,3 +38,40 @@ def test_monthly_output_and_checkpoint_share_the_same_clock(tmp_path):
     combined = xr.concat([jan.to_xarray(), feb.to_xarray()], dim="time")
     # Exact timestamps and physical fields agree across the restart seam.
     xr.testing.assert_allclose(daily.to_xarray(), combined)
+
+
+def test_odd_length_mean_intervals_are_labelled_at_exact_half_seconds():
+    """A 1 s step averaged over 3 s has a half-second midpoint, exactly.
+
+    The traced clock holds whole seconds, so the label comes from the exact
+    bounds in milliseconds, and monthly means weight the intervals by those
+    bounds across the Jan/Feb seam.
+    """
+    model = Model(coords=get_held_suarez_coords(layers=8, spectral_truncation=21),
+                  physics=held_suarez_physics(), time_step=1 / 60,
+                  start_time="2000-01-31T23:59:54")
+    preds = model.run(total_time="12 seconds", save_interval="3 seconds",
+                      output_averages=True)
+    starts = (np.datetime64("2000-01-31T23:59:54", "ms")
+              + np.arange(4) * np.timedelta64(3, "s"))
+    expected = starts + np.timedelta64(1500, "ms")
+    np.testing.assert_array_equal(preds.time_labels(), expected)
+    ds = preds.to_xarray()
+    np.testing.assert_array_equal(ds.time.values.astype("datetime64[ms]"),
+                                  expected)
+    np.testing.assert_array_equal(
+        ds.time_bounds.values.astype("datetime64[ms]"),
+        np.stack([starts, starts + np.timedelta64(3, "s")], axis=1))
+    # The datetime64[ms] round trip is exact.
+    assert np.array_equal(
+        expected.astype("datetime64[ns]").astype("datetime64[ms]"), expected)
+
+    monthly = preds.monthly_means()
+    temperature = ds.temperature.values.astype(np.float64)
+    np.testing.assert_allclose(monthly.temperature.values[0],
+                               temperature[:2].mean(axis=0), rtol=1e-6)
+    np.testing.assert_allclose(monthly.temperature.values[1],
+                               temperature[2:].mean(axis=0), rtol=1e-6)
+    np.testing.assert_array_equal(
+        monthly.time_coverage.values.astype("timedelta64[ms]"),
+        np.array([6000, 6000], dtype="timedelta64[ms]"))

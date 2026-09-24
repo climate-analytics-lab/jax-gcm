@@ -44,8 +44,8 @@ def output_time_labels(values) -> np.ndarray:
 
     Returns:
         A NumPy ``datetime64[ms]`` array. Millisecond storage represents exact
-        whole-second model times and half-second interval midpoints without
-        the narrow year range of ``datetime64[ns]``.
+        whole-second model times and the half-second midpoints of odd-length
+        intervals without the narrow year range of ``datetime64[ns]``.
 
     """
     host = jax.device_get(values)
@@ -198,7 +198,29 @@ class ModelPredictions:
 
     @property
     def times(self):
+        """The traced whole-second clock value of each output frame.
+
+        For interval means this is the midpoint floored to a whole second;
+        use :meth:`time_labels` for the exact label.
+        """
         return self._predictions.times
+
+    def time_labels(self) -> np.ndarray:
+        """Exact ``datetime64[ms]`` host labels of the output frames.
+
+        Instantaneous frames are labelled at their time. Interval means are
+        labelled at the midpoint of their exact bounds, computed in
+        milliseconds, so an odd-length interval's half-second midpoint is
+        exact (the traced clock can only hold whole seconds).
+        """
+        cell_method = getattr(self._predictions, "time_cell_method", None)
+        bounds = getattr(self._predictions, "time_bounds", None)
+        is_mean = (cell_method is not None
+                   and bool(np.asarray(jax.device_get(cell_method))))
+        if is_mean and bounds is not None:
+            bounds = output_time_labels(bounds)
+            return bounds[:, 0] + (bounds[:, 1] - bounds[:, 0]) // 2
+        return output_time_labels(self.times)
 
     @property
     def observations(self):
@@ -553,7 +575,7 @@ class ModelPredictions:
         # protocol; delegate whenever the grid has no modal axes.
         if self._dycore is not None and not hasattr(
                 self._coords.horizontal, "modal_axes"):
-            times = output_time_labels(self.times)
+            times = self.time_labels()
             ds = self._dycore.to_xarray(self._predictions, times)
             # The dycore's ``to_xarray`` has already run
             # ``cf_metadata.finalize_output`` (CSV attrs and the curated
@@ -582,7 +604,7 @@ class ModelPredictions:
         # Per-physics flattening of the diagnostic struct into a dict of named fields.
         physics_preds_dict = self._physics.data_struct_to_dict(physics_predictions, nodal_shape=nodal_shape)
 
-        times = output_time_labels(self.times)
+        times = self.time_labels()
         coords = jax.device_get(self._coords)
 
         additional_coords = {}

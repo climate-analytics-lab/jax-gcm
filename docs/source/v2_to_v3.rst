@@ -546,8 +546,9 @@ months and years have different lengths. In Hydra, select an endpoint with
 ``run.total_time=null run.end_time=2001-01-01``.
 
 Run and save durations must divide exactly into model steps, and the run must
-contain complete save intervals. Averaged save intervals must contain an even
-number of seconds so their midpoint fits the whole-second model clock.
+contain complete save intervals. An interval mean is labelled at the midpoint
+of its exact bounds, which may fall on a half second for an odd-length
+interval (e.g. a 1 s step with ``save_interval="3 seconds"``).
 
 Seasonal physics now evaluates January 1 at phase zero in every year. The v2
 default instead inherited an epoch-dependent offset (seven days on
@@ -592,10 +593,10 @@ floating epoch days into nanoseconds:
    ocean = ocean.assign_coords(time=labels)
 
 The result is exact ``datetime64[ms]``; integer-second model labels are
-preserved. A ``Model`` run's interval midpoints are always whole seconds,
-because averaged save intervals must span an even number of seconds; the
-millisecond unit exists only so an external caller's own half-second
-midpoints convert exactly. Floating days-since-epoch input is rejected. The trajectory serializer uses
+preserved, and interval midpoints are exact to the millisecond: an
+odd-length interval's midpoint falls on a half second and is represented
+exactly (``ModelPredictions.time_labels`` and ``to_xarray`` compute it from
+the exact bounds). Floating days-since-epoch input is rejected. The trajectory serializer uses
 the same conversion, preventing tiny timestamp differences from expanding
 an xarray merge into two interleaved axes (#862).
 

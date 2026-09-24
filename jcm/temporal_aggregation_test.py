@@ -222,3 +222,25 @@ def test_half_second_midpoint_and_dates_beyond_nanosecond_range_are_exact():
 
     assert str(result.time.values[0]) == "2500-01-01T00:00:00.500"
     np.testing.assert_array_equal(result.time_bounds, bounds)
+
+
+@pytest.mark.parametrize("unit", ["us", "ns"])
+def test_millisecond_aligned_fine_bounds_are_accepted_unchanged(unit):
+    daily = _daily("2000-01-01", "2000-02-01")
+    ms = temporal_aggregation.monthly_means(daily)
+    fine = daily.copy()
+    fine["time_bounds"] = (("time", "bounds"),
+                           daily.time_bounds.values.astype(f"datetime64[{unit}]"))
+    xr.testing.assert_identical(temporal_aggregation.monthly_means(fine), ms)
+
+
+@pytest.mark.parametrize("unit,offset", [("us", 1), ("ns", 500_000)])
+def test_sub_millisecond_bounds_are_rejected_not_shifted(unit, offset):
+    daily = _daily("2000-01-01", "2000-01-03")
+    bounds = daily.time_bounds.values.astype(f"datetime64[{unit}]")
+    bounds[0, 1] = bounds[0, 1] - np.timedelta64(offset, unit)
+    daily["time_bounds"] = (("time", "bounds"), bounds)
+    with pytest.raises(ValueError, match="millisecond precision"):
+        temporal_aggregation.monthly_means(daily)
+    with pytest.raises(ValueError, match="millisecond precision"):
+        temporal_aggregation.MonthlyMeanAccumulator().update(daily)

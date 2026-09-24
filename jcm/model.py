@@ -353,6 +353,10 @@ def _op_split_trajectory(
                 dynamics=averaged_dynamics,
                 physics=_strip_sampler(diag_sum),
             )
+            # The traced clock holds whole seconds, so an odd-length interval's
+            # half-second midpoint is floored here. The exact label (exact to
+            # the millisecond) is recomputed from ``bounds`` on the host:
+            # ``ModelPredictions.time_labels`` / ``to_xarray``.
             midpoint_offset = inner_steps * dt_seconds // 2
             midpoint_days, midpoint_seconds = divmod(
                 midpoint_offset, SECONDS_PER_DAY)
@@ -1266,9 +1270,6 @@ class Model:
             raise ValueError("save_interval must be exactly divisible by the model timestep.")
         if total_seconds % save_seconds:
             raise ValueError("total_time must be exactly divisible by save_interval.")
-        if output_averages and save_seconds % 2:
-            raise ValueError(
-                "averaged output intervals need a whole-second midpoint.")
         inner_steps = save_seconds // dt_seconds
         outer_steps = total_seconds // save_seconds
         # Op-split saves end-of-step states (snapshot mode) or post-step
