@@ -683,6 +683,7 @@ from jcm.physics.radiation import (  # noqa: E402
     current_cos_zenith,
     radiation_should_compute,
     rescale_cached_radiation,
+    surface_optics_for_solve,
 )
 from jcm.physics.radiation.radiation_types import RadiationParameters  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
@@ -820,13 +821,11 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         co2_vmr = ppmv_to_mole_fraction(forcing.co2_vmr)
 
         # Surface temperature still lives in the legacy "surface" key
-        # (until the EchamSurface migration); the radiation surface
-        # albedo / emissivity is on the "radiation" sub-struct.
+        # (until the EchamSurface migration); the surface albedo /
+        # emissivity are the current step's published surface optics.
         surface_temperature = diagnostics["surface"].surface_temperature.reshape(ncols)
-        radiation = diagnostics["radiation"]
-        surface_albedo_vis = radiation.surface_albedo_vis.reshape(ncols)
-        surface_albedo_nir = radiation.surface_albedo_nir.reshape(ncols)
-        surface_emissivity = radiation.surface_emissivity.reshape(ncols)
+        (surface_albedo_vis, surface_albedo_nir,
+         surface_emissivity) = surface_optics_for_solve(diagnostics, ncols)
 
         # Reshape aerosol fields so column is the leading (mapped) axis.
         # Per-band fields are ``(n_bnd, nlev, ncols)`` — transpose so the

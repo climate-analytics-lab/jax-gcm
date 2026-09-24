@@ -163,9 +163,11 @@ class RadiationData:
     """Radiation diagnostics shared by every radiation scheme.
 
     Written by the radiation term on its compute step (and re-used,
-    unchanged, on cached steps); seeded by ``EchamBoundaryConditions``
-    which fills the surface optical properties and zeros the flux
-    fields. Lives next to :class:`RadiationParameters` so the radiation
+    unchanged, on cached steps apart from the shortwave zenith rescale).
+    The surface optical properties are the ones that solve used: a
+    boundary-condition term publishes the current step's under
+    ``jcm.physics.radiation.SURFACE_OPTICS_KEY`` and the radiation reads
+    them only when it solves. Lives next to :class:`RadiationParameters` so the radiation
     schemes (grey two-stream, RRTMGP, NN emulator) share one home.
     """
 

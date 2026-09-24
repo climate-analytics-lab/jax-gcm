@@ -42,7 +42,7 @@ from flax import nnx, struct
 from jcm.forcing import ForcingData
 from jcm.physics.chemistry.simple_chemistry import ChemistryData
 from jcm.physics.coords_util import column_lat_lon
-from jcm.physics.radiation import current_cos_zenith
+from jcm.physics.radiation import SURFACE_OPTICS_KEY, current_cos_zenith
 from jcm.physics.radiation.radiation_types import RadiationData
 from jcm.physics.surface.echam import albedo as albedo_scheme
 from jcm.physics.surface.echam.albedo import EchamSurfaceAlbedoParameters
@@ -172,7 +172,7 @@ class EchamBoundaryConditions(PhysicsTerm):
         "pressure_full", "surface_pressure",
     )
     provides: ClassVar[tuple[str, ...]] = (
-        "radiation", "surface", "chemistry",
+        "radiation", "surface", "chemistry", SURFACE_OPTICS_KEY,
     )
     # Carry seeded as zeros by the base class. The first
     # ``compute_tendencies`` call overwrites every boundary field from
@@ -356,12 +356,19 @@ class EchamBoundaryConditions(PhysicsTerm):
 
         # Start from whatever the previous step (or upstream term) left us
         # so we don't clobber radiation cache or other sub-struct fields.
+        # The surface optics go to the radiation as this step's INPUT, not
+        # onto the ``radiation`` carry: the radiation term reads them when it
+        # solves and publishes the values it solved with, holding them
+        # between solves so albedo, reflected flux and heating stay one
+        # solve's (see ``SURFACE_OPTICS_KEY``). The ocean albedo therefore
+        # enters at the solve-time zenith angle, as in ECHAM.
+        surface_optics = {
+            "albedo_vis": albedo_vis,
+            "albedo_nir": albedo_nir,
+            "emissivity": emissivity,
+        }
         radiation = diagnostics.get(
             "radiation", RadiationData.zeros((ncols,), nlev),
-        ).copy(
-            surface_albedo_vis=albedo_vis,
-            surface_albedo_nir=albedo_nir,
-            surface_emissivity=emissivity,
         )
         surface = diagnostics.get(
             "surface", SurfaceData.zeros((ncols,), nlev),
@@ -382,6 +389,7 @@ class EchamBoundaryConditions(PhysicsTerm):
         zero_tendencies = PhysicsTendency.zeros(state.temperature.shape)
         return zero_tendencies, {
             **diagnostics,
+            SURFACE_OPTICS_KEY: surface_optics,
             "radiation": radiation,
             "surface": surface,
             "chemistry": chemistry,

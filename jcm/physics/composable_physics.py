@@ -666,6 +666,10 @@ class ComposablePhysics(nnx.Module, Physics):
         # Running tendency view for diagnostics (see the term loop); an
         # intermediate, not a field anyone wants in the netCDF.
         "_tendency_run",
+        # Current-step surface optics handed to the radiation
+        # (``jcm.physics.radiation.SURFACE_OPTICS_KEY``); the values a
+        # radiation solve used are published as ``radiation.surface_*``.
+        "_surface_optics",
     })
 
     # Dict-valued diagnostics that must NOT flatten into user output.
