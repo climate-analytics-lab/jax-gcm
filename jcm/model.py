@@ -951,7 +951,12 @@ class Model:
             physics_state: Optional gridpoint state to project into the active
                 dycore. When omitted, the dycore constructs its default state.
             random_seed: Seed used by a dycore's default-state perturbations.
-            sim_time: Initial model time in seconds.
+            sim_time: Initial value of the backend's native elapsed-time
+                counter, in seconds. A fresh run started from the returned
+                state (``run``, ``bootstrap_state``, ``run_from_state``)
+                resets it to zero, because the exact clock starts at
+                ``start_time``; it survives only for callers that drive the
+                dycore directly.
 
         Returns:
             A backend-native state containing every tracer required by the
@@ -1345,7 +1350,7 @@ class Model:
 
         """
         run_state, predictions = self.run_from_state_with_carry(
-            initial_state,
+            self._at_fresh_clock(initial_state),
             forcing,
             save_interval=save_interval,
             total_time=total_time,
@@ -1771,6 +1776,25 @@ class Model:
             observer_xs=observer_xs,
         )
 
+    def _at_fresh_clock(self, dycore_state):
+        """Return ``dycore_state`` with its native elapsed counter at zero.
+
+        A fresh run starts the exact clock at ``start_time`` / step 0, and
+        that clock is the only authoritative one: forcing, output labels and
+        checkpoints read it, never the backend's float counter. A native
+        state carrying some other ``sim_time`` (a donor run's state, or
+        ``initial_state(sim_time=...)``) would otherwise advance a second
+        clock at a different offset for any dycore logic that consults it.
+        Normalising, rather than rejecting, is what importing a state as an
+        initial condition means throughout v3 — ``load_checkpoint(...,
+        as_initial_condition=True)`` resets the counter the same way — and
+        a native state records no absolute time to disagree with.
+        """
+        sim_time = self.dycore.sim_time(dycore_state)
+        if sim_time is None:
+            return dycore_state
+        return self.dycore.with_sim_time(dycore_state, jnp.zeros_like(sim_time))
+
     def bootstrap_state(self, initial_state=None) -> tuple[Any, Any]:
         """Build, install, and return an initial state/carry pair.
 
@@ -1799,6 +1823,7 @@ class Model:
             # Assume the caller has supplied a dycore-native state object.
             self.initial_nodal_state = self.dycore.to_physics_state(initial_state)
             dycore_state = initial_state
+        dycore_state = self._at_fresh_clock(dycore_state)
 
         # Eagerly build the physics carry. ``resume`` would otherwise build it
         # lazily on first call, but materialising it here makes the pytree

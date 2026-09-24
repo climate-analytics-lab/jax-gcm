@@ -75,3 +75,38 @@ def test_odd_length_mean_intervals_are_labelled_at_exact_half_seconds():
     np.testing.assert_array_equal(
         monthly.time_coverage.values.astype("timedelta64[ms]"),
         np.array([6000, 6000], dtype="timedelta64[ms]"))
+
+
+def test_fresh_run_normalises_a_native_state_clock():
+    """A native state carrying sim_time=10 d starts a fresh run at start_time.
+
+    The exact clock is authoritative, so the backend counter is reset rather
+    than left running 10 days ahead of it.
+    """
+    import jax
+
+    model = _model()
+    native = model.initial_state(sim_time=10 * 86400.0)
+    preds = model.run(initial_state=native, save_interval="6h",
+                      total_time="12h")
+    elapsed = model.run_state.time - model.start_time
+    exact = int(elapsed.days) * 86400 + int(elapsed.seconds)
+    assert exact == 12 * 3600
+    assert int(model.run_state.step) == 12 * 3600 // 180 // 60
+    native_after = float(jax.device_get(model.dycore.sim_time(model.dycore_state)))
+    assert abs(native_after - exact) < 1.0
+    np.testing.assert_array_equal(
+        preds.time_labels(),
+        np.array(["2000-01-31T06:00", "2000-01-31T12:00"], dtype="datetime64[ms]"))
+
+    # The low-level fresh-run door normalises the same way.
+    _, preds2 = model.run_from_state(native, model_forcing(model),
+                                     save_interval="6h", total_time="6h")
+    np.testing.assert_array_equal(
+        preds2.time_labels(),
+        np.array(["2000-01-31T06:00"], dtype="datetime64[ms]"))
+
+
+def model_forcing(model):
+    from jcm.forcing import default_forcing
+    return default_forcing(model.coords.horizontal)
