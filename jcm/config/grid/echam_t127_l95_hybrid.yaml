@@ -1,0 +1,19 @@
+# T127 / 95 hybrid levels — ECHAM's own T127 quadratic Gaussian grid
+# (384 lon x 192 lat, node-for-node the grid of ECHAM's T127GR15_jan_surf.nc).
+#
+# SUPPORTED, NOT VALIDATED: every boundary/forcing input exists for this grid
+# on the data mirror (terrain, SST/ice, emissions, DMS, the five Tegen dust
+# inputs, ozone, oxidants — so forcing=from_file / terrain=auto / the JAM
+# auto keys all resolve), but T127 is NOT a release-validation matrix
+# member and nothing here is calibrated or tuned for it: the physics runs
+# with its T63-tuned parameters (see docs/source/science/configurations.md).
+#
+# Time step: the shared 12-min default is validated only up to T106/T119.
+# Scaling that step by the advective CFL (dt ∝ 1/T) suggests
+# run.time_step=10 here; it is a starting point, not a tested setting.
+# Horizontal diffusion (diffusion=auto) uses ECHAM's own tabulated T127
+# e-folding times.
+vertical: hybrid
+layers: 95
+spectral_truncation: 127
+spmd_mesh: null

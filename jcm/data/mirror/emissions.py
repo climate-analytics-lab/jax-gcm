@@ -24,10 +24,11 @@ import glob
 import numpy as np
 import xarray as xr
 
-CEDS_ROOT = ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
-             "CMIP7/CMIP/PNNL-JGCRI/CEDS-CMIP-2025-04-18/atmos/mon")
-BB_ROOT = ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
-           "CMIP7/CMIP/DRES/DRES-CMIP-BB4CMIP7-2-0/atmos/mon")
+from jcm.data.mirror import sites
+
+CEDS_ROOT = sites.input4mips(
+    "CMIP7/CMIP/PNNL-JGCRI/CEDS-CMIP-2025-04-18/atmos/mon")
+BB_ROOT = sites.input4mips("CMIP7/CMIP/DRES/DRES-CMIP-BB4CMIP7-2-0/atmos/mon")
 
 SPECIES = ("SO2", "BC", "OC", "NH3")
 PI_YEARS = ("1850-01-01", "1859-12-31")

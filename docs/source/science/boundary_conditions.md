@@ -74,17 +74,28 @@ year into twelve equal slices rather than calendar months, so records 2-11
 switch 1-2 days late; that is shared by every monthly climatology in the model
 and is tracked in #805 rather than changed here. The region mask is categorical and is refused at load if it is
 not integral in [1, 8], which is what a linear or conservative regrid would
-produce. T63 is the native HAMMOZ grid; the T106 products are nearest-neighbour
-refinements of it, stamped as such in their file attributes — the T106
-dynamics therefore gains resolution that the dust source does not, and the
-``ndust = 3`` tuning polynomial the refined map feeds is itself only fitted up
-to T63 (see {doc}`aerosol`). No shipped JAM configuration composes dust
-above T63, so this bounds an unsupported combination rather than one the
-model offers.
+produce. The products come from the ECHAM-HAMMOZ input pool at the three
+resolutions HAMMOZ ships (``jcm/data/mirror/dust.py``, provenance in
+``jcm/data/mirror/SOURCES.md``). **T63 and T127** are native files of the same
+2016 processing. **T255** exists only in HAMMOZ's older ``v01_001`` input set,
+whose files are the same products under older names — checked value for value
+at T63 and T127, where both sets exist, and consistent with native T127 after
+coarsening (correlation ≥ 0.997) — except the roughness map, which that set
+carries as a different field; T255 roughness is therefore refined from T127
+and stamped as such. **T106**, which HAMMOZ does not ship, is remapped from the
+finest native file (T255) with the exact-overlap first-order conservative
+scheme CDO's ``remapcon`` uses — the scheme the HAMMOZ files themselves were
+made with — so area means are conserved to round-off. The categorical region
+mask is never remapped: it is regenerated on every grid from the eight
+``cdo setclonlatbox`` lon/lat boxes recorded in the HAMMOZ file's history
+(Huneeus et al. 2011), which reproduce the native T63 and T127 masks cell for
+cell. The data are therefore at least as fine as the dynamics on every
+published Gaussian grid; what does not carry over is the ``ndust = 3`` tuning
+polynomial the maps feed, fitted only up to T63 (see {doc}`aerosol`).
 
-Two consequences of the T63-only inputs reach the **cubed-sphere** configurations
-in particular. First, the mirror publishes these five products at T63 and T106
-and **nowhere else** (``jcm/data/mirror_manifest.json``): there is no ne30pg3
+Two consequences reach the **cubed-sphere** configurations in particular.
+First, the mirror publishes these five products on the Gaussian grids
+(T63/T106/T127/T255) and **nowhere else** (``jcm/data/mirror_manifest.json``): there is no ne30pg3
 dust bundle, so ``auto`` resolves to nothing on the pySES backend and a shipped
 ``+configuration=ma-ne30-l{47,95}`` run emits **no dust at all** — its only
 online aerosol source is wind-driven Gong sea salt. Second, a T63 or T106 file
@@ -92,11 +103,10 @@ supplied explicitly is sampled onto the pySES physics columns, not regridded to
 them: the four continuous fields bilinearly and the categorical ``regions`` mask
 nearest-neighbour, since bilinear sampling would invent fractional region
 indices that the integrality check at load then refuses
-(``jcm/dycore/pyses/forcing.py``). An ne30 dust field is thus two removes from a
-native one — a nearest-neighbour refinement of T63, then a column sample of
-that — which is a stronger version of the same T106 caveat, not a different
-one. Native HAMMOZ inputs, or the 0.5-degree originals the T63 files were made
-from, would close both.
+(``jcm/dycore/pyses/forcing.py``). A hand-supplied T127 or T255 file (finer than
+ne30's ~1°) is the closest an ne30 run can get to a native field; a conservative
+remap onto the pg3 cells, or the 0.5-degree originals the HAMMOZ files were made
+from, would close the gap.
 
 **Status & known limitations.** The analytic-ozone fallback is a real
 low-fidelity path (loud warning); a run that logs the analytic-ozone warning is

@@ -194,6 +194,37 @@ def _memory_map_count():
         return None
 
 
+def _load_malloc_trim():
+    """Return glibc's ``malloc_trim``, or ``None`` where there is no glibc.
+
+    ``malloc_trim(0)`` hands the free pages at the top of every malloc arena
+    back to the OS. Without it a pytest process's RSS only ratchets up: the
+    per-test arrays, traces and the executables ``jax.clear_caches()`` drops
+    are freed to the allocator, which keeps them mapped, so the next test's
+    differently-sized allocations grow the heap again instead of reusing
+    them.
+    """
+    import ctypes
+    import ctypes.util
+
+    name = ctypes.util.find_library("c")
+    if not name or sys.platform == "darwin":
+        return None
+    try:
+        return getattr(ctypes.CDLL(name), "malloc_trim", None)
+    except OSError:
+        return None
+
+
+_malloc_trim = _load_malloc_trim()
+
+
+def _release_freed_heap():
+    """Return freed heap pages to the OS (no-op without glibc)."""
+    if _malloc_trim is not None:
+        _malloc_trim(0)
+
+
 # The kernel caps the mappings a process may hold (``vm.max_map_count``,
 # 65,530 by default on older kernels), and every compiled XLA CPU executable
 # holds several. A worker running op-by-op derivative checks compiles one
@@ -236,6 +267,11 @@ def pytest_runtest_teardown(item, nextitem):
     if (not over_maps and nextitem is not None
             and _memory_group(item) == _memory_group(nextitem)):
         return
+    # At every boundary, not only when the caches are dropped: most of what
+    # a finished class leaves behind is already free, just not returned to
+    # the OS, and it is that retained heap that drives a long xdist worker
+    # into the runner's memory ceiling.
+    _release_freed_heap()
     rss = _rss_bytes()
     if over_maps:
         rss = None      # clear now, whatever the growth budget says
@@ -250,4 +286,5 @@ def pytest_runtest_teardown(item, nextitem):
     import jax
     jax.clear_caches()
     gc.collect()
+    _release_freed_heap()
     _rss_at_last_clear = _rss_bytes()

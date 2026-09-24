@@ -342,7 +342,10 @@ SPEEDY output flattening, hyperdiffusion coverage, and backlog fixes
   than the model grid (deriving them instead) rather than crashing later
   in physics (#578).
 - The conservative regridder accepts rectilinear sources (1-D lon/lat
-  axes + 2-D area, #533).
+  axes + 2-D area, #533) and remaps them with the exact-overlap first-order
+  conservative operator (CDO ``remapcon``'s scheme), exact at any resolution
+  ratio; unstructured sources keep nearest-cell binning, but a target cell no
+  source centre reaches takes the nearest source value instead of zero.
 - **JAX persistent compilation cache on by default** (#592):
   ``$SCRATCH/jcm-jax-cache`` (else ``~/.cache/jcm/jax``), relocatable
   via ``JCM_CACHE_DIR``, disable with ``JCM_CACHE_DIR=off``. Entries
@@ -421,6 +424,13 @@ Dynamical cores and grids
   an ``ne30`` L95 dycore preset.
 - **The Hydra** ``dycore`` **group selects the backend**, dispatched by
   ``jcm.runners.build_model``; a whole pySES run is one command.
+- **ECHAM T127 and T255 grids** — *supported, not validated*.
+  ``get_coords(spectral_truncation=127|255)`` builds ECHAM's own 384×192 /
+  768×384 Gaussian grids (dinosaur has no ``Grid.T127``/``T255`` factory; they
+  are constructed like T63), with ``grid=echam_t{127,255}_l{47,95}_hybrid``
+  presets. Every climatological and static input is on the data mirror for
+  them; they are outside the release matrix and nothing is tuned for them —
+  see :doc:`science/configurations`.
 
 Diagnostics and output
 """"""""""""""""""""""
@@ -646,6 +656,25 @@ corrections, listed here because they change climate:
   small islands retain orography).
 - PI (1850s; SST/ice = 1870–1879 mean) and PD (2005–2014) eras ship for
   every product.
+- The mirror publishes ``t127`` and ``t255`` bundles (terrain, PI/PD
+  forcing, emissions, DMS, dust, and ozone/oxidants at L47/L95); the yearly
+  transient series stay at ``t63``/``t106`` (#888). The five Tegen dust inputs
+  now come from the ECHAM-HAMMOZ pool at every resolution it ships — native at
+  T63, T127 and T255 — and the **t106 dust bundles change**: they are
+  conservatively coarsened from the native T255 files instead of
+  nearest-neighbour refined from T63 (area means now match T63 to round-off;
+  RMS departure from a T127-derived reference drops ~3×), and the region mask
+  is regenerated from HAMMOZ's own lon/lat-box recipe (566 of 51,200 T106
+  cells change region along box edges). The builder runs on NCAR Glade or DKRZ
+  Levante (``jcm/data/mirror/sites.py``) and adds a grid with ``--grids``
+  without rebuilding the others.
+- **The t63/t106 emission bundles change** (``emissions_{pi,pd}`` and every
+  ``emissions_amip`` year): they are remapped with the exact-overlap
+  conservative operator instead of nearest-centre binning, which carried
+  1-3 % global-mean flux errors and misplaced point sources by a cell (up to
+  ~55 % of a field's maximum locally). Global-mean fluxes now agree across
+  every published grid to round-off; the release-validated T63 JAM
+  configurations see correspondingly changed emissions.
 - The native ne30pg3 terrain published as ``bundles/ne30pg3/sso.nc``
   carried a DEM-validity placeholder ``lsm`` (99.8 % land) instead of a
   land-sea mask; it is replaced by the assembled
@@ -768,12 +797,12 @@ Accepted limitations (proposed)
   column hosts for ``AerocomDiagnostics``, ``MoistAirColumnState``,
   ``NudgingTerm`` and ``UpperSponge`` only. The composability claim is
   narrower than it reads (#626).
-- **Native HAMMOZ dust inputs exist only at T63.** T106 is a
-  nearest-neighbour refinement, and there is no ne30 product at all — so a
-  shipped ne30 configuration has the dust term composed but inert. Both the
-  inputs and the emission calibration are T63 quantities, which is the
-  resolution every shipped JAM configuration runs at; online aerosol on the
-  cubed sphere is separate work. See :doc:`science/boundary_conditions`.
+- **There is no ne30 dust product.** The HAMMOZ dust inputs are native at
+  T63, T127 and T255 (T106 conservatively derived), but nothing is published
+  on the cubed sphere, so a shipped ne30 configuration has the dust term
+  composed but inert. The emission calibration is a T63 quantity, which is
+  the resolution every shipped JAM configuration runs at; online aerosol on
+  the cubed sphere is separate work. See :doc:`science/boundary_conditions`.
 - **The release-validation matrix has three gaps**: the T106 members' multi-GPU
   mesh configurations have never been run for a full year, ``echam-jam`` at
   L95 needs L95 oxidant and ozone inputs staged, and the single-column
@@ -883,6 +912,17 @@ dinosaur is pinned to a release
   1.5.0 also fixes the hybrid-coordinate temperature equation
   (neuralgcm/dinosaur#144), so results on ECHAM hybrid levels differ from
   runs made with earlier dinosaur builds; sigma-level runs are unchanged.
+- jcm runs dinosaur's float32 GPU matmuls at ``Precision.HIGHEST`` instead of
+  1.5.0's bfloat16-emulation defaults. On jaxlib < 0.11.2, an XLA miscompile
+  of the default corrupts the inverse transform of log surface pressure, and
+  hybrid-level GPU runs drift mass from the northern to the southern
+  hemisphere within weeks (a −116 hPa NH−SH surface-pressure asymmetry on a
+  Held-Suarez aquaplanet, ~938 hPa at 40–60°N with ECHAM physics). The
+  3-pass default used with ``spmd_mesh`` also visibly alters the solution on
+  GPU. **GPU runs made with dinosaur 1.5.0 before this fix should be
+  repeated**; CPU runs are unaffected. The cost is +2 % per simulated day
+  single-device and +8 % with SPMD on a dycore-only case
+  (neuralgcm/dinosaur#147).
 
 Other floors that are floors for a reason:
 

@@ -47,11 +47,11 @@ from __future__ import annotations
 import numpy as np
 import xarray as xr
 
+from jcm.data.mirror import sites
 from jcm.data.regridding import (conservative_to_gaussian, fill_nearest,
                                  interp_to)
 
-AMIP_ROOT = ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
-             "CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10")
+AMIP_ROOT = sites.input4mips("CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10")
 TOS = (f"{AMIP_ROOT}/ocean/mon/tos/gn/v20250807/"
        "tos_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-10_gn_"
        "187001-202212.nc")
