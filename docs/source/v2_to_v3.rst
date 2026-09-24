@@ -1001,25 +1001,24 @@ VMRs) while the ledger covers only ``specific_humidity`` and
 ``qc``/``qi``/``qr``/``qs``. JAM aerosol and gas tracers are deliberately
 **not** capped; their removal is bounded where it is produced.
 
-Native HAMMOZ dust inputs exist only at T63
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+No ne30 dust product; dust tuning is a T63 quantity
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-*Documented limitation (proposed) — #810, with the calibration half in #808.*
+*Documented limitation (proposed) — the calibration half follows #808.*
 
-The five HAMMOZ soil and source fields exist on disk only at T63. T106 is
-published as a **nearest-neighbour refinement** of T63 — the honest choice,
-since conservative regridding cannot refine a grid and the region mask is
-categorical, but not the native field HAMMOZ would use. So T106 gains
-resolution in the dynamics and none in the dust source, and the ``ndust = 3``
-tuning polynomial it feeds is itself fitted only up to T63.
+The five HAMMOZ soil and source fields are published natively at T63, T127 and
+T255 (the resolutions the ECHAM-HAMMOZ input pool ships), and T106 is
+conservatively coarsened from the T255 files, so every Gaussian grid carries a
+dust source at least as fine as its dynamics. The ``ndust = 3`` tuning
+polynomial those maps feed is fitted only up to T63, and T127/T255 are
+supported-but-untuned grids.
 
 There is **no ne30 dust product at all**, so ``auto`` resolves to nothing on
 the pySES backend: a shipped ``+configuration=ma-ne30-l{47,95}`` run has the
 dust term composed but inert, leaving online Gong sea salt as its only aerosol
 source. A file supplied by hand is sampled onto the physics columns —
-continuous fields bilinearly, the categorical region mask nearest-neighbour —
-so an ne30 dust field is two removes from a native one. See
-:doc:`science/boundary_conditions` and :doc:`science/aerosol`.
+continuous fields bilinearly, the categorical region mask nearest-neighbour.
+See :doc:`science/boundary_conditions` and :doc:`science/aerosol`.
 
 Validation gaps in the release matrix
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

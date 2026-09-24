@@ -8,8 +8,15 @@ import os
 from pathlib import Path
 
 
-def build_registry(root: str) -> dict:
-    reg = {"repo": "climate-analytics-lab/jax-gcm-data", "files": {}}
+def build_registry(root: str, base: dict | None = None) -> dict:
+    """Hash every file under ``root``; entries override those of ``base``.
+
+    ``base`` is the published registry when ``root`` is a partial upload tree
+    (a ``--grids`` build): its entries for files not rebuilt are kept, so the
+    uploaded ``registry.json`` still covers the whole mirror.
+    """
+    reg = {"repo": "climate-analytics-lab/jax-gcm-data",
+           "files": dict((base or {}).get("files", {}))}
     root_p = Path(root)
     for p in sorted(root_p.rglob("*")):
         if not p.is_file() or p.name == "registry.json":
@@ -24,10 +31,11 @@ def build_registry(root: str) -> dict:
     return reg
 
 
-def write_registry(root: str) -> str:
+def write_registry(root: str, base: dict | None = None) -> str:
+    """Write ``root/registry.json`` (merged onto ``base``, see build_registry)."""
     out = os.path.join(root, "registry.json")
     with open(out, "w") as f:
-        json.dump(build_registry(root), f, indent=1, sort_keys=True)
+        json.dump(build_registry(root, base), f, indent=1, sort_keys=True)
     return out
 
 

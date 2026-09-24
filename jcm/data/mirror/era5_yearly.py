@@ -45,10 +45,10 @@ import xarray as xr
 from jcm.data.mirror.amip_yearly import _TIME_ENC, ghg_ppmv
 from jcm.data.mirror.bundles import (_to_lonlat, land_surface_fields,
                                      translate_land)
-from jcm.data.mirror.era5_land import FIELDS, RDA_MODA, _open_year
+from jcm.data.mirror.era5_land import _RDA, FIELDS, RDA_MODA, _open_year
 from jcm.data.regridding import fill_nearest, interp_to
 
-RDA_AN_SFC = "/glade/campaign/collections/rda/data/d633000/e5.oper.an.sfc"
+RDA_AN_SFC = f"{_RDA}/d633000/e5.oper.an.sfc" if _RDA else None
 
 #: 6-hourly analysis fields for the ocean half of the bundle.
 AN_CODES = {"sstk": "128_034_sstk", "ci": "128_031_ci"}
