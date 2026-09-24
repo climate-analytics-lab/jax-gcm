@@ -1,0 +1,46 @@
+# SPEEDY physics forced by externally prescribed surface fluxes (jax-gcm#301).
+#
+# Identical to ``speedy.yaml`` except the surface-flux term runs in forced
+# mode: the bulk-formula turbulent fluxes (stress, sensible heat,
+# evaporation) are REPLACED by the ``forcing.prescribed_surface_flux``
+# fields at the same seam the interactive values occupy — radiative and
+# skin-temperature bookkeeping stays interactive, and the published
+# ``surface_exchange`` struct echoes the prescribed values (see
+# ``jcm.physics.surface.speedy_surface_flux.get_surface_fluxes`` and
+# docs/source/design/surface_exchange.md for units/signs: SHF [W/m2] and
+# evaporation [kg/m2/s] positive up, stress [N/m2] positive down).
+#
+# Example, a constant-flux aquaplanet smoke run:
+#
+#     python -m jcm.main physics=speedy-forced-flux \
+#         +forcing.prescribed_surface_flux.constants.sensible_heat_flux=10.0 \
+#         +forcing.prescribed_surface_flux.constants.evaporation=3.0e-5 \
+#         +forcing.prescribed_surface_flux.constants.stress_u=0.05 \
+#         +forcing.prescribed_surface_flux.constants.stress_v=0.0
+
+checkpoint_terms: true
+
+terms:
+  speedy_flags:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyFlags
+  speedy_forcing:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyForcing
+  speedy_humidity:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyHumidity
+  speedy_convection:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyConvection
+  speedy_large_scale_condensation:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyLargeScaleCondensation
+  speedy_clouds:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyClouds
+  speedy_shortwave_radiation:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyShortwaveRadiation
+  speedy_downward_longwave:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyDownwardLongwaveRadiation
+  speedy_surface_flux:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedySurfaceFlux
+    prescribed_fluxes: true
+  speedy_upward_longwave:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyUpwardLongwaveRadiation
+  speedy_vertical_diffusion:
+    _target_: jcm.physics.speedy.speedy_terms.SpeedyVerticalDiffusion

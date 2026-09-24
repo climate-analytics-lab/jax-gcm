@@ -80,7 +80,8 @@ def _build_model_and_step(physics_factory, n_steps: int):
     """
     coords = get_coords(get_echam_levels(47), spectral_truncation=63)
     terrain = TerrainData.from_file(_T63_BC_DIR / "terrain.nc", coords=coords)
-    forcing = ForcingData.from_file(_T63_BC_DIR / "forcing.nc", coords=coords)
+    forcing = ForcingData.from_file(
+        _T63_BC_DIR / "forcing.nc", coords=coords, align_mode="wrap_year")
     physics = physics_factory()
     model = Model(coords=coords, terrain=terrain, physics=physics, time_step=12)
     # Bootstrap from the balanced-isothermal start so the step loop below can

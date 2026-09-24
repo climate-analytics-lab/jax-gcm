@@ -16,7 +16,25 @@ dinosaur>=1.5.0
 # both. (0.12.0 is unusable here anyway — it imports the long-gone private
 # `jax._src.core.mutable_array`.)
 flax>=0.12.1
-jax-datetime
+# jax arrives transitively (via flax, dinosaur, jax-rrtmgp, ...) but jcm pins it
+# DIRECTLY here because none of those declare an upper bound and the 0.11 line is
+# broken for us: jax 0.11.x removed `jax.experimental.hijax.HiPrimitive`, which
+# flax's nnx layer subclasses at *import* time
+# (`flax/nnx/variablelib.py: class NewVariable(hjx.HiPrimitive)`), so `import flax`
+# — and therefore `import jcm` — raises `AttributeError` on ANY flax against jax
+# 0.11.x (verified for both 0.12.8 and 0.12.9). Without this bound a clean-env
+# install on Python >= 3.12 deterministically resolves the newest flax (0.12.9,
+# which itself requires jax>=0.11.1) onto jax 0.11.2 and cannot import; on Python
+# 3.11 the break is only hidden because jax 0.11.x requires Python >= 3.12, so the
+# resolver silently falls back to 0.10.2 — the fix must live in metadata, not rely
+# on that accident. Capping flax alone is NOT enough (flax 0.12.8 breaks on jax
+# 0.11.2 too); the untested-and-broken axis is jax, so we cap it. Floor 0.10 is the
+# validated minor line (shared env and CI both run 0.10.2); revisit the ceiling
+# once jcm is validated on jax 0.11+ (needs flax to also gain a jax upper bound or
+# the hijax API to stabilise). See #853.
+jax>=0.10,<0.11
+# Exact integer day/second clocks, comparisons and interpolation.
+jax-datetime>=0.1.0
 tree-math
 hydra-core
 
@@ -34,5 +52,5 @@ myst-parser  # Markdown source for design/* docs
 
 # Radiation scheme
 jax-solar  # Requires Python 3.11+
-jax-rrtmgp>=0.3.0  # 0.3.0 stops overwriting the TOA fluxes with a quadratic extrapolation (jax-gcm#711) and splits a prescribed toa_flux_lw across g-points; 0.2.1: per-call sfc_alb/sfc_emis overrides for the per-column surface coupling; 0.2.0: gas-optics gather + shared-table fixes
+jax-rrtmgp>=0.4.0  # 0.4.0 vectorizes the minor-gas absorbers — 2x radiation solve on A100 (jax-rrtmgp#27/#31), 1.59x whole-model on t63-echam-rrtmgp f64 — and adds the opt-in gpt_chunk knob (jax-rrtmgp#32); 0.3.0 stops overwriting the TOA fluxes with a quadratic extrapolation (jax-gcm#711) and splits a prescribed toa_flux_lw across g-points; 0.2.1: per-call sfc_alb/sfc_emis overrides for the per-column surface coupling; 0.2.0: gas-optics gather + shared-table fixes
 huggingface_hub

@@ -37,7 +37,7 @@ interpolation and an on-calendar start date:
 
 ```bash
 python -m jcm.main forcing=amip forcing.years=[1979,1983] \
-    run.start_date=1979-01-01 grid=echam_t63_l47_hybrid ...
+    run.start_time=1979-01-01 grid=echam_t63_l47_hybrid ...
 ```
 
 Built with `python -m jcm.data.mirror.build_mirror --stage amip
@@ -62,9 +62,17 @@ cannot flicker year-to-year. Built with `--stage era5-transient
 --years 1979,2024` (buildable from 1941; land monthly means are reduced
 from 6-hourly analyses outside the 1979–2022 pre-computed range; GHGs
 are trend-extrapolated past 2022, stamped in the attrs).
-Supported grids: `t63`, `t106` (Gaussian) and `ne30pg3` (native columns,
-`terrain.nc` only — the pySES path interpolates the Gaussian forcing
-files and uses the native CESM CEDS emissions product). The ne30pg3
+Supported grids: `t63`, `t106`, `t127`, `t255` (Gaussian) and `ne30pg3`
+(native columns, `terrain.nc` only — the pySES path interpolates the Gaussian
+forcing files and uses the native CESM CEDS emissions product). `t127` and
+`t255` are ECHAM's own T127/T255 grids (384×192 and 768×384) and are
+**supported, not validated**: every climatological and static bundle above
+exists for them, so `grid=echam_t{127,255}_l{47,95}_hybrid` resolves all of its
+inputs, but they are not release-matrix members and nothing is tuned for them
+(see {doc}`../science/configurations`). The yearly transient series
+(`forcing_amip`, `emissions_amip`, `ozone_amip`, `forcing_era5`) are published
+for `t63` and `t106` only — `TRANSIENT_GRIDS` in `build_mirror.py`, tracked
+for the new grids in #888. The ne30pg3
 `terrain.nc` is fully assembled: GMTED2010 SSO statistics, land fraction
 from the CESM topo `LANDFRAC` (SSO zeroed below 10% land), and exact
 GLL-node orography (`orog_gll` = `PHIS_gll`/g).
@@ -149,11 +157,102 @@ terrain = bundle_file("t63", "terrain.nc")     # cached HF download
 Fetch once on a node with internet; compute nodes then hit the cache.
 `registry.json` at the dataset root records sha256 + size for every file.
 
+## Hosted initial states
+
+`bundles/<grid>_<levels>/init_states/` holds model states rather than
+boundary conditions: `jcm.checkpoint.save_checkpoint` msgpack files a run can
+warm-start from with `init=from_state init.file=hf://...`. They are hosted
+rather than committed because they run from a few MB to several GB and are
+regenerated whenever the physics they describe moves.
+
+Two kinds live there today:
+
+- **Equilibrated states** from the #638 validation campaign
+  (`echam_{1m,2m}_macsp_year2.msgpack`, `speedy_year1.msgpack`). These are
+  **unreadable by current jcm** and are kept only as provenance: they predate
+  the checkpoint schema stamp, so they carry no field names, *and* they are
+  structurally stale — an ECHAM T63L47 donor stores 118 physics-carry arrays
+  where the current model expects 146 (51 vs 56 for SPEEDY). `load_checkpoint`
+  refuses a structural difference it cannot name rather than guessing, which
+  is the correct behaviour and not a bug to work around. Replacing them is
+  issue #762.
+- **Regression-fixture states**, `<member>_fixture_<digest>.msgpack`, one per
+  supported-matrix member, written by
+  `jcm.data.test.release_matrix.generate_stats` and consumed by the
+  GPU-gated regression in `jcm/model_test.py`. Their *bands* stay in the
+  repo (tens to a few hundred KB, so a change is reviewable as a diff);
+  only the state is hosted. A member's band file and its state are a matched pair — the bands
+  describe the window that follows that exact state — so they are regenerated
+  together, one command per member:
+
+  ```bash
+  CUDA_VISIBLE_DEVICES=<idx> python -c "import os; os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
+  ```
+
+  in a CI-parity environment (a fresh venv with `pip install -e ".[mam4]"`
+  and the pinned CUDA jax — never a shared or long-lived one: bands drawn
+  under a different jax-rrtmgp release fail a correct model across the whole
+  column). The preallocation setting must precede the jcm import, because
+  importing jcm initialises the CUDA backend (#859) and the default would
+  hand 75 % of the card to the orchestrator; `generate` refuses to run
+  without it. See `tools/release_validation/README.md` for re-deriving bands
+  on an already-published state.
+
+  and the resulting `<member>_fixture_<digest>.msgpack` is uploaded
+  additively under the member's `init_states/` prefix. The digest is in the
+  name because `fetch` resolves cache-first and never revalidates a hit: a
+  stable name could not be republished without leaving every already-warm
+  cache pairing an old state with new bands. The band file records the exact
+  path it was generated against.
+
+`jcm.data.remote.fetch` resolves these cache-first like any other mirror file,
+so a warm cache needs no network and a cold cache on an internet-less node
+fails with the prefetch instructions rather than a bare error.
+
 ## Rebuilding the mirror
 
-The builders live in `jcm/data/mirror/` and run on NCAR Glade, where all
-sources are on disk (`jcm/data/mirror/SOURCES.md` is the verified path
-inventory):
+The builders live in `jcm/data/mirror/` (`jcm/data/mirror/SOURCES.md` is the
+verified path inventory). They run on either of two sites, whose source roots
+are declared once in `jcm/data/mirror/sites.py` (auto-detected, or
+`JCM_MIRROR_SITE`):
+
+- **NCAR Glade** holds every source except the ECHAM-HAMMOZ pool, so it can
+  rebuild Tier A and every bundle except the dust inputs.
+- **DKRZ Levante** holds the CMIP7 input4MIPs tree and the ECHAM-HAMMOZ and
+  ECHAM6 pools under `/pool/data`, but not the RDA ERA5 archive. It therefore
+  does not rebuild Tier A: `--stage pull` fetches the published Tier A products
+  (only the PI/PD climatology arrays of the emissions stores) and
+  `registry.json`, so a new grid regrids from exactly the data the published
+  grids were built from. The Lana DMS file and GMTED are downloaded once into
+  `$JCM_MIRROR_ROOT/sources/`; the two WACCM CCMI REFC1 decade oxidant files
+  are not on the public CESM inputdata server and are copied from Glade (the
+  public `oxid_ozone_WACCM_CCMI_*_cycle` files are a different run, ccmi30
+  1995–2004, and are not substitutes).
+
+`--grids` restricts every stage to a subset of the published grids, which is how
+a grid is added without rebuilding or re-uploading the others. The registry
+stage then merges the new hashes onto the pulled `registry.json` rather than
+rewriting it from the partial upload tree. The t127/t255 bundles were built on
+Levante with
+
+```bash
+python -m jcm.data.mirror.build_mirror --grids t127,t255 \
+    --stage pull,sso,ozone,aux,dust,bundles
+python -m jcm.data.mirror.build_mirror --grids t106 --stage dust
+python -m jcm.data.mirror.build_mirror --grids t106,t127,t255 --stage registry
+```
+
+and the port was checked by rebuilding the t63 SSO, ozone, oxidant, DMS,
+terrain, forcing and emissions bundles the same way and comparing them with the
+published Glade-built files (identical up to ~3e-8 relative, float round-off).
+The t63/t106 emission bundles were then rebuilt with the exact conservative
+remap — `--stage emissions` from the Levante input4MIPs tree (it replaces the
+pulled climatology-only stores with full ones; their climatology arrays came
+out identical to the published Tier A), then
+`--grids t63,t106 --products emissions --stage bundles,amip`; `--products`
+limits those stages to the named bundle products so unchanged files are not
+republished. Any partial build — `--grids`, `--products`, or pulled Tier A —
+stages no Tier A and merges its registry onto the published one.
 
 - `sso.py` — streams the GMTED2010 DEM in latitude strips, accumulating
   Lott–Miller gradient-tensor statistics onto Gaussian bins or, for
@@ -165,9 +264,23 @@ inventory):
   levels.
 - `emissions.py` — CEDS sector sums and BB4CMIP7 fluxes streamed to zarr.
 - `bundles.py` — per-grid assembly: bilinear for smooth fields,
-  cos-lat-weighted conservative binning for emissions fluxes,
-  nearest-ocean fill for AMIP SST under land.
-- `registry.py` — hashes the upload tree.
+  exact-overlap first-order conservative remapping for emission fluxes
+  (`jcm.data.regridding.conservative_to_gaussian`; area means conserved to
+  round-off on every grid), nearest-ocean fill for AMIP SST under land.
+  Nearest-centre binning, used before, left whole latitude rows of T255
+  empty (its 0.47° cells are finer than the 0.5° CEDS source) and carried
+  1-3 % global-mean errors on t63/t106; those emission bundles were rebuilt
+  with the exact scheme.
+- `dust.py` — the five Tegen inputs from the ECHAM-HAMMOZ pool: native at
+  T63, T127 and T255 (the T255 files are the older `v01_001` lineage, verified
+  to be the same products where both lineages exist), exact-overlap
+  conservative from the finest native file elsewhere (T106 from T255;
+  T255 roughness is refined from T127, the one product HAMMOZ never shipped at
+  T255, and says so in its attributes), and the region mask regenerated on every
+  grid from the `setclonlatbox` recipe in the HAMMOZ file history, which
+  reproduces the native T63/T127 masks cell for cell.
+- `registry.py` — hashes the upload tree (merged onto the published registry
+  for a `--grids` build).
 - `build_mirror.py --stage upload` — pushes to the HF dataset with
   retries (the xet backend has aborted 44k-file pushes with transient
   timeouts; uploads resume, committed files are skipped). Deliberately
@@ -177,6 +290,10 @@ inventory):
 
 ## Known caveats
 
+- **T127/T255 terrain is GMTED-derived like every other grid.** ECHAM's own
+  `T127GR15_jan_surf.nc` / `T255_jan_surf.nc` (in `/pool/data/ECHAM6`) carry
+  a full SSO set too; they are used only as a cross-check of the GMTED
+  statistics, so that every published grid derives its orography the same way.
 - **PI SST/sea-ice is the 1870–1879 AMIP mean** — the earliest observed
   decade; no observational 1850 state exists.
 - **Bundled oxidants come from the WACCM CCMI REFC1 decade
@@ -193,6 +310,18 @@ inventory):
   `snowc` is likewise the snow-cover fraction `min(1, sd/sd2sc)`. Both
   follow the packaged files' conventions exactly (see the `bundles.py`
   docstring).
+- `soilw_rel` is a **second, independent** soil-moisture channel in the
+  same forcing bundle, not a refinement of `soilw_am`: ECHAM's relative
+  soil wetness `ws/wsmx = min(1, swvl1/θ_cap(slt))` — the ERA5 0–7 cm
+  volumetric content over the HTESSEL field capacity of that cell's own
+  soil type (Balsamo et al. 2009). That is the layer and the
+  normalisation the Tegen dust saturation cut-off is defined against, so
+  `DustEmissions` reads it and SPEEDY's land evaporation keeps
+  `soilw_am`. It needs one extra ERA5 invariant, the soil-type code
+  `slt` (`128_043_slt`), so a build tree whose Tier A `era5` product
+  predates the channel must re-run `--stage era5` before `--stage
+  bundles`. Forcing files without the channel still load — the dust term
+  warns and falls back.
 - The packaged T63 `orosig` was ≈0 everywhere; the GMTED-derived bundles
   supply a real mean-slope field, so SSO gravity-wave drag will behave
   differently (more drag) than with the packaged terrain. The gradient

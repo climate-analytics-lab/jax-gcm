@@ -13,6 +13,86 @@ release or merging `dev` → `main`.
 | echam-jam-t63-{l47,l95} | `echam-jam` | T63 | RRTMGP + JAM |
 | scm | full ECHAM+JAM physics | 1 column L47 | `scm_check.py` |
 
+## The fast regression fixtures
+
+The year-long runs above are the release gate; they are far too slow to catch
+an accidental change during development. The same matrix therefore also backs
+a **fast** regression — a few minutes per member — in
+`jcm/model_test.py::test_release_matrix_default_statistics`, gated behind
+`JCM_RUN_GPU_INTEGRATION_TESTS=1`.
+
+Each member's fixture is a pair: the **bands** (`<member>_statistics.nc`,
+committed under `jcm/data/test/release_matrix/`, tens to a few hundred KB so a
+change shows up as a reviewable diff) and the **init state** it resumes from
+(hosted on the data mirror under `bundles/<grid>_<levels>/init_states/`, since
+it runs from a few MB to several GB). The bands describe the window that follows that exact state, so the two
+are only meaningful together and are regenerated together — one command per
+member, on a GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=<idx> python -c "import os; os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
+```
+
+The `os.environ` assignment must precede the jcm import: importing jcm
+initialises the JAX CUDA backend (#859), and the default preallocates 75% of
+the card to the orchestrating process, starving the workers that actually
+integrate the model. `generate` refuses to run without it.
+
+**Generate in a CI-parity environment** — a fresh venv with
+`pip install -e ".[mam4]"` plus a CUDA jax build of the pinned version
+(`pip install "jax[cuda12]==<the pinned jax>"`), so every dependency resolves
+to the repo's pins — **never in a shared or long-lived environment**. The bands
+are only valid under the dependencies the test later runs with: a jax-rrtmgp
+release a pin has moved past shifts the radiation of the whole column, so bands
+drawn under it fail a correct model across the whole column, indistinguishably
+from a physics regression. Each band file records the versions it was drawn under
+(`bands_environment`) and the ones its init state was spun up under
+(`init_state_environment`); check them first when a whole member fails
+together. To re-derive bands on an already-published state, pass
+`write_state=False` with the state in `out_dir`, plus
+`state_environment=<its init_state_environment>` so that record is kept.
+
+then upload the file it wrote — `<member>_fixture_<digest>.msgpack`, whose
+name carries a digest of its own contents — additively under that member's
+`init_states/` prefix (see `docs/source/design/data_mirror.md`). Upload it
+under exactly the name `generate` produced: the band file records that path,
+and `jcm.data.remote.fetch` resolves cache-first without revalidating, so a
+stable name could not be republished without leaving already-warm caches
+pairing an old state with new bands.
+
+Before uploading, validate the new pair locally: point
+`JCM_FIXTURE_STATE_DIR` at the directory holding the generated state(s) and
+run the test. With it set, each member reads its state from there (digest
+checked) and never from the mirror; a member whose state is absent is skipped,
+named. A band file marked `hosted_state="pending"` (a state deliberately not
+published yet) is skipped for the same reason when its state is not local, but
+is validated like any other member when `JCM_FIXTURE_STATE_DIR` holds it.
+
+Every band is an area-weighted global mean — the grid's Gauss-Legendre
+quadrature weights, via `jcm.analysis.global_mean`, never an equal-weight mean
+over latitude rings — computed by the one reduction that both `generate` and
+the test use. Band number concentrations are column burdens weighted by the layer air mass
+`dp/g` (the `pressure_thickness` diagnostic): `air_density * layer_thickness`
+is not a mass weight, because `layer_thickness` is floored at 10 m. Every
+reduction propagates NaN, so a partially non-finite run fails its member
+rather than averaging the finite cells into a band-sized mean.
+
+Both are built through the member's **validated preset**, the same recipe this
+directory's `matrix.yaml` names, so the regression covers what the project
+claims to support rather than a composition invented for the test.
+
+Two things to know before reading a failure:
+
+- These are **regression** bands, not a climatology. They come from a short
+  window after a short spin-up from the preset's own init, because the
+  equilibrated states on the mirror are unreadable by current jcm (#762). A
+  failure means "something changed", not "the physics is wrong".
+- The **JAM members' bands describe the post-dust-retune aerosol climate**
+  (#787/#808/#840): the relative-soil-wetness saltation gate and the
+  `nduscale_reg` recalibration for jcm's winds. They were regenerated against
+  that code and the rebuilt forcing bundle, so a failure is a regression, not
+  the known-provisional state the pre-#840 bands were.
+
 ## Workflow
 
 ```bash
@@ -45,12 +125,49 @@ design until fixed or the matrix declares them expected. Post the table
 as-is.
 
 Gates: NaN scan on every saved variable; TOA net |≤10| W/m²; precip
-2–4 mm/day; cloud cover 0.4–0.8; near-surface T 278–295 K; AOD₅₅₀
+2–4 mm/day; cloud cover 0.5–0.9 (SPEEDY 0.4–0.8, see below);
+near-surface T 278–295 K; AOD₅₅₀
 0.02–0.35; JAM per-species burdens vs loose AeroCom ranges. `--last-n 40`
 scores the settled ~200 days of a from-zero spin-up year (full spin-up is
 ~9 months — see #638). The checker speaks both the ECHAM and SPEEDY field
 dialects. Post the table to the release issue; compare settled sim-days/hr
 against the baselines in #638 (>15% drop = runtime regression).
+
+**Cloud cover** is ECHAM's own total cover `aclcov` — maximum-random
+overlap of `clouds.cloud_fraction`, `mo_cloud.f90` §10.2, via
+`jcm.analysis.total_cloud_cover` — because that is the construction the
+reference model uses and a total cover is the basis the satellite
+climatologies are quoted on, and because it is computable from any saved
+output.
+
+The ECHAM band is **0.5–0.9**, calibrated on this definition: max-random
+reads +0.11 to +0.15 above the column max the gate used to score, so a band
+carried over from column-max experience would fail correct members on the
+ceiling for a purely definitional reason.
+
+SPEEDY scores its own `shortwave_rad.cloudc` — an RH-based column cover with
+no profile to overlap, and untouched by this work — so it gates on its own
+**0.4–0.8**. Shifting it with the ECHAM band would tighten the floor of the
+member that sits closest to it (recorded 0.57 and 0.58) for a reason that
+does not apply to it.
+
+Two more covers are **printed and not gated**: `cloud_cover_colmax`, the
+column maximum the gate used to score (a lower bound, kept so the #638/#782
+tables stay readable), and `cloud_cover_radiation`, the McICA sub-column
+cover the RRTMGP flux solve integrates (dropped when the run saved none, or
+an all-zero field under grey radiation; the NOTE says which). The McICA
+cover is a **different measurement, not a cross-check** — a time mean of an
+instantaneous cover from a differently-preprocessed field, against an
+overlap of the output-averaged fraction — and the two differ by ~0.25 on a
+measured arm, which is expected.
+
+**Cover numbers from before #707 are not comparable with these** — that PR
+gave the 1M scheme ECHAM's `ccwmin` cover write-back, which redefined what
+`clouds.cloud_fraction` counts. Its measured size (−0.066 of low cloud for
++0.15 W/m²: bookkeeping, not cloud) is a **column-max** figure and does not
+carry over to the other two definitions, where it is unmeasured. Rationale,
+the measured table and the #782 decomposition:
+`docs/source/design/cloud_cover_gate.md`.
 
 ### The JAM aerosol block
 

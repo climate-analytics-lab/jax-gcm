@@ -8,10 +8,107 @@ Includes wavelength-dependent optical properties across multiple spectral bands.
 
 import jax.numpy as jnp
 import jax
+import numpy as np
 from typing import Tuple
 # from functools import partial  # Not needed anymore
 
 from .radiation_types import OpticalProperties
+from .constants import SW_BAND_LIMITS, LW_BAND_LIMITS, N_SW_BANDS, N_LW_BANDS
+
+# Wavelength (um) separating the UV/visible shortwave bands from the near-IR.
+# 0.69 um is the SW_BAND_LIMITS split (4000-14500 cm^-1 = near-IR); 0.7 sits
+# just above it, so the near-IR band's effective wavelength (1.14 um) is
+# near-IR and the UV/visible band's (0.49 um) is not.
+_VIS_NIR_BOUNDARY_UM = 0.7
+
+# Effective solar photosphere temperature [K] (IAU 2015 nominal) for the
+# broadband solar weighting of the shortwave bands.
+_SOLAR_T_EFF_K = 5772.0
+
+
+def _planck_lambda(wavelength_um: np.ndarray, temperature: float) -> np.ndarray:
+    """Planck spectral radiance B_lambda (arbitrary units) at ``wavelength_um``."""
+    h, c_light, k_b = 6.62607015e-34, 2.99792458e8, 1.380649e-23
+    lam = wavelength_um * 1.0e-6
+    return 1.0 / (lam**5 * np.expm1(h * c_light / (lam * k_b * temperature)))
+
+
+def _solar_weighted_wavelengths_um(band_limits) -> jnp.ndarray:
+    """Return the solar-flux-weighted effective wavelength (um) of each SW band.
+
+    ``band_limits`` is the ``((wn_lo, wn_hi), ...)`` tuple from ``constants.py``
+    (wavenumber, cm^-1). Each band's effective wavelength is the mean
+    wavelength weighted by the incident solar spectrum, approximated by a
+    5772 K blackbody:
+
+        lambda_eff = int lambda B_lambda(T_sun) dlambda / int B_lambda(T_sun) dlambda
+
+    over the band's own interval. This is the standard broadband-effective-
+    wavelength convention: a spectrally varying property (aerosol AOD via its
+    Angstrom law, droplet refractive index, ice absorption) is evaluated at
+    the wavelength where the band's photons actually are. The grey scheme has
+    no ECHAM counterpart to defer to (ECHAM's radiation is RRTM(G)/PSrad with
+    narrow bands), so the choice is ours. The alternative -- the
+    mid-WAVENUMBER wavelength -- is heavily biased toward the short end of a
+    broad band: for UV/visible (14500-50000 cm^-1, 0.20-0.69 um) it gives
+    0.31 um, where only a sliver of the band's solar energy lies, and with an
+    Angstrom exponent of 2 it inflates the band's aerosol optical depth by
+    (0.49/0.31)^2 ~ 2.5x over the solar-weighted value.
+
+    Computed once at import in NumPy (static configuration, not traced).
+    Current values: near-IR 1.136 um, UV/visible 0.489 um. The two bands
+    carry 50.6 % / 49.4 % of the blackbody solar flux between 0.2 and 2.5 um,
+    consistent with the grey scheme's equal per-band TOA split.
+    """
+    out = []
+    for lo, hi in band_limits:
+        lam = np.linspace(1.0e4 / hi, 1.0e4 / lo, 20001)
+        weight = _planck_lambda(lam, _SOLAR_T_EFF_K)
+        # Uniform grid: the trapezoid spacing cancels in the ratio.
+        trap = np.ones_like(lam)
+        trap[0] = trap[-1] = 0.5
+        out.append(float(np.sum(trap * lam * weight) / np.sum(trap * weight)))
+    return jnp.array(out)
+
+
+def _band_centre_wavelengths_um(band_limits) -> jnp.ndarray:
+    """Return the mid-wavenumber wavelength (um) for each band in ``band_limits``.
+
+    Used for the LONGWAVE bands: ``lambda = 1e4 / (0.5*(wn_lo+wn_hi))`` um.
+    The longwave cloud absorption is tabulated per band
+    (``_LW_KABS_LIQUID``/``_LW_KABS_ICE``) and the LW aerosol optical depth is
+    negligible, so the LW representative wavelength only needs to lie inside
+    its own band. Deriving it from the limits keeps band b evaluated inside
+    band b's own interval (#678).
+    """
+    return jnp.array(
+        [1.0e4 / (0.5 * (lo + hi)) for (lo, hi) in band_limits]
+    )
+
+
+# Per-band representative wavelengths (um), derived once from the band limits.
+# SW: solar-flux-weighted effective wavelength (see
+# ``_solar_weighted_wavelengths_um``); LW: mid-wavenumber.
+_SW_BAND_WAVELENGTHS_UM = _solar_weighted_wavelengths_um(SW_BAND_LIMITS)
+_LW_BAND_WAVELENGTHS_UM = _band_centre_wavelengths_um(LW_BAND_LIMITS)
+
+# Heuristic longwave mass-absorption coefficients (m^2/kg) per LW band. These
+# are NOT a reference lookup table -- this whole grey cloud-optics module is a
+# Mie/parameterisation approximation used only by the grey two-stream scheme.
+# One coefficient per ACTUAL longwave band (``N_LW_BANDS``); the values are the
+# mean of the finer per-sub-band coefficients this module used previously,
+# aggregated over each band's wavenumber interval (LW bands 10-350 / 350-500 /
+# 500-2500 cm^-1). The prior code indexed an 8-entry table with the 3-band loop,
+# so bands got coefficients belonging to a different band set (#678); an
+# ``N_LW_BANDS``-length array indexed by band cannot mismatch.
+_LW_KABS_LIQUID = jnp.array([100.0, 105.0, 150.0])
+_LW_KABS_ICE = jnp.array([48.0, 52.0, 82.0])
+if _LW_KABS_LIQUID.shape[0] != N_LW_BANDS or _LW_KABS_ICE.shape[0] != N_LW_BANDS:
+    raise ValueError(
+        "LW cloud absorption tables must have one entry per LW band "
+        f"({N_LW_BANDS}); got {_LW_KABS_LIQUID.shape[0]} / "
+        f"{_LW_KABS_ICE.shape[0]}."
+    )
 
 
 # Physical constants for Mie scattering
@@ -39,51 +136,55 @@ WATER_ABSORPTION_COEFF = {
 
 def get_band_wavelength(band: int, is_sw: bool = True) -> float:
     """Get representative wavelength for a spectral band.
-    
+
     Args:
-        band: Band index
-        is_sw: True for shortwave, False for longwave
-        
+        band: Band index into the shortwave (``is_sw=True``) or longwave
+            (``is_sw=False``) band set defined in ``constants.py``.
+        is_sw: True for shortwave, False for longwave. Always a Python bool
+            at the call sites, so it selects the band set in Python; ``band``
+            may be a traced integer and indexes the derived array.
+
     Returns:
-        Representative wavelength in micrometers
+        Representative wavelength in micrometers: the solar-flux-weighted
+        effective wavelength for a shortwave band
+        (``_solar_weighted_wavelengths_um``), the mid-wavenumber wavelength
+        for a longwave band (``_band_centre_wavelengths_um``). Every
+        wavelength-dependent grey optical property -- cloud optics, aerosol
+        Angstrom scaling, the near-IR/visible classifier -- reads it here.
 
     """
-    # Define all SW wavelengths
-    sw_wavelengths = jnp.array([
-        0.245,  # Band 0: UV-C/B (0.20-0.29 μm)
-        0.305,  # Band 1: UV-A (0.29-0.32 μm)
-        0.38,   # Band 2: Blue (0.32-0.44 μm)
-        0.565,  # Band 3: Green-Red (0.44-0.69 μm)
-        0.94,   # Band 4: Near-IR 1 (0.69-1.19 μm)
-        2.595,  # Band 5: Near-IR 2 (1.19-4.00 μm)
-    ])
-    
-    # Define all LW wavelengths (converted from wavenumber)
-    lw_wavelengths = jnp.array([
-        95.2,   # Band 0: Far-IR window (10-200 cm⁻¹)
-        35.7,   # Band 1: H2O rotation (200-280 cm⁻¹)
-        29.4,   # Band 2: CO2 bending (280-400 cm⁻¹)
-        21.3,   # Band 3: CO2 v2 (400-540 cm⁻¹)
-        14.9,   # Band 4: H2O continuum (540-800 cm⁻¹)
-        11.1,   # Band 5: H2O + O3 (800-1000 cm⁻¹)
-        9.1,    # Band 6: O3 + H2O (1000-1200 cm⁻¹)
-        5.26,   # Band 7: H2O bands (1200-2600 cm⁻¹)
-    ])
-    
-    # Get wavelength using JAX-compatible conditional
-    sw_wl = jnp.where(
-        band < len(sw_wavelengths),
-        sw_wavelengths[band],
-        0.55  # Default visible
-    )
-    
-    lw_wl = jnp.where(
-        band < len(lw_wavelengths),
-        lw_wavelengths[band],
-        10.0  # Default LW
-    )
-    
-    return jnp.where(is_sw, sw_wl, lw_wl)
+    wavelengths = _SW_BAND_WAVELENGTHS_UM if is_sw else _LW_BAND_WAVELENGTHS_UM
+    return wavelengths[band]
+
+
+def sw_band_is_near_ir(band) -> jnp.ndarray:
+    """Return True where shortwave ``band`` is near-IR (wavelength > 0.7 um).
+
+    Single source of truth for the near-IR vs UV/visible split of the SW bands,
+    derived from each band's own wavelength (hence from ``SW_BAND_LIMITS``).
+    EVERY SW band-indexed input keys off this -- cloud optics wavelength,
+    surface albedo (``surface_albedo_by_sw_band``), ozone absorption (strong in
+    UV/visible) and water-vapour absorption (near-IR) -- so a reorder of
+    ``SW_BAND_LIMITS`` propagates to all of them at once and cannot be
+    half-applied. This is exactly the trap #678 fixed: the band order was
+    corrected for cloud optics but the albedo / gas-optics arrays kept the old
+    order, pairing near-IR cloud properties with visible albedo and ozone.
+    Accepts a scalar or an array of band indices.
+    """
+    return get_band_wavelength(band, is_sw=True) > _VIS_NIR_BOUNDARY_UM
+
+
+def surface_albedo_by_sw_band(
+    albedo_vis: jnp.ndarray, albedo_nir: jnp.ndarray,
+) -> jnp.ndarray:
+    """Surface albedo per SW band, ordered by the band wavelengths.
+
+    Returns an ``(N_SW_BANDS,)`` array giving each band its near-IR or visible
+    albedo according to ``sw_band_is_near_ir`` -- never a hardcoded
+    ``[vis, nir]`` order that could disagree with the band definitions (#678).
+    """
+    near_ir = sw_band_is_near_ir(jnp.arange(N_SW_BANDS))
+    return jnp.where(near_ir, albedo_nir, albedo_vis)
 
 
 @jax.jit
@@ -243,11 +344,17 @@ _R_EFF_LIQUID_UM = 11.0
 def effective_radius_liquid(cdnc_factor: jnp.ndarray) -> jnp.ndarray:
     """Fallback liquid droplet effective radius (microns).
 
-    A column constant scaled by the Twomey factor. This is a FALLBACK: the
-    2-moment scheme publishes a microphysical ``clouds.r_eff_liq`` from the
-    ECHAM Martin/Bower law and never reaches here, and every production
-    configuration runs 2M. It is live only on the 1M ``physics=echam``
-    preset, where the resulting lack of any LWC dependence is jax-gcm#717.
+    A column constant scaled by the Twomey factor. This is a FALLBACK: both the
+    2-moment and 1-moment schemes publish a microphysical ``clouds.r_eff_liq``
+    (ECHAM Martin/Bower law) that ``resolve_effective_radii`` prefers per cell
+    (per level and column) wherever it is nonzero. Because the ECHAM term order
+    runs radiation before microphysics, radiation reads that radius from the
+    carried ``clouds`` state one step lagged, so this fallback is used only where
+    the carry is still zero -- the cold-start first step, and thereafter any
+    cloudy cell that was clear the previous step, so a newly-cloudy level falls
+    back even in an otherwise-cloudy column (``eff_liquid_droplet_radius``
+    returns exactly 0 in a clear cell) -- and throughout any composition with no
+    droplet-radius-publishing microphysics.
 
     The land/ocean contrast is deliberately NOT applied, because the two
     references mean different things by it:
@@ -459,7 +566,7 @@ def liquid_cloud_optics_lw(
     Args:
         cloud_water_path: Cloud water path (kg/m²)
         effective_radius: Droplet effective radius (microns)
-        band: Spectral band index (0-7)
+        band: Longwave band index into LW_BAND_LIMITS (0..N_LW_BANDS-1)
         
     Returns:
         Optical depth (absorption)
@@ -467,32 +574,11 @@ def liquid_cloud_optics_lw(
     """
     # Get wavelength for this band
     wavelength = get_band_wavelength(band, is_sw=False)
-    
-    # Enhanced absorption coefficient depends on band
-    # Based on water absorption spectrum in IR
-    k_abs = jnp.where(
-        band == 0, 25.0,   # Far-IR window (10-200 cm⁻¹)
-        jnp.where(
-            band == 1, 180.0,  # H2O rotation band (200-280 cm⁻¹) - high absorption
-            jnp.where(
-                band == 2, 90.0,   # CO2 bending + H2O (280-400 cm⁻¹)
-                jnp.where(
-                    band == 3, 120.0,  # CO2 v2 + H2O (400-540 cm⁻¹)
-                    jnp.where(
-                        band == 4, 160.0,  # H2O continuum (540-800 cm⁻¹) - very high
-                        jnp.where(
-                            band == 5, 140.0,  # H2O + O3 (800-1000 cm⁻¹)
-                            jnp.where(
-                                band == 6, 100.0,  # O3 + H2O (1000-1200 cm⁻¹)
-                                200.0               # H2O bands (1200-2600 cm⁻¹) - strongest
-                            )
-                        )
-                    )
-                )
-            )
-        )
-    )
-    
+
+    # One absorption coefficient per LW band, indexed by band (#678). The
+    # values are heuristic band-averages; see ``_LW_KABS_LIQUID``.
+    k_abs = _LW_KABS_LIQUID[band]
+
     # Size dependence - smaller droplets have slightly higher absorption per unit mass
     size_factor = jnp.sqrt(12.0 / effective_radius)
     
@@ -517,7 +603,7 @@ def ice_cloud_optics_lw(
     Args:
         cloud_ice_path: Cloud ice path (kg/m²)
         effective_radius: Ice crystal effective radius (microns)
-        band: Spectral band index (0-7)
+        band: Longwave band index into LW_BAND_LIMITS (0..N_LW_BANDS-1)
         
     Returns:
         Optical depth (absorption)
@@ -525,32 +611,11 @@ def ice_cloud_optics_lw(
     """
     # Get wavelength for this band
     wavelength = get_band_wavelength(band, is_sw=False)
-    
-    # Ice absorption coefficient depends on band
-    # Ice is generally less absorbing than liquid water
-    k_abs = jnp.where(
-        band == 0, 12.0,   # Far-IR window (10-200 cm⁻¹)
-        jnp.where(
-            band == 1, 85.0,   # H2O rotation band (200-280 cm⁻¹) - moderate absorption
-            jnp.where(
-                band == 2, 45.0,   # CO2 bending + H2O (280-400 cm⁻¹)
-                jnp.where(
-                    band == 3, 60.0,   # CO2 v2 + H2O (400-540 cm⁻¹)
-                    jnp.where(
-                        band == 4, 90.0,   # H2O continuum (540-800 cm⁻¹) - higher
-                        jnp.where(
-                            band == 5, 75.0,   # H2O + O3 (800-1000 cm⁻¹)
-                            jnp.where(
-                                band == 6, 55.0,   # O3 + H2O (1000-1200 cm⁻¹)
-                                110.0               # H2O bands (1200-2600 cm⁻¹) - strongest
-                            )
-                        )
-                    )
-                )
-            )
-        )
-    )
-    
+
+    # One absorption coefficient per LW band, indexed by band (#678). Ice is
+    # generally less absorbing than liquid water; see ``_LW_KABS_ICE``.
+    k_abs = _LW_KABS_ICE[band]
+
     # Size dependence - larger crystals have different absorption characteristics
     size_factor = jnp.sqrt(35.0 / effective_radius)
     
@@ -568,6 +633,8 @@ def cloud_optics(
     cloud_ice_path: jnp.ndarray,
     layer_thickness: jnp.ndarray,
     cdnc_factor: jnp.ndarray,
+    inhomogeneity_liquid: jnp.ndarray = 1.0,
+    inhomogeneity_ice: jnp.ndarray = 1.0,
 ) -> Tuple[OpticalProperties, OpticalProperties]:
     """Calculate complete cloud optical properties.
 
@@ -576,6 +643,16 @@ def cloud_optics(
         cloud_ice_path: In-cloud ice path per layer (kg/m²) [nlev]
         layer_thickness: Geometric layer thickness (m) [nlev]
         cdnc_factor: Cloud droplet number concentration factor from aerosols
+        inhomogeneity_liquid / inhomogeneity_ice: ECHAM sub-grid cloud
+            inhomogeneity factors applied to the liquid / ice **optical depth**
+            (``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``,
+            ``l_variable_inhoml = .FALSE.``). Default 1.0 = no reduction. They
+            multiply the optical depth only -- the effective radii (which set
+            the extinction per unit mass) and the tau-weighted ssa/asymmetry
+            are taken from the UNSCALED paths, exactly as ECHAM derives
+            ``zomg``/``zasy`` before applying ``zinhoml``. Scaling the input
+            path instead would shrink the diagnostic ice radius via the
+            Moss/Foot IWC law and partly undo the reduction (#678).
 
     Returns:
         Tuple of (sw_optics, lw_optics)
@@ -583,9 +660,11 @@ def cloud_optics(
     """
     nlev = cloud_water_path.shape[0]
 
-    # Calculate effective radii. The Moss/Foot ice formula wants the
-    # IN-CLOUD ice water content in g/m3; the caller hands in-cloud paths
-    # per layer (kg/m2), so IWC = path / dz, converted kg -> g.
+    # Effective radii from the PHYSICAL (unscaled) in-cloud paths. The Moss/Foot
+    # ice formula wants the in-cloud ice water content in g/m3; the caller hands
+    # in-cloud paths per layer (kg/m2), so IWC = path / dz, converted kg -> g.
+    # The inhomogeneity factor must not enter here -- it scales optical depth,
+    # not the crystal/droplet size (#678).
     r_eff_liq = effective_radius_liquid(cdnc_factor)
     iwc_gm3 = cloud_ice_path / jnp.maximum(layer_thickness, 1.0) * 1e3
     r_eff_ice = effective_radius_ice(iwc_gm3)
@@ -602,9 +681,11 @@ def cloud_optics(
             cloud_ice_path, r_eff_ice, band
         )
         
-        # Combine (additive optical depth)
+        # Combine (additive optical depth). ssa/asymmetry are weighted by the
+        # UNSCALED optical depths (ECHAM computes zomg/zasy before applying the
+        # inhomogeneity factor); the factor scales the final optical depth only.
         tau_total = tau_liq + tau_ice
-        
+
         # Combined single scattering albedo (weighted by tau). Safe-denominator
         # double-``where``: a cloud-free layer has ``tau_total == 0``, and a bare
         # ``.../tau_total`` there differentiates to ``inf`` so ``where``'s VJP
@@ -630,8 +711,11 @@ def cloud_optics(
             (tau_liq * ssa_liq * g_liq + tau_ice * ssa_ice * g_ice) / denom_scat,
             0.0
         )
-        
-        return tau_total, ssa_combined, g_combined
+
+        # Inhomogeneity scales the optical depth per phase (ECHAM ztau).
+        tau_scaled = inhomogeneity_liquid * tau_liq + inhomogeneity_ice * tau_ice
+
+        return tau_scaled, ssa_combined, g_combined
     
     # Apply to all SW bands - use fixed shape
     from .constants import N_SW_BANDS
@@ -649,7 +733,8 @@ def cloud_optics(
     def calculate_lw_band(band):
         tau_liq = liquid_cloud_optics_lw(cloud_water_path, r_eff_liq, band)
         tau_ice = ice_cloud_optics_lw(cloud_ice_path, r_eff_ice, band)
-        return tau_liq + tau_ice
+        # Inhomogeneity scales the optical depth per phase (ECHAM ztau).
+        return inhomogeneity_liquid * tau_liq + inhomogeneity_ice * tau_ice
     
     # Apply to all LW bands - use fixed shape
     from .constants import N_LW_BANDS

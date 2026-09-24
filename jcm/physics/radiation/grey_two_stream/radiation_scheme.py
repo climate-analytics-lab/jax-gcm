@@ -7,6 +7,7 @@ coordinating shortwave and longwave radiation computations.
 
 import jax.numpy as jnp
 
+from jcm.physics.chemistry.simple_chemistry import ppmv_to_mole_fraction
 from jcm.physics.coords_util import column_lat_lon
 from typing import Tuple, Optional
 
@@ -22,7 +23,11 @@ from jax_solar import radiation_flux, get_solar_sin_altitude, OrbitalTime
 from jcm.forcing import SolarGeometry
 
 from .gas_optics import gas_optical_depth_lw, gas_optical_depth_sw
-from ..cloud_optics import cloud_optics
+from ..cloud_optics import (
+    cloud_optics,
+    get_band_wavelength,
+    surface_albedo_by_sw_band,
+)
 from ..mcica import (
     column_total_cover,
     effective_cloud_fraction,
@@ -115,6 +120,42 @@ def combine_optical_properties(
         single_scatter_albedo=combined_ssa,
         asymmetry_factor=combined_g
     )
+
+
+# Reference wavelength (um) of the broadband aerosol AOD the grey scheme reads.
+_AOD_REFERENCE_WAVELENGTH_UM = 0.55
+
+
+def aerosol_band_aod_scaling(
+    angstrom: jnp.ndarray, n_sw_bands: int, n_lw_bands: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Per-band factors that scale the 550 nm aerosol AOD to each grey band.
+
+    Ångström law ``AOD(λ) = AOD(0.55 µm) · (λ / 0.55)^(-α)`` evaluated at each
+    band's representative wavelength from the shared ``get_band_wavelength``
+    helper -- the same wavelength the cloud optics use. For the shortwave that
+    is the solar-flux-weighted effective wavelength (UV/visible 0.489 µm,
+    near-IR 1.136 µm): a broadband AOD evaluated at the band's
+    mid-WAVENUMBER (0.31 µm for the 0.20-0.69 µm band) would inflate the
+    UV/visible AOD ~2.5x for α = 2 (see
+    ``cloud_optics._solar_weighted_wavelengths_um``).
+
+    Args:
+        angstrom: Ångström exponent α (scalar per column).
+        n_sw_bands: Number of shortwave bands.
+        n_lw_bands: Number of longwave bands.
+
+    Returns:
+        ``(sw_scaling, lw_scaling)`` of shapes ``(n_sw_bands,)`` and
+        ``(n_lw_bands,)``.
+
+    """
+    sw_wavelengths = get_band_wavelength(jnp.arange(n_sw_bands), is_sw=True)
+    lw_wavelengths = get_band_wavelength(jnp.arange(n_lw_bands), is_sw=False)
+    sw_scaling = (sw_wavelengths / _AOD_REFERENCE_WAVELENGTH_UM) ** (-angstrom)
+    # LW: tiny AOD at long wavelengths, kept for completeness.
+    lw_scaling = (lw_wavelengths / _AOD_REFERENCE_WAVELENGTH_UM) ** (-angstrom)
+    return sw_scaling, lw_scaling
 
 
 def prepare_radiation_state(
@@ -286,23 +327,13 @@ def radiation_scheme(
     default_n_sw_bands = 2
     default_n_lw_bands = 3
 
-    # Compute representative wavelengths (μm) from SW band limits (wavenumbers cm⁻¹)
-    # λ = 1e4 / ν_mid, where ν_mid is the midpoint wavenumber of the band
-    sw_band_limits = parameters.sw_band_limits  # [[4000, 14500], [14500, 50000]]
-    sw_wavelengths = 1e4 / ((sw_band_limits[:, 0] + sw_band_limits[:, 1]) / 2.0)
-
-    # Apply Angstrom scaling: AOD(λ) = AOD(550nm) * (λ/0.55)^(-α)
-    ref_wavelength = 0.55  # μm (550 nm reference)
-    sw_scaling = (sw_wavelengths / ref_wavelength) ** (-angstrom)  # [n_sw_bands]
+    sw_scaling, lw_scaling = aerosol_band_aod_scaling(
+        angstrom, default_n_sw_bands, default_n_lw_bands,
+    )
 
     aerosol_tau_sw = aerosol_aod_col[:, None] * sw_scaling[None, :]  # [nlev, n_sw_bands]
     aerosol_ssa_sw = jnp.tile(aerosol_ssa_col[:, None], (1, default_n_sw_bands))
     aerosol_asy_sw = jnp.tile(aerosol_asy_col[:, None], (1, default_n_sw_bands))
-
-    # LW bands: apply Angstrom scaling (gives very small AOD at long wavelengths)
-    lw_band_limits = parameters.lw_band_limits  # [[10, 350], [350, 500], [500, 2500]]
-    lw_wavelengths = 1e4 / ((lw_band_limits[:, 0] + lw_band_limits[:, 1]) / 2.0)
-    lw_scaling = (lw_wavelengths / ref_wavelength) ** (-angstrom)
 
     aerosol_tau_lw = aerosol_aod_col[:, None] * lw_scaling[None, :]  # [nlev, n_lw_bands]
     aerosol_ssa_lw = jnp.zeros((nlev, default_n_lw_bands))  # Pure absorption in LW
@@ -386,6 +417,13 @@ def radiation_scheme(
     # approximation misses, at twice the radiative-transfer cost. For
     # canonical McICA see the RRTMGP path (rrtmgp.py) — there the
     # gpoint count makes per-gpoint sub-columns effectively free.
+    # Physical (unscaled) in-cloud paths. The ECHAM sub-grid inhomogeneity
+    # reduction (``mo_cloud_optics.f90`` ``zinhoml``/``zinhomi``,
+    # l_variable_inhoml = .FALSE.) is passed into ``cloud_optics`` and applied
+    # to the optical depth there -- NOT to the path, so the diagnostic ice
+    # radius stays derived from the physical IWC (#678). This within-cloud
+    # horizontal-variability correction is distinct from the beam-split
+    # clear/cloudy partitioning above.
     in_cloud_lwp = in_cloud_path(
         rad_state.cloud_water_path, rad_state.cloud_fraction,
         eps=parameters.cld_frac_min,
@@ -400,6 +438,8 @@ def radiation_scheme(
         cloud_ice_path=in_cloud_ipath,
         layer_thickness=layer_thickness,
         cdnc_factor=cdnc_factor,
+        inhomogeneity_liquid=parameters.cloud_inhomogeneity,
+        inhomogeneity_ice=parameters.cloud_inhomogeneity,
     )
     zero_optics_sw = OpticalProperties(
         optical_depth=jnp.zeros_like(cloud_sw_optics_cloudy.optical_depth),
@@ -484,7 +524,11 @@ def radiation_scheme(
     # Note: When vmapped, albedos are scalars; otherwise extract first element
     albedo_vis_val = surface_albedo_vis if surface_albedo_vis.ndim == 0 else surface_albedo_vis[0]
     albedo_nir_val = surface_albedo_nir if surface_albedo_nir.ndim == 0 else surface_albedo_nir[0]
-    surface_albedo_arr = jnp.array([albedo_vis_val, albedo_nir_val])
+    # Order the albedo BY BAND WAVELENGTH, not a hardcoded [vis, nir]: band 0 is
+    # near-IR under SW_BAND_LIMITS, so it must receive the near-IR albedo. Keying
+    # off ``sw_band_is_near_ir`` keeps this consistent with the cloud-optics and
+    # gas-optics band order (#678).
+    surface_albedo_arr = surface_albedo_by_sw_band(albedo_vis_val, albedo_nir_val)
 
     # Two shortwave RT calls, one per beam. ``shortwave_fluxes`` also
     # returns direct/diffuse split components which we don't propagate
@@ -603,9 +647,15 @@ def radiation_scheme(
         noa_frac_toa_sw_up_clear=jnp.zeros_like(toa_sw_up_clear),
         noa_frac_toa_lw_up_clear=jnp.zeros_like(toa_sw_up_clear),
         toa_lw_up_clear_noa=jnp.zeros_like(toa_lw_up_clear),
-        # Grey two-stream has no McICA sub-columns; the radiation-view
-        # cloud-cover diagnostic is defined as 0 here (see RadiationData).
-        total_cloud_cover=jnp.zeros_like(olr),
+        # The cover the grey flux solve actually integrates: the beam-split
+        # weight ``c_col`` between the clear and cloudy two-stream calls,
+        # under the configured overlap rule (``column_total_cover``). This is
+        # the grey analogue of RRTMGP's McICA sub-column cover -- the
+        # radiation's own view of the cloud -- so consumers of
+        # ``radiation.total_cloud_cover`` (the CMIP ``clt`` mapping in
+        # ``tools/aerocom_cmor.py``, the release-validation cloud-cover
+        # report) see the cloud the grey fluxes respond to, not a clear sky.
+        total_cloud_cover=c_col,
         step=jnp.int32(0),
     )
 
@@ -766,8 +816,8 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         chemistry = diagnostics["chemistry"]
         # Convert ppmv → mole fraction. Ozone is a chemistry field; CO2 is a
         # prescribed forcing read straight from ForcingData (well-mixed scalar).
-        ozone_vmr = chemistry.ozone_vmr * 1e-6
-        co2_vmr = forcing.co2_vmr * 1e-6
+        ozone_vmr = chemistry.ozone_mole_fraction()
+        co2_vmr = ppmv_to_mole_fraction(forcing.co2_vmr)
 
         # Surface temperature still lives in the legacy "surface" key
         # (until the EchamSurface migration); the radiation surface

@@ -228,8 +228,12 @@ class SurfaceData:
     # Surface fluxes
     sensible_heat_flux: jnp.ndarray  # Sensible heat flux [W/m²] (ncols,)
     latent_heat_flux: jnp.ndarray    # Latent heat flux [W/m²] (ncols,)
-    momentum_flux_u: jnp.ndarray     # U momentum flux [N/m²] (ncols,)
-    momentum_flux_v: jnp.ndarray     # V momentum flux [N/m²] (ncols,)
+    # Positive-down: the momentum flux INTO the surface, positive with
+    # the wind (republished from the vdiff-delivered
+    # VDiffSurfaceFluxes.stress_u/v — same sign as the #754
+    # surface-exchange contract).
+    momentum_flux_u: jnp.ndarray     # U momentum flux into surface [N/m²] (ncols,)
+    momentum_flux_v: jnp.ndarray     # V momentum flux into surface [N/m²] (ncols,)
 
     # Surface temperatures
     surface_temperature: jnp.ndarray # Surface temperature [K] (ncols,)

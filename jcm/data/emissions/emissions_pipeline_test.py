@@ -45,7 +45,6 @@ class ContractRoundTripTest(unittest.TestCase):
         import jax_datetime as jdt
         return DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime("2001-07-02")),
-            calendar="gregorian",
         )
 
     def test_returns_none_without_emis_vars(self):
@@ -54,7 +53,8 @@ class ContractRoundTripTest(unittest.TestCase):
         self.assertIsNone(read_anthropogenic_emissions(ds))
 
     def test_reads_all_channels(self):
-        emis = read_anthropogenic_emissions(_synthetic_emissions_ds())
+        emis = read_anthropogenic_emissions(_synthetic_emissions_ds(),
+                                            align_mode="wrap_year")
         self.assertEqual(
             set(emis),
             {"emis_surface_combustion_so2", "emis_surface_combustion_bc",
@@ -64,20 +64,40 @@ class ContractRoundTripTest(unittest.TestCase):
     def test_select_slices_channels_to_grid(self):
         # After select(date), each per-channel TimeSeries collapses to the bare
         # (lon, lat) grid the term consumes (ravels to ncols = lon*lat).
-        emis = read_anthropogenic_emissions(_synthetic_emissions_ds())
+        emis = read_anthropogenic_emissions(_synthetic_emissions_ds(),
+                                            align_mode="wrap_year")
         forcing = ForcingData.zeros((_NLON, _NLAT)).copy(
             anthropogenic_emissions=emis)
-        sliced = forcing.select(self._date(), calendar="gregorian")
+        sliced = forcing.select(self._date())
         bc = sliced.anthropogenic_emissions["emis_surface_combustion_bc"]
         self.assertEqual(bc.shape, (_NLON, _NLAT))
         self.assertEqual(jnp.ravel(bc).size, _NLON * _NLAT)
         self.assertTrue(np.allclose(np.asarray(bc), 1.0e-11))
 
+    def test_single_year_dated_axis_is_transient(self):
+        """Twelve real dates are never inferred to be a climatology (#884).
+
+        ``auto`` refuses an in-memory dataset outright; declared dated, the
+        year keeps its exact dates rather than repeating annually.
+        """
+        from jcm.forcing import BY_DATE
+
+        ds = _synthetic_emissions_ds().assign_coords(
+            time=np.arange("2001-01", "2002-01", dtype="datetime64[M]"))
+        with self.assertRaisesRegex(ValueError, "emissions_align=auto"):
+            read_anthropogenic_emissions(ds)
+        emissions = read_anthropogenic_emissions(ds, align_mode="by_date")
+        leaf = emissions["emis_surface_combustion_bc"]
+        self.assertEqual(int(leaf.align_mode), BY_DATE)
+        np.testing.assert_array_equal(
+            leaf.times.to_datetime64().astype("datetime64[M]"),
+            np.arange("2001-01", "2002-01", dtype="datetime64[M]"))
+
     def test_static_field_passthrough(self):
         # A time-less emissions field is carried as a bare array, still sliced
         # to a no-op by select.
         ds = _synthetic_emissions_ds().isel(time=0)  # drop time dim
-        emis = read_anthropogenic_emissions(ds)
+        emis = read_anthropogenic_emissions(ds, align_mode="wrap_year")
         bc = emis["emis_surface_combustion_bc"]
         self.assertEqual(bc.shape, (_NLON, _NLAT))
 
@@ -106,8 +126,7 @@ class PreSpeciatedContractTest(unittest.TestCase):
         from jcm.date import DateData
         import jax_datetime as jdt
         return DateData.set_date(
-            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime("2001-07-02")),
-            calendar="gregorian")
+            model_time=jdt.Datetime.from_pydatetime(jdt.to_datetime("2001-07-02")))
 
     def test_returns_none_without_vars(self):
         ds = xr.Dataset({"emis_surface_combustion_so2":
@@ -115,14 +134,16 @@ class PreSpeciatedContractTest(unittest.TestCase):
         self.assertIsNone(read_prescribed_aerosol_emissions(ds))
 
     def test_keys_strip_prefix(self):
-        emis = read_prescribed_aerosol_emissions(_synthetic_speciated_ds())
+        emis = read_prescribed_aerosol_emissions(
+            _synthetic_speciated_ds(), align_mode="wrap_year")
         self.assertEqual(set(emis), {"m_bc_pcm", "m_so4_acc"})
 
     def test_select_slices_surface_and_volume(self):
-        emis = read_prescribed_aerosol_emissions(_synthetic_speciated_ds())
+        emis = read_prescribed_aerosol_emissions(
+            _synthetic_speciated_ds(), align_mode="wrap_year")
         forcing = ForcingData.zeros((_NLON, _NLAT)).copy(
             prescribed_aerosol_emissions=emis)
-        sliced = forcing.select(self._date(), calendar="gregorian")
+        sliced = forcing.select(self._date())
         got = sliced.prescribed_aerosol_emissions
         # 2-D surface channel → (lon, lat); 3-D volume channel → (lev, lon, lat).
         self.assertEqual(got["m_bc_pcm"].shape, (_NLON, _NLAT))
@@ -153,7 +174,8 @@ class EmissionsRaiseBurdenTest(unittest.TestCase):
             # A strong, uniform anthropogenic source so the signal is
             # unambiguous over the few-step run.
             emis = read_anthropogenic_emissions(
-                _synthetic_emissions_ds(bc=5.0e-9, oc=5.0e-9, so2=5.0e-9))
+                _synthetic_emissions_ds(bc=5.0e-9, oc=5.0e-9, so2=5.0e-9),
+                align_mode="wrap_year")
             forcing = forcing.copy(anthropogenic_emissions=emis)
         preds = model.run(forcing=forcing, save_interval=0.0625, total_time=0.0625)
         return preds
@@ -201,7 +223,8 @@ class PreSpeciatedRaisesBurdenTest(unittest.TestCase):
                         "lat": np.linspace(-87, 87, _NLAT),
                         "time": np.arange(12)})
             forcing = forcing.copy(
-                prescribed_aerosol_emissions=read_prescribed_aerosol_emissions(ds))
+                prescribed_aerosol_emissions=read_prescribed_aerosol_emissions(
+                    ds, align_mode="wrap_year"))
         return model.run(forcing=forcing, save_interval=0.0625, total_time=0.0625)
 
     def test_so4_burden_increases(self):

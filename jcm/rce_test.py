@@ -22,6 +22,7 @@ from jcm.forcing import SolarGeometry
 from jcm.physics.clouds.sundqvist import saturation_specific_humidity
 from jcm.rce import (
     _STRATOSPHERE_Q_FLOOR,
+    AerosolFree,
     _pressure_centers,
     fixed_rh_closure,
     rce_column,
@@ -124,6 +125,39 @@ class TestRcePhysicsComposition(unittest.TestCase):
         names = {t.category: t.name for t in physics.terms}
         self.assertEqual(names["radiation"], "grey_two_stream_radiation")
         self.assertEqual(names["convection"], "tiedtke_convection")
+
+    def test_aerosol_free_replaces_only_the_aerosol_term(self):
+        """``AerosolFree`` swaps MACv2-SP out and publishes clean-air aerosol.
+
+        Zero optical depth everywhere and the clean-air Twomey factor
+        (``cdnc_factor = 1``), leaving the rest of the stack -- clouds
+        included -- in place.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        full = echam_physics(radiation_scheme="grey")
+        physics = full.replace("aerosol", AerosolFree())
+        self.assertEqual(
+            [t.category for t in physics.terms],
+            [t.category for t in full.terms],
+        )
+        names = {t.category: t.name for t in physics.terms}
+        self.assertEqual(names["aerosol"], "aerosol_free")
+
+        term = AerosolFree()
+        nlev, ncols = 5, 3
+        state = rce_initial_state(
+            SigmaCoordinates.equidistant(nlev), sst=300.0,
+        )
+        state = state.copy(
+            temperature=jnp.broadcast_to(state.temperature[:, None], (nlev, ncols)),
+        )
+        tend, diags = term(state, {"clouds": "kept"}, None, None)
+        self.assertEqual(diags["clouds"], "kept")
+        aerosol = diags["aerosol"]
+        self.assertEqual(float(jnp.max(jnp.abs(aerosol.aod_profile))), 0.0)
+        np.testing.assert_allclose(np.asarray(aerosol.cdnc_factor), 1.0)
+        self.assertEqual(float(jnp.max(jnp.abs(tend.temperature))), 0.0)
 
 
 class TestRceColumnConstruction(unittest.TestCase):
@@ -417,6 +451,25 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     convection. This is the regression guard for the closure fix that anchors the
     cloud-base mass flux to the surface moisture supply (ECHAM ``zmfub``) so
     convection runs continuously instead of switching fully on/off.
+
+    The column is **aerosol-free** (``AerosolFree`` replaces MACv2-SP). The
+    MACv2-SP plumes are a geographic climatology, and this column at 0°N/0°E
+    sits in the Central African biomass-burning plume (AOD 0.33 at 550 nm,
+    SSA 0.87, Ångström 2). Measured over days 40-80, that plume absorbs
+    ~100 W/m² of shortwave in the lower troposphere and stabilises the column
+    until the water cycle is nearly dead: precipitation/evaporation 1 % (dev
+    band order) or 0 % (corrected band order) with the mid-wavenumber
+    aerosol wavelength, and 4.7 % with no convective precipitation once the
+    AOD is scaled at the solar-weighted band wavelength. An RCE test means
+    the idealised clear-air column, not a smoke plume.
+
+    What it does NOT pin, and why: even aerosol-free the grey column is not a
+    true RCE. Grey water-vapour SW absorption plus opaque grey LW leave no net
+    atmospheric radiative cooling, so P/E ≈ 8 % and column water vapour keeps
+    rising (#883); E ≈ P is therefore not asserted. Nor is the column water
+    budget: Tiedtke's flux divergence is conservative only in its own
+    dual-grid layer mass, which leaks ~0.04 mm/d against the host's true
+    layer mass (#530).
     """
 
     def test_whole_model_column_reaches_physical_time_mean_rce(self):
@@ -426,7 +479,7 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         physics = echam_physics(
             radiation_scheme="grey",
             radiation=RadiationParameters.default(solar_constant=420.0),
-        )
+        ).replace("aerosol", AerosolFree())
         scm = rce_column(
             sst=300.0, relative_humidity=0.7, lat_deg=0.0, nlev=nlev,
             dt_seconds=900.0, physics=physics, interactive_humidity=True,
@@ -466,18 +519,13 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         self.assertGreater(float(q[-1, -1]) * 1e3, 5.0)
         self.assertLess(float(q[-1, -1]) * 1e3, 30.0)
 
-        # Precipitation is active at equilibrium. With this branch's
-        # corrected plumes (plain ECHAM entrainment — no dry-air dilution
-        # factor) and coupled surface fluxes, CAPE consumption is
-        # efficient enough that the closed column parks JUST BELOW the
-        # hard 100 J/kg trigger and convective precip goes to zero at
-        # equilibrium while large-scale precip carries the water cycle —
-        # a known artifact of the hard trigger, fixed by the smoothed
-        # (sigmoid) trigger in the structure/smoothing PR, whose version
-        # of this test restores the strict convective-precip assertion
-        # (and passes with convection continuously active). Here we pin
-        # the equilibrium water cycle instead: total precip positive over
-        # the last 40 days, and the convective diagnostic finite.
+        # Convection stays active through the averaging window. Aerosol-free,
+        # the time-mean convective precipitation over the last 40 days is
+        # 0.021 mm/d (convection on in ~49 % of steps) and the total is
+        # 0.028 mm/d. Both are small against evaporation (0.36 mm/d, the
+        # no-net-cooling gap of #883), but strictly positive: the hard-trigger
+        # extinction these pins guard against drives the equilibrium
+        # convective precipitation to exactly zero.
         precip = np.asarray(
             preds.physics_data["convection"].precip_conv
         ).reshape(len(preds.times), -1)[:, 0]
@@ -488,14 +536,10 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
             preds.physics_data["clouds"].precip_snow
         ).reshape(len(preds.times), -1)[:, 0]
         total = precip + rain + snow
-        self.assertGreater(float(total[-40 * spd:].mean()), 0.0)
         self.assertTrue(np.all(np.isfinite(precip)))
-        # STRICT pin restored on this branch: with the smoothed (sigmoid)
-        # trigger + unconditional Nordeng rescale, convection stays
-        # continuously active through the near-neutral equilibrium — the
-        # hard-trigger extinction that forced the fixes-PR to relax this
-        # assertion is cured here (see the fixes-PR comment above).
+        self.assertTrue(np.all(np.isfinite(total)))
         self.assertGreater(float(precip[-40 * spd:].mean()), 0.0)
+        self.assertGreater(float(total[-40 * spd:].mean()), 0.0)
 
         # The high-frequency convective flicker is bounded. History of this
         # pin: the bare-CAPE on/off closure gave ≈14 K/day per-level
@@ -529,5 +573,7 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         # This bound therefore tracks a single closed column sitting on its
         # 100 J/kg trigger, and retuning that trigger/closure against the
         # corrected CAPE — after which this should come back down — is #682.
+        # In the aerosol-free column this test now runs, the measured value is
+        # 22.4 K/day, with convection on in ~49 % of steps.
         max_temporal_std = float(np.max(tot[-40 * spd:].std(axis=0)))
         self.assertLess(max_temporal_std, 32.0)  # K/day

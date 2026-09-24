@@ -12,8 +12,11 @@ from .cloud_utils import (
     breadth_factor,
     eff_liquid_droplet_radius,
     ice_volume_mean_radius,
+    latent_heat_over_cp,
+    moist_isobaric_heat_capacity,
 )
 from .lohmann_2m_params import CloudParams2M
+from jcm.testing import check_gradients
 
 _EPS = 1.1920929e-7  # float32 machine epsilon, as CloudParams2M.eps
 
@@ -215,3 +218,108 @@ class TestIceVolumeMeanRadius:
             lambda x: ice_volume_mean_radius(x, jnp.array([5.0e4]), self._P).sum(),
         )(jnp.array([0.0]))
         assert jnp.all(jnp.isfinite(g)), g
+
+
+class TestCloudUtilsGradients:
+    """AD against a central difference for the radius helpers (#820).
+
+    All green. ``ice_volume_mean_radius`` carries the Schumann (2011)
+    ``-2261 + sqrt(5113188 + 2809*r**3)`` inversion, whose square root would
+    be the obvious hazard; the ``ceffmin``/``ceffmax`` clip above it keeps the
+    argument near 5e6 and the operating points below stay inside the clip, so
+    the derivative is ordinary. A point on the clip itself would report the
+    clip's kink rather than anything about the inversion.
+    """
+
+    _PARAMS = CloudParams2M.default()
+
+    def test_ice_volume_mean_radius(self):
+        """Cirrus-like ice contents and crystal numbers, inside the clip."""
+        check_gradients(
+            lambda ice, number: ice_volume_mean_radius(
+                ice, number, self._PARAMS),
+            (jnp.array([1.0e-3, 1.0e-2, 5.0e-2]),
+             jnp.array([1.0e4, 5.0e4, 2.0e5])),
+            rtol=1e-3)
+
+    def test_eff_liquid_droplet_radius(self):
+        """Liquid contents well above the eps guard on the denominator."""
+        check_gradients(
+            lambda q, rho, cdnc: eff_liquid_droplet_radius(q, rho, cdnc, _EPS),
+            (jnp.array([1.0e-5, 2.0e-4, 8.0e-4]),
+             jnp.array([0.6, 0.9, 1.15]),
+             jnp.array([3.0e7, 1.0e8, 2.0e8])),
+            rtol=1e-3)
+
+    def test_breadth_factor(self):
+        """Linear in CDNC, so this is a pure regression fence."""
+        check_gradients(breadth_factor, (jnp.array([3.0e7, 1.0e8, 2.0e8]),),
+                        rtol=1e-3)
+
+
+class TestMoistHeatCapacity:
+    """The moist-cp latent-heat factors both cloud ports share (#706).
+
+    ECHAM builds ``zlvdcp = alv/pcair``, ``zlsdcp = als/pcair`` with the MOIST
+    heat capacity ``pcair = cpd + cpd·vtmpc2·max(q,0) = cpd·(1 + vtmpc2·q)``
+    (mo_cloud.f90:412-414, mo_cloud_micro_2m.f90:534/844-848). These pin the
+    helper against that hand-computed reference at dry and moist extremes.
+    """
+
+    def test_dry_air_recovers_L_over_cpd(self):
+        """At q = 0 the factors collapse to the plain dry ``L/cpd``."""
+        lvdcp, lsdcp = latent_heat_over_cp(jnp.array(0.0))
+        np.testing.assert_allclose(float(lvdcp), c.alhc / c.cpd, rtol=1e-6)
+        np.testing.assert_allclose(float(lsdcp), c.alhs / c.cpd, rtol=1e-6)
+        np.testing.assert_allclose(
+            float(moist_isobaric_heat_capacity(jnp.array(0.0))), c.cpd, rtol=1e-6)
+
+    def test_matches_hand_computed_pcair(self):
+        """Heat capacity and both ratios equal the ECHAM ``pcair`` values."""
+        vtmpc2 = c.cpv / c.cpd - 1.0
+        for q in (0.0, 5.0e-3, 1.8e-2, 3.5e-2):
+            cp_ref = c.cpd * (1.0 + vtmpc2 * q)      # = cpd + (cpv-cpd)*q
+            cp = float(moist_isobaric_heat_capacity(jnp.array(q)))
+            np.testing.assert_allclose(cp, cp_ref, rtol=1e-6)
+            lvdcp, lsdcp = latent_heat_over_cp(jnp.array(q))
+            np.testing.assert_allclose(float(lvdcp), c.alhc / cp_ref, rtol=1e-6)
+            np.testing.assert_allclose(float(lsdcp), c.alhs / cp_ref, rtol=1e-6)
+
+    def test_moist_factor_is_smaller_and_of_the_right_size(self):
+        """Moist cp lowers the heating factor: ~1.5 % at tropical q, up to ~3 %.
+
+        The shift is ``vtmpc2·q`` (``cp`` up, ``L/cp`` down by the same
+        fraction to first order). Assert both the SIGN (moist heating factor
+        below dry — the systematic tropical-boundary-layer over-heating #706
+        removes) and the MAGNITUDE at a tropical humidity and at a moist
+        extreme.
+        """
+        vtmpc2 = float(c.cpv / c.cpd - 1.0)          # ~0.861
+        lvdcp_dry = c.alhc / c.cpd
+
+        # Tropical boundary layer q ~ 18 g/kg: ~1.5 % smaller.
+        lvdcp_trop, _ = latent_heat_over_cp(jnp.array(1.8e-2))
+        shift_trop = 1.0 - float(lvdcp_trop) / lvdcp_dry
+        assert 0.0 < shift_trop
+        np.testing.assert_allclose(shift_trop, vtmpc2 * 1.8e-2 / (1.0 + vtmpc2 * 1.8e-2),
+                                   rtol=2e-3)
+        assert 0.013 < shift_trop < 0.017
+
+        # A moist extreme q ~ 35 g/kg approaches the ~3 % the issue cites.
+        lvdcp_hot, _ = latent_heat_over_cp(jnp.array(3.5e-2))
+        shift_hot = 1.0 - float(lvdcp_hot) / lvdcp_dry
+        assert 0.028 < shift_hot < 0.031
+
+    def test_negative_humidity_is_clamped(self):
+        """A spectral-ringing q < 0 cannot drive cp below dry ``cpd``."""
+        cp_neg = float(moist_isobaric_heat_capacity(jnp.array(-5.0e-3)))
+        np.testing.assert_allclose(cp_neg, c.cpd, rtol=1e-6)
+
+    def test_factors_are_per_level_arrays(self):
+        """A humidity profile yields per-level factors that track it."""
+        q = jnp.array([0.0, 1.0e-2, 2.0e-2])
+        lvdcp, lsdcp = latent_heat_over_cp(q)
+        assert lvdcp.shape == (3,)
+        # Monotonically decreasing with humidity.
+        assert float(lvdcp[0]) > float(lvdcp[1]) > float(lvdcp[2])
+        assert float(lsdcp[0]) > float(lsdcp[1]) > float(lsdcp[2])

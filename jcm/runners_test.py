@@ -6,13 +6,16 @@ so it can run in the regular pytest sweep — we do not test the full ECHAM
 T85x47 grid here.
 """
 
+import logging
 import os
+import types
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import numpy as np
 import pytest
+import xarray as xr
 from hydra import compose, initialize_config_dir
 
 # Path/auto resolution lives in the forcing-side engine; tests stub it THERE
@@ -27,11 +30,17 @@ from jcm.runners import (
     build_tracer_filter,
     configure_host_device_count,
     guard_emulator_ghg_forcing,
+    resolve_effective_time_step_seconds,
     run,
 )
 
 
 CONFIG_DIR = str(Path(__file__).parent / "config")
+
+
+#: A stand-in ``(dataset, states)`` for ``_load_states_from_cfg``: one state
+#: (so no time axis is needed) with the leading-axis shape the runner reads.
+_ONE_STATE_FILE = (xr.Dataset(), types.SimpleNamespace(u_wind=np.zeros((1,))))
 
 
 def _compose(overrides=None):
@@ -49,6 +58,130 @@ _NULL_EMISSIONS = (
     "forcing.emissions_file=null", "forcing.dms_file=null",
     "forcing.dust_file=null", "forcing.oxidants_file=null",
 )
+
+
+class TestEffectiveTimeStepResolution(unittest.TestCase):
+    """One config/model contract supplies every runner timestep (#801)."""
+
+    def test_built_model_takes_precedence_over_an_explicit_config_value(self):
+        """A built integrator is authoritative; the config cannot outvote it.
+
+        A diagnostic that quoted the config value here would describe a run
+        that is not happening — the pySES failure mode of #801.
+        """
+        import types
+
+        cfg = _compose(["run.time_step=7.5"])
+        model = types.SimpleNamespace(
+            dt_si=types.SimpleNamespace(m=1800.0),
+        )
+        self.assertEqual(
+            resolve_effective_time_step_seconds(cfg, model), 1800.0,
+        )
+
+    def test_explicit_minutes_used_when_nothing_is_built(self):
+        cfg = _compose(["run.time_step=7.5"])
+        self.assertEqual(resolve_effective_time_step_seconds(cfg), 450.0)
+
+    def test_null_falls_back_to_the_pyses_dycore_group(self):
+        """The pySES group owns its step, so no build is needed to read it."""
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=null"])
+        self.assertEqual(resolve_effective_time_step_seconds(cfg), 900.0)
+
+    def test_null_does_not_read_dt_seconds_from_a_dinosaur_config(self):
+        """The dinosaur group derives dt_seconds FROM run.time_step.
+
+        Treating it as an independent owner would resolve a stale number, so
+        the fallback is gated on the backend that genuinely owns its step.
+        """
+        from omegaconf import open_dict
+
+        cfg = _compose(["run.time_step=null"])
+        with open_dict(cfg):
+            cfg.dycore.dt_seconds = 4242.0
+        with self.assertRaises(ValueError):
+            resolve_effective_time_step_seconds(cfg)
+
+    def test_explicit_zero_is_not_treated_as_delegation(self):
+        cfg = _compose(["run.time_step=0"])
+        self.assertEqual(resolve_effective_time_step_seconds(cfg), 0.0)
+
+    def test_null_delegates_to_built_model(self):
+        import types
+
+        cfg = _compose(["run.time_step=null"])
+        model = types.SimpleNamespace(
+            dt_si=types.SimpleNamespace(m=1800.0),
+        )
+        self.assertEqual(
+            resolve_effective_time_step_seconds(cfg, model), 1800.0,
+        )
+
+    def test_null_accepts_a_built_dycore(self):
+        import types
+
+        cfg = _compose(["run.time_step=null"])
+        dycore = types.SimpleNamespace(dt_seconds=900.0)
+        self.assertEqual(
+            resolve_effective_time_step_seconds(cfg, dycore), 900.0,
+        )
+
+    def test_null_without_an_owner_raises_a_contract_error(self):
+        cfg = _compose(["run.time_step=null"])
+        with self.assertRaisesRegex(ValueError, "owns a timestep"):
+            resolve_effective_time_step_seconds(cfg)
+
+    def _build_pyses_with_mocks(self, cfg):
+        from jcm.runners import _build_pyses_model
+
+        physics = mock.MagicMock()
+        physics.required_tracers.return_value = ()
+        dycore = mock.MagicMock()
+        dycore.dt_seconds = 900.0
+        expected = object()
+
+        with mock.patch("jcm.runners.build_physics", return_value=physics), \
+                mock.patch(
+                    "jcm.dycore.pyses.PysesCamSEDycore",
+                    return_value=dycore,
+                ), \
+                mock.patch("jcm.runners._pyses_lid_sponge_term"), \
+                mock.patch("jcm.runners.Model", return_value=expected) as model:
+            result = _build_pyses_model(cfg)
+        self.assertIs(result, expected)
+        return model
+
+    def test_pyses_never_forwards_a_runner_timestep_to_model(self):
+        """The dycore owns the step; run.time_step must not veto the build.
+
+        ``run/default.yaml`` sets 12 minutes, so forwarding it would make
+        ``dycore=pyses_ne30l47`` fail construction unless the user also
+        selected ``run=pyses_year`` — a value they never chose overriding the
+        group that owns it.
+        """
+        for overrides in (
+            ["dycore=pyses_ne30l47"],                      # default run group
+            ["dycore=pyses_ne30l47", "run.time_step=30"],  # explicit conflict
+            ["dycore=pyses_ne30l47", "run.time_step=null"],
+        ):
+            with self.subTest(overrides=overrides):
+                model = self._build_pyses_with_mocks(_compose(overrides))
+                self.assertNotIn("time_step", model.call_args.kwargs)
+
+    def test_pyses_warns_when_the_runner_value_disagrees(self):
+        """A conflicting value is ignored loudly, not silently."""
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=30"])
+        with self.assertLogs("jcm.runners", level="WARNING") as logs:
+            self._build_pyses_with_mocks(cfg)
+        joined = "\n".join(logs.output)
+        self.assertIn("pySES owns the timestep", joined)
+        self.assertIn("900.0", joined)
+
+    def test_pyses_is_quiet_when_the_runner_value_agrees(self):
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=15"])
+        with mock.patch("jcm.runners.logger") as log:
+            self._build_pyses_with_mocks(cfg)
+        log.warning.assert_not_called()
 
 
 class TestTracerPositivityResolution(unittest.TestCase):
@@ -432,6 +565,7 @@ class TestAttachOzonePreservesAquaplanetSST(unittest.TestCase):
             ).to_netcdf(ozone_path)
             cfg.forcing.kind = "default"
             cfg.forcing.ozone_file = str(ozone_path)
+            cfg.forcing.ozone_align = "wrap_year"
 
             forcing_with_ozone = build_forcing(cfg, coords)
 
@@ -440,6 +574,131 @@ class TestAttachOzonePreservesAquaplanetSST(unittest.TestCase):
             np.asarray(forcing_with_ozone.sea_surface_temperature),
             np.asarray(baseline.sea_surface_temperature),
         )
+
+
+class TestRunLogLevel(unittest.TestCase):
+    """``run.log_level`` must reach jcm's loggers in every run mode (#815).
+
+    ``runners`` is the only layer that sets a level — jcm the library sets
+    none — so ``run()`` applying it before the mode dispatch is what makes
+    the knob mean the same thing everywhere. It used to be applied by
+    ``Model.__init__``, and only ``full`` builds a ``Model``, so it did
+    nothing at all in ``prescribed`` and ``scm``: the ``jcm`` logger stayed
+    NOTSET and deferred to the root level Hydra's job logging sets (INFO),
+    the opposite of what a user asking for WARNING wants.
+    """
+
+    def _level_seen_by(self, mode, requested):
+        """Level on the ``jcm`` logger when ``run`` dispatches to ``mode``.
+
+        The mode's runner is stubbed out, so this asserts the level is in
+        place *before* dispatch — which is what makes it mode-independent,
+        rather than a property of whatever each runner happens to build.
+        """
+        from jcm import runners
+
+        cfg = _compose()
+        # Set on the composed config rather than as a Hydra override: the
+        # override grammar parses ``run.log_level=50`` to an int either way,
+        # so an override string could not exercise the numeric-*string* path.
+        cfg.run.log_level = requested
+        cfg.run.mode = mode
+        seen = {}
+
+        def _capture(*args, **kwargs):
+            seen["level"] = logging.getLogger("jcm").level
+            return None
+
+        target = {"full": "_run_full", "prescribed": "_run_prescribed",
+                  "scm": "_run_scm"}[mode]
+        with mock.patch.object(runners, target, _capture):
+            runners.run(cfg)
+        return seen["level"]
+
+    def test_every_mode_applies_the_requested_level(self):
+        for mode in ("full", "prescribed", "scm"):
+            for requested, expected in (("WARNING", logging.WARNING),
+                                        ("CRITICAL", logging.CRITICAL),
+                                        ("INFO", logging.INFO)):
+                with self.subTest(mode=mode, log_level=requested):
+                    self.assertEqual(
+                        self._level_seen_by(mode, requested), expected)
+
+    def test_a_numeric_level_is_taken_as_is(self):
+        """The Python door spells this as an int, so the config may too.
+
+        The string spelling is not hypothetical: an interpolation such as
+        ``${oc.env:JCM_LOG_LEVEL,WARNING}`` always resolves to ``str``, as
+        does a shell-quoted CLI override.
+        """
+        for requested in (50, "50"):
+            with self.subTest(requested=requested):
+                self.assertEqual(
+                    self._level_seen_by("scm", requested), logging.CRITICAL)
+
+    def test_a_missing_level_uses_the_documented_default(self):
+        """A hand-rolled ``run`` group must not die before the run starts."""
+        from jcm import runners
+
+        cfg = _compose()
+        cfg.run.mode = "scm"
+        del cfg.run.log_level
+        seen = {}
+        with mock.patch.object(
+                runners, "_run_scm",
+                lambda *a, **k: seen.update(
+                    level=logging.getLogger("jcm").level)):
+            runners.run(cfg)
+        self.assertEqual(seen["level"], logging.WARNING)
+
+    def test_the_config_applies_even_with_a_supplied_model(self):
+        """``run(cfg, model=...)`` applies the config's level regardless.
+
+        ``run()`` is the only caller of ``_apply_log_level``, so this pins
+        that its own call covers the pre-built-model path too, and that a
+        level the caller had already set is superseded by the config, which
+        is what describes the run.
+        """
+        from jcm import runners
+
+        logging.getLogger("jcm").setLevel(logging.DEBUG)   # a caller's own choice
+        cfg = _compose()
+        cfg.run.log_level = "CRITICAL"
+        seen = {}
+        with mock.patch.object(
+                runners, "_run_full",
+                lambda *a, **k: seen.update(
+                    level=logging.getLogger("jcm").level)):
+            runners.run(cfg, model=object())
+        self.assertEqual(seen["level"], logging.CRITICAL)
+
+    def test_the_python_door_leaves_the_callers_level_alone(self):
+        """Only the CLI configures logging — ``build_model`` must not.
+
+        ``jcm.configurations.load`` is a documented library API and reaches
+        ``build_model``, so applying the config's level there would put jcm
+        back to reconfiguring logging for a host application that never
+        asked for a CLI run (found by review on #819). ``run()`` is the CLI's
+        own entry point and is the only place that may.
+        """
+        from jcm import runners
+
+        cfg = _compose()
+        cfg.run.log_level = "CRITICAL"
+        logging.getLogger("jcm").setLevel(logging.DEBUG)   # the caller's choice
+
+        from jcm.dycore.dinosaur import dycore as dinosaur_dycore
+        with mock.patch.object(dinosaur_dycore, "DinosaurDycore",
+                               side_effect=RuntimeError("stop here")):
+            with self.assertRaises(RuntimeError):
+                runners.build_model(cfg)
+
+        self.assertEqual(logging.getLogger("jcm").level, logging.DEBUG)
+
+    def test_an_unrecognised_level_is_refused(self):
+        """A typo must not silently run the job at some other verbosity."""
+        with self.assertRaisesRegex(ValueError, "not a logging level"):
+            self._level_seen_by("scm", "warnign")
 
 
 class TestAutoOzoneDefault(unittest.TestCase):
@@ -504,7 +763,7 @@ class TestAutoOzoneDefault(unittest.TestCase):
         from jcm.runners import _resolve_auto_ozone
 
         # T85 hybrid: no packaged bc/*/ozone.nc matches and the mirror
-        # publishes ozone for t63/t106 only. The fetch is still attempted
+        # publishes no t85 ozone. The fetch is still attempted
         # (the manifest's grid list can lag what is staged) and fails.
         cfg = _compose(["physics=echam", "grid=echam_t85_l47_hybrid"])
         coords = build_coords(cfg)
@@ -609,7 +868,8 @@ class TestEmissionsConfig(unittest.TestCase):
                                   (("lon", "lat", "time"),
                                    np.full((nlon, nlat, 12), 1e-11))}, nlon, nlat)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
-                            f"forcing.emissions_file={p}"])
+                            f"forcing.emissions_file={p}",
+                            "forcing.emissions_align=wrap_year"])
             f = build_forcing(cfg, coords)
         self.assertIn("emis_surface_combustion_bc", f.anthropogenic_emissions)
         self.assertIsNone(f.prescribed_aerosol_emissions)
@@ -624,7 +884,8 @@ class TestEmissionsConfig(unittest.TestCase):
                                   (("lon", "lat", "time"),
                                    np.full((nlon, nlat, 12), 1e-11))}, nlon, nlat)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
-                            f"forcing.emissions_file={p}"])
+                            f"forcing.emissions_file={p}",
+                            "forcing.emissions_align=wrap_year"])
             f = build_forcing(cfg, coords)
         self.assertIn("m_so4_acc", f.prescribed_aerosol_emissions)
         self.assertIsNone(f.anthropogenic_emissions)
@@ -651,7 +912,8 @@ class TestEmissionsConfig(unittest.TestCase):
                          np.full((nlon, nlat, 12), 2e-11))},
                        coords=base).to_netcdf(p2)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
-                            f"forcing.emissions_file=[{p1},{p2}]"])
+                            f"forcing.emissions_file=[{p1},{p2}]",
+                            "forcing.emissions_align=wrap_year"])
             f = build_forcing(cfg, coords)
         self.assertIn("emis_surface_combustion_bc", f.anthropogenic_emissions)
         self.assertIn("emis_biomass_burning_bc", f.anthropogenic_emissions)
@@ -681,7 +943,8 @@ class TestEmissionsConfig(unittest.TestCase):
                        coords=base).to_netcdf(p2)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
                             "grid=echam_t42_l8_sigma",
-                            f"forcing.emissions_file=[{p1},{p2}]"])
+                            f"forcing.emissions_file=[{p1},{p2}]",
+                            "forcing.emissions_align=wrap_year"])
             with self.assertRaises(ValueError) as ctx:
                 build_forcing(cfg, coords)
         msg = str(ctx.exception)
@@ -708,7 +971,8 @@ class TestEmissionsConfig(unittest.TestCase):
                            coords=base).to_netcdf(p)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
                             "grid=echam_t42_l8_sigma",
-                            f"forcing.emissions_file=[{p1},{p2}]"])
+                            f"forcing.emissions_file=[{p1},{p2}]",
+                            "forcing.emissions_align=wrap_year"])
             with self.assertRaises(ValueError) as ctx:
                 build_forcing(cfg, coords)
         msg = str(ctx.exception)
@@ -765,6 +1029,8 @@ class TestEmissionsConfig(unittest.TestCase):
             with open_dict(cfg):
                 cfg.forcing.emissions_file = [str(Path(tmp) / "bb_{year}.nc"),
                                               str(anthro_path)]
+                # User files: each product declares its own mode (#884).
+                cfg.forcing.emissions_align = ["by_date", "wrap_year"]
                 cfg.forcing.years = [2000, 2001]
             f = build_forcing(cfg, coords)
 
@@ -787,9 +1053,8 @@ class TestEmissionsConfig(unittest.TestCase):
         # of 2001 (200106) and climatology month index 6 (16).
         date = DateData.set_date(
             model_time=jdt.Datetime.from_pydatetime(
-                jdt.to_datetime("2001-07-15")),
-            calendar="gregorian")
-        sel = f.select(date, calendar="gregorian").anthropogenic_emissions
+                jdt.to_datetime("2001-07-15")))
+        sel = f.select(date).anthropogenic_emissions
         self.assertAlmostEqual(
             float(np.asarray(sel["emis_biomass_burning_bc"])[0, 0]), 200106.0)
         self.assertAlmostEqual(
@@ -824,6 +1089,7 @@ class TestEmissionsConfig(unittest.TestCase):
             with open_dict(cfg):
                 cfg.forcing.emissions_file = [str(Path(tmp) / "bb_{year}.nc"),
                                               str(Path(tmp) / "an_{year}.nc")]
+                cfg.forcing.emissions_align = "by_date"
                 cfg.forcing.years = [2000, 2001]
             f = build_forcing(cfg, coords)
         em = f.anthropogenic_emissions
@@ -831,6 +1097,88 @@ class TestEmissionsConfig(unittest.TestCase):
             self.assertIsInstance(em[var], TimeSeries)
             self.assertEqual(int(em[var].align_mode), BY_DATE)
             self.assertEqual(em[var].values.shape[0], 24)
+
+    def test_static_user_file_loads_under_auto(self):
+        # Codex #877 P2: a user emissions file whose fields have no time axis
+        # needs no alignment, so the default ``emissions_align=auto`` must not
+        # reject it (alignment is resolved only for a timed product).
+        import tempfile
+
+        import xarray as xr
+        from jcm.forcing import TimeSeries
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "static.nc"
+            xr.Dataset(
+                {"emis_surface_combustion_bc": (("lon", "lat"),
+                                                np.full((nlon, nlat), 1e-11))},
+                coords={"lon": np.linspace(0, 360, nlon, endpoint=False),
+                        "lat": np.linspace(-87, 87, nlat)},
+            ).to_netcdf(p)
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file={p}"])
+            f = build_forcing(cfg, coords)
+        leaf = f.anthropogenic_emissions["emis_surface_combustion_bc"]
+        self.assertNotIsInstance(leaf, TimeSeries)
+        self.assertTrue(np.allclose(np.asarray(leaf), 1e-11))
+
+    def test_user_file_align_auto_raises_naming_the_knob(self):
+        # #884: a user emission file is not a mirror product, so ``auto``
+        # cannot resolve its time alignment and must raise, not guess.
+        import tempfile
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, {"emis_surface_combustion_bc":
+                                  (("lon", "lat", "time"),
+                                   np.full((nlon, nlat, 12), 1e-11))}, nlon, nlat)
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file={p}"])
+            with self.assertRaisesRegex(ValueError,
+                                        "forcing.emissions_align=auto"):
+                build_forcing(cfg, coords)
+
+    def test_per_product_align_list_must_match_products(self):
+        import tempfile
+        from jcm.runners import build_forcing
+        coords = self._coords()
+        nlon, nlat = coords.horizontal.nodal_shape
+        with tempfile.TemporaryDirectory() as tmp:
+            p = self._write(tmp, {"emis_surface_combustion_bc":
+                                  (("lon", "lat", "time"),
+                                   np.full((nlon, nlat, 12), 1e-11))}, nlon, nlat)
+            cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                            "grid=echam_t42_l8_sigma",
+                            f"forcing.emissions_file={p}",
+                            "forcing.emissions_align=[wrap_year,by_date]"])
+            with self.assertRaisesRegex(ValueError, "one mode per product"):
+                build_forcing(cfg, coords)
+
+    def test_user_surface_file_align_auto_raises(self):
+        # The SST/sea-ice boundary file follows the same rule: a user copy of
+        # even a packaged climatology must declare ``forcing.align``.
+        import shutil
+        import tempfile
+        from importlib import resources
+        from jcm.runners import build_forcing
+        src = resources.files("jcm.data.bc.t30.clim") / "forcing.nc"
+        with tempfile.TemporaryDirectory() as tmp:
+            dst = Path(tmp) / "forcing.nc"
+            shutil.copy(str(src), dst)
+            cfg = _compose(["forcing=from_file", f"forcing.file={dst}"])
+            from jcm.runners import build_coords
+            coords = build_coords(cfg)
+            with self.assertRaisesRegex(ValueError, "forcing.align=auto"):
+                build_forcing(cfg, coords)
+            # Declared, it loads.
+            cfg = _compose(["forcing=from_file", f"forcing.file={dst}",
+                            "forcing.align=wrap_year"])
+            self.assertIsNotNone(build_forcing(cfg, coords))
 
     def test_grid_mismatch_raises(self):
         import tempfile
@@ -844,7 +1192,8 @@ class TestEmissionsConfig(unittest.TestCase):
                                    np.full((nlon + 2, nlat, 12), 1e-11))},
                             nlon + 2, nlat)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
-                            f"forcing.emissions_file={p}"])
+                            f"forcing.emissions_file={p}",
+                            "forcing.emissions_align=wrap_year"])
             with self.assertRaisesRegex(ValueError, "model grid"):
                 build_forcing(cfg, coords)
 
@@ -857,7 +1206,8 @@ class TestEmissionsConfig(unittest.TestCase):
             p = self._write(tmp, {"sst": (("lon", "lat", "time"),
                                           np.zeros((nlon, nlat, 12)))}, nlon, nlat)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
-                            f"forcing.emissions_file={p}"])
+                            f"forcing.emissions_file={p}",
+                            "forcing.emissions_align=wrap_year"])
             with self.assertRaisesRegex(ValueError, "no emissions variables"):
                 build_forcing(cfg, coords)
 
@@ -958,6 +1308,7 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
                 f"forcing.dust_file={dust}",
                 *companions,
                 f"forcing.oxidants_file={ox}",
+                "forcing.oxidants_align=wrap_year",
             ])
             f = build_forcing(cfg, coords)
         nlon, nlat = coords.horizontal.nodal_shape
@@ -1031,7 +1382,8 @@ class TestNaturalForcingFilesConfig(unittest.TestCase):
             _, _, ox, _ = self._write_files(tmp, coords,
                                          nlev=coords.nodal_shape[0] + 3)
             cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
-                            f"forcing.oxidants_file={ox}"])
+                            f"forcing.oxidants_file={ox}",
+                            "forcing.oxidants_align=wrap_year"])
             with self.assertRaisesRegex(ValueError, "levels"):
                 build_forcing(cfg, coords)
 
@@ -1130,12 +1482,247 @@ class TestModeDispatch(unittest.TestCase):
             self.assertEqual(len(reports1), 1)
             self.assertTrue(Path(ckpt_path).exists())
 
+            # The file carries the schema stamp, which is what lets a later
+            # jcm migrate a changed carry field set rather than reject the
+            # whole checkpoint (#731).
+            import flax.serialization
+
+            from jcm.checkpoint import SCHEMA_VERSION
+
+            day1 = flax.serialization.msgpack_restore(
+                Path(ckpt_path).read_bytes())
+            self.assertEqual(int(day1["schema_version"]), SCHEMA_VERSION)
+            self.assertAlmostEqual(float(day1["elapsed_days"]), 1.0)
+
             # Second invocation: total 2 days, but the first chunk
             # should be skipped because the checkpoint records day=1.
             cfg2 = _compose(base_overrides + ["run.total_time=2"])
             reports2 = run(cfg2)
             self.assertEqual(len(reports2), 1, "should run only the remaining chunk")
             self.assertAlmostEqual(reports2[0]["elapsed_days"], 2.0, places=5)
+
+            # That chunk rotated the day-1 checkpoint to ``.prev`` instead of
+            # overwriting the only restartable state.
+            prev = Path(f"{ckpt_path}.prev")
+            self.assertTrue(prev.exists())
+            rotated = flax.serialization.msgpack_restore(prev.read_bytes())
+            self.assertAlmostEqual(float(rotated["elapsed_days"]), 1.0)
+            current = flax.serialization.msgpack_restore(
+                Path(ckpt_path).read_bytes())
+            self.assertAlmostEqual(float(current["elapsed_days"]), 2.0)
+
+    def test_chunked_budget_uses_model_timestep(self):
+        """The budget floor uses the step that advanced the model (#801)."""
+        import tempfile
+        import types
+
+        from jcm.runners import run_chunked
+
+        class _Dataset:
+            def __init__(self):
+                self.attrs = {}
+
+            def to_netcdf(self, _path):
+                pass
+
+        for configured in ("null", "7"):
+            with self.subTest(configured_time_step=configured):
+                dataset = _Dataset()
+                predictions = types.SimpleNamespace(
+                    _predictions={},
+                    params=None,
+                    to_xarray=lambda: dataset,
+                )
+                import jax_datetime as jdt
+                model = types.SimpleNamespace(
+                    dt_si=types.SimpleNamespace(m=1800.0),
+                    start_time=jdt.to_datetime("2000-01-01"),
+                    run_state=types.SimpleNamespace(time=jdt.to_datetime("2000-01-02")),
+                    run=mock.Mock(return_value=predictions),
+                )
+                cfg = _compose([
+                    f"run.time_step={configured}",
+                    "run.total_time=1",
+                    "run.save_interval=1",
+                ])
+
+                with tempfile.TemporaryDirectory() as tmpdir, \
+                        mock.patch("jcm.diagnostics.check_health",
+                                   return_value=(True, {})), \
+                        mock.patch("jcm.diagnostics.print_report"), \
+                        mock.patch("jcm.diagnostics.aerosol_budget_report",
+                                   return_value=[]) as budget, \
+                        mock.patch("jcm.runners.provenance.attrs",
+                                   return_value={}), \
+                        mock.patch("jcm.runners.provenance.write_sidecar"):
+                    run_chunked(
+                        cfg,
+                        chunk_days=1,
+                        output_prefix=f"{tmpdir}/chunk",
+                        model=model,
+                        forcing=object(),
+                    )
+
+                budget.assert_called_once_with(dataset, 1800.0)
+
+    def test_chunked_schedule_is_exact_seconds_to_a_sub_day_endpoint(self):
+        """365 d + 1 h in 30-day chunks lands exactly on the end_time.
+
+        Float-day bookkeeping made the final remainder 5.041666666666686 d,
+        which no longer parses as whole seconds and aborted the run.
+        """
+        import tempfile
+
+        import jax_datetime as jdt
+
+        from jcm.date import parse_duration_seconds
+        from jcm.runners import run_chunked
+
+        class _Dataset:
+            attrs = {}
+
+            def to_netcdf(self, _path):
+                pass
+
+        predictions = types.SimpleNamespace(
+            _predictions={}, params=None, to_xarray=lambda: _Dataset())
+        start = jdt.to_datetime("2001-01-01")
+        state = types.SimpleNamespace(time=start)
+        chunks = []
+
+        def advance(**kwargs):
+            seconds = parse_duration_seconds(kwargs["total_time"])
+            chunks.append(seconds)
+            state.time = state.time + jdt.Timedelta(
+                days=seconds // 86400, seconds=seconds % 86400)
+            return predictions
+
+        model = types.SimpleNamespace(
+            dt_si=types.SimpleNamespace(m=1800.0), start_time=start,
+            run_state=state, run=mock.Mock(side_effect=advance),
+            resume=mock.Mock(side_effect=advance))
+        cfg = _compose(["run.total_time=null",
+                        "run.end_time=2002-01-01T01:00:00",
+                        "run.save_interval=1h"])
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch("jcm.diagnostics.check_health",
+                           return_value=(True, {})), \
+                mock.patch("jcm.diagnostics.print_report"), \
+                mock.patch("jcm.diagnostics.aerosol_budget_report",
+                           return_value=[]), \
+                mock.patch("jcm.runners.provenance.attrs", return_value={}), \
+                mock.patch("jcm.runners.provenance.write_sidecar"):
+            run_chunked(cfg, chunk_days=30, output_prefix=f"{tmpdir}/c",
+                        model=model, forcing=object())
+        self.assertEqual(chunks, [30 * 86400] * 12 + [5 * 86400 + 3600])
+        self.assertEqual(
+            np.asarray(state.time.to_datetime64()).astype("datetime64[s]"),
+            np.datetime64("2002-01-01T01:00:00", "s"))
+
+        # A duration that is not whole seconds is still refused up front.
+        bad = _compose(["run.total_time=0.1234567", "run.save_interval=1"])
+        with self.assertRaisesRegex(ValueError, "whole-second"):
+            run_chunked(bad, chunk_days=30, output_prefix="unused",
+                        model=model, forcing=object())
+
+    def test_prescribed_mode_resolves_a_delegated_timestep_without_building(self):
+        """A delegating backend's step is read from its config group.
+
+        The physics-only driver has no dycore of its own, but constructing a
+        whole ne30L47 core just to read ``dt_seconds`` is not the way to get
+        one.
+        """
+        from jcm.runners import _run_prescribed
+
+        # A single state with no time axis carries no date: start_time is
+        # required for it (see TestPrescribedStartTime).
+        cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=null",
+                        "run.start_time=2000-01-01"])
+        expected = object()
+
+        with mock.patch("jcm.runners.build_model") as build, \
+                mock.patch("jcm.runners.build_coords", return_value=object()), \
+                mock.patch("jcm.runners.build_physics", return_value=object()), \
+                mock.patch("jcm.runners.build_terrain", return_value=object()), \
+                mock.patch("jcm.runners.build_forcing", return_value=object()), \
+                mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
+                mock.patch("jcm.runners.warn_on_config_traps"), \
+                mock.patch("jcm.runners._load_states_from_cfg",
+                           return_value=_ONE_STATE_FILE), \
+                mock.patch(
+                    "jcm.prescribed_state_model.PrescribedStateModel",
+                ) as prescribed_cls:
+            prescribed_cls.return_value.run.return_value = expected
+            result = _run_prescribed(cfg)
+
+        build.assert_not_called()
+        self.assertIs(result, expected)
+        self.assertEqual(
+            prescribed_cls.call_args.kwargs["dt_seconds"], 900.0,
+        )
+
+    def test_prescribed_mode_prefers_a_supplied_model_over_the_config(self):
+        """When the caller already built the model, it owns the step."""
+        import types
+
+        from jcm.runners import _run_prescribed
+
+        cfg = _compose(["run.time_step=12", "run.start_time=2000-01-01"])
+        owner = types.SimpleNamespace(dt_si=types.SimpleNamespace(m=1800.0))
+        expected = object()
+
+        with mock.patch("jcm.runners.build_model") as build, \
+                mock.patch("jcm.runners.build_coords", return_value=object()), \
+                mock.patch("jcm.runners.build_physics", return_value=object()), \
+                mock.patch("jcm.runners.build_terrain", return_value=object()), \
+                mock.patch("jcm.runners.build_forcing", return_value=object()), \
+                mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
+                mock.patch("jcm.runners.warn_on_config_traps"), \
+                mock.patch("jcm.runners._load_states_from_cfg",
+                           return_value=_ONE_STATE_FILE), \
+                mock.patch(
+                    "jcm.prescribed_state_model.PrescribedStateModel",
+                ) as prescribed_cls:
+            prescribed_cls.return_value.run.return_value = expected
+            result = _run_prescribed(cfg, owner)
+
+        build.assert_not_called()
+        self.assertIs(result, expected)
+        self.assertEqual(
+            prescribed_cls.call_args.kwargs["dt_seconds"], 1800.0,
+        )
+
+    def test_scm_mode_preserves_explicit_zero_timestep(self):
+        """Explicit zero reaches the SCM instead of triggering fallback."""
+        import types
+
+        from jcm.runners import _run_scm
+
+        cfg = _compose(["run.time_step=0"])
+        vertical = object()
+        coords = types.SimpleNamespace(vertical=vertical)
+        physics = object()
+        states = object()
+        column_states = object()
+        expected = object()
+
+        with mock.patch("jcm.runners.build_model") as build, \
+                mock.patch("jcm.runners.build_coords", return_value=coords), \
+                mock.patch("jcm.runners.build_physics", return_value=physics), \
+                mock.patch("jcm.runners.warn_on_config_traps"), \
+                mock.patch("jcm.runners._load_states_from_cfg",
+                           return_value=(object(), states)), \
+                mock.patch("jcm.runners._select_column", return_value=(
+                    column_states, (1, 2, 3.0, 4.0))), \
+                mock.patch(
+                    "jcm.single_column_model.SingleColumnModel",
+                ) as scm_cls:
+            scm_cls.return_value.run.return_value = expected
+            result = _run_scm(cfg)
+
+        build.assert_not_called()
+        self.assertIs(result, expected)
+        self.assertEqual(scm_cls.call_args.kwargs["dt_seconds"], 0.0)
 
     def test_archive_fires_on_interval_crossing_not_divisibility(self):
         """``archive_ckpt_every`` need not divide ``chunk_days``.
@@ -1177,7 +1764,7 @@ class TestModeDispatch(unittest.TestCase):
             cfg = _compose([
                 "physics=held_suarez",
                 "grid=held_suarez_t31_l8",
-                "run.time_step=180",
+                "run.time_step=36",
                 "run.total_time=1.2",
                 "run.save_interval=0.3",
                 "run.chunk_days=0.3",
@@ -1279,6 +1866,62 @@ class TestModeDispatch(unittest.TestCase):
             self.assertLess(float(np.asarray(warm.time.max())),
                             float(np.asarray(donor_end.time.max())))
 
+    def test_from_state_unstamped_donor_needs_an_explicit_assertion(self):
+        """A pre-3.0 donor is refused until ``init.unstamped_scale`` says so.
+
+        End-to-end through Hydra, because the escape hatch is only useful
+        if the override grammar can express it: the leaf names contain
+        dots, so the value is a list of ``"name=factor"`` entries rather
+        than a mapping (#731).
+        """
+        import tempfile
+
+        import flax.serialization
+        import jax
+
+        import numpy as np
+
+        from jcm.runners import build_model
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            common = [
+                "physics=held_suarez",
+                "grid=held_suarez_t31_l8",
+                "run.time_step=180",
+                "run.save_interval=1",
+                "run.chunk_days=1",
+            ]
+            donor_cfg = _compose(common + ["run.total_time=1"])
+            donor = build_model(donor_cfg)
+            donor.bootstrap_state()
+            # The pre-#731 payload: positional leaf lists and no stamp.
+            legacy = f"{tmpdir}/legacy.ckpt"
+            Path(legacy).write_bytes(flax.serialization.to_bytes({
+                "elapsed_days": 1.0,
+                "dycore_leaves": [
+                    np.asarray(x) for x in
+                    jax.tree_util.tree_leaves(donor.dycore_state)],
+                "physics_leaves": [
+                    np.asarray(x) for x in
+                    jax.tree_util.tree_leaves(donor.physics_carry)],
+            }))
+
+            warm = common + [
+                "init=from_state",
+                f"init.file={legacy}",
+                "run.total_time=1",
+                f"run.output_prefix={tmpdir}/warm",
+            ]
+            with self.assertRaises(ValueError) as ctx:
+                run(_compose(warm))
+            self.assertIn("unstamped_scale", str(ctx.exception))
+
+            reports = run(_compose(warm + [
+                'init.unstamped_scale=["tracers.specific_humidity=1000"]',
+            ]))
+            self.assertEqual(len(reports), 1)
+            self.assertAlmostEqual(reports[0]["elapsed_days"], 1.0, places=5)
+
     def _write_state_file(self, path):
         # Run a tiny full simulation and dump it so the prescribed/scm modes
         # have a JCM-shaped state to load.
@@ -1307,6 +1950,13 @@ class TestModeDispatch(unittest.TestCase):
             ])
             preds = run(cfg)
             self.assertEqual(preds.tendencies.temperature.shape[0], 2)
+            # No run.start_time: the dated (v3) state file dates itself, so
+            # the diagnosed states carry the file's own exact times.
+            with xr.open_dataset(state_file) as written:
+                file_times = written.time.values.astype("datetime64[s]")
+            np.testing.assert_array_equal(
+                np.asarray(preds.to_xarray().time.values).astype(
+                    "datetime64[s]"), file_times)
 
     def test_scm_mode_picks_column_from_state_file(self):
         import tempfile
@@ -1647,6 +2297,79 @@ class TestRunDispatchErrorPaths(unittest.TestCase):
             _run_scm(cfg)
 
 
+class TestPrescribedStartTime(unittest.TestCase):
+    """Where ``run.mode=prescribed`` places its first state.
+
+    A dated (v3) state file dates itself; ``run.start_time`` overrides it
+    with a warning, and is required for an elapsed-time axis.
+    """
+
+    def _run(self, ds, overrides=()):
+        from jcm.runners import _run_prescribed
+
+        cfg = _compose(["run.time_step=12", *overrides])
+        n = int(ds.sizes.get("time", 1))
+        states = types.SimpleNamespace(u_wind=np.zeros((n,)))
+        with mock.patch("jcm.runners.build_coords", return_value=object()), \
+                mock.patch("jcm.runners.build_physics", return_value=object()), \
+                mock.patch("jcm.runners.build_terrain", return_value=object()), \
+                mock.patch("jcm.runners.build_forcing", return_value=object()), \
+                mock.patch("jcm.runners.guard_emulator_ghg_forcing"), \
+                mock.patch("jcm.runners.warn_on_config_traps"), \
+                mock.patch("jcm.runners.validate_run_forcing"), \
+                mock.patch("jcm.runners._load_states_from_cfg",
+                           return_value=(ds, states)), \
+                mock.patch(
+                    "jcm.prescribed_state_model.PrescribedStateModel",
+                ) as prescribed_cls:
+            _run_prescribed(cfg)
+        kwargs = prescribed_cls.call_args.kwargs
+        times = prescribed_cls.return_value.run.call_args.kwargs["times"]
+        start = np.asarray(kwargs["start_time"].to_datetime64()).astype(
+            "datetime64[s]").reshape(-1)[0]
+        return start, np.asarray(times)
+
+    @staticmethod
+    def _dated(start="1990-07-01T12:00:00", n=3):
+        t = np.datetime64(start, "s") + np.arange(n) * np.timedelta64(1, "D")
+        return xr.Dataset(coords={"time": t})
+
+    def test_dated_file_without_start_time_uses_its_first_time(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            start, times = self._run(self._dated())
+        self.assertEqual(start, np.datetime64("1990-07-01T12:00:00", "s"))
+        np.testing.assert_array_equal(times, [0.0, 1.0, 2.0])
+
+    def test_matching_start_time_does_not_warn(self):
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", UserWarning)
+            start, _ = self._run(self._dated(),
+                                 ["run.start_time=1990-07-01T12:00:00"])
+        self.assertEqual(start, np.datetime64("1990-07-01T12:00:00", "s"))
+
+    def test_differing_start_time_warns_and_the_config_wins(self):
+        with self.assertWarns(UserWarning) as caught:
+            start, _ = self._run(self._dated(),
+                                 ["run.start_time=2000-01-01"])
+        message = str(caught.warning)
+        self.assertIn("2000-01-01T00:00:00", message)
+        self.assertIn("1990-07-01T12:00:00", message)
+        self.assertIn("configured run.start_time is used", message)
+        self.assertEqual(start, np.datetime64("2000-01-01T00:00:00", "s"))
+
+    def test_elapsed_time_file_without_start_time_raises(self):
+        ds = xr.Dataset(coords={"time": ("time", [0.0, 1.0, 2.0],
+                                         {"units": "d"})})
+        with self.assertRaisesRegex(ValueError, "run.start_time"):
+            self._run(ds)
+        start, times = self._run(ds, ["run.start_time=1979-01-01"])
+        self.assertEqual(start, np.datetime64("1979-01-01T00:00:00", "s"))
+        np.testing.assert_array_equal(times, [0.0, 1.0, 2.0])
+
+
 class TestPrescribedStateTracerLoading(unittest.TestCase):
     """``prescribed`` / ``scm`` load the tracers the physics declares (#718).
 
@@ -1932,13 +2655,9 @@ class TestInjectJwHumidityMagnitude(unittest.TestCase):
     """``jw_state`` must hand the gridpoint physics a physical
     humidity magnitude (a few g/kg, i.e. O(1e-2) kg/kg), not 1000x larger.
 
-    Regression for the moist-init blow-up: storing the raw kg/kg ``q_profile``
-    into the dynamics ``State.tracers`` skipped the
-    ``nondimensionalize(q * gram/kilogram)`` that the canonical
-    physics->dynamics bridge applies. The forward bridge then re-dimensionalized
-    (~x1000), so the physics saw q ~ 5 kg/kg; the cloud saturation adjustment
-    read that as hugely supersaturated and dumped ~7000 K of latent heat in a
-    single step, NaNing every moist init at step 1.
+    The dycore-native state and public ``PhysicsState`` both represent q as a
+    dimensionless kg/kg mass fraction. This catches either a missing or an
+    accidental extra factor of 1000 in the direct JW injection path.
     """
 
     def test_jw_physics_q_is_physical_magnitude(self):
@@ -2127,16 +2846,16 @@ class TestAutoInputResolution(unittest.TestCase):
 
 
 class TestYearExpansionAndStartDate(unittest.TestCase):
-    """{year} pattern expansion + run.start_date threading (#610)."""
+    """{year} pattern expansion + run.start_time threading (#610)."""
 
     def test_amip_preset_composes(self):
         cfg = _compose(["forcing=amip", "forcing.years=[1979,1980]",
-                        "run.start_date=1979-01-01"])
+                        "run.start_time=1979-01-01"])
         self.assertEqual(cfg.forcing.kind, "from_file")
         self.assertEqual(cfg.forcing.align, "by_date_interp")
         self.assertIn("{year}", cfg.forcing.file)
         self.assertEqual(list(cfg.forcing.years), [1979, 1980])
-        self.assertEqual(cfg.run.start_date, "1979-01-01")
+        self.assertEqual(cfg.run.start_time, "1979-01-01")
 
     def test_ozone_coverage_falls_back_and_overrides(self):
         # Per-product coverage (Codex P1 on #633): the era5 preset's
@@ -2226,7 +2945,7 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
 
     def test_era5_preset_composes(self):
         cfg = _compose(["forcing=era5", "forcing.years=[2023,2024]",
-                        "run.start_date=2023-01-01"])
+                        "run.start_time=2023-01-01"])
         self.assertEqual(cfg.forcing.align, "by_date_interp")
         self.assertIn("forcing_era5", cfg.forcing.file)
         self.assertEqual(list(cfg.forcing.ozone_available_years)[-1], 2022)
@@ -2260,34 +2979,34 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
             runners._forcing_products("/bb_{year}.nc", [2000, 2001], None),
             [["/bb_2000.nc", "/bb_2001.nc"]])
 
-    def test_start_date_resolves_to_datetime(self):
+    def test_start_time_resolves_to_datetime(self):
         from omegaconf import OmegaConf
 
         from jcm import runners
-        cfg = OmegaConf.create({"run": {"start_date": "1979-01-01"}})
-        dt = runners._resolve_start_date(cfg)
+        cfg = OmegaConf.create({"run": {"start_time": "1979-01-01"}})
+        dt = runners._resolve_start_time(cfg)
         self.assertIsNotNone(dt)
         import jax_datetime as jdt
         self.assertEqual(
             int((dt - jdt.to_datetime("1979-01-01")).days), 0)
 
-    def test_start_date_null_keeps_model_default(self):
+    def test_start_time_null_keeps_model_default(self):
         from omegaconf import OmegaConf
 
         from jcm import runners
-        self.assertIsNone(runners._resolve_start_date(
+        self.assertIsNone(runners._resolve_start_time(
             OmegaConf.create({"run": {}})))
-        self.assertIsNone(runners._resolve_start_date(
-            OmegaConf.create({"run": {"start_date": None}})))
+        self.assertIsNone(runners._resolve_start_time(
+            OmegaConf.create({"run": {"start_time": None}})))
 
-    def test_start_date_threads_into_model(self):
+    def test_start_time_threads_into_model(self):
         from jcm import runners
         cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8",
-                        "run.time_step=180", "run.start_date=1979-01-01"])
+                        "run.time_step=180", "run.start_time=1979-01-01"])
         model = runners.build_model(cfg)
         import jax_datetime as jdt
         self.assertEqual(
-            int((model.start_date - jdt.to_datetime("1979-01-01")).days), 0)
+            int((model.start_time - jdt.to_datetime("1979-01-01")).days), 0)
 
 
 class TestEmulatorWeightsBuilderPath(unittest.TestCase):
@@ -2388,7 +3107,7 @@ class TestEmulatorGhgGuard(unittest.TestCase):
 
         rising = make_time_series(
             np.array([DEFAULT_CH4_VMR_PPMV, 2.4, 3.0]),
-            np.array([0.0, 1.0, 2.0]),
+            np.arange("2000-01-01", "2000-01-04", dtype="datetime64[D]"),
         )
         forcing = types.SimpleNamespace(
             ch4_vmr=rising, n2o_vmr=self._forcing().n2o_vmr)
@@ -2402,7 +3121,7 @@ class TestEmulatorGhgGuard(unittest.TestCase):
         from jcm.forcing import DEFAULT_CH4_VMR_PPMV, make_time_series
 
         flat = make_time_series(
-            np.full(3, DEFAULT_CH4_VMR_PPMV), np.array([0.0, 1.0, 2.0]))
+            np.full(3, DEFAULT_CH4_VMR_PPMV), np.arange("2000-01-01", "2000-01-04", dtype="datetime64[D]"))
         forcing = types.SimpleNamespace(
             ch4_vmr=flat, n2o_vmr=self._forcing().n2o_vmr)
         guard_emulator_ghg_forcing(self._physics(True), forcing)
@@ -2417,23 +3136,6 @@ class TestWarnOnConfigTraps:
     real (expensive) model. Every finding is a WARNING; the tests assert both
     that it fires on its trap combo and that it stays silent on the sane one.
     """
-
-    @pytest.fixture(autouse=True)
-    def _audible_jcm_logger(self):
-        # ``caplog.at_level("WARNING")`` sets only the ROOT logger level, so a
-        # leaked ``jcm``-hierarchy level (another module's logging test can
-        # leave ``logging.getLogger("jcm")`` at CRITICAL under xdist) would
-        # filter these warnings before they reach caplog and make the
-        # assert-present cases spuriously fail. Force the ``jcm`` logger audible
-        # for the duration and restore it, so the capture is order-independent.
-        import logging
-        jcm_logger = logging.getLogger("jcm")
-        prev = jcm_logger.level
-        jcm_logger.setLevel(logging.WARNING)
-        try:
-            yield
-        finally:
-            jcm_logger.setLevel(prev)
 
     @staticmethod
     def _physics(*names):
@@ -2494,8 +3196,8 @@ class TestWarnOnConfigTraps:
 
         from jcm.forcing import make_time_series
         if loaded:
-            yw = make_time_series(jnp.full((2, 9), 0.3), jnp.arange(2.0))
-            ac = make_time_series(jnp.full((2, 2, 9), 0.7), jnp.arange(2.0))
+            yw = make_time_series(jnp.full((2, 9), 0.3), np.arange("2000-01-01", "2000-01-03", dtype="datetime64[D]"))
+            ac = make_time_series(jnp.full((2, 2, 9), 0.7), np.arange("2000-01-01", "2000-01-03", dtype="datetime64[D]"))
         else:
             yw = jnp.ones(9)
             ac = jnp.ones((2, 9))
@@ -2512,7 +3214,7 @@ class TestWarnOnConfigTraps:
         import jax.numpy as jnp
 
         from jcm.forcing import make_time_series
-        sst = make_time_series(jnp.zeros((2, 4, 4)), jnp.arange(2.0),
+        sst = make_time_series(jnp.zeros((2, 4, 4)), np.arange("2000-01-01", "2000-01-03", dtype="datetime64[D]"),
                                align_mode=align_mode)
         static = jnp.zeros((4, 4))
         return types.SimpleNamespace(
@@ -3317,6 +4019,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         # ``years`` is likewise not in the base forcing struct.
         OmegaConf.set_struct(cfg, False)
         cfg.forcing.emissions_file = "hf://bundles/t42/emis/{year}.nc"
+        cfg.forcing.emissions_align = "by_date"
         cfg.forcing.years = [2000, 2001]
         coords = build_coords(cfg)
 
@@ -3365,6 +4068,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         OmegaConf.set_struct(cfg, False)
         cfg.forcing.oxidants_file = \
             "hf://bundles/t42_l8/oxidants_{year}.nc"
+        cfg.forcing.oxidants_align = "by_date"
         cfg.forcing.years = [2000, 2001]
         coords = build_coords(cfg)
 
@@ -3397,8 +4101,8 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
             seen["paths"],
             ["hf://bundles/t42_l8/oxidants_2000.nc",
              "hf://bundles/t42_l8/oxidants_2001.nc"])
-        # Multi-year axis → "auto" alignment (BY_DATE for the transient run).
-        self.assertEqual(read_mock.call_args.kwargs["align_mode"], "auto")
+        # Not a mirror product, so the declared mode is passed through (#884).
+        self.assertEqual(read_mock.call_args.kwargs["align_mode"], "by_date")
 
     def test_oxidants_explicit_list_is_one_product(self):
         """An explicit-list oxidants_file is ONE product, opened together (F2).
@@ -3422,6 +4126,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         ])
         OmegaConf.set_struct(cfg, False)
         cfg.forcing.oxidants_file = ["/ox_a.nc", "/ox_b.nc"]
+        cfg.forcing.oxidants_align = "by_date"
         coords = build_coords(cfg)
 
         seen = {}
@@ -3442,12 +4147,16 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                 mock.patch("xarray.open_dataset",
                            side_effect=_open_datetime_stub), \
                 mock.patch("jcm.forcing.read_oxidant_vmr",
-                           return_value={"oh": object(), "no3": object()}), \
+                           return_value={"oh": object(), "no3": object()}) \
+                as read_mock, \
                 mock.patch("jcm.forcing.validate_oxidant_levels"):
             build_forcing(cfg, coords)
 
         # The whole list reached a single open_mfdataset (one product, one axis).
         self.assertEqual(seen["paths"], ["/ox_a.nc", "/ox_b.nc"])
+        # Hydra stores the explicit Python list as ListConfig; it remains a
+        # dated product rather than being mistaken for a scalar climatology.
+        self.assertEqual(read_mock.call_args.kwargs["align_mode"], "by_date")
 
     def test_oxidants_mixed_time_axes_raise(self):
         """A mixed integer-month + datetime oxidant set is rejected loudly (F2).
@@ -3772,6 +4481,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         ])
         OmegaConf.set_struct(cfg, False)
         cfg.forcing.oxidants_file = ["/ox_2000.nc", "/ox_2001.nc"]
+        cfg.forcing.oxidants_align = "by_date"
         coords = build_coords(cfg)
         seen = {}
 
@@ -3956,3 +4666,62 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         with self.assertRaisesRegex(
                 ValueError, "transient surface forcing is not supported"):
             build_forcing(cfg, coords, dycore=dycore)
+
+
+class TestRunDateEndpoints(unittest.TestCase):
+    """CLI endpoints follow the same real dates and duration contract."""
+
+    def test_leap_year_endpoint(self):
+        import jax_datetime as jdt
+        from omegaconf import OmegaConf
+        from jcm.runners import _configured_total_days
+
+        cfg = OmegaConf.create({"run": {"total_time": None,
+                                        "end_time": "2000-03-01"}})
+        self.assertEqual(_configured_total_days(cfg, jdt.to_datetime("2000-02-01")), 29)
+
+    def test_duration_and_endpoint_are_exclusive(self):
+        import jax_datetime as jdt
+        from omegaconf import OmegaConf
+        from jcm.runners import _configured_total_days
+
+        for total, end in [(10, "2000-03-01"), (None, None)]:
+            cfg = OmegaConf.create({"run": {"total_time": total, "end_time": end}})
+            with self.assertRaisesRegex(ValueError, "exactly one"):
+                _configured_total_days(cfg, jdt.to_datetime("2000-01-01"))
+
+
+    def test_config_rejects_subsecond_dates_before_chunking(self):
+        import jax_datetime as jdt
+        from omegaconf import OmegaConf
+        from jcm.runners import _configured_total_days, _resolve_start_time
+
+        cfg = OmegaConf.create({"run": {"total_time": None,
+                                        "end_time": "2000-03-01T00:00:00.5",
+                                        "start_time": "2000-01-01T00:00:00.5"}})
+        with self.assertRaisesRegex(ValueError, "whole-second"):
+            _resolve_start_time(cfg)
+        with self.assertRaisesRegex(ValueError, "whole-second"):
+            _configured_total_days(cfg, jdt.to_datetime("2000-01-01"))
+
+
+    def test_supplied_model_clock_drives_era5_interfaces(self):
+        import types
+        import jax_datetime as jdt
+        from omegaconf import OmegaConf
+        from jcm import runners
+
+        cfg = OmegaConf.create({
+            "run": {"start_time": None, "total_time": 1, "end_time": None},
+            "init": {"date": None}, "nudging": {"enabled": True}})
+        model = types.SimpleNamespace(start_time=jdt.to_datetime("2010-02-03"),
+                                      coords=object())
+        forcing = mock.Mock()
+        with mock.patch("jcm.data.era5.nudging_target") as target, \
+                mock.patch("jcm.data.era5.initial_state") as initial, \
+                mock.patch("jcm.runners.provenance.record_fact"):
+            runners._maybe_attach_nudging_target(forcing, cfg, model)
+            target.assert_called_once_with(model.coords, "2010-02-02", "2010-02-06",
+                                           freq="6h")
+            runners._state_from_era5(model, cfg)
+            self.assertEqual(initial.call_args.args[1], "2010-02-03T00:00:00")

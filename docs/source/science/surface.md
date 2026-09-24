@@ -8,7 +8,20 @@ separately over land and sea fractions and returned as the area-weighted grid
 mean ``merged = sea + fmask·(land − sea)``; near-surface air properties are
 extrapolated to σ = 0.99 using a lapse rate anchored at a fixed sigma, and land
 includes an interactive skin-temperature energy balance and an orographic drag
-enhancement. The **ECHAM multi-tile** scheme (``jcm/physics/surface/echam/``)
+enhancement. The sea tile blends open water and sea ice the way SPEEDY's
+ocean/ice coupler does (``sea_model.f90``): the bulk formulae see one
+ice-weighted sea-surface temperature ``tsea = (1 − sice)·SST + sice·T_ice``,
+with the ice surface at the saline freezing point (``273.2 − 1.8 K``, jcm
+carrying no separate ice temperature) and ``sice = forcing.sice_am`` — in the
+SPEEDY convention the ice fraction *of the sea part* of the cell, entering the
+sea tile unnormalised exactly as reference ``forcing.f90`` uses it for the sea
+albedo, with the ``fmask`` merge supplying the sea-area weighting once (the
+ECHAM multi-tile path below instead reads the field under ECHAM's box-tiling
+convention, ``clip(sice, 0, 1 − land)``). The
+colder, humidity-poor ice surface suppresses the sensible and latent exchange
+over ice relative to open water; the sensible flux is linear in ``tsea`` so the
+temperature blend equals a flux blend, while for evaporation and the stability
+factor blending the temperature is SPEEDY's chosen approximation. The **ECHAM multi-tile** scheme (``jcm/physics/surface/echam/``)
 carries water/ice/land tile machinery (``ocean.py``, ``sea_ice.py``,
 ``land.py``), but its per-step albedo/radiative/tile energy-balance computation
 (``surface_physics.py::surface_physics_step``) is currently **diagnostic-only

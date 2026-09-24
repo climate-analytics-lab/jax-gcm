@@ -14,9 +14,18 @@ in ``jcm/data/input_resolution.py``, driven by the Hydra ``forcing`` group
   ``jcm/config/forcing/era5.yaml`` are
   transient yearly bundles: one file per year, a ``years`` range, and
   ``align: by_date_interp`` (linear interpolation between month-start / mid-month
-  boundary samples). Plain single-file paths use ``align: auto``, which chooses
-  ``wrap_year`` (climatology, indexed by fraction-of-year) for ≤~1-year spans and
-  ``by_date`` otherwise.
+  boundary samples). Whether a file is a climatology or dated is **declared**,
+  never inferred from its time axis (``jcm/forcing.py::resolve_align``):
+  ``align: auto`` resolves only data-mirror / packaged products from the kind
+  the mirror manifest records, and a user file sets ``wrap_year`` /
+  ``by_date`` / ``by_date_interp``. A ``wrap_year`` climatology is replayed on
+  the real Gregorian calendar (``jcm/forcing.py::_select_time_series``): twelve
+  records are January–December, held from the 1st of each month; 365/366
+  records are a nominal-date daily table; other lengths keep equal fractions of
+  the actual year. A twelve-record surface climatology is first expanded to
+  daily values by periodic Dec/Jan linear interpolation
+  (``jcm/data/bc/interpolate.py::interpolate_to_daily``), as SPEEDY treats its
+  monthly boundary means.
 - **Per-product coverage clamping.** ``jcm/forcing.py::expand_yearly_files``
   pads the requested range by one year each side, **clipped to the product's
   ``available_years``**, so ``by_date_interp`` has bracketing samples across the
@@ -74,8 +83,39 @@ year into twelve equal slices rather than calendar months, so records 2-11
 switch 1-2 days late; that is shared by every monthly climatology in the model
 and is tracked in #805 rather than changed here. The region mask is categorical and is refused at load if it is
 not integral in [1, 8], which is what a linear or conservative regrid would
-produce. T63 is the native HAMMOZ grid; the T106 products are nearest-neighbour
-refinements of it, stamped as such in their file attributes (#810).
+produce. The products come from the ECHAM-HAMMOZ input pool at the three
+resolutions HAMMOZ ships (``jcm/data/mirror/dust.py``, provenance in
+``jcm/data/mirror/SOURCES.md``). **T63 and T127** are native files of the same
+2016 processing. **T255** exists only in HAMMOZ's older ``v01_001`` input set,
+whose files are the same products under older names — checked value for value
+at T63 and T127, where both sets exist, and consistent with native T127 after
+coarsening (correlation ≥ 0.997) — except the roughness map, which that set
+carries as a different field; T255 roughness is therefore refined from T127
+and stamped as such. **T106**, which HAMMOZ does not ship, is remapped from the
+finest native file (T255) with the exact-overlap first-order conservative
+scheme CDO's ``remapcon`` uses — the scheme the HAMMOZ files themselves were
+made with — so area means are conserved to round-off. The categorical region
+mask is never remapped: it is regenerated on every grid from the eight
+``cdo setclonlatbox`` lon/lat boxes recorded in the HAMMOZ file's history
+(Huneeus et al. 2011), which reproduce the native T63 and T127 masks cell for
+cell. The data are therefore at least as fine as the dynamics on every
+published Gaussian grid; what does not carry over is the ``ndust = 3`` tuning
+polynomial the maps feed, fitted only up to T63 (see {doc}`aerosol`).
+
+Two consequences reach the **cubed-sphere** configurations in particular.
+First, the mirror publishes these five products on the Gaussian grids
+(T63/T106/T127/T255) and **nowhere else** (``jcm/data/mirror_manifest.json``): there is no ne30pg3
+dust bundle, so ``auto`` resolves to nothing on the pySES backend and a shipped
+``+configuration=ma-ne30-l{47,95}`` run emits **no dust at all** — its only
+online aerosol source is wind-driven Gong sea salt. Second, a T63 or T106 file
+supplied explicitly is sampled onto the pySES physics columns, not regridded to
+them: the four continuous fields bilinearly and the categorical ``regions`` mask
+nearest-neighbour, since bilinear sampling would invent fractional region
+indices that the integrality check at load then refuses
+(``jcm/dycore/pyses/forcing.py``). A hand-supplied T127 or T255 file (finer than
+ne30's ~1°) is the closest an ne30 run can get to a native field; a conservative
+remap onto the pg3 cells, or the 0.5-degree originals the HAMMOZ files were made
+from, would close the gap.
 
 **Status & known limitations.** The analytic-ozone fallback is a real
 low-fidelity path (loud warning); a run that logs the analytic-ozone warning is

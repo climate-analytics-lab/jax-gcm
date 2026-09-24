@@ -96,7 +96,7 @@ bundle path from `--grid` — terrain, forcing, emissions, DMS, dust, plus
 level-resolved ozone and oxidants from `bundles/<grid>_l<levels>/` — and
 prefetches them on the login node at generation time, baking the local
 cache paths into the job. Compute nodes need no internet, and every
-grid/level combination the mirror carries (t63/t106 × l47/l95) works the
+grid/level combination the mirror carries (t63/t106/t127/t255 × l47/l95) works the
 same way: no packaged-grid special cases, no purge-eligible scratch
 files, and a grid/level mismatch fails at generation, not in the queue.
 
@@ -195,4 +195,6 @@ engaging.
 T63L47 JAM fits comfortably at fraction 0.93 with 1 saved frame per chunk (2
 frames OOM'd). T63L95 fits on one GPU. T106L95 does **not** — use 4 GPUs with
 `+grid.spmd_mesh=[2,2,1]` and fraction 0.85. Valid spectral truncations are
-21, 31, 42, 63, 85, 106, 119, 170, 213, 340, 425 — **T127 does not exist**.
+21, 31, 42, 63, 85, 106, 119, 127, 170, 213, 255, 340, 425. T127/T255 are
+ECHAM's own grids — supported (all mirror inputs exist) but **not validated or
+tuned**; pick the time step yourself (≈10 min at T127, ≈5 min at T255 as a start).

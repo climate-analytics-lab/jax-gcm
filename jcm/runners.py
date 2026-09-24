@@ -403,6 +403,14 @@ _band_config_for_terms = RadiationBandConfig.for_terms
 from jcm.physics.radiation.nn_emulator_scheme import (  # noqa: E402
     guard_ghg_forcing as guard_emulator_ghg_forcing,
 )
+# Both directions of the forced-mode contract (#301) are checked right after
+# forcing assembly, the first point physics and forcing meet on the CLI:
+# supplied fluxes need a consumer (the error names the config key and how to
+# enable forced mode) and a forced-mode physics needs its fluxes. The model
+# call re-applies the same helper with the concrete run window.
+from jcm.physics.surface.prescribed_flux import (  # noqa: E402
+    validate_run_forcing as validate_run_forcing,
+)
 
 
 def maybe_add_sponge(physics, cfg: DictConfig):
@@ -443,7 +451,7 @@ def maybe_add_nudging(physics, cfg: DictConfig, coords):
 
     Timescale config only — the ERA5 reference target is attached to
     forcing at run time (``_maybe_attach_nudging_target``), windowed to
-    ``run.start_date + run.total_time``.
+    ``run.start_time + run.total_time``.
     """
     nudging_cfg = cfg.get("nudging", None)
     if nudging_cfg is None or not nudging_cfg.get("enabled", False):
@@ -464,7 +472,7 @@ def maybe_add_nudging(physics, cfg: DictConfig, coords):
 def _maybe_attach_nudging_target(forcing, cfg: DictConfig, model):
     """Attach the windowed ERA5 nudging target to forcing (#610).
 
-    The window is ``[run.start_date, start + total_time]`` padded by a
+    The window is ``[run.start_time, start + total_time]`` padded by a
     day each side. Requires internet (or a warm ``jcm.data.era5``
     cache — prefetch on a login node for compute-node runs).
     """
@@ -478,9 +486,8 @@ def _maybe_attach_nudging_target(forcing, cfg: DictConfig, model):
     import datetime as _dt
 
     from jcm.data import era5
-    start_raw = cfg.get("run", {}).get("start_date", None) or "2000-01-01"
-    start = _dt.date.fromisoformat(str(start_raw)[:10])
-    days = float(cfg.run.total_time)
+    start = model.start_time.to_pydatetime().date()
+    days = _configured_total_days(cfg, model.start_time)
     window = (str(start - _dt.timedelta(days=1)),
               str(start + _dt.timedelta(days=int(days) + 2)))
     target = era5.nudging_target(
@@ -603,7 +610,14 @@ def _state_from_file(model: Model, cfg: DictConfig):
     ``model.run(initial_state=..., initial_physics_state=...)`` — the donor's
     physics carry is threaded through so the warm start keeps its radiation
     sub-cycle cache / prior-step TKE rather than resetting them.
+
+    ``init.unstamped_scale`` (default unset) is the escape hatch for a
+    donor written before the checkpoint schema stamp, which is otherwise
+    refused because its unit convention is unrecorded — the position any
+    state spun up with an earlier jcm is in. See
+    ``docs/source/design/checkpoint_compatibility.md``.
     """
+    from jcm.checkpoint import parse_unstamped_scale
     from jcm.initial_states import checkpoint_state
 
     path = _resolve_data_path(cfg.init.file)
@@ -614,7 +628,11 @@ def _state_from_file(model: Model, cfg: DictConfig):
             "first chunk checkpoint would overwrite the donor init state. "
             "Give the run its own checkpoint_path."
         )
-    state, physics_carry, days = checkpoint_state(model, path)
+    state, physics_carry, days = checkpoint_state(
+        model, path,
+        unstamped_scale=parse_unstamped_scale(
+            cfg.init.get("unstamped_scale", None)),
+    )
     logger.info(
         "init=from_state: loaded %s (donor state carried %.0f sim-days); "
         "clock reset to 0", path, days,
@@ -625,7 +643,7 @@ def _state_from_file(model: Model, cfg: DictConfig):
 def _state_from_era5(model: Model, cfg: DictConfig):
     """Config adapter for the ``init.kind=era5`` initial condition.
 
-    Resolves the ERA5 slice date from ``init.date``, else ``run.start_date``,
+    Resolves the ERA5 slice date from ``init.date``, else ``run.start_time``,
     else the 2000-01-01 default — matching the calendar the run integrates on
     — records provenance, then returns the regridded ``PhysicsState`` from
     :func:`jcm.data.era5.initial_state` for the caller to run.
@@ -633,8 +651,7 @@ def _state_from_era5(model: Model, cfg: DictConfig):
     from jcm.data import era5
 
     date = (cfg.get("init", {}).get("date", None)
-            or cfg.get("run", {}).get("start_date", None)
-            or "2000-01-01")
+            or str(model.start_time.to_datetime64()))
     provenance.record_fact("initial_condition", f"era5:{date}")
     return era5.initial_state(model.coords, str(date))
 
@@ -703,19 +720,162 @@ def _want_omega(cfg: DictConfig, physics=None) -> bool:
         "plev" in (phys.get("aerocom_groups") or ()))
 
 
-def _resolve_start_date(cfg: DictConfig):
-    """``run.start_date`` (ISO date string) as a ``jax_datetime.Datetime``.
+def _configured_total_seconds(cfg: DictConfig, start_time) -> int:
+    """Resolve the mutually exclusive run duration/end time to exact seconds.
+
+    Kept as an integer so chunked scheduling never accumulates float-day
+    rounding: a 365-day-plus-one-hour run in 30-day chunks must end on the
+    configured instant, not on ``5.041666666666686`` days that no longer
+    parse as whole seconds. A duration that is not whole seconds is refused
+    (:func:`jcm.date.parse_duration_seconds`; ``end_time`` itself only takes
+    whole seconds).
+    """
+    from jcm.date import parse_duration_seconds, to_datetime
+
+    total = cfg.run.get("total_time")
+    end = cfg.run.get("end_time")
+    if (total is None) == (end is None):
+        raise ValueError("Set exactly one of run.total_time and run.end_time; "
+                         "set run.total_time=null when selecting an end_time.")
+    if end is None:
+        return parse_duration_seconds(total)
+    delta = to_datetime(str(end), name="end_time") - to_datetime(start_time)
+    seconds = int(delta.days) * 86400 + int(delta.seconds)
+    if seconds <= 0:
+        raise ValueError("The configured run must have a positive finite duration.")
+    return seconds
+
+
+def _configured_total_days(cfg: DictConfig, start_time) -> float:
+    """Return the configured run length in days (for day-granular windows)."""
+    return _configured_total_seconds(cfg, start_time) / 86400.0
+
+
+def _resolve_start_time(cfg: DictConfig):
+    """``run.start_time`` (ISO date string) as a ``jax_datetime.Datetime``.
 
     ``None``/unset keeps ``Model``'s default (2000-01-01). Transient
     (``BY_DATE``-aligned) forcing samples the file at the absolute model
     date, so a historical run must set this to place itself on the
-    forcing's calendar (issue #610).
+    forcing's dated coverage (issue #610).
     """
-    raw = cfg.get("run", {}).get("start_date", None)
+    raw = cfg.get("run", {}).get("start_time", None)
     if raw in (None, "", "null"):
         return None
-    import jax_datetime as jdt
-    return jdt.to_datetime(str(raw))
+    from jcm.date import to_datetime
+    return to_datetime(str(raw), name="start_time")
+
+
+_LOG_LEVEL_NAMES = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def _apply_log_level(cfg: DictConfig) -> None:
+    """Set the ``jcm`` logger level from ``cfg.run.log_level``.
+
+    The level goes on the ``jcm`` logger rather than the root one, so the
+    CLI's verbosity knob covers jcm's own output without deciding a level for
+    anything else in the host process. ``jcm`` the *library* sets no level at
+    all — this function and Hydra's own ``job_logging`` are the only logging
+    configuration jcm performs, and both belong to the CLI. Called only from
+    :func:`run`, never from the model builders: those are reachable from
+    :func:`jcm.configurations.load`, a library door.
+
+    A numeric level is taken as-is, spelled as an int or a string: a config
+    writer reasonably tries ``run.log_level=50``, and an interpolation such
+    as ``${oc.env:JCM_LOG_LEVEL,WARNING}`` always arrives as a string.
+    Anything else unrecognised raises rather than quietly falling back: a
+    typo would otherwise run the whole job at a verbosity nobody chose.
+
+    Read with ``.get`` like every other ``run`` key, so a hand-rolled ``run``
+    group that omits it keeps working on the documented default rather than
+    dying before the run starts.
+
+    Applied unconditionally by :func:`run`, including on the
+    ``run(cfg, model=...)`` path — the config describes the run, so it wins
+    over a level a caller happened to set when building the model. A caller
+    who wants their own verbosity sets it after :func:`run` returns, or puts
+    it in the config.
+    """
+    requested = cfg.run.get("log_level", None)
+    if requested is None:
+        requested = "WARNING"
+    if isinstance(requested, int) and not isinstance(requested, bool):
+        level = requested
+    else:
+        level = getattr(logging, str(requested).upper(), None)
+        if not isinstance(level, int):
+            try:
+                level = int(str(requested))
+            except ValueError:
+                raise ValueError(
+                    f"run.log_level={requested!r} is not a logging level; "
+                    f"expected one of {', '.join(_LOG_LEVEL_NAMES)} or an "
+                    "int.") from None
+    logging.getLogger("jcm").setLevel(level)
+
+
+def resolve_effective_time_step_seconds(
+    cfg: DictConfig,
+    model_or_dycore=None,
+) -> float:
+    """Resolve the runner timestep in seconds from its owning source.
+
+    A **built** model or dycore is authoritative: it has already baked its
+    timestep into its integrator, so a config value that disagrees describes
+    a run that is not happening. Diagnostics that quote a timestep must quote
+    the one that actually advanced the state.
+
+    Without a built object, ownership follows the config. ``run.time_step``
+    is in minutes and any explicit value, including zero, is used as given.
+    ``run.time_step: null`` delegates to the dycore group, which is
+    meaningful only for a backend that owns its step in its own config
+    (pySES, via ``dycore.dt_seconds``). The dinosaur backend derives
+    ``dt_seconds`` *from* ``run.time_step``, so its group value is not an
+    independent source and is deliberately not consulted.
+
+    Args:
+        cfg: Hydra configuration containing the ``run`` group.
+        model_or_dycore: Built :class:`Model` or dynamical core. When given,
+            it wins over the config.
+
+    Returns:
+        Effective timestep in seconds.
+
+    Raises:
+        ValueError: If nothing in scope owns a timestep.
+
+    """
+    if model_or_dycore is not None:
+        dt_si = getattr(model_or_dycore, "dt_si", None)
+        if dt_si is not None:
+            return float(getattr(dt_si, "m", dt_si))
+
+        dycore = getattr(model_or_dycore, "dycore", model_or_dycore)
+        dt_seconds = getattr(dycore, "dt_seconds", None)
+        if dt_seconds is None:
+            dt_seconds = getattr(model_or_dycore, "dt_seconds", None)
+        if dt_seconds is not None:
+            return float(dt_seconds)
+        raise ValueError(
+            "a built model/dycore was supplied but exposes neither dt_si "
+            "nor dt_seconds."
+        )
+
+    configured_minutes = cfg.get("run", {}).get("time_step", None)
+    if configured_minutes is not None:
+        return float(configured_minutes) * 60.0
+
+    dycore_cfg = cfg.get("dycore", {})
+    if dycore_cfg.get("name", "dinosaur") == "pyses":
+        dycore_dt = dycore_cfg.get("dt_seconds", None)
+        if dycore_dt is not None:
+            return float(dycore_dt)
+
+    raise ValueError(
+        "run.time_step is null and nothing else in scope owns a timestep: "
+        "pass the built model/dycore, or select a backend whose config "
+        "declares one (pySES's dycore.dt_seconds)."
+    )
 
 
 def build_model(cfg: DictConfig) -> Model:
@@ -758,19 +918,19 @@ def build_model(cfg: DictConfig) -> Model:
     diffusion = build_diffusion(cfg)
     tracer_filter = build_tracer_filter(cfg)
 
-    log_level = getattr(logging, cfg.run.log_level.upper(), logging.WARNING)
     # Build the dycore explicitly so the diffusion config flows in via the
     # dycore constructor (Model itself no longer takes a diffusion kwarg —
     # that's a dinosaur-backend concern). The tracer filter is the same kind of
     # dycore-side knob.
-    time_step = float(cfg.run.time_step)
+    time_step_seconds = resolve_effective_time_step_seconds(cfg)
+    time_step = time_step_seconds / 60.0
     tracer_specs = {spec.name: spec for spec in physics.required_tracers()}
     sl_options = {"off_centering": float(
         cfg.get("sl_off_centering", DEFAULT_OFF_CENTERING))}
     dycore = DinosaurDycore(
         coords=coords,
         terrain=terrain,
-        dt_seconds=time_step * 60.0,
+        dt_seconds=time_step_seconds,
         tracer_specs=tracer_specs,
         diffusion=diffusion,
         tracer_filter=tracer_filter,
@@ -781,8 +941,7 @@ def build_model(cfg: DictConfig) -> Model:
         dycore,
         physics=physics,
         time_step=time_step,
-        start_date=_resolve_start_date(cfg),
-        log_level=log_level,
+        start_time=_resolve_start_time(cfg),
     )
 
 
@@ -790,9 +949,11 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     """Build a Model on the pySES CAM-SE backend from ``cfg.dycore``.
 
     Composition mirrors the production ne30 campaign driver this replaces:
-    the backend owns resolution and timestep (``grid`` group and
-    ``run.time_step`` are ignored — the Model adopts ``dt_seconds``), the
-    physics runs float32 on the float64 core, and a finite-lid sponge term
+    the backend owns resolution and timestep (the Model adopts
+    ``dycore.dt_seconds``). ``run.time_step`` may be null or repeat that value;
+    a conflicting explicit value raises instead of letting runner diagnostics
+    use a different step from the dynamics. The physics runs float32 on the
+    float64 core, and a finite-lid sponge term
     (USSA temperature relaxation + implicit Rayleigh wind friction, see the
     dycore config's ``lid_sponge``) is appended to the physics: the ~1 Pa
     lid sits outside the shipped radiation schemes' validity and both
@@ -825,11 +986,29 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     if sponge is not None and int(sponge.get("levels", 0)) > 0:
         physics = physics + _pyses_lid_sponge_term(dycore, sponge)
 
-    log_level = getattr(logging, cfg.run.log_level.upper(), logging.WARNING)
-    # No time_step: the Model adopts the dycore's dt_seconds (single source
-    # of truth; a conflicting run.time_step would raise).
+    # The dycore owns the step, so the Model adopts ``dycore.dt_seconds`` and
+    # ``run.time_step`` is ignored — which is what
+    # ``config/dycore/pyses_ne30l47.yaml`` has always documented. Forwarding
+    # the runner value into ``Model`` instead would make every pySES run that
+    # does not also select ``run=pyses_year`` fail its consistency check on
+    # ``run/default.yaml``'s 12 minutes, vetoing the dycore group with a value
+    # the user never chose. Warn on a disagreement rather than refusing to
+    # build; ``resolve_effective_time_step_seconds`` reads the built model, so
+    # no diagnostic can quote the losing number.
+    configured_time_step = cfg.get("run", {}).get("time_step", None)
+    if (configured_time_step is not None
+            and abs(float(configured_time_step) * 60.0
+                    - float(dycore.dt_seconds)) > 1e-6):
+        logger.warning(
+            "pySES owns the timestep: adopting dycore.dt_seconds=%.1f s "
+            "(%.4g min) and ignoring run.time_step=%s min. Select "
+            "run=pyses_year, whose time_step is null, to make the delegation "
+            "explicit.",
+            float(dycore.dt_seconds), float(dycore.dt_seconds) / 60.0,
+            configured_time_step,
+        )
     return Model(dycore=dycore, physics=physics,
-                 start_date=_resolve_start_date(cfg), log_level=log_level)
+                 start_time=_resolve_start_time(cfg))
 
 
 def _pyses_default_bc(filename: str) -> str:
@@ -927,6 +1106,39 @@ def build_forcing(cfg: DictConfig, coords, dycore=None):
     return forcing_assembly.build_forcing(cfg, coords)
 
 
+def _pyses_align_modes(forcing_cfg, surface_spec, ozone_spec):
+    """Return the pySES readers' alignment specs, declared from pre-fetch specs.
+
+    Each ``auto`` becomes the explicit mode of the manifest product its
+    ORIGINAL spec names (:func:`jcm.forcing.declare_manifest_align`), before
+    ``_resolve_data_path`` substitutes a fetched local path that need not name
+    it any more (#884). Anything else (explicit modes; ``auto`` on a user file)
+    passes through to the readers, which apply the same rule.
+    """
+    from jcm.forcing import declare_manifest_align
+    from jcm.forcing_assembly import _oxidant_spec
+    emissions_raw = forcing_cfg.get("emissions_file", None)
+    emissions_spec = None
+    if emissions_raw not in (None, "", "null"):
+        emissions_spec = [
+            e for p in _forcing_products(
+                emissions_raw, forcing_cfg.get("years", None),
+                _product_available_years(forcing_cfg,
+                                         "emissions_available_years"))
+            for e in (p if isinstance(p, (list, tuple)) else [p])]
+    return {
+        "align_mode": declare_manifest_align(
+            forcing_cfg.get("align", "auto"), surface_spec),
+        "emissions_align": declare_manifest_align(
+            forcing_cfg.get("emissions_align", "auto"), emissions_spec),
+        "oxidants_align": declare_manifest_align(
+            forcing_cfg.get("oxidants_align", "auto"),
+            _oxidant_spec(forcing_cfg)),
+        "ozone_align": declare_manifest_align(
+            forcing_cfg.get("ozone_align", "auto"), ozone_spec),
+    }
+
+
 def _build_pyses_forcing(_forcing_cfg, dycore, coords):
     """Build pySES-backend forcing: bilinear column sampling of the inputs.
 
@@ -940,6 +1152,24 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
     expansion) so the two paths cannot drift.
     """
     from jcm.dycore.pyses.forcing import build_forcing as pyses_build_forcing
+
+    # Forced-mode surface fluxes (jax-gcm#301) are wired only through the
+    # spectral assembly (``forcing_assembly._attach_prescribed_surface_fluxes``);
+    # the pySES column-forcing builder has no path for them. Rather than accept
+    # the block and silently drop it — which would then trip the run-start
+    # ``validate_forcing`` with all four fields still ``None`` and a confusing
+    # message — refuse it here with the real reason: forced surface fluxes are
+    # a dinosaur(spectral)-backend capability for v3.0.
+    if _forcing_cfg is not None and _forcing_cfg.get(
+            "prescribed_surface_flux", None) not in (None, "", "null"):
+        raise ValueError(
+            "forcing.prescribed_surface_flux is not supported on the pySES "
+            "backend: forced surface fluxes (jax-gcm#301) are wired through "
+            "the spectral (dinosaur) forcing path only for v3.0. Run the "
+            "forced-flux presets (physics=speedy-forced-flux / "
+            "echam-forced-flux) on a dinosaur dycore, or drop the "
+            "prescribed_surface_flux block for a pySES run."
+        )
 
     ozone_file = _forcing_cfg.get("ozone_file", None)
     if ozone_file == "auto":
@@ -980,6 +1210,7 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
             "Provide a single 12-month climatology file, or use the "
             "spectral dinosaur backend for transient ozone."
         )
+    ozone_spec = ozone_file  # pre-fetch spec: names a manifest product
     provenance.record_fact(
         "ozone_source",
         f"prescribed:{ozone_file}" if ozone_file
@@ -1037,6 +1268,10 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
                        "dust_regions_file", "dust_roughness_file")},
         oxidants_file=_resolve_oxidant_paths(_forcing_cfg),
         ozone_file=_resolve_data_path(ozone_file),
+        # Time alignment follows the one #884 rule (jcm.forcing.resolve_align):
+        # ``auto`` resolves only data-mirror/packaged products, decided on the
+        # ORIGINAL (pre-fetch) specs so a fetched path cannot change it.
+        **_pyses_align_modes(_forcing_cfg, raw_file or file, ozone_spec),
     )
     # MACv2-SP plume weights are the one dycore-agnostic attachment the
     # spectral tail below also performs that ``pyses_build_forcing`` does
@@ -1122,6 +1357,13 @@ def run(cfg: DictConfig, model: Model | None = None):
       ``cfg.run.column.{lat_deg,lon_deg}``, and run :class:`SingleColumnModel`
       for tracer evolution at that column.
     """
+    # Apply the verbosity knob before anything can log. ``run()`` is the only
+    # place jcm sets a level, deliberately: it is the CLI's own entry point,
+    # whereas ``build_model`` is reachable from the documented Python door
+    # ``jcm.configurations.load``, where resetting the caller's ``jcm`` level
+    # would be the library configuring logging all over again.
+    _apply_log_level(cfg)
+
     # Best-effort raise of the CPU device count, looked up from
     # ``grid.host_device_count`` with a top-level ``host_device_count``
     # fallback; no-op on a single device or on GPU. Note that importing the
@@ -1162,9 +1404,9 @@ def run(cfg: DictConfig, model: Model | None = None):
     if mode == "full":
         return _run_full(cfg, model)
     if mode == "prescribed":
-        return _run_prescribed(cfg)
+        return _run_prescribed(cfg, model)
     if mode == "scm":
-        return _run_scm(cfg)
+        return _run_scm(cfg, model)
     raise ValueError(
         f"Unknown run.mode={mode!r}; expected 'full', 'prescribed' or 'scm'."
     )
@@ -1213,14 +1455,14 @@ def _resolved_emission_value(literal, key, coords, jam, is_pyses):
 def _forcing_tracks_calendar(forcing) -> bool:
     """Report whether the RESOLVED surface forcing is date-aligned (transient).
 
-    The config keys ``forcing.years`` / ``forcing.align`` miss the common case
-    of a single multi-year netCDF under the default ``align: auto``:
-    ``ForcingData.from_file``'s span-based auto-detection resolves it to
-    ``BY_DATE`` at build time, yet the config still reads ``align: auto`` /
-    ``years: null``. So classify from what the resolution actually produced —
+    The config keys ``forcing.years`` / ``forcing.align`` miss the case of a
+    transient data-mirror product under the default ``align: auto``, which
+    resolves from the manifest to ``BY_DATE`` at build time while the config
+    still reads ``align: auto`` / ``years: null``. So classify from what the
+    resolution actually produced —
     any surface ``TimeSeries`` leaf (SST / sea-ice / snow / soil / land T) whose
     ``align_mode`` is ``BY_DATE`` / ``BY_DATE_INTERP`` means those fields track
-    real calendar dates. A 12-month climatology resolves to ``WRAP_YEAR`` and is
+    real calendar dates. A climatology resolves to ``WRAP_YEAR`` and is
     not transient. ``forcing`` may be ``None`` (default/prescribed path builds
     none) — then there is no date-aligned surface forcing to flag.
     """
@@ -1346,9 +1588,9 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
 
     # 5. Transient (by-date) surface forcing driving JAM off the present-day
     #    emission bundles. Transience is read off the RESOLVED forcing's surface
-    #    alignment (:func:`_forcing_tracks_calendar`) — a single multi-year
-    #    netCDF under ``align: auto`` resolves to BY_DATE while the config still
-    #    reads ``auto``/``years: null``, which keying only on those keys misses —
+    #    alignment (:func:`_forcing_tracks_calendar`) — a transient mirror
+    #    product under ``align: auto`` resolves to BY_DATE while the config
+    #    still reads ``auto``/``years: null``, which keying only on those misses —
     #    with ``years``/``align`` as OR fallbacks for a forcing-less caller.
     #    Only ``auto`` that RESOLVED to a real present-day *_pd bundle is the
     #    concern (F2); an auto that nulled is warning 3's case, not this one.
@@ -1517,6 +1759,7 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
     forcing = _maybe_attach_nudging_target(forcing, cfg, model)
     guard_emulator_ghg_forcing(model.physics, forcing)
+    validate_run_forcing(model.physics, forcing)
     warn_on_config_traps(cfg, model.physics, forcing, coords=model.coords,
                          dycore=getattr(model, "dycore", None))
     # After model + forcing construction: config-selected libraries are
@@ -1536,7 +1779,8 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         return model.run(
             forcing=forcing,
             save_interval=cfg.run.save_interval,
-            total_time=cfg.run.total_time,
+            total_time=cfg.run.get("total_time"),
+            end_time=cfg.run.get("end_time"),
             output_averages=cfg.run.output_averages,
             snapshot_interval=cfg.run.get("snapshot_interval"),
             snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
@@ -1560,7 +1804,8 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         initial_physics_state=initial_physics_state,
         forcing=forcing,
         save_interval=cfg.run.save_interval,
-        total_time=cfg.run.total_time,
+        total_time=cfg.run.get("total_time"),
+        end_time=cfg.run.get("end_time"),
         output_averages=cfg.run.output_averages,
         snapshot_interval=cfg.run.get("snapshot_interval"),
         snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
@@ -1584,7 +1829,21 @@ def _load_states_from_cfg(cfg: DictConfig, physics):
     against a clear sky — the second half of #718. ``run.tracer_vars: {}``
     opts out explicitly; an explicit mapping still wins outright.
     """
-    state_file = _resolve_data_path(cfg.run.get("state_file", None))
+    from jcm.data import input_resolution as ir
+
+    raw_state_file = cfg.run.get("state_file", None)
+    # ONE file: the state series is opened with a single ``open_dataset``
+    # and its time coordinate is the snapshot clock, so a list or a
+    # ``{year}`` pattern (which the forcing keys accept) is rejected here
+    # rather than reaching ``open_dataset`` as a confusing error.
+    if ir._is_seq(raw_state_file) or (
+            isinstance(raw_state_file, str) and "{year}" in raw_state_file):
+        raise ValueError(
+            f"run.state_file={raw_state_file!r}: give ONE netCDF state file "
+            "(a single JCM output); lists and {year} patterns are not "
+            "supported for the state series. Concatenate the files along "
+            "time first (e.g. xarray.open_mfdataset(...).to_netcdf(...)).")
+    state_file = _resolve_data_path(raw_state_file)
     if not state_file:
         raise ValueError(
             f"run.mode={cfg.run.mode!r} requires run.state_file to point "
@@ -1608,9 +1867,203 @@ def _load_states_from_cfg(cfg: DictConfig, physics):
     )
 
 
-def _run_prescribed(cfg: DictConfig):
-    """Diagnose physics tendencies from a JCM state-file time series."""
+#: Units a NUMERIC state-file ``time`` axis may carry, as elapsed time → the
+#: factor to days. ``"d"`` is what :func:`jcm.cf_metadata._time_attrs` writes
+#: for a numeric elapsed-simulation-time axis; the spelled-out and seconds
+#: forms are the same quantity in the other units a backend may emit.
+_ELAPSED_TIME_UNITS_TO_DAYS = {
+    "d": 1.0, "day": 1.0, "days": 1.0,
+    "s": 1.0 / 86400.0, "second": 1.0 / 86400.0, "seconds": 1.0 / 86400.0,
+}
+
+
+def _prescribed_state_times_days(ds, n_states: int, source: str):
+    """Days since the FIRST snapshot at which each state of ``ds`` is valid.
+
+    The state file's own ``time`` coordinate is the snapshot clock: a saved
+    run's states are typically daily (``save_interval``) while the physics
+    step is hours, so synthesising ``arange(n) * dt`` would select and
+    coverage-check date-aligned forcing on the wrong dates. The offsets are
+    relative to the first sample; which instant that first sample is placed
+    at is :func:`_prescribed_start_time`'s decision (the file's own first
+    date for a dated axis, ``run.start_time`` for an elapsed-time axis).
+
+    Accepted ``time`` axes — exactly the forms JCM writers emit:
+
+    - decoded dates (``datetime64`` or ``cftime``; a cftime calendar is
+      placed on the Gregorian clock by its nominal date, as every forcing
+      axis is) — what ``ModelPredictions`` / the pySES backend write;
+    - elapsed time: ``timedelta64``, or a NUMERIC axis whose ``units`` are
+      days (``"d"``/``"day"``/``"days"``; ``"d"`` is what
+      ``cf_metadata._time_attrs`` labels a numeric elapsed-simulation-time
+      axis) or seconds (``"s"``/``"second"``/``"seconds"``). A numeric axis
+      with no or other units is rejected: its unit would have to be guessed.
+
+    Common rules: a single state needs no time axis (offset 0); otherwise
+    the axis must have one entry per state, all present/finite, strictly
+    increasing (an unordered or duplicated series has no well-defined
+    snapshot clock). Any irregular cadence is honoured as given.
+    """
+    import numpy as np
+    import pandas as pd
+
+    from jcm.forcing import _host_epoch_seconds, _is_datetime_axis, _time_axis_from_ds
+    if "time" not in ds.coords and "time" not in ds.dims:
+        if n_states == 1:
+            return np.zeros(1)
+        raise ValueError(
+            f"{source}: {n_states} states but no 'time' coordinate, so the "
+            "snapshot clock is unknown. Save the states with their time axis "
+            "(any JCM output has one).")
+    raw = np.asarray(ds["time"].values).reshape(-1)
+    if raw.size != n_states:
+        raise ValueError(
+            f"{source}: the 'time' coordinate has {raw.size} entries for "
+            f"{n_states} states.")
+    accepted = ("decoded dates (datetime64/cftime), timedelta64, or a numeric "
+                "elapsed-time axis with units 'd'/'days' or 's'/'seconds'")
+    if _is_datetime_axis(raw):
+        if bool(np.any(pd.isnull(raw))):
+            raise ValueError(f"{source}: the 'time' coordinate has missing "
+                             "(NaT) entries.")
+        # Exact whole-second offsets (``_time_axis_from_ds`` places a
+        # ``cftime`` noleap axis on the Gregorian clock by its nominal date,
+        # as every forcing axis is).
+        seconds = _host_epoch_seconds(_time_axis_from_ds(ds)).reshape(-1)
+        days = (seconds - seconds[0]) / 86400.0
+    elif np.issubdtype(raw.dtype, np.timedelta64):
+        if bool(np.any(pd.isnull(raw))):
+            raise ValueError(f"{source}: the 'time' coordinate has missing "
+                             "(NaT) entries.")
+        days = raw / np.timedelta64(1, "D")
+    elif np.issubdtype(raw.dtype, np.number):
+        units = str(ds["time"].attrs.get(
+            "units", ds["time"].encoding.get("units", ""))).strip().lower()
+        if units not in _ELAPSED_TIME_UNITS_TO_DAYS:
+            raise ValueError(
+                f"{source}: the numeric 'time' coordinate has units "
+                f"{units or '(none)'!r}, so its unit is unknown. Accepted: "
+                f"{accepted}.")
+        if not bool(np.all(np.isfinite(raw))):
+            raise ValueError(f"{source}: the 'time' coordinate has missing "
+                             "(non-finite) entries.")
+        days = raw.astype(float) * _ELAPSED_TIME_UNITS_TO_DAYS[units]
+    else:
+        raise ValueError(
+            f"{source}: the 'time' coordinate (dtype {raw.dtype}) is not a "
+            f"time axis. Accepted: {accepted}.")
+    days = np.asarray(days, dtype=float)
+    if days.size > 1 and not bool(np.all(np.diff(days) > 0)):
+        raise ValueError(
+            f"{source}: the 'time' coordinate is not strictly increasing; "
+            "the states must be ordered in time with distinct stamps.")
+    return days - days[0]
+
+
+def _prescribed_state_first_time(ds):
+    """Return the state file's first time as exact ``datetime64[s]`` or ``None``.
+
+    Only a decoded date axis (``datetime64`` / ``cftime``, what v3 outputs
+    write) carries an absolute date; ``cftime`` noleap dates are placed on
+    the Gregorian clock by their nominal date, as every forcing axis is. An
+    elapsed-time axis (``timedelta64``, numeric ``d``/``s``, the form older
+    outputs wrote) or a missing axis has none, so this returns ``None``.
+    """
+    import numpy as np
+
+    from jcm.forcing import _is_datetime_axis, _time_axis_from_ds
+    if "time" not in ds.coords and "time" not in ds.dims:
+        return None
+    raw = np.asarray(ds["time"].values).reshape(-1)
+    if raw.size == 0 or not _is_datetime_axis(raw):
+        return None
+    first = _time_axis_from_ds(ds.isel(time=[0]))
+    return np.asarray(first.to_datetime64()).astype("datetime64[s]").reshape(-1)[0]
+
+
+def _prescribed_start_time(configured, file_first, source: str):
+    """Resolve the time of the first prescribed state.
+
+    - A dated state file (v3 output) dates itself: its first time is the
+      default, so ``run.start_time`` may be left unset.
+    - A ``run.start_time`` that is also set is used — the config wins — but
+      a warning names both values when it differs from the file's first
+      time, since every state is then evaluated away from its own date.
+    - An elapsed-time or missing axis carries no absolute date, so
+      ``run.start_time`` is required.
+
+    ``configured`` is ``_resolve_start_time(cfg)`` (a ``jax_datetime``
+    value, or ``None`` when unset); ``file_first`` is
+    :func:`_prescribed_state_first_time`'s result.
+    """
+    import warnings
+
+    import numpy as np
+
+    if configured is None:
+        if file_first is None:
+            raise ValueError(
+                f"{source}: the state file's time axis is elapsed time (or "
+                "absent), so it carries no absolute date to place the first "
+                "state at. Set run.start_time to the first state's time "
+                "(e.g. run.start_time=2000-01-01T12:00:00). Only a decoded "
+                "date axis (datetime64/cftime, what v3 outputs write) dates "
+                "itself; elapsed axes are timedelta64 or numeric with units "
+                "'d'/'days' or 's'/'seconds'.")
+        from jcm.date import to_datetime
+        return to_datetime(str(file_first), name="start_time")
+    if file_first is not None:
+        configured64 = np.asarray(configured.to_datetime64()).astype(
+            "datetime64[s]").reshape(-1)[0]
+        if configured64 != file_first:
+            warnings.warn(
+                f"run.start_time={configured64} differs from the first time "
+                f"of {source} ({file_first}); the configured run.start_time "
+                "is used, so every state is evaluated "
+                f"{(configured64 - file_first) / np.timedelta64(1, 'D'):+g} "
+                "days from its own date. Unset run.start_time to use the "
+                "file's dates.",
+                UserWarning, stacklevel=3)
+    return configured
+
+
+def _reject_full_mode_only_knobs(cfg: DictConfig) -> None:
+    """Refuse integration-only run knobs in a diagnostic run mode.
+
+    ``run.chunk_days`` / ``run.checkpoint_path`` drive the chunked,
+    resumable ``full`` integration; ``prescribed`` and ``scm`` evaluate a
+    state file in one pass with nothing to checkpoint, so a set value would
+    be silently ignored.
+    """
+    mode = cfg.run.get("mode", "full")
+    chunk = float(cfg.run.get("chunk_days", 0) or 0)
+    ckpt = cfg.run.get("checkpoint_path", None)
+    if chunk > 0 or ckpt not in (None, "", "null"):
+        raise ValueError(
+            f"run.mode={mode!r} evaluates run.state_file in one pass: "
+            "run.chunk_days and run.checkpoint_path apply only to "
+            "run.mode=full (got chunk_days="
+            f"{cfg.run.get('chunk_days', 0)!r}, checkpoint_path={ckpt!r}). "
+            "Unset them for this mode.")
+
+
+def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
+    """Diagnose physics tendencies from a JCM state-file time series.
+
+    Each state is evaluated at its OWN time on the exact Gregorian clock a
+    full run uses: the state file's ``time`` offsets
+    (:func:`_prescribed_state_times_days`) from the first state's time, which
+    a dated file supplies itself and ``run.start_time`` overrides (and must
+    supply for an elapsed-time axis; :func:`_prescribed_start_time`). The
+    forced-mode contract is checked over exactly that window before any
+    physics runs.
+    """
     from jcm.prescribed_state_model import PrescribedStateModel
+
+    _reject_full_mode_only_knobs(cfg)
+    # A null runner timestep is resolved from the dycore group's own value;
+    # there is no need to construct the backend just to read a number.
+    dt_seconds = resolve_effective_time_step_seconds(cfg, time_step_model)
 
     coords = build_coords(cfg)
     physics = build_physics(cfg)
@@ -1618,15 +2071,25 @@ def _run_prescribed(cfg: DictConfig):
     forcing = build_forcing(cfg, coords)
     guard_emulator_ghg_forcing(physics, forcing)
     warn_on_config_traps(cfg, physics, forcing, coords=coords)
-    _, states = _load_states_from_cfg(cfg, physics)
+    ds, states = _load_states_from_cfg(cfg, physics)
+    source = f"run.state_file={cfg.run.state_file!r}"
+    times = _prescribed_state_times_days(
+        ds, int(states.u_wind.shape[0]), source=source)
+    start_time = _prescribed_start_time(
+        _resolve_start_time(cfg), _prescribed_state_first_time(ds), source)
 
     model = PrescribedStateModel(
+        start_time=start_time,
         physics=physics,
         coords=coords,
         terrain=terrain,
-        dt_seconds=float(cfg.run.time_step) * 60.0,
+        dt_seconds=dt_seconds,
     )
-    return model.run(states, forcing=forcing)
+    # Both directions of the forced-mode contract over the states' own
+    # window, before any physics runs (``model.run`` re-applies it).
+    validate_run_forcing(physics, forcing,
+                         run_window=model._run_window_seconds(times))
+    return model.run(states, forcing=forcing, times=times)
 
 
 #: Nearest-column selection; the science lives in
@@ -1634,7 +2097,7 @@ def _run_prescribed(cfg: DictConfig):
 _select_column = select_column
 
 
-def _run_scm(cfg: DictConfig):
+def _run_scm(cfg: DictConfig, time_step_model: Model | None = None):
     """Run the single-column model on the column nearest to the user's lat/lon."""
     from jcm.single_column_model import SingleColumnModel
 
@@ -1646,6 +2109,11 @@ def _run_scm(cfg: DictConfig):
     lat_deg = float(column_cfg.lat_deg)
     lon_deg = float(column_cfg.lon_deg)
 
+    # The SCM has no dycore of its own; a delegating run reads the step from
+    # the configured backend's group rather than building that backend.
+    dt_seconds = resolve_effective_time_step_seconds(cfg, time_step_model)
+
+    _reject_full_mode_only_knobs(cfg)
     physics = build_physics(cfg)
     # Build coords just to grab the vertical coord; horizontal grid is unused.
     coords = build_coords(cfg)
@@ -1656,6 +2124,7 @@ def _run_scm(cfg: DictConfig):
     # ``warn_on_config_traps``. ``coords`` is still passed for symmetry with the
     # other run paths (the scm branch does not use it).
     warn_on_config_traps(cfg, physics, None, coords=coords)
+    _reject_forced_flux_in_scm(cfg, physics)
     ds, states = _load_states_from_cfg(cfg, physics)
     column_states, (i_lon, i_lat, actual_lat, actual_lon) = _select_column(
         states, ds, lat_deg=lat_deg, lon_deg=lon_deg,
@@ -1671,9 +2140,35 @@ def _run_scm(cfg: DictConfig):
         vertical=coords.vertical,
         lat_deg=actual_lat,
         lon_deg=actual_lon,
-        dt_seconds=float(cfg.run.time_step) * 60.0,
+        dt_seconds=dt_seconds,
     )
     return scm.run(column_states)
+
+
+def _reject_forced_flux_in_scm(cfg: DictConfig, physics) -> None:
+    """Refuse forced surface fluxes (#301) on the SCM CLI path.
+
+    Forced fluxes are a gridded ``ForcingData`` input, which ``run.mode=scm``
+    never assembles: a ``prescribed_surface_flux`` block would be dropped
+    silently and a forced-mode physics would have nothing to read.
+    """
+    forcing_cfg = cfg.get("forcing", None)
+    if forcing_cfg is not None and forcing_cfg.get(
+            "prescribed_surface_flux", None) not in (None, "", "null"):
+        raise ValueError(
+            "forcing.prescribed_surface_flux is not supported with "
+            "run.mode=scm: the single-column runner builds no ForcingData, so "
+            "the prescribed fluxes would be ignored. Drive forced mode from "
+            "Python (SingleColumnModel.run(..., forcing=ForcingData with the "
+            "prescribed_* fields)) or run it on the full model.")
+    consumed = getattr(physics, "consumed_forcing_fields", lambda: ())()
+    if consumed:
+        raise ValueError(
+            f"run.mode=scm with a physics package that reads {list(consumed)} "
+            "(forced mode, #301): the single-column runner builds no "
+            "ForcingData to supply them. Use an interactive physics preset for "
+            "the SCM CLI, or drive forced mode from Python "
+            "(SingleColumnModel.run(..., forcing=...)).")
 
 
 def run_chunked(
@@ -1708,12 +2203,24 @@ def run_chunked(
     if forcing is None:
         forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
 
-    save_interval = float(cfg.run.save_interval)
-    total_time = float(cfg.run.total_time)
+    from jcm.date import parse_duration_seconds
+
+    # All scheduling is in exact integer seconds of the model clock; days are
+    # derived only for file names and reports. The save interval is handed to
+    # the model as configured (it parses it exactly) after an eager check.
+    save_interval = cfg.run.save_interval
+    parse_duration_seconds(save_interval)
+    total_seconds = _configured_total_seconds(cfg, model.start_time)
+    chunk_seconds = parse_duration_seconds(chunk_days)
+
+    def _elapsed_seconds():
+        elapsed = model.run_state.time - model.start_time
+        return int(elapsed.days) * 86400 + int(elapsed.seconds)
 
     ckpt_path = cfg.run.get("checkpoint_path", None)
 
     reports: list[dict] = []
+    elapsed_seconds = 0
     elapsed_sim_days = 0.0
     total_wall = 0.0
     resumed_from_ckpt = False
@@ -1726,7 +2233,7 @@ def run_chunked(
         # Mirrors the init-kind branching of the fresh-start path below;
         # the template values are immediately overwritten by the
         # checkpoint's contents.
-        # ``bootstrap_state`` populates both ``_final_dycore_state`` and the
+        # ``bootstrap_state`` populates both ``dycore_state`` and the
         # physics carry (eagerly), which ``load_checkpoint`` needs as
         # deserialization templates; their values are immediately overwritten
         # by the checkpoint's contents, so the init-kind only decides the
@@ -1738,19 +2245,21 @@ def run_chunked(
         else:
             model.bootstrap_state()
 
-        elapsed_sim_days = load_checkpoint(model, ckpt_path)
+        load_checkpoint(model, ckpt_path)
+        # The restored exact clock, not the float elapsed_days record.
+        elapsed_seconds = _elapsed_seconds()
+        elapsed_sim_days = elapsed_seconds / 86400.0
         resumed_from_ckpt = True
         print(
             f"Resumed from checkpoint {ckpt_path} at sim-day "
             f"{elapsed_sim_days:.1f}"
         )
 
-    chunk_idx = int(elapsed_sim_days // chunk_days)
+    chunk_idx = elapsed_seconds // chunk_seconds
     started_at_days = elapsed_sim_days
-    while elapsed_sim_days < total_time:
-        cur_chunk = min(chunk_days, total_time - elapsed_sim_days)
-        if cur_chunk <= 0:
-            break
+    while elapsed_seconds < total_seconds:
+        cur_chunk_seconds = min(chunk_seconds, total_seconds - elapsed_seconds)
+        cur_chunk = f"{cur_chunk_seconds} seconds"
 
         t0 = time.perf_counter()
         first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
@@ -1802,7 +2311,8 @@ def run_chunked(
         )
         chunk_wall = time.perf_counter() - t0
         total_wall += chunk_wall
-        elapsed_sim_days += cur_chunk
+        elapsed_seconds = _elapsed_seconds()
+        elapsed_sim_days = elapsed_seconds / 86400.0
 
         ds = preds.to_xarray()
         ok, report = check_health(ds, chunk_idx, elapsed_sim_days)
@@ -1810,17 +2320,17 @@ def run_chunked(
         reports.append(report)
         print_report(report)
 
-        # #713: one greppable aerosol-budget line per species per chunk
-        # (jcm.diagnostics.aerosol_budget_report). pySES presets omit
-        # run.time_step (the Model adopts the dycore's dt); the closure
-        # floor is an order-of-magnitude guide, so a nominal 900 s stands
-        # in rather than reaching into the dycore from here.
-        _dt_cfg = cfg.get("run", {}).get("time_step", None)
-        _dt_s = float(_dt_cfg) * 60.0 if _dt_cfg else 900.0
-        for _line in aerosol_budget_report(ds, _dt_s):
+        # #713: one greppable aerosol-budget line per species per chunk. The
+        # rounding floor depends on the timestep, so use the same effective
+        # value that advanced this model (including delegated backends).
+        # This diagnostic describes the run that just completed, so the
+        # model's actual timestep is authoritative even when a caller passes
+        # a separately assembled cfg with a conflicting explicit value.
+        dt_seconds = float(model.dt_si.m)
+        for _line in aerosol_budget_report(ds, dt_seconds):
             print(_line)
 
-        nc_path = f"{output_prefix}_day{int(elapsed_sim_days)}.nc"
+        nc_path = f"{output_prefix}_day{elapsed_sim_days:g}.nc"
         # The parameters ride on the predictions object, not the module
         # registry, so the record belongs to the model that produced THIS
         # chunk; pass them to both calls or the sidecar's run_hash will not
@@ -1833,7 +2343,7 @@ def run_chunked(
         print(f"  Saved {nc_path}")
         snap_ds = getattr(preds, "snapshot_dataset", lambda: None)()
         if snap_ds is not None:
-            snap_path = (f"{output_prefix}_day{int(elapsed_sim_days)}"
+            snap_path = (f"{output_prefix}_day{elapsed_sim_days:g}"
                          "_snapshots.nc")
             snap_ds.attrs.update(provenance.attrs(params))
             snap_ds.to_netcdf(snap_path)
@@ -1853,7 +2363,7 @@ def run_chunked(
             cp = Path(ckpt_path)
             if cp.exists():
                 cp.replace(f"{ckpt_path}.prev")
-            save_checkpoint(model, ckpt_path, elapsed_days=elapsed_sim_days)
+            save_checkpoint(model, ckpt_path)
             print(f"  Saved checkpoint to {ckpt_path}")
             archive_every = float(cfg.run.get("archive_ckpt_every", 0.0) or 0.0)
             # Archive at the first chunk boundary past each interval multiple,
@@ -1863,9 +2373,10 @@ def run_chunked(
             # elapsed accumulates by summing chunks, so a nominal 0.9 arrives
             # as 0.8999999999999999 and would otherwise slip a whole chunk.
             tol = 1e-6 * archive_every
+            previous_days = (elapsed_seconds - cur_chunk_seconds) / 86400.0
             if archive_every > 0 and (
                 int((elapsed_sim_days + tol) // archive_every)
-                > int((elapsed_sim_days - cur_chunk + tol) // archive_every)
+                > int((previous_days + tol) // archive_every)
             ):
                 import shutil
 

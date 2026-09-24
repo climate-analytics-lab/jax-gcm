@@ -11,6 +11,7 @@ as the full ECHAM6 sequence is wired into the orchestrator — see #341.
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from math import pi
 
 from .cloud_utils import (
@@ -36,6 +37,7 @@ from .lohmann_2m import (
 )
 from .lohmann_2m_params import CloudParams2M
 from jcm.constants import rhow, alhs, alhc, rv
+from jcm.testing import check_gradients
 
 # Parameters are no longer module-level exports of lohmann_2m_params: the
 # scheme reads everything from a threaded ``CloudParams2M`` struct. Tests
@@ -1066,10 +1068,13 @@ class TestUpdateInCloudWaterCirrusBranches_2M:
         """The DEFAULT branch: N = rho*q_i / ((4/3)*pi*prid^3*rho_ice).
 
         ``prid`` is a volume-mean radius in METRES, so with the fixture's
-        20e-6 m the candidate is ~7.7e6 /m^3. Regression guard for #725: the
-        divide-by-zero floor here must be ``d_epsilon``, not ``eps`` (~1.2e-7),
-        which exceeds a realistic ``prid**3`` (~8e-15) and would clamp the
-        candidate to ~0.5 /m^3, pinning ICNC at ``icemin``.
+        20e-6 m the candidate is ~7.7e6 /m^3, below ``icemax`` so the #846
+        cap is inactive and the normal-operating value is the pure inversion.
+        Regression guard for #725: the radius floor
+        (``cirrus_min_ice_radius`` ~1e-7 m) must sit far below a realistic
+        ``prid`` (~2e-5 m) so it never binds here — an ``eps``-sized (~1.2e-7)
+        floor on ``prid**3`` would instead clamp the candidate to ~0.5 /m^3,
+        pinning ICNC at ``icemin``.
         """
         n = 3
         inputs = self._inputs_with_ice(n)
@@ -1079,8 +1084,145 @@ class TestUpdateInCloudWaterCirrusBranches_2M:
         )
         assert jnp.allclose(icnc_o, expected, rtol=1e-4), (icnc_o, expected)
         # Far above the floor — the bug made this branch indistinguishable
-        # from "no crystals diagnosed at all".
+        # from "no crystals diagnosed at all". At 20 um the candidate
+        # (~7.7e6 /m^3) is below ``icemax`` so the physical cap is inactive
+        # here; the normal-operating value is unchanged.
         assert jnp.all(icnc_o > 1.0e5 * _P.icemin)
+        assert jnp.all(icnc_o < _P.icemax)
+
+    def test_nic_cirrus_1_candidate_capped_at_icemax_for_small_crystals(self):
+        """#846: the diagnosed number is bounded by the maximum-plausible ICNC.
+
+        Below the volume-mean radius at which the ice-mass inversion would
+        exceed ``icemax`` (~1.8e-5 m for this fixture's IWC), the candidate
+        would run to ~1e11-1e20 /m^3 — four to thirteen orders above realistic
+        cirrus. It is capped at ``icemax`` (the reference's cap on crystal
+        NUMBER, ECHAM ``MIN(candidate, zascs)``; jcm uses ``icemax`` as the
+        max-plausible-number ceiling since aerosol number is not plumbed here).
+        """
+        n = 3
+        inputs = self._inputs_with_ice(n)
+        for r in (0.0, 1e-8, 1e-7, 3e-7, 1e-6):
+            inputs["ice_radius_mean"] = _full(n, r)
+            _, icnc_o, *_ = update_in_cloud_water(**inputs)
+            assert jnp.all(jnp.isfinite(icnc_o))
+            # ll2_ic fires (icnc <= icemin), candidate pinned at icemax.
+            assert jnp.allclose(icnc_o, _P.icemax, rtol=1e-6), (r, icnc_o)
+
+    @pytest.mark.parametrize("x64", [False, True])
+    def test_nic_cirrus_1_icnc_gradient_finite_across_radius_sweep(self, x64):
+        """#846: jvp/vjp of the ICNC diagnosis are finite for every radius.
+
+        The bug: written as ``C / r**3`` the derivative forms ``1/r**6``,
+        which overflows float32 below r ~ 3e-7 m, so the jvp was NaN **even
+        for a zero tangent** (0*inf) on exactly the small-crystal cells this
+        branch diagnoses. The fix floors the radius at
+        ``cirrus_min_ice_radius`` and scales both radii by a STATIC 1 um
+        reference before the cube, so no gradient path — including the one
+        through the parameter leaf itself — touches a tiny denominator.
+        Swept in both float32 and float64 over [1e-8, 1e-5] m, spanning the
+        overflow region. The reverse-mode sweep also differentiates the FULL
+        ``CloudParams2M`` pytree: with ``cirrus_min_ice_radius`` doubling as
+        the scale, dividing by ``r_ref**3`` (1e-21) put ``(r_ref**3)**-2 ~
+        1e42`` = inf on the parameter's own vjp — NaN via 0*inf on capped
+        cells and -inf even at physical radii (Codex review on #857).
+        """
+        # Snapshot-and-restore rather than assume-False: the flag is
+        # process-global and mam4_jax flips it on at import, so a worker that
+        # ran a JAM/MAM4 test first legitimately enters with x64=True.
+        prior_x64 = jax.config.read("jax_enable_x64")
+        jax.config.update("jax_enable_x64", x64)
+        try:
+            n = 3
+            base = self._inputs_with_ice(n)
+            base["temp_prev"] = _full(n, 220.0)  # nucleating-cirrus cell
+            dtype = jnp.float64 if x64 else jnp.float32
+            base = {
+                k: (v.astype(dtype) if isinstance(v, jnp.ndarray)
+                    and v.dtype.kind == "f" else v)
+                for k, v in base.items()
+            }
+
+            def icnc_only(ice_radius_mean, air_density, cloud_ice_in_cloud):
+                args = dict(base)
+                args.update(
+                    ice_radius_mean=ice_radius_mean,
+                    air_density=air_density,
+                    cloud_ice_in_cloud=cloud_ice_in_cloud,
+                )
+                return update_in_cloud_water(**args)[1]
+
+            def icnc_of_params(params, ice_radius_mean):
+                args = dict(base)
+                args.update(params=params, ice_radius_mean=ice_radius_mean)
+                return jnp.sum(update_in_cloud_water(**args)[1] ** 2)
+
+            for r in (1e-8, 1e-7, 3e-7, 1e-6, 3e-6, 1e-5):
+                rad = _full(n, r).astype(dtype)
+                argtuple = (rad, base["air_density"], base["cloud_ice_in_cloud"])
+                # Zero-tangent jvp: the exact probe from #846 (0*inf -> NaN).
+                _, jvp_zero = jax.jvp(
+                    icnc_only, argtuple,
+                    tuple(jnp.zeros_like(a) for a in argtuple),
+                )
+                assert jnp.all(jnp.isfinite(jvp_zero)), (r, x64, jvp_zero)
+                # Reverse mode w.r.t. all three candidate inputs.
+                grads = jax.grad(
+                    lambda *a: jnp.sum(icnc_only(*a) ** 2),
+                    argnums=(0, 1, 2),
+                )(*argtuple)
+                for g in grads:
+                    assert jnp.all(jnp.isfinite(g)), (r, x64, g)
+                # Reverse mode w.r.t. EVERY CloudParams2M leaf — the repo
+                # convention is that params are differentiable, so the
+                # parameter pytree must be gradient-clean too. This is what
+                # caught the ``/ r_ref**3`` overflow the first fix introduced.
+                pgrads = jax.grad(icnc_of_params)(base["params"], rad)
+                for name, g in vars(pgrads).items():
+                    if hasattr(g, "dtype"):
+                        assert jnp.all(jnp.isfinite(g)), (r, x64, name, g)
+
+            # AD matches a central difference at a physical operating point
+            # where the candidate is below icemax (the cap is inactive, so
+            # the derivative is the genuine ``d ICNC / d r`` etc.).
+            phys = (_full(n, 3e-5).astype(dtype),
+                    base["air_density"], base["cloud_ice_in_cloud"])
+            check_gradients(icnc_only, phys, rtol=1e-2, seed=0)
+        finally:
+            jax.config.update("jax_enable_x64", prior_x64)
+
+    def test_nic_cirrus_1_min_radius_parameter_gradient_is_live_and_correct(self):
+        """#846/#857: d ICNC / d cirrus_min_ice_radius, where the floor binds.
+
+        The floor and the ``icemax`` cap can both make the parameter's
+        gradient legitimately zero (radius above the floor, or candidate
+        capped), so finiteness alone would pass with the leaf severed. This
+        fixture makes it LIVE: ``qi`` small enough (1e-11 kg/kg) that the
+        candidate at ``r_safe = r_ref`` (~3e6 /m^3) sits below ``icemax``
+        while the radius (1e-8 m) sits below the floor — there
+        ``N = C rho qi / r_ref^3`` exactly, so ``dN/dr_ref = -3N/r_ref``.
+        Float32, checked against both the analytic form and ``check_gradients``.
+        """
+        n = 3
+        inputs = self._inputs_with_ice(n)
+        inputs["temp_prev"] = _full(n, 220.0)
+        inputs["ice_radius_mean"] = _full(n, 1e-8)
+        inputs["cloud_ice_in_cloud"] = _full(n, 1e-11)
+
+        def icnc_of_ref(r_ref):
+            args = dict(inputs)
+            args["params"] = _P.replace(cirrus_min_ice_radius=r_ref)
+            return update_in_cloud_water(**args)[1]
+
+        r0 = _P.cirrus_min_ice_radius
+        icnc = icnc_of_ref(r0)
+        assert jnp.all(icnc < _P.icemax)          # cap inactive
+        assert jnp.all(icnc > _P.icemin)          # floor-diagnosed, not icemin
+        grad = jax.grad(lambda r: jnp.sum(icnc_of_ref(r)))(r0)
+        expected = -3.0 * jnp.sum(icnc) / r0
+        assert jnp.isfinite(grad)
+        assert jnp.isclose(grad, expected, rtol=1e-4), (grad, expected)
+        check_gradients(icnc_of_ref, (r0,), rtol=1e-2, seed=0)
 
     def test_nic_cirrus_2_uses_external_source_capped_by_pressure(self):
         n = 3
@@ -1385,7 +1527,7 @@ class TestUpdateTendencies_2M:
         """``preffl`` is bit-identical to the ECHAM law written out in place.
 
         The law lives in the shared ``eff_liquid_droplet_radius`` helper (also
-        used by the 1M scheme, #717); this pins the 2M numbers against an
+        used by the 1M scheme); this pins the 2M numbers against an
         independent transcription of the same expression.
         """
         n = 3
@@ -1466,7 +1608,8 @@ class TestIcon2MPipeline:
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
         physics = echam_physics(cloud_scheme="2m", checkpoint_terms=False)
-        model = Model(coords=get_speedy_coords(), physics=physics, time_step=180)
+        # Model.time_step is minutes; use the intended 180-second step.
+        model = Model(coords=get_speedy_coords(), physics=physics, time_step=3)
         preds = model.run(save_interval=(1 / 24.0), total_time=(2 / 24.0))
 
         assert jnp.all(jnp.isfinite(preds.dynamics.temperature))
@@ -1896,10 +2039,16 @@ class TestColumnEnthalpyConservation2M:
         import jcm.constants as c
 
         tend, rain_sfc, snow_sfc = TestColumnEnthalpyConservation2M._run(cols)
-        _, _, _, _, _, _, _, _, rho, dz, _, _ = cols
+        _, q, _, _, _, _, _, _, rho, dz, _, _ = cols
         mass = np.asarray(rho * dz)                       # [kg/m²] per level
 
-        heating = mass * c.cpd * np.asarray(tend.dtedt)   # [W/m²] per level
+        # The scheme converts latent heat with the MOIST heat capacity
+        # cp = cpd·(1 + vtmpc2·q) evaluated at the step-start humidity (#706),
+        # so the enthalpy identity closes against cp·dT, not cpd·dT. The
+        # fixtures pass no step-start override, so q here IS the anchor
+        # humidity the scheme's cp uses.
+        cp_moist = c.cpd + (c.cpv - c.cpd) * np.maximum(np.asarray(q), 0.0)
+        heating = mass * cp_moist * np.asarray(tend.dtedt)   # [W/m²] per level
         dE = float(np.sum(
             heating
             - mass * c.alhc * np.asarray(tend.dqcdt)
@@ -2533,3 +2682,153 @@ class TestScavengingLedger2M:
                   "incloud_snow_formation", "incloud_riming",
                   "process_cloud_fraction", "condensate_evaporation_rate"):
             assert getattr(zeros, f).shape == (nlev, ncols)
+
+
+class TestSpaConfigurationHandover:
+    """SPA tuning is applied post-compose, so ``replace`` must carry it."""
+
+    def test_replace_preserves_the_spa_tuning(self):
+        """Losing it would silently revert a 2000x prefactor to 1.0.
+
+        ``echam_physics`` configures SPA from the aerosol module after the
+        package is composed, so a 2M term swapped in afterwards has never seen
+        those values and would fall back to the (1.0, 0.5, 0.0) constructor
+        defaults — changing the droplet number the whole cloud scheme keys off,
+        with no error to say so.
+        """
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        cat = Lohmann2MMicrophysics.category
+        physics = echam_physics(aerosol_module="jam", cloud_scheme="2m")
+        before = [t for t in physics.terms if t.category == cat][0]
+        after = [t for t in physics.replace(cat, Lohmann2MMicrophysics()).terms
+                 if t.category == cat][0]
+
+        # Guard against passing because both sides sit on the default.
+        assert float(before._spa_prefactor.get_value()) != 1.0
+        for name in ("_spa_prefactor", "_spa_exponent", "_spa_cap_smoothing"):
+            assert (float(getattr(after, name).get_value())
+                    == float(getattr(before, name).get_value())), name
+
+
+class TestSchemeGradients2M:
+    """AD against a central difference through the whole 2M column (#820).
+
+    ``cloud_microphysics_2m`` is 175 ``where`` and 131 ``max``/``min`` deep and
+    had no scheme-level gradient check at all. It comes out clean: on a column
+    carrying condensate and cover in every layer, AD matches a converged
+    secant, and in float64 (outside the suite, which pins float32 for #729)
+    jvp and vjp agree to 1e-16 with the difference converging to them.
+
+    The operating point matters more than anything else here. The scheme
+    switches on exact zeros — ``qc``, ``qi``, the number concentrations and the
+    cloud cover each gate a ``where`` — so a fixture that zeroes them in its
+    clear layers, as the conservation fixtures above reasonably do, sits on
+    every one of those switches at once and has no two-sided derivative to
+    compare against. That is the point, not the scheme; this fixture is off
+    them.
+    """
+
+    NLEV = 16
+
+    def _column(self):
+        """Build a mixed-phase column with condensate and cover at every level."""
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+        temperature = jnp.linspace(232.0, 298.0, self.NLEV)
+        pressure = jnp.linspace(2.0e4, 1.0e5, self.NLEV)
+        air_density = pressure / (287.0 * temperature)
+        humidity = 0.93 * jax.vmap(saturation_specific_humidity)(
+            pressure, temperature)
+        qc = jnp.full(self.NLEV, 3.1e-5).at[9:13].set(1.1e-3)
+        qi = jnp.full(self.NLEV, 7.2e-6).at[3:7].set(2.3e-4)
+        cloud_fraction = (jnp.full(self.NLEV, 0.14)
+                          .at[3:7].set(0.55).at[9:13].set(0.65))
+        # Number concentrations proportional to mass, so the two never
+        # disagree about whether a layer holds condensate.
+        qnc = 5.1e7 * qc / 1.1e-3
+        qni = 1.1e4 * qi / 2.3e-4
+        return dict(
+            temperature=temperature, humidity=humidity, pressure=pressure,
+            qc=qc, qi=qi, qnc=qnc, qni=qni, cloud_fraction=cloud_fraction,
+            air_density=air_density,
+            layer_thickness=jnp.full(self.NLEV, 500.0),
+            tke=jnp.full(self.NLEV, 0.12),
+            activated_cdnc=jnp.full(self.NLEV, 5.2e7),
+            ice_nuclei=jnp.zeros(self.NLEV),
+            ice_nuclei_deposition=jnp.zeros(self.NLEV),
+        )
+
+    def _scheme_fn(self, column):
+        """Return f(T, q, qc, qi, qnc, qni, cf, rho) -> tendencies + precip."""
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+
+        def f(temperature, humidity, qc, qi, qnc, qni, cloud_fraction,
+              air_density):
+            out = cloud_microphysics_2m(
+                temperature, humidity, column["pressure"], qc, qi, qnc, qni,
+                cloud_fraction, air_density, column["layer_thickness"],
+                column["tke"], column["activated_cdnc"],
+                column["ice_nuclei"], column["ice_nuclei_deposition"],
+                1800.0, _P)
+            tend = out[0]
+            return (tend.dtedt, tend.dqdt, tend.dqcdt, tend.dqidt,
+                    tend.dqncdt, tend.dqnidt, out[1], out[2])
+
+        return f
+
+    @pytest.mark.parametrize("seed", [0, 3])
+    def test_column_gradients_match_a_central_difference(self, seed):
+        """One column, off every condensate switch.
+
+        ``adjoint_rtol=1e-3`` rather than the 1e-4 default, with its
+        derivation: the identity holds to 1e-16 under x64, so the float32 gap
+        — measured at 1.5e-7 to 2.4e-4 over four direction seeds here — is
+        round-off through the column ``lax.scan``, the same double sum
+        contracted in opposite orders by the two AD modes.
+        """
+        column = self._column()
+        args = tuple(column[k] for k in (
+            "temperature", "humidity", "qc", "qi", "qnc", "qni",
+            "cloud_fraction", "air_density"))
+        check_gradients(self._scheme_fn(column), args,
+                        rtol=1e-2, seed=seed, adjoint_rtol=1e-3)
+
+    def test_gradients_are_finite_at_degenerate_operating_points(self):
+        """Zero TKE, a clear column and zero droplet number stay finite.
+
+        ``scheme.py:302`` computes the updraft velocity as
+        ``sqrt(maximum(2*tke, 0.0))``, whose derivative at ``tke = 0`` would be
+        ``0.5 * inf``; the ECHAM term hands the scheme a literal zeros array
+        whenever no vertical-diffusion diagnostic is present, so that is the
+        default state. It is inert today only because the updraft velocity
+        reaches nothing differentiable — ``deposition_freezing.py:210`` uses it
+        solely inside a comparison — which is exactly why this fence is worth
+        having: it fails the day that changes.
+        """
+        base = self._column()
+        keys = ("temperature", "humidity", "qc", "qi", "qnc", "qni",
+                "cloud_fraction", "air_density")
+
+        def finite_for(overrides):
+            column = dict(base)
+            column.update(overrides)
+            f = self._scheme_fn(column)
+            args = tuple(column[k] for k in keys)
+            grads = jax.grad(
+                lambda *a: sum(jnp.sum(x ** 2) for x in f(*a)),
+                argnums=tuple(range(len(args))),
+            )(*args)
+            return {k: bool(jnp.all(jnp.isfinite(g)))
+                    for k, g in zip(keys, grads)}
+
+        zeros = jnp.zeros(self.NLEV)
+        for label, overrides in (
+            ("zero TKE", {"tke": zeros}),
+            ("clear column", {"qc": zeros, "qi": zeros, "qnc": zeros,
+                              "qni": zeros, "cloud_fraction": zeros}),
+            ("zero number concentration", {"qnc": zeros, "qni": zeros}),
+            ("zero activated CDNC", {"activated_cdnc": zeros}),
+        ):
+            for name, ok in finite_for(overrides).items():
+                assert ok, f"d/d{name} is not finite with {label}"

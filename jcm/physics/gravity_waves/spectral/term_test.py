@@ -15,6 +15,7 @@ from jcm.physics.gravity_waves.spectral.params import (
 from jcm.physics.gravity_waves.spectral.term import FrontalGravityWaveDrag
 from jcm.physics_interface import PhysicsState
 from jcm.terrain import TerrainData
+from jcm.testing import check_gradients
 from jcm.utils import get_coords
 
 KX = 20
@@ -262,6 +263,74 @@ class Ne30HeatingRegressionTest(unittest.TestCase):
 
         g = jax.grad(loss)(jnp.asarray(1.25e-3))
         self.assertTrue(bool(jnp.isfinite(g)))
+
+
+class FrontalGwDragGradientTest(unittest.TestCase):
+    """AD through the whole ``FrontalGravityWaveDrag`` term (#820).
+
+    The adjoint reference, not a difference, for the reason set out in
+    ``solver_test.py::GwSolverGradientTest``: the solver this term wraps is
+    a stack of limiters, and on a whole (nlev, nlon, nlat) grid the
+    one-sided secants of the projection stall just above the kink gate at
+    every rung — the central estimate is stable to a few parts in a thousand
+    while the two one-sided ones stay ~10 % apart, which is a kink's
+    signature and not a step that can be shrunk away. What is checked is
+    that jvp and vjp agree, that no input returns a non-finite gradient, and
+    that the state inputs are live.
+
+    ``d/d(frontogenesis)`` is identically zero, and that is CAM: ``gw_cm_src``
+    launches on the boolean ``frontgf > frontgfc`` and the launched spectrum
+    does not scale with the frontogenesis function, so the trigger is a step.
+    A gradient-based calibration therefore cannot tune this term through the
+    frontogenesis field; it tunes it through ``taubgnd``, ``effgw`` and
+    ``frontgfc``, which are ``nnx.Param`` leaves. The zero is pinned below so
+    a change to a soft trigger cannot land unnoticed.
+    """
+
+    def _setup(self, frontogenesis=1.0e-14):
+        term, state, forcing, terrain = _make_setup()
+        diagnostics = {"_dt_seconds": DT,
+                       "frontogenesis": jnp.full((KX, IX, IL), frontogenesis)}
+
+        def f(u_wind, v_wind, temperature, frontgf):
+            tendency, _ = term(
+                state.copy(u_wind=u_wind, v_wind=v_wind,
+                           temperature=temperature),
+                {**diagnostics, "frontogenesis": frontgf}, forcing, terrain)
+            return (tendency.u_wind, tendency.v_wind, tendency.temperature)
+
+        args = (state.u_wind, state.v_wind, state.temperature,
+                diagnostics["frontogenesis"])
+        return f, args
+
+    def test_term_gradients_are_adjoint_and_live(self):
+        """Both AD modes agree; u, v and T are all live."""
+        f, args = self._setup()
+        for seed in (0, 4):
+            with self.subTest(seed=seed):
+                check_gradients(f, args, reference="adjoint",
+                                adjoint_rtol=5e-3,
+                                live_inputs=["[0]", "[1]", "[2]"], seed=seed)
+
+    def test_term_gradients_are_finite(self):
+        """No input may return a non-finite gradient above the trigger."""
+        f, args = self._setup()
+        gradients = jax.grad(
+            lambda *a: sum(jnp.sum(x ** 2) for x in f(*a)),
+            argnums=(0, 1, 2, 3),
+        )(*args)
+        names = ("u_wind", "v_wind", "temperature", "frontogenesis")
+        for name, gradient in zip(names, gradients):
+            self.assertTrue(bool(jnp.all(jnp.isfinite(gradient))),
+                            f"d/d{name} is not finite: {gradient}")
+
+    def test_frontogenesis_trigger_carries_no_gradient(self):
+        """``d/d(frontogenesis)`` is exactly zero — the trigger is a step."""
+        f, args = self._setup()
+        gradient = jax.grad(
+            lambda *a: sum(jnp.sum(x ** 2) for x in f(*a)), argnums=3,
+        )(*args)
+        self.assertEqual(float(jnp.max(jnp.abs(gradient))), 0.0)
 
 
 if __name__ == "__main__":

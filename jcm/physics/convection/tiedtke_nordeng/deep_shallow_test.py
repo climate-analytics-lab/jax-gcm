@@ -41,7 +41,12 @@ def _unstable_column(cap_hpa=None):
     for k in range(NLEV - 2, -1, -1):
         lapse = 9.7e-3 if k > NLEV - 5 else 6.3e-3
         if cap_hpa is not None and p[k] < cap_hpa * 100.0:
-            lapse = -2.0e-3          # inversion above the cap
+            # Strong inversion above the cap. With the faithful #669
+            # entrainment/detrainment (metre-based, capped) deep plumes now
+            # penetrate to their true buoyancy ceiling, so a weak inversion
+            # no longer holds a thin cap — this must decisively kill the
+            # plume for the depth-demotion fixture below.
+            lapse = -8.0e-3          # inversion above the cap
         t[k] = t[k + 1] - lapse * dz[k]
     qs, _ = saturation_specific_humidity_and_derivative(jnp.array(t), jnp.array(p))
     q = 0.9 * np.asarray(qs)
@@ -118,7 +123,7 @@ class TestMoistureConvergenceSplit(unittest.TestCase):
         """ECHAM mo_cumastr.f90:752: deep with a cloud thinner than 200 hPa
         is relabelled shallow, however strong the convergence.
         """
-        col = _unstable_column(cap_hpa=850.0)
+        col = _unstable_column(cap_hpa=900.0)
         _, state = _run(col, qte_dynamics=_convergence_profile(col[4], col[3], 0.5))
         p = np.asarray(col[2])
         mfu = np.asarray(state.mfu)
@@ -188,7 +193,9 @@ class TestLaggedDynamicsReconstruction(unittest.TestCase):
                             air_density, u_wind, v_wind, qc, qi, dt_seconds,
                             params, land_fraction, moisture_supply,
                             moisture_tend_profile, thvsig, omega,
-                            qte_dynamics):
+                            qte_dynamics, layer_mass=None,
+                            humidity_m1=None,
+                            use_updraft_cover=False):
             zeros = jnp.zeros_like(temperature)
             return ConvectionTendencies(
                 dtedt=zeros, dqdt=qte_dynamics, dudt=zeros, dvdt=zeros,

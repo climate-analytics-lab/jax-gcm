@@ -222,7 +222,7 @@ class TestNudgingTargetHumidity(unittest.TestCase):
         state = PhysicsState(
             u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
             temperature=jnp.full(shape, 280.0),
-            specific_humidity=jnp.full(shape, 8.0),  # g/kg, a moist column
+            specific_humidity=jnp.full(shape, 8e-3),  # kg/kg, a moist column
             geopotential=jnp.zeros(shape),
             normalized_surface_pressure=jnp.ones((nlon, nlat)),
             tracers={},

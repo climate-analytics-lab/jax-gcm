@@ -82,7 +82,7 @@ class _FakeCoords:
 
     @property
     def nodal_shape(self):
-        # ``(nlev, *horizontal_shape)`` — Model._final_dycore_state pytree
+        # ``(nlev, *horizontal_shape)`` — Model.dycore_state pytree
         # readers grab this in a few places (e.g. the xarray output path).
         return (self.vertical.layers,) + self.horizontal.nodal_shape
 

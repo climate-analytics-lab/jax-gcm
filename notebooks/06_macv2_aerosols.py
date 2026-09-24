@@ -105,7 +105,7 @@ def build_forcing(ds: xr.Dataset, nodal_shape: tuple[int, int]) -> ForcingData:
     real time-varying MACv2-SP aerosols.
 
     For a run with realistic SST/sea-ice, replace the bare-array fields
-    here with `ForcingData.from_dataset(your_era5_ds, coords=...)`.
+    here with `ForcingData.from_dataset(your_era5_ds, coords=..., align_mode="by_date")`.
     """
     year_weight, ann_cycle = read_macv2_weights(ds)
     base = ForcingData.zeros(nodal_shape)
@@ -148,8 +148,7 @@ def main(macv2_path: Path) -> None:
             terrain=terrain,
             physics=physics,
             time_step=20.0,                              # minutes
-            start_date=jdt.to_datetime(start),
-            calendar="gregorian",                        # MACv2 years are gregorian
+            start_time=jdt.to_datetime(start),
         )
         preds = model.run(forcing=forcing,
                           save_interval="1 day",

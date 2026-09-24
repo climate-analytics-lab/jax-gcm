@@ -257,7 +257,7 @@ class EndToEndTest(unittest.TestCase):
 
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
-            coords=coords, terrain=TerrainData.aquaplanet(coords), time_step=900.0,
+            coords=coords, terrain=TerrainData.aquaplanet(coords), time_step=15.0,
             physics=echam_physics(
                 radiation_scheme="grey", cloud_scheme="2m",
                 enable_aerocom=True,
@@ -268,7 +268,7 @@ class EndToEndTest(unittest.TestCase):
         # The diagnostics term must be terminal — nothing may depend on it.
         self.assertEqual(names[-1], "aerocom_diagnostics")
 
-        ds = model.run(total_time=0.05, save_interval=0.05).to_xarray()
+        ds = model.run(total_time="1 hour", save_interval="1 hour").to_xarray()
         emitted = [k for k in ds.data_vars if "aerocom" in k]
         self.assertTrue(emitted,
                         f"no aerocom_* diagnostics in output: {list(ds.data_vars)[:5]}")
@@ -293,11 +293,11 @@ class EndToEndTest(unittest.TestCase):
         def run(enable):
             coords = get_coords(get_echam_levels(47), spectral_truncation=21)
             m = Model(coords=coords, terrain=TerrainData.aquaplanet(coords),
-                      time_step=900.0,
+                      time_step=15.0,
                       physics=echam_physics(radiation_scheme="grey",
                                             cloud_scheme="2m",
                                             enable_aerocom=enable))
-            return m.run(total_time=0.05, save_interval=0.05).to_xarray()
+            return m.run(total_time="1 hour", save_interval="1 hour").to_xarray()
 
         off, on = run(False), run(True)
         np.testing.assert_allclose(
@@ -305,6 +305,69 @@ class EndToEndTest(unittest.TestCase):
             rtol=1e-10, atol=1e-10,
             err_msg="AerocomDiagnostics perturbed the trajectory; it must be "
                     "diagnostic-only")
+
+
+class TropopauseOrientationTest(unittest.TestCase):
+    """aerocom_ptp must be computed on a surface-first column (#841).
+
+    The diagnostics reach ``_plev_group`` in the physics-internal TOP-first
+    frame (index 0 = model top, surface at -1), but ``find_tropopause_level``
+    requires surface-first and returns the LOWEST qualifying level. Fed the raw
+    top-first column it returns the HIGHEST qualifying level instead — a
+    spurious ~15-30 hPa value insensitive to the actual sounding. This drives
+    the group with two known soundings (a high tropical and a lower
+    extratropical tropopause) and asserts a physical, sounding-dependent band.
+    """
+
+    def _column_stack(self, nlev):
+        # Surface-first physical soundings, returned in the TOP-first frame the
+        # physics hands to the diagnostics (index 0 = model top).
+        p_sf = np.logspace(np.log10(101325.0), np.log10(100.0), nlev)
+        z_sf = -7500.0 * np.log(p_sf / 101325.0)
+
+        def temp(z, z_trop, t_sfc):
+            t_trop = t_sfc - 0.0065 * z_trop
+            return np.where(z <= z_trop, t_sfc - 0.0065 * z,
+                            t_trop + 0.0018 * (z - z_trop))
+
+        # Tropical: high, cold tropopause (~16 km). Extratropical: lower
+        # (~10.5 km). The finder must place the tropical one at LOWER pressure.
+        t_sf = np.stack([temp(z_sf, 16000.0, 300.0),
+                         temp(z_sf, 10500.0, 288.0)], axis=1)  # (nlev, 2)
+        t_tf = jnp.asarray(t_sf[::-1], jnp.float32)
+        p_tf = jnp.asarray(np.stack([p_sf, p_sf], axis=1)[::-1], jnp.float32)
+        z_tf = jnp.asarray(np.stack([z_sf, z_sf], axis=1)[::-1], jnp.float32)
+        return t_tf, p_tf, z_tf
+
+    def test_ptp_is_physical_and_sounding_dependent(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.utils import get_coords
+
+        nlev = 47
+        term = AerocomDiagnostics(groups=("plev",))
+        # Populates _ref_level_pressures so the search window is grid-derived.
+        term.cache_coords(get_coords(get_echam_levels(nlev),
+                                     spectral_truncation=21))
+        t_tf, p_tf, z_tf = self._column_stack(nlev)
+
+        class _State:
+            temperature = t_tf
+            u_wind = jnp.zeros((nlev, 2))
+            v_wind = jnp.zeros((nlev, 2))
+
+        out = term._plev_group(_State(), {"height_full": z_tf}, t_tf, p_tf)
+        ptp = np.asarray(out["aerocom_ptp"]) / 100.0  # hPa
+
+        # On the buggy top-first path both columns collapse to the top of the
+        # search window (~15 hPa) regardless of the sounding; the fix must be
+        # well below that and must order the two tropopauses correctly.
+        self.assertLess(ptp[0], ptp[1],
+                        "tropical tropopause must sit at lower pressure "
+                        f"(higher) than extratropical: {ptp}")
+        self.assertTrue(80.0 < ptp[0] < 160.0,
+                        f"tropical ptp out of band: {ptp[0]} hPa")
+        self.assertTrue(130.0 < ptp[1] < 260.0,
+                        f"extratropical ptp out of band: {ptp[1]} hPa")
 
 
 class CodexRegressionTest(unittest.TestCase):
@@ -549,12 +612,12 @@ class AerosolGroupEndToEndTest(unittest.TestCase):
 
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
-            coords=coords, terrain=TerrainData.aquaplanet(coords), time_step=900.0,
+            coords=coords, terrain=TerrainData.aquaplanet(coords), time_step=15.0,
             physics=echam_physics(
                 radiation_scheme="grey", cloud_scheme="2m", aerosol_module="jam",
                 enable_aerocom=True, aerocom_groups=("aerosol",)),
         )
-        ds = model.run(total_time=0.05, save_interval=0.05).to_xarray()
+        ds = model.run(total_time="1 hour", save_interval="1 hour").to_xarray()
         for key in ("aerocom_N70", "aerocom_N100", "aerocom_PM1", "aerocom_PM10"):
             self.assertIn(key, ds.data_vars)
             self.assertTrue(np.isfinite(np.asarray(ds[key])).all(), key)
@@ -586,11 +649,11 @@ class PerBandOpticsSerializationTest(unittest.TestCase):
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
             coords=coords, terrain=TerrainData.aquaplanet(coords),
-            time_step=900.0,
+            time_step=15.0,
             physics=echam_physics(cloud_scheme="2m", aerosol_module="jam",
                                   radiation_scheme="rrtmgp"),
         )
-        ds = model.run(total_time=0.02, save_interval=0.02).to_xarray()
+        ds = model.run(total_time="15 minutes", save_interval="15 minutes").to_xarray()
         sw = "jam_optics.aod_sw_per_band"
         lw = "jam_optics.aod_lw_per_band"
         self.assertIn(sw, ds.data_vars)
@@ -623,11 +686,11 @@ class Macv2NamespaceOutputTest(unittest.TestCase):
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
             coords=coords, terrain=TerrainData.aquaplanet(coords),
-            time_step=900.0,
+            time_step=15.0,
             physics=echam_physics(aerosol_module="macv2sp",
                                   radiation_scheme="rrtmgp"),
         )
-        ds = model.run(total_time=0.02, save_interval=0.02).to_xarray()
+        ds = model.run(total_time="15 minutes", save_interval="15 minutes").to_xarray()
         # Namespaced, CF-named MACv2-SP output present...
         self.assertIn("macsp.od550aer", ds.data_vars)
         self.assertIn("macsp.aod_anthropogenic", ds.data_vars)

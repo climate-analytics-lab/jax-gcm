@@ -20,6 +20,34 @@ selected by config:
   network in ``nn_emulator.py``) — a bidirectional-GRU emulator of RTE+RRTMGP.
   See {doc}`../design/radiation_nn_emulator`.
 
+**Grey two-stream layer solution.** Each homogeneous layer's diffuse
+reflectance and transmittance are the exact two-stream result of Meador &
+Weaver (1980, eq. 14-15; equivalently Toon et al. 1989) under the Eddington
+closure (``two_stream_coefficients``: ``gamma1 = (7 - ssa(4 + 3g))/4``,
+``gamma2 = -(1 - ssa(4 - 3g))/4``). With eigenvalue
+``lambda = sqrt(gamma1**2 - gamma2**2)``, ``e = exp(-lambda*tau)`` and
+``Gamma = gamma2/(gamma1 + lambda)`` the solution is
+``R = Gamma (1 - e^2)/(1 - Gamma^2 e^2)`` and
+``T = (1 - Gamma^2) e/(1 - Gamma^2 e^2)``,
+so a semi-infinite layer has albedo ``Gamma`` and a conservative
+(``ssa = 1``) layer reflects ``R = gamma1*tau/(1 + gamma1*tau)`` with
+``R + T = 1``. ``layer_reflectance_transmittance`` evaluates the algebraically
+identical rearrangement ``R = gamma2 S/(gamma1 S + 1 + e^2)``,
+``T = 2 e/(gamma1 S + 1 + e^2)`` with ``S = (1 - e^2)/lambda``, chosen because
+its denominator cannot cancel to zero, it never divides by ``gamma1`` or
+``gamma1 + lambda`` (both zero at ``ssa = g = 1``), and it contains no growing
+exponential — one expression is valid and differentiable at every optical
+depth. For ``lambda*tau < 0.1`` it is evaluated as an even Taylor series in
+``(lambda*tau)^2``: R and T are even functions of ``lambda``, hence smooth in
+``lambda^2 = 3(1-ssa)(1-ssa*g)``, and the series carries the true endpoint
+derivative through autodiff at the conservative limit (where the closed value
+is ``R = gamma1*tau/(1+gamma1*tau)``). Longwave gas layers (``ssa = 0``) keep
+the Eddington coefficients ``gamma1 = 7/4``, ``gamma2 = -1/4``,
+``lambda = sqrt(3)``: the closure yields a small *negative* reflectance
+(``Gamma ~ -0.07``), clipped to ``R = 0`` as an approximation artefact, and a
+diffuse transmittance ``T = (1 - Gamma^2) e/(1 - Gamma^2 e^2)`` — within 0.5%
+of, but not exactly, ``exp(-sqrt(3)*tau)``.
+
 **Partial-cloud / overlap** differs by backend. **RRTMGP** uses full **McICA**
 (``jcm/physics/radiation/mcica.py``): one stochastic binary cloud profile per
 g-point, seeded deterministically per column and model step, with three overlap
@@ -34,12 +62,25 @@ layer cloud fractions and paths, so the runtime ``cloud_overlap`` /
 carries its own cloud formulation. Swapping backends therefore changes the
 cloud-overlap treatment, not just the gas optics. The AeroCom
 total-cloud-cover diagnostic uses the maximum-random closure.
+
+**Offline**, the total cloud cover jcm reports from saved output is also
+maximum-random — ECHAM's own ``aclcov`` (``mo_cloud.f90`` §10.2), as
+:func:`jcm.analysis.total_cloud_cover`, and it is what the release-validation
+``cloud_cover`` gate scores. That choice defers to ECHAM and is deliberate:
+overlap is a definition, the three in common use differ by ~0.3 in the global
+mean, and a total cover is the basis the satellite climatologies are quoted
+on. It is a different number from the McICA ``radiation.total_cloud_cover``
+above — sampled quantity, different preprocessing, different time treatment —
+and {doc}`../design/cloud_cover_gate` sets out the provenance, the measured
+magnitudes and how far apart the two run.
 Radiation **sub-steps** on the ECHAM-family backends (grey, RRTMGP, NN
 emulator): a gate (``radiation_should_compute``) skips the expensive solve and
 rescales cached heating on intermediate steps. SPEEDY has its own, different
-cadence — ``SpeedyFlags`` gates shortwave every ``nstrad`` calls and the skipped
-calls contribute a *zero* shortwave tendency rather than replaying cached
-heating (#752).
+cadence — ``SpeedyFlags`` gates shortwave every ``nstrad`` calls, and the
+skipped calls re-apply the heating rate cached from the last solve
+(``SWRadiationData.heating_rate``, SPEEDY's ``tt_rsw``) rather than rescaling
+it, which is what the Fortran does. The two families therefore differ in how
+they *reuse* the cached solve, not in whether they reuse it.
 
 **Aerosol-radiation coupling** is per-band: MACv2-SP simple plumes and JAM online
 optics both feed per-band aerosol optical depth / SSA / asymmetry into RRTMGP. For
@@ -57,6 +98,35 @@ RRTMGP and the NN emulator so a feature and its label describe the same cloud):
   factor (``effective_radius_liquid``). This constant is the land/ocean average of
   **CAM4's ``reltab``** (``cloud_optical_properties.F90``); both origins are
   documented in-code.
+- **Sub-grid inhomogeneity factor** — the cloud **optical depth** is multiplied by
+  a fixed factor (default 0.8), correcting the plane-parallel albedo bias of
+  homogeneous-cloud radiative transfer. This is ECHAM's ``mo_cloud_optics.f90``
+  treatment with ``l_variable_inhoml = .FALSE.`` (``ztau = ztol*zinhoml +
+  ztoi*zinhomi``). It scales the optical depth only: the effective radii and the
+  τ-weighted ssa/asymmetry are taken from the physical (unscaled) condensate, so
+  the diagnostic ice radius still follows the Moss/Foot IWC law. A single factor
+  (same for liquid and ice) is used, ECHAM's T63 value where ``zinhoml1 =
+  zinhomi = 0.8``; the RRTMGP backend combines the per-phase optics by
+  τ-weighting inside jax-rrtmgp, so a common factor scales the total τ without
+  disturbing that weighting. Distinct liquid/ice factors (``zinhomi = 0.85`` at
+  T127+, the shallow-convection ``zinhoml2 = 0.4``) need per-phase optical-depth
+  scaling in the backend (jax-rrtmgp#37) and, for the convection dependence,
+  ``ktype`` in the radiation glue (#870). Applied on both the RRTMGP and grey
+  backends via ``RadiationParameters.cloud_inhomogeneity``.
+- **Grey backend band wavelengths** — every wavelength-dependent grey optical
+  property (the Mie/heuristic cloud optics in
+  ``jcm/physics/radiation/cloud_optics.py``, the Ångström scaling of the
+  broadband aerosol AOD, and the near-IR/visible band classifier that assigns
+  surface albedo and gas absorbers) reads one representative wavelength per band
+  from ``get_band_wavelength``, derived from the band limits in
+  ``jcm/physics/radiation/constants.py``. For a **shortwave** band it is the
+  solar-flux-weighted mean wavelength, ``λ_eff = ∫λ B_λ(5772 K) dλ / ∫B_λ dλ``
+  over the band: 0.489 µm for UV/visible (0.20–0.69 µm) and 1.136 µm for the
+  near-IR (0.69–2.5 µm). **Longwave** bands use the mid-wavenumber wavelength
+  (their cloud absorption is tabulated per band and their aerosol AOD is
+  negligible, so the value only has to lie inside the band). The grey scheme's
+  TOA flux is split equally between the two SW bands, which the 5772 K
+  blackbody supports (50.6 % / 49.4 %).
 
 **What ECHAM/CAM does.** ECHAM6-HAM2.3 runs the **PSrad/RRTMG** two-stream
 correlated-k scheme (``mo_psrad_interface.f90``; Pincus & Stevens 2013; RRTMG:
@@ -71,10 +141,19 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
 **Why we differ.**
 - `science` — the liquid effective-radius fallback deliberately does *not* apply
   CAM4's land/ocean contrast, because ``cdnc_factor`` already carries the
-  aerosol/CCN effect (applying both double-counts it). The fallback — a constant
-  radius with no LWC dependence — is live on every 1M composition, including the
-  release-validated ``t63-echam-1m`` / ``t106-echam-1m`` configurations (#717);
-  2M configurations use microphysical effective radii.
+  aerosol/CCN effect (applying both double-counts it). Both the 1M and 2M
+  microphysics now publish an LWC-dependent ``clouds.r_eff_liq`` from the ECHAM
+  Martin/Bower law; radiation reads it from the carried ``clouds`` state, which
+  — because the ECHAM term order runs radiation *before* microphysics — is the
+  previous step's value (a one-step lag). The constant fallback therefore
+  survives only where that carried radius is still zero, resolved **cell by
+  cell** (``resolve_effective_radii`` selects on ``r_eff > 0`` per level and
+  column): the cold-start first step, and thereafter any cloudy cell that was
+  clear the previous step — so a level that newly turns cloudy falls back for
+  that step even in a column already cloudy elsewhere
+  (``eff_liquid_droplet_radius`` returns exactly 0 in a clear cell). A
+  composition that runs radiation with no droplet-radius-publishing microphysics
+  uses the fallback throughout.
 - `science` — the grey two-stream backend reads a single *broadband* aerosol
   profile (``aerosol.aod_profile``/``ssa_profile``/``asy_profile`` plus a column
   ``angstrom`` it band-scales itself) rather than the per-band arrays only
@@ -83,6 +162,18 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   aerosol direct effect — at band-centre rather than exact-550 nm accuracy, and
   only with ``jam_optics=True`` (the default; ``False`` leaves the carry slot
   radiatively passive).
+- `science` — the grey scheme has no ECHAM counterpart (ECHAM's radiation is
+  PSrad/RRTMG with narrow bands), so its broadband representative wavelength is
+  our choice. It follows the standard broadband-effective-wavelength convention
+  (weight by the incident solar spectrum) rather than the mid-wavenumber value,
+  which for the broad UV/visible band sits at 0.31 µm, where little of the
+  band's solar energy lies: with an Ångström exponent of 2 it inflates that
+  band's aerosol optical depth ~2.5× relative to the solar-weighted value
+  (MACv2-SP plumes carry exponents up to 2). Cloud SW optics barely move: for
+  liquid at ``r_eff`` = 10 µm the optical depth and asymmetry are unchanged
+  (geometric-optics limit, size parameter ≫ 1) and the near-IR single-scattering
+  albedo shifts by 3e-5; for ice at 30 µm the optical depth changes by ≤ 2 % and
+  the near-IR single-scattering albedo by −0.005.
 - `compute` — the SW spectrum is collapsed to a single broadband albedo
   (``0.46·vis + 0.54·nir``) at the RRTMGP surface BC; a true per-band /
   direct-diffuse albedo needs a g-point→band map in the library (deferred).
@@ -93,11 +184,33 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   not form ``0·inf`` on clear columns.
 
 **Status & known limitations.**
-- **No sub-grid cloud inhomogeneity scaling.** ECHAM's continuous
-  ``zinhoml = LWP^{-p}`` rescaling is not implemented; instead a one-sided
-  in-cloud-condensate cap (``_MAX_IN_CLOUD_CONDENSATE``) prevents thin-cloud
-  optical-depth blow-up. It binds in a negligible fraction of cloudy cells — a NaN
-  guard, *not* inhomogeneity coverage (#678).
+- **Grey shortwave direct-beam source is not energy-conserving (#855).** The
+  direct-to-diffuse reflectance ``R_dir`` uses a single-scattering source whose
+  ``gamma3`` goes negative for forward-scattering clouds at high sun, so a thick
+  conservative cloud reflects ~0 at TOA and its scattered energy is dropped. The
+  diffuse layer solution above is exact; this is a separate defect in the
+  direct-beam source, awaiting the Toon et al. (1989) source functions.
+- **Cloud inhomogeneity is one factor, not ECHAM's per-phase / convection-type
+  values.** The single 0.8 factor above is ECHAM's nn=63 case, where the liquid
+  and ice factors coincide (``zinhoml1 = zinhomi = 0.8``). ECHAM uses a larger
+  ice factor at higher truncation (``zinhomi = 0.85`` at T127+) and drops the
+  liquid factor to ``zinhoml2 = 0.4`` in shallow-convective columns
+  (``ktype = 4``). jcm cannot yet apply distinct liquid/ice values on the RRTMGP
+  backend — jax-rrtmgp weights the combined ssa/asymmetry by the per-phase
+  optical depths, so unequal factors would re-weight those intensive properties
+  rather than only scaling optical depth; that needs per-phase optical-depth
+  scaling in the library (jax-rrtmgp#37). The convection-type dependence
+  additionally needs ``ktype`` threaded into the radiation glue (#870). The
+  separate in-cloud-condensate cap (``_MAX_IN_CLOUD_CONDENSATE``) is only a NaN
+  guard against thin-cloud optical-depth blow-up; it binds in ~0.003 % of cloudy
+  cells and is *not* an inhomogeneity term.
+- **The NN emulator does not reflect the inhomogeneity factor yet.** The emulated
+  path predicts fluxes directly, so the inhomogeneity effect is implicit in its
+  training labels rather than a runtime knob; it deliberately does not read
+  ``cloud_inhomogeneity``. The packaged checkpoint predates the 0.8 factor, so
+  ``echam-emulated-2m`` diverges from the RRTMGP backend by a few W/m² for cloudy
+  columns until the emulator is retrained against the corrected radiation (#881,
+  folded into the #743 retrain).
 - **Thin-lid aerosol-radiation cutoff.** Online aerosol optics are zeroed above
   ``_AER_RAD_PMIN`` (``jcm/physics/aerosol/jam/optics/optics_term.py``) and the
   per-layer band τ is capped, to bound heating over ~1 Pa lid layers; aerosol mass
@@ -129,3 +242,18 @@ sub-step caching + carry wiring), ``cloud_optics_test.py``, ``mcica_test.py``
 ``rte-rrtmgp-nn`` checkpoint). Design references:
 {doc}`../design/aerocom_erfari_sampling`, {doc}`../design/radiation_nn_emulator`,
 {doc}`../design/aerosol_optics_diagnostics`.
+
+## Seasonal timing in v3
+
+The forcing interface derives the annual phase from the elapsed fraction of
+**the current Gregorian year**, including the fractional day. January 1 is
+phase zero; a leap year has 366 days. SPEEDY's solar Fourier coefficients and
+its empirical ozone offset `10 / 365` remain unchanged: that denominator is a
+local empirical constant, not the model's date arithmetic. Monthly forcing
+uses civil months rather than twelve equal fractions of a nominal year.
+
+This changes the seasonal forcing relative to the former epoch-based 365-day
+clock, so old climate baselines are not numerically interchangeable. The
+calendar-boundary tests establish date alignment; multi-year SPEEDY and ECHAM
+climate comparisons remain a release validation requirement. The full rationale
+and downstream coupling migration are tracked in [issue #876](https://github.com/climate-analytics-lab/jax-gcm/issues/876).

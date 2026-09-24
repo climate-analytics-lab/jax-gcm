@@ -83,8 +83,9 @@ Run the test suite to ensure your changes don't break existing functionality:
    # Run only fast tests (skip slow integration tests)
    $ pytest -m "not slow"
 
-   # Match the CI fast-test coverage gate
+   # Match the CI fast-test coverage gate (both steps, as CI runs them)
    $ pytest -m "not slow" --cov=jcm --cov-fail-under=90
+   $ coverage report --fail-under=90
 
    # Run the linter
    $ ruff check .
@@ -97,6 +98,44 @@ parallel — in particular on a Derecho login node, where a 10 GiB per-user
 cgroup makes ``-n 12`` an OOM rather than a test result — see
 :doc:`design/test_suite_memory`, which also covers the ``jax_enable_x64``
 isolation the root ``conftest.py`` provides.
+
+What CI runs
+^^^^^^^^^^^^
+
+``ruff check .`` is a gate, not a parallel job: it runs first and both test
+jobs hang off it, so a lint error costs about twenty seconds instead of two
+runner-hours. Behind it the fast suite (90% coverage) and — on pull requests
+only — the slow suite (80%, against ``.coveragerc-pr``) run in parallel.
+
+The fast suite runs under ``pytest -n auto --dist loadscope``. The suite's
+cost is XLA compilation rather than arithmetic — 87 of ~3100 tests account for
+over half its wall clock, on arrays of a few dozen elements — and those
+compiles are independent, so they parallelise well: 67 minutes serial became
+35 measured, which is 1.91x on the 2 workers ``-n auto`` resolves to on a
+standard runner — very nearly linear, so core count is the ceiling rather than
+any inefficiency. ``loadscope`` keeps each class on one worker so its tests
+still reuse each other's compiled executables. The fast job also sets
+``JCM_TEST_CACHE_GROWTH_MB=256``, because every worker retains its own
+executables and two default-budget workers do not fit the runner; see
+:doc:`design/test_suite_memory`. The slow suite stays
+single-process for the same reason — its tests are full integrations with a
+much higher floor per worker. If
+the fast suite fails it cancels the whole run, taking the in-flight slow job
+with it, so **a cancelled slow result never means the slow tests passed**. It
+does not tell you *why* on its own: ``cancel-in-progress: true`` cancels that
+job identically when a newer push supersedes the run, and so does cancelling
+by hand, so open the ``fast-tests`` job to tell a real failure from a
+superseded run.
+
+Two limits by design: the cancel only fires on pull requests, since a push to
+``main`` or ``dev`` has no slow job to stop and a cancelled run there would
+mute the failure notification; and it is best-effort, because a pull request
+from a fork gets a read-only token, so there the slow suite runs to
+completion.
+
+The workflow is triggered by pull requests, and by pushes to ``main`` and
+``dev`` only. A branch with no open pull request gets no CI at all, so run the
+commands above locally before opening one.
 
 Code Quality
 ^^^^^^^^^^^^
@@ -243,6 +282,45 @@ Documentation is built with Sphinx. To build locally:
    $ make html
 
 Then open ``docs/build/html/index.html`` in your browser.
+
+The strict build is the gate
+""""""""""""""""""""""""""""
+
+``make html`` is the convenient loop, but CI
+(``.github/workflows/run_docs.yaml``) builds the **whole** tree with warnings
+as errors, and that is what a documentation change has to clear. Run the
+identical command before pushing, **from the repository root** (the path is
+``docs/source``, so this fails if you are still inside ``docs/`` from the
+``make html`` above):
+
+.. code-block:: console
+
+   $ cd <repo root>
+   $ sphinx-build -W --keep-going -b html docs/source /tmp/docs-html
+
+``-W`` turns every warning into an error; ``--keep-going`` reports all of them
+in one pass instead of stopping at the first, so a page with several problems
+takes one run to fix rather than several. The build must end in
+``build succeeded`` with no warnings at all.
+
+Two things to know when a warning does appear:
+
+- **Fix it at the source, not with a suppression.** ``conf.py`` deliberately
+  sets no ``suppress_warnings``; a blanket entry there would silently disarm
+  the gate for everyone.
+- **Docstrings are part of the tree.** ``api.rst`` autosummarises ``jcm``
+  recursively, so a malformed ``Args:`` block in a documented module fails the
+  docs build even though the code imports fine. Co-located ``*_test.py``
+  modules and ``conftest.py`` are filtered out of that walk by
+  ``docs/source/_templates/autosummary/module.rst`` — tests are not public API,
+  and the pyses backend's tests need an optional extra the docs environment
+  does not install.
+
+Because the docs workflow is not triggered by ``jcm/**/*.py`` (see the comment
+in ``run_docs.yaml``), a docstring change that breaks the strict build surfaces
+on the next documentation PR rather than on the code PR that introduced it.
+Running the command above after editing a public docstring avoids handing that
+to someone else.
 
 Communication
 -------------

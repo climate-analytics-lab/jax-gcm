@@ -92,6 +92,7 @@ physics memory/throughput win matters).
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Mapping, Sequence
 
 import jax.numpy as jnp
@@ -111,6 +112,8 @@ from jcm.dycore.pyses.interp import interp_grid_to_points
 from jcm.dycore.pyses.physics_grid import FVPhysicsGrid
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData, _SSO_NAMES
+
+logger = logging.getLogger(__name__)
 
 
 # Default deepened upper sponge for the finite-top full-L47 column (see the
@@ -513,8 +516,7 @@ class PysesCamSEDycore(DynamicalCore):
                                             workers=-1)
                 spacing = np.sqrt(4.0 * np.pi / ds.sizes["ncol"])
                 if ds.sizes["ncol"] != ncol or np.median(d_col) > 0.1 * spacing:
-                    import logging
-                    logging.warning(
+                    logger.warning(
                         "terrain file has %d columns vs model %d (median "
                         "offset %.2g of a cell) — sampling nearest-neighbor,"
                         " which is piecewise-constant across file cells",
@@ -585,8 +587,7 @@ class PysesCamSEDycore(DynamicalCore):
                     np.asarray(ds["orog_gll"].values)[gi], 0.0)
             else:
                 if "ncol" in ds.dims:
-                    import logging
-                    logging.warning(
+                    logger.warning(
                         "native terrain file has no orog_gll: GLL "
                         "orography falls back to nearest-column sampling "
                         "(piecewise-constant); include orog_gll for a "
@@ -1003,14 +1004,9 @@ class PysesCamSEDycore(DynamicalCore):
         rg = self._regrid_targets()
 
         times = np.asarray(times)
-        # Sim-day floats -> datetime64, the same conversion
-        # ``ModelPredictions._trajectory_dataset`` applies on the dinosaur
-        # path. A numeric axis cannot carry CF reference-time units, so a file
-        # stamped ``Conventions = CF-1.11`` with a bare elapsed-days ``time``
-        # would be undecodable by a CF reader.
-        time_values = (
-            times * (np.timedelta64(1, "D") / np.timedelta64(1, "ns"))
-        ).astype("datetime64[ns]")
+        if not np.issubdtype(times.dtype, np.datetime64):
+            raise TypeError("pySES output timestamps must be exact datetime64 values.")
+        time_values = times.astype("datetime64[ms]")
         coords = {
             "time": time_values,
             "lon": ("lon", rg["lon_centers"]),

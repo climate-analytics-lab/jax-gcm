@@ -31,8 +31,8 @@ def mixed_phase_deposition_and_corrections(
     sat_vap_pres_water: jnp.ndarray,     # pesw [Pa] saturation vapour pressure w.r.t. water
     bergeron_variable: jnp.ndarray,      # peta [-] variable for Bergeron-Findeisen process
     tompkins_genti: jnp.ndarray,         # pgenti [kg/kg] Tompkins cloud cover scheme variable
-    lsdcp: jnp.ndarray,                  # plsdcp [K] Ls / cpd
-    lvdcp: jnp.ndarray,                  # plvdcp [K] Lv / cpd
+    lsdcp: jnp.ndarray,                  # plsdcp [K] Ls / cp (moist, #706)
+    lvdcp: jnp.ndarray,                  # plvdcp [K] Lv / cp (moist, #706)
     specific_humidity: jnp.ndarray,      # pqp1 [kg/kg] specific humidity (t)
     qsat_prev: jnp.ndarray,              # pqsm1 [kg/kg] saturation specific humidity (t-1)
     air_density: jnp.ndarray,            # prho [kg/m^3]
@@ -116,9 +116,9 @@ def mixed_phase_deposition_and_corrections(
     tompkins_genti : array
         Ice source term from the Tompkins cloud cover scheme `pgenti` [kg/kg].
     lsdcp : array
-        Latent heat of sublimation / cpd `plsdcp` [K].
+        Latent heat of sublimation over the moist cp `plsdcp` [K] (#706).
     lvdcp : array
-        Latent heat of vaporisation / cpd `plvdcp` [K].
+        Latent heat of vaporisation over the moist cp `plvdcp` [K] (#706).
     specific_humidity : array
         Specific humidity at (t) `pqp1` [kg/kg].
     qsat_prev : array
@@ -717,8 +717,8 @@ def het_mxphase_freezing(
 def WBF_process(
     wbf_mask: jnp.ndarray,                 # Original: ld_WBF
     cloud_fraction: jnp.ndarray,           # Original: paclc
-    lsdcp: jnp.ndarray,                    # Original: plsdcp  (Ls/cpd)
-    lvdcp: jnp.ndarray,                    # Original: plvdcp  (Lv/cpd)
+    lsdcp: jnp.ndarray,                    # Original: plsdcp  (Ls/cp, moist #706)
+    lvdcp: jnp.ndarray,                    # Original: plvdcp  (Lv/cp, moist #706)
     cdnc: jnp.ndarray,                     # Original: pcdnc   (INOUT) CDNC [1/m^3]
     cloud_liquid_in_cloud: jnp.ndarray,    # Original: pxlb    (INOUT) in-cloud liquid [kg/kg]
     cloud_ice_in_cloud: jnp.ndarray,       # Original: pxib    (INOUT) in-cloud ice [kg/kg]
@@ -760,9 +760,9 @@ def WBF_process(
     cloud_fraction : jnp.ndarray
         Cloud cover fraction in the layer. (Fortran: paclc)
     lsdcp : jnp.ndarray
-        Latent heat of sublimation divided by cpd (Ls/cpd). (Fortran: plsdcp)
+        Latent heat of sublimation over the moist cp (Ls/cp). (Fortran: plsdcp, #706)
     lvdcp : jnp.ndarray
-        Latent heat of vaporization divided by cpd (Lv/cpd). (Fortran: plvdcp)
+        Latent heat of vaporization over the moist cp (Lv/cp). (Fortran: plvdcp, #706)
     cdnc : jnp.ndarray
         Cloud droplet number concentration (pcdnc) [1/m^3] (INOUT).
     cloud_liquid_in_cloud : jnp.ndarray

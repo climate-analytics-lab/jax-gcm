@@ -737,17 +737,39 @@ class AerocomDiagnostics(PhysicsTerm):
         if z_full is not None:
             from jcm.physics.diagnostics.wmo_tropopause import (
                 find_tropopause_level)
+            # find_tropopause_level requires a SURFACE-first column (index 0 =
+            # surface): it walks its search window from the near-surface end
+            # upward and returns the LOWEST qualifying level, which is the WMO
+            # tropopause only when index 0 is the surface. These diagnostics
+            # are in the physics-internal TOP-first frame (index 0 = model top,
+            # surface at -1; see docs/source/design/
+            # output_vertical_conventions.md), so flip the level axis at this
+            # boundary. The fields are (nlev, *horiz); ``.T`` moves the level
+            # axis last and ``[..., ::-1]`` reverses it to surface-first. Before
+            # #841 the top-first arrays went in unflipped and the finder
+            # returned the highest qualifying level (~30 hPa) instead of the
+            # tropopause.
+            t_sf = temperature.T[..., ::-1]
+            p_sf = p_full.T[..., ::-1]
+            z_sf = z_full.T[..., ::-1]
             ref_p = self._nominal_level_pressures(nlev)
             if ref_p is not None:
-                ncctop = int(np.searchsorted(ref_p, 4000.0))
-                nccbot = int(np.searchsorted(ref_p, 55000.0))
+                # ref_p is the ascending (top-first) nominal pressures.
+                # searchsorted gives the window as top-first indices; a
+                # top-first index i is surface-first index nlev-1-i, so the
+                # slice [ncctop:nccbot] maps to [nlev-nccbot : nlev-ncctop].
+                n_top = int(np.searchsorted(ref_p, 4000.0))
+                n_bot = int(np.searchsorted(ref_p, 55000.0))
+                ncctop = nlev - n_bot
+                nccbot = nlev - n_top
                 nccbot = max(nccbot, ncctop + 2)
                 out["aerocom_ptp"] = find_tropopause_level(
-                    temperature.T, p_full.T, z_full.T,
-                    ncctop=ncctop, nccbot=nccbot)
+                    t_sf, p_sf, z_sf, ncctop=ncctop, nccbot=nccbot)
             elif nlev == 47:
-                out["aerocom_ptp"] = find_tropopause_level(
-                    temperature.T, p_full.T, z_full.T)
+                # No nominal pressures cached: fall back to the finder's
+                # surface-first L47 defaults (13, 35), the same window the
+                # standalone wmo_tropopause() uses.
+                out["aerocom_ptp"] = find_tropopause_level(t_sf, p_sf, z_sf)
             else:
                 # No nominal pressures and not the grid the defaults were
                 # tuned for: a constant-fallback ptp would be misleading.
@@ -861,7 +883,31 @@ class AerocomDiagnostics(PhysicsTerm):
             else:
                 nlev = temperature.shape[0]
                 tke = tke.reshape(-1, nlev).T if tke.shape[0] != nlev                     else tke.reshape(nlev, -1)
-                w_act = 0.7 * jnp.sqrt(jnp.maximum(2.0 * tke, 0.0))
+                # Double-``where`` around the root, for the same reason
+                # ``tke_budget.py::echam_tke_source_update`` carries one:
+                # ``sqrt(maximum(x, 0))`` is the one floor shape that does
+                # not protect the derivative. At TKE = 0 the two arguments
+                # of ``maximum`` tie, JAX splits the derivative 0.5/0.5
+                # between them, and multiplying that by ``sqrt'(0) = inf``
+                # returns ``+inf`` in reverse mode and ``nan`` in forward
+                # mode — for every column of the group, since the whole
+                # dict is differentiated together. A *positive* floor would
+                # be safe (below it ``maximum`` passes a zero derivative),
+                # but 0 is the physically right floor for a turbulent
+                # kinetic energy, so the guard is the double-``where``.
+                # A laminar layer, a cold start and a zero-initialised
+                # vdiff carry all sit exactly at TKE = 0, so this is an
+                # ordinary state rather than a corner.
+                #
+                # Forward-identical — ``sqrt(max(0, 0)) == 0`` is what the
+                # outer ``where`` selects — and the derivative reported at 0
+                # becomes 0, the only finite choice at a square root's
+                # endpoint.
+                positive_tke = tke > 0.0
+                w_act = 0.7 * jnp.where(
+                    positive_tke,
+                    jnp.sqrt(2.0 * jnp.where(positive_tke, tke, 1.0)),
+                    0.0)
                 cf = clouds.cloud_fraction
                 cloudy = cf > THRES_CLD
                 # Lowest cloudy level, TOA-first: flip, argmax, unflip.

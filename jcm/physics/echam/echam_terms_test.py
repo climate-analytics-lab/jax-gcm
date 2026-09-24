@@ -87,8 +87,9 @@ class TestEchamComposablePhysics(unittest.TestCase):
         physics = echam_physics(checkpoint_terms=False)
         # Cloud fraction and microphysics are separate terms; the GWD
         # category split adds Hines + SSO (the simple-GWD scheme is kept
-        # available but excluded from the default factory).
-        self.assertEqual(len(physics.terms), 12)
+        # available but excluded from the default factory); the terminal
+        # EchamSurfaceExchange publishes the #754 coupling struct.
+        self.assertEqual(len(physics.terms), 13)
         categories = [t.category for t in physics.terms]
         self.assertIn("radiation", categories)
         self.assertIn("convection", categories)
@@ -149,6 +150,41 @@ class TestEchamComposablePhysics(unittest.TestCase):
 
         off = echam_physics(checkpoint_terms=False, cu_lmfmid=False)
         self.assertNotIn("omega", off.required_dycore_fields())
+
+    def test_updraft_precip_cover_follows_the_ham_submodel(self):
+        """The sub-cloud rain-evaporation cover tracks the JAM chain (#812).
+
+        ECHAM keys ``zcucov`` on ``lham`` (mo_cufluxdts.f90:414-420); jcm's
+        ``lham`` is "the JAM aerosol chain is composed", so the convection
+        term takes the updraft-area cover for a JAM run and the constant 0.05
+        otherwise. An explicit ``convective_updraft_precip_cover`` pins it.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            TiedtkeConvection,
+        )
+
+        def cover_flag(physics):
+            (conv,) = (t for t in physics.terms
+                       if isinstance(t, TiedtkeConvection))
+            return conv._updraft_precip_cover
+
+        # Non-JAM ECHAM: the constant 0.05 (flag off).
+        self.assertFalse(cover_flag(echam_physics(checkpoint_terms=False)))
+        # Pinned on without JAM (the A/B escape hatch).
+        self.assertTrue(cover_flag(echam_physics(
+            checkpoint_terms=False, convective_updraft_precip_cover=True)))
+        # A JAM run defaults the flag on; pinning it off recovers 0.05. Build
+        # only the convection term list cheaply via the placeholder core.
+        jam_on = echam_physics(
+            checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
+            radiation_scheme="grey", jam_microphysics="placeholder")
+        self.assertTrue(cover_flag(jam_on))
+        jam_off = echam_physics(
+            checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
+            radiation_scheme="grey", jam_microphysics="placeholder",
+            convective_updraft_precip_cover=False)
+        self.assertFalse(cover_flag(jam_off))
 
     def test_cu_lmfmid_rejects_a_simultaneous_convection_override(self):
         """cu_lmfmid and an explicit convection Parameters are exclusive."""
@@ -247,7 +283,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
         # Verify split/merge roundtrip works
         graphdef, state = nnx.split(composable)
         restored = nnx.merge(graphdef, state)
-        self.assertEqual(len(restored.terms), 12)
+        self.assertEqual(len(restored.terms), 13)
 
 
 if __name__ == "__main__":

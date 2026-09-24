@@ -68,11 +68,11 @@ class TestChemistryIntegration(TestCase):
         
         # Check that ozone is initialized with reasonable values
         self.assertTrue(jnp.all(physics_data["chemistry"].ozone_vmr > 0))
-        self.assertTrue(jnp.all(physics_data["chemistry"].ozone_vmr < 20000))  # Less than 20 ppmv
+        self.assertTrue(jnp.all(physics_data["chemistry"].ozone_vmr < 20.0))
         
         # Check that methane is initialized
         self.assertTrue(jnp.all(physics_data["chemistry"].methane_vmr > 0))
-        self.assertTrue(jnp.all(physics_data["chemistry"].methane_vmr < 5000))  # Less than 5 ppmv
+        self.assertTrue(jnp.all(physics_data["chemistry"].methane_vmr < 5.0))
 
         # CO2 is a prescribed forcing (forcing.co2_vmr), not a chemistry field.
 

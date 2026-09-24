@@ -86,7 +86,10 @@ def bundle_path(manifest: dict, name: str, grid: str = None, nlev=None) -> str:
     """Mirror-relative path for a product, filling ``{grid}``/``{nlev}``.
 
     Returns the path *without* an ``hf://`` scheme (the resolver prepends it).
-    Raises if a needed template field is missing.
+    Raises if a needed template field is missing. A transient product's
+    ``{year}`` placeholder is kept verbatim: the year set is a run property
+    (``forcing.years`` clamped to the product's coverage), so the caller's
+    ``{year}`` expansion (:func:`jcm.forcing.expand_yearly_files`) fills it.
     """
     tmpl = product(manifest, name)["path"]
     fields = {}
@@ -98,6 +101,8 @@ def bundle_path(manifest: dict, name: str, grid: str = None, nlev=None) -> str:
         if nlev is None:
             raise ValueError(f"product {name!r} path {tmpl!r} needs nlev")
         fields["nlev"] = int(nlev)
+    if "{year}" in tmpl:
+        fields["year"] = "{year}"
     return tmpl.format(**fields)
 
 

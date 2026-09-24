@@ -15,6 +15,7 @@ import numpy as np
 
 import jcm.constants as c
 from jcm.physics import thermodynamics as thermo
+from jcm.testing import check_gradients
 
 
 class TestSaturationVaporPressure(unittest.TestCase):
@@ -203,3 +204,99 @@ class TestGridMeanToInCloud(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestThermodynamicsGradients(unittest.TestCase):
+    """AD against a central difference (#820).
+
+    These are regression fences on functions every ECHAM scheme calls: all
+    four are green, and pinning them means a later guard added upstream
+    cannot silently break them.
+
+    The operating points sit strictly inside the mixed-phase ramp rather than
+    on ``t_min = 238.15`` or on ``c.tmelt``. ``mixed_phase_weight`` is a
+    ``clip``, so its derivative at either end of the ramp is one-sided; a
+    fixture placed exactly there would be testing the kink, which is a
+    property of the point and not a defect in the formula.
+    """
+
+    def _profile(self):
+        """Return (temperature, pressure) spanning the mixed-phase range."""
+        return (jnp.linspace(235.0, 300.0, 12),
+                jnp.linspace(2.0e4, 1.0e5, 12))
+
+    def test_saturation_specific_humidity_column_and_block(self):
+        """Broadcasting-native: a column and a 3-column block both check out.
+
+        ``rtol=1e-2`` on the block. The consistency search settles on a coarse
+        rung there (5e-4) because the block's three columns project with
+        opposite signs and cancel, and at that rung the secant's own
+        truncation leaves it ~0.6% from the AD value; the single column
+        reaches 1e-3 at a finer rung.
+        """
+        temperature, pressure = self._profile()
+        check_gradients(thermo.saturation_specific_humidity,
+                        (temperature, pressure), rtol=1e-3)
+
+        stack = lambda a, s: jnp.stack(  # noqa: E731
+            [a * (1.0 + s * k) for k in range(3)], axis=1)
+        check_gradients(
+            thermo.saturation_specific_humidity,
+            (stack(temperature, 0.01), stack(pressure, 0.0)), rtol=1e-2)
+
+    def test_saturation_specific_humidity_and_derivative(self):
+        """The paired value/derivative form agrees with a secant too."""
+        temperature, pressure = self._profile()
+        check_gradients(thermo.saturation_specific_humidity_and_derivative,
+                        (temperature, pressure), rtol=1e-3)
+
+    def test_mixed_phase_weight_inside_the_ramp(self):
+        """Strictly between t_min and tmelt, where the clip is inactive."""
+        check_gradients(thermo.mixed_phase_weight,
+                        (jnp.linspace(241.0, 270.0, 12),), rtol=1e-3)
+
+    def test_grid_mean_to_in_cloud(self):
+        """Cloud fractions well above the eps guard."""
+        check_gradients(
+            thermo.grid_mean_to_in_cloud,
+            (jnp.full(8, 1.0e-4), jnp.linspace(0.12, 0.9, 8)), rtol=1e-3)
+
+
+class TestMoistIsobaricHeatCapacity:
+    """ECHAM ``zcpq = cpd·(1 + vtmpc2·MAX(pqm1, 0))`` (mo_cumastr.f90:229)."""
+
+    def test_dry_air_is_cpd(self):
+        cp = thermo.moist_isobaric_heat_capacity(jnp.asarray(0.0))
+        np.testing.assert_allclose(float(cp), c.cpd, rtol=1e-7)
+
+    def test_moist_extremes_hand_computed(self):
+        # vtmpc2 = cpv/cpd − 1, so cp = cpd + (cpv − cpd)·q exactly.
+        for q in (0.018, 0.035):
+            expected = c.cpd + (c.cpv - c.cpd) * q
+            cp = thermo.moist_isobaric_heat_capacity(jnp.asarray(q))
+            np.testing.assert_allclose(float(cp), expected, rtol=1e-6)
+        # The shift the dry-cpd form missed: ~1.5 % at 18 g/kg, ~3 % at 35.
+        ratio_18 = float(thermo.moist_isobaric_heat_capacity(
+            jnp.asarray(0.018))) / c.cpd
+        ratio_35 = float(thermo.moist_isobaric_heat_capacity(
+            jnp.asarray(0.035))) / c.cpd
+        assert 1.014 < ratio_18 < 1.017
+        assert 1.028 < ratio_35 < 1.032
+
+    def test_negative_humidity_clamped(self):
+        cp = thermo.moist_isobaric_heat_capacity(jnp.asarray(-1e-3))
+        np.testing.assert_allclose(float(cp), c.cpd, rtol=1e-7)
+
+    def test_broadcasting_native(self):
+        q = jnp.linspace(0.0, 0.02, 12).reshape(3, 4)
+        cp = thermo.moist_isobaric_heat_capacity(q)
+        assert cp.shape == q.shape
+        np.testing.assert_allclose(
+            np.asarray(cp), c.cpd * (1.0 + c.vtmpc2 * np.asarray(q)),
+            rtol=1e-6)
+
+    def test_gradient_finite_at_clamp(self):
+        g = jax.grad(lambda q: thermo.moist_isobaric_heat_capacity(q))
+        assert np.isfinite(float(g(jnp.asarray(0.0))))
+        np.testing.assert_allclose(
+            float(g(jnp.asarray(0.01))), c.cpd * c.vtmpc2, rtol=1e-6)

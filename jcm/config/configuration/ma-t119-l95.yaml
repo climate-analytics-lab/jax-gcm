@@ -24,7 +24,7 @@
 #    above. forcing.ozone_file=analytic accepts the profile deliberately.
 #  - forcing.{emissions,dms,dust*,oxidants}_file=null: T119 has NO mirror
 #    bundle, so the JAM ``auto`` default cannot resolve them (the per-grid
-#    bundles only exist for t63/t106 — jcm/data/mirror/build_mirror.py's
+#    bundles exist for t63/t106/t127/t255 but not t119 — build_mirror.py's
 #    GRIDS) and would abort build_forcing. This member therefore runs
 #    EMISSION-FREE, matching the pre-#640 middle-atmosphere benchmark, which
 #    supplied no emission inputs at any resolution. To drive aerosol at T119,
@@ -46,6 +46,7 @@ defaults:
 init:
   rh: 0.0
 forcing:
+  align: wrap_year
   file: hf://bundles/t63/forcing_pd.nc
   # Emission-free: T119 has no mirror bundle, so ``auto`` cannot resolve these
   # (see the header). Explicit nulls keep the composed run one command instead

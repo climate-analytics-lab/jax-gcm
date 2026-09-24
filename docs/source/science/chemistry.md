@@ -14,6 +14,14 @@ climatology, or an **analytic fixed distribution** — a stratospheric-max profi
 parameterised by scale height, max VMR and tropopause height (the declared
 ``ozone_stratosphere_coeff`` is inert, #799) — when no file is given) and
 ``chemistry.methane_vmr`` every step.
+Both public fields are in **ppmv**, matching ``ForcingData.co2_vmr``,
+``ForcingData.ch4_vmr``, ``ForcingData.n2o_vmr`` and
+``OzoneClimatology.o3_ppmv``. Their production/loss diagnostics are therefore
+in ppmv s⁻¹. Radiation converts each gas exactly once at its boundary to the
+dimensionless mol/mol values required by gas optics; use
+``ChemistryData.ozone_mole_fraction()`` and
+``ChemistryData.methane_mole_fraction()`` when another consumer needs that
+representation.
 ``jcm/physics/chemistry/simple_chemistry.py::SimpleChemistry`` runs alongside it
 as a **diagnostic** relaxation: it recomputes ozone production/loss and the
 methane sink from that seeded state, but what it returns for the VMRs does not

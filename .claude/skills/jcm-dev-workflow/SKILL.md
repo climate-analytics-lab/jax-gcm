@@ -47,15 +47,26 @@ round-tripping through the device.
 - `-n 12` is the local default; `-n auto` picks from visible CPUs; `-n 0` (or
   omitting `-n`) forces one process when you need ordered output or are
   chasing a flake.
-- Coverage: `JAX_PLATFORMS=cpu pytest -n 12 --cov=jcm --cov-fail-under=90`.
+- Coverage: `JAX_PLATFORMS=cpu pytest -n 12 --cov=jcm --cov-fail-under=90`,
+  then `coverage report --fail-under=90`. The second command is the one that
+  reliably fails: `fail_under` is judged at the reported precision, which is
+  why both rcfiles set `[report] precision = 2` (#786).
 - Tests are `*_test.py`, co-located with the module, `unittest.TestCase` run
   under pytest. Root `conftest.py` clears `jcm` imports between tests to stop
   state leaking.
 - Mark tests over ~1 min `@pytest.mark.slow`.
 
-**CI thresholds**: push runs fast tests at **90%** coverage; a pull request
-also runs the slow tests at **80%**. So a PR can surface slow-test failures a
-push never did — run the full suite locally before opening one.
+**CI thresholds**: ruff gates the run, then the fast tests at **90%**
+coverage and the slow tests at **80%** (pull requests only) run in parallel
+behind it; on a PR, if the fast suite goes red the run is cancelled, taking
+the slow suite with it, and `fast-tests` itself reports as cancelled rather
+than failed (the failing step is still red inside it). A cancelled slow result
+therefore never means *passing* — and never means *the fast suite failed*
+either, since `cancel-in-progress` cancels it the same way when your next push
+supersedes the run. Open `fast-tests` before concluding anything. `push` triggers the workflow on
+`main`/`dev` alone, so a feature branch gets no CI until its PR exists: run
+the full suite locally before opening one, or the PR is the first thing that
+has ever tested it.
 
 **Lint before every push, always.** `ruff check .` takes seconds; a lint
 failure in CI burns a full cycle on something reported instantly locally.

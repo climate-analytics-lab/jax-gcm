@@ -30,6 +30,7 @@ from jcm.terrain import TerrainData
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
     ice_volume_mean_radius,
+    latent_heat_over_cp,
     minimum_CDNC,
     threshold_vert_vel,
 )
@@ -175,8 +176,14 @@ def cloud_microphysics_2m(
 
     eps_dt = jnp.finfo(qc.dtype).eps
     zero = jnp.zeros_like(qc)
-    lsdcp = c.alhs / c.cpd
-    lvdcp = c.alhc / c.cpd
+    # Latent-heat-to-heat-capacity ratios built from the MOIST heat capacity
+    # ``cpd·(1 + vtmpc2·q)`` evaluated at the step-start humidity (ECHAM
+    # zlvdcp = alv/pcair, zlsdcp = als/pcair; mo_cloud_micro_2m.f90:844-848,
+    # pcair from pqm1). Per-level (nlev,) arrays — every ledger term below and
+    # the ``update_tendencies`` accounting divide by this same per-level cp,
+    # so the column enthalpy identity closes against ``cp·dT`` (the enthalpy
+    # gate uses the same moist cp). #706.
+    lvdcp, lsdcp = latent_heat_over_cp(specific_humidity_m1)
 
     # ------------------------------------------------------------------
     # Upstream increments (ECHAM's accumulated tendencies × ztmst)
@@ -335,7 +342,8 @@ def cloud_microphysics_2m(
          cdnc0_k, icnc0_k,
          esw_k, esi_k, qsw_k, qsi_k, dqsw_k, dqsi_k,
          subice_k, subwat_k, thermo_k, eta_k, verv_k, visc_k, melt_k,
-         act_cdnc_k, n_inp_k, inp_dep_k, is_bottom_k) = level_in
+         act_cdnc_k, n_inp_k, inp_dep_k, is_bottom_k,
+         lvdcp_k, lsdcp_k) = level_in
 
         zero_s = jnp.zeros_like(cf_k)
 
@@ -361,7 +369,7 @@ def cloud_microphysics_2m(
          rain_flux, snow_flux, ice_flux, ice_flux_n,
          ice_tend_k, pimlt_k, psmlt_a, pximlt_k) = melting_snow_and_ice(
             melt_k, t_m1_k, qi_run_k, dp_k,
-            icnc_sedi, lsdcp, lvdcp,
+            icnc_sedi, lsdcp_k, lvdcp_k,
             icnc_sedi,
             jnp.array(0.0),  # qmel accumulator
             cdnc0_k,
@@ -379,7 +387,7 @@ def cloud_microphysics_2m(
             precip_mask, falling_ice_mask_k,
             q_m1_k, t_m1_k,
             precip_cover, dp_k, dpg_k,
-            subice_k, lsdcp,
+            subice_k, lsdcp_k,
             zqrho_k,          # ECHAM pqrho = zqrho = 1.3/ρ (was 1/ρ)
             qsi_k, inv_rho_k,
             snow_flux, rho_k,
@@ -458,21 +466,21 @@ def cloud_microphysics_2m(
         # the humidity increment this step, minus the saturation-humidity
         # change implied by the temperature increment (damped by the
         # warming feedback), condenses into the cloudy fraction.
-        zlc = jnp.where(lo2, lsdcp, lvdcp)
+        zlc = jnp.where(lo2, lsdcp_k, lvdcp_k)
         zqsm1 = jnp.where(lo2, qsi_k, qsw_k)
         zdqsdt = jnp.where(lo2, dqsi_k, dqsw_k)
 
         zdtdt = (dT_up_k
-                 - lvdcp * (evp_k + zxlevap)
-                 - (lsdcp - lvdcp) * (psmlt_a + pximlt_k + pimlt_k)
-                 - lsdcp * (sub_k + zxievap + xisub_k))
+                 - lvdcp_k * (evp_k + zxlevap)
+                 - (lsdcp_k - lvdcp_k) * (psmlt_a + pximlt_k + pimlt_k)
+                 - lsdcp_k * (sub_k + zxievap + xisub_k))
         zqp1 = jnp.maximum(q_m1_k + dq_up_k, 0.0)
         ztp1 = t_m1_k + zdtdt
 
         zdqsat = (zdtdt
                   + cf_k * (zlc * dq_up_k
-                            + lvdcp * (evp_k + zxlevap)
-                            + lsdcp * (sub_k + zxievap + xisub_k)))
+                            + lvdcp_k * (evp_k + zxlevap)
+                            + lsdcp_k * (sub_k + zxievap + xisub_k)))
         zdqsat = (zdqsat * zdqsdt
                   / (1.0 + cf_k * zlc * zdqsdt))
         zqcdif = (dq_up_k - zdqsat) * cf_k
@@ -504,7 +512,7 @@ def cloud_microphysics_2m(
             esi_k, esw_k,
             eta_k,
             zero_s,             # tompkins_genti
-            lsdcp, lvdcp,
+            lsdcp_k, lvdcp_k,
             zqp1, zqsm1,
             rho_k, ztp1,
             zxievap,
@@ -608,7 +616,7 @@ def cloud_microphysics_2m(
         # the mass and the heat travel with it (#662 finding 1).
         (cdnc_w, zxlb, zxib,
          wbf_liq_tend, wbf_ice_tend, wbf_dtedt) = WBF_process(
-            ll_wbf, paclc, lsdcp, lvdcp,
+            ll_wbf, paclc, lsdcp_k, lvdcp_k,
             cdnc_h, zxlb, zxib,
             zero_s, zero_s, zero_s,
             dt,
@@ -718,7 +726,7 @@ def cloud_microphysics_2m(
         (precip_cover, rain_flux, snow_flux, snow_melt_b,
          _pfevapr, _pfrain, _pfsnow, _pfsubls) = update_precip_fluxes(
             paclc, dp_k,
-            evp_k, lsdcp, lvdcp,
+            evp_k, lsdcp_k, lvdcp_k,
             zrpr, zsacl, zspr,
             sub_k, ztp1tmp,
             # ECHAM folds the sedimenting ice flux into the snow flux
@@ -773,6 +781,7 @@ def cloud_microphysics_2m(
         subsat_wrt_ice, subsat_wrt_water, thermo_term_water,
         bergeron_eta, updraft_velocity, dynamic_viscosity, melt_mask,
         activated_cdnc, n_inp, ice_nuclei_deposition, is_bottom_level,
+        lvdcp, lsdcp,
     )
 
     zero_scalar = jnp.array(0.0, dtype=qc.dtype)
@@ -1049,6 +1058,19 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         self._spa_prefactor = nnx.Param(jnp.asarray(prefactor))
         self._spa_exponent = nnx.Param(jnp.asarray(exponent))
         self._spa_cap_smoothing = nnx.Param(jnp.asarray(cap_smoothing))
+
+    def adopt_runtime_configuration(self, previous) -> None:
+        """Inherit the SPA activation tuning from a displaced 2M term.
+
+        Set by ``echam_physics`` after composition, from the aerosol module's
+        parameters, so a term swapped in afterwards would otherwise silently
+        fall back to the (1.0, 0.5, 0.0) constructor defaults and change the
+        droplet number the whole cloud scheme keys off.
+        """
+        for name in ("_spa_prefactor", "_spa_exponent", "_spa_cap_smoothing"):
+            param = getattr(previous, name, None)
+            if param is not None:
+                setattr(self, name, nnx.Param(jnp.asarray(param.get_value())))
 
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:

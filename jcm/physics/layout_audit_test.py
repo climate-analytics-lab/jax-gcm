@@ -112,6 +112,9 @@ INERT_IN_HARNESS = frozenset({
     # broadcasting-native but produces the same zeros in either host, so a
     # host-vs-host comparison proves nothing — like ``ResetEmissionFluxes``.
     "AerosolCarrySeeder",
+    # ``jcm.rce.AerosolFree`` publishes the same all-zero, clean-air aerosol
+    # base in either host (broadcasting-native), so nothing to compare.
+    "AerosolFree",
     "BettsMillerConvection",
     "FrontalGravityWaveDrag",
     "IceNucleation",
@@ -139,10 +142,12 @@ NOT_AUDITED = frozenset({
     "CloudBorneCarryStore", "CloudBorneExchange", "CloudsatCosp",
     "ConvectiveTracerTransport",
     "DmsEmissions", "DustEmissions", "Echam1MMicrophysics",
-    "EchamBoundaryConditions", "EchamSurface", "GreyTwoStreamRadiation",
+    "EchamBoundaryConditions", "EchamSurface", "EchamSurfaceExchange",
+    "GreyTwoStreamRadiation",
     "HeldSuarez", "HinesGwd", "JamOpticsTerm", "Lohmann2MMicrophysics",
     "Macv2SpAerosol", "ModalMicrophysicsTerm", "NNEmulatorRadiation",
-    "PreSpeciatedEmissions", "PrescribedOxidants", "RRTMGPRadiation",
+    "PreSpeciatedEmissions", "PrescribedOxidants",
+    "PrescribedSurfaceFlux", "RRTMGPRadiation",
     "SeaSaltEmissions", "SimpleChemistry", "SimpleGwd",
     "SlinnDryDeposition", "SpeedyClouds", "SpeedyConvection",
     "SpeedyDownwardLongwaveRadiation", "SpeedyForcing", "SpeedyHumidity",

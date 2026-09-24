@@ -15,7 +15,7 @@ The threaded ``diagnostics`` dict serves a dual role:
   terms read but the user never sees. ``data_struct_to_dict`` filters them
   out of the user-facing output.
 
-See docs/design/composable_physics.md for the full design.
+See docs/source/design/composable_physics.md for the full design.
 """
 
 from __future__ import annotations
@@ -29,12 +29,57 @@ from jax.sharding import NamedSharding, PartitionSpec
 from flax import nnx
 
 from jcm import profiling
-from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
+from jcm.physics_interface import (
+    Physics,
+    PhysicsState,
+    PhysicsTendency,
+    _record_water_positivity_corrections,
+    _verify_tendencies_with_water_corrections,
+)
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 from jcm.physics.budget_gauge import gauge_aerosol_budget
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics.radiation.band_config import RadiationBandConfig
+
+
+_WATER_POSITIVITY_OUTPUT_ATTRS = {
+    "water_positivity_correction.specific_humidity_tendency": {
+        "units": "kg kg-1 s-1",
+        "long_name": "specific-humidity positivity correction tendency",
+        "description": "specific-humidity positivity correction tendency",
+    },
+    "water_positivity_correction.qc_tendency": {
+        "units": "kg kg-1 s-1",
+        "long_name": "cloud-liquid positivity correction tendency",
+        "description": "cloud-liquid positivity correction tendency",
+    },
+    "water_positivity_correction.qi_tendency": {
+        "units": "kg kg-1 s-1",
+        "long_name": "cloud-ice positivity correction tendency",
+        "description": "cloud-ice positivity correction tendency",
+    },
+    "water_positivity_correction.qr_tendency": {
+        "units": "kg kg-1 s-1",
+        "long_name": "rain-water positivity correction tendency",
+        "description": "rain-water positivity correction tendency",
+    },
+    "water_positivity_correction.qs_tendency": {
+        "units": "kg kg-1 s-1",
+        "long_name": "snow-water positivity correction tendency",
+        "description": "snow-water positivity correction tendency",
+    },
+    "water_positivity_correction.total_water_tendency": {
+        "units": "kg kg-1 s-1",
+        "long_name": "total artificial water source from positivity correction",
+        "description": "total artificial water source from positivity correction",
+    },
+    "water_positivity_correction.column_water_source": {
+        "units": "kg m-2 s-1",
+        "long_name": "column artificial water source from positivity correction",
+        "description": "column artificial water source from positivity correction",
+    },
+}
 
 
 class ComposablePhysics(nnx.Module, Physics):
@@ -162,6 +207,21 @@ class ComposablePhysics(nnx.Module, Physics):
                 seen[spec.name] = spec
         return tuple(seen.values())
 
+    def prognostic_carry_slots(self) -> tuple[str, ...]:
+        """Union of the carry keys terms declare as prognostic state.
+
+        These are the keys a checkpoint restore must not seed or drop to
+        absorb a field-set change, because nothing recomputes them — see
+        :attr:`PhysicsTerm.prognostic_carry_slots` and
+        ``docs/source/design/checkpoint_compatibility.md``.
+        """
+        seen: list[str] = []
+        for term in self.terms:
+            for key in getattr(term, "prognostic_carry_slots", ()):
+                if key not in seen:
+                    seen.append(key)
+        return tuple(seen)
+
     def required_dycore_fields(self) -> tuple[str, ...]:
         """Union of per-term ``requires_dycore_fields``, minus any field an
         upstream term already ``provides`` (a physics-side provider term
@@ -251,6 +311,39 @@ class ComposablePhysics(nnx.Module, Physics):
         diagnostics = jax.tree.map(_pin, diagnostics)
         return tendencies, diagnostics
 
+    def _finalize_tendency_verification(
+        self,
+        state: PhysicsState,
+        raw_tendencies: PhysicsTendency,
+        applied_tendencies: PhysicsTendency,
+        water_corrections: dict[str, jnp.ndarray],
+        physics_data: dict,
+    ) -> dict:
+        """Record the exact positivity source and applied carry tendency."""
+        del state
+        # The diagnostics carry must have one static pytree shape across a
+        # scan.  A caller may carry extra dormant tracers in ``PhysicsState``
+        # (the RCE helpers do this for reuse across minimal and full-ECHAM
+        # columns), but those extras are not part of this composition's
+        # contract.  Limit the ledger to specific humidity plus water tracers
+        # declared by the active terms so the template and every live step
+        # publish the same keys.  A term that evolves a tracer must declare it
+        # via ``required_tracers()``.
+        declared_tracers = {
+            spec.name for spec in self.required_tracers()
+        }
+        water_corrections = {
+            name: value
+            for name, value in water_corrections.items()
+            if name == "specific_humidity" or name in declared_tracers
+        }
+        return _record_water_positivity_corrections(
+            physics_data,
+            raw_tendencies,
+            applied_tendencies,
+            water_corrections,
+        )
+
     def _compute_tendencies_3d(
         self, state, forcing, terrain, prev_physics_data=None,
     ):
@@ -285,6 +378,9 @@ class ComposablePhysics(nnx.Module, Physics):
             tendencies += tend
 
         # Same cross-step handoff as the columns path (see there for why).
+        # This raw value fixes the compute_tendencies output structure; the
+        # gridpoint interface replaces it with the applied post-cap tendency
+        # before the carry leaves the host.
         diagnostics["_prev_step"] = {
             "specific_humidity": state.specific_humidity,
             "q_tendency": tendencies.specific_humidity,
@@ -392,6 +488,9 @@ class ComposablePhysics(nnx.Module, Physics):
         # information ECHAM's ``pqte`` carries into ``cucall`` — and with
         # the same one-step-lagged provenance, since ECHAM's leapfrog
         # dynamics tendency is computed from the previous time level too.
+        # ``acc`` is provisional here so compute_tendencies has one stable
+        # output structure. The gridpoint interface replaces q_tendency with
+        # its applied post-cap value before the carry leaves the host.
         # First consumer: the Tiedtke deep/shallow moisture-convergence
         # test (``zdqcv``, #699). Excluded from xarray output; zeros on
         # step 1 (the structural template), which reads as "no known
@@ -424,7 +523,7 @@ class ComposablePhysics(nnx.Module, Physics):
     def get_empty_data(self, coords) -> dict[str, jnp.ndarray]:
         """Return a zero-filled template of the per-step diagnostics dict.
 
-        Internal helper used by ``Model._build_initial_physics_carry``
+        Internal helper used by ``Model.initial_physics_carry``
         and ``Model._get_op_split_integrate_fn`` to discover the
         pytree structure of ``compute_tendencies``' output dict. The
         ``lax.scan`` carry needs to be that exact structure on
@@ -472,14 +571,39 @@ class ComposablePhysics(nnx.Module, Physics):
             },
         )
         probe_forcing = ForcingData.zeros(nodal_shape)
+        # Let terms complete the probe forcing the same way it seeds tracers
+        # (above): a term that requires an optional forcing field for its
+        # configuration — e.g. a forced-surface-flux term reading
+        # ``prescribed_*`` — fills it here so the abstract trace follows the
+        # real code path instead of a ``None``-guard.
+        for term in self.terms:
+            probe_forcing = term.augment_probe_forcing(probe_forcing)
         probe_terrain = TerrainData.aquaplanet(coords)
 
         diagnostics = jax.eval_shape(
             lambda s, f, t: self.compute_tendencies(s, f, t)[1],
             probe_state, probe_forcing, probe_terrain,
         )
-        return tree_map(lambda leaf: jnp.zeros(leaf.shape, leaf.dtype),
-                        diagnostics)
+        diagnostics = tree_map(
+            lambda leaf: jnp.zeros(leaf.shape, leaf.dtype), diagnostics,
+        )
+        zero_tendency = PhysicsTendency.zeros(
+            shape_3d,
+            tracers={
+                spec.name: jnp.zeros(shape_3d)
+                for spec in self.required_tracers()
+            },
+        )
+        _, zero_corrections = _verify_tendencies_with_water_corrections(
+            probe_state, zero_tendency, self.dt_seconds,
+        )
+        return self._finalize_tendency_verification(
+            probe_state,
+            zero_tendency,
+            zero_tendency,
+            zero_corrections,
+            diagnostics,
+        )
 
     def initial_carry_state(self, coords) -> dict[str, jnp.ndarray]:
         """Aggregate per-term cross-step carry-state slots.
@@ -597,6 +721,64 @@ class ComposablePhysics(nnx.Module, Physics):
     #: without renaming the internal struct radiation/microphysics read.
     _output_key_map: Mapping[str, str] = {}
 
+    def publishes_surface_exchange(self) -> bool:
+        """Whether some term publishes the #754 surface-exchange contract.
+
+        True when a composed term declares the package-independent
+        ``"surface_exchange"`` diagnostics key (see
+        :mod:`jcm.physics.surface.surface_exchange`) in ``provides`` —
+        SPEEDY's surface-flux term and the ECHAM publisher do; Held-Suarez
+        deliberately opts out (it resolves no surface fluxes).
+        """
+        from jcm.physics.surface.surface_exchange import SURFACE_EXCHANGE_KEY
+        return any(
+            SURFACE_EXCHANGE_KEY in getattr(term, "provides", ())
+            for term in self.terms
+        )
+
+    def consumed_forcing_fields(self) -> tuple[str, ...]:
+        """Union of the composed terms' :meth:`PhysicsTerm.consumed_forcing_fields`."""
+        fields: list[str] = []
+        for term in self.terms:
+            hook = getattr(term, "consumed_forcing_fields", None)
+            for name in (hook() if hook is not None else ()):
+                if name not in fields:
+                    fields.append(name)
+        return tuple(fields)
+
+    def validate_forcing(self, forcing, run_window=None) -> None:
+        """Run every term's :meth:`PhysicsTerm.validate_forcing` once.
+
+        :class:`~jcm.model.Model` calls this on the concrete run forcing
+        before compiling, so a term that requires an optional field it
+        cannot run without (e.g. forced-mode surface fluxes) fails loudly
+        at run start rather than silently applying a zero. ``run_window``
+        (``(start_seconds, end_seconds)`` since 1970-01-01, or ``None``
+        when not concretely known) is passed through so a term can check a
+        date-aligned series covers the run.
+        """
+        for term in self.terms:
+            term.validate_forcing(forcing, run_window=run_window)
+
+    def require_surface_exchange(self) -> None:
+        """Fail loudly at composition time if no surface exchange is published.
+
+        A coupler (JAX-ESM, an ocean/land component) calls this once on the
+        composed package instead of discovering a missing
+        ``diagnostics["surface_exchange"]`` key mid-run — the
+        composition-time loudness #754 asks for.
+        """
+        if not self.publishes_surface_exchange():
+            names = [getattr(term, "name", type(term).__name__)
+                     for term in self.terms]
+            raise ValueError(
+                "No composed term publishes the 'surface_exchange' "
+                f"coupling struct (terms: {names}). SPEEDY and ECHAM "
+                "packages publish it; Held-Suarez opts out because it "
+                "resolves no surface fluxes. See "
+                "docs/source/design/surface_exchange.md."
+            )
+
     def units_table_paths(self) -> tuple:
         """Units/description CSVs of every term in this package, deduplicated.
 
@@ -631,6 +813,8 @@ class ComposablePhysics(nnx.Module, Physics):
         for term in self.terms:
             for var, attrs in getattr(term, "output_attrs", {}).items():
                 merged.setdefault(var, dict(attrs))
+        for var, attrs in _WATER_POSITIVITY_OUTPUT_ATTRS.items():
+            merged.setdefault(var, dict(attrs))
         return merged
 
     def data_struct_to_dict(
@@ -769,13 +953,21 @@ class ComposablePhysics(nnx.Module, Physics):
     def replace(self, category: str, new_term: PhysicsTerm) -> ComposablePhysics:
         """Replace all terms of a given category with a single new term.
 
-        The new term is inserted at the position of the first replaced term.
+        The new term is inserted at the position of the first replaced term,
+        and inherits that term's post-compose configuration through
+        :meth:`~jcm.physics.physics_term.PhysicsTerm.adopt_runtime_configuration`
+        — settings a factory applied after assembly, from a sibling term,
+        which the replacement's constructor could not have known. Without that
+        handover a swapped-in term silently reverts to constructor defaults:
+        an optics term replaced this way would lose its radiation cadence and
+        recompute every band on every step.
         """
         new_terms = []
         inserted = False
         for t in self.terms:
             if t.category == category:
                 if not inserted:
+                    new_term.adopt_runtime_configuration(t)
                     new_terms.append(new_term)
                     inserted = True
                 # skip original term

@@ -1,5 +1,10 @@
 import unittest
-from jcm.date import fraction_of_year_elapsed, DateData, parse_duration_days
+import jax
+from jcm.date import (
+    fraction_of_year_elapsed, DateData, parse_duration_days,
+    parse_duration_seconds,
+    to_datetime,
+)
 from jcm.model import Model
 import jax_datetime as jdt
 import jax.numpy as jnp
@@ -20,21 +25,6 @@ class TestDateUnit(unittest.TestCase):
         self.assertAlmostEqual(fraction_of_year_elapsed(jdt.to_datetime('2001-07-02 12:00:00')), (182 + 0.5)/365, places=4)
         self.assertAlmostEqual(fraction_of_year_elapsed(jdt.to_datetime('2001-12-31')), 364/365, places=4)
         self.assertAlmostEqual(fraction_of_year_elapsed(jdt.to_datetime('2001-02-28')), (31+27)/365, places=4)
-
-    def test_fraction_of_year_365_day_wraps_at_365(self):
-        # Under '365_day' the year is a fixed-length 365-day chunk indexed
-        # against the gregorian `delta.days` mod 365, so two dates exactly
-        # 365 days apart agree on tyear.
-        a = fraction_of_year_elapsed(jdt.to_datetime('2001-01-01'), calendar='365_day')
-        b = fraction_of_year_elapsed(jdt.to_datetime('2002-01-01'), calendar='365_day')
-        self.assertAlmostEqual(float(a), float(b), places=6)
-        # 365 days after Jan 1 2001 lands at the same tyear.
-        c = fraction_of_year_elapsed(
-            jdt.Datetime.from_pydatetime(jdt.to_datetime('2001-01-01'))
-            + jdt.Timedelta(days=jnp.int32(365)),
-            calendar='365_day',
-        )
-        self.assertAlmostEqual(float(a), float(c), places=6)
 
     def test_date_data(self):
         # Test the DateData class — `tyear`/`model_year` are now methods
@@ -59,14 +49,80 @@ class TestDateUnit(unittest.TestCase):
     def test_overflow(self):
         model = Model(
             coords=get_speedy_coords(),
-            start_date=jdt.to_datetime('1970-01-01'),
-            calendar='gregorian',
+            start_time=jdt.to_datetime('1970-01-01'),
         )
         for i in range(6):
             year = 10**i
-            date = model._date_from_sim_time((year+.5) * 365.2425 * 86400)
-            self.assertEqual(date.model_year('gregorian'), jnp.round(1970 + year))
-            self.assertTrue(jnp.isclose(date.tyear('gregorian'), 0.5, atol=2e-2))
+            date = model.date_from_sim_time((year+.5) * 365.2425 * 86400)
+            self.assertEqual(date.model_year(), jnp.round(1970 + year))
+            self.assertTrue(jnp.isclose(date.tyear(), 0.5, atol=2e-2))
+
+
+class TestModelDateFromSimTime(unittest.TestCase):
+    """Public model-clock conversion in eager and transformed code (#758)."""
+
+    def setUp(self):
+        # Gregorian and 7.5 minutes are both non-default Model settings. The
+        # leap-day boundary makes an incorrect calendar/date rollover visible.
+        self.model = Model(
+            coords=get_speedy_coords(),
+            time_step=7.5,
+            start_time=jdt.to_datetime('2000-02-28 12:00:00'),
+        )
+
+    def assert_datetime_equal(self, actual, expected):
+        self.assertEqual(int(actual.delta.days), int(expected.delta.days))
+        self.assertEqual(int(actual.delta.seconds), int(expected.delta.seconds))
+
+    def test_eager_sub_day_rounding_rolls_into_next_day(self):
+        before = self.model.date_from_sim_time(43199.4)
+        after = self.model.date_from_sim_time(43199.6)
+
+        self.assert_datetime_equal(
+            before.dt, jdt.to_datetime('2000-02-28 23:59:59'))
+        self.assert_datetime_equal(
+            after.dt, jdt.to_datetime('2000-02-29 00:00:00'))
+        # Date rounding and step counting are deliberately independent: both
+        # inputs are still short of the 96th 450-second model step.
+        self.assertEqual(int(before.model_step), 95)
+        self.assertEqual(int(after.model_step), 95)
+        self.assertEqual(after.dt_seconds, 450.0)
+        self.assertEqual(int(after.model_year()), 2000)
+
+    def test_jitted_boundary_uses_model_timestep_and_calendar(self):
+        convert = jax.jit(self.model.date_from_sim_time)
+
+        at_boundary = convert(jnp.asarray(43200.0))
+        next_day = convert(jnp.asarray(129600.0))
+
+        self.assert_datetime_equal(
+            at_boundary.dt, jdt.to_datetime('2000-02-29 00:00:00'))
+        self.assert_datetime_equal(
+            next_day.dt, jdt.to_datetime('2000-03-01 00:00:00'))
+        self.assertEqual(int(at_boundary.model_step), 96)
+        self.assertEqual(int(next_day.model_step), 288)
+        self.assertEqual(at_boundary.dt_seconds, 450.0)
+        self.assertEqual(int(next_day.model_year()), 2000)
+
+    def test_date_metadata_is_outside_the_gradient_graph(self):
+        def seconds_since_epoch(sim_time):
+            date = self.model.date_from_sim_time(sim_time)
+            return (
+                date.dt.delta.days.astype(jnp.float32) * 86400.0
+                + date.dt.delta.seconds.astype(jnp.float32)
+            )
+
+        derivative = jax.grad(seconds_since_epoch)(jnp.asarray(123.4))
+        self.assertEqual(float(derivative), 0.0)
+
+    def test_private_name_is_a_compatibility_alias(self):
+        sim_time = jnp.asarray(43200.0)
+        public = self.model.date_from_sim_time(sim_time)
+        compatibility = self.model._date_from_sim_time(sim_time)
+
+        self.assert_datetime_equal(public.dt, compatibility.dt)
+        self.assertEqual(int(public.model_step), int(compatibility.model_step))
+        self.assertEqual(public.dt_seconds, compatibility.dt_seconds)
 
 
 class TestParseDurationDays(unittest.TestCase):
@@ -86,17 +142,33 @@ class TestParseDurationDays(unittest.TestCase):
         self.assertEqual(parse_duration_days('1 d'), parse_duration_days('1 day'))
         self.assertEqual(parse_duration_days('1 day'), parse_duration_days('1 days'))
         self.assertEqual(parse_duration_days('3 hr'), parse_duration_days('3 hours'))
-        self.assertEqual(parse_duration_days('1 mo'), parse_duration_days('1 month'))
-        self.assertEqual(parse_duration_days('1 yr'), parse_duration_days('1 year'))
 
-    def test_calendar_year(self):
-        self.assertAlmostEqual(parse_duration_days('1 year', calendar='365_day'), 365.0)
-        self.assertAlmostEqual(parse_duration_days('1 year', calendar='gregorian'), 365.2425)
-        self.assertAlmostEqual(parse_duration_days('5 years', calendar='365_day'), 1825.0)
+    def test_calendar_units_rejected(self):
+        for value in ('1 month', '2 years', '1 mo', '1 yr'):
+            with self.assertRaisesRegex(ValueError, 'not fixed'):
+                parse_duration_days(value)
 
-    def test_calendar_month(self):
-        self.assertAlmostEqual(parse_duration_days('1 month', calendar='365_day'), 365.0 / 12)
-        self.assertAlmostEqual(parse_duration_days('12 months', calendar='365_day'), 365.0)
+    def test_whole_second_precision(self):
+        self.assertEqual(parse_duration_seconds('1.5 minutes'), 90)
+        with self.assertRaisesRegex(ValueError, 'whole-second'):
+            parse_duration_seconds('0.1 seconds')
+
+    def test_positive_duration_required(self):
+        for value in (0, -1, '0 days', '-1 seconds'):
+            with self.assertRaisesRegex(ValueError, 'positive'):
+                parse_duration_seconds(value)
+
+    def test_datetime_rejects_nat_and_subseconds(self):
+        with self.assertRaisesRegex(ValueError, 'NaT'):
+            to_datetime('NaT')
+        with self.assertRaisesRegex(ValueError, 'whole-second'):
+            to_datetime('2000-01-01T00:00:00.5')
+
+    def test_datetime_normalizes_timezone(self):
+        actual = to_datetime('2000-01-01T01:00:00+01:00')
+        expected = jdt.to_datetime('2000-01-01T00:00:00')
+        self.assertEqual(int(actual.delta.days), int(expected.delta.days))
+        self.assertEqual(int(actual.delta.seconds), int(expected.delta.seconds))
 
     def test_unknown_unit_rejected(self):
         with self.assertRaises(ValueError):

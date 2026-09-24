@@ -8,6 +8,7 @@ from .sundqvist import (
     condensation_evaporation, critical_relative_humidity, _qs_and_dqs_dt,
 )
 from jcm.constants import tmelt, eps, alhc, cpd
+from jcm.testing import check_gradients
 
 
 
@@ -516,3 +517,136 @@ class TestCondensationToCloudWater:
 
         assert jnp.max(dqidt) > 0.0, \
             f"dqi/dt should be > 0 for cold supersaturated column, got {float(jnp.max(dqidt)):.6e}"
+
+
+class TestSundqvistGradients:
+    """AD against a central difference for cover and condensation (#820).
+
+    Both are green, and the scheme's two selectors are smooth by
+    construction rather than by fixture: review B.2.4 replaced the hard
+    ``clip(b0, 0, 1)`` with a softplus pair (``sundqvist.py:404``) and the
+    ``argmax`` inversion pick with a sigmoid gate and a softmax over the
+    BL-masked lapse (``sundqvist.py:316/326``), precisely so that ``crt`` and
+    ``cinv`` carry a gradient across the sub-critical and saturated ranges.
+    The remaining kinks are the ordinary ``maximum``/``minimum`` floors on
+    pressure and saturation; the operating points below sit off them.
+    """
+
+    NLEV = 14
+
+    def _column(self):
+        """Return (temperature, humidity, pressure) for a moist column."""
+        temperature = jnp.linspace(232.0, 295.0, self.NLEV)
+        pressure = jnp.linspace(2.0e4, 1.0e5, self.NLEV)
+        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
+        return temperature, 0.82 * qs, pressure, qs
+
+    def test_cloud_fraction_gradients_match_a_central_difference(self):
+        """Single column: ``calculate_cloud_fraction`` is vmapped by callers."""
+        temperature, humidity, pressure, _ = self._column()
+        config = CloudParameters.default()
+        check_gradients(
+            lambda t, q, p: calculate_cloud_fraction(t, q, p, 1.0e5, config),
+            (temperature, humidity, pressure), rtol=1e-3)
+
+    def test_condensation_gradients_column_and_block_agree(self):
+        """``condensation_evaporation`` is elementwise, so both shapes check.
+
+        Supersaturated at 1.06x, well clear of the ``q == qs`` switch.
+        """
+        temperature, _, pressure, qs = self._column()
+        config = CloudParameters.default()
+        cloud_water = jnp.full(self.NLEV, 3.0e-4)
+        cloud_ice = jnp.full(self.NLEV, 5.0e-5)
+        cloud_fraction = jnp.full(self.NLEV, 0.6)
+        f = lambda t, q, qc, qi, cf, p: condensation_evaporation(  # noqa: E731
+            t, q, qc, qi, cf, p, 1800.0, config)
+
+        args = (temperature, 1.06 * qs, cloud_water, cloud_ice,
+                cloud_fraction, pressure)
+        check_gradients(f, args, rtol=1e-3)
+
+        stack = lambda a: jnp.stack(  # noqa: E731
+            [a * (1.0 + 0.03 * k) for k in range(3)], axis=1)
+        check_gradients(f, tuple(stack(a) for a in args), rtol=1e-3)
+
+
+class TestStratocumulusInversionPick:
+    """The Sc enhancement picks ONE level, the lowest on a plateau (#677).
+
+    ECHAM's ``zknvb`` scan (``mo_cover.f90:236-244``) is a
+    strict-improvement scan from the surface up, so on the clip-to-0
+    plateau of a weakly-capped / isothermal boundary layer it resolves to
+    the lowest qualifying level and enhances there alone. The differentiable
+    softmax surrogate reproduces that with a per-level downward depth bias
+    (``smooth_inv_depth``); before #677 the bias was 500x too weak and the
+    boost was smeared ~1/N across the tied levels.
+    """
+
+    def _plateau_column(self, nlev=20):
+        """Return a column with an isothermal (dT/dz=0) BL plateau."""
+        import jcm.constants as c
+        p = jnp.linspace(2e4, 1.013e5, nlev)
+        t = jnp.linspace(220.0, 290.0, nlev)
+        # heights the scheme sees (surface-last), to locate the BL band
+        p_safe = jnp.maximum(p, 1.0)
+        dz = (c.rd * 0.5 * (t[:-1] + t[1:]) / c.grav
+              * jnp.log(p_safe[1:] / p_safe[:-1]))
+        z = jnp.concatenate([jnp.cumsum(dz[::-1])[::-1], jnp.zeros(1)])
+        in_bl = jnp.where((z >= 500.0) & (z <= 2000.0))[0]
+        # flatten those levels to a common temperature -> dT/dz=0 plateau
+        tval = float(t[int(in_bl[0])])
+        for k in [int(x) for x in in_bl]:
+            t = t.at[k].set(tval)
+        return t, p, [int(x) for x in in_bl]
+
+    def test_isothermal_bl_boosts_exactly_one_level(self):
+        from jcm.physics.clouds.sundqvist import _stratocumulus_zsat
+        t, p, in_bl = self._plateau_column()
+        cfg = CloudParameters.default()
+        zsat = _stratocumulus_zsat(t, p, p[-1], cfg,
+                                   enhance_allowed=jnp.array(True))
+        enh = 1.0 - zsat                      # per-level enhancement
+        # exactly one level carries essentially all of the enhancement
+        peak = float(jnp.max(enh))
+        share = float(jnp.max(enh) / jnp.sum(enh))
+        assert peak > 0.25, f"peak boost too weak: {peak}"
+        assert share > 0.95, f"boost still smeared, peak share={share}"
+        # ... and it is the LOWEST (nearest-surface, largest index) BL level
+        assert int(jnp.argmax(enh)) == max(in_bl)
+
+    def test_height_origin_lifts_the_bottom_level(self):
+        """The lowest full level sits above the surface interface, not at 0.
+
+        ECHAM measures its search-window heights from the surface half-level
+        (``mo_echam_cloud_params.f90:146-161``); a genuine surface pressure
+        above the lowest full-level pressure must lift the whole profile by
+        the bottom half-layer thickness (~30-60 m), not leave it at z=0
+        (#677).
+        """
+        import jcm.constants as c
+        from jcm.physics.clouds.sundqvist import _full_level_heights
+        t, p, _ = self._plateau_column()
+        ps = p[-1] + 7.0e2            # ~7 hPa bottom half-layer -> ~60 m
+        z = _full_level_heights(t, p, ps)
+        # bottom full level lifted off the ground by the hydrostatic offset
+        expect_bottom = float(c.rd * t[-1] / c.grav * jnp.log(ps / p[-1]))
+        assert 20.0 < float(z[-1]) < 120.0, float(z[-1])
+        assert abs(float(z[-1]) - expect_bottom) < 1e-3
+        # and the whole profile is exactly the old (z_bottom=0) profile
+        # shifted up by that constant offset
+        z0 = _full_level_heights(t, p, p[-1])   # ps == lowest level -> offset 0
+        assert float(z0[-1]) == 0.0
+        assert bool(jnp.allclose(z - z0, expect_bottom, atol=1e-4))
+
+    def test_smooth_inv_depth_zero_recovers_smear(self):
+        """Setting the depth bias to 0 recovers the diluted 1/N plateau split."""
+        from jcm.physics.clouds.sundqvist import _stratocumulus_zsat
+        t, p, in_bl = self._plateau_column()
+        base = CloudParameters.default()
+        cfg0 = base.__class__(**{**base.__dict__,
+                                 'smooth_inv_depth': jnp.array(0.0)})
+        enh = 1.0 - _stratocumulus_zsat(t, p, p[-1], cfg0,
+                                        enhance_allowed=jnp.array(True))
+        share = float(jnp.max(enh) / jnp.sum(enh))
+        assert share < 0.6, f"depth=0 should smear, got peak share={share}"

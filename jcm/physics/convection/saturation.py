@@ -151,7 +151,11 @@ def cuadjtq_newton(
     """
     def _lcp(T):
         # Phase-consistent latent heat: L_s pairs with the ice saturation
-        # branch of ``phase="auto"`` below tmelt (review finding 2.7).
+        # branch of ``phase="auto"`` below tmelt (review finding 2.7). DRY
+        # ``cpd`` is the reference: cuadjtq reads ``L/cp`` from the
+        # ``tlucub``/``tlucuc`` tables built with ``alv/cpd``, ``als/cpd``
+        # (mo_echam_convect_tables.f90:214-215, 254-258), not the moist
+        # ``zcpq`` of the cumastr static-energy ledger.
         return jnp.where(T >= c.tmelt, c.alhc, c.alhs) / c.cpd
 
     def _first_pass(T, q_vap, liq):
@@ -218,6 +222,8 @@ def cuadjtq_newton_evap(
 
     """
     def _lcp(T):
+        # Dry ``cpd``: the same cuadjtq ``tlucuc = L/cpd`` table as
+        # :func:`cuadjtq_newton` (mo_echam_convect_tables.f90:214-215).
         return jnp.where(T >= c.tmelt, c.alhc, c.alhs) / c.cpd
 
     def _pass(carry, _):

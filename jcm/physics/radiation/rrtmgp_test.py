@@ -287,6 +287,30 @@ class TestRRTMGPGreenhouseGases:
     normalisation branch.
     """
 
+    def test_public_ppmv_contract_converts_each_gas_once(self):
+        """A realistic ppmv input must reach gas optics as mol/mol (#749)."""
+        from jcm.forcing import ForcingData
+        from jcm.physics.chemistry.simple_chemistry import ChemistryData
+        from jcm.physics.radiation.rrtmgp import (
+            _greenhouse_gas_mole_fractions,
+        )
+
+        chemistry = ChemistryData.zeros((1,), 2).copy(
+            ozone_vmr=jnp.full((2, 1), 8.0),
+            methane_vmr=jnp.full((2, 1), 1.9),
+        )
+        forcing = ForcingData.zeros(
+            (1,), co2_vmr=jnp.asarray(420.0), n2o_vmr=jnp.asarray(0.327),
+        )
+
+        ozone, methane, co2, n2o = _greenhouse_gas_mole_fractions(
+            chemistry, forcing,
+        )
+        np.testing.assert_allclose(ozone, 8.0e-6)
+        np.testing.assert_allclose(methane, 1.9e-6)
+        np.testing.assert_allclose(co2, 420.0e-6)
+        np.testing.assert_allclose(n2o, 0.327e-6)
+
     def test_added_ghgs_reduce_olr(self):
         nlev = 10
         base = _make_inputs(nlev=nlev)
@@ -1158,8 +1182,16 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
         frac0 = effect0 / np.asarray(r0.toa_lw_up)
         frac2 = (np.asarray(r2.toa_lw_up) - np.asarray(r2.toa_lw_up_noa)) \
             / np.asarray(r2.toa_lw_up)
+        # The fraction is ~-0.0067 of a ~250 W/m2 flux and is recovered from
+        # a float32 reconstruction, F2 - F2*(1 - f): one ulp of that flux
+        # (~1.5e-5 W/m2) moves the recovered fraction by ulp(F)/F ~ 6e-8,
+        # which is rtol 1e-5 of the fraction itself. The tolerance therefore
+        # has to admit several ulps of the flux path, whose rounding order
+        # belongs to jax-rrtmgp and changed between 0.3.0 and 0.4.0 (#849);
+        # 1e-4 admits ~15 ulps and still fails a hold that drifts with the
+        # 4 K perturbation (a fraction moving with the flux changes by O(1e-2)).
         np.testing.assert_allclose(
-            frac2, frac0, rtol=1e-5, atol=1e-9,
+            frac2, frac0, rtol=1e-4, atol=1e-9,
             err_msg="the held aerosol fraction changed on a skipped step",
         )
 
@@ -1530,3 +1562,94 @@ class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
                 RRTMGPRadiation(aerosol_free_interval=bad)
         # Integral floats are fine — YAML happily produces them.
         RRTMGPRadiation(aerosol_free_interval=2.0)
+
+
+class TestRRTMGPMoistureConversion:
+    """The RRTMGP path must hand the library the SPECIFIC humidity, not a
+    mixing ratio round-tripped through the grey scheme's H2O VMR (#678).
+    """
+
+    def test_qt_is_specific_humidity_not_mixing_ratio(self):
+        """``q_t`` handed to the library equals the input specific humidity.
+
+        The grey scheme stores ``h2o_vmr = q/(1-q)*1.608``; reconstructing q
+        from it with ``*eps`` (1.608*eps = 1.0002) returned the *mixing ratio*
+        q/(1-q), so the library's own ``(q_t-q_c)/(1-q_t)`` applied ``1/(1-q)``
+        a second time. Passing the specific humidity straight through removes
+        the double conversion: the vapour part of ``q_t`` must be exactly q.
+        """
+        import jcm.constants as c
+        from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
+            prepare_radiation_state,
+        )
+        from jcm.physics.radiation.rrtmgp import prepare_rrtmgp_data
+
+        nlev = 8
+        q = 0.02  # 20 g/kg, where the old +2.1% error was largest
+        pressure_levels = jnp.linspace(10000.0, 90000.0, nlev)
+        pressure_interfaces = jnp.linspace(5000.0, 95000.0, nlev + 1)
+        temperature = jnp.full(nlev, 280.0)
+        air_density = pressure_levels / (c.rd * temperature)
+        layer_thickness = jnp.full(nlev, 1000.0)
+        state = prepare_radiation_state(
+            temperature=temperature,
+            specific_humidity=jnp.full(nlev, q),
+            pressure_levels=pressure_levels,
+            pressure_interfaces=pressure_interfaces,
+            layer_thickness=layer_thickness,
+            air_density=air_density,
+            cloud_water=jnp.zeros(nlev),
+            cloud_ice=jnp.zeros(nlev),
+            cloud_fraction=jnp.zeros(nlev),
+            cos_zenith=jnp.array(0.5),
+        )
+        out = prepare_rrtmgp_data(
+            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
+        )
+        # Vapour = q_t - q_c; cloud-free here so q_c == 0.
+        vapour = out["q_t"][0, 0, 1:-1] - out["q_c"][0, 0, 1:-1]
+        assert np.allclose(np.asarray(vapour), q, atol=1e-8)
+
+        # The library then forms VMR = (q_t - q_c)/(1 - q_t) / eps. With the
+        # fix this reconstructs the TRUE vmr q/((1-q)*eps); the double
+        # conversion would have given q/((1-q)) * 1.608 (too high by ~2.1%).
+        q_t = out["q_t"][0, 0, 1:-1]
+        library_vmr = (q_t - out["q_c"][0, 0, 1:-1]) / (1.0 - q_t) / c.eps
+        true_vmr = q / ((1.0 - q) * c.eps)
+        assert np.allclose(np.asarray(library_vmr), true_vmr, rtol=1e-6)
+
+
+class TestRRTMGPCloudInhomogeneity:
+    """ECHAM's fixed cloud sub-grid inhomogeneity factor (#678)."""
+
+    def test_inhomogeneity_factor_reduces_reflected_sw(self):
+        """A smaller liquid inhomogeneity factor thins the cloud optically.
+
+        The factor multiplies the in-cloud condensate path (equivalently the
+        optical depth), so reducing it must lower the reflected TOA shortwave
+        and stay NaN-free -- the faithful ECHAM ``zinhoml`` behaviour, not the
+        old one-sided clip that was inert almost everywhere.
+        """
+        base = _make_inputs(nlev=10)
+
+        full = dict(base)
+        full["parameters"] = RadiationParameters.default(
+            cloud_inhomogeneity=1.0,
+        )
+        _, diag_full = radiation_scheme_rrtmgp(**full)
+
+        reduced = dict(base)
+        reduced["parameters"] = RadiationParameters.default(
+            cloud_inhomogeneity=0.5,
+        )
+        _, diag_reduced = radiation_scheme_rrtmgp(**reduced)
+
+        assert jnp.isfinite(diag_full.toa_sw_up)
+        assert jnp.isfinite(diag_reduced.toa_sw_up)
+        # Thinner clouds reflect less sunlight back to space.
+        assert float(diag_reduced.toa_sw_up) < float(diag_full.toa_sw_up)
+
+    def test_default_factor_is_echam_t63_value(self):
+        """The default matches ECHAM's nn=63 ``zinhoml1 = zinhomi = 0.8``."""
+        p = RadiationParameters.default()
+        assert float(p.cloud_inhomogeneity) == pytest.approx(0.8)

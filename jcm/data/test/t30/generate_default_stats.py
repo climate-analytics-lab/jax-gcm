@@ -26,6 +26,8 @@ i.e. the *mean* is the last monthly global mean and the *std* is the
 std over time of the global-mean time series. The test then checks
 ``pred_ds.isel(time=-1).mean(dim={'lon','lat'})`` falls inside
 ``mean ± 3·std`` for every variable in ``default_stat_vars``.
+Statistics retain the model output units; in particular, specific humidity
+uses the public kg/kg contract and the equivalent CF spelling ``kg kg-1``.
 """
 
 default_stat_vars = ['u_wind', 'v_wind', 'temperature', 'geopotential', 'specific_humidity',
@@ -48,7 +50,8 @@ def run_default_speedy_model(save_interval=None):
 
     coords = get_speedy_coords()
     realistic_terrain = TerrainData.from_file(forcing_dir / 'terrain.nc', coords=coords)
-    realistic_forcing = ForcingData.from_file(forcing_dir / 'forcing.nc', coords=coords)
+    realistic_forcing = ForcingData.from_file(
+        forcing_dir / 'forcing.nc', coords=coords, align_mode="wrap_year")
 
     # in the default scenario output every timestep and don't average
     # in the test scenario, output as designated and average

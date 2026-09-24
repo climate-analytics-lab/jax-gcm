@@ -59,11 +59,18 @@ ruff check .
 
 # 2. Push gate — fast tests, 90% coverage
 JAX_PLATFORMS=cpu pytest -n 12 -m "not slow" --cov=jcm --cov-fail-under=90
+coverage report --fail-under=90
 
 # 3. PR gate — slow tests only, 80% coverage vs .coveragerc-pr
 JAX_PLATFORMS=cpu pytest -n 4 -m "slow" --cov=jcm \
     --cov-config=.coveragerc-pr --cov-fail-under=80
+coverage report --rcfile=.coveragerc-pr --fail-under=80
 ```
+
+The trailing `coverage report` is not redundant — it mirrors the two
+enforcement steps CI gained in #786, and it is the one that exits non-zero
+on plugin behaviour nobody controls. See the "Coverage differs by suite"
+note below.
 
 Gates 2 and 3 are real compute — run them on a `develop`-queue node, not
 a login node; `local_ci.sh` does. The `-n 4` on gate 3 is
@@ -149,6 +156,14 @@ replying — Codex has been right (forcing unit conventions) and wrong
   fast-tested utility modules). New fast-tested modules that slow tests
   never touch belong in `.coveragerc-pr`'s omit list — that is the
   repo's documented mechanism, see the header comment there.
+- **A floor is only enforced at the reported precision.** `fail_under`
+  is checked as `round(total, precision) < fail_under`, so at
+  coverage's default precision of 0 the 80 floor was a 79.5 floor and
+  the slow gate printed `FAIL ... 79.68%` while exiting 0 (#786). Both
+  rcfiles now carry `[report] precision = 2`; run the gates with the
+  repo's rcfiles (never a bare `--cov-fail-under` against a config
+  that lacks it), and keep the standalone `coverage report` line so a
+  plugin change cannot disarm the gate unnoticed.
 - `JAX_PLATFORMS=cpu` is mandatory on GPU nodes (xdist workers
   otherwise fight over the GPU).
 - The gate job asks for 16 cpus so `-n 12` (fast) and `-n 4` (slow) both
@@ -159,7 +174,9 @@ replying — Codex has been right (forcing unit conventions) and wrong
   recompiling. Only the XLA-compile share is saved — tracing reruns —
   and only for bit-identical whole model steps. Safe: a miss just
   recompiles.
-- The repo pins `ruff` in CI; run the pinned version (`pip show ruff`
-  vs `.github/workflows/run_linter.yaml`) before trusting a clean pass.
+- The repo pins `ruff` in CI, in two places that must agree —
+  `run_linter.yaml` (lints everything, every push) and the `lint` gate job
+  in `run_test.yaml` (the fast/slow suites hang off it). Run the pinned
+  version (`pip show ruff` vs either file) before trusting a clean pass.
 - GPU-gated slow tests skip on CPU exactly as they do in CI — a local
   CPU pass is equivalent evidence.

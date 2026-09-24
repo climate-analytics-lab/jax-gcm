@@ -2,7 +2,8 @@
 
 Produces the Tier A land-surface product at native 0.25°: a 12-month
 climatology of skin temperature, soil temperature and moisture, snow
-depth (water equivalent) and albedo, plus the invariant land-sea mask.
+depth (water equivalent) and albedo, plus the invariant land-sea mask,
+vegetation cover and soil type.
 Per-grid regridding and translation into jcm forcing variables happens
 at bundle assembly.
 """
@@ -12,9 +13,13 @@ from __future__ import annotations
 import numpy as np
 import xarray as xr
 
-RDA_MODA = "/glade/campaign/collections/rda/data/d633001/e5.moda.an.sfc"
-RDA_INVARIANT = ("/glade/campaign/collections/rda/data/d633000/"
-                 "e5.oper.invariant/197901")
+from jcm.data.mirror import sites
+
+# ``None`` on a site without the RDA archive (Levante): the ``era5`` stage is
+# then refused by ``check_sources`` and the Tier A product is pulled instead.
+_RDA = sites.current().rda
+RDA_MODA = f"{_RDA}/d633001/e5.moda.an.sfc" if _RDA else None
+RDA_INVARIANT = f"{_RDA}/d633000/e5.oper.invariant/197901" if _RDA else None
 
 # ERA5 GRIB table 128 codes for the fields the jcm forcing needs.
 FIELDS = {
@@ -36,10 +41,14 @@ def _open_year(field_code: str, year: int) -> xr.DataArray:
     return ds[name]
 
 
-# Invariant fields: land fraction + low/high vegetation cover (the
-# SPEEDY soil-availability formula weights the deep layer by vegetation).
+# Invariant fields: land fraction, low/high vegetation cover (the SPEEDY
+# soil-availability formula weights the deep layer by vegetation) and soil
+# type ``slt``, which selects each cell's HTESSEL field capacity — the
+# denominator of the ECHAM-like relative soil wetness (#787). ``slt`` is part
+# of ERA5's standard invariant group; a missing file raises here rather than
+# letting the wetness field be normalised by a stand-in constant.
 INVARIANTS = {"lsm": "128_172_lsm", "cvl": "128_027_cvl",
-              "cvh": "128_028_cvh"}
+              "cvh": "128_028_cvh", "slt": "128_043_slt"}
 
 
 def load_invariant(name: str) -> xr.DataArray:

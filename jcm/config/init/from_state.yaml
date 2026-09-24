@@ -1,15 +1,30 @@
 # Warm start from a saved model state — e.g. the hosted equilibrated init
 # states under hf://bundles/<grid>_<levels>/init_states/ — skipping the
 # ~9-month from-cold spin-up (#638). The full dycore + physics state is
-# restored but the clock starts at zero / run.start_date; this differs
+# restored but the clock starts at zero / run.start_time; this differs
 # from run.checkpoint_path, which resumes a run's OWN day counter. With
 # run.chunk_days > 0 the two compose (a preempted from_state run resumes
 # from its own checkpoint); non-chunked runs never write checkpoints.
 # The file's pytree must match the composed model (grid, levels, physics
-# tracer set) — load_checkpoint validates every leaf shape and fails
-# loudly naming the file. Small caveat: the restored physics carry keeps
-# the donor's cached radiation fluxes until the first radiation_interval
-# (default 2 h) elapses, so the very first hours mix donor-date insolation
-# into the new calendar — negligible against the spin-up it avoids.
+# tracer set) — load_checkpoint restores a changed physics-carry field set
+# by name and fails loudly, naming the file, on anything else. Small
+# caveat: the restored physics carry keeps the donor's cached radiation
+# fluxes until the first radiation_interval (default 2 h) elapses, so the
+# very first hours mix donor-date insolation into the new calendar —
+# negligible against the spin-up it avoids.
 kind: from_state
 file: ???
+# Escape hatch for a donor written before the checkpoint schema stamp
+# (jcm 3.0), which load_checkpoint otherwise refuses: such a file records
+# neither its schema nor which unit convention its dycore state uses, and
+# #824 changed what a stored mass mixing ratio means. Set this only when you
+# know how the file was written — any state spun up with an earlier jcm is in
+# that position. Entries are "<leaf name>=<factor>"; a pre-#824 ECHAM donor
+# needs its humidity AND every other mass mixing-ratio tracer multiplied by
+# 1000 (its gridpoint values were already kg/kg, so its physics carry is
+# left alone):
+#   init.unstamped_scale=["tracers.specific_humidity=1000","tracers.qc=1000","tracers.qi=1000"]
+# A SPEEDY donor is the mirror image — do not copy the ECHAM entries.
+# An empty list asserts "already in the current convention". See
+# docs/source/design/checkpoint_compatibility.md.
+unstamped_scale: null

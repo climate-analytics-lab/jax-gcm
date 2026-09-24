@@ -600,9 +600,27 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         "vertical_diffusion": VerticalDiffusionData,
     }
 
-    def __init__(self, params: VDiffParameters | None = None):
-        """Hold the scheme-native :class:`VDiffParameters`."""
+    def __init__(self, params: VDiffParameters | None = None,
+                 couple_surface: bool = True):
+        """Hold the scheme-native :class:`VDiffParameters`.
+
+        Args:
+            params: Scheme parameters (defaults to ECHAM values).
+            couple_surface: Static flag forwarded to
+                :func:`vertical_diffusion_column`. ``True`` (default): the
+                implicit solve carries the surface exchange as its
+                bottom-row Robin BC and the delivered fluxes are diagnosed
+                from the solution. ``False``: interior-only diffusion with
+                insulating / free-slip bottom boundaries — the forced
+                surface mode (jax-gcm#301), where a downstream
+                :class:`~jcm.physics.surface.prescribed_flux.
+                PrescribedSurfaceFlux` term delivers externally prescribed
+                fluxes explicitly instead (the exact replacement seam: the
+                solve's surface coupling is OFF, so no double counting).
+
+        """
         self.params = nnx.Param(params or VDiffParameters.default())
+        self.couple_surface = couple_surface
 
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
@@ -760,7 +778,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         )
 
         vdiff_tendencies, vdiff_diagnostics = vertical_diffusion_column(
-            vdiff_state, params, dt,
+            vdiff_state, params, dt, couple_surface=self.couple_surface,
         )
 
         u_tend = vdiff_tendencies.u_tendency.T

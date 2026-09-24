@@ -373,7 +373,7 @@ class TestRCEConvection(unittest.TestCase):
         The cudtdq ledger guarantees (with the deviation DSE fluxes
         telescoping over the column):
 
-            cp·Σ dT/dt·Δp/g  =  Σ zalv·(plude+pdmfup+pdmfdp)·… − alhf·Σ pdpmel
+            Σ cp·dT/dt·Δp/g  =  Σ zalv·(plude+pdmfup+pdmfdp)·… − alhf·Σ pdpmel
                               =  −Σ zalv·(dq/dt)·Δp/g − alhf·Σ pdpmel
 
         i.e. the column warms by exactly the latent heat of the vapour it
@@ -402,7 +402,11 @@ class TestRCEConvection(unittest.TestCase):
         dp_lev = np.concatenate([dpa, dpa[-1:]])
         mass = dp_lev / c.grav
         zalv = np.where(np.asarray(T) > c.tmelt, c.alhc, c.alhs)
-        cp_int = c.cpd * float(np.sum(np.asarray(tendencies.dtedt) * mass))
+        # The ledger converts heat to temperature with ECHAM's MOIST
+        # ``pcpen = cpd·(1 + vtmpc2·q)`` (``zrcpm``, mo_cufluxdts.f90:648),
+        # so the enthalpy it deposits is integrated with the same ``cp``.
+        cp_moist = c.cpd * (1.0 + c.vtmpc2 * np.maximum(np.asarray(q), 0.0))
+        cp_int = float(np.sum(cp_moist * np.asarray(tendencies.dtedt) * mass))
         # Every kg of vapour the column loses was condensed somewhere in
         # the plume and released its latent heat — whether it left as
         # precipitation or as detrained condensate (the qc/qi tendencies
@@ -511,18 +515,20 @@ class TestMoistureSupplyClosure(unittest.TestCase):
         # Re-justified for the unconditional ECHAM rescale (restored after
         # coupled runs locked into a desiccated fixed point): the moisture
         # budget is only the FIRST GUESS; Nordeng sets the amplitude for
-        # every deep column. Preserved anti-flicker content: no
-        # layer_mass/dt CFL explosion (max(mfu) grows above cloud base by
-        # organized entrainment, so the bound pins the burst, not a
-        # specific amplitude) and branch agreement.
+        # every deep column. The anti-flicker/anti-explosion invariant this
+        # test now pins is that NEITHER branch blows up the layer_mass/dt CFL
+        # cap and BOTH keep convection active. Since #676 the E=0 branch uses
+        # ECHAM's constant fallback ``zmfub = 0.01`` (mo_cumastr.f90:567)
+        # rather than the dimensionally-invalid ``cape/(g·tau)`` velocity, so
+        # its cloud-base first guess is legitimately a different magnitude
+        # from the moisture-anchored E/(q_u−q_e); the two are no longer
+        # expected to sit within a tight ratio, only to both stay bounded.
         mfu_anchored = float(jnp.max(self._run(1.0e-4)[1].mfu))
         mfu_cape = float(jnp.max(self._run(0.0)[1].mfu))
         self.assertGreater(mfu_anchored, 0.0)  # convection still active
-        self.assertLess(mfu_anchored, 5.0)
+        self.assertGreater(mfu_cape, 0.0)      # fallback still convects
+        self.assertLess(mfu_anchored, 5.0)     # no CFL explosion
         self.assertLess(mfu_cape, 5.0)
-        ratio = mfu_anchored / max(mfu_cape, 1e-10)
-        self.assertGreater(ratio, 1.0 / 3.0)
-        self.assertLess(ratio, 3.0)
 
     def test_precip_scales_with_moisture_supply(self):
         """Moisture-budget content: precip exports the supplied moisture.

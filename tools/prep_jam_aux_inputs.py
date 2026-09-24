@@ -7,7 +7,9 @@ three small netCDFs in the jcm reader-contract layouts (see
 onto the physics columns at model-build time — so the files stay on their
 native lon/lat grids here.
 
-Sources (all under /glade/campaign/cesm/cesmdata/inputdata):
+Sources (CESM inputdata; the root per machine comes from
+``jcm.data.mirror.sites`` — on-disk on Glade, downloaded once into the mirror
+root's ``sources/cesm_inputdata`` on Levante):
 
 * DMS seawater concentration: ``Csw_DMS_Lana2011_f09f09_1750_2100`` — the
   Lana et al. (2011) surface-ocean climatology in nmol/L (verified constant
@@ -27,13 +29,12 @@ Sources (all under /glade/campaign/cesm/cesmdata/inputdata):
 
 Usage:
     python tools/prep_jam_aux_inputs.py [--year 2014] \
-        [--outdir /glade/derecho/scratch/$USER/jam_inputs]
+        [--outdir $SCRATCH/jam_inputs]
 """
 
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -44,13 +45,18 @@ import xarray as xr
 # this branch/worktree and may be absent from the editable install.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-_INPUTDATA = "/glade/campaign/cesm/cesmdata/inputdata"
+from jcm.data.mirror import sites  # noqa: E402
+
+_SITE = sites.current()
+_INPUTDATA = _SITE.cesm_inputdata
 _DMS_SRC = f"{_INPUTDATA}/atm/cam/chem/ocnexch/Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc"
 _OXID_SRC = (f"{_INPUTDATA}/atm/cam/chem/trop_mozart_aero/oxid/"
              "oxid_1.9x2.5_L26_1850-2015_c20181106.nc")
 
-# 12 monthly mid-month timestamps: gives the readers a clean one-year span so
-# ``align_mode='auto'`` resolves to WRAP_YEAR (climatology) indexing.
+# 12 monthly mid-month timestamps, one per calendar month: the one-year
+# climatology layout the WRAP_YEAR readers index by month position (these
+# products are published as manifest ``climatology`` products, which is what
+# ``align: auto`` resolves from — never the time axis, #884).
 _CLIMO_TIME = np.array([np.datetime64(f"2014-{m:02d}-15") for m in range(1, 13)])
 
 
@@ -96,7 +102,7 @@ def prep_oxidants(out: Path, year: int, nlev: int = 47) -> None:
     print(f"wrote {out} {dict(out_ds.sizes)}")
 
 
-_WACCM_OXID_DIR = ("/glade/p/cesmdata/cseg/inputdata/atm/cam/ozone")
+_WACCM_OXID_DIR = _SITE.waccm_oxidants
 
 
 def prep_oxidants_waccm(out: Path, year: int, nlev: int = 47) -> None:
@@ -235,7 +241,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--year", type=int, default=2014)
     ap.add_argument("--outdir",
-                    default=f"/glade/derecho/scratch/{os.environ['USER']}/jam_inputs")
+                    default=str(Path(_SITE.default_root).parent / "jam_inputs"))
     ap.add_argument("--target-truncation", type=int, default=None,
                     help="also write copies regridded onto this Gaussian "
                          "grid (for the spectral-backend runners, which do "

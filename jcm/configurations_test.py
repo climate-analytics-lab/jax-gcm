@@ -144,6 +144,14 @@ class TestConfigurationsDoor(unittest.TestCase):
         self.assertAlmostEqual(
             parse_duration_days(exp.run_kwargs["save_interval"]), 0.5)
 
+    def test_end_time_override_passes_through(self):
+        exp = configurations.load(
+            "speedy-t31",
+            **{"terrain": "aquaplanet", "forcing": "default",
+               "run.total_time": None, "run.end_time": "2001-01-01"})
+        self.assertIsNone(exp.run_kwargs["total_time"])
+        self.assertEqual(exp.run_kwargs["end_time"], "2001-01-01")
+
     def test_module_imports_no_hydra_or_omegaconf_at_top_level(self):
         # The door's whole point: a caller (this file) never imports hydra.
         tree = ast.parse(Path(__file__).read_text())
@@ -325,6 +333,18 @@ class TestConfigurationsAcceptance(unittest.TestCase):
 
 @pytest.mark.slow
 class TestConfigurationsSmoke(unittest.TestCase):
+    def test_end_time_run_kwargs_stop_at_configured_endpoint(self):
+        exp = configurations.load(
+            "speedy-t31",
+            **{"terrain": "aquaplanet", "forcing": "default",
+               "run.total_time": None,
+               "run.end_time": "2000-01-01T00:30:00",
+               "run.save_interval": "30 minutes"})
+        ds = exp.model.run(**exp.run_kwargs).to_xarray()
+        self.assertEqual(ds.time.values[-1],
+                         np.datetime64("2000-01-01T00:30:00"))
+        self.assertTrue(bool(np.isfinite(ds.temperature.values).all()))
+
     def test_speedy_run_kwargs_produce_finite_output(self):
         # No mocks: SPEEDY needs no network. Run one save interval and confirm
         # model.run accepts **run_kwargs and yields finite output.
@@ -334,6 +354,66 @@ class TestConfigurationsSmoke(unittest.TestCase):
         preds = exp.model.run(**exp.run_kwargs)
         ds = preds.to_xarray()
         self.assertTrue(bool(np.isfinite(ds.temperature.values).all()))
+
+
+# ---------------------------------------------------------------------------
+# #884: every shipped configuration declares or manifest-resolves its alignment
+# ---------------------------------------------------------------------------
+
+#: (value key, align key, transient mode) for every time-resolved forcing input
+#: that goes through :func:`jcm.forcing.resolve_align`.
+_ALIGNED_INPUTS = (
+    ("file", "align", "by_date"),
+    ("ozone_file", "ozone_align", "by_date_interp"),
+    ("emissions_file", "emissions_align", "by_date"),
+    ("oxidants_file", "oxidants_align", "by_date"),
+)
+
+
+def _aligned_specs(forcing_cfg):
+    """Yield ``(key, spec, paths, transient)`` for each configured input.
+
+    ``auto`` input VALUES resolve to the key's manifest ``auto`` product at
+    build time; its path template stands in for the fetched file (only the
+    template decides the kind), so this needs no network.
+    """
+    from jcm.data import mirror_manifest as mm
+    man = mm.load_manifest()
+    for key, align_key, transient in _ALIGNED_INPUTS:
+        if key == "file" and forcing_cfg.get("kind") != "from_file":
+            continue
+        value = forcing_cfg.get(key, None)
+        if value in (None, "", "null", "none", "analytic"):
+            continue
+        if value == "auto":
+            product = mm.product_for_key(man, key)
+            value = "hf://" + mm.product(man, product)["path"].replace(
+                "{grid}", "t63").replace("{nlev}", "47")
+        values = list(value) if not isinstance(value, str) else [value]
+        spec = forcing_cfg.get(align_key, "auto")
+        specs = (list(spec) if not isinstance(spec, str) else
+                 [spec] * len(values))
+        for v, sp in zip(values, specs):
+            yield key, str(sp), v, transient
+
+
+@pytest.mark.parametrize("preset", [None, "amip", "era5"])
+@pytest.mark.parametrize("name", sorted(configurations.available()))
+def test_shipped_configuration_time_alignment_resolves(name, preset):
+    """No shipped configuration (alone, or with a transient forcing preset)
+    reaches the #884 "auto cannot resolve" error: each time-resolved input is
+    either a manifest product or declares its mode.
+    """
+    from jcm.forcing import resolve_align
+    overrides = [] if preset is None else [f"forcing={preset}",
+                                           "forcing.years=[2000,2000]"]
+    cfg = configurations._compose(name, overrides)
+    checked = 0
+    for key, spec, value, transient in _aligned_specs(cfg.forcing):
+        resolve_align(spec, paths=value, config_key=f"forcing.{key}",
+                      transient=transient)
+        checked += 1
+    assert checked >= 1, f"{name}: no time-resolved input was checked"
 
 
 if __name__ == "__main__":

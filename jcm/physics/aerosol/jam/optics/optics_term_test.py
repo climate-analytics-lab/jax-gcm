@@ -66,6 +66,46 @@ def _setup(nlev=4, ncols=3, n_sw=3, n_lw=2):
     return state, diagnostics, band, n_sw, n_lw
 
 
+def _consistent_state(state, diagnostics, saturation=0.8, center_modes=False):
+    """Replace ``_jam_state`` with the κ-Köhler state implied by the tracers.
+
+    ``_setup`` sets ``mass``, ``number``, ``r_dry`` and ``r_wet``
+    independently of the tracers it writes, which is fine for plumbing tests
+    but not for any test about the modal GEOMETRY: the optics read the dry
+    volume from the mass tracers and the radii/number from ``_jam_state``,
+    and only a state the microphysics core actually produced makes the two
+    agree. This runs the placeholder core's diagnosis on the fixture's
+    tracers, so ``r_wet = r_dry·g`` at the κ-Köhler growth factor for
+    ``saturation`` — which is all the water volume depends on.
+
+    ``r_dry`` is a different matter. With ``_setup``'s own numbers the core
+    CLIPS three of the four modes (Aitken and primary carbon at ``dgnum_hi``,
+    coarse at ``dgnum_lo``), so ``r_dry`` is the clipped radius, not the
+    solution of ``V = N (π/6) Dg³ exp(4.5 ln²σ)``. Pass ``center_modes=True``
+    to pick, per mode, the number that puts ``dg`` exactly on ``mode.dgnum``
+    — strictly inside every bound, so no clip is active and that identity
+    holds for all four modes. Only tests that assert something about the
+    third moment itself need it; the water volume is a pure ratio and does
+    not care either way.
+    """
+    from jcm.physics.aerosol.jam.microphysics.placeholder import (
+        equilibrium_modal_state,
+    )
+    masses = {k: v for k, v in state.tracers.items() if k.startswith("m_")}
+    numbers = {k: v for k, v in state.tracers.items() if k.startswith("n_")}
+    if center_modes:
+        numbers = {}
+        for mode in MAM4_SPEC.modes:
+            vol = sum(masses[mass_name(sp, mode.short)]
+                      / MAM4_SPEC.species_props(sp).density
+                      for sp in mode.species)
+            k = (np.pi / 6.0) * np.exp(4.5 * np.log(mode.geom_std_dev) ** 2)
+            numbers[number_name(mode.short)] = vol / (k * mode.dgnum ** 3)
+    sat = jnp.full(state.temperature.shape, saturation)
+    aer = equilibrium_modal_state(masses, numbers, MAM4_SPEC, sat)
+    return {**diagnostics, "_jam_state": aer}
+
+
 class JamOpticsTermTest(unittest.TestCase):
     def _term(self, band):
         term = JamOpticsTerm()
@@ -208,7 +248,10 @@ class JamOpticsTermTest(unittest.TestCase):
         num = num.at[:, 0, :].set(-jnp.abs(num[:, 0, :]))
         num = num.at[:, :, 1].set(-1.0e7)
         diagnostics = {**diagnostics, "_jam_state": aer.copy(number=num)}
-        # And the corresponding number tracers (used for the water volume).
+        # And the corresponding number tracers: the ringing field this models
+        # drives both negative together. (The optics read the number only
+        # through ``num_per_area`` — the water volume is number-free, #790 —
+        # so this pairing is realism, not a load-bearing input.)
         tracers = dict(state.tracers)
         for mode in MAM4_SPEC.modes:
             nm = number_name(mode.short)
@@ -259,16 +302,152 @@ class JamOpticsTermTest(unittest.TestCase):
         self.assertEqual(float(jnp.max(jnp.abs(a.aod_lw_per_band))), 0.0)
 
     def test_more_aerosol_more_aod(self):
+        """Doubling the aerosol mass at fixed number grows every particle and
+        so must raise the extinction.
+
+        The modal state must be re-diagnosed from the doubled tracers, not
+        held fixed: the per-particle cross-section comes from ``_jam_state``
+        (number and wet radius), so doubling the mass tracers ALONE leaves
+        the extinction exactly unchanged — mass enters only through the
+        volume-mixed refractive index, whose species ratios and water
+        fraction are both scale-free (#790). Pairing doubled tracers with a
+        fixed state therefore asserts nothing about "more aerosol".
+        """
         state, diagnostics, band, *_ = _setup()
         term = self._term(band)
-        _, d1 = term(state, diagnostics, None, None)
-        # double the mass tracers
-        state2 = state.copy(tracers={k: 2.0 * v for k, v in state.tracers.items()})
-        _, d2 = term(state2, diagnostics, None, None)
+        d_in1 = _consistent_state(state, diagnostics)
+        _, d1 = term(state, d_in1, None, None)
+        mass2 = {k: (2.0 * v if k.startswith("m_") else v)
+                 for k, v in state.tracers.items()}
+        state2 = state.copy(tracers=mass2)
+        d_in2 = _consistent_state(state2, diagnostics)
+        _, d2 = term(state2, d_in2, None, None)
         self.assertGreater(
             float(jnp.sum(d2["aerosol"].aod_sw_per_band)),
             float(jnp.sum(d1["aerosol"].aod_sw_per_band)),
         )
+
+    def test_refractive_index_independent_of_number(self):
+        """At fixed radii and masses, the modal number scales the extinction
+        but must not touch the volume-mixed refractive index.
+
+        The dry volume in the mixing rule comes from the mass tracers, so a
+        water volume carrying an ``N`` of its own — as ``N·(4/3)π·(r_wet³ −
+        r_dry³)`` does — would make the water FRACTION, and with it the SSA,
+        move with a quantity the dry volume never saw (#790). With the
+        number-free form the SSA and asymmetry are invariant and the AOD is
+        exactly linear in the number.
+        """
+        state, diagnostics, band, *_ = _setup()
+        term = self._term(band)
+        aer = diagnostics["_jam_state"]
+        _, d1 = term(state, diagnostics, None, None)
+        # The fixture peaks near tau = 0.13 per layer and band, so tripling
+        # the number stays clear of the ``_MAX_LAYER_TAU`` = 1 clamp and the
+        # scaling below is exact rather than clipped.
+        d_in3 = {**diagnostics, "_jam_state": aer.copy(number=3.0 * aer.number)}
+        _, d3 = term(state, d_in3, None, None)
+        a1, a3 = d1["aerosol"], d3["aerosol"]
+        np.testing.assert_allclose(
+            np.asarray(a3.aod_sw_per_band), 3.0 * np.asarray(a1.aod_sw_per_band),
+            rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(a3.ssa_sw_per_band), np.asarray(a1.ssa_sw_per_band),
+            rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(a3.asy_sw_per_band), np.asarray(a1.asy_sw_per_band),
+            rtol=1e-6)
+
+    def test_water_depends_on_growth_ratio_not_on_number(self):
+        """The water volume is set by ``r_wet/r_dry`` alone.
+
+        Two cases with the number/radius pairing made grossly inconsistent on
+        purpose (1000x the number the radii imply):
+
+        * ``r_wet == r_dry`` — no growth, so exactly zero water, while the
+          dry species still extinguish;
+        * ``r_wet == 1.05·r_dry`` — one uniform growth factor across modes,
+          so water's share of EVERY mode's volume, and hence of the column
+          extinction it is apportioned by, is exactly ``(g³ − 1)/g³``.
+
+        The second case is the discriminating one: ``N·(4/3)π·(r_wet³ −
+        r_dry³)`` would put the inflated ``N`` into the water while the dry
+        volume it mixes with comes from the mass tracers, so it misses that
+        share by orders of magnitude (#790). The first case alone does not
+        discriminate — both forms vanish at zero growth.
+        """
+        state, diagnostics, band, *_ = _setup()
+        aer = diagnostics["_jam_state"]
+        term = JamOpticsTerm(optics_diagnostics=True)
+        term.cache_band_config(band)
+
+        dry = aer.copy(r_wet=aer.r_dry, number=1.0e3 * aer.number)
+        _, out = term(state, {**diagnostics, "_jam_state": dry}, None, None)
+        np.testing.assert_array_equal(np.asarray(out["od550_wat"]), 0.0)
+        np.testing.assert_array_equal(np.asarray(out["abs550_wat"]), 0.0)
+        self.assertTrue(bool(np.all(np.asarray(out["od550aer"]) > 0.0)))
+
+        g = 1.05
+        grown = aer.copy(r_wet=g * aer.r_dry, number=1.0e3 * aer.number)
+        _, out = term(state, {**diagnostics, "_jam_state": grown}, None, None)
+        share = np.asarray(out["od550_wat"]) / np.asarray(out["od550aer"])
+        np.testing.assert_allclose(share, (g ** 3 - 1.0) / g ** 3, rtol=1e-5)
+
+    def test_degenerate_dry_radius_gives_zero_water_and_zero_gradient(self):
+        """A core reporting ``r_dry = 0`` must give 0 water, not NaN, and must
+        not leave a gradient on the degenerate branch.
+
+        Defensive: no in-repo core produces ``r_dry = 0`` (the placeholder
+        falls back to ``mode.dgnum``, MAM4-JAX takes ``0.5·dgncur_a``), so
+        this pins the behaviour for an external or future core. The growth
+        ratio ``(r_wet/r_dry)³`` is the one division the water volume makes,
+        and it multiplies a ``vol_dry`` that is zero on exactly those modes.
+        The ``jnp.where`` selects no growth there — value and gradient both
+        zero — and ``_MIN_DRY_RADIUS`` keeps the ratio's cube finite in the
+        arm the select discards, since both arms are evaluated and an ``inf``
+        there would come back as a NaN in the reverse pass. float64 has the
+        range to absorb a smaller floor, so only the default float32 physics
+        exercises the overflow half of this.
+        """
+        if jax.config.read("jax_enable_x64"):
+            self.skipTest("the float32 overflow guarded here cannot occur in x64")
+        state, diagnostics, band, *_ = _setup()
+        aer = diagnostics["_jam_state"]
+        empty = aer.copy(r_dry=jnp.zeros_like(aer.r_dry))
+        no_mass = state.copy(
+            tracers={k: (jnp.zeros_like(v) if k.startswith("m_") else v)
+                     for k, v in state.tracers.items()})
+        term = JamOpticsTerm(optics_diagnostics=True)
+        term.cache_band_config(band)
+        _, out = term(no_mass, {**diagnostics, "_jam_state": empty}, None, None)
+        self.assertEqual(out["aerosol"].aod_sw_per_band.dtype, jnp.float32)
+        for key in ("od550aer", "od550_wat", "abs550_wat"):
+            np.testing.assert_array_equal(np.asarray(out[key]), 0.0)
+        self.assertTrue(
+            bool(np.all(np.isfinite(np.asarray(out["aerosol"].aod_sw_per_band)))))
+
+        def water_from_mass(jam_state, scale):
+            tr = {k: (scale * v if k.startswith("m_") else v)
+                  for k, v in state.tracers.items()}
+            _, o = term(state.copy(tracers=tr),
+                        {**diagnostics, "_jam_state": jam_state}, None, None)
+            return jnp.sum(o["od550_wat"])
+
+        # A degenerate r_dry carrying REAL mass must still add no water. This
+        # is the discriminating half: with a bare floor instead of the select
+        # the growth ratio would be (r_wet/1e-12)³ and the mode would be
+        # essentially all water.
+        wet = lambda s: water_from_mass(empty, s)
+        self.assertEqual(float(wet(jnp.float32(1.0))), 0.0)
+        self.assertEqual(float(jax.grad(wet)(jnp.float32(1.0))), 0.0)
+
+        # And an all-empty cell must leave a FINITE gradient. Making the water
+        # proportional to vol_dry means vol_tot is exactly zero there, which a
+        # floored denominator would turn into a NaN cotangent (0 x inf) and
+        # poison the whole reverse pass; clean columns are most of a cold-start
+        # aerosol field, so this is a hard requirement, not a corner case.
+        clean = lambda s: water_from_mass(aer, s)
+        self.assertEqual(float(jax.grad(clean)(jnp.float32(0.0))), 0.0)
 
     def test_column_aod_550_diagnostic(self):
         from jcm.physics.aerosol.aerosol_types import AerosolData
@@ -365,10 +544,6 @@ class JamOpticsTermTest(unittest.TestCase):
 
         g = jax.grad(loss)(jnp.asarray(1.0))
         self.assertTrue(np.isfinite(float(g)))
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class OpticsDiagnosticsTest(unittest.TestCase):
@@ -558,6 +733,54 @@ class OpticsDiagnosticsTest(unittest.TestCase):
             np.asarray(out["abs550aer"]), rtol=1e-4, atol=1e-12)
         np.testing.assert_allclose(np.asarray(out["abs550_bc"]), 0.0, atol=1e-20)
 
+    def test_water_fraction_is_the_third_moment_growth(self):
+        """The water share of a mode's extinction equals its VOLUME share,
+        ``(g³ − 1)/g³`` with ``g = r_wet/r_dry`` — exact and Mie-independent.
+
+        Extinction is apportioned by volume fraction and every particle of
+        a κ-Köhler mode grows by the same ``g``, so the wet third moment is
+        ``g³`` times the dry one and the water fraction of the mode's total
+        volume is ``(g³ − 1)/g³`` regardless of ``σ_g``. The modes carry
+        different κ, so the column total is the per-mode-AOD-weighted mean of
+        the shares.
+
+        ``center_modes=True`` keeps every mode strictly inside its ``dg``
+        bounds, which is what makes the comparison against issue #790's table
+        exact here: with no clip active, ``N·(4/3)π·(r_wet³ − r_dry³)`` on
+        this state gives a water volume smaller by precisely
+        ``exp(4.5 ln²σ_g)`` — 2.70 at σ_g = 1.6, 4.73 at σ_g = 1.8. (On a
+        clipped mode the factor is ``(dg_clip/dg_true)³/exp(4.5 ln²σ_g)``
+        instead, which can land either side of 1.) The assertion itself does
+        not depend on that: it is a pure ratio and holds clipped or not.
+        """
+        state, diagnostics, band, _, _ = _setup()
+        d_in = _consistent_state(state, diagnostics, saturation=0.8,
+                                 center_modes=True)
+        aer = d_in["_jam_state"]
+        term = JamOpticsTerm(optics_diagnostics=True)
+        term.cache_band_config(band)
+        _, out = term(state, d_in, None, None)
+        expected = np.zeros_like(np.asarray(out["od550aer"]))
+        for i, mode in enumerate(MAM4_SPEC.modes):
+            # The docstring's appeal to #790's table holds only off the clip
+            # bounds, so assert that rather than trusting ``center_modes``.
+            dg = 2.0 * np.asarray(aer.r_dry[i])
+            self.assertTrue(bool(np.all(dg > mode.dgnum_lo)), mode.short)
+            self.assertTrue(bool(np.all(dg < mode.dgnum_hi)), mode.short)
+            g3 = np.asarray(aer.r_wet[i] / aer.r_dry[i]) ** 3      # (nlev, ncols)
+            # Uniform saturation and species mix -> one g per mode.
+            np.testing.assert_allclose(g3, g3.flat[0], rtol=1e-6)
+            share_i = (g3.flat[0] - 1.0) / g3.flat[0]
+            self.assertGreater(share_i, 0.0)
+            expected += share_i * np.asarray(out[f"od550_mode_{mode.short}"])
+        np.testing.assert_allclose(np.asarray(out["od550_wat"]), expected,
+                                   rtol=1e-5)
+        # And the share is substantial for the soluble modes at RH 0.8, so on
+        # this unclipped state the number-median-radius form would show as the
+        # 2.70x/4.73x deficit of #790's table.
+        share = np.asarray(out["od550_wat"]) / np.asarray(out["od550aer"])
+        self.assertGreater(float(share.min()), 0.3)
+
     def test_angstrom_discriminates_fine_from_coarse(self):
         """Physical validation of the spectral pass, not just its plumbing.
 
@@ -584,3 +807,184 @@ class OpticsDiagnosticsTest(unittest.TestCase):
         self.assertGreater(fine, 1.5, f"fine-mode Angstrom too low: {fine}")
         self.assertLess(coarse, 0.5, f"coarse-mode Angstrom too high: {coarse}")
         self.assertGreater(fine, coarse)
+
+
+class _VolumeExtinctionOptics(JamOpticsTerm):
+    """A minimal per-VOLUME backend, to exercise the ``_mode_optics`` seam.
+
+    Deliberately shaped like an emulator rather than like the default
+    quadrature: it predicts an extinction per unit particle VOLUME, so it
+    consumes ``vol_total``/``col_factor`` instead of ``num_per_area`` and never
+    touches the Mie LUT. That is the normalisation the seam exists to support
+    — anything that already speaks in per-particle cross-sections would fit
+    the default path without a hook.
+
+    The refractive index enters through ``m_k`` only so the test can tell that
+    the mixed index really reached the backend.
+    """
+
+    KE_RHO = 2.0e6      # [1/m]
+    SSA = 0.9
+    ASY = 0.7
+
+    def _build_mie_lut(self):
+        return None
+
+    def _mode_optics(self, inputs):
+        ke_rho = self.KE_RHO * (1.0 + inputs.m_k)
+        tau = ke_rho * inputs.vol_total * inputs.col_factor
+        scat = self.SSA * tau
+        return tau, scat, self.ASY * scat
+
+    def _map_bands(self, one_band, lam_all, ri_j):
+        return jax.lax.map(lambda xs: one_band(xs[0], xs[1]), (lam_all, ri_j))
+
+
+class _VmapVolumeExtinctionOptics(_VolumeExtinctionOptics):
+    """The same backend on the default (``vmap``) band map, for the A/B."""
+
+    def _map_bands(self, one_band, lam_all, ri_j):
+        return jax.vmap(one_band)(lam_all, ri_j)
+
+
+class ModeOpticsSeamTest(unittest.TestCase):
+    """The ``_mode_optics``/``_map_bands`` extension point (jax-gcm#791).
+
+    An external package supplies an alternative Mie pathway by subclassing
+    ``JamOpticsTerm`` and overriding these hooks; the base class keeps the
+    modal geometry, the mass gate, the SSA/asymmetry weighting and the
+    AeroCom apportionment, so none of that is duplicated. These tests pin the
+    parts of the contract an out-of-tree subclass depends on.
+    """
+
+    def test_backend_optics_reach_the_aerosol_struct(self):
+        """A per-volume backend's SSA/asymmetry survive to the band arrays."""
+        state, diagnostics, band, n_sw, n_lw = _setup()
+        diagnostics = _consistent_state(state, diagnostics)
+        term = _VolumeExtinctionOptics()
+        term.cache_band_config(band)
+        fields = term._compute_fields(state, diagnostics)
+
+        aod = np.asarray(fields["aod_sw_per_band"])
+        self.assertEqual(aod.shape[0], n_sw)
+        self.assertTrue(np.all(np.isfinite(aod)))
+        self.assertGreater(float(aod.max()), 0.0)
+        # Every populated cell is a mix of modes that all report the same
+        # SSA/asymmetry, so the extinction-weighted averages are exactly them.
+        lit = aod > 0.0
+        np.testing.assert_allclose(
+            np.asarray(fields["ssa_sw_per_band"])[lit],
+            _VolumeExtinctionOptics.SSA, rtol=1e-5)
+        np.testing.assert_allclose(
+            np.asarray(fields["asy_sw_per_band"])[lit],
+            _VolumeExtinctionOptics.ASY, rtol=1e-5)
+        self.assertEqual(
+            np.asarray(fields["aod_lw_per_band"]).shape[0], n_lw)
+
+    def test_backend_skips_the_lut_build(self):
+        """``_build_mie_lut`` is what saves a backend the ~4 s table build."""
+        self.assertIsNone(_VolumeExtinctionOptics()._lut)
+        self.assertIsNotNone(JamOpticsTerm()._lut)
+
+    def test_band_map_hook_is_memory_strategy_only(self):
+        """``lax.map`` and ``vmap`` over bands must agree to rounding.
+
+        Not bit-for-bit: XLA lowers a batched and a scanned band axis
+        differently, and the two associate the float32 arithmetic differently,
+        which shows up at ~2 ulp. The point of the test is that the choice of
+        band map is a memory strategy and nothing else — any difference beyond
+        rounding would mean it had changed the physics.
+        """
+        state, diagnostics, band, _, _ = _setup()
+        diagnostics = _consistent_state(state, diagnostics)
+        out = {}
+        for name, cls in (("map", _VolumeExtinctionOptics),
+                          ("vmap", _VmapVolumeExtinctionOptics)):
+            term = cls()
+            term.cache_band_config(band)
+            out[name] = term._compute_fields(state, diagnostics)
+        for key in ("aod_sw_per_band", "ssa_sw_per_band", "asy_sw_per_band",
+                    "aod_lw_per_band", "aod_profile"):
+            np.testing.assert_allclose(
+                np.asarray(out["map"][key]), np.asarray(out["vmap"][key]),
+                rtol=1e-5, atol=0.0,
+                err_msg=f"{key} differs between the two band maps")
+
+    def test_base_class_still_owns_the_aerocom_decomposition(self):
+        """Per-species apportionment works for a backend that never sees it."""
+        state, diagnostics, band, _, _ = _setup()
+        diagnostics = _consistent_state(state, diagnostics)
+        term = _VolumeExtinctionOptics(optics_diagnostics=True)
+        term.cache_band_config(band)
+        _, out = term(state, diagnostics, None, None)
+
+        total = np.asarray(out["od550aer"])
+        self.assertGreater(float(total.mean()), 0.0)
+        species = sorted({sp for m in MAM4_SPEC.modes for sp in m.species})
+        parts = sum(np.asarray(out[f"od550_{sp}"]) for sp in species)
+        parts = parts + np.asarray(out["od550_wat"])
+        np.testing.assert_allclose(parts, total, rtol=1e-5)
+
+    def test_backend_gradients_are_finite(self):
+        """The seam's contract: finite derivatives through an aerosol mass.
+
+        The dry-mass gate and the layer-tau cap downstream select and bound
+        VALUES — they cannot repair a non-finite derivative produced inside
+        ``_mode_optics``, because reverse mode multiplies a zero cotangent
+        into whatever came back. This pins that a conforming backend's
+        gradients survive the surrounding machinery.
+        """
+        state, diagnostics, band, _, _ = _setup()
+        diagnostics = _consistent_state(state, diagnostics)
+        term = _VolumeExtinctionOptics()
+        term.cache_band_config(band)
+        key = mass_name("so4", "acc")
+
+        def loss(scale):
+            tracers = dict(state.tracers)
+            tracers[key] = tracers[key] * scale
+            fields = term._compute_fields(state.copy(tracers=tracers),
+                                          diagnostics)
+            return jnp.sum(fields["aod_sw_per_band"])
+
+        g = float(jax.grad(loss)(1.0))
+        self.assertTrue(np.isfinite(g))
+        self.assertGreater(g, 0.0)
+
+    def test_replace_attaches_a_subclass_by_category(self):
+        """The documented attachment route for an out-of-tree backend.
+
+        A backend ships as a ``JamOpticsTerm`` subclass and is attached in
+        Python, by category, on an assembled package — there is no in-repo
+        registry or config key to add a backend to, deliberately, because the
+        implementations live outside this repository.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        physics = echam_physics(aerosol_module="jam", cloud_scheme="2m")
+        swapped = physics.replace("aerosol_optics", _VolumeExtinctionOptics())
+
+        gate = [t for t in physics.terms
+                if t.category == "aerosol_optics"][0]._radiation_interval_s
+        self.assertEqual(gate, 7200.0)
+        swapped_gate = [t for t in swapped.terms
+                        if t.category == "aerosol_optics"][0]._radiation_interval_s
+        self.assertEqual(
+            swapped_gate, gate,
+            "the replacement lost the radiation cadence, so it would recompute "
+            "every band on every step instead of every eighth")
+
+        default = [t for t in physics.terms if t.category == "aerosol_optics"]
+        replaced = [t for t in swapped.terms if t.category == "aerosol_optics"]
+        self.assertEqual(len(default), 1)
+        self.assertEqual(len(replaced), 1)
+        self.assertIsInstance(replaced[0], _VolumeExtinctionOptics)
+        # Position preserved, so the JAM chain's validated ordering — the
+        # optics sit after the microphysics core that writes ``_jam_state``
+        # — survives the swap. ``ComposablePhysics`` would raise here if not.
+        self.assertEqual([t.category for t in physics.terms],
+                         [t.category for t in swapped.terms])
+
+
+if __name__ == "__main__":
+    unittest.main()

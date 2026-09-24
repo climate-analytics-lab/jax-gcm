@@ -16,6 +16,8 @@ import xarray
 
 from jcm import cf_metadata
 
+logger = logging.getLogger(__name__)
+
 DYNAMICS_UNITS_TABLE_CSV_PATH = resources.files('jcm') / 'dynamics_units_table.csv'
 
 TRUNCATION_FOR_NODAL_SHAPE = {
@@ -26,14 +28,26 @@ TRUNCATION_FOR_NODAL_SHAPE = {
     (256, 128): 85,
     (320, 160): 106,
     (360, 180): 119,
+    (384, 192): 127,  # T127 — ECHAM high-resolution grid (supported, not validated)
     (512, 256): 170,
     (640, 320): 213,
+    (768, 384): 255,  # T255 — ECHAM very-high-resolution grid (supported, not validated)
     (1024, 512): 340,
     (1280, 640): 425,
 }
 
 VALID_NODAL_SHAPES = tuple(TRUNCATION_FOR_NODAL_SHAPE.keys())
 VALID_TRUNCATIONS = tuple(TRUNCATION_FOR_NODAL_SHAPE.values())
+
+#: Truncations dinosaur has no ``Grid.T<n>`` factory for, built with
+#: ``Grid.construct`` at ECHAM's node count (``gaussian_nodes`` = nlat/2, the
+#: Gaussian latitudes per hemisphere). Derived from the table above so each
+#: nodal shape is declared in exactly one place.
+_ECHAM_GAUSSIAN_NODES = {
+    trunc: nlat // 2
+    for (nlon, nlat), trunc in TRUNCATION_FOR_NODAL_SHAPE.items()
+    if trunc in (63, 127, 255)
+}
 
 def get_coords(
     vertical_coords: Union[typing.Array, SigmaCoordinates, HybridCoordinates],
@@ -84,16 +98,19 @@ def get_coords(
         spectral_truncation = TRUNCATION_FOR_NODAL_SHAPE[nodal_shape]
     elif spectral_truncation not in VALID_TRUNCATIONS:
         raise ValueError(f"Invalid horizontal resolution: {spectral_truncation}. Must be one of: {VALID_TRUNCATIONS}.")
-    # Most truncations have a dedicated dinosaur factory (Grid.T31, T42, …);
-    # T63 doesn't, so build it directly via Grid.construct with
-    # gaussian_nodes=(max_wavenumber+1)/2-rounded so the nodal grid matches
-    # the ECHAM T63 file (192 lon × 96 lat). For all other supported
-    # truncations the dedicated Grid.T* factory uses the same convention,
-    # so we use it where available.
-    if spectral_truncation == 63:
+    # Most truncations have a dedicated dinosaur factory (Grid.T31, T42, …).
+    # The ECHAM truncations T63/T127/T255 don't, so they are built directly
+    # via Grid.construct with ECHAM's own node count (gaussian_nodes = nlat/2),
+    # giving the 192x96 / 384x192 / 768x384 quadratic grids of ECHAM's
+    # T63GR15 / T127GR15 / T255 boundary files node-for-node (the Gaussian
+    # latitudes agree with those files to ~1e-13 deg). Every other supported
+    # truncation's Grid.T* factory uses the same quadratic convention.
+    if spectral_truncation in _ECHAM_GAUSSIAN_NODES:
         def horizontal_grid(**kwargs):
             return dinosaur.spherical_harmonic.Grid.construct(
-                max_wavenumber=63, gaussian_nodes=48, **kwargs)
+                max_wavenumber=spectral_truncation,
+                gaussian_nodes=_ECHAM_GAUSSIAN_NODES[spectral_truncation],
+                **kwargs)
     else:
         horizontal_grid = getattr(
             dinosaur.spherical_harmonic.Grid, f'T{spectral_truncation}')
@@ -500,14 +517,14 @@ def _resolve_tracer_vars(ds, tracer_vars, required_tracers) -> dict[str, str]:
     if tracer_vars is None:
         resolved = {name: name for name in names if name in ds}
         if resolved:
-            logging.info(
+            logger.info(
                 "load_states_from_xarray: loading tracer(s) %s, declared by "
                 "the physics and present in the state file.",
                 ", ".join(resolved),
             )
         missing = [name for name in names if name not in resolved]
         if missing:
-            logging.warning(
+            logger.warning(
                 "load_states_from_xarray: the physics declares tracer(s) %s "
                 "but the state file carries no such variable(s); physics will "
                 "see them as absent (zero).",
@@ -517,7 +534,7 @@ def _resolve_tracer_vars(ds, tracer_vars, required_tracers) -> dict[str, str]:
 
     dropped = [name for name in names if name not in tracer_vars and name in ds]
     if dropped:
-        logging.warning(
+        logger.warning(
             "load_states_from_xarray: tracer(s) %s are declared by the physics "
             "and present in the state file, but the explicit tracer_vars "
             "mapping omits them; physics will see them as zero.",
@@ -542,7 +559,7 @@ def _check_top_first_pressures(ds, surface_pressure_var: str) -> None:
     detector, not a precision check on the vertical grid.
 
     Skipped when the file has no ``pressure_full`` (a trimmed restart file
-    holding only the prognostic fields, e.g. ``spinup_state.nc``) or when the
+    holding only the prognostic fields) or when the
     sampled column is not finite; those fall back to the ``level``-coordinate
     inference alone.
 
@@ -674,14 +691,14 @@ def load_states_from_xarray(
                 ds = cf_metadata.orient_top_first(ds)
             # else: ascending sigma is already top-first; pass through.
         else:
-            logging.warning(
+            logger.warning(
                 "load_states_from_xarray: %r coordinate is non-numeric or "
                 "size<=1; cannot determine vertical orientation. Assuming the "
                 "Dataset is already top-first (physics frame).",
                 cf_metadata.LEVEL_DIM,
             )
     else:
-        logging.warning(
+        logger.warning(
             "load_states_from_xarray: no %r coordinate present; cannot "
             "determine vertical orientation. Assuming the Dataset is already "
             "top-first (physics frame).",

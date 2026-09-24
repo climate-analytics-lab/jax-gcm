@@ -5,6 +5,7 @@ Derecho login node: ``docs/source/design/test_suite_memory.md``.
 """
 
 import gc
+import logging
 import os
 import sys
 
@@ -18,17 +19,66 @@ _PYSES_TESTS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 _X64_BASELINE = False
 
+# Level and propagation of every ``jcm`` logger as the session found them,
+# keyed by name. Normally empty: ``pytest_configure`` runs before collection
+# imports ``jcm``, and nothing in the package sets a level at import time, so
+# in practice every logger restores to the ``NOTSET`` default below. It is
+# captured anyway so that a package that *did* set one (issue #817 weighs
+# attaching jcm's handler to the ``jcm`` logger, which would) is preserved
+# rather than silently flattened by the restore. See ``_pin_logging_levels``.
+_LOGGING_BASELINE = {}
+
+
+def _disable_gpu_preallocation():
+    """Force ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` for the test session.
+
+    XLA's default claims 75 % of the card at backend initialisation, and
+    merely *importing* a test module that reaches jcm triggers that (#859:
+    the SPEEDY lookup tables are built on jcm's import chain) — measured at
+    61,214 MiB of an 80 GB A100 for a process whose test then does no device
+    work at all. On a shared box that locks out colleagues; worse, it starves
+    this session's own subprocesses: the release-matrix regression integrates
+    each member in a worker process, and a worker can only use what the
+    parent pytest process left on the card. The worker's own
+    ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` governs the worker's pool, not
+    the parent's, so it cannot give back memory the parent already holds —
+    which is how the T106 and JAM members came to OOM under pytest while
+    passing when run directly.
+
+    This therefore OVERRIDES any inherited value rather than defaulting it:
+    an operator's exported ``XLA_PYTHON_CLIENT_PREALLOCATE=true`` would
+    otherwise survive and reproduce exactly that failure. No test needs a
+    preallocated pool (it only changes when memory is claimed, not what a
+    test computes), so there is no explicit choice worth preserving. The
+    variable is read at backend initialisation, not at jax import, so setting
+    it before collection imports anything takes effect; it is applied both at
+    this module's import (the earliest point pytest runs repo code) and in
+    ``pytest_configure``.
+    """
+    os.environ["XLA_PYTHON_CLIENT_PREALLOCATE"] = "false"
+
+
+_disable_gpu_preallocation()
+
 
 def pytest_configure(config):
-    """Record the session's starting ``jax_enable_x64`` (issue #729).
+    """Record the session's starting global config (#729, #815).
 
-    Imported here rather than lazily at the first test because the baseline
-    has to predate every test-module import: a module that flips the flag at
-    collection time would otherwise define the baseline meant to detect it.
+    Both baselines are taken here rather than lazily at the first test
+    because they have to predate every test-module import: a module (or a
+    ``setUpClass``, which runs before any function-scoped fixture) that flips
+    ``jax_enable_x64`` — or builds a quiet ``Model`` — would otherwise define
+    the baseline meant to detect it.
     """
+    _disable_gpu_preallocation()
+
     global _X64_BASELINE
     import jax
     _X64_BASELINE = bool(jax.config.read("jax_enable_x64"))
+
+    for name in _jcm_logger_names():
+        logger = logging.getLogger(name)
+        _LOGGING_BASELINE[name] = (logger.level, logger.propagate)
 
 
 @pytest.fixture(autouse=True)
@@ -52,6 +102,58 @@ def _pin_jax_x64(request):
     _restore()
     yield
     _restore()
+
+
+def _jcm_logger_names():
+    """Every logger in the ``jcm`` hierarchy that currently exists."""
+    return [name for name in list(logging.Logger.manager.loggerDict)
+            if name == "jcm" or name.startswith("jcm.")]
+
+
+def _restore_logging():
+    """Put the ``jcm`` logger levels back to the session baseline.
+
+    A logger with no baseline entry — which is every one of them in a normal
+    run, see ``_LOGGING_BASELINE`` — goes back to ``NOTSET`` and propagating,
+    i.e. deferring to its ancestors, which is how a freshly imported module's
+    logger starts out.
+
+    The root logger is deliberately left alone: pytest owns it (``--log-level``
+    and ``caplog`` set and restore it around each test phase), so pinning it
+    here would quietly override ``--log-level`` for the whole session.
+    """
+    for name in _jcm_logger_names():
+        logger = logging.getLogger(name)
+        level, propagate = _LOGGING_BASELINE.get(name, (logging.NOTSET, True))
+        if logger.level != level:
+            logger.setLevel(level)  # also clears the manager's level cache
+        logger.propagate = propagate
+
+
+@pytest.fixture(autouse=True)
+def _pin_logging_levels():
+    """Hold the ``jcm`` logger levels at the session default (#815).
+
+    ``runners.run()`` sets the level on the ``jcm`` logger from
+    ``run.log_level`` — the CLI is the application, so that is where the
+    knob belongs — and every test that drives a run therefore leaves one
+    behind. That breaks any later test asserting a warning fires, because
+    ``assertLogs(level=...)`` and ``caplog.at_level(...)`` raise only the
+    ROOT logger's level: the record is filtered at its own logger and never
+    propagates. Under xdist it depends on which worker drew the run, so it
+    surfaces as an unreproducible failure in an unrelated module.
+
+    This is what #815 was, in its original form: ``Model.__init__`` used to
+    set the level too, so merely *constructing* a quiet model leaked one.
+    That is gone — jcm the library configures no logging — but the runners
+    layer still legitimately sets a level, so the isolation is still needed.
+
+    Restored before as well as after the test, so a leak from a test that
+    errored out of its own teardown does not travel any further either.
+    """
+    _restore_logging()
+    yield
+    _restore_logging()
 
 
 def _memory_group(item):
@@ -83,6 +185,37 @@ def _rss_bytes():
     return maxrss if sys.platform == "darwin" else maxrss * 1024
 
 
+def _load_malloc_trim():
+    """Return glibc's ``malloc_trim``, or ``None`` where there is no glibc.
+
+    ``malloc_trim(0)`` hands the free pages at the top of every malloc arena
+    back to the OS. Without it a pytest process's RSS only ratchets up: the
+    per-test arrays, traces and the executables ``jax.clear_caches()`` drops
+    are freed to the allocator, which keeps them mapped, so the next test's
+    differently-sized allocations grow the heap again instead of reusing
+    them.
+    """
+    import ctypes
+    import ctypes.util
+
+    name = ctypes.util.find_library("c")
+    if not name or sys.platform == "darwin":
+        return None
+    try:
+        return getattr(ctypes.CDLL(name), "malloc_trim", None)
+    except OSError:
+        return None
+
+
+_malloc_trim = _load_malloc_trim()
+
+
+def _release_freed_heap():
+    """Return freed heap pages to the OS (no-op without glibc)."""
+    if _malloc_trim is not None:
+        _malloc_trim(0)
+
+
 # How far the process may grow between cache clears. Clearing is not free —
 # it forces later tests to recompile — so it is worth doing only once the
 # retained executables are actually costing memory. Zero disables the gate
@@ -109,6 +242,11 @@ def pytest_runtest_teardown(item, nextitem):
     global _rss_at_last_clear
     if nextitem is not None and _memory_group(item) == _memory_group(nextitem):
         return
+    # At every boundary, not only when the caches are dropped: most of what
+    # a finished class leaves behind is already free, just not returned to
+    # the OS, and it is that retained heap that drives a long xdist worker
+    # into the runner's memory ceiling.
+    _release_freed_heap()
     rss = _rss_bytes()
     if _MAX_GROWTH_BYTES > 0 and rss is not None:
         if _rss_at_last_clear is None:
@@ -121,4 +259,5 @@ def pytest_runtest_teardown(item, nextitem):
     import jax
     jax.clear_caches()
     gc.collect()
+    _release_freed_heap()
     _rss_at_last_clear = _rss_bytes()

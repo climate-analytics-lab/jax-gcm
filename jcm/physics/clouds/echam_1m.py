@@ -25,7 +25,11 @@ from typing import NamedTuple, Tuple, Optional
 import tree_math
 
 import jcm.constants as c
-from jcm.physics.clouds.cloud_utils import eff_liquid_droplet_radius
+from jcm.physics.clouds.cloud_utils import (
+    eff_liquid_droplet_radius,
+    latent_heat_over_cp,
+    moist_isobaric_heat_capacity,
+)
 
 # Defaults shared by the ``default`` factory's signature AND its legacy-config
 # guard (F2, #674): the Beheng rate prefactor and the KK2000 in-cloud qc
@@ -33,6 +37,24 @@ from jcm.physics.clouds.cloud_utils import eff_liquid_droplet_radius
 # signature ships, and they can never drift apart.
 _BEHENG_CCRAUT_DEFAULT = 15.0
 _KK2000_QC_THRESHOLD_DEFAULT = 1.0e-5
+
+# The smallest denominator a float32 quotient can be *differentiated* at.
+# Both AD modes multiply the denominator's tangent/cotangent by ``den**-2``,
+# which XLA evaluates as ``1/(den*den)``; with subnormals flushed to zero on
+# the CPU backend that reciprocal is ``inf`` for every ``den`` below
+# ``2**-63 = 1.08e-19`` (measured exactly there), and the numerator's own zero
+# then turns ``0 * inf`` into ``nan`` while the forward quotient is a perfectly
+# good 0. So a denominator that a ``where`` has made merely *positive* is not
+# yet safe to divide by: it has to clear this bound.
+#
+# This is a property of float32, not of any physical scale, so it is a module
+# constant rather than a tunable — and distinct from ``MicrophysicsParameters``
+# ``d_epsilon`` (1e-30), which floors the *dead* branch of a ``where`` where
+# only strict positivity matters and nothing is ever divided by it. A tenfold
+# margin above the measured bound; condensate below it is eleven orders under
+# ``ccwmin`` and six under ``cqtmin``, i.e. no cloud by any of this scheme's
+# own definitions.
+_MIN_DIFFERENTIABLE_DENOMINATOR = 1.0e-18
 
 
 @tree_math.struct
@@ -71,7 +93,9 @@ class MicrophysicsParameters:
                          # (ECHAM mo_echam_cloud_params: 95.0)
     ccsacl: float        # Riming efficiency of snow collecting cloud
                          # water (ECHAM: 0.10)
-    cvtfall: float       # Terminal velocity factor for ice
+    cvtfall: float       # Ice/snow terminal-velocity factor. ECHAM at nn==63
+                         # (jcm's default grid) is 2.5 (mo_echam_cloud_params.f90
+                         # :211); the 2M scheme uses 2.5 too (#675).
 
     # Cloud droplet number concentration
     base_cdnc: float     # Baseline CDNC in clean air (1/m³), modulated by aerosol cdnc_factor
@@ -165,7 +189,7 @@ class MicrophysicsParameters:
                 ccracl=6.0, cauloc=0.0, clmin=0.0, clmax=0.5,
                  ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
                  crhosno=100.0, ccsaut=95.0, ccsacl=0.1,
-                 cvtfall=3.29, base_cdnc=100.0e6,
+                 cvtfall=2.5, base_cdnc=100.0e6,
                  t_mix_min=238.15, t_mix_max=273.15,
                  epsilon=1.0e-12, d_epsilon=1.0e-30,
                  cqtmin=1.0e-12, ccwmin=1.0e-7,
@@ -325,7 +349,9 @@ def autoconversion_beheng(
         cloud_water: Grid-mean cloud water mixing ratio (kg/kg)
         cloud_fraction: Cloud fraction (0-1)
         air_density: Air density (kg/m³)
-        droplet_number: Cloud droplet number concentration (1/m³)
+        droplet_number: Cloud droplet number concentration PER KG of air
+            (1/kg). Multiplied by ``air_density`` internally to get 1/cm³,
+            so a per-kg input is required (the caller passes cdnc/ρ).
         dt: Time step (s)
         config: Microphysics configuration (uses ccraut, epsilon)
 
@@ -390,7 +416,9 @@ def autoconversion_kk2000(
         cloud_water: Grid-mean cloud water mixing ratio (kg/kg)
         cloud_fraction: Cloud fraction (0-1)
         air_density: Air density (kg/m³)
-        droplet_number: Cloud droplet number concentration (1/m³)
+        droplet_number: Cloud droplet number concentration PER KG of air
+            (1/kg). Multiplied by ``air_density`` internally to get 1/cm³,
+            so a per-kg input is required (the caller passes cdnc/ρ).
         dt: Time step (s) — unused (explicit rate); kept in signature
             for parity with ``autoconversion_beheng``.
         config: Microphysics configuration (uses ccraut_kk_threshold,
@@ -519,53 +547,6 @@ def ice_autoconversion(
     return cloud_fraction * zsaut / dt
 
 
-def sedimentation_flux(
-    hydrometeor: jnp.ndarray,
-    air_density: jnp.ndarray,
-    dz: jnp.ndarray,
-    terminal_velocity: jnp.ndarray,
-    dt: float
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Calculate sedimentation flux and tendency for a hydrometeor
-    
-    Uses upwind differencing with flux limiter to maintain stability.
-    JAX-compatible implementation without loops.
-    
-    Args:
-        hydrometeor: Hydrometeor mixing ratio (kg/kg) [nlev]
-        air_density: Air density (kg/m³) [nlev]
-        dz: Layer thickness (m) [nlev]
-        terminal_velocity: Fall velocity (m/s) [nlev]
-        dt: Time step (s)
-        
-    Returns:
-        Tuple of (flux [nlev+1], tendency [nlev])
-
-    """
-    # Mass content (kg/m³)
-    mass_content = hydrometeor * air_density
-    
-    # Calculate fluxes at each interface (upwind)
-    # Flux from level k to k+1
-    flux_unlimited = mass_content * terminal_velocity
-    
-    # CFL limiter to prevent overshooting
-    max_flux = mass_content * dz / dt
-    flux_limited = jnp.minimum(flux_unlimited, max_flux)
-    
-    # Build interface fluxes
-    # flux[0] = 0 (top), flux[k+1] = flux from level k
-    flux = jnp.concatenate([jnp.zeros(1), flux_limited])
-    
-    # Tendency from flux divergence
-    # (flux_in - flux_out) / (dz * rho)
-    flux_in = flux[:-1]  # Flux from above
-    flux_out = flux[1:]  # Flux to below
-    tendency = (flux_in - flux_out) / (dz * air_density)
-    
-    return flux, tendency
-
-
 def _saturation_adjustment_layer(
     T: jnp.ndarray,
     q: jnp.ndarray,
@@ -574,6 +555,7 @@ def _saturation_adjustment_layer(
     p: jnp.ndarray,
     config: MicrophysicsParameters,
     cf: jnp.ndarray | None = None,
+    cp: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Per-layer cuadjtq-style saturation adjustment.
 
@@ -615,13 +597,21 @@ def _saturation_adjustment_layer(
     # of every code path that touches echam_1m.
     from jcm.physics.clouds.sundqvist import _qs_and_dqs_dt
 
+    # Divide latent heat by the MOIST heat capacity when the caller supplies it
+    # (the column sweep passes the per-level ``cpd·(1 + vtmpc2·q)``), so the
+    # condensation heating in this Newton step uses the SAME cp as the
+    # microphysics ledger that follows it — otherwise condensation and
+    # evaporation in one column would run on different heat capacities (#706).
+    # ``cp=None`` (legacy/standalone callers) keeps the dry ``cpd``.
+    cp_use = c.cpd if cp is None else cp
+
     weight_liquid = jnp.clip(
         (T - config.t_mix_min)
         / jnp.maximum(config.t_mix_max - config.t_mix_min, 1e-3),
         0.0, 1.0,
     )
     L_eff = weight_liquid * c.alhc + (1.0 - weight_liquid) * c.alhs
-    L_cp = L_eff / c.cpd
+    L_cp = L_eff / cp_use
 
     # ---- Pass 1: linearised Newton step, CLOUD-FRACTION weighted ----
     # ECHAM's condensational growth/dissipation ``zqcdif`` carries a
@@ -655,16 +645,22 @@ def _saturation_adjustment_layer(
     cond_total = cond1 + cond2
 
     # ---- Partition between liquid / ice ----
-    # The guard threshold is ``d_epsilon``, NOT ``> 0``. The double-where
-    # protects the unselected branch, but the division VJP on the SELECTED
-    # branch computes ``-g * qc / (safe_total * safe_total)``, and for
-    # 0 < total_cloud < ~1e-154 (spectral-ringing condensate tails reach
-    # 1e-287 in real JW columns) the squared denominator underflows to 0,
-    # giving 0/0 = NaN in the reverse pass while the forward is perfectly
-    # finite. Any total below ``d_epsilon`` is physically no cloud at all,
-    # and treating it as the cloud-free branch changes the increments by
-    # at most O(total_cloud) ~ 1e-30 kg/kg.
-    has_cloud = total_cloud > config.d_epsilon
+    # The guard threshold is ``_MIN_DIFFERENTIABLE_DENOMINATOR``, NOT ``> 0``
+    # and not ``d_epsilon``. The double-``where`` below protects the unselected
+    # branch, but ``safe_total`` is what the SELECTED branch actually divides
+    # by, and both AD modes weight that denominator's perturbation by
+    # ``safe_total**-2``. A spectral-ringing condensate tail — 4e-30 kg/kg of
+    # ice in a nominally clear layer is an ordinary state of a running column,
+    # and the one this sweep's term-level gradient check lands on — squares to
+    # nothing in float32, so that factor is ``inf``; the liquid numerator is
+    # exactly 0 there, and ``0 * inf`` is ``nan`` in every output the scan
+    # touches from that level down, off a finite forward pass. The threshold
+    # has to clear the float32 bound for that reason and not a physical one
+    # (see the constant), and a total below it is no cloud at all by this
+    # scheme's own thresholds, so routing it to the cloud-free branch moves
+    # the increments by at most O(total_cloud) ~ 1e-18 kg/kg and the
+    # temperature by ~1e-15 K.
+    has_cloud = total_cloud > _MIN_DIFFERENTIABLE_DENOMINATOR
     safe_total = jnp.where(has_cloud, total_cloud, 1.0)
     qc_frac = jnp.where(has_cloud, qc / safe_total, 0.0)
     qi_frac = jnp.where(has_cloud, qi / safe_total, 0.0)
@@ -686,7 +682,7 @@ def _saturation_adjustment_layer(
         cond_total * qi_frac,
     )
     L_for_dT = jnp.where(cond_total > 0, L_eff, L_evap)
-    dT = L_for_dT * cond_total / c.cpd
+    dT = L_for_dT * cond_total / cp_use
     return dT, dq, dqc, dqi
 
 
@@ -719,8 +715,16 @@ def cloud_microphysics_column_sweep(
     droplet_number: jnp.ndarray,
     dt: float,
     config: Optional[MicrophysicsParameters] = None,
+    specific_humidity_m1: Optional[jnp.ndarray] = None,
 ) -> Tuple[MicrophysicsTendencies, MicrophysicsState]:
     """ECHAM ``mo_cloud.f90`` column-sweep cloud + microphysics routine.
+
+    ``temperature`` / ``specific_humidity`` are the provisional
+    (post-vdiff/convection) state the sweep acts on and its tendencies are
+    relative to. ``specific_humidity_m1`` is the STEP-START humidity (ECHAM
+    ``qm1``) from which the moist heat capacity ``pcair`` — and hence every
+    ``L/cp`` latent-heat factor — is built; it defaults to
+    ``specific_humidity`` for standalone callers with no upstream increment.
 
     Faithful port of ICON/ECHAM ``mo_cloud.f90`` lines 260-1080. Treats
     rain (``zrfl``) and snow (``zsfl``) as **downward fluxes** that
@@ -787,14 +791,28 @@ def cloud_microphysics_column_sweep(
     nlev = temperature.shape[0]
     pmref = air_density * layer_thickness     # kg/m² per layer
 
-    # Phase weights for the latent-heat update from snow melting / riming.
-    zlsdcp = c.alhs / c.cpd
-    zlvdcp = c.alhc / c.cpd
-    zlfdcp = zlsdcp - zlvdcp        # alhf / cp
+    # Latent-heat-to-heat-capacity ratios built from the MOIST heat capacity
+    # ``cpd·(1 + vtmpc2·q)`` (ECHAM zlvdcp = alv/pcair, zlsdcp = als/pcair;
+    # mo_cloud.f90:412-414). ECHAM builds pcair ONCE per step in physc
+    # (physc.f90:289, ``zcair = cpd + cpd·vtmpc2·max(qm1, 0)``) from the
+    # STEP-START humidity qm1 — before vdiff/convection advance q — and hands
+    # that same array to cloud; so q here is ``specific_humidity_m1``, not
+    # the provisional post-upstream humidity the sweep otherwise acts on
+    # (same anchoring as the 2M port). Per-level (nlev,) columns, fixed
+    # through the sweep. Every latent term below (melt, clear-sky
+    # evaporation, riming, rain evap) and the in-sweep saturation adjustment
+    # divide by this SAME per-level cp so the column's latent heating stays
+    # internally consistent (#706).
+    if specific_humidity_m1 is None:
+        specific_humidity_m1 = specific_humidity
+    zlvdcp_col, zlsdcp_col = latent_heat_over_cp(specific_humidity_m1)
+    zlfdcp_col = zlsdcp_col - zlvdcp_col        # alhf / cp
+    cp_moist_col = moist_isobaric_heat_capacity(specific_humidity_m1)
 
     def step(carry, level_inputs):
         zrfl, zsfl, zclcpre, zxiflux = carry
-        T0, q0, p, qc0, qi0, cf, rho, dz, ndrop, mref, is_bottom = level_inputs
+        (T0, q0, p, qc0, qi0, cf, rho, dz, ndrop, mref, is_bottom,
+         zlvdcp, zlsdcp, zlfdcp, cp_moist_k) = level_inputs
 
         # ---------- (0a) instant melt of cloud ice above the melting point
         # (ECHAM zimlt): ice cannot persist at T > tmelt; it converts to
@@ -915,7 +933,7 @@ def cloud_microphysics_column_sweep(
         # ``(T0, q0, qc0, qi0)`` — same logic as ECHAM ``mo_cloud.f90``
         # 696-784. Outputs are absolute increments over ``dt``.
         dT_cond_a, dq_cond_a, dqc_cond_a, dqi_cond_a = _saturation_adjustment_layer(
-            T0, q0, qc0, qi0, p, config, cf=cf,
+            T0, q0, qc0, qi0, p, config, cf=cf, cp=cp_moist_k,
         )
         T1 = T0 + dT_cond_a
         q1 = q0 + dq_cond_a
@@ -1001,70 +1019,105 @@ def cloud_microphysics_column_sweep(
         zrac1 = zxlb * _impl_depletion(config.ccracl * zxrp1 * dt)
         zxlb = zxlb - zrac1
 
-        # (3c) Snow riming of cloud water (ECHAM zsacl1, mo_cloud.f90:
-        # 1054-1100): geometric sweep-out rate from the Marshall-Palmer
-        # snow content, K = π·cn0s·3.078·λ^0.8125·√(1.3/ρ) with
-        # λ = (zxsp1/(π·crhosno·cn0s))^0.8125-argument, times the riming
-        # efficiency ccsacl = 0.10, integrated implicitly. The previous
-        # code reused the RAIN accretion coefficient (ccracl = 6.0) on the
-        # raw snow content — ~3× too much riming per step — and gated on
-        # T < tmelt, which the Fortran doesn't (above melting the incoming
-        # snow has already melted to rain). (Review finding 2.14.)
-        zlamsm_arg = jnp.maximum(
-            zxsp1 / (jnp.pi * config.crhosno * config.cn0s), 0.0,
-        )
-        ksnow = jnp.where(
-            zxsp1 > config.epsilon,
-            jnp.pi * config.cn0s * 3.078
-            * jnp.where(zxsp1 > config.epsilon, zlamsm_arg, 1.0) ** 0.8125
-            * zqrho_sqrt,
-            0.0,
-        )
-        zsacl = zxlb * _impl_depletion(ksnow * config.ccsacl * dt)
-        zxlb = zxlb - zsacl
-
-        # (3d) Local-rain accretion (zrac2). ECHAM ``mo_cloud.f90:860``:
+        # (3c) Local-rain accretion (zrac2). ECHAM ``mo_cloud.f90:1009``:
         # ``ztmp2 = -ccracl · zauloc · rho · zraut · dt`` then
-        # ``zrac2 = zxlb · (1 - exp(ztmp2))``. ``zauloc`` scales with
-        # layer thickness; clipped to ``[clmin, clmax]``. With the
-        # ECHAM6.3 default ``cauloc=0`` this is identically zero — the
-        # branch is here for parameter completeness and ICON-style
-        # tunings that enable it.
+        # ``zrac2 = zxlb · (1 - exp(ztmp2))`` — the in-step autoconverted
+        # rain (whose local water content is ``zauloc·rho·zraut``) also
+        # collects cloud water from its source layer. ``zauloc`` scales with
+        # layer thickness, clipped to ``[clmin, clmax]``. With the ECHAM6.3
+        # default ``cauloc=0`` this is identically zero (``zauloc=0``); the
+        # branch exists for ICON-style tunings that enable it. It runs before
+        # riming, matching the Fortran depletion order (zraut, zrac1, zrac2 in
+        # the warm loop; the riming/aggregation passes follow in the cold
+        # loop). The ``· dt`` in the exponent was previously missing — a
+        # ~1750× underestimate of this accretion wherever ``cauloc>0`` enables
+        # it (#675).
         zauloc = jnp.clip(config.cauloc * dz / 5000.0, config.clmin, config.clmax)
         zrac2 = zxlb * _impl_depletion(
-            config.ccracl * zauloc * rho * zraut,
+            config.ccracl * zauloc * rho * zraut * dt,
         )
         zxlb = zxlb - zrac2
 
-        # (3e) Ice autoconversion (qi → snow) and snow aggregation
-        # (qi by falling snow). Sequential like the warm-rain side.
+        # (3d) Ice autoconversion (qi → snow), ECHAM ``zsaut``. Produces the
+        # in-layer snow content ``zxsp2 = zauloc·rho·zsaut`` that the second
+        # riming/aggregation pass below sweeps out (mo_cloud.f90:1050).
         qiaut_rate_in_cloud = ice_autoconversion(
             zxib, T1, jnp.array(1.0), dt, config, air_density=rho,
         )
         zsaut = jnp.minimum(qiaut_rate_in_cloud * dt, zxib)
         zxib = zxib - zsaut
-        # Snow aggregation of cloud ice (zsaci1): same geometric kernel as
-        # riming but with the temperature-dependent collection efficiency
-        # zcolleffi = exp(0.025·(T − tmelt)) instead of ccsacl (finding
-        # 2.14 — cold aggregation lacked the exponential suppression).
-        zcolleffi = jnp.exp(0.025 * (T1 - c.tmelt))
-        zsaci = zxib * _impl_depletion(ksnow * zcolleffi * dt)
-        zxib = zxib - zsaci
+        zxsp2 = zauloc * rho * zsaut
 
-        # Convert in-cloud per-dt depletions to grid-mean tendencies
-        # (kg/kg/s). ECHAM's area weighting (mo_cloud.f90:1054-1100):
-        # processes driven by the FALLING flux (zrac1 rain accretion,
-        # zsacl riming, zsaci aggregation — all zxsp1/zxrp1-based) act on
-        # the cloud∩precip overlap zclcstar; in-cloud processes (zraut,
-        # zrac2, zsaut) act on the full cloud fraction. The previous code
-        # put riming under cf (finding 2.14f).
-        dqcdt_micro = -(
-            cf * (zraut + zrac2) + zclcstar * (zrac1 + zsacl)
-        ) / dt
-        dqidt_micro = -(cf * zsaut + zclcstar * zsaci) / dt
-        # Riming latent heat with the SAME area weight as the mass
-        # (Fortran heats with the already-weighted zsacl, line 1251).
-        dTdt_rime = zlfdcp * zclcstar * zsacl / dt
+        # (3e) Riming of cloud water + aggregation of cloud ice by snow, in
+        # TWO passes exactly as ECHAM ``mo_cloud.f90:1058-1090``: pass 1 on
+        # the snow falling in from above (``zxsp1``), pass 2 on the snow
+        # generated within THIS layer (``zxsp2``). Each uses the
+        # Marshall-Palmer geometric sweep-out kernel
+        # ``K = π·cn0s·3.078·λ^0.8125·√(1.3/ρ)`` with the λ-argument
+        # ``content/(π·crhosno·cn0s)``; riming carries the efficiency
+        # ``ccsacl = 0.10``, aggregation the temperature-dependent collection
+        # efficiency ``zcolleffi = exp(0.025·(T−tmelt))``. Both integrate
+        # implicitly (``1 - exp(-rate·dt)``) so per-step depletion is bounded
+        # in ``[0, in-cloud]``. The prior port had only pass 1 (finding 2.14
+        # fixed the kernel + efficiency); pass 2 was missing — dormant at the
+        # ``cauloc=0`` default but silently absent for anyone enabling the
+        # local-rain path (#675).
+        zcolleffi = jnp.exp(0.025 * (T1 - c.tmelt))
+
+        def _snow_kernel(snow_content):
+            # Marshall-Palmer sweep-out rate for a given snow water content.
+            # Double-where guard on ``λ_arg**0.8125`` (infinite derivative at
+            # a zero base, the snow-free common case): the outer ``where``
+            # zeroes the forward value where no snow is present; the inner
+            # ``where`` substitutes a safe base of 1.0 there so the reverse
+            # pass stays finite (issue #558).
+            lam_arg = jnp.maximum(
+                snow_content / (jnp.pi * config.crhosno * config.cn0s), 0.0,
+            )
+            present = snow_content > config.epsilon
+            return jnp.where(
+                present,
+                jnp.pi * config.cn0s * 3.078
+                * jnp.where(present, lam_arg, 1.0) ** 0.8125
+                * zqrho_sqrt,
+                0.0,
+            )
+
+        # Pass 1 — incoming snow flux (zxsp1). Depletes in-cloud zxlb then
+        # zxib in the Fortran order.
+        ksnow1 = _snow_kernel(zxsp1)
+        zsacl1 = zxlb * _impl_depletion(ksnow1 * config.ccsacl * dt)
+        zxlb = zxlb - zsacl1
+        zsaci1 = zxib * _impl_depletion(ksnow1 * zcolleffi * dt)
+        zxib = zxib - zsaci1
+
+        # Pass 2 — in-layer snow (zxsp2; nonzero only when cauloc>0).
+        ksnow2 = _snow_kernel(zxsp2)
+        zsacl2 = zxlb * _impl_depletion(ksnow2 * config.ccsacl * dt)
+        zxlb = zxlb - zsacl2
+        zsaci2 = zxib * _impl_depletion(ksnow2 * zcolleffi * dt)
+        zxib = zxib - zsaci2
+
+        # Grid-mean weighting (ECHAM mo_cloud.f90:1078-1099). Processes driven
+        # by the FALLING flux (zrac1 rain accretion; zsacl1 riming, zsaci1
+        # aggregation — all from zxsp1) act on the cloud∩precip overlap
+        # ``zclcstar``; in-cloud processes and the in-layer-snow pass (zraut,
+        # zrac2, zsaut; zsacl2, zsaci2 from zxsp2) act on the full cloud
+        # fraction ``cf`` (ECHAM zclcaux):
+        #   zrpr  = cf·(zraut + zrac2)  + zclcstar·zrac1              (rain)
+        #   zsacl = zclcstar·zsacl1     + cf·zsacl2                   (riming)
+        #   zspr  = cf·(zsaut + zsaci2) + zclcstar·zsaci1            (snow)
+        # Riming (liquid → snow) is a liquid sink AND a snow source; the two
+        # aggregation legs and zsaut are ice sinks / snow sources.
+        rain_src_gm = cf * (zraut + zrac2) + zclcstar * zrac1
+        riming_gm = zclcstar * zsacl1 + cf * zsacl2
+        snow_src_gm = cf * (zsaut + zsaci2) + zclcstar * zsaci1
+
+        dqcdt_micro = -(rain_src_gm + riming_gm) / dt
+        dqidt_micro = -snow_src_gm / dt
+        # Riming latent heat (fusion) with the SAME grid-mean weight as the
+        # mass moved (Fortran heats with the already-weighted zsacl).
+        dTdt_rime = zlfdcp * riming_gm / dt
 
         # ---------- (4) Rotstayn rain evaporation on POST-condensation q1 ----------
         # ICON ``mo_cloud.f90:397-435``. ``zsusatw`` is the (negative)
@@ -1117,21 +1170,14 @@ def cloud_microphysics_column_sweep(
         rain_evap_flux = zevp * mref / dt                             # kg/m²/s
 
         # ---------- (6) flux update ----------
-        # ECHAM ``mo_cloud.f90:879`` rain source:
-        #   zrpr = cf · (zraut + zrac2)  +  zclcstar · zrac1
-        # and analogously for snow (line 950). Rain produced in-cloud
-        # (autoconv, local-rain accretion) covers the full cloud area;
-        # rain accretion of cloud water by *falling* rain covers only
-        # the intersection of cloud area and the incoming precipitating
-        # area (zclcstar). All the in-cloud zXXX values are per-dt
-        # depletion amounts in kg/kg, so divide by dt to get rate, then
-        # multiply by mref to get the kg/m²/s flux into ``zrfl``.
-        rain_source = (
-            cf * (zraut + zrac2) + zclcstar * zrac1
-        ) * mref / dt
-        snow_source = (
-            cf * zsaut + zclcstar * (zsaci + zsacl)
-        ) * mref / dt
+        # ECHAM ``mo_cloud.f90:1178`` (zzdrr/zzdrs): rain source is the
+        # grid-mean ``zrpr``; the snow flux receives BOTH the snow source
+        # ``zspr`` and the riming ``zsacl`` (``zzdrs = zcons2·zdp·(zspr +
+        # zsacl)``). All the grid-mean amounts are per-dt depletions in
+        # kg/kg, so divide by dt for a rate and multiply by mref for the
+        # kg/m²/s flux into ``zrfl`` / ``zsfl``.
+        rain_source = rain_src_gm * mref / dt
+        snow_source = (snow_src_gm + riming_gm) * mref / dt
         # Clamp to ≥ 0 against float round-off when rain evap consumes
         # essentially all of the incoming flux.
         zrfl_out = jnp.maximum(zrfl + rain_source - rain_evap_flux, 0.0)
@@ -1196,6 +1242,7 @@ def cloud_microphysics_column_sweep(
         cloud_water, cloud_ice, cloud_fraction,
         air_density, layer_thickness, droplet_number, pmref,
         is_bottom_level,
+        zlvdcp_col, zlsdcp_col, zlfdcp_col, cp_moist_col,
     )
     (zrfl_surface, zsfl_surface, _zclcpre_surface, _zxiflux_sfc), per_level_out = jax.lax.scan(
         step,
@@ -1321,7 +1368,10 @@ class Echam1MMicrophysics(PhysicsTerm):
         # sweep's saturation balance and rain evaporation must see THAT
         # (T, q) — using the step-start state let the same supersaturation
         # be condensed by both convection and microphysics, and computed
-        # evaporation against a stale qsat (review finding 2.15).
+        # evaporation against a stale qsat (review finding 2.15). The moist
+        # heat capacity is the one exception: ECHAM builds pcair from the
+        # step-start qm1, so ``state.specific_humidity`` is passed to the
+        # sweep separately for the L/cp factors.
         thermo_run = diagnostics.get("thermo_run")
         if thermo_run is None:
             temperature_in = state.temperature
@@ -1358,13 +1408,15 @@ class Echam1MMicrophysics(PhysicsTerm):
         # :class:`~jcm.physics.clouds.sundqvist.SundqvistCloudFraction`.
         micro_tend, micro_state = jax.vmap(
             cloud_microphysics_column_sweep,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None),
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 1),
             out_axes=(0, 0),
         )(
             temperature_in, specific_humidity_in, pressure_full,
             qc_interim, qi_interim, cloud_fraction,
             air_density, layer_thickness,
             droplet_number_per_kg, dt, params,
+            # Step-start q (ECHAM qm1) anchors the moist-cp L/cp factors.
+            state.specific_humidity,
         )
 
         tendency = PhysicsTendency(
