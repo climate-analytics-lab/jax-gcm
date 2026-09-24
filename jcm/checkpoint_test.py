@@ -29,6 +29,7 @@ import flax.serialization
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import tree_math
 
 from jcm.checkpoint import (
@@ -682,6 +683,103 @@ class TestCompositionCoverage(unittest.TestCase):
             any(key.startswith("radiation.") for key in payload["physics"]),
             sorted(payload["physics"])[:10],
         )
+
+
+
+class TestSurfaceOpticsAcrossRestart(unittest.TestCase):
+    """The radiation's surface optics survive a restart bit for bit (#672).
+
+    The boundary-condition term hands the radiation this step's surface
+    albedo / emissivity under a step-local key that ``ComposablePhysics``
+    drops before the carry (so it is never checkpointed); the radiation
+    publishes the values it solved with in ``radiation.surface_*`` and holds
+    them between solves. A restart in the middle of a radiation interval
+    must therefore replay the held, solve-time albedo exactly, and a file
+    carrying the step-local key (written by an intermediate build) must load
+    to the same result.
+    """
+
+    DT_MIN = 30          # model step [min]
+    EVERY = 4            # radiation solves every 4 steps (2 h)
+
+    def _build(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.radiation.radiation_types import RadiationParameters
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        return Model(
+            coords=coords, terrain=TerrainData.aquaplanet(coords),
+            time_step=self.DT_MIN,
+            physics=echam_physics(
+                radiation_scheme="grey",
+                radiation=RadiationParameters.default(
+                    radiation_interval=self.EVERY * self.DT_MIN * 60.0)))
+
+    @staticmethod
+    def _radiation(model):
+        rad = model.physics_carry["radiation"]
+        return {name: np.asarray(getattr(rad, name)) for name in (
+            "surface_albedo_vis", "surface_albedo_nir", "surface_emissivity",
+            "sw_flux_up", "sw_flux_down", "surface_sw_up", "surface_sw_down",
+            "toa_sw_up", "sw_heating_rate")}
+
+    @pytest.mark.slow
+    def test_mid_interval_restart_is_bit_identical(self):
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.radiation import SURFACE_OPTICS_KEY
+
+        self.assertIn(SURFACE_OPTICS_KEY, ComposablePhysics._STEP_LOCAL_KEYS)
+        step_days = self.DT_MIN / 1440.0
+        total = 2 * self.EVERY            # two radiation intervals
+        split = self.EVERY + 2            # mid-interval: a cached step next
+
+        baseline = self._build()
+        baseline.run(save_interval=step_days, total_time=total * step_days)
+        want = self._radiation(baseline)
+        # Anti-vacuity: the sun is up somewhere and the ocean albedo varies.
+        self.assertGreater(float(want["surface_sw_down"].max()), 100.0)
+        self.assertGreater(float(np.ptp(want["surface_albedo_vis"])), 1e-3)
+
+        first = self._build()
+        first.run(save_interval=step_days, total_time=split * step_days)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(first, path, elapsed_days=split * step_days)
+            payload = _read_payload(path)
+            # Step-local: never part of the checkpointed carry.
+            self.assertFalse(
+                [k for k in payload["physics"] if SURFACE_OPTICS_KEY in k])
+
+            resumed = self._build()
+            resumed.bootstrap_state()
+            load_checkpoint(resumed, path)
+            resumed.resume(save_interval=step_days,
+                           total_time=(total - split) * step_days)
+
+            # A file that does carry the step-local key (written by a build
+            # that checkpointed it) loads with the key dropped: zeros there
+            # can never reach a solve.
+            stale = dict(payload)
+            stale["physics"] = dict(payload["physics"])
+            ncols_shape = want["surface_albedo_vis"].shape
+            for field in ("albedo_vis", "albedo_nir", "emissivity"):
+                stale["physics"][f"{SURFACE_OPTICS_KEY}.{field}"] = (
+                    np.zeros(ncols_shape, np.float32))
+            stale_path = Path(tmp) / "stale.msgpack"
+            _write_payload(stale_path, stale)
+            from_stale = self._build()
+            from_stale.bootstrap_state()
+            load_checkpoint(from_stale, stale_path)
+            from_stale.resume(save_interval=step_days,
+                              total_time=(total - split) * step_days)
+
+        for label, model in (("resumed", resumed), ("stale-key", from_stale)):
+            got = self._radiation(model)
+            for name, value in want.items():
+                np.testing.assert_array_equal(
+                    got[name], value, err_msg=f"{label}: radiation.{name}")
 
 
 if __name__ == "__main__":

@@ -103,6 +103,9 @@ published albedo, the reflected flux and the heating therefore always describe
 one solve, and the zenith-dependent open-water albedo enters at the solve-time
 sun, as in ECHAM, whose radiation reads the surface albedo at a radiation step
 (``trigrad``) and replays the transmissivities in between (``radheat``).
+The hand-off is step-local: it is dropped before the cross-step carry, so it is
+never checkpointed, and a restart replays the held ``radiation.surface_*`` of
+the last solve bit for bit.
 
 The snow maps follow one convention across products and consumers: ``glac`` is
 the glacier share of the land and ``snowc`` the snow-covered fraction of the

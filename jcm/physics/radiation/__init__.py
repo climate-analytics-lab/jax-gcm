@@ -29,6 +29,11 @@ from jcm.physics_interface import PhysicsTendency
 #: the reflected flux and the heating rate always describe one solve — as in
 #: ECHAM, whose radiation reads the surface albedo only at a radiation step
 #: (``trigrad``) and replays the transmissivities in between (``radheat``).
+#:
+#: Step-local: ``ComposablePhysics`` removes it before the diagnostics become
+#: the cross-step carry (``_STEP_LOCAL_KEYS``), so it is never checkpointed
+#: and a radiation term only ever sees the value published earlier in the
+#: same step.
 SURFACE_OPTICS_KEY = "_surface_optics"
 
 
