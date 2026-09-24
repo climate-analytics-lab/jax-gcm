@@ -11,6 +11,7 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
+from jcm.physics.surface.echam.albedo import CTFREEZ
 from jcm.physics.thermodynamics import saturation_specific_humidity
 from .vertical_diffusion_types import (
     VDiffState, VDiffParameters, VDiffTendencies, VDiffDiagnostics
@@ -62,6 +63,16 @@ def compute_virtual_temperature(
 
     """
     return temperature * (1.0 + 0.608 * qv)
+
+
+def _default_sublimation_fraction(like: jnp.ndarray) -> jnp.ndarray:
+    """Sublimating share per tile when none is given: the sea-ice tile only.
+
+    Tile index 1 is sea ice in the water/ice/land ordering this package
+    uses throughout; a single-tile state has no ice tile.
+    """
+    out = jnp.zeros_like(like)
+    return out.at[:, 1].set(1.0) if like.shape[1] > 1 else out
 
 
 @jax.jit
@@ -138,10 +149,8 @@ def prepare_vertical_diffusion_state(
     if surface_wetness is None:
         surface_wetness = jnp.ones_like(roughness_length)
     if surface_sublimation_fraction is None:
-        surface_sublimation_fraction = jnp.zeros_like(roughness_length)
-        if roughness_length.shape[1] > 1:
-            surface_sublimation_fraction = (
-                surface_sublimation_fraction.at[:, 1].set(1.0))
+        surface_sublimation_fraction = _default_sublimation_fraction(
+            roughness_length)
 
     return VDiffState(
         u=u,
@@ -371,7 +380,7 @@ def vertical_diffusion_column(
         # the moisture row: LH = ρ·C_L·tp1·(tp2·q_L − X̂_K).
         sub = state.surface_sublimation_fraction
         if sub is None:
-            sub = jnp.zeros_like(wet).at[:, 1].set(1.0)
+            sub = _default_sublimation_fraction(wet)
         k_lh = ce_t * (c.alhc * wet + (c.alhs - c.alhc) * sub)
         c_lh = jnp.sum(frac * k_lh, axis=1)
         q_lh = (jnp.sum(frac * k_lh * qsat_tiles, axis=1)
@@ -743,10 +752,9 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # as EchamSurface's rebuild.
         sst_col = forcing.sea_surface_temperature.reshape(ncols)
         land_temp_col = forcing.stl_am.reshape(ncols)
-        ctfreez = 271.38
         ice_temp_col = jnp.where(
             sea_ice_fraction > 0.0,
-            jnp.minimum(sst_col, ctfreez),
+            jnp.minimum(sst_col, CTFREEZ),
             sst_col,
         )
         surface_temperature = jnp.stack(

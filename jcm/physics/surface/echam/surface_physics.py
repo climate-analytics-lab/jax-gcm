@@ -20,6 +20,7 @@ from .turbulent_fluxes import (
 from .ocean import ocean_physics_step
 from .sea_ice import sea_ice_physics_step
 from .land import land_surface_physics_step
+from .albedo import CTFREEZ
 
 
 def initialize_surface_state(
@@ -446,11 +447,10 @@ class EchamSurface(PhysicsTerm):
         # fraction of an fmask=0.6 cell would otherwise use stl_am instead
         # of sst).
         ocean_temp = forcing.sea_surface_temperature.reshape(ncols)
-        ctfreez = 271.38  # K, ECHAM iniphy.f90:71 saline-water freezing
         land_temp = forcing.stl_am.reshape(ncols)
         ice_surface_temp = jnp.where(
             sea_ice_fraction > 0.0,
-            jnp.minimum(ocean_temp, ctfreez),
+            jnp.minimum(ocean_temp, CTFREEZ),
             ocean_temp,
         )
         ice_temp = jnp.repeat(ice_surface_temp[:, jnp.newaxis], 2, axis=1)

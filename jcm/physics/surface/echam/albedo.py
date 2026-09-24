@@ -102,8 +102,10 @@ class EchamSurfaceAlbedoParameters:
     #: Band offsets on the direct-beam albedo (``palw1dir``/``palw2dir``).
     ocean_direct_vis_offset: jnp.ndarray = 0.0082
     ocean_direct_nir_offset: jnp.ndarray = -0.007
-    #: ECHAM ``lrce``: the direct-beam albedo is the constant 0.07 instead
-    #: of the zenith fit. Static — it selects a code path.
+    #: ``zalw`` under ECHAM ``lrce`` (replaces the zenith fit).
+    ocean_direct_rce: jnp.ndarray = 0.07
+    #: ECHAM ``lrce``: the direct-beam albedo is ``ocean_direct_rce``
+    #: instead of the zenith fit. Static — it selects a code path.
     rce: bool = struct.field(pytree_node=False, default=False)
 
     @classmethod
@@ -265,7 +267,7 @@ def ocean_albedo(
     diffuse = p.ocean_albedo_diffuse * jnp.ones_like(cos_zenith)
     sunlit = cos_zenith > 0.0
     if p.rce:
-        zalw = 0.07 * jnp.ones_like(cos_zenith)
+        zalw = p.ocean_direct_rce * jnp.ones_like(cos_zenith)
     else:
         # Dark columns evaluate the fit at mu0 = 1 and are then discarded:
         # at mu0 = 0 the exponent's derivative ``mu0**b · ln(mu0)`` is

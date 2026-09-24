@@ -284,3 +284,52 @@ class TestWind10mReduction:
             cm, jnp.full((1, 3), 6.0 * 0.4 ** 2 / bn ** 2),
             jnp.full((1, 3), bn), jnp.asarray([32.6]))))(jnp.full((1, 3), 0.01))
         assert np.all(np.isfinite(np.asarray(g)))
+
+
+class TestFrozenSurfacePhase:
+    """ECHAM ``tlucua``: a frozen tile saturates over ice (#672)."""
+
+    @staticmethod
+    def _neutral_frozen_state(q_factor):
+        """Air at the tile's potential temperature, qv = q_factor·qsat_ice.
+
+        With equal potential temperatures and no condensate the bulk
+        Richardson number is set by the humidity contrast alone, so it is
+        zero exactly when the surface saturation equals the air humidity.
+        """
+        from jcm.constants import PhysicalConstants
+        from jcm.physics.thermodynamics import saturation_specific_humidity
+
+        const = PhysicalConstants()
+        t_sfc, p_sfc, offset = 260.0, 101325.0, 1000.0
+        t_air = t_sfc * ((p_sfc - offset) / p_sfc) ** (const.rd / const.cpd)
+        q_ice = float(saturation_specific_humidity(t_sfc, p_sfc, phase="ice"))
+        state = _build_state(T_air=t_air, T_sfc=t_sfc, q_air=q_factor * q_ice,
+                             p_sfc=p_sfc, p_full_offset=offset)
+        return state
+
+    def _exchange(self, state):
+        params = VDiffParameters.default(surface_layer_scheme="echam_louis")
+        sCH, _, _ = compute_surface_exchange_coefficients_echam_louis(
+            state, params, jnp.array([5.0]),
+            state.surface_temperature, state.temperature[:, -1],
+        )
+        return float(sCH[0, 1])
+
+    def test_air_at_ice_saturation_is_neutral(self):
+        """At ``q = qsat_ice`` the exchange is exactly the neutral coefficient.
+
+        ``CH·|U| = |U|·κ²/(ln(z/z0m)·ln(z/z0h))`` at ``Ri = 0``; drier air is
+        unstable (more exchange), moister stable (less). The Sundqvist
+        mixed-phase blend puts the 260 K surface ~8 % above ice saturation,
+        which made this case unstable and ~1 % above neutral.
+        """
+        import jcm.constants as c
+
+        at_sat = self._exchange(self._neutral_frozen_state(1.0))
+        drier = self._exchange(self._neutral_frozen_state(0.97))
+        moister = self._exchange(self._neutral_frozen_state(1.03))
+        assert moister < at_sat < drier
+        log_z = np.log(60.0 / 5.0e-4)   # z_ref / z0 (m and h) of _build_state
+        neutral = 5.0 * c.karman_const ** 2 / log_z ** 2
+        np.testing.assert_allclose(at_sat, neutral, rtol=2e-4)
