@@ -102,8 +102,9 @@ Every constant is a differentiable leaf of ``EchamSurfaceAlbedoParameters``
 **What ECHAM/CAM does.** ECHAM 6.3 evaluates the same three routines each step
 in ``mo_surface.f90`` and averages the tile albedos band by band. Its land
 albedo comes from JSBACH, which offers two schemes: the broadband
-``update_land_surface_fast`` above (``use_albedo=.FALSE.``) and, by default, the
-per-band ``update_albedo_snowage_temp``, which needs per-band soil and canopy
+``update_land_surface_fast`` above (``use_albedo=.FALSE.``, the code
+default) and the per-band ``update_albedo_snowage_temp``
+(``use_albedo=.TRUE.``, which the standard MPI-M run setup selects), which needs per-band soil and canopy
 albedo maps, the land-cover-type composition, LAI, a canopy snow store and a
 prognostic snow age. Its default sea-ice path is the melt-pond scheme
 (``update_albedo_ice_meltpond``, ``lmeltpond=.TRUE.``), which needs prognostic
@@ -117,19 +118,24 @@ library ``lctlib_nlct21.def``, identical for every non-glacier type.
   background ``alb`` (the minimum monthly ERA5 forecast albedo), a cover
   fraction ``snowc = min(1, SWE/60 mm)``, a forest fraction (ERA5 high
   vegetation cover ``cvh``) and a glacier mask (the cells whose ERA5 snow
-  never melts), built by ``jcm/data/mirror/bundles.py``. The broadband
-  ``use_albedo=.FALSE.`` scheme is the JSBACH path those inputs support
-  exactly; the per-band default would need maps that do not exist here. For
+  never melts), both per unit land, built by ``jcm/data/mirror/bundles.py``
+  (the packaged T63 file carries ECHAM's own ``FOREST``/``GLAC`` with the
+  same ERA5 snow cover). The broadband ``use_albedo=.FALSE.`` scheme is the
+  JSBACH path those inputs support exactly; the per-band scheme would need
+  maps that do not exist here. For
   the same reason sea ice uses ``lmeltpond=.FALSE.``. Snow cover is the
   prescribed climatology rather than ECHAM's Roesch fraction of a prognostic
   snow depth: without prognostic snow there is no depth to apply it to. With
   no LAI the canopy fraction uses JSBACH's own ``MAX(LAI, 2)`` floor
   (``forest·0.865``, at most 13 % of the forest fraction below a dense
-  canopy's), and with no canopy snow store the canopy is snow-free — so
-  snow-covered forest shows its background albedo, the lowest value
-  JSBACH's canopy term can give (the snow-covered canopy albedo is 0.20).
+  canopy's), and with no canopy snow store the canopy is snow-free — so the
+  canopy part of a snow-covered forest shows the background albedo instead
+  of JSBACH's snowy-canopy 0.20 (lower for the usual dark forest
+  background; above 0.20 the ``MAX(…, bg)`` floor makes the two agree).
   Sea ice carries no snow and sits at ``min(SST, ctfreez) = 271.38 K``,
-  below the ramp, so it stays at the cold bare-ice value 0.75.
+  below the 1 K ramp, so it is effectively a constant 0.75 (``calbmxi``):
+  neither the melt-season drop to 0.60 nor the snow-on-ice 0.85 occurs
+  until ice temperature and snow on ice are prognostic.
 - `compute` — the RRTMGP surface boundary takes one albedo per column for
   both the direct beam and diffuse light (see {doc}`radiation`), so the
   open-water direct and diffuse albedos are merged with equal weights

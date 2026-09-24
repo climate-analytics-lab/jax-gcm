@@ -257,10 +257,12 @@ inventory):
   predates the channel must re-run `--stage era5` before `--stage
   bundles`. Forcing files without the channel still load — the dust term
   warns and falls back.
-- `forest` and `glac` are static land-cover fractions for the ECHAM
-  land albedo (JSBACH's broadband scheme, see the *Surface albedo*
-  section of the surface science page): `forest` is the ERA5 invariant
-  high-vegetation cover `cvh`, `glac` the same permanent-snow mask
+- `forest` and `glac` are static land-cover fractions **of the land**
+  for the ECHAM land albedo (JSBACH's broadband scheme, see the *Surface
+  albedo* section of the surface science page), each regridded together
+  with the ERA5 land mask and divided by it so coastal cells are not
+  diluted by sea zeros: `forest` is the ERA5 invariant high-vegetation
+  cover `cvh`, `glac` the same permanent-snow mask
   (ERA5 snow depth never below 0.1 m w.e. in the climatology) that zeroes
   `snowc`, so a cell's snow is either seasonal (`snowc`) or glacier
   (`glac`). Both come from fields the Tier A `era5` product already

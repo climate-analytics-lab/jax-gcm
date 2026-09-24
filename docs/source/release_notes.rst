@@ -671,7 +671,8 @@ ECHAM surface albedo and frozen-surface saturation
   albedo (0.4 at the melting point to 0.8 five kelvin below), snow masked by
   forest, and a glacier albedo (0.75-0.85) on ice sheets — where the constant
   0.15/0.25 used to put Antarctica and Greenland at ~0.2. Sea ice is
-  ``update_albedo_ice`` (0.60-0.75 bare ice); open water carries ECHAM's
+  ``update_albedo_ice``, effectively its cold bare-ice 0.75 while the ice
+  temperature is prescribed at ``min(SST, ctfreez)``; open water carries ECHAM's
   zenith-angle-dependent direct-beam albedo with the 0.07 diffuse albedo.
   Over a 5-day January ``t63-echam-1m`` A/B the global planetary albedo rises
   **0.274 → 0.300-0.302** and the absorbed solar radiation at TOA falls by
@@ -694,10 +695,14 @@ ECHAM surface albedo and frozen-surface saturation
 - **Breaking:** ``SurfaceOpticsParameters`` holds the albedo constants in a
   nested ``EchamSurfaceAlbedoParameters`` (``albedo=``) and keeps only the
   three emissivities at the top level; the six ``*_albedo_vis``/``*_albedo_nir``
-  fields are gone. The packaged ``jcm/data/bc/t63/forcing.nc`` stores
-  ``snowc`` as the jcm cover fraction ``min(1, SWE/sd2sc)`` (it held the ECHAM
-  snow water equivalent in metres) and gains ``forest``/``glac`` from the ECHAM
-  surface file.
+  fields are gone. The packaged ``jcm/data/bc/t63/forcing.nc`` — the pySES
+  backend's default forcing — stores ``snowc`` as the jcm cover fraction
+  ``min(1, SWE/sd2sc)`` with a seasonal cycle (the data-mirror ERA5 monthly
+  climatology, zero on glaciers) where it held one January ECHAM snow water
+  equivalent in metres for every month, and gains ``forest``/``glac`` from
+  the ECHAM surface file. Everything reading ``snowc`` from that file sees
+  the change: the ECHAM albedo and land latent heat, the JAM dust snow gate,
+  and SPEEDY's snow albedo if pointed at it.
 
 Moist dynamics: condensate loading and one tracer contract
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""

@@ -667,6 +667,8 @@ Generating BC files from ECHAM input
         --land-init ic_land_soil_T63GR15_1976.nc \
         --out-dir jcm/data/bc/t63/
 
+``--snow-cover FILE`` takes the 12-month ``snowc`` cover fraction of a jcm forcing file on the same grid instead of the single ECHAM snow snapshot; the packaged T63 file is built with the data-mirror ``forcing_pd.nc`` this way, since the land albedo reads the snow cover every month.
+
 When ``--land-init`` is provided (the JSBACH initial-conditions file from a standard ECHAM dataset), the ``stl`` field uses the real monthly land-surface temperature climatology and the soil-moisture / snow fields use ``init_moist`` / ``snow`` rather than the AMIP-SST extrapolation. Without ``--land-init``, ``stl`` falls back to AMIP SST extrapolated over land — fine for short development runs, but the ~+30 K bias over the Tibetan and Antarctic plateaus has historically driven multi-day stability failures, so the JSBACH-backed file should be used for any climate-style integration.
 
 ``ForcingData.from_file`` runs a one-time sanity check on the loaded fields (range bounds, finiteness, and a heuristic that flags the AMIP-extrapolation case at high orography). Hard violations raise; soft ones print a warning and continue.
