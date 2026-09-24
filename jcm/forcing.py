@@ -348,8 +348,8 @@ class ForcingData:
     # glacier share of the LAND; ``forest`` (``forest_fraction``), ``snowc``
     # (``snowc_am``) and ``alb`` (``alb0``) describe the NON-glacier land
     # (JSBACH's tiling: a glacier tile, and vegetation / seasonal snow /
-    # background albedo on the others); ``stl`` and the soil moisture are
-    # conditional on the land. Consumers combine them once: total snow cover
+    # background albedo on the others), as do ``soilw_am`` / ``soilw_rel``
+    # (the glacier counts as fully wet); ``stl`` is conditional on the land. Consumers combine them once: total snow cover
     # of the land ``g + (1 - g)·min(1, s)`` (:func:`land_snow_cover`),
     # effective forest ``(1 - g)·f`` and the background albedo on the
     # non-glacier tile only (``jcm.physics.surface.echam.albedo``).

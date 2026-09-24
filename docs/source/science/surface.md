@@ -110,8 +110,9 @@ the last solve bit for bit.
 The land-surface maps follow one convention across products, regrids and
 consumers (``jcm/data/regridding.py::CONDITIONAL_FIELDS``): ``lsm`` is the land
 share of the cell, ``glac`` the glacier share of the **land**, and ``forest``,
-``snowc`` and ``alb`` describe the **non-glacier** land (JSBACH's tiling); the
-soil fields and ``stl`` are conditional on the land. Every regrid of these
+``snowc``, ``alb`` and the soil wetness describe the **non-glacier** land
+(JSBACH's tiling; the glacier counts as fully wet); ``stl`` is conditional on
+the land. Every regrid of these
 fields — the bundle builders, the runtime upsampler and the pySES column
 sampler — weights each by its own mask
 (``jcm/data/regridding.py::regrid_land_surface``), so ocean or glacier

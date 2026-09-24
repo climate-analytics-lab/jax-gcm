@@ -266,7 +266,8 @@ inventory):
   |---|---|---|---|---|
   | `lsm` | land share of the cell | — | builders (ERA5 `lsm`), converter (`SLF`), packaged T63 (terrain) | regrid weight; terrain `fmask` |
   | `glac` | glacier share of the land | land | builders (permanent-snow mask), converter (`GLAC`) | albedo tile average; snow total |
-  | `stl`, `soilw_am`, `soilw_rel` | land temperature / wetness | land | builders | surface tiles, dust |
+  | `stl` | land-tile temperature (glacier included) | land | builders, converter | surface tiles, albedo ramps |
+  | `soilw_am`, `soilw_rel` | soil wetness of the non-glacier land | non-glacier land | builders, converter | land wetness `g + (1 − g)·(s + (1 − s)·w)` share, dust |
   | `forest` | forest share of the non-glacier land | non-glacier land | builders (ERA5 `cvh`), converter (`FOREST`) | land albedo, effective `(1 − glac)·forest` |
   | `snowc` | snow-covered share of the non-glacier land | non-glacier land | builders, converter | albedo; total `glac + (1 − glac)·snowc` (`land_snow_cover`) for wetness, sublimation, dust |
   | `alb` | snow-free background albedo of the non-glacier land | non-glacier land | builders (min monthly ERA5 `fal`), converter (`ALB`) | land albedo, non-glacier tile only |

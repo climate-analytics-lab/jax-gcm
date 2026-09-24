@@ -697,8 +697,9 @@ ECHAM surface albedo and frozen-surface saturation
   read by the JAM dust snow gate). Forcing files now also carry ``lsm``, the
   land share, and every regrid of the land-surface channels (bundle
   builders, runtime upsampler, pySES column sampler) weights each by the
-  part of the cell it describes — ``glac``, ``stl`` and the soil fields by
-  the land, ``forest``, ``snowc`` and ``alb`` by the non-glacier land — so
+  part of the cell it describes — ``glac`` and ``stl`` by the land,
+  ``forest``, ``snowc``, ``alb`` and the soil wetness by the non-glacier
+  land — so
   coastal and ice-margin cells are no longer diluted by their ocean or
   glacier neighbours. On pySES this changes the coastal columns of every
   run on the packaged T63 forcing.

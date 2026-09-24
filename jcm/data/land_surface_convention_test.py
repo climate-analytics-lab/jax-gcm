@@ -27,7 +27,10 @@ OCEAN, FOREST, GLACIER, SNOWY = (2.0, 2.0), (2.0, 4.0), (4.0, 2.0), (4.0, 4.0)
 # Expected at the target: 3 of 4 points are land, 1 of those 3 glacier; the
 # 2 non-glacier land points are both 60 % forest, one of them snow covered.
 EXPECT = {"lsm": 0.75, "glac": 1.0 / 3.0, "forest": 0.6, "snowc": 0.5,
-          "alb": 0.25, "stl": (260.0 + 250.0 + 262.0) / 3.0}
+          "alb": 0.25, "stl": (260.0 + 250.0 + 262.0) / 3.0,
+          # Soil wetness of the NON-glacier land: the glacier's 0 must not
+          # dilute it (the vdiff counts the glacier as fully wet already).
+          "soilw_am": 0.3}
 
 
 def _source():
@@ -38,7 +41,7 @@ def _source():
     """
     shape = (LAT.size, LON.size)
     f = {k: np.zeros(shape) for k in
-         ("lsm", "glac", "forest", "snowc", "alb")}
+         ("lsm", "glac", "forest", "snowc", "alb", "soilw_am")}
     f["stl"] = np.full(shape, 290.0)
     f["alb"][:] = 0.06                      # ocean albedo, must not leak
 
@@ -47,9 +50,11 @@ def _source():
         for k, v in values.items():
             f[k][i, j] = v
 
-    put(FOREST, lsm=1.0, forest=0.6, snowc=0.0, alb=0.2, stl=260.0)
-    put(GLACIER, lsm=1.0, glac=1.0, alb=0.8, stl=250.0)
-    put(SNOWY, lsm=1.0, forest=0.6, snowc=1.0, alb=0.3, stl=262.0)
+    put(FOREST, lsm=1.0, forest=0.6, snowc=0.0, alb=0.2, stl=260.0,
+        soilw_am=0.4)
+    put(GLACIER, lsm=1.0, glac=1.0, alb=0.8, stl=250.0, soilw_am=0.0)
+    put(SNOWY, lsm=1.0, forest=0.6, snowc=1.0, alb=0.3, stl=262.0,
+        soilw_am=0.2)
     # A coastal row at 6N: ocean at 2E, fully snow-covered land at 4E.
     put((6.0, 4.0), lsm=1.0, snowc=1.0, alb=0.2, stl=265.0)
     return f
@@ -69,7 +74,8 @@ class TestGaussianBuilders(unittest.TestCase):
             {"snowc": xr.DataArray(f["snowc"], **grid),
              "alb": xr.DataArray(f["alb"], **grid),
              "forest": era5.cvh,
-             "stl": xr.DataArray(f["stl"], **grid)},
+             "stl": xr.DataArray(f["stl"], **grid),
+             "soilw_am": xr.DataArray(f["soilw_am"], **grid)},
             lats=np.array([3.0, 6.0]), lons=np.array([3.0]))
         for name, value in EXPECT.items():
             np.testing.assert_allclose(
@@ -97,7 +103,7 @@ class TestPysesColumnSampler(unittest.TestCase):
             {"sst": monthly(np.full_like(f["stl"], 290.0)),
              "icec": monthly(np.zeros_like(f["stl"])),
              "stl": monthly(f["stl"]),
-             "soilw_am": monthly(np.where(f["lsm"] > 0, 0.4, 0.0)),
+             "soilw_am": monthly(f["soilw_am"]),
              "snowc": monthly(f["snowc"]),
              "alb": (("lon", "lat"), f["alb"].T),
              "forest": (("lon", "lat"), f["forest"].T),
@@ -111,8 +117,10 @@ class TestPysesColumnSampler(unittest.TestCase):
         self.assertAlmostEqual(float(static["alb"][0]), EXPECT["alb"], 12)
         np.testing.assert_allclose(monthly_out["snowc"][:, 0], EXPECT["snowc"])
         np.testing.assert_allclose(monthly_out["stl"][:, 0], EXPECT["stl"])
-        # Soil: land-conditional -> 0.4 on land, not diluted by the ocean.
-        np.testing.assert_allclose(monthly_out["soilw_am"][:, 0], 0.4)
+        # Soil wetness of the non-glacier land, diluted by neither the ocean
+        # nor the glacier.
+        np.testing.assert_allclose(monthly_out["soilw_am"][:, 0],
+                                   EXPECT["soilw_am"])
         np.testing.assert_allclose(monthly_out["snowc"][:, 1], 1.0)
         # Ocean fields keep the plain bilinear sample.
         np.testing.assert_allclose(monthly_out["sst"][:, 0], 290.0)
@@ -141,13 +149,12 @@ class TestSpectralUpsampler(unittest.TestCase):
              for name in ("lsm", "glac", "forest", "alb", "stl")}
             | {"snowc": (("lon", "lat", "time"), f["snowc"].T[:, :, None]),
                "icec": (("lon", "lat", "time"), np.zeros_like(f["stl"]).T[:, :, None]),
-               "soilw_am": (("lon", "lat", "time"),
-                            np.where(f["lsm"] > 0, 0.4, 0.0).T[:, :, None])},
+               "soilw_am": (("lon", "lat", "time"), f["soilw_am"].T[:, :, None])},
             coords={"lon": LON, "lat": LAT, "time": [0]})
         grid = types.SimpleNamespace(latitudes=np.radians(np.array([3.0])),
                                      longitudes=np.radians(np.array([3.0])))
         out = upsample_forcings_ds(ds, grid)
-        for name, value in {**EXPECT, "soilw_am": 0.4}.items():
+        for name, value in EXPECT.items():
             np.testing.assert_allclose(np.asarray(out[name]).ravel()[0], value,
                                        rtol=1e-6, err_msg=name)
 

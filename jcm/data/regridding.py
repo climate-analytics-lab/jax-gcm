@@ -312,11 +312,15 @@ def conservative_to_gaussian(field: np.ndarray, src_lats, src_lons,
 #:
 #: * ``lsm`` — the land share of the cell (the terrain land-sea mask).
 #: * ``"land"`` — conditional on the land: ``glac`` (glacier share of the
-#:   land), ``stl``, ``soilw_am``, ``soilw_rel``.
+#:   land) and ``stl`` (the land-tile temperature, glacier included — the
+#:   albedo's glacier ramp and the surface tiles read it over all the land).
 #: * ``"open_land"`` — conditional on the NON-glacier land, weight
 #:   ``lsm·(1 − glac)``: ``forest`` (forest share), ``snowc`` (snow-covered
-#:   share), ``alb`` (snow-free background albedo) — JSBACH's tiling, where
-#:   the glacier is a tile of its own.
+#:   share), ``alb`` (snow-free background albedo), ``soilw_am`` /
+#:   ``soilw_rel`` (soil wetness: the vertical diffusion treats the glacier
+#:   as fully wet and applies soil wetness to the non-glacier share only,
+#:   and dust has no source on a glacier) — JSBACH's tiling, where the
+#:   glacier is a tile of its own.
 #:
 #: A raw bilinear regrid of such a field lets the cells it is not defined on
 #: (ocean, glacier) dilute it, and the consumer — which multiplies by the
@@ -326,7 +330,8 @@ def conservative_to_gaussian(field: np.ndarray, src_lats, src_lons,
 #: ``g + (1 − g)·s``, effective forest ``(1 − g)·f``, background albedo on
 #: the non-glacier tile only.
 CONDITIONAL_FIELDS = {
-    "glac": "land", "stl": "land", "soilw_am": "land", "soilw_rel": "land",
+    "glac": "land", "stl": "land",
+    "soilw_am": "open_land", "soilw_rel": "open_land",
     "forest": "open_land", "snowc": "open_land", "alb": "open_land",
 }
 
