@@ -1565,6 +1565,66 @@ class TestModeDispatch(unittest.TestCase):
 
                 budget.assert_called_once_with(dataset, 1800.0)
 
+    def test_chunked_schedule_is_exact_seconds_to_a_sub_day_endpoint(self):
+        """365 d + 1 h in 30-day chunks lands exactly on the end_time.
+
+        Float-day bookkeeping made the final remainder 5.041666666666686 d,
+        which no longer parses as whole seconds and aborted the run.
+        """
+        import tempfile
+
+        import jax_datetime as jdt
+
+        from jcm.date import parse_duration_seconds
+        from jcm.runners import run_chunked
+
+        class _Dataset:
+            attrs = {}
+
+            def to_netcdf(self, _path):
+                pass
+
+        predictions = types.SimpleNamespace(
+            _predictions={}, params=None, to_xarray=lambda: _Dataset())
+        start = jdt.to_datetime("2001-01-01")
+        state = types.SimpleNamespace(time=start)
+        chunks = []
+
+        def advance(**kwargs):
+            seconds = parse_duration_seconds(kwargs["total_time"])
+            chunks.append(seconds)
+            state.time = state.time + jdt.Timedelta(
+                days=seconds // 86400, seconds=seconds % 86400)
+            return predictions
+
+        model = types.SimpleNamespace(
+            dt_si=types.SimpleNamespace(m=1800.0), start_time=start,
+            run_state=state, run=mock.Mock(side_effect=advance),
+            resume=mock.Mock(side_effect=advance))
+        cfg = _compose(["run.total_time=null",
+                        "run.end_time=2002-01-01T01:00:00",
+                        "run.save_interval=1h"])
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch("jcm.diagnostics.check_health",
+                           return_value=(True, {})), \
+                mock.patch("jcm.diagnostics.print_report"), \
+                mock.patch("jcm.diagnostics.aerosol_budget_report",
+                           return_value=[]), \
+                mock.patch("jcm.runners.provenance.attrs", return_value={}), \
+                mock.patch("jcm.runners.provenance.write_sidecar"):
+            run_chunked(cfg, chunk_days=30, output_prefix=f"{tmpdir}/c",
+                        model=model, forcing=object())
+        self.assertEqual(chunks, [30 * 86400] * 12 + [5 * 86400 + 3600])
+        self.assertEqual(
+            np.asarray(state.time.to_datetime64()).astype("datetime64[s]"),
+            np.datetime64("2002-01-01T01:00:00", "s"))
+
+        # A duration that is not whole seconds is still refused up front.
+        bad = _compose(["run.total_time=0.1234567", "run.save_interval=1"])
+        with self.assertRaisesRegex(ValueError, "whole-second"):
+            run_chunked(bad, chunk_days=30, output_prefix="unused",
+                        model=model, forcing=object())
+
     def test_prescribed_mode_resolves_a_delegated_timestep_without_building(self):
         """A delegating backend's step is read from its config group.
 

@@ -720,10 +720,17 @@ def _want_omega(cfg: DictConfig, physics=None) -> bool:
         "plev" in (phys.get("aerocom_groups") or ()))
 
 
-def _configured_total_days(cfg: DictConfig, start_time) -> float:
-    """Resolve the mutually exclusive run duration/end time on the host."""
-    import numpy as np
-    from jcm.date import parse_duration_days, to_datetime
+def _configured_total_seconds(cfg: DictConfig, start_time) -> int:
+    """Resolve the mutually exclusive run duration/end time to exact seconds.
+
+    Kept as an integer so chunked scheduling never accumulates float-day
+    rounding: a 365-day-plus-one-hour run in 30-day chunks must end on the
+    configured instant, not on ``5.041666666666686`` days that no longer
+    parse as whole seconds. A duration that is not whole seconds is refused
+    (:func:`jcm.date.parse_duration_seconds`; ``end_time`` itself only takes
+    whole seconds).
+    """
+    from jcm.date import parse_duration_seconds, to_datetime
 
     total = cfg.run.get("total_time")
     end = cfg.run.get("end_time")
@@ -731,13 +738,17 @@ def _configured_total_days(cfg: DictConfig, start_time) -> float:
         raise ValueError("Set exactly one of run.total_time and run.end_time; "
                          "set run.total_time=null when selecting an end_time.")
     if end is None:
-        days = parse_duration_days(total)
-    else:
-        delta = to_datetime(str(end), name="end_time") - to_datetime(start_time)
-        days = float(delta.days) + float(delta.seconds) / 86400.0
-    if not np.isfinite(days) or days <= 0:
+        return parse_duration_seconds(total)
+    delta = to_datetime(str(end), name="end_time") - to_datetime(start_time)
+    seconds = int(delta.days) * 86400 + int(delta.seconds)
+    if seconds <= 0:
         raise ValueError("The configured run must have a positive finite duration.")
-    return days
+    return seconds
+
+
+def _configured_total_days(cfg: DictConfig, start_time) -> float:
+    """Return the configured run length in days (for day-granular windows)."""
+    return _configured_total_seconds(cfg, start_time) / 86400.0
 
 
 def _resolve_start_time(cfg: DictConfig):
@@ -2192,14 +2203,24 @@ def run_chunked(
     if forcing is None:
         forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
 
-    from jcm.date import parse_duration_days
+    from jcm.date import parse_duration_seconds
 
-    save_interval = parse_duration_days(cfg.run.save_interval)
-    total_time = _configured_total_days(cfg, model.start_time)
+    # All scheduling is in exact integer seconds of the model clock; days are
+    # derived only for file names and reports. The save interval is handed to
+    # the model as configured (it parses it exactly) after an eager check.
+    save_interval = cfg.run.save_interval
+    parse_duration_seconds(save_interval)
+    total_seconds = _configured_total_seconds(cfg, model.start_time)
+    chunk_seconds = parse_duration_seconds(chunk_days)
+
+    def _elapsed_seconds():
+        elapsed = model.run_state.time - model.start_time
+        return int(elapsed.days) * 86400 + int(elapsed.seconds)
 
     ckpt_path = cfg.run.get("checkpoint_path", None)
 
     reports: list[dict] = []
+    elapsed_seconds = 0
     elapsed_sim_days = 0.0
     total_wall = 0.0
     resumed_from_ckpt = False
@@ -2224,19 +2245,21 @@ def run_chunked(
         else:
             model.bootstrap_state()
 
-        elapsed_sim_days = load_checkpoint(model, ckpt_path)
+        load_checkpoint(model, ckpt_path)
+        # The restored exact clock, not the float elapsed_days record.
+        elapsed_seconds = _elapsed_seconds()
+        elapsed_sim_days = elapsed_seconds / 86400.0
         resumed_from_ckpt = True
         print(
             f"Resumed from checkpoint {ckpt_path} at sim-day "
             f"{elapsed_sim_days:.1f}"
         )
 
-    chunk_idx = int(elapsed_sim_days // chunk_days)
+    chunk_idx = elapsed_seconds // chunk_seconds
     started_at_days = elapsed_sim_days
-    while elapsed_sim_days < total_time:
-        cur_chunk = min(chunk_days, total_time - elapsed_sim_days)
-        if cur_chunk <= 0:
-            break
+    while elapsed_seconds < total_seconds:
+        cur_chunk_seconds = min(chunk_seconds, total_seconds - elapsed_seconds)
+        cur_chunk = f"{cur_chunk_seconds} seconds"
 
         t0 = time.perf_counter()
         first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
@@ -2288,8 +2311,8 @@ def run_chunked(
         )
         chunk_wall = time.perf_counter() - t0
         total_wall += chunk_wall
-        elapsed = model.run_state.time - model.start_time
-        elapsed_sim_days = int(elapsed.days) + int(elapsed.seconds) / 86400.0
+        elapsed_seconds = _elapsed_seconds()
+        elapsed_sim_days = elapsed_seconds / 86400.0
 
         ds = preds.to_xarray()
         ok, report = check_health(ds, chunk_idx, elapsed_sim_days)
@@ -2350,9 +2373,10 @@ def run_chunked(
             # elapsed accumulates by summing chunks, so a nominal 0.9 arrives
             # as 0.8999999999999999 and would otherwise slip a whole chunk.
             tol = 1e-6 * archive_every
+            previous_days = (elapsed_seconds - cur_chunk_seconds) / 86400.0
             if archive_every > 0 and (
                 int((elapsed_sim_days + tol) // archive_every)
-                > int((elapsed_sim_days - cur_chunk + tol) // archive_every)
+                > int((previous_days + tol) // archive_every)
             ):
                 import shutil
 
