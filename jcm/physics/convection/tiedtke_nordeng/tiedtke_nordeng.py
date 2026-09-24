@@ -2005,8 +2005,27 @@ class TiedtkeConvection(PhysicsTerm):
             mass_flux_down=_mfd,
             entrain_up=_entrain,
             entrain_down=_entrain_dn,
-            cloud_base=jnp.zeros(ncols, dtype=int),
-            cloud_top=jnp.zeros(ncols, dtype=int),
+            # Updraft base / top level indices on this term's (top-first
+            # physics) level axis, the analogues of ECHAM ``kcbot`` /
+            # ``kctop``. The 1M cloud scheme reads ``cloud_top`` for ECHAM's
+            # shallow-convection liquid test (``mo_cloud.f90``, the radiation
+            # ``ktype = 4``); they carry a meaning only where ``ktype > 0``.
+            # ECHAM's ``kctop`` is the last level the parcel is still buoyant
+            # (``cuasc``); jcm's differentiable, sigmoid-softened plume
+            # termination has no hard last-buoyant level, so the top is the
+            # highest level the updraft still reaches with mass flux above
+            # ``cmfcmin`` (``actual_ktop``) — which can sit one level above
+            # ECHAM's in a marginally buoyant overshoot.
+            cloud_base=(
+                _state_all.kbase.reshape(-1).astype(jnp.int32)
+                if _state_all is not None
+                else jnp.zeros(ncols, dtype=jnp.int32)
+            ),
+            cloud_top=(
+                _state_all.ktop.reshape(-1).astype(jnp.int32)
+                if _state_all is not None
+                else jnp.zeros(ncols, dtype=jnp.int32)
+            ),
             cape=jnp.zeros(ncols),
             # Per-column convection type for downstream guards (the
             # Sundqvist Sc enhancement gates on ktype == 0). Custom /

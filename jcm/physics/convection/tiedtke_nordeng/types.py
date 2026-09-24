@@ -242,9 +242,12 @@ class ConvectionData:
 
     Stored in the diagnostics dict under the ``"convection"`` key (no
     leading underscore — flows to user-facing xarray output as
-    ``convection.<field>``). The ``cloud_base`` / ``cloud_top`` / ``cape``
-    fields are reserved for the future port of the equivalent ECHAM
-    diagnostics; they are zero-filled today. ``mass_flux_up``/``down`` and
+    ``convection.<field>``). ``cloud_base`` / ``cloud_top`` are the
+    updraft's base and top level indices (analogues of ECHAM ``kcbot`` /
+    ``kctop``; see ``TiedtkeConvection``) on the
+    TOP-FIRST physics level axis — index 0 is the model top, the reverse of
+    the saved ``level`` axis — and mean something only where ``ktype > 0``.
+    ``cape`` is reserved for a future port and is zero-filled today. ``mass_flux_up``/``down`` and
     ``entrain_up``/``entrain_down`` are populated (post-rescale, post-cap —
     the same ledger scaling as the tendencies) for the convective tracer
     transport (#602, #622): the updraft flux at each layer's TOP
@@ -260,13 +263,17 @@ class ConvectionData:
                                      # [kg/m²/s] (nlev, ncols)
     entrain_down: jnp.ndarray        # Downdraft entrainment flux per layer
                                      # [kg/m²/s] (nlev, ncols)
-    cloud_base: jnp.ndarray          # Cloud base level index (ncols,)
-    cloud_top: jnp.ndarray           # Cloud top level index (ncols,)
+    cloud_base: jnp.ndarray          # Cloud base level index, top-first (ncols,)
+    cloud_top: jnp.ndarray           # Cloud top level index, top-first (ncols,)
     cape: jnp.ndarray                # CAPE [J/kg] (ncols,)
     ktype: jnp.ndarray               # Convection type per column (0=off,
-                                     # 1=deep, 2=shallow, 3=mid) — consumed
-                                     # by the Sundqvist stratocumulus guard
-                                     # (ECHAM gates on ktype==0) (ncols,)
+                                     # 1=deep, 2=shallow, 3=mid; 4=shallow
+                                     # with its liquid mostly below the
+                                     # cloud top, set on 2 by the 1M cloud
+                                     # scheme as ECHAM ``mo_cloud`` does) —
+                                     # read next step by the Sundqvist Sc
+                                     # guard (ktype==0) and the radiation
+                                     # liquid inhomogeneity (ktype==4) (ncols,)
     precip_conv: jnp.ndarray         # Convective precipitation [kg/m²/s] (ncols,)
     precip_flux: jnp.ndarray         # Convective precip flux entering each
                                      # layer from above [kg/m²/s] (nlev, ncols)
@@ -293,8 +300,8 @@ class ConvectionData:
             mass_flux_down=jnp.zeros((nlev,) + nodal_shape),
             entrain_up=jnp.zeros((nlev,) + nodal_shape),
             entrain_down=jnp.zeros((nlev,) + nodal_shape),
-            cloud_base=jnp.zeros(nodal_shape, dtype=int),
-            cloud_top=jnp.zeros(nodal_shape, dtype=int),
+            cloud_base=jnp.zeros(nodal_shape, dtype=jnp.int32),
+            cloud_top=jnp.zeros(nodal_shape, dtype=jnp.int32),
             cape=jnp.zeros(nodal_shape),
             ktype=jnp.zeros(nodal_shape, dtype=jnp.int32),
             precip_conv=jnp.zeros(nodal_shape),
@@ -325,15 +332,21 @@ CONVECTION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
         "units": "kg m-2 s-1",
         "long_name": "downdraft entrainment flux per layer"},
     "convection.cloud_base": {
-        "units": "1", "long_name": "convective cloud base level index"},
+        "units": "1",
+        "long_name": ("convective cloud base level index on the top-first "
+                      "physics axis (0 = model top); valid where ktype > 0")},
     "convection.cloud_top": {
-        "units": "1", "long_name": "convective cloud top level index"},
+        "units": "1",
+        "long_name": ("convective cloud top level index on the top-first "
+                      "physics axis (0 = model top); valid where ktype > 0")},
     "convection.cape": {
         "units": "J kg-1",
         "long_name": "convective available potential energy"},
     "convection.ktype": {
         "units": "1",
-        "long_name": "convection type (0=off, 1=deep, 2=shallow, 3=mid)"},
+        "long_name": ("convection type (0=off, 1=deep, 2=shallow, 3=mid, "
+                      "4=shallow with liquid below cloud top [1M cloud "
+                      "scheme])")},
     "convection.precip_conv": {
         "standard_name": "convective_precipitation_flux",
         "units": "kg m-2 s-1", "long_name": "convective precipitation flux"},

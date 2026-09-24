@@ -190,6 +190,13 @@ classified it:
 3. **Mid-level convection** (``ktype=3``): a ``cubasmc``-initiated plume with
    no surface connection (see the mid-level trigger above).
 
+With the 1M cloud scheme a fourth value appears in the published
+``convection.ktype``: the cloud step re-types a shallow column as ``ktype=4``
+when its liquid water path at and below the convective cloud top
+(``convection.cloud_top``) exceeds ``clwprat`` times the path above it, exactly
+as ECHAM's ``mo_cloud.f90`` does, so that the next step's radiation applies the
+shallow-convection liquid inhomogeneity factor.
+
 The convergence integral uses ECHAM's ``pqte``: the same-step vdiff moisture
 tendency plus the dynamics (advection + hyperdiffusion) tendency of the
 just-completed dycore step, reconstructed one step lagged from the physics

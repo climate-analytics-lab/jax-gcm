@@ -169,3 +169,65 @@ class TestAdvanceThermoRun(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOneRelativeHumidity(unittest.TestCase):
+    """The published ``relative_humidity`` is the documented water-RH (#615).
+
+    The Sundqvist cover computes its own ``q/qsat`` with ECHAM's binary ice
+    switch, which jumps by tens of percent across the cloud-ice threshold in
+    adjacent cells; it once overwrote this key after MoistAirColumnState set
+    it, so the saved field's meaning depended on the composition. Pin that it
+    no longer can.
+    """
+
+    def test_only_the_moist_air_term_provides_it_in_echam_physics(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        for kw in ({}, {"cloud_scheme": "2m"}):
+            providers = [t.name for t in echam_physics(**kw).terms
+                         if "relative_humidity" in t.provides]
+            self.assertEqual(providers, [MoistAirColumnState.name], kw)
+
+    def test_published_rh_is_water_rh_after_the_cover_runs(self):
+        import jax.numpy as jnp
+
+        from jcm.physics.clouds.sundqvist import SundqvistCloudFraction
+
+        ncols = 2
+        state = _state((ncols,))
+        # Cold (235 K) upper levels carrying cloud ice in column 1 only: the
+        # cover's ice switch fires there and not in column 0.
+        qi = np.zeros((NLEV, ncols), dtype=np.float32)
+        qi[:3, 1] = 1.0e-5
+        state = state.copy(
+            specific_humidity=np.full((NLEV, ncols), 1.0e-4, np.float32),
+            tracers={"qc": np.zeros_like(qi), "qi": qi},
+        )
+        moist = MoistAirColumnState()
+        moist.cache_coords(_coords())
+        _, diags = moist(state, {}, None, None)
+
+        # The documented definition, computed independently: e / e_s,w with
+        # the Bolton (1980) water saturation, at every temperature.
+        t = np.asarray(state.temperature, np.float64)
+        q = np.asarray(state.specific_humidity, np.float64)
+        p = np.asarray(diags["pressure_full"], np.float64)
+        e = q * p / (0.622 + 0.378 * q)
+        es_w = 611.2 * np.exp(17.67 * (t - 273.15) / (t - 29.65))
+        np.testing.assert_allclose(
+            np.asarray(diags["relative_humidity"]), e / es_w, rtol=1e-4)
+
+        # Minimal stand-ins for the two fields the cover reads (land mask,
+        # sea ice) — the Sc enhancement is irrelevant to this check.
+        forcing = type("F", (), {"sice_am": None})()
+        terrain = type("T", (), {"fmask": jnp.ones(ncols)})()
+        _, after = SundqvistCloudFraction()(state, diags, forcing, terrain)
+        np.testing.assert_array_equal(
+            np.asarray(after["relative_humidity"]),
+            np.asarray(diags["relative_humidity"]))
+        # The cover's own humidity is published separately and does differ
+        # (ice saturation) in the icy cold cells.
+        cover = np.asarray(after["cover_relative_humidity"])
+        water = np.asarray(after["relative_humidity"])
+        self.assertGreater(float(np.max(cover[:3, 1] / water[:3, 1])), 1.1)

@@ -21,8 +21,16 @@ Computes the pressure / height / density / humidity diagnostics that
 - ``layer_thickness`` from ``Δp / (ρ g)`` with a 10 m floor so that very
   thin uniform sigma layers don't blow up downstream divisions.
 - ``surface_pressure`` (Pa).
-- ``relative_humidity`` from the Tetens formula, with temperature clipped
-  only enough to avoid divide-by-zero at T = 29.65 K.
+- ``relative_humidity`` — THE public relative humidity of every ECHAM
+  composition: the vapour-pressure ratio ``e / e_s,w`` **with respect to
+  liquid water at all temperatures** (the WMO definition, and what
+  ``tools/aerocom_cmor.py`` writes as CMIP ``hur``), with ``e_s,w`` from the
+  Bolton (1980) Magnus fit. Temperature is clipped only enough to avoid
+  divide-by-zero at T = 29.65 K. It is a pure function of (T, q, p), so its
+  meaning does not change with which cloud or convection scheme is composed.
+  Scheme-internal humidities that switch to ice saturation (e.g. the
+  Sundqvist cover's ``cover_relative_humidity``) are published under their
+  own names and never overwrite this key.
 
 The numerical implementation matches what was previously in
 ``_prepare_common_physics_state`` (echam/echam_physics.py:44-132); this
@@ -160,6 +168,15 @@ class MoistAirColumnState(PhysicsTerm):
     category: ClassVar[str] = "prepare"
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = MOIST_AIR_FIELDS
+    # CF metadata for the public humidity diagnostic, so the file states which
+    # saturation reference it uses (see the module docstring).
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "relative_humidity": {
+            "standard_name": "relative_humidity",
+            "units": "1",
+            "long_name": "relative humidity with respect to liquid water",
+        },
+    }
 
     def __init__(self):
         """Defer coefficient caching until ``cache_coords`` runs."""
@@ -255,9 +272,10 @@ class MoistAirColumnState(PhysicsTerm):
             dp / (air_density * physical_constants.grav), 10.0,
         )
 
-        # Tetens formula. The temperature clip is a wide math-safety bound
-        # (avoids divide-by-zero at T = 29.65 K and exp overflow at high T)
-        # — NOT a physical-range clip.
+        # Water-saturation RH (WMO), Bolton (1980) Magnus fit for e_s,w. The
+        # temperature clip is a wide math-safety bound (avoids divide-by-zero
+        # at T = 29.65 K and exp overflow at high T) — NOT a physical-range
+        # clip.
         T_clip = jnp.clip(state.temperature, 50.0, 500.0)
         q_clip = jnp.maximum(state.specific_humidity, 0.0)
         es = 611.2 * jnp.exp(

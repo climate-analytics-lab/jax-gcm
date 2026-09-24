@@ -2,7 +2,9 @@
 
 A ``#NNN`` in ``docs/source/science/**`` asserts that the gap it names is
 still open; a closed one silently converts a documented limitation into a
-claim the reader believes was fixed. Three consumers police that invariant and
+claim the reader believes was fixed. A cross-repository ``repo#NNN`` /
+``owner/repo#NNN`` (e.g. ``jax-rrtmgp#37``) makes the same claim about that
+repository's issue, and is resolved there. Three consumers police that invariant and
 must agree on what counts as a citation, so the parsing and the API lookup
 live here rather than in any one of them:
 
@@ -35,11 +37,52 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 SCIENCE = REPO / "docs" / "source" / "science"
 
-#: A tracked-gap reference. Deliberately the same shape the rot guard has
-#: always used, so this refactor cannot change which references are policed.
-ISSUE_REF = re.compile(r"#(\d{1,6})\b")
+#: The repository a bare ``#NNN`` names, and the owner a bare ``repo#NNN``
+#: resolves under (the register's cross-repository citations name sibling
+#: repositories of this organisation, e.g. ``jax-rrtmgp#37``).
+HOME_REPO = "climate-analytics-lab/jax-gcm"
+HOME_OWNER = HOME_REPO.split("/")[0]
 
-_API = "https://api.github.com/repos/climate-analytics-lab/jax-gcm/issues/{}"
+#: A tracked-gap reference: ``#NNN`` (this repository), ``repo#NNN`` (a
+#: sibling repository of :data:`HOME_OWNER`) or ``owner/repo#NNN``. The
+#: optional prefix is part of the SAME match, so a cross-repository reference
+#: is never also read as a citation of this repository's ``#NNN`` — reading
+#: ``jax-rrtmgp#37`` as jax-gcm#37 reported a live jax-rrtmgp issue as "a pull
+#: request, not an issue" (#882). Seven digits still match nothing at all: the
+#: ``\b`` refuses every truncation of the run. The look-behind anchors a match
+#: at the start of a token, so a deeper path (``a/b/c#3``) is not misread as
+#: owner ``b``, repository ``c``.
+ISSUE_REF = re.compile(
+    r"(?<![A-Za-z0-9._/-])"
+    r"(?:(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)/)?"
+    r"(?P<repo>[A-Za-z0-9._-]*[A-Za-z0-9_])?"
+    r"#(?P<number>\d{1,6})\b"
+)
+
+_API = "https://api.github.com/repos/{repo}/issues/{number}"
+
+
+def parse_refs(text: str) -> list[tuple[str, str]]:
+    """Every tracked-gap reference in ``text`` as ``(repo, number)`` pairs.
+
+    ``repo`` is the fully qualified ``owner/name``: :data:`HOME_REPO` for a
+    bare ``#NNN``, ``HOME_OWNER/name`` for ``name#NNN``, and as written for
+    ``owner/name#NNN``.
+    """
+    refs = []
+    for m in ISSUE_REF.finditer(text):
+        owner, name = m.group("owner"), m.group("repo")
+        if name is None:
+            repo = HOME_REPO
+        else:
+            repo = f"{owner or HOME_OWNER}/{name}"
+        refs.append((repo, m.group("number")))
+    return refs
+
+
+def ref_label(repo: str, number: str | int) -> str:
+    """How a reference is printed: ``#N`` at home, ``owner/name#N`` abroad."""
+    return f"#{number}" if repo == HOME_REPO else f"{repo}#{number}"
 
 
 class ApiUnavailable(RuntimeError):
@@ -60,14 +103,29 @@ def science_pages() -> list[Path]:
     return pages
 
 
-def citations() -> dict[str, list[str]]:
-    """Map each cited issue number to the page names citing it."""
-    refs: dict[str, list[str]] = {}
+def all_citations() -> dict[tuple[str, str], list[str]]:
+    """Map each cited ``(repo, number)`` to the page names citing it.
+
+    Cross-repository references are included: a ``jax-rrtmgp#37`` asserts
+    that jax-rrtmgp issue 37 is open exactly as ``#37`` asserts it of this
+    repository's, so the sweep resolves each against its own repository.
+    """
+    refs: dict[tuple[str, str], list[str]] = {}
     for page in science_pages():
-        for num in ISSUE_REF.findall(page.read_text()):
-            if page.name not in refs.setdefault(num, []):
-                refs[num].append(page.name)
+        for ref in parse_refs(page.read_text()):
+            if page.name not in refs.setdefault(ref, []):
+                refs[ref].append(page.name)
     return refs
+
+
+def citations() -> dict[str, list[str]]:
+    """Map each cited issue number OF THIS REPOSITORY to the pages citing it.
+
+    What the close hook asks about: closing jax-gcm issue ``N`` concerns only
+    the pages citing ``#N``, never a page citing another repository's ``N``.
+    """
+    return {num: pages for (repo, num), pages in all_citations().items()
+            if repo == HOME_REPO}
 
 
 def pages_citing(number: int | str) -> list[str]:
@@ -75,12 +133,14 @@ def pages_citing(number: int | str) -> list[str]:
     return citations().get(str(int(number)), [])
 
 
-def issue_state(number: int | str, *, token: str | None = None,
-                timeout: float = 10.0) -> str:
+def issue_state(number: int | str, *, repo: str = HOME_REPO,
+                token: str | None = None, timeout: float = 10.0) -> str:
     """Return ``"open"``, ``"closed"``, ``"missing"`` or ``"pull_request"``.
 
     A pull request is reported separately because the issues endpoint returns
     PRs too, and a PR — even an open one — is not a durable tracked gap.
+    ``repo`` is the ``owner/name`` the number belongs to (see
+    :func:`parse_refs`).
 
     Raises:
         ApiUnavailable: on rate limiting, server errors or a network failure.
@@ -92,7 +152,8 @@ def issue_state(number: int | str, *, token: str | None = None,
         # Unauthenticated is 60 req/hr per IP, which a shared runner exhausts;
         # the Actions-provided token is 5000 req/hr.
         headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(_API.format(int(number)), headers=headers)
+    req = urllib.request.Request(
+        _API.format(repo=repo, number=int(number)), headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             payload = json.load(resp)
@@ -116,15 +177,18 @@ def stale_citations(*, token: str | None = None) -> list[str]:
 
     """
     stale = []
-    for num, pages in sorted(citations().items(), key=lambda kv: int(kv[0])):
-        state = issue_state(num, token=token)
+    # Home references first, then each other repository's, numerically.
+    order = lambda kv: (kv[0][0] != HOME_REPO, kv[0][0], int(kv[0][1]))  # noqa: E731
+    for (repo, num), pages in sorted(all_citations().items(), key=order):
+        state = issue_state(num, repo=repo, token=token)
+        label = ref_label(repo, num)
         where = f"(cited in {sorted(set(pages))})"
         if state == "missing":
-            stale.append(f"#{num} does not exist {where}")
+            stale.append(f"{label} does not exist {where}")
         elif state == "pull_request":
-            stale.append(f"#{num} is a pull request, not an issue {where}")
+            stale.append(f"{label} is a pull request, not an issue {where}")
         elif state != "open":
-            stale.append(f"#{num} is {state} {where}")
+            stale.append(f"{label} is {state} {where}")
     return stale
 
 

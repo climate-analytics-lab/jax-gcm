@@ -17,7 +17,11 @@ from jcm.physics.radiation.grey_two_stream.radiation_scheme import radiation_sch
 from jcm.physics.radiation.rrtmgp import (
     radiation_scheme_rrtmgp,
 )
-from jcm.physics.radiation.radiation_types import RadiationParameters
+from jcm.physics.radiation.radiation_types import (
+    RadiationParameters,
+    lagged_convection_type,
+    liquid_inhomogeneity,
+)
 from jcm.physics.radiation.grey_two_stream.radiation_scheme_test import (
     create_test_atmosphere,
     create_default_aerosol_data,
@@ -1619,29 +1623,33 @@ class TestRRTMGPMoistureConversion:
         assert np.allclose(np.asarray(library_vmr), true_vmr, rtol=1e-6)
 
 
+def _uniform_inhomogeneity(f):
+    """Radiation parameters with every inhomogeneity factor set to ``f``."""
+    return RadiationParameters.default(
+        cloud_inhomogeneity_liquid=f,
+        cloud_inhomogeneity_liquid_convective=f,
+        cloud_inhomogeneity_liquid_shallow=f,
+        cloud_inhomogeneity_ice=f,
+    )
+
+
 class TestRRTMGPCloudInhomogeneity:
-    """ECHAM's fixed cloud sub-grid inhomogeneity factor (#678)."""
+    """ECHAM's fixed cloud sub-grid inhomogeneity factors (#678, #870)."""
 
     def test_inhomogeneity_factor_reduces_reflected_sw(self):
-        """A smaller liquid inhomogeneity factor thins the cloud optically.
+        """A smaller inhomogeneity factor thins the cloud optically.
 
         The factor multiplies the in-cloud condensate path (equivalently the
         optical depth), so reducing it must lower the reflected TOA shortwave
-        and stay NaN-free -- the faithful ECHAM ``zinhoml`` behaviour, not the
-        old one-sided clip that was inert almost everywhere.
+        and stay NaN-free -- the faithful ECHAM ``zinhoml``/``zinhomi``
+        behaviour.
         """
         base = _make_inputs(nlev=10)
 
-        full = dict(base)
-        full["parameters"] = RadiationParameters.default(
-            cloud_inhomogeneity=1.0,
-        )
+        full = dict(base, parameters=_uniform_inhomogeneity(1.0))
         _, diag_full = radiation_scheme_rrtmgp(**full)
 
-        reduced = dict(base)
-        reduced["parameters"] = RadiationParameters.default(
-            cloud_inhomogeneity=0.5,
-        )
+        reduced = dict(base, parameters=_uniform_inhomogeneity(0.5))
         _, diag_reduced = radiation_scheme_rrtmgp(**reduced)
 
         assert jnp.isfinite(diag_full.toa_sw_up)
@@ -1649,7 +1657,101 @@ class TestRRTMGPCloudInhomogeneity:
         # Thinner clouds reflect less sunlight back to space.
         assert float(diag_reduced.toa_sw_up) < float(diag_full.toa_sw_up)
 
-    def test_default_factor_is_echam_t63_value(self):
-        """The default matches ECHAM's nn=63 ``zinhoml1 = zinhomi = 0.8``."""
+    def test_defaults_are_echam_t63_values(self):
+        """``setup_cloud_optics`` at nn=63: zinhoml1=zinhoml3=zinhomi=0.8,
+        zinhoml2=0.4.
+        """
         p = RadiationParameters.default()
-        assert float(p.cloud_inhomogeneity) == pytest.approx(0.8)
+        assert float(p.cloud_inhomogeneity_liquid) == pytest.approx(0.8)
+        assert float(p.cloud_inhomogeneity_liquid_convective) == pytest.approx(0.8)
+        assert float(p.cloud_inhomogeneity_liquid_shallow) == pytest.approx(0.4)
+        assert float(p.cloud_inhomogeneity_ice) == pytest.approx(0.8)
+
+    def test_liquid_factor_selected_by_convective_type(self):
+        """``mo_cloud_optics.f90``: ktype 0 -> zinhoml1, 4 -> zinhoml2, else
+        zinhoml3. Distinct values prove each branch is the right leaf.
+        """
+        p = RadiationParameters.default(
+            cloud_inhomogeneity_liquid=0.7,
+            cloud_inhomogeneity_liquid_convective=0.9,
+            cloud_inhomogeneity_liquid_shallow=0.4,
+        )
+        ktype = jnp.array([0, 1, 2, 3, 4], dtype=jnp.int32)
+        np.testing.assert_allclose(
+            np.asarray(liquid_inhomogeneity(ktype, p)),
+            [0.7, 0.9, 0.9, 0.9, 0.4], rtol=1e-6)
+        # At the defaults a shallow-liquid column gets 0.4, every other 0.8.
+        np.testing.assert_allclose(
+            np.asarray(liquid_inhomogeneity(ktype, RadiationParameters.default())),
+            [0.8, 0.8, 0.8, 0.8, 0.4], rtol=1e-6)
+
+    def test_shallow_liquid_column_weakens_sw_cre(self):
+        """A ktype-4 column halves the liquid optical depth: less reflected SW, a
+        weaker (less negative) SW cloud radiative effect, more OLR.
+        Deep/shallow/none columns share the 0.8 factor, so they give
+        identical fluxes.
+        """
+        base = _make_inputs(nlev=10)
+        assert float(jnp.sum(base["cloud_water"])) > 0.0  # liquid is present
+
+        diags = {k: radiation_scheme_rrtmgp(
+            **base, convection_type=jnp.int32(k))[1] for k in (0, 2, 4)}
+        up = {k: float(d.toa_sw_up) for k, d in diags.items()}
+        assert all(np.isfinite(v) for v in up.values())
+        assert up[4] < up[0]
+        assert up[2] == pytest.approx(up[0], rel=1e-6)
+        # SW CRE = clear - all-sky reflected: negative, weaker when thinner.
+        cre = {k: float(d.toa_sw_up_clear - d.toa_sw_up)
+               for k, d in diags.items()}
+        assert cre[0] < 0.0
+        assert cre[0] < cre[4] <= 0.0
+        assert float(diags[4].toa_lw_up) > float(diags[0].toa_lw_up)
+
+    def test_grey_backend_applies_the_same_selection(self):
+        """The grey backend reads the same per-column liquid factor. Its SW
+        cloud response is absorption-dominated (#855), so the robust check
+        is the LW: a thinner shallow-liquid cloud lets more OLR out, and the
+        0.8-factor types agree exactly.
+        """
+        base = _make_inputs(nlev=10)
+        diags = {k: radiation_scheme(**base, convection_type=jnp.int32(k))[1]
+                 for k in (0, 2, 4)}
+        olr = {k: float(d.toa_lw_up) for k, d in diags.items()}
+        assert all(np.isfinite(v) for v in olr.values())
+        assert olr[4] > olr[0]
+        assert olr[2] == pytest.approx(olr[0], rel=1e-6)
+        assert float(diags[4].toa_sw_up) != float(diags[0].toa_sw_up)
+
+    def test_factors_are_differentiable_leaves(self):
+        """Each liquid factor carries a live gradient exactly where selected."""
+        base = _make_inputs(nlev=10)
+
+        def reflected(f, field, ktype):
+            p = RadiationParameters.default(**{field: f})
+            return radiation_scheme_rrtmgp(
+                **dict(base, parameters=p), convection_type=ktype,
+            )[1].toa_sw_up
+
+        def grad(field, ktype):
+            return float(jax.grad(reflected)(
+                jnp.float32(0.6), field, jnp.int32(ktype)))
+
+        assert grad("cloud_inhomogeneity_liquid_shallow", 4) > 0.0
+        assert grad("cloud_inhomogeneity_liquid", 4) == 0.0
+        assert grad("cloud_inhomogeneity_liquid", 0) > 0.0
+        assert grad("cloud_inhomogeneity_liquid_shallow", 0) == 0.0
+        assert grad("cloud_inhomogeneity_liquid_convective", 2) > 0.0
+
+    def test_lagged_convection_type_reads_the_carry(self):
+        """Radiation reads the previous step's ``convection.ktype``; with no
+        convection carry it is 0 (ECHAM's cold-start ``rtype``).
+        """
+        from jcm.physics.convection.tiedtke_nordeng.types import ConvectionData
+
+        conv = ConvectionData.zeros((3,), 4).replace(
+            ktype=jnp.array([0, 2, 4], dtype=jnp.int32))
+        np.testing.assert_array_equal(
+            np.asarray(lagged_convection_type({"convection": conv}, 3)),
+            [0, 2, 4])
+        np.testing.assert_array_equal(
+            np.asarray(lagged_convection_type({}, 3)), [0, 0, 0])

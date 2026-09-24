@@ -161,19 +161,32 @@ number to bring a clipped mode back inside its bounds the way MAM4's
 activation for the log-normal modes, using the **κ-Köhler** critical
 supersaturation with κ read from the MAM4 core's per-mode volume-weighted
 hygroscopicity, and a single characteristic updraft ``w = √(2·TKE/3)`` from the
-previous step's TTE-TKE. Two shape-coefficient variants are selectable: every shipped ``echam-jam*``
+previous step's TTE-TKE. The droplet-growth coefficient uses CAM's local-state
+transport coefficients — water-vapour diffusivity
+``Dv = 2.11e-5·(1013.25 hPa/p)·(T/273 K)^1.94`` and dry-air conductivity
+``Ka = (5.69 + 0.017·(T − 273 K))·4.186e-3`` W m⁻¹ K⁻¹ (Pruppacher & Klett 13.3,
+13.18) — and the Kelvin coefficient is CAM's fixed ``aten`` (surface tension
+0.076 N m⁻¹ at 273 K), so every mode's critical supersaturation is
+level-independent. Two shape-coefficient variants are selectable: every shipped ``echam-jam*``
 configuration pins ``ghosh2025`` (the revised coefficients); ``arg2000`` (the
 original paper's) is the bare-factory default.
 (``jcm/physics/aerosol/jam/activation/arg.py``, ``arg_term.py``.)
 
 **What ECHAM/CAM does.** This is CAM's ``ndrop.F90`` structure
 (``activate_modal`` / ``maxsat``, f1/f2 shape factors, volume-weighted κ-mixing,
-``√(2/3·TKE)`` single updraft), fed genuine MAM4 modal properties. ECHAM-HAM's
+``√(2/3·TKE)`` single updraft, ``diff0``/``conduct0``/``aten``), fed genuine MAM4
+modal properties. ECHAM-HAM's
 ``mo_ham_activ::ham_activ_abdulrazzak_ghan`` implements the same ARG closed form
 but with a **van 't Hoff electrolyte "B" (soluble-ion) Köhler** hygroscopicity and
 a ``0.7·√TKE`` updraft.
 
 **Why we differ.**
+- `science` — the transport coefficients follow the local T and p because the
+  sea-level constants (2.11e-5 m² s⁻¹, 0.024 W m⁻¹ K⁻¹) under-state ``Dv`` aloft
+  by up to ~2x and bias activation high, increasingly with altitude (~4 % at
+  900 hPa, ~18 % at 500 hPa for a MAM4-like population at w = 0.3 m s⁻¹). The
+  conductivity is CAM's dry-air form; HAM's ``mo_ham_activ`` adds a moist-air
+  correction to ``Ka`` that the CAM port does not carry.
 - `science` (provenance correction) — the true reference is **CAM ``ndrop.F90``**,
   not HAM. Because HAM uses κ-free electrolyte hygroscopicity, "fixing" jcm toward
   the historically-cited HAM would replace κ with ``B`` for the MAM4 modes and
@@ -184,7 +197,10 @@ a ``0.7·√TKE`` updraft.
 **Status & known limitations.** The ``ghosh2025`` variant's coefficients are
 fitted to the paper's tables (flagged in code) and off by default. A negative
 floor is applied before the number-weighted fraction to survive spectral ringing
-on the cold-start aerosol field.
+on the cold-start aerosol field. The deposition-nucleation half of the
+aerosol→ice pathway is computed (``ice_nuclei_deposition``) but read by the 2M
+scheme only under ``nic_cirrus = 2``, whose source is itself hollow, so it is
+inert on the shipped ``nic_cirrus = 1`` default (#679, #552).
 
 ### Cloud-borne aerosol store
 

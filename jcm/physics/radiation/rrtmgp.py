@@ -43,7 +43,11 @@ from jcm.physics.radiation.mcica import (
     generate_subcolumns,
     in_cloud_path,
 )
-from jcm.physics.radiation.radiation_types import cloud_overlap_name
+from jcm.physics.radiation.radiation_types import (
+    cloud_overlap_name,
+    lagged_convection_type,
+    liquid_inhomogeneity,
+)
 from jcm.physics.radiation.cloud_optics import resolve_effective_radii
 import jcm.constants as c
 
@@ -62,7 +66,7 @@ from rrtmgp.rrtmgp import RRTMGP
 # everything above the threshold to the same value -- and is NOT the sub-grid
 # inhomogeneity treatment. The inhomogeneity factor (ECHAM ``zinhoml``/
 # ``zinhomi``) is a separate FIXED multiplicative reduction applied to the
-# per-gpoint optical-depth paths (see ``RadiationParameters.cloud_inhomogeneity``
+# per-gpoint optical-depth paths (see ``RadiationParameters.cloud_inhomogeneity_*``
 # and the ``in_cloud_*_lib`` scaling in ``radiation_scheme_rrtmgp``). Measured on
 # T63L47 output this clip binds in ~0.003% of cloudy cells, so it is inert in
 # practice; keep it strictly as a NaN guard (#678).
@@ -542,6 +546,7 @@ def radiation_scheme_rrtmgp(
     n2o_vmr: Optional[jnp.ndarray] = None,
     r_eff_liq_um: Optional[jnp.ndarray] = None,
     r_eff_ice_um: Optional[jnp.ndarray] = None,
+    convection_type: jnp.ndarray = jnp.int32(0),
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
 
@@ -579,6 +584,10 @@ def radiation_scheme_rrtmgp(
             preffl/preffi written by the 2M scheme; lagged one step by the
             carry). Levels <= 0 mean "not provided" and use the diagnostic
             fallbacks in ``prepare_rrtmgp_data``.
+        convection_type: the column's (previous-step) ECHAM ``ktype``, which
+            selects the liquid inhomogeneity factor (see
+            :func:`~jcm.physics.radiation.radiation_types.liquid_inhomogeneity`).
+            0 (no convection) when not supplied.
 
     """
     # CDNC factor from aerosol data
@@ -713,21 +722,28 @@ def radiation_scheme_rrtmgp(
     )
     # Per-gpoint condensate paths carry the cloud optical depth (τ ∝ path at the
     # fixed effective radius resolved from the PHYSICAL path). The ECHAM sub-grid
-    # inhomogeneity factor multiplies the optical depth (``mo_cloud_optics.f90``:
-    # ``ztau = ztol*zinhoml + ztoi*zinhomi``, ``l_variable_inhoml = .FALSE.``),
-    # so it is applied HERE -- to the τ-driving paths -- not to the physical path
-    # that set the effective radius above (#678).
+    # inhomogeneity factors multiply the per-phase optical depth
+    # (``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``,
+    # ``l_variable_inhoml = .FALSE.``), so they are applied HERE -- to the
+    # τ-driving paths -- not to the physical path that set the effective radius
+    # above. The liquid factor follows the column's convective type (``zinhoml``
+    # 1/2/3); the ice factor is ``zinhomi``.
     #
-    # The SAME factor scales both phases (see ``RadiationParameters`` for why a
-    # single factor, not two): jax-rrtmgp weights the combined ssa (by τ) and
-    # asymmetry (by ssa) from these per-phase paths, so a common factor leaves
-    # those weightings unchanged and scales only the total optical depth --
-    # exactly ECHAM's ``ztau`` at the T63 default ``zinhoml = zinhomi = 0.8``.
-    in_cloud_lwp_lib = parameters.cloud_inhomogeneity * lax.cond(
+    # jax-rrtmgp's only per-phase inputs are these paths, and it weights the
+    # combined ssa (by τ) and asymmetry (by τ·ssa) with the τ they produce.
+    # Wherever the two factors are equal -- every column at the T63 defaults
+    # except shallow-convective ``ktype == 4`` ones -- the common factor cancels
+    # in those weights and this is exactly ECHAM's ``ztau``/``zomg``/``zasy``.
+    # Where they differ AND a layer holds both phases, the ssa/asymmetry are
+    # weighted by the scaled rather than ECHAM's unscaled τ; the total optical
+    # depth is still exact. Weighting by the physical τ needs a per-phase
+    # optical-depth scale inside the library (jax-rrtmgp#37).
+    zinhoml = liquid_inhomogeneity(convection_type, parameters)
+    in_cloud_lwp_lib = zinhoml * lax.cond(
         needs_reversal, lambda a: a[::-1], identity,
         icon_state.cloud_water_path,
     )
-    in_cloud_ipath_lib = parameters.cloud_inhomogeneity * lax.cond(
+    in_cloud_ipath_lib = parameters.cloud_inhomogeneity_ice * lax.cond(
         needs_reversal, lambda a: a[::-1], identity,
         icon_state.cloud_ice_path,
     )
@@ -1397,6 +1413,9 @@ class RRTMGPRadiation(PhysicsTerm):
             n2o_vmr=lev_to_col(jnp.broadcast_to(n2o_vmr, (nlev, ncols))),
             r_eff_liq_um=lev_to_col(r_eff_liq_um),
             r_eff_ice_um=lev_to_col(r_eff_ice_um),
+            # Previous step's convective type: selects the liquid
+            # inhomogeneity factor (ECHAM radiation reads the lagged rtype).
+            convection_type=lagged_convection_type(diagnostics, ncols),
         )
 
         # We tried a day/night split here (solve the dark ~half LW-only, skip
@@ -1413,6 +1432,7 @@ class RRTMGPRadiation(PhysicsTerm):
             0, None, None, None,  # col_index, model_step, base_seed, cre
             0, 0, 0, 0,          # ozone_vmr, co2_vmr, ch4_vmr, n2o_vmr
             0, 0,                # r_eff_liq_um, r_eff_ice_um
+            0,                   # convection_type
         )
         tendencies_vmapped, diagnostics_vmapped = _maybe_chunked_vmap(
             radiation_scheme_rrtmgp, _in_axes,
@@ -1428,6 +1448,7 @@ class RRTMGPRadiation(PhysicsTerm):
             model_step, base_seed, compute_cre,
             cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"], cols["n2o_vmr"],
             cols["r_eff_liq_um"], cols["r_eff_ice_um"],
+            cols["convection_type"],
         )
 
         _fresh_toa = dict(
@@ -1480,6 +1501,7 @@ class RRTMGPRadiation(PhysicsTerm):
                     cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"],
                     cols["n2o_vmr"],
                     cols["r_eff_liq_um"], cols["r_eff_ice_um"],
+                    cols["convection_type"],
                 )
                 return (
                     _column_vector_rrtmgp(dnoa.toa_sw_up, ncols),

@@ -34,7 +34,9 @@ class CitationParsingTest(unittest.TestCase):
             with self.subTest(num=num):
                 self.assertTrue(pages)
                 for name in pages:
-                    self.assertIn(f"#{num}", (tg.SCIENCE / name).read_text())
+                    self.assertIn(
+                        (tg.HOME_REPO, num),
+                        tg.parse_refs((tg.SCIENCE / name).read_text()))
 
     def test_pages_are_deduplicated(self):
         for num, pages in tg.citations().items():
@@ -47,16 +49,46 @@ class CitationParsingTest(unittest.TestCase):
         num = next(iter(tg.citations()))
         self.assertEqual(tg.pages_citing(int(num)), tg.pages_citing(num))
 
-    def test_ref_shape_is_unchanged(self):
-        r"""The regex must keep matching exactly what the old guard matched.
+    def test_ref_shape(self):
+        r"""Which text counts as a citation, and of which repository.
 
-        Including its quirks: a run of seven digits matches nothing at all
-        (the ``\b`` refuses every truncation of it), while a ``#`` glued to a
-        preceding word still counts. Both are pre-existing behaviour, pinned
-        here so this refactor cannot quietly change which refs are policed.
+        A run of seven digits matches nothing at all (the ``\b`` refuses
+        every truncation of it). A ``#`` glued to a preceding name is a
+        cross-repository reference to that sibling repository, never a
+        citation of this repository's number (#882).
         """
+        home, owner = tg.HOME_REPO, tg.HOME_OWNER
         text = "see #123 and #45678, not #1234567 or C#4 or a#9"
-        self.assertEqual(tg.ISSUE_REF.findall(text), ["123", "45678", "4", "9"])
+        self.assertEqual(tg.parse_refs(text), [
+            (home, "123"), (home, "45678"),
+            (f"{owner}/C", "4"), (f"{owner}/a", "9"),
+        ])
+
+    def test_cross_repo_refs_are_not_home_refs(self):
+        """``jax-rrtmgp#37`` names jax-rrtmgp's issue, not jax-gcm#37 (#882)."""
+        text = ("needs per-phase scaling in the library (jax-rrtmgp#37); "
+                "also google/jax#18 and (#870).")
+        self.assertEqual(tg.parse_refs(text), [
+            (f"{tg.HOME_OWNER}/jax-rrtmgp", "37"),
+            ("google/jax", "18"),
+            (tg.HOME_REPO, "870"),
+        ])
+
+    def test_deeper_paths_are_not_read_as_owner_and_repo(self):
+        self.assertEqual(tg.parse_refs("see a/b/c#3 and x/y#4"),
+                         [("x/y", "4")])
+
+    def test_register_cross_repo_ref_is_kept_out_of_home_citations(self):
+        """The real register's ``jax-rrtmgp#37`` must not read as ``#37``."""
+        text = (tg.SCIENCE / "radiation.md").read_text()
+        self.assertIn("jax-rrtmgp#37", text)
+        rrtmgp = (f"{tg.HOME_OWNER}/jax-rrtmgp", "37")
+        self.assertIn("radiation.md", tg.all_citations()[rrtmgp])
+        self.assertNotIn("radiation.md", tg.pages_citing(37))
+
+    def test_labels(self):
+        self.assertEqual(tg.ref_label(tg.HOME_REPO, 5), "#5")
+        self.assertEqual(tg.ref_label("o/r", "5"), "o/r#5")
 
     def test_science_pages_are_found(self):
         self.assertTrue(all(p.suffix == ".md" for p in tg.science_pages()))
@@ -71,6 +103,15 @@ class IssueStateTest(unittest.TestCase):
         with mock.patch(target, side_effect=side,
                         return_value=_response(payload or {})):
             return tg.issue_state(number, token="t")
+
+    def test_url_names_the_citation_repo(self):
+        target = "tracked_gaps.urllib.request.urlopen"
+        for repo in (tg.HOME_REPO, f"{tg.HOME_OWNER}/jax-rrtmgp"):
+            with self.subTest(repo=repo), mock.patch(
+                    target, return_value=_response({"state": "open"})) as op:
+                tg.issue_state(37, repo=repo, token="t")
+                self.assertEqual(op.call_args[0][0].full_url,
+                                 f"https://api.github.com/repos/{repo}/issues/37")
 
     def test_open_and_closed(self):
         self.assertEqual(self._state({"state": "open"}), "open")
@@ -104,12 +145,32 @@ class IssueStateTest(unittest.TestCase):
 
 
 class StaleCitationsTest(unittest.TestCase):
-    def _stale(self, states):
-        with mock.patch.object(tg, "citations",
-                               return_value={k: ["p.md"] for k in states}), \
+    def _stale(self, states, repo=tg.HOME_REPO):
+        with mock.patch.object(
+                tg, "all_citations",
+                return_value={(repo, k): ["p.md"] for k in states}), \
              mock.patch.object(tg, "issue_state",
                                side_effect=lambda n, **kw: states[str(n)]):
             return tg.stale_citations()
+
+    def test_cross_repo_ref_is_resolved_in_its_own_repo(self):
+        """``jax-rrtmgp#37`` is looked up in jax-rrtmgp, not here (#882)."""
+        seen = []
+
+        def state(n, *, repo, **kw):
+            seen.append((repo, str(n)))
+            return "open" if repo.endswith("/jax-rrtmgp") else "pull_request"
+
+        rrtmgp = (f"{tg.HOME_OWNER}/jax-rrtmgp", "37")
+        with mock.patch.object(tg, "all_citations",
+                               return_value={rrtmgp: ["radiation.md"]}), \
+             mock.patch.object(tg, "issue_state", side_effect=state):
+            self.assertEqual(tg.stale_citations(), [])
+        self.assertEqual(seen, [rrtmgp])
+
+    def test_cross_repo_stale_line_names_the_repo(self):
+        stale = self._stale({"37": "closed"}, repo="o/r")
+        self.assertEqual(stale, ["o/r#37 is closed (cited in ['p.md'])"])
 
     def test_open_refs_are_not_stale(self):
         self.assertEqual(self._stale({"1": "open", "2": "open"}), [])
@@ -127,7 +188,8 @@ class StaleCitationsTest(unittest.TestCase):
         def boom(n, **kw):
             raise tg.ApiUnavailable("429")
 
-        with mock.patch.object(tg, "citations", return_value={"1": ["p.md"]}), \
+        with mock.patch.object(tg, "all_citations",
+                               return_value={(tg.HOME_REPO, "1"): ["p.md"]}), \
              mock.patch.object(tg, "issue_state", side_effect=boom), \
              self.assertRaises(tg.ApiUnavailable):
             tg.stale_citations()

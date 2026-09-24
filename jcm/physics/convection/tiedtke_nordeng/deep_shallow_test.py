@@ -316,5 +316,72 @@ class TestPrevStepPublication(unittest.TestCase):
             "the _prev_step carry leaked into user-facing output")
 
 
+
+class TestCloudTopBasePublication(unittest.TestCase):
+    """``convection.cloud_top``/``cloud_base`` carry the updraft's ktop/kbase.
+
+    The 1M cloud scheme reads ``cloud_top`` for ECHAM's shallow-liquid
+    radiation re-typing (``mo_cloud.f90``, ``ktype = 4``, #870), so they must
+    be the scheme's indices on the term's own level axis, not zero-fill.
+    """
+
+    def test_published_indices_follow_the_column_state(self):
+        import pytest
+        from types import SimpleNamespace
+
+        import jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng as tn
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.convection.tiedtke_nordeng.types import (
+            ConvectionTendencies)
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = 8, 2
+        shape = (nlev, ncols)
+
+        def fake_convection(temperature, humidity, pressure, *args,
+                            use_updraft_cover=False, **kwargs):
+            zeros = jnp.zeros_like(temperature)
+            params = args[7]
+            state = tn.initialize_convection(
+                temperature, humidity, pressure, zeros, zeros, params)
+            state = state._replace(
+                ktype=jnp.int32(2), kbase=jnp.int32(6), ktop=jnp.int32(3))
+            return ConvectionTendencies(
+                dtedt=zeros, dqdt=zeros, dudt=zeros, dvdt=zeros,
+                qc_conv=zeros, qi_conv=zeros, precip_formation=zeros,
+                precip_conv=jnp.zeros((), temperature.dtype),
+                precip_flux=zeros, dqc_dt=zeros, dqi_dt=zeros,
+            ), state
+
+        monkey = pytest.MonkeyPatch()
+        try:
+            monkey.setattr(tn, "tiedtke_nordeng_convection", fake_convection)
+            state = PhysicsState.zeros(
+                shape,
+                temperature=jnp.full(shape, 280.0),
+                specific_humidity=jnp.full(shape, 5e-3),
+                tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape)},
+            )
+            pf = jnp.broadcast_to(
+                jnp.linspace(10000.0, 100000.0, nlev)[:, None], shape)
+            diagnostics = {
+                "_dt_seconds": 900.0,
+                "pressure_full": pf,
+                "layer_thickness": jnp.full(shape, 800.0),
+                "air_density": pf / (c.rd * 280.0),
+                "clouds": CloudData.zeros((ncols,), nlev),
+            }
+            _, out = tn.TiedtkeConvection()(
+                state, diagnostics, forcing=None,
+                terrain=SimpleNamespace(fmask=jnp.zeros(ncols)))
+        finally:
+            monkey.undo()
+        conv = out["convection"]
+        np.testing.assert_array_equal(np.asarray(conv.ktype), [2, 2])
+        np.testing.assert_array_equal(np.asarray(conv.cloud_top), [3, 3])
+        np.testing.assert_array_equal(np.asarray(conv.cloud_base), [6, 6])
+        self.assertEqual(conv.cloud_top.dtype, jnp.int32)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,7 +15,15 @@
   a **pure diagnostic** — the term emits zero T/q/qc/qi tendencies; the
   saturation adjustment lives downstream in each microphysics scheme (the 2M
   path's ``mixed_phase_deposition_and_corrections``, and ``echam_1m.py``'s own
-  port of the same linearised-Newton step).
+  port of the same linearised-Newton step). The humidity the cover closure sees,
+  ``q/q_s`` with ``q_s`` over ice where the cell holds cloud ice below
+  ``t_ice`` (``mo_cover.f90``'s ``lo2`` switch), is published as
+  ``cover_relative_humidity``. It is a scheme-internal closure variable — it
+  jumps by up to ~25 % across the cloud-ice threshold between adjacent cold
+  cells — so it is kept apart from the model's one public ``relative_humidity``,
+  which ``MoistAirColumnState`` computes with respect to liquid water at every
+  temperature (the WMO definition, written as CMIP ``hur``) and which no
+  composition changes the meaning of.
 - **ECHAM 1-moment microphysics**
   (``jcm/physics/clouds/echam_1m.py::Echam1MMicrophysics``) — a flux-coupled
   top-down column sweep: autoconversion (Beheng 1994 default or KK2000),

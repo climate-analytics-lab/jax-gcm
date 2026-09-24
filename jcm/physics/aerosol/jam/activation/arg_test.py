@@ -6,9 +6,14 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from unittest import mock
+
+from jcm.physics.aerosol.jam.activation import arg as arg_module
 from jcm.physics.aerosol.jam.activation.arg import (
     _shape_coefficients,
+    air_thermal_conductivity,
     arg_activation,
+    vapor_diffusivity,
 )
 from jcm.physics.aerosol.jam.activation.arg_term import ArgActivation
 
@@ -195,6 +200,90 @@ class ArgActivationCoreTest(unittest.TestCase):
         g = jax.jit(jax.grad(loss))(jnp.asarray(0.5))
         self.assertTrue(np.isfinite(float(g)))
         self.assertGreaterEqual(float(g), 0.0)  # more updraft -> more droplets
+
+
+def _mam4_like():
+    """Aitken / accumulation / coarse modes, MAM4-like sizes and kappas."""
+    col = lambda *v: jnp.asarray(v).reshape(3, 1, 1)
+    return dict(
+        r_dry=col(0.013e-6, 0.06e-6, 1.0e-6),
+        kappa=col(0.5, 0.5, 1.1),
+        number_vol=col(500.0e6, 200.0e6, 1.0e6),
+        sigma_g=col(1.6, 1.8, 1.8),
+        can_activate=col(1.0, 1.0, 1.0),
+    )
+
+
+class ArgTransportCoefficientTest(unittest.TestCase):
+    """T/p-dependent Dv and Ka, CAM ``ndrop.F90`` ``diff0`` / ``conduct0`` (#679)."""
+
+    def test_match_cam_ndrop_expressions(self):
+        for t, p in ((273.0, 101325.0), (280.0, 9.0e4), (250.0, 5.0e4)):
+            with self.subTest(t=t, p=p):
+                diff0 = 0.211e-4 * (1013.25e2 / p) * (t / 273.0) ** 1.94
+                conduct0 = (5.69 + 0.017 * (t - 273.0)) * 4.186e2 * 1.0e-5
+                self.assertAlmostEqual(
+                    float(vapor_diffusivity(jnp.asarray(t), jnp.asarray(p))),
+                    diff0, delta=1e-6 * diff0)
+                self.assertAlmostEqual(
+                    float(air_thermal_conductivity(jnp.asarray(t))),
+                    conduct0, delta=1e-6 * conduct0)
+
+    def _n_act(self, t, p, constant):
+        """Activated number [m^-3]; ``constant`` pins the old sea-level Dv/Ka."""
+        def run():
+            n_act, *_ = arg_activation(
+                updraft=jnp.full((1, 1), 0.3),
+                temperature=jnp.full((1, 1), t),
+                pressure=jnp.full((1, 1), p),
+                sigma_acc=1.8, variant="arg2000", **_mam4_like(),
+            )
+            return _scalar(n_act)
+
+        if not constant:
+            return run()
+        with mock.patch.object(arg_module, "vapor_diffusivity",
+                               lambda t, p: 2.11e-5), \
+             mock.patch.object(arg_module, "air_thermal_conductivity",
+                               lambda t: 0.024):
+            return run()
+
+    def test_activation_drops_aloft_by_the_expected_magnitude(self):
+        """Constant Dv/Ka over-activate, increasingly with altitude.
+
+        At 500 hPa / 250 K Dv is ~1.7x its sea-level value, so the growth
+        resistance falls, the maximum supersaturation falls, and a MAM4-like
+        population activates ~10-25 % fewer droplets than with the constants
+        (the #679 audit measured -4 % at 900 hPa and -19 % at 500 hPa/260 K on
+        a similar population). Near the reference state the two agree to a
+        few percent.
+        """
+        drop = {}
+        for t, p in ((280.0, 9.0e4), (270.0, 7.0e4), (250.0, 5.0e4)):
+            local = self._n_act(t, p, constant=False)
+            const = self._n_act(t, p, constant=True)
+            self.assertGreater(local, 0.0)
+            drop[p] = 1.0 - local / const
+        self.assertGreater(drop[5.0e4], 0.10)
+        self.assertLess(drop[5.0e4], 0.25)
+        self.assertLess(abs(drop[9.0e4]), 0.08)
+        self.assertGreater(drop[5.0e4], drop[7.0e4])
+        self.assertGreater(drop[7.0e4], drop[9.0e4])
+
+    def test_grad_through_temperature_and_pressure_finite(self):
+        def loss(t, p):
+            n_act, *_ = arg_activation(
+                updraft=jnp.full((1, 1), 0.3),
+                temperature=jnp.full((1, 1), t),
+                pressure=jnp.full((1, 1), p),
+                sigma_acc=1.8, variant="arg2000", **_mam4_like(),
+            )
+            return jnp.sum(n_act)
+
+        gt, gp = jax.grad(loss, argnums=(0, 1))(
+            jnp.asarray(250.0), jnp.asarray(5.0e4))
+        self.assertTrue(np.isfinite(float(gt)) and np.isfinite(float(gp)))
+        self.assertNotEqual(float(gp), 0.0)
 
 
 class ArgTermTest(unittest.TestCase):
