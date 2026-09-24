@@ -132,6 +132,15 @@ class MicrophysicsParameters:
                          # condensate below which a cell no longer counts as
                          # cloudy — drives the post-microphysics ``paclc``
                          # write-back (mo_cloud.f90:1280, #687)
+    clwprat: float       # ECHAM ``clwprat`` (mo_echam_cloud_params, 4.0 at
+                         # nn=63): a shallow-convective column (ktype 2) is
+                         # re-typed 4 for radiation when its liquid water path
+                         # at/below the convective cloud top exceeds clwprat x
+                         # the path above it (mo_cloud.f90:1449-1455), which
+                         # selects the shallow liquid inhomogeneity zinhoml2.
+                         # A discrete threshold: its gradient is identically
+                         # zero, so it is a configuration value, not a
+                         # calibration target
 
     # Autoconversion scheme selector (int flag — JAX won't trace strings).
     # 0 = Beheng (1994) implicit form (default; robust at large dt),
@@ -192,7 +201,7 @@ class MicrophysicsParameters:
                  cvtfall=2.5, base_cdnc=100.0e6,
                  t_mix_min=238.15, t_mix_max=273.15,
                  epsilon=1.0e-12, d_epsilon=1.0e-30,
-                 cqtmin=1.0e-12, ccwmin=1.0e-7,
+                 cqtmin=1.0e-12, ccwmin=1.0e-7, clwprat=4.0,
                  autoconversion_scheme=0) -> 'MicrophysicsParameters':
         """Return default microphysics parameters.
 
@@ -223,6 +232,7 @@ class MicrophysicsParameters:
             d_epsilon=jnp.array(d_epsilon),
             cqtmin=jnp.array(cqtmin),
             ccwmin=jnp.array(ccwmin),
+            clwprat=jnp.array(clwprat),
             autoconversion_scheme=autoconversion_scheme,
         )
         # Run the field-level cross-validation on this door too (the runner
@@ -1295,6 +1305,58 @@ from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
 
 
+def shallow_liquid_convection_type(
+    ktype: jnp.ndarray,
+    cloud_top: jnp.ndarray,
+    pressure_full: jnp.ndarray,
+    cloud_water: jnp.ndarray,
+    pressure_thickness: jnp.ndarray,
+    clwprat,
+) -> jnp.ndarray:
+    """ECHAM's radiation convective type: ``ktype`` with shallow-liquid 4s.
+
+    ``mo_cloud.f90`` (1M ``cloud``, lines 1439-1455)::
+
+        zxlvitop = sum_{jk < kctop} xlm1 * dp/g       ! liquid ABOVE the top
+        zxlvibot = zxlvi - zxlvitop                   ! at and below the top
+        IF (ktype == 2 .AND. zxlvibot > clwprat*zxlvitop) ktype = 4
+
+    Broadcasting-native: level on axis 0, any trailing horizontal axes.
+    "Above the top" is decided by pressure (``p < p(cloud_top)``), so the
+    result does not depend on the level axis's orientation. ECHAM's ``pxlm1``
+    is non-negative; jcm's advected ``qc`` can carry small negative ringing, so
+    the path above the top is floored at zero and a column needs positive
+    liquid at/below the top to re-type — identical to ECHAM for any
+    non-negative ``qc`` (where ``0 > clwprat·0`` is already false), and it
+    keeps a liquid-free column from reading as "shallow liquid".
+
+    Args:
+        ktype: convection type per column (*horiz), int.
+        cloud_top: convective cloud-top level index per column (*horiz), on
+            the same level axis as ``pressure_full``.
+        pressure_full: full-level pressure [Pa] (nlev, *horiz).
+        cloud_water: grid-mean cloud liquid [kg/kg] (nlev, *horiz).
+        pressure_thickness: layer Δp [Pa] (nlev, *horiz).
+        clwprat: ECHAM ``clwprat`` threshold ratio.
+
+    Returns:
+        ``ktype`` with qualifying shallow columns set to 4, same dtype.
+
+    """
+    ktype = jnp.asarray(ktype)
+    top = jnp.clip(cloud_top, 0, pressure_full.shape[0] - 1).astype(jnp.int32)
+    p_top = jnp.take_along_axis(pressure_full, top[jnp.newaxis], axis=0)
+    liquid = cloud_water * pressure_thickness / c.grav
+    lwp_above_raw = jnp.sum(
+        jnp.where(pressure_full < p_top, liquid, 0.0), axis=0)
+    lwp_below = jnp.sum(liquid, axis=0) - lwp_above_raw
+    lwp_above = jnp.maximum(lwp_above_raw, 0.0)
+    shallow_liquid = (
+        (ktype == 2) & (lwp_below > 0.0) & (lwp_below > clwprat * lwp_above)
+    )
+    return jnp.where(shallow_liquid, jnp.asarray(4, ktype.dtype), ktype)
+
+
 class Echam1MMicrophysics(PhysicsTerm):
     """ECHAM 1-moment cloud microphysics as a composable PhysicsTerm.
 
@@ -1313,7 +1375,12 @@ class Echam1MMicrophysics(PhysicsTerm):
     Writes ``precip_rain``, ``precip_snow``, ``droplet_number`` and the
     droplet effective radius ``r_eff_liq`` back into the public
     ``"clouds"`` key (preserving the upstream ``cloud_fraction`` /
-    ``qc`` / ``qi`` fields).
+    ``qc`` / ``qi`` fields). When a convection term has published
+    ``"convection"`` upstream, it also re-types that step's shallow columns
+    whose liquid sits below the convective cloud top as ``ktype = 4`` for the
+    next step's radiation (:func:`shallow_liquid_convection_type`, ECHAM
+    ``mo_cloud.f90``). ``"convection"`` is deliberately not in ``provides``:
+    the term only amends it, and cannot supply it where no convection runs.
     """
 
     name: ClassVar[str] = "echam_1m_microphysics"
@@ -1513,5 +1580,30 @@ class Echam1MMicrophysics(PhysicsTerm):
             d_temperature=tendency.temperature,
             d_specific_humidity=tendency.specific_humidity,
             d_qc=tendency.tracers.get("qc"), d_qi=tendency.tracers.get("qi"))
+
+        # ECHAM ``mo_cloud.f90`` (after the column loop): re-type a shallow
+        # convective column (ktype 2) as 4 when its liquid water path at and
+        # below the convective cloud top exceeds ``clwprat`` x the path above
+        # it — "shallow convection with the liquid below the top". Nothing in
+        # the cloud scheme uses it; it is stored for NEXT step's radiation,
+        # which drops the liquid inhomogeneity to ``zinhoml2`` there
+        # (``mo_cloud_optics.f90``). ECHAM does this only in the 1M ``cloud``
+        # routine — its 2M ``cloud_micro_interface`` never re-types — so the
+        # Lohmann 2M term deliberately has no counterpart. The liquid is the
+        # step-start ``pxlm1`` (``state.tracers["qc"]``), as in ECHAM.
+        conv = diagnostics.get("convection")
+        if conv is not None and hasattr(conv, "cloud_top"):
+            diagnostics = {**diagnostics, "convection": conv.replace(
+                ktype=shallow_liquid_convection_type(
+                    conv.ktype, conv.cloud_top, pressure_full,
+                    state.tracers.get("qc", jnp.zeros_like(state.temperature)),
+                    # Every ECHAM stack has MoistAirColumnState's exact Δp;
+                    # the ρ·g·dz fallback (dz floored at 10 m) only serves
+                    # hand-built diagnostics without it.
+                    diagnostics.get("pressure_thickness",
+                                    air_density * layer_thickness * c.grav),
+                    params.clwprat,
+                ),
+            )}
 
         return tendency, {**diagnostics, "clouds": clouds}

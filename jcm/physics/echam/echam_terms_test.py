@@ -186,6 +186,29 @@ class TestEchamComposablePhysics(unittest.TestCase):
             convective_updraft_precip_cover=False)
         self.assertFalse(cover_flag(jam_off))
 
+    def test_jam_takes_ham_ice_inhomogeneity(self):
+        """JAM (2M + ARG) defaults to ECHAM-HAM's ``zinhomi = 0.7``; every
+        other stack keeps ECHAM6's 0.8, and an explicit override wins.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.radiation.radiation_types import RadiationParameters
+
+        def zinhomi(physics):
+            rad = next(t for t in physics.terms if t.category == "radiation")
+            return float(rad.params.get_value().cloud_inhomogeneity_ice)
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", radiation_scheme="grey",
+                   jam_microphysics="placeholder")
+        self.assertAlmostEqual(zinhomi(echam_physics(**jam)), 0.7, places=6)
+        self.assertAlmostEqual(
+            zinhomi(echam_physics(checkpoint_terms=False)), 0.8, places=6)
+        self.assertAlmostEqual(zinhomi(echam_physics(
+            checkpoint_terms=False, cloud_scheme="2m")), 0.8, places=6)
+        explicit = RadiationParameters.default(cloud_inhomogeneity_ice=0.9)
+        self.assertAlmostEqual(
+            zinhomi(echam_physics(**jam, radiation=explicit)), 0.9, places=6)
+
     def test_cu_lmfmid_rejects_a_simultaneous_convection_override(self):
         """cu_lmfmid and an explicit convection Parameters are exclusive."""
         from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
@@ -285,11 +308,6 @@ class TestEchamComposablePhysics(unittest.TestCase):
         restored = nnx.merge(graphdef, state)
         self.assertEqual(len(restored.terms), 13)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestAerosolFreeValidation(unittest.TestCase):
     """The mode/interval contract must hold for every radiation scheme.
 
@@ -388,3 +406,83 @@ class TestEmulatorWeightsFile(unittest.TestCase):
         # The "auto" default must stay silent for other schemes (it is the
         # unset state, not a user choice).
         self.echam_physics(radiation_scheme="grey")  # no raise
+
+
+class TestRadiationReadsLaggedConvectionType(unittest.TestCase):
+    """End to end through a composed ECHAM stack (#870).
+
+    Step 1 publishes a ``convection`` carry; the radiation term, run on that
+    carry with ``ktype`` forced per column to 0 / 2 / 4, must thin the liquid
+    cloud only in the ktype-4 columns — the carry → term → scheme path the
+    scheme-level tests do not exercise.
+    """
+
+    def test_only_shallow_liquid_columns_change(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+        physics = echam_physics(radiation_scheme="grey",
+                                checkpoint_terms=False)
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        physics.cache_coords(coords)
+        nlev = 8
+        nlon, nlat = coords.horizontal.nodal_shape
+        ncols = nlon * nlat
+        qc = jnp.zeros((nlev, nlon, nlat)).at[5:7].set(2e-4)
+        state = PhysicsState.zeros(
+            (nlev, nlon, nlat),
+            temperature=jnp.full((nlev, nlon, nlat), 285.0),
+            specific_humidity=jnp.full((nlev, nlon, nlat), 8e-3),
+            normalized_surface_pressure=jnp.ones((nlon, nlat)),
+            tracers={**{spec.name: jnp.zeros((nlev, nlon, nlat))
+                        for spec in physics.required_tracers()}, "qc": qc},
+        )
+        forcing = ForcingData.zeros((nlon, nlat))
+        _, diag = physics.compute_tendencies(
+            state, forcing, TerrainData.aquaplanet(coords))
+
+        # Column view of the state and a fixed half-cover liquid cloud where
+        # qc sits, so every column carries the same optically thick liquid.
+        cols = lambda a: jnp.reshape(a, a.shape[:1] + (ncols,))  # noqa: E731
+        state_cols = PhysicsState.zeros(
+            (nlev, ncols),
+            temperature=cols(state.temperature),
+            specific_humidity=cols(state.specific_humidity),
+            normalized_surface_pressure=jnp.ones(ncols),
+            tracers={"qc": cols(qc), "qi": jnp.zeros((nlev, ncols))},
+        )
+        clouds = diag["clouds"].copy(
+            cloud_fraction=jnp.where(cols(qc) > 0, 0.5, 0.0))
+        pattern = jnp.tile(jnp.array([0, 2, 4], jnp.int32),
+                           ncols // 3 + 1)[:ncols]
+        rad = next(t for t in physics.terms if t.category == "radiation")
+        params = rad.params.get_value()
+
+        def solve(ktype):
+            d = {**diag, "clouds": clouds,
+                 "convection": diag["convection"].replace(ktype=ktype)}
+            _, out = rad._compute_full(state_cols, d, forcing, params)
+            return (np.asarray(out.sw_heating_rate),        # (nlev, ncols)
+                    np.asarray(out.toa_sw_up), np.asarray(out.cos_zenith))
+
+        base, base_up, mu0 = solve(jnp.zeros(ncols, jnp.int32))
+        mixed, mixed_up, _ = solve(pattern)
+        pattern = np.asarray(pattern)
+        self.assertTrue(np.all(np.isfinite(mixed)))
+        # 0 and 2 share the 0.8 liquid factor: bit-identical columns.
+        np.testing.assert_array_equal(mixed[:, pattern != 4],
+                                      base[:, pattern != 4])
+        # ktype 4 in daylight: the 0.4 liquid factor thins the cloud, so the
+        # column's SW heating changes and less SW is reflected on average.
+        # (The grey LW is saturated by this much liquid, hence the SW check;
+        # a few grey columns are float32-insensitive to the change.)
+        lit4 = (pattern == 4) & (mu0 > 0.1)
+        self.assertGreater(int(lit4.sum()), 0)
+        changed = np.abs(mixed[:, lit4] - base[:, lit4]).max(axis=0) > 0.0
+        self.assertGreater(float(changed.mean()), 0.9)
+        self.assertLess(float(mixed_up[lit4].mean()),
+                        float(base_up[lit4].mean()))
+
+
+if __name__ == "__main__":
+    unittest.main()

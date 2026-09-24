@@ -1501,3 +1501,108 @@ class TestColumnSweepStateGradients:
         check_gradients(
             self._sweep_fn(column), (T, q, qc, qi, cf, nd),
             rtol=1e-2, adjoint_rtol=self.ADJOINT_RTOL)
+
+
+class TestShallowLiquidConvectionType:
+    """ECHAM ``mo_cloud.f90``'s radiation ``ktype = 4`` re-typing (#870).
+
+    A shallow column (ktype 2) becomes 4 when its liquid water path at and
+    below the convective cloud top exceeds ``clwprat`` x the path above it;
+    radiation then applies the shallow liquid inhomogeneity ``zinhoml2``.
+    """
+
+    NLEV = 6
+
+    def _columns(self):
+        from .echam_1m import shallow_liquid_convection_type
+
+        nlev = self.NLEV
+        # Top-first: level 0 is the model top. Cloud top at level 3 in every
+        # column, so levels 0-2 are "above the top".
+        p = jnp.linspace(2e4, 1e5, nlev)[:, None] * jnp.ones((1, 6))
+        dp = jnp.full((nlev, 6), 1.0e4)
+        qc = jnp.zeros((nlev, 6))
+        qc = qc.at[4, 0].set(1e-4)                          # 2: all below
+        qc = qc.at[1, 1].set(1e-4).at[4, 1].set(3e-4)       # 2: bot = 3 x top
+        qc = qc.at[1, 2].set(1e-4).at[4, 2].set(5e-4)       # 2: bot = 5 x top
+        qc = qc.at[4, 3].set(1e-4)                          # 1 (deep)
+        # col 4: ktype 0 with liquid; col 5: ktype 2 with no liquid at all
+        qc = qc.at[4, 4].set(1e-4)
+        ktype = jnp.array([2, 2, 2, 1, 0, 2], dtype=jnp.int32)
+        top = jnp.full((6,), 3, dtype=jnp.int32)
+        return shallow_liquid_convection_type, ktype, top, p, qc, dp
+
+    def test_retypes_exactly_echam_cases(self):
+        fn, ktype, top, p, qc, dp = self._columns()
+        out = fn(ktype, top, p, qc, dp, 4.0)
+        np.testing.assert_array_equal(np.asarray(out), [4, 2, 4, 1, 0, 2])
+        assert out.dtype == ktype.dtype
+        # ECHAM's T31 ``clwprat = 0``: any liquid at/below the top re-types.
+        out0 = fn(ktype, top, p, qc, dp, 0.0)
+        np.testing.assert_array_equal(np.asarray(out0), [4, 4, 4, 1, 0, 2])
+
+    def test_negative_ringing_does_not_retype_a_dry_column(self):
+        """Advected ``qc`` can ring slightly negative above the top; with no
+        liquid at/below it the column is not "shallow liquid" (ECHAM's
+        non-negative ``pxlm1`` never meets this case).
+        """
+        fn, ktype, top, p, _, dp = self._columns()
+        qc = jnp.zeros_like(p).at[1].set(-1e-7)
+        out = fn(ktype, top, p, qc, dp, 4.0)
+        np.testing.assert_array_equal(np.asarray(out), np.asarray(ktype))
+        # Liquid below with negative ringing above: still re-typed.
+        qc = qc.at[4].set(1e-4)
+        out = fn(ktype, top, p, qc, dp, 4.0)
+        np.testing.assert_array_equal(np.asarray(out), [4, 4, 4, 1, 0, 4])
+
+    def test_independent_of_level_orientation(self):
+        fn, ktype, top, p, qc, dp = self._columns()
+        out = fn(ktype, top, p, qc, dp, 4.0)
+        flipped = fn(ktype, self.NLEV - 1 - top, p[::-1], qc[::-1], dp[::-1],
+                     4.0)
+        np.testing.assert_array_equal(np.asarray(out), np.asarray(flipped))
+
+    def _term_diagnostics(self, with_convection):
+        from .cloud_data import CloudData
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.convection.tiedtke_nordeng.types import ConvectionData
+        from jcm.physics_interface import PhysicsState
+
+        _, ktype, top, p, qc, dp = self._columns()
+        nlev, ncols = qc.shape
+        t = jnp.full((nlev, ncols), 285.0)
+        state = PhysicsState.zeros(
+            (nlev, ncols), temperature=t,
+            specific_humidity=jnp.full((nlev, ncols), 1e-3),
+            tracers={"qc": qc, "qi": jnp.zeros_like(qc)},
+        )
+        diagnostics = {
+            "_dt_seconds": 600.0,
+            "pressure_full": p,
+            "pressure_thickness": dp,
+            "air_density": p / (287.05 * t),
+            "layer_thickness": jnp.full((nlev, ncols), 500.0),
+            "clouds": CloudData.zeros((ncols,), nlev).copy(
+                qc=qc, qi=jnp.zeros_like(qc),
+                cloud_fraction=jnp.where(qc > 0, 0.5, 0.0)),
+            "aerosol": AerosolData.zeros((ncols,), nlev),
+        }
+        if with_convection:
+            diagnostics["convection"] = ConvectionData.zeros(
+                (ncols,), nlev).replace(ktype=ktype, cloud_top=top)
+        return state, diagnostics
+
+    def test_term_amends_the_convection_carry(self):
+        from .echam_1m import Echam1MMicrophysics
+
+        state, diagnostics = self._term_diagnostics(with_convection=True)
+        _, out = Echam1MMicrophysics()(state, diagnostics, None, None)
+        np.testing.assert_array_equal(
+            np.asarray(out["convection"].ktype), [4, 2, 4, 1, 0, 2])
+
+    def test_term_without_convection_adds_nothing(self):
+        from .echam_1m import Echam1MMicrophysics
+
+        state, diagnostics = self._term_diagnostics(with_convection=False)
+        _, out = Echam1MMicrophysics()(state, diagnostics, None, None)
+        assert "convection" not in out

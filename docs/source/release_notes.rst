@@ -728,6 +728,26 @@ ARG activation with local-state transport coefficients
   ~4 % at 900 hPa rising to ~18 % at 500 hPa. **Changes results** for every
   JAM configuration (fewer activated droplets aloft) (#679).
 
+Convective-type cloud inhomogeneity
+"""""""""""""""""""""""""""""""""""
+
+- The radiation's liquid cloud inhomogeneity now follows the previous step's
+  convective type, as in ECHAM ``mo_cloud_optics.f90``: 0.8 without
+  convection and for deep/shallow/mid-level convection, 0.4 in shallow
+  columns whose liquid sits below the convective cloud top (``ktype = 4``,
+  which the 1M cloud scheme sets from ECHAM's ``clwprat`` test). The ice
+  factor is separate: 0.8, except 0.7 in the JAM composition (ECHAM-HAM's
+  2M + ARG value). **Changes results** for 1M configurations (thinner
+  trade-cumulus liquid optically, a weaker SW cloud radiative effect there)
+  and for JAM (optically thinner ice cloud); the other 2M configurations are
+  unchanged, since ECHAM's 2M scheme never re-types.
+  **Breaking for direct callers:** ``RadiationParameters.cloud_inhomogeneity``
+  is replaced by ``cloud_inhomogeneity_liquid``,
+  ``cloud_inhomogeneity_liquid_convective``,
+  ``cloud_inhomogeneity_liquid_shallow`` and ``cloud_inhomogeneity_ice``.
+  ``convection.cloud_top``/``cloud_base`` now carry the updraft's level
+  indices (top-first physics axis) instead of zeros (#870).
+
 RCE initial state seeds a mixed sub-cloud layer
 """""""""""""""""""""""""""""""""""""""""""""""
 
