@@ -1,0 +1,52 @@
+name: Set up the JCM test environment
+description: >
+  Python, cached wheel downloads and an editable install, shared by the fast
+  and slow test jobs. A composite action rather than duplicated steps because
+  GitHub Actions does not resolve YAML anchors in workflow files, and the two
+  suites must install *identically* — a drift between them would move the
+  coverage denominator without anyone noticing.
+
+inputs:
+  python-version:
+    description: Python version to install.
+    required: false
+    default: '3.11'
+
+runs:
+  using: composite
+  steps:
+    # Job-local JAX/XLA compilation cache (nothing is uploaded or persisted
+    # — the dir dies with the runner). In today's single-process pytest run
+    # JAX's in-memory dedup already reuses identical modules, so this is
+    # mostly insurance: it keeps that reuse if the suite is ever split
+    # across processes (pytest-xdist) or a step restarts, at zero cost.
+    # Set via $GITHUB_ENV because the `runner` context is not available in
+    # job-level `env` (the workflow fails validation there).
+    # NOTE deliberately NOT actions/cache'd across runs: entries are
+    # native code and the cache key does not include CPU features, while
+    # this runner pool is CPU-heterogeneous — a cross-machine hit could
+    # be an illegal-instruction crash, not just a miss.
+    - name: Enable job-local JAX compilation cache
+      shell: bash
+      run: echo "JAX_COMPILATION_CACHE_DIR=$RUNNER_TEMP/jax-cache" >> "$GITHUB_ENV"
+
+    - name: Set up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ inputs.python-version }}
+        # Cache the wheel downloads. jax/jaxlib and the scientific stack are
+        # a large, almost-never-changing install repeated on every job, and
+        # a PR runs it twice (fast, then slow). Keyed on requirements.txt, so
+        # a dependency change invalidates it automatically.
+        cache: 'pip'
+        cache-dependency-path: requirements.txt
+
+    # No extras: CI dependency parity. Code behind an optional extra
+    # (`jcm[cosp]`, ...) must count as uncovered here, which is what the
+    # local gates are told to reproduce.
+    - name: Install dependencies
+      shell: bash
+      run: |
+        python -m pip install --upgrade pip
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        pip install -e .
