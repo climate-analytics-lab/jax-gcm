@@ -221,7 +221,7 @@ MIRROR_RECORD = "mirror_revision.json"
 
 
 def mirror_commit(rundir: str, resume: bool, force: bool) -> tuple[str, bool]:
-    """Return ``(commit, opt_in)`` for one member; record it in its rundir.
+    """Return ``(commit, opt_in)`` for one member (recorded after preflight).
 
     The commit is part of what a member is: the same code and config read
     different inputs at another commit. A fresh launch records this process's
@@ -248,12 +248,22 @@ def mirror_commit(rundir: str, resume: bool, force: bool) -> tuple[str, bool]:
                 "the run's boundary inputs mid-integration. Unset it to "
                 "continue on the recorded commit, or pass "
                 "--force-mirror-revision to switch deliberately.")
+    return commit, force and resume
+
+
+def write_mirror_record(rundir: str, commit: str) -> None:
+    """Record ``commit`` in ``rundir`` (after the preflight has passed)."""
+    import json
+
+    from jcm.data.remote import revision_source
+    record = Path(rundir) / MIRROR_RECORD
+    if record.exists() and json.loads(record.read_text())["commit"] == commit:
+        return      # a resume on the recorded commit keeps the launch record
     record.parent.mkdir(parents=True, exist_ok=True)
     record.write_text(json.dumps({
-        "requested": commit, "source": source, "commit": commit,
+        "requested": commit, "source": revision_source(), "commit": commit,
         "written": datetime.datetime.now(datetime.timezone.utc).isoformat(
             timespec="seconds")}, indent=1))
-    return commit, force and resume
 
 
 def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
@@ -382,6 +392,10 @@ def main(argv=None):
                 f"here:\n{report}\nStage them per "
                 "jcm/data/mirror/SOURCES.md, or pass --no-prefetch to "
                 "generate the jobs anyway.")
+
+    # Only now, with every input available, is the commit this launch's.
+    for _, tag in plan:
+        write_mirror_record(f"{scratch}/jam_runs/{tag}", mirror[tag][0])
 
     for name, tag in plan:
         m = cfg["members"][name]

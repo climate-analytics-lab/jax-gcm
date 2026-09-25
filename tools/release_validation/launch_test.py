@@ -296,3 +296,17 @@ def test_resume_refuses_a_different_explicit_sha_unless_forced(
     record = scratch / "jam_runs" / "mx_speedy_t31_rx" / launch.MIRROR_RECORD
     assert json.loads(record.read_text())["commit"] == c
 
+
+def test_failed_preflight_leaves_the_record_untouched(scratch, repo,
+                                                      monkeypatch):
+    record = scratch / "jam_runs" / "mx_speedy_t31_fp" / launch.MIRROR_RECORD
+    monkeypatch.setenv("JCM_MIRROR_REVISION", "a" * 40)
+    _launch(repo, "--tag", "fp")
+    _checkpoint(scratch, "fp")
+    before = record.read_text()
+    monkeypatch.setenv("JCM_MIRROR_REVISION", "c" * 40)
+    monkeypatch.setattr(launch, "prefetch", lambda ovs: ["hf://missing.nc"])
+    with pytest.raises(SystemExit, match="not available"):
+        _launch(repo, "--tag", "fp", "--resume", "--force-mirror-revision")
+    assert record.read_text() == before
+
