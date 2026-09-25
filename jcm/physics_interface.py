@@ -195,6 +195,16 @@ Attributes:
 """
 
 
+#: Dycore transport schemes a physics package may ask for through
+#: :meth:`Physics.preferred_advection` (see
+#: docs/source/design/dinosaur_transport_selection.md). Defined here, not in
+#: the dinosaur backend, so the physics side can validate preferences without
+#: importing a dycore; ``jcm.dycore.dinosaur.dycore`` re-exports them.
+SEMI_LAGRANGIAN = "semi_lagrangian"
+EULERIAN = "eulerian"
+ADVECTION_SCHEMES = (SEMI_LAGRANGIAN, EULERIAN)
+
+
 class Physics:
     UNITS_TABLE_CSV_PATH = None
     cached_coords = None

@@ -219,6 +219,24 @@ class TestComposablePhysics(unittest.TestCase):
             ComposablePhysics(terms=[Eulerian(), SemiLagrangian()]).preferred_advection(),
             "semi_lagrangian")
 
+    def test_unknown_advection_preference_is_rejected(self):
+        """A misspelt vote must fail loudly, not be dropped from the tally."""
+        class Misspelt(LinearHeating):
+            name: ClassVar[str] = "misspelt_vote"
+
+            def preferred_advection(self):
+                return "euler"
+
+        class Eulerian(LinearHeating):
+            name: ClassVar[str] = "eulerian_vote"
+
+            def preferred_advection(self):
+                return "eulerian"
+
+        for terms in ([Misspelt()], [Eulerian(), Misspelt()]):
+            with self.assertRaisesRegex(ValueError, "misspelt_vote"):
+                ComposablePhysics(terms=terms).preferred_advection()
+
     def test_speedy_prefers_eulerian(self):
         from jcm.physics.speedy.speedy_terms import speedy_physics
 

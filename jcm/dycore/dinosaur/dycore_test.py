@@ -96,8 +96,31 @@ class AdvectionSelectionTest(unittest.TestCase):
 
     def test_explicit_eulerian_rejects_late_tracer_registration(self):
         dycore = _small_dycore(advection="eulerian")
+        primitive = dycore.primitive
         with self.assertRaisesRegex(ValueError, "#521"):
             dycore.tracer_specs = self._dust()
+        # The refusal is all-or-nothing: a caller that catches it keeps a
+        # tracer-free Eulerian dycore, not tracer specs on spectral transport.
+        self.assertEqual(dycore.tracer_specs, {})
+        self.assertIs(dycore.primitive, primitive)
+        self.assertEqual(dycore.advection, "eulerian")
+        dycore.tracer_specs = {}  # still consistent: no rebuild needed
+
+    def test_failed_rebuild_restores_transport_state(self):
+        from unittest import mock
+
+        dycore = _small_dycore()
+        before = (dycore.tracer_specs, dycore.advection, dycore.primitive,
+                  dycore._dynamics_step_fn)
+        with mock.patch.object(type(dycore), "_build_filters",
+                               side_effect=RuntimeError("boom")):
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                dycore.tracer_specs = self._dust()
+            with self.assertRaisesRegex(RuntimeError, "boom"):
+                dycore.resolve_advection("eulerian")
+        self.assertEqual(
+            (dycore.tracer_specs, dycore.advection, dycore.primitive,
+             dycore._dynamics_step_fn), before)
 
     def test_unresolved_default_is_semi_lagrangian(self):
         dycore = _small_dycore()
