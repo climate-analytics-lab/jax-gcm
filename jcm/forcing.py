@@ -141,6 +141,19 @@ BY_DATE_INTERP = 2  # as BY_DATE, but linearly interpolate between samples.
                     # (PCMDI ``tosbcs`` is constructed so that linear
                     # interpolation reconstructs the observed monthly means).
 
+# `TimeSeries.persist` codes: the declared out-of-range policy of a dated
+# (``BY_DATE`` / ``BY_DATE_INTERP``) leaf (#900). The names are
+# :data:`jcm.data.input_resolution.PERSIST_MODES` (the one vocabulary the config
+# knobs, the ``{year}`` expansion and the readers share); the leaf carries the
+# int code, like ``align_mode``, so the struct stays a clean pytree.
+# ``PERSIST_STRICT``: the run window must be covered
+# (:func:`check_forcing_coverage` raises otherwise). ``PERSIST_HOLD``: holding
+# the end samples outside the axis is the declared experiment; the check warns
+# once instead. Selection itself (:func:`_select_time_series`) clamps either
+# way — the policy decides only whether a run may ask it to.
+PERSIST_STRICT = 0
+PERSIST_HOLD = 1
+
 # Default scalar CO2 mixing ratio (ppmv) when no time series is supplied.
 # 420 ppmv is the value the ECHAM/RRTMGP physics was calibrated against (it was
 # previously hard-coded in ``ChemistryParameters``); SPEEDY's ``ablco2`` simply
@@ -173,7 +186,11 @@ class TimeSeries:
     `values` carries the data with a time axis at index 0; `times` is its exact
     :class:`jax_datetime.Datetime` coordinate. `align_mode` distinguishes
     dated samples (``BY_DATE`` / ``BY_DATE_INTERP``) from a climatology
-    replayed every year (``WRAP_YEAR``). The Model collapses
+    replayed every year (``WRAP_YEAR``). `persist` is a dated leaf's declared
+    out-of-range policy (``PERSIST_STRICT`` / ``PERSIST_HOLD``, #900; ``None``
+    reads as strict), checked against the run window at run start by
+    :func:`check_forcing_coverage`; a ``WRAP_YEAR`` leaf covers every date and
+    ignores it. The Model collapses
     every `TimeSeries` leaf to its current-step slice via
     `ForcingData.select(date)` before handing the forcing to physics, so
     physics terms always see the leading-time axis already removed.
@@ -182,10 +199,33 @@ class TimeSeries:
     values: jnp.ndarray
     times: jdt.Datetime
     align_mode: jnp.ndarray   # int scalar, stored as a 0-d jnp array
+    persist: Any = None       # int scalar (0-d jnp array); None = strict
 
 
-def make_time_series(values, times, align_mode=BY_DATE):
-    """Build a validated `TimeSeries` with a strictly increasing time axis."""
+def persist_code(persist, config_key: str = "persist") -> int:
+    """Return the ``TimeSeries.persist`` code of a policy name (or code).
+
+    Accepts ``"strict"`` / ``"hold"`` (validated by
+    :func:`jcm.data.input_resolution.check_persist`, which names
+    ``config_key`` on error) or an already-resolved int code.
+    """
+    if isinstance(persist, (int, np.integer)) and not isinstance(persist, bool):
+        code = int(persist)
+        if code not in (PERSIST_STRICT, PERSIST_HOLD):
+            raise ValueError(f"{config_key}={persist!r}: unknown persist code.")
+        return code
+    from jcm.data.input_resolution import PERSIST_HOLD as _HOLD, check_persist
+    return (PERSIST_HOLD if check_persist(persist, config_key) == _HOLD
+            else PERSIST_STRICT)
+
+
+def make_time_series(values, times, align_mode=BY_DATE, persist="strict"):
+    """Build a validated `TimeSeries` with a strictly increasing time axis.
+
+    ``persist`` is the leaf's declared out-of-range policy (``"strict"``,
+    the default, or ``"hold"``; see :class:`TimeSeries`) — only meaningful
+    for a date-aligned leaf.
+    """
     values = jnp.asarray(values)
     raw_times = np.asarray(times) if not isinstance(times, jdt.Datetime) else None
     if raw_times is not None and np.issubdtype(raw_times.dtype, np.datetime64):
@@ -235,6 +275,7 @@ def make_time_series(values, times, align_mode=BY_DATE):
         values=values,
         times=times,
         align_mode=jnp.asarray(align_mode, dtype=jnp.int32),
+        persist=jnp.asarray(persist_code(persist), dtype=jnp.int32),
     )
 
 
@@ -582,7 +623,8 @@ class ForcingData:
 
     @classmethod
     def from_file(cls, filename, coords: CoordinateSystem = None,
-                  align_mode: str = "auto", validate: bool = True):
+                  align_mode: str = "auto", validate: bool = True,
+                  persist: str = "strict"):
         """Initialize forcing data from one or more netCDF files.
 
         Thin wrapper around `from_dataset`: opens `filename` with xarray
@@ -594,7 +636,9 @@ class ForcingData:
         given explicitly — see :func:`resolve_align` (#884).
         The ``validate`` flag forwards to `from_dataset` (default ``True``;
         pass ``False`` to bypass the BC sanity check, e.g. for synthetic
-        test fixtures).
+        test fixtures). ``persist`` (``"strict"`` | ``"hold"``) is the
+        declared out-of-range policy of a date-aligned file, forwarded to
+        `from_dataset` (``forcing.persist``, #900).
         """
         import xarray as xr
         align_mode = resolve_align(align_mode, paths=filename,
@@ -607,11 +651,12 @@ class ForcingData:
         else:
             ds = xr.open_dataset(filename)
         return cls.from_dataset(ds, coords=coords,
-                                align_mode=align_mode, validate=validate)
+                                align_mode=align_mode, validate=validate,
+                                persist=persist)
 
     @classmethod
     def from_bundles(cls, coords, *, aerosol=None, surface="pd", years=None,
-                     fetch=None):
+                     fetch=None, persist="strict"):
         """Build the canonical mirror-bundle forcing set for a composition.
 
         The Python counterpart of the CLI's ``forcing=…`` + ``auto`` defaults:
@@ -632,6 +677,14 @@ class ForcingData:
         in RAISING on a hybrid grid it cannot resolve (#774). ``fetch``
         (default: the HF cache) pre-resolves the composed surface bundle via the
         engine; the ``auto`` products use the cache.
+
+        ``persist`` (``"strict"`` | ``"hold"``) is the declared out-of-range
+        policy of every dated input composed here — the CLI's
+        ``forcing.persist`` / ``ozone_persist`` / ``emissions_persist`` /
+        ``oxidants_persist`` / ``macv2_persist`` at once (#900). ``"strict"``
+        (default): ``years`` outside a transient product's coverage raise, and
+        ``Model.run`` refuses a window its dated inputs do not cover;
+        ``"hold"`` declares holding the endpoint values intended.
 
         Era consistency (F1): the surface epoch selects the ancillary epoch, so
         an 1870s PI surface is not silently paired with present-day ancillaries.
@@ -686,6 +739,9 @@ class ForcingData:
             "years": years, "available_years": None,
             "ozone_available_years": None, "emissions_available_years": None,
             "oxidants_available_years": None,
+            **{k: persist for k in ("persist", "ozone_persist",
+                                    "emissions_persist", "oxidants_persist",
+                                    "macv2_persist")},
         }
 
         # Pin the era-consistent ancillary epoch (F1). "pd" is the manifest
@@ -727,7 +783,7 @@ class ForcingData:
                     "file", file_spec, grid_token=grid_token, nlev=nlev,
                     vertical=vertical, years=years,
                     available=forcing_dict["available_years"],
-                    manifest=manifest, fetch=fetch)
+                    manifest=manifest, fetch=fetch, persist=persist)
                 file_spec = (list(sr.paths) if len(sr.paths) > 1
                              else sr.paths[0])
                 # The fetched path may not name the product any more, so carry
@@ -753,7 +809,8 @@ class ForcingData:
 
     @classmethod
     def from_dataset(cls, ds, coords: CoordinateSystem = None,
-                     align_mode: str = "auto", validate: bool = True):
+                     align_mode: str = "auto", validate: bool = True,
+                     persist: str = "strict"):
         """Initialize forcing data from an in-memory xarray Dataset.
 
         Time-varying variables are wrapped as `TimeSeries` leaves so the
@@ -776,6 +833,13 @@ class ForcingData:
                 so the default `"auto"` raises (:func:`resolve_align`,
                 #884); :meth:`from_file` resolves `auto` for mirror/packaged
                 files.
+            validate: Run the host-side boundary-value sanity check.
+            persist: `"strict"` (default) or `"hold"` — the declared
+                out-of-range policy of a date-aligned file (#900). Under
+                `"strict"` a run whose window the time axis does not cover
+                fails at start (:func:`check_forcing_coverage`); `"hold"`
+                declares that holding the first/last sample outside it is
+                intended. Ignored for `"wrap_year"`, which covers every date.
 
         """
         expected_structure = {
@@ -817,6 +881,7 @@ class ForcingData:
         # and only applies when the file actually wraps the year.
         resolved_align_mode = align_mode_code(resolve_align(
             align_mode, config_key="forcing.align"))
+        persist = persist_code(persist, config_key="forcing.persist")
         is_wrap_year_monthly = (resolved_align_mode == WRAP_YEAR
                                 and _is_monthly_climatology(ds))
         if is_wrap_year_monthly:
@@ -869,7 +934,8 @@ class ForcingData:
             """
             arr = jnp.asarray(values)
             arr = jnp.moveaxis(arr, -1, 0)  # (time, lon, lat)
-            return make_time_series(arr, times, align_mode=resolved_align_mode)
+            return make_time_series(arr, times, align_mode=resolved_align_mode,
+                                    persist=persist)
 
         # annual-mean surface albedo (no time axis)
         alb0 = jnp.asarray(ds["alb"])
@@ -921,7 +987,8 @@ class ForcingData:
             arr = jnp.asarray(ds[name])
             if arr.ndim == 0:
                 return arr
-            return make_time_series(arr, times, align_mode=resolved_align_mode)
+            return make_time_series(arr, times, align_mode=resolved_align_mode,
+                                    persist=persist)
 
         co2_vmr = _optional_ghg("co2")
         ch4_vmr = _optional_ghg("ch4")
@@ -1377,7 +1444,10 @@ def _select_time_series(ts: TimeSeries, date: DateData) -> jnp.ndarray:
         return stepped
 
     # BY_DATE_INTERP: linear interpolation between the bracketing samples,
-    # clamped to the end values outside the axis. `align_mode` is traced, so
+    # clamped to the end values outside the axis. The clamp is the mechanism
+    # of a declared ``persist=hold``; a strict leaf is never asked for a date
+    # outside its coverage, because every entry point checks the run window
+    # first (``check_forcing_coverage``). `align_mode` is traced, so
     # both the stepped and interpolated values are computed and selected with
     # `where` (cheap: one extra gather + fma per leaf per step).
     lo = jnp.clip(idx_date, 0, n_time - 2)
@@ -1469,7 +1539,8 @@ def emissions_have_time(ds) -> bool:
                if str(v).startswith(("emis_", "aero_emis_")))
 
 
-def read_anthropogenic_emissions(ds, align_mode: str = "auto"):
+def read_anthropogenic_emissions(ds, align_mode: str = "auto",
+                                 persist: str = "strict"):
     """Build the ``ForcingData.anthropogenic_emissions`` mapping from a dataset.
 
     Reads every ``emis_<sector>_<species>`` variable (the emissions-file
@@ -1487,7 +1558,10 @@ def read_anthropogenic_emissions(ds, align_mode: str = "auto"):
     ``align_mode`` (``wrap_year`` / ``by_date`` / ``by_date_interp``); the
     assembly resolves ``forcing.emissions_align`` to one per product with
     :func:`resolve_align`, and ``auto`` raises here because an in-memory dataset
-    carries no manifest identity (#884). Inputs are flux rates, not interval
+    carries no manifest identity (#884). ``persist`` (``"strict"`` |
+    ``"hold"``, ``forcing.emissions_persist``) is a dated product's declared
+    out-of-range policy, checked against the run window at run start
+    (:func:`check_forcing_coverage`, #900). Inputs are flux rates, not interval
     totals; bounds-aware conversion of interval totals at ingestion remains
     tracked in #876.
     """
@@ -1498,6 +1572,7 @@ def read_anthropogenic_emissions(ds, align_mode: str = "auto"):
     mode = (align_mode_code(resolve_align(
         align_mode, config_key="forcing.emissions_align"))
         if has_time else BY_DATE)
+    persist = persist_code(persist, config_key="forcing.emissions_persist")
     times = _times_for_mode(ds, mode) if has_time else None
     out: dict[str, Any] = {}
     for name in emis_names:
@@ -1508,13 +1583,15 @@ def read_anthropogenic_emissions(ds, align_mode: str = "auto"):
             # them to (ncols,).
             others = [d for d in da.dims if d != "time"]
             arr = jnp.asarray(da.transpose("time", *others).values)
-            out[name] = make_time_series(arr, times, align_mode=mode)
+            out[name] = make_time_series(arr, times, align_mode=mode,
+                                         persist=persist)
         else:
             out[name] = jnp.asarray(da.values)
     return out
 
 
-def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto"):
+def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto",
+                                      persist: str = "strict"):
     """Build ``ForcingData.prescribed_aerosol_emissions`` from a dataset.
 
     Reads every ``aero_emis_<tracer>`` variable (the already-speciated emissions
@@ -1525,8 +1602,9 @@ def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto"):
     3-D (``lev, lon, lat`` volume); the non-time axes are kept in file order
     (``lev`` before the horizontal), which :class:`PreSpeciatedEmissions`
     reshapes to ``(nlev, ncols)``. Fields must already be on the model grid (no
-    regridding here — use :mod:`jcm.data.emissions.prepare`). Time alignment and
-    the flux-rate contract as in :func:`read_anthropogenic_emissions`.
+    regridding here — use :mod:`jcm.data.emissions.prepare`). Time alignment,
+    out-of-range ``persist`` policy and the flux-rate contract as in
+    :func:`read_anthropogenic_emissions`.
     """
     prefix = "aero_emis_"
     names = [str(v) for v in ds.data_vars if str(v).startswith(prefix)]
@@ -1536,6 +1614,7 @@ def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto"):
     mode = (align_mode_code(resolve_align(
         align_mode, config_key="forcing.emissions_align"))
         if has_time else BY_DATE)
+    persist = persist_code(persist, config_key="forcing.emissions_persist")
     times = _times_for_mode(ds, mode) if has_time else None
     out: dict[str, Any] = {}
     for name in names:
@@ -1544,7 +1623,8 @@ def read_prescribed_aerosol_emissions(ds, align_mode: str = "auto"):
         if "time" in da.dims:
             others = [d for d in da.dims if d != "time"]
             arr = jnp.asarray(da.transpose("time", *others).values)
-            out[key] = make_time_series(arr, times, align_mode=mode)
+            out[key] = make_time_series(arr, times, align_mode=mode,
+                                        persist=persist)
         else:
             out[key] = jnp.asarray(da.values)
     return out
@@ -1889,7 +1969,7 @@ _OXIDANT_VAR_MAP = {
 
 
 def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
-                     align_mode: str = "wrap_year"):
+                     align_mode: str = "wrap_year", persist: str = "strict"):
     """Read a monthly oxidant climatology for ``ForcingData.oxidant_vmr``.
 
     Expects the HAMMOZ/MACC ``ham_oxidants_monthly_T63L47_macc.nc`` layout:
@@ -1911,7 +1991,10 @@ def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
 
     Returns ``{"oh"|"no3"|"o3"|"h2o2": TimeSeries}`` with values shaped
     ``(time, nlev, lon, lat)`` on the model orientation, ``WRAP_YEAR`` by
-    default.
+    default. ``persist`` (``"strict"`` | ``"hold"``,
+    ``forcing.oxidants_persist``) is a dated series' declared out-of-range
+    policy, checked against the run window at run start
+    (:func:`check_forcing_coverage`, #900).
     """
     missing = [v for v in _OXIDANT_VAR_MAP if v not in ds.data_vars]
     if missing:
@@ -1951,6 +2034,7 @@ def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
             f"or a dated series); got dims {sample.dims}.")
     mode = align_mode_code(resolve_align(
         align_mode, config_key="forcing.oxidants_align"))
+    persist = persist_code(persist, config_key="forcing.oxidants_persist")
     times = _times_for_mode(ds, mode)
     out: dict[str, Any] = {}
     for var, key in _OXIDANT_VAR_MAP.items():
@@ -1958,7 +2042,8 @@ def read_oxidant_vmr(ds, nlev: int, lat_deg=None, lon_deg=None,
         # Defensive: a fill-value cell decoded to NaN means "no data" — treat
         # as zero oxidant rather than let NaN poison the sulfur chemistry.
         arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
-        out[key] = make_time_series(arr, times, align_mode=mode)
+        out[key] = make_time_series(arr, times, align_mode=mode,
+                                    persist=persist)
     return out
 
 
@@ -2022,7 +2107,8 @@ def packaged_macv2_path() -> str:
     return ir.resolve_packaged(mm.load_manifest(), "macv2_sp")
 
 
-def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
+def read_macv2_weights(path, persist: str = "strict") -> tuple[TimeSeries,
+                                                               TimeSeries]:
     """Read MACv2-SP time-varying plume weights into two ``TimeSeries`` leaves.
 
     The MACv2-SP file (the packaged SPv2.1 CMIP7 build, or the older v1) carries
@@ -2035,10 +2121,12 @@ def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
       ``TimeSeries`` of shape ``(year, plume)`` so the model picks the current
       calendar year. Only part of the axis carries real data (SPv2.1: 1850-2023;
       v1: 1850-2016); the trailing years are ``_FillValue`` (delivered as NaN),
-      which would inject NaN AOD, so the last valid year is forward-filled (a
-      documented jcm convention — the reference STOPs out of range). The
-      forward-fill finds the last all-valid year dynamically, so it adapts to
-      either file's real span with no version-specific constant.
+      which would inject NaN AOD. The axis is therefore truncated at the last
+      all-valid year, found dynamically so it adapts to either file's real
+      span with no version-specific constant: the fill years are not data,
+      and keeping them (forward-filled) would silently hold the last real
+      amplitude for decades inside an axis that looks covered. Past the real
+      span the run-start coverage check decides, like every dated input.
     * ``ann_cycle(plume, week, feature)`` — the seasonal cycle. Returned as
       ``forcing.aerosol_ann_cycle``: a ``WRAP_YEAR`` ``TimeSeries`` arranged
       ``(week, feature, plume)`` so a ``select(date)`` slice yields the
@@ -2047,27 +2135,32 @@ def read_macv2_weights(path) -> tuple[TimeSeries, TimeSeries]:
     ``select(date)`` collapses each leaf to its current-step slice, so nothing
     extra is needed at run time. Attach both to a :class:`ForcingData` via
     ``base.copy(aerosol_year_weight=..., aerosol_ann_cycle=...)``.
+
+    The dated ``year_weight`` axis covers its first year through the end of
+    its last; a run outside it fails at start under ``persist="strict"`` (the
+    default, ``forcing.macv2_persist``) — as the reference STOPs — and
+    ``persist="hold"`` declares holding the edge year's amplitude intended
+    (:func:`check_forcing_coverage`, #900).
     """
     import xarray as xr
 
     ds = path if isinstance(path, xr.Dataset) else xr.open_dataset(path)
     try:
-        # year_weight: (plume, year) -> (year, plume). Forward-fill past the
-        # last all-valid year so out-of-range years reuse the last real
-        # amplitude instead of the file's NaN fill.
+        # year_weight: (plume, year) -> (year, plume), truncated after the
+        # last all-valid year: the trailing _FillValue years are not data.
         yw_np = np.asarray(ds["year_weight"].values.T, dtype=float)  # (251, 9)
         valid = ~np.isnan(yw_np).any(axis=1)
-        last_valid = np.where(valid)[0].max()
-        yw_np[last_valid + 1:] = yw_np[last_valid]
-        yw = jnp.asarray(yw_np)
+        last_valid = int(np.where(valid)[0].max())
+        yw = jnp.asarray(yw_np[:last_valid + 1])
 
         # Exact dated time axis, one sample per year-start. The file labels year Y with the integer Y; treat it as
         # Y-01-01 00:00 UTC.
-        years = ds["years"].values.astype(int)
+        years = ds["years"].values.astype(int)[:last_valid + 1]
         year_dates = np.asarray(
             [f"{int(y)}-01-01" for y in years], dtype="datetime64[s]")
         year_weight = make_time_series(
-            yw, year_dates, align_mode=BY_DATE)
+            yw, year_dates, align_mode=BY_DATE,
+            persist=persist_code(persist, "forcing.macv2_persist"))
 
         # ann_cycle: (plume, week, feature) -> (week, feature, plume). WRAP_YEAR
         # repeats every year; the exact labels are informational for this
@@ -2114,7 +2207,8 @@ def _is_datetime_axis(values) -> bool:
 
 def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
                                    align_mode: str = "auto",
-                                   source: str = "prescribed_surface_flux"):
+                                   source: str = "prescribed_surface_flux",
+                                   persist: str = "strict"):
     """Read a forced-mode surface-flux dataset into ``ForcingData`` fields.
 
     The Python door behind ``forcing.prescribed_surface_flux.file`` (the Hydra
@@ -2159,9 +2253,11 @@ def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
     either mode: ``_by_date_index`` uses ``searchsorted`` (requires ascending)
     and WRAP_YEAR's position 0 must be January. Duplicate, non-finite or
     non-date timestamps raise. Coverage of the run window by a BY_DATE axis is
-    checked at run start (:func:`by_date_coverage_error`, called from the
-    forced-mode terms' ``validate_forcing``), because only the run knows its
-    window.
+    checked at run start (:func:`check_forcing_coverage`, reached through
+    ``validate_run_forcing`` and the forced-mode terms' ``validate_forcing``),
+    because only the run knows its window; ``persist`` (``"strict"`` |
+    ``"hold"``, ``forcing.prescribed_surface_flux.persist``) declares whether
+    a run past it fails or deliberately holds the end samples (#900).
 
     Args:
         ds: An open ``xarray.Dataset``.
@@ -2170,6 +2266,8 @@ def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
             (``"auto"`` raises for a time-resolved file) — the vocabulary of
             ``forcing.align`` / :func:`resolve_align`.
         source: Label (file path) for error messages.
+        persist: ``"strict"`` (default) | ``"hold"`` — the out-of-range
+            policy of a date-aligned archive.
 
     Returns:
         ``dict`` mapping ``ForcingData`` field name → array or TimeSeries.
@@ -2193,6 +2291,8 @@ def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
                 f"{source}: variable {var!r} must be dimensioned (lat, lon) "
                 f"with an optional leading time axis; got {ds[var].dims}.")
 
+    persist = persist_code(persist,
+                           "forcing.prescribed_surface_flux.persist")
     timed = [v for v in PRESCRIBED_FLUX_FILE_VARS if "time" in ds[v].dims]
     order = times = None
     mode = None
@@ -2211,7 +2311,7 @@ def read_prescribed_surface_fluxes(ds, lat_deg=None, lon_deg=None,
             out[field] = jnp.asarray(values[0])
         else:
             out[field] = make_time_series(
-                np.asarray(values)[order], times, mode)
+                np.asarray(values)[order], times, mode, persist=persist)
     if mode in (BY_DATE, BY_DATE_INTERP):
         bounds = _prescribed_flux_time_bounds(ds, order, times, source)
         if bounds is not None:
@@ -2328,12 +2428,20 @@ def _prescribed_flux_time_axis(ds, align_mode, source):
 
 def by_date_coverage_error(ts: "TimeSeries", start_seconds: float,
                            end_seconds: float, name: str = "",
-                           bounds=None) -> str | None:
+                           bounds=None, remedy: str | None = None) -> str | None:
     """Message if a date-aligned ``ts`` does not cover ``[start, end]``, else None.
 
     ``BY_DATE``/``BY_DATE_INTERP`` selection (:func:`_select_time_series`) clamps
     to the first/last sample outside the axis, so running past the end of a
     transient archive would otherwise silently hold its last sample forever.
+    Every dated forcing leaf is judged by this one rule
+    (:func:`check_forcing_coverage`); ``remedy`` is the input-specific closing
+    advice of the message (which knobs to set), defaulting to a generic one.
+    For ``BY_DATE_INTERP`` the same end-interval slack is the interpolation
+    bracket's judgement: past the last stamp selection holds the last value
+    (there is no later sample to interpolate towards), and the slack says for
+    how long that sample still stands for its own interval — a mid-month
+    stamp its month, a month-start stamp the month it opens.
 
     The usable window is, in order of preference:
 
@@ -2387,14 +2495,230 @@ def by_date_coverage_error(ts: "TimeSeries", start_seconds: float,
     if start_seconds >= lo and end_seconds <= hi:
         return None
     _d = _iso
+    if remedy is None:
+        remedy = ("Supply data covering the whole run; declare persist='hold' "
+                  "to hold its end samples deliberately; or, if the file is a "
+                  "climatology meant to repeat every year, declare "
+                  "align=wrap_year.")
     return (
         f"{name}: the date-aligned (BY_DATE) time axis spans {_d(t[0])} .. "
         f"{_d(t[-1])} (usable {_d(lo)} .. {_d(hi)}, {what}), but the run "
         f"covers {_d(start_seconds)} .. {_d(end_seconds)}. Outside its "
         "coverage a date-aligned series would silently hold a neighbouring "
-        "sample. Supply fluxes covering the whole run; if the file is a "
-        "monthly climatology meant to repeat every year, set "
-        "forcing.prescribed_surface_flux.align=wrap_year.")
+        f"sample. {remedy}")
+
+
+def _coverage_window(ts: "TimeSeries", start_seconds: float, bounds=None):
+    """``(lo, hi)`` usable window of a dated ``ts`` (seconds since 1970).
+
+    The same window :func:`by_date_coverage_error` judges against, for the
+    ``hold`` warning to name what is held.
+    """
+    t = _host_epoch_seconds(ts.times).astype(float).reshape(-1)
+    if isinstance(bounds, jdt.Datetime):
+        bounds = _host_epoch_seconds(bounds).astype(float)
+    if bounds is not None:
+        lo, hi, _ = _declared_coverage(bounds, start_seconds)
+        return lo, hi
+    if t.size < 2:
+        return float(t[0]), float(t[0])
+    return (_repeat_cadence(t[1], t[0], t[0]),
+            _repeat_cadence(t[-2], t[-1], t[-1]))
+
+
+#: The dated input families of :class:`ForcingData`, keyed by top-level field:
+#: ``(label, persist knob, align knob)`` — the knobs the coverage message and
+#: the ``hold`` warning name. One family per declared ``*_persist`` knob, so a
+#: policy applies to every leaf read from that input.
+_SURFACE_INPUT = ("surface forcing (forcing.file)", "forcing.persist",
+                  "forcing.align")
+_OZONE_INPUT = ("ozone (forcing.ozone_file)", "forcing.ozone_persist",
+                "forcing.ozone_align")
+_EMISSIONS_INPUT = ("emissions (forcing.emissions_file)",
+                    "forcing.emissions_persist", "forcing.emissions_align")
+_FLUX_INPUT = ("prescribed surface fluxes (forcing.prescribed_surface_flux)",
+               "forcing.prescribed_surface_flux.persist",
+               "forcing.prescribed_surface_flux.align")
+DATED_INPUT_FAMILIES = {
+    **{f: _SURFACE_INPUT for f in (
+        "sea_surface_temperature", "sice_am", "snowc_am", "soilw_am",
+        "stl_am", "soilw_rel", "co2_vmr", "ch4_vmr", "n2o_vmr")},
+    "ozone_climatology": _OZONE_INPUT,
+    "anthropogenic_emissions": _EMISSIONS_INPUT,
+    "prescribed_aerosol_emissions": _EMISSIONS_INPUT,
+    "oxidant_vmr": ("oxidants (forcing.oxidants_file)",
+                    "forcing.oxidants_persist", "forcing.oxidants_align"),
+    "aerosol_year_weight": ("MACv2-SP plume weights (forcing.macv2_file)",
+                            "forcing.macv2_persist", None),
+    "aerosol_ann_cycle": ("MACv2-SP plume weights (forcing.macv2_file)",
+                          "forcing.macv2_persist", None),
+    **{f: _FLUX_INPUT for f in (
+        "prescribed_sensible_heat_flux", "prescribed_evaporation",
+        "prescribed_stress_u", "prescribed_stress_v")},
+    "nudging_target": ("nudging target (nudging.enabled)", None, None),
+}
+
+#: ``(family label, lo, hi)`` of every held interval already warned about in
+#: this process, so a chunked run (which re-validates every chunk) or a
+#: resume warns once per held input rather than once per call.
+_HOLD_WARNED: set = set()
+
+
+def _dated_leaves(value, name):
+    """Yield ``(name, TimeSeries)`` for every ``TimeSeries`` inside ``value``.
+
+    Walks mappings (emissions, oxidants), dataclass structs
+    (:class:`OzoneClimatology`, a ``NudgingTarget``) and the leaf itself, so a
+    nested dated input is judged exactly like a top-level one.
+    """
+    import dataclasses
+    if isinstance(value, TimeSeries):
+        yield name, value
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            yield from _dated_leaves(v, f"{name}[{k!r}]")
+    elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+        for f in dataclasses.fields(value):
+            yield from _dated_leaves(getattr(value, f.name), f"{name}.{f.name}")
+
+
+def _is_traced(tree) -> bool:
+    import jax
+    return any(isinstance(x, jax.core.Tracer)
+               for x in tree_util.tree_leaves(tree))
+
+
+def _coverage_remedy(family, what) -> str:
+    """Return the closing advice of a coverage error for one input family."""
+    label, persist_key, align_key = family
+    if family is DATED_INPUT_FAMILIES["nudging_target"]:
+        return ("The CLI fetches the nudging target for the configured run "
+                "window; build it for this run's window (or construct it with "
+                "NudgingTarget.from_dataset(..., persist='hold') to hold its "
+                "end samples deliberately) (#900).")
+    if persist_key is None:
+        return ("Supply data covering the whole run, or build its TimeSeries "
+                "with make_time_series(..., persist='hold') to hold its end "
+                "samples deliberately (#900).")
+    # The inputs that accept a {year} pattern: their coverage comes from
+    # forcing.years, which a run must place on the same period.
+    yearly = family in (_SURFACE_INPUT, _OZONE_INPUT, _EMISSIONS_INPUT,
+                        DATED_INPUT_FAMILIES["oxidant_vmr"])
+    parts = [f"Supply {what} covering the whole run"
+             + (" (a {year} pattern covers forcing.years, which must describe "
+                "the same period as run.start_time and the run length)"
+                if yearly else "")
+             + f", or declare {persist_key}=hold (Python: persist='hold' on "
+             "its reader) to hold its end samples deliberately"]
+    if align_key is not None:
+        parts.append(f"; if the file is a climatology meant to repeat every "
+                     f"year, set {align_key}=wrap_year")
+    return "".join(parts) + " (#900)."
+
+
+def check_forcing_coverage(forcing, run_window, *, fields=None,
+                           owner: str | None = None) -> None:
+    """Check every dated forcing leaf against the run window — THE coverage rule.
+
+    Walks every ``BY_DATE`` / ``BY_DATE_INTERP`` :class:`TimeSeries` leaf of
+    ``forcing`` (nested ones too: ozone, the emission and oxidant mappings, a
+    nudging target) and judges it with :func:`by_date_coverage_error` —
+    prescribed-flux leaves against their CF ``time_bnds`` when the reader found
+    them. A leaf that does not cover ``run_window = (start_s, end_s)``
+    (seconds since 1970-01-01) then follows its declared ``persist`` policy
+    (#900): ``strict`` (the default) collects the one-line error, and after the
+    walk every uncovered input is reported in one ``ValueError``; ``hold``
+    warns once per held input, naming it, its usable coverage and the run
+    window, instead. ``WRAP_YEAR`` and static leaves always cover.
+
+    ``fields`` restricts the walk to those top-level ``ForcingData`` fields
+    (the forced-mode terms check only their own four); ``owner`` prefixes the
+    names. Skipped — nothing to judge — when ``run_window`` or ``forcing`` is
+    ``None`` and per leaf when its axis or policy is traced (``run`` inside a
+    JAX transformation), so this never forces a host read of a tracer.
+
+    The full walk (``fields=None``) also records the policy of every dated
+    input and any held interval as the ``dated_input_persistence`` provenance
+    fact, which the CLI stamps into the output attributes.
+    """
+    import dataclasses
+    # A partial stand-in (not a struct) has no dated leaves to judge.
+    if (forcing is None or run_window is None
+            or not dataclasses.is_dataclass(forcing)):
+        return
+    start_s, end_s = (float(x) for x in run_window)
+    bounds = getattr(forcing, "prescribed_flux_time_bounds", None)
+    if bounds is not None and _is_traced(bounds):
+        bounds = None
+    prefix = f"{owner}: " if owner else ""
+    errors, held, policies = {}, {}, {}
+    names = (fields if fields is not None
+             else [f.name for f in dataclasses.fields(forcing)])
+    for field in names:
+        family = DATED_INPUT_FAMILIES.get(
+            field, (f"forcing.{field}", None, None))
+        for name, leaf in _dated_leaves(getattr(forcing, field, None),
+                                        f"forcing.{field}"):
+            if _is_traced((leaf.times, leaf.align_mode, leaf.persist)):
+                continue
+            if int(np.asarray(leaf.align_mode)) not in (BY_DATE,
+                                                        BY_DATE_INTERP):
+                continue
+            hold = (leaf.persist is not None
+                    and int(np.asarray(leaf.persist)) == PERSIST_HOLD)
+            policies.setdefault(family[0], set()).add(
+                "hold" if hold else "strict")
+            leaf_bounds = bounds if field.startswith("prescribed_") else None
+            what = ("fluxes" if family is _FLUX_INPUT
+                    else "data" if family[1] is None
+                    else "a series")
+            err = by_date_coverage_error(
+                leaf, start_s, end_s, name=prefix + name, bounds=leaf_bounds,
+                remedy=_coverage_remedy(family, what))
+            if err is None:
+                continue
+            if not hold:
+                errors.setdefault(family[0], []).append((name, err))
+                continue
+            lo, hi = _coverage_window(leaf, start_s, leaf_bounds)
+            held.setdefault((family[0], family[1], lo, hi), []).append(name)
+    for (label, knob, lo, hi), leaf_names in held.items():
+        if (label, lo, hi) in _HOLD_WARNED:
+            continue
+        _HOLD_WARNED.add((label, lo, hi))
+        ends = []
+        if start_s < lo:
+            ends.append(f"its first sample before {_iso(lo)}")
+        if end_s > hi:
+            ends.append(f"its last sample after {_iso(hi)}")
+        warnings.warn(
+            f"{prefix}{label}: {knob or 'persist'}=hold — the run "
+            f"{_iso(start_s)} .. {_iso(end_s)} extends past the date-aligned "
+            f"coverage {_iso(lo)} .. {_iso(hi)}, so {' and '.join(ends)} "
+            f"{'is' if len(ends) == 1 else 'are'} held (declared, #900). "
+            f"Held fields: {', '.join(leaf_names)}.",
+            UserWarning, stacklevel=2)
+    if fields is None and policies:
+        from jcm import provenance
+        record = "; ".join(
+            f"{label}={'/'.join(sorted(p))}"
+            + "".join(f" held outside {_iso(lo)}..{_iso(hi)}"
+                      for (lab, _, lo, hi) in held if lab == label)
+            for label, p in sorted(policies.items()))
+        provenance.record_fact("dated_input_persistence", record)
+    if errors:
+        # One line per input: its first uncovered leaf's message, naming any
+        # further fields read from the same input (they share its axis).
+        lines = []
+        for leaves in errors.values():
+            line = leaves[0][1]
+            if len(leaves) > 1:
+                line += (" Also uncovered from the same input: "
+                         + ", ".join(n for n, _ in leaves[1:]) + ".")
+            lines.append(line)
+        raise ValueError(lines[0] if len(lines) == 1 else
+                         f"{len(lines)} dated forcing inputs do not cover the "
+                         "run window:\n" + "\n".join(lines))
 
 
 def _iso(seconds: float) -> str:

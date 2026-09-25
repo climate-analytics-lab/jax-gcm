@@ -316,6 +316,18 @@ _PER_PRODUCT_AVAILABLE = {
     "oxidants_file": "oxidants_available_years",
 }
 
+#: Each yearly product's declared out-of-range policy (#900), mirroring
+#: ``jcm.forcing_assembly._persist``: a ``{year}`` range outside the product's
+#: coverage raises under ``strict`` (the default) and reuses the edge-year file
+#: under ``hold`` — the same expansion the build will perform, so the prefetch
+#: neither fetches files the run will not open nor hides the build's error.
+_PER_PRODUCT_PERSIST = {
+    "file": "persist",
+    "ozone_file": "ozone_persist",
+    "emissions_file": "emissions_persist",
+    "oxidants_file": "oxidants_persist",
+}
+
 
 def _preset_data_files(overrides: list[str]) -> list[str]:
     """Prescribed-input paths (hf:// or local) a preset resolves to.
@@ -352,22 +364,34 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
         val = forcing.get(per) if per else None
         return val if val is not None else forcing.get("available_years", None)
 
-    def _add(v, available):
+    def _persist_for(key):
+        knob = _PER_PRODUCT_PERSIST.get(str(key))
+        val = forcing.get(knob) if knob else None
+        return "strict" if val is None else val
+
+    def _add(v, available, key="file", persist=None):
         # A ``{year}`` scalar expands to its yearly-file list; a plain path
         # passes through. Lists name several independent products — expand each
-        # element with the same coverage clamp (mirrors _forcing_products).
+        # element with the same coverage rule (mirrors _forcing_products),
+        # under its declared persist policy (one per product when a list).
         # ``analytic`` joins the sentinels: it selects the analytic ozone
         # profile (#774), not a file, and must not reach the prefetch.
+        if persist is None:
+            persist = _persist_for(key)
         if isinstance(v, str) and v not in ("auto", "null", "none", "???",
                                             "analytic"):
-            expanded = expand(v, years, available)
+            expanded = expand(v, years, available,
+                              persist=(persist if isinstance(persist, str)
+                                       else "strict"), key=str(key))
             if isinstance(expanded, (list, tuple)):
                 out.extend(str(x) for x in expanded)
             else:
                 out.append(expanded)
         elif isinstance(v, (list, tuple)):
-            for x in v:
-                _add(x, available)
+            for i, x in enumerate(v):
+                each = (persist[i] if isinstance(persist, (list, tuple))
+                        and i < len(persist) else persist)
+                _add(x, available, key, each)
 
     for group in ("forcing", "terrain", "dycore"):
         node = cfg.get(group, None)
@@ -383,7 +407,7 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
             # The ``{year}`` clamp only applies to forcing-group keys (terrain /
             # dycore files are never yearly patterns; ``forcing.years`` and the
             # ``*_available_years`` overrides live under ``forcing``).
-            _add(v, _available_for(k) if group == "forcing" else None)
+            _add(v, _available_for(k) if group == "forcing" else None, k)
     out += _auto_emission_files(cfg)
     out += _auto_ozone_files(cfg)
     return out

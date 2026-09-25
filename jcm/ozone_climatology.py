@@ -90,6 +90,7 @@ class OzoneClimatology:
         lat_deg: np.ndarray | None = None,
         lon_deg: np.ndarray | None = None,
         align_mode: str = "auto",
+        persist: str = "strict",
     ) -> "OzoneClimatology":
         """Load a pre-interpolated ozone file as a ``TimeSeries`` leaf.
 
@@ -121,6 +122,13 @@ class OzoneClimatology:
                 data-mirror/packaged product (a transient one →
                 ``by_date_interp``) and an error for any other file
                 (``forcing.ozone_align``; :func:`jcm.forcing.resolve_align`).
+            persist: ``strict`` (default) | ``hold`` — the declared
+                out-of-range policy of a transient file
+                (``forcing.ozone_persist``): a run outside its time axis
+                fails at start under ``strict``, and ``hold`` declares
+                holding the end months intended
+                (:func:`jcm.forcing.check_forcing_coverage`, #900). Ignored
+                for a ``wrap_year`` climatology.
 
         Returns:
             ``OzoneClimatology`` whose ``o3_ppmv`` is a
@@ -132,11 +140,12 @@ class OzoneClimatology:
         # Local import: ``jcm.forcing`` already imports this module via
         # ``ForcingData``, so importing it at module top would cycle.
         from jcm.forcing import (WRAP_YEAR, align_mode_code, make_time_series,
-                                 resolve_align)
+                                 persist_code, resolve_align)
 
         align = align_mode_code(resolve_align(
             align_mode, paths=path, config_key="forcing.ozone_align",
             transient="by_date_interp"))
+        persist = persist_code(persist, config_key="forcing.ozone_persist")
 
         from_yearly_list = isinstance(path, (list, tuple))
         if from_yearly_list:
@@ -247,6 +256,7 @@ class OzoneClimatology:
             jnp.asarray(o3_cols, dtype=jnp.float32),
             times,
             align_mode=align,
+            persist=persist,
         )
         return cls(o3_ppmv=ts)
 

@@ -86,15 +86,14 @@ def check_prescribed_flux_forcing(forcing: ForcingData, owner: str,
        error, not a zero flux);
     2. when ``run_window = (start_s, end_s)`` (seconds since
        1970-01-01) is known, every date-aligned (``BY_DATE``/
-       ``BY_DATE_INTERP``) ``TimeSeries`` field covers it — outside its axis
-       the selection clamps and would silently hold the archive's end sample
-       (see :func:`jcm.forcing.by_date_coverage_error`). Skipped when the
-       window or the leaf is traced (``run`` inside a JAX transformation),
-       where no concrete value exists to check.
+       ``BY_DATE_INTERP``) ``TimeSeries`` field covers it, under the fields'
+       declared ``persist`` policy — the shared rule every dated input
+       follows (:func:`jcm.forcing.check_forcing_coverage`, restricted to
+       these four fields; #900). Skipped when the window or the leaf is
+       traced (``run`` inside a JAX transformation), where no concrete value
+       exists to check.
     """
-    import jax
-
-    from jcm.forcing import TimeSeries, by_date_coverage_error
+    from jcm.forcing import check_forcing_coverage
 
     missing = missing_prescribed_flux_fields(forcing)
     if missing:
@@ -106,27 +105,8 @@ def check_prescribed_flux_forcing(forcing: ForcingData, owner: str,
             "surface-exchange contract, "
             "docs/source/design/surface_exchange.md."
         )
-    if run_window is None:
-        return
-    start_s, end_s = run_window
-    # The archive's declared coverage (CF ``time_bnds``) wins over the
-    # end-sample cadence when the reader found one.
-    bounds = getattr(forcing, "prescribed_flux_time_bounds", None)
-    if any(isinstance(x, jax.core.Tracer)
-           for x in jax.tree_util.tree_leaves(bounds)):
-        bounds = None
-    for name in PRESCRIBED_FLUX_FORCING_FIELDS:
-        leaf = getattr(forcing, name)
-        if not isinstance(leaf, TimeSeries) or any(
-                isinstance(x, jax.core.Tracer)
-                for x in jax.tree_util.tree_leaves(
-                    (leaf.times, leaf.align_mode))):
-            continue
-        err = by_date_coverage_error(leaf, start_s, end_s,
-                                     name=f"{owner}: forcing.{name}",
-                                     bounds=bounds)
-        if err is not None:
-            raise ValueError(err)
+    check_forcing_coverage(forcing, run_window,
+                           fields=PRESCRIBED_FLUX_FORCING_FIELDS, owner=owner)
 
 
 def check_prescribed_flux_consumers(physics, forcing) -> None:
@@ -172,33 +152,42 @@ def check_prescribed_flux_consumers(physics, forcing) -> None:
 
 
 def validate_run_forcing(physics, forcing, run_window=None) -> None:
-    """Enforce both directions of the forced-mode forcing contract (#301).
+    """Enforce the run-start forcing contract: forced mode (#301) + coverage (#900).
 
     The ONE check every run entry point applies to its concrete forcing
     before stepping, so no door can run a forced composition on a silent
-    zero flux or an interactive one on silently ignored fluxes:
+    zero flux, an interactive one on silently ignored fluxes, or any dated
+    input past its archive on silently held end samples:
 
     (a) prescribed fluxes supplied → some composed term must consume them
         (:func:`check_prescribed_flux_consumers`);
     (b) a consumer composed → ``physics.validate_forcing(forcing,
         run_window)`` runs every term's own check: the forced-mode terms
-        raise if the fluxes are absent or, given a concrete ``run_window``
-        ``(start_s, end_s)`` in seconds since 1970-01-01, if a
-        date-aligned archive does not cover it
-        (:func:`check_prescribed_flux_forcing`).
+        raise if the fluxes are absent (and judge their coverage, below);
+    (c) given a concrete ``run_window`` ``(start_s, end_s)`` in seconds since
+        1970-01-01, EVERY date-aligned forcing leaf — surface fields and
+        GHGs, ozone, emissions, oxidants, MACv2-SP weights, prescribed
+        fluxes, a nudging target — must cover it, or have declared
+        ``persist=hold`` (:func:`jcm.forcing.check_forcing_coverage`).
 
-    Callers: ``Model.run_from_state_with_carry`` (the choke point of
-    ``run`` / ``resume`` / ``run_from_state``), ``SingleColumnModel.run``,
-    ``PrescribedStateModel.run`` (window = its state times), and the CLI /
-    recipe doors right after forcing assembly (window unknown there, so
-    presence only; the model call then checks coverage). A physics object
-    without ``validate_forcing`` is tolerated. Presence checks never read a
-    tracer, so this is safe inside a JAX transformation.
+    Callers and their windows: ``Model.run_from_state_with_carry`` (the
+    choke point of ``run`` / ``resume`` / ``run_from_state``; the exact run
+    window), ``PrescribedStateModel.run`` (its state times),
+    ``SingleColumnModel.run`` (``None``: a column has no absolute date), and
+    the CLI / recipe doors right after forcing assembly (the configured
+    ``[run.start_time, start + total_time]``, so a transient run past its
+    archive fails before the run is compiled). A physics object without
+    ``validate_forcing`` is tolerated. Presence checks never read a tracer,
+    and coverage skips traced windows and leaves, so this is safe inside a
+    JAX transformation.
     """
+    from jcm.forcing import check_forcing_coverage
+
     check_prescribed_flux_consumers(physics, forcing)
     validate = getattr(physics, "validate_forcing", None)
     if validate is not None:
         validate(forcing, run_window=run_window)
+    check_forcing_coverage(forcing, run_window)
 
 
 class PrescribedSurfaceFlux(PhysicsTerm):

@@ -389,5 +389,47 @@ class PysesAlignmentRuleTest(unittest.TestCase):
         self.assertEqual(int(leaf.align_mode), WRAP_YEAR)
 
 
+
+class PysesPersistenceTest(unittest.TestCase):
+    """The column readers carry the declared out-of-range policy (#900)."""
+
+    @staticmethod
+    def _emis():
+        return xr.Dataset(
+            {"emis_biomass_burning_bc": (
+                ("time", "lon", "lat"),
+                np.full((12, _LON.size, _LAT.size), 3.0e-12))},
+            coords={"time": _TIME, "lon": _LON, "lat": _LAT},
+        )
+
+    def test_emissions_and_oxidants_carry_persist_to_the_columns(self):
+        from jcm.forcing import PERSIST_HOLD, PERSIST_STRICT
+        ox = xr.Dataset(
+            {v: (("time", "mlev", "lat", "lon"),
+                 np.full((12, 4, _LAT.size, _LON.size), 1e-12))
+             for v in ("OH_VMR_avrg", "NO3_VMR_avrg", "O3_VMR_avrg",
+                       "H2O2_VMR_avrg")},
+            coords={"time": _TIME, "lon": _LON, "lat": _LAT},
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            forcing = _attach(
+                emissions_file=_write(tmp, "emis.nc", self._emis()),
+                emissions_align="by_date", emissions_persist=["hold"],
+                oxidants_file=_write(tmp, "ox.nc", ox),
+                oxidants_align="by_date", oxidants_persist="strict")
+        emis = forcing.anthropogenic_emissions["emis_biomass_burning_bc"]
+        self.assertEqual(int(emis.align_mode), BY_DATE)
+        self.assertEqual(int(emis.persist), PERSIST_HOLD)
+        self.assertEqual(int(forcing.oxidant_vmr["oh"].persist),
+                         PERSIST_STRICT)
+
+    def test_emissions_policies_must_agree_on_one_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "need one policy"):
+                _attach(emissions_file=_write(tmp, "emis.nc", self._emis()),
+                        emissions_align="by_date",
+                        emissions_persist=["hold", "strict"])
+
+
 if __name__ == "__main__":
     unittest.main()
