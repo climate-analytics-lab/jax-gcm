@@ -211,7 +211,10 @@ offline)::
        terrain=from_file terrain.file=hf://bundles/t63/terrain.nc \
        forcing.file=hf://bundles/t63/forcing_pd.nc
 
-See :doc:`design/data_mirror` for the full bundle catalogue. The Python door
+Every ``hf://`` read resolves at the dataset commit pinned in
+``jcm/data/remote.py``; ``JCM_MIRROR_REVISION=<commit sha>`` overrides it (a
+branch name is refused). Prefetch under the same value you run with. See
+:doc:`design/data_mirror` for the full bundle catalogue and the pin. The Python door
 onto the same bundles is :meth:`jcm.forcing.ForcingData.from_bundles` (in the
 getting-started guide).
 

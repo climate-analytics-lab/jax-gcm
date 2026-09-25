@@ -30,6 +30,7 @@ import collections
 import dataclasses
 import functools
 import logging
+import os
 from collections.abc import Mapping
 from importlib import metadata
 from pathlib import Path
@@ -257,6 +258,15 @@ def _prognostic_carry_slots(model) -> list[str]:
     return [str(key) for key in (declared() if callable(declared) else declared)]
 
 
+def _mirror_revision() -> str:
+    """Return the data-mirror commit this process reads (see jcm.data.remote)."""
+    from jcm.data import remote
+    try:
+        return remote.mirror_revision()
+    except ValueError:      # an invalid override: record it as given
+        return "invalid: " + os.environ.get(remote.REVISION_ENV, "")
+
+
 def save_checkpoint(model, path, *, elapsed_days: float | None = None) -> Path:
     """Persist the model's current dycore + physics state to ``path``.
 
@@ -305,6 +315,9 @@ def save_checkpoint(model, path, *, elapsed_days: float | None = None) -> Path:
             "step": np.asarray(run_state.step),
             "dt_seconds": float(model.dt_si.m),
         },
+        # With the clock, the run's identity: the data-mirror commit its
+        # inputs were read at, so a resume can refuse different inputs.
+        "data_mirror_revision": _mirror_revision(),
         "dycore": dict(_named_leaves(model.dycore_state)),
         "physics": dict(_named_leaves(model.physics_carry)),
         "physics_fields": _struct_fields(model.physics_carry),
@@ -629,7 +642,8 @@ def _load_unstamped(
 
 
 def load_checkpoint(model, path, *, unstamped_scale=None,
-                    as_initial_condition=False) -> float:
+                    as_initial_condition=False,
+                    metadata: dict | None = None) -> float:
     """Restore ``dycore_state`` + ``physics_carry`` from ``path``.
 
     The model must already have been bootstrapped (e.g. by an earlier
@@ -670,6 +684,10 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
             resetting the exact clock and dycore counter. Required for files
             predating the exact-clock schema; their seasonal interpretation
             cannot be continued as a v3 run.
+        metadata: Optional dict, filled with the file's non-array records
+            (currently ``data_mirror_revision``, the mirror commit the saving
+            run read, or ``None`` for a file that predates the record), so a
+            caller can check it without decoding the file twice.
 
     Returns:
         The ``elapsed_days`` recorded in the file, i.e. the *donor's*
@@ -702,6 +720,9 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
             f"{type(raw).__name__}, expected a mapping)."
         )
 
+    if metadata is not None:
+        rev = raw.get("data_mirror_revision")
+        metadata["data_mirror_revision"] = None if rev is None else str(rev)
     if "elapsed_days" not in raw:
         raise ValueError(
             f"Checkpoint {path} is not a jcm checkpoint: it records no "

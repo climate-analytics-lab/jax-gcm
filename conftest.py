@@ -288,3 +288,17 @@ def pytest_runtest_teardown(item, nextitem):
     gc.collect()
     _release_freed_heap()
     _rss_at_last_clear = _rss_bytes()
+
+
+@pytest.fixture(autouse=True)
+def _one_mirror_revision_per_test():
+    """Treat each test as its own process for the one-mirror-commit rule.
+
+    ``jcm.data.remote.mirror_revision`` freezes the commit at its first call
+    in a process; tests set different overrides, so each starts unfrozen.
+    """
+    from jcm.data import remote
+    remote._FROZEN = None
+    yield
+    remote._FROZEN = None
+

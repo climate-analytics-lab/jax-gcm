@@ -1119,11 +1119,18 @@ def stage_pull() -> None:
     """
     from huggingface_hub import snapshot_download
 
-    from jcm.data.remote import DEFAULT_REPO
+    from jcm.data.remote import DEFAULT_REPO, mirror_revision
 
+    # Pinned like every other mirror read. The registry pulled here is merged
+    # into and re-uploaded, so when extending the tip set JCM_MIRROR_REVISION
+    # to the tip's sha first; pulling an older commit would drop the entries
+    # added since.
+    revision = mirror_revision()
+    print(f"pull: mirror revision {revision}", flush=True)
     stage = BUILD / "pulled"
     snapshot_download(repo_id=DEFAULT_REPO, repo_type="dataset",
-                      allow_patterns=list(_TIER_A_PULL), local_dir=str(stage))
+                      revision=revision, allow_patterns=list(_TIER_A_PULL),
+                      local_dir=str(stage))
     for name in ("era5_land_climo_2005-2014_0p25.nc", "ceds_anthro.zarr",
                  "bb4cmip7.zarr"):
         dst = BUILD / name
@@ -1152,11 +1159,15 @@ def stage_upload() -> None:
     for attempt in range(1, 6):
         print(f"upload attempt {attempt}", flush=True)
         try:
-            api.upload_folder(repo_id=DEFAULT_REPO, repo_type="dataset",
-                              folder_path=str(UPLOAD),
-                              commit_message="Mirror update via "
-                                             "build_mirror --stage upload")
-            print("upload: done", flush=True)
+            commit = api.upload_folder(
+                repo_id=DEFAULT_REPO, repo_type="dataset",
+                folder_path=str(UPLOAD),
+                commit_message="Mirror update via build_mirror --stage upload")
+            # Runs read the pinned commit, so the upload changes nothing they
+            # see until the pin is bumped; print the line that does it.
+            print(f"upload: done, mirror revision {commit.oid}\n"
+                  f"  to make runs read it, set in jcm/data/remote.py:\n"
+                  f"    MIRROR_REVISION = \"{commit.oid}\"", flush=True)
             return
         except Exception as e:                      # noqa: BLE001
             last = e

@@ -409,3 +409,54 @@ class GpuTenantTest(unittest.TestCase):
                         f"GPU-abc, 999999, python, 305 MiB")
         self.assertEqual([p["pid"] for p in g["procs"]], ["999999"])
         self.assertFalse(gpu_util.is_free(g))
+
+
+class MirrorRevisionTest(unittest.TestCase):
+    def test_run_persists_the_mirror_commit(self):
+        """result.json, report.md and run.log name the commit and source."""
+        import argparse
+        import json
+        import subprocess
+        import tempfile
+        from unittest import mock
+
+        import benchmark
+
+        remote = benchmark._remote()
+        seen = {}
+
+        def fake_model(cmd, cwd, env, stdout, stderr, check):
+            seen["env"] = env.get(remote.REVISION_ENV)
+            return subprocess.CompletedProcess(cmd, 0)
+
+        env = {k: v for k, v in os.environ.items()
+               if k != remote.REVISION_ENV}
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.dict(os.environ, env, clear=True):
+            args = argparse.Namespace(
+                preset=sorted(PRESETS)[0], months=1, days=1, gpu=0,
+                label="pin", chunk_days=1, save_interval=1, outdir=d,
+                python=sys.executable, pythonpath=None,
+                allow_unhealthy=False, f32=False, tol=0.1, keep_output=True,
+                scratch_root=d, wait_for_gpu=0.0, allow_busy_gpu=True,
+                extra=[])
+            with mock.patch.object(benchmark, "_preset_data_files",
+                                   return_value=[]), \
+                    mock.patch.object(benchmark, "_require_free_gpu"), \
+                    mock.patch.object(benchmark, "_gpu_sampler"), \
+                    mock.patch.object(benchmark, "_gpu_name",
+                                      return_value="fake"), \
+                    mock.patch.object(benchmark, "_provenance",
+                                      return_value={}), \
+                    mock.patch.object(benchmark.subprocess, "run",
+                                      side_effect=fake_model):
+                benchmark.run(args)
+            out = pathlib.Path(d) / "pin"
+            saved = json.loads((out / "result.json").read_text())
+            texts = [(out / f).read_text() for f in ("report.md", "run.log")]
+        pin = remote.MIRROR_REVISION
+        self.assertEqual(saved["data_mirror_revision"],
+                         {"commit": pin, "source": "pinned"})
+        self.assertEqual(seen["env"], pin)
+        for text in texts:
+            self.assertIn(pin, text)

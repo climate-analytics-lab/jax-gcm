@@ -96,6 +96,26 @@ class RegistryAndHashTest(unittest.TestCase):
                          "prescribed:/x/ozone.nc")
         self.assertIn("ozone=prescribed:/x/ozone.nc", provenance.summary())
 
+    def test_mirror_revision_is_recorded_and_hashed(self):
+        from unittest import mock
+
+        from jcm.data import remote
+        env = {k: v for k, v in os.environ.items()
+               if k != remote.REVISION_ENV}
+        with mock.patch.dict(os.environ, env, clear=True):
+            provenance.start_run()
+            attrs = provenance.attrs()
+            pinned_hash = provenance.collect()["run_hash"]
+        self.assertEqual(attrs["jcm_prov_data_mirror_revision"],
+                         remote.MIRROR_REVISION)
+        self.assertEqual(attrs["jcm_prov_data_mirror_revision_source"],
+                         "pinned")
+        remote._FROZEN = None                        # a new process
+        with mock.patch.dict(os.environ, {remote.REVISION_ENV: "1" * 40}):
+            other = provenance.collect()
+        self.assertEqual(other["facts"]["data_mirror_revision_source"], "env")
+        self.assertNotEqual(other["run_hash"], pinned_hash)
+
     def test_attrs_are_netcdf_safe_strings(self):
         attrs = provenance.attrs()
         for key, value in attrs.items():
