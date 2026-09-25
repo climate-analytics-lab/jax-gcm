@@ -2507,7 +2507,20 @@ def run_chunked(
     # The run reached its end: flush the pending (possibly partial) month.
     # Not after a bail — that month's remainder was never integrated.
     if accumulator is not None and not bailed and elapsed_seconds >= total_seconds:
-        _write_monthly(accumulator.finish(), output_prefix, last_params)
+        final = accumulator.finish()
+        if last_params is None:
+            # Resumed at the final checkpoint: no chunk ran. The checkpoint is
+            # saved before this flush, so its restored stream still holds the
+            # final month, which the previous attempt has usually written
+            # already — from the same trajectory, so leave that file and its
+            # sidecar alone rather than re-stamp them. It is written here
+            # only when the previous attempt died before writing it. No
+            # chunk has traced the model's parameters, so read them from the
+            # built physics, as the trace does (a resumed run rebuilds the
+            # same physics from the same config).
+            final = _unwritten_months(final, output_prefix)
+            last_params = _built_params(model)
+        _write_monthly(final, output_prefix, last_params)
 
     return reports
 
@@ -2580,16 +2593,13 @@ def _monthly_input(ds):
 
 def _write_monthly(months, output_prefix: str, params) -> list[str]:
     """Write each month of ``months`` to ``{prefix}_monthly_YYYY-MM.nc``."""
-    import numpy as np
-
     if months is None:
         return []
     paths = []
     for i in range(months.sizes["time"]):
         month = months.isel(time=[i])
         bounds = month["time"].attrs.get("bounds", "time_bounds")
-        label = np.datetime_as_string(month[bounds].values[0, 0], unit="M")
-        path = f"{output_prefix}_monthly_{label}.nc"
+        path = _monthly_path(month, output_prefix)
         # The means are float64 (the stream accumulates in float64). A source
         # variable's file encoding can ride along through the arithmetic and
         # would narrow them on write; a month re-emitted from a restored
@@ -2604,6 +2614,53 @@ def _write_monthly(months, output_prefix: str, params) -> list[str]:
               f"{float(month['time_coverage_fraction'].values[0]):.3f})")
         paths.append(path)
     return paths
+
+
+def _monthly_path(month, output_prefix: str) -> str:
+    """Return the file a one-month dataset is written to."""
+    import numpy as np
+
+    bounds = month["time"].attrs.get("bounds", "time_bounds")
+    label = np.datetime_as_string(month[bounds].values[0, 0], unit="M")
+    return f"{output_prefix}_monthly_{label}.nc"
+
+
+def _unwritten_months(months, output_prefix: str):
+    """Drop the months whose file already exists with the same ``time_bounds``.
+
+    A file that cannot be read (e.g. truncated by a kill mid-write) or covers
+    a different interval counts as unwritten, so it is rewritten.
+    """
+    import numpy as np
+    import xarray as xr
+
+    if months is None:
+        return None
+    keep = []
+    for i in range(months.sizes["time"]):
+        month = months.isel(time=[i])
+        bounds = month["time"].attrs.get("bounds", "time_bounds")
+        path = _monthly_path(month, output_prefix)
+        try:
+            with xr.open_dataset(path) as old:
+                written = np.array_equal(old[bounds].values,
+                                         month[bounds].values)
+        except (OSError, ValueError, KeyError):
+            written = False
+        if written:
+            print(f"  Kept {path} (already written for this interval)")
+        else:
+            keep.append(i)
+    return months.isel(time=keep) if keep else None
+
+
+def _built_params(model) -> dict:
+    """Return the parameter record :meth:`Model.run` captures at trace time."""
+    try:
+        return provenance.describe_params(getattr(model, "physics", None))
+    except Exception:  # noqa: BLE001 — provenance never fails a run
+        logger.warning("provenance: parameter capture failed", exc_info=True)
+        return {}
 
 
 def _clock64(model):

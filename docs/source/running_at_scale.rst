@@ -367,6 +367,9 @@ refused rather than dropping or double-counting intervals. With
 ``run.bail_on_unhealthy=false`` the stream follows the integration while the
 checkpoint (and so the persisted month) stays at the last healthy chunk; a
 resume re-integrates from there and rewrites any month file closed since.
+A restart from the final checkpoint integrates nothing: it writes the final
+month only if that file is missing (or unreadable, or covers a different
+interval), and otherwise leaves it and its sidecar untouched.
 
 ``run=longrun`` (and ``run=pyses_year``) default to exactly this: a
 **calendar year** — ``run.total_time: 12 months``, resolved against

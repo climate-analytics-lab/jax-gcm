@@ -4910,6 +4910,47 @@ class TestMonthlyMeansStream(unittest.TestCase):
         run(_monthly_cfg(prefix, 5, extra=extra))
         _assert_same_months(self, _monthly_files(prefix), self.ref)
 
+    def test_restart_at_the_final_checkpoint(self):
+        """A restart with nothing left to integrate still owns the final month.
+
+        The final checkpoint is saved before the final flush, so its restored
+        stream holds the final month. If that month's file was written, the
+        restart leaves it and its sidecar byte-for-byte alone; if the previous
+        attempt died before writing it, the restart writes it — with the
+        run's parameter provenance, although no chunk ran to trace them.
+        """
+        import hashlib
+
+        from jcm import provenance
+
+        prefix = str(self.tmp / "final")
+        ckpt = f"{prefix}.ckpt"
+        extra = [f"run.checkpoint_path={ckpt}"]
+        run(_monthly_cfg(prefix, 5, extra=extra))
+        march = Path(f"{prefix}_monthly_2000-03.nc")
+        sidecar = Path(f"{march}.provenance.json")
+
+        def digests():  # hashes: a failing bytes compare would diff 2 MB
+            return tuple(hashlib.sha256(p.read_bytes()).hexdigest()
+                         for p in (march, sidecar))
+
+        before = digests()
+        with xr.open_dataset(march) as ds:
+            params_before = provenance.read_params(ds.attrs)
+            hash_before = ds.attrs["jcm_prov_run_hash"]
+        self.assertTrue(params_before)
+
+        run(_monthly_cfg(prefix, 5, extra=extra))
+        self.assertEqual(digests(), before)
+
+        march.unlink()
+        sidecar.unlink()
+        run(_monthly_cfg(prefix, 5, extra=extra))
+        _assert_same_months(self, _monthly_files(prefix), self.ref)
+        with xr.open_dataset(march) as ds:
+            self.assertEqual(provenance.read_params(ds.attrs), params_before)
+            self.assertEqual(ds.attrs["jcm_prov_run_hash"], hash_before)
+
 
 class TestMonthlyMeansConfig(unittest.TestCase):
     """Refusals happen before integrating; calendar lengths resolve exactly."""
