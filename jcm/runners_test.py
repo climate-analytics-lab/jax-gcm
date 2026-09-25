@@ -5005,13 +5005,18 @@ class TestMonthlyMeansStream(unittest.TestCase):
         run(_monthly_cfg(prefix, 5, extra=extra))
         self.assertEqual(digests(), before)
 
-        march.unlink()
-        sidecar.unlink()
-        run(_monthly_cfg(prefix, 5, extra=extra))
-        _assert_same_months(self, _monthly_files(prefix), self.ref)
-        with xr.open_dataset(march) as ds:
-            self.assertEqual(provenance.read_params(ds.attrs), params_before)
-            self.assertEqual(ds.attrs["jcm_prov_run_hash"], hash_before)
+        # Month file written but the sidecar not (kill between the two), then
+        # neither: both are (re)written with the run's params provenance.
+        for missing in ((sidecar,), (march, sidecar)):
+            for path in missing:
+                path.unlink()
+            run(_monthly_cfg(prefix, 5, extra=extra))
+            self.assertTrue(sidecar.exists())
+            _assert_same_months(self, _monthly_files(prefix), self.ref)
+            with xr.open_dataset(march) as ds:
+                self.assertEqual(provenance.read_params(ds.attrs),
+                                 params_before)
+                self.assertEqual(ds.attrs["jcm_prov_run_hash"], hash_before)
 
 
 class TestMonthlyMeansConfig(unittest.TestCase):

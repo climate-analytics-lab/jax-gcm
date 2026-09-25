@@ -2638,8 +2638,9 @@ def _monthly_path(month, output_prefix: str) -> str:
 def _unwritten_months(months, output_prefix: str):
     """Drop the months whose file already exists with the same ``time_bounds``.
 
-    A file that cannot be read (e.g. truncated by a kill mid-write) or covers
-    a different interval counts as unwritten, so it is rewritten.
+    A file that cannot be read (e.g. truncated by a kill mid-write), covers
+    a different interval, or has no provenance sidecar counts as unwritten,
+    so it is rewritten.
     """
     import numpy as np
     import xarray as xr
@@ -2657,6 +2658,9 @@ def _unwritten_months(months, output_prefix: str):
                                          month[bounds].values)
         except (OSError, ValueError, KeyError):
             written = False
+        # The sidecar is written after the file: without it the month's
+        # write was interrupted, so both are rewritten.
+        written = written and Path(f"{path}.provenance.json").exists()
         if written:
             print(f"  Kept {path} (already written for this interval)")
         else:
