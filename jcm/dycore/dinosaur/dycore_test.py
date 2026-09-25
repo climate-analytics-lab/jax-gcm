@@ -6,10 +6,11 @@ import unittest
 class SemiLagrangianRequiredTest(unittest.TestCase):
     """The SL core is a hard requirement of the dinosaur backend.
 
-    Every tracer-carrying configuration must use it — Eulerian spectral
-    transport rang negative on sharp emission sources and NaN'd the aerosol
-    microphysics (#521) — so a dinosaur without it is not a usable install
-    even for the tracer-free Eulerian path.
+    It is the default transport and what the physics-decided mode always uses
+    for tracer-carrying physics — Eulerian spectral transport rings negative on
+    sharp emission sources and NaN'd the aerosol microphysics (#521), so an
+    explicit Eulerian request with tracers only warns — and a dinosaur without
+    it is not a usable install even for the tracer-free Eulerian path.
     """
 
     def test_missing_sl_core_fails_with_an_actionable_message(self):

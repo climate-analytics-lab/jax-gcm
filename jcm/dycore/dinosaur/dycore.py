@@ -96,8 +96,11 @@ DEFAULT_OFF_CENTERING = 0.2
 
 
 #: Transport schemes the dinosaur backend offers (see ``DinosaurDycore``'s
-#: ``advection`` argument). Semi-Lagrangian is the default and the only scheme
-#: allowed to carry extra tracers; Eulerian exists for tracer-free physics.
+#: ``advection`` argument). Semi-Lagrangian is the default and what the
+#: physics-decided mode always picks for tracer-carrying physics; Eulerian is
+#: meant for tracer-free physics (SPEEDY declares it). An explicit Eulerian with
+#: extra tracers runs but logs a warning (spectral transport rings negative on
+#: sharp sources, #521).
 SEMI_LAGRANGIAN = "semi_lagrangian"
 EULERIAN = "eulerian"
 ADVECTION_SCHEMES = (SEMI_LAGRANGIAN, EULERIAN)
@@ -106,10 +109,12 @@ ADVECTION_SCHEMES = (SEMI_LAGRANGIAN, EULERIAN)
 def _require_semi_lagrangian() -> None:
     """Fail with an actionable message when the SL core is missing.
 
-    Every tracer-carrying configuration must use semi-Lagrangian transport —
-    Eulerian spectral transport rang negative on sharp emission sources and
-    NaN'd the aerosol microphysics (#521) — so the SL core is a hard
-    requirement of this backend, not an optional extra.
+    Semi-Lagrangian is the default transport and the one the physics-decided
+    mode always uses for tracer-carrying physics — Eulerian spectral transport
+    rings negative on sharp emission sources and NaN'd the aerosol
+    microphysics (#521), so an explicit Eulerian request with tracers only runs
+    with a warning. The SL core is therefore a hard install requirement of this
+    backend, not an optional extra, even for runs that resolve to Eulerian.
     """
     if semi_lagrangian_available():
         return
@@ -117,9 +122,9 @@ def _require_semi_lagrangian() -> None:
     raise RuntimeError(
         "the installed dinosaur has no semi-Lagrangian transport "
         f"({', '.join(missing)} missing), and jcm's dinosaur backend "
-        "requires it — it is the only transport allowed to carry tracers, "
-        "because the Eulerian spectral path rings negative on sharp sources "
-        "and NaN's aerosol microphysics (#521). "
+        "requires it — it is the default transport and the one used for "
+        "tracer-carrying physics, because the Eulerian spectral path rings "
+        "negative on sharp sources and NaN's aerosol microphysics (#521). "
         "Install a current release:\n"
         "    pip install 'dinosaur>=1.5.0'\n"
         "and remove any older dinosaur checkout from PYTHONPATH."

@@ -331,11 +331,13 @@ composes ``+experiment@atmosphere=<name>`` and has to move in the same cycle.
 ``+advection=`` is gone; ``dycore.advection`` replaces it
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Semi-Lagrangian is the only transport allowed to carry tracers on the
-Dinosaur backend: Eulerian spectral transport rang negative on sharp emission
-sources and NaN'd the aerosol microphysics. The top-level
-``+advection=...`` switch is rejected, and the backend refuses to build on a
-dinosaur without the SL classes, naming what to install.
+Semi-Lagrangian is the Dinosaur backend's default transport, and the one the
+automatic (physics-decided) choice always uses for tracer-carrying physics:
+Eulerian spectral transport rang negative on sharp emission sources and NaN'd
+the aerosol microphysics. An explicit Eulerian request with tracers is not an
+error — it runs, but logs a warning. The top-level ``+advection=...`` config
+group no longer exists, and the backend refuses to build on a dinosaur
+without the SL classes, naming what to install.
 
 The scheme is now ``DinosaurDycore(advection=...)`` / ``dycore.advection``,
 default ``None`` / ``null`` = *the physics decides*. SPEEDY declares the

@@ -1129,7 +1129,8 @@ class TestModelSeedsTracers(unittest.TestCase):
         self.assertIn("specific_humidity", state.tracers)
         self.assertIn("qc", state.tracers)
         self.assertIn("qnc", state.tracers)
-        # Semi-Lagrangian transport (the only transport jcm has) splits the
+        # Semi-Lagrangian transport (what the physics-decided mode picks for
+        # this tracer-carrying composition) splits the
         # tracer representations, so equal shapes are NOT the invariant:
         # ``specific_humidity`` stays MODAL because it participates in the
         # implicit q<->Tv coupling, while every declared extra tracer is
