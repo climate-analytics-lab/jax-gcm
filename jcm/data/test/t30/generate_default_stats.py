@@ -85,7 +85,10 @@ def generate() -> None:
     import xarray as xr
 
     _, predictions = run_default_speedy_model(save_interval=None)
-    pred_ds = predictions.to_xarray()
+    # Reduce only the variables the stats file stores: the output Dataset also
+    # carries non-numeric (datetime-valued) variables that ``std`` cannot
+    # reduce.
+    pred_ds = predictions.to_xarray()[default_stat_vars]
 
     pred_ds_mean = (
         pred_ds.resample(time="1ME").mean().isel(time=-1).mean(dim={"lon", "lat"})
