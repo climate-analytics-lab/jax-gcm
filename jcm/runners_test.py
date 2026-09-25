@@ -4910,6 +4910,68 @@ class TestMonthlyMeansStream(unittest.TestCase):
         run(_monthly_cfg(prefix, 5, extra=extra))
         _assert_same_months(self, _monthly_files(prefix), self.ref)
 
+    def test_repeated_kills_after_the_state_write_still_resume(self):
+        """Kill after staging the monthly state, before the checkpoint — twice.
+
+        The state matching the committed checkpoint must survive every
+        retry, so the third attempt still resumes and finishes bit-identically.
+        """
+        from jcm import runners as r
+
+        prefix = str(self.tmp / "twice")
+        ckpt = f"{prefix}.ckpt"
+        extra = [f"run.checkpoint_path={ckpt}"]
+        real = r._save_monthly_stream
+        mar1 = np.datetime64("2000-03-01", "s")
+
+        def killed_at_mar1(accumulator, path, model):
+            real(accumulator, path, model)
+            if r._clock64(model) == mar1:
+                raise RuntimeError("killed")
+
+        with mock.patch.object(r, "_save_monthly_stream", killed_at_mar1):
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, "killed"):
+                    run(_monthly_cfg(prefix, 5, extra=extra))
+        run(_monthly_cfg(prefix, 5, extra=extra))
+        _assert_same_months(self, _monthly_files(prefix), self.ref)
+
+    def test_kill_before_promotion_then_after_the_next_state_write(self):
+        """Kill after the checkpoint but before ``.new`` is promoted, then
+        kill the retry right after it stages the next chunk's state.
+
+        The retry must restore ``.new`` and complete its promotion, or the
+        next staging overwrites the only state matching the checkpoint.
+        """
+        from jcm import runners as r
+
+        prefix = str(self.tmp / "promote")
+        ckpt = f"{prefix}.ckpt"
+        extra = [f"run.checkpoint_path={ckpt}"]
+        real_commit, real_save = r._commit_monthly_stream, r._save_monthly_stream
+        calls = []
+
+        def commit_killed_at_day10(path):
+            calls.append(path)
+            if len(calls) == 2:
+                raise RuntimeError("killed")
+            real_commit(path)
+
+        def save_killed_at_mar6(accumulator, path, model):
+            real_save(accumulator, path, model)
+            if r._clock64(model) == np.datetime64("2000-03-06", "s"):
+                raise RuntimeError("killed")
+
+        with mock.patch.object(r, "_commit_monthly_stream",
+                               commit_killed_at_day10):
+            with self.assertRaisesRegex(RuntimeError, "killed"):
+                run(_monthly_cfg(prefix, 5, extra=extra))
+        with mock.patch.object(r, "_save_monthly_stream", save_killed_at_mar6):
+            with self.assertRaisesRegex(RuntimeError, "killed"):
+                run(_monthly_cfg(prefix, 5, extra=extra))
+        run(_monthly_cfg(prefix, 5, extra=extra))
+        _assert_same_months(self, _monthly_files(prefix), self.ref)
+
     def test_restart_at_the_final_checkpoint(self):
         """A restart with nothing left to integrate still owns the final month.
 

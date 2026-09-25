@@ -2442,13 +2442,18 @@ def run_chunked(
             from jcm.checkpoint import save_checkpoint
 
             if accumulator is not None:
-                # BEFORE the checkpoint: whichever of the two a kill leaves
-                # current, one of ``.monthly`` / ``.monthly.prev`` matches it.
+                # Staged as ``.monthly.new`` BEFORE the checkpoint and promoted
+                # only after it: until the new checkpoint is committed the
+                # state matching the old one is never overwritten, so any
+                # number of kills leaves one of ``.monthly`` / ``.monthly.new``
+                # at the checkpoint's instant.
                 _save_monthly_stream(accumulator, ckpt_path, model)
             cp = Path(ckpt_path)
             if cp.exists():
                 cp.replace(f"{ckpt_path}.prev")
             save_checkpoint(model, ckpt_path)
+            if accumulator is not None:
+                _commit_monthly_stream(ckpt_path)
             print(f"  Saved checkpoint to {ckpt_path}")
             archive_every = float(cfg.run.get("archive_ckpt_every", 0.0) or 0.0)
             # Archive at the first chunk boundary past each interval multiple,
@@ -2675,29 +2680,43 @@ def _clock64(model):
 
 
 def _save_monthly_stream(accumulator, ckpt_path: str, model) -> None:
-    """Persist the pending month next to the checkpoint, rotating ``.prev``."""
+    """Stage the pending month as ``.monthly.new`` for the next checkpoint."""
+    accumulator.save(Path(f"{ckpt_path}.monthly.new"),
+                     clock=str(_clock64(model)))
+
+
+def _commit_monthly_stream(ckpt_path: str) -> None:
+    """After the checkpoint: ``.monthly`` -> ``.prev``, ``.new`` -> ``.monthly``."""
     state = Path(f"{ckpt_path}.monthly")
     if state.exists():
         state.replace(f"{ckpt_path}.monthly.prev")
-    accumulator.save(state, clock=str(_clock64(model)))
+    Path(f"{ckpt_path}.monthly.new").replace(state)
 
 
 def _restore_monthly_stream(ckpt_path: str, model):
     """Return the persisted pending month that describes the restored clock.
 
-    ``.monthly`` is written just before the checkpoint, so after a kill
-    between the two the checkpoint's partner is ``.monthly.prev``. Anything
-    else — no state, or neither file at the checkpoint's instant — is refused
-    rather than silently dropping or double-counting intervals.
+    ``.monthly`` matches the committed checkpoint; after a kill between the
+    checkpoint and the promotion of the staged state it is
+    ``.monthly.new``, whose promotion is then completed; ``.monthly.prev``
+    pairs with ``.ckpt.prev``. A staged file at any other instant is
+    ignored. Anything else — no state,
+    or no file at the checkpoint's instant — is refused rather than silently
+    dropping or double-counting intervals.
     """
     from jcm.temporal_aggregation import MonthlyMeanAccumulator
 
     clock = str(_clock64(model))
     seen = []
-    for candidate in (f"{ckpt_path}.monthly", f"{ckpt_path}.monthly.prev"):
+    for candidate in (f"{ckpt_path}.monthly", f"{ckpt_path}.monthly.new",
+                      f"{ckpt_path}.monthly.prev"):
         if Path(candidate).exists():
             accumulator, meta = MonthlyMeanAccumulator.load(candidate)
             if meta.get("clock") == clock:
+                if candidate.endswith(".new"):
+                    # Finish the interrupted promotion now: the next chunk
+                    # stages over ``.new`` before its checkpoint commits.
+                    _commit_monthly_stream(ckpt_path)
                 return accumulator
             seen.append(f"{candidate} @ {meta.get('clock')}")
     raise ValueError(
