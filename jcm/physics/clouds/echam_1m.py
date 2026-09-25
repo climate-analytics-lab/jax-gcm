@@ -706,7 +706,7 @@ def _qsat_water(pressure: jnp.ndarray, temperature: jnp.ndarray):
 def _ice_fall_speed_density_power(
     ice_density: jnp.ndarray,
     d_epsilon: float,
-    continuation_cutoff: float = 0.0,
+    continuation_cutoff: float = 1.0e-10,
 ) -> jnp.ndarray:
     """Return the 0.16 density power with an optional C1 low-end join.
 
@@ -745,7 +745,7 @@ def cloud_microphysics_column_sweep(
     dt: float,
     config: Optional[MicrophysicsParameters] = None,
     specific_humidity_m1: Optional[jnp.ndarray] = None,
-    ice_fall_speed_continuation_cutoff: float = 0.0,
+    ice_fall_speed_continuation_cutoff: float = 1.0e-10,
 ) -> Tuple[MicrophysicsTendencies, MicrophysicsState]:
     """ECHAM ``mo_cloud.f90`` column-sweep cloud + microphysics routine.
 
@@ -1360,17 +1360,16 @@ class Echam1MMicrophysics(PhysicsTerm):
         self,
         params: MicrophysicsParameters | None = None,
         *,
-        ice_fall_speed_continuation_cutoff: float = 0.0,
+        ice_fall_speed_continuation_cutoff: float = 1.0e-10,
     ):
-        """Hold scheme parameters and optional low-ice fall-speed cutoff.
+        """Hold scheme parameters and the low-ice fall-speed cutoff.
 
         Args:
             params: Scheme-native microphysics parameters.
             ice_fall_speed_continuation_cutoff: Density-weighted cloud-ice
                 cutoff [kg/m3] for the differentiable C1 continuation. The
-                default 0 preserves the ECHAM fall-speed law. Positive values
-                are an expert numerical option and require case-specific
-                validation.
+                default 1e-10 enables the bounded C1 continuation. Pass 0
+                explicitly to recover the original ECHAM fall-speed law.
 
         """
         self.params = nnx.Param(

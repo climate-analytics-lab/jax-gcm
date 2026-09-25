@@ -24,18 +24,17 @@
   ``mo_cloud.f90`` single-moment branch. The ice/snow fall-speed factor
   ``cvtfall = 2.5`` is ECHAM's value for jcm's default T63 grid
   (``mo_echam_cloud_params.f90``, ``nn == 63``), the same the 2M scheme uses.
-  Its cloud-ice fall speed normally retains ECHAM's density power
-  ``v = cvtfall (rho q_i)^0.16``. For differentiability experiments,
-  ``Echam1MMicrophysics(ice_fall_speed_continuation_cutoff=x0)`` supports an
-  opt-in C1 continuation below a positive density-weighted cutoff ``x0``
-  [kg m-3]: with ``t = rho q_i / x0``, the power becomes
-  ``x0^0.16 [1.84 t - 0.84 t^2]`` below the join and is exactly the original
-  power at and above it. This continuation is zero and has finite right slope
-  at the origin, is positive and monotone, and matches both value and slope at
-  ``x0``. The default cutoff is zero, so ordinary configurations use the
-  original ECHAM law. A positive cutoff is a static, non-trainable expert
-  option: no universal physically justified value is prescribed, and users
-  must verify forward sensitivity and conservation for their application.
+  Its cloud-ice fall speed uses a C1 continuation of ECHAM's density power
+  ``v = cvtfall (rho q_i)^0.16`` below the default density-weighted cutoff
+  ``x0 = 1e-10`` kg m-3. With ``t = rho q_i / x0``, the continued power is
+  ``x0^0.16 [1.84 t - 0.84 t^2]`` below the join and exactly the original
+  power at and above it. The continuation is zero with finite right slope at
+  the origin, is positive and monotone, and matches both value and slope at
+  ``x0``. Tests cover forward sensitivity below the cutoff, exact resolved-ice
+  behavior, and column-water closure, but ``1e-10`` is a numerical threshold,
+  not a universal physical cloud-ice boundary. Pass
+  ``ice_fall_speed_continuation_cutoff=0`` explicitly to recover the original
+  ECHAM law; positive cutoffs remain static and non-trainable.
 - **Lohmann 2-moment microphysics**
   (``jcm/physics/clouds/lohmann_2m/scheme.py`` — ``cloud_microphysics_2m`` and its
   ``Lohmann2MMicrophysics`` term) — the full two-moment process chain (droplet and
@@ -84,8 +83,8 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   default parameter instance (that would sever gradients / overrides).
 
 **Status & known limitations (stated openly).**
-- The 1M low-ice fall-speed continuation is a differentiability-driven
-  numerical option related to the gradient-regularisation work in #843. It
+- The default 1M low-ice fall-speed continuation is a differentiability-driven
+  numerical treatment related to the gradient-regularisation work in #843. It
   bounds the formal ``q_i -> 0+`` slope without deleting ice or changing the
   resolved-ice law, but it does not establish that a particular cutoff is a
   physical cloud-ice threshold or that every coupled multi-step gradient is

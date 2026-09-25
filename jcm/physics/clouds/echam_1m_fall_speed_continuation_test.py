@@ -31,6 +31,20 @@ def test_negative_continuation_cutoff_is_rejected():
         _ice_fall_speed_density_power(jnp.asarray(1.0e-12), 1.0e-30, -1.0)
 
 
+def test_default_is_enabled_and_explicit_zero_is_original_power_law():
+    """Omission enables the join; zero remains an independently checked escape."""
+    values = jnp.asarray([1.0e-14, 0.5 * _CUTOFF, _CUTOFF, 1.0e-5])
+    default = _ice_fall_speed_density_power(values, 1.0e-30)
+    enabled = _ice_fall_speed_density_power(values, 1.0e-30, _CUTOFF)
+    legacy = _ice_fall_speed_density_power(values, 1.0e-30, 0.0)
+    np.testing.assert_array_equal(default, enabled)
+    np.testing.assert_allclose(
+        legacy, jnp.maximum(values, 1.0e-30) ** _EXPONENT,
+        rtol=1e-6, atol=0.0,
+    )
+    assert jnp.any(default[:2] != legacy[:2])
+
+
 @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
 def test_continuation_is_monotone_safe_and_exact_above_join(dtype):
     """Both branches stay finite; resolved ice retains the original law."""
@@ -90,20 +104,30 @@ def _cold_column(cloud_ice):
             cloud_fraction, air_density, layer_thickness, droplet_number)
 
 
-def test_full_sweep_default_and_resolved_continuation_are_identical():
-    """The default is unchanged and the joined law is exact above x0."""
+def test_full_sweep_default_is_bounded_and_zero_retains_legacy_behavior():
+    """The omitted cutoff changes trace ice but equals explicit 1e-10."""
     config = MicrophysicsParameters.default()
-    column = _cold_column(jnp.full(6, 1.0e-5))
+    column = _cold_column(
+        jnp.asarray([2e-7, 2e-12, 0.0, 3e-11, 8e-6, 0.0]))
     default = cloud_microphysics_column_sweep(
         *column, 900.0, config)
-    explicit_zero = cloud_microphysics_column_sweep(
-        *column, 900.0, config, None, 0.0)
     bounded = cloud_microphysics_column_sweep(
         *column, 900.0, config, None, _CUTOFF)
-    for reference, zero, candidate in zip(
-            jax.tree.leaves(default), jax.tree.leaves(explicit_zero),
-            jax.tree.leaves(bounded), strict=True):
-        np.testing.assert_array_equal(zero, reference)
+    legacy_tendency, _ = cloud_microphysics_column_sweep(
+        *column, 900.0, config, None, 0.0)
+    for candidate, reference in zip(
+            jax.tree.leaves(default), jax.tree.leaves(bounded), strict=True):
+        np.testing.assert_array_equal(candidate, reference)
+    assert jnp.any(default[0].dqidt != legacy_tendency.dqidt)
+
+    resolved = _cold_column(jnp.full(6, 1.0e-5))
+    default_resolved = cloud_microphysics_column_sweep(
+        *resolved, 900.0, config)
+    legacy_resolved = cloud_microphysics_column_sweep(
+        *resolved, 900.0, config, None, 0.0)
+    for candidate, reference in zip(
+            jax.tree.leaves(default_resolved), jax.tree.leaves(legacy_resolved),
+            strict=True):
         np.testing.assert_array_equal(candidate, reference)
 
 
@@ -113,7 +137,7 @@ def test_trace_ice_full_sweep_closes_column_water_budget():
     cloud_ice = jnp.asarray([2e-7, 2e-12, 0.0, 3e-11, 8e-6, 0.0])
     column = _cold_column(cloud_ice)
     tendency, state = cloud_microphysics_column_sweep(
-        *column, 900.0, config, None, _CUTOFF)
+        *column, 900.0, config)
     legacy_tendency, _ = cloud_microphysics_column_sweep(
         *column, 900.0, config, None, 0.0)
     assert jnp.any(tendency.dqidt != legacy_tendency.dqidt)
@@ -128,10 +152,10 @@ def test_trace_ice_full_sweep_closes_column_water_budget():
     assert float(jnp.abs(residual)) < 1e-10
 
 
-def test_cutoff_is_static_under_jit():
-    """The expert cutoff remains static when the NNX term crosses JIT."""
-    term = Echam1MMicrophysics(
-        ice_fall_speed_continuation_cutoff=_CUTOFF)
+def test_default_term_cutoff_is_static_under_jit():
+    """The enabled default cutoff remains static across the NNX JIT boundary."""
+    term = Echam1MMicrophysics()
+    assert term.ice_fall_speed_continuation_cutoff == _CUTOFF
     power = nnx.jit(lambda module, x: _ice_fall_speed_density_power(
         x, 1.0e-30, module.ice_fall_speed_continuation_cutoff))
     assert jnp.isfinite(power(term, jnp.asarray(1.0e-12)))
