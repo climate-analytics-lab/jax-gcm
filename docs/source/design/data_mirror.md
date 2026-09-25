@@ -157,6 +157,41 @@ terrain = bundle_file("t63", "terrain.nc")     # cached HF download
 Fetch once on a node with internet; compute nodes then hit the cache.
 `registry.json` at the dataset root records sha256 + size for every file.
 
+### Pinned revision
+
+Every mirror read resolves at one dataset commit: `MIRROR_REVISION` in
+`jcm/data/remote.py`, or `JCM_MIRROR_REVISION` when set. The mirror is
+republished in place, so without a pin a machine with a warm cache and one with
+a cold cache would read different files from the same config. The Hugging Face
+cache stores each file under the commit it was downloaded at, so only a copy at
+the pinned commit is accepted, still with no network access once cached.
+
+`JCM_MIRROR_REVISION` must be a full 40-hex commit sha. A branch such as `main`
+is refused, because it moves: two jobs of one run could read different files
+under it. The error prints the one-line `HfApi().dataset_info(...).sha` command
+that resolves a branch to its current commit. Prefetch under the same value you
+run with.
+
+The commit is part of a run's identity, and is recorded as such:
+
+- **Provenance:** `data_mirror_revision` and its source (`pinned`/`env`) are
+  written as `jcm_prov_*` attributes and in the sidecar, and enter the run
+  hash.
+- **Checkpoints** record it. A chunked resume at a different commit is
+  refused unless `JCM_ALLOW_MIRROR_REVISION_CHANGE=1`.
+- **Release validation:** `tools/release_validation/launch.py` writes it to
+  `<rundir>/mirror_revision.json`, exports it into each job, and on `--resume`
+  reuses the recorded commit; a different explicit one needs
+  `--force-mirror-revision`.
+- **Benchmarks:** `tools/benchmark.py` writes it to `result.json`,
+  `report.md` and `run.log`.
+- **Fixture bands** record it. The release-matrix regression fails a band file
+  drawn at a different commit instead of comparing it.
+
+Bumping the pin is a reviewed one-line change that alters every mirror input:
+`build_mirror --stage upload` prints the new commit and the line to paste, and
+bands drawn at the old commit are regenerated in the same PR.
+
 ## Hosted initial states
 
 `bundles/<grid>_<levels>/init_states/` holds model states rather than
@@ -199,15 +234,15 @@ Two kinds live there today:
   on an already-published state.
 
   and the resulting `<member>_fixture_<digest>.msgpack` is uploaded
-  additively under the member's `init_states/` prefix. The digest is in the
-  name because `fetch` resolves cache-first and never revalidates a hit: a
-  stable name could not be republished without leaving every already-warm
-  cache pairing an old state with new bands. The band file records the exact
-  path it was generated against.
+  additively under the member's `init_states/` prefix, with the pin bumped to
+  the upload's commit in the same PR as the bands. The digest in the name
+  means a state is never republished under an older state's name. The band
+  file records the exact path it was generated against.
 
-`jcm.data.remote.fetch` resolves these cache-first like any other mirror file,
-so a warm cache needs no network and a cold cache on an internet-less node
-fails with the prefetch instructions rather than a bare error.
+`jcm.data.remote.fetch` resolves these at the pinned commit like any other
+mirror file, so a warm cache needs no network and a cold cache on an
+internet-less node fails with the prefetch instructions rather than a bare
+error.
 
 ## Rebuilding the mirror
 
@@ -284,7 +319,10 @@ stages no Tier A and merges its registry onto the published one.
 - `build_mirror.py --stage upload` — pushes to the HF dataset with
   retries (the xet backend has aborted 44k-file pushes with transient
   timeouts; uploads resume, committed files are skipped). Deliberately
-  excluded from `--stage all` — publishing is explicit. Needs
+  excluded from `--stage all` — publishing is explicit. It prints the
+  commit it created; runs keep reading the pinned one until `MIRROR_REVISION`
+  is bumped. `--stage pull` reads the pinned commit too, so when extending the
+  tip set `JCM_MIRROR_REVISION` to the tip's sha first. Needs
   `hf auth login` with write access; run `python -m` from the repo
   checkout's own directory.
 
