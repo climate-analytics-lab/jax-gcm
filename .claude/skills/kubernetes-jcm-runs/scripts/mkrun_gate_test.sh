@@ -102,5 +102,25 @@ check "bail_on_unhealthy=False notice is not a failure" 0 "$(run_gate 0)"
 printf 'Saved predictions to run_day365.nc\n  Checkpoint NOT updated (unhealthy chunk) - restart from\n' > "$L"
 check "unhealthy chunk is still caught" 1 "$(run_gate 0)"
 
+# --- Default mode: 12 calendar months of monthly means, no chunk files. ---
+# 2000-01-01 + 12 months is 366 days (leap year); progress comes from the
+# per-chunk health report, since no _dayN.nc is written.
+"$PY" "$HERE/mkrun.py" --name testrun 2>/dev/null \
+  | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["spec"]["template"]["spec"]["containers"][0]["command"][-1])' \
+  > "$TMP/full.sh"
+grep -q "run.total_time=12months" "$TMP/full.sh" \
+  && grep -q "forcing_pd.nc" "$TMP/full.sh" && grep -q "run.monthly_means=true" "$TMP/full.sh"
+check "default run is 12 months of PD-forced monthly means" 0 "$?"
+sed -n '/^tail -c +\$((ATTEMPT_START/,$p' "$TMP/full.sh" \
+  | sed "s#/runs/testrun#$RUNDIR#g" > "$TMP/gate.sh"
+
+# 11. Completion seen only through the health reports.
+printf '  Chunk 72 | Day 361 (0.99 yr) | OK\n  Chunk 73 | Day 366 (1.00 yr) | OK\n  Saved %s/testrun_monthly_2000-12.nc\n' "$RUNDIR" > "$L"
+check "monthly-only run complete at day 366" 0 "$(run_gate 0)"
+
+# 12. ...and a monthly-only run evicted at day 105 is not.
+printf '  Chunk 20 | Day 105 (0.29 yr) | OK\n' > "$L"
+check "monthly-only run evicted mid-year" 1 "$(run_gate 0)"
+
 if [ "$fails" -eq 0 ]; then echo "all gate tests passed"; else
   echo "$fails gate test(s) failed"; exit 1; fi

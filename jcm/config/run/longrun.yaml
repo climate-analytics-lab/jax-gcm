@@ -1,7 +1,14 @@
-# Long ECHAM run: 30-day chunks with health checks between each chunk,
-# 5-day saves inside each chunk, conservative timestep, sponge enabled
-# with T-damping toward an absolute target so the JW-dry init can spin
-# up against realistic ozone without a runaway at the model top.
+# Long ECHAM run: one calendar year (12 Gregorian months from
+# ``run.start_time``) written as calendar-month means (#901) —
+# ``{output_prefix}_monthly_YYYY-MM.nc``, built from daily interval means that
+# are streamed and not kept (``save_chunks: false``; set it true to also keep
+# ``{output_prefix}_day{N}.nc``). 5-day chunks with health checks between
+# them; the daily saves of one chunk are what sits in device memory, so the
+# footprint matches the old 30-day chunks of 5-day saves. Conservative
+# timestep, sponge enabled with T-damping toward an absolute target so the
+# JW-dry init can spin up against realistic ozone without a runaway at the
+# model top. ``run.total_time=<days>`` still works (a fixed length, e.g. for
+# benchmarks); ``run.total_time=null run.end_time=...`` for a named endpoint.
 # Replaces the old ``utils/run_echam_longrun.py`` script. See
 # ``feat: ECHAM lmidatm stability stack`` PR for the calibration.
 #
@@ -12,9 +19,11 @@ defaults:
   - _self_
 
 time_step: 12
-save_interval: 5
-total_time: 365
+save_interval: 1
+total_time: 12 months
 output_averages: true
+monthly_means: true
+save_chunks: false
 output: longrun.nc
 log_level: INFO
 
@@ -36,5 +45,5 @@ sponge:
   damp_temperature: true
   target_T_K: 250.0
 
-chunk_days: 30
+chunk_days: 5
 output_prefix: longrun

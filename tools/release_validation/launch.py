@@ -9,12 +9,11 @@ override sets) and becomes a PBS job running a full-output year on one
 A100. Per-grid inputs resolve automatically inside jcm (``terrain=auto``,
 ``forcing.ozone_file=auto``) and are PREFETCHED here, on the submitting
 (networked) node, so a member whose inputs are unavailable refuses at submit
-time instead of after hours of GPU; JAM members additionally need the aux
-inputs staged per
-``jcm/data/mirror/SOURCES.md`` (dms/oxidants + emissions on the model
-grid) via the ``JAM_INPUTS``/``JCM_EMISSIONS`` environment. The five
-Tegen dust bundles are mirror products and are fetched here, on the
-login node, so the compute nodes need no network.
+time instead of after hours of GPU; JAM members additionally get their aux
+inputs as concrete paths — the present-day climatological mirror bundles
+(``emissions_pd``, ``dms``, ``oxidants_pd`` and the five Tegen dust
+bundles), fetched here, on the login node, so the compute nodes need no
+network.
 Each run directory is namespaced by ``--tag`` (default: the launched
 repo's HEAD short SHA), because a release-validation member is a *fresh*
 year: a fixed rundir let a second matrix run silently resume the first
@@ -71,40 +70,38 @@ def dust_overrides(token: str) -> list[str]:
     return out
 
 
+#: JAM aux inputs besides dust: the present-day (2005-2014) climatology
+#: products ``auto`` resolves to (``emissions_pd``, ``dms``, ``oxidants_pd``).
+_JAM_PD_KEYS = ("emissions_file", "dms_file", "oxidants_file")
+
+
 def jam_aux(grid: str, levels: str) -> list[str]:
-    inputs = os.environ.get(
-        "JAM_INPUTS", "/glade/derecho/scratch/" + os.environ.get("USER", "")
-        + "/jam_inputs")
+    """Present-day climatological JAM inputs, fetched HERE as concrete paths.
+
+    The same ``*_pd`` mirror climatologies the presets resolve with ``auto``
+    (CEDS/BB4CMIP emissions and PD oxidants averaged over 2005-2014, the Lana
+    DMS climatology) plus the five dust bundles — so a release member runs
+    under the same climatological present-day AMIP forcing as ``forcing_pd``.
+    Fetched on the (networked) generating node and baked in as local cache
+    paths, so the compute job needs no network.
+    """
+    from jcm.data import mirror_manifest as mm
+    from jcm.data.remote import fetch
     token = grid.split("_")[1]        # echam_t63_l95_hybrid -> t63
-    # Emissions are horizontal-only (12-month 2-D fields), so every level
-    # set of a horizontal grid shares the L47-named prep_emissions output.
-    emis = os.environ.get(
-        "JCM_EMISSIONS",
-        f"{HOME}/jax-gcm/runs/emissions_echam_{token}_l47_hybrid_2014.nc")
-    # The oxidant source (cam/waccm) is the preparer's choice —
-    # prep_jam_aux_inputs recommends waccm at L95 — so match any source
-    # rather than hardcoding one.
-    ox = sorted(Path(inputs).glob(
-        f"oxidants_*_echam_{levels}_2014_{token}.nc"))
-    ov = [
-        f"forcing.emissions_file={emis}",
-        f"forcing.dms_file={inputs}/dms_lana2011_climo_{token}.nc",
-        *dust_overrides(token),
-    ]
-    if ox:
-        ov.append(f"forcing.oxidants_file={ox[-1]}")
-    else:
-        raise SystemExit(
-            f"no oxidants_*_echam_{levels}_2014_{token}.nc under {inputs} — "
-            "regenerate per jcm/data/mirror/SOURCES.md (scratch is "
-            "purge-eligible)")
-    for o in ov[:2]:
-        path = o.split("=", 1)[1]
-        if not Path(path).exists():
+    nlev = int(levels.lstrip("l"))    # l95 -> 95
+    manifest = mm.load_manifest()
+    out = []
+    for key in _JAM_PD_KEYS:
+        product = mm.product_for_key(manifest, key)
+        rel = mm.bundle_path(manifest, product, token, nlev)
+        try:
+            out.append(f"forcing.{key}={fetch(rel)}")
+        except Exception as exc:                              # noqa: BLE001
             raise SystemExit(
-                f"missing JAM input {path} — regenerate per "
-                "jcm/data/mirror/SOURCES.md (scratch is purge-eligible)")
-    return ov
+                f"could not fetch the present-day JAM input {rel} for "
+                f"{token}/{levels}: {exc}. Generate the jobs on a node with "
+                "network so the compute nodes need none.") from exc
+    return out + dust_overrides(token)
 
 
 def _preset_grid(preset_name: str) -> str | None:
@@ -231,6 +228,9 @@ def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
            f"run.total_time={d['days']}.0",
            f"run.save_interval={d['save_interval']}",
            f"run.chunk_days={d['chunk_days']}",
+           # The release matrix scores per-chunk files (health.py), so it
+           # opts out of run/longrun.yaml's calendar-month stream (#901).
+           "run.monthly_means=false", "run.save_chunks=true",
            "run.output_averages=true", "run.log_level=INFO",
            f"run.output={name}.nc",
            f"run.output_prefix={rundir}/{name}",

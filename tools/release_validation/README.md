@@ -96,8 +96,8 @@ Two things to know before reading a failure:
 ## Workflow
 
 ```bash
-# 1. Generate + submit the year runs (Derecho; JAM aux inputs staged per
-#    jcm/data/mirror/SOURCES.md, pointed at by JAM_INPUTS/JCM_EMISSIONS)
+# 1. Generate + submit the year runs (Derecho; JAM aux inputs are the
+#    present-day climatology mirror bundles, fetched at generation time)
 python tools/release_validation/launch.py --repo . --submit
 
 # 2. SCM member (CPU, ~15 min)

@@ -84,9 +84,21 @@ Benchmarks and production runs want opposite things, so they have separate
 generators. Do not use `mkjob.py` for a run whose output you intend to keep.
 
 ```bash
-python $S/mkrun.py --name pi-control --days 365 | kubectl apply -f -
-python $S/mkrun.py --name aci-2yr --days 730 --physics echam-jam-aci \
+python $S/mkrun.py --name pd-year | kubectl apply -f -      # 12 calendar months
+python $S/mkrun.py --name aci-2yr --months 24 --physics echam-jam-aci \
     --pin jcm=abc1234 | kubectl apply -f -
+```
+
+A run is 12 calendar months from `--start-time` (default 2000-01-01) by
+default, under the present-day climatological AMIP forcing (the mirror's
+`forcing_pd`/`ozone_pd` bundles, `auto` PD emissions/oxidants), written as
+calendar-month means (`<name>_monthly_YYYY-MM.nc`) from daily means in 5-day
+chunks. `--days N` gives a fixed length instead; `--save-chunks` also keeps
+the per-chunk daily files (hundreds of GB for a JAM year). The completion
+gate reads the per-chunk `Chunk K | Day N` health lines, so it works without
+chunk files.
+
+```bash
 ```
 
 | | `mkjob.py` (benchmark) | `mkrun.py` (production) |
