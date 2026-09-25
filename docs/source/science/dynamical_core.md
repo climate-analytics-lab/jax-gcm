@@ -6,17 +6,20 @@ native tendency conversion, hyperdiffusion, spectral/remap filters and vertical
 remapping. Two backends implement it. The shipped default is a spectral-transform
 core wrapping the external ``dinosaur`` package
 (``jcm/dycore/dinosaur/dycore.py::DinosaurDycore``): primitive equations on a
-Gaussian grid, integrated with the two-time-level **semi-Lagrangian
+Gaussian grid, integrated by default with the two-time-level **semi-Lagrangian
 semi-implicit Crank–Nicolson two-stage (RK2)** step
 (``semi_lagrangian_crank_nicolson_rk2``, off-centred 0.2), on hybrid σ–p or
-pure-σ vertical coordinates. The optional backend is the pySES CAM-SE spectral-element core on a
+pure-σ vertical coordinates. Tracer-free physics that asks for it (SPEEDY)
+runs the Eulerian spectral-transport core with the IMEX-RK SIL3 step instead
+(see {doc}`../design/dinosaur_transport_selection`). The optional backend is the pySES CAM-SE spectral-element core on a
 cubed sphere (``jcm/dycore/pyses/dycore.py::PysesCamSEDycore``,
 ``pip install jcm[pyses]``, registry name ``pyses_cam_se``), coupled to the
 column physics through a pg2 finite-volume physics grid (see
 {doc}`../design/pyses_cam_se_dycore`).
 
 On the **dinosaur** backend tracer transport is **semi-Lagrangian only** —
-departure-point transport with a Bermejo–Staniforth quasi-monotone limiter.
+departure-point transport with a Bermejo–Staniforth quasi-monotone limiter;
+the Eulerian core is available only to physics that carries no extra tracers.
 Every jcm extra tracer (aerosol mass/number, gases, cloud condensate) rides as
 a *nodal* tracer while ``specific_humidity`` stays modal for the implicit
 q↔Tᵥ coupling; the condensate species additionally enter the dynamics through
@@ -87,11 +90,15 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
 σ–p vertical coordinates.
 
 **Why we differ.**
-- `compute` — semi-Lagrangian is the *only* tracer transport; the Eulerian
-  spectral-transform tracer path was removed because it rang negative on sharp
-  emission sources and NaN'd the aerosol microphysics. This is a
-  positivity/compute-motivated choice with no fallback. See
+- `compute` — semi-Lagrangian is the *only* tracer transport; Eulerian
+  spectral-transform transport of tracers rang negative on sharp emission
+  sources and NaN'd the aerosol microphysics, so a tracer-carrying
+  configuration cannot select it. See
   {doc}`../design/dinosaur_sl_jam_configuration`.
+- `compute` — tracer-free SPEEDY runs the Eulerian spectral core it was
+  formulated on: semi-Lagrangian buys it nothing (``specific_humidity`` is
+  modal under both schemes) and costs ~4x the step on CPU. See
+  {doc}`../design/dinosaur_transport_selection`.
 - `compute` — the dinosaur backend integrates with a two-time-level
   semi-Lagrangian semi-implicit Crank–Nicolson RK2 step rather than ECHAM's
   three-time-level leapfrog + semi-implicit (both are semi-implicit; the
@@ -116,8 +123,9 @@ rely on.
 - ``jcm/dycore/base.py`` — ``DynamicalCore`` protocol (``initial_state``,
   ``step``, ``to_physics_state``, ``Predictions``).
 - ``jcm/dycore/dinosaur/dycore.py`` — ``DinosaurDycore``,
-  ``semi_lagrangian_available`` / ``_require_semi_lagrangian`` (the
-  Eulerian-removal guard), transport build (nodal tracers), filter build.
+  ``semi_lagrangian_available`` / ``_require_semi_lagrangian``,
+  ``resolve_advection`` (transport selection and the tracer guard), transport
+  build (nodal tracers), filter build.
 - ``jcm/dycore/pyses/dycore.py`` — ``PysesCamSEDycore``.
 - ``jcm/diffusion.py`` — ``DiffusionFilter`` and its ``auto`` / ``echam_lmidatm``
   / ``default`` constructors; ``_ECHAM_LMIDATM_ORDERS``.

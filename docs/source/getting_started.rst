@@ -317,6 +317,15 @@ configuration; it then owns the time step.
    )
    model = Model(dycore=dycore)          # adopts the dycore's 30-minute step
 
+*Transport scheme.* ``DinosaurDycore(advection=None)`` (the default; Hydra
+``dycore.advection=null``) lets the physics choose: SPEEDY runs the Eulerian
+spectral core it was formulated on, which on CPU is ~4x faster than
+semi-Lagrangian for SPEEDY; ECHAM, JAM, Held–Suarez and any composition that
+carries extra tracers run semi-Lagrangian. Pass ``advection="semi_lagrangian"``
+or ``"eulerian"`` to force one — Eulerian is refused for tracer-carrying
+physics, whose sharp tracer fields it rings negative. See
+:doc:`design/dinosaur_transport_selection`.
+
 **Initial conditions.** For the common starting states there are ready-made
 builders in :mod:`jcm.initial_states` — the same ones the CLI's ``init`` group
 exposes. Each returns a state; hand it to ``run`` as ``initial_state=``:

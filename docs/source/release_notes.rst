@@ -6,8 +6,8 @@ v3.0.0 (unreleased)
 
 v3.0 is a deliberate major release. It makes **online interactive aerosol**
 (JAM/MAM4) a working configuration end to end, adds the pySES CAM-SE
-dynamical-core backend alongside a semi-Lagrangian-only Dinosaur backend, and
-settles a set of unit, API and output contracts that were inconsistent in the
+dynamical-core backend alongside a Dinosaur backend whose tracer transport is
+semi-Lagrangian only, and settles a set of unit, API and output contracts that were inconsistent in the
 2.x line. Several of those corrections change the climate a configuration
 produces.
 
@@ -453,11 +453,15 @@ Dynamical cores and grids
   frontogenesis physics-fields provider. Selected from Hydra with
   ``dycore=pyses_ne30l{47,95}`` or the ``+configuration=ma-ne30-l{47,95}``
   presets. See :doc:`design/pyses_cam_se_dycore`.
-- **Semi-Lagrangian transport is the Dinosaur backend's only transport.**
+- **Semi-Lagrangian transport is the Dinosaur backend's only tracer transport.**
   Every extra tracer rides nodally with a Bermejo-Staniforth quasi-monotone
   limiter, so aerosol non-negativity is structural in transport rather than
-  imposed afterwards. There is no Eulerian option and no ``+advection``
-  switch. ``diffusion.tracer_positivity`` survives, defaulting to ``auto``
+  imposed afterwards. The top-level ``+advection`` switch is gone;
+  ``dycore.advection`` (default ``null`` = the physics decides) selects the
+  scheme, and Eulerian is refused for any tracer-carrying physics. Tracer-free
+  SPEEDY declares the Eulerian core it was formulated on, so SPEEDY runs keep
+  2.x transport and CPU speed (semi-Lagrangian cost ~4x the SPEEDY step on
+  CPU) — see :doc:`design/dinosaur_transport_selection`. ``diffusion.tracer_positivity`` survives, defaulting to ``auto``
   (on for JAM), but only as a mass-conserving hole-filler at the
   dynamics-to-physics boundary — see
   :doc:`design/dinosaur_sl_jam_configuration`.

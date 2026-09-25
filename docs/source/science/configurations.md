@@ -155,8 +155,14 @@ guard is a ``ValueError`` / ``RuntimeError`` in the file named:
   initializes from its resting USSA-1976 state (``init=isothermal``) or a saved
   state, and nudging is dinosaur-only.
 - **A SL-less dinosaur install** — ``jcm/dycore/dinosaur/dycore.py``
-  (``_require_semi_lagrangian``): the Eulerian tracer path was removed, so
-  the backend requires the semi-Lagrangian dinosaur.
+  (``_require_semi_lagrangian``): semi-Lagrangian is the only transport
+  allowed to carry tracers, so the backend requires the semi-Lagrangian
+  dinosaur.
+- **Eulerian transport with tracer-carrying physics** —
+  ``jcm/dycore/dinosaur/dycore.py`` (``DinosaurDycore``): an explicit
+  ``advection="eulerian"`` / ``dycore.advection=eulerian`` is refused when the
+  physics declares any extra tracer (#521); ``null`` falls back to
+  semi-Lagrangian instead.
 - **Physics that needs a dycore field the backend cannot provide** —
   ``jcm/model.py``: e.g. Tiedtke's ``cu_lmfmid`` mid-level trigger needs ``omega``,
   which pySES does not publish (hence ``cu_lmfmid: false`` in the ne30
