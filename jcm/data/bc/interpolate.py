@@ -124,6 +124,26 @@ def upsample_forcings_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Datase
         ds_interp[v] = ds_interp[v].clip(min=0.)
     for v in ['icec', 'soilw_am', 'alb']:
         ds_interp[v] = ds_interp[v].clip(max=1.)
+    if "lsm" in ds.data_vars:
+        # A file carrying its land share follows the bundle convention for
+        # land-conditional fields (jcm.data.regridding.CONDITIONAL_FIELDS):
+        # regrid those with their land / non-glacier-land weights so ocean
+        # and glacier neighbours do not dilute them (#672). Files without
+        # ``lsm`` (the SPEEDY T30 climatology) keep the plain regrid.
+        from jcm.data.regridding import CONDITIONAL_FIELDS, regrid_land_surface
+
+        def regrid(da):
+            name = da.name or "_field"
+            return _upsample_ds(da.rename(name).to_dataset(), grid)[name]
+
+        conditional = {v: ds[v] for v in CONDITIONAL_FIELDS
+                       if v in ds.data_vars}
+        glac = ds["glac"] if "glac" in ds.data_vars else None
+        regridded = regrid_land_surface(conditional, ds["lsm"].clip(0.0, 1.0),
+                                        regrid, glac=glac)
+        for v, da in regridded.items():
+            ds_interp[v] = da.transpose(*ds_interp[v].dims)
+        ds_interp["lsm"] = ds_interp["lsm"].clip(0.0, 1.0)
     return ds_interp
 
 def upsample_terrain_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Dataset:

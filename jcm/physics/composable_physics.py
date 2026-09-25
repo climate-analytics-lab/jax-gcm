@@ -386,7 +386,7 @@ class ComposablePhysics(nnx.Module, Physics):
             "q_tendency": tendencies.specific_humidity,
         }
 
-        return tendencies, diagnostics
+        return tendencies, self._drop_step_local(diagnostics)
 
     def _compute_tendencies_columns(
         self, state, forcing, terrain, prev_physics_data=None,
@@ -518,7 +518,7 @@ class ComposablePhysics(nnx.Module, Physics):
             self._column_surface_sharding,
         )
         tendencies = _reshape_tendencies_to_3d(acc, nlev, nlat, nlon)
-        return tendencies, diagnostics
+        return tendencies, self._drop_step_local(diagnostics)
 
     def get_empty_data(self, coords) -> dict[str, jnp.ndarray]:
         """Return a zero-filled template of the per-step diagnostics dict.
@@ -667,6 +667,23 @@ class ComposablePhysics(nnx.Module, Physics):
         # intermediate, not a field anyone wants in the netCDF.
         "_tendency_run",
     })
+
+    # Per-step inputs one term hands to a later term of the SAME step. They
+    # are rebuilt every step before anything reads them, so they are removed
+    # before the diagnostics become the cross-step carry: never checkpointed,
+    # never output, and no stale or zero-seeded value can reach a reader
+    # after a restart. ``_surface_optics`` is the boundary-condition term's
+    # surface albedo / emissivity for the radiation
+    # (``jcm.physics.radiation.SURFACE_OPTICS_KEY``).
+    _STEP_LOCAL_KEYS: ClassVar[frozenset[str]] = frozenset({
+        "_surface_optics",
+    })
+
+    @classmethod
+    def _drop_step_local(cls, diagnostics: dict) -> dict:
+        """``diagnostics`` without the :attr:`_STEP_LOCAL_KEYS`."""
+        return {k: v for k, v in diagnostics.items()
+                if k not in cls._STEP_LOCAL_KEYS}
 
     # Dict-valued diagnostics that must NOT flatten into user output.
     # ``_sampler_state`` duplicates the whole state for the observer path

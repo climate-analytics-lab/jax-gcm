@@ -84,7 +84,7 @@ import jax.numpy as jnp
 from jax import jit
 
 from jcm.terrain import TerrainData
-from jcm.forcing import ForcingData
+from jcm.forcing import ForcingData, land_wetness
 from jcm.physics.speedy.params import Parameters, SurfaceFluxParameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.physics.speedy.physics_data import PhysicsData
@@ -230,7 +230,13 @@ def _land_fluxes(
     # term in the energy balance below on the same hard condition).
     # evap_smoothing > 0 [g/kg] rounds it with a softplus; 0 keeps the hard
     # maximum.
-    evap_excess = forcing.soilw_am * qsat_skin - air.q_land
+    # Whole-land availability: ``soilw_am`` describes the non-glacier land
+    # and the glacier share evaporates at the potential rate
+    # (``jcm.forcing.land_wetness``, the same combination the ECHAM path
+    # uses). No glacier map (the T30 climatology) leaves ``soilw_am``.
+    wetness = land_wetness(forcing.soilw_am,
+                           getattr(forcing, "glacier_fraction", None))
+    evap_excess = wetness * qsat_skin - air.q_land
     evap = sfp.chl * rho_wind * smooth_pos(evap_excess, sfp.evap_smoothing)
 
     tsk3 = tskin ** 3.0
@@ -257,7 +263,7 @@ def _land_fluxes(
         # the matching fraction of the latent sensitivity rather than all of
         # it. At width 0 it reduces to the hard evap > 0 mask.
         evap_gate = smooth_gate(evap_excess, 0.0, sfp.evap_smoothing)
-        dqsat = evap_gate * forcing.soilw_am * (
+        dqsat = evap_gate * wetness * (
             get_qsat(tskin + 1.0, air.psa, 1.0) - qsat_skin)
 
         dtskin = residual / (

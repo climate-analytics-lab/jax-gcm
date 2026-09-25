@@ -322,6 +322,34 @@ stages no Tier A and merges its registry onto the published one.
   predates the channel must re-run `--stage era5` before `--stage
   bundles`. Forcing files without the channel still load — the dust term
   warns and falls back.
+- **Land-surface convention.** Land-surface channels are conditional on
+  part of the cell, and every regrid weights each by that part
+  (`jcm.data.regridding.regrid_land_surface`: `interp(field·mask) /
+  interp(mask)`, the plain value where the mask regrids to zero):
+
+  | field | meaning | mask (weight) | writers | consumers |
+  |---|---|---|---|---|
+  | `lsm` | land share of the cell | — | builders (ERA5 `lsm`), converter (`SLF`), packaged T63 (terrain) | regrid weight; terrain `fmask` |
+  | `glac` | glacier share of the land | land | builders (permanent-snow mask), converter (`GLAC`) | ECHAM albedo tile average; snow total and wetness (ECHAM and SPEEDY) |
+  | `stl` | land-tile temperature (glacier included) | land | builders, converter | surface tiles, albedo ramps |
+  | `soilw_am`, `soilw_rel` | soil wetness of the non-glacier land | non-glacier land | builders, converter | whole-land wetness `jcm.forcing.land_wetness`: ECHAM `g + (1 − g)·(s + (1 − s)·w)`, SPEEDY `g + (1 − g)·w` (its soil availability has no snow term); dust |
+  | `forest` | forest share of the non-glacier land | non-glacier land | builders (ERA5 `cvh`), converter (`FOREST`) | land albedo, effective `(1 − glac)·forest` |
+  | `snowc` | snow-covered share of the non-glacier land | non-glacier land | builders, converter | ECHAM albedo; total `glac + (1 − glac)·snowc` (`land_snow_cover`) for wetness, sublimation, dust, and as SPEEDY's whole-land snow cover |
+  | `alb` | snow-free background albedo of the non-glacier land | non-glacier land | builders (min monthly ERA5 `fal`), converter (`ALB`) | ECHAM land albedo, non-glacier tile only; SPEEDY `alb0 + S·(albsn − alb0)` with the whole-land snow cover S, which is the same tile average (glacier at `albsn`) |
+
+  The same helper runs in the builders (on ERA5's land points,
+  `lsm > 0.5`), in the runtime spectral upsampler and in the pySES column
+  sampler for any file that carries `lsm`; a file without `lsm` (the SPEEDY
+  T30 climatology, bundles published before this) keeps the plain bilinear
+  regrid. `forest` is the ERA5 invariant high-vegetation cover `cvh`,
+  `glac` the same permanent-snow mask
+  (ERA5 snow depth never below 0.1 m w.e. in the climatology) that zeroes
+  `snowc`, so a cell's snow is either seasonal (`snowc`) or glacier
+  (`glac`). These channels come from fields the Tier A `era5` product already
+  carries, so re-running `--stage bundles` (and the transient stages)
+  adds them without a new ERA5 download. Bundles built before the
+  channels existed load with both `None`: no forest masking, and ice
+  sheets take their ERA5 background albedo instead of the glacier ramp.
 - The packaged T63 `orosig` was ≈0 everywhere; the GMTED-derived bundles
   supply a real mean-slope field, so SSO gravity-wave drag will behave
   differently (more drag) than with the packaged terrain. The gradient

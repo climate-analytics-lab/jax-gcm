@@ -650,3 +650,54 @@ class TestAquaplanetSurfaceFluxes(unittest.TestCase):
         self.assertFalse(df_dstate.isnan().any_true(), "Gradient w.r.t. state contains NaNs")
         self.assertFalse(df_dparams.isnan().any_true(), "Gradient w.r.t. parameters contains NaNs")
         self.assertFalse(df_dforcing.isnan().any_true(), "Gradient w.r.t. forcing contains NaNs")
+
+
+class TestGlacierShareOfTheLand(unittest.TestCase):
+    """SPEEDY reads the land fields under the bundle convention (#672).
+
+    ``soilw_am`` / ``snowc_am`` / ``alb0`` describe the non-glacier land;
+    SPEEDY's land tile is the whole land, so the glacier share enters at the
+    point SPEEDY reads them: fully wet (``jcm.forcing.land_wetness``) and fully
+    snow covered (``jcm.forcing.land_snow_cover``).
+    """
+
+    @staticmethod
+    def _fluxes(soilw_am, glacier=None, snow=0.0):
+        from jcm.physics.forcing.speedy_forcing import set_forcing
+
+        args = build_inputs(soilw_am=soilw_am)
+        forcing = args["forcing"].copy(
+            alb0=0.2 * jnp.ones(XY), snowc_am=snow * jnp.ones(XY),
+            glacier_fraction=(None if glacier is None
+                              else glacier * jnp.ones(XY)))
+        args["forcing"] = forcing
+        _, physics_data = set_forcing(
+            args["state"], args["physics_data"], args["parameters"],
+            forcing, args["terrain"])
+        args["physics_data"] = physics_data
+        _, physics_data = get_surface_fluxes(**args)
+        return physics_data
+
+    def test_half_glacier_blends_albedo_and_wetness(self):
+        half = self._fluxes(0.2, glacier=0.5)
+        # Albedo: glacier at albsn (snow), the bare half at alb0.
+        albsn = float(Parameters.default().mod_radcon.albsn)
+        self.assertAlmostEqual(float(half.mod_radcon.alb_l.mean()),
+                               0.5 * albsn + 0.5 * 0.2, places=6)
+        # Wetness: 0.5 + 0.5·0.2 = 0.6 — the same surface as a glacier-free
+        # soil at 0.6 (the snow conductivity aside, which the glacier also
+        # carries), so the evaporation matches a soil of that wetness.
+        wet = self._fluxes(0.6, glacier=0.0, snow=0.5)
+        self.assertGreater(float(half.surface_flux.evap.max()), 0.0)
+        jnp_diff = jnp.max(jnp.abs(half.surface_flux.evap
+                                   - wet.surface_flux.evap))
+        self.assertLess(float(jnp_diff),
+                        1e-5 * float(jnp.max(jnp.abs(wet.surface_flux.evap))))
+
+    def test_glacier_free_cell_is_unchanged(self):
+        none = self._fluxes(0.3)
+        zero = self._fluxes(0.3, glacier=0.0)
+        for a, b in ((none.mod_radcon.alb_l, zero.mod_radcon.alb_l),
+                     (none.surface_flux.evap, zero.surface_flux.evap),
+                     (none.surface_flux.shf, zero.surface_flux.shf)):
+            self.assertEqual(float(jnp.max(jnp.abs(a - b))), 0.0)

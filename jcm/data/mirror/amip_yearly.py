@@ -30,7 +30,7 @@ import xarray as xr
 from jcm.data.mirror import sites
 from jcm.data.mirror.bundles import (AMIP_ROOT, _ANTHRO_SECTORS,
                                      _EMIS_SPECIES, _to_lonlat,
-                                     translate_land)
+                                     land_surface_fields, translate_land)
 from jcm.data.regridding import (conservative_to_gaussian, fill_nearest,
                                  interp_to)
 
@@ -112,7 +112,8 @@ def build_forcing_year(era5_path: str, year: int, lats, lons,
     # re-stamped on this year's time axis (months align 1:1). The input
     # is the climatology, so its own window doubles as the fixed
     # ice-sheet-mask window.
-    land = translate_land(era5, permanent_snow=era5.sd.min("time") >= 0.1)
+    permanent_snow = era5.sd.min("time") >= 0.1
+    land = translate_land(era5, permanent_snow=permanent_snow)
 
     def _on_year_axis(da):
         return da.assign_coords(time=times)
@@ -120,17 +121,19 @@ def build_forcing_year(era5_path: str, year: int, lats, lons,
     fields = {
         "sst": interp_to(sst_da, lats, lons),
         "icec": interp_to(icec_da, lats, lons).clip(0.0, 1.0),
-        "stl": _on_year_axis(interp_to(land["stl"], lats, lons)),
-        "soilw_am": _on_year_axis(
-            interp_to(land["soilw_am"], lats, lons).clip(0.0, 1.0)),
-        # The dust saturation cut-off reads this one, not soilw_am: an AMIP
-        # year without it would silently run with the cut-off inert (#787).
-        "soilw_rel": _on_year_axis(
-            interp_to(land["soilw_rel"], lats, lons).clip(0.0, 1.0)),
-        "snowc": _on_year_axis(
-            interp_to(land["snowc"], lats, lons).clip(0.0, 1.0)),
-        "alb": interp_to(era5.fal.min("time"), lats, lons),
+        # soilw_rel: the dust saturation cut-off reads it, not soilw_am; an
+        # AMIP year without it would silently run the cut-off inert (#787).
+        **land_surface_fields(era5, permanent_snow, {
+            "stl": land["stl"],
+            "soilw_am": land["soilw_am"],
+            "soilw_rel": land["soilw_rel"],
+            "snowc": land["snowc"],
+            "alb": era5.fal.min("time"),
+            "forest": era5.cvh.clip(0.0, 1.0),
+        }, lats, lons),
     }
+    for name in ("stl", "soilw_am", "soilw_rel", "snowc"):
+        fields[name] = _on_year_axis(fields[name])
     ds = xr.Dataset(coords={"lat": lats, "lon": lons, "time": times})
     for name, da in fields.items():
         ds[name] = _to_lonlat(da)

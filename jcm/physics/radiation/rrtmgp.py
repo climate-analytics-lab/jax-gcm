@@ -1012,6 +1012,7 @@ from jcm.physics.radiation import (  # noqa: E402
     current_cos_zenith,
     radiation_should_compute,
     rescale_cached_radiation,
+    surface_optics_for_solve,
 )
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
@@ -1342,10 +1343,8 @@ class RRTMGPRadiation(PhysicsTerm):
         surface_temperature_col = (
             diagnostics["surface"].surface_temperature.reshape(ncols)
         )
-        radiation_in = diagnostics["radiation"]
-        surface_albedo_vis_col = radiation_in.surface_albedo_vis.reshape(ncols)
-        surface_albedo_nir_col = radiation_in.surface_albedo_nir.reshape(ncols)
-        surface_emissivity_col = radiation_in.surface_emissivity.reshape(ncols)
+        (surface_albedo_vis_col, surface_albedo_nir_col,
+         surface_emissivity_col) = surface_optics_for_solve(diagnostics, ncols)
 
         aerosol_in = diagnostics["aerosol"]
         # Per-SW-band fields are ``(n_bnd_sw, nlev, ncols)`` from MACv2-SP;

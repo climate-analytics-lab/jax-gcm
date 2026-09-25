@@ -180,6 +180,13 @@ class VDiffState(NamedTuple):
     # Ocean surface velocities (for momentum exchange)
     ocean_u: jnp.ndarray          # Ocean u-velocity [m/s] (ncol,)
     ocean_v: jnp.ndarray          # Ocean v-velocity [m/s] (ncol,)
+
+    # Fraction of each tile's POTENTIAL evaporation that sublimates [-]
+    # (ncol, nsfc_type): 1 over sea ice (ECHAM ``ahfli = als·evap``), the
+    # snow-cover fraction over land (JSBACH ``alv·E + (als−alv)·snow_fract·
+    # E_pot``), 0 over open water. Sets only the latent heat attached to the
+    # surface moisture flux; the moisture flux itself does not depend on it.
+    surface_sublimation_fraction: jnp.ndarray = None
     
 
 
@@ -217,7 +224,7 @@ class VDiffSurfaceFluxes(NamedTuple):
 
     evaporation: jnp.ndarray     # E [kg/m²/s] (ncol,), positive up (into column)
     sensible_heat: jnp.ndarray   # SH [W/m²] (ncol,), positive up (into column)
-    latent_heat: jnp.ndarray     # LH = alhc·E [W/m²] (ncol,)
+    latent_heat: jnp.ndarray     # LH = Σ_t f_t·L_t·E_t [W/m²] (ncol,)
     # Downward momentum flux INTO the surface (positive with the wind);
     # the delivered column momentum change is its negative (verified
     # against the column-integrated tendency; see

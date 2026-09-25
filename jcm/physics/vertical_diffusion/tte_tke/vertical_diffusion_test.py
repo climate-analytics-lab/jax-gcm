@@ -1503,3 +1503,167 @@ class TestColumnSolveGradients:
             zero_tke.tke, zero_tke.temperature, zero_tke.qv)
         for name, g in zip(("tke", "temperature", "qv"), grads):
             assert jnp.all(jnp.isfinite(g)), f"{name} gradient is not finite"
+
+
+class TestSurfaceTilePhase:
+    """Saturation phase and latent heat per surface tile (#672).
+
+    ECHAM reads every tile's surface saturation from the ``tlucua`` table —
+    over ice below the melting point, over water above — and reports the
+    moisture flux's latent heat as ``als·E`` over sea ice, ``alv·E`` over open
+    water and JSBACH's ``alv·E + (als − alv)·snow_fract·E_pot`` over land.
+    """
+
+    @staticmethod
+    def _tile_state(tile, t_sfc, *, wetness=1.0, sublimation=None, qv=None):
+        state = _make_marine_bl_state(ncol=1, sst_offset=5.0, wind=10.0)
+        fraction = jnp.zeros((1, 3)).at[:, tile].set(1.0)
+        wet = jnp.ones((1, 3)).at[:, tile].set(wetness)
+        replace = dict(
+            surface_fraction=fraction,
+            surface_temperature=jnp.full((1, 3), t_sfc),
+            surface_wetness=wet,
+            surface_sublimation_fraction=sublimation,
+        )
+        if qv is not None:
+            replace["qv"] = jnp.full_like(state.qv, qv)
+        return state._replace(**replace)
+
+    def test_sea_ice_moisture_flux_carries_the_sublimation_heat(self):
+        from .vertical_diffusion import vertical_diffusion_column
+
+        params = VDiffParameters.default()
+        # Sea-ice tile (index 1) with the default sublimation fraction.
+        _, diag = vertical_diffusion_column(
+            self._tile_state(1, 265.0), params, 900.0)
+        flux = diag.surface_fluxes
+        e = float(flux.evaporation[0])
+        assert abs(e) > 1e-8, "vacuous test: no moisture flux"
+        np.testing.assert_allclose(float(flux.latent_heat[0]) / e,
+                                   PHYS_CONST.alhs, rtol=1e-5)
+        # Open water: condensation heat.
+        _, diag = vertical_diffusion_column(
+            self._tile_state(0, 300.0), params, 900.0)
+        flux = diag.surface_fluxes
+        np.testing.assert_allclose(
+            float(flux.latent_heat[0]) / float(flux.evaporation[0]),
+            PHYS_CONST.alhc, rtol=1e-5)
+
+    def test_snow_covered_land_sublimates_its_share_of_the_potential_flux(self):
+        from .vertical_diffusion import vertical_diffusion_column
+
+        wetness, snow = 0.5, 0.4
+        sub = jnp.zeros((1, 3)).at[:, 2].set(snow)
+        _, diag = vertical_diffusion_column(
+            self._tile_state(2, 300.0, wetness=wetness, sublimation=sub),
+            VDiffParameters.default(), 900.0)
+        flux = diag.surface_fluxes
+        # E = w·E_pot, so LH/E = alv + (als - alv)·snow/w.
+        expected = (PHYS_CONST.alhc
+                    + (PHYS_CONST.alhs - PHYS_CONST.alhc) * snow / wetness)
+        np.testing.assert_allclose(
+            float(flux.latent_heat[0]) / float(flux.evaporation[0]),
+            expected, rtol=1e-5)
+
+    def test_frozen_tile_saturates_over_ice(self):
+        """A column at ice saturation over a 260 K tile exchanges no moisture.
+
+        With the air everywhere at the tile's ice saturation humidity the
+        surface is in equilibrium and the delivered flux vanishes. The
+        Sundqvist mixed-phase blend puts the tile's saturation ~8 % above
+        the ice value at 260 K, which would drive a spurious evaporation.
+        """
+        from jcm.physics.thermodynamics import saturation_specific_humidity
+
+        from .vertical_diffusion import vertical_diffusion_column
+
+        base = self._tile_state(1, 260.0)
+        q_ice = float(saturation_specific_humidity(
+            260.0, base.pressure_half[0, -1], phase="ice"))
+        state = self._tile_state(1, 260.0, qv=q_ice)
+        _, diag = vertical_diffusion_column(
+            state, VDiffParameters.default(), 900.0)
+        e = float(diag.surface_fluxes.evaporation[0])
+        # Scale: the flux the same exchange would carry for an 8 % excess.
+        _, diag_dry = vertical_diffusion_column(
+            self._tile_state(1, 260.0, qv=0.92 * q_ice),
+            VDiffParameters.default(), 900.0)
+        scale = float(diag_dry.surface_fluxes.evaporation[0])
+        assert scale > 0.0
+        assert abs(e) < 1e-3 * scale
+
+    def test_term_wets_snowy_land_and_charges_its_sublimation(self):
+        """The term's land tile follows JSBACH with the prescribed snow cover.
+
+        Snow evaporates at the potential rate (wetness ``s + (1-s)·w``), and
+        the reported latent heat charges the sublimation heat to that snow
+        share: ``LH/E = alv + (als - alv)·s / (s + (1-s)·w)``.
+        """
+        from types import SimpleNamespace
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+        from .vertical_diffusion import TteTkeVerticalDiffusion
+        from .vertical_diffusion_types import VerticalDiffusionData
+
+        vstate = _make_marine_bl_state(ncol=1, sst_offset=5.0, wind=10.0)
+        nlev = vstate.u.shape[1]
+        to_col = lambda a: jnp.asarray(a).T  # noqa: E731
+        state = PhysicsState(
+            u_wind=to_col(vstate.u), v_wind=to_col(vstate.v),
+            temperature=to_col(vstate.temperature),
+            specific_humidity=to_col(vstate.qv),
+            geopotential=to_col(vstate.geopotential),
+            normalized_surface_pressure=jnp.ones((1,)),
+            tracers={"qc": jnp.zeros((nlev, 1)), "qi": jnp.zeros((nlev, 1))},
+        )
+        t_land = float(vstate.surface_temperature[0, 0])
+        diagnostics = {
+            "_dt_seconds": 900.0,
+            "pressure_full": to_col(vstate.pressure_full),
+            "pressure_half": to_col(vstate.pressure_half),
+            "height_full": to_col(vstate.height_full),
+            "height_half": to_col(vstate.height_half),
+            "surface": SurfaceData.zeros((1,), nlev).copy(
+                roughness_length=jnp.full((1,), 0.01)),
+            "vertical_diffusion": VerticalDiffusionData.zeros((1,), nlev).copy(
+                tke=jnp.full((nlev, 1), 3.0)),
+            "radiation": SimpleNamespace(surface_sw_down=jnp.zeros(1),
+                                         surface_lw_down=jnp.zeros(1)),
+        }
+        terrain = TerrainData.single_column(fmask=1.0)
+        soil, snow = 0.2, 0.5
+
+        def fluxes(snow_cover, glacier=None):
+            forcing = ForcingData.zeros((1, 1)).copy(
+                stl_am=jnp.full((1, 1), t_land),
+                soilw_am=jnp.full((1, 1), soil),
+                snowc_am=jnp.full((1, 1), snow_cover),
+                glacier_fraction=(None if glacier is None
+                                  else jnp.full((1, 1), glacier)),
+            )
+            _, diag = TteTkeVerticalDiffusion()(state, diagnostics, forcing,
+                                                terrain)
+            out = diag["vertical_diffusion"]
+            return (float(out.surface_evaporation.ravel()[0]),
+                    float(out.surface_latent_heat.ravel()[0]))
+
+        e_bare, lh_bare = fluxes(0.0)
+        e_snow, lh_snow = fluxes(snow)
+        assert e_bare > 1e-7, "vacuous test: no land evaporation"
+        np.testing.assert_allclose(lh_bare / e_bare, PHYS_CONST.alhc,
+                                   rtol=1e-5)
+        wet = snow + (1.0 - snow) * soil
+        # Wetter surface, same exchange: E scales with the wetness.
+        np.testing.assert_allclose(e_snow / e_bare, wet / soil, rtol=0.05)
+        np.testing.assert_allclose(
+            lh_snow / e_snow,
+            PHYS_CONST.alhc + (PHYS_CONST.alhs - PHYS_CONST.alhc) * snow / wet,
+            rtol=1e-5)
+        # Half glacier, the rest fully snow covered (``snowc`` is the share
+        # of the NON-glacier land): all snow — potential rate, all sublimated.
+        e_full, lh_full = fluxes(1.0, glacier=0.5)
+        assert e_full > e_snow  # wetness 1 > 0.6
+        np.testing.assert_allclose(lh_full / e_full, PHYS_CONST.alhs, rtol=1e-5)

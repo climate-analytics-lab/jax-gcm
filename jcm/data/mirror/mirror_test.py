@@ -336,6 +336,27 @@ class LandChannelCoverageTest(unittest.TestCase):
             missing = sorted(translated - written)
             self.assertEqual(missing, [], f"{name}.py never names {missing}")
 
+    def test_every_writer_regrids_land_through_the_convention_helper(self):
+        """Every writer splices :func:`land_surface_fields` into its dict.
+
+        It is the one place the land-conditional channels (and ``glac``,
+        ``forest``, ``lsm``) are regridded with their masks (#672); a writer
+        that interpolated them itself would dilute them at coasts again.
+        """
+        import ast
+        import inspect
+        import importlib
+
+        for name in self._WRITERS:
+            module = importlib.import_module(f"jcm.data.mirror.{name}")
+            spliced = any(
+                key is None and isinstance(value, ast.Call)
+                and getattr(value.func, "id", None) == "land_surface_fields"
+                for node in ast.walk(ast.parse(inspect.getsource(module)))
+                if isinstance(node, ast.Dict)
+                for key, value in zip(node.keys, node.values))
+            self.assertTrue(spliced, f"{name}.py bypasses land_surface_fields")
+
 
 def _translate_land_keys():
     """Return the channel names ``translate_land`` produces on a minimal input."""

@@ -732,6 +732,67 @@ Fixes that change the climate of a configuration you did not otherwise touch.
 :doc:`v2_to_v3` quotes the measured direction and magnitude for each, where one
 was measured.
 
+ECHAM surface albedo and frozen-surface saturation
+""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The ECHAM surface albedo now follows ECHAM 6.3 tile by tile instead of fixed
+  per-type constants (#672). Land is JSBACH's broadband scheme
+  (``update_land_surface_fast``): the snow-free background ``alb``, brightened
+  by the prescribed ``snowc`` snow cover towards a temperature-dependent snow
+  albedo (0.4 at the melting point to 0.8 five kelvin below), snow masked by
+  forest, and a glacier albedo (0.75-0.85) on ice sheets — where the constant
+  0.15/0.25 used to put Antarctica and Greenland at ~0.2. Sea ice is
+  ``update_albedo_ice``, effectively its cold bare-ice 0.75 while the ice
+  temperature is prescribed at ``min(SST, ctfreez)``; open water carries ECHAM's
+  zenith-angle-dependent direct-beam albedo with the 0.07 diffuse albedo.
+  Over a 5-day January ``t63-echam-1m`` A/B the global planetary albedo rises
+  **0.274 → 0.300-0.302** and the absorbed solar radiation at TOA falls by
+  **9.1-9.6 W/m²** (ice sheets 0.22 → 0.85 surface albedo; snow-covered NH land
+  0.22 → 0.50-0.64). See :doc:`science/surface`.
+- The surface saturation humidity of every ECHAM tile (and of the
+  lowest-level air in the surface-layer Richardson number) is taken over ice
+  below the melting point and over water above, as ECHAM's ``tlucua`` table
+  does, instead of the Sundqvist mixed-phase blend; the latent heat in the
+  surface-layer buoyancy switches with the air temperature. The reported
+  latent heat flux is ``alhs·E`` over sea ice and carries the sublimation share
+  of the snow-covered fraction over land, and snow-covered land evaporates at
+  the potential rate (JSBACH's land wetness ``s + (1 − s)·w``).
+- New optional static forcing fields ``forest`` and ``glac``
+  (``ForcingData.forest_fraction`` / ``glacier_fraction``) carry the land
+  cover the land albedo reads; the bundle builders write them from ERA5
+  ``cvh`` and the permanent-snow mask. Bundles published before this change
+  lack them and load with both ``None`` (no forest masking; ice sheets keep
+  their ERA5 background albedo of ≈0.8). ``snowc`` is the snow-covered
+  fraction of the non-glacier land, so the snow-covered share of the land
+  is ``glac + (1 − glac)·snowc`` (``jcm.forcing.land_snow_cover``, also
+  read by the JAM dust snow gate). Forcing files now also carry ``lsm``, the
+  land share, and every regrid of the land-surface channels (bundle
+  builders, runtime upsampler, pySES column sampler) weights each by the
+  part of the cell it describes — ``glac`` and ``stl`` by the land,
+  ``forest``, ``snowc``, ``alb`` and the soil wetness by the non-glacier
+  land — so
+  coastal and ice-margin cells are no longer diluted by their ocean or
+  glacier neighbours. On pySES this changes the coastal columns of every
+  run on the packaged T63 forcing. SPEEDY reads the same fields through the
+  same helpers (``jcm.forcing.land_snow_cover`` / ``land_wetness``): with a
+  glacier map its land tile counts the glacier as fully snow covered and
+  fully wet; without one (the T30 climatology) nothing changes.
+- The radiation solves with the surface albedo and emissivity of its solve
+  step and publishes those in ``radiation.surface_*``, held between solves,
+  so the published albedo, reflected flux and heating stay one solve's
+  under ``radiation_interval`` sub-stepping.
+- **Breaking:** ``SurfaceOpticsParameters`` holds the albedo constants in a
+  nested ``EchamSurfaceAlbedoParameters`` (``albedo=``) and keeps only the
+  three emissivities at the top level; the six ``*_albedo_vis``/``*_albedo_nir``
+  fields are gone. The packaged ``jcm/data/bc/t63/forcing.nc`` — the pySES
+  backend's default forcing — stores ``snowc`` as the jcm cover fraction
+  ``min(1, SWE/sd2sc)`` with a seasonal cycle (the data-mirror ERA5 monthly
+  climatology, zero on glaciers) where it held one January ECHAM snow water
+  equivalent in metres for every month, and gains ``forest``/``glac`` from
+  the ECHAM surface file. Everything reading ``snowc`` from that file sees
+  the change: the ECHAM albedo and land latent heat, the JAM dust snow gate,
+  and SPEEDY's snow albedo if pointed at it.
+
 Moist dynamics: condensate loading and one tracer contract
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""
 

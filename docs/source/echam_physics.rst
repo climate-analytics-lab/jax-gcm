@@ -647,14 +647,23 @@ The ECHAM physics package consumes two NetCDF files at run time. T63 versions si
      - 12-month climatology
      - Sea-ice tile fraction (clipped to ``[0, 1 − fmask]`` at apply time).
    * - ``alb`` (forcing.nc) → ``forcing.alb0``
-     - Static (annual mean)
-     - Bare-land surface albedo for the radiation backends.
+     - Static
+     - Snow-free background albedo of the non-glacier land (JSBACH ``update_land_surface_fast``, see :doc:`science/surface`).
    * - ``soilw_am`` (forcing.nc)
      - 12-month climatology
      - Soil-moisture initial state for the land-tile column.
    * - ``snowc`` (forcing.nc) → ``forcing.snowc_am``
      - 12-month climatology
-     - Snow cover (clipped to plausible range at load time).
+     - Prescribed snow-cover fraction of the non-glacier land (total cover ``glac + (1 − glac)·snowc``): brightens the land albedo towards the temperature-dependent snow albedo and sets the sublimating share of the land latent heat flux.
+   * - ``forest`` (forcing.nc) → ``forcing.forest_fraction``
+     - Static (optional)
+     - Forest share of the non-glacier land, masking the snow albedo under a canopy. ``None`` (no forest) if absent.
+   * - ``lsm`` (forcing.nc)
+     - Static (optional)
+     - Land share of the cell: the weight any regrid of the file gives the land-conditional channels (``jcm.data.regridding.CONDITIONAL_FIELDS``).
+   * - ``glac`` (forcing.nc) → ``forcing.glacier_fraction``
+     - Static (optional)
+     - Glacier share of the land: the ECHAM glacier albedo and a fully snow-covered (sublimating) surface. ``None`` (no glacier) if absent.
 
 Generating BC files from ECHAM input
 """"""""""""""""""""""""""""""""""""
@@ -667,6 +676,8 @@ Generating BC files from ECHAM input
         --sic     T63_amipsic_1979-2008_mean.nc \
         --land-init ic_land_soil_T63GR15_1976.nc \
         --out-dir jcm/data/bc/t63/
+
+``--snow-cover FILE`` takes the 12-month ``snowc`` cover fraction of a jcm forcing file on the same grid instead of the single ECHAM snow snapshot; the packaged T63 file is built with the data-mirror ``forcing_pd.nc`` this way, since the land albedo reads the snow cover every month.
 
 When ``--land-init`` is provided (the JSBACH initial-conditions file from a standard ECHAM dataset), the ``stl`` field uses the real monthly land-surface temperature climatology and the soil-moisture / snow fields use ``init_moist`` / ``snow`` rather than the AMIP-SST extrapolation. Without ``--land-init``, ``stl`` falls back to AMIP SST extrapolated over land — fine for short development runs, but the ~+30 K bias over the Tibetan and Antarctic plateaus has historically driven multi-day stability failures, so the JSBACH-backed file should be used for any climate-style integration.
 
@@ -842,7 +853,7 @@ Forcing and Boundary Conditions
 - **Sea Ice Concentration**: Prescribed from climatology
 - **Snow Cover**: Prescribed from climatology
 - **Soil Moisture**: Prescribed from climatology
-- **Surface Albedo**: Annual-mean bare-land albedo
+- **Surface Albedo**: ECHAM 6.3 tile albedos — land from the background ``alb`` with prescribed snow cover, forest masking and glaciers; temperature-dependent sea ice; zenith-dependent open water (:doc:`science/surface`)
 - **Aerosol Temporal Weights**: Per-plume year and seasonal cycle weights for MACv2-SP
 
 The forcing data system supports both realistic (from netCDF files with 365 daily time steps) and idealized (aquaplanet with cos2 SST profile) configurations.

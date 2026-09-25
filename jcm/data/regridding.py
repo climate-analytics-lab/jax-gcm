@@ -19,12 +19,18 @@ JIT'd model:
 * **Sphere geometry** (:func:`unit_sphere_vectors`, :func:`nearest_index`,
   :func:`fill_nearest`, :func:`gaussian_latlon`): the shared unit-vector /
   KDTree machinery for nearest-neighbour matching on the sphere.
+* **Land-conditional fields** (:func:`regrid_conditional_fraction`,
+  :func:`regrid_land_surface`, :data:`CONDITIONAL_FIELDS`): the one place
+  the bundle convention for land-surface fields is regridded — every
+  builder, the runtime upsampler and the pySES column sampler go through it.
 
 Note — the *runtime* boundary-condition upsampler
 (``jcm.data.bc.interpolate.upsample_forcings_ds``) stays separate: it
 bilinearly refines packaged forcing files to higher spectral resolutions at
 model start with its own pole-averaging conventions, and changing it would
-change existing runs.
+change existing runs. It regrids the land-conditional fields through
+:func:`regrid_land_surface` (with its own interpolator) only for files that
+carry ``lsm``, i.e. files written under the bundle convention.
 """
 
 from __future__ import annotations
@@ -485,3 +491,112 @@ def conservative_overlap(field: np.ndarray, src_lats, src_lons,
     den = w_lat @ valid.astype(np.float64) @ w_lon.T
     with np.errstate(invalid="ignore", divide="ignore"):
         return np.where(den > 0.0, num / den, np.nan)
+
+
+# ---------------------------------------------------------------------------
+# Land-conditional boundary fields (#672)
+# ---------------------------------------------------------------------------
+
+#: The boundary-condition bundle convention for land-surface fields: each is
+#: a value or fraction CONDITIONAL on a part of the cell, and names which.
+#:
+#: * ``lsm`` — the land share of the cell (the terrain land-sea mask).
+#: * ``"land"`` — conditional on the land: ``glac`` (glacier share of the
+#:   land) and ``stl`` (the land-tile temperature, glacier included — the
+#:   albedo's glacier ramp and the surface tiles read it over all the land).
+#: * ``"open_land"`` — conditional on the NON-glacier land, weight
+#:   ``lsm·(1 − glac)``: ``forest`` (forest share), ``snowc`` (snow-covered
+#:   share), ``alb`` (snow-free background albedo), ``soilw_am`` /
+#:   ``soilw_rel`` (soil wetness: the vertical diffusion treats the glacier
+#:   as fully wet and applies soil wetness to the non-glacier share only,
+#:   and dust has no source on a glacier) — JSBACH's tiling, where the
+#:   glacier is a tile of its own.
+#:
+#: A raw bilinear regrid of such a field lets the cells it is not defined on
+#: (ocean, glacier) dilute it, and the consumer — which multiplies by the
+#: land / non-glacier share again — then counts that share twice.
+#: :func:`regrid_land_surface` regrids every one of them with its own mask.
+#: Consumers combine them once: total snow cover of the land
+#: ``g + (1 − g)·s``, effective forest ``(1 − g)·f``, background albedo on
+#: the non-glacier tile only.
+CONDITIONAL_FIELDS = {
+    "glac": "land", "stl": "land",
+    "soilw_am": "open_land", "soilw_rel": "open_land",
+    "forest": "open_land", "snowc": "open_land", "alb": "open_land",
+}
+
+#: Physical range each conditional field is clamped to after the regrid
+#: (``None`` = unbounded on that side). ``snowc`` has no upper bound: the
+#: SPEEDY files store the unclipped ratio SWE/sd2sc.
+_CONDITIONAL_RANGE = {
+    "glac": (0.0, 1.0), "stl": (None, None), "soilw_am": (0.0, 1.0),
+    "soilw_rel": (0.0, 1.0), "forest": (0.0, 1.0), "snowc": (0.0, None),
+    "alb": (0.0, 1.0),
+}
+
+
+def regrid_conditional_fraction(field, weight, regrid, *, lo=0.0, hi=1.0):
+    """Regrid a field conditional on the part of the cell ``weight`` marks.
+
+    ``regrid(field·weight) / regrid(weight)``: the mask-weighted mean over the
+    source points that contribute to each target point, which for a linear
+    regrid is the exact area share of the conditioning part. Where the mask
+    regrids to zero (no contributing source point has any of that part) the
+    plain ``regrid(field)`` is returned instead, so a target cell the mask
+    misses never reads an invented 0 — a background albedo of 0 on a sliver
+    of land would otherwise be a silent bias. Clamped to ``[lo, hi]``
+    (``None`` leaves that side open).
+
+    Works on ``xarray.DataArray`` (broadcast by dimension name) and on numpy
+    arrays (``weight`` broadcast over trailing axes ``field`` has beyond it).
+    ``regrid`` maps a source array to its target-grid counterpart.
+    """
+    if isinstance(field, xr.DataArray):
+        num = regrid(field * weight)
+        den = regrid(weight * xr.ones_like(field))
+        plain = regrid(field)
+        has = den > 1e-6
+        out = xr.where(has, num / xr.where(has, den, 1.0), plain)
+        return out if lo is None and hi is None else out.clip(lo, hi)
+    field = np.asarray(field, dtype=np.float64)
+    weight = np.asarray(weight, dtype=np.float64)
+    weight = np.broadcast_to(
+        weight.reshape(weight.shape + (1,) * (field.ndim - weight.ndim)),
+        field.shape)
+    num = np.asarray(regrid(field * weight))
+    den = np.asarray(regrid(np.ascontiguousarray(weight)))
+    plain = np.asarray(regrid(field))
+    has = den > 1e-6
+    out = np.where(has, num / np.where(has, den, 1.0), plain)
+    return out if lo is None and hi is None else np.clip(out, lo, hi)
+
+
+def regrid_land_surface(fields: dict, lsm, regrid, glac=None) -> dict:
+    """Regrid the :data:`CONDITIONAL_FIELDS` in ``fields`` with their masks.
+
+    Args:
+        fields: ``{name: source array}``; entries not in
+            :data:`CONDITIONAL_FIELDS` are returned untouched (not regridded).
+        lsm: Source land share (the ``"land"`` weight).
+        regrid: Source -> target regrid callable (see
+            :func:`regrid_conditional_fraction`).
+        glac: Source glacier share of the land; ``None`` means no glacier.
+            When ``"glac"`` is not itself in ``fields`` it is still used to
+            build the ``"open_land"`` weight.
+
+    Returns:
+        ``{name: target array}`` for every conditional field in ``fields``.
+
+    """
+    open_land = lsm if glac is None else lsm * (1.0 - glac)
+    weights = {"land": lsm, "open_land": open_land}
+    out = {}
+    for name, value in fields.items():
+        kind = CONDITIONAL_FIELDS.get(name)
+        if kind is None:
+            out[name] = value
+            continue
+        lo, hi = _CONDITIONAL_RANGE[name]
+        out[name] = regrid_conditional_fraction(
+            value, weights[kind], regrid, lo=lo, hi=hi)
+    return out

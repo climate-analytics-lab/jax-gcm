@@ -43,7 +43,8 @@ import numpy as np
 import xarray as xr
 
 from jcm.data.mirror.amip_yearly import _TIME_ENC, ghg_ppmv
-from jcm.data.mirror.bundles import _to_lonlat, translate_land
+from jcm.data.mirror.bundles import (_to_lonlat, land_surface_fields,
+                                     translate_land)
 from jcm.data.mirror.era5_land import _RDA, FIELDS, RDA_MODA, _open_year
 from jcm.data.regridding import fill_nearest, interp_to
 
@@ -235,24 +236,22 @@ def build_forcing_year(clim_path: str, sstice_path: str, year: int,
 
     # Land: translate the 13 monthly means with the climatological
     # ice-sheet mask, then blend onto the month-start axis.
-    tl = translate_land(land, permanent_snow=clim.sd.min("month") >= 0.1)
+    permanent_snow = clim.sd.min("month") >= 0.1
+    tl = translate_land(land, permanent_snow=permanent_snow)
     fields = {
         "sst": interp_to(sst_da, lats, lons),
         "icec": interp_to(icec_da, lats, lons).clip(0.0, 1.0),
-        "stl": interp_to(_blend_to_month_starts(tl["stl"], times),
-                         lats, lons),
-        "soilw_am": interp_to(
-            _blend_to_month_starts(tl["soilw_am"], times),
-            lats, lons).clip(0.0, 1.0),
-        "soilw_rel": interp_to(
-            _blend_to_month_starts(tl["soilw_rel"], times),
-            lats, lons).clip(0.0, 1.0),
-        "snowc": interp_to(
-            _blend_to_month_starts(tl["snowc"], times),
-            lats, lons).clip(0.0, 1.0),
-        # Background albedo stays climatological, like the ice-sheet
-        # mask: a per-year minimum drifts with how snowy the year was.
-        "alb": interp_to(clim.fal.min("month"), lats, lons),
+        # Background albedo and the static land cover stay climatological,
+        # like the ice-sheet mask: a per-year minimum drifts with how snowy
+        # the year was.
+        **land_surface_fields(clim, permanent_snow, {
+            "stl": _blend_to_month_starts(tl["stl"], times),
+            "soilw_am": _blend_to_month_starts(tl["soilw_am"], times),
+            "soilw_rel": _blend_to_month_starts(tl["soilw_rel"], times),
+            "snowc": _blend_to_month_starts(tl["snowc"], times),
+            "alb": clim.fal.min("month"),
+            "forest": clim.cvh.clip(0.0, 1.0),
+        }, lats, lons),
     }
     ds = xr.Dataset(coords={"lat": lats, "lon": lons, "time": times})
     for name, da in fields.items():
