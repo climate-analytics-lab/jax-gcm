@@ -5,10 +5,11 @@ ECHAM transports every tracer through Tiedtke convection (the
 same for constituents; jcm applied the convective mass fluxes only to
 heat, moisture and momentum (#602 item 2). This term closes that gap for
 an explicit tracer list using the profiles the Tiedtke term publishes
-in ``ConvectionData``: the updraft mass flux at each layer's top
-interface (``mass_flux_up``), the downdraft mass flux at each layer's
-bottom interface (``mass_flux_down``), and the absolute per-layer
-entrainment fluxes (``entrain_up``/``entrain_down``), all carrying the
+in ``ConvectionData``: the updraft and downdraft mass fluxes at each
+layer's TOP interface (``mass_flux_up``/``mass_flux_down``, ECHAM's
+half-level ``pmfu``/``pmfd``; no flux crosses the surface), and the
+absolute per-layer entrainment fluxes (``entrain_up``/``entrain_down``),
+all carrying the
 scheme's rescale + cap ledger scaling, so tracer transport is
 proportional to the heat and moisture transport actually applied.
 
@@ -19,8 +20,9 @@ subsidence, plus the mirrored downdraft leg (jax-gcm#622):
   ``D_k = max(E_raw_k − (M_k − M_{k+1}), 0)`` with the effective
   entrainment ``E_k = D_k + (M_k − M_{k+1})`` — this absorbs everything
   the mass-flux profile actually did (survival cuts, cloud-base supply:
-  at cloud base the mass-flux jump appears as entrainment of that
-  layer's air, which is exactly the physical picture).
+  below cloud base the published flux carries cuflx's linear-in-pressure
+  sub-cloud taper, so each sub-cloud layer supplies air in proportion to
+  its mass — ECHAM's ``pmfuxt`` taper).
 * Updraft tracer concentration from an upward scan:
   ``q_up_k = (M_{k+1}·q_up_{k+1} + E_k·q_k) / (M_{k+1} + E_k)`` — a
   convex mix, so the plume concentration is bounded by the environment
@@ -121,7 +123,7 @@ def convective_tracer_tendency(
     layer_thickness: jnp.ndarray,
     dt: jnp.ndarray,
     mfd: jnp.ndarray | None = None,          # (nlev, ncols) downdraft flux at
-                                             # layer BOTTOM [kg/m²/s], ≤ 0
+                                             # layer TOP [kg/m²/s], ≤ 0
     entrain_down: jnp.ndarray | None = None,  # (nlev, ncols) per-layer
                                               # downdraft entrainment [kg/m²/s]
     scav_weights: jnp.ndarray | None = None,  # (K,) per-tracer removal weight
@@ -166,17 +168,16 @@ def convective_tracer_tendency(
     entrain_eff = detrain + delta                     # >= 0 by construction
 
     # Downdraft ledger (jax-gcm#622), mirrored: ``mfd[k]`` is the flux
-    # leaving layer k through its BOTTOM interface (the downdraft scan's
-    # convention — the taper halves then land in the two lowest layers
-    # exactly as cuddraf's ``itopde`` split), so the flux entering from
-    # above is ``mfd[k-1]``. Magnitudes throughout; the bottom layer's
-    # outflow is forced to zero (no flux through the surface — a residual
-    # detrains there via continuity, mirroring the model-top handling).
+    # ENTERING layer k through its TOP interface (ECHAM's half-level
+    # ``pmfd``, the same interface as ``mfu[k]``), so the flux leaving
+    # through its bottom is ``mfd[k+1]`` — zero out of the bottom layer: no
+    # flux crosses the surface, and the cuddraf taper's residual at the top
+    # of the lowest layer detrains there via continuity. Magnitudes
+    # throughout.
     if mfd is not None:
-        md_out = jnp.maximum(-mfd, 0.0)
-        md_out = md_out.at[-1].set(0.0)
-        md_in = jnp.concatenate(
-            [jnp.zeros_like(md_out[:1]), md_out[:-1]], axis=0
+        md_in = jnp.maximum(-mfd, 0.0)
+        md_out = jnp.concatenate(
+            [md_in[1:], jnp.zeros_like(md_in[:1])], axis=0
         )
         e_dn_raw = (
             jnp.maximum(entrain_down, 0.0)

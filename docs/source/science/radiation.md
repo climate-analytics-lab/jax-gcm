@@ -98,21 +98,37 @@ RRTMGP and the NN emulator so a feature and its label describe the same cloud):
   factor (``effective_radius_liquid``). This constant is the land/ocean average of
   **CAM4's ``reltab``** (``cloud_optical_properties.F90``); both origins are
   documented in-code.
-- **Sub-grid inhomogeneity factor** — the cloud **optical depth** is multiplied by
-  a fixed factor (default 0.8), correcting the plane-parallel albedo bias of
-  homogeneous-cloud radiative transfer. This is ECHAM's ``mo_cloud_optics.f90``
-  treatment with ``l_variable_inhoml = .FALSE.`` (``ztau = ztol*zinhoml +
-  ztoi*zinhomi``). It scales the optical depth only: the effective radii and the
-  τ-weighted ssa/asymmetry are taken from the physical (unscaled) condensate, so
-  the diagnostic ice radius still follows the Moss/Foot IWC law. A single factor
-  (same for liquid and ice) is used, ECHAM's T63 value where ``zinhoml1 =
-  zinhomi = 0.8``; the RRTMGP backend combines the per-phase optics by
-  τ-weighting inside jax-rrtmgp, so a common factor scales the total τ without
-  disturbing that weighting. Distinct liquid/ice factors (``zinhomi = 0.85`` at
-  T127+, the shallow-convection ``zinhoml2 = 0.4``) need per-phase optical-depth
-  scaling in the backend (jax-rrtmgp#37) and, for the convection dependence,
-  ``ktype`` in the radiation glue (#870). Applied on both the RRTMGP and grey
-  backends via ``RadiationParameters.cloud_inhomogeneity``.
+- **Sub-grid inhomogeneity factors** — the cloud **optical depth** is multiplied
+  by fixed per-phase factors, correcting the plane-parallel albedo bias of
+  homogeneous-cloud radiative transfer. This is ECHAM's
+  ``mo_cloud_optics.f90::cloud_optics`` treatment with ``l_variable_inhoml =
+  .FALSE.`` (``ztau = ztol*zinhoml + ztoi*zinhomi``), at ECHAM's T63 values
+  (``setup_cloud_optics``, nn = 63): ice ``zinhomi = 0.8`` — ``0.7`` in the JAM
+  composition, ECHAM-HAM's value for its 2M + ARG setup (``lcdnc_progn``,
+  ``ncd_activ = 2``), which is the pairing JAM is — and a liquid factor
+  chosen per column by the convective type ``ktype`` — ``zinhoml1 = 0.8`` with
+  no convection, ``zinhoml3 = 0.8`` for deep, shallow and mid-level convection,
+  and ``zinhoml2 = 0.4`` for ``ktype = 4``, a shallow-convective column whose
+  liquid water path at and below the convective cloud top exceeds
+  ``clwprat = 4`` times the path above it. As in ECHAM the re-typing to 4 is
+  done by the 1M cloud scheme after convection (``mo_cloud.f90``;
+  ``Echam1MMicrophysics`` amends ``convection.ktype`` from the step-start
+  liquid and the Tiedtke cloud top) and read by the *next* step's radiation,
+  which runs before convection (ECHAM's lagged ``rtype``). ECHAM's 2M
+  ``cloud_micro_interface`` never re-types, so under ``cloud_scheme = "2m"``
+  every column keeps the 0.8 liquid factor, as in ECHAM-HAM. The
+  factors scale the optical depth only: the effective radii come from the
+  physical (unscaled) condensate, so the diagnostic ice radius still follows the
+  Moss/Foot IWC law. On the grey backend the τ-weighted ssa/asymmetry are
+  likewise taken from the unscaled per-phase optical depths, exactly ECHAM's
+  ``zomg``/``zasy``. The RRTMGP backend can only pass per-phase condensate paths
+  to jax-rrtmgp, which weights the combined ssa/asymmetry by the τ those paths
+  produce: identical to ECHAM wherever the liquid and ice factors are equal
+  (every column except ``ktype = 4`` ones at the defaults), while in a
+  ``ktype = 4`` layer holding both phases the total τ is exact but the
+  ssa/asymmetry weighting uses the scaled τ (jax-rrtmgp#37). The four factors are
+  ``RadiationParameters.cloud_inhomogeneity_{liquid, liquid_convective,
+  liquid_shallow, ice}``, differentiable leaves.
 - **Grey backend band wavelengths** — every wavelength-dependent grey optical
   property (the Mie/heuristic cloud optics in
   ``jcm/physics/radiation/cloud_optics.py``, the Ångström scaling of the
@@ -193,27 +209,29 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   conservative cloud reflects ~0 at TOA and its scattered energy is dropped. The
   diffuse layer solution above is exact; this is a separate defect in the
   direct-beam source, awaiting the Toon et al. (1989) source functions.
-- **Cloud inhomogeneity is one factor, not ECHAM's per-phase / convection-type
-  values.** The single 0.8 factor above is ECHAM's nn=63 case, where the liquid
-  and ice factors coincide (``zinhoml1 = zinhomi = 0.8``). ECHAM uses a larger
-  ice factor at higher truncation (``zinhomi = 0.85`` at T127+) and drops the
-  liquid factor to ``zinhoml2 = 0.4`` in shallow-convective columns
-  (``ktype = 4``). jcm cannot yet apply distinct liquid/ice values on the RRTMGP
-  backend — jax-rrtmgp weights the combined ssa/asymmetry by the per-phase
-  optical depths, so unequal factors would re-weight those intensive properties
-  rather than only scaling optical depth; that needs per-phase optical-depth
-  scaling in the library (jax-rrtmgp#37). The convection-type dependence
-  additionally needs ``ktype`` threaded into the radiation glue (#870). The
-  separate in-cloud-condensate cap (``_MAX_IN_CLOUD_CONDENSATE``) is only a NaN
-  guard against thin-cloud optical-depth blow-up; it binds in ~0.003 % of cloudy
-  cells and is *not* an inhomogeneity term.
+- **Cloud inhomogeneity carries ECHAM's T63 values, not its per-resolution
+  table.** ECHAM raises the ice factor at higher truncation (``zinhomi = 0.85``
+  at T127+) and uses ``zinhoml3 = 0.4`` at T31; jcm takes the T63 values at
+  every resolution and exposes them as parameters, the same T63 convention as
+  the other ECHAM cloud constants. The 2M + SPA composition (no ECHAM-HAM
+  counterpart: HAM activates with Lin-Leaitch or ARG) keeps ECHAM6's
+  ``zinhomi = 0.8``. On RRTMGP, a mixed-phase layer in a ``ktype = 4``
+  column weights its combined ssa/asymmetry by the scaled rather than the
+  physical per-phase τ until jax-rrtmgp takes a per-phase optical-depth scale
+  (jax-rrtmgp#37). The separate in-cloud-condensate cap
+  (``_MAX_IN_CLOUD_CONDENSATE``) is only a NaN guard against thin-cloud
+  optical-depth blow-up; it binds in ~0.003 % of cloudy cells and is *not* an
+  inhomogeneity term.
 - **The NN emulator does not reflect the inhomogeneity factor yet.** The emulated
   path predicts fluxes directly, so the inhomogeneity effect is implicit in its
-  training labels rather than a runtime knob; it deliberately does not read
-  ``cloud_inhomogeneity``. The packaged checkpoint predates the 0.8 factor, so
-  ``echam-emulated-2m`` diverges from the RRTMGP backend by a few W/m² for cloudy
-  columns until the emulator is retrained against the corrected radiation (#881,
-  folded into the #743 retrain).
+  training labels rather than a runtime knob; it deliberately does not read the
+  ``cloud_inhomogeneity_*`` factors or the convective type. The packaged
+  checkpoint predates the 0.8 factor, so ``echam-emulated-2m`` diverges from the
+  RRTMGP backend by a few W/m² for cloudy columns until the emulator is
+  retrained against the corrected radiation (#881, folded into the #743
+  retrain). The convective-type dependence does not widen that gap: the emulated
+  configuration is 2M, where no column is re-typed and RRTMGP also applies the
+  uniform 0.8 liquid factor.
 - **Thin-lid aerosol-radiation cutoff.** Online aerosol optics are zeroed above
   ``_AER_RAD_PMIN`` (``jcm/physics/aerosol/jam/optics/optics_term.py``) and the
   per-layer band τ is capped, to bound heating over ~1 Pa lid layers; aerosol mass

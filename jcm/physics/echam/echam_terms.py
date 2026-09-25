@@ -123,7 +123,9 @@ def echam_physics(
         microphysics_2m: Override for 2-moment microphysics
             ``CloudParams2M`` (used when ``cloud_scheme="2m"``).
         radiation: Override for ``RadiationParameters`` (shared by all
-            three radiation backends).
+            three radiation backends). When omitted, the defaults are used
+            except that ``aerosol_module="jam"`` takes ECHAM-HAM's 2M + ARG
+            ice inhomogeneity ``cloud_inhomogeneity_ice = 0.7``.
         vertical_diffusion: Override for TTE-TKE ``VDiffParameters``.
         surface: Override for ``SurfaceParameters``.
         aerosol: Override for MACv2-SP ``AerosolParameters``. Also
@@ -364,7 +366,15 @@ def echam_physics(
     clouds_p = clouds or CloudParameters.default()
     microphysics_p = microphysics or MicrophysicsParameters.default()
     microphysics_2m_p = microphysics_2m or CloudParams2M.default()
-    radiation_p = radiation or RadiationParameters.default()
+    # ECHAM-HAM re-tunes the ice-cloud inhomogeneity for its two-moment +
+    # Abdul-Razzak & Ghan configuration (``lcdnc_progn`` with ``ncd_activ = 2``:
+    # ``zinhomi = 0.7`` at T63, L31 and L47 alike;
+    # ``mo_cloud_optics.f90::setup_cloud_optics``). jcm's JAM stack is exactly
+    # that pairing — the 2M scheme fed by ARG activation — so it takes HAM's
+    # value; every other composition keeps ECHAM6's T63 ``zinhomi = 0.8``
+    # (``RadiationParameters.default``). An explicit ``radiation=`` wins.
+    radiation_p = radiation or RadiationParameters.default(
+        cloud_inhomogeneity_ice=0.7 if aerosol_module == "jam" else 0.8)
     vertical_diffusion_p = vertical_diffusion or VDiffParameters.default()
     surface_p = surface or SurfaceParameters.default()
     aerosol_p = aerosol or AerosolParameters.default()

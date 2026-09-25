@@ -342,7 +342,6 @@ class EchamBoundaryConditions(PhysicsTerm):
                 ozone_scale_height=jnp.asarray(self._ozone_scale_height_m),
                 ozone_max_vmr=jnp.asarray(self._ozone_peak_ppmv),
                 ozone_tropopause_height=jnp.asarray(self._ozone_peak_height_m),
-                ozone_stratosphere_coeff=defaults.ozone_stratosphere_coeff,
                 methane_surface_vmr=defaults.methane_surface_vmr,
                 methane_lifetime=defaults.methane_lifetime,
                 methane_oh_scaling=defaults.methane_oh_scaling,

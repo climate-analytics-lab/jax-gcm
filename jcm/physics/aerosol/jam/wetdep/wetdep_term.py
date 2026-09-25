@@ -272,16 +272,14 @@ def conv_precip_cover(
     (p_s − p_half(kcbot))``, squared for mid-level convection;
     mo_cufluxdts.f90:233-239) — the updraft draws its air from the whole
     sub-cloud layer, so the shaft below the base keeps its footprint and
-    tapers to the surface. ``ConvectionData.mass_flux_up`` carries the
-    plume profile alone (the tracer transport derives the cloud-base
-    supply from its jump, see ``tracer_transport``), so the sub-cloud
-    taper is rebuilt here from the layer masses: ``p_s − p_half(k) =
-    g·Σ_{j≥k} m_j``, so the pressure ratio is the ratio of the air mass
-    below the two interfaces. Levels are top-first; the cloud base is the
-    lowest level with a non-zero flux. Under ``lham`` ECHAM's ``cuflx`` uses
-    this same area as the footprint of its sub-cloud rain evaporation;
-    jcm's convection scheme still carries the non-HAM ``zcucov = 0.05``
-    there (jax-gcm#812).
+    tapers to the surface. ``ConvectionData.mass_flux_up`` already carries
+    that taper (the Tiedtke term publishes the flux its ledger uses), so
+    the shared helper's reconstruction of it from the layer masses —
+    ``p_s − p_half(k) = g·Σ_{j≥k} m_j`` below the lowest interface with a
+    non-zero flux — is then a no-op; it keeps a plume-only profile correct
+    too. Levels are top-first. With the JAM chain composed (ECHAM's
+    ``lham``), the convection scheme's sub-cloud rain evaporation uses this
+    same area as its footprint.
 
     One documented deviation: HAMMOZ divides by the UPDRAFT density
     ``zrhou = p/(rd·ptu)`` (mo_cufluxdts.f90:406-407); ``ConvectionData``

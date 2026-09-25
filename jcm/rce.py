@@ -431,6 +431,73 @@ def jam_scavenging_column(vertical, physics, *, sst: float = 302.0,
     return state, seed, pfull
 
 
+#: Large-scale moisture convergence [kg/m²/s] the prescribed JAM column is
+#: taken to be under at its first step (~17 mm/day), spread over the lower
+#: free troposphere — see :func:`convergent_initial_physics_data`.
+JAM_COLUMN_CONVERGENCE = 2.0e-4
+
+
+def convergent_initial_physics_data(scm: SingleColumnModel, state: PhysicsState,
+                                    convergence: float = JAM_COLUMN_CONVERGENCE):
+    """Build the initial physics carry of a prescribed column under convergence.
+
+    A prescribed (re-imposed every step) column is one whose dynamics exactly
+    undoes the physics, and Tiedtke reads that from the ``_prev_step`` carry
+    as ECHAM's lagged dynamics moisture tendency ``pqte`` (the
+    ``TiedtkeConvection`` wrapper). Its deep/shallow split is ECHAM's
+    moisture-convergence test, so such a column classifies DEEP only once a
+    step has shown the dynamics resupplying moisture — and at the first step
+    there is no previous step. The faithful ECHAM shallow plume (strongly
+    entraining and detraining, ``entrscv``) does not rain in the tropical
+    check column, so without that information the column settles on its
+    non-precipitating shallow state, which carries no convective aerosol
+    sink.
+
+    This returns the model's own initial carry with ``_prev_step`` stating
+    that the previous step's physics removed ``convergence`` [kg/m²/s] of
+    vapour from the lower free troposphere (the middle of the column down to
+    four levels above the surface) — i.e. that the column is under that much
+    large-scale moisture convergence, as a deep tropical column is. From
+    there the deep plume's own drying keeps the lagged convergence signal
+    alive, exactly as it would under sustained ascent.
+
+    Args:
+        scm: The single-column model the carry is for.
+        state: The prescribed column state (its humidity is the carried
+            ``specific_humidity``).
+        convergence: Column moisture convergence [kg/m²/s].
+
+    Returns:
+        The ``initial_physics_data`` dict for :meth:`SingleColumnModel.run`.
+
+    """
+    template = scm.physics.get_empty_data(scm.coords)
+    carry = scm.physics.initial_carry_state(scm.coords)
+    data = {**template, **carry}
+    prev = data["_prev_step"]
+    nlev = state.specific_humidity.shape[0]
+    vertical = scm.coords.vertical
+    if isinstance(vertical, HybridCoordinates):
+        a_half = jnp.asarray(vertical.a_boundaries)
+        b_half = jnp.asarray(vertical.b_boundaries)
+    else:
+        b_half = jnp.asarray(vertical.boundaries)
+        a_half = jnp.zeros_like(b_half)
+    p_half = a_half + b_half * c.p0 * state.normalized_surface_pressure
+    mass = jnp.diff(p_half) / c.grav
+    levels = jnp.arange(nlev)
+    lower_ft = (levels >= nlev // 2) & (levels < nlev - 4)
+    q_tendency = jnp.where(
+        lower_ft, -convergence / jnp.sum(jnp.where(lower_ft, mass, 0.0)), 0.0)
+    data["_prev_step"] = {
+        **prev,
+        "specific_humidity": jnp.reshape(
+            state.specific_humidity, jnp.shape(prev["specific_humidity"])),
+        "q_tendency": jnp.reshape(q_tendency, jnp.shape(prev["q_tendency"])),
+    }
+    return data
+
+
 def rce_column(
     *,
     sst: float = 300.0,

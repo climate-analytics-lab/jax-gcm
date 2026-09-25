@@ -69,27 +69,25 @@ class RadiationParameters:
     # correct time-mean radiative statistics).
     mcica_freeze_step: float
 
-    # Cloud sub-grid inhomogeneity factor: a single value scaling the cloud
-    # optical depth to correct the plane-parallel albedo bias of assuming
-    # horizontally homogeneous cloud water. This is ECHAM's fixed inhomogeneity
-    # treatment (``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``
-    # with ``l_variable_inhoml = .FALSE.``). The default 0.8 is ECHAM's T63
-    # value, where the liquid and ice factors coincide
-    # (``zinhoml1 = zinhomi = 0.8`` at nn=63).
-    #
-    # A SINGLE factor (same for liquid and ice) is used deliberately, not two:
-    # the RRTMGP backend hands the per-phase condensate paths to jax-rrtmgp,
-    # which weights the combined single-scattering albedo (by optical depth) and
-    # asymmetry (by ssa) from those paths. One factor scales both phases
-    # equally, so the weighting ratios are unchanged and only the total optical
-    # depth scales -- exactly ECHAM's ``ztau`` with a common factor, and
-    # identical on the grey backend. Distinct liquid/ice factors (ECHAM's
-    # ``zinhomi = 0.85`` at T127+, or the shallow-convection ``zinhoml2 = 0.4``)
-    # would additionally re-weight ssa/asymmetry through that interface, so they
-    # need per-phase optical-depth scaling inside the backend (jax-rrtmgp#37);
-    # the convection-type dependence separately needs ``ktype`` in the radiation
-    # glue (#870). Set to 1.0 to disable. Differentiable leaf.
-    cloud_inhomogeneity: jnp.ndarray = 0.8
+    # Cloud sub-grid inhomogeneity factors: fixed multipliers on the cloud
+    # optical depth correcting the plane-parallel albedo bias of assuming
+    # horizontally homogeneous condensate. This is ECHAM's fixed treatment
+    # (``mo_cloud_optics.f90::cloud_optics`` with ``l_variable_inhoml =
+    # .FALSE.``): ``ztau = ztol*zinhoml + ztoi*zinhomi``, with the LIQUID factor
+    # chosen per column by the (previous step's) convective type ``ktype``:
+    #   ktype == 0            -> zinhoml1 (no convection)
+    #   ktype in {1, 2, 3}    -> zinhoml3 (deep / shallow / mid-level)
+    #   ktype == 4            -> zinhoml2 (shallow convection whose liquid sits
+    #                            mostly below the cloud top; the 1M cloud scheme
+    #                            sets it, ECHAM ``mo_cloud.f90`` ``clwprat``)
+    # Defaults are ECHAM's T63 values (``setup_cloud_optics``, nn == 63). They
+    # scale optical depth only: the effective radii and (on the grey backend)
+    # the tau-weighted ssa/asymmetry come from the physical condensate. Set all
+    # four to 1.0 to disable. Differentiable leaves.
+    cloud_inhomogeneity_liquid: jnp.ndarray = 0.8             # zinhoml1
+    cloud_inhomogeneity_liquid_convective: jnp.ndarray = 0.8  # zinhoml3
+    cloud_inhomogeneity_liquid_shallow: jnp.ndarray = 0.4     # zinhoml2
+    cloud_inhomogeneity_ice: jnp.ndarray = 0.8                # zinhomi
 
     # Neural-network emulator (only used when radiation_scheme="emulated")
     emulator_weights: Optional[object] = None  # EmulatorWeights pytree
@@ -104,7 +102,10 @@ class RadiationParameters:
                  min_cos_zenith=0.035, cld_frac_min=1e-3,
                  cloud_overlap=2, cloud_decorrelation_km=2.0,
                  mcica_freeze_step=0.0,
-                 cloud_inhomogeneity=0.8,
+                 cloud_inhomogeneity_liquid=0.8,
+                 cloud_inhomogeneity_liquid_convective=0.8,
+                 cloud_inhomogeneity_liquid_shallow=0.4,
+                 cloud_inhomogeneity_ice=0.8,
                  emulator_weights=None, sw_scaling=None,
                  lw_scaling=None) -> 'RadiationParameters':
         """Return default radiation parameters"""
@@ -118,7 +119,12 @@ class RadiationParameters:
             cloud_overlap=jnp.asarray(cloud_overlap),
             cloud_decorrelation_km=jnp.asarray(cloud_decorrelation_km),
             mcica_freeze_step=jnp.asarray(mcica_freeze_step),
-            cloud_inhomogeneity=jnp.asarray(cloud_inhomogeneity),
+            cloud_inhomogeneity_liquid=jnp.asarray(cloud_inhomogeneity_liquid),
+            cloud_inhomogeneity_liquid_convective=jnp.asarray(
+                cloud_inhomogeneity_liquid_convective),
+            cloud_inhomogeneity_liquid_shallow=jnp.asarray(
+                cloud_inhomogeneity_liquid_shallow),
+            cloud_inhomogeneity_ice=jnp.asarray(cloud_inhomogeneity_ice),
             emulator_weights=emulator_weights,
             sw_scaling=sw_scaling,
             lw_scaling=lw_scaling,
@@ -135,6 +141,61 @@ _CLOUD_OVERLAP_NAMES = {
     CLOUD_OVERLAP_MAXIMUM_RANDOM: "maximum_random",
     CLOUD_OVERLAP_EXPONENTIAL: "exponential",
 }
+
+
+#: ECHAM ``ktype`` value for a shallow-convective column whose liquid water
+#: lies mostly at/below the convective cloud top (``mo_cloud.f90``: set on
+#: ``ktype == 2`` when ``LWP_below > clwprat * LWP_above``). Radiation drops
+#: the liquid inhomogeneity factor to ``zinhoml2`` there.
+KTYPE_SHALLOW_LIQUID: int = 4
+
+
+def liquid_inhomogeneity(convection_type, parameters: "RadiationParameters"):
+    """Per-column liquid-cloud inhomogeneity factor (ECHAM ``zinhoml``).
+
+    ``mo_cloud_optics.f90::cloud_optics`` (``l_variable_inhoml = .FALSE.``)::
+
+        IF (ktype == 0)      zinhoml = zinhoml1   ! no convection
+        ELSE IF (ktype /= 4) zinhoml = zinhoml3   ! deep/shallow/mid convection
+        ELSE                 zinhoml = zinhoml2   ! shallow, liquid below top
+
+    Args:
+        convection_type: integer ``ktype`` per column (any shape).
+        parameters: supplies the three liquid factors (differentiable leaves).
+
+    Returns:
+        The factor, broadcast to ``convection_type``'s shape.
+
+    """
+    ktype = jnp.asarray(convection_type)
+    return jnp.where(
+        ktype == 0,
+        parameters.cloud_inhomogeneity_liquid,
+        jnp.where(
+            ktype == KTYPE_SHALLOW_LIQUID,
+            parameters.cloud_inhomogeneity_liquid_shallow,
+            parameters.cloud_inhomogeneity_liquid_convective,
+        ),
+    )
+
+
+def lagged_convection_type(diagnostics: dict, ncols: int) -> jnp.ndarray:
+    """Return the previous step's ``convection.ktype`` per column, for radiation.
+
+    Radiation runs before convection in the ECHAM ``physc`` order, so — as in
+    ECHAM, whose ``radiation`` reads the ``rtype`` stored by the previous
+    step's ``cucall`` + ``cloud`` — the convective type it sees is one step
+    old, read from the cross-step ``"convection"`` carry. A composition with
+    no convection carry (a Betts-Miller RCE stack, a bare radiation test)
+    reads 0, "no convection", which is also ECHAM's cold-start ``rtype``. It is
+    deliberately not a declared ``requires`` (that would reject radiation's
+    placement ahead of convection), the same lagged-read pattern as the
+    Sundqvist stratocumulus guard.
+    """
+    conv = diagnostics.get("convection")
+    if conv is None or not hasattr(conv, "ktype"):
+        return jnp.zeros((ncols,), dtype=jnp.int32)
+    return jnp.reshape(conv.ktype, (ncols,)).astype(jnp.int32)
 
 
 def cloud_overlap_name(code: int) -> str:

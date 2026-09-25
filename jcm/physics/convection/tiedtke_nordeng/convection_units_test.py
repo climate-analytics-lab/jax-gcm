@@ -484,7 +484,10 @@ class TestUpdraftDetrainment:
         ktop = 15
 
         # Create a moist-unstable profile
-        pressure = jnp.linspace(100000, 10000, nlev)
+        # Top-first (index 0 = model top): ``calculate_updraft`` is the
+        # scheme's top-first internal, whose ascent scans upward from the
+        # cloud-base interface ``kbase`` to the ceiling ``ktop``.
+        pressure = jnp.linspace(10000, 100000, nlev)
         temperature = 300.0 * (pressure / 100000.0) ** 0.286
         qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
         humidity = 0.85 * qs
@@ -513,7 +516,10 @@ class TestUpdraftDetrainment:
         kbase = 30
         ktop = 15
 
-        pressure = jnp.linspace(100000, 10000, nlev)
+        # Top-first (index 0 = model top): ``calculate_updraft`` is the
+        # scheme's top-first internal, whose ascent scans upward from the
+        # cloud-base interface ``kbase`` to the ceiling ``ktop``.
+        pressure = jnp.linspace(10000, 100000, nlev)
         temperature = 300.0 * (pressure / 100000.0) ** 0.286
         qs = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
         humidity = 0.85 * qs
