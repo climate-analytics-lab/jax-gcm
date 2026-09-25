@@ -1562,8 +1562,8 @@ def read_anthropogenic_emissions(ds, align_mode: str = "auto",
     ``"hold"``, ``forcing.emissions_persist``) is a dated product's declared
     out-of-range policy, checked against the run window at run start
     (:func:`check_forcing_coverage`, #900). Inputs are flux rates, not interval
-    totals; bounds-aware conversion of interval totals at ingestion remains
-    tracked in #876.
+    totals: an input stored as per-interval totals must be converted to a
+    rate before it is read, as nothing here divides by interval bounds.
     """
     emis_names = [str(v) for v in ds.data_vars if str(v).startswith("emis_")]
     if not emis_names:
@@ -1804,9 +1804,9 @@ def read_dust_source(ds, lat_deg=None, lon_deg=None, var_name="pot_source",
         # directly.
         return jnp.asarray(arr)
     # WRAP_YEAR steps the record by month, never interpolating, as
-    # ``bgc_dust_read_monthly`` does — but it bins the year into twelve equal
-    # 30.42-day slices, so records 2-11 switch 1-2 days after the calendar
-    # month start (#805, shared by every monthly climatology).
+    # ``bgc_dust_read_monthly`` does: a twelve-record climatology holds
+    # record m from the 1st of Gregorian month m
+    # (``_monthly_climatology_index``, shared by every monthly climatology).
     if ds.sizes["time"] != _DUST_MONTHS:
         raise ValueError(
             f"{var_name}: the HAMMOZ potential-source climatology has "
