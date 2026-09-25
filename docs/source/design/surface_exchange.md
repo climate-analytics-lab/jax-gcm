@@ -173,7 +173,7 @@ run entry point applies to its concrete forcing before stepping:
 | `Model.run_from_state_with_carry` (so `run`, `resume`, `run_from_state`) | the run's absolute start/end |
 | `PrescribedStateModel.run` (`run.mode=prescribed`) | the span of the prescribed state times |
 | `SingleColumnModel.run` | none (a column has no absolute date) |
-| CLI runners and `jcm.configurations.load`, right after forcing assembly | none (presence only; the model call then checks coverage) |
+| CLI runners and `jcm.configurations.load`, right after forcing assembly | the configured `[run.start_time, start + total_time]` |
 
 (a) Prescribed fluxes with no consumer are rejected rather than silently
 ignored; the error names `forcing.prescribed_surface_flux` and how to
@@ -181,7 +181,10 @@ enable forced mode. The check is by declared capability, not class name,
 so a composition edited with `replace`/`remove` is judged by what its terms
 actually read. (b) With a consumer composed, every term's
 `validate_forcing` runs: the forced-mode terms raise if their fields are
-absent or, given a window, if a date-aligned archive does not cover it.
+absent or, given a window, if a date-aligned archive does not cover it
+under its declared persistence. The same helper then checks every other
+dated forcing input against the window; that general rule is
+{doc}`forcing_time_semantics`.
 The SCM CLI (`run.mode=scm`) builds no `ForcingData`, so it refuses both a
 `prescribed_surface_flux` block and a forced-mode physics; drive a forced
 column from Python instead.
@@ -243,36 +246,21 @@ load or run start rather than silently mis-phasing the fluxes:
   Anything else — a July→June span, a four-weekly axis, a seasonal
   climatology — raises.
 - `BY_DATE` selection clamps to the end samples outside its axis, so at run
-  start (`validate_forcing` of the forced-mode terms, which
-  `validate_run_forcing` calls with the run window — the model run's, or
-  the prescribed states' span) a date-aligned archive must cover the whole
-  run. The covered window is the file's CF time bounds when it carries
-  them (the variable the `time` coordinate's `bounds` attribute names, or
-  `time_bnds`/`time_bounds`; validated to bracket each sample), which is
-  exact for any stamp placement. The bounds are kept per interval, so
-  disjoint ones are a declared gap: the run must lie inside one contiguous
-  stretch, because inside a gap a neighbouring sample would silently stand
-  in for data the file says it lacks. Rejecting such files at read time
+  start a date-aligned archive must cover the whole run window, or declare
+  `persist: hold` in the block (`read_prescribed_surface_fluxes(...,
+  persist="hold")` from Python) to hold its end samples deliberately. This is
+  the rule every dated input follows, and the covered span is defined once in
+  {doc}`forcing_time_semantics`. What is specific to flux archives is the
+  **CF time bounds**: the reader carries them (the variable the `time`
+  coordinate's `bounds` attribute names, or `time_bnds`/`time_bounds`;
+  validated to bracket each sample) to the check, which makes the span exact
+  for any stamp placement. The bounds are kept per interval, so disjoint ones
+  are a declared gap the run may not cross. Rejecting such files at read time
   would refuse archives with a declared outage that a run avoiding it can
-  use; without bounds no gap is ever inferred from the stamps. A single
-  dated sample without bounds covers only its own instant. Without bounds
-  it is otherwise the end samples plus
-  each END's own spacing (first interval before the first sample, last
-  interval after the last): a sample may be stamped at the start or the
-  middle of the interval it represents, so a Jan-1…Dec-1 or a Jan-15…Dec-15
-  monthly archive both cover their calendar year. Calendar cadences are
-  stepped in calendar months: same-day-of-month series (monthly or yearly)
-  and month-END series (Jan 31, Feb 28/29, …; a noleap Feb 28 counts),
-  which stay anchored at month end (Dec 31 before a Jan-31 first sample,
-  Mar 31 after a Feb-28/29 last one). Any other cadence — including
-  mid-month stamps whose day varies — is extended by its elapsed length in
-  seconds, exact for fixed steps (`jcm.forcing._repeat_cadence` lists the
-  forms). An interior gap never
-  widens that slack, so a daily archive with a long internal gap still ends
-  one day after its last sample. A run outside it raises and
-  names both remedies — supply covering fluxes, or declare the file a
-  climatology. The check is skipped only when the window or the series is
-  traced (a run inside a JAX transformation).
+  use. Without bounds the span is the end samples plus each end's own
+  spacing. A run outside it raises and names the remedies: supply covering
+  fluxes, declare `forcing.prescribed_surface_flux.persist=hold`, or declare
+  the file a climatology.
 
 The same `auto` rule applies to the surface boundary file (`forcing.align`)
 and the ozone / emissions / oxidant files (`forcing.ozone_align`,
@@ -281,7 +269,10 @@ recorded kind is the only thing `auto` may consult, because it is the only
 place the climatology/transient distinction is actually recorded. The
 alternative of stamping the CF `climatology` attribute on files and keying
 `auto` on it was rejected: the attribute is essentially absent from real
-forcing data, so it would still leave every user file to a guess.
+forcing data, so it would still leave every user file to a guess. What a
+dated input does outside its time axis is declared the same way, per input
+(`forcing.persist`, `forcing.ozone_persist`, ...; see
+{doc}`forcing_time_semantics`).
 
 ## What this replaces
 

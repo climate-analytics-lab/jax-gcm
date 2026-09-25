@@ -1441,6 +1441,54 @@ class TestExpandYearlyFiles(unittest.TestCase):
                                 available=[1870, 2022])[-1],
             "/x/2022.nc")
 
+    def test_requested_years_outside_coverage_raise_under_strict(self):
+        # #900: a year with no file would silently hold the edge year's
+        # samples; under the default strict policy that is an error naming
+        # the product, both ranges and the declared escape.
+        for years in ([2023, 2024], [2020, 2024], [1940, 1951]):
+            with self.subTest(years=years), self.assertRaisesRegex(
+                    ValueError,
+                    r"forcing.ozone_file='/o3/\{year\}.nc'.*"
+                    rf"{years[0]}-{years[-1]}.*1950-2022.*"
+                    r"forcing.ozone_persist=hold"):
+                expand_yearly_files("/o3/{year}.nc", years, [1950, 2022],
+                                    key="ozone_file")
+        with self.assertRaisesRegex(ValueError, "forcing.persist=hold"):
+            expand_yearly_files("/x/{year}.nc", [2023, 2023], [1950, 2022])
+
+    def test_hold_reuses_the_edge_year_with_a_warning(self):
+        with self.assertWarnsRegex(UserWarning,
+                                   "forcing.emissions_persist=hold"):
+            out = expand_yearly_files("/e/{year}.nc", [2023, 2024],
+                                      [1950, 2022], persist="hold",
+                                      key="emissions_file")
+        self.assertEqual(out, ["/e/2022.nc"])
+        with self.assertWarns(UserWarning):
+            out = expand_yearly_files("/e/{year}.nc", [2020, 2024],
+                                      [1950, 2022], persist="hold",
+                                      key="emissions_file")
+        self.assertEqual(out, [f"/e/{y}.nc" for y in range(2019, 2023)])
+        with self.assertWarns(UserWarning):
+            out = expand_yearly_files("/e/{year}.nc", [1900, 1901],
+                                      [1950, 2022], persist="hold",
+                                      key="emissions_file")
+        self.assertEqual(out, ["/e/1950.nc"])
+
+    def test_covered_request_is_silent_under_either_policy(self):
+        import warnings
+        for persist in ("strict", "hold"):
+            with self.subTest(persist), warnings.catch_warnings():
+                warnings.simplefilter("error")
+                self.assertEqual(
+                    expand_yearly_files("/x/{year}.nc", [2021, 2022],
+                                        [1950, 2022], persist=persist),
+                    ["/x/2020.nc", "/x/2021.nc", "/x/2022.nc"])
+
+    def test_unknown_persist_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "forcing.oxidants_persist"):
+            expand_yearly_files("/x/{year}.nc", [2000, 2000], [1950, 2022],
+                                persist="auto", key="oxidants_file")
+
     def test_plain_paths_and_none_pass_through(self):
         self.assertEqual(expand_yearly_files("/x/forcing.nc", [1979, 1981]),
                          "/x/forcing.nc")
@@ -1540,8 +1588,9 @@ class TestReadMacv2Weights(unittest.TestCase):
         from jcm.forcing import BY_DATE, WRAP_YEAR, read_macv2_weights
         ds, _, ac = self._synthetic_macv2()
         yw_ts, ac_ts = read_macv2_weights(ds)
-        # year_weight -> (year, plume), BY_DATE so the model tracks the year.
-        self.assertEqual(yw_ts.values.shape, (5, 9))
+        # year_weight -> (year, plume), BY_DATE so the model tracks the year;
+        # the NaN fill year 2017 is cut, leaving the four real years.
+        self.assertEqual(yw_ts.values.shape, (4, 9))
         self.assertEqual(int(yw_ts.align_mode), BY_DATE)
         # ann_cycle -> (week, feature, plume), WRAP_YEAR (repeats yearly).
         self.assertEqual(ac_ts.values.shape, (52, 2, 9))
@@ -1550,22 +1599,402 @@ class TestReadMacv2Weights(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(ac_ts.values)[0, 0, :],
                                    ac[:, 0, 0])
 
-    def test_forward_fills_nan_fill_years(self):
+    def test_truncates_nan_fill_years(self):
+        """Fill years are not data: the axis ends at the last real year, so
+        a run past it is judged by the coverage rule (#900), not silently
+        fed a forward-filled amplitude inside an apparently covered axis.
+        """
         from jcm.forcing import read_macv2_weights
-        ds, _, _ = self._synthetic_macv2()
+        ds, yw, _ = self._synthetic_macv2()
         yw_ts, _ = read_macv2_weights(ds)
         vals = np.asarray(yw_ts.values)
         self.assertFalse(np.isnan(vals).any())
-        # The 2017 fill row reuses the last valid year (2016).
-        np.testing.assert_allclose(vals[-1], vals[-2])
+        np.testing.assert_allclose(vals, yw[:, :4].T)
+        np.testing.assert_array_equal(
+            yw_ts.times.to_datetime64().astype("datetime64[Y]").astype(int)
+            + 1970, [2013, 2014, 2015, 2016])
+
+    def test_year_weight_coverage_follows_declared_persist(self):
+        from jcm.forcing import (
+            PERSIST_HOLD, _HOLD_WARNED, check_forcing_coverage,
+            read_macv2_weights,
+        )
+        ds, _, _ = self._synthetic_macv2()
+        base = ForcingData.zeros((4, 2))
+        inside = (_iso_seconds("2014-06-01"), _iso_seconds("2016-12-31"))
+        past = (_iso_seconds("2016-06-01"), _iso_seconds("2017-06-01"))
+        strict = base.copy(aerosol_year_weight=read_macv2_weights(ds)[0])
+        check_forcing_coverage(strict, inside)            # covered
+        with self.assertRaisesRegex(ValueError, "forcing.macv2_persist=hold"):
+            check_forcing_coverage(strict, past)
+        held_ts = read_macv2_weights(ds, persist="hold")[0]
+        self.assertEqual(int(held_ts.persist), PERSIST_HOLD)
+        _HOLD_WARNED.clear()
+        with self.assertWarnsRegex(UserWarning, "macv2_persist=hold"):
+            check_forcing_coverage(
+                base.copy(aerosol_year_weight=held_ts), past)
 
     def test_time_axis_is_year_starts_since_epoch(self):
         from jcm.forcing import read_macv2_weights
-        ds, _, _ = self._synthetic_macv2(years=(1970, 1971))
+        ds, _, _ = self._synthetic_macv2(years=(1970, 1971), fill_last=False)
         yw_ts, _ = read_macv2_weights(ds)
         np.testing.assert_array_equal(
             yw_ts.times.to_datetime64().astype('datetime64[D]'),
             np.asarray(['1970-01-01', '1971-01-01'], dtype='datetime64[D]'))
+
+
+def _iso_seconds(iso: str) -> float:
+    """``iso`` as seconds since 1970-01-01 (the coverage check's clock)."""
+    import pandas as pd
+    return float((pd.Timestamp(iso) - pd.Timestamp(0)).total_seconds())
+
+
+class TestDatedInputPersistence(unittest.TestCase):
+    """Every dated input declares its out-of-range policy (#900).
+
+    Per input x {strict-covered, strict-uncovered-raises, hold-warns-and-holds},
+    each built through its own REAL reader so the policy is proven to reach
+    the leaf from the door a user calls. Each archive holds the twelve
+    mid-month samples of 2000 with values 0..11, so the held value is
+    identifiable.
+    """
+
+    NLON, NLAT, NLEV = 3, 2, 2
+
+    @classmethod
+    def _times(cls):
+        import pandas as pd
+        return (pd.date_range("2000-01-01", periods=12, freq="MS")
+                + pd.Timedelta(days=14)).values
+
+    @classmethod
+    def _ramp(cls, *shape):
+        return np.broadcast_to(
+            np.arange(12, dtype=float).reshape((12,) + (1,) * len(shape)),
+            (12, *shape)).copy()
+
+    def _surface(self, persist):
+        import xarray as xr
+        shape = (96, 48)
+        ramp = np.moveaxis(self._ramp(*shape), 0, -1)
+        ds = xr.Dataset(
+            {name: (("lon", "lat", "time"), ramp + (280.0 if name in (
+                "sst", "stl") else 0.0))
+             for name in ("stl", "icec", "sst", "soilw_am", "snowc")}
+            | {"alb": (("lon", "lat"), np.zeros(shape))},
+            coords={"time": self._times()})
+        ds["icec"] = ds["icec"] * 0.0
+        forcing = ForcingData.from_dataset(
+            ds, align_mode="by_date_interp", validate=False, persist=persist)
+        return forcing, lambda f: f.sea_surface_temperature, 280.0 + 11.0
+
+    def _ozone(self, persist):
+        import os
+        import tempfile
+
+        import xarray as xr
+
+        from jcm.ozone_climatology import OzoneClimatology
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, "o3.nc")
+        xr.Dataset(
+            {"O3": (("time", "level", "lat", "lon"),
+                    self._ramp(self.NLEV, self.NLAT, self.NLON) * 1e-6)},
+            coords={"time": self._times()}).to_netcdf(path)
+        clim = OzoneClimatology.from_file(
+            path, nlon=self.NLON, nlat=self.NLAT, nlev=self.NLEV,
+            align_mode="by_date_interp", persist=persist)
+        forcing = ForcingData.zeros((self.NLON, self.NLAT)).copy(
+            ozone_climatology=clim)
+        return forcing, lambda f: f.ozone_climatology.o3_ppmv, 11.0
+
+    def _emissions(self, persist):
+        import xarray as xr
+
+        from jcm.forcing import read_anthropogenic_emissions
+        ds = xr.Dataset(
+            {"emis_ene_so2": (("time", "lon", "lat"),
+                              self._ramp(self.NLON, self.NLAT))},
+            coords={"time": self._times()})
+        emis = read_anthropogenic_emissions(ds, align_mode="by_date",
+                                            persist=persist)
+        forcing = ForcingData.zeros((self.NLON, self.NLAT)).copy(
+            anthropogenic_emissions=emis)
+        return (forcing, lambda f: f.anthropogenic_emissions["emis_ene_so2"],
+                11.0)
+
+    def _oxidants(self, persist):
+        import xarray as xr
+
+        from jcm.forcing import read_oxidant_vmr
+        ramp = self._ramp(self.NLEV, self.NLAT, self.NLON)
+        ds = xr.Dataset(
+            {v: (("time", "mlev", "lat", "lon"), ramp)
+             for v in ("OH_VMR_avrg", "NO3_VMR_avrg", "O3_VMR_avrg",
+                       "H2O2_VMR_avrg")},
+            coords={"time": self._times()})
+        vmr = read_oxidant_vmr(ds, nlev=self.NLEV, align_mode="by_date",
+                               persist=persist)
+        forcing = ForcingData.zeros((self.NLON, self.NLAT)).copy(
+            oxidant_vmr=vmr)
+        return forcing, lambda f: f.oxidant_vmr["oh"], 11.0
+
+    def _fluxes(self, persist):
+        import xarray as xr
+
+        from jcm.forcing import read_prescribed_surface_fluxes
+        ramp = self._ramp(self.NLAT, self.NLON)
+        ds = xr.Dataset(
+            {v: (("time", "lat", "lon"), ramp)
+             for v in ("sensible_heat_flux", "evaporation", "stress_u",
+                       "stress_v")},
+            coords={"time": self._times()})
+        fields = read_prescribed_surface_fluxes(ds, align_mode="by_date",
+                                                persist=persist)
+        forcing = ForcingData.zeros((self.NLON, self.NLAT)).copy(**fields)
+        return forcing, lambda f: f.prescribed_evaporation, 11.0
+
+    #: input -> (builder, the knob its errors and warnings name)
+    INPUTS = {
+        "surface": ("_surface", "forcing.persist"),
+        "ozone": ("_ozone", "forcing.ozone_persist"),
+        "emissions": ("_emissions", "forcing.emissions_persist"),
+        "oxidants": ("_oxidants", "forcing.oxidants_persist"),
+        "prescribed fluxes": ("_fluxes",
+                              "forcing.prescribed_surface_flux.persist"),
+    }
+
+    COVERED = ("2000-01-01", "2000-12-31")
+    PAST_END = ("2000-06-01", "2001-06-01")
+    BEFORE_START = ("1999-06-01", "2000-06-01")
+
+    def _window(self, pair):
+        return tuple(_iso_seconds(x) for x in pair)
+
+    def test_strict_covered_passes(self):
+        from jcm.forcing import check_forcing_coverage
+        for label, (builder, _) in self.INPUTS.items():
+            with self.subTest(label):
+                forcing, _, _ = getattr(self, builder)("strict")
+                check_forcing_coverage(forcing, self._window(self.COVERED))
+
+    def test_strict_uncovered_raises_naming_the_knob(self):
+        from jcm.forcing import check_forcing_coverage
+        for label, (builder, knob) in self.INPUTS.items():
+            forcing, _, _ = getattr(self, builder)("strict")
+            for window in (self.PAST_END, self.BEFORE_START):
+                with self.subTest(label, window=window):
+                    with self.assertRaisesRegex(ValueError, f"{knob}=hold"):
+                        check_forcing_coverage(forcing, self._window(window))
+
+    def test_hold_warns_once_and_holds_the_end_sample(self):
+        import warnings
+
+        from jcm import provenance
+        from jcm.date import DateData, to_datetime
+        from jcm.forcing import _HOLD_WARNED, check_forcing_coverage
+        date = DateData.set_date(model_time=to_datetime("2001-05-01"))
+        for label, (builder, knob) in self.INPUTS.items():
+            with self.subTest(label):
+                forcing, leaf, last = getattr(self, builder)("hold")
+                _HOLD_WARNED.clear()
+                window = self._window(self.PAST_END)
+                with self.assertWarnsRegex(UserWarning, f"{knob}=hold") as cm:
+                    check_forcing_coverage(forcing, window)
+                message = str(cm.warning)
+                # Names the covered end and the run end it holds past.
+                self.assertIn("2001-06-01", message)
+                self.assertIn("2001-01", message)
+                # Warned once: a second (e.g. chunked) call stays silent.
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error")
+                    check_forcing_coverage(forcing, window)
+                # Recorded for the output provenance.
+                self.assertIn(
+                    "hold",
+                    provenance._state["facts"]["dated_input_persistence"])
+                # And the lookup does hold the last sample past the end.
+                held = np.asarray(leaf(forcing.select(date)))
+                np.testing.assert_allclose(held, last)
+
+    def test_wrap_year_ignores_the_policy(self):
+        import xarray as xr
+
+        from jcm.forcing import (check_forcing_coverage,
+                                 read_anthropogenic_emissions)
+        ds = xr.Dataset(
+            {"emis_ene_so2": (("time", "lon", "lat"),
+                              self._ramp(self.NLON, self.NLAT))},
+            coords={"time": self._times()})
+        forcing = ForcingData.zeros((self.NLON, self.NLAT)).copy(
+            anthropogenic_emissions=read_anthropogenic_emissions(
+                ds, align_mode="wrap_year"))
+        check_forcing_coverage(forcing, self._window(("2050-01-01",
+                                                      "2060-01-01")))
+
+    def test_unknown_policy_is_rejected(self):
+        import xarray as xr
+
+        from jcm.forcing import read_anthropogenic_emissions
+        ds = xr.Dataset(
+            {"emis_ene_so2": (("time", "lon", "lat"),
+                              self._ramp(self.NLON, self.NLAT))},
+            coords={"time": self._times()})
+        with self.assertRaisesRegex(ValueError,
+                                    "forcing.emissions_persist='auto'"):
+            read_anthropogenic_emissions(ds, align_mode="by_date",
+                                         persist="auto")
+
+    def test_every_uncovered_input_is_reported_once(self):
+        from jcm.forcing import check_forcing_coverage
+        surface, _, _ = self._surface("strict")
+        emissions, _, _ = self._emissions("strict")
+        forcing = surface.copy(
+            anthropogenic_emissions=emissions.anthropogenic_emissions)
+        with self.assertRaises(ValueError) as cm:
+            check_forcing_coverage(forcing, self._window(self.PAST_END))
+        message = str(cm.exception)
+        self.assertIn("2 dated forcing inputs", message)
+        # One line per input; the surface file's other fields are named on
+        # its line rather than repeated as separate errors.
+        self.assertEqual(len(message.splitlines()), 3)
+        self.assertIn("Also uncovered from the same input", message)
+
+    def test_traced_or_absent_window_is_not_checked(self):
+        import jax
+
+        from jcm.forcing import check_forcing_coverage
+        forcing, _, _ = self._emissions("strict")
+        check_forcing_coverage(forcing, None)
+        check_forcing_coverage(None, self._window(self.PAST_END))
+        # Inside a JAX transformation the leaves are tracers: nothing to
+        # read on the host, so nothing is judged (and nothing raises).
+        window = self._window(self.PAST_END)
+
+        @jax.jit
+        def traced(f):
+            check_forcing_coverage(f, window)
+            return f.anthropogenic_emissions["emis_ene_so2"].values.sum()
+
+        traced(forcing)
+
+    def test_hold_before_the_start_and_with_declared_bounds(self):
+        import pandas as pd
+        import xarray as xr
+
+        from jcm.forcing import (_HOLD_WARNED, check_forcing_coverage,
+                                 read_prescribed_surface_fluxes)
+        starts = pd.date_range("2000-01-01", periods=12, freq="MS")
+        ends = pd.date_range("2000-02-01", periods=12, freq="MS")
+        ramp = self._ramp(self.NLAT, self.NLON)
+        ds = xr.Dataset(
+            {v: (("time", "lat", "lon"), ramp)
+             for v in ("sensible_heat_flux", "evaporation", "stress_u",
+                       "stress_v")}
+            | {"time_bnds": (("time", "nv"),
+                             np.stack([starts.values, ends.values], axis=1))},
+            coords={"time": (starts + (ends - starts) / 2).values})
+        ds["time"].attrs["bounds"] = "time_bnds"
+        fields = read_prescribed_surface_fluxes(ds, align_mode="by_date",
+                                                persist="hold")
+        forcing = ForcingData.zeros((self.NLON, self.NLAT)).copy(**fields)
+        _HOLD_WARNED.clear()
+        with self.assertWarnsRegex(
+                UserWarning, "first sample before 2000-01-01.*last sample "
+                             "after 2001-01-01"):
+            check_forcing_coverage(
+                forcing, self._window(("1999-12-01", "2001-02-01")))
+
+    def test_single_dated_sample_holds_only_its_instant(self):
+        from jcm.forcing import (BY_DATE, _HOLD_WARNED, check_forcing_coverage,
+                                 make_time_series)
+        leaf = make_time_series(np.ones((1, 9)),
+                                np.array(["2000-01-01"], "datetime64[s]"),
+                                BY_DATE, persist="hold")
+        forcing = ForcingData.zeros((self.NLON, self.NLAT)).copy(
+            aerosol_year_weight=leaf)
+        _HOLD_WARNED.clear()
+        with self.assertWarnsRegex(UserWarning, "macv2_persist=hold"):
+            check_forcing_coverage(forcing, self._window(self.COVERED))
+
+    def test_inputs_without_a_config_knob_name_their_python_escape(self):
+        from jcm.forcing import BY_DATE, check_forcing_coverage, make_time_series
+        from jcm.nudging import NudgingTarget
+        t = self._times().astype("datetime64[s]")
+        ts = make_time_series(np.ones((12, 2)), t, BY_DATE)
+        nudged = ForcingData.zeros((self.NLON, self.NLAT)).copy(
+            nudging_target=NudgingTarget(u_wind=ts, v_wind=ts,
+                                         temperature=ts))
+        with self.assertRaisesRegex(ValueError,
+                                    r"forcing.nudging_target.u_wind.*"
+                                    r"NudgingTarget.from_dataset"):
+            check_forcing_coverage(nudged, self._window(self.PAST_END))
+        dms = ForcingData.zeros((self.NLON, self.NLAT)).copy(dms_seawater=ts)
+        with self.assertRaisesRegex(ValueError,
+                                    r"make_time_series\(\.\.\., "
+                                    r"persist='hold'\)"):
+            check_forcing_coverage(dms, self._window(self.PAST_END))
+
+    def test_cli_assembly_threads_the_declared_policy(self):
+        """``forcing.persist`` reaches the expansion AND every surface leaf."""
+        import os
+        import tempfile
+
+        import xarray as xr
+        from omegaconf import OmegaConf
+
+        from jcm.forcing import PERSIST_HOLD
+        from jcm.forcing_assembly import assemble_spectral_forcing
+        coords = get_speedy_coords(layers=8, spectral_truncation=31)
+        shape = (96, 48)
+        ramp = np.moveaxis(self._ramp(*shape), 0, -1)
+        ds = xr.Dataset(
+            {"sst": (("lon", "lat", "time"), 280.0 + ramp),
+             "stl": (("lon", "lat", "time"), 270.0 + 2 * ramp),
+             "icec": (("lon", "lat", "time"), 0.0 * ramp),
+             "snowc": (("lon", "lat", "time"), 0.0 * ramp),
+             "soilw_am": (("lon", "lat", "time"), 0.5 + 0.0 * ramp),
+             "alb": (("lon", "lat"), np.full(shape, 0.2))},
+            coords={"time": self._times()})
+        with tempfile.TemporaryDirectory() as d:
+            ds.to_netcdf(os.path.join(d, "2000.nc"))
+            base = {"kind": "from_file",
+                    "file": os.path.join(d, "{year}.nc"),
+                    "years": [2000, 2001], "available_years": [2000, 2000],
+                    "align": "by_date_interp"}
+            with self.assertRaisesRegex(ValueError, "forcing.persist=hold"):
+                assemble_spectral_forcing(OmegaConf.create(base), coords)
+            with self.assertRaisesRegex(ValueError, "forcing.persist='auto'"):
+                assemble_spectral_forcing(
+                    OmegaConf.create({**base, "persist": "auto"}), coords)
+            with self.assertWarnsRegex(UserWarning, "forcing.persist=hold"):
+                forcing = assemble_spectral_forcing(
+                    OmegaConf.create({**base, "persist": "hold"}), coords)
+        for name in ("sea_surface_temperature", "sice_am", "stl_am"):
+            self.assertEqual(int(getattr(forcing, name).persist),
+                             PERSIST_HOLD, name)
+
+    def test_flux_constants_reject_a_persist_policy(self):
+        from omegaconf import OmegaConf
+
+        from jcm.forcing_assembly import _attach_prescribed_surface_fluxes
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        cfg = OmegaConf.create({"prescribed_surface_flux": {
+            "constants": {"sensible_heat_flux": 1.0, "evaporation": 0.0,
+                          "stress_u": 0.0, "stress_v": 0.0},
+            "persist": "hold"}})
+        with self.assertRaisesRegex(ValueError, "apply only to a 'file'"):
+            _attach_prescribed_surface_fluxes(None, cfg, coords)
+
+    def test_persist_codes(self):
+        from jcm.forcing import PERSIST_HOLD, PERSIST_STRICT, persist_code
+        self.assertEqual(persist_code("hold"), PERSIST_HOLD)
+        self.assertEqual(persist_code(PERSIST_STRICT), PERSIST_STRICT)
+        self.assertEqual(persist_code(np.int32(1)), PERSIST_HOLD)
+        with self.assertRaisesRegex(ValueError, "unknown persist code"):
+            persist_code(7, "forcing.x_persist")
+        with self.assertRaisesRegex(ValueError, "forcing.x_persist=True"):
+            persist_code(True, "forcing.x_persist")
 
 
 def _t63l47_coords():
@@ -1795,8 +2224,9 @@ class TestForcingFromBundles(unittest.TestCase):
                                            surface=None)
         yw = np.asarray(forcing.aerosol_year_weight.values)
         self.assertFalse(np.allclose(yw, 1.0))
-        # The packaged file carries 251 annual samples (1850..2100).
-        self.assertEqual(yw.shape[0], 251)
+        # The packaged file's 251-year axis (1850..2100) carries real data
+        # to 2023 only; the fill years are cut, not forward-filled (#900).
+        self.assertEqual(yw.shape[0], 174)
 
     def test_invalid_arguments_raise(self):
         coords = _t42l8_sigma_coords()

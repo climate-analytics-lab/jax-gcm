@@ -75,7 +75,8 @@ class NudgingTarget:
     def from_dataset(cls, ds, *,
                      u_var: str = "u", v_var: str = "v",
                      T_var: str = "T", q_var: str = "q",
-                     time_var: Optional[str] = "time") -> "NudgingTarget":
+                     time_var: Optional[str] = "time",
+                     persist: str = "strict") -> "NudgingTarget":
         """Build a :class:`NudgingTarget` from an xarray Dataset.
 
         Args:
@@ -91,6 +92,11 @@ class NudgingTarget:
                 relaxation leaves humidity alone.
             time_var: Time coord name. ``None`` for static (climatology)
                 reference data.
+            persist: ``"strict"`` (default) | ``"hold"`` — the declared
+                out-of-range policy of a time-varying target: a run outside
+                its time axis fails at start under ``"strict"``
+                (:func:`jcm.forcing.check_forcing_coverage`, #900), and
+                ``"hold"`` declares holding the end samples intended.
 
         Returns:
             A :class:`NudgingTarget` ready to attach to a
@@ -120,7 +126,8 @@ class NudgingTarget:
             times = _time_axis_from_ds(ds.rename({time_var: "time"}))
 
             def ts(a):
-                return make_time_series(a, times, align_mode=BY_DATE)
+                return make_time_series(a, times, align_mode=BY_DATE,
+                                        persist=persist)
 
             return cls(u_wind=ts(u), v_wind=ts(v), temperature=ts(T),
                        specific_humidity=None if q is None else ts(q))

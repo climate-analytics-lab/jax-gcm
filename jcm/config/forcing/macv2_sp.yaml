@@ -21,3 +21,10 @@ defaults:
 # shipped in the wheel — no download, no mirror fetch). Override with a local
 # path (``forcing.macv2_file=/path/to/file.nc``) to use a different build.
 macv2_file: auto
+
+# The per-year ``year_weight`` series is dated (by_date) and ends at the file's
+# last real year (SPv2.1: 2023; the trailing fill years are not data). A run
+# outside it fails at start under ``strict`` (default) — as the reference
+# MACv2-SP code STOPs out of range — and ``hold`` declares holding the edge
+# year's plume amplitude intended, with a warning (#900).
+macv2_persist: strict

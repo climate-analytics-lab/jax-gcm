@@ -26,18 +26,24 @@ in ``jcm/data/input_resolution.py``, driven by the Hydra ``forcing`` group
   daily values by periodic Dec/Jan linear interpolation
   (``jcm/data/bc/interpolate.py::interpolate_to_daily``), as SPEEDY treats its
   monthly boundary means.
-- **Per-product coverage clamping.** ``jcm/forcing.py::expand_yearly_files``
-  pads the requested range by one year each side, **clipped to the product's
+- **Coverage is declared, never assumed.** ``jcm/forcing.py::expand_yearly_files``
+  pads the requested ``years`` by one year each side, **clipped to the product's
   ``available_years``**, so ``by_date_interp`` has bracketing samples across the
   Jan-1/Dec-31 boundaries. Products with different coverage in one configuration
-  are supported via a per-product override (e.g. ``ozone_available_years``). Beyond
-  a product's coverage the time lookup clamps to the nearest end sample
-  (``jcm/forcing.py::make_time_series``).
-- **GHG extrapolation beyond coverage.** CO₂/CH₄/N₂O ride along in the yearly
-  files as global-mean annual series. For run dates past the product endpoint
-  (PCMDI-AMIP ends 2022; the ERA5 bundle runs later) the time lookup **clamps GHG
-  to the last sample** — slowly-evolving-species behaviour, not linear
-  extrapolation.
+  are supported via a per-product override (e.g. ``ozone_available_years``). A
+  dated input must cover the run (``jcm/forcing.py::check_forcing_coverage``,
+  applied at run start by every entry point) unless its ``*_persist`` knob
+  declares ``hold``, in which case the edge sample is held — first/last value,
+  not an extrapolation — with a warning and a provenance record. Requested years
+  outside a product's coverage likewise fail at expansion unless held. The full
+  rule, and why there is no inferred default, is
+  {doc}`../design/forcing_time_semantics`.
+- **GHG beyond coverage.** CO₂/CH₄/N₂O ride along in the yearly
+  files as global-mean annual series, so they share the surface file's
+  ``forcing.persist``: past the product endpoint (PCMDI-AMIP ends 2022; the
+  ERA5 bundle runs later) a ``hold`` run keeps the last sample —
+  slowly-evolving-species behaviour, not linear extrapolation — and a
+  ``strict`` run is refused.
 - **Ozone auto-resolve.** ``forcing.ozone_file: auto`` (the shipped default)
   resolves a packaged CMIP6 ozone climatology matching the grid; no match degrades
   to the analytic profile with a warning; an explicit path loads strictly (grid
@@ -54,7 +60,8 @@ alternative (all fields on one ERA5 land-sea mask).
 - `science` — the ``era5`` and ``amip`` SST constructions differ by ~0.16 K RMS
   and must not be mixed within one configuration (documented in
   ``jcm/config/forcing/era5.yaml``).
-  GHG and ozone beyond coverage are clamped, not extrapolated.
+  GHG and ozone beyond coverage are held, not extrapolated, and only when
+  declared (``forcing=era5`` declares it for its 2022-ending ozone).
 - `differentiability` — all ``ForcingData`` numeric fields (GHG scalars,
   emission/ozone fields) are pytree leaves, so autodiff traces through them and
   boundary conditions remain calibratable by gradient (their *effect* is
@@ -122,12 +129,14 @@ low-fidelity path (loud warning); a run that logs the analytic-ozone warning is
 *not* a valid radiation benchmark. AMIP-SST land extrapolation is heuristically
 detected and can be rejected at load. Prescribed emission / oxidant / DMS /
 dust fields are inert until the data mirror supplies them (online Gong sea
-salt needs no file — see {doc}`aerosol`). The GHG clamp beyond coverage is a
-simplification for slowly-evolving species.
+salt needs no file — see {doc}`aerosol`). A declared hold beyond coverage is
+a simplification suited to slowly-evolving species.
 
 **Code pointers.**
-- ``jcm/forcing.py`` — ``ForcingData``, ``make_time_series`` (end-clamp),
-  ``expand_yearly_files`` (per-product coverage padding), the GHG series helpers.
+- ``jcm/forcing.py`` — ``ForcingData``, ``make_time_series``,
+  ``check_forcing_coverage`` / ``by_date_coverage_error`` (the declared
+  coverage rule), ``expand_yearly_files`` (per-product coverage padding), the
+  GHG series helpers.
 - ``jcm/forcing_assembly.py`` — ``build_forcing`` and the ``_attach_ozone`` /
   ``_attach_emissions`` / ``_attach_dms`` / ``_attach_dust`` / ``_attach_oxidants``
   chain; ``jcm/runners.py::build_forcing`` delegates to it.
@@ -140,4 +149,7 @@ simplification for slowly-evolving species.
 
 **Validation evidence.** ``jcm/forcing_test.py`` (incl. year-expansion / start-date
 cases), ``jcm/physics/forcing/echam_boundary_conditions_test.py``,
-``jcm/data/input_resolution_test.py`` (per-product coverage and auto resolution).
+``jcm/data/input_resolution_test.py`` (per-product coverage and auto resolution),
+``TestDatedInputPersistence`` in ``jcm/forcing_test.py`` (every dated input ×
+strict/hold) and the entry-point matrix in
+``jcm/physics/surface/surface_exchange_test.py``.

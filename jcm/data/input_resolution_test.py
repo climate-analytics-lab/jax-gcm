@@ -52,22 +52,54 @@ class TestForcingProducts(unittest.TestCase):
             ir.forcing_products("/bb_{year}.nc", [2000, 2001], None),
             [["/bb_2000.nc", "/bb_2001.nc"]])
 
-    def test_coverage_clamps_expansion(self):
-        # emissions coverage ends 2022 while the requested range runs to 2024.
-        self.assertEqual(
-            ir.forcing_products("/emis/{year}.nc", [2023, 2024], [1850, 2022]),
-            [["/emis/2022.nc"]])
+    def test_coverage_gates_expansion_by_declared_persist(self):
+        # emissions coverage ends 2022 while the requested range runs to 2024:
+        # strict (the default) refuses, a declared hold reuses the edge year.
+        with self.assertRaisesRegex(ValueError,
+                                    "forcing.emissions_persist=hold"):
+            ir.forcing_products("/emis/{year}.nc", [2023, 2024],
+                                [1850, 2022], key="emissions_file")
+        with self.assertWarns(UserWarning):
+            self.assertEqual(
+                ir.forcing_products("/emis/{year}.nc", [2023, 2024],
+                                    [1850, 2022], persist="hold",
+                                    key="emissions_file"),
+                [["/emis/2022.nc"]])
         # The by-date bracket pads one year each side, clipped to coverage.
         self.assertEqual(
             ir.expand_yearly("/o3/{year}.nc", [2022, 2022], [1850, 2022]),
             ["/o3/2021.nc", "/o3/2022.nc"])
 
+    def test_per_product_persist(self):
+        # One policy per list product, like emissions_align.
+        with self.assertWarns(UserWarning):
+            out = ir.forcing_products(
+                ["/bb/{year}.nc", "/anthro/{year}.nc"], [2023, 2023],
+                [1850, 2022], persist=["hold", "hold"], key="emissions_file")
+        self.assertEqual(out, [["/bb/2022.nc"], ["/anthro/2022.nc"]])
+        with self.assertRaisesRegex(ValueError, "2 entries"):
+            ir.forcing_products(["/a.nc"], [2000, 2000], None,
+                                persist=["hold", "strict"],
+                                key="emissions_file")
+
+    def test_persist_key_for(self):
+        self.assertEqual(ir.persist_key_for("file"), "forcing.persist")
+        self.assertEqual(ir.persist_key_for("ozone_file"),
+                         "forcing.ozone_persist")
+        self.assertEqual(ir.persist_key_for("macv2_file"),
+                         "forcing.macv2_persist")
+
     def test_coverage_from_manifest(self):
         manifest = mm.load_manifest()
         cov = mm.coverage(manifest, "emissions_amip")
-        self.assertEqual(
-            ir.forcing_products("/emis/{year}.nc", [2023, 2024], cov),
-            [["/emis/2022.nc"]])
+        with self.assertRaisesRegex(ValueError, "1950-2022"):
+            ir.forcing_products("/emis/{year}.nc", [2023, 2024], cov,
+                                key="emissions_file")
+        with self.assertWarns(UserWarning):
+            self.assertEqual(
+                ir.forcing_products("/emis/{year}.nc", [2023, 2024], cov,
+                                    persist="hold", key="emissions_file"),
+                [["/emis/2022.nc"]])
 
 
 class TestMergeCompatibility(unittest.TestCase):

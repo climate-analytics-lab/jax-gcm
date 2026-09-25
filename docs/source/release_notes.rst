@@ -225,6 +225,27 @@ Forcing time alignment is declared, never inferred
   ``forcing.align=wrap_year`` for a climatology or ``forcing.align=by_date``
   for dated samples. Every shipped configuration and the ``amip`` / ``era5``
   presets resolve unchanged. See :doc:`v2_to_v3`.
+- **Every dated input must cover the run, or declare a hold** (#900). v2
+  clamped a ``by_date`` / ``by_date_interp`` input to its first or last sample
+  outside its time axis, and a ``{year}`` range past a product's
+  ``available_years`` to the edge-year file, with no warning, so a transient
+  run past its SST, ozone, emission or oxidant archive silently reused the
+  last record. Each dated input now declares its out-of-range policy next to
+  its alignment: ``forcing.persist`` / ``ozone_persist`` /
+  ``emissions_persist`` / ``oxidants_persist`` / ``macv2_persist`` /
+  ``prescribed_surface_flux.persist`` (and ``persist=`` on the Python
+  readers and ``ForcingData.from_bundles``). The default ``strict`` checks
+  every dated leaf against the run window at every entry point (the CLI with
+  the configured window right after assembly, before compilation; ``Model.run``
+  / ``resume`` / ``PrescribedStateModel.run`` with their exact windows), and
+  rejects out-of-coverage ``forcing.years`` before fetching. ``hold`` holds the
+  edge samples deliberately, warns once, and records the policy in the output
+  provenance (``jcm_prov_dated_input_persistence``). ``forcing=era5`` declares
+  ``ozone_persist: hold`` for its 2023–24 years. The MACv2-SP ``year_weight``
+  axis now ends at the file's last real year instead of forward-filling the
+  fill years. **Fix:** a transient run past its archive adds
+  ``forcing.<input>_persist=hold`` (or covers the run with data). See
+  :ref:`v3-persist`.
 
 MACv2-SP removed from JAM; namespaced aerosol output
 """"""""""""""""""""""""""""""""""""""""""""""""""""

@@ -101,7 +101,8 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
                   dust_regions_file=None, dust_roughness_file=None,
                   oxidants_file=None, ozone_file=None, align_mode="auto",
                   emissions_align="auto", oxidants_align="auto",
-                  ozone_align="auto") -> ForcingData:
+                  ozone_align="auto", emissions_persist="strict",
+                  oxidants_persist="strict") -> ForcingData:
     """Interpolate a monthly lon/lat forcing climatology onto the physics columns.
 
     Args:
@@ -119,6 +120,11 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
             else raises.
         emissions_align, oxidants_align, ozone_align: the per-input
             alignment specs forwarded to :func:`attach_jam_forcing`.
+        emissions_persist, oxidants_persist: the declared out-of-range
+            policies (``strict`` | ``hold``, #900) of a dated emissions /
+            oxidant series, forwarded to :func:`attach_jam_forcing`. The
+            surface and ozone readers here are climatology-only, so they
+            have no policy to declare.
         validate: Run the host-side physical-range sanity check jcm applies
             to boundary data (``jcm.forcing._validate_bc_fields``). Disable
             only for synthetic test fixtures.
@@ -221,6 +227,8 @@ def build_forcing(forcing_file: str, dycore, *, validate: bool = True,
         emissions_align=emissions_align,
         oxidants_align=oxidants_align,
         ozone_align=ozone_align,
+        emissions_persist=emissions_persist,
+        oxidants_persist=oxidants_persist,
     )
 
 
@@ -248,7 +256,7 @@ def _leaf_to_columns(leaf, lon, lat, col_lon, col_lat):
     ).reshape(lead + (1, col_lon.size))
     if isinstance(leaf, TimeSeries):
         return TimeSeries(values=jnp.asarray(cols), times=leaf.times,
-                          align_mode=leaf.align_mode)
+                          align_mode=leaf.align_mode, persist=leaf.persist)
     return jnp.asarray(cols)
 
 
@@ -281,7 +289,8 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
                        dust_regions_file=None, dust_roughness_file=None,
                        oxidants_file=None, ozone_file=None,
                        emissions_align="auto", oxidants_align="auto",
-                       ozone_align="auto") -> ForcingData:
+                       ozone_align="auto", emissions_persist="strict",
+                       oxidants_persist="strict") -> ForcingData:
     """Attach JAM emission/oxidant fields to a column-layout ``ForcingData``.
 
     The column analogue of ``jcm.runners``' ``_attach_emissions`` /
@@ -298,6 +307,10 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
     (:func:`jcm.forcing.resolve_align`, #884): explicit modes as given,
     ``auto`` only for a data-mirror/packaged product (from its manifest kind),
     an error for any other file. Ozone on this path is climatology-only.
+    The ``*_persist`` policies (``strict`` | ``hold``) ride on the dated
+    leaves for the run-start coverage check
+    (:func:`jcm.forcing.check_forcing_coverage`, #900); one combined open
+    means one emissions policy, as for the alignment.
     """
     import xarray as xr
 
@@ -359,8 +372,20 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
             align = (resolve_align(spec, paths=paths,
                                    config_key="forcing.emissions_align")
                      if emissions_have_time(ds) else spec)
-            anthro = read_anthropogenic_emissions(ds, align_mode=align)
-            speciated = read_prescribed_aerosol_emissions(ds, align_mode=align)
+            policy = emissions_persist
+            if not isinstance(policy, str) and hasattr(policy, "__iter__"):
+                policies = {str(v) for v in policy}
+                if len(policies) != 1:
+                    raise ValueError(
+                        f"forcing.emissions_persist={list(policy)!r}: the "
+                        "pySES path opens every emission product as ONE "
+                        "dataset along a shared time axis, so they need one "
+                        "policy.")
+                policy = policies.pop()
+            anthro = read_anthropogenic_emissions(ds, align_mode=align,
+                                                  persist=policy)
+            speciated = read_prescribed_aerosol_emissions(
+                ds, align_mode=align, persist=policy)
         if anthro is None and speciated is None:
             raise ValueError(
                 f"emissions_file {emissions_file!r} has no emissions variables "
@@ -441,7 +466,8 @@ def attach_jam_forcing(forcing, col_lon, col_lat, *, nlev,
             vmr = read_oxidant_vmr(
                 ds, nlev=nlev,
                 align_mode=resolve_align(oxidants_align, paths=paths,
-                                         config_key="forcing.oxidants_align"))
+                                         config_key="forcing.oxidants_align"),
+                persist=oxidants_persist)
             forcing = forcing.copy(
                 oxidant_vmr={k: to_cols(v, lon, lat) for k, v in vmr.items()})
 
