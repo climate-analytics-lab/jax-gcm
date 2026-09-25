@@ -121,6 +121,9 @@ exports it into every job (a PBS job does not inherit the submitting shell).
 `--resume` reuses the recorded commit; an explicit, different
 `JCM_MIRROR_REVISION` is refused unless `--force-mirror-revision`, which
 records the new commit and opts the job in to resuming across the switch.
+If a forced launch dies before its first checkpoint, re-issue the same
+`--resume --force-mirror-revision` command, which regenerates the opt-in; the
+record stores only requested/source/commit/written.
 Compare two validation runs only at the same commit.
 
 Every artefact of a launch — rundir, PBS job name, outputs, log — is

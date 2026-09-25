@@ -257,11 +257,15 @@ def _checkpoint(scratch, tag):
 
 
 def test_job_exports_the_pinned_commit(scratch, repo):
+    import json
+
     from jcm.data import remote
     _launch(repo, "--tag", "p")
     env = _job_env(repo, "p")
     assert env["JCM_MIRROR_REVISION"] == remote.MIRROR_REVISION
     assert "JCM_ALLOW_MIRROR_REVISION_CHANGE" not in env
+    record = scratch / "jam_runs" / "mx_speedy_t31_p" / launch.MIRROR_RECORD
+    assert json.loads(record.read_text())["source"] == "pinned"
 
 
 def test_resume_keeps_the_recorded_commit_when_the_pin_moves(
