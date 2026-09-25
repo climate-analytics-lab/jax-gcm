@@ -243,6 +243,18 @@ class Physics:
         """
         return None
 
+    def preferred_advection(self) -> str | None:
+        """Transport scheme this physics asks the dycore for, or ``None``.
+
+        Consulted by :class:`~jcm.model.Model` for a dycore constructed with
+        ``advection=None`` (see
+        :meth:`jcm.dycore.dinosaur.dycore.DinosaurDycore.resolve_advection`).
+        ``"eulerian"`` is honoured only when the physics carries no extra
+        tracers; ``None`` means no preference (semi-Lagrangian).
+        ``ComposablePhysics`` aggregates per-term preferences.
+        """
+        return None
+
     def required_dycore_fields(self):
         """Names of dycore-supplied fields this physics needs each step.
 

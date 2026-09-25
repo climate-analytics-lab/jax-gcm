@@ -212,6 +212,41 @@ class TestTracerPositivityResolution(unittest.TestCase):
             _compose(["physics=echam", "diffusion.tracer_positivity=true"])))
 
 
+class TestAdvectionResolution(unittest.TestCase):
+    """``dycore.advection`` reaches the dinosaur dycore through build_model.
+
+    ``null`` (the default) lets the physics decide — SPEEDY declares the
+    Eulerian core; everything else resolves semi-Lagrangian — and an explicit
+    value wins (an explicit Eulerian with tracer-carrying physics only warns,
+    #521). Aquaplanet/default forcing keeps the builds offline.
+    """
+
+    _OFFLINE = ["terrain=aquaplanet", "forcing=default"]
+
+    def _advection(self, overrides):
+        return build_model(_compose([*self._OFFLINE, *overrides])).dycore.advection
+
+    def test_default_config_is_null(self):
+        self.assertIsNone(_compose().dycore.advection)
+
+    def test_speedy_resolves_eulerian(self):
+        self.assertEqual(self._advection(["physics=speedy"]), "eulerian")
+
+    def test_explicit_semi_lagrangian_wins_for_speedy(self):
+        self.assertEqual(
+            self._advection(["physics=speedy", "dycore.advection=semi_lagrangian"]),
+            "semi_lagrangian")
+
+    def test_held_suarez_resolves_semi_lagrangian(self):
+        self.assertEqual(self._advection(["physics=held_suarez"]), "semi_lagrangian")
+
+    def test_explicit_eulerian_warns_for_tracer_physics(self):
+        with self.assertLogs("jcm.dycore.dinosaur.dycore", "WARNING"):
+            self.assertEqual(
+                self._advection(["physics=echam", "dycore.advection=eulerian"]),
+                "eulerian")
+
+
 class TestConfigComposition(unittest.TestCase):
     def test_default_compose(self):
         cfg = _compose()

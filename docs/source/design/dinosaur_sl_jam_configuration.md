@@ -21,12 +21,15 @@ python -m jcm.main \
 
 Load-bearing pieces:
 
-- **Semi-Lagrangian transport (now unconditional)** — nodal tracer transport (no spectral
-  round-trip for the ~40 JAM tracers) with Bermejo–Staniforth monotone
-  limiting: positivity by construction. It is also the *only* transport the
-  backend has: the Eulerian path was removed (#625) because it required
+- **Semi-Lagrangian transport (the default for every tracer-carrying
+  configuration)** — nodal tracer transport (no spectral round-trip for the
+  ~40 JAM tracers) with Bermejo–Staniforth monotone limiting: positivity by
+  construction. The physics-decided mode (`dycore.advection=null`) always
+  resolves JAM to it: Eulerian spectral transport of these tracers required
   `tracer_positivity` clipping to survive at all and lost ~20 % of
-  near-source tracer mass to it by day 10.
+  near-source tracer mass to it by day 10. The Eulerian core remains for
+  tracer-free physics (SPEEDY); forcing `dycore.advection=eulerian` on JAM
+  still runs, but warns — see {doc}`dinosaur_transport_selection`.
 - **`sl_off_centering=0.2`** — required over real orography (`off=0` is
   unstable even from a good state); validated over 215 days. This is now
   the default everywhere (`DEFAULT_OFF_CENTERING` in the dinosaur dycore,

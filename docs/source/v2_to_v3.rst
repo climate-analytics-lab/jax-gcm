@@ -328,15 +328,25 @@ through ``hydra.searchpath: [pkg://jcm.config]`` must also change
 ``+experiment@<node>=<name>`` to ``+configuration@<node>=<name>``; JAX-ESM
 composes ``+experiment@atmosphere=<name>`` and has to move in the same cycle.
 
-``+advection=`` is gone
-^^^^^^^^^^^^^^^^^^^^^^^
+``+advection=`` is gone; ``dycore.advection`` replaces it
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Semi-Lagrangian tracer transport is the only transport on the Dinosaur
-backend; the Eulerian spectral path was removed because it rang negative on
-sharp emission sources and NaN'd the aerosol microphysics.
-``+advection=semi_lagrangian`` and ``+advection=eulerian`` are both rejected,
-and the backend refuses to build on a dinosaur without the SL classes, naming
-what to install.
+Semi-Lagrangian is the Dinosaur backend's default transport, and the one the
+automatic (physics-decided) choice always uses for tracer-carrying physics:
+Eulerian spectral transport rang negative on sharp emission sources and NaN'd
+the aerosol microphysics. An explicit Eulerian request with tracers is not an
+error — it runs, but logs a warning. The top-level ``+advection=...`` config
+group no longer exists, and the backend refuses to build on a dinosaur
+without the SL classes, naming what to install.
+
+The scheme is now ``DinosaurDycore(advection=...)`` / ``dycore.advection``,
+default ``None`` / ``null`` = *the physics decides*. SPEEDY declares the
+Eulerian spectral core it was formulated on (it carries no extra tracers,
+and semi-Lagrangian costs ~4x its CPU step for nothing), so **SPEEDY runs
+Eulerian exactly as in 2.x** with no code change. ECHAM, JAM, Held–Suarez and
+any SPEEDY composition that adds tracers run semi-Lagrangian; an explicit
+``eulerian`` with tracer-carrying physics runs but warns. See
+:doc:`design/dinosaur_transport_selection`.
 
 ``diffusion.tracer_positivity`` is **not** gone. It survives as a
 mass-conserving hole-filler at the dynamics-to-physics boundary, rather than
