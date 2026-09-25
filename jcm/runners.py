@@ -935,6 +935,8 @@ def build_model(cfg: DictConfig) -> Model:
         diffusion=diffusion,
         tracer_filter=tracer_filter,
         compute_omega=_want_omega(cfg, physics),
+        # null -> Model resolves it from physics.preferred_advection().
+        advection=cfg.get("dycore", {}).get("advection", None),
         sl_options=sl_options,
     )
     return Model(

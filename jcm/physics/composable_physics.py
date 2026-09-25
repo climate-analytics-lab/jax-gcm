@@ -251,6 +251,20 @@ class ComposablePhysics(nnx.Module, Physics):
         ]
         return min(limits) if limits else None
 
+    def preferred_advection(self) -> str | None:
+        """Aggregate per-term transport preferences (see ``PhysicsTerm``).
+
+        Any term asking for ``"semi_lagrangian"`` wins — for a term that may
+        be a correctness requirement, whereas an ``"eulerian"`` preference
+        is a fidelity/cost one. Otherwise any ``"eulerian"`` preference,
+        else ``None`` (no preference).
+        """
+        prefs = {term.preferred_advection() for term in self.terms} - {None}
+        for scheme in ("semi_lagrangian", "eulerian"):
+            if scheme in prefs:
+                return scheme
+        return None
+
     def compute_tendencies(
         self,
         state: PhysicsState,

@@ -193,6 +193,37 @@ class TestComposablePhysics(unittest.TestCase):
             tend.u_wind, 0.1 * state.temperature, rtol=1e-5
         )
 
+    def test_preferred_advection_aggregation(self):
+        """No vote -> None; any Eulerian -> Eulerian; any SL wins outright.
+
+        SL wins because a term asking for it may need it for correctness
+        (nodal, monotone transport), whereas an Eulerian preference is a
+        fidelity/cost one (SPEEDY).
+        """
+        class Eulerian(LinearHeating):
+            name: ClassVar[str] = "eulerian_vote"
+
+            def preferred_advection(self):
+                return "eulerian"
+
+        class SemiLagrangian(LinearHeating):
+            name: ClassVar[str] = "sl_vote"
+
+            def preferred_advection(self):
+                return "semi_lagrangian"
+
+        self.assertIsNone(self._make_physics().preferred_advection())
+        self.assertEqual(
+            (self._make_physics() + Eulerian()).preferred_advection(), "eulerian")
+        self.assertEqual(
+            ComposablePhysics(terms=[Eulerian(), SemiLagrangian()]).preferred_advection(),
+            "semi_lagrangian")
+
+    def test_speedy_prefers_eulerian(self):
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        self.assertEqual(speedy_physics().preferred_advection(), "eulerian")
+
     def test_replace(self):
         physics = self._make_physics()
         new_rad = LinearHeating(alpha=5.0)

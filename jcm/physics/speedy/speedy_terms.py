@@ -211,6 +211,18 @@ class SpeedyTermBase(PhysicsTerm):
         # Placeholder — populated by cache_coords
         self._coords_cached = False
 
+    def preferred_advection(self) -> str:
+        """SPEEDY runs on the Eulerian spectral core.
+
+        SPEEDY was formulated and tuned on an Eulerian spectral dycore and
+        carries no extra tracers (``specific_humidity`` is modal under either
+        scheme), so semi-Lagrangian transport buys it nothing — while on CPU
+        it costs ~4x the whole step at T31L8. A SPEEDY composition that adds
+        tracers still gets semi-Lagrangian (the dycore enforces it, #521).
+        See docs/source/design/dinosaur_transport_selection.md.
+        """
+        return "eulerian"
+
     def cache_coords(self, coords):
         speedy_coords = SpeedyCoords.from_coordinate_system(coords)
         self._speedy_coords = nnx.Variable(speedy_coords)

@@ -11,3 +11,13 @@ name: dinosaur
 # on when the AeroCom plev group runs, off otherwise. Set true/false to
 # override either way.
 compute_omega: null
+
+# Transport scheme: semi_lagrangian | eulerian | null. ``null`` means
+# "decide from the physics": SPEEDY declares the Eulerian spectral core it
+# was formulated and tuned on (it carries no extra tracers, and SL costs
+# ~4x the step on CPU for no benefit there); everything else — and any
+# composition that carries extra tracers — runs semi-Lagrangian, because
+# spectral transport rings negative on sharp tracers and NaN'd the aerosol
+# microphysics (#521). An explicit ``eulerian`` with tracer-carrying
+# physics is rejected at model construction.
+advection: null
