@@ -22,6 +22,19 @@ ozone_file: auto
 ozone_align: auto
 emissions_align: auto
 oxidants_align: auto
+# What a DATED (by_date / by_date_interp) ozone / emissions / oxidants input
+# does outside its time axis (#900): ``strict`` (default) — the run window must
+# be covered, and a {year} expansion must lie inside the product's available
+# years, or the run fails before it is compiled; ``hold`` — holding the edge
+# year / end samples past the archive is the declared experiment (e.g. "2014
+# emissions after 2014"), and jcm warns once naming what is held. No ``auto``:
+# whether a run past an archive is a mistake cannot be read off the file, the
+# same rule as ``*_align`` (#884). ``emissions_persist`` also takes one value
+# per ``emissions_file`` product. wrap_year climatologies cover every date and
+# ignore the policy.
+ozone_persist: strict
+emissions_persist: strict
+oxidants_persist: strict
 
 # --- Prescribed-emission inputs (JAM / online aerosol) -----------------------
 # The four keys below default to ``auto`` (same convention as ``ozone_file``):
@@ -90,6 +103,9 @@ oxidants_file: auto
 #               between them) and the run must lie within the archive (its
 #               CF ``time_bnds`` if present, else the first/last sample
 #               interval of slack at each end) or it fails at start.
+#   persist: strict | hold  (default strict) — for a by_date file, whether a
+#               run outside that coverage fails (strict) or deliberately
+#               holds the end samples with a warning (hold); #900.
 #               The default ``auto`` resolves only data-mirror products and no
 #               mirror product carries fluxes, so it raises: the timestamps
 #               alone cannot tell a monthly climatology from a one-year

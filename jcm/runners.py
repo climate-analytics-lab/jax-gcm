@@ -403,11 +403,13 @@ _band_config_for_terms = RadiationBandConfig.for_terms
 from jcm.physics.radiation.nn_emulator_scheme import (  # noqa: E402
     guard_ghg_forcing as guard_emulator_ghg_forcing,
 )
-# Both directions of the forced-mode contract (#301) are checked right after
-# forcing assembly, the first point physics and forcing meet on the CLI:
-# supplied fluxes need a consumer (the error names the config key and how to
-# enable forced mode) and a forced-mode physics needs its fluxes. The model
-# call re-applies the same helper with the concrete run window.
+# The run-start forcing contract is checked right after forcing assembly, the
+# first point physics and forcing meet on the CLI: both directions of forced
+# mode (#301 — supplied fluxes need a consumer, a forced-mode physics needs its
+# fluxes) and the coverage of every dated input over the CONFIGURED run window
+# (#900, :func:`configured_run_window`), so a transient run past its archive
+# fails before the run is compiled. The model call re-applies the same helper
+# with its exact window.
 from jcm.physics.surface.prescribed_flux import (  # noqa: E402
     validate_run_forcing as validate_run_forcing,
 )
@@ -762,6 +764,21 @@ def _run_duration(cfg: DictConfig, start_time) -> tuple:
     return total, end
 
 
+def configured_run_window(cfg: DictConfig, model):
+    """Return the configured ``[start, start + total]`` window, seconds since 1970.
+
+    What the CLI doors pass to :func:`validate_run_forcing` right after
+    forcing assembly (#900): the whole configured run — ``run.start_time``
+    through ``run.total_time`` / ``run.end_time`` — which contains every
+    chunk and resumed segment, so a dated input that does not cover the run
+    fails once, up front, instead of at the chunk that first leaves its
+    archive.
+    """
+    from jcm.model import _run_window_seconds
+    return _run_window_seconds(
+        model.start_time, _configured_total_seconds(cfg, model.start_time))
+
+
 def _configured_total_days(cfg: DictConfig, start_time) -> float:
     """Return the configured run length in days (for day-granular windows)."""
     return _configured_total_seconds(cfg, start_time) / 86400.0
@@ -951,6 +968,8 @@ def build_model(cfg: DictConfig) -> Model:
         diffusion=diffusion,
         tracer_filter=tracer_filter,
         compute_omega=_want_omega(cfg, physics),
+        # null -> Model resolves it from physics.preferred_advection().
+        advection=cfg.get("dycore", {}).get("advection", None),
         sl_options=sl_options,
     )
     return Model(
@@ -1088,6 +1107,7 @@ from jcm.forcing_assembly import (  # noqa: E402
     _merge_disjoint_emissions as _merge_disjoint_emissions,
     _model_latlon_deg as _model_latlon_deg,
     _open_forcing_dataset as _open_forcing_dataset,
+    _persist as _persist,
     _product_available_years as _product_available_years,
     _product_time_axis as _product_time_axis,
     _reject_year_pattern as _reject_year_pattern,
@@ -1140,7 +1160,9 @@ def _pyses_align_modes(forcing_cfg, surface_spec, ozone_spec):
             e for p in _forcing_products(
                 emissions_raw, forcing_cfg.get("years", None),
                 _product_available_years(forcing_cfg,
-                                         "emissions_available_years"))
+                                         "emissions_available_years"),
+                persist=_persist(forcing_cfg, "emissions_file"),
+                key="emissions_file")
             for e in (p if isinstance(p, (list, tuple)) else [p])]
     return {
         "align_mode": declare_manifest_align(
@@ -1288,6 +1310,10 @@ def _build_pyses_forcing(_forcing_cfg, dycore, coords):
         # ``auto`` resolves only data-mirror/packaged products, decided on the
         # ORIGINAL (pre-fetch) specs so a fetched path cannot change it.
         **_pyses_align_modes(_forcing_cfg, raw_file or file, ozone_spec),
+        # The declared out-of-range policies of the dated JAM inputs (#900);
+        # surface and ozone are climatology-only on this path.
+        emissions_persist=_persist(_forcing_cfg, "emissions_file"),
+        oxidants_persist=_persist(_forcing_cfg, "oxidants_file"),
     )
     # MACv2-SP plume weights are the one dycore-agnostic attachment the
     # spectral tail below also performs that ``pyses_build_forcing`` does
@@ -1640,8 +1666,10 @@ def warn_emission_config_traps(*, has_jam, is_pyses, is_scm, forcing_cfg,
                 "{year}.nc\"', with the run's forcing.years range. The "
                 "emissions_amip bundle spans 1950-2022 (ends before era5's "
                 "2024 surface coverage), so also set "
-                "forcing.emissions_available_years=[1950,2022] to clamp the "
-                "expansion to the built files (era5 already ships this). The "
+                "forcing.emissions_available_years=[1950,2022] (era5 already "
+                "ships this); run years past 2022 are then rejected unless "
+                "you declare forcing.emissions_persist=hold to hold the 2022 "
+                "emissions deliberately (#900). The "
                 "mirror publishes NO transient oxidants product (only "
                 "oxidants_pi/oxidants_pd climatologies), so transient oxidants "
                 "must come from a separately prepared dataset; "
@@ -1775,7 +1803,8 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     forcing = build_forcing(cfg, model.coords, dycore=getattr(model, "dycore", None))
     forcing = _maybe_attach_nudging_target(forcing, cfg, model)
     guard_emulator_ghg_forcing(model.physics, forcing)
-    validate_run_forcing(model.physics, forcing)
+    validate_run_forcing(model.physics, forcing,
+                         run_window=configured_run_window(cfg, model))
     warn_on_config_traps(cfg, model.physics, forcing, coords=model.coords,
                          dycore=getattr(model, "dycore", None))
     # After model + forcing construction: config-selected libraries are

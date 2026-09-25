@@ -212,6 +212,41 @@ class TestTracerPositivityResolution(unittest.TestCase):
             _compose(["physics=echam", "diffusion.tracer_positivity=true"])))
 
 
+class TestAdvectionResolution(unittest.TestCase):
+    """``dycore.advection`` reaches the dinosaur dycore through build_model.
+
+    ``null`` (the default) lets the physics decide — SPEEDY declares the
+    Eulerian core; everything else resolves semi-Lagrangian — and an explicit
+    value wins (an explicit Eulerian with tracer-carrying physics only warns,
+    #521). Aquaplanet/default forcing keeps the builds offline.
+    """
+
+    _OFFLINE = ["terrain=aquaplanet", "forcing=default"]
+
+    def _advection(self, overrides):
+        return build_model(_compose([*self._OFFLINE, *overrides])).dycore.advection
+
+    def test_default_config_is_null(self):
+        self.assertIsNone(_compose().dycore.advection)
+
+    def test_speedy_resolves_eulerian(self):
+        self.assertEqual(self._advection(["physics=speedy"]), "eulerian")
+
+    def test_explicit_semi_lagrangian_wins_for_speedy(self):
+        self.assertEqual(
+            self._advection(["physics=speedy", "dycore.advection=semi_lagrangian"]),
+            "semi_lagrangian")
+
+    def test_held_suarez_resolves_semi_lagrangian(self):
+        self.assertEqual(self._advection(["physics=held_suarez"]), "semi_lagrangian")
+
+    def test_explicit_eulerian_warns_for_tracer_physics(self):
+        with self.assertLogs("jcm.dycore.dinosaur.dycore", "WARNING"):
+            self.assertEqual(
+                self._advection(["physics=echam", "dycore.advection=eulerian"]),
+                "eulerian")
+
+
 class TestConfigComposition(unittest.TestCase):
     def test_default_compose(self):
         cfg = _compose()
@@ -2273,9 +2308,13 @@ class TestRunDispatchErrorPaths(unittest.TestCase):
         # _run_full only touches ``model.coords`` (for the forcing) and
         # ``model.physics`` (for the emulator GHG guard and the config-trap
         # check, both of which no-op on an empty term list).
+        # ``start_time`` gives the configured window the dated-input
+        # coverage check (#900) is run against.
+        from jcm.date import to_datetime
         stub = _types.SimpleNamespace(
             coords=build_coords(cfg),
-            physics=_types.SimpleNamespace(terms=[]))
+            physics=_types.SimpleNamespace(terms=[]),
+            start_time=to_datetime("2000-01-01"))
         with self.assertRaisesRegex(ValueError, "Unknown init.kind"):
             _run_full(cfg, model=stub)
 
@@ -2873,18 +2912,23 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
                 runners._product_available_years(
                     cfg, "ozone_available_years")),
             ["/o3/2021.nc", "/o3/2022.nc"])
-        self.assertEqual(
+        # Past the product's coverage the requested years have no file: the
+        # default strict policy refuses (#900)...
+        with self.assertRaisesRegex(ValueError, "forcing.ozone_persist=hold"):
             runners._expand_years(
                 "/o3/{year}.nc", [2023, 2024],
                 runners._product_available_years(
-                    cfg, "ozone_available_years")),
-            ["/o3/2022.nc"])
-        # A range entirely past coverage clamps to the last edge file
-        # rather than inverting into an empty expansion.
-        self.assertEqual(
-            runners._expand_years("/o3/{year}.nc", [2024, 2024],
-                                  available=[1850, 2022]),
-            ["/o3/2022.nc"])
+                    cfg, "ozone_available_years"), key="ozone_file")
+        # ...and a declared hold reuses the last edge file rather than
+        # inverting into an empty expansion.
+        with self.assertWarns(UserWarning):
+            self.assertEqual(
+                runners._expand_years(
+                    "/o3/{year}.nc", [2023, 2024],
+                    runners._product_available_years(
+                        cfg, "ozone_available_years"),
+                    persist="hold", key="ozone_file"),
+                ["/o3/2022.nc"])
         fallback = OmegaConf.create({"available_years": [1979, 2024]})
         self.assertEqual(
             runners._product_available_years(
@@ -2906,13 +2950,22 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
             "available_years": [1979, 2024],
             "emissions_available_years": [1850, 2022],
         })
-        # Emissions clamp to the last built (2022) file...
-        self.assertEqual(
+        # Emissions past their coverage need the declared hold (#900), which
+        # then reuses the last built (2022) file...
+        with self.assertRaisesRegex(ValueError,
+                                    "forcing.emissions_persist=hold"):
             runners._forcing_products(
                 "/emis/{year}.nc", cfg.years,
                 runners._product_available_years(
-                    cfg, "emissions_available_years")),
-            [["/emis/2022.nc"]])
+                    cfg, "emissions_available_years"))
+        with self.assertWarns(UserWarning):
+            self.assertEqual(
+                runners._forcing_products(
+                    "/emis/{year}.nc", cfg.years,
+                    runners._product_available_years(
+                        cfg, "emissions_available_years"),
+                    persist="hold"),
+                [["/emis/2022.nc"]])
         # ...while the surface product (shared available_years, coverage to
         # 2024) still reaches the requested 2023-2024 (plus the one-year
         # by_date_interp bracket on the low side).
@@ -2953,6 +3006,11 @@ class TestYearExpansionAndStartDate(unittest.TestCase):
         # so the preset ships a per-product emissions clamp (Codex round 8).
         self.assertEqual(list(cfg.forcing.available_years)[-1], 2024)
         self.assertEqual(list(cfg.forcing.emissions_available_years)[-1], 2022)
+        # Ozone past 2022 is a DECLARED hold in the preset (#900); the
+        # surface and emissions stay strict.
+        self.assertEqual(cfg.forcing.ozone_persist, "hold")
+        self.assertEqual(cfg.forcing.persist, "strict")
+        self.assertEqual(cfg.forcing.emissions_persist, "strict")
 
     def test_list_spec_splits_into_per_element_products(self):
         # emissions_file may be a list (e.g. biomass-burning + anthropogenic).
@@ -3669,7 +3727,9 @@ class TestAttachMacv2Weights(unittest.TestCase):
         cfg = OmegaConf.create({"kind": "default", "macv2_file": "auto"})
         forcing = _attach_macv2_weights(None, cfg, coords)
         yw = np.asarray(forcing.aerosol_year_weight.values)
-        self.assertEqual(yw.shape, (251, 9))
+        # SPv2.1's real years 1850..2023; the trailing fill years are cut.
+        self.assertEqual(yw.shape, (174, 9))
+        self.assertFalse(np.isnan(yw).any())
         self.assertFalse(np.allclose(yw, 1.0))
 
     def test_pyses_path_attaches_macv2_weights(self):

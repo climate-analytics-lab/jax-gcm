@@ -51,6 +51,47 @@ _ALIGNMENT_FROM_MANIFEST = {
 #: Values that mean "explicitly off" for any forcing key.
 _NONE_SENTINELS = (None, "", "null", "none", "None")
 
+#: The declared out-of-range policies of a dated input (#900), the ``persist``
+#: counterpart of the ``align`` vocabulary. ``strict`` (every default): the
+#: input must cover the run window — a ``{year}`` expansion must lie inside the
+#: product's available years, and a date-aligned series must cover the run
+#: (``jcm.forcing.check_forcing_coverage``) — or the run raises. ``hold``: the
+#: user declares that holding the edge year / end sample past the archive is
+#: the intended experiment, and jcm warns once naming what is held. There is
+#: deliberately no ``auto``: whether a transient run past its archive is a
+#: mistake or a "hold 2014 emissions" experiment cannot be read off the file
+#: (the #884 rule — temporal semantics are declared, never inferred).
+PERSIST_STRICT = "strict"
+PERSIST_HOLD = "hold"
+PERSIST_MODES = (PERSIST_STRICT, PERSIST_HOLD)
+
+
+def check_persist(persist, config_key: str = "forcing.persist") -> str:
+    """Validate a declared ``persist`` policy and return it as a string."""
+    value = str(persist)
+    if value not in PERSIST_MODES:
+        raise ValueError(
+            f"{config_key}={persist!r}: unknown out-of-range policy; expected "
+            f"one of {PERSIST_MODES} — 'strict' (the input must cover the run) "
+            "or 'hold' (deliberately hold its endpoint values past it). There "
+            "is no 'auto': whether holding is intended cannot be inferred "
+            "(#900).")
+    return value
+
+
+def persist_key_for(key: str) -> str:
+    """Return the ``forcing.*_persist`` knob that governs the forcing key ``key``.
+
+    ``file`` (the surface boundary file) → ``forcing.persist``; every other
+    ``<name>_file`` → ``forcing.<name>_persist``, mirroring the ``*_align``
+    knobs.
+    """
+    key = str(key)
+    if key == "file":
+        return "forcing.persist"
+    stem = key[:-len("_file")] if key.endswith("_file") else key
+    return f"forcing.{stem}_persist"
+
 
 class SpecKind(enum.Enum):
     """What a parsed user value denotes."""
@@ -123,7 +164,8 @@ def _is_seq(value) -> bool:
 # {year} file-pattern expansion + product splitting
 # ---------------------------------------------------------------------------
 
-def expand_yearly_files(file_spec, years, available=None):
+def expand_yearly_files(file_spec, years, available=None, *,
+                        persist=PERSIST_STRICT, key="file"):
     """Expand a ``{year}`` file pattern into the yearly-bundle file list.
 
     The transient AMIP bundles are one file per year (issue #610:
@@ -142,7 +184,19 @@ def expand_yearly_files(file_spec, years, available=None):
     so a run starting Jan 1 needs the previous December's sample (and a
     run ending Dec 31 the next January's) for ``by_date_interp`` to
     bracket the boundary instead of clamping to the nearest mid-month
-    value for ~half a month.
+    value for ~half a month. That one-year pad is the interpolation bracket
+    and is simply clipped where coverage ends; whether the run itself is then
+    covered is judged at run start from the loaded time axis
+    (``jcm.forcing.check_forcing_coverage``).
+
+    The REQUESTED years are a different matter: a year outside
+    ``available`` has no file, so the run would hold the edge year's samples
+    for it. That is declared, never inferred (#900). Under ``persist="strict"``
+    (the default) it raises, naming the product (``key``, the forcing key the
+    pattern came from), the requested and available ranges and the
+    ``persist=hold`` escape. Under ``persist="hold"`` the expansion is clipped
+    to coverage — a range entirely outside it reuses the nearest edge-year
+    file — and a warning names what is held.
 
     This expands a **single** product (one scalar spec). A ``{year}``
     pattern becomes that product's list of yearly files — one product
@@ -167,20 +221,44 @@ def expand_yearly_files(file_spec, years, available=None):
         raise ValueError(
             f"forcing file pattern {file_spec!r} contains {{year}} but "
             "no year range is set — add e.g. forcing.years=[1979,1983]")
+    persist_key = persist_key_for(key)
+    persist = check_persist(persist, persist_key)
     first, last = int(years[0]), int(years[-1])
     if last < first:
         raise ValueError(f"forcing.years range is reversed: {years!r}")
     if available is not None:
         lo, hi = int(available[0]), int(available[-1])
+        if first < lo or last > hi:
+            detail = (
+                f"forcing.{key}={file_spec!r}: forcing.years requests "
+                f"{first}-{last}, but the product's available years are "
+                f"{lo}-{hi}, so the run would hold the "
+                f"{'first' if first < lo else 'last'} year's samples for the "
+                "years it has no file for")
+            if persist == PERSIST_STRICT:
+                raise ValueError(
+                    f"{detail}. Narrow forcing.years (and the run) to the "
+                    f"covered years, supply the missing years, or declare "
+                    f"{persist_key}=hold to hold the edge year deliberately "
+                    "(#900).")
+            import warnings
+            warnings.warn(
+                f"{detail}; {persist_key}=hold declares that deliberate, so "
+                "the expansion reuses the edge-year file(s).",
+                # Default stacklevel on purpose: several doors expand the same
+                # spec (oxidants resolve it twice), and one warning location
+                # lets the ``default`` filter show an identical message once.
+                UserWarning)
         first, last = max(first - 1, lo), min(last + 1, hi)
-        # A requested range entirely outside coverage would invert here
-        # and expand to nothing; clamp to the nearest edge file instead
-        # (the time lookup then clamps to its first/last sample).
+        # Only reachable under ``hold``: a requested range entirely outside
+        # coverage would invert here and expand to nothing, so reuse the
+        # nearest edge file (the declared hold) instead.
         first, last = min(first, hi), max(last, lo)
     return [file_spec.format(year=y) for y in range(first, last + 1)]
 
 
-def expand_yearly(file_spec, years, available=None, *, expand=None):
+def expand_yearly(file_spec, years, available=None, *, expand=None,
+                  persist=PERSIST_STRICT, key="file"):
     """Expand one ``{year}`` pattern (see :func:`expand_yearly_files`).
 
     The rule lives in :func:`expand_yearly_files` (this module); this only lets a
@@ -188,10 +266,11 @@ def expand_yearly(file_spec, years, available=None, *, expand=None):
     the resolver stays a single home for the mapping.
     """
     fn = expand or expand_yearly_files
-    return fn(file_spec, years, available)
+    return fn(file_spec, years, available, persist=persist, key=key)
 
 
-def forcing_products(file_spec, years, available=None, *, expand=None) -> list:
+def forcing_products(file_spec, years, available=None, *, expand=None,
+                     persist=PERSIST_STRICT, key="file") -> list:
     """Split a spec into independent products, each year-expanded.
 
     A **list** value names several products (e.g. a biomass-burning file plus an
@@ -200,11 +279,40 @@ def forcing_products(file_spec, years, available=None, *, expand=None) -> list:
     their distinct time axes instead of being outer-joined. A scalar is a single
     product; a scalar ``{year}`` pattern becomes that product's yearly-file list.
     Port of ``jcm.runners._forcing_products``.
+
+    ``persist`` is the product's declared out-of-range policy — a scalar for
+    every product, or (for a list spec) one policy per product, like
+    ``forcing.emissions_align`` (see :func:`per_product`).
     """
     if _is_seq(file_spec):
-        return [expand_yearly(e, years, available, expand=expand)
-                for e in file_spec]
-    return [expand_yearly(file_spec, years, available, expand=expand)]
+        elems = list(file_spec)
+        policies = per_product(persist, len(elems), persist_key_for(key))
+        return [expand_yearly(e, years, available, expand=expand,
+                              persist=p, key=key)
+                for e, p in zip(elems, policies)]
+    if _is_seq(persist):
+        persist = per_product(persist, 1, persist_key_for(key))[0]
+    return [expand_yearly(file_spec, years, available, expand=expand,
+                          persist=persist, key=key)]
+
+
+def per_product(spec, n_products, config_key) -> list:
+    """Expand a per-product knob (``*_align`` / ``*_persist``) to one per product.
+
+    A scalar applies to every product; a list gives one value per product of
+    the matching ``*_file`` list, in order — the way to declare a list that
+    mixes, e.g., a transient product with a climatology, or one product held
+    past its archive beside a strict one (neither can be inferred).
+    """
+    if _is_seq(spec):
+        specs = [str(v) for v in spec]
+        if len(specs) != n_products:
+            raise ValueError(
+                f"{config_key} has {len(specs)} entries but the input has "
+                f"{n_products} products; give one value per product, or a "
+                "single value for all of them.")
+        return specs
+    return [str(spec)] * n_products
 
 
 # ---------------------------------------------------------------------------
@@ -470,7 +578,8 @@ def _fetch_path(p, fetch):
 
 def resolve_input(key, value, *, grid_token, nlev=None, vertical="hybrid",
                   years=None, available=None, fetch=None, manifest=None,
-                  enabled=True, expand=None) -> ResolvedInput:
+                  enabled=True, expand=None,
+                  persist=PERSIST_STRICT) -> ResolvedInput:
     """Resolve one forcing value into concrete local paths + alignment.
 
     ``value`` is the raw config value (``auto`` / a path / ``hf://`` URL /
@@ -486,8 +595,10 @@ def resolve_input(key, value, *, grid_token, nlev=None, vertical="hybrid",
       publish it for this grid (silent degrade the caller surfaces as a warning),
       and raises a precise "declared but not yet staged" error for a product like
       ``macv2_sp`` that the mirror has not published yet.
-    * explicit path(s) → ``{year}`` patterns expanded (coverage-clamped), each
-      list element kept as its own product, ``hf://`` fetched.
+    * explicit path(s) → ``{year}`` patterns expanded (requested years checked
+      against ``available`` under the declared ``persist`` policy, the
+      interpolation pad clipped to it), each list element kept as its own
+      product, ``hf://`` fetched.
     * ``null`` → an opted-out :class:`ResolvedInput` (``is_none``).
     """
     from jcm.data import mirror_manifest as mm
@@ -532,7 +643,8 @@ def resolve_input(key, value, *, grid_token, nlev=None, vertical="hybrid",
                              provenance=(hf,))
 
     # EXPLICIT
-    products = forcing_products(spec.raw, years, available, expand=expand)
+    products = forcing_products(spec.raw, years, available, expand=expand,
+                                persist=persist, key=key)
     # The manifest kind is decided on the ORIGINAL (pre-fetch) spec: a fetch
     # callback may return a path anywhere, which no longer names the product,
     # and a path substitution must never change the alignment (#884).

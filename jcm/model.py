@@ -610,6 +610,16 @@ class Model:
         # ``TracerSpec.nondimensionalize=False``.
         self.dycore.required_tracers_ok(self.physics.required_tracers())
         self.dycore.tracer_specs = tracer_specs
+        # Settle a physics-decides (``advection=None``) transport scheme now
+        # that the dycore knows the tracer set: SPEEDY asks for the Eulerian
+        # core it was formulated on, which the dycore grants only for a
+        # tracer-free composition (#521). Backends without a choice of
+        # transport (pySES) have no ``resolve_advection``; physics objects
+        # outside the Physics hierarchy have no preference.
+        resolve_advection = getattr(self.dycore, "resolve_advection", None)
+        if resolve_advection is not None:
+            preferred = getattr(self.physics, "preferred_advection", None)
+            resolve_advection(preferred() if preferred is not None else None)
         # Convenience aliases so callers don't have to type ``self.dycore.coords``.
         self.coords = dycore.coords
         self.terrain = dycore.terrain

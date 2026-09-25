@@ -1425,9 +1425,11 @@ def _door_prescribed(coords, physics, forcing, start):
 
 def _door_cli(coords, physics, forcing, start):
     # The CLI/recipe doors (_run_full, _run_prescribed, configurations) call
-    # this re-export right after assembly; the window is not known there.
+    # this re-export right after assembly, with the CONFIGURED window
+    # (``runners.configured_run_window``: run.start_time + total_time, #900).
     from jcm import runners
-    runners.validate_run_forcing(physics, forcing)
+    runners.validate_run_forcing(
+        physics, forcing, run_window=(_secs(start), _secs(start) + 3600.0))
     raise AssertionError("reached: no contract violation raised")
 
 
@@ -1439,7 +1441,7 @@ _DOORS = {
         _door_model("run_from_state_with_carry"), True),
     "SingleColumnModel.run": (_door_scm, False),
     "PrescribedStateModel.run": (_door_prescribed, True),
-    "runners/configurations (CLI)": (_door_cli, False),
+    "runners/configurations (CLI)": (_door_cli, True),
 }
 
 
@@ -1468,6 +1470,110 @@ def test_entry_point_rejects_uncovered_archive(door):
         _DOORS[door][0](coords, physics, forcing, "2001-06-01")
 
 
+def _dated_2000_forcing(coords, which):
+    """Aquaplanet forcing whose ``which`` input is a BY_DATE archive of 2000.
+
+    Built directly as ``TimeSeries`` leaves (the readers are covered in
+    ``jcm/forcing_test.py::TestDatedInputPersistence``); what is under test
+    here is that every door judges every input family.
+    """
+    from jcm.forcing import BY_DATE, BY_DATE_INTERP, make_time_series
+    from jcm.ozone_climatology import OzoneClimatology
+    forcing = default_forcing(coords.horizontal)
+    nodal = coords.horizontal.nodal_shape
+    nlev = coords.nodal_shape[0]
+    t = _dates(_monthly_seconds(2000, day=15))
+
+    def ts(*shape, mode=BY_DATE):
+        return make_time_series(jnp.ones((12, *shape)), t, mode)
+
+    if which == "sst":
+        return forcing.copy(
+            sea_surface_temperature=ts(*nodal, mode=BY_DATE_INTERP))
+    if which == "ozone":
+        return forcing.copy(ozone_climatology=OzoneClimatology(
+            o3_ppmv=ts(nlev, nodal[0] * nodal[1], mode=BY_DATE_INTERP)))
+    if which == "emissions":
+        return forcing.copy(anthropogenic_emissions={
+            "emis_ene_so2": ts(*nodal)})
+    if which == "oxidants":
+        return forcing.copy(oxidant_vmr={
+            k: ts(nlev, *nodal) for k in ("oh", "no3", "o3", "h2o2")})
+    if which == "macv2":
+        return forcing.copy(aerosol_year_weight=make_time_series(
+            jnp.ones((1, 9)), _dates([_secs("2000-01-01")]), BY_DATE))
+    raise AssertionError(which)
+
+
+#: input -> the knob its coverage error names
+_DATED_INPUT_KNOBS = {
+    "sst": "forcing.persist",
+    "ozone": "forcing.ozone_persist",
+    "emissions": "forcing.emissions_persist",
+    "oxidants": "forcing.oxidants_persist",
+    "macv2": "forcing.macv2_persist",
+}
+
+
+@pytest.mark.parametrize("which", list(_DATED_INPUT_KNOBS))
+@pytest.mark.parametrize(
+    "door", [d for d, (_, windowed) in _DOORS.items() if windowed])
+def test_entry_point_rejects_uncovered_dated_input(door, which):
+    """#900: a 2000 archive of ANY dated input cannot drive a 2001 run, at
+    any door, and the error names that input's persist knob — before the
+    run is compiled.
+    """
+    from jcm.physics.speedy.speedy_coords import get_speedy_coords
+    from jcm.physics.speedy.speedy_terms import speedy_physics
+    coords = get_speedy_coords(layers=8, spectral_truncation=21)
+    forcing = _dated_2000_forcing(coords, which)
+    with pytest.raises(ValueError,
+                       match=f"{_DATED_INPUT_KNOBS[which]}=hold"):
+        _DOORS[door][0](coords, speedy_physics(), forcing, "2001-06-01")
+
+
+def test_cli_door_holds_a_declared_input_with_a_warning():
+    """The same 2001 run passes the CLI door once the input declares hold."""
+    import warnings
+
+    from jcm import runners
+    from jcm.forcing import BY_DATE, _HOLD_WARNED, make_time_series
+    from jcm.physics.speedy.speedy_coords import get_speedy_coords
+    from jcm.physics.speedy.speedy_terms import speedy_physics
+    coords = get_speedy_coords(layers=8, spectral_truncation=21)
+    nodal = coords.horizontal.nodal_shape
+    leaf = make_time_series(jnp.ones((12, *nodal)),
+                            _dates(_monthly_seconds(2000, day=15)), BY_DATE,
+                            persist="hold")
+    forcing = default_forcing(coords.horizontal).copy(
+        anthropogenic_emissions={"emis_ene_so2": leaf})
+    _HOLD_WARNED.clear()
+    window = (_secs("2001-06-01"), _secs("2001-06-02"))
+    with pytest.warns(UserWarning, match="emissions_persist=hold"):
+        runners.validate_run_forcing(speedy_physics(), forcing,
+                                     run_window=window)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")      # warned once per held input
+        runners.validate_run_forcing(speedy_physics(), forcing,
+                                     run_window=window)
+
+
+def test_cli_configured_window_spans_the_whole_run():
+    """``configured_run_window``: run.start_time through total/end time."""
+    import types
+
+    from jcm.date import to_datetime
+    from jcm.runners import configured_run_window
+    from jcm.runners_test import _compose
+    model = types.SimpleNamespace(start_time=to_datetime("2001-03-01"))
+    cfg = _compose(["run.total_time=10"])
+    assert configured_run_window(cfg, model) == pytest.approx(
+        (_secs("2001-03-01"), _secs("2001-03-11")))
+    cfg = _compose(["run.total_time=null", "run.end_time=2002-03-01"])
+    assert configured_run_window(cfg, model) == pytest.approx(
+        (_secs("2001-03-01"), _secs("2002-03-01")))
+
+
 def test_every_entry_point_calls_the_shared_contract_helper():
     """Structural guard: each door that steps physics on a forcing calls
     ``validate_run_forcing``, and the ``Model`` doors funnel into the one
@@ -1483,6 +1589,12 @@ def test_every_entry_point_calls_the_shared_contract_helper():
                PrescribedStateModel.run, runners._run_full,
                runners._run_prescribed, configurations.load):
         assert "validate_run_forcing(" in inspect.getsource(fn), fn
+    # The CLI doors that know the run window pass it (#900): the configured
+    # one for a full run, the states' span for prescribed mode.
+    for fn in (runners._run_full, configurations.load):
+        assert "configured_run_window(" in inspect.getsource(fn), fn
+    assert "_run_window_seconds(times)" in inspect.getsource(
+        runners._run_prescribed)
     for fn in (Model.run_from_state, Model.resume):
         assert "run_from_state_with_carry(" in inspect.getsource(fn), fn
     assert "self.resume(" in inspect.getsource(Model.run)

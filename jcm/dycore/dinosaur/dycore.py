@@ -1,7 +1,9 @@
 """Dinosaur-backed implementation of the :class:`DynamicalCore` protocol.
 
 Wraps the spectral primitive-equations dycore from the external ``dinosaur``
-package. Owns the semi-Lagrangian Crank-Nicolson RK2 step, the three diffusion filter closures,
+package. Owns the time step (semi-Lagrangian Crank-Nicolson RK2, or the
+Eulerian IMEX-RK SIL3 for tracer-free physics that asks for it — see
+``advection`` on :class:`DinosaurDycore`), the three diffusion filter closures,
 the global-mean ps-conservation filter, the modal-orography truncation,
 and the gridpoint↔modal conversions. Outside this subpackage the rest of
 jax-gcm only sees the gridpoint :class:`PhysicsState` projection.
@@ -10,6 +12,8 @@ jax-gcm only sees the gridpoint :class:`PhysicsState` projection.
 from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
+
+import logging
 
 import jax
 import jax.numpy as jnp
@@ -67,6 +71,8 @@ def physics_specs_from_constants(
 # dycore itself rebuilds per-instance from its injected ``constants``.
 PHYSICS_SPECS = physics_specs_from_constants(PhysicalConstants.default())
 
+logger = logging.getLogger(__name__)
+
 
 #: Semi-Lagrangian transport classes jcm requires from dinosaur (released in
 #: 1.4.0; ``requirements.txt`` pins >= 1.5.0 for the hybrid-level fix).
@@ -89,21 +95,36 @@ def semi_lagrangian_available() -> bool:
 DEFAULT_OFF_CENTERING = 0.2
 
 
+#: Transport schemes the dinosaur backend offers (see ``DinosaurDycore``'s
+#: ``advection`` argument). Semi-Lagrangian is the default and what the
+#: physics-decided mode always picks for tracer-carrying physics; Eulerian is
+#: meant for tracer-free physics (SPEEDY declares it). An explicit Eulerian with
+#: extra tracers runs but logs a warning (spectral transport rings negative on
+#: sharp sources, #521).
+SEMI_LAGRANGIAN = "semi_lagrangian"
+EULERIAN = "eulerian"
+ADVECTION_SCHEMES = (SEMI_LAGRANGIAN, EULERIAN)
+
+
 def _require_semi_lagrangian() -> None:
     """Fail with an actionable message when the SL core is missing.
 
-    jcm transports tracers semi-Lagrangian only — the Eulerian spectral
-    transport it replaced rang negative on sharp emission sources and NaN'd
-    the aerosol microphysics (#521), so there is no fallback to offer.
+    Semi-Lagrangian is the default transport and the one the physics-decided
+    mode always uses for tracer-carrying physics — Eulerian spectral transport
+    rings negative on sharp emission sources and NaN'd the aerosol
+    microphysics (#521), so an explicit Eulerian request with tracers only runs
+    with a warning. The SL core is therefore a hard install requirement of this
+    backend, not an optional extra, even for runs that resolve to Eulerian.
     """
     if semi_lagrangian_available():
         return
     missing = [n for n in _SL_CLASSES if not hasattr(primitive_equations, n)]
     raise RuntimeError(
         "the installed dinosaur has no semi-Lagrangian transport "
-        f"({', '.join(missing)} missing), and jcm's dinosaur backend now "
-        "requires it — the Eulerian path has been removed because it rang "
-        "negative on sharp sources and NaN'd aerosol microphysics (#521). "
+        f"({', '.join(missing)} missing), and jcm's dinosaur backend "
+        "requires it — it is the default transport and the one used for "
+        "tracer-carrying physics, because the Eulerian spectral path rings "
+        "negative on sharp sources and NaN's aerosol microphysics (#521). "
         "Install a current release:\n"
         "    pip install 'dinosaur>=1.5.0'\n"
         "and remove any older dinosaur checkout from PYTHONPATH."
@@ -125,6 +146,13 @@ class DinosaurDycore(DynamicalCore):
             this every time it is constructed.
         diffusion: :class:`DiffusionFilter` describing horizontal hyperdiffusion
             scaling. Defaults to :meth:`DiffusionFilter.default`.
+        advection: Transport scheme: ``"semi_lagrangian"``, ``"eulerian"``,
+            or ``None`` (the default) to let the attached physics decide —
+            :class:`jcm.model.Model` calls :meth:`resolve_advection` with
+            :meth:`Physics.preferred_advection`. An unresolved ``None``
+            (a dycore driven without a Model) runs semi-Lagrangian.
+            An explicit ``"eulerian"`` with tracers is allowed but warns;
+            see :meth:`__init__` for why.
 
     """
 
@@ -140,6 +168,7 @@ class DinosaurDycore(DynamicalCore):
         tracer_filter: Any | None = None,
         compute_frontogenesis: bool = False,
         compute_omega: bool = False,
+        advection: str | None = None,
         sl_options: Mapping[str, Any] | None = None,
     ):
         """Initialise the dinosaur backend; see the class docstring for argument semantics.
@@ -157,19 +186,38 @@ class DinosaurDycore(DynamicalCore):
         limiter's non-negativity exact. ``specific_humidity`` stays
         modal (it participates in the implicit q<->Tv coupling).
 
-        There is no Eulerian option. The classic spectral-transform
-        transport rang negative on sharp sources and was the documented
-        cause of aerosol blow-ups, so keeping it selectable only offered
-        a way to run a configuration nobody should choose; it was also
-        the silent default, which is how whole investigations ended up
-        run on it by accident.
+        ``advection="eulerian"`` selects the classic spectral-transform
+        transport (IMEX-RK SIL3), intended for physics that carries no
+        extra tracers. Spectral transport of a sharp tracer rings negative
+        and was the documented cause of aerosol blow-ups (#521), so the
+        ``None`` (physics-decides) mode never picks it for a tracer-carrying
+        composition, and an explicit request with tracers logs a warning
+        (it runs, with the tracers transported spectrally). For
+        tracer-free physics the SL core buys nothing — ``specific_humidity``
+        is modal under both schemes — while on CPU its departure-point
+        interpolation (gather-bound under XLA:CPU) costs ~4x the whole
+        Eulerian step at T31L8. SPEEDY, whose climate was formulated and
+        tuned on the Eulerian spectral core, therefore declares Eulerian
+        (:meth:`jcm.physics.physics_term.PhysicsTerm.preferred_advection`);
+        see docs/source/design/dinosaur_transport_selection.md.
 
-        ``sl_options`` forwards extras: ``interpolation_order``
+        ``sl_options`` forwards extras (semi-Lagrangian only; ignored by
+        the Eulerian step): ``interpolation_order``
         ('cubic'), ``monotone_tracers`` (True), ``departure_iterations``
         (1), ``off_centering`` (:data:`DEFAULT_OFF_CENTERING`),
         ``vertical_interpolation_order`` ('linear').
         """
         _require_semi_lagrangian()
+        if advection is not None and advection not in ADVECTION_SCHEMES:
+            raise ValueError(
+                f"advection must be one of {ADVECTION_SCHEMES} or None "
+                f"(let the physics decide), got {advection!r}"
+            )
+        # The caller's request (None = let the physics decide) is kept apart
+        # from the resolved scheme so ``resolve_advection`` can tell an
+        # explicit choice, which it must honour, from the auto mode.
+        self._advection_request = advection
+        self._advection = advection or SEMI_LAGRANGIAN
         self._sl_options = dict(sl_options or {})
         self.coords = coords
         self.terrain = terrain
@@ -234,14 +282,52 @@ class DinosaurDycore(DynamicalCore):
         self._build_transport()
 
     def _build_transport(self) -> None:
-        """(Re)build the tracer-dependent transport machinery.
+        """(Re)build the tracer- and scheme-dependent transport machinery.
 
         The SL primitive registers every extra tracer as NODAL at
         construction, and the modal filters wrap around that registration,
         so the primitive, filters and step function must all be rebuilt
-        whenever the tracer *set* changes — see the ``tracer_specs``
-        setter, which :class:`jcm.model.Model` drives after construction.
+        whenever the tracer *set* or the transport scheme changes — see the
+        ``tracer_specs`` setter and :meth:`resolve_advection`, which
+        :class:`jcm.model.Model` drives after construction.
         """
+        # Only the name set is baked into the transport; the setter compares
+        # against this to decide whether a rebuild is needed.
+        self._transport_tracer_names = tuple(self._tracer_specs)
+        if self._advection == EULERIAN:
+            if self._tracer_specs:
+                logger.warning(
+                    "advection='eulerian' with extra tracers (%s): they are "
+                    "transported spectrally, which rings negative on sharp "
+                    "tracer fields (the cause of the aerosol-microphysics "
+                    "NaNs in #521). Prefer advection='semi_lagrangian' (or "
+                    "None to let the physics decide) for tracer-carrying "
+                    "physics.", ", ".join(self._tracer_specs))
+            self._nodal_tracers = ()
+            self._cloud_keys = tuple(
+                name for name in CONDENSATE_TRACERS if name in self._tracer_specs
+            ) or None
+            if isinstance(self.coords.vertical, HybridCoordinates):
+                self._primitive = primitive_equations.PrimitiveEquationsHybrid(
+                    reference_temperature=self._reference_temperature,
+                    orography=self._truncated_orography,
+                    coords=self.coords,
+                    physics_specs=self._physics_specs,
+                    hpa_quantity=units.pascal,
+                    humidity_key='specific_humidity',
+                    cloud_keys=self._cloud_keys,
+                )
+            else:
+                self._primitive = primitive_equations.PrimitiveEquations(
+                    reference_temperature=self._reference_temperature,
+                    orography=self._truncated_orography,
+                    coords=self.coords,
+                    physics_specs=self._physics_specs,
+                )
+            self._filters = self._build_filters()
+            self._dynamics_step_fn = self._build_dynamics_step_fn()
+            return
+
         # Every jcm extra tracer rides nodally under semi-Lagrangian
         # transport (see the constructor docstring).
         self._nodal_tracers = tuple(self._tracer_specs)
@@ -324,6 +410,49 @@ class DinosaurDycore(DynamicalCore):
         return self._dt_si
 
     @property
+    def advection(self) -> str:
+        """The transport scheme in effect (``"semi_lagrangian"`` or ``"eulerian"``)."""
+        return self._advection
+
+    @property
+    def advection_requested(self) -> str | None:
+        """The constructor's ``advection`` (``None`` = let the physics decide)."""
+        return self._advection_request
+
+    def resolve_advection(self, preferred: str | None) -> str:
+        """Settle the transport scheme from the attached physics' preference.
+
+        An explicit constructor choice always wins. In the ``None`` mode the
+        physics' preference is adopted, except that a tracer-carrying
+        composition gets semi-Lagrangian — e.g. SPEEDY plus an aerosol
+        package: SPEEDY's Eulerian preference should not put the aerosol
+        tracers on the spectral transport that NaN'd them (#521). Rebuilds
+        the transport if the scheme changed.
+
+        Args:
+            preferred: ``Physics.preferred_advection()`` — one of
+                :data:`ADVECTION_SCHEMES`, or ``None`` for no preference.
+
+        Returns:
+            The resolved scheme.
+
+        """
+        if self._advection_request is not None:
+            return self._advection
+        if preferred is not None and preferred not in ADVECTION_SCHEMES:
+            raise ValueError(
+                f"physics preferred_advection must be one of "
+                f"{ADVECTION_SCHEMES} or None, got {preferred!r}"
+            )
+        scheme = preferred or SEMI_LAGRANGIAN
+        if scheme == EULERIAN and self._tracer_specs:
+            scheme = SEMI_LAGRANGIAN
+        if scheme != self._advection:
+            self._advection = scheme
+            self._build_transport()
+        return self._advection
+
+    @property
     def off_centering(self) -> float:
         """Off-centering of the SL step (``sl_options`` override or the default)."""
         return float(self._sl_options.get("off_centering", DEFAULT_OFF_CENTERING))
@@ -348,9 +477,13 @@ class DinosaurDycore(DynamicalCore):
         # Spec *values* (initial_value, nondimensionalize) are read live from
         # self._tracer_specs by initial_state/state-bridge calls; only the
         # name set is baked into the transport, so only that forces a rebuild.
-        rebuild = tuple(specs) != self._nodal_tracers
+        rebuild = tuple(specs) != self._transport_tracer_names
         self._tracer_specs = specs
         if rebuild:
+            # Auto mode: a physics swap that adds tracers leaves Eulerian
+            # (resolve_advection's rule).
+            if self._advection_request is None and specs:
+                self._advection = SEMI_LAGRANGIAN
             self._build_transport()
 
     # ------------------------------------------------------------------
@@ -446,11 +579,11 @@ class DinosaurDycore(DynamicalCore):
         return filters
 
     # ------------------------------------------------------------------
-    # Dynamics step (SL Crank-Nicolson RK2)
+    # Dynamics step (SL Crank-Nicolson RK2 or Eulerian IMEX-RK SIL3)
     # ------------------------------------------------------------------
 
     def _build_dynamics_step_fn(self):
-        """Build the dynamics step (SL Crank–Nicolson RK2).
+        """Build the dynamics step (SL Crank–Nicolson RK2, or Eulerian IMEX-RK SIL3).
 
         The op-split caller adds the physics dynamics-tendency to the state
         forward-Euler-style before invoking this; the integrator advances
@@ -458,8 +591,11 @@ class DinosaurDycore(DynamicalCore):
         semi-Lagrangian path uses the self-starting two-stage
         ``semi_lagrangian_crank_nicolson_rk2`` (not SETTLS): it carries no
         cross-step departure memory, so jcm's chunked ``lax.scan`` /
-        checkpoint-resume structure works unchanged.
+        checkpoint-resume structure works unchanged. The Eulerian path uses
+        dinosaur's IMEX-RK SIL3 — also single-step, so the same holds.
         """
+        if self._advection == EULERIAN:
+            return dinosaur.time_integration.imex_rk_sil3(self._primitive, self._dt)
         return dinosaur.time_integration.semi_lagrangian_crank_nicolson_rk2(
             self._primitive, self._dt,
             off_centering=self.off_centering,

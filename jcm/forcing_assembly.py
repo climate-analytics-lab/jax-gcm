@@ -209,13 +209,35 @@ def _resolve_auto_terrain(coords):
         ) from e
 
 
-def _forcing_products(file_spec, years, available):
+def _forcing_products(file_spec, years, available, *, persist="strict",
+                      key="emissions_file"):
     """Split a forcing spec into per-product, year-expanded file sets.
 
     Thin adapter over :func:`jcm.data.input_resolution.forcing_products` — the
-    single home for the list-into-products split + ``{year}`` coverage clamp.
+    single home for the list-into-products split + ``{year}`` coverage rule
+    (requested years outside ``available`` raise unless ``persist`` is
+    ``hold``, #900).
     """
-    return ir.forcing_products(file_spec, years, available)
+    return ir.forcing_products(file_spec, years, available, persist=persist,
+                               key=key)
+
+
+def _persist(forcing_cfg, key: str):
+    """Return the declared ``persist`` policy of one forcing input (default strict).
+
+    ``key`` is the forcing key the input comes from (``file``,
+    ``ozone_file``, ...); its knob is :func:`jcm.data.input_resolution.
+    persist_key_for` (``forcing.persist``, ``forcing.ozone_persist``, ...).
+    A list (``emissions_persist``, one per product) is returned as a list.
+    """
+    knob = ir.persist_key_for(key)[len("forcing."):]
+    value = (forcing_cfg.get(knob, ir.PERSIST_STRICT)
+             if forcing_cfg is not None else ir.PERSIST_STRICT)
+    if value is None:
+        return ir.PERSIST_STRICT
+    if ir._is_seq(value):
+        return [ir.check_persist(v, f"forcing.{knob}") for v in value]
+    return ir.check_persist(value, f"forcing.{knob}")
 
 
 def _open_forcing_dataset(path):
@@ -241,9 +263,10 @@ def _product_available_years(forcing_cfg, key: str):
     and CEDS ``emissions_amip`` bundles both end in 2022); a per-product
     override (``ozone_available_years`` / ``emissions_available_years`` /
     ``oxidants_available_years``) keeps each pattern's expansion inside the
-    files that actually exist — for run dates beyond it, the time lookup
-    clamps to the last sample. ``key`` selects the override; any product
-    without one shares the top-level ``available_years``.
+    files that actually exist; requested years beyond it raise unless the
+    product declares ``*_persist: hold`` (#900). ``key`` selects the
+    override; any product without one shares the top-level
+    ``available_years``.
     """
     avail = forcing_cfg.get(key, None)
     return avail if avail is not None else forcing_cfg.get(
@@ -472,8 +495,13 @@ def assemble_spectral_forcing(forcing_cfg, coords):
         forcing = None
     elif forcing_cfg.kind == "from_file":
         from jcm.forcing import ForcingData
+        # The declared out-of-range policy (#900) gates the {year} expansion
+        # here, before anything is fetched, and rides on every dated leaf for
+        # the run-start coverage check.
+        persist = _persist(forcing_cfg, "file")
         files = _expand_years(forcing_cfg.file, forcing_cfg.get("years", None),
-                              forcing_cfg.get("available_years", None))
+                              forcing_cfg.get("available_years", None),
+                              persist=persist, key="file")
         # ``auto`` resolves from the UNFETCHED spec (an ``hf://`` URL or a
         # packaged path names its manifest product); a user file must declare
         # its mode (#884, :func:`jcm.forcing.resolve_align`).
@@ -481,7 +509,8 @@ def assemble_spectral_forcing(forcing_cfg, coords):
         align = resolve_align(forcing_cfg.get("align", "auto"), paths=files,
                               config_key="forcing.align")
         forcing = ForcingData.from_file(
-            _resolve_data_path(files), coords=coords, align_mode=align)
+            _resolve_data_path(files), coords=coords, align_mode=align,
+            persist=persist)
     else:
         raise ValueError(f"Unknown forcing.kind={forcing_cfg.kind!r}")
     forcing = _attach_ozone(forcing, forcing_cfg, coords)
@@ -522,10 +551,12 @@ def _attach_ozone(forcing, forcing_cfg, coords):
     # The pre-fetch spec (``hf://`` / pattern expansion / packaged path) names
     # the manifest product; alignment is decided on it, not on the fetched
     # path (#884).
+    ozone_persist = _persist(forcing_cfg, "ozone_file")
     ozone_raw = _expand_years(
         forcing_cfg.get("ozone_file", None),
         forcing_cfg.get("years", None),
-        _product_available_years(forcing_cfg, "ozone_available_years"))
+        _product_available_years(forcing_cfg, "ozone_available_years"),
+        persist=ozone_persist, key="ozone_file")
     ozone_file = _resolve_data_path(ozone_raw)
     if isinstance(ozone_file, (list, tuple)):
         ozone_file = [str(p) for p in ozone_file]
@@ -576,6 +607,7 @@ def _attach_ozone(forcing, forcing_cfg, coords):
         ozone_file,
         nlon=int(nlon), nlat=int(nlat), nlev=int(nlev),
         lat_deg=lat_deg, lon_deg=lon_deg, align_mode=align,
+        persist=ozone_persist,
     )
     provenance.record_fact("ozone_source", f"prescribed:{ozone_file}")
     provenance.record_input(ozone_file)
@@ -675,8 +707,9 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     # ``emissions_amip`` bundle ends 2022), so honour an
     # ``emissions_available_years`` override — the same mechanism ozone uses —
     # and only fall back to the shared ``available_years`` when it is unset.
-    # Without this, ``emissions_file=.../{year}.nc`` would over-expand into
-    # never-built 2023/2024 files following the transient-warning's advice.
+    # It is what makes a request past 2022 recognisable as such: strict
+    # refuses it, a declared ``emissions_persist: hold`` reuses the 2022 file
+    # (#900), and neither asks for never-built 2023/2024 files.
     available = _product_available_years(
         forcing_cfg, "emissions_available_years")
 
@@ -707,10 +740,15 @@ def _attach_emissions(forcing, forcing_cfg, coords):
     anthro_src: dict = {}
     speciated_src: dict = {}
     from jcm.forcing import emissions_have_time, resolve_align
-    products = list(_forcing_products(raw, years, available))
+    persist = _persist(forcing_cfg, "emissions_file")
+    products = list(_forcing_products(raw, years, available, persist=persist,
+                                      key="emissions_file"))
     aligns = _per_product_align(forcing_cfg.get("emissions_align", "auto"),
                                 len(products))
-    for product, align_spec in zip(products, aligns):
+    persists = ir.per_product(persist, len(products),
+                              "forcing.emissions_persist")
+    for product, align_spec, product_persist in zip(products, aligns,
+                                                     persists):
         path = _resolve_data_path(product)
         if path in (None, "", "null"):
             continue
@@ -723,8 +761,10 @@ def _attach_emissions(forcing, forcing_cfg, coords):
             align = (resolve_align(align_spec, paths=product,
                                    config_key="forcing.emissions_align")
                      if emissions_have_time(ds) else align_spec)
-            a = read_anthropogenic_emissions(ds, align_mode=align)
-            s = read_prescribed_aerosol_emissions(ds, align_mode=align)
+            a = read_anthropogenic_emissions(ds, align_mode=align,
+                                             persist=product_persist)
+            s = read_prescribed_aerosol_emissions(ds, align_mode=align,
+                                                  persist=product_persist)
         finally:
             ds.close()
         if a is None and s is None:
@@ -889,15 +929,17 @@ def _resolve_oxidant_paths(forcing_cfg):
     if raw in (None, "", "null"):
         return None
     from omegaconf import ListConfig
-    # Per-product coverage, resolved HERE so both the spectral and pySES paths
-    # (which share this helper) clamp a transient oxidant ``{year}`` pattern to
-    # the same range and cannot drift. The mirror publishes no transient
-    # oxidants product, but a user bringing their own series whose coverage
-    # differs from the surface forcing's sets ``oxidants_available_years``; it
-    # falls back to the shared ``available_years`` when unset.
+    # Per-product coverage and persist policy, resolved HERE so both the
+    # spectral and pySES paths (which share this helper) expand a transient
+    # oxidant ``{year}`` pattern under the same rule and cannot drift. The
+    # mirror publishes no transient oxidants product, but a user bringing
+    # their own series whose coverage differs from the surface forcing's sets
+    # ``oxidants_available_years``; it falls back to the shared
+    # ``available_years`` when unset.
     files = _resolve_data_path(_expand_years(
         raw, forcing_cfg.get("years", None),
-        _product_available_years(forcing_cfg, "oxidants_available_years")))
+        _product_available_years(forcing_cfg, "oxidants_available_years"),
+        persist=_persist(forcing_cfg, "oxidants_file"), key="oxidants_file"))
     if isinstance(files, (list, tuple, ListConfig)):
         paths = [str(p) for p in files
                  if str(p) not in ("", "null", "none", "None")]
@@ -952,7 +994,10 @@ def _resolve_pyses_emission_paths(forcing_cfg):
     # :func:`_product_time_axis`), then flatten to the single path list
     # ``attach_jam_forcing`` opens by-coords.
     products: list[list[str]] = []
-    for product in _forcing_products(raw, years, available):
+    for product in _forcing_products(
+            raw, years, available,
+            persist=_persist(forcing_cfg, "emissions_file"),
+            key="emissions_file"):
         resolved = _resolve_data_path(product)
         if isinstance(resolved, (list, tuple)):
             files = [str(p) for p in resolved
@@ -997,7 +1042,8 @@ def _oxidant_spec(forcing_cfg):
         return None
     return _expand_years(
         raw, forcing_cfg.get("years", None),
-        _product_available_years(forcing_cfg, "oxidants_available_years"))
+        _product_available_years(forcing_cfg, "oxidants_available_years"),
+        persist=_persist(forcing_cfg, "oxidants_file"), key="oxidants_file")
 
 
 def _attach_oxidants(forcing, forcing_cfg, coords):
@@ -1063,7 +1109,8 @@ def _attach_oxidants(forcing, forcing_cfg, coords):
     try:
         mapping = read_oxidant_vmr(
             ds, nlev=nlev, lat_deg=lat_deg, lon_deg=lon_deg,
-            align_mode=oxidant_align(forcing_cfg, paths))
+            align_mode=oxidant_align(forcing_cfg, paths),
+            persist=_persist(forcing_cfg, "oxidants_file"))
         validate_oxidant_levels(ds, coords, ref)
     finally:
         ds.close()
@@ -1121,7 +1168,8 @@ def _attach_macv2_weights(forcing, forcing_cfg, coords):
     path = _resolve_data_path(
         packaged_macv2_path() if raw == "auto" else raw)
     from jcm.forcing import read_macv2_weights
-    year_weight, ann_cycle = read_macv2_weights(str(path))
+    year_weight, ann_cycle = read_macv2_weights(
+        str(path), persist=_persist(forcing_cfg, "macv2_file"))
     forcing = _ensure_parent_forcing(forcing, coords)
     return forcing.copy(aerosol_year_weight=year_weight,
                         aerosol_ann_cycle=ann_cycle)
@@ -1174,13 +1222,17 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
     import jax.numpy as jnp
 
     align = str(block.get("align", "auto"))
+    persist = ir.check_persist(block.get("persist", ir.PERSIST_STRICT),
+                               "forcing.prescribed_surface_flux.persist")
     if constants is not None:
-        if align != "auto":
-            # Constants have no time axis; an explicit align is a config
-            # mistake (probably meant for a file), not something to ignore.
+        if align != "auto" or persist != ir.PERSIST_STRICT:
+            # Constants have no time axis; an explicit align/persist is a
+            # config mistake (probably meant for a file), not something to
+            # ignore.
             raise ValueError(
-                "forcing.prescribed_surface_flux.align applies only to a "
-                f"'file' source; got align={align!r} with 'constants'.")
+                "forcing.prescribed_surface_flux.align/persist apply only to "
+                f"a 'file' source; got align={align!r}, persist={persist!r} "
+                "with 'constants'.")
         missing = [v for v in PRESCRIBED_FLUX_FILE_VARS if v not in constants]
         if missing:
             raise ValueError(
@@ -1206,7 +1258,8 @@ def _attach_prescribed_surface_fluxes(forcing, forcing_cfg, coords):
             fields = read_prescribed_surface_fluxes(
                 ds, lat_deg, lon_deg,
                 align_mode=align,
-                source=f"prescribed_surface_flux file {path}")
+                source=f"prescribed_surface_flux file {path}",
+                persist=persist)
         provenance.record_fact("prescribed_surface_flux", f"file:{path}")
         provenance.record_input(path)
 

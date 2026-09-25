@@ -348,7 +348,14 @@ class AutoEmissionPrefetchTest(unittest.TestCase):
             "forcing.years=[2021,2024]",
             "forcing.emissions_available_years=[1850,2022]",
         ]
-        files = _preset_data_files(overrides)
+        # Years past the product's coverage are refused unless the product
+        # declares a hold (#900) — the prefetch applies the build's rule.
+        with self.assertRaisesRegex(ValueError,
+                                    "forcing.emissions_persist=hold"):
+            _preset_data_files(overrides)
+        with self.assertWarns(UserWarning):
+            files = _preset_data_files(
+                overrides + ["forcing.emissions_persist=hold"])
         self.assertIn("hf://bundles/t63/emissions_amip/2022.nc", files)
         self.assertNotIn("hf://bundles/t63/emissions_amip/2023.nc", files)
         self.assertNotIn("hf://bundles/t63/emissions_amip/2024.nc", files)

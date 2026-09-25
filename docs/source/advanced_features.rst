@@ -168,6 +168,11 @@ A file's time alignment is always declared — ``wrap_year`` for a
 climatology, ``by_date`` / ``by_date_interp`` for dated samples — because a
 year of monthly data looks exactly like a climatology; ``auto`` resolves only
 the data-mirror products, whose kind the mirror manifest records.
+So is what a dated input does outside its time axis: each run (here, each
+year's ``run`` / ``resume``) must lie inside the slice it is given, or the call
+fails before compiling. Pass ``persist='hold'`` to the reader when holding the
+end samples past the archive is the experiment you mean
+(:doc:`design/forcing_time_semantics`).
 
 xarray's lazy loading means each year's slice only pulls the data it
 actually needs from disk, so this stays memory-efficient even for very
@@ -200,7 +205,9 @@ that :meth:`~jcm.forcing.ForcingData.from_file` concatenates along ``time``:
 
 Passing ``available`` widens the expansion by one year on each side (clipped to
 coverage) so the mid-month samples bracket the run's start/end instead of
-clamping for ~half a month. Non-pattern specs (plain paths, lists, ``None``)
+clamping for ~half a month. Requested years outside ``available`` raise, since
+there is no file for them; ``persist='hold'`` reuses the edge-year file
+instead (``forcing.persist=hold`` and its per-input siblings on the CLI). Non-pattern specs (plain paths, lists, ``None``)
 pass through untouched, so a run can mix a yearly SST pattern with a static
 dust climatology under one ``forcing.years`` range. When you hand-assemble a
 :class:`~jcm.forcing.ForcingData` rather than loading a validated bundle,

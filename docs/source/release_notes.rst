@@ -6,8 +6,9 @@ v3.0.0 (unreleased)
 
 v3.0 is a deliberate major release. It makes **online interactive aerosol**
 (JAM/MAM4) a working configuration end to end, adds the pySES CAM-SE
-dynamical-core backend alongside a semi-Lagrangian-only Dinosaur backend, and
-settles a set of unit, API and output contracts that were inconsistent in the
+dynamical-core backend alongside a Dinosaur backend whose tracer transport is
+semi-Lagrangian by default, and settles a set of unit, API and output
+contracts that were inconsistent in the
 2.x line. Several of those corrections change the climate a configuration
 produces.
 
@@ -234,6 +235,27 @@ Forcing time alignment is declared, never inferred
   ``forcing.align=wrap_year`` for a climatology or ``forcing.align=by_date``
   for dated samples. Every shipped configuration and the ``amip`` / ``era5``
   presets resolve unchanged. See :doc:`v2_to_v3`.
+- **Every dated input must cover the run, or declare a hold** (#900). v2
+  clamped a ``by_date`` / ``by_date_interp`` input to its first or last sample
+  outside its time axis, and a ``{year}`` range past a product's
+  ``available_years`` to the edge-year file, with no warning, so a transient
+  run past its SST, ozone, emission or oxidant archive silently reused the
+  last record. Each dated input now declares its out-of-range policy next to
+  its alignment: ``forcing.persist`` / ``ozone_persist`` /
+  ``emissions_persist`` / ``oxidants_persist`` / ``macv2_persist`` /
+  ``prescribed_surface_flux.persist`` (and ``persist=`` on the Python
+  readers and ``ForcingData.from_bundles``). The default ``strict`` checks
+  every dated leaf against the run window at every entry point (the CLI with
+  the configured window right after assembly, before compilation; ``Model.run``
+  / ``resume`` / ``PrescribedStateModel.run`` with their exact windows), and
+  rejects out-of-coverage ``forcing.years`` before fetching. ``hold`` holds the
+  edge samples deliberately, warns once, and records the policy in the output
+  provenance (``jcm_prov_dated_input_persistence``). ``forcing=era5`` declares
+  ``ozone_persist: hold`` for its 2023–24 years. The MACv2-SP ``year_weight``
+  axis now ends at the file's last real year instead of forward-filling the
+  fill years. **Fix:** a transient run past its archive adds
+  ``forcing.<input>_persist=hold`` (or covers the run with data). See
+  :ref:`v3-persist`.
 
 MACv2-SP removed from JAM; namespaced aerosol output
 """"""""""""""""""""""""""""""""""""""""""""""""""""
@@ -462,11 +484,16 @@ Dynamical cores and grids
   frontogenesis physics-fields provider. Selected from Hydra with
   ``dycore=pyses_ne30l{47,95}`` or the ``+configuration=ma-ne30-l{47,95}``
   presets. See :doc:`design/pyses_cam_se_dycore`.
-- **Semi-Lagrangian transport is the Dinosaur backend's only transport.**
+- **Semi-Lagrangian is the Dinosaur backend's default tracer transport.**
   Every extra tracer rides nodally with a Bermejo-Staniforth quasi-monotone
   limiter, so aerosol non-negativity is structural in transport rather than
-  imposed afterwards. There is no Eulerian option and no ``+advection``
-  switch. ``diffusion.tracer_positivity`` survives, defaulting to ``auto``
+  imposed afterwards. The top-level ``+advection`` switch is gone;
+  ``dycore.advection`` (default ``null`` = the physics decides) selects the
+  scheme; tracer-carrying physics defaults to semi-Lagrangian (an explicit
+  Eulerian with tracers warns). Tracer-free
+  SPEEDY declares the Eulerian core it was formulated on, so SPEEDY runs keep
+  2.x transport and CPU speed (semi-Lagrangian cost ~4x the SPEEDY step on
+  CPU) — see :doc:`design/dinosaur_transport_selection`. ``diffusion.tracer_positivity`` survives, defaulting to ``auto``
   (on for JAM), but only as a mass-conserving hole-filler at the
   dynamics-to-physics boundary — see
   :doc:`design/dinosaur_sl_jam_configuration`.

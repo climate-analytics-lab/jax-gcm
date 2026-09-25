@@ -328,15 +328,25 @@ through ``hydra.searchpath: [pkg://jcm.config]`` must also change
 ``+experiment@<node>=<name>`` to ``+configuration@<node>=<name>``; JAX-ESM
 composes ``+experiment@atmosphere=<name>`` and has to move in the same cycle.
 
-``+advection=`` is gone
-^^^^^^^^^^^^^^^^^^^^^^^
+``+advection=`` is gone; ``dycore.advection`` replaces it
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Semi-Lagrangian tracer transport is the only transport on the Dinosaur
-backend; the Eulerian spectral path was removed because it rang negative on
-sharp emission sources and NaN'd the aerosol microphysics.
-``+advection=semi_lagrangian`` and ``+advection=eulerian`` are both rejected,
-and the backend refuses to build on a dinosaur without the SL classes, naming
-what to install.
+Semi-Lagrangian is the Dinosaur backend's default transport, and the one the
+automatic (physics-decided) choice always uses for tracer-carrying physics:
+Eulerian spectral transport rang negative on sharp emission sources and NaN'd
+the aerosol microphysics. An explicit Eulerian request with tracers is not an
+error — it runs, but logs a warning. The top-level ``+advection=...`` config
+group no longer exists, and the backend refuses to build on a dinosaur
+without the SL classes, naming what to install.
+
+The scheme is now ``DinosaurDycore(advection=...)`` / ``dycore.advection``,
+default ``None`` / ``null`` = *the physics decides*. SPEEDY declares the
+Eulerian spectral core it was formulated on (it carries no extra tracers,
+and semi-Lagrangian costs ~4x its CPU step for nothing), so **SPEEDY runs
+Eulerian exactly as in 2.x** with no code change. ECHAM, JAM, Held–Suarez and
+any SPEEDY composition that adds tracers run semi-Lagrangian; an explicit
+``eulerian`` with tracer-carrying physics runs but warns. See
+:doc:`design/dinosaur_transport_selection`.
 
 ``diffusion.tracer_positivity`` is **not** gone. It survives as a
 mass-conserving hole-filler at the dynamics-to-physics boundary, rather than
@@ -488,7 +498,75 @@ resolving under ``auto``; every shipped configuration and the ``amip`` /
 ``era5`` presets are unchanged. The declared mode is also checked: a
 prescribed-flux file declared ``wrap_year`` must hold exactly twelve monthly
 samples January to December, a declared ozone climatology must have twelve
-months, and a date-aligned flux archive must cover the run window.
+months, and a date-aligned input must cover the run window
+(:ref:`v3-persist`).
+
+.. _v3-persist:
+
+Dated inputs must cover the run, or declare a hold
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+v2 looked up a dated (``by_date`` / ``by_date_interp``) input by clamping to
+its first or last sample outside its time axis, so a transient run past the
+end of its SST, ozone, emission or oxidant archive quietly reused the final
+record, and a ``{year}`` range past a product's ``available_years`` quietly
+reused the edge-year file. v3 applies the #884 rule to that too: what an input
+does outside its archive is **declared**, per input, never inferred.
+
+Each dated input has a ``persist`` knob next to its ``align`` knob:
+``forcing.persist`` (the surface file and the GHG series in it),
+``forcing.ozone_persist``, ``forcing.emissions_persist`` (a scalar, or one
+value per ``emissions_file`` product), ``forcing.oxidants_persist``,
+``forcing.macv2_persist`` and ``forcing.prescribed_surface_flux.persist``. The
+Python readers take the same ``persist=`` argument. There are two values:
+
+* ``strict`` (the default): the input must cover the run window, or the run
+  fails before it is compiled, and ``forcing.years`` outside the product's
+  available years fails at build time before anything is fetched. Every entry
+  point checks this: ``Model.run`` / ``resume`` / ``run_from_state``,
+  ``PrescribedStateModel.run``, and the CLI and ``jcm.configurations.load``
+  with the configured ``run.start_time`` + ``total_time`` window.
+* ``hold``: holding the edge samples (and the edge-year file) past the archive
+  is the intended experiment. jcm warns once, naming the input, its last
+  covered date and the run end, and records the policy in the output
+  provenance (``jcm_prov_dated_input_persistence``).
+
+``wrap_year`` climatologies cover every date and are unaffected. The covered
+span of an archive is its CF ``time_bnds`` when the reader has them, otherwise
+one end-sample interval of slack at each end, so a Jan-1…Dec-1 or mid-month
+monthly archive covers its calendar year
+(:doc:`design/forcing_time_semantics`).
+
+What now errors, and the fix:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - v2 usage
+     - v3 fix
+   * - a transient run past its archive's end (e.g. ``forcing=amip
+       forcing.years=[2020,2024]``, or emissions ``{year}`` files ending 2022
+       in a 2030 run)
+     - cover the run with data, or declare the hold:
+       ``forcing.persist=hold`` / ``forcing.ozone_persist=hold`` /
+       ``forcing.emissions_persist=hold`` / ``forcing.oxidants_persist=hold``
+   * - a dated file whose dates do not match ``run.start_time`` (e.g.
+       ``forcing.years=[1979,1983]`` left on the default 2000 start)
+     - set ``run.start_time`` to the period the file covers
+   * - ``ForcingData.from_file`` / ``OzoneClimatology.from_file`` /
+       ``read_anthropogenic_emissions`` / ``read_oxidant_vmr`` on a dated file
+       used past its end from Python
+     - pass ``persist="hold"`` (or ``ForcingData.from_bundles(...,
+       persist="hold")``)
+   * - ``forcing=macv2_sp`` in a year after the file's last real year (SPv2.1:
+       2023; v2 forward-filled the trailing fill years)
+     - ``forcing.macv2_persist=hold``
+
+``forcing=era5`` declares ``ozone_persist: hold``: its surface files run to 2024
+but the ozone bundles end in 2022, and holding 2022 ozone for 2023–24 is the
+preset's stated choice. Its transient emissions, if you add them, stay
+``strict``.
 
 Other config-surface changes
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -577,10 +655,8 @@ so idealised-calendar climatologies still load. Dated ``by_date`` /
 retain their nominal date components, and ``by_date_interp`` interpolates
 across the actual bracketing dates, including a missing leap day. Unsupported
 transient 360-day and Julian axes are rejected at ingestion; preprocess those
-explicitly with xarray. Dated lookup holds endpoint values outside its axis
-for the surface, ozone, emission and oxidant inputs; only prescribed surface
-fluxes are checked to cover the run window, so check forcing coverage when
-constructing an experiment.
+explicitly with xarray. Every dated input must cover the run window, or
+declare that holding its end samples is intended (:ref:`v3-persist`).
 
 Coupled output must use the shared public conversion instead of multiplying
 floating epoch days into nanoseconds:
