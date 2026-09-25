@@ -2171,6 +2171,33 @@ def _reject_forced_flux_in_scm(cfg: DictConfig, physics) -> None:
             "(SingleColumnModel.run(..., forcing=...)).")
 
 
+def _check_resume_mirror_revision(ckpt_path, recorded) -> None:
+    """Refuse to resume on another data-mirror commit than the run used.
+
+    The model was just rebuilt, reading its inputs at this process's commit;
+    if that differs from the checkpoint's (a moved pin, a different
+    ``JCM_MIRROR_REVISION``), the integration would switch its boundary
+    inputs mid-run. ``JCM_ALLOW_MIRROR_REVISION_CHANGE=1`` accepts the switch,
+    and the next checkpoint then records the new commit. A checkpoint without
+    a record (written before it existed) is not checked.
+    """
+    from jcm.data import remote
+    current = remote.mirror_revision()
+    if recorded is None or recorded == current:
+        return
+    msg = (f"checkpoint {ckpt_path} was written by a run that read the data "
+           f"mirror at {recorded}, but this run reads it at {current}; "
+           "resuming would change the boundary inputs mid-integration.")
+    if os.environ.get("JCM_ALLOW_MIRROR_REVISION_CHANGE") == "1":
+        logger.warning("%s Continuing because "
+                       "JCM_ALLOW_MIRROR_REVISION_CHANGE=1.", msg)
+        return
+    raise RuntimeError(
+        f"{msg} Set {remote.REVISION_ENV}={recorded} to continue on the "
+        "recorded inputs, or JCM_ALLOW_MIRROR_REVISION_CHANGE=1 to switch "
+        "deliberately.")
+
+
 def run_chunked(
     cfg: DictConfig,
     chunk_days: float,
@@ -2245,7 +2272,10 @@ def run_chunked(
         else:
             model.bootstrap_state()
 
-        load_checkpoint(model, ckpt_path)
+        ckpt_meta: dict = {}
+        load_checkpoint(model, ckpt_path, metadata=ckpt_meta)
+        _check_resume_mirror_revision(
+            ckpt_path, ckpt_meta.get("data_mirror_revision"))
         # The restored exact clock, not the float elapsed_days record.
         elapsed_seconds = _elapsed_seconds()
         elapsed_sim_days = elapsed_seconds / 86400.0

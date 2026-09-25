@@ -195,12 +195,16 @@ def _resolve_auto_terrain(coords):
     nlon, nlat = (int(v) for v in coords.horizontal.nodal_shape)
     packaged = ir.resolve_packaged(mm.load_manifest(), "terrain_packaged",
                                    nlat=nlat, nlon=nlon)
+    # Recorded like every other resolved input, so provenance lists it.
     if packaged is not None:
+        provenance.record_input(packaged)
         return packaged
     token = _grid_token(coords)
     from jcm.data.remote import bundle_file
     try:
-        return str(bundle_file(token, "terrain.nc"))
+        resolved = str(bundle_file(token, "terrain.nc"))
+        provenance.record_input(f"hf://bundles/{token}/terrain.nc", resolved)
+        return resolved
     except Exception as e:  # noqa: BLE001
         raise FileNotFoundError(
             f"terrain.kind=auto: no packaged terrain matches "
