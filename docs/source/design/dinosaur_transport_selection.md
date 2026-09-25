@@ -10,13 +10,13 @@ The dinosaur backend offers two transport schemes, chosen per run by
 
 ## The rule
 
-1. **Tracers force semi-Lagrangian.** Spectral (Eulerian) transport of a sharp
-   tracer field rings negative every step; it was the documented cause of the
-   aerosol-microphysics NaNs that motivated the SL core (#521, and
-   {doc}`dinosaur_sl_jam_configuration`). So no path may put a declared tracer
-   on it: ``advection="eulerian"`` with non-empty ``tracer_specs`` raises at
-   construction (or when the tracers are registered later).
-2. **An explicit choice wins** otherwise.
+1. **Tracers default to semi-Lagrangian.** Spectral (Eulerian) transport of a
+   sharp tracer field rings negative every step; it was the documented cause
+   of the aerosol-microphysics NaNs that motivated the SL core (#521, and
+   {doc}`dinosaur_sl_jam_configuration`). So the default never puts a declared
+   tracer on it. An explicit ``advection="eulerian"`` with tracers still runs,
+   but logs a warning: it is a poor choice, not an invalid one.
+2. **An explicit choice wins.**
 3. **``advection=None`` (the default) lets the physics decide.**
    ``Model`` calls ``DinosaurDycore.resolve_advection(physics.preferred_advection())``
    once the tracer set is known. ``PhysicsTerm.preferred_advection()`` returns

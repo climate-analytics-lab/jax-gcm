@@ -218,7 +218,7 @@ class SpeedyTermBase(PhysicsTerm):
         carries no extra tracers (``specific_humidity`` is modal under either
         scheme), so semi-Lagrangian transport buys it nothing — while on CPU
         it costs ~4x the whole step at T31L8. A SPEEDY composition that adds
-        tracers still gets semi-Lagrangian (the dycore enforces it, #521).
+        tracers still resolves to semi-Lagrangian (#521).
         See docs/source/design/dinosaur_transport_selection.md.
         """
         return "eulerian"

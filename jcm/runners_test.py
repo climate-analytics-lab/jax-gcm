@@ -217,8 +217,8 @@ class TestAdvectionResolution(unittest.TestCase):
 
     ``null`` (the default) lets the physics decide — SPEEDY declares the
     Eulerian core; everything else resolves semi-Lagrangian — and an explicit
-    value wins, except that Eulerian is refused for tracer-carrying physics
-    (#521). Aquaplanet/default forcing keeps the builds offline.
+    value wins (an explicit Eulerian with tracer-carrying physics only warns,
+    #521). Aquaplanet/default forcing keeps the builds offline.
     """
 
     _OFFLINE = ["terrain=aquaplanet", "forcing=default"]
@@ -240,10 +240,11 @@ class TestAdvectionResolution(unittest.TestCase):
     def test_held_suarez_resolves_semi_lagrangian(self):
         self.assertEqual(self._advection(["physics=held_suarez"]), "semi_lagrangian")
 
-    def test_explicit_eulerian_rejected_for_tracer_physics(self):
-        with self.assertRaisesRegex(ValueError, "#521"):
-            build_model(_compose([*self._OFFLINE, "physics=echam",
-                                  "dycore.advection=eulerian"]))
+    def test_explicit_eulerian_warns_for_tracer_physics(self):
+        with self.assertLogs("jcm.dycore.dinosaur.dycore", "WARNING"):
+            self.assertEqual(
+                self._advection(["physics=echam", "dycore.advection=eulerian"]),
+                "eulerian")
 
 
 class TestConfigComposition(unittest.TestCase):

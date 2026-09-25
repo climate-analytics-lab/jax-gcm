@@ -322,8 +322,8 @@ configuration; it then owns the time step.
 spectral core it was formulated on, which on CPU is ~4x faster than
 semi-Lagrangian for SPEEDY; ECHAM, JAM, Held–Suarez and any composition that
 carries extra tracers run semi-Lagrangian. Pass ``advection="semi_lagrangian"``
-or ``"eulerian"`` to force one — Eulerian is refused for tracer-carrying
-physics, whose sharp tracer fields it rings negative. See
+or ``"eulerian"`` to force one — Eulerian with tracer-carrying physics runs
+but warns, since it rings negative on sharp tracer fields. See
 :doc:`design/dinosaur_transport_selection`.
 
 **Initial conditions.** For the common starting states there are ready-made

@@ -17,9 +17,9 @@ cubed sphere (``jcm/dycore/pyses/dycore.py::PysesCamSEDycore``,
 column physics through a pg2 finite-volume physics grid (see
 {doc}`../design/pyses_cam_se_dycore`).
 
-On the **dinosaur** backend tracer transport is **semi-Lagrangian only** —
+On the **dinosaur** backend tracer transport is **semi-Lagrangian** by default —
 departure-point transport with a Bermejo–Staniforth quasi-monotone limiter;
-the Eulerian core is available only to physics that carries no extra tracers.
+the Eulerian core is meant for physics that carries no extra tracers.
 Every jcm extra tracer (aerosol mass/number, gases, cloud condensate) rides as
 a *nodal* tracer while ``specific_humidity`` stays modal for the implicit
 q↔Tᵥ coupling; the condensate species additionally enter the dynamics through
@@ -90,10 +90,10 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
 σ–p vertical coordinates.
 
 **Why we differ.**
-- `compute` — semi-Lagrangian is the *only* tracer transport; Eulerian
+- `compute` — semi-Lagrangian is the default tracer transport; Eulerian
   spectral-transform transport of tracers rang negative on sharp emission
-  sources and NaN'd the aerosol microphysics, so a tracer-carrying
-  configuration cannot select it. See
+  sources and NaN'd the aerosol microphysics, so tracer-carrying
+  configurations never default to it (forcing it warns). See
   {doc}`../design/dinosaur_sl_jam_configuration`.
 - `compute` — tracer-free SPEEDY runs the Eulerian spectral core it was
   formulated on: semi-Lagrangian buys it nothing (``specific_humidity`` is
@@ -124,7 +124,7 @@ rely on.
   ``step``, ``to_physics_state``, ``Predictions``).
 - ``jcm/dycore/dinosaur/dycore.py`` — ``DinosaurDycore``,
   ``semi_lagrangian_available`` / ``_require_semi_lagrangian``,
-  ``resolve_advection`` (transport selection and the tracer guard), transport
+  ``resolve_advection`` (transport selection), transport
   build (nodal tracers), filter build.
 - ``jcm/dycore/pyses/dycore.py`` — ``PysesCamSEDycore``.
 - ``jcm/diffusion.py`` — ``DiffusionFilter`` and its ``auto`` / ``echam_lmidatm``

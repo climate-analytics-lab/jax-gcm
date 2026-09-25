@@ -343,7 +343,7 @@ Eulerian spectral core it was formulated on (it carries no extra tracers,
 and semi-Lagrangian costs ~4x its CPU step for nothing), so **SPEEDY runs
 Eulerian exactly as in 2.x** with no code change. ECHAM, JAM, Held–Suarez and
 any SPEEDY composition that adds tracers run semi-Lagrangian; an explicit
-``eulerian`` with tracer-carrying physics raises. See
+``eulerian`` with tracer-carrying physics runs but warns. See
 :doc:`design/dinosaur_transport_selection`.
 
 ``diffusion.tracer_positivity`` is **not** gone. It survives as a

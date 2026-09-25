@@ -248,9 +248,9 @@ class PhysicsTerm(nnx.Module):
         ``"eulerian"`` or ``"semi_lagrangian"``, or ``None`` (default) for no
         preference. ``ComposablePhysics`` aggregates: any
         ``"semi_lagrangian"`` wins (it may be a correctness requirement),
-        otherwise any ``"eulerian"``. The dycore still overrides an Eulerian
-        preference to semi-Lagrangian whenever the composition carries
-        extra tracers (#521). See
+        otherwise any ``"eulerian"``. The dycore still resolves an Eulerian
+        preference to semi-Lagrangian when the composition carries extra
+        tracers (#521). See
         docs/source/design/dinosaur_transport_selection.md.
         """
         return None

@@ -61,14 +61,13 @@ def _small_dycore(**kwargs):
 
 @unittest.skipUnless(_sl_available(), "needs the semi-Lagrangian dinosaur")
 class AdvectionSelectionTest(unittest.TestCase):
-    """``advection`` selection: explicit, physics-decided, and the #521 guard.
+    """``advection`` selection: explicit, physics-decided, and the #521 warning.
 
-    Eulerian spectral transport is offered only for tracer-free physics
-    (SPEEDY declares it — it carries no extra tracers and SL costs ~4x its
-    CPU step for nothing). Spectral transport of a sharp tracer rings
-    negative and NaN'd the aerosol microphysics (#521), so no path may put
-    a tracer on it: an explicit request raises, and the physics-decided
-    mode falls back to semi-Lagrangian.
+    Eulerian spectral transport is meant for tracer-free physics (SPEEDY
+    declares it — it carries no extra tracers and SL costs ~4x its CPU step
+    for nothing). Spectral transport of a sharp tracer rings negative and
+    NaN'd the aerosol microphysics (#521), so the physics-decided mode never
+    picks it for tracers, and an explicit request with tracers warns.
     """
 
     def _dust(self):
@@ -90,37 +89,11 @@ class AdvectionSelectionTest(unittest.TestCase):
             dycore.primitive, primitive_equations.SemiLagrangianPrimitiveEquations)
         self.assertEqual(dycore._nodal_tracers, ())
 
-    def test_explicit_eulerian_with_tracers_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "#521"):
-            _small_dycore(advection="eulerian", tracer_specs=self._dust())
-
-    def test_explicit_eulerian_rejects_late_tracer_registration(self):
-        dycore = _small_dycore(advection="eulerian")
-        primitive = dycore.primitive
-        with self.assertRaisesRegex(ValueError, "#521"):
-            dycore.tracer_specs = self._dust()
-        # The refusal is all-or-nothing: a caller that catches it keeps a
-        # tracer-free Eulerian dycore, not tracer specs on spectral transport.
-        self.assertEqual(dycore.tracer_specs, {})
-        self.assertIs(dycore.primitive, primitive)
+    def test_explicit_eulerian_with_tracers_warns(self):
+        with self.assertLogs("jcm.dycore.dinosaur.dycore", "WARNING") as logs:
+            dycore = _small_dycore(advection="eulerian", tracer_specs=self._dust())
+        self.assertIn("#521", logs.output[0])
         self.assertEqual(dycore.advection, "eulerian")
-        dycore.tracer_specs = {}  # still consistent: no rebuild needed
-
-    def test_failed_rebuild_restores_transport_state(self):
-        from unittest import mock
-
-        dycore = _small_dycore()
-        before = (dycore.tracer_specs, dycore.advection, dycore.primitive,
-                  dycore._dynamics_step_fn)
-        with mock.patch.object(type(dycore), "_build_filters",
-                               side_effect=RuntimeError("boom")):
-            with self.assertRaisesRegex(RuntimeError, "boom"):
-                dycore.tracer_specs = self._dust()
-            with self.assertRaisesRegex(RuntimeError, "boom"):
-                dycore.resolve_advection("eulerian")
-        self.assertEqual(
-            (dycore.tracer_specs, dycore.advection, dycore.primitive,
-             dycore._dynamics_step_fn), before)
 
     def test_unresolved_default_is_semi_lagrangian(self):
         dycore = _small_dycore()

@@ -30,9 +30,6 @@ from flax import nnx
 
 from jcm import profiling
 from jcm.physics_interface import (
-    ADVECTION_SCHEMES,
-    EULERIAN,
-    SEMI_LAGRANGIAN,
     Physics,
     PhysicsState,
     PhysicsTendency,
@@ -262,21 +259,8 @@ class ComposablePhysics(nnx.Module, Physics):
         is a fidelity/cost one. Otherwise any ``"eulerian"`` preference,
         else ``None`` (no preference).
         """
-        prefs = set()
-        for term in self.terms:
-            pref = term.preferred_advection()
-            if pref is None:
-                continue
-            # Validate every vote, not just the winner: a misspelt preference
-            # would otherwise be dropped here and the run would silently use
-            # a scheme the term never asked for.
-            if pref not in ADVECTION_SCHEMES:
-                raise ValueError(
-                    f"term {term.name!r} preferred_advection must be one of "
-                    f"{ADVECTION_SCHEMES} or None, got {pref!r}"
-                )
-            prefs.add(pref)
-        for scheme in (SEMI_LAGRANGIAN, EULERIAN):  # SL first: it wins
+        prefs = {term.preferred_advection() for term in self.terms} - {None}
+        for scheme in ("semi_lagrangian", "eulerian"):
             if scheme in prefs:
                 return scheme
         return None

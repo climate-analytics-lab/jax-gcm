@@ -19,5 +19,5 @@ compute_omega: null
 # composition that carries extra tracers — runs semi-Lagrangian, because
 # spectral transport rings negative on sharp tracers and NaN'd the aerosol
 # microphysics (#521). An explicit ``eulerian`` with tracer-carrying
-# physics is rejected at model construction.
+# physics runs but logs a warning.
 advection: null
