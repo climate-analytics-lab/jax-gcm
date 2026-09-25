@@ -28,10 +28,10 @@ sed -n '/^tail -c +\$((ATTEMPT_START/,$p' "$TMP/full.sh" \
 [ -s "$TMP/gate.sh" ] || { echo "FAILED to extract gate from generated script"; exit 1; }
 
 fails=0
-run_gate() {  # $1 = bytes already in run.log before this attempt
+run_gate() {  # $1 = bytes already in run.log before this attempt, $2 = jcm.main rc (default 0)
   ( set -euo pipefail
     ATTEMPT_START="$1"
-    RC=0
+    RC="${2:-0}"
     # shellcheck disable=SC1090
     source "$TMP/gate.sh" ) >"$TMP/out" 2>&1
   echo $?
@@ -121,6 +121,21 @@ check "monthly-only run complete at day 366" 0 "$(run_gate 0)"
 # 12. ...and a monthly-only run evicted at day 105 is not.
 printf '  Chunk 20 | Day 105 (0.29 yr) | OK\n' > "$L"
 check "monthly-only run evicted mid-year" 1 "$(run_gate 0)"
+
+# 13. Restart from the final checkpoint whose pending final-month flush
+#     succeeds: nothing integrated, rc=0 — already complete.
+printf '  Chunk 73 | Day 366 (1.00 yr) | OK\n' > "$L"
+off=$(stat -c%s "$L")
+printf 'Resumed from checkpoint %s/testrun.ckpt at sim-day 366.0\n  Saved %s/testrun_monthly_2000-12.nc\n' "$RUNDIR" "$RUNDIR" >> "$L"
+check "final-checkpoint restart, final flush ok" 0 "$(run_gate "$off" 0)"
+
+# 14. ...but if that flush fails, jcm.main's nonzero rc must fail the Job:
+#     no chunk line or health report is written, so the rc is the only
+#     signal that the final month is missing.
+printf '  Chunk 73 | Day 366 (1.00 yr) | OK\n' > "$L"
+off=$(stat -c%s "$L")
+printf 'Resumed from checkpoint %s/testrun.ckpt at sim-day 366.0\nOSError: No space left on device\n' "$RUNDIR" >> "$L"
+check "final-checkpoint restart, final flush fails" 1 "$(run_gate "$off" 1)"
 
 if [ "$fails" -eq 0 ]; then echo "all gate tests passed"; else
   echo "$fails gate test(s) failed"; exit 1; fi

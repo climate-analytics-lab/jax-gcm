@@ -229,6 +229,16 @@ if [ -z "$LAST" ]; then
   # which must NOT look like success.
   RESUMED=$(grep -oE "Resumed from checkpoint .* at sim-day [0-9.]+" \\
             /tmp/attempt.log | grep -oE "[0-9.]+$" | tail -1 || true)
+  # A restart from the final checkpoint still does work: it flushes the
+  # final month when its file was not written before the pod died. That
+  # flush writes no chunk file or health line, so only the exit code says
+  # whether it succeeded — a failed flush must fail the Job, not pass as
+  # "already complete" with the final month missing.
+  if [ -n "$RESUMED" ] && [ "${{RESUMED%%.*}}" -ge {days} ] && [ "$RC" -ne 0 ]; then
+    echo "FATAL: resumed at the final checkpoint (day $RESUMED) but jcm.main"
+    echo "       exited rc=$RC — the pending final flush did not complete."
+    exit $RC
+  fi
   if [ -n "$RESUMED" ] && [ "${{RESUMED%%.*}}" -ge {days} ]; then
     echo "=== already complete: checkpoint at day $RESUMED of {days}, nothing to do ==="
     exit 0
