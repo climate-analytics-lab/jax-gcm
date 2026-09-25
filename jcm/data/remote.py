@@ -50,12 +50,14 @@ REVISION_ENV = "JCM_MIRROR_REVISION"
 _COMMIT_SHA = re.compile(r"[0-9a-f]{40}\Z")
 
 
-def mirror_revision() -> str:
-    """Return the commit this process reads the mirror at.
+def requested_revision() -> str:
+    """Return the commit the environment asks for, without fixing it.
 
     ``$JCM_MIRROR_REVISION`` when set, else :data:`MIRROR_REVISION`. Only a
     full commit sha is accepted: a branch such as ``main`` moves, so two
     machines (or two jobs of one run) could read different files under it.
+    For a launcher deciding which commit its jobs read; everything that reads
+    the mirror uses :func:`mirror_revision`.
 
     Raises:
         ValueError: the override is not a 40-hex commit sha.
@@ -72,6 +74,28 @@ def mirror_revision() -> str:
             f".dataset_info('{DEFAULT_REPO}', revision='{value}').sha)\"\n"
             f"and set {REVISION_ENV} to the printed sha.")
     return value
+
+
+#: The commit this process reads the mirror at, fixed by the first call.
+_FROZEN: str | None = None
+
+
+def mirror_revision() -> str:
+    """Return the one commit this process reads the mirror at.
+
+    :func:`requested_revision`, frozen at the first call: a process reads one
+    commit, so a model built at one commit can never be run with inputs from
+    another. Changing the override later in the process raises.
+    """
+    global _FROZEN
+    revision = requested_revision()
+    if _FROZEN is None:
+        _FROZEN = revision
+    elif revision != _FROZEN:
+        raise RuntimeError(
+            f"{REVISION_ENV} changed from {_FROZEN} to {revision} within one "
+            "process; a process reads one mirror commit.")
+    return revision
 
 
 def revision_source() -> str:
@@ -109,7 +133,7 @@ def is_transport_failure(exc: BaseException) -> bool:
     return local_miss
 
 
-def fetch(path: str, repo_id: str = DEFAULT_REPO) -> str:
+def fetch(path: str) -> str:
     """Resolve one mirror file at :func:`mirror_revision` to a local path.
 
     The Hugging Face cache stores each file under the commit it was
@@ -126,7 +150,7 @@ def fetch(path: str, repo_id: str = DEFAULT_REPO) -> str:
             "Fetching remote boundary conditions needs huggingface_hub: "
             "pip install huggingface_hub") from e
     revision = mirror_revision()
-    common = dict(repo_id=repo_id, repo_type="dataset", filename=path,
+    common = dict(repo_id=DEFAULT_REPO, repo_type="dataset", filename=path,
                   revision=revision)
     try:
         return hf_hub_download(**common, local_files_only=True)
@@ -152,7 +176,7 @@ def fetch(path: str, repo_id: str = DEFAULT_REPO) -> str:
             f"fetch('{path}')\"") from e
 
 
-def bundle_file(grid: str, name: str, repo_id: str = DEFAULT_REPO) -> str:
+def bundle_file(grid: str, name: str) -> str:
     """Resolve ``bundles/<grid>/<name>`` to a local path (see :func:`fetch`).
 
     ``grid`` is a Gaussian grid (``t63``, ``t106``, ``t127``, ``t255``), one
@@ -160,4 +184,4 @@ def bundle_file(grid: str, name: str, repo_id: str = DEFAULT_REPO) -> str:
     ``ne30pg3`` — level-suffixed grids hold the level-resolved products
     (ozone, oxidants). ``jcm/data/mirror_manifest.json`` lists what exists.
     """
-    return fetch(f"bundles/{grid}/{name}", repo_id=repo_id)
+    return fetch(f"bundles/{grid}/{name}")

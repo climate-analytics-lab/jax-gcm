@@ -4744,6 +4744,7 @@ class ResumeMirrorRevisionTest(unittest.TestCase):
         env = {remote.REVISION_ENV: current}
         if allow:
             env["JCM_ALLOW_MIRROR_REVISION_CHANGE"] = "1"
+        remote._FROZEN = None                        # each call: a process
         with mock.patch.dict(os.environ, env):
             _check_resume_mirror_revision("/x/ckpt", recorded)
 

@@ -110,6 +110,7 @@ class RegistryAndHashTest(unittest.TestCase):
                          remote.MIRROR_REVISION)
         self.assertEqual(attrs["jcm_prov_data_mirror_revision_source"],
                          "pinned")
+        remote._FROZEN = None                        # a new process
         with mock.patch.dict(os.environ, {remote.REVISION_ENV: "1" * 40}):
             other = provenance.collect()
         self.assertEqual(other["facts"]["data_mirror_revision_source"], "env")

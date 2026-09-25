@@ -62,9 +62,17 @@ class RevisionTest(unittest.TestCase):
         with _env():
             self.assertEqual(remote.mirror_revision(), remote.MIRROR_REVISION)
             self.assertEqual(remote.revision_source(), "pinned")
+        remote._FROZEN = None                        # a new process
         with _env(A):
             self.assertEqual(remote.mirror_revision(), A)
             self.assertEqual(remote.revision_source(), "env")
+
+    def test_changing_the_override_within_a_process_raises(self):
+        with _env(A):
+            remote.mirror_revision()
+        with _env("b" * 40), self.assertRaisesRegex(
+                RuntimeError, f"changed from {A} to {'b' * 40}"):
+            remote.mirror_revision()
 
     def test_branch_override_is_refused_with_the_resolving_command(self):
         with _env("main"), self.assertRaisesRegex(

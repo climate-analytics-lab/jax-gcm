@@ -234,8 +234,9 @@ def mirror_commit(rundir: str, resume: bool, force: bool) -> tuple[str, bool]:
     """
     import json
 
-    from jcm.data.remote import REVISION_ENV, mirror_revision, revision_source
-    commit, source = mirror_revision(), revision_source()
+    from jcm.data.remote import (
+        REVISION_ENV, requested_revision, revision_source)
+    commit, source = requested_revision(), revision_source()
     record = Path(rundir) / MIRROR_RECORD
     if resume and record.exists():
         recorded = json.loads(record.read_text())["commit"]
@@ -372,6 +373,14 @@ def main(argv=None):
     mirror = {tag: mirror_commit(f"{scratch}/jam_runs/{tag}", a.resume,
                                  a.force_mirror_revision)
               for _, tag in plan}
+    # This process reads the mirror at one commit (jcm.data.remote), so a
+    # launch's members must share it; resume differing ones separately.
+    commits = {m[0] for m in mirror.values()}
+    if len(commits) > 1:
+        raise SystemExit(
+            f"these members read different mirror commits "
+            f"({', '.join(sorted(commits))}); launch them separately.")
+    os.environ["JCM_MIRROR_REVISION"] = commits.pop()
 
     # Preflight every member's inputs before writing any job: a matrix launch
     # that cannot resolve an input should fail whole, on the node that still
@@ -379,8 +388,6 @@ def main(argv=None):
     if not a.no_prefetch:
         missing = {}
         for name, tag in plan:
-            # Prefetch at the commit this member's job will read.
-            os.environ["JCM_MIRROR_REVISION"] = mirror[tag][0]
             unavailable = prefetch(
                 overrides(tag, cfg["members"][name], d,
                           f"{scratch}/jam_runs/{tag}"))
@@ -402,7 +409,6 @@ def main(argv=None):
     for name, tag in plan:
         m = cfg["members"][name]
         rundir = f"{scratch}/jam_runs/{tag}"
-        os.environ["JCM_MIRROR_REVISION"] = mirror[tag][0]  # dust fetch
         ovs = " \\\n    ".join(
             overrides(tag, m, d, rundir) + [f"hydra.run.dir={rundir}"])
         job = PBS.format(

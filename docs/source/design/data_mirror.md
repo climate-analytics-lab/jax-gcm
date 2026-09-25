@@ -170,7 +170,8 @@ the pinned commit is accepted, still with no network access once cached.
 is refused, because it moves: two jobs of one run could read different files
 under it. The error prints the one-line `HfApi().dataset_info(...).sha` command
 that resolves a branch to its current commit. Prefetch under the same value you
-run with.
+run with. A process reads one commit: it is fixed at the first mirror read, and
+changing the override later in the same process raises.
 
 The commit is part of a run's identity, and is recorded as such:
 

@@ -314,3 +314,16 @@ def test_failed_preflight_leaves_the_record_untouched(scratch, repo,
         _launch(repo, "--tag", "fp", "--resume", "--force-mirror-revision")
     assert record.read_text() == before
 
+
+def test_members_at_different_commits_are_launched_separately(
+        scratch, repo, monkeypatch):
+    monkeypatch.setenv("JCM_MIRROR_REVISION", "a" * 40)
+    launch.main(["--repo", str(repo), "--tag", "mx", "--members", "speedy-t31"])
+    monkeypatch.setenv("JCM_MIRROR_REVISION", "c" * 40)
+    launch.main(["--repo", str(repo), "--tag", "mx",
+                 "--members", "echam-1m-t63"])
+    monkeypatch.delenv("JCM_MIRROR_REVISION")       # each reuses its record
+    with pytest.raises(SystemExit, match="launch them separately"):
+        launch.main(["--repo", str(repo), "--tag", "mx", "--resume",
+                     "--members", "speedy-t31,echam-1m-t63"])
+
