@@ -340,9 +340,12 @@ def main() -> int:
     p.add_argument("--no-monthly-means", dest="monthly_means",
                    action="store_false", default=True,
                    help="do not stream calendar-month means")
-    p.add_argument("--save-chunks", action="store_true", default=False,
+    p.add_argument("--save-chunks", action="store_true", default=None,
                    help="also keep every chunk's interval means (_dayN.nc); "
-                        "hundreds of GB for a JAM year of daily means")
+                        "hundreds of GB for a JAM year of daily means. "
+                        "Default: off with monthly means, on without them")
+    p.add_argument("--no-save-chunks", dest="save_chunks",
+                   action="store_false")
     p.add_argument("--gpus", type=int, default=1)
     p.add_argument("--cpu", type=int, default=8)
     p.add_argument("--memory", default="64Gi")
@@ -362,6 +365,9 @@ def main() -> int:
     p.add_argument("--extra", nargs="*", default=[],
                    help="raw Hydra overrides appended last")
     a = p.parse_args()
+    if a.save_chunks is None:
+        # Without monthly means the chunk files are the run's only output.
+        a.save_chunks = not a.monthly_means
 
     pins = dict(x.split("=", 1) for x in a.pin)
     resolved = resolve_refs(pins)

@@ -4998,6 +4998,12 @@ class TestMonthlyMeansConfig(unittest.TestCase):
                 run(_monthly_cfg(prefix, 1, total=2,
                                  extra=[f"run.checkpoint_path={ckpt}"]))
 
+    def test_no_output_at_all_is_refused_before_integrating(self):
+        cfg = _monthly_cfg("unused", 5, extra=["run.monthly_means=false",
+                                               "run.save_chunks=false"])
+        with self.assertRaisesRegex(ValueError, "no output"):
+            self._run_chunked(cfg)
+
     def test_monthly_means_need_the_chunked_loop(self):
         with self.assertRaisesRegex(ValueError, "chunk_days > 0"):
             run(_monthly_cfg("unused", 0))

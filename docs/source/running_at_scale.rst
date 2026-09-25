@@ -356,14 +356,18 @@ or last month carries its actual ``time_bounds`` plus ``time_coverage`` and
 intervals that tile the months from ``run.start_time`` (daily or sub-daily
 saves from a midnight start); a schedule that would cross a month edge is
 refused before integrating. ``run.save_chunks=false`` keeps only the monthly
-files — a year of daily means for a JAM configuration is hundreds of GB.
+files — a year of daily means for a JAM configuration is hundreds of GB — and
+is refused without ``run.monthly_means=true``, which would write nothing.
 
 With a checkpoint, the pending month is persisted as
-``{run.checkpoint_path}.monthly`` just before each checkpoint, rotated to
-``.monthly.prev`` and copied beside every ``archive_ckpt_every`` archive, and
-restored on resume; a kill between the two files pairs the checkpoint with
-``.monthly.prev``, and a checkpoint with no monthly state at its instant is
-refused rather than dropping or double-counting intervals. With
+``{run.checkpoint_path}.monthly``: staged as ``.monthly.new`` just before
+each checkpoint and promoted once the checkpoint is committed (the previous
+state rotates to ``.monthly.prev``), copied beside every
+``archive_ckpt_every`` archive, and restored on resume. The state matching the
+checkpoint is never overwritten before its successor is committed, so
+repeated kills at any point still resume, and a checkpoint with no monthly
+state at its instant is refused rather than dropping or double-counting
+intervals. With
 ``run.bail_on_unhealthy=false`` the stream follows the integration while the
 checkpoint (and so the persisted month) stays at the last healthy chunk; a
 resume re-integrates from there and rewrites any month file closed since.

@@ -137,5 +137,12 @@ off=$(stat -c%s "$L")
 printf 'Resumed from checkpoint %s/testrun.ckpt at sim-day 366.0\nOSError: No space left on device\n' "$RUNDIR" >> "$L"
 check "final-checkpoint restart, final flush fails" 1 "$(run_gate "$off" 1)"
 
+# 15. Opting out of monthly means keeps the chunk files by default: they are
+#     then the run's only output (the runner refuses a run writing neither).
+"$PY" "$HERE/mkrun.py" --name testrun --no-monthly-means 2>/dev/null \
+  | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["spec"]["template"]["spec"]["containers"][0]["command"][-1])' \
+  | grep -q "run.monthly_means=false.*run.save_chunks=true"
+check "--no-monthly-means implies save_chunks=true" 0 "$?"
+
 if [ "$fails" -eq 0 ]; then echo "all gate tests passed"; else
   echo "$fails gate test(s) failed"; exit 1; fi

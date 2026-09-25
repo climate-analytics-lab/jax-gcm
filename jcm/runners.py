@@ -2277,6 +2277,11 @@ def run_chunked(
     # chunk length. The pending month is persisted with the checkpoint.
     monthly = bool(cfg.run.get("monthly_means", False))
     save_chunks = bool(cfg.run.get("save_chunks", True))
+    if not (monthly or save_chunks):
+        raise ValueError(
+            "run.save_chunks=false with run.monthly_means=false: the run would "
+            "produce no output. Set run.save_chunks=true or "
+            "run.monthly_means=true.")
     accumulator = None
     if monthly:
         from jcm.temporal_aggregation import MonthlyMeanAccumulator
