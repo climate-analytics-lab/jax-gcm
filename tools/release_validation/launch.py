@@ -215,6 +215,47 @@ def prefetch(ovs: list[str]) -> list[str]:
     return missing
 
 
+#: Written into each member's rundir at launch: the data-mirror commit the
+#: run reads, so a ``--resume`` continues on exactly the same inputs.
+MIRROR_RECORD = "mirror_revision.json"
+
+
+def mirror_commit(rundir: str, resume: bool, force: bool) -> tuple[str, bool]:
+    """Return ``(commit, opt_in)`` for one member; record it in its rundir.
+
+    The commit is part of what a member is: the same code and config read
+    different inputs at another commit. A fresh launch records this process's
+    commit (the pin, or ``JCM_MIRROR_REVISION``). ``--resume`` reuses the
+    recorded one, so a jcm update that moved the pin cannot switch a running
+    member's inputs; an explicit different ``JCM_MIRROR_REVISION`` is refused
+    unless ``force``, which records the new commit and opts the job in to
+    resuming a checkpoint written at the old one (``run_chunked`` otherwise
+    refuses it).
+    """
+    import json
+
+    from jcm.data.remote import REVISION_ENV, mirror_revision, revision_source
+    commit, source = mirror_revision(), revision_source()
+    record = Path(rundir) / MIRROR_RECORD
+    if resume and record.exists():
+        recorded = json.loads(record.read_text())["commit"]
+        if recorded == commit or (source == "pinned" and not force):
+            return recorded, False
+        if not force:
+            raise SystemExit(
+                f"{REVISION_ENV}={commit} differs from the mirror commit "
+                f"{recorded} recorded in {record}; resuming on it would change "
+                "the run's boundary inputs mid-integration. Unset it to "
+                "continue on the recorded commit, or pass "
+                "--force-mirror-revision to switch deliberately.")
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({
+        "requested": commit, "source": source, "commit": commit,
+        "written": datetime.datetime.now(datetime.timezone.utc).isoformat(
+            timespec="seconds")}, indent=1))
+    return commit, force and resume
+
+
 def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
     # Presets may carry their own output plumbing (the pyses ones set
     # run.checkpoint_path); ours must win, so strip conflicting keys
@@ -263,7 +304,8 @@ export JAX_PLATFORMS=cuda,cpu
 export MAM4_JAX_ENABLE_X64=0
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.93
 export JAX_COMPILATION_CACHE_DIR=${{SCRATCH}}/jcm-jax-cache
-mkdir -p {rundir}
+export JCM_MIRROR_REVISION={mirror_revision}
+{mirror_optin}mkdir -p {rundir}
 cd {repo}
 python -u -m jcm.main \\
     {ovs}
@@ -283,6 +325,10 @@ def main(argv=None):
     ap.add_argument("--resume", action="store_true",
                     help="continue an existing run rather than refusing to "
                          "start on top of its checkpoint")
+    ap.add_argument("--force-mirror-revision", action="store_true",
+                    help="with --resume, switch a run to the explicitly set "
+                         "JCM_MIRROR_REVISION although it was started at "
+                         "another mirror commit (its inputs change mid-run)")
     ap.add_argument("--submit", action="store_true")
     ap.add_argument("--no-prefetch", action="store_true",
                     help="skip the input preflight (offline job generation)")
@@ -309,6 +355,11 @@ def main(argv=None):
     plan = [(name, f"mx_{name.replace('-', '_')}_{run_tag}") for name in wanted]
     for _, tag in plan:
         check_fresh(f"{scratch}/jam_runs/{tag}", a.resume)
+    # Each member's mirror commit, resolved (and recorded) before the
+    # prefetch; the job exports it, as a PBS job does not inherit this shell.
+    mirror = {tag: mirror_commit(f"{scratch}/jam_runs/{tag}", a.resume,
+                                 a.force_mirror_revision)
+              for _, tag in plan}
 
     # Preflight every member's inputs before writing any job: a matrix launch
     # that cannot resolve an input should fail whole, on the node that still
@@ -316,6 +367,8 @@ def main(argv=None):
     if not a.no_prefetch:
         missing = {}
         for name, tag in plan:
+            # Prefetch at the commit this member's job will read.
+            os.environ["JCM_MIRROR_REVISION"] = mirror[tag][0]
             unavailable = prefetch(
                 overrides(tag, cfg["members"][name], d,
                           f"{scratch}/jam_runs/{tag}"))
@@ -333,12 +386,16 @@ def main(argv=None):
     for name, tag in plan:
         m = cfg["members"][name]
         rundir = f"{scratch}/jam_runs/{tag}"
+        os.environ["JCM_MIRROR_REVISION"] = mirror[tag][0]  # dust fetch
         ovs = " \\\n    ".join(
             overrides(tag, m, d, rundir) + [f"hydra.run.dir={rundir}"])
         job = PBS.format(
             name=tag, account=a.account, hours=m.get("hours", d["hours"]),
             logdir=str(outdir), venv=venv, repo=repo,
             rundir=rundir, ovs=ovs, marker=f"{tag.upper()}_COMPLETE",
+            mirror_revision=mirror[tag][0],
+            mirror_optin=("export JCM_ALLOW_MIRROR_REVISION_CHANGE=1\n"
+                          if mirror[tag][1] else ""),
         )
         path = outdir / f"{tag}.pbs"
         path.write_text(job)

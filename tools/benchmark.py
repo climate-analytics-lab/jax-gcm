@@ -35,6 +35,7 @@ Results land in ``<outdir>/<label>/`` as ``report.md``, ``result.json``,
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import pathlib
 import re
@@ -573,12 +574,32 @@ def _hf_fetch(path: str) -> str:
     what makes this safe, and it stays the single source of truth for the
     dataset id rather than being copied in here.
     """
+    return _remote().fetch(path)
+
+
+@functools.lru_cache(maxsize=1)
+def _remote():
+    """Load ``jcm/data/remote.py`` once, by file path (see :func:`_hf_fetch`)."""
     import importlib.util
     src = REPO / "jcm" / "data" / "remote.py"
     spec = importlib.util.spec_from_file_location("_jcm_remote", src)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.fetch(path)
+    return mod
+
+
+def _mirror_revision() -> dict:
+    """Return this run's mirror commit and its source, and export the commit.
+
+    The model subprocess inherits ``os.environ``, so exporting makes it read
+    exactly the commit the prefetch did. The source is read before the
+    export, which would otherwise make every run look overridden.
+    """
+    remote = _remote()
+    mirror = {"commit": remote.mirror_revision(),
+              "source": remote.revision_source()}
+    os.environ[remote.REVISION_ENV] = mirror["commit"]
+    return mirror
 
 
 def run(args) -> dict:
@@ -608,6 +629,7 @@ def run(args) -> dict:
     # at a local path, changes which bundles the run actually needs. Composing
     # the preset alone would prefetch (or fail offline on) bundles the effective
     # config never uses.
+    mirror = _mirror_revision()
     files = _preset_data_files([*preset, *args.extra])
     missing = []
     for f in files:
@@ -715,6 +737,9 @@ def run(args) -> dict:
 
     t0 = time.time()
     with log_path.open("w") as fh:
+        fh.write(f"data mirror revision: {mirror['commit']} "
+                 f"({mirror['source']})\n")
+        fh.flush()
         proc = subprocess.run(cmd, cwd=REPO, env=env, stdout=fh,
                               stderr=subprocess.STDOUT, check=False)
     wall_total = time.time() - t0
@@ -748,6 +773,7 @@ def run(args) -> dict:
         "overrides": overrides,
         "env": env_note,
         "provenance": _provenance(env, args.python),
+        "data_mirror_revision": mirror,
         **analyse_chunks(walls, chunk, tol=args.tol),
         "gpu": _summarize_gpu(gpu_path),
     }
@@ -816,6 +842,8 @@ def _report(r: dict) -> str:
         f"- requested {r['requested_days']} d, "
         f"completed {r['completed_days']} d",
         f"- exit code: {r['exit_code']}",
+        f"- data mirror revision: "
+        f"{r.get('data_mirror_revision', {}).get('commit', '?')}",
         "",
         "## Throughput",
         "",

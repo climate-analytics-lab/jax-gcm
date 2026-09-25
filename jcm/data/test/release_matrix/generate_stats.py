@@ -390,12 +390,10 @@ def state_mirror_path(member: str, digest: str) -> str:
     """Mirror path of ``member``'s init state, as ``fetch`` takes it.
 
     The content digest is in the **filename**, not merely recorded beside it,
-    because a stable name cannot be republished safely:
-    :func:`jcm.data.remote.fetch` resolves cache-first and never revalidates a
-    hit, so any host that had already fetched the old state would keep using
-    it against newly committed bands — a mismatched pair failing for as long
-    as that cache survived, with nothing to indicate why. A new state is a new
-    path, so a stale cache entry simply goes unused.
+    so a state is never republished under a name an older state held. Mirror
+    reads resolve at the pinned commit (:mod:`jcm.data.remote`), so a state
+    uploaded after the pin is readable only once the pin is bumped — in the
+    same PR as its bands.
 
     The band file records the exact path it was generated against; nothing
     reconstructs this name in order to read a state back.
@@ -425,6 +423,30 @@ def _assert_state_digest(path, mirror_path: str) -> None:
             f"for {expected!r} ({mirror_path}): a mismatched state/bands pair. "
             "Regenerate them together with "
             "jcm.data.test.release_matrix.generate_stats.generate().")
+
+
+def check_band_mirror_revision(member: str, band_attrs, run_commit: str
+                               ) -> None:
+    """Refuse to compare bands drawn at a different data-mirror commit.
+
+    A run reading its inputs at another commit differs from the bands for a
+    reason that is not physics, so the mismatch fails as itself, before any
+    window runs. A band file without the record predates the pin and is
+    compared anyway, with a warning, until it is regenerated.
+    """
+    import warnings
+
+    recorded = band_attrs.get("data_mirror_revision")
+    if recorded is None:
+        warnings.warn(
+            f"{member}: band file records no data_mirror_revision; comparing "
+            f"at mirror commit {run_commit} anyway. Regenerate the bands to "
+            "record it (tools/release_validation/README.md).", stacklevel=2)
+    elif str(recorded) != run_commit:
+        raise AssertionError(
+            f"{member}: fixture generated at data-mirror commit {recorded}, "
+            f"run uses {run_commit}: regenerate the bands "
+            "(tools/release_validation/README.md).")
 
 
 def resolve_state(mirror_path: str) -> str | None:
@@ -867,6 +889,10 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
     stats_ds.attrs["bands_environment"] = band_env
     stats_ds.attrs["init_state_environment"] = (
         band_env if write_state else (state_environment or "unrecorded"))
+    # The mirror commit the workers read their inputs at (they inherit this
+    # process's environment); see check_band_mirror_revision.
+    from jcm.data import remote
+    stats_ds.attrs["data_mirror_revision"] = remote.mirror_revision()
     held = HELD_STATES.get(member)
     stats_ds.attrs["hosted_state"] = "pending" if held else "published"
     if held:
