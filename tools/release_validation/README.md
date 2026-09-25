@@ -55,10 +55,10 @@ together. To re-derive bands on an already-published state, pass
 then upload the file it wrote — `<member>_fixture_<digest>.msgpack`, whose
 name carries a digest of its own contents — additively under that member's
 `init_states/` prefix (see `docs/source/design/data_mirror.md`). Upload it
-under exactly the name `generate` produced: the band file records that path,
-and `jcm.data.remote.fetch` resolves cache-first without revalidating, so a
-stable name could not be republished without leaving already-warm caches
-pairing an old state with new bands.
+under exactly the name `generate` produced: the band file records that path.
+Mirror reads resolve at the pinned commit (`MIRROR_REVISION` in
+`jcm/data/remote.py`), so bump the pin to the upload's commit in the same PR as
+the bands, or no run can read the new state.
 
 Before uploading, validate the new pair locally: point
 `JCM_FIXTURE_STATE_DIR` at the directory holding the generated state(s) and
@@ -67,6 +67,13 @@ checked) and never from the mirror; a member whose state is absent is skipped,
 named. A band file marked `hosted_state="pending"` (a state deliberately not
 published yet) is skipped for the same reason when its state is not local, but
 is validated like any other member when `JCM_FIXTURE_STATE_DIR` holds it.
+
+**Bands are tied to a data-mirror commit.** `generate` records the commit its
+inputs were read at as the band file's `data_mirror_revision`. The regression
+fails a member whose band file names a different commit than the run's, with
+"fixture generated at <A>, run uses <B>: regenerate the bands", instead of
+reporting an input change as a physics regression. A band file without the
+attribute predates it and is compared with a warning.
 
 Every band is an area-weighted global mean — the grid's Gauss-Legendre
 quadrature weights, via `jcm.analysis.global_mean`, never an equal-weight mean
@@ -107,6 +114,17 @@ python tools/release_validation/scm_check.py 10
 python tools/release_validation/health.py $SCRATCH/jam_runs/mx_<member>_<tag> \
     --last-n 40 --log runs/mx_<member>_<tag>.log
 ```
+
+**The data-mirror commit is part of a validation run's provenance.**
+`launch.py` records it in `<rundir>/mirror_revision.json` at first launch and
+exports it into every job (a PBS job does not inherit the submitting shell).
+`--resume` reuses the recorded commit; an explicit, different
+`JCM_MIRROR_REVISION` is refused unless `--force-mirror-revision`, which
+records the new commit and opts the job in to resuming across the switch.
+If a forced launch dies before its first checkpoint, re-issue the same
+`--resume --force-mirror-revision` command, which regenerates the opt-in; the
+record stores only requested/source/commit/written.
+Compare two validation runs only at the same commit.
 
 Every artefact of a launch — rundir, PBS job name, outputs, log — is
 namespaced by a run tag, which defaults to the launched repo's HEAD short

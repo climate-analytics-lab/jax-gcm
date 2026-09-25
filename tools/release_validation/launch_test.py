@@ -11,6 +11,7 @@ Nothing here submits anything -- ``qsub`` is monkeypatched out.
 from __future__ import annotations
 
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -33,6 +34,10 @@ def offline(monkeypatch):
     """
     monkeypatch.setattr(launch, "_hf_fetch", lambda rel: rel)
     monkeypatch.setattr(launch, "_preset_data_files", lambda ovs: [])
+    # main() exports each member's commit into its own environment; setenv
+    # first so monkeypatch restores the variable afterwards.
+    monkeypatch.setenv("JCM_MIRROR_REVISION", "0" * 40)
+    monkeypatch.delenv("JCM_MIRROR_REVISION")
 
 
 @pytest.fixture
@@ -238,3 +243,87 @@ def test_no_prefetch_generates_jobs_offline(scratch, repo, monkeypatch):
     _launch(repo, "--tag", "offlinegen", "--no-prefetch")
     assert not called
     assert list((repo / "runs").glob("*.pbs"))
+
+
+def _job_env(repo, tag):
+    """Return the ``export``s of a generated PBS script."""
+    text = (repo / "runs" / f"mx_speedy_t31_{tag}.pbs").read_text()
+    return dict(re.findall(r"^export (\w+)=(\S*)$", text, re.M))
+
+
+def _checkpoint(scratch, tag):
+    (scratch / "jam_runs" / f"mx_speedy_t31_{tag}"
+     / "checkpoint.msgpack").write_bytes(b"x")
+
+
+def test_job_exports_the_pinned_commit(scratch, repo):
+    import json
+
+    from jcm.data import remote
+    _launch(repo, "--tag", "p")
+    env = _job_env(repo, "p")
+    assert env["JCM_MIRROR_REVISION"] == remote.MIRROR_REVISION
+    assert "JCM_ALLOW_MIRROR_REVISION_CHANGE" not in env
+    record = scratch / "jam_runs" / "mx_speedy_t31_p" / launch.MIRROR_RECORD
+    assert json.loads(record.read_text())["source"] == "pinned"
+
+
+def test_resume_keeps_the_recorded_commit_when_the_pin_moves(
+        scratch, repo, monkeypatch):
+    from jcm.data import remote
+    first = remote.MIRROR_REVISION
+    _launch(repo, "--tag", "rp")
+    _checkpoint(scratch, "rp")
+    monkeypatch.setattr(remote, "MIRROR_REVISION", "d" * 40)
+    monkeypatch.delenv("JCM_MIRROR_REVISION")
+    _launch(repo, "--tag", "rp", "--resume")
+    assert _job_env(repo, "rp")["JCM_MIRROR_REVISION"] == first
+
+
+def test_resume_refuses_a_different_explicit_sha_unless_forced(
+        scratch, repo, monkeypatch):
+    import json
+    a, c = "a" * 40, "c" * 40
+    monkeypatch.setenv("JCM_MIRROR_REVISION", a)
+    _launch(repo, "--tag", "rx")
+    _checkpoint(scratch, "rx")
+    monkeypatch.setenv("JCM_MIRROR_REVISION", c)
+    with pytest.raises(SystemExit, match="force-mirror-revision"):
+        _launch(repo, "--tag", "rx", "--resume")
+    assert _job_env(repo, "rx")["JCM_MIRROR_REVISION"] == a
+
+    monkeypatch.setenv("JCM_MIRROR_REVISION", c)
+    _launch(repo, "--tag", "rx", "--resume", "--force-mirror-revision")
+    env = _job_env(repo, "rx")
+    assert env["JCM_MIRROR_REVISION"] == c
+    assert env["JCM_ALLOW_MIRROR_REVISION_CHANGE"] == "1"
+    record = scratch / "jam_runs" / "mx_speedy_t31_rx" / launch.MIRROR_RECORD
+    assert json.loads(record.read_text())["commit"] == c
+
+
+def test_failed_preflight_leaves_the_record_untouched(scratch, repo,
+                                                      monkeypatch):
+    record = scratch / "jam_runs" / "mx_speedy_t31_fp" / launch.MIRROR_RECORD
+    monkeypatch.setenv("JCM_MIRROR_REVISION", "a" * 40)
+    _launch(repo, "--tag", "fp")
+    _checkpoint(scratch, "fp")
+    before = record.read_text()
+    monkeypatch.setenv("JCM_MIRROR_REVISION", "c" * 40)
+    monkeypatch.setattr(launch, "prefetch", lambda ovs: ["hf://missing.nc"])
+    with pytest.raises(SystemExit, match="not available"):
+        _launch(repo, "--tag", "fp", "--resume", "--force-mirror-revision")
+    assert record.read_text() == before
+
+
+def test_members_at_different_commits_are_launched_separately(
+        scratch, repo, monkeypatch):
+    monkeypatch.setenv("JCM_MIRROR_REVISION", "a" * 40)
+    launch.main(["--repo", str(repo), "--tag", "mx", "--members", "speedy-t31"])
+    monkeypatch.setenv("JCM_MIRROR_REVISION", "c" * 40)
+    launch.main(["--repo", str(repo), "--tag", "mx",
+                 "--members", "echam-1m-t63"])
+    monkeypatch.delenv("JCM_MIRROR_REVISION")       # each reuses its record
+    with pytest.raises(SystemExit, match="launch them separately"):
+        launch.main(["--repo", str(repo), "--tag", "mx", "--resume",
+                     "--members", "speedy-t31,echam-1m-t63"])
+

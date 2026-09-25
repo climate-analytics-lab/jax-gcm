@@ -750,6 +750,15 @@ corrections, listed here because they change climate:
   ``bundles/ne30pg3/terrain.nc`` (CESM ``LANDFRAC`` land fraction, exact
   GLL orography), and the pySES ``build_terrain`` now rejects any
   terrain file averaging >0.9 land as a placeholder (#596).
+- Every mirror read is pinned to one dataset commit (``MIRROR_REVISION`` in
+  ``jcm/data/remote.py``; ``JCM_MIRROR_REVISION=<commit sha>`` overrides it,
+  and a branch name is refused). Two machines therefore no longer read
+  different copies of a republished bundle depending on their caches. Runs,
+  checkpoints, release-validation launches, benchmarks and fixture bands
+  record the commit. The pin is the 2026-09-24 upload carrying the
+  conservatively remapped t63/t106 ``emissions_{pd,pi}`` bundles, so a cache
+  holding the earlier emissions re-fetches once; prefetch before running
+  offline.
 
 
 Corrected physics

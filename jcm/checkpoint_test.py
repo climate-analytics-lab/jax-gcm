@@ -21,6 +21,7 @@ forcing. The composition-coverage tests build one SPEEDY and one ECHAM model
 (bootstrap only, no integration) to exercise a moist tracer set.
 """
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -238,6 +239,20 @@ class TestCheckpointSchemaStamp(unittest.TestCase):
         # ``specific_humidity`` is a kg/kg mass mixing ratio even though no
         # term declares it — the flag a unit migration keys on.
         self.assertTrue(payload["dycore_tracers"]["specific_humidity"])
+
+    def test_mirror_revision_round_trips_through_metadata(self):
+        from unittest import mock
+
+        from jcm.data import remote
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {remote.REVISION_ENV: "a" * 40}):
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(self.model, path, elapsed_days=0.0)
+            fresh = _build_model()
+            fresh.bootstrap_state()
+            meta = {}
+            load_checkpoint(fresh, path, metadata=meta)
+        self.assertEqual(meta["data_mirror_revision"], "a" * 40)
 
     def test_newer_schema_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

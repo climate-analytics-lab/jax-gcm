@@ -77,6 +77,50 @@ class RegistryTest(unittest.TestCase):
 
 
 
+class MirrorRevisionStagesTest(unittest.TestCase):
+    def test_upload_prints_the_pin_line_and_pull_is_pinned(self):
+        import contextlib
+        import io
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import huggingface_hub
+
+        from jcm.data import remote
+        from jcm.data.mirror import build_mirror as bm
+
+        class _Api:
+            def upload_folder(self, **kw):
+                return SimpleNamespace(oid="f" * 40)
+
+        out = io.StringIO()
+        with mock.patch.object(huggingface_hub, "HfApi", _Api), \
+                contextlib.redirect_stdout(out):
+            bm.stage_upload()
+        self.assertIn('MIRROR_REVISION = "' + "f" * 40 + '"', out.getvalue())
+
+        pulled = []
+
+        def snapshot(**kw):
+            pulled.append(kw["revision"])
+            root = Path(kw["local_dir"])
+            for name in ("era5_land_climo_2005-2014_0p25.nc",
+                         "ceds_anthro.zarr", "bb4cmip7.zarr"):
+                (root / "products" / name).mkdir(parents=True)
+            (root / "registry.json").write_text("{}")
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(bm, "BUILD", Path(d)), \
+                mock.patch.object(bm, "_REMOTE_REGISTRY", Path(d) / "r.json"), \
+                mock.patch.object(huggingface_hub, "snapshot_download",
+                                  snapshot), \
+                contextlib.redirect_stdout(io.StringIO()):
+            bm.stage_pull()
+        self.assertEqual(pulled, [remote.mirror_revision()])
+
+
 class DustProductTest(unittest.TestCase):
     """The dust bundle builder on a synthetic stand-in for the HAMMOZ pool.
 

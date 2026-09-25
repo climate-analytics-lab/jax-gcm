@@ -2848,6 +2848,14 @@ class TestAutoInputResolution(unittest.TestCase):
             self.assertEqual(_resolve_auto_terrain(coords), "/cached/file.nc")
             self.assertEqual(f.call_args.args[0], "bundles/t21/terrain.nc")
 
+    def test_terrain_auto_is_recorded_as_an_input(self):
+        from jcm import provenance
+        from jcm.runners import _resolve_auto_terrain
+        provenance.start_run()
+        packaged = _resolve_auto_terrain(self._coords(63))
+        self.assertIn(packaged, provenance.collect()["inputs"])
+        provenance.start_run()
+
     def test_ozone_auto_nulls_on_sigma_without_fetch(self):
         # Codex round 14 family check: auto-ozone has the SAME sigma hole as
         # oxidants. ``jcm.data.bc.interpolate_ozone`` writes the packaged AND
@@ -4785,3 +4793,31 @@ class TestRunDateEndpoints(unittest.TestCase):
                                            freq="6h")
             runners._state_from_era5(model, cfg)
             self.assertEqual(initial.call_args.args[1], "2010-02-03T00:00:00")
+
+
+class ResumeMirrorRevisionTest(unittest.TestCase):
+    """A resume must not silently switch the run's mirror inputs."""
+
+    def _check(self, recorded, current, allow=False):
+        from jcm.data import remote
+        from jcm.runners import _check_resume_mirror_revision
+        env = {remote.REVISION_ENV: current}
+        if allow:
+            env["JCM_ALLOW_MIRROR_REVISION_CHANGE"] = "1"
+        remote._FROZEN = None                        # each call: a process
+        with mock.patch.dict(os.environ, env):
+            _check_resume_mirror_revision("/x/ckpt", recorded)
+
+    def test_same_commit_or_unrecorded_resumes(self):
+        self._check("a" * 40, "a" * 40)
+        self._check(None, "b" * 40)
+
+    def test_different_commit_is_refused_naming_the_recorded_one(self):
+        with self.assertRaisesRegex(RuntimeError,
+                                    "JCM_MIRROR_REVISION=" + "a" * 40):
+            self._check("a" * 40, "b" * 40)
+
+    def test_explicit_opt_in_warns_and_continues(self):
+        with self.assertLogs("jcm.runners", "WARNING"):
+            self._check("a" * 40, "b" * 40, allow=True)
+

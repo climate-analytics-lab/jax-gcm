@@ -1776,12 +1776,15 @@ class TestReleaseMatrixStatistics(unittest.TestCase):
         # enough, which is why this does not try.
         worker_env = dict(os.environ)
 
+        from jcm.data import remote
         from jcm.data.test.release_matrix.generate_stats import (
             band_path,
+            check_band_mirror_revision,
             members,
             resolve_state,
             stats_window_global_mean_isolated,
         )
+        run_commit = remote.mirror_revision()
 
         #: Optional extras a member needs before it can even be composed.
         extras = {"echam-jam-t63-l47": "mam4_jax",
@@ -1823,6 +1826,7 @@ class TestReleaseMatrixStatistics(unittest.TestCase):
                 self.assertTrue(
                     any(v.endswith(".mean") for v in bands.data_vars),
                     f"{bands_file} carries no bands")
+                check_band_mirror_revision(member, bands.attrs, run_commit)
 
                 # The state path comes from the band file, digest and all,
                 # so these bands are always checked against the state they
@@ -1875,6 +1879,23 @@ class TestReleaseMatrixStatistics(unittest.TestCase):
                 "no matrix member had a band file, its optional extras and "
                 "its init state available",
             )
+
+
+class TestReleaseMatrixBandMirrorRevision(unittest.TestCase):
+    """Bands are compared only with a run at the commit they were drawn at."""
+
+    def test_mismatch_fails_and_absent_warns(self):
+        from jcm.data.test.release_matrix.generate_stats import (
+            check_band_mirror_revision,
+        )
+        a, b = "a" * 40, "b" * 40
+        check_band_mirror_revision("m", {"data_mirror_revision": a}, a)
+        with self.assertRaisesRegex(
+                AssertionError,
+                f"generated at data-mirror commit {a}, run uses {b}"):
+            check_band_mirror_revision("m", {"data_mirror_revision": a}, b)
+        with self.assertWarnsRegex(UserWarning, "m: band file records no"):
+            check_band_mirror_revision("m", {}, a)
 
 
 class TestReleaseMatrixBandCheck(unittest.TestCase):
