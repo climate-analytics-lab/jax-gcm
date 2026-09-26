@@ -6,6 +6,7 @@ coordinating shortwave and longwave radiation computations.
 """
 
 import jax.numpy as jnp
+import numpy as np
 
 from jcm.physics.chemistry.simple_chemistry import ppmv_to_mole_fraction
 from jcm.physics.coords_util import column_lat_lon
@@ -263,7 +264,7 @@ def radiation_scheme(
     aerosol_data,  # AerosolData from physics_data
     ozone_vmr: Optional[jnp.ndarray] = None,
     co2_vmr: float = 400e-6,
-    convection_type: jnp.ndarray = jnp.int32(0),
+    convection_type: jnp.ndarray = np.int32(0),  # numpy, not jnp: a jax default is built at import (#859)
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """Radiation scheme wrapper that extracts aerosol data and includes aerosol effects.
 

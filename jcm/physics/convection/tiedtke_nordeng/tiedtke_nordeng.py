@@ -683,8 +683,8 @@ def _tiedtke_convection_toa_first(
     qi: jnp.ndarray,
     dt: float,
     config: ConvectionParameters = None,
-    land_fraction: jnp.ndarray = jnp.array(0.0),
-    moisture_supply: jnp.ndarray = jnp.array(0.0),
+    land_fraction: jnp.ndarray | None = None,
+    moisture_supply: jnp.ndarray | None = None,
     moisture_tend_profile: jnp.ndarray | None = None,
     thvsig: jnp.ndarray | None = None,
     omega: jnp.ndarray | None = None,
@@ -751,6 +751,13 @@ def _tiedtke_convection_toa_first(
         layer ``k``) and ``kbase``/``ktop`` are interface indices.
 
     """
+    # Built at call time, not as a default argument: a jax array in a
+    # ``def`` default is created at import and initialises the JAX backend
+    # on ``import`` (#859).
+    if land_fraction is None:
+        land_fraction = jnp.array(0.0)
+    if moisture_supply is None:
+        moisture_supply = jnp.array(0.0)
     if config is None:
         config = ConvectionParameters.default()
 
@@ -1409,8 +1416,8 @@ def tiedtke_nordeng_convection(
     qi: jnp.ndarray,
     dt: float,
     config: ConvectionParameters = None,
-    land_fraction: jnp.ndarray = jnp.array(0.0),
-    moisture_supply: jnp.ndarray = jnp.array(0.0),
+    land_fraction: jnp.ndarray | None = None,
+    moisture_supply: jnp.ndarray | None = None,
     moisture_tend_profile: jnp.ndarray | None = None,
     thvsig: jnp.ndarray | None = None,
     omega: jnp.ndarray | None = None,
@@ -1443,6 +1450,13 @@ def tiedtke_nordeng_convection(
     See :func:`_tiedtke_convection_toa_first` for the physics
     documentation and argument descriptions.
     """
+    # Built at call time, not as a default argument: a jax array in a
+    # ``def`` default is created at import and initialises the JAX backend
+    # on ``import`` (#859).
+    if land_fraction is None:
+        land_fraction = jnp.array(0.0)
+    if moisture_supply is None:
+        moisture_supply = jnp.array(0.0)
     nlev = temperature.shape[0]
     is_surface_first = pressure[0] >= pressure[-1]
 

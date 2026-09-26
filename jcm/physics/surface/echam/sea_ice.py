@@ -25,7 +25,7 @@ from .surface_types import (
 def compute_ice_albedo(
     ice_thickness: jnp.ndarray,
     snow_depth: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Compute sea ice albedo as a function of ice thickness and snow cover.
 
@@ -39,6 +39,8 @@ def compute_ice_albedo(
                  albedo_nir_direct, albedo_nir_diffuse)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     # Base ice albedo (depends on ice thickness)
     thick_ice_albedo_vis = 0.75  # Thick ice visible albedo
     thin_ice_albedo_vis = 0.50   # Thin ice visible albedo
@@ -78,7 +80,7 @@ def compute_ice_albedo(
 def compute_ice_roughness(
     ice_thickness: jnp.ndarray,
     snow_depth: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> jnp.ndarray:
     """Compute sea ice surface roughness.
 
@@ -91,6 +93,8 @@ def compute_ice_roughness(
         Ice roughness length [m] (ncol,)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     # Base ice roughness
     z0_ice_base = params.z0_ice
 
@@ -118,7 +122,7 @@ def sea_ice_physics_step(
     exchange_coeff_moisture: jnp.ndarray,
     exchange_coeff_momentum: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, jnp.ndarray]:
     """Diagnostic sea-ice surface step: bulk fluxes only.
 
@@ -146,6 +150,8 @@ def sea_ice_physics_step(
         Tuple of (surface_fluxes, zero_tendencies, roughness_length)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     ncol = ice_temp.shape[0]
     del dt, ocean_temp  # Unused — no prognostic step.
 

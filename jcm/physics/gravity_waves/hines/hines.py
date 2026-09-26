@@ -68,6 +68,7 @@ Algorithm (column-mode, executed at each grid column):
   the leftover-loop-variable in ``mair`` indexing at the top-level
   heating term, and the 0-based shift of various 1-based loop bounds.
 """
+import math
 from typing import NamedTuple, Tuple
 
 import jax
@@ -78,8 +79,11 @@ import tree_math
 import jcm.constants as c
 
 # 8-azimuth case uses cos(45°) projections; precompute as a Python float
-# so it folds into XLA constants.
-_COS_PI_4 = float(jnp.cos(jnp.pi / 4))
+# so it folds into XLA constants. ``math`` rather than ``jnp``: a jnp op at
+# module level initialises the JAX backend on import (#859). The weakly-typed
+# Python float is cast to the working dtype at use, so float32 physics sees the
+# same correctly-rounded value the jnp.cos form produced.
+_COS_PI_4 = math.cos(math.pi / 4)
 
 
 @tree_math.struct

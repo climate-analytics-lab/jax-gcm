@@ -29,7 +29,7 @@ def initialize_surface_state(
     ocean_temp: jnp.ndarray,
     ice_temp: jnp.ndarray,
     soil_temp: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> SurfaceState:
     """Initialize surface state from basic inputs.
     
@@ -45,6 +45,8 @@ def initialize_surface_state(
         Initialized surface state
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     # Use fixed value for nsfc_type since it needs to be concrete for array creation
     nsfc_type = 3  # Always 3: water, ice, land
     nice_layers = 2  # Default ice layers
@@ -131,7 +133,7 @@ def surface_physics_step(
     surface_state: SurfaceState,
     dt: float,
     wind_speed_10m: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default(),
+    params: SurfaceParameters | None = None,
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics]:
     """Complete surface physics step for all surface types.
     
@@ -148,6 +150,8 @@ def surface_physics_step(
         Tuple of (surface_fluxes, tendencies, diagnostics)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     ncol, nsfc_type = surface_state.temperature.shape
     
     # Compute bulk Richardson number
