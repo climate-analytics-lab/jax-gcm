@@ -286,6 +286,12 @@ def layer_reflectance_transmittance(
     The optical properties are used as given; the shortwave flux solver
     delta-scales them (``delta_eddington_scaling``) before calling this.
 
+    Domain: the direct-beam solution conserves energy for every ``g`` in
+    ``[-1, 1]``, but its diffuse components are non-negative only for
+    ``g mu0 >= -2/3``; below that the Eddington downward scattering fraction
+    ``gamma4 = (2 + 3 g mu0)/4`` is negative by construction (Meador &
+    Weaver 1980).
+
     Args:
         tau: Optical depth
         ssa: Single scattering albedo

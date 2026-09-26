@@ -82,7 +82,10 @@ out analytically into ``(E - e)/(lambda - 1/mu0)``, evaluated as a scaled
 ``(1 - exp(-x))/x`` that is carried as a series near ``x = 0`` so its
 derivative is exact through the resonance. No clip is applied to ``R_dir`` or
 ``T_dir``: both are non-negative on the delta-scaled coefficients, and a clip
-would break the conservation identity.
+would break the conservation identity. Domain: for a strictly non-negative diffuse
+component the Eddington closure needs ``g mu0 >= -2/3`` (below it
+``gamma4 = (2 + 3 g mu0)/4 < 0``); energy still closes there. No scatterer in
+the model has ``g < 0``.
 
 **Partial-cloud / overlap** differs by backend. **RRTMGP** uses full **McICA**
 (``jcm/physics/radiation/mcica.py``): one stochastic binary cloud profile per
