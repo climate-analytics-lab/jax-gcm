@@ -22,8 +22,10 @@ from jcm.forcing import default_forcing
 from jcm.physics.surface.surface_exchange import (
     SURFACE_EXCHANGE_KEY,
     SURFACE_EXCHANGE_OUTPUT_ATTRS,
+    WIND_REFERENCES,
     SurfaceExchange,
     surface_exchange_from,
+    surface_exchange_output_attrs,
 )
 from jcm.physics_interface import PhysicsState
 
@@ -41,18 +43,62 @@ class TestSurfaceExchangeStruct:
             net_heat_flux=base, sensible_heat_flux=base * 2,
             latent_heat_flux=base * 3, evaporation=base * 4,
             precipitation=base * 5, stress_u=base * 6, stress_v=base * 7,
-            wind_speed=base * 8, air_density=base * 9,
-            air_potential_temperature=base * 10,
+            wind_speed=base * 8, wind_u=base * 8 * 0.6,
+            wind_v=-base * 8 * 0.8, air_density=base * 9,
+            air_potential_temperature=base * 10, wind_reference="10m",
         )
 
     def test_tree_round_trip(self):
-        """A tree_math struct flattens and unflattens losslessly."""
+        """The struct flattens and unflattens losslessly, metadata included."""
         se = self._full()
         leaves, treedef = jax.tree_util.tree_flatten(se)
         rebuilt = jax.tree_util.tree_unflatten(treedef, leaves)
-        for name in ("net_heat_flux", "evaporation", "stress_v",
+        for name in ("net_heat_flux", "evaporation", "stress_v", "wind_u",
                      "air_potential_temperature"):
             assert jnp.array_equal(getattr(se, name), getattr(rebuilt, name))
+        assert rebuilt.wind_reference == "10m"
+
+    def test_wind_reference_is_static_metadata(self):
+        """Not an array leaf: the struct is a valid jit output and the
+        reference is readable on the host.
+        """
+        se = self._full()
+        assert "10m" not in jax.tree_util.tree_leaves(se)
+        out = jax.jit(lambda x: x.replace(wind_u=x.wind_u * 1.0))(se)
+        assert out.wind_reference == "10m"
+
+    def test_wind_reference_is_required(self):
+        with pytest.raises(TypeError, match="wind_reference"):
+            SurfaceExchange(*([jnp.zeros(2)] * 12))
+
+    def test_validate_accepts_consistent_struct(self):
+        self._full().validate()
+
+    def test_validate_rejects_wind_vector_speed_mismatch(self):
+        se = self._full().replace(wind_v=self._full().wind_v * 0.5)
+        with pytest.raises(ValueError, match="hypot"):
+            se.validate()
+
+    def test_validate_rejects_unknown_reference(self):
+        with pytest.raises(ValueError, match="wind_reference"):
+            self._full().replace(wind_reference="2m").validate()
+
+    def test_validate_tile_invariants(self):
+        se = self._full(n=2)
+        frac = jnp.array([[0.5, 0.2, 0.3], [1.0, 0.0, 0.0]])
+        red = jnp.array([[1.2, 0.8, 0.6], [1.0, 0.5, 0.5]])
+        # Tiles whose fraction-weighted sum IS the grid mean, all parallel
+        # to it (as ECHAM's per-tile reductions of one lowest-level wind).
+        speed_t = red * (se.wind_speed / jnp.sum(frac * red, axis=-1))[:, None]
+        tiled = se.replace(
+            tile_fraction=frac, wind_speed_tile=speed_t,
+            wind_u_tile=speed_t * (se.wind_u / se.wind_speed)[:, None],
+            wind_v_tile=speed_t * (se.wind_v / se.wind_speed)[:, None])
+        tiled.validate()
+        with pytest.raises(ValueError, match="tile_fraction"):
+            tiled.replace(tile_fraction=None).validate()
+        with pytest.raises(ValueError, match="wind_u_tile"):
+            tiled.replace(wind_u_tile=tiled.wind_u_tile * 1.1).validate()
 
     def test_tree_map_preserves_none_optionals(self):
         """Optional tile fields stay out of the leaf set until filled."""
@@ -64,22 +110,55 @@ class TestSurfaceExchangeStruct:
         assert jnp.array_equal(doubled.evaporation, se.evaporation * 2)
 
     def test_zeros(self):
-        z = SurfaceExchange.zeros((3, 2))
+        z = SurfaceExchange.zeros((3, 2), wind_reference="lowest_level")
         assert z.net_heat_flux.shape == (3, 2)
+        assert z.wind_u.shape == (3, 2)
         assert float(jnp.sum(jnp.abs(z.sensible_heat_flux))) == 0.0
         assert z.stress_u_tile is None
+        assert z.wind_u_tile is None
+        assert z.wind_reference == "lowest_level"
 
     def test_output_attrs_cover_every_guaranteed_field(self):
         """Every guaranteed field has CF/units metadata; all state units."""
         guaranteed = [
             "net_heat_flux", "sensible_heat_flux", "latent_heat_flux",
             "evaporation", "precipitation", "stress_u", "stress_v",
-            "wind_speed", "air_density", "air_potential_temperature",
+            "wind_speed", "wind_u", "wind_v", "air_density",
+            "air_potential_temperature",
         ]
         for field in guaranteed:
             key = f"surface_exchange.{field}"
             assert key in SURFACE_EXCHANGE_OUTPUT_ATTRS, key
             assert "units" in SURFACE_EXCHANGE_OUTPUT_ATTRS[key]
+        assert (SURFACE_EXCHANGE_OUTPUT_ATTRS["surface_exchange.wind_u"]
+                ["standard_name"] == "eastward_wind")
+        assert (SURFACE_EXCHANGE_OUTPUT_ATTRS["surface_exchange.wind_v"]
+                ["standard_name"] == "northward_wind")
+
+    @pytest.mark.parametrize("reference", sorted(WIND_REFERENCES))
+    def test_output_attrs_carry_the_wind_reference(self, reference):
+        attrs = surface_exchange_output_attrs(reference)
+        for field in ("wind_speed", "wind_u", "wind_v"):
+            entry = attrs[f"surface_exchange.{field}"]
+            assert entry["wind_reference"] == reference
+            assert (entry["wind_reference_description"]
+                    == WIND_REFERENCES[reference])
+            assert ("height" in entry) == (reference == "10m")
+        # The shared table itself is not mutated.
+        assert "wind_reference" not in (
+            SURFACE_EXCHANGE_OUTPUT_ATTRS["surface_exchange.wind_u"])
+        with pytest.raises(ValueError, match="wind_reference"):
+            surface_exchange_output_attrs("2m")
+
+    def test_publishers_declare_their_reference(self):
+        from jcm.physics.speedy.speedy_terms import SpeedySurfaceFlux
+        from jcm.physics.surface.echam.surface_exchange_publisher import (
+            EchamSurfaceExchange,
+        )
+        key = "surface_exchange.wind_u"
+        assert (SpeedySurfaceFlux.output_attrs[key]["wind_reference"]
+                == "lowest_level")
+        assert EchamSurfaceExchange.output_attrs[key]["wind_reference"] == "10m"
 
     def test_none_optionals_omitted_from_flattened_output(self):
         """A None optional field is dropped, not published as a zero."""
@@ -88,6 +167,9 @@ class TestSurfaceExchangeStruct:
         flat = cp.data_struct_to_dict(self._full(), nodal_shape=(4,))
         assert "evaporation" in flat
         assert "net_heat_flux" in flat
+        assert "wind_u" in flat
+        # Static string metadata is an attribute, not a variable.
+        assert "wind_reference" not in flat
         # Optional tile / phase-split fields left None must not appear.
         assert "tile_fraction" not in flat
         assert "precip_rain" not in flat
@@ -121,7 +203,7 @@ class TestPublishSeam:
             surface_exchange_from({})
 
     def test_accessor_returns_struct(self):
-        se = SurfaceExchange.zeros((2,))
+        se = SurfaceExchange.zeros((2,), wind_reference="10m")
         assert surface_exchange_from({SURFACE_EXCHANGE_KEY: se}) is se
 
 
@@ -189,9 +271,43 @@ class TestSpeedyPublisher:
         assert float(self.se.air_density.max()) < 2.0
         assert float(self.se.air_potential_temperature.min()) > 250.0
 
+    def test_wind_is_the_closure_wind(self):
+        """``(wind_u, wind_v)`` is SPEEDY's own ``(u0, v0)`` = fwind0 x the
+        lowest-level wind, fwind0 = 0.95 by default.
+        """
+        assert self.se.wind_reference == "lowest_level"
+        assert jnp.array_equal(self.se.wind_u, self.sf.u0)
+        assert jnp.array_equal(self.se.wind_v, self.sf.v0)
+        assert jnp.allclose(self.se.wind_u, 0.95 * self.state.u_wind[-1])
+        assert jnp.allclose(self.se.wind_v, 0.95 * self.state.v_wind[-1])
+        self.se.validate()
+
+    def test_westerly_gives_positive_wind_and_stress(self):
+        # The setup wind is a uniform 5 m/s westerly.
+        assert float(self.se.wind_u.min()) > 0.0
+        assert float(self.se.stress_u.min()) > 0.0
+
+    def test_wind_gradient_finite_at_rest(self):
+        """SPEEDY's default state is at rest: the published wind (speed and
+        components) must not poison reverse mode there.
+        """
+        state0 = self.state.copy(u_wind=jnp.zeros_like(self.state.u_wind))
+
+        def total(scale):
+            state = state0.copy(u_wind=state0.u_wind * scale,
+                                v_wind=state0.v_wind * scale)
+            _, diag = self.phys.compute_tendencies(
+                state, self.forcing, self.terrain)
+            se = diag[SURFACE_EXCHANGE_KEY]
+            return jnp.sum(se.wind_speed + se.wind_u + se.wind_v)
+
+        assert jnp.isfinite(jax.grad(total)(1.0))
+
     def test_tiles_and_split_absent(self):
         assert self.se.tile_fraction is None
         assert self.se.precip_rain is None
+        assert self.se.wind_u_tile is None
+        assert self.se.wind_speed_tile is None
 
 
 # ---------------------------------------------------------------------------
@@ -238,6 +354,17 @@ class TestSpeedyForcedMode:
                      "stress_u", "stress_v"):
             assert jnp.allclose(getattr(sef, name), getattr(self.se, name))
 
+    def test_forced_wind_is_the_atmospheres_own(self):
+        """The coupler prescribes stress only; the published wind is
+        unchanged by forcing the fluxes.
+        """
+        _, diag_f = self.forced.compute_tendencies(
+            self.state, self.forcing_p, self.terrain)
+        sef = diag_f[SURFACE_EXCHANGE_KEY]
+        for name in ("wind_speed", "wind_u", "wind_v"):
+            assert jnp.array_equal(getattr(sef, name), getattr(self.se, name))
+        assert sef.wind_reference == self.se.wind_reference
+
     def test_missing_forcing_raises(self):
         # The loud check lives in validate_forcing (called by Model on the
         # concrete run forcing); __call__ itself falls back to zeros so the
@@ -251,7 +378,7 @@ class TestSpeedyForcedMode:
 # ECHAM publisher + forced mode
 # ---------------------------------------------------------------------------
 
-def _echam_setup(**echam_kwargs):
+def _echam_setup(v_wind=0.0, **echam_kwargs):
     from jcm.utils import get_coords
     from jcm.physics.echam.echam_levels import get_echam_levels
     from jcm.physics.echam.echam_terms import echam_physics
@@ -270,6 +397,7 @@ def _echam_setup(**echam_kwargs):
         * jnp.ones(shape),
         specific_humidity=jnp.full(shape, 3e-3),
         u_wind=jnp.full(shape, 5.0),
+        v_wind=jnp.full(shape, v_wind),
         normalized_surface_pressure=jnp.ones(nodal),
         tracers={s.name: jnp.zeros(shape) for s in phys.required_tracers()},
     )
@@ -316,9 +444,75 @@ class TestEchamPublisher:
         assert jnp.allclose(self.se.precipitation, expected)
         assert float(self.se.precipitation.min()) >= 0.0
 
-    def test_tiles_and_split_absent(self):
-        assert self.se.tile_fraction is None
+    def test_flux_tiles_and_split_absent(self):
+        assert self.se.sensible_heat_flux_tile is None
+        assert self.se.stress_u_tile is None
         assert self.se.precip_rain is None
+
+
+class TestEchamPublishedWind:
+    """ECHAM publishes vdiff's 10 m wind: grid mean, tiles, one 10 m wind."""
+
+    def setup_method(self):
+        (self.coords, self.terrain, self.phys, self.state,
+         self.forcing, self.nodal, self.nlev) = _echam_setup(
+            v_wind=-3.0, enable_aerocom=True, aerocom_groups=("nearsurface",))
+        # A hydrostatic (isothermal 260 K) geopotential, so the lowest level
+        # sits ~30 m up and the 10 m reduction is active (a zero
+        # geopotential puts it below 10 m, where the wind is unreduced).
+        vertical = self.coords.vertical
+        sigma = jnp.asarray(vertical.centers if hasattr(vertical, "centers")
+                            else vertical.get_sigma_centers(101325.0))
+        geopotential = -c.rd * 260.0 * jnp.log(sigma)
+        self.state = self.state.copy(geopotential=geopotential[:, None, None]
+                                     * jnp.ones(self.state.temperature.shape))
+        _, self.diag = self.phys.compute_tendencies(
+            self.state, self.forcing, self.terrain,
+            self.phys.initial_carry_state(self.coords))
+        self.se = self.diag[SURFACE_EXCHANGE_KEY]
+        self.vdiff = self.diag["vertical_diffusion"]
+
+    def test_wind_is_the_vdiff_10m_wind(self):
+        ncols = self.se.wind_speed.shape[0]
+        assert self.se.wind_reference == "10m"
+        for name, vname in (("wind_speed", "wind_10m"),
+                            ("wind_u", "wind_10m_u"),
+                            ("wind_v", "wind_10m_v")):
+            assert jnp.array_equal(
+                getattr(self.se, name),
+                getattr(self.vdiff, vname).reshape(ncols))
+        self.se.validate()
+
+    def test_wind_parallel_to_lowest_level_and_reduced(self):
+        """ECHAM ``u10 = zred * pum1``: the 10 m vector keeps the
+        lowest-level direction (westerly, southward) and is weaker.
+        """
+        u_low, v_low = 5.0, -3.0
+        speed_low = float(jnp.hypot(u_low, v_low))
+        assert jnp.allclose(self.se.wind_u * speed_low,
+                            u_low * self.se.wind_speed, rtol=1e-5)
+        assert jnp.allclose(self.se.wind_v * speed_low,
+                            v_low * self.se.wind_speed, rtol=1e-5)
+        assert float(self.se.wind_speed.max()) < speed_low
+        assert float(self.se.wind_u.min()) > 0.0
+        assert float(self.se.stress_u.min()) > 0.0
+
+    def test_grid_mean_is_the_tile_weighted_sum(self):
+        frac = self.se.tile_fraction
+        assert frac.shape == self.se.wind_u_tile.shape
+        assert jnp.allclose(jnp.sum(frac, axis=-1), 1.0)
+        for name in ("wind_u", "wind_v", "wind_speed"):
+            assert jnp.allclose(
+                jnp.sum(frac * getattr(self.se, name + "_tile"), axis=-1),
+                getattr(self.se, name), rtol=1e-5, atol=1e-6)
+
+    def test_aerocom_uas_vas_are_the_published_wind(self):
+        """One 10 m wind in the output: AeroCom uas/vas == wind_u/wind_v."""
+        ncols = self.se.wind_u.shape[0]
+        assert jnp.array_equal(
+            self.diag["aerocom_uas"].reshape(ncols), self.se.wind_u)
+        assert jnp.array_equal(
+            self.diag["aerocom_vas"].reshape(ncols), self.se.wind_v)
 
 
 class TestEchamForcedMode:
@@ -380,6 +574,15 @@ class TestEchamForcedMode:
         assert jnp.allclose(sef.sensible_heat_flux, self.se.sensible_heat_flux)
         assert jnp.allclose(sef.evaporation, self.se.evaporation)
         assert jnp.allclose(sef.stress_u, self.se.stress_u)
+
+    def test_forced_wind_is_the_atmospheres_own(self):
+        """The vdiff term diagnoses the 10 m wind before its surface-coupling
+        branch, so forcing the fluxes leaves the published wind unchanged.
+        """
+        sef = self.diag_f[SURFACE_EXCHANGE_KEY]
+        for name in ("wind_speed", "wind_u", "wind_v", "wind_u_tile",
+                     "wind_speed_tile", "tile_fraction"):
+            assert jnp.array_equal(getattr(sef, name), getattr(self.se, name))
 
     def test_missing_forcing_raises(self):
         # The loud check lives in validate_forcing (called by Model on the

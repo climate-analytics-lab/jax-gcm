@@ -19,8 +19,8 @@ from flax import nnx
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.surface.surface_exchange import (
     SURFACE_EXCHANGE_KEY,
-    SURFACE_EXCHANGE_OUTPUT_ATTRS,
     SurfaceExchange,
+    surface_exchange_output_attrs,
 )
 from jcm.physics.surface.prescribed_flux import (
     PRESCRIBED_FLUX_FORCING_FIELDS,
@@ -488,7 +488,9 @@ class SpeedySurfaceFlux(SpeedyTermBase):
     # Literal string (== SURFACE_EXCHANGE_KEY) so the requires-audit's AST
     # walk can evaluate the tuple.
     provides: ClassVar[tuple[str, ...]] = ("surface_exchange",)
-    output_attrs: ClassVar = SURFACE_EXCHANGE_OUTPUT_ATTRS
+    # SPEEDY's near-surface wind is fwind0 x the lowest-level wind: it has
+    # no surface-layer profile to reduce to 10 m (#911).
+    output_attrs: ClassVar = surface_exchange_output_attrs("lowest_level")
 
     def __init__(
         self,
@@ -627,7 +629,11 @@ class SpeedySurfaceFlux(SpeedyTermBase):
         Unit and sign normalisation to the contract happens here and only
         here: evaporation/precipitation g -> kg/m2/s, latent heat via
         SPEEDY's own ``alhc`` [J/g], stress negated from "on the
-        atmosphere" to "into the surface". SPEEDY has no faithful
+        atmosphere" to "into the surface". The wind vector is the
+        closure's own ``(u0, v0) = fwind0 * (u, v)[lowest]`` — the wind the
+        bulk formulae used — published at ``wind_reference="lowest_level"``;
+        the coupler prescribes stress only, so in forced mode it is still
+        the atmosphere's own wind. SPEEDY has no faithful
         rain/snow split and no per-tile delivered fluxes (the sea tile
         blends the ice *temperature*, not fluxes), so the optional
         contract fields stay ``None`` — see
@@ -666,8 +672,11 @@ class SpeedySurfaceFlux(SpeedyTermBase):
             stress_u=-sf.ustr,
             stress_v=-sf.vstr,
             wind_speed=wind_speed,
+            wind_u=sf.u0,
+            wind_v=sf.v0,
             air_density=p_bot / (c.rd * t_bot * (1.0 + c.vtmpc1 * q_bot)),
             air_potential_temperature=t_bot * (1.0 / (fsg_bot * psa)) ** c.akap,
+            wind_reference="lowest_level",
         )
 
 

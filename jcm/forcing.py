@@ -538,6 +538,18 @@ class ForcingData:
     # the run-start coverage check (:func:`by_date_coverage_error`).
     prescribed_flux_time_bounds: Any = None
 
+    # Ocean surface current [m/s], eastward/northward on the model grid
+    # (2-D ``(ix, il)`` maps or ``TimeSeries``), for a coupler to feed back
+    # from its ocean. RESERVED, NOT YET USED: in ECHAM the surface stress and
+    # the open-water 10 m wind are relative to this current
+    # (mo_surface_ocean.f90, ``zudif = u - ocu``; ``wind10w``), and the
+    # TTE-TKE solve already takes a momentum target for it, but the
+    # vertical diffusion still applies a zero current regardless of these
+    # fields. They exist so the coupling API is stable before that lands;
+    # see docs/source/design/surface_exchange.md. ``None`` = no current.
+    ocean_u: Any = None
+    ocean_v: Any = None
+
     @classmethod
     def zeros(cls,nodal_shape,
               alb0=None,sice_am=None,snowc_am=None,
@@ -1030,7 +1042,9 @@ class ForcingData:
              prescribed_evaporation=None,
              prescribed_stress_u=None,
              prescribed_stress_v=None,
-             prescribed_flux_time_bounds=None):
+             prescribed_flux_time_bounds=None,
+             ocean_u=None,
+             ocean_v=None):
         # ``nudging_target`` uses an ``_UNSET`` sentinel because ``None`` is
         # the natural value for "no nudging target wired" — falling back to
         # ``self.nudging_target`` only when the caller didn't supply the
@@ -1106,6 +1120,8 @@ class ForcingData:
                 if prescribed_flux_time_bounds is not None
                 else self.prescribed_flux_time_bounds
             ),
+            ocean_u=ocean_u if ocean_u is not None else self.ocean_u,
+            ocean_v=ocean_v if ocean_v is not None else self.ocean_v,
         )
 
     def isnan(self):
