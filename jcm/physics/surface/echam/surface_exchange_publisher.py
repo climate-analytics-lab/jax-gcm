@@ -21,8 +21,8 @@ from jcm.forcing import ForcingData
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.surface.surface_exchange import (
     SURFACE_EXCHANGE_KEY,
-    SURFACE_EXCHANGE_OUTPUT_ATTRS,
     SurfaceExchange,
+    surface_exchange_output_attrs,
 )
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
@@ -42,13 +42,19 @@ class EchamSurfaceExchange(PhysicsTerm):
     - the surface radiation balance from ``"radiation"``;
     - precipitation as stratiform (``clouds.precip_rain + precip_snow``)
       plus convective (``convection.precip_conv``);
-    - the 10 m wind from ``"vertical_diffusion"``.
+    - the 10 m wind vector and speed from ``"vertical_diffusion"`` (ECHAM
+      ``u10``/``v10``/``wind10``, ``wind_reference="10m"``), grid mean and
+      per tile with the tile fractions it was weighted by. The wind is the
+      atmosphere's own in forced mode too: vdiff diagnoses it before its
+      surface-coupling branch.
 
     The optional rain/snow split stays ``None``: the Tiedtke port exposes
     only total convective precipitation, and a stratiform-only "rain"
-    would be wrong as a total split (see the design doc). Per-tile fields
-    stay ``None`` because ECHAM's per-tile explicit fluxes are not
-    consistent with the delivered grid mean from the implicit solve.
+    would be wrong as a total split (see the design doc). The per-tile
+    FLUX fields stay ``None`` because ECHAM's per-tile explicit fluxes are
+    not consistent with the delivered grid mean from the implicit solve;
+    the per-tile wind fields are filled, since the grid-mean 10 m wind is
+    by construction their fraction-weighted sum.
 
     Only the surface exchange itself is a hard dependency: ``"surface"`` and
     ``"vertical_diffusion"`` (the delivered fluxes + 10 m wind) and
@@ -69,7 +75,9 @@ class EchamSurfaceExchange(PhysicsTerm):
     # Literal string (== SURFACE_EXCHANGE_KEY) so the requires-audit's AST
     # walk can evaluate the tuple.
     provides: ClassVar[tuple[str, ...]] = ("surface_exchange",)
-    output_attrs: ClassVar = SURFACE_EXCHANGE_OUTPUT_ATTRS
+    # Tile order of the vdiff surface tiles the wind tiles are published on.
+    output_attrs: ClassVar = surface_exchange_output_attrs(
+        "10m", tile_names=("water", "sea_ice", "land"))
 
     def __call__(
         self,
@@ -136,8 +144,16 @@ class EchamSurfaceExchange(PhysicsTerm):
             stress_u=surface.momentum_flux_u.reshape(ncols),
             stress_v=surface.momentum_flux_v.reshape(ncols),
             wind_speed=vdiff.wind_10m.reshape(ncols),
+            wind_u=vdiff.wind_10m_u.reshape(ncols),
+            wind_v=vdiff.wind_10m_v.reshape(ncols),
             air_density=p_bot / (c.rd * t_bot * (1.0 + c.vtmpc1 * q_bot)),
             air_potential_temperature=t_bot * (c.p0 / p_bot) ** c.akap,
+            wind_reference="10m",
+            # Tile axis 0 = water, 1 = sea ice, 2 = land (the vdiff tiles).
+            tile_fraction=vdiff.surface_fraction.reshape(ncols, -1),
+            wind_u_tile=vdiff.wind_10m_u_tile.reshape(ncols, -1),
+            wind_v_tile=vdiff.wind_10m_v_tile.reshape(ncols, -1),
+            wind_speed_tile=vdiff.wind_10m_tile.reshape(ncols, -1),
         )
 
         tendency = PhysicsTendency.zeros(state.temperature.shape)

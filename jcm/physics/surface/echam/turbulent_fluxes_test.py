@@ -486,24 +486,19 @@ class TestTurbulentFluxGradients:
                          jnp.array([1.0e5, 9.7e4, 1.01e5])),
                         rtol=1e-3)
 
-    @pytest.mark.parametrize("wind_10m", [0.0, 0.3], ids=["w10=0", "w10>0"])
-    def test_calm_wind_diagnostics_gradients_are_finite(self, wind_10m):
+    def test_calm_wind_diagnostics_gradients_are_finite(self):
         """The cone tips of ``compute_surface_diagnostics`` at ``u = v = 0``.
 
-        Three wind norms meet here at once: ``sqrt(u^2 + v^2)`` at
-        ``turbulent_fluxes.py:311``, the momentum-flux magnitude at ``:318``
-        and the friction velocity at ``:322``, plus the quotient
-        ``wind_speed_10m / wind_speed_atm`` at ``:313`` whose denominator is
-        then the 1e-30 floor's square root, 1e-15.
+        Three wind norms meet here at once: the lowest-level wind speed
+        ``sqrt(u^2 + v^2)``, the momentum-flux magnitude and the friction
+        velocity, each ``sqrt(maximum(x, 1e-30))``.
 
         Finite, and for the reason the floors are 1e-30 rather than 0: below
         the floor ``jnp.maximum`` sends the whole derivative to the constant
         branch, so the ``sqrt'`` singularity is multiplied by an exact zero
         instead of forming ``0 * inf``. A ``maximum(x, 0.0)`` there would tie
         at the tip and split 0.5/0.5 against ``sqrt'(0) = inf``, which is the
-        shape that produces a NaN. ``wind_10m = 0.3`` with a calm column is
-        the awkward combination — a finite 10 m wind over a 1e-15 denominator
-        — and is checked alongside the fully calm one.
+        shape that produces a NaN.
         """
         ncol, nsfc_type = 2, 3
         calm = jnp.zeros(ncol)
@@ -517,19 +512,18 @@ class TestTurbulentFluxGradients:
                 atmospheric_state.humidity,
                 jnp.full((ncol, nsfc_type), 0.01), calm))
 
-        def total(u_wind, v_wind, momentum_u, momentum_v, wind_speed_10m):
+        def total(u_wind, v_wind, momentum_u, momentum_v):
             state = atmospheric_state._replace(u_wind=u_wind, v_wind=v_wind)
             flux = fluxes._replace(momentum_u_mean=momentum_u,
                                    momentum_v_mean=momentum_v)
             diagnostics = compute_surface_diagnostics(
-                state, surface_state, flux, resistances, wind_speed_10m)
+                state, surface_state, flux, resistances)
             return sum(jnp.sum(leaf ** 2)
                        for leaf in jax.tree.leaves(diagnostics))
 
-        args = (calm, calm, calm, calm, jnp.full(ncol, wind_10m))
+        args = (calm, calm, calm, calm)
         gradients = jax.grad(total, argnums=tuple(range(len(args))))(*args)
-        names = ("u_wind", "v_wind", "momentum_u_mean", "momentum_v_mean",
-                 "wind_speed_10m")
+        names = ("u_wind", "v_wind", "momentum_u_mean", "momentum_v_mean")
         for name, gradient in zip(names, gradients):
             assert jnp.all(jnp.isfinite(gradient)), (
                 f"d/d{name} is not finite at calm wind: {gradient}")

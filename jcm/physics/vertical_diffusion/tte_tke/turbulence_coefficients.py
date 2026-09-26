@@ -543,8 +543,24 @@ def compute_turbulence_diagnostics(
     # 10 m wind (ECHAM ``nsurf_diag``), area-weighted over the tiles from the
     # same per-tile CM·|U|. Surface-flux parameterizations (sea salt, DMS) are
     # calibrated to u10, not to the lowest model level — ~33 m at L47.
-    wind_10m = wind_speed_surface * jnp.sum(
-        state.surface_fraction * wind_10m_tile, axis=1)
+    # ``wind_10m_tile`` is each tile's reduction factor ``zred``; ECHAM
+    # scales the lowest-level wind by it component-wise, per tile
+    # (mo_surface_ocean.f90::postproc_ocean ``zu10w = zred*pum1``, and the
+    # ice/land analogues), and box-averages the tiles by fraction
+    # (mo_surface.f90::surface_box_average -> ``u10``/``v10``/``wind10``). So
+    # the grid-mean vector is ``u_low * sum_t f_t zred_t``: the
+    # fraction-weighted sum of the per-tile vectors, and parallel to the
+    # lowest-level wind with magnitude ``wind_10m``. ``u_low`` is the
+    # step-start wind, as in ECHAM: vdiff.f90 passes ``pum1(:,klev)`` (t-dt),
+    # not the implicitly updated wind, to update_surface (vdiff.f90:951-964)
+    # and on to postproc_ocean/ice/land (mo_surface.f90:936-967).
+    reduction_10m = jnp.sum(state.surface_fraction * wind_10m_tile, axis=1)
+    wind_10m = wind_speed_surface * reduction_10m
+    wind_10m_u = state.u[:, -1] * reduction_10m
+    wind_10m_v = state.v[:, -1] * reduction_10m
+    speed_10m_tile = wind_10m_tile * wind_speed_surface[:, None]
+    u_10m_tile = wind_10m_tile * state.u[:, -1:]
+    v_10m_tile = wind_10m_tile * state.v[:, -1:]
     
     # Convective velocity scale (simplified)
     convective_velocity = jnp.maximum(friction_velocity, 0.1)
@@ -560,6 +576,12 @@ def compute_turbulence_diagnostics(
         friction_velocity=friction_velocity,
         convective_velocity=convective_velocity,
         wind_10m=wind_10m,
+        wind_10m_u=wind_10m_u,
+        wind_10m_v=wind_10m_v,
+        wind_10m_reduction=reduction_10m,
+        wind_10m_tile=speed_10m_tile,
+        wind_10m_u_tile=u_10m_tile,
+        wind_10m_v_tile=v_10m_tile,
         richardson_number=ri,
         mixing_length=mixing_length,
         kinetic_energy_dissipation=jnp.zeros(ncol)  # Will be computed by TKE budget

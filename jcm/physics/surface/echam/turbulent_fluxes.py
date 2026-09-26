@@ -263,23 +263,23 @@ def compute_surface_diagnostics(
     surface_state: SurfaceState,
     surface_fluxes: SurfaceFluxes,
     resistances: SurfaceResistances,
-    wind_speed_10m: jnp.ndarray,
     params: SurfaceParameters = SurfaceParameters.default(),
 ) -> SurfaceDiagnostics:
-    """Compute standard surface diagnostics (2m temperature, 10m wind, etc.).
-    
+    """Compute standard surface diagnostics (2m temperature, u*, etc.).
+
+    The 10 m wind is not among them: the ECHAM family has one 10 m wind,
+    diagnosed by the vertical-diffusion term from the per-tile
+    surface-layer reduction (``vertical_diffusion.wind_10m*``, ECHAM
+    ``nsurf_diag``), which the surface-exchange contract publishes and the
+    AeroCom ``uas``/``vas`` apply to the post-physics wind.
+
     Args:
         atmospheric_state: Atmospheric forcing
         surface_state: Surface state
         surface_fluxes: Surface fluxes
         resistances: Surface resistances
         params: Surface parameters
-        wind_speed_10m: 10 m wind speed [m/s] (ncol,) from the surface-layer
-            profile (ECHAM ``nsurf_diag``, diagnosed by the vertical-diffusion
-            term). Required: the vdiff carry always holds one, so a fallback
-            here would only ever hide a wiring mistake behind a wind that is
-            not the 10 m wind.
-        
+
     Returns:
         Surface diagnostics
 
@@ -306,13 +306,8 @@ def compute_surface_diagnostics(
     # 2m dew point (simplified)
     dewpoint_2m = temp_2m - 20.0 * (1.0 - atmospheric_state.humidity / 0.01)
     
-    # Components keep the lowest level's direction; the magnitude is the
-    # surface-layer reduction the caller diagnosed.
     wind_speed_atm = jnp.sqrt(jnp.maximum(
         atmospheric_state.u_wind**2 + atmospheric_state.v_wind**2, 1.0e-30))
-    reduction = wind_speed_10m / wind_speed_atm
-    u_wind_10m = reduction * atmospheric_state.u_wind
-    v_wind_10m = reduction * atmospheric_state.v_wind
     
     # Friction velocity
     momentum_flux_magnitude = jnp.sqrt(jnp.maximum(
@@ -339,7 +334,6 @@ def compute_surface_diagnostics(
     # Tile-specific diagnostics
     temp_2m_tile = jnp.zeros((ncol, nsfc_type))
     humidity_2m_tile = jnp.zeros((ncol, nsfc_type))
-    wind_speed_10m_tile = jnp.zeros((ncol, nsfc_type))
     
     for isfc in range(nsfc_type):
         temp_2m_tile = temp_2m_tile.at[:, isfc].set(
@@ -352,15 +346,11 @@ def compute_surface_diagnostics(
         humidity_2m_tile = humidity_2m_tile.at[:, isfc].set(
             q_sfc + (atmospheric_state.humidity - q_sfc) * (z_2m / z_10m)
         )
-        wind_speed_10m_tile = wind_speed_10m_tile.at[:, isfc].set(wind_speed_10m)
     
     return SurfaceDiagnostics(
         temperature_2m=temp_2m,
         humidity_2m=humidity_2m,
         dewpoint_2m=dewpoint_2m,
-        wind_speed_10m=wind_speed_10m,
-        u_wind_10m=u_wind_10m,
-        v_wind_10m=v_wind_10m,
         friction_velocity=friction_velocity,
         richardson_number=ri_mean,
         surface_layer_height=jnp.full(ncol, 100.0),  # Simplified
@@ -369,5 +359,4 @@ def compute_surface_diagnostics(
         energy_balance_residual=energy_balance_residual,
         temperature_2m_tile=temp_2m_tile,
         humidity_2m_tile=humidity_2m_tile,
-        wind_speed_10m_tile=wind_speed_10m_tile
     )
