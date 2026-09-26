@@ -28,10 +28,10 @@ sed -n '/^tail -c +\$((ATTEMPT_START/,$p' "$TMP/full.sh" \
 [ -s "$TMP/gate.sh" ] || { echo "FAILED to extract gate from generated script"; exit 1; }
 
 fails=0
-run_gate() {  # $1 = bytes already in run.log before this attempt
+run_gate() {  # $1 = bytes already in run.log before this attempt, $2 = jcm.main rc (default 0)
   ( set -euo pipefail
     ATTEMPT_START="$1"
-    RC=0
+    RC="${2:-0}"
     # shellcheck disable=SC1090
     source "$TMP/gate.sh" ) >"$TMP/out" 2>&1
   echo $?
@@ -101,6 +101,48 @@ check "bail_on_unhealthy=False notice is not a failure" 0 "$(run_gate 0)"
 # 10. The other real emission: a chunk whose checkpoint was withheld.
 printf 'Saved predictions to run_day365.nc\n  Checkpoint NOT updated (unhealthy chunk) - restart from\n' > "$L"
 check "unhealthy chunk is still caught" 1 "$(run_gate 0)"
+
+# --- Default mode: 12 calendar months of monthly means, no chunk files. ---
+# 2000-01-01 + 12 months is 366 days (leap year); progress comes from the
+# per-chunk health report, since no _dayN.nc is written.
+"$PY" "$HERE/mkrun.py" --name testrun 2>/dev/null \
+  | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["spec"]["template"]["spec"]["containers"][0]["command"][-1])' \
+  > "$TMP/full.sh"
+grep -q "run.total_time=12months" "$TMP/full.sh" \
+  && grep -q "forcing_pd.nc" "$TMP/full.sh" && grep -q "run.monthly_means=true" "$TMP/full.sh"
+check "default run is 12 months of PD-forced monthly means" 0 "$?"
+sed -n '/^tail -c +\$((ATTEMPT_START/,$p' "$TMP/full.sh" \
+  | sed "s#/runs/testrun#$RUNDIR#g" > "$TMP/gate.sh"
+
+# 11. Completion seen only through the health reports.
+printf '  Chunk 72 | Day 361 (0.99 yr) | OK\n  Chunk 73 | Day 366 (1.00 yr) | OK\n  Saved %s/testrun_monthly_2000-12.nc\n' "$RUNDIR" > "$L"
+check "monthly-only run complete at day 366" 0 "$(run_gate 0)"
+
+# 12. ...and a monthly-only run evicted at day 105 is not.
+printf '  Chunk 20 | Day 105 (0.29 yr) | OK\n' > "$L"
+check "monthly-only run evicted mid-year" 1 "$(run_gate 0)"
+
+# 13. Restart from the final checkpoint whose pending final-month flush
+#     succeeds: nothing integrated, rc=0 — already complete.
+printf '  Chunk 73 | Day 366 (1.00 yr) | OK\n' > "$L"
+off=$(stat -c%s "$L")
+printf 'Resumed from checkpoint %s/testrun.ckpt at sim-day 366.0\n  Saved %s/testrun_monthly_2000-12.nc\n' "$RUNDIR" "$RUNDIR" >> "$L"
+check "final-checkpoint restart, final flush ok" 0 "$(run_gate "$off" 0)"
+
+# 14. ...but if that flush fails, jcm.main's nonzero rc must fail the Job:
+#     no chunk line or health report is written, so the rc is the only
+#     signal that the final month is missing.
+printf '  Chunk 73 | Day 366 (1.00 yr) | OK\n' > "$L"
+off=$(stat -c%s "$L")
+printf 'Resumed from checkpoint %s/testrun.ckpt at sim-day 366.0\nOSError: No space left on device\n' "$RUNDIR" >> "$L"
+check "final-checkpoint restart, final flush fails" 1 "$(run_gate "$off" 1)"
+
+# 15. Opting out of monthly means keeps the chunk files by default: they are
+#     then the run's only output (the runner refuses a run writing neither).
+"$PY" "$HERE/mkrun.py" --name testrun --no-monthly-means 2>/dev/null \
+  | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["spec"]["template"]["spec"]["containers"][0]["command"][-1])' \
+  | grep -q "run.monthly_means=false.*run.save_chunks=true"
+check "--no-monthly-means implies save_chunks=true" 0 "$?"
 
 if [ "$fails" -eq 0 ]; then echo "all gate tests passed"; else
   echo "$fails gate test(s) failed"; exit 1; fi

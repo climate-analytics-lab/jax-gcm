@@ -316,8 +316,9 @@ Chunked, resumable runs and checkpoints
 ----------------------------------------
 
 Long integrations run in **chunks** with a health gate between them. Setting
-``run.chunk_days`` (``run=longrun`` uses 30) breaks the integration into pieces,
-writes each to ``{run.output_prefix}_day{N}.nc`` — a **relative** prefix by
+``run.chunk_days`` (``run=longrun`` uses 5) breaks the integration into pieces,
+writes each to ``{run.output_prefix}_day{N}.nc`` (unless ``run.save_chunks`` is
+false, see :ref:`monthly-means-cli`) — a **relative** prefix by
 default (``longrun``/``chunked_run``), so point it at a durable absolute path
 when the working directory is ephemeral (a container, a scratch job) — and runs
 :func:`jcm.diagnostics.check_health` after each one. With
@@ -341,6 +342,56 @@ Set ``run.archive_ckpt_every`` (sim-days; 0 = off) to also copy the rotating
 checkpoint to a dated, never-overwritten archive at the first chunk boundary
 past each interval multiple (the cadence need not divide ``run.chunk_days``),
 so a later experiment can restart from before a slowly-developing failure.
+
+.. _monthly-means-cli:
+
+Calendar-month means from the CLI
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``run.monthly_means=true`` streams every chunk's interval means through
+:class:`jcm.temporal_aggregation.MonthlyMeanAccumulator` and writes each
+Gregorian month to ``{run.output_prefix}_monthly_YYYY-MM.nc`` as soon as the
+first interval of the next month arrives (#901). The means are
+duration-weighted and accumulated in float64, and the files do not depend on
+``run.chunk_days`` or on where a run was killed and resumed. A partial first
+or last month carries its actual ``time_bounds`` plus ``time_coverage`` and
+``time_coverage_fraction``. It needs ``run.output_averages=true`` and save
+intervals that tile the months from ``run.start_time`` (daily or sub-daily
+saves from a midnight start); a schedule that would cross a month edge is
+refused before integrating. ``run.save_chunks=false`` keeps only the monthly
+files — a year of daily means for a JAM configuration is hundreds of GB — and
+is refused without ``run.monthly_means=true``, which would write nothing.
+
+With a checkpoint, the pending month is persisted as
+``{run.checkpoint_path}.monthly``: staged as ``.monthly.new`` just before
+each checkpoint and promoted once the checkpoint is committed (the previous
+state rotates to ``.monthly.prev``), copied beside every
+``archive_ckpt_every`` archive, and restored on resume. The state matching the
+checkpoint is never overwritten before its successor is committed, so
+repeated kills at any point still resume, and a checkpoint with no monthly
+state at its instant is refused rather than dropping or double-counting
+intervals. With
+``run.bail_on_unhealthy=false`` the stream follows the integration while the
+checkpoint (and so the persisted month) stays at the last healthy chunk; a
+resume re-integrates from there and rewrites any month file closed since.
+A restart from the final checkpoint integrates nothing: it writes the final
+month only if that file is missing (or unreadable, covers a different
+interval, or lacks its provenance sidecar), and otherwise leaves it and its
+sidecar untouched.
+
+``run=longrun`` (and ``run=pyses_year``) default to exactly this: a
+**calendar year** — ``run.total_time: 12 months``, resolved against
+``run.start_time`` into the exact end (366 days from the default 2000-01-01) —
+of daily means in 5-day chunks, written only as monthly files. Month/year
+lengths are accepted for ``run.total_time`` only; the fixed-duration APIs
+(``save_interval``, ``Model.run``) still reject them. A fixed length still
+works (``run.total_time=90``), as does ``run.save_chunks=true`` to also keep
+the daily files.
+
+The same recipes through :func:`jcm.configurations.load` hand
+``model.run`` that calendar year of daily saves, which an in-process run holds
+in memory in full; pass ``run.total_time`` / ``run.save_interval`` for an
+in-memory run, and reduce with ``ModelPredictions.monthly_means()``.
 
 The same primitives are available directly to bring-your-own-driver workflows
 via :py:mod:`jcm.checkpoint`:
@@ -465,7 +516,7 @@ scheduler does not extend a job past its walltime, so a long run is a *chain*
 of jobs sharing one checkpoint: each job resumes from
 ``run.checkpoint_path``, integrates until the walltime kills it, and the next
 job in the chain picks up at the last completed chunk. Once the run reaches
-``run.total_time`` a resubmitted job restores the checkpoint and exits
+``run.total_time`` (a calendar year under ``run=longrun``) a resubmitted job restores the checkpoint and exits
 immediately, so over-provisioning the chain is harmless:
 
 .. code-block:: bash
@@ -475,7 +526,6 @@ immediately, so over-provisioning the chain is harmless:
    #PBS -l walltime=12:00:00
    cd "$PBS_O_WORKDIR"
    python -m jcm.main +configuration=t63-echam-jam run=longrun \
-       run.total_time=365 \
        run.output_prefix="$SCRATCH/t63-echam-jam" \
        run.checkpoint_path="$SCRATCH/t63-echam-jam.ckpt"
 

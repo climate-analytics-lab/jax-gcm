@@ -718,6 +718,12 @@ def run(args) -> dict:
         # save_interval must be <= chunk_days or the chunk write dies with an
         # IndexError from to_xarray() on an empty time axis.
         f"run.save_interval={min(args.save_interval, chunk)}",
+        # A benchmark times fixed-length chunks of interval means; the
+        # calendar-month stream run/longrun.yaml now defaults to (#901) would
+        # refuse 5-day saves that cross month edges, and the per-chunk files
+        # are what --keep-output keeps.
+        "run.monthly_means=false",
+        "run.save_chunks=true",
         # With --allow-unhealthy the driver keeps integrating past a health
         # gate trip. Timing stays valid when it does: XLA runs the same
         # compiled program over the same shapes regardless of the values in

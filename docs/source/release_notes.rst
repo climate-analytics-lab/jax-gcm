@@ -26,9 +26,11 @@ One exact Gregorian clock and real monthly output
 """""""""""""""""""""""""""""""""""""""""""""""""
 
 - ``Model(start_time=...)`` replaces ``start_date`` and removes the
-  ``calendar`` switch. Runs use exactly one fixed ``total_time`` or absolute
-  ``end_time``; month/year duration aliases and silently truncated intervals
-  are rejected. The exact datetime and step counter travel with the resumable
+  ``calendar`` switch. Runs use exactly one ``total_time`` or absolute
+  ``end_time``; a month/year ``run.total_time`` (``12 months``) is resolved
+  against ``run.start_time`` into the exact end, while the fixed-duration APIs
+  (``save_interval``, ``Model.run``) reject month/year aliases, and silently
+  truncated intervals are rejected. The exact datetime and step counter travel with the resumable
   ``RunState`` and schema-2 checkpoints.
 - ``wrap_year`` climatologies select by real calendar position: twelve
   monthly records switch at civil month boundaries, including leap years
@@ -36,6 +38,13 @@ One exact Gregorian clock and real monthly output
   dates preserve their nominal date components on the Gregorian clock (#449).
   Whether a file repeats annually is declared, never inferred (see the #884
   entry below).
+- The chunked CLI streams calendar-month means (#901):
+  ``run.monthly_means=true`` writes ``{output_prefix}_monthly_YYYY-MM.nc``
+  independent of chunk length, with the pending month persisted and rotated
+  with the checkpoint; ``run.save_chunks=false`` drops the per-chunk files.
+  ``run=longrun`` and ``run=pyses_year`` now default to a calendar year
+  (``12 months``) of daily means in 5-day chunks written only as monthly
+  files — previously 365 days of 5-day means in 30-/10-day chunk files.
 - ``ModelPredictions.monthly_means()`` reduces bounded interval means by
   real month; save daily means with ``output_averages=True`` first. Observer
   sampling stays independent. Exact shared ``output_time_labels`` replaces

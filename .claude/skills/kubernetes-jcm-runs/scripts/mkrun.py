@@ -1,8 +1,16 @@
 #!/usr/bin/env python
 """Generate a Nautilus Job for a PRODUCTION jcm run (output kept, resumable).
 
-    python mkrun.py --name pi-control --days 365 | kubectl apply -f -
-    python mkrun.py --name pi-control --days 365 --resume | kubectl apply -f -
+    python mkrun.py --name pd-year | kubectl apply -f -          # 12 calendar months
+    python mkrun.py --name pd-year --months 24 | kubectl apply -f -
+    python mkrun.py --name bench-90d --days 90 | kubectl apply -f -  # fixed length
+
+By default a run is 12 calendar months from ``--start-time`` under the
+present-day climatological AMIP forcing (the mirror's ``*_pd`` bundles: PCMDI
+AMIP SST/sea ice and CEDS/BB4CMIP emissions averaged 2005-2014, PD ozone and
+oxidants), written as calendar-month means (``run.monthly_means``, #901) —
+``<name>_monthly_YYYY-MM.nc`` — from daily interval means that are streamed,
+not kept.
 
 Different from `mkjob.py` in every way that matters:
 
@@ -19,6 +27,7 @@ Different from `mkjob.py` in every way that matters:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import subprocess
 import sys
@@ -63,25 +72,52 @@ def resolve_refs(pins: dict) -> dict:
     return out
 
 
-# Only T63L47 ozone is packaged in the repo. `forcing.ozone_file: auto`
-# resolves that and SILENTLY falls back to the analytic profile otherwise —
-# ~7.6x the tropospheric column, so the run completes and its radiation is
-# simply wrong. For a production year that is the worst possible failure
-# mode, so anything else must supply --ozone explicitly.
-PACKAGED_OZONE = {"echam_t63_l47_hybrid"}
+def grid_tokens(grid: str) -> tuple[str, str]:
+    """``echam_t63_l47_hybrid`` -> (``t63``, ``l47``), the mirror bundle keys."""
+    parts = grid.split("_")
+    if len(parts) < 3 or not parts[1].startswith("t") or not parts[2].startswith("l"):
+        raise SystemExit(f"cannot derive mirror bundle names from grid {grid!r}; "
+                         "expected echam_t<N>_l<M>_<vertical>")
+    return parts[1], parts[2]
 
 
-def ozone_override(a) -> list:
-    if a.ozone:
-        return [f"forcing.ozone_file={a.ozone}"]
-    if a.grid in PACKAGED_OZONE:
-        return []          # `auto` resolves the packaged file correctly
-    raise SystemExit(
-        f"grid {a.grid} has no packaged ozone climatology, and leaving it at "
-        "`auto` silently falls back to the ANALYTIC profile (~7.6x the "
-        "tropospheric column) — the run would finish and be scientifically "
-        "wrong.\nPass --ozone <file reachable from the pod>, or use "
-        f"{sorted(PACKAGED_OZONE)[0]}.")
+def forcing_overrides(a) -> list:
+    """Present-day climatological AMIP inputs from the data mirror.
+
+    Surface forcing, terrain and ozone are named explicitly (the surface file
+    has no ``auto``; an ozone left at ``auto`` on a grid without a mirrored
+    climatology falls back to the analytic profile, ~7.6x the tropospheric
+    column). Emissions/DMS/oxidants/dust resolve ``auto`` to the same ``_pd``
+    climatologies. ``--ozone`` overrides the ozone file.
+    """
+    token, lev = grid_tokens(a.grid)
+    ozone = a.ozone or f"hf://bundles/{token}_{lev}/ozone_pd.nc"
+    return ["terrain=from_file",
+            f"terrain.file=hf://bundles/{token}/terrain.nc",
+            "forcing=from_file",
+            f"forcing.file=hf://bundles/{token}/forcing_pd.nc",
+            f"forcing.ozone_file={ozone}"]
+
+
+def target_days(a) -> int:
+    """Sim-days the run must reach: --days, or --months from --start-time."""
+    if a.days:
+        return a.days
+    start = datetime.date.fromisoformat(a.start_time)
+    year, month0 = divmod(start.month - 1 + a.months, 12)
+    return (start.replace(year=start.year + year, month=month0 + 1)
+            - start).days
+
+
+def length_overrides(a) -> list:
+    length = f"run.total_time={a.days}" if a.days else \
+        f"run.total_time={a.months}months"
+    return [length, f"run.start_time={a.start_time}",
+            f"run.chunk_days={a.chunk_days}",
+            f"run.save_interval={a.save_interval}",
+            "run.output_averages=true",
+            f"run.monthly_means={'true' if a.monthly_means else 'false'}",
+            f"run.save_chunks={'true' if a.save_chunks else 'false'}"]
 
 
 def build(a, resolved) -> dict:
@@ -100,16 +136,10 @@ def build(a, resolved) -> dict:
         f"physics={a.physics}",
         f"grid={a.grid}",
         "init=jw", "init.rh=0.0",
-        "terrain=from_file",
-        "terrain.file=/work/jcm/jcm/data/bc/t63/terrain.nc",
-        "forcing=from_file",
-        "forcing.file=/work/jcm/jcm/data/bc/t63/forcing.nc",
-        *ozone_override(a),
+        *forcing_overrides(a),
         "run=longrun",
-        f"run.total_time={a.days}",
+        *length_overrides(a),
         f"run.time_step={a.dt}",
-        f"run.chunk_days={a.chunk_days}",
-        f"run.save_interval={a.save_interval}",
         f"run.output_prefix={rundir}/{a.name}",
         f"++run.checkpoint_path={rundir}/{a.name}.ckpt",
         # Stop on NaN. The opposite of the benchmark default: a year that has
@@ -117,6 +147,7 @@ def build(a, resolved) -> dict:
         "++run.bail_on_unhealthy=true",
         *a.extra,
     ])
+    days = target_days(a)
     script = f"""set -euo pipefail
 echo "=== node $NODE_NAME | $(nvidia-smi --query-gpu=name --format=csv,noheader) | attempt $(date -u +%FT%TZ) ==="
 mkdir -p /work {rundir}
@@ -186,7 +217,11 @@ fi
 # pipefail propagates that out of the command substitution, which would abort
 # the script before the empty-LAST branch below could run — marking a genuine
 # completion-restart as failed. Same for RESUMED.
-LAST=$(grep -oE "_day[0-9]+\\.nc" /tmp/attempt.log | grep -oE "[0-9]+" \\
+# Progress = the furthest chunk end this attempt reached: a saved chunk file
+# (``_dayN.nc``) or, when only monthly means are written (save_chunks=false),
+# the per-chunk health report ``Chunk K | Day N (...)``.
+LAST=$( (grep -oE "_day[0-9]+\\.nc" /tmp/attempt.log | grep -oE "[0-9]+";
+         grep -oE "\\| Day [0-9]+ \\(" /tmp/attempt.log | grep -oE "[0-9]+") \\
        | sort -n | tail -1 || true)
 if [ -z "$LAST" ]; then
   # No output this attempt. Distinguish the one benign case — the run was
@@ -194,20 +229,30 @@ if [ -z "$LAST" ]; then
   # which must NOT look like success.
   RESUMED=$(grep -oE "Resumed from checkpoint .* at sim-day [0-9.]+" \\
             /tmp/attempt.log | grep -oE "[0-9.]+$" | tail -1 || true)
-  if [ -n "$RESUMED" ] && [ "${{RESUMED%%.*}}" -ge {a.days} ]; then
-    echo "=== already complete: checkpoint at day $RESUMED of {a.days}, nothing to do ==="
+  # A restart from the final checkpoint still does work: it flushes the
+  # final month when its file was not written before the pod died. That
+  # flush writes no chunk file or health line, so only the exit code says
+  # whether it succeeded — a failed flush must fail the Job, not pass as
+  # "already complete" with the final month missing.
+  if [ -n "$RESUMED" ] && [ "${{RESUMED%%.*}}" -ge {days} ] && [ "$RC" -ne 0 ]; then
+    echo "FATAL: resumed at the final checkpoint (day $RESUMED) but jcm.main"
+    echo "       exited rc=$RC — the pending final flush did not complete."
+    exit $RC
+  fi
+  if [ -n "$RESUMED" ] && [ "${{RESUMED%%.*}}" -ge {days} ]; then
+    echo "=== already complete: checkpoint at day $RESUMED of {days}, nothing to do ==="
     exit 0
   fi
   echo "FATAL: this attempt wrote no output and resumed at day ${{RESUMED:-0}}"
-  echo "       of {a.days} — no progress made. Check for a stale or foreign"
+  echo "       of {days} — no progress made. Check for a stale or foreign"
   echo "       checkpoint at {rundir}/{a.name}.ckpt."
   exit 1
 fi
-if [ "$LAST" -lt {a.days} ]; then
-  echo "FATAL: reached day $LAST of {a.days} — incomplete"
+if [ "$LAST" -lt {days} ]; then
+  echo "FATAL: reached day $LAST of {days} — incomplete"
   exit 1
 fi
-echo "=== finished $(date -u +%FT%TZ), day $LAST of {a.days}, rc=$RC ==="
+echo "=== finished $(date -u +%FT%TZ), day $LAST of {days}, rc=$RC ==="
 exit $RC
 """
     return {
@@ -276,12 +321,31 @@ exit $RC
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--name", required=True, help="run name; also the outdir")
-    p.add_argument("--days", type=int, default=365)
+    p.add_argument("--months", type=int, default=12,
+                   help="run length in calendar months from --start-time")
+    p.add_argument("--days", type=int, default=None,
+                   help="fixed run length in days instead of --months")
+    p.add_argument("--start-time", default="2000-01-01",
+                   help="model start date (climatological forcing replays "
+                        "every year; the date sets the calendar)")
     p.add_argument("--physics", default="echam-jam")
     p.add_argument("--grid", default="echam_t63_l47_hybrid")
     p.add_argument("--dt", type=int, default=12, help="minutes")
-    p.add_argument("--chunk-days", type=int, default=30)
-    p.add_argument("--save-interval", type=int, default=5)
+    p.add_argument("--chunk-days", type=int, default=5,
+                   help="health-gated chunk length; its daily saves are what "
+                        "sits in device memory")
+    p.add_argument("--save-interval", type=int, default=1,
+                   help="interval-mean length in days (must tile the months "
+                        "for monthly means)")
+    p.add_argument("--no-monthly-means", dest="monthly_means",
+                   action="store_false", default=True,
+                   help="do not stream calendar-month means")
+    p.add_argument("--save-chunks", action="store_true", default=None,
+                   help="also keep every chunk's interval means (_dayN.nc); "
+                        "hundreds of GB for a JAM year of daily means. "
+                        "Default: off with monthly means, on without them")
+    p.add_argument("--no-save-chunks", dest="save_chunks",
+                   action="store_false")
     p.add_argument("--gpus", type=int, default=1)
     p.add_argument("--cpu", type=int, default=8)
     p.add_argument("--memory", default="64Gi")
@@ -301,6 +365,9 @@ def main() -> int:
     p.add_argument("--extra", nargs="*", default=[],
                    help="raw Hydra overrides appended last")
     a = p.parse_args()
+    if a.save_chunks is None:
+        # Without monthly means the chunk files are the run's only output.
+        a.save_chunks = not a.monthly_means
 
     pins = dict(x.split("=", 1) for x in a.pin)
     resolved = resolve_refs(pins)

@@ -169,6 +169,13 @@ builds one for you:
    # Override any key with Hydra dotted syntax:
    exp = configurations.load("t63-echam-jam", **{"run.total_time": 30})
 
+The recipes' own run length is a **calendar year of daily means**
+(``run.total_time: 12 months``). The CLI streams those into one file per
+calendar month (``run.monthly_means``, see :ref:`monthly-means-cli`); an
+in-process ``model.run(**exp.run_kwargs)`` keeps every daily mean in memory,
+so override ``run.total_time`` (and ``run.save_interval``) for in-memory runs
+and reduce with ``predictions.monthly_means()``.
+
 ``exp.model`` is a built :class:`~jcm.model.Model`, ``exp.forcing`` the built
 :class:`~jcm.forcing.ForcingData`, and ``exp.config`` a plain resolved dict.
 The initial state the configuration calls for is already applied, so
