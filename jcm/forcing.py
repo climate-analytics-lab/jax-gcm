@@ -545,8 +545,9 @@ class ForcingData:
     # (mo_surface_ocean.f90, ``zudif = u - ocu``; ``wind10w``), and the
     # TTE-TKE solve already takes a momentum target for it, but the
     # vertical diffusion still applies a zero current regardless of these
-    # fields. They exist so the coupling API is stable before that lands;
-    # see docs/source/design/surface_exchange.md. ``None`` = no current.
+    # fields. They exist so the coupling API is stable before that lands
+    # (#915); see docs/source/design/surface_exchange.md. ``None`` = no
+    # current.
     ocean_u: Any = None
     ocean_v: Any = None
 

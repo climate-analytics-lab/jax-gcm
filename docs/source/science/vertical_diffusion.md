@@ -158,7 +158,7 @@ the Richardson number inside the coefficient solve.
 **Status & known limitations.** The wind is not taken relative to an ocean
 surface current: ECHAM's open-water 10 m speed and stress use ``u − ocu``, and
 jcm applies a zero current (``ForcingData.ocean_u``/``ocean_v`` are reserved
-for it but not yet read; see {doc}`../design/surface_exchange`). The Businger-Dyer
+for it but not yet read, #915; see {doc}`../design/surface_exchange`). The Businger-Dyer
 branch's neutral reference uses that scheme's own hard-coded von Kármán constant
 rather than the live ``jcm.constants`` value, so a ``set_constants`` override
 changes the drag and its neutral reference together.

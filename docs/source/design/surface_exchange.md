@@ -88,7 +88,8 @@ stress and `wind10w` relative to the ocean surface current
 exist so that a coupler's API is stable before this lands, but the TTE-TKE
 vertical diffusion does not read them yet: it applies a zero current (the
 stress against a surface at rest), and the published 10 m wind is the wind
-over a surface at rest. Setting the fields has no effect today.
+over a surface at rest. Setting the fields has no effect today; the
+implementation is tracked in #915.
 
 ## Why grid-mean is guaranteed and tiles are optional
 

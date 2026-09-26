@@ -815,7 +815,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
 
         # Zero ocean current: the stress is against a surface at rest.
         # ``ForcingData.ocean_u/ocean_v`` are reserved for a coupled current
-        # but are not read here yet (docs/source/design/surface_exchange.md).
+        # but are not read here yet (#915, docs/source/design/surface_exchange.md).
         ocean_u = jnp.zeros(ncols)
         ocean_v = jnp.zeros(ncols)
 

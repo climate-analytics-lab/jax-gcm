@@ -571,7 +571,7 @@ Coupling to an external surface component
   checks the vector and tile invariants. ``ForcingData.ocean_u``/``ocean_v``
   are reserved for a coupled ocean surface current but are **not yet used**:
   the vertical diffusion still takes the stress against a surface at rest
-  (#911).
+  (#911; implementation tracked in #915).
 - **Forced surface mode.** ``physics=speedy-forced-flux`` /
   ``physics=echam-forced-flux`` deliver externally prescribed sensible-heat,
   evaporation and momentum fluxes in place of the package's own surface
