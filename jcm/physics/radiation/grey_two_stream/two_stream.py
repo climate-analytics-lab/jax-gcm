@@ -57,6 +57,15 @@ def delta_eddington_scaling(
         ssa' = (1 - f) ssa / (1 - ssa f)
         g'   = (g - f) / (1 - f) = g / (1 + g)
 
+    Domain: the truncation removes a *forward* peak, so it applies only to
+    ``g > 0``; ``f = max(g, 0)**2``, and a backward-scattering layer
+    (``-1 <= g <= 0``) passes through unscaled. Applied to ``g < 0`` the
+    formula leaves the physical range (``g = -0.9`` gives ``g' = -9``,
+    ``g = -1`` divides by zero). ``g'`` is written as
+    ``g - g+**2/(1 + g+)`` with ``g+ = max(g, 0)``, which is ``g/(1 + g)``
+    for ``g > 0`` and ``g`` otherwise, continuous with slope 1 on both
+    sides of ``g = 0``.
+
     This is the adjustment Toon et al. (1989) prescribe with the Eddington
     coefficients for solar radiation, and it is what makes the closure hold
     for cloud droplets and aerosol: unscaled, ``g = 0.85`` makes the
@@ -74,7 +83,8 @@ def delta_eddington_scaling(
         The scaled ``(tau, ssa, g)``.
 
     """
-    f = g * g
+    g_forward = jnp.maximum(g, 0.0)
+    f = g_forward * g_forward
     one_minus_ssa_f = 1.0 - ssa * f
     # ``1 - ssa f`` vanishes only at ssa = g = 1: a purely forward-scattering,
     # non-absorbing layer, which the scaling makes transparent (tau' = 0).
@@ -83,7 +93,8 @@ def delta_eddington_scaling(
     safe = one_minus_ssa_f > 0.0
     denom = jnp.where(safe, one_minus_ssa_f, 1.0)
     ssa_scaled = jnp.where(safe, ssa * (1.0 - f) / denom, ssa)
-    return one_minus_ssa_f * tau, ssa_scaled, g / (1.0 + g)
+    g_scaled = g - f / (1.0 + g_forward)
+    return one_minus_ssa_f * tau, ssa_scaled, g_scaled
 
 
 # ``(1 - exp(-x))/x = sum_n (-x)^n/(n+1)!`` is evaluated as this truncated

@@ -13,6 +13,7 @@ import pytest
 from jcm.physics.radiation.grey_two_stream.two_stream import (
     two_stream_coefficients,
     layer_reflectance_transmittance,
+    delta_eddington_scaling,
     longwave_fluxes,
     shortwave_fluxes,
     flux_to_heating_rate
@@ -853,8 +854,10 @@ def _eddington_gammas(ssa, g, mu0):
 
 def _delta_scaled(tau, ssa, g):
     """Joseph et al. (1976) delta-Eddington scaling, float64."""
-    f = g * g
-    return (1.0 - ssa * f) * tau, ssa * (1.0 - f) / (1.0 - ssa * f), g / (1.0 + g)
+    gp = max(g, 0.0)
+    f = gp * gp
+    return ((1.0 - ssa * f) * tau, ssa * (1.0 - f) / (1.0 - ssa * f),
+            g - f / (1.0 + gp))
 
 
 def _direct_reference(tau, ssa, g, mu0):
@@ -916,8 +919,9 @@ class TestShortwaveEnergyConservation:
         return self._fluxes(np.full(n, tau_total / n), np.full(n, ssa),
                             np.full(n, g), mu0, albedo)
 
+    @pytest.mark.parametrize("g", [-1.0, -0.9, 0.0, 0.85, 1.0])
     @pytest.mark.parametrize("albedo", [0.0, 0.3])
-    def test_reflection_transmission_absorption_close(self, albedo):
+    def test_reflection_transmission_absorption_close(self, albedo, g):
         """``R + T + A = 1`` over the sweep, each term from its own fluxes.
 
         ``R`` is the TOA upward flux, ``T`` the net flux into the surface and
@@ -925,14 +929,30 @@ class TestShortwaveEnergyConservation:
         be non-negative (a layer cannot emit shortwave). With ``ssa = 1`` no
         layer absorbs, so ``R + T = 1`` on its own. The TOA downward flux is
         exactly the incident beam (no diffuse light enters from space).
-        Measured float32 closure: 3e-7.
+        Measured float32 closure: 5e-7.
+
+        The asymmetry sweep covers the whole physical range: backward
+        scattering (``g < 0``, passed through the delta scaling unscaled),
+        isotropic, a cloud droplet, and the pure forward peak ``g = 1``,
+        which the scaling makes transparent. For ``g mu0 < -2/3`` the
+        Eddington downward direct-scattering fraction
+        ``gamma4 = (2 + 3 g mu0)/4`` is itself negative — a property of the
+        closure, not of the scaling or the solver — and the diffuse
+        *component* of the downward flux dips below zero by up to 1.5 % of
+        the incident flux (at ``g = -1``, overhead sun, a thin layer). Energy
+        is still conserved there and the total downward flux, the upward
+        flux and every layer's absorption stay non-negative; only the diffuse
+        component's sign is relaxed, and only in that regime.
         """
         for ssa in self.SSA:
             for tau in self.TAU:
                 for mu0 in self.MU0:
                     up, down, direct, diffuse = self._column(
-                        tau, ssa, mu0, albedo)
-                    case = f"ssa={ssa} tau={tau} mu0={mu0} albedo={albedo}"
+                        tau, ssa, mu0, albedo, g=g)
+                    case = (f"g={g} ssa={ssa} tau={tau} mu0={mu0} "
+                            f"albedo={albedo}")
+                    for flux in (up, down, direct, diffuse):
+                        assert np.all(np.isfinite(np.asarray(flux))), case
                     assert float(down[0]) == pytest.approx(1.0, abs=1e-7), case
                     assert float(diffuse[0]) == 0.0, case
                     net = np.asarray(down - up, np.float64)
@@ -942,7 +962,11 @@ class TestShortwaveEnergyConservation:
                     assert abs(r + t + a - 1.0) < 1e-6, case
                     assert np.all(layer_absorption > -1e-6), case
                     assert np.all(np.asarray(up) >= 0.0), case
-                    assert np.all(np.asarray(diffuse) >= 0.0), case
+                    assert np.all(np.asarray(down) >= 0.0), case
+                    if g * mu0 >= -2.0 / 3.0:
+                        assert np.all(np.asarray(diffuse) >= 0.0), case
+                    else:
+                        assert np.all(np.asarray(diffuse) > -0.02), case
                     if ssa == 1.0:
                         assert abs(r + t - 1.0) < 1e-6, case
                     else:
@@ -950,6 +974,63 @@ class TestShortwaveEnergyConservation:
                     # The surface reflects its albedo of what reaches it.
                     assert float(up[-1]) == pytest.approx(
                         albedo * float(down[-1]), abs=1e-7), case
+
+    def test_delta_scaling_domain(self):
+        """The forward-peak truncation acts only on ``g > 0``.
+
+        ``g <= 0`` passes through unchanged (``f = max(g, 0)**2``): applied
+        to backward scattering the formula would leave the physical range
+        (``g = -0.9 -> g' = -9``) or divide by zero (``g = -1``). The scaled
+        asymmetry is continuous with slope 1 through ``g = 0``, so its
+        gradient is finite (and one) there from either side.
+        """
+        g = jnp.array([-1.0, -0.9, -0.3, 0.0, 0.3, 0.85, 1.0])
+        tau, ssa, gs = delta_eddington_scaling(
+            jnp.ones_like(g), jnp.full_like(g, 0.9), g)
+        for x in (tau, ssa, gs):
+            assert np.all(np.isfinite(np.asarray(x)))
+        np.testing.assert_array_equal(np.asarray(gs[:4]), np.asarray(g[:4]))
+        np.testing.assert_array_equal(np.asarray(tau[:4]), 1.0)
+        np.testing.assert_allclose(np.asarray(ssa[:4]), 0.9, rtol=1e-7)
+        assert np.all((np.asarray(gs) >= -1.0) & (np.asarray(gs) <= 0.5))
+        for side in (-1e-4, 0.0, 1e-4):
+            grads = jax.grad(
+                lambda a: jnp.sum(jnp.stack(delta_eddington_scaling(
+                    jnp.float32(2.0), jnp.float32(0.9), a))),
+            )(jnp.float32(side))
+            assert jnp.isfinite(grads)
+            dg = jax.grad(lambda a: delta_eddington_scaling(
+                jnp.float32(2.0), jnp.float32(0.9), a)[2])(jnp.float32(side))
+            assert float(dg) == pytest.approx(1.0, abs=1e-3)
+
+    def test_pure_backscatter_layer_is_finite_and_conserves(self):
+        """``g = -1``: no NaN in the fluxes or their gradients, energy closes.
+
+        This divided by zero when the truncation was applied to ``g < 0``.
+        """
+        n = self.NLEV
+        up, down, direct, diffuse = self._fluxes(
+            np.full(n, 0.5), np.full(n, 0.99), np.full(n, -1.0), 1.0, 0.2)
+        for flux in (up, down, direct, diffuse):
+            assert np.all(np.isfinite(np.asarray(flux)))
+        assert np.all(np.asarray(up) >= 0.0)
+        assert np.all(np.asarray(down) >= 0.0)
+        net = np.asarray(down - up, np.float64)
+        absorption = net[:-1] - net[1:]
+        assert abs(float(up[0]) + net[-1] + absorption.sum() - 1.0) < 1e-6
+        assert np.all(absorption > -1e-6)
+
+        def total(g):
+            optics = OpticalProperties(
+                optical_depth=jnp.full((n, 1), 0.5),
+                single_scatter_albedo=jnp.full((n, 1), 0.99),
+                asymmetry_factor=g)
+            u, d, _, _ = shortwave_fluxes(
+                optics, 1.0, jnp.array([1.0]), jnp.array([0.2]), 1)
+            return jnp.sum(u) + jnp.sum(d)
+
+        grad = jax.grad(total)(jnp.full((n, 1), -1.0))
+        assert jnp.all(jnp.isfinite(grad))
 
     @pytest.mark.parametrize("mu0", [0.1, 0.5, 1.0])
     def test_layer_scatters_all_of_a_conservative_beam(self, mu0):

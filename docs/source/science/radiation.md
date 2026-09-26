@@ -52,7 +52,9 @@ of, but not exactly, ``exp(-sqrt(3)*tau)``.
 optical properties are first delta-scaled (``delta_eddington_scaling``; Joseph,
 Wiscombe & Weinman 1976): the forward diffraction peak ``f = g^2`` is counted as
 unscattered, ``tau' = (1 - ssa f) tau``, ``ssa' = (1 - f) ssa/(1 - ssa f)``,
-``g' = g/(1 + g)``. This is the adjustment Toon et al. (1989) prescribe with the
+``g' = g/(1 + g)``; the truncation removes a *forward* peak, so it applies only to
+``g > 0`` (``f = max(g, 0)^2``) and backward-scattering layers pass through
+unscaled. This is the adjustment Toon et al. (1989) prescribe with the
 Eddington coefficients for solar radiation; unscaled, a cloud's ``g = 0.85``
 makes the direct-beam backscatter coefficient ``gamma3 = (2 - 3 g mu0)/4``
 negative at high sun, while scaled ``gamma3 >= 1/8``. Each layer then scatters
