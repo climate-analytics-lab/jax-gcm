@@ -75,7 +75,9 @@ class EchamSurfaceExchange(PhysicsTerm):
     # Literal string (== SURFACE_EXCHANGE_KEY) so the requires-audit's AST
     # walk can evaluate the tuple.
     provides: ClassVar[tuple[str, ...]] = ("surface_exchange",)
-    output_attrs: ClassVar = surface_exchange_output_attrs("10m")
+    # Tile order of the vdiff surface tiles the wind tiles are published on.
+    output_attrs: ClassVar = surface_exchange_output_attrs(
+        "10m", tile_names=("water", "sea_ice", "land"))
 
     def __call__(
         self,

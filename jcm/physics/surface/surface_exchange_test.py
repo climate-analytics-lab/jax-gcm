@@ -507,6 +507,36 @@ class TestEchamPublishedWind:
                 jnp.sum(frac * getattr(self.se, name + "_tile"), axis=-1),
                 getattr(self.se, name), rtol=1e-5, atol=1e-6)
 
+    def test_flattened_tile_variables_carry_attrs(self):
+        """Every ``*_tile.N`` wind and ``tile_fraction.N`` variable the
+        output flattener writes has units, reference and tile identity.
+        """
+        from jcm.physics.surface.echam.surface_exchange_publisher import (
+            EchamSurfaceExchange,
+        )
+        diag = jax.tree_util.tree_map(lambda x: x[None], self.diag)
+        flat = self.phys.data_struct_to_dict(
+            diag, nodal_shape=(self.nlev,) + self.nodal)
+        attrs = EchamSurfaceExchange.output_attrs
+        names = ("water", "sea_ice", "land")
+        tiles = [k for k in flat
+                 if k.startswith("surface_exchange.") and "_tile." in k]
+        assert len(tiles) == 9
+        for key in tiles:
+            index = int(key.rsplit(".", 1)[1])
+            entry = attrs[key]
+            assert entry["units"] == "m s-1"
+            assert entry["wind_reference"] == "10m"
+            assert entry["height"] == "10 m"
+            assert entry["surface_type"] == names[index]
+        for index in range(3):
+            key = f"surface_exchange.tile_fraction.{index}"
+            assert key in flat
+            assert attrs[key]["units"] == "1"
+            assert attrs[key]["surface_type"] == names[index]
+        # And the physics-level merge the netCDF writer applies has them.
+        assert "surface_exchange.wind_u_tile.2" in self.phys.output_attrs()
+
     def test_aerocom_uas_vas_are_the_published_wind(self):
         """One 10 m wind in the output: AeroCom uas/vas == wind_u/wind_v."""
         ncols = self.se.wind_u.shape[0]

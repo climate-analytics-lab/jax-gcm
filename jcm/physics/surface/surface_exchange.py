@@ -305,13 +305,21 @@ SURFACE_EXCHANGE_OUTPUT_ATTRS = {
 _WIND_OUTPUT_FIELDS = ("wind_speed", "wind_u", "wind_v")
 
 
-def surface_exchange_output_attrs(wind_reference: str) -> dict:
+def surface_exchange_output_attrs(wind_reference: str,
+                                  tile_names: tuple[str, ...] = ()) -> dict:
     """:data:`SURFACE_EXCHANGE_OUTPUT_ATTRS` stamped with a wind reference.
 
     Each publisher declares its ``output_attrs`` through this, so the netCDF
     wind variables carry the same ``wind_reference`` as the in-memory struct
     plus its :data:`WIND_REFERENCES` description (and a CF-style ``height``
     for the 10 m reference).
+
+    ``tile_names`` (tile index order) is given by a publisher that fills the
+    wind tiles. The output flattener writes a trailing tile axis as one
+    variable per tile (``surface_exchange.wind_u_tile.0``, ...), and output
+    attributes match exact names, so each expanded tile variable, and each
+    ``tile_fraction.N``, gets its own entry: the grid-mean wind attributes
+    plus ``surface_type`` (the tile's name) and ``tile_index``.
     """
     if wind_reference not in WIND_REFERENCES:
         raise ValueError(f"wind_reference={wind_reference!r}; expected one "
@@ -323,6 +331,22 @@ def surface_exchange_output_attrs(wind_reference: str) -> dict:
         entry["wind_reference_description"] = WIND_REFERENCES[wind_reference]
         if wind_reference == "10m":
             entry["height"] = "10 m"
+    for index, name in enumerate(tile_names):
+        tile = {"surface_type": name, "tile_index": index}
+        for field in _WIND_OUTPUT_FIELDS:
+            grid = attrs[f"surface_exchange.{field}"]
+            attrs[f"surface_exchange.{field}_tile.{index}"] = {
+                **grid, **tile,
+                "long_name": f"{grid['long_name']} over the {name} tile",
+                "description": f"{grid['description']}; {name} tile "
+                               f"(index {index}) of the tile axis",
+            }
+        attrs[f"surface_exchange.tile_fraction.{index}"] = {
+            **tile, "units": "1", "standard_name": "area_fraction",
+            "long_name": f"{name} tile fraction of the grid box",
+            "description": f"fraction of the grid box covered by the {name} "
+                           f"tile (index {index}); the tiles sum to 1",
+        }
     return attrs
 
 
