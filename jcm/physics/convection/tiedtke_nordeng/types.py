@@ -258,7 +258,11 @@ class ConvectionTendencies(NamedTuple):
     # [kg/m²/s] (nlev,) — the local carrier flux for below-cloud
     # (impaction) aerosol washout.
     precip_flux: jnp.ndarray
-    
+    # Column water created by cuflx's non-negative floor on the rain/snow
+    # fluxes where the downdraft takes up more rain than the plume generates
+    # [kg/m²/s] (scalar per column); see ``convective_precip_fluxes`` (#912).
+    precip_floor_source: jnp.ndarray
+
     # Fixed tracer tendencies (qc, qi only)
     dqc_dt: jnp.ndarray      # Cloud water tendency (kg/kg/s)
     dqi_dt: jnp.ndarray      # Cloud ice tendency (kg/kg/s)
@@ -306,6 +310,12 @@ class ConvectionData:
     precip_conv: jnp.ndarray         # Convective precipitation [kg/m²/s] (ncols,)
     precip_flux: jnp.ndarray         # Convective precip flux entering each
                                      # layer from above [kg/m²/s] (nlev, ncols)
+    # Column water [kg/m²/s] created by cuflx's non-negative floor on the
+    # rain/snow fluxes where the downdraft's rain uptake exceeds what the
+    # plume generates (ECHAM behaviour, #912). The convective ledger removes
+    # ``precip_conv - precip_floor_source`` of water, so a column budget
+    # closes as ``E - P + precip_floor_source``. (ncols,)
+    precip_floor_source: jnp.ndarray
     qc_conv: jnp.ndarray             # Convective cloud water [kg/kg] (nlev, ncols)
     precip_formation: jnp.ndarray    # Per-layer updraft precip generation
                                      # [kg/m²/s] (nlev, ncols)
@@ -335,6 +345,7 @@ class ConvectionData:
             ktype=jnp.zeros(nodal_shape, dtype=jnp.int32),
             precip_conv=jnp.zeros(nodal_shape),
             precip_flux=jnp.zeros((nlev,) + nodal_shape),
+            precip_floor_source=jnp.zeros(nodal_shape),
             precip_formation=jnp.zeros((nlev,) + nodal_shape),
             qc_conv=jnp.zeros((nlev,) + nodal_shape),
             qi_conv=jnp.zeros((nlev,) + nodal_shape),
@@ -382,6 +393,10 @@ CONVECTION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     "convection.precip_flux": {
         "units": "kg m-2 s-1",
         "long_name": "convective precipitation flux entering each layer"},
+    "convection.precip_floor_source": {
+        "units": "kg m-2 s-1",
+        "long_name": ("column water created by the convective scheme's "
+                      "non-negative precipitation-flux floor")},
     "convection.qc_conv": {
         "units": "kg kg-1", "long_name": "convective cloud water mixing ratio"},
     "convection.precip_formation": {

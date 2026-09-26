@@ -154,6 +154,7 @@ def test_wrapper_advances_cloud_diagnostics_for_downstream_microphysics(monkeypa
             precip_formation=zeros,
             precip_conv=jnp.array(0.0),
             precip_flux=zeros,
+            precip_floor_source=jnp.zeros((), temperature.dtype),
             dqc_dt=dqc_col,
             dqi_dt=dqi_col,
         ), None
@@ -237,6 +238,7 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
             qc_conv=temperature, qi_conv=humidity,
             precip_formation=jnp.zeros_like(temperature),
             precip_flux=jnp.zeros_like(temperature),
+            precip_floor_source=jnp.zeros((), temperature.dtype),
             # Probe: ride thvsig out on an otherwise-unused scalar. dtedt is
             # zero so cap_scale == 1 and it passes through unscaled.
             precip_conv=thvsig,
@@ -349,6 +351,7 @@ def test_cap_scales_momentum_consistently_with_ledger(monkeypatch):
             dudt=ones * dudt_raw, dvdt=ones * dvdt_raw,
             qc_conv=zeros, qi_conv=zeros,
             precip_formation=zeros, precip_flux=zeros,
+            precip_floor_source=jnp.zeros((), temperature.dtype),
             precip_conv=jnp.zeros_like(temperature[0]),
             dqc_dt=zeros, dqi_dt=zeros,
         ), None
@@ -420,6 +423,7 @@ def test_wrapper_feeds_true_layer_mass_and_interfaces_to_the_scheme(monkeypatch)
             dtedt=zeros, dqdt=layer_mass, dudt=zeros, dvdt=zeros,
             qc_conv=zeros, qi_conv=zeros,
             precip_formation=zeros, precip_flux=zeros,
+            precip_floor_source=jnp.zeros((), temperature.dtype),
             precip_conv=jnp.zeros(()),
             dqc_dt=jnp.diff(pressure_half) / c.grav, dqi_dt=zeros,
         ), None
@@ -518,6 +522,7 @@ def test_wrapper_surfaces_applied_convective_heating_and_moistening(monkeypatch)
             precip_formation=zeros,
             precip_conv=jnp.array(0.0),
             precip_flux=zeros,
+            precip_floor_source=jnp.zeros((), temperature.dtype),
             dqc_dt=zeros,
             dqi_dt=zeros,
         ), None

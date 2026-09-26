@@ -11,7 +11,13 @@ The single-column model applies the summed physics tendencies, so the
 budget is checked on the TENDENCIES of one step (the SCM's prescribed
 tracer base makes state differences unusable for tracers):
 
-    Σ (dq/dt + dqc/dt + dqi/dt)·Δp/g  +  P_conv + P_rain + P_snow − E ≈ 0
+    Σ (dq/dt + dqc/dt + dqi/dt)·Δp/g  +  P_conv + P_rain + P_snow − E − S ≈ 0
+
+``S`` is the water Tiedtke's precipitation-flux floor creates where the
+downdraft takes up more rain than the plume generates — ECHAM behaviour,
+published as ``convection.precip_floor_source`` (#912). It is part of the
+convective ledger, so the closure keeps it rather than hiding it in a looser
+bound.
 """
 
 import unittest
@@ -80,6 +86,9 @@ class TestComposedColumnWaterClosure(unittest.TestCase):
             + np.asarray(ph["convection"].precip_conv).reshape(nsteps, -1)[:, 0]
         )
         E = np.asarray(ph["surface"].evaporation).reshape(nsteps, -1)[:, 0]
+        S = np.asarray(
+            ph["convection"].precip_floor_source,
+        ).reshape(nsteps, -1)[:, 0]
 
         # Since the surface exchange became the bottom boundary row of the
         # vdiff implicit solve, the published evaporation IS the delivered
@@ -91,7 +100,7 @@ class TestComposedColumnWaterClosure(unittest.TestCase):
         np.testing.assert_allclose(E_eff, E)
 
         col = (dq + dqc + dqi) @ mass  # (nsteps,)
-        residual = col + P - E
+        residual = col + P - E - S
         scale = np.maximum.reduce([np.abs(E), np.abs(P), np.abs(col), np.full_like(E, 1e-9)])
         rel = np.abs(residual) / scale
 
