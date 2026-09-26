@@ -335,9 +335,13 @@ class TestTwoStreamSolver:
         assert jnp.all(T_dif >= 0) and jnp.all(T_dif <= 1)
         assert jnp.all(R_dif + T_dif <= 1)  # Energy conservation
         
-        # Direct beam transmission follows Beer's law
-        expected_T_dir = jnp.exp(-self.tau / 0.5)
-        assert jnp.allclose(T_dir, expected_T_dir, atol=0.01)
+        # R_dir/T_dir are the beam's diffusely reflected and transmitted
+        # fractions: with the unscattered Beer's-law beam they account for
+        # at most all of it, the rest (ssa = 0.9) being absorbed.
+        unscattered = jnp.exp(-self.tau / 0.5)
+        assert jnp.all(R_dir > 0) and jnp.all(T_dir > 0)
+        absorbed = 1.0 - R_dir - T_dir - unscattered
+        assert jnp.all(absorbed > 0) and jnp.all(absorbed < 1.0 - unscattered)
     
     def test_flux_to_heating(self):
         """Test heating rate calculation"""

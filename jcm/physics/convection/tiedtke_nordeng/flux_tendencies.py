@@ -185,7 +185,7 @@ def convective_precip_fluxes(
     use_updraft_cover: bool = False,
     updraft_layer_mass: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
-           jnp.ndarray]:
+           jnp.ndarray, jnp.ndarray]:
     """ECHAM ``cuflx`` precipitation budget (mo_cufluxdts.f90:265-491).
 
     Walks the column top→bottom three times, exactly as the Fortran:
@@ -236,11 +236,14 @@ def convective_precip_fluxes(
             ``use_updraft_cover``; the ledger passes ``dp_lev / g``.
 
     Returns:
-        ``(rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux)`` —
-        surface rain and snow fluxes, the production-only diagnostic
-        ``prain``, the per-layer snow melt, ``pdmfup`` including the
-        (negative) sub-cloud evaporation increments, and the total
-        (rain + snow) precipitation flux ENTERING each layer from above.
+        ``(rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux,
+        floor_source)`` — surface rain and snow fluxes, the production-only
+        diagnostic ``prain``, the per-layer snow melt, ``pdmfup`` including
+        the (negative) sub-cloud evaporation increments, the total
+        (rain + snow) precipitation flux ENTERING each layer from above, and
+        the column water [kg/m²/s] that ``cuflx``'s non-negative floor on
+        the rain and snow fluxes creates when the downdraft takes up more
+        rain than the plume generates.
 
     """
     nlev = len(temperature)
@@ -318,6 +321,19 @@ def convective_precip_fluxes(
         partition_step, (jnp.zeros(()), jnp.zeros(())),
         (gen, temperature, humidity, dp_lev),
     )
+    # ``cuflx`` floors each phase's flux at zero (mo_cufluxdts.f90:324-325).
+    # The ledger's vapour and heat sources are ``pdmfup + pdmfdp`` unfloored,
+    # so wherever the downdraft's rain uptake exceeds what the plume
+    # generates the floor creates the difference as water: the surface
+    # precipitation no longer equals the column's water loss. ECHAM has the
+    # same floor; ``cumastr`` scales the first ascent's downdraft to the
+    # closed flux and re-runs ``cuasc`` (mo_cumastr.f90:944-986), and a
+    # second ascent that rains less than the scaled downdraft takes up (a
+    # deep-to-shallow demotion with its larger entrainment) drives the flux
+    # negative. The created water is returned so the column budget can
+    # account for it; removing it is a deviation from ECHAM tracked in
+    # #912.
+    floor_source = jnp.maximum(-prfl, 0.0) + jnp.maximum(-psfl, 0.0)
     prfl = jnp.maximum(prfl, 0.0)
     psfl = jnp.maximum(psfl, 0.0)
     prain = jnp.sum(jnp.maximum(pdmfup, 0.0))
@@ -390,7 +406,8 @@ def convective_precip_fluxes(
         [jnp.zeros_like(flux_bottom[:1]), flux_bottom[:-1]]
     )
 
-    return rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux
+    return (rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux,
+            floor_source)
 
 
 def calculate_tendencies(
@@ -521,7 +538,7 @@ def calculate_tendencies(
     # sub-cloud Kessler evaporation charged back into pdmfup), on the true
     # layer thickness.
     (rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj,
-     precip_flux) = convective_precip_fluxes(
+     precip_flux, floor_source) = convective_precip_fluxes(
         temperature, humidity, pressure, env.dp, kbase,
         updraft_state.pdmfup, downdraft_state.pdmfdp, dt,
         updraft_temperature=updraft_state.tu,
@@ -615,6 +632,7 @@ def calculate_tendencies(
         precip_formation=jnp.maximum(updraft_state.pdmfup, 0.0),
         precip_conv=precip_rate,
         precip_flux=precip_flux,
+        precip_floor_source=floor_source,
         dqc_dt=dqc_dt,
         dqi_dt=dqi_dt
     )
