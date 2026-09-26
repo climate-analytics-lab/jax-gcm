@@ -27,6 +27,7 @@ JAX-GCM is designed to be a fully differentiable climate model that balances eas
    design/tracer_mass_conservation
    design/jam
    design/jam_carbon_aging
+   design/jam_modal_microphysics
    design/jam_aerosol_removal
    design/jam_m7_configuration
    design/jam_cloud_borne_ice_phase

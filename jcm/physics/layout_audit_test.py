@@ -120,6 +120,11 @@ INERT_IN_HARNESS = frozenset({
     "BettsMillerConvection",
     "FrontalGravityWaveDrag",
     "IceNucleation",
+    # AER-01: every process is still an identity, so it is a no-op by
+    # design exactly as PlaceholderMicrophysics is. It stays here once the
+    # processes land, for Mam4JaxMicrophysics's reason instead — it needs
+    # populated aerosol tracers, which this harness does not supply.
+    "JamModalMicrophysics",
     "LottMillerSso",
     "M7JaxMicrophysics",
     "Mam4JaxMicrophysics",

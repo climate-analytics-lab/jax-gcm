@@ -23,6 +23,9 @@ from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.mam4_data import (
     MAM4_SPEC,
 )
+from jcm.physics.aerosol.jam.microphysics.modal import (
+    JamModalMicrophysics,
+)
 from jcm.physics.aerosol.jam.microphysics.placeholder import (
     PlaceholderMicrophysics,
 )
@@ -44,6 +47,7 @@ _LAZY_CORES = {
 __all__ = [
     "ModalMicrophysicsTerm",
     "PlaceholderMicrophysics",
+    "JamModalMicrophysics",
     "MAM4_SPEC",
     "M7_SPEC",
     *_LAZY_CORES,
