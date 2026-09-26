@@ -210,7 +210,8 @@ class SurfaceExchange:
         for name, tile in tiles:
             _check(f"sum(tile_fraction * {name}_tile) == {name}",
                    (frac * np.asarray(tile)).sum(axis=-1), getattr(self, name))
-        if self.wind_speed_tile is not None:
+        if all(t is not None for t in (self.wind_u_tile, self.wind_v_tile,
+                                       self.wind_speed_tile)):
             _check("hypot(wind_u_tile, wind_v_tile) == wind_speed_tile",
                    np.hypot(self.wind_u_tile, self.wind_v_tile),
                    self.wind_speed_tile)

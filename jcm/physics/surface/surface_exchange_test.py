@@ -95,6 +95,7 @@ class TestSurfaceExchangeStruct:
             wind_u_tile=speed_t * (se.wind_u / se.wind_speed)[:, None],
             wind_v_tile=speed_t * (se.wind_v / se.wind_speed)[:, None])
         tiled.validate()
+        tiled.replace(wind_speed_tile=None).validate()  # partial tiles are fine
         with pytest.raises(ValueError, match="tile_fraction"):
             tiled.replace(tile_fraction=None).validate()
         with pytest.raises(ValueError, match="wind_u_tile"):
