@@ -88,9 +88,16 @@ Process = Callable[
 def gas_aerosol_exchange(population, env, spec):
     """Condensation of H2SO4 and SOAG onto existing modes. **AER-03.**
 
-    Transition-regime (Fuchs-Sutugin) mass transfer, partitioned across
-    modes by condensation sink. Competes with nucleation for the same
-    ``g_h2so4``, which is why it runs first and why the two share a budget.
+    Seinfeld & Pandis (1998) mass-transfer expressions integrated over each
+    mode's size distribution (Binkowski and Shankar, 1995), with an
+    accommodation coefficient of 0.65 for H2SO4 (Poschl et al., 1998).
+    H2SO4 condensation is irreversible; SOA is reversible.
+
+    Competes with nucleation for the same ``g_h2so4``, which is why it runs
+    first and why the two share a budget. It must also record the soluble
+    mass it deposits on the primary-carbon mode: MAM computes ageing inside
+    this step, and this scaffold keeps ageing separate, so the bookkeeping
+    has to cross the seam instead (D-A1).
     """
     return population
 
@@ -98,10 +105,13 @@ def gas_aerosol_exchange(population, env, spec):
 def rename(population, env, spec):
     """Transfer across a mode boundary once a mode grows past it. **AER-07.**
 
-    In MAM4 this is aitken to accumulation: condensation grows the Aitken
-    mode, and beyond ``dgnum_hi`` the particles are accumulation-mode by
-    definition. Without it, condensation inflates Aitken sizes without
-    bound.
+    Aitken to accumulation, following Easter et al. (2004): after the
+    continuous-growth processes, the particles on the upper tail of the
+    Aitken distribution are accumulation-mode by definition, and their
+    number and mass transfer across. Without it, condensation inflates
+    Aitken sizes without bound. The supplement to Liu et al. (2012) is
+    explicit that this runs *after* continuous growth, which is what fixes
+    its position behind ``gas_aerosol_exchange`` here.
     """
     return population
 
@@ -109,10 +119,20 @@ def rename(population, env, spec):
 def nucleation(population, env, spec):
     """New-particle formation from H2SO4 vapour. **AER-04.**
 
-    Binary H2SO4-H2O homogeneous nucleation, plus the correction carrying
-    the critical cluster up to the Aitken mode's lower bound (only a
-    fraction survives coagulation on the way). The sole source of new
-    particle *number* in the population.
+    Two pathways, because MAM's default is not binary alone (D-A2):
+
+    * binary H2SO4-H2O homogeneous nucleation (Vehkamaki et al., 2002),
+      the free-troposphere term - MAM4 predicts no NH3, so the ternary
+      parameterization used by the 7-mode version is unavailable;
+    * an empirical first-order-in-H2SO4 rate within the planetary boundary
+      layer (Sihto et al., 2006) with a coefficient of 1.0e-6 s^-1. This
+      is what addresses the continental Aitken-number deficit that
+      binary-only nucleation leaves.
+
+    Kerminen and Kulmala (2002) then carries the critical cluster up to the
+    Aitken mode's lower bound, where only a fraction survives coagulation
+    on the way. New particles enter the Aitken mode. This is the sole
+    source of new particle *number* in the population.
     """
     return population
 
@@ -123,6 +143,12 @@ def coagulation(population, env, spec):
     Intra-modal coagulation removes number at constant mass; inter-modal
     moves both mass and number to the larger mode. This is what bounds the
     number that nucleation creates.
+
+    Rates follow the CMAQ v4.6 fast/approximate algorithms (Binkowski and
+    Roselle, 2003), over the Aitken, accumulation and primary-carbon modes
+    ONLY: MAM neglects coagulation involving the coarse and larger modes
+    as much slower. The Aitken-to-primary-carbon path also ages carbon, so
+    like condensation this step owes AER-06 a record of what it deposited.
     """
     return population
 
@@ -135,6 +161,13 @@ def carbonaceous_ageing(population, env, spec):
     fresh hydrophobic carbon, wrong once a soluble coating has grown on it.
     This transfer is the only pathway that ends the exclusion, so its
     absence is what sets the ~21-day BC lifetime.
+
+    The criterion is three monolayers of sulfate with SOA included, and the
+    aged fraction is ``M_SO4,cond / M_SO4,age-all + M_SOA,cond /
+    M_SOA,age-all`` (Liu et al., 2012, supplement S1.1.5); that fraction of
+    the mode's POA, BC and number moves to accumulation. In MAM this is
+    computed inside condensation and coagulation rather than as its own
+    step - see D-A1 for why it is separate here and what that costs.
     """
     return population
 
@@ -149,10 +182,13 @@ def carbonaceous_ageing(population, env, spec):
 #: new particles. Ageing runs last because it consumes the coating the two
 #: earlier mass processes deposited.
 #:
-#: **D-A1 is still open** (whether to adopt this order as-is or sub-cycle
-#: the stiff condensation/nucleation pair). It is recorded here because a
-#: scaffold whose order is arbitrary invites someone to reorder it by
-#: accident later.
+#: **D-A1 DECIDED 2026-09-26**: adopt this order, one pass per physics
+#: step, no sub-cycling yet. Two caveats worth knowing before changing it:
+#: the published MAM description does NOT state the amicphys sequence (it
+#: comes from jcm's own ``Mam4JaxMicrophysics`` docstring), and MAM folds
+#: ageing into condensation and coagulation rather than running it last.
+#: Sub-cycling gets revisited on a measurement, not a hunch - if AER-04
+#: shows one step depleting ``g_h2so4`` by more than ~50 %.
 PROCESS_ORDER: tuple[tuple[str, Process], ...] = (
     ("gas_aerosol_exchange", gas_aerosol_exchange),
     ("rename", rename),

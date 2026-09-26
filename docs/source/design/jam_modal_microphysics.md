@@ -74,14 +74,14 @@ Dependencies in brackets. Each card is implement → review → full gates.
 
 | Card | Title | Deps |
 |---|---|---|
-| **AER-01** | `ModalMicrophysicsCore` skeleton: subclass, `spec = MAM4_SPEC`, process-order scaffold, `_jam_state` written via the existing κ-Köhler diagnostics, zero tendency. Bitwise-equal to `PlaceholderMicrophysics`. | — |
+| **AER-01** | ✅ `JamModalMicrophysics` skeleton: subclass, `spec = MAM4_SPEC`, process-order scaffold, `_jam_state` via the shared κ-Köhler diagnostics (moved to `koehler.py`), zero tendency, bitwise-equal to `PlaceholderMicrophysics`. Classified in `layout_audit_test.py` — that could not wait for AER-08, since the roster assertion fails on any unclassified `PhysicsTerm`. | — |
 | **AER-02** | Modal moment helpers: dry/wet diameter from mass+number, mode surface area, the M₀/M₃ conversions every later card needs. Property tests (moment self-consistency, σ_g invariance). | AER-01 |
-| **AER-03** | A2 condensation: Fuchs–Sutugin transition-regime mass transfer of `g_h2so4`/`g_soag` onto all modes, partitioned by condensation sink. Conserves S and C to rounding. | AER-02 |
-| **AER-04** | A1 nucleation: binary H₂SO₄–H₂O rate, plus the survival correction from the critical cluster to the Aitken lower bound. Competes with AER-03 for the same `g_h2so4`. | AER-03 |
-| **AER-05** | A3 coagulation: Brownian kernel, intra-modal number sink and inter-modal mass/number transfer over the MAM4 mode pairs. | AER-02 |
-| **AER-06** | A4 ageing: monolayer coating criterion on `pcm`, transfer to `acc`. `n_so4_monolayers` knob, default 3.0 (matching `Mam4JaxMicrophysics`; ECHAM-HAM's `m7_coat` uses 1.0). | AER-03, AER-05 |
-| **AER-07** | A5 renaming: `aitken` → `accum` when the mode grows past `dgnum_hi`. | AER-02 |
-| **AER-08** | Wire `jam_microphysics="modal"` through `echam_physics()` and the Hydra config; classify the term in `layout_audit_test.py`. | AER-01 |
+| **AER-03** | A2 condensation: Seinfeld & Pandis mass transfer integrated over each mode's size distribution (Binkowski & Shankar 1995), accommodation coefficient 0.65 for H₂SO₄ (Pöschl et al. 1998). H₂SO₄ irreversible, SOA reversible. Must also record the soluble mass deposited on `pcm` — AER-06 consumes it (D-A1). Conserves S and C to rounding. | AER-02 |
+| **AER-04** | A1 nucleation: binary H₂SO₄–H₂O (Vehkamäki et al. 2002) **plus** the PBL first-order pathway (Sihto et al. 2006, 1.0×10⁻⁶ s⁻¹), with Kerminen & Kulmala (2002) survival to the Aitken lower bound. Competes with AER-03 for the same `g_h2so4`. Settles the PBL-height sub-decision in D-A2. | AER-03 |
+| **AER-05** | A3 coagulation: CMAQ v4.6 fast/approximate algorithms (Binkowski & Roselle 2003). **Aitken, accumulation and primary-carbon only** — MAM neglects coagulation involving coarse and larger modes as much slower. Aitken↔pcm also ages, so this feeds AER-06. | AER-02 |
+| **AER-06** | A4 ageing: 3-monolayer sulfate criterion on `pcm` with SOA included, `f_age = M_SO4,cond/M_SO4,age-all + M_SOA,cond/M_SOA,age-all`, transferring that fraction of POA/BC/number to `acc`. `n_so4_monolayers` default 3.0 (Liu et al. 2012 supplement S1.1.5; ECHAM-HAM's `m7_coat` uses 1.0). | AER-03, AER-05 |
+| **AER-07** | A5 renaming: transfer the upper tail of `aitken` number and mass to `accum` after continuous growth, following Easter et al. (2004). | AER-02 |
+| **AER-08** | Wire `jam_microphysics="modal"` through `echam_physics()` and the Hydra config. (Classification landed in AER-01.) | AER-01, D-A4 |
 | **AER-09** | Conservation gates: per-process sulfur/carbon/number budgets as a ledger, asserted in tests. | AER-03..07 |
 | **AER-10** | Science doc + release note; `jam.md` cross-links; reference verification (§7). | AER-09 |
 | **AER-11** | Differentiability check: finite-difference vs autodiff through each process; no `jnp.where` NaN traps on empty modes. | AER-09 |
@@ -150,33 +150,128 @@ step.
 
 **Blocked on SP-15.** Raise with the SP work unit sequence, not here.
 
-## 7. References — TO VERIFY BEFORE IMPLEMENTATION
+## 7. References — VERIFIED 2026-09-26
 
-Listed from memory and **not yet checked against the papers**. Each must be
-confirmed before it enters a docstring or the science register, because a
-parameterization doc that miscites its own scheme is worse than one with no
-citation.
+Checked against the papers, not recalled. The authority for what MAM
+actually does is the **supplement** to Liu et al. (2012) — sections S1.1.4
+to S1.1.7 — because the main text of neither Liu paper describes the
+microphysics schemes. Vehkamäki is cited in neither main text.
 
-- Vehkamäki et al. (2002), JGR 107(D22), 4622 — binary H₂SO₄–H₂O nucleation.
-- Kerminen & Kulmala (2002), J. Aerosol Sci. 33 — apparent-vs-real
-  nucleation rate / survival to a larger size.
-- Fuchs & Sutugin (1971) — transition-regime correction.
-- Binkowski & Shankar (1995), JGR 100(D12) — modal coagulation moments.
-- Liu et al. (2012), GMD 5, 709–739 — MAM3/CAM5; Liu et al. (2016), GMD 9,
-  505–522 — MAM4 four-mode.
-- Vignati et al. (2004), JGR 109, D22202 — M7, for the Phase-B mode-choice
-  comparison.
-- Abdul-Razzak & Ghan — already cited by `activation/arg.py`; reuse that
-  citation rather than restating it.
+| Process | Reference |
+|---|---|
+| Binary nucleation | Vehkamäki, H., Kulmala, M., Napari, I., Lehtinen, K. E. J., Timmreck, C., Noppel, M., Laaksonen, A. (2002), *An improved parameterization for sulfuric acid–water nucleation rates for tropospheric and stratospheric conditions*, JGR 107, 4622, doi:10.1029/2002JD002184 |
+| PBL nucleation | Sihto, S.-L., et al. (2006), ACP 6, 4079–4091 — empirical first-order-in-H₂SO₄ rate; coefficient 1.0×10⁻⁶ s⁻¹ as in Wang et al. (2009) |
+| Nucleated-particle survival | Kerminen, V.-M., Kulmala, M. (2002), *Analytical formulae connecting the "real" and the "apparent" nucleation rate…*, J. Aerosol Sci. 33(4), 609–622 |
+| Condensation | Seinfeld & Pandis (1998) mass-transfer expressions, integrated over each mode's size distribution per Binkowski, F. S., Shankar, U. (1995), JGR 100, 26191–26209 |
+| H₂SO₄ accommodation coefficient (0.65) | Pöschl, U., et al. (1998), J. Phys. Chem. A 102(49), 10082–10089 |
+| Coagulation | Binkowski, F., Roselle, S. (2003), *Models-3 CMAQ aerosol component – 1*, JGR 108(D6), 4183, doi:10.1029/2001JD001409 — MAM uses CMAQ v4.6's fast/approximate algorithms |
+| Renaming (Aitken → accumulation) | Easter, R. C., et al. (2004), *MIRAGE* |
+| Water uptake / κ | Ghan & Zaveri (2007) equilibrium Köhler; κ per Petters, M. D., Kreidenweis, S. M. (2007), ACP 7(8), 1961–1971 — already the basis of ``koehler.py`` |
+| MAM3 / CAM5 | Liu, X., et al. (2012), GMD 5, 709–739, doi:10.5194/gmd-5-709-2012 (+ supplement) |
+| MAM4 four-mode | Liu, X., et al. (2016), GMD 9, 505–522, doi:10.5194/gmd-9-505-2016 |
+| M7 (Phase-B mode comparison) | Vignati, E., Wilson, J., Stier, P. (2004), JGR 109, D22202, doi:10.1029/2003JD004485 |
+| Ternary nucleation (**not used** — needs NH₃) | Merikanto, J., et al. (2007), JGR 112, D15207 |
 
-## 8. Decisions needed before AER-01
+### Corrections to the first draft of this plan
 
-- **D-A1 — process order.** MAM4 runs gas exchange, rename, nucleation,
-  coagulation, ageing within one substep. Adopt that order as-is, or
-  sub-cycle the stiff nucleation/condensation pair?
-- **D-A2 — nucleation scheme.** Binary H₂SO₄–H₂O only (MAM4's default), or
-  also a boundary-layer ternary/organic pathway? Binary alone understates
-  continental Aitken number.
+Three attributions in the version written before this check were wrong,
+and all three had reached the card table and the code docstrings:
+
+1. **Fuchs–Sutugin was cited for condensation.** It appears nowhere in
+   MAM's description. The transition-regime treatment enters through the
+   Seinfeld & Pandis mass-transfer expressions as integrated by Binkowski
+   & Shankar (1995).
+2. **Binkowski & Shankar (1995) was cited for coagulation.** It is the
+   *condensation* size-distribution integration. Coagulation is Binkowski
+   & Roselle (2003).
+3. **Renaming had no reference.** It is Easter et al. (2004), and the
+   supplement is explicit that it runs *after* continuous growth — which
+   independently confirms the scaffold's condensation-before-rename order.
+
+## 8. Decisions
+
+### D-A1 — process order: ADOPT MAM's ORDER, NO SUB-CYCLING YET
+
+`gas_aerosol_exchange → rename → nucleation → coagulation →
+carbonaceous_ageing`, one pass per physics step.
+
+What the evidence does and does not support, stated plainly:
+
+- **Supported.** Rename follows continuous growth (supplement S1.1.5,
+  Easter et al. 2004). Ageing is driven by the mass condensation and
+  coagulation deposit, so it cannot precede them.
+- **Not documented.** Neither Liu paper nor the supplement states the
+  `amicphys` operator sequence or any sub-stepping. The five-step order
+  comes from jcm's own `Mam4JaxMicrophysics` docstring, which describes
+  the core it wraps. That provenance is weaker than a paper and is
+  recorded as such rather than dressed up.
+
+**A consequence to carry into AER-03/05/06.** In MAM, ageing is *not* a
+terminal step: it is computed inside condensation (from the condensed
+mass on `pcm`) and again inside coagulation (Aitken→pcm transfer ages
+some primary carbon). This scaffold keeps ageing as its own process, so
+**AER-03 and AER-05 must each record the soluble mass they deposit on
+`pcm`** for AER-06 to consume. If that bookkeeping turns out to be more
+awkward than folding ageing into the two donors, revisit this decision
+rather than working around it.
+
+**Sub-cycling: not now.** Condensation and nucleation compete for the
+same `g_h2so4` and the pair is genuinely stiff, but no measurement here
+yet justifies the cost. Revisit with a trigger, not a hunch: if AER-04
+shows a single step depleting `g_h2so4` by more than ~50 %, sub-cycle
+that pair. The driver is a fold over `self.processes`, so adding
+sub-cycling is a driver change, not an architecture change.
+
+### D-A2 — nucleation scheme: BINARY **PLUS** PBL, NO TERNARY
+
+The question as originally posed — "binary only (MAM4's default), or also
+a boundary-layer ternary/organic pathway?" — had a false premise.
+**MAM's default is not binary-only.** Supplement S1.1.4, verbatim:
+
+> "A binary parameterization (Vehkamaki et al., 2002) is used in the
+> 3-mode version, which does not predict NH3, while a ternary
+> parameterization (Merikanto et al., 2007) is used in the 7-mode
+> version. The boundary layer parameterization, which is applied in the
+> planetary boundary layer (PBL) in both versions, uses the empirical
+> first order (in H2SO4) nucleation rate from Sihto et al. (2006), with a
+> first order rate coefficient of 1.0×10-6 s-1 as in Wang et al. (2009)."
+
+So:
+
+- **Binary (Vehkamäki 2002)** — the free-troposphere pathway, since MAM4
+  inherits MAM3's 3-mode chemistry and predicts no NH₃.
+- **PBL first-order (Sihto 2006)**, coefficient 1.0×10⁻⁶ s⁻¹, applied
+  within the boundary layer. This is what addresses the continental
+  Aitken-number deficit that binary-only nucleation causes — the worry
+  that prompted the original question. MAM answers it with this pathway,
+  not with ternary.
+- **Kerminen & Kulmala (2002)** for survival from the critical cluster to
+  the Aitken lower bound. New particles go to the Aitken mode.
+- **Ternary is out of scope and structurally unavailable**: it requires
+  NH₃, and JAM's `gas_species.py` carries only `dms`, `so2`, `h2so4` and
+  `soag`. Adding it means a new prognostic gas, its emissions and its
+  chemistry — a separate piece of work, not a knob.
+
+**Sub-decision for AER-04 — where the PBL height comes from.** The Sihto
+pathway needs to know which levels are in the boundary layer. jcm has
+`pbl_height` on the vertical-diffusion diagnostics struct
+(`vertical_diffusion_types.py:359`), but the term order is against us:
+measured on `echam_physics(aerosol_module="jam", cloud_scheme="2m")`, the
+microphysics core is term **12** and `TteTkeVerticalDiffusion` is term
+**21**, so any published PBL height is **one step lagged** (and absent on
+the first step). Two options, to settle in AER-04:
+
+- (a) read the lagged `pbl_height` and document the lag — defensible,
+  since the PBL depth varies slowly against a 30-minute step;
+- (b) diagnose the boundary layer locally inside the process from the
+  temperature/humidity profile, which is self-contained but duplicates a
+  diagnosis the host already makes.
+
+(a) is the lighter option and the likely answer, but it needs the
+first-step behaviour pinned down before it is chosen.
+
+### D-A3, D-A4 — still open
+
 - **D-A3 — validation reference.** Is installing GPL `mam4-jax` into a
   throwaway venv for AER-12 acceptable as a *test-only* comparison, given
   it is never imported by shipped code?
