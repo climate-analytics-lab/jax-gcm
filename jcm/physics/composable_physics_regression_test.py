@@ -203,6 +203,15 @@ class TestEchamReferenceTrajectory(_Float32ReferenceTest):
     this reference shift (9.7 % in v, 7.5 % in u) to the corrected seasonal
     forcing rather than integration or output changes. The 3% cross-runner
     tolerance remains unchanged.
+
+    Regenerated 2026-09-26 for the energy-conserving grey shortwave (#855:
+    delta-Eddington layers, the two-stream direct-beam source and the adding
+    solve). ``echam_physics()`` defaults to the grey scheme, whose clouds had
+    booked the scattered part of the direct beam as absorption and now reflect
+    it, so the day-1 shortwave heating of every cloudy column changes. The
+    shift is 39 % in u and 41 % in v (winds spun up from rest, so a small
+    absolute change), 0.8 % in specific humidity and < 0.05 % in temperature,
+    surface pressure and condensate. The speedy reference is unchanged.
     """
 
     @pytest.mark.slow

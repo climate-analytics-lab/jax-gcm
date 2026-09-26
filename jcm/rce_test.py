@@ -462,28 +462,33 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     ``zdqcv`` test), so its convection is the shallow plume. That plume
     entrains at ``entrscv`` and, as in ``cuasc``, stops at the first interface
     where it no longer condenses or is not buoyant, which in this column is
-    within a layer or two of cloud base: it moistens the boundary layer and
-    precipitates little, and it switches on and off with the saturation of
-    the lowest layers.
+    within a layer or two of cloud base; it switches on and off with the
+    saturation of the lowest layers. The column is overcast (TOA shortwave
+    albedo ~0.63), and precipitation is split between the shallow plume and
+    the 1M stratiform scheme.
 
     The column is **aerosol-free** (``AerosolFree`` replaces MACv2-SP). The
     MACv2-SP plumes are a geographic climatology, and this column at 0°N/0°E
     sits in the Central African biomass-burning plume (AOD 0.33 at 550 nm,
-    SSA 0.87, Ångström 2). Measured over days 40-80, that plume absorbs
-    ~100 W/m² of shortwave in the lower troposphere and stabilises the column
-    until the water cycle is nearly dead: precipitation/evaporation 1 % (dev
-    band order) or 0 % (corrected band order) with the mid-wavenumber
-    aerosol wavelength, and 4.7 % with no convective precipitation once the
-    AOD is scaled at the solar-weighted band wavelength. An RCE test means
-    the idealised clear-air column, not a smoke plume.
+    SSA 0.87, Ångström 2). Measured over days 40-80, that plume raises the
+    atmosphere's shortwave absorption from ~119 to ~157 W/m², all but cancels
+    its net radiative cooling (-1 W/m² against -15 to -27 W/m² aerosol-free)
+    and holds precipitation/evaporation at 0.69. An RCE test means the
+    idealised clear-air column, not a smoke plume.
 
     The column water budget IS pinned: every term's ledger is conservative in
-    the host's own layer mass, so over the averaging window the change of
-    column water equals evaporation minus precipitation.
+    the host's own layer mass except Tiedtke's, which creates the water its
+    precipitation-flux floor removes (ECHAM behaviour, #912) and publishes it
+    as ``convection.precip_floor_source``, so over the averaging window the
+    change of column water equals evaporation minus precipitation plus that
+    source. Evaporation is pinned to be substantially balanced by
+    precipitation, which fails when the column has no net atmospheric
+    radiative cooling to drive convection.
 
-    What it does NOT pin, and why: even aerosol-free the grey column is not a
-    true RCE — its column water vapour keeps rising (#883), so E ≈ P is not
-    asserted.
+    What it does NOT pin, and why: E ≈ P and a steady column water. Over days
+    40-80 the column water still changes by -0.02 to +0.14 mm/d (up to 20 % of
+    E) across trajectories that differ only in round-off, the same order as
+    the ~0.06-0.09 mm/d that #912 creates (#883).
     """
 
     def test_whole_model_column_reaches_physical_time_mean_rce(self):
@@ -534,11 +539,12 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         self.assertLess(float(q[-1, -1]) * 1e3, 30.0)
 
         # Convection stays alive through the averaging window: over the last
-        # 40 days the time-mean convective precipitation is 0.024 mm/d
-        # (convection on in 31 % of the steps) of a 0.027 mm/d total against
-        # 0.27 mm/d of evaporation. The pins are strict positivity: the hard-trigger
-        # extinction they guard against drives the equilibrium convective
-        # precipitation to exactly zero.
+        # 40 days the time-mean convective precipitation is 0.34-0.57 mm/d
+        # (convection on in 83-87 % of the steps) of a 0.64-0.87 mm/d total
+        # against 0.70-0.85 mm/d of evaporation, across trajectories that
+        # differ only in round-off. The pins are strict positivity: the
+        # hard-trigger extinction they guard against drives the equilibrium
+        # convective precipitation to exactly zero.
         precip = np.asarray(
             preds.physics_data["convection"].precip_conv
         ).reshape(len(preds.times), -1)[:, 0]
@@ -556,16 +562,17 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
 
         # The high-frequency convective flicker is bounded: the largest
         # per-level temporal standard deviation of the total heating over the
-        # window. The measured value is 23.7 K/day, at the lowest level, where
-        # the shallow plume's on/off cycle with the boundary layer's
-        # saturation (see the class docstring) deposits its sub-cloud flux
-        # divergence; the bound leaves a third of margin.
+        # window. The measured value is 3.8-4.8 K/day across trajectories
+        # that differ only in round-off, from the shallow plume's on/off cycle
+        # with the boundary layer's saturation (see the class docstring); the
+        # bound leaves two-thirds of margin.
         max_temporal_std = float(np.max(tot[-40 * spd:].std(axis=0)))
-        self.assertLess(max_temporal_std, 32.0)  # K/day
+        self.assertLess(max_temporal_std, 8.0)  # K/day
 
-        # Column water budget over the window: Δ(column water)/Δt = E − P on
-        # the host's own layer mass (measured residual ~1e-5 mm/d, against
-        # E ≈ 1.5 mm/d; a dual-grid convective ledger leaked ~0.06 mm/d here).
+        # Column water budget over the window: Δ(column water)/Δt =
+        # E − P + (the Tiedtke floor source, #912) on the host's own layer
+        # mass. Measured residual <= 2e-5 mm/d against E ≈ 0.8 mm/d; without
+        # the source term it is 0.06-0.09 mm/d.
         vertical = scm.coords.vertical
         ps = float(np.asarray(ic.normalized_surface_pressure) * c.p0)
         mass = np.diff(np.asarray(vertical.a_boundaries)
@@ -576,7 +583,19 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         evap = np.asarray(
             preds.physics_data["surface"].effective_evaporation
         ).reshape(len(preds.times), -1)[:, 0]
+        floor_source = np.asarray(
+            preds.physics_data["convection"].precip_floor_source
+        ).reshape(len(preds.times), -1)[:, 0]
         window = slice(-40 * spd, None)
         dwater_dt = (water[-1] - water[-40 * spd - 1]) / (40 * spd * 900.0)
-        residual = float(evap[window].mean() - total[window].mean() - dwater_dt)
+        residual = float(evap[window].mean() - total[window].mean()
+                         + floor_source[window].mean() - dwater_dt)
         self.assertLess(abs(residual), 1e-2 * float(evap[window].mean()))
+
+        # Precipitation substantially balances evaporation: 0.91-1.10 of it
+        # over the window across round-off-perturbed trajectories. A column
+        # whose atmosphere has no net radiative cooling rains a small
+        # fraction of what it evaporates (0.13 when the grey shortwave booked
+        # its clouds' scattered light as absorption).
+        self.assertGreater(float(total[window].mean()),
+                           0.8 * float(evap[window].mean()))

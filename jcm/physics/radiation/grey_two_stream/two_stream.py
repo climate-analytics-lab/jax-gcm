@@ -3,17 +3,116 @@
 This module implements the two-stream approximation for radiative
 transfer through a multi-layer atmosphere.
 
-The implementation uses the Eddington approximation with the
-adding method for combining layers.
+Each homogeneous layer is solved exactly under the Eddington closure
+(Meador & Weaver 1980; Toon et al. 1989): its diffuse reflectance and
+transmittance, and -- for the shortwave -- the fraction of the collimated
+solar beam it scatters into the upward and downward diffuse streams. The
+shortwave optical properties are delta-scaled first (the delta-Eddington
+approximation of Joseph, Wiscombe & Weinman 1976), and the layers are
+combined with the adding method (Shonk & Hogan 2008, eqs. 9-13), so the
+column conserves energy: with no absorption, everything that enters at the
+top leaves through the top or reaches the surface.
+
+The longwave keeps its no-scattering source recurrence; only its layer
+transmittance comes from the solution above.
 
 """
 
 import functools
+import math
 
 import jax.numpy as jnp
 import jax
 from typing import Tuple, Optional
 from ..radiation_types import OpticalProperties
+
+
+# Below this cosine of the solar zenith angle the direct-beam path length
+# ``1/mu0`` is floored. It is a numerical guard for the grazing and night-side
+# columns only (``1/mu0`` would otherwise overflow): the caller masks every
+# shortwave flux to zero where ``cos_zenith <= 0``, and at ``mu0 = 1e-4`` the
+# incident flux on a horizontal surface is already ~0.1 W/m2.
+_MU0_FLOOR = 1.0e-4
+
+# The direct-beam layer solution is evaluated in one of two exactly
+# equivalent forms, selected on the squared eigenvalue ``lambda**2``; see
+# ``_direct_beam_layer``. Any threshold in (0, 1) keeps both forms away from
+# their singular points; 0.25 (``lambda = 0.5``) sits well inside it.
+_DIRECT_FORM_SWITCH_LAMBDA_SQ = 0.25
+
+
+def delta_eddington_scaling(
+    tau: jnp.ndarray,
+    ssa: jnp.ndarray,
+    g: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Delta-Eddington scaling of the layer optical properties.
+
+    Joseph, Wiscombe & Weinman (1976): the forward diffraction peak of the
+    phase function, a fraction ``f = g**2`` of the scattered light, is
+    treated as unscattered, and the two-stream solution is applied to the
+    remainder:
+
+        tau' = (1 - ssa f) tau
+        ssa' = (1 - f) ssa / (1 - ssa f)
+        g'   = (g - f) / (1 - f) = g / (1 + g)
+
+    This is the adjustment Toon et al. (1989) prescribe with the Eddington
+    coefficients for solar radiation, and it is what makes the closure hold
+    for cloud droplets and aerosol: unscaled, ``g = 0.85`` makes the
+    Eddington direct-beam backscatter coefficient
+    ``gamma3 = (2 - 3 g mu0)/4`` negative at high sun, so a thin
+    forward-scattering layer would reflect a negative flux. Scaled,
+    ``g' <= 1/2`` and ``gamma3 >= 1/8`` for every ``mu0``.
+
+    Args:
+        tau: Optical depth.
+        ssa: Single-scattering albedo.
+        g: Asymmetry factor.
+
+    Returns:
+        The scaled ``(tau, ssa, g)``.
+
+    """
+    f = g * g
+    one_minus_ssa_f = 1.0 - ssa * f
+    # ``1 - ssa f`` vanishes only at ssa = g = 1: a purely forward-scattering,
+    # non-absorbing layer, which the scaling makes transparent (tau' = 0).
+    # Its scaled ssa is then immaterial; the safe denominator keeps the
+    # division and its derivative finite there.
+    safe = one_minus_ssa_f > 0.0
+    denom = jnp.where(safe, one_minus_ssa_f, 1.0)
+    ssa_scaled = jnp.where(safe, ssa * (1.0 - f) / denom, ssa)
+    return one_minus_ssa_f * tau, ssa_scaled, g / (1.0 + g)
+
+
+# ``(1 - exp(-x))/x = sum_n (-x)^n/(n+1)!`` is evaluated as this truncated
+# series below ``_PSI_SERIES_SWITCH``. Ten terms are exact to float64 there:
+# the first omitted term is ``0.1**10/11! = 2.5e-18``.
+_PSI_SERIES_SWITCH = 0.1
+_PSI_SERIES = tuple((-1.0) ** n / math.factorial(n + 1) for n in range(10))
+
+
+def _one_minus_exp_neg_over_x(x: jnp.ndarray) -> jnp.ndarray:
+    """``(1 - exp(-x)) / x`` for ``x >= 0``, smooth through ``x = 0``.
+
+    The direct quotient ``-expm1(-x)/x`` is accurate in value for any
+    ``x > 0``, but its *derivative*, ``(x exp(-x) + expm1(-x))/x**2``, is a
+    difference of two ``O(x)`` terms whose ``O(x**2)`` residual is lost to
+    round-off as ``x -> 0`` -- reverse and forward mode at the direct-beam
+    resonance, where ``x = 0``, returned O(1) garbage. Below
+    ``_PSI_SERIES_SWITCH`` the Maclaurin series is used instead, which carries
+    value and derivative to working precision; above it the quotient's
+    derivative loses at most ``eps/x`` relative. The safe operand keeps the
+    discarded branch finite.
+    """
+    small = x < _PSI_SERIES_SWITCH
+    x_series = jnp.where(small, x, 0.0)
+    series = _PSI_SERIES[-1]
+    for coeff in reversed(_PSI_SERIES[:-1]):
+        series = coeff + x_series * series
+    x_safe = jnp.where(small, 1.0, x)
+    return jnp.where(small, series, -jnp.expm1(-x_safe) / x_safe)
 
 
 @jax.jit
@@ -51,6 +150,119 @@ def two_stream_coefficients(
     return gamma1, gamma2, gamma3, gamma4
 
 
+def _direct_beam_layer(
+    tau: jnp.ndarray,
+    ssa: jnp.ndarray,
+    gamma1: jnp.ndarray,
+    gamma2: jnp.ndarray,
+    gamma3: jnp.ndarray,
+    gamma4: jnp.ndarray,
+    lambda_sq: jnp.ndarray,
+    R: jnp.ndarray,
+    T: jnp.ndarray,
+    one_minus_T: jnp.ndarray,
+    mu0,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Direct-to-diffuse reflectance and transmittance of one layer.
+
+    The two-stream equations with the collimated source (Meador & Weaver 1980
+    eq. 4-5; Toon et al. 1989 eq. 23-24), for a unit horizontal flux incident
+    at the layer top, ``m = 1/mu0`` and optical depth ``t`` from the top:
+
+        dF+/dt = gamma1 F+ - gamma2 F- - ssa gamma3 m exp(-m t)
+        dF-/dt = gamma2 F+ - gamma1 F- + ssa gamma4 m exp(-m t)
+
+    with no diffuse radiation entering either face. The beam scatters
+    ``ssa m exp(-m t) dt`` into the diffuse field, a fraction ``gamma3`` up and
+    ``gamma4 = 1 - gamma3`` down, so for ``ssa = 1`` the net flux is constant
+    and ``R_dir + T_dir + exp(-m tau) = 1``. The particular solution is
+    ``F+ = A exp(-m t)``, ``F- = B exp(-m t)`` (Toon et al. 1989 eq. 23-24,
+    ``C+``/``C-``), with
+
+        A = ssa m [gamma3 (gamma1 - m) + gamma2 gamma4] / (lambda^2 - m^2)
+        B = ssa m [gamma4 (gamma1 + m) + gamma2 gamma3] / (lambda^2 - m^2).
+
+    Adding the homogeneous solution that cancels the particular solution's
+    diffuse flux at each face — which is the layer's own diffuse response,
+    so it enters only through ``R`` and ``T`` — gives
+
+        R_dir = A (1 - T E) - R B
+        T_dir = B (E - T) - R A E,          E = exp(-m tau).
+
+    This form depends on the eigenvalue only through ``lambda^2`` and the
+    diffuse ``R``, ``T``, which are already smooth at the conservative limit
+    ``lambda = 0``, so it needs no floor there. Its only singularity is the
+    resonance ``lambda = m``, a removable one (the numerators vanish with the
+    denominator) that needs ``lambda >= 1``. For ``lambda^2`` above
+    ``_DIRECT_FORM_SWITCH_LAMBDA_SQ`` the same solution is instead evaluated
+    with the resonance factored out analytically. Writing ``e = exp(-lambda
+    tau)``, ``D = (gamma1 + lambda) - (gamma1 - lambda) e^2`` and
+    ``W = (E - e)/(lambda - m)``,
+
+        R_dir = ssa m [P (1 - e E)/(lambda + m) + Q e W] / D
+        T_dir = ssa m [U W + V e (1 - e E)/(lambda + m)] / D
+
+    with ``P = gamma3 (lambda + gamma1) + gamma2 gamma4``,
+    ``Q = gamma3 (lambda - gamma1) - gamma2 gamma4``,
+    ``U = gamma4 (lambda + gamma1) + gamma2 gamma3`` and
+    ``V = gamma4 (lambda - gamma1) - gamma2 gamma3``. ``W`` is analytic in
+    ``lambda - m`` and is evaluated as ``E tau psi((lambda - m) tau)`` or
+    ``e tau psi((m - lambda) tau)``, ``psi(x) = (1 - exp(-x))/x``, whichever
+    has a non-negative argument, so it passes through the resonance with no
+    division and no overflow. ``D >= 2 lambda >= 1`` on that branch, and
+    ``|lambda^2 - m^2| >= 3/4`` on the other, so neither divides by a small
+    number. Both forms are the exact solution; they agree to round-off at the
+    switch.
+
+    Both are evaluated with safe operands on the branch not taken, so reverse
+    mode sees no ``0 * inf``. No clip is applied: with the delta-scaled
+    coefficients ``gamma3 >= 1/8`` and the solution is non-negative, and a
+    clip would break the conservation identity above.
+    """
+    mu0_safe = jnp.maximum(mu0, _MU0_FLOOR)
+    m = 1.0 / mu0_safe
+    E = jnp.exp(-m * tau)
+    one_minus_E = -jnp.expm1(-m * tau)
+
+    use_ratio_form = lambda_sq < _DIRECT_FORM_SWITCH_LAMBDA_SQ
+
+    # --- lambda^2 below the switch: particular solution + diffuse response.
+    # The resonance cannot occur here (lambda < 1/2 < 1 <= m); the safe
+    # operand keeps the discarded branch's denominator away from it too.
+    k2_r = jnp.where(use_ratio_form, lambda_sq, 0.0)
+    resonance = k2_r - m * m                        # <= -3/4
+    A = ssa * m * (gamma3 * (gamma1 - m) + gamma2 * gamma4) / resonance
+    B = ssa * m * (gamma4 * (gamma1 + m) + gamma2 * gamma3) / resonance
+    # 1 - T E and E - T, each assembled from non-cancelling pieces.
+    R_ratio = A * (one_minus_T + T * one_minus_E) - R * B
+    T_ratio = B * (one_minus_T - one_minus_E) - R * A * E
+
+    # --- lambda^2 at or above the switch: resonance factored out.
+    k2_f = jnp.where(use_ratio_form, 1.0, lambda_sq)
+    k = jnp.sqrt(k2_f)
+    e = jnp.exp(-k * tau)
+    one_minus_eE = -jnp.expm1(-(k + m) * tau)
+    D = (gamma1 + k) - (gamma1 - k) * e * e
+    d = k - m
+    above = d >= 0.0
+    W = jnp.where(
+        above,
+        E * tau * _one_minus_exp_neg_over_x(jnp.where(above, d, 0.0) * tau),
+        e * tau * _one_minus_exp_neg_over_x(jnp.where(above, 0.0, -d) * tau),
+    )
+    P = gamma3 * (k + gamma1) + gamma2 * gamma4
+    Q = gamma3 * (k - gamma1) - gamma2 * gamma4
+    U = gamma4 * (k + gamma1) + gamma2 * gamma3
+    V = gamma4 * (k - gamma1) - gamma2 * gamma3
+    scale = ssa * m / D
+    R_factored = scale * (P * one_minus_eE / (k + m) + Q * e * W)
+    T_factored = scale * (U * W + V * e * one_minus_eE / (k + m))
+
+    R_dir = jnp.where(use_ratio_form, R_ratio, R_factored)
+    T_dir = jnp.where(use_ratio_form, T_ratio, T_factored)
+    return R_dir, T_dir
+
+
 @jax.jit
 def layer_reflectance_transmittance(
     tau: jnp.ndarray,
@@ -58,17 +270,25 @@ def layer_reflectance_transmittance(
     g: jnp.ndarray,
     mu0: Optional[float] = None
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Calculate layer reflectance and transmittance.
-    
+    """Exact Eddington two-stream solution of one homogeneous layer.
+
+    The optical properties are used as given; the shortwave flux solver
+    delta-scales them (``delta_eddington_scaling``) before calling this.
+
     Args:
         tau: Optical depth
-        ssa: Single scattering albedo  
+        ssa: Single scattering albedo
         g: Asymmetry factor
-        mu0: Cosine of solar zenith angle (for SW)
-        
+        mu0: Cosine of solar zenith angle (shortwave only)
+
     Returns:
-        Tuple of (R_dif, T_dif, R_dir, T_dir)
-        For LW, only diffuse components are used
+        Tuple of ``(R_dif, T_dif, R_dir, T_dir)``. ``R_dif``/``T_dif`` are the
+        diffuse reflectance and transmittance. For the shortwave, ``R_dir`` and
+        ``T_dir`` are the fractions of the collimated beam incident on the
+        layer top (per unit horizontal flux) that leave it as *diffuse*
+        radiation through the top and through the bottom; the unscattered
+        beam ``exp(-tau/mu0)`` is not included. With ``ssa = 1``,
+        ``R_dir + T_dir + exp(-tau/mu0) = 1``. For the longwave both are zero.
 
     """
     # Get two-stream coefficients
@@ -194,7 +414,7 @@ def layer_reflectance_transmittance(
     R_exp = gamma2 * scaled_path / denom
     T_exp = 2.0 * exp_minus / denom
 
-    R_dif = jnp.where(use_series, R_series, R_exp)
+    R_dif_exact = jnp.where(use_series, R_series, R_exp)
     T_dif = jnp.where(use_series, T_series, T_exp)
 
     # Physical bounds. R + T <= 1 already holds by construction on both
@@ -204,28 +424,29 @@ def layer_reflectance_transmittance(
     # ``cosh x >= 1``), so the upper clip never acts. The lower clip removes
     # the small negative reflectance the Eddington closure produces for weakly
     # scattering layers, where ``gamma2 < 0`` for ``ssa < 1/(4 - 3g)`` — an
-    # approximation artefact, not a physical value.
-    R_dif = jnp.clip(R_dif, 0.0, 1.0)
+    # approximation artefact, not a physical value. Raising R to 0 there only
+    # lowers the layer's absorption ``1 - R - T``, which stays >= 0.
+    R_dif = jnp.clip(R_dif_exact, 0.0, 1.0)
     T_dif = jnp.clip(T_dif, 0.0, 1.0)
-    
-    if mu0 is not None:
-        # Direct beam transmittance (Beer's law); guard tau/mu0 from overflow
-        mu0_safe = jnp.maximum(mu0, 0.01)
-        tau_over_mu = jnp.clip(tau / mu0_safe, 0.0, 100.0)
-        T_dir = jnp.exp(-tau_over_mu)
 
-        # Direct-to-diffuse reflectance (guard denom from zero when ssa*gamma4 ≈ 1).
-        # NOTE (#855): this single-scattering source is not energy-conserving.
-        # ``gamma3 = (2 - 3*g*mu0)/4`` goes negative for forward-scattering
-        # clouds at high sun (g=0.85, mu0=1 -> -0.14), R_dir clips to 0, and the
-        # scattered fraction of the attenuated direct beam is then dropped
-        # entirely — a thick conservative cloud reflects ~0 at TOA. The faithful
-        # fix is the Toon et al. (1989) direct-beam source functions; it is a
-        # separate defect from the diffuse layer solution corrected above (#848)
-        # and is tracked in #855.
-        denom_dir = jnp.maximum(1.0 - ssa * gamma4, 1e-8)
-        R_dir = ssa * gamma3 * (1.0 - T_dir) / denom_dir
-        R_dir = jnp.clip(R_dir, 0.0, 1.0)
+    if mu0 is not None:
+        # ``1 - T`` in closed form, without the cancellation of forming it
+        # from T for a thin layer: series ``(C - 1)/C`` with
+        # ``C - 1 = (cosh x - 1) + gamma1 tau sinhc``; exponential
+        # ``(gamma1 S + (1 - e)^2) / denom``. Both are sums of non-negative
+        # terms over a positive denominator.
+        cosh_x_m1 = x2_safe / 2.0 + x2_sq / 24.0 + x2_sq * x2_safe / 720.0
+        one_minus_T = jnp.where(
+            use_series,
+            (cosh_x_m1 + gamma1 * tau * sinhc) / denom_series,
+            (gamma1 * scaled_path + jnp.square(1.0 - exp_minus)) / denom,
+        )
+        # The direct-beam solution is built on the *unclipped* diffuse
+        # reflectance: it is an exact identity in R (see
+        # ``_direct_beam_layer``), and the clipped value would break it.
+        R_dir, T_dir = _direct_beam_layer(
+            tau, ssa, gamma1, gamma2, gamma3, gamma4, lambda_sq,
+            R_dif_exact, T_dif, one_minus_T, mu0)
     else:
         # Longwave - no direct beam
         T_dir = jnp.zeros_like(tau)
@@ -360,90 +581,90 @@ def shortwave_fluxes_single_band(
     toa_flux: float,
     surface_albedo: float
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Calculate SW fluxes for a single band."""
-    nlev = tau.shape[0]
-    
-    # Calculate layer properties with solar angle
-    R_dif, T_dif, R_dir, T_dir = layer_reflectance_transmittance(tau, ssa, g, cos_zenith)
-    
-    # Direct beam transmission through atmosphere
-    # Calculate cumulative direct transmission from TOA
-    direct_trans = jnp.cumprod(T_dir, axis=0)
-    
-    # Add TOA transmission
-    direct_trans_full = jnp.concatenate([jnp.array([1.0]), direct_trans])
-    
-    # Direct flux at each level
-    flux_direct = toa_flux * direct_trans_full
-    
-    # Diffuse radiation calculation
-    # Source from direct beam scattering (split into upward/downward components)
-    source_diffuse = toa_flux * R_dir * direct_trans_full[:-1]
-    source_up = 0.5 * source_diffuse
-    source_down = 0.5 * source_diffuse
-    
-    # Initialize diffuse fluxes
-    flux_down_dif = jnp.zeros(nlev + 1)
-    flux_up_dif = jnp.zeros(nlev + 1)
+    """Shortwave fluxes of one band: delta-Eddington layers joined by adding.
 
-    # Initial surface reflection of direct beam only
-    flux_up_dif = flux_up_dif.at[nlev].set(surface_albedo * flux_direct[nlev])
+    Args:
+        tau: Layer optical depth, top-first ``[nlev]``.
+        ssa: Layer single-scattering albedo ``[nlev]``.
+        g: Layer asymmetry factor ``[nlev]``.
+        cos_zenith: Cosine of the solar zenith angle.
+        toa_flux: Downward solar flux on a horizontal surface at the top.
+        surface_albedo: Surface albedo, applied to the direct beam and to
+            diffuse light alike.
 
-    # Upward diffuse calculation
-    def upward_diffuse_step(carry, x):
-        flux_below = carry
-        R, T, S = x
-        flux_above = T * flux_below + S
-        return flux_above, flux_above
+    Returns:
+        ``(flux_up, flux_down, flux_direct, flux_down_diffuse)`` at the
+        ``nlev + 1`` interfaces, top-first. ``flux_down`` is the direct plus
+        the diffuse downward flux. The direct beam is the delta-scaled one,
+        so it includes the forward-diffraction peak.
 
-    _, flux_up_levels = jax.lax.scan(
-        upward_diffuse_step,
-        flux_up_dif[nlev],
-        (R_dif[::-1], T_dif[::-1], source_up[::-1])
+    """
+    # Delta-Eddington: the layer solution and the direct beam both use the
+    # scaled optical properties (Joseph et al. 1976).
+    tau, ssa, g = delta_eddington_scaling(tau, ssa, g)
+    R_dif, T_dif, R_dir, T_dir = layer_reflectance_transmittance(
+        tau, ssa, g, cos_zenith)
+
+    # Unscattered beam at every interface. Accumulating the optical depth
+    # rather than multiplying layer transmittances keeps a beam that has
+    # decayed to exactly 0 from feeding a 0 into a product's reverse pass.
+    mu0 = jnp.maximum(cos_zenith, _MU0_FLOOR)
+    tau_above = jnp.concatenate(
+        [jnp.zeros((1,), tau.dtype), jnp.cumsum(tau)])
+    flux_direct = toa_flux * jnp.exp(-tau_above / mu0)
+
+    # Diffuse sources: the beam arriving at each layer's top, scattered into
+    # the upward and downward diffuse streams by that layer.
+    src_up = R_dir * flux_direct[:-1]
+    src_down = T_dir * flux_direct[:-1]
+
+    # Adding method (Shonk & Hogan 2008, eqs. 9-13), as in the RTE solver of
+    # RRTMGP. Upward pass from the surface: the albedo of everything below
+    # each interface and the diffuse upward flux the sources below it emit,
+    # both including the infinite series of reflections between each layer
+    # and what lies beneath it.
+    def adding_step(carry, layer):
+        albedo_below, source_below = carry
+        R, T, s_up, s_down = layer
+        inv = 1.0 / (1.0 - R * albedo_below)
+        albedo = R + T * T * inv * albedo_below
+        source = s_up + T * inv * (source_below + s_down * albedo_below)
+        return (albedo, source), (albedo, source)
+
+    surface_source = surface_albedo * flux_direct[-1]
+    _, (albedo_above, source_above) = jax.lax.scan(
+        adding_step,
+        (surface_albedo, surface_source),
+        (R_dif[::-1], T_dif[::-1], src_up[::-1], src_down[::-1]),
     )
-    flux_up_dif = flux_up_dif.at[:-1].set(flux_up_levels[::-1])
+    # Interface-indexed, top-first: entry k is the value at the top of layer
+    # k; the surface value closes the arrays.
+    albedo = jnp.concatenate(
+        [albedo_above[::-1], jnp.reshape(surface_albedo, (1,)).astype(tau.dtype)])
+    source = jnp.concatenate(
+        [source_above[::-1], jnp.reshape(surface_source, (1,))])
 
-    # Downward diffuse calculation
-    def downward_diffuse_step(carry, x):
-        flux_above = carry
-        R, T, S, flux_up = x
-        flux_below = T * flux_above + R * flux_up + S
+    # Downward pass from the top (no diffuse light enters at TOA): the flux
+    # leaving the bottom of each layer is what it transmits, what it
+    # reflects back of the upward emission from below, and its own downward
+    # source, again summed over the multiple reflections with the albedo
+    # below.
+    def downward_step(flux_above, layer):
+        R, T, s_down, albedo_below, source_below = layer
+        flux_below = (T * flux_above + R * source_below + s_down) / (
+            1.0 - R * albedo_below)
         return flux_below, flux_below
 
     _, flux_down_levels = jax.lax.scan(
-        downward_diffuse_step,
-        0.0,  # No diffuse at TOA
-        (R_dif, T_dif, source_down, flux_up_dif[:-1])
+        downward_step,
+        jnp.zeros((), flux_direct.dtype),
+        (R_dif, T_dif, src_down, albedo[1:], source[1:]),
     )
-    flux_down_dif = flux_down_dif.at[1:].set(flux_down_levels)
+    flux_down_dif = jnp.concatenate(
+        [jnp.zeros((1,), flux_direct.dtype), flux_down_levels])
+    flux_up = albedo * flux_down_dif + source
 
-    # CRITICAL FIX: Update surface upward flux to include diffuse reflection
-    # Surface reflects both direct AND diffuse downward radiation
-    flux_up_dif = flux_up_dif.at[nlev].set(
-        surface_albedo * (flux_direct[nlev] + flux_down_dif[nlev])
-    )
-
-    # Recalculate upward diffuse with correct surface boundary condition
-    _, flux_up_levels = jax.lax.scan(
-        upward_diffuse_step,
-        flux_up_dif[nlev],
-        (R_dif[::-1], T_dif[::-1], source_up[::-1])
-    )
-    flux_up_dif = flux_up_dif.at[:-1].set(flux_up_levels[::-1])
-
-    # Recalculate downward diffuse with updated upward flux for consistency
-    _, flux_down_levels = jax.lax.scan(
-        downward_diffuse_step,
-        0.0,  # No diffuse at TOA
-        (R_dif, T_dif, source_down, flux_up_dif[:-1])
-    )
-    flux_down_dif = flux_down_dif.at[1:].set(flux_down_levels)
-    
-    # Total fluxes
-    flux_down_total = flux_direct + flux_down_dif
-    flux_up_total = flux_up_dif  # No upward direct
-    
-    return flux_up_total, flux_down_total, flux_direct, flux_down_dif
+    return flux_up, flux_direct + flux_down_dif, flux_direct, flux_down_dif
 
 
 @functools.partial(jax.jit, static_argnames=('n_bands',))

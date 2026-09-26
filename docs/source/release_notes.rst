@@ -910,6 +910,26 @@ RCE initial state seeds a mixed sub-cloud layer
   to the surface. Pass ``mixed_layer_top_m=0.0`` to restore the previous
   profile; see :doc:`design/convective_trigger_soundings` for the reasoning.
 
+Grey two-stream shortwave conserves energy
+""""""""""""""""""""""""""""""""""""""""""
+
+- The grey scheme's shortwave now delta-scales its optical properties
+  (delta-Eddington, Joseph et al. 1976), scatters the direct beam into the
+  diffuse streams with the exact two-stream source solution (Meador & Weaver
+  1980; Toon et al. 1989) and joins the layers with the adding method, as the
+  RRTMGP solver does. Before, the scattered part of the direct beam was dropped
+  wherever a forward-scattering cloud met a high sun, and the missing flux was
+  booked as absorption: a thick non-absorbing cloud reflected nothing and heated
+  instead. A ``tau = 82`` liquid cloud under an overhead sun now reflects 88 %
+  of the incident flux (4e-36 before), and with no absorption the column closes
+  its energy budget to float32 round-off (#855). **Changes results** for every
+  configuration on the grey radiation (the ``echam_physics()`` default): cloudy
+  columns reflect far more and heat far less in the shortwave. The
+  ``echam_t21l16_1day`` composable-physics reference is regenerated.
+  ``layer_reflectance_transmittance``'s ``T_dir`` is now the diffusely
+  transmitted fraction of the beam; the unscattered ``exp(-tau/mu0)`` is no
+  longer included.
+
 
 Known limitations
 ^^^^^^^^^^^^^^^^^

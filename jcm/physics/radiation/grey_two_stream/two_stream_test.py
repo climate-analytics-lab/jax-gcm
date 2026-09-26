@@ -841,3 +841,313 @@ class TestLayerForwardValue:
         r, t, _, _ = layer_reflectance_transmittance(tau, ssa, g, None)
         assert not jnp.any(jnp.isnan(r)) and not jnp.any(jnp.isnan(t))
         assert float(jnp.max(r + t)) <= 1.0 + 1e-4
+
+
+def _eddington_gammas(ssa, g, mu0):
+    """Eddington ``gamma1..4`` (Toon et al. 1989, Table 1), float64."""
+    g1 = (7.0 - ssa * (4.0 + 3.0 * g)) / 4.0
+    g2 = -(1.0 - ssa * (4.0 - 3.0 * g)) / 4.0
+    g3 = (2.0 - 3.0 * g * mu0) / 4.0
+    return g1, g2, g3, 1.0 - g3
+
+
+def _delta_scaled(tau, ssa, g):
+    """Joseph et al. (1976) delta-Eddington scaling, float64."""
+    f = g * g
+    return (1.0 - ssa * f) * tau, ssa * (1.0 - f) / (1.0 - ssa * f), g / (1.0 + g)
+
+
+def _direct_reference(tau, ssa, g, mu0):
+    """Textbook direct-beam layer solution in float64 (Toon et al. 1989).
+
+    Particular solution ``C+/C-`` over ``lambda**2 - 1/mu0**2`` plus the
+    homogeneous solution, written independently of the code's rearrangement:
+    the four boundary constants are solved as a 2x2 linear system. Valid away
+    from the resonance and from ``lambda = 0``.
+    """
+    g1, g2, g3, g4 = _eddington_gammas(ssa, g, mu0)
+    m = 1.0 / mu0
+    lam = np.sqrt(g1 * g1 - g2 * g2)
+    a = ssa * m * (g3 * (g1 - m) + g2 * g4) / (lam * lam - m * m)
+    b = ssa * m * (g4 * (g1 + m) + g2 * g3) / (lam * lam - m * m)
+    # Homogeneous modes exp(+/- lam t): F+ = c1 u1 e^{lam t} + c2 u2 e^{-lam t},
+    # F- = c1 e^{lam t} + c2 e^{-lam t}, with u = F+/F- of each mode.
+    u_plus = g2 / (g1 - lam)      # mode e^{+lam t}: (g1 - lam) F+ = g2 F-
+    u_minus = g2 / (g1 + lam)     # mode e^{-lam t}: (g1 + lam) F+ = g2 F-
+    e_p, e_m = np.exp(lam * tau), np.exp(-lam * tau)
+    E = np.exp(-m * tau)
+    # F-(0) = 0 and F+(tau) = 0.
+    mat = np.array([[1.0, 1.0], [u_plus * e_p, u_minus * e_m]])
+    rhs = np.array([-b, -a * E])
+    c1, c2 = np.linalg.solve(mat, rhs)
+    r_dir = a + c1 * u_plus + c2 * u_minus
+    t_dir = b * E + c1 * e_p + c2 * e_m
+    return r_dir, t_dir
+
+
+class TestShortwaveEnergyConservation:
+    """The shortwave two-stream conserves energy and reflects from clouds.
+
+    The direct beam is solved with the Toon et al. (1989) / Meador & Weaver
+    (1980) source functions on delta-Eddington layers and the column is joined
+    by the adding method, so with no absorption everything incident at the
+    top leaves through the top or is absorbed at the surface, and a thick
+    conservative cloud has the two-stream cloud albedo (#855: the scattered
+    beam used to be dropped, and such a cloud reflected ~0).
+    """
+
+    SSA = (0.5, 0.9, 0.999, 1.0)
+    TAU = (0.1, 1.0, 10.0, 100.0)
+    MU0 = (0.1, 0.5, 1.0)
+    NLEV = 10
+
+    @staticmethod
+    def _fluxes(tau, ssa, g, mu0, albedo, toa=1.0):
+        optics = OpticalProperties(
+            optical_depth=jnp.asarray(tau, jnp.float32)[:, None],
+            single_scatter_albedo=jnp.asarray(ssa, jnp.float32)[:, None],
+            asymmetry_factor=jnp.asarray(g, jnp.float32)[:, None])
+        up, down, direct, diffuse = shortwave_fluxes(
+            optics, mu0, jnp.array([toa]), jnp.array([albedo]), 1)
+        return up[:, 0], down[:, 0], direct[:, 0], diffuse[:, 0]
+
+    def _column(self, tau_total, ssa, mu0, albedo, g=0.85):
+        n = self.NLEV
+        return self._fluxes(np.full(n, tau_total / n), np.full(n, ssa),
+                            np.full(n, g), mu0, albedo)
+
+    @pytest.mark.parametrize("albedo", [0.0, 0.3])
+    def test_reflection_transmission_absorption_close(self, albedo):
+        """``R + T + A = 1`` over the sweep, each term from its own fluxes.
+
+        ``R`` is the TOA upward flux, ``T`` the net flux into the surface and
+        ``A`` the sum of the layers' net-flux convergences, each of which must
+        be non-negative (a layer cannot emit shortwave). With ``ssa = 1`` no
+        layer absorbs, so ``R + T = 1`` on its own. The TOA downward flux is
+        exactly the incident beam (no diffuse light enters from space).
+        Measured float32 closure: 3e-7.
+        """
+        for ssa in self.SSA:
+            for tau in self.TAU:
+                for mu0 in self.MU0:
+                    up, down, direct, diffuse = self._column(
+                        tau, ssa, mu0, albedo)
+                    case = f"ssa={ssa} tau={tau} mu0={mu0} albedo={albedo}"
+                    assert float(down[0]) == pytest.approx(1.0, abs=1e-7), case
+                    assert float(diffuse[0]) == 0.0, case
+                    net = np.asarray(down - up, np.float64)
+                    layer_absorption = net[:-1] - net[1:]
+                    r, t = float(up[0]), float(net[-1])
+                    a = float(layer_absorption.sum())
+                    assert abs(r + t + a - 1.0) < 1e-6, case
+                    assert np.all(layer_absorption > -1e-6), case
+                    assert np.all(np.asarray(up) >= 0.0), case
+                    assert np.all(np.asarray(diffuse) >= 0.0), case
+                    if ssa == 1.0:
+                        assert abs(r + t - 1.0) < 1e-6, case
+                    else:
+                        assert a > 0.0, case
+                    # The surface reflects its albedo of what reaches it.
+                    assert float(up[-1]) == pytest.approx(
+                        albedo * float(down[-1]), abs=1e-7), case
+
+    @pytest.mark.parametrize("mu0", [0.1, 0.5, 1.0])
+    def test_layer_scatters_all_of_a_conservative_beam(self, mu0):
+        """Per layer: ``R_dir + T_dir + exp(-tau/mu0) = 1`` at ``ssa = 1``.
+
+        The layer-level identity behind the column closure, on the
+        delta-scaled properties the solver uses.
+        """
+        tau = jnp.array(self.TAU, jnp.float32)
+        t, s, a = _delta_scaled(np.asarray(self.TAU), 1.0, 0.85)
+        _, _, r_dir, t_dir = layer_reflectance_transmittance(
+            jnp.asarray(t, jnp.float32), jnp.full_like(tau, s),
+            jnp.full_like(tau, a), mu0)
+        total = r_dir + t_dir + jnp.exp(-jnp.asarray(t, jnp.float32) / mu0)
+        np.testing.assert_allclose(np.asarray(total), 1.0, atol=1e-6)
+
+    @pytest.mark.parametrize("tau", [10.0, 82.0, 300.0])
+    @pytest.mark.parametrize("mu0", [0.2, 0.5, 1.0])
+    def test_thick_conservative_cloud_has_the_two_stream_albedo(self, tau, mu0):
+        """A non-absorbing cloud reflects the closed-form two-stream albedo.
+
+        For ``ssa = 1`` Meador & Weaver (1980) give, over a black surface,
+        ``R = [gamma1 tau + (gamma3 - gamma1 mu0)(1 - exp(-tau/mu0))]
+        / (1 + gamma1 tau)`` with the delta-Eddington ``gamma``. The #855
+        reproduction (tau = 82, g = 0.85, overhead sun) reflected 4e-36 of
+        1370 W/m2; the exact value is 0.878.
+        """
+        g = 0.85
+        ts, _, gs = _delta_scaled(tau, 1.0, g)
+        g1, _, g3, _ = _eddington_gammas(1.0, gs, mu0)
+        expected = (g1 * ts + (g3 - g1 * mu0) * (1.0 - np.exp(-ts / mu0))) / (
+            1.0 + g1 * ts)
+        for n in (1, self.NLEV):
+            up, _, _, _ = self._fluxes(np.full(n, tau / n), np.ones(n),
+                                       np.full(n, g), mu0, 0.0)
+            assert float(up[0]) == pytest.approx(expected, rel=1e-5)
+        if tau >= 82.0:
+            assert expected > 0.6
+
+    def test_issue_855_reproduction(self):
+        """The #855 case: tau = 82, ssa = 1, g = 0.85, mu0 = 1, 1370 W/m2."""
+        up, down, _, _ = self._fluxes(np.array([82.0]), np.array([1.0]),
+                                      np.array([0.85]), 1.0, 0.0, toa=1370.0)
+        assert float(up[0]) / 1370.0 == pytest.approx(0.8778, abs=1e-3)
+        assert float(up[0] + down[-1]) == pytest.approx(1370.0, rel=1e-6)
+
+    @pytest.mark.parametrize("ssa", [0.9, 0.999, 1.0])
+    @pytest.mark.parametrize("tau", [0.3, 5.0, 60.0])
+    def test_adding_matches_one_homogeneous_layer(self, ssa, tau):
+        """Ten sublayers joined by adding equal the single-layer solution.
+
+        The two-stream solution of a homogeneous slab is exact, so the adding
+        method must reproduce it from any subdivision — a check on the adding
+        recurrences and on the direct-beam sources together. (Below
+        ``ssa ~ 0.4`` the Eddington diffuse reflectance is clipped at 0, which
+        breaks this identity at the 1e-3 level by design; see
+        ``layer_reflectance_transmittance``.)
+        """
+        for albedo in (0.0, 0.3):
+            one = self._fluxes(np.array([tau]), np.array([ssa]),
+                               np.array([0.85]), 0.6, albedo)
+            ten = self._column(tau, ssa, 0.6, albedo)
+            for a, b in zip(one, ten):
+                np.testing.assert_allclose(
+                    [float(a[0]), float(a[-1])], [float(b[0]), float(b[-1])],
+                    atol=2e-6)
+
+    @pytest.mark.parametrize("ssa", SSA)
+    @pytest.mark.parametrize("mu0", MU0)
+    def test_reflectance_increases_with_optical_depth(self, ssa, mu0):
+        """Over a black surface, a thicker cloud never reflects less.
+
+        Exactly monotone wherever the Eddington diffuse reflectance is
+        non-negative. At ``ssa = 0.5, g = 0.85`` the delta-scaled layer has
+        ``ssa' = 0.22 < 1/(4 - 3 g')``, where the Eddington closure's
+        ``gamma2`` — and with it the exact solution's diffuse reflectance — is
+        negative (the artefact ``layer_reflectance_transmittance`` clips for
+        the diffuse field). The direct-beam solution carries it, so R peaks
+        and then settles 0.3 % lower onto its semi-infinite value; that
+        closure artefact is bounded here rather than hidden.
+        """
+        taus = np.logspace(-3, 3, 61)
+        r = np.array([
+            float(self._fluxes(np.array([t]), np.array([ssa]),
+                               np.array([0.85]), mu0, 0.0)[0][0])
+            for t in taus])
+        if ssa >= 0.9:
+            assert np.all(np.diff(r) >= -1e-7), np.diff(r).min()
+        else:
+            assert np.all(np.diff(r) >= -5e-3 * r.max()), np.diff(r).min()
+        assert r[-1] > r[0]
+
+
+class TestDirectBeamLayerSolution:
+    """``R_dir``/``T_dir`` against an independent float64 reference."""
+
+    @pytest.mark.parametrize(
+        "tau, ssa, g, mu0",
+        [(0.3, 0.9, 0.5, 0.6),     # lambda^2 below the form switch
+         (2.0, 0.99, 0.46, 1.0),
+         (5.0, 0.5, 0.3, 0.4),     # above the switch
+         (3.0, 0.2, 0.4, 0.8),
+         (1.2, 0.3, 0.2, 0.62),
+         (40.0, 0.95, 0.45, 0.3)],
+    )
+    def test_matches_textbook_solution(self, tau, ssa, g, mu0):
+        _, _, r_dir, t_dir = layer_reflectance_transmittance(
+            jnp.array([tau]), jnp.array([ssa]), jnp.array([g]), mu0)
+        r_ref, t_ref = _direct_reference(tau, ssa, g, mu0)
+        assert float(r_dir[0]) == pytest.approx(r_ref, rel=1e-5, abs=1e-7)
+        assert float(t_dir[0]) == pytest.approx(t_ref, rel=1e-5, abs=1e-7)
+
+    def test_continuous_through_the_resonance(self):
+        """At ``lambda = 1/mu0`` the ratio form is 0/0; the code is not.
+
+        The value at the resonance must lie on the smooth curve through the
+        reference on either side of it, and its derivative must be finite.
+        """
+        ssa, g, tau = 0.2, 0.4, 1.0
+        g1, g2, _, _ = _eddington_gammas(ssa, g, 1.0)
+        mu_res = 1.0 / np.sqrt(g1 * g1 - g2 * g2)
+        lo = np.array(_direct_reference(tau, ssa, g, mu_res * (1 - 1e-3)))
+        hi = np.array(_direct_reference(tau, ssa, g, mu_res * (1 + 1e-3)))
+
+        def layer(mu0):
+            _, _, r, t = layer_reflectance_transmittance(
+                jnp.array([tau]), jnp.array([ssa]), jnp.array([g]), mu0)
+            return jnp.stack([r[0], t[0]])
+
+        at = np.asarray(layer(jnp.float32(mu_res)))
+        np.testing.assert_allclose(at, 0.5 * (lo + hi), rtol=1e-5)
+        d = jax.jacfwd(layer)(jnp.float32(mu_res))
+        assert jnp.all(jnp.isfinite(d))
+        np.testing.assert_allclose(
+            np.asarray(d), (hi - lo) / (2e-3 * mu_res), rtol=1e-2)
+
+    def test_continuous_across_the_form_switch(self):
+        """The two exact forms agree where ``lambda**2`` crosses 1/4."""
+        g, tau, mu0 = 0.45, 3.0, 0.7
+        # Solve 3 (1 - ssa)(1 - ssa g) = 0.25 for ssa.
+        ssa_switch = ((1 + g) - np.sqrt((1 + g) ** 2
+                                        - 4 * g * (1 - 0.25 / 3))) / (2 * g)
+        vals = []
+        for ssa in (ssa_switch * (1 - 1e-6), ssa_switch * (1 + 1e-6)):
+            _, _, r, t = layer_reflectance_transmittance(
+                jnp.array([tau]), jnp.array([ssa]), jnp.array([g]), mu0)
+            vals.append((float(r[0]), float(t[0])))
+        np.testing.assert_allclose(vals[0], vals[1], rtol=1e-5)
+
+
+class TestShortwaveGradients:
+    """Gradients of the shortwave solve across the conservation sweep."""
+
+    NLEV = 4
+
+    def _f(self, mu0):
+        def f(tau, ssa, asym, toa, albedo):
+            return shortwave_fluxes(
+                OpticalProperties(optical_depth=tau, single_scatter_albedo=ssa,
+                                  asymmetry_factor=asym),
+                mu0, toa, albedo, 1)
+        return f
+
+    def _args(self, tau, ssa, g=0.85):
+        n = self.NLEV
+        return (jnp.full((n, 1), tau / n, jnp.float32),
+                jnp.full((n, 1), ssa, jnp.float32),
+                jnp.full((n, 1), g, jnp.float32),
+                jnp.array([430.0]), jnp.array([0.2]))
+
+    def test_gradients_finite_over_the_sweep(self):
+        """Reverse mode is finite everywhere.
+
+        Including ``ssa = 1`` exactly, ``ssa = 1 - 1e-7`` (``lambda -> 0``),
+        the thickest layers and the lowest sun.
+        """
+        ssas = (0.5, 0.9, 0.999, 1.0 - 1e-7, 1.0)
+        for mu0 in TestShortwaveEnergyConservation.MU0:
+            f = self._f(mu0)
+
+            def scalar(*args):
+                up, down, _, _ = f(*args)
+                return jnp.sum(up) + jnp.sum(down)
+
+            grad = jax.jit(jax.grad(scalar, argnums=(0, 1, 2, 3, 4)))
+            for ssa in ssas:
+                for tau in TestShortwaveEnergyConservation.TAU:
+                    for name, gr in zip(("tau", "ssa", "g", "toa", "albedo"),
+                                        grad(*self._args(tau, ssa))):
+                        assert jnp.all(jnp.isfinite(gr)), (
+                            f"d/d{name} not finite at ssa={ssa} tau={tau} "
+                            f"mu0={mu0}")
+
+    @pytest.mark.parametrize(
+        "tau, ssa, mu0",
+        [(10.0, 1.0, 0.5),        # conservative limit, lambda = 0
+         (1.0, 0.999, 1.0),
+         (100.0, 0.9, 0.1),
+         (0.1, 0.5, 0.5)])
+    def test_matches_a_central_difference(self, tau, ssa, mu0):
+        check_gradients(self._f(mu0), self._args(tau, ssa), rtol=2e-3)

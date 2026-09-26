@@ -48,6 +48,40 @@ the Eddington coefficients ``gamma1 = 7/4``, ``gamma2 = -1/4``,
 diffuse transmittance ``T = (1 - Gamma^2) e/(1 - Gamma^2 e^2)`` — within 0.5%
 of, but not exactly, ``exp(-sqrt(3)*tau)``.
 
+**Grey shortwave: delta-Eddington layers joined by adding.** The shortwave
+optical properties are first delta-scaled (``delta_eddington_scaling``; Joseph,
+Wiscombe & Weinman 1976): the forward diffraction peak ``f = g^2`` is counted as
+unscattered, ``tau' = (1 - ssa f) tau``, ``ssa' = (1 - f) ssa/(1 - ssa f)``,
+``g' = g/(1 + g)``. This is the adjustment Toon et al. (1989) prescribe with the
+Eddington coefficients for solar radiation; unscaled, a cloud's ``g = 0.85``
+makes the direct-beam backscatter coefficient ``gamma3 = (2 - 3 g mu0)/4``
+negative at high sun, while scaled ``gamma3 >= 1/8``. Each layer then scatters
+the collimated beam into the diffuse streams by the exact two-stream solution
+with a direct source (``_direct_beam_layer``; Meador & Weaver 1980, Toon et al.
+1989 eq. 23-24): the particular solution ``C+ = A exp(-tau/mu0)``,
+``C- = B exp(-tau/mu0)`` with the resonance factor
+``1/(lambda^2 - 1/mu0^2)``, plus the homogeneous solution that cancels its
+diffuse flux at the faces, which is the layer's own diffuse response, so
+``R_dir = A (1 - T E) - R B`` and ``T_dir = B (E - T) - R A E`` with
+``E = exp(-tau/mu0)``. For ``ssa = 1`` this gives ``R_dir + T_dir + E = 1``
+exactly, and a thick conservative cloud reflects the closed-form two-stream
+albedo ``[gamma1 tau + (gamma3 - gamma1 mu0)(1 - E)]/(1 + gamma1 tau)`` (0.88 for
+``tau = 82``, ``g = 0.85``, overhead sun). The layers are combined with the
+adding method (Shonk & Hogan 2008, eqs. 9-13, the RTE solver jax-rrtmgp uses),
+so every multiple reflection between layers and with the surface is counted and
+the column closes its energy budget: with no absorption, what enters at the top
+leaves through the top or is absorbed at the surface (float32 closure 3e-7).
+`differentiability` — the direct-beam solution is written so that it has no
+removable singularity on the differentiated path: below ``lambda^2 = 1/4`` it
+depends on the eigenvalue only through ``lambda^2`` and the diffuse ``R``,
+``T`` (smooth at the conservative limit ``lambda = 0``, needing no floor); above
+it, where the resonance ``lambda = 1/mu0`` can occur, the resonance is factored
+out analytically into ``(E - e)/(lambda - 1/mu0)``, evaluated as a scaled
+``(1 - exp(-x))/x`` that is carried as a series near ``x = 0`` so its
+derivative is exact through the resonance. No clip is applied to ``R_dir`` or
+``T_dir``: both are non-negative on the delta-scaled coefficients, and a clip
+would break the conservation identity.
+
 **Partial-cloud / overlap** differs by backend. **RRTMGP** uses full **McICA**
 (``jcm/physics/radiation/mcica.py``): one stochastic binary cloud profile per
 g-point, seeded deterministically per column and model step, with three overlap
@@ -203,12 +237,23 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   not form ``0·inf`` on clear columns.
 
 **Status & known limitations.**
-- **Grey shortwave direct-beam source is not energy-conserving (#855).** The
-  direct-to-diffuse reflectance ``R_dir`` uses a single-scattering source whose
-  ``gamma3`` goes negative for forward-scattering clouds at high sun, so a thick
-  conservative cloud reflects ~0 at TOA and its scattered energy is dropped. The
-  diffuse layer solution above is exact; this is a separate defect in the
-  direct-beam source, awaiting the Toon et al. (1989) source functions.
+- **Grey shortwave keeps the Eddington closure's negative diffuse
+  reflectance clipped.** For strongly absorbing layers
+  (``ssa' < 1/(4 - 3 g')`` after delta scaling, e.g. ``ssa = 0.5``,
+  ``g = 0.85``) Eddington's ``gamma2`` is negative, and so is the exact
+  solution's diffuse reflectance; the diffuse field clips it to 0 (see the layer
+  solution above), which raises the layer's reflection slightly and makes a
+  homogeneous slab differ from its subdivision by up to ~1e-3 of the incident
+  flux. The direct-beam solution keeps the exact value, so over such a layer the
+  reflectance first rises with optical depth and then settles ~0.3 % lower onto
+  its semi-infinite value. RRTMGP avoids this by using the practical improved
+  flux method (Zdunkowski et al. 1980), whose ``gamma2 >= 0``; the grey scheme
+  keeps the Eddington coefficients its layer solution is built and tested on.
+- **Grey longwave is non-scattering.** Every grey longwave optical property
+  (gas, cloud, aerosol) has ``ssa = 0``, so the layer reflectance is zero and
+  the longwave recurrence carries transmission and emission only, with an
+  isothermal-layer source ``B (1 - T)`` at the layer-mean temperature rather
+  than a linear-in-tau Planck profile.
 - **Cloud inhomogeneity carries ECHAM's T63 values, not its per-resolution
   table.** ECHAM raises the ice factor at higher truncation (``zinhomi = 0.85``
   at T127+) and uses ``zinhoml3 = 0.4`` at T31; jcm takes the T63 values at
