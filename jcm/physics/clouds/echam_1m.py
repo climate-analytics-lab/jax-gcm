@@ -18,6 +18,7 @@ Based on the ECHAM6/ICON ``mo_cloud.f90`` single-moment branch
 """
 
 import math
+from functools import partial
 
 import jax
 import jax.numpy as jnp
@@ -713,6 +714,87 @@ def _qsat_water(pressure: jnp.ndarray, temperature: jnp.ndarray):
     return qsw, es_safe
 
 
+def _continued_ice_density_power_slope(
+    ice_density: jnp.ndarray,
+    derivative_cutoff: float,
+) -> jnp.ndarray:
+    """Return the bounded local slope used below the derivative cutoff."""
+    exponent = 0.16
+    cutoff = jnp.asarray(derivative_cutoff, dtype=ice_density.dtype)
+    below = ice_density < cutoff
+    safe_high = jnp.where(below, cutoff, ice_density)
+    safe_low = jnp.where(below, ice_density, cutoff)
+    t = safe_low / cutoff
+    low_slope = cutoff ** (exponent - 1.0) * (
+        (2.0 - exponent) + 2.0 * (exponent - 1.0) * t)
+    high_slope = exponent * safe_high ** (exponent - 1.0)
+    return jnp.where(below, low_slope, high_slope)
+
+
+_ICE_FALL_SPEED_DERIVATIVE_CUTOFF = 1.0e-10
+
+
+@partial(jax.custom_jvp, nondiff_argnums=(2,))
+def _ice_fall_speed_density_power(
+    ice_density: jnp.ndarray,
+    d_epsilon: float,
+    derivative_cutoff: float = _ICE_FALL_SPEED_DERIVATIVE_CUTOFF,
+) -> jnp.ndarray:
+    """Return the original ECHAM power with an optional surrogate derivative.
+
+    The primal is always the pre-PR ``maximum(x, d_epsilon)**0.16``. A positive
+    static ``derivative_cutoff`` substitutes the bounded local slope of its C1
+    continuation below that cutoff during AD. Zero uses JAX's true derivative.
+    """
+    if not math.isfinite(derivative_cutoff) or derivative_cutoff < 0.0:
+        raise ValueError("derivative_cutoff must be finite and nonnegative")
+    return jnp.maximum(ice_density, d_epsilon) ** 0.16
+
+
+@_ice_fall_speed_density_power.defjvp
+def _ice_fall_speed_density_power_jvp(
+    derivative_cutoff: float,
+    primals: tuple[jnp.ndarray, float],
+    tangents: tuple[jnp.ndarray, float],
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Keep the legacy primal while replacing only its ice-density slope."""
+    ice_density, d_epsilon = primals
+    ice_density_dot, d_epsilon_dot = tangents
+    primal = jnp.maximum(ice_density, d_epsilon) ** 0.16
+    if not math.isfinite(derivative_cutoff) or derivative_cutoff < 0.0:
+        raise ValueError("derivative_cutoff must be finite and nonnegative")
+    if derivative_cutoff == 0.0:
+        _, tangent = jax.jvp(
+            lambda x, epsilon: jnp.maximum(x, epsilon) ** 0.16,
+            primals,
+            tangents,
+        )
+        return primal, tangent
+    # Preserve the true dependence on a trainable d_epsilon. At an exact tie,
+    # jnp.maximum splits its tangent equally between its two arguments.
+    exponent = 0.16
+    epsilon = jnp.asarray(d_epsilon, dtype=ice_density.dtype)
+    epsilon_weight = jnp.where(
+        ice_density < epsilon,
+        1.0,
+        jnp.where(ice_density > epsilon, 0.0, 0.5),
+    )
+    ice_density_weight = 1.0 - epsilon_weight
+    epsilon_slope = exponent * primal / jnp.maximum(ice_density, epsilon)
+    true_ice_density_slope = epsilon_slope * ice_density_weight
+    ice_density_slope = jnp.where(
+        ice_density < derivative_cutoff,
+        _continued_ice_density_power_slope(
+            ice_density, derivative_cutoff),
+        true_ice_density_slope,
+    )
+    tangent = (
+        ice_density_slope * ice_density_dot
+        + epsilon_slope * epsilon_weight * d_epsilon_dot
+    )
+    return primal, tangent
+
+
 def cloud_microphysics_column_sweep(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
@@ -726,6 +808,7 @@ def cloud_microphysics_column_sweep(
     dt: float,
     config: Optional[MicrophysicsParameters] = None,
     specific_humidity_m1: Optional[jnp.ndarray] = None,
+    ice_fall_speed_derivative_cutoff: float = _ICE_FALL_SPEED_DERIVATIVE_CUTOFF,
 ) -> Tuple[MicrophysicsTendencies, MicrophysicsState]:
     """ECHAM ``mo_cloud.f90`` column-sweep cloud + microphysics routine.
 
@@ -843,20 +926,14 @@ def cloud_microphysics_column_sweep(
         # never precipitated (review finding 2.9).
         zdp = mref * c.grav  # layer Δp [Pa]
         zxip1 = jnp.maximum(qi0, 0.0)
-        # Double-where guard: ``x ** 0.16`` at ``x == 0`` (an ice-free layer,
-        # the common case) has an infinite derivative, so the reverse pass
-        # NaNs even though the forward is 0. The ``where`` keeps the forward
-        # exactly 0 where there is no ice; the inner floor only has to make the
-        # base strictly positive for the differentiated branch — hence the
-        # negligible ``d_epsilon`` (NOT ``epsilon``: a 1e-12 floor would
-        # inflate the fall speed of tiny-but-nonzero ice by orders of
-        # magnitude, opening the water budget; see the ``epsilon`` /
-        # ``d_epsilon`` note on MicrophysicsParameters). Issue #558.
-        zxifall = config.cvtfall * jnp.where(
-            rho * zxip1 > 0.0,
-            jnp.maximum(rho * zxip1, config.d_epsilon) ** 0.16,
-            0.0,
+        fall_speed_power = _ice_fall_speed_density_power(
+            rho * zxip1,
+            config.d_epsilon,
+            ice_fall_speed_derivative_cutoff,
         )
+        # Preserve ECHAM's original ice-free branch in both primal and AD.
+        zxifall = config.cvtfall * jnp.where(
+            rho * zxip1 > 0.0, fall_speed_power, 0.0)
         zal1 = jnp.exp(-zxifall * c.grav * rho * dt / jnp.maximum(zdp, config.epsilon))
         # Influx contribution ``zal2 * (1 - zal1)`` with
         # ``zal2 = zxiflux / (rho * v)``: analytically this has a REMOVABLE
@@ -1396,10 +1473,29 @@ class Echam1MMicrophysics(PhysicsTerm):
     # the cover term; this term fills the precip/process-rate fields.
     output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS
 
-    def __init__(self, params: MicrophysicsParameters | None = None):
-        """Hold the scheme-native :class:`MicrophysicsParameters`."""
+    def __init__(
+        self,
+        params: MicrophysicsParameters | None = None,
+        *,
+        ice_fall_speed_derivative_cutoff: float = (
+            _ICE_FALL_SPEED_DERIVATIVE_CUTOFF
+        ),
+    ):
+        """Hold scheme parameters and the low-ice derivative cutoff.
+
+        Args:
+            params: Scheme-native microphysics parameters.
+            ice_fall_speed_derivative_cutoff: Density-weighted cloud-ice
+                cutoff [kg/m3] for the bounded surrogate local derivative.
+                The default is 1e-10. Pass 0 for the original JAX derivative;
+                neither setting changes the original ECHAM forward law.
+
+        """
         self.params = nnx.Param(
             params or MicrophysicsParameters.default(),
+        )
+        self.ice_fall_speed_derivative_cutoff = (
+            ice_fall_speed_derivative_cutoff
         )
 
     @classmethod
@@ -1475,7 +1571,7 @@ class Echam1MMicrophysics(PhysicsTerm):
         # :class:`~jcm.physics.clouds.sundqvist.SundqvistCloudFraction`.
         micro_tend, micro_state = jax.vmap(
             cloud_microphysics_column_sweep,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 1),
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, None, None, 1, None),
             out_axes=(0, 0),
         )(
             temperature_in, specific_humidity_in, pressure_full,
@@ -1484,6 +1580,7 @@ class Echam1MMicrophysics(PhysicsTerm):
             droplet_number_per_kg, dt, params,
             # Step-start q (ECHAM qm1) anchors the moist-cp L/cp factors.
             state.specific_humidity,
+            self.ice_fall_speed_derivative_cutoff,
         )
 
         tendency = PhysicsTendency(

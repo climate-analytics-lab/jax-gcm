@@ -32,6 +32,16 @@
   ``mo_cloud.f90`` single-moment branch. The ice/snow fall-speed factor
   ``cvtfall = 2.5`` is ECHAM's value for jcm's default T63 grid
   (``mo_echam_cloud_params.f90``, ``nn == 63``), the same the 2M scheme uses.
+  Its cloud-ice fall speed retains ECHAM's forward density power
+  ``v = cvtfall (max(rho q_i, d_epsilon))^0.16`` and original zero-ice outer
+  gate exactly. During automatic differentiation, the default
+  ``ice_fall_speed_derivative_cutoff=1e-10`` kg m-3 substitutes the bounded
+  local slope of a C1 continuation below the cutoff; at and above the cutoff
+  it uses the true ECHAM derivative. This is a surrogate derivative: forward
+  AD below the cutoff intentionally differs from finite differences of the
+  unchanged primal. Pass ``ice_fall_speed_derivative_cutoff=0`` for the
+  original JAX derivative. The static default is a numerical threshold, not a
+  physically validated cloud-ice boundary.
 - **Lohmann 2-moment microphysics**
   (``jcm/physics/clouds/lohmann_2m/scheme.py`` — ``cloud_microphysics_2m`` and its
   ``Lohmann2MMicrophysics`` term) — the full two-moment process chain (droplet and
@@ -80,6 +90,15 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   default parameter instance (that would sever gradients / overrides).
 
 **Status & known limitations (stated openly).**
+- The default 1M low-ice fall-speed surrogate derivative is a
+  differentiability-driven numerical treatment related to the
+  gradient-regularisation work in #843. It bounds the formal ``q_i -> 0+``
+  local slope without deleting ice or changing any forward result or the
+  resolved-ice derivative. A one-date, zero-radiation calibration diagnostic
+  found finite three- and eight-step gradients and three successful updates,
+  but this is not full-model reverse-mode qualification, physical validation
+  of the threshold, or evidence that every coupled multi-step gradient is
+  useful.
 - **Ice treatment is much unresolved** and depends on choices that exist in no
   single reference. The live heterogeneous ice-nucleating-particle path is a
   prognostic JAM ``ice_nuclei`` field where an online dust/BC source exists —
