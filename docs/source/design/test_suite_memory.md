@@ -136,6 +136,50 @@ Two related login-node observations that are *not* the problem:
   10 GiB cap is a guaranteed OOM, and the resulting red run carries no
   information.
 
+## GPU memory: preallocation, and why importing jcm is device-free
+
+On a GPU host, XLA claims 75 % of the card the moment a JAX backend is first
+initialised (`XLA_PYTHON_CLIENT_PREALLOCATE`, default on) — 61,222 MiB of an
+80 GB A100 — and keeps it for the life of the process. The root
+`conftest.py` therefore *forces* `XLA_PYTHON_CLIENT_PREALLOCATE=false` for the
+session, overriding an inherited `true`. The reason is not only courtesy on a
+shared box: the release-matrix regression integrates each member in a worker
+subprocess, a worker can only use what the parent pytest process left on the
+card, and the first test in the session that builds any jax array would
+otherwise hand three-quarters of it to the parent. `generate_stats.generate()`
+refuses to orchestrate without the same setting, for the same reason.
+Preallocation changes when memory is claimed, never what a test computes.
+
+Backend initialisation is lazy: `import jax` does not do it; the first query
+that needs a device does (`jnp.array`, `jnp.asarray`, any `jnp` op,
+`jax.devices()`). jcm keeps its *import* free of such queries (#859), so
+`import jcm` — or importing any jcm module — leaves the backend uninitialised
+and the GPU untouched, and the device is first touched when a model or physics
+term builds arrays. `jcm/import_side_effects_test.py` enforces this: in a fresh
+subprocess it imports `jcm`, then every jcm module one by one, and asserts
+after each that `jax._src.xla_bridge.backends_are_initialized()` is still
+false — the one choke point every device-array creation passes through, so it
+catches a jax array however it is spelled. A GPU-gated companion checks with
+`nvidia-smi` that the importing process holds no CUDA context, with a positive
+control so it skips rather than passes where `nvidia-smi` cannot see the
+process. The conftest guard still acts before collection because *tests*
+touch the device, and the setting only counts if it predates the first one.
+
+Keeping it that way, when writing a module:
+
+* no jax array at module level, in a class body, or as a `def` default — all
+  of them are evaluated at import. Store constant tables as tuples of Python
+  floats (or numpy) and materialise them with `jnp.asarray(...)` where used;
+  use `None` defaults resolved in the body, or numpy scalars
+  (`np.int32(0)`) where a fixed dtype is the point. Materialising at use also
+  makes the table's dtype follow the `jax_enable_x64` flag at the time the
+  physics runs, not whichever flag was set when the module was first imported.
+* derived Python constants that need arithmetic use `math`/numpy, not `jnp`
+  followed by `float(...)`.
+* `jax.config.update(...)` at import changes every later user's process; the
+  one dependency that does it (`mam4_jax`, below) is imported lazily and
+  wrapped.
+
 ## Process-global JAX config: `jax_enable_x64`
 
 Two dependencies turn float64 on for the whole process:

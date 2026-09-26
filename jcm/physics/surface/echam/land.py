@@ -21,7 +21,7 @@ def compute_land_albedo(
     vegetation_fraction: jnp.ndarray,
     soil_wetness: jnp.ndarray,
     snow_depth: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Compute land surface albedo based on vegetation, soil, and snow.
     
@@ -36,6 +36,8 @@ def compute_land_albedo(
                  albedo_nir_direct, albedo_nir_diffuse)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     # Vegetation albedo
     veg_albedo_vis = 0.05  # Green vegetation visible
     veg_albedo_nir = 0.45  # Green vegetation NIR
@@ -79,7 +81,7 @@ def compute_land_albedo(
 def compute_land_roughness(
     vegetation_fraction: jnp.ndarray,
     snow_depth: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> jnp.ndarray:
     """Compute land surface roughness.
     
@@ -92,6 +94,8 @@ def compute_land_roughness(
         Land roughness length [m] (ncol,)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     # Vegetation roughness
     z0_vegetation = 0.5  # m (forest)
     z0_bare_soil = 0.01  # m (bare soil)
@@ -115,7 +119,7 @@ def soil_heat_conduction(
     soil_temp: jnp.ndarray,
     surface_temp: jnp.ndarray,
     soil_depths: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> jnp.ndarray:
     """Compute heat conduction in soil layers.
     
@@ -129,6 +133,8 @@ def soil_heat_conduction(
         Heat conduction flux [W/m²] (ncol,)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     # Soil thermal properties
     thermal_conductivity = 1.5  # W/m/K (typical soil)
     
@@ -149,7 +155,7 @@ def soil_temperature_step(
     soil_depths: jnp.ndarray,
     soil_moisture: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> jnp.ndarray:
     """Update soil temperature using heat diffusion equation.
     
@@ -165,6 +171,8 @@ def soil_temperature_step(
         Soil temperature tendency [K/s] (ncol, nsoil_layers)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     ncol, nsoil_layers = soil_temp.shape
     
     # Soil thermal properties
@@ -208,7 +216,7 @@ def compute_transpiration(
     net_radiation: jnp.ndarray,
     exchange_coeff_moisture: jnp.ndarray,
     air_density: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> jnp.ndarray:
     """Compute transpiration from vegetation using simplified Penman-Monteith.
     
@@ -226,6 +234,8 @@ def compute_transpiration(
         Transpiration rate [kg/m²/s] (ncol,)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     # Only transpire where there's vegetation
     veg_mask = vegetation_fraction > 0.01
     
@@ -255,7 +265,7 @@ def soil_moisture_step(
     transpiration: jnp.ndarray,
     soil_depths: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> jnp.ndarray:
     """Update soil moisture including precipitation, evaporation, and transpiration.
     
@@ -272,6 +282,8 @@ def soil_moisture_step(
         Soil moisture tendency [1/s] (ncol, nsoil_layers)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     ncol, nsoil_layers = soil_moisture.shape
     
     # Soil properties
@@ -335,7 +347,7 @@ def land_surface_physics_step(
     vegetation_fraction: jnp.ndarray,
     soil_depths: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, jnp.ndarray]:
     """Complete land surface physics step.
     
@@ -357,6 +369,8 @@ def land_surface_physics_step(
         Tuple of (surface_fluxes, tendencies, roughness_length)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     ncol = soil_temp.shape[0]
 
     # Surface temperature (top soil layer)

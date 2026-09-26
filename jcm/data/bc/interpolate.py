@@ -234,7 +234,7 @@ def interpolate(grid, output_dir=None):
 
 def main(argv=None) -> int:
     from jcm.utils import get_coords
-    from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
+    from jcm.physics.speedy.physical_constants import compute_sigma_boundaries
     """CLI entrypoint. Parse argv and call `interpolate`.
 
     Args:
@@ -259,7 +259,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv) # uses sys.argv[1:] if argv is None
 
     # it doesn't matter what the vertical coordinate system is, so we are just using a fixed one here, interpolation is horizontal
-    coords = get_coords(SIGMA_LAYER_BOUNDARIES[7],spectral_truncation=args.target_resolution)
+    coords = get_coords(compute_sigma_boundaries(7),spectral_truncation=args.target_resolution)
 
     try:
         interpolate(coords.horizontal)

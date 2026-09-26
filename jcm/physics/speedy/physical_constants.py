@@ -53,10 +53,19 @@ nstrad = 3 # number of timesteps between shortwave evaluations
 # as the EXACT special cases used whenever nlev is 7 or 8 so that all legacy
 # behaviour and regression tests are bit-for-bit unchanged. For any other nlev,
 # `compute_sigma_boundaries` falls back to the analytic Frierson (2006) stretch.
+#
+# Stored as tuples of Python floats, NOT jax arrays: this module is on
+# ``import jcm``'s chain, and a module-level ``jnp.array`` would be the first
+# backend query of the process — initialising the default (CUDA) backend and,
+# under JAX's default preallocation, claiming 75% of the GPU on import (#859). The device
+# array is materialised by :func:`compute_sigma_boundaries` at call time, which
+# also makes its dtype follow the ``jax_enable_x64`` flag in force when the
+# coordinates are built rather than whichever flag happened to be set when this
+# module was first imported. Use ``compute_sigma_boundaries(nlev)`` for an array.
 SIGMA_LAYER_BOUNDARIES = {
-    # 5: jnp.array([0.0, 0.15, 0.35, 0.65, 0.9, 1.0]), # FIXME: not supported at the moment
-    7: jnp.array([0.0, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
-    8: jnp.array([0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0]),
+    # 5: (0.0, 0.15, 0.35, 0.65, 0.9, 1.0), # FIXME: not supported at the moment
+    7: (0.0, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0),
+    8: (0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0),
 }
 
 
@@ -100,7 +109,7 @@ def compute_sigma_boundaries(nlev: int) -> jnp.ndarray:
         raise ValueError(f"SPEEDY physics requires nlev >= 2, got {nlev}")
 
     if nlev in SIGMA_LAYER_BOUNDARIES:
-        return SIGMA_LAYER_BOUNDARIES[nlev]
+        return jnp.asarray(SIGMA_LAYER_BOUNDARIES[nlev])
 
     # Frierson (2006) cubic stretch. z runs 1 -> 0 so that exp(-5*...) maps the
     # surface end (z=1) toward sigma=1 and the top (z=0) toward sigma=0.
@@ -162,8 +171,16 @@ def _bottom_layer_thickness(nlev: int) -> float:
     return float(boundaries[-1] - boundaries[-2])
 
 
-# Reference severity for the canonical-stable T21 (trunc=21), nlev=8 run.
-_S_REFERENCE = (21 + 1) ** _DT_SEVERITY_EXPONENT / _bottom_layer_thickness(8)
+def _s_reference() -> float:
+    """Return the severity of the canonical-stable T21 (trunc=21), nlev=8 run.
+
+    A function rather than a module constant because it goes through
+    :func:`compute_sigma_boundaries` (a jax array); evaluating it at import time
+    would initialise the JAX backend on ``import jcm`` (#859). It is cheap and
+    only needed when a time step is resolved, so it is not cached — that keeps
+    it in the same precision as the ``dsigma_bottom`` it is compared against.
+    """
+    return (21 + 1) ** _DT_SEVERITY_EXPONENT / _bottom_layer_thickness(8)
 
 
 def stable_time_step_from_geometry(
@@ -206,7 +223,7 @@ def stable_time_step_from_geometry(
     s_norm = (
         (spectral_truncation + 1) ** _DT_SEVERITY_EXPONENT
         / float(dsigma_bottom)
-    ) / _S_REFERENCE
+    ) / _s_reference()
     if s_norm <= _DT_SEVERITY_PLATEAU:
         raw = _DT_REFERENCE_MINUTES
     else:

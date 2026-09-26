@@ -22,6 +22,7 @@ import logging
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from jcm.physics.coords_util import column_lat_lon
 from jax import lax
@@ -536,8 +537,8 @@ def radiation_scheme_rrtmgp(
     longitude: float,
     parameters: RadiationParameters,
     aerosol_data,
-    column_index: jnp.ndarray = jnp.int32(0),
-    model_step: jnp.ndarray = jnp.int32(0),
+    column_index: jnp.ndarray = np.int32(0),  # numpy, not jnp: a jax default is built at import (#859)
+    model_step: jnp.ndarray = np.int32(0),  # numpy, not jnp: a jax default is built at import (#859)
     base_seed: int = 0,
     compute_cre: bool = True,
     ozone_vmr: Optional[jnp.ndarray] = None,
@@ -546,7 +547,7 @@ def radiation_scheme_rrtmgp(
     n2o_vmr: Optional[jnp.ndarray] = None,
     r_eff_liq_um: Optional[jnp.ndarray] = None,
     r_eff_ice_um: Optional[jnp.ndarray] = None,
-    convection_type: jnp.ndarray = jnp.int32(0),
+    convection_type: jnp.ndarray = np.int32(0),  # numpy, not jnp: a jax default is built at import (#859)
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
 

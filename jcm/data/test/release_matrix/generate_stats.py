@@ -30,12 +30,14 @@ One command per member, on a GPU::
 
     CUDA_VISIBLE_DEVICES=<idx> python -c "import os; os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
 
-The ``os.environ`` assignment must come *before* the jcm import — merely
-importing jcm initialises the JAX CUDA backend (the SPEEDY lookup tables are
-built at import time), and the default claims 75 % of the card for this
-orchestrating process, which holds no device work of its own but would starve
-every worker it spawns. ``generate`` refuses to run without it rather than
-OOM-ing an hour in.
+Set the variable first, as above. Importing jcm does not initialise a JAX
+backend and ``generate`` itself does no device work, so a fresh invocation
+leaves this orchestrating process holding no GPU memory at all; but XLA reads
+the setting only when a backend first comes up, so a process that has already
+touched the device (a notebook or REPL that ran anything on-device first) would
+hold 75 % of the card under the default and starve every worker it spawns.
+``generate`` therefore refuses to run without the variable rather than OOM-ing
+an hour in.
 
 Run it in a CI-parity environment — a fresh venv with
 ``pip install -e ".[mam4]"`` and the pinned CUDA jax — never a shared or
@@ -754,25 +756,26 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
     import numpy as np
     import xarray as xr
 
-    # The orchestrator must never hold a device pool (see :func:`_run_worker`)
-    # — but it cannot avoid initialising JAX, because merely importing jcm
-    # builds device lookup tables (measured: ``import jcm`` alone claims
-    # 61,214 MiB of an 80 GB A100 under JAX's default 75 % preallocation, in
-    # a process that then does no device work at all; #859 tracks making the
-    # library import lazy). The pool is grabbed at *import* time, before this
-    # function can do anything about it, so the environment variable must be
-    # set before the jcm import — and rather than hope, refuse to run
-    # without it: with preallocation on, the orchestrator's pool starves the
-    # workers and the largest member OOMs an hour in, which is a far worse
-    # failure than this one. No code here can set it retroactively; only the
-    # invocation can.
+    # The orchestrator must never hold a device pool (see :func:`_run_worker`).
+    # Neither ``import jcm`` (#859; enforced by jcm/import_side_effects_test.py)
+    # nor anything below initialises a JAX backend in this process, so a clean
+    # invocation holds none. The guard is for the invocation that is not
+    # clean: XLA reads the preallocation setting once, when a backend first
+    # comes up, so if the calling process already touched the device (a
+    # notebook that built a model before calling generate) its pool is 75 %
+    # of the card and cannot be shrunk from here — the workers then starve
+    # and the largest member OOMs an hour in, a far worse failure than this
+    # one. Setting the variable in the environment of this call cannot help
+    # such a process, and whether a backend is live is not a reliable proxy
+    # for how big its pool is, so require the invocation to say ``false``
+    # rather than guess.
     if os.environ.get("XLA_PYTHON_CLIENT_PREALLOCATE") != "false":
         raise RuntimeError(
             "generate() must run with XLA_PYTHON_CLIENT_PREALLOCATE=false "
-            "set BEFORE jcm is imported: importing jcm initialises the JAX "
-            "CUDA backend, whose default preallocates 75% of the card to "
-            "this orchestrating process and starves the worker subprocesses "
-            "that integrate the model. Invoke as:\n"
+            "set before anything in this process initialises a JAX backend: "
+            "under the default, the first device use preallocates 75% of the "
+            "card to this orchestrating process and starves the worker "
+            "subprocesses that integrate the model. Invoke as:\n"
             "  python -c \"import os; "
             "os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; "
             "from jcm.data.test.release_matrix.generate_stats import "
