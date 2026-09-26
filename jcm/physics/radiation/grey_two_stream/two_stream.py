@@ -88,11 +88,15 @@ def delta_eddington_scaling(
     one_minus_ssa_f = 1.0 - ssa * f
     # ``1 - ssa f`` vanishes only at ssa = g = 1: a purely forward-scattering,
     # non-absorbing layer, which the scaling makes transparent (tau' = 0).
-    # Its scaled ssa is then immaterial; the safe denominator keeps the
-    # division and its derivative finite there.
+    # The scaled ssa has no unique limit there (0 along g = 1, 1 along
+    # ssa = 1), and it sets the sign of the layer's first-order response to
+    # tau'. The corner takes the g = 1 limit, 0, so the derivative with
+    # respect to ssa, the direction an optimizer approaches it from, is the
+    # true one-sided derivative; the derivative with respect to g there is
+    # not. The double ``where`` keeps the division and its derivative finite.
     safe = one_minus_ssa_f > 0.0
     denom = jnp.where(safe, one_minus_ssa_f, 1.0)
-    ssa_scaled = jnp.where(safe, ssa * (1.0 - f) / denom, ssa)
+    ssa_scaled = jnp.where(safe, ssa * (1.0 - f) / denom, 0.0)
     g_scaled = g - f / (1.0 + g_forward)
     return one_minus_ssa_f * tau, ssa_scaled, g_scaled
 
@@ -438,13 +442,17 @@ def layer_reflectance_transmittance(
     # branches (exponential: ``R + T - 1 = (gamma2 - gamma1) S / denom``;
     # series: ``((gamma2 - gamma1) tau sinhc + (1 - cosh x)) / denom`` — both
     # non-positive since ``gamma1 - gamma2 = 2(1 - ssa) >= 0`` and
-    # ``cosh x >= 1``), so the upper clip never acts. The lower clip removes
-    # the small negative reflectance the Eddington closure produces for weakly
-    # scattering layers, where ``gamma2 < 0`` for ``ssa < 1/(4 - 3g)`` — an
-    # approximation artefact, not a physical value. Raising R to 0 there only
-    # lowers the layer's absorption ``1 - R - T``, which stays >= 0.
-    R_dif = jnp.clip(R_dif_exact, 0.0, 1.0)
-    T_dif = jnp.clip(T_dif, 0.0, 1.0)
+    # ``cosh x >= 1``), and ``0 <= T <= 1`` (both denominators are >= 1 and
+    # >= 2e respectively), so neither needs a clip. The Eddington closure
+    # gives a small negative reflectance for weakly scattering layers, where
+    # ``gamma2 < 0`` for ``ssa < 1/(4 - 3g)`` — an approximation artefact, not
+    # a physical value — and it is set to 0 there. Raising R to 0 only lowers
+    # the layer's absorption ``1 - R - T``, which stays >= 0. R has the sign
+    # of ``gamma2`` (``S``, ``tau sinhc`` and both denominators are
+    # non-negative), so the selection is on ``gamma2`` rather than a clip on
+    # R: a clip's subgradient at ``R = 0`` (every ``tau = 0`` layer) would put
+    # the negative-branch derivative ``gamma2`` into the tangent.
+    R_dif = jnp.where(gamma2 > 0.0, R_dif_exact, 0.0)
 
     if mu0 is not None:
         # ``1 - T`` in closed form, without the cancellation of forming it

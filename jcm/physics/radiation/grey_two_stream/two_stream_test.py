@@ -1224,6 +1224,38 @@ class TestShortwaveGradients:
                             f"d/d{name} not finite at ssa={ssa} tau={tau} "
                             f"mu0={mu0}")
 
+    @pytest.mark.parametrize("ssa", [1.0, 1.0 - 1e-7])
+    def test_ssa_derivative_at_the_pure_forward_corner(self, ssa):
+        """``g = 1``: d(surface SW down)/d(ssa) equals the one-sided difference.
+
+        At ``ssa = g = 1`` the delta scaling makes the layer transparent and
+        its scaled ssa has no unique limit (0 along ``g = 1``, 1 along
+        ``ssa = 1``). The corner takes the ``g = 1`` limit so the ssa
+        derivative, taken from below as ssa cannot exceed 1, is the true one
+        (it had followed the ``ssa' = 1`` branch: 0.84 against 3.33). The
+        ``tau = 0`` subgradient of the old reflectance clip is also gone.
+        The g-derivative at this exact corner is direction-dependent and is
+        not asserted.
+        """
+        n = self.NLEV
+
+        def surface_down(s):
+            _, down, _, _ = shortwave_fluxes(
+                OpticalProperties(
+                    optical_depth=jnp.full((n, 1), 0.5, jnp.float32),
+                    single_scatter_albedo=jnp.full((n, 1), 1.0, jnp.float32)
+                    * s,
+                    asymmetry_factor=jnp.ones((n, 1), jnp.float32)),
+                0.6, jnp.array([1.0]), jnp.array([0.2]), 1)
+            return down[-1, 0]
+
+        ad = float(jax.grad(surface_down)(jnp.float32(ssa)))
+        h = 1e-3
+        fd = (float(surface_down(jnp.float32(ssa)))
+              - float(surface_down(jnp.float32(ssa - h)))) / h
+        assert np.isfinite(ad)
+        assert ad == pytest.approx(fd, rel=2e-3)
+
     @pytest.mark.parametrize(
         "tau, ssa, mu0",
         [(10.0, 1.0, 0.5),        # conservative limit, lambda = 0
