@@ -66,7 +66,7 @@ defines, and the struct says which (maintainer decision on #911):
 
 | `wind_reference` | Package | Definition |
 |---|---|---|
-| `"10m"` | ECHAM | 10 m wind from the stability-dependent surface-layer profile of each tile (`mo_surface` `nsurf_diag`): per tile `u10_t = zred_t·u_low`, box mean `u_low·Σ f_t·zred_t` |
+| `"10m"` | ECHAM | 10 m wind from the stability-dependent surface-layer profile of each tile (`mo_surface` `nsurf_diag`): per tile `u10_t = zred_t·u_low`, box mean `u_low·Σ f_t·zred_t`, with `u_low` the step-start lowest-level wind the surface fluxes used (as ECHAM's `u10`, which `vdiff.f90::update_surface` computes from `pum1`); the AeroCom `uas`/`vas` apply the same `Σ f_t·zred_t` to the post-physics wind, the time level of the other AeroCom winds |
 | `"lowest_level"` | SPEEDY | `fwind0 × (u, v)` at the lowest model level (σ = 0.95 at L8; `fwind0 = 0.95` by default), the wind the SPEEDY bulk formulae use; no gustiness |
 
 A common 10 m height was rejected: SPEEDY has no surface-layer profile, so
@@ -153,9 +153,10 @@ phase split at all. Both packages therefore guarantee `precipitation`
   column-integrated vdiff tendency), so they pass through unnegated. The
   wind (grid mean and tiles, with the tile fractions) is the 10 m wind the
   vertical-diffusion term diagnoses (`vertical_diffusion.wind_10m*`). It is
-  the ECHAM family's only 10 m wind: the AeroCom `uas`/`vas` are the same
-  fields rather than a separate neutral log-profile interpolation, and the
-  surface term's own diagnostics carry no 10 m wind.
+  the ECHAM family's only 10 m surface-layer profile: the AeroCom
+  `uas`/`vas` apply the same reduction (to the post-physics wind, above)
+  rather than a separate neutral log-profile interpolation, and the surface
+  term's own diagnostics carry no 10 m wind.
 - **Held-Suarez opts out**: a bulk relaxation has no surface fluxes,
   precipitation or hydrology to report, and zeros would read as a calm dry
   planet. `require_surface_exchange()` fails loudly with the opt-out named.

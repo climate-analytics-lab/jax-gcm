@@ -508,9 +508,10 @@ Diagnostics and output
   (``tools/aerocom_cmor.py``), and the CALIPSO and MODIS satellite simulators
   alongside CloudSat, including COSP joint histograms (``clmodis`` tau/Reff,
   LWP+IWP/Reff, the lidar scattering-ratio CFAD and ISCCP). The 10 m wind
-  ``uas``/``vas`` is the vertical-diffusion term's stability-corrected 10 m
-  wind, the same vector the surface-exchange contract publishes, so the
-  output carries one 10 m wind (#911).
+  ``uas``/``vas`` applies the vertical-diffusion term's stability-corrected
+  10 m reduction, the one the surface-exchange contract's wind uses, to the
+  post-physics lowest-level wind, so it shares the time level of the other
+  AeroCom winds (#911).
 - **Virtual observation operators** — stations, tracks and solar-time swaths —
   sampled every model timestep, each producing its own output dataset. See
   :doc:`design/observers`.

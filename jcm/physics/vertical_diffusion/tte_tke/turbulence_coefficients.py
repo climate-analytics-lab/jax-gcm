@@ -550,7 +550,10 @@ def compute_turbulence_diagnostics(
     # (mo_surface.f90::surface_box_average -> ``u10``/``v10``/``wind10``). So
     # the grid-mean vector is ``u_low * sum_t f_t zred_t``: the
     # fraction-weighted sum of the per-tile vectors, and parallel to the
-    # lowest-level wind with magnitude ``wind_10m``.
+    # lowest-level wind with magnitude ``wind_10m``. ``u_low`` is the
+    # step-start wind, as in ECHAM: vdiff.f90 passes ``pum1(:,klev)`` (t-dt),
+    # not the implicitly updated wind, to update_surface (vdiff.f90:951-964)
+    # and on to postproc_ocean/ice/land (mo_surface.f90:936-967).
     reduction_10m = jnp.sum(state.surface_fraction * wind_10m_tile, axis=1)
     wind_10m = wind_speed_surface * reduction_10m
     wind_10m_u = state.u[:, -1] * reduction_10m
@@ -575,6 +578,7 @@ def compute_turbulence_diagnostics(
         wind_10m=wind_10m,
         wind_10m_u=wind_10m_u,
         wind_10m_v=wind_10m_v,
+        wind_10m_reduction=reduction_10m,
         wind_10m_tile=speed_10m_tile,
         wind_10m_u_tile=u_10m_tile,
         wind_10m_v_tile=v_10m_tile,

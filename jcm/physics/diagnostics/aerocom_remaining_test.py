@@ -30,8 +30,7 @@ class NearSurfaceGroupTest(unittest.TestCase):
         class _Vdiff:
             pass
         _Vdiff.tke = jnp.full((nx, nlev), tke)  # (ncol, nlev) layout
-        _Vdiff.wind_10m_u = jnp.linspace(6.0, 7.0, nx)
-        _Vdiff.wind_10m_v = jnp.linspace(-3.0, -2.0, nx)
+        _Vdiff.wind_10m_reduction = jnp.linspace(0.7, 0.8, nx)
 
         class _Terrain:
             pass
@@ -48,6 +47,10 @@ class NearSurfaceGroupTest(unittest.TestCase):
             "clouds": _Clouds(), "surface": _Surface(),
             "convection": _Conv(), "vertical_diffusion": _Vdiff(),
             "height_full": z_full, "height_half": z_half,
+            # A same-step wind tendency, so post-physics != step start.
+            "_tendency_run": {"u_wind": jnp.full((nlev, nx), 1e-3),
+                              "v_wind": jnp.full((nlev, nx), -2e-3)},
+            "_dt_seconds": 600.0,
         }
 
         class _State:
@@ -65,14 +68,19 @@ class NearSurfaceGroupTest(unittest.TestCase):
             state, diagnostics, _Terrain(), state.temperature, p_full)
         return out, state, diagnostics
 
-    def test_uas_vas_are_the_vdiff_10m_wind(self):
-        """One 10 m wind: uas/vas ARE the vdiff surface-layer vector."""
+    def test_uas_vas_reduce_the_post_physics_wind(self):
+        """uas/vas are the vdiff 10 m reduction applied to the SAVED
+        (post-physics) lowest-level wind, the time level of the
+        pressure-level winds, not the step-start wind.
+        """
         out, _, diag = self._diag(z0=0.1)
-        vdiff = diag["vertical_diffusion"]
-        np.testing.assert_array_equal(np.asarray(out["aerocom_uas"]),
-                                      np.asarray(vdiff.wind_10m_u))
-        np.testing.assert_array_equal(np.asarray(out["aerocom_vas"]),
-                                      np.asarray(vdiff.wind_10m_v))
+        red = np.asarray(diag["vertical_diffusion"].wind_10m_reduction)
+        u_post = 10.0 + 1e-3 * 600.0
+        v_post = -5.0 - 2e-3 * 600.0
+        np.testing.assert_allclose(np.asarray(out["aerocom_uas"]),
+                                   red * u_post, rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(out["aerocom_vas"]),
+                                   red * v_post, rtol=1e-6)
 
     def test_uas_vas_zero_without_vdiff(self):
         out, state, diag = self._diag()

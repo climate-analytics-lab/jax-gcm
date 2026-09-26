@@ -922,6 +922,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             wind_10m=wind_10m,
             wind_10m_u=vdiff_diagnostics.wind_10m_u,
             wind_10m_v=vdiff_diagnostics.wind_10m_v,
+            wind_10m_reduction=vdiff_diagnostics.wind_10m_reduction,
             wind_10m_tile=vdiff_diagnostics.wind_10m_tile,
             wind_10m_u_tile=vdiff_diagnostics.wind_10m_u_tile,
             wind_10m_v_tile=vdiff_diagnostics.wind_10m_v_tile,

@@ -387,7 +387,7 @@ class AerocomDiagnostics(PhysicsTerm):
         module; silently inactive without it.
     ``nearsurface``
         2 m temperature/dew point (neutral log-profile interpolation),
-        the vertical-diffusion 10 m wind vector (see
+        10 m winds from the vertical-diffusion surface-layer reduction (see
         :meth:`_nearsurface_group`), sea-level
         pressure, the convective/stratiform x rain/snow precipitation
         split (``prcr``/``prcs``/``prsn``) and the activation cloud-base
@@ -814,11 +814,15 @@ class AerocomDiagnostics(PhysicsTerm):
                            temperature, p_full) -> dict:
         """2 m / 10 m diagnostics, sea-level pressure, precipitation split.
 
-        ``uas``/``vas`` are the model's one 10 m wind: the vector the
-        vertical-diffusion term diagnoses with the stability-dependent
-        per-tile surface-layer reduction (ECHAM ``nsurf_diag`` ``u10``/
-        ``v10``), the same numbers the surface-exchange contract publishes
-        as ``wind_u``/``wind_v``. The 2 m temperature interpolates between
+        ``uas``/``vas`` apply the vertical-diffusion term's stability-
+        dependent 10 m reduction (the grid-mean ``sum_t f_t zred_t`` of
+        ECHAM ``nsurf_diag``, ``vertical_diffusion.wind_10m_reduction``) to
+        the POST-physics lowest-level wind, so they are at the same time
+        level as the pressure-level winds of this AeroCom set. The
+        surface-exchange contract's ``wind_u``/``wind_v`` apply the same
+        reduction to the step-start wind the surface fluxes used, as ECHAM's
+        own ``u10``/``v10`` do (``update_surface`` gets ``pum1``). The
+        2 m temperature interpolates between
         the surface and the lowest model level with the NEUTRAL logarithmic
         profile, using the tile-averaged momentum roughness the surface term
         publishes (heat roughness = 0.1 z0m, the model's own ratio).
@@ -849,14 +853,17 @@ class AerocomDiagnostics(PhysicsTerm):
         p_sfc = state.normalized_surface_pressure.reshape(ncols_shape) * c.p0
 
         vdiff = diagnostics.get("vertical_diffusion")
-        wind_10m_u = getattr(vdiff, "wind_10m_u", None)
-        if wind_10m_u is None:
-            # No vdiff term composed: there is no 10 m wind to report.
+        reduction = getattr(vdiff, "wind_10m_reduction", None)
+        if reduction is None:
+            # No vdiff term composed: there is no 10 m profile to apply.
             out["aerocom_uas"] = jnp.zeros(ncols_shape, dtype=temperature.dtype)
             out["aerocom_vas"] = jnp.zeros(ncols_shape, dtype=temperature.dtype)
         else:
-            out["aerocom_uas"] = wind_10m_u.reshape(ncols_shape)
-            out["aerocom_vas"] = vdiff.wind_10m_v.reshape(ncols_shape)
+            reduction = reduction.reshape(ncols_shape)
+            out["aerocom_uas"] = (
+                reduction * _post_physics(state, diagnostics, "u_wind")[-1])
+            out["aerocom_vas"] = (
+                reduction * _post_physics(state, diagnostics, "v_wind")[-1])
 
         sfc = diagnostics.get("surface")
         t_skin = getattr(sfc, "surface_temperature", None)

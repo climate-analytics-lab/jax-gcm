@@ -467,7 +467,7 @@ class TestEchamPublishedWind:
         geopotential = -c.rd * 260.0 * jnp.log(sigma)
         self.state = self.state.copy(geopotential=geopotential[:, None, None]
                                      * jnp.ones(self.state.temperature.shape))
-        _, self.diag = self.phys.compute_tendencies(
+        self.tend, self.diag = self.phys.compute_tendencies(
             self.state, self.forcing, self.terrain,
             self.phys.initial_carry_state(self.coords))
         self.se = self.diag[SURFACE_EXCHANGE_KEY]
@@ -537,14 +537,38 @@ class TestEchamPublishedWind:
         # And the physics-level merge the netCDF writer applies has them.
         assert "surface_exchange.wind_u_tile.2" in self.phys.output_attrs()
 
-    def test_aerocom_uas_vas_are_the_published_wind(self):
-        """One 10 m wind in the output: AeroCom uas/vas == wind_u/wind_v."""
+    def test_aerocom_uas_vas_use_the_same_profile_on_the_saved_wind(self):
+        """AeroCom uas/vas apply the contract wind's 10 m reduction to the
+        post-physics lowest-level wind (the pressure-level winds' time
+        level); the contract keeps the step-start wind the fluxes used.
+        """
         ncols = self.se.wind_u.shape[0]
-        assert jnp.array_equal(
-            self.diag["aerocom_uas"].reshape(ncols), self.se.wind_u)
-        assert jnp.array_equal(
-            self.diag["aerocom_vas"].reshape(ncols), self.se.wind_v)
+        red = self.vdiff.wind_10m_reduction.reshape(ncols)
+        # Contract wind = reduction x step-start lowest-level wind.
+        assert jnp.allclose(self.se.wind_u, red * 5.0, rtol=1e-5)
+        assert jnp.allclose(self.se.wind_v, red * -3.0, rtol=1e-5)
+        # AeroCom is the terminal term, so the saved wind is the step-start
+        # wind plus the whole step's tendency.
+        dt = self.phys.dt_seconds
+        u_post = (self.state.u_wind + dt * self.tend.u_wind)[-1]
+        v_post = (self.state.v_wind + dt * self.tend.v_wind)[-1]
+        assert not jnp.allclose(u_post, 5.0)  # physics moved the wind
+        assert jnp.allclose(
+            self.diag["aerocom_uas"].reshape(ncols), red * u_post.reshape(ncols),
+            rtol=1e-5, atol=1e-6)
+        assert jnp.allclose(
+            self.diag["aerocom_vas"].reshape(ncols), red * v_post.reshape(ncols),
+            rtol=1e-5, atol=1e-6)
 
+    def test_contract_wind_is_consistent_with_stress(self):
+        """The contract wind is the wind the delivered stress acted on:
+        same direction (the implicit solve can only reduce, not rotate, a
+        uniform column's wind here).
+        """
+        cross = self.se.wind_u * self.se.stress_v - self.se.wind_v * self.se.stress_u
+        dot = self.se.wind_u * self.se.stress_u + self.se.wind_v * self.se.stress_v
+        assert float(dot.min()) > 0.0
+        assert jnp.allclose(cross, 0.0, atol=1e-5 * float(jnp.abs(dot).max()))
 
 class TestEchamForcedMode:
     """ECHAM: couple_surface off + prescribed delivery reproduces budgets."""

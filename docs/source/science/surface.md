@@ -34,7 +34,8 @@ solve, see {doc}`vertical_diffusion`), so ``EchamSurface`` returns zero
 u/v/T/qᵥ tendencies and republishes the vdiff-delivered fluxes as the public
 ``"surface"`` fields. The 10 m wind is likewise the vdiff term's per-tile
 surface-layer reduction (ECHAM ``nsurf_diag``, see {doc}`vertical_diffusion`),
-the one 10 m wind the coupling contract and the AeroCom ``uas``/``vas`` publish.
+the one 10 m profile the coupling contract's wind and the AeroCom ``uas``/``vas``
+use.
 
 **What ECHAM/CAM does.** ECHAM6's ``vdiff``/``mo_surface`` scheme couples the
 surface into a single tridiagonal spanning the column plus the surface exchange,

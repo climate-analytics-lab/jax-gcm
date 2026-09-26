@@ -266,6 +266,7 @@ class VDiffDiagnostics(NamedTuple):
     # per-tile 10 m wind the grid means are the fraction-weighted sums of.
     wind_10m_u: jnp.ndarray               # u(10 m) [m/s] (ncol,)
     wind_10m_v: jnp.ndarray               # v(10 m) [m/s] (ncol,)
+    wind_10m_reduction: jnp.ndarray       # sum_t f_t zred_t [-] (ncol,)
     wind_10m_tile: jnp.ndarray            # |U(10 m)| per tile [m/s] (ncol, nsfc_type)
     wind_10m_u_tile: jnp.ndarray          # u(10 m) per tile [m/s] (ncol, nsfc_type)
     wind_10m_v_tile: jnp.ndarray          # v(10 m) per tile [m/s] (ncol, nsfc_type)
@@ -380,11 +381,15 @@ class VerticalDiffusionData:
     # The same 10 m wind as a vector (ECHAM ``u10``/``v10``) and per tile
     # (0 = water, 1 = sea ice, 2 = land), with the tile fractions it was
     # weighted by: ``sum(surface_fraction * wind_10m_u_tile, -1) ==
-    # wind_10m_u`` (and likewise for v and the speed). The one 10 m wind of
-    # the ECHAM family: the surface-exchange contract and the AeroCom
-    # ``uas``/``vas`` read these.
+    # wind_10m_u`` (and likewise for v and the speed). From the step-start
+    # lowest-level wind, as ECHAM's u10 (``update_surface`` gets ``pum1``);
+    # the surface-exchange contract publishes these.
     wind_10m_u: jnp.ndarray          # u(10 m) [m/s] (ncols,)
     wind_10m_v: jnp.ndarray          # v(10 m) [m/s] (ncols,)
+    # The grid-mean reduction factor itself, sum_t f_t zred_t, so a
+    # consumer can apply the same surface-layer profile to a lowest-level
+    # wind at another time (the AeroCom uas/vas use the post-physics wind).
+    wind_10m_reduction: jnp.ndarray  # [-] (ncols,)
     wind_10m_tile: jnp.ndarray       # |U(10 m)| per tile [m/s] (ncols, nsfc_type)
     wind_10m_u_tile: jnp.ndarray     # u(10 m) per tile [m/s] (ncols, nsfc_type)
     wind_10m_v_tile: jnp.ndarray     # v(10 m) per tile [m/s] (ncols, nsfc_type)
@@ -422,6 +427,7 @@ class VerticalDiffusionData:
             wind_10m=jnp.zeros(nodal_shape),
             wind_10m_u=jnp.zeros(nodal_shape),
             wind_10m_v=jnp.zeros(nodal_shape),
+            wind_10m_reduction=jnp.zeros(nodal_shape),
             wind_10m_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
             wind_10m_u_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
             wind_10m_v_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
@@ -450,6 +456,7 @@ class VerticalDiffusionData:
             'wind_10m': self.wind_10m,
             'wind_10m_u': self.wind_10m_u,
             'wind_10m_v': self.wind_10m_v,
+            'wind_10m_reduction': self.wind_10m_reduction,
             'wind_10m_tile': self.wind_10m_tile,
             'wind_10m_u_tile': self.wind_10m_u_tile,
             'wind_10m_v_tile': self.wind_10m_v_tile,

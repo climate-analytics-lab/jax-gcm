@@ -270,8 +270,8 @@ def compute_surface_diagnostics(
     The 10 m wind is not among them: the ECHAM family has one 10 m wind,
     diagnosed by the vertical-diffusion term from the per-tile
     surface-layer reduction (``vertical_diffusion.wind_10m*``, ECHAM
-    ``nsurf_diag``), which the surface-exchange contract and the AeroCom
-    ``uas``/``vas`` publish.
+    ``nsurf_diag``), which the surface-exchange contract publishes and the
+    AeroCom ``uas``/``vas`` apply to the post-physics wind.
 
     Args:
         atmospheric_state: Atmospheric forcing

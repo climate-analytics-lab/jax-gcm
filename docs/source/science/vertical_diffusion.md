@@ -117,7 +117,8 @@ and per tile (``wind_10m_tile`` / ``wind_10m_u_tile`` / ``wind_10m_v_tile``,
 with the ``surface_fraction`` they are weighted by), alongside the exchange
 coefficients. It is the ECHAM family's one 10 m wind: the surface-exchange
 contract publishes it as ``wind_u``/``wind_v``, and the AeroCom ``uas``/``vas``
-are the same fields. It is
+apply its grid-mean reduction (``wind_10m_reduction``) to the post-physics
+lowest-level wind, the time level of the other AeroCom winds. It is
 the surface-layer profile evaluated at 10 m rather than an interpolation
 between levels: with ``bn = ln(z₁/z₀ₘ)`` the neutral profile factor and
 ``bm = bn·√(CMₙ|U| / CM|U|)`` its stability-corrected counterpart,
@@ -143,7 +144,8 @@ multiplies the true wind.
 **What ECHAM/CAM does.** ECHAM5 ``vdiff.f90`` / ICON
 ``mo_surface_diag::nsurf_diag`` compute the 10 m wind by exactly this
 construction, from the ``pbn``/``pbm`` profile factors ``mo_turbulence_diag``
-exports for the purpose (per tile ``zu10w = zred·pum1`` in
+exports for the purpose, from the step-start wind ``pum1`` that
+``vdiff.f90::update_surface`` passes to the surface (per tile ``zu10w = zred·pum1`` in
 ``mo_surface_ocean.f90::postproc_ocean`` and its ice/land analogues, box-averaged
 by fraction in ``mo_surface.f90::surface_box_average`` into ``u10``/``v10``/
 ``wind10``); ``zepdu2 = 1 m²/s²`` is ECHAM's calm-wind floor on the
