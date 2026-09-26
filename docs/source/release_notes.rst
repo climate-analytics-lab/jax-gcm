@@ -760,6 +760,28 @@ corrections, listed here because they change climate:
   holding the earlier emissions re-fetches once; prefetch before running
   offline.
 
+Importing jcm does not touch the GPU
+""""""""""""""""""""""""""""""""""""
+
+``import jcm`` — and importing any jcm module, including the physics packages
+directly — no longer initialises a JAX backend (#859). Previously the SPEEDY
+sigma tables on ``jcm``'s import chain were built as jax arrays at import, the
+first device query of the process, so on a GPU host a bare ``import jcm``
+brought up CUDA and, under JAX's default ``XLA_PYTHON_CLIENT_PREALLOCATE``,
+claimed 75 % of the card (61,222 MiB of an 80 GB A100) in a process that might
+never do device work — an orchestrator whose integrations run in subprocesses,
+or a REPL inspecting output. The device is now first touched when a model or
+physics term actually builds arrays. Module-level tables (the SPEEDY and
+Held-Suarez sigma boundaries, the grey cloud-optics band tables, the TTE
+Businger-Dyer roughness tables) are stored as Python floats and materialised
+where used, and ``def`` defaults that were jax arrays are ``None`` or numpy
+scalars. Two consequences: ``physical_constants.SIGMA_LAYER_BOUNDARIES`` and
+``held_suarez.utils.DEFAULT_SIGMA_BOUNDARIES`` are now tuples of floats (use
+``compute_sigma_boundaries(nlev)`` for an array), and the dtype of those tables
+follows the ``jax_enable_x64`` setting in force when they are used rather than
+whichever was in force at import. ``jcm/import_side_effects_test.py`` enforces
+the property for every module.
+
 
 Corrected physics
 ^^^^^^^^^^^^^^^^^

@@ -2265,10 +2265,11 @@ class TestReleaseMatrixGeneratePreallocationGuard(unittest.TestCase):
     def test_generate_refuses_without_preallocation_disabled(self):
         """generate() must refuse to orchestrate from a preallocated parent.
 
-        Importing jcm initialises the CUDA backend (#859), so by the time
-        ``generate`` runs, a parent without
-        ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` already holds 75 % of the
-        card and its workers OOM an hour in. The guard turns that into an
+        XLA reads the setting only when a backend first comes up, so a
+        calling process that has already touched the device without
+        ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` holds 75 % of the card and
+        ``generate``'s workers OOM an hour in; it cannot be fixed from
+        inside ``generate``. The guard turns that into an
         immediate, named failure. The test session's own conftest guard
         *sets* the variable, so simulate the unguarded invocation by
         removing it.
