@@ -165,17 +165,10 @@ class TestSurfacePhysicsStep:
         
         self.dt = 3600.0  # 1 hour
     
-    def _wind_10m(self):
-        """Build a diagnosed 10 m wind, as the vdiff carry supplies in a real run."""
-        u = self.atmospheric_state.u_wind
-        v = self.atmospheric_state.v_wind
-        return 0.9 * jnp.sqrt(jnp.maximum(u ** 2 + v ** 2, 1.0e-30))
-
     def test_surface_physics_step_basic(self):
         """Test basic surface physics step."""
         fluxes, tendencies, diagnostics = surface_physics_step(
             self.atmospheric_state, self.surface_state, self.dt,
-            self._wind_10m(),
         )
         
         assert isinstance(fluxes, SurfaceFluxes)
@@ -200,7 +193,6 @@ class TestSurfacePhysicsStep:
         """Test energy conservation in surface physics step."""
         fluxes, tendencies, diagnostics = surface_physics_step(
             self.atmospheric_state, self.surface_state, self.dt,
-            self._wind_10m(),
         )
         
         # Net surface energy flux should be finite
@@ -217,7 +209,6 @@ class TestSurfacePhysicsStep:
         """Test flux consistency between tiles and means."""
         fluxes, tendencies, diagnostics = surface_physics_step(
             self.atmospheric_state, self.surface_state, self.dt,
-            self._wind_10m(),
         )
         
         # Check that mean fluxes are consistent with tile fluxes
@@ -244,13 +235,11 @@ class TestSurfacePhysicsStep:
         """
         base, _, _ = surface_physics_step(
             self.atmospheric_state, self.surface_state, self.dt,
-            self._wind_10m(),
         )
         doubled = self.atmospheric_state._replace(
             exchange_coeff_momentum=self.atmospheric_state.exchange_coeff_momentum * 2.0
         )
-        scaled, _, _ = surface_physics_step(doubled, self.surface_state, self.dt,
-                                       self._wind_10m())
+        scaled, _, _ = surface_physics_step(doubled, self.surface_state, self.dt)
 
         assert jnp.allclose(scaled.momentum_u_mean, 2.0 * base.momentum_u_mean, rtol=1e-5)
         assert jnp.allclose(scaled.momentum_v_mean, 2.0 * base.momentum_v_mean, rtol=1e-5)
@@ -374,9 +363,8 @@ class TestSurfacePhysicsStepGradients:
 
     Green, against a central difference, for a single column and for a
     four-column block. The two finiteness tests below carry the substance:
-    the module's wind norms and the ``wind_speed_10m / wind_speed_atm``
-    quotient are cone tips at calm wind, where no two-sided derivative
-    exists, and a run reaches them (an initialised-at-rest spin-up starts
+    the module's wind norms are cone tips at calm wind, where no two-sided
+    derivative exists, and a run reaches them (an initialised-at-rest spin-up starts
     there).
     """
 
@@ -411,10 +399,9 @@ class TestSurfacePhysicsStepGradients:
             jnp.full((ncol, 4), land_temp))
 
     def _step(self, ncol, atmospheric_state, surface_state):
-        """Return ``f(u, v, T, q, CH, CM, CE, T_ocean, U_10m)``."""
+        """Return ``f(u, v, T, q, CH, CM, CE, T_ocean)``."""
         def f(u_wind, v_wind, temperature, humidity, exchange_heat,
-              exchange_momentum, exchange_moisture, ocean_temp,
-              wind_speed_10m):
+              exchange_momentum, exchange_moisture, ocean_temp):
             state = atmospheric_state._replace(
                 u_wind=u_wind, v_wind=v_wind, temperature=temperature,
                 humidity=humidity, exchange_coeff_heat=exchange_heat,
@@ -427,8 +414,7 @@ class TestSurfacePhysicsStepGradients:
             surface = surface_state._replace(
                 ocean_temp=ocean_temp,
                 temperature=surface_state.temperature.at[:, 0].set(ocean_temp))
-            return surface_physics_step(state, surface, 3600.0,
-                                        wind_speed_10m)
+            return surface_physics_step(state, surface, 3600.0)
 
         return f
 
@@ -451,19 +437,16 @@ class TestSurfacePhysicsStepGradients:
                 atmospheric_state.exchange_coeff_heat,
                 atmospheric_state.exchange_coeff_momentum,
                 atmospheric_state.exchange_coeff_moisture,
-                surface_state.ocean_temp,
-                0.9 * jnp.sqrt(u_wind ** 2 + v_wind ** 2))
+                surface_state.ocean_temp)
         check_gradients(self._step(ncol, atmospheric_state, surface_state),
                         args, rtol=1e-3)
 
-    @pytest.mark.parametrize("wind_10m", [0.0, 0.3], ids=["w10=0", "w10>0"])
-    def test_calm_wind_gradients_are_finite(self, wind_10m):
+    def test_calm_wind_gradients_are_finite(self):
         """``u = v = 0``: every wind norm in the step is at its cone tip.
 
-        ``surface_physics.py:154`` and ``turbulent_fluxes.py:220/311/318/322``
-        all form ``sqrt(maximum(u^2 + v^2, 1e-30))``, and ``:313`` then
-        divides the diagnosed 10 m wind by the result — 1e-15 here. The
-        gradient is finite because the floor is 1e-30 rather than 0: below it
+        ``surface_physics.py`` and ``turbulent_fluxes.py`` form
+        ``sqrt(maximum(u^2 + v^2, 1e-30))`` for the wind speed, the momentum
+        flux magnitude and the friction velocity. The gradient is finite because the floor is 1e-30 rather than 0: below it
         ``jnp.maximum`` routes the whole derivative to the constant branch,
         so ``sqrt'`` at the floor is multiplied by an exact zero instead of
         meeting a 0.5/0.5 tie and forming ``0 * inf``.
@@ -481,7 +464,7 @@ class TestSurfacePhysicsStepGradients:
                 atmospheric_state.exchange_coeff_heat,
                 atmospheric_state.exchange_coeff_momentum,
                 atmospheric_state.exchange_coeff_moisture,
-                surface_state.ocean_temp, jnp.full(ncol, wind_10m))
+                surface_state.ocean_temp)
 
         def total(*a):
             return sum(jnp.sum(leaf ** 2)
@@ -490,7 +473,7 @@ class TestSurfacePhysicsStepGradients:
         gradients = jax.grad(total, argnums=tuple(range(len(args))))(*args)
         names = ("u_wind", "v_wind", "temperature", "humidity",
                  "exchange_coeff_heat", "exchange_coeff_momentum",
-                 "exchange_coeff_moisture", "ocean_temp", "wind_speed_10m")
+                 "exchange_coeff_moisture", "ocean_temp")
         for name, gradient in zip(names, gradients):
             assert jnp.all(jnp.isfinite(gradient)), (
                 f"d/d{name} is not finite at calm wind: {gradient}")
@@ -522,8 +505,7 @@ class TestSurfacePhysicsStepGradients:
                 atmospheric_state.exchange_coeff_heat,
                 atmospheric_state.exchange_coeff_momentum,
                 atmospheric_state.exchange_coeff_moisture,
-                surface_state.ocean_temp,
-                0.9 * jnp.sqrt(u_wind ** 2 + v_wind ** 2))
+                surface_state.ocean_temp)
 
         def total(*a):
             return sum(jnp.sum(leaf ** 2)
@@ -532,7 +514,7 @@ class TestSurfacePhysicsStepGradients:
         gradients = jax.grad(total, argnums=tuple(range(len(args))))(*args)
         names = ("u_wind", "v_wind", "temperature", "humidity",
                  "exchange_coeff_heat", "exchange_coeff_momentum",
-                 "exchange_coeff_moisture", "ocean_temp", "wind_speed_10m")
+                 "exchange_coeff_moisture", "ocean_temp")
         for name, gradient in zip(names, gradients):
             assert jnp.all(jnp.isfinite(gradient)), (
                 f"d/d{name} is not finite at zero temperature difference: "

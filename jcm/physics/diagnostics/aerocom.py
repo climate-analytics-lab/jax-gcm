@@ -386,8 +386,9 @@ class AerocomDiagnostics(PhysicsTerm):
         ``PM1``/``PM10`` from the modal state. Requires the JAM aerosol
         module; silently inactive without it.
     ``nearsurface``
-        2 m temperature/dew point, 10 m winds (neutral log-profile
-        interpolation, see :meth:`_nearsurface_group`), sea-level
+        2 m temperature/dew point (neutral log-profile interpolation),
+        the vertical-diffusion 10 m wind vector (see
+        :meth:`_nearsurface_group`), sea-level
         pressure, the convective/stratiform x rain/snow precipitation
         split (``prcr``/``prcs``/``prsn``) and the activation cloud-base
         updraft ``wbase``.
@@ -813,15 +814,19 @@ class AerocomDiagnostics(PhysicsTerm):
                            temperature, p_full) -> dict:
         """2 m / 10 m diagnostics, sea-level pressure, precipitation split.
 
-        The 2 m temperature and 10 m winds interpolate between the surface
-        and the lowest model level with the NEUTRAL logarithmic profile,
-        using the tile-averaged momentum roughness the surface term
+        ``uas``/``vas`` are the model's one 10 m wind: the vector the
+        vertical-diffusion term diagnoses with the stability-dependent
+        per-tile surface-layer reduction (ECHAM ``nsurf_diag`` ``u10``/
+        ``v10``), the same numbers the surface-exchange contract publishes
+        as ``wind_u``/``wind_v``. The 2 m temperature interpolates between
+        the surface and the lowest model level with the NEUTRAL logarithmic
+        profile, using the tile-averaged momentum roughness the surface term
         publishes (heat roughness = 0.1 z0m, the model's own ratio).
-        Stability corrections are deliberately omitted in this first
-        version: they modify the 2 m values by O(1 K) in strongly
-        stable/unstable layers, which matters for NWP verification but not
-        for the AeroCom context fields — documented so nobody mistakes
-        this for a Monin-Obukhov implementation. ``dew2`` converts the
+        Stability corrections are deliberately omitted there: they modify
+        the 2 m values by O(1 K) in strongly stable/unstable layers, which
+        matters for NWP verification but not for the AeroCom context fields
+        — documented so nobody mistakes this for a Monin-Obukhov
+        implementation. ``dew2`` converts the
         (well-mixed) lowest-level specific humidity to a dew point at
         surface pressure via the inverted Magnus formula. ``psl`` is the
         standard WMO reduction with the 6.5 K/km lapse. ``wbase`` is the
@@ -838,32 +843,36 @@ class AerocomDiagnostics(PhysicsTerm):
 
         t_low = temperature[-1]
         q_low = _post_physics(state, diagnostics, "specific_humidity")[-1]
-        u_low = _post_physics(state, diagnostics, "u_wind")[-1]
-        v_low = _post_physics(state, diagnostics, "v_wind")[-1]
         # The ACTUAL surface pressure, not the lowest level-centre pressure:
         # at L47 the two differ by ~400 Pa even over ocean, which would bias
         # psl and the dew point directly (Codex review on PR #604).
         p_sfc = state.normalized_surface_pressure.reshape(ncols_shape) * c.p0
+
+        vdiff = diagnostics.get("vertical_diffusion")
+        wind_10m_u = getattr(vdiff, "wind_10m_u", None)
+        if wind_10m_u is None:
+            # No vdiff term composed: there is no 10 m wind to report.
+            out["aerocom_uas"] = jnp.zeros(ncols_shape, dtype=temperature.dtype)
+            out["aerocom_vas"] = jnp.zeros(ncols_shape, dtype=temperature.dtype)
+        else:
+            out["aerocom_uas"] = wind_10m_u.reshape(ncols_shape)
+            out["aerocom_vas"] = vdiff.wind_10m_v.reshape(ncols_shape)
 
         sfc = diagnostics.get("surface")
         t_skin = getattr(sfc, "surface_temperature", None)
         z0m = getattr(sfc, "roughness_length", None)
         if t_skin is None or z0m is None or z_full is None or z_half is None:
             zero = jnp.zeros(ncols_shape, dtype=temperature.dtype)
-            for k in ("tas", "uas", "vas", "dew2", "wbase"):
+            for k in ("tas", "dew2", "wbase"):
                 out[f"aerocom_{k}"] = zero
         else:
             z_agl = jnp.maximum(z_full[-1] - z_half[-1], 10.0)
             z0m = jnp.clip(z0m.reshape(ncols_shape), 1e-5, 2.0)
             z0h = 0.1 * z0m
-            # Neutral log-profile ratios; winds vanish at z0m, scalars
-            # reach the skin value at z0h.
-            r10 = jnp.log(10.0 / z0m) / jnp.log(z_agl / z0m)
+            # Neutral log-profile ratio; scalars reach the skin value at z0h.
             r2 = jnp.log(2.0 / z0h) / jnp.log(z_agl / z0h)
             t_skin = t_skin.reshape(ncols_shape)
             out["aerocom_tas"] = t_skin + (t_low - t_skin) * jnp.clip(r2, 0.0, 1.0)
-            out["aerocom_uas"] = u_low * jnp.clip(r10, 0.0, 1.0)
-            out["aerocom_vas"] = v_low * jnp.clip(r10, 0.0, 1.0)
             # Magnus inversion: e = q p / (eps + (1-eps) q); Td from
             # ln(e/611.2) = 17.62 Td / (Td + 243.12) (Td in Celsius).
             eps_rd = 0.622
@@ -875,7 +884,6 @@ class AerocomDiagnostics(PhysicsTerm):
                 td_c + 273.15, out["aerocom_tas"])
 
             # Cloud-base updraft from the vdiff TKE (see docstring).
-            vdiff = diagnostics.get("vertical_diffusion")
             tke = getattr(vdiff, "tke", None)
             if tke is None:
                 out["aerocom_wbase"] = jnp.zeros(ncols_shape,
