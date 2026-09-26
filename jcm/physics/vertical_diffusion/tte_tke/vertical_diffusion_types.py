@@ -262,6 +262,13 @@ class VDiffDiagnostics(NamedTuple):
     # Grid-mean 10 m wind speed, the reference height every surface-flux
     # parameterization (sea salt, DMS) is calibrated to.
     wind_10m: jnp.ndarray                 # |U(10 m)| [m/s] (ncol,)
+    # Its eastward/northward components (ECHAM ``u10``/``v10``) and the
+    # per-tile 10 m wind the grid means are the fraction-weighted sums of.
+    wind_10m_u: jnp.ndarray               # u(10 m) [m/s] (ncol,)
+    wind_10m_v: jnp.ndarray               # v(10 m) [m/s] (ncol,)
+    wind_10m_tile: jnp.ndarray            # |U(10 m)| per tile [m/s] (ncol, nsfc_type)
+    wind_10m_u_tile: jnp.ndarray          # u(10 m) per tile [m/s] (ncol, nsfc_type)
+    wind_10m_v_tile: jnp.ndarray          # v(10 m) per tile [m/s] (ncol, nsfc_type)
 
     # Richardson number
     richardson_number: jnp.ndarray        # Bulk Richardson number [-] (ncol, nlev)
@@ -370,6 +377,18 @@ class VerticalDiffusionData:
     # Diagnosed 10 m wind speed (ECHAM ``vphysc%velo10m``): the reference
     # height the surface-flux emission schemes are calibrated to.
     wind_10m: jnp.ndarray            # |U(10 m)| [m/s] (ncols,)
+    # The same 10 m wind as a vector (ECHAM ``u10``/``v10``) and per tile
+    # (0 = water, 1 = sea ice, 2 = land), with the tile fractions it was
+    # weighted by: ``sum(surface_fraction * wind_10m_u_tile, -1) ==
+    # wind_10m_u`` (and likewise for v and the speed). The one 10 m wind of
+    # the ECHAM family: the surface-exchange contract and the AeroCom
+    # ``uas``/``vas`` read these.
+    wind_10m_u: jnp.ndarray          # u(10 m) [m/s] (ncols,)
+    wind_10m_v: jnp.ndarray          # v(10 m) [m/s] (ncols,)
+    wind_10m_tile: jnp.ndarray       # |U(10 m)| per tile [m/s] (ncols, nsfc_type)
+    wind_10m_u_tile: jnp.ndarray     # u(10 m) per tile [m/s] (ncols, nsfc_type)
+    wind_10m_v_tile: jnp.ndarray     # v(10 m) per tile [m/s] (ncols, nsfc_type)
+    surface_fraction: jnp.ndarray    # tile fractions [-] (ncols, nsfc_type)
 
     # Grid-mean surface fluxes DELIVERED by the implicit surface-coupled
     # column solve this step (diagnosed from the implicit solution, so they
@@ -401,6 +420,12 @@ class VerticalDiffusionData:
             surface_friction_velocity=jnp.zeros(nodal_shape),
             monin_obukhov_length=jnp.zeros(nodal_shape),
             wind_10m=jnp.zeros(nodal_shape),
+            wind_10m_u=jnp.zeros(nodal_shape),
+            wind_10m_v=jnp.zeros(nodal_shape),
+            wind_10m_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
+            wind_10m_u_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
+            wind_10m_v_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
+            surface_fraction=jnp.zeros(nodal_shape + (nsfc_type,)),
             surface_evaporation=jnp.zeros(nodal_shape),
             surface_sensible_heat=jnp.zeros(nodal_shape),
             surface_latent_heat=jnp.zeros(nodal_shape),
@@ -423,6 +448,12 @@ class VerticalDiffusionData:
             'surface_friction_velocity': self.surface_friction_velocity,
             'monin_obukhov_length': self.monin_obukhov_length,
             'wind_10m': self.wind_10m,
+            'wind_10m_u': self.wind_10m_u,
+            'wind_10m_v': self.wind_10m_v,
+            'wind_10m_tile': self.wind_10m_tile,
+            'wind_10m_u_tile': self.wind_10m_u_tile,
+            'wind_10m_v_tile': self.wind_10m_v_tile,
+            'surface_fraction': self.surface_fraction,
             'surface_evaporation': self.surface_evaporation,
             'surface_sensible_heat': self.surface_sensible_heat,
             'surface_latent_heat': self.surface_latent_heat,

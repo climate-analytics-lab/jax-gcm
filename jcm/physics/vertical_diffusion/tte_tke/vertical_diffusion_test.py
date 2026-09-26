@@ -203,6 +203,48 @@ class TestTurbulenceCoefficients:
         assert diag.friction_velocity.shape == (ncol,)
         assert jnp.allclose(diag.friction_velocity, expected, rtol=1e-5)
 
+    def test_10m_wind_vector_is_the_tile_weighted_reduction(self):
+        """ECHAM ``nsurf_diag``: per-tile ``u10_t = zred_t * u_low`` and the
+        grid mean is their fraction-weighted sum (``surface_box_average``).
+
+        The tiles are made to differ (roughness, stability) so the grid mean
+        is a genuine weighted average, not three copies of one value.
+        """
+        ncol, nlev = 3, 10
+        state = create_test_atmospheric_state(ncol, nlev)
+        fraction = jnp.array([0.5, 0.2, 0.3])
+        state = state._replace(
+            surface_fraction=jnp.broadcast_to(fraction, (ncol, 3)),
+            roughness_length=jnp.broadcast_to(
+                jnp.array([1e-4, 1e-3, 0.5]), (ncol, 3)),
+            surface_temperature=jnp.broadcast_to(
+                jnp.array([305.0, 260.0, 290.0]), (ncol, 3)),
+            v=state.v.at[:, -1].set(jnp.array([-3.0, 0.0, 4.0])),
+        )
+        k = jnp.ones((ncol, nlev)) * 0.1
+        diag = compute_turbulence_diagnostics(
+            state, VDiffParameters.default(), k, k, k)
+
+        u_low, v_low = state.u[:, -1], state.v[:, -1]
+        speed_low = jnp.hypot(u_low, v_low)
+        red = diag.wind_10m_tile / speed_low[:, None]
+        assert float(jnp.ptp(red[0])) > 1e-3  # the tiles really differ
+        np.testing.assert_allclose(diag.wind_10m_u_tile, red * u_low[:, None],
+                                   rtol=1e-6)
+        np.testing.assert_allclose(diag.wind_10m_v_tile, red * v_low[:, None],
+                                   rtol=1e-6, atol=1e-7)
+        for grid, tile in ((diag.wind_10m, diag.wind_10m_tile),
+                           (diag.wind_10m_u, diag.wind_10m_u_tile),
+                           (diag.wind_10m_v, diag.wind_10m_v_tile)):
+            np.testing.assert_allclose(
+                grid, jnp.sum(state.surface_fraction * tile, axis=1),
+                rtol=1e-6, atol=1e-7)
+        np.testing.assert_allclose(
+            jnp.hypot(diag.wind_10m_u, diag.wind_10m_v), diag.wind_10m,
+            rtol=1e-6)
+        # The reduction lowers the wind toward the surface.
+        assert jnp.all(diag.wind_10m < speed_low)
+
 
 class TestMatrixSolver:
     """Test tridiagonal matrix solver."""
