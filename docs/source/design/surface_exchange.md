@@ -30,9 +30,15 @@ from the delivered values.
 | `evaporation` | kg m⁻² s⁻¹ | positive up |
 | `precipitation` | kg m⁻² s⁻¹ | positive down, ≥ 0; total (rain + snow, convective + stratiform) |
 | `stress_u`, `stress_v` | N m⁻² | **positive down**: eastward/northward momentum flux into the surface (= −stress on the atmosphere); westerlies give `stress_u > 0` |
-| `wind_speed` | m s⁻¹ | near-surface speed at the package's reference (SPEEDY: fwind0-scaled σ = 0.99 wind; ECHAM: 10 m) |
+| `wind_speed` | m s⁻¹ | near-surface speed at the package's reference (`wind_reference`, below) |
+| `wind_u`, `wind_v` | m s⁻¹ | eastward/northward near-surface wind at the same reference, on the unrotated model grid; `hypot(wind_u, wind_v) == wind_speed` |
 | `air_density` | kg m⁻³ | moist density at the lowest model level, p/(R_d·T·(1 + vtmpc1·q)) |
 | `air_potential_temperature` | K | lowest model level, T·(p₀/p)^κ |
+
+`wind_reference` is static metadata on the struct (not an array leaf, so the
+struct stays a valid `jit`/`scan` output), a key of `WIND_REFERENCES`; the
+publisher's `output_attrs` stamp the same value, its description and, for
+10 m, a `height` onto the netCDF wind variables.
 
 The signs are a maintainer decision on #754: turbulent fluxes positive up,
 the net heat flux positive down. The last two thermodynamic fields exist
@@ -46,8 +52,43 @@ from the output — absence is explicit, never a zero indistinguishable from
 data (the #647 lesson):
 
 - `precip_rain`, `precip_snow` — the phase split;
-- `tile_fraction` and `*_tile` counterparts of the fluxes, with the
-  invariant `sum(tile_fraction * field_tile, axis=-1) == field`.
+- `tile_fraction` and `*_tile` counterparts of the fluxes and the wind
+  (`wind_u_tile`, `wind_v_tile`, `wind_speed_tile`), with the invariant
+  `sum(tile_fraction * field_tile, axis=-1) == field`.
+
+`SurfaceExchange.validate()` checks the wind-vector and tile invariants on
+concrete values, for couplers and tests.
+
+## The near-surface wind: each package's own reference
+
+The wind fields sit at the reference the package's own surface closure
+defines, and the struct says which (maintainer decision on #911):
+
+| `wind_reference` | Package | Definition |
+|---|---|---|
+| `"10m"` | ECHAM | 10 m wind from the stability-dependent surface-layer profile of each tile (`mo_surface` `nsurf_diag`): per tile `u10_t = zred_t·u_low`, box mean `u_low·Σ f_t·zred_t` |
+| `"lowest_level"` | SPEEDY | `fwind0 × (u, v)` at the lowest model level (σ = 0.95 at L8; `fwind0 = 0.95` by default), the wind the SPEEDY bulk formulae use; no gustiness |
+
+A common 10 m height was rejected: SPEEDY has no surface-layer profile, so
+its 10 m wind would be invented rather than diagnosed. A consumer that needs
+a specific height reads `wind_reference` and adapts. The components are the
+wind itself, not a stress-derived direction: a stress-direction proxy
+(`wind_speed·stress/|stress|`) is exact for SPEEDY but only approximate for
+ECHAM, whose implicit solve rotates the delivered stress, and the real field
+costs nothing to publish.
+
+ECHAM-MPIOM itself exchanges per-surface-type stresses and the open-water 10 m
+speed (`wind10w`), not `u10`/`v10`, which are output diagnostics; the vector
+is published because a coupled component with its own drag law (e.g. JAX-ESM's
+Veros bulk stress) or a sea-ice free-drift term needs it.
+
+**Ocean surface currents are reserved, not applied.** ECHAM takes the ocean
+stress and `wind10w` relative to the ocean surface current
+(`mo_surface_ocean.f90`, `zudif = u − ocu`). `ForcingData.ocean_u`/`ocean_v`
+exist so that a coupler's API is stable before this lands, but the TTE-TKE
+vertical diffusion does not read them yet: it applies a zero current (the
+stress against a surface at rest), and the published 10 m wind is the wind
+over a surface at rest. Setting the fields has no effect today.
 
 ## Why grid-mean is guaranteed and tiles are optional
 
@@ -78,6 +119,12 @@ the tile fields: a package may fill them once (and only once) its
 fraction-weighted tile fluxes provably reproduce the delivered mean —
 an API-stable upgrade path, no break.
 
+The wind tiles are the case that already qualifies. ECHAM's grid-mean 10 m
+wind is *defined* as the fraction-weighted sum of the per-tile 10 m winds,
+so ECHAM fills `wind_u_tile`/`wind_v_tile`/`wind_speed_tile` and
+`tile_fraction` (tile axis: water, sea ice, land), while its flux tiles stay
+`None`. SPEEDY has no tiles and leaves all of them `None`.
+
 Similarly the rain/snow split is optional because the Tiedtke-Nordeng port
 exposes only total convective precipitation (`convection.precip_conv`);
 publishing the stratiform-only split (`clouds.precip_rain/snow`) as the
@@ -95,14 +142,19 @@ phase split at all. Both packages therefore guarantee `precipitation`
   fluxes the bottom-level tendencies use. Normalisations: g → kg m⁻² s⁻¹
   for evaporation/precipitation, `latent = alhc·evap` (SPEEDY's J/g
   constant against g m⁻² s⁻¹), stress negated from SPEEDY's
-  on-the-atmosphere `ustr/vstr`.
+  on-the-atmosphere `ustr/vstr`. The wind is the closure's own `(u0, v0)`.
 - **ECHAM** publishes from a terminal `EchamSurfaceExchange` term
   (`jcm/physics/surface/echam/surface_exchange_publisher.py`), composed
   after the cloud microphysics because stratiform precipitation only
   exists then — everything published is the same step's. Turbulent fluxes
   come from the vdiff-delivered `"surface"` fields; the ECHAM
   `momentum_flux_u/v` are already positive-down (verified against the
-  column-integrated vdiff tendency), so they pass through unnegated.
+  column-integrated vdiff tendency), so they pass through unnegated. The
+  wind (grid mean and tiles, with the tile fractions) is the 10 m wind the
+  vertical-diffusion term diagnoses (`vertical_diffusion.wind_10m*`). It is
+  the ECHAM family's only 10 m wind: the AeroCom `uas`/`vas` are the same
+  fields rather than a separate neutral log-profile interpolation, and the
+  surface term's own diagnostics carry no 10 m wind.
 - **Held-Suarez opts out**: a bulk relaxation has no surface fluxes,
   precipitation or hydrology to report, and zeros would read as a calm dry
   planet. `require_surface_exchange()` fails loudly with the opt-out named.
@@ -149,6 +201,11 @@ Absent `prescribed_*` fields raise a pointed error at composition/trace
 time — a forced run never silently applies zero fluxes. The published
 `surface_exchange` struct in forced mode echoes the prescribed values
 exactly (the closed loop a coupler iterates on).
+
+The wind fields are not prescribed: the coupler supplies stress, and the
+published wind is the atmosphere's own in both modes (ECHAM's vdiff diagnoses
+the 10 m wind before its surface-coupling branch; SPEEDY's `(u0, v0)` come
+from the lowest level whatever the flux source).
 
 Prescribed evaporation is republished with `latent = alhc·E`
 (vaporization). A coupler whose evaporation includes sublimation over ice
@@ -279,7 +336,7 @@ dated input does outside its time axis is declared the same way, per input
 JAX-ESM's SPEEDY-only reach into private keys (`_surface_flux.hfluxn`
 negated by hand, freshwater from three structs with a hard-coded g → kg
 conversion) is superseded by reading the published struct; that block is
-tagged `TODO(jax-gcm#754)` in the JAX-ESM source. #482 (near-surface wind /
-boundary-layer coupling) concerns the `wind_speed` field's reference
-height; the contract deliberately states the per-package reference rather
-than promising a common height until that lands.
+tagged `TODO(jax-gcm#754)` in the JAX-ESM source, and its read of SPEEDY's
+private `_surface_flux.u0/v0` for the wind vector (which left ECHAM without
+one) is superseded by `wind_u`/`wind_v`, published by every package at the
+reference the table above defines.
