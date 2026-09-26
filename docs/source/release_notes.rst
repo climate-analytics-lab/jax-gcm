@@ -929,6 +929,13 @@ Grey two-stream shortwave conserves energy
   ``layer_reflectance_transmittance``'s ``T_dir`` is now the diffusely
   transmitted fraction of the beam; the unscattered ``exp(-tau/mu0)`` is no
   longer included.
+- New diagnostic ``convection.precip_floor_source`` [kg m-2 s-1]: the water
+  the Tiedtke scheme creates where ``cuflx`` floors a negative convective rain
+  flux, i.e. where the downdraft takes up more rain than the re-run updraft
+  generates. ECHAM behaves the same way; the floor is kept and its source
+  tracked (#912). A column water budget closes as
+  ``E - P + precip_floor_source``. The grey RCE column reaches this regime
+  once its clouds reflect, at ~0.06-0.09 mm/d.
 
 
 Known limitations
