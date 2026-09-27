@@ -217,14 +217,13 @@ class TestWrittenFileConvention(unittest.TestCase):
     def setUpClass(cls):
         from jcm.model import Model
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.utils import get_coords
 
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
             coords=coords,
-            physics=echam_physics(radiation_scheme="grey",
-                                  checkpoint_terms=False),
+            physics=idealized_echam_physics(checkpoint_terms=False),
             time_step=3.0,
         )
         preds = model.run(save_interval=1.0 / 24.0, total_time=1.0 / 24.0)

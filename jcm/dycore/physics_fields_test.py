@@ -385,8 +385,7 @@ class OmegaDiagnosticTermTest(unittest.TestCase):
 
     def test_echam_factory_keeps_aerocom_terminal(self):
         from jcm.physics.echam.echam_terms import echam_physics
-        physics = echam_physics(radiation_scheme="grey",
-                                diagnose_omega=True, enable_aerocom=True)
+        physics = echam_physics(diagnose_omega=True, enable_aerocom=True)
         names = [t.name for t in physics.terms]
         self.assertIn("omega_diagnostic", names)
         self.assertEqual(names[-1], "aerocom_diagnostics")
@@ -455,8 +454,7 @@ class EchamFactoryTest(unittest.TestCase):
     def test_gw_scheme_switch(self):
         from jcm.physics.echam.echam_terms import echam_physics
 
-        frontal = echam_physics(radiation_scheme="grey",
-                                gw_scheme="frontal")
+        frontal = echam_physics(gw_scheme="frontal")
         names = [t.name for t in frontal.terms]
         self.assertIn("frontal_gravity_wave_drag", names)
         self.assertNotIn("hines_gwd", " ".join(names))
@@ -466,15 +464,15 @@ class EchamFactoryTest(unittest.TestCase):
         self.assertEqual(frontal.required_dycore_fields(),
                          ("omega", "frontogenesis"))
 
-        hines = echam_physics(radiation_scheme="grey", gw_scheme="hines")
+        hines = echam_physics(gw_scheme="hines")
         self.assertEqual(hines.required_dycore_fields(), ("omega",))
 
-        none = echam_physics(radiation_scheme="grey", gw_scheme="none")
+        none = echam_physics(gw_scheme="none")
         none_names = [t.name for t in none.terms]
         self.assertNotIn("frontal_gravity_wave_drag", none_names)
 
         with self.assertRaises(ValueError):
-            echam_physics(radiation_scheme="grey", gw_scheme="bogus")
+            echam_physics(gw_scheme="bogus")
 
 
 if __name__ == "__main__":

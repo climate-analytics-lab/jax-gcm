@@ -10,7 +10,7 @@ from dinosaur.sigma_coordinates import SigmaCoordinates
 
 from jcm.constants import grav
 from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
-from jcm.physics.echam.echam_terms import echam_physics
+from jcm.physics.echam.testing import idealized_echam_physics
 from jcm.physics_interface import Physics, PhysicsState, PhysicsTendency
 from jcm.single_column_model import SCMPredictions, SingleColumnModel
 from jcm.utils import create_initial_tracers, create_single_column_state
@@ -160,12 +160,12 @@ class TestSCMHeldSuarez(unittest.TestCase):
 
 
 class TestSCMEcham(unittest.TestCase):
-    """ECHAM-grey SCM run — exercises tracer evolution."""
+    """Idealized ECHAM-stack SCM run (machinery) — exercises tracer evolution."""
 
     def test_echam_run_smoke(self):
         column_state = _make_column_state(nlev=8)
         scm = SingleColumnModel(
-            physics=echam_physics(radiation_scheme='grey'),
+            physics=idealized_echam_physics(),
             vertical=SigmaCoordinates.equidistant(8),
             lat_deg=0.0,
             lon_deg=0.0,
@@ -209,7 +209,7 @@ class TestSCMEcham(unittest.TestCase):
         """
         column_state = _make_column_state(nlev=8)
         scm = SingleColumnModel(
-            physics=echam_physics(radiation_scheme='grey'),
+            physics=idealized_echam_physics(),
             vertical=SigmaCoordinates.equidistant(8),
             lat_deg=0.0,
             lon_deg=0.0,

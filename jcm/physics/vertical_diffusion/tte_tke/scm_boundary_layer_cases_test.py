@@ -169,7 +169,7 @@ def _surface_plus_vdiff_physics(f: float, u_g: float, v_g: float):
     are removed (asserted); radiation/aerosol/etc. are removed best-effort so
     only the real ECHAM surface + vdiff act on the column.
     """
-    phys = echam_physics(radiation_scheme="grey")
+    phys = echam_physics()
     for cat in ("convection", "clouds", "chemistry", "hines", "sso",
                 "radiation", "aerosol", "cloud_fraction"):
         try:

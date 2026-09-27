@@ -251,15 +251,15 @@ class EndToEndTest(unittest.TestCase):
     def test_runs_in_echam_physics_and_emits_diagnostics(self):
         from jcm.model import Model
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
             coords=coords, terrain=TerrainData.aquaplanet(coords), time_step=15.0,
-            physics=echam_physics(
-                radiation_scheme="grey", cloud_scheme="2m",
+            physics=idealized_echam_physics(
+                cloud_scheme="2m",
                 enable_aerocom=True,
                 aerocom_groups=("cloud", "column", "plev")),
         )
@@ -286,7 +286,7 @@ class EndToEndTest(unittest.TestCase):
         """Adding the term must not change the model trajectory."""
         from jcm.model import Model
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
@@ -294,9 +294,8 @@ class EndToEndTest(unittest.TestCase):
             coords = get_coords(get_echam_levels(47), spectral_truncation=21)
             m = Model(coords=coords, terrain=TerrainData.aquaplanet(coords),
                       time_step=15.0,
-                      physics=echam_physics(radiation_scheme="grey",
-                                            cloud_scheme="2m",
-                                            enable_aerocom=enable))
+                      physics=idealized_echam_physics(
+                          cloud_scheme="2m", enable_aerocom=enable))
             return m.run(total_time="1 hour", save_interval="1 hour").to_xarray()
 
         off, on = run(False), run(True)
@@ -606,15 +605,15 @@ class AerosolGroupEndToEndTest(unittest.TestCase):
     def test_aerosol_group_runs_with_jam(self):
         from jcm.model import Model
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
             coords=coords, terrain=TerrainData.aquaplanet(coords), time_step=15.0,
-            physics=echam_physics(
-                radiation_scheme="grey", cloud_scheme="2m", aerosol_module="jam",
+            physics=idealized_echam_physics(
+                cloud_scheme="2m", aerosol_module="jam",
                 enable_aerocom=True, aerocom_groups=("aerosol",)),
         )
         ds = model.run(total_time="1 hour", save_interval="1 hour").to_xarray()
@@ -633,9 +632,9 @@ class PerBandOpticsSerializationTest(unittest.TestCase):
     Regression: ``*_sw_per_band`` / ``*_lw_per_band`` are
     ``(band, level, lon, lat)`` and the shape→dims lookup had no band
     coordinate, so the FIRST full-output echam-jam+RRTMGP run after
-    jax-gcm#584 crashed at output conversion (grey-radiation
-    compositions never build the per-band fields, which is how CI
-    missed it).
+    jax-gcm#584 crashed at output conversion (a composition with the
+    idealized grey radiation never builds the per-band fields, which is
+    how CI missed it).
     """
 
     @pytest.mark.slow

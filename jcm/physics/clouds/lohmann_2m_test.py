@@ -1602,12 +1602,16 @@ class TestIcon2MPipeline:
         assert nondim_flags["qc"] is True
 
     def test_model_runs_with_2m_and_stays_finite(self):
-        """Short SPEEDY-grid run with the 2M composable physics; no NaNs."""
-        from jcm.physics.echam.echam_terms import echam_physics
+        """Short SPEEDY-grid run with the 2M composable physics; no NaNs.
+
+        Composition machinery, so the cheap idealized stack carries it.
+        """
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.model import Model
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
-        physics = echam_physics(cloud_scheme="2m", checkpoint_terms=False)
+        physics = idealized_echam_physics(cloud_scheme="2m",
+                                          checkpoint_terms=False)
         # Model.time_step is minutes; use the intended 180-second step.
         model = Model(coords=get_speedy_coords(), physics=physics, time_step=3)
         preds = model.run(save_interval=(1 / 24.0), total_time=(2 / 24.0))

@@ -183,14 +183,14 @@ class TestModelUnit(unittest.TestCase):
         from jcm.model import Model
         from jcm.utils import get_coords
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
 
         # Smallest hybrid setup that exercises the same code path as the
         # T63L47 + real-terrain configuration that surfaced the bug.
         coords = get_coords(get_echam_levels(47), spectral_truncation=31)
         model = Model(
             coords=coords,
-            physics=echam_physics(radiation_scheme="grey", checkpoint_terms=False),
+            physics=idealized_echam_physics(checkpoint_terms=False),
             time_step=3.0,
         )
 
@@ -530,11 +530,11 @@ class TestOperatorSplitPhysics(unittest.TestCase):
         from jcm.model import Model
         from jcm.utils import get_coords
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         coords = get_coords(get_echam_levels(47), spectral_truncation=31)
         return Model(
             coords=coords,
-            physics=echam_physics(radiation_scheme="grey", checkpoint_terms=False),
+            physics=idealized_echam_physics(checkpoint_terms=False),
             time_step=3.0,
         )
 

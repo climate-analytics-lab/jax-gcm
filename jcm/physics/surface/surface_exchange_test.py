@@ -380,15 +380,18 @@ class TestSpeedyForcedMode:
 # ---------------------------------------------------------------------------
 
 def _echam_setup(v_wind=0.0, **echam_kwargs):
+    # The surface-exchange publisher and forced mode are coupling machinery,
+    # independent of the radiation scheme, so the cheap idealized composition
+    # carries them.
     from jcm.utils import get_coords
     from jcm.physics.echam.echam_levels import get_echam_levels
-    from jcm.physics.echam.echam_terms import echam_physics
+    from jcm.physics.echam.testing import idealized_echam_physics
     from jcm.terrain import TerrainData
 
     levels = get_echam_levels(47)
     coords = get_coords(levels, spectral_truncation=21)
     terrain = TerrainData.aquaplanet(coords)
-    phys = echam_physics(**echam_kwargs)
+    phys = idealized_echam_physics(**echam_kwargs)
     phys.cache_coords(coords)
     nodal = coords.horizontal.nodal_shape
     nlev = coords.nodal_shape[0]
@@ -585,8 +588,8 @@ class TestEchamForcedMode:
             self.phys.initial_carry_state(self.coords))
         self.se = self.diag_i[SURFACE_EXCHANGE_KEY]
 
-        from jcm.physics.echam.echam_terms import echam_physics
-        self.forced = echam_physics(prescribed_surface_fluxes=True)
+        from jcm.physics.echam.testing import idealized_echam_physics
+        self.forced = idealized_echam_physics(prescribed_surface_fluxes=True)
         self.forced.cache_coords(self.coords)
         self.forcing_p = self.forcing.copy(
             prescribed_sensible_heat_flux=self.se.sensible_heat_flux.reshape(

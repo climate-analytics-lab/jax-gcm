@@ -213,7 +213,7 @@ class IceNucleationModelTest(unittest.TestCase):
         import numpy as onp
 
         from jcm.model import Model
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
@@ -221,7 +221,7 @@ class IceNucleationModelTest(unittest.TestCase):
         terrain = TerrainData.aquaplanet(coords)
         model = Model(
             coords=coords, time_step=30, terrain=terrain,
-            physics=echam_physics(
+            physics=idealized_echam_physics(
                 aerosol_module="jam", cloud_scheme="2m", jam_ice_scheme=scheme,
             ),
         )

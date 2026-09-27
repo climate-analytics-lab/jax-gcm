@@ -230,6 +230,9 @@ class SolveTimeSurfaceOpticsTest(unittest.TestCase):
         bc = EchamBoundaryConditions()
         bc._lats = nnx.Variable(lats)
         bc._lons = nnx.Variable(lons)
+        # The solve-time surface-optics contract is the same for every
+        # radiation term (all replay through rescale_cached_radiation); the grey
+        # term is the cheapest two-column harness for it.
         rad_term = GreyTwoStreamRadiation(params=RadiationParameters.default(
             radiation_interval=every * self.DT))
         rad_term._lats = nnx.Variable(lats)

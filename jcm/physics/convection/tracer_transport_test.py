@@ -539,7 +539,7 @@ class ComposedColumnScavengingTest(unittest.TestCase):
     @pytest.mark.slow
     def test_soluble_tracer_is_scavenged_out_of_the_convective_column(self):
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.rce import (
             JAM_COLUMN_FT_WINDOW,
             convergent_initial_physics_data,
@@ -549,8 +549,7 @@ class ComposedColumnScavengingTest(unittest.TestCase):
 
         nlev, dt, nsteps = 47, 900.0, 96          # one day
         vertical = get_echam_levels(nlev)
-        physics = echam_physics(cloud_scheme="2m", aerosol_module="jam",
-                                radiation_scheme="grey")
+        physics = idealized_echam_physics(cloud_scheme="2m", aerosol_module="jam")
         scm = SingleColumnModel(physics=physics, vertical=vertical,
                                 lat_deg=0.0, lon_deg=150.0, dt_seconds=dt)
         # The SAME prescribed column and seeds the release-validation check
