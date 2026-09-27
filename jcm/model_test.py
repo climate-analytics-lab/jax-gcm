@@ -1769,11 +1769,12 @@ class TestReleaseMatrixStatistics(unittest.TestCase):
         # This process needs no device of its own — it reads band files and
         # spawns one worker per member — and the session-wide preallocation
         # guard in the root ``conftest.py`` is what keeps it from holding the
-        # card anyway. That guard has to live there because merely *importing*
-        # this module initialises a CUDA backend: measured at 61,214 MiB of an
-        # 80 GB A100 before any test body runs, against 428 MiB with the guard
-        # in place. No pin applied from inside a test body can be early
-        # enough, which is why this does not try.
+        # card anyway. Importing jcm initialises no backend (#859), but any
+        # earlier test in this pytest process that built a jax array has —
+        # and under the default that pool is 75 % of the card (61,214 MiB of
+        # an 80 GB A100, against 428 MiB with the guard). No pin applied from
+        # inside a test body can predate those tests, which is why this does
+        # not try.
         worker_env = dict(os.environ)
 
         from jcm.data import remote
@@ -2265,10 +2266,11 @@ class TestReleaseMatrixGeneratePreallocationGuard(unittest.TestCase):
     def test_generate_refuses_without_preallocation_disabled(self):
         """generate() must refuse to orchestrate from a preallocated parent.
 
-        Importing jcm initialises the CUDA backend (#859), so by the time
-        ``generate`` runs, a parent without
-        ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` already holds 75 % of the
-        card and its workers OOM an hour in. The guard turns that into an
+        XLA reads the setting only when a backend first comes up, so a
+        calling process that has already touched the device without
+        ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` holds 75 % of the card and
+        ``generate``'s workers OOM an hour in; it cannot be fixed from
+        inside ``generate``. The guard turns that into an
         immediate, named failure. The test session's own conftest guard
         *sets* the variable, so simulate the unguarded invocation by
         removing it.

@@ -274,7 +274,7 @@ def _stratocumulus_zsat(
     pressure: jnp.ndarray,
     surface_pressure: float,
     config: CloudParameters,
-    enhance_allowed: jnp.ndarray = jnp.array(True),
+    enhance_allowed: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Per-layer stratocumulus saturation factor ``zsat`` ∈ (0, 1].
 
@@ -306,6 +306,11 @@ def _stratocumulus_zsat(
         the cf formula.
 
     """
+    # Built at call time, not as a default argument: a jax array in a
+    # ``def`` default is created at import and initialises the JAX backend
+    # on ``import`` (#859).
+    if enhance_allowed is None:
+        enhance_allowed = jnp.array(True)
     nlev = temperature.shape[0]
 
     z_full = _full_level_heights(temperature, pressure, surface_pressure)
@@ -410,7 +415,7 @@ def calculate_cloud_fraction(
     pressure: jnp.ndarray,
     surface_pressure: float,
     config: CloudParameters,
-    enhance_allowed: jnp.ndarray = jnp.array(True),
+    enhance_allowed: jnp.ndarray | None = None,
     cloud_ice: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Diagnose cloud fraction following ECHAM ``mo_cover.f90``.
@@ -445,6 +450,11 @@ def calculate_cloud_fraction(
         ``(nlev,)``.
 
     """
+    # Built at call time, not as a default argument: a jax array in a
+    # ``def`` default is created at import and initialises the JAX backend
+    # on ``import`` (#859).
+    if enhance_allowed is None:
+        enhance_allowed = jnp.array(True)
     if cloud_ice is None:
         cloud_ice = jnp.zeros_like(temperature)
     qs = _qs_cover(pressure, temperature, cloud_ice, t_ice=config.t_ice)

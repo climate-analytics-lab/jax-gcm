@@ -22,7 +22,7 @@ from .surface_types import (
 @jax.jit
 def compute_ocean_albedo(
     solar_zenith_angle: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Compute ocean surface albedo as a function of solar zenith angle.
 
@@ -35,6 +35,8 @@ def compute_ocean_albedo(
                  albedo_nir_direct, albedo_nir_diffuse)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     # Fresnel reflection formula for direct beam
     # Simplified parameterization based on zenith angle
     cos_theta = jnp.cos(solar_zenith_angle)
@@ -55,7 +57,7 @@ def compute_ocean_roughness(
     wind_speed: jnp.ndarray,
     ocean_u: jnp.ndarray,
     ocean_v: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> jnp.ndarray:
     """Compute ocean surface roughness using Charnock relation.
 
@@ -69,6 +71,8 @@ def compute_ocean_roughness(
         Ocean roughness length [m] (ncol,)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     # Relative wind speed (wind minus ocean current)
     # For simplicity, assume wind_speed is the magnitude and ocean currents are small
     wind_rel_speed = jnp.maximum(wind_speed, params.min_wind_speed)
@@ -99,7 +103,7 @@ def compute_ocean_surface_fluxes(
     exchange_coeff_moisture: jnp.ndarray,
     exchange_coeff_momentum: jnp.ndarray,
     solar_zenith_angle: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> Tuple[SurfaceFluxes, jnp.ndarray]:
     """Compute surface fluxes over ocean.
 
@@ -118,6 +122,8 @@ def compute_ocean_surface_fluxes(
         Tuple of (surface_fluxes, roughness_length)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     ncol = ocean_temp.shape[0]
 
     # Air density
@@ -200,7 +206,7 @@ def ocean_physics_step(
     exchange_coeff_momentum: jnp.ndarray,
     solar_zenith_angle: jnp.ndarray,
     dt: float,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, jnp.ndarray]:
     """Diagnostic ocean surface step: bulk fluxes only, no prognostic state.
 
@@ -225,6 +231,8 @@ def ocean_physics_step(
         Tuple of (surface_fluxes, zero_tendencies, roughness_length)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     ncol = ocean_temp.shape[0]
     del dt  # Unused — no prognostic step.
 

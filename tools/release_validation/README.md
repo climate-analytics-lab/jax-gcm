@@ -33,10 +33,12 @@ member, on a GPU:
 CUDA_VISIBLE_DEVICES=<idx> python -c "import os; os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
 ```
 
-The `os.environ` assignment must precede the jcm import: importing jcm
-initialises the JAX CUDA backend (#859), and the default preallocates 75% of
-the card to the orchestrating process, starving the workers that actually
-integrate the model. `generate` refuses to run without it.
+Set the variable first, as above. Importing jcm does not initialise a JAX
+backend, and `generate` does no device work itself, but XLA reads the setting
+only when a backend first comes up: a process that has already touched the
+device (a notebook that built a model first) holds 75% of the card under the
+default, starving the workers that actually integrate the model. `generate`
+refuses to run without it.
 
 **Generate in a CI-parity environment** — a fresh venv with
 `pip install -e ".[mam4]"` plus a CUDA jax build of the pinned version

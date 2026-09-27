@@ -338,9 +338,9 @@ def calculate_updraft(
     ktype: int,
     mass_flux_base: float,
     config: ConvectionParameters,
-    land_fraction: jnp.ndarray = jnp.array(0.0),
+    land_fraction: jnp.ndarray | None = None,
     type_weights: jnp.ndarray | None = None,
-    lift: jnp.ndarray = jnp.array(0.0),
+    lift: jnp.ndarray | None = None,
     u_wind: jnp.ndarray | None = None,
     v_wind: jnp.ndarray | None = None,
     cp_moist: jnp.ndarray | None = None,
@@ -404,6 +404,13 @@ def calculate_updraft(
         :class:`UpdatedraftState` of half-level profiles.
 
     """
+    # Built at call time, not as a default argument: a jax array in a
+    # ``def`` default is created at import and initialises the JAX backend
+    # on ``import`` (#859).
+    if land_fraction is None:
+        land_fraction = jnp.array(0.0)
+    if lift is None:
+        lift = jnp.array(0.0)
     nlev = temperature.shape[0]
     if cp_moist is None:
         cp_moist = moist_isobaric_heat_capacity(humidity)

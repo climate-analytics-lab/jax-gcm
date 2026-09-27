@@ -200,7 +200,7 @@ def compute_surface_resistances(
     atmospheric_state: AtmosphericForcing,
     surface_state: SurfaceState,
     richardson_number: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> SurfaceResistances:
     """Compute surface resistances for heat, moisture, and momentum transfer.
     
@@ -214,6 +214,8 @@ def compute_surface_resistances(
         Surface resistances
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     ncol, nsfc_type = surface_state.temperature.shape
     
     # Wind speed
@@ -264,7 +266,7 @@ def compute_surface_diagnostics(
     surface_fluxes: SurfaceFluxes,
     resistances: SurfaceResistances,
     wind_speed_10m: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default(),
+    params: SurfaceParameters | None = None,
 ) -> SurfaceDiagnostics:
     """Compute standard surface diagnostics (2m temperature, 10m wind, etc.).
     
@@ -284,6 +286,8 @@ def compute_surface_diagnostics(
         Surface diagnostics
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     ncol, nsfc_type = surface_state.temperature.shape
     
     # Reference heights
