@@ -132,7 +132,6 @@ def surface_physics_step(
     atmospheric_state: AtmosphericForcing,
     surface_state: SurfaceState,
     dt: float,
-    wind_speed_10m: jnp.ndarray,
     params: SurfaceParameters | None = None,
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics]:
     """Complete surface physics step for all surface types.

@@ -265,7 +265,6 @@ def compute_surface_diagnostics(
     surface_state: SurfaceState,
     surface_fluxes: SurfaceFluxes,
     resistances: SurfaceResistances,
-    wind_speed_10m: jnp.ndarray,
     params: SurfaceParameters | None = None,
 ) -> SurfaceDiagnostics:
     """Compute standard surface diagnostics (2m temperature, u*, etc.).

@@ -244,6 +244,31 @@ class TestSurfacePhysicsStep:
         assert jnp.allclose(scaled.momentum_u_mean, 2.0 * base.momentum_u_mean, rtol=1e-5)
         assert jnp.allclose(scaled.momentum_v_mean, 2.0 * base.momentum_v_mean, rtol=1e-5)
 
+    def test_surface_physics_step_honours_passed_parameters(self):
+        """Parameters passed positionally after ``dt`` reach the tiles.
+
+        ``EchamSurface`` calls ``surface_physics_step(atm, surface, dt,
+        params)``, so the fourth positional argument is the parameter set.
+        Every tile's upward longwave is ``emissivity * sigma * T**4``, so a
+        lower emissivity must change the net longwave; a step that fell back
+        to the default parameters would return the default flux.
+        """
+        default, _, _ = surface_physics_step(
+            self.atmospheric_state, self.surface_state, self.dt,
+        )
+        grey_surface = SurfaceParameters.default(emissivity=0.5)
+        positional, _, _ = surface_physics_step(
+            self.atmospheric_state, self.surface_state, self.dt, grey_surface,
+        )
+        keyword, _, _ = surface_physics_step(
+            self.atmospheric_state, self.surface_state, self.dt,
+            params=grey_surface,
+        )
+
+        assert jnp.allclose(positional.longwave_net, keyword.longwave_net)
+        assert jnp.all(
+            jnp.abs(positional.longwave_net - default.longwave_net) > 1.0)
+
 
 class TestCombineSurfaceFluxes:
     """Test surface flux combination."""
