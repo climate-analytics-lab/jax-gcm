@@ -813,6 +813,9 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             snow_col,
         ], axis=1)
 
+        # Zero ocean current: the stress is against a surface at rest.
+        # ``ForcingData.ocean_u/ocean_v`` are reserved for a coupled current
+        # but are not read here yet (#915, docs/source/design/surface_exchange.md).
         ocean_u = jnp.zeros(ncols)
         ocean_v = jnp.zeros(ncols)
 
@@ -917,6 +920,13 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             pbl_height=pbl_height,
             surface_friction_velocity=u_star,
             wind_10m=wind_10m,
+            wind_10m_u=vdiff_diagnostics.wind_10m_u,
+            wind_10m_v=vdiff_diagnostics.wind_10m_v,
+            wind_10m_reduction=vdiff_diagnostics.wind_10m_reduction,
+            wind_10m_tile=vdiff_diagnostics.wind_10m_tile,
+            wind_10m_u_tile=vdiff_diagnostics.wind_10m_u_tile,
+            wind_10m_v_tile=vdiff_diagnostics.wind_10m_v_tile,
+            surface_fraction=surface_fraction,
             surface_evaporation=sfc_fluxes.evaporation,
             surface_sensible_heat=sfc_fluxes.sensible_heat,
             surface_latent_heat=sfc_fluxes.latent_heat,

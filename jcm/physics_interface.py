@@ -349,6 +349,12 @@ class Physics:
                     # explicit, so the variable is simply omitted from
                     # the output rather than published as a fake zero.
                     continue
+                if isinstance(val, str):
+                    # Static string metadata (e.g. SurfaceExchange's
+                    # ``wind_reference``) is not an array variable; the
+                    # publishing term carries it into the netCDF as
+                    # variable attributes through its ``output_attrs``.
+                    continue
                 if isinstance(val, jax.Array):
                     items[new_key] = val
                 elif hasattr(val, "__dict__") and val.__dict__:

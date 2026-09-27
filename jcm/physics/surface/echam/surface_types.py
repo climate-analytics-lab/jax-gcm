@@ -177,9 +177,6 @@ class SurfaceDiagnostics(NamedTuple):
     temperature_2m: jnp.ndarray        # 2m temperature [K] (ncol,)
     humidity_2m: jnp.ndarray           # 2m specific humidity [kg/kg] (ncol,)
     dewpoint_2m: jnp.ndarray           # 2m dew point [K] (ncol,)
-    wind_speed_10m: jnp.ndarray        # 10m wind speed [m/s] (ncol,)
-    u_wind_10m: jnp.ndarray            # 10m u-wind [m/s] (ncol,)
-    v_wind_10m: jnp.ndarray            # 10m v-wind [m/s] (ncol,)
     
     # Surface layer properties
     friction_velocity: jnp.ndarray     # Friction velocity [m/s] (ncol,)
@@ -194,7 +191,6 @@ class SurfaceDiagnostics(NamedTuple):
     # Tile-specific diagnostics
     temperature_2m_tile: jnp.ndarray   # 2m temperature per tile [K] (ncol, nsfc_type)
     humidity_2m_tile: jnp.ndarray      # 2m humidity per tile [kg/kg] (ncol, nsfc_type)
-    wind_speed_10m_tile: jnp.ndarray   # 10m wind per tile [m/s] (ncol, nsfc_type)
 
 
 class SurfaceResistances(NamedTuple):

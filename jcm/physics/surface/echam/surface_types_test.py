@@ -265,9 +265,6 @@ class TestSurfaceDiagnostics:
             temperature_2m=jnp.ones(ncol) * 285.0,
             humidity_2m=jnp.ones(ncol) * 0.008,
             dewpoint_2m=jnp.ones(ncol) * 280.0,
-            wind_speed_10m=jnp.ones(ncol) * 6.0,
-            u_wind_10m=jnp.ones(ncol) * 4.0,
-            v_wind_10m=jnp.ones(ncol) * 3.0,
             friction_velocity=jnp.ones(ncol) * 0.3,
             richardson_number=jnp.ones(ncol) * 0.1,
             surface_layer_height=jnp.ones(ncol) * 100.0,
@@ -276,17 +273,14 @@ class TestSurfaceDiagnostics:
             energy_balance_residual=jnp.ones(ncol) * 5.0,
             temperature_2m_tile=jnp.ones((ncol, nsfc_type)) * 285.0,
             humidity_2m_tile=jnp.ones((ncol, nsfc_type)) * 0.008,
-            wind_speed_10m_tile=jnp.ones((ncol, nsfc_type)) * 6.0
         )
         
         assert diagnostics.temperature_2m.shape == (ncol,)
         assert diagnostics.humidity_2m.shape == (ncol,)
         assert diagnostics.temperature_2m_tile.shape == (ncol, nsfc_type)
-        assert diagnostics.wind_speed_10m_tile.shape == (ncol, nsfc_type)
         
         # Check values
         assert jnp.allclose(diagnostics.temperature_2m, 285.0)
-        assert jnp.allclose(diagnostics.wind_speed_10m, 6.0)
         assert jnp.allclose(diagnostics.net_radiation, 150.0)
 
 

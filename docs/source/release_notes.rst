@@ -516,7 +516,11 @@ Diagnostics and output
 - **AeroCom phase-4 diagnostic suite** with CMOR post-processing
   (``tools/aerocom_cmor.py``), and the CALIPSO and MODIS satellite simulators
   alongside CloudSat, including COSP joint histograms (``clmodis`` tau/Reff,
-  LWP+IWP/Reff, the lidar scattering-ratio CFAD and ISCCP).
+  LWP+IWP/Reff, the lidar scattering-ratio CFAD and ISCCP). The 10 m wind
+  ``uas``/``vas`` applies the vertical-diffusion term's stability-corrected
+  10 m reduction, the one the surface-exchange contract's wind uses, to the
+  post-physics lowest-level wind, so it shares the time level of the other
+  AeroCom winds (#911).
 - **Virtual observation operators** — stations, tracks and solar-time swaths —
   sampled every model timestep, each producing its own output dataset. See
   :doc:`design/observers`.
@@ -566,6 +570,18 @@ Coupling to an external surface component
   faithfully. SPEEDY and ECHAM publish it; Held-Suarez opts out;
   ``ComposablePhysics.require_surface_exchange()`` fails a coupler fast at
   composition time (#754).
+- **The near-surface wind vector on the contract.** ``SurfaceExchange``
+  carries the eastward/northward wind ``wind_u``/``wind_v`` at the same
+  reference as ``wind_speed``, which each package keeps as its own and names
+  in the static ``wind_reference`` field and the netCDF attributes: ECHAM's
+  stability-corrected 10 m wind (``"10m"``), SPEEDY's ``fwind0``-scaled
+  lowest-level wind (``"lowest_level"``). ECHAM also fills the optional
+  per-tile ``wind_u_tile``/``wind_v_tile``/``wind_speed_tile`` with
+  ``tile_fraction`` (water, sea ice, land); ``SurfaceExchange.validate()``
+  checks the vector and tile invariants. ``ForcingData.ocean_u``/``ocean_v``
+  are reserved for a coupled ocean surface current but are **not yet used**:
+  the vertical diffusion still takes the stress against a surface at rest
+  (#911; implementation tracked in #915).
 - **Forced surface mode.** ``physics=speedy-forced-flux`` /
   ``physics=echam-forced-flux`` deliver externally prescribed sensible-heat,
   evaporation and momentum fluxes in place of the package's own surface
