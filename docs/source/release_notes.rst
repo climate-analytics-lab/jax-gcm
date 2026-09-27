@@ -521,6 +521,14 @@ Diagnostics and output
   10 m reduction, the one the surface-exchange contract's wind uses, to the
   post-physics lowest-level wind, so it shares the time level of the other
   AeroCom winds (#911).
+- **AeroCom number and PM diagnostics take each mode's width from the aerosol
+  spec**: ``aerocom_N70``/``aerocom_N100`` and ``aerocom_PM1``/``aerocom_PM10``
+  integrate every mode with its own ``geom_std_dev``, and an explicit
+  ``AerocomDiagnostics(mode_sigma_g=...)`` lists one width per mode in the order
+  of the spec's modes. Values from earlier development builds used swapped
+  Aitken/accumulation widths — about 7–8 % high in near-surface N70/N100 and
+  about 16 % high in PM1 on a spun-up T63 JAM state; PM10 and the model state
+  are unaffected (#917).
 - **Virtual observation operators** — stations, tracks and solar-time swaths —
   sampled every model timestep, each producing its own output dataset. See
   :doc:`design/observers`.
