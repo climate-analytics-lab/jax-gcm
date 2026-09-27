@@ -450,9 +450,11 @@ class AerocomDiagnostics(PhysicsTerm):
         ``overlap`` should match the radiation scheme's overlap
         assumption, as the protocol requests. ``plev_pa`` lists the
         pressure surfaces for the ``plev`` group (default 200 and 700
-        hPa, the levels AeroCom asks for). ``mode_sigma_g`` gives the
-        geometric standard deviation per aerosol mode for the number
-        diagnostics; ``None`` uses the MAM4 defaults.
+        hPa, the levels AeroCom asks for). ``mode_sigma_g`` overrides the
+        geometric standard deviation used for each aerosol mode by the
+        number and PM diagnostics, one entry per mode in the order of the
+        spec's modes; ``None`` takes each mode's ``geom_std_dev`` from the
+        aerosol spec itself.
         """
         unknown = set(groups) - set(self.ALL_GROUPS)
         if unknown:
@@ -464,15 +466,16 @@ class AerocomDiagnostics(PhysicsTerm):
         self.groups = tuple(groups)
         self.overlap = str(overlap)
         self.plev_pa = tuple(float(p) for p in plev_pa)
-        # MAM4 modal widths (Aitken, accumulation, coarse, primary-carbon).
+        # ``None`` is resolved against the spec's modes in _aerosol_group,
+        # where the spec is known, so a width can never be paired with the
+        # wrong mode by a parallel table falling out of order.
         self.mode_sigma_g = (tuple(float(s) for s in mode_sigma_g)
-                             if mode_sigma_g is not None
-                             else (1.6, 1.8, 1.8, 1.6))
+                             if mode_sigma_g is not None else None)
         # sigma_g = 1 is a monodisperse delta: ln(sigma) = 0 divides both
         # lognormal integrals by zero, and sigma < 1 is not a width at all.
         # The per-mode COUNT is checked against the live modal state in
         # _aerosol_group, where it is known.
-        bad = [s for s in self.mode_sigma_g if s <= 1.0]
+        bad = [s for s in (self.mode_sigma_g or ()) if s <= 1.0]
         if bad:
             raise ValueError(
                 f"mode_sigma_g entries must be > 1 (geometric std dev); got {bad}")
@@ -1045,14 +1048,19 @@ class AerocomDiagnostics(PhysicsTerm):
                      else jam.number)
         mass_pp = (jnp.stack(mass_post) if all(x is not None for x in mass_post)
                    else jam.mass)
-        # One width per live mode, positionally. The previous cycling idiom
-        # ((sigma * n)[:n]) silently handed mode 5 mode 1's width if the
-        # modal scheme ever grew; fail loudly instead.
-        if len(self.mode_sigma_g) != n_modes:
+        # One width per live mode, in the spec's mode order (the order of
+        # jam.number / jam.r_dry). By default each mode's own geom_std_dev;
+        # an explicit override is positional in that same order. A count
+        # that disagrees with the modal state fails loudly rather than
+        # pairing some mode with another's width.
+        sigmas = (self.mode_sigma_g if self.mode_sigma_g is not None
+                  else tuple(float(mode.geom_std_dev) for mode in spec.modes))
+        if len(sigmas) != n_modes:
             raise ValueError(
-                f"mode_sigma_g has {len(self.mode_sigma_g)} entries but the "
-                f"modal state carries {n_modes} modes; pass one width per mode")
-        sigmas = self.mode_sigma_g
+                f"{len(sigmas)} mode widths ("
+                f"{'mode_sigma_g' if self.mode_sigma_g is not None else 'aerosol spec'}"
+                f") but the modal state carries {n_modes} modes; "
+                "pass one width per mode")
         rho_air = diagnostics.get("air_density")
         for label, d_thresh in _N_THRESHOLDS.items():
             total = None
