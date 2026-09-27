@@ -105,13 +105,15 @@ mirror is reachable, except where noted.
 These compose and run but have no validation coverage; several have a known
 scientific gap, so treat results with care:
 
-- **Grey radiation + online (JAM) aerosol** — the direct effect *is* carried,
-  through the broadband 550 nm-band profile ``JamOpticsTerm`` writes for grey
-  (see {doc}`radiation`), but at band-centre accuracy and with none of the
-  per-band spectral detail RRTMGP uses, and no validation campaign has been run
-  on the combination. Reachable from either door: ``echam_physics(
-  aerosol_module="jam", radiation_scheme="grey", ...)`` or the CLI's
-  factory-backed ``physics=echam-jam physics.radiation_scheme=grey``.
+- **The ECHAM term stack with idealized grey radiation** — not an ECHAM
+  configuration: the grey two-stream is an idealized scheme with no ECHAM
+  reference (see {doc}`radiation`), so ``echam_physics()`` does not offer it
+  and the factory-built presets reject ``physics.radiation_scheme=grey``. It is
+  composed only explicitly, as a term —
+  ``echam_physics(radiation_scheme=GreyTwoStreamRadiation())`` — for idealized
+  studies and cheap tests, and nothing validates it. With JAM the aerosol direct
+  effect is still carried, through the broadband 550 nm-band profile
+  ``JamOpticsTerm`` writes, at band-centre accuracy.
 - **The ECHAM T127 and T255 grids** (``grid=echam_t{127,255}_l{47,95}_hybrid``;
   384×192 and 768×384, node-for-node ECHAM's ``T127GR15`` / ``T255`` grids,
   built with ``Grid.construct`` as T63 is) — *supported, not validated*. The

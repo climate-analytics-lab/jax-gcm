@@ -23,7 +23,7 @@ builder: echam_physics
 
 aerosol_module: jam
 cloud_scheme: 2m            # ARG activated_cdnc feeds the 2-moment scheme
-radiation_scheme: rrtmgp    # set radiation_scheme=grey for the cheap grey scheme
+radiation_scheme: rrtmgp    # the ECHAM radiation; "grey" (idealized, not ECHAM) is rejected
 jam_microphysics: mam4_jax  # the MAM4-JAX core (#490); "placeholder" for κ-Köhler
 jam_arg_variant: ghosh2025  # or arg2000
 jam_aqueous_scheme: full

@@ -51,13 +51,17 @@ Each parameterization is described in detail below.
 Radiation
 ^^^^^^^^^
 
-JAX-GCM offers three radiation backends, selected via the ``radiation_scheme`` argument to :func:`echam_physics`:
+The ECHAM stack offers two radiation backends, selected via the ``radiation_scheme`` argument to :func:`echam_physics`:
 
-- ``"rrtmgp"`` (recommended): the same RRTMGP correlated-k gas-optics package used by ICON, wrapped via the ``jax-rrtmgp`` library
-- ``"grey"`` (default): a fast, low-fidelity two-stream scheme intended for development and ML emulator training
-- ``"emulated"``: a neural-network surrogate of RRTMGP
+- ``"rrtmgp"`` (default): the same RRTMGP correlated-k gas-optics package used by ICON, wrapped via the ``jax-rrtmgp`` library
+- ``"emulated"``: a neural-network surrogate of RRTMGP, the fast option
 
-**RRTMGP** (recommended for production)
+The grey two-stream scheme (``jcm.physics.radiation.grey_two_stream``) is an
+idealized scheme, not ECHAM physics, and ``radiation_scheme="grey"`` is
+rejected; see :doc:`science/radiation` for what it is and how to compose it
+explicitly.
+
+**RRTMGP** (default)
 
 The RRTMGP path provides physically correct heating rates suitable for multi-day to multi-year integrations.
 
@@ -111,15 +115,9 @@ Per-call cost at T63L47 g128/g112 is dominated by gas-optics interpolation table
      - ≈ 101 ms
      - ~155×
 
-The microphysics choice has effectively no impact on RRTMGP per-call cost — the work is entirely radiation. With the default 2-hour ``radiation_interval`` cache (RRTMGP fires on 1 step in 10 at dt = 12 min) a 30-day T63L47 + sponge integration takes ~78 min wall vs ~6.5 min for grey radiation — i.e. **~12× the grey total**, not the ~4× a smaller-config measurement might suggest. That works out to ~1.5 sim-yr per wall-day on one A100 at climate-quality resolution.
+The microphysics choice has effectively no impact on RRTMGP per-call cost — the work is entirely radiation. With the default 2-hour ``radiation_interval`` cache (RRTMGP fires on 1 step in 10 at dt = 12 min) a 30-day T63L47 + sponge integration takes ~78 min wall vs ~6.5 min with the idealized grey radiation in its place — i.e. **~12× the grey total**, not the ~4× a smaller-config measurement might suggest. That works out to ~1.5 sim-yr per wall-day on one A100 at climate-quality resolution.
 
-**Grey two-stream** (development / ML training)
-
-The grey scheme is a simplified two-stream scheme with hand-tuned band coefficients. It is fast (single GPU pass, no chunking) but NOT physically calibrated — comparison against the RRTMGP harness shows mid-tropospheric LW cooling is roughly 150× too weak and OLR is ~70 % too high on a tropical column. Grey is appropriate for short development runs, neural-network emulator training (the network learns the mapping anyway), and any test where radiation is a passive element of the run; for multi-day climate-style integrations use RRTMGP.
-
-*Configuration*: 2 SW bands (visible 0.2-0.69 µm, near-IR 0.69-2.5 µm), 3 LW bands (window 10-350 cm⁻¹, CO2 350-500 cm⁻¹, H2O 500-2500 cm⁻¹).
-
-**Common features (all backends)**
+**Common features**
 
 - Gas absorption for H2O, CO2, O3, CH4, N2O
 - Mie scattering for liquid cloud droplets; ice crystal optics (Yang et al. 2013, Baum et al. 2014)
@@ -917,7 +915,7 @@ orchestrator:
    # Create composable ECHAM physics with all standard terms
    physics = echam_physics()
 
-   # Use neural network radiation emulator instead of grey radiation
+   # Use the neural-network emulator of RRTMGP, the fast radiation option
    physics = echam_physics(radiation_scheme="emulated")
 
    # Remove non-orographic Hines gravity-wave drag
@@ -957,8 +955,6 @@ respective process directories:
 
    * - Process
      - Module path
-   * - Radiation (grey 2-stream)
-     - ``jcm.physics.radiation.grey_two_stream``
    * - Radiation (RRTMGP)
      - ``jcm.physics.radiation.rrtmgp``
    * - Convection

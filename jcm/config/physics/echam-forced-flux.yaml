@@ -30,8 +30,9 @@
 
 builder: echam_physics
 
-# RRTMGP is the supported ECHAM radiation (same rule as echam.yaml: no
-# CLI route to a grey-ECHAM composition).
+# RRTMGP is the ECHAM radiation (``emulated`` is the fast option). The
+# factory rejects ``grey``: the grey two-stream is an idealized scheme, not
+# ECHAM physics.
 radiation_scheme: rrtmgp
 
 prescribed_surface_fluxes: true
