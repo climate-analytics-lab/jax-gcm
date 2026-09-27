@@ -264,8 +264,8 @@ class TestConfigComposition(unittest.TestCase):
             "physics=echam",
             "grid=echam_t42_l8_sigma",
         ])
-        # The echam preset composes the supported ECHAM radiation (RRTMGP);
-        # grey is a SPEEDY/debug scheme and must not be an ECHAM default.
+        # The echam preset composes the ECHAM radiation (RRTMGP); the grey
+        # two-stream is an idealized scheme, not ECHAM physics.
         self.assertIn("rrtmgp_radiation", cfg.physics.terms)
         self.assertNotIn("grey_two_stream_radiation", cfg.physics.terms)
         self.assertIn("tiedtke_convection", cfg.physics.terms)
@@ -862,15 +862,13 @@ class TestEmissionsConfig(unittest.TestCase):
         return str(path)
 
     def test_echam_jam_factory_includes_emission_terms(self):
-        # Exercise the factory-build path and emission-term wiring with
-        # lightweight overrides — the preset's real defaults (mam4_jax core,
-        # rrtmgp) need the optional ``jcm[mam4]`` extra / radiation data that the
-        # base CI image doesn't carry; the wiring under test is independent of
-        # both.
+        # Exercise the factory-build path and emission-term wiring with the
+        # placeholder JAM core — the preset's mam4_jax default needs the
+        # optional ``jcm[mam4]`` extra that the base CI image doesn't carry;
+        # the wiring under test is independent of it.
         from jcm.runners import build_physics
         cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
-                        "physics.jam_microphysics=placeholder",
-                        "physics.radiation_scheme=grey"])
+                        "physics.jam_microphysics=placeholder"])
         names = [t.name for t in build_physics(cfg).terms]
         self.assertIn("jam_anthropogenic_emissions", names)
         self.assertIn("jam_prescribed_aerosol_emissions", names)
@@ -884,6 +882,26 @@ class TestEmissionsConfig(unittest.TestCase):
         with open_dict(cfg):
             cfg.physics.cloud_sheme = "2m"      # sic
         with self.assertRaisesRegex(ValueError, "cloud_sheme"):
+            build_physics(cfg)
+
+    def test_grey_radiation_override_is_rejected(self):
+        # The factory-built presets forward radiation_scheme to
+        # echam_physics(), so the CLI route to grey must fail with the
+        # factory's own explanation: grey is an idealized scheme, not ECHAM
+        # physics (#918).
+        from jcm.runners import build_physics
+        cfg = _compose([*_NULL_EMISSIONS, "physics=echam-jam",
+                        "grid=echam_t42_l8_sigma",
+                        "physics.jam_microphysics=placeholder",
+                        "physics.radiation_scheme=grey"])
+        with self.assertRaisesRegex(ValueError,
+                                    "idealized scheme, not ECHAM physics"):
+            build_physics(cfg)
+        cfg = _compose(["physics=echam-forced-flux",
+                        "grid=echam_t42_l8_sigma",
+                        "physics.radiation_scheme=grey"])
+        with self.assertRaisesRegex(ValueError,
+                                    "idealized scheme, not ECHAM physics"):
             build_physics(cfg)
 
     def test_unknown_builder_raises(self):
@@ -3883,8 +3901,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         # A published grid (t63): the auto default resolves the per-grid bundle
         # and eagerly fetches it, so a cold cache must fail loudly here.
         cfg = _compose(["physics=echam-jam", "grid=echam_t63_l47_hybrid",
-                        "physics.jam_microphysics=placeholder",
-                        "physics.radiation_scheme=grey"])
+                        "physics.jam_microphysics=placeholder"])
         coords = build_coords(cfg)
 
         def _raise(_path, **_kw):
@@ -3915,8 +3932,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         from jcm import runners
         from jcm.runners import build_coords
         cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
-                        "physics.jam_microphysics=placeholder",
-                        "physics.radiation_scheme=grey"])
+                        "physics.jam_microphysics=placeholder"])
         coords = build_coords(cfg)
 
         def _no_fetch(path):
@@ -3946,8 +3962,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         from jcm.runners import build_coords
         cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
                         "grid.spectral_truncation=63",
-                        "physics.jam_microphysics=placeholder",
-                        "physics.radiation_scheme=grey"])
+                        "physics.jam_microphysics=placeholder"])
         coords = build_coords(cfg)
 
         with mock.patch.object(forcing_assembly, "_resolve_data_path",
@@ -3978,8 +3993,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
                            ("echam_t63_l95_hybrid", 95)):
             with self.subTest(grid):
                 cfg = _compose(["physics=echam-jam", f"grid={grid}",
-                                "physics.jam_microphysics=placeholder",
-                                "physics.radiation_scheme=grey"])
+                                "physics.jam_microphysics=placeholder"])
                 coords = build_coords(cfg)
                 with mock.patch.object(forcing_assembly, "_resolve_data_path",
                                        side_effect=lambda p: p):
@@ -4007,8 +4021,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         from jcm.runners import build_coords
         cfg = _compose(["physics=echam-jam", "grid=echam_t42_l8_sigma",
                         "grid.spectral_truncation=63", "grid.layers=47",
-                        "physics.jam_microphysics=placeholder",
-                        "physics.radiation_scheme=grey"])
+                        "physics.jam_microphysics=placeholder"])
         coords = build_coords(cfg)
         # Guard the premise: this really is a sigma grid at the published
         # (t63, l47) — the exact silent-corruption combo the gate rejects.
@@ -4078,7 +4091,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         cfg = _compose([
             "physics=echam-jam", "grid=echam_t42_l8_sigma",
             "physics.jam_microphysics=placeholder",
-            "physics.radiation_scheme=grey",
             *_NULL_EMISSIONS,
         ])
         # Set the pattern path and year range directly: the Hydra override
@@ -4130,7 +4142,6 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         cfg = _compose([
             "physics=echam-jam", "grid=echam_t42_l8_sigma",
             "physics.jam_microphysics=placeholder",
-            "physics.radiation_scheme=grey",
             *_NULL_EMISSIONS,
         ])
         OmegaConf.set_struct(cfg, False)
@@ -4189,8 +4200,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         from jcm.runners import build_coords, build_forcing
         cfg = _compose([
             "physics=echam-jam", "grid=echam_t42_l8_sigma",
-            "physics.jam_microphysics=placeholder",
-            "physics.radiation_scheme=grey", *_NULL_EMISSIONS,
+            "physics.jam_microphysics=placeholder", *_NULL_EMISSIONS,
         ])
         OmegaConf.set_struct(cfg, False)
         cfg.forcing.oxidants_file = ["/ox_a.nc", "/ox_b.nc"]
@@ -4243,8 +4253,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         from jcm.runners import build_coords, build_forcing
         cfg = _compose([
             "physics=echam-jam", "grid=echam_t42_l8_sigma",
-            "physics.jam_microphysics=placeholder",
-            "physics.radiation_scheme=grey", *_NULL_EMISSIONS,
+            "physics.jam_microphysics=placeholder", *_NULL_EMISSIONS,
         ])
         OmegaConf.set_struct(cfg, False)
         cfg.forcing.oxidants_file = ["/clim.nc", "/transient.nc"]
@@ -4544,8 +4553,7 @@ class TestBuildForcingAutoEmissionsWiring(unittest.TestCase):
         from jcm.runners import build_coords, build_forcing
         cfg = _compose([
             "physics=echam-jam", "grid=echam_t42_l8_sigma",
-            "physics.jam_microphysics=placeholder",
-            "physics.radiation_scheme=grey", *_NULL_EMISSIONS,
+            "physics.jam_microphysics=placeholder", *_NULL_EMISSIONS,
         ])
         OmegaConf.set_struct(cfg, False)
         cfg.forcing.oxidants_file = ["/ox_2000.nc", "/ox_2001.nc"]
