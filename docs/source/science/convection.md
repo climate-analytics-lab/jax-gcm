@@ -102,6 +102,16 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   Nordeng CAPE rescale, so ``tau`` still sets their amplitude.
 - SPEEDY and Betts-Miller are idealized alternatives; Betts-Miller is
   specific-humidity-formulated (Isca's mixing-ratio form differs at second order).
+- **Tiedtke creates water where the downdraft out-takes the plume's rain
+  (#912).** As in ECHAM, ``cumastr`` scales the first ascent's downdraft to the
+  closed flux and re-runs ``cuasc``, and ``cuflx`` floors the rain and snow
+  fluxes at zero while the vapour ledger keeps the unfloored
+  ``pdmfup + pdmfdp``. A second ascent that rains less than the scaled
+  downdraft takes up (a deep-to-shallow demotion) therefore creates the
+  difference as water. The amount is published as
+  ``convection.precip_floor_source``, so a column budget closes as
+  ``E - P + precip_floor_source``; in the grey whole-model RCE column it is
+  ~0.06 mm/d, ~8 % of evaporation.
 
 **Code pointers.**
 - ``jcm/physics/convection/tiedtke_nordeng/`` — ``tiedtke_nordeng.py``

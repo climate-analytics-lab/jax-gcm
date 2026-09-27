@@ -214,6 +214,7 @@ class TestLaggedDynamicsReconstruction(unittest.TestCase):
                 precip_formation=zeros,
                 precip_conv=jnp.zeros((), temperature.dtype),
                 precip_flux=zeros,
+                precip_floor_source=jnp.zeros((), temperature.dtype),
                 dqc_dt=zeros, dqi_dt=zeros,
             ), tn.initialize_convection(
                 temperature, humidity, pressure, u_wind, v_wind, params)
@@ -362,6 +363,7 @@ class TestCloudTopBasePublication(unittest.TestCase):
                 qc_conv=zeros, qi_conv=zeros, precip_formation=zeros,
                 precip_conv=jnp.zeros((), temperature.dtype),
                 precip_flux=zeros, dqc_dt=zeros, dqi_dt=zeros,
+                precip_floor_source=jnp.zeros((), temperature.dtype),
             ), state
 
         monkey = pytest.MonkeyPatch()
