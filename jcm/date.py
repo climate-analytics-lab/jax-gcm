@@ -233,6 +233,66 @@ def parse_duration_seconds(value) -> int:
     return int(rounded)
 
 
+def calendar_duration_months(value) -> int | None:
+    """Whole months in a calendar duration string, or ``None`` if not one.
+
+    ``"12 months"`` -> 12, ``"1 year"`` -> 12. Only positive whole numbers
+    are accepted; anything that is not a month/year string (numbers, fixed
+    units) returns ``None`` so callers fall through to
+    :func:`parse_duration_seconds`.
+    """
+    if isinstance(value, numbers.Real) or value is None:
+        return None
+    m = re.match(r"^\s*([+-]?\d+(?:\.\d+)?)\s*([a-z]+)\s*$",
+                 str(value).strip().lower())
+    if not m or m.group(2) not in _MONTH_ALIASES | _YEAR_ALIASES:
+        return None
+    n = float(m.group(1))
+    if n <= 0 or not n.is_integer():
+        raise ValueError(
+            f"Calendar duration {value!r} must be a positive whole number of "
+            "months or years.")
+    return int(n) * (12 if m.group(2) in _YEAR_ALIASES else 1)
+
+
+def add_calendar_months(start: pydt.datetime, months: int) -> pydt.datetime:
+    """``start`` moved by whole Gregorian months, keeping day and time.
+
+    Refuses a start day that does not exist in the target month (e.g. Jan 31
+    + 1 month) rather than guessing an end-of-month convention.
+    """
+    year, month0 = divmod(start.month - 1 + months, 12)
+    try:
+        return start.replace(year=start.year + year, month=month0 + 1)
+    except ValueError as error:
+        raise ValueError(
+            f"{start.isoformat()} + {months} month(s) has no matching day; "
+            "start calendar-duration runs on a day that exists in every "
+            "month (1-28), or set run.end_time explicitly.") from error
+
+
+def resolve_calendar_end(value, start) -> str | None:
+    """ISO end time for a calendar ``total_time``, or ``None`` if not one.
+
+    ``start`` is the run's start (``jax_datetime.Datetime``, datetime64,
+    datetime or ISO string). Calendar durations are not fixed lengths, so
+    they are resolved against the start into the equivalent exact
+    ``end_time`` at the configuration boundary; the model clock itself only
+    ever sees fixed seconds.
+    """
+    months = calendar_duration_months(value)
+    if months is None:
+        return None
+    import numpy as np
+    if start is None:                       # Model's default start
+        start = "2000-01-01"
+    if isinstance(start, np.datetime64):
+        start = str(start.astype("datetime64[s]"))
+    start64 = np.datetime64(to_datetime(start).to_datetime64(), "s")
+    end = add_calendar_months(start64.astype(pydt.datetime), months)
+    return end.isoformat()
+
+
 def parse_duration_days(value) -> float:
     """Compatibility adapter returning fixed duration days."""
     return parse_duration_seconds(value) / SECONDS_PER_DAY

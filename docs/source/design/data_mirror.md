@@ -228,10 +228,10 @@ Two kinds live there today:
   in a CI-parity environment (a fresh venv with `pip install -e ".[mam4]"`
   and the pinned CUDA jax — never a shared or long-lived one: bands drawn
   under a different jax-rrtmgp release fail a correct model across the whole
-  column). The preallocation setting must precede the jcm import, because
-  importing jcm initialises the CUDA backend (#859) and the default would
-  hand 75 % of the card to the orchestrator; `generate` refuses to run
-  without it. See `tools/release_validation/README.md` for re-deriving bands
+  column). Set the preallocation variable first: XLA reads it only when a
+  backend first comes up, and a calling process that has already touched the
+  device would otherwise hold 75 % of the card and starve the workers;
+  `generate` refuses to run without it. See `tools/release_validation/README.md` for re-deriving bands
   on an already-published state.
 
   and the resulting `<member>_fixture_<digest>.msgpack` is uploaded

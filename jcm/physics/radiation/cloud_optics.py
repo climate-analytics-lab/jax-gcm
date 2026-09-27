@@ -33,7 +33,7 @@ def _planck_lambda(wavelength_um: np.ndarray, temperature: float) -> np.ndarray:
     return 1.0 / (lam**5 * np.expm1(h * c_light / (lam * k_b * temperature)))
 
 
-def _solar_weighted_wavelengths_um(band_limits) -> jnp.ndarray:
+def _solar_weighted_wavelengths_um(band_limits) -> tuple[float, ...]:
     """Return the solar-flux-weighted effective wavelength (um) of each SW band.
 
     ``band_limits`` is the ``((wn_lo, wn_hi), ...)`` tuple from ``constants.py``
@@ -68,10 +68,10 @@ def _solar_weighted_wavelengths_um(band_limits) -> jnp.ndarray:
         trap = np.ones_like(lam)
         trap[0] = trap[-1] = 0.5
         out.append(float(np.sum(trap * lam * weight) / np.sum(trap * weight)))
-    return jnp.array(out)
+    return tuple(out)
 
 
-def _band_centre_wavelengths_um(band_limits) -> jnp.ndarray:
+def _band_centre_wavelengths_um(band_limits) -> tuple[float, ...]:
     """Return the mid-wavenumber wavelength (um) for each band in ``band_limits``.
 
     Used for the LONGWAVE bands: ``lambda = 1e4 / (0.5*(wn_lo+wn_hi))`` um.
@@ -81,14 +81,19 @@ def _band_centre_wavelengths_um(band_limits) -> jnp.ndarray:
     its own band. Deriving it from the limits keeps band b evaluated inside
     band b's own interval (#678).
     """
-    return jnp.array(
-        [1.0e4 / (0.5 * (lo + hi)) for (lo, hi) in band_limits]
-    )
+    return tuple(1.0e4 / (0.5 * (lo + hi)) for (lo, hi) in band_limits)
 
 
 # Per-band representative wavelengths (um), derived once from the band limits.
 # SW: solar-flux-weighted effective wavelength (see
 # ``_solar_weighted_wavelengths_um``); LW: mid-wavenumber.
+#
+# These and the ``_LW_KABS_*`` tables below are tuples of Python floats, turned
+# into jax arrays with ``jnp.asarray`` where they are indexed: a module-level
+# ``jnp.array`` would be the first backend query of the process, so importing
+# this module would initialise the (CUDA) backend and preallocate the GPU (#859).
+# Materialising at use also gives the arrays the dtype of the ``jax_enable_x64``
+# setting in force when the physics runs, not the one in force at import.
 _SW_BAND_WAVELENGTHS_UM = _solar_weighted_wavelengths_um(SW_BAND_LIMITS)
 _LW_BAND_WAVELENGTHS_UM = _band_centre_wavelengths_um(LW_BAND_LIMITS)
 
@@ -101,13 +106,13 @@ _LW_BAND_WAVELENGTHS_UM = _band_centre_wavelengths_um(LW_BAND_LIMITS)
 # 500-2500 cm^-1). The prior code indexed an 8-entry table with the 3-band loop,
 # so bands got coefficients belonging to a different band set (#678); an
 # ``N_LW_BANDS``-length array indexed by band cannot mismatch.
-_LW_KABS_LIQUID = jnp.array([100.0, 105.0, 150.0])
-_LW_KABS_ICE = jnp.array([48.0, 52.0, 82.0])
-if _LW_KABS_LIQUID.shape[0] != N_LW_BANDS or _LW_KABS_ICE.shape[0] != N_LW_BANDS:
+_LW_KABS_LIQUID = (100.0, 105.0, 150.0)
+_LW_KABS_ICE = (48.0, 52.0, 82.0)
+if len(_LW_KABS_LIQUID) != N_LW_BANDS or len(_LW_KABS_ICE) != N_LW_BANDS:
     raise ValueError(
         "LW cloud absorption tables must have one entry per LW band "
-        f"({N_LW_BANDS}); got {_LW_KABS_LIQUID.shape[0]} / "
-        f"{_LW_KABS_ICE.shape[0]}."
+        f"({N_LW_BANDS}); got {len(_LW_KABS_LIQUID)} / "
+        f"{len(_LW_KABS_ICE)}."
     )
 
 
@@ -154,7 +159,7 @@ def get_band_wavelength(band: int, is_sw: bool = True) -> float:
 
     """
     wavelengths = _SW_BAND_WAVELENGTHS_UM if is_sw else _LW_BAND_WAVELENGTHS_UM
-    return wavelengths[band]
+    return jnp.asarray(wavelengths)[band]
 
 
 def sw_band_is_near_ir(band) -> jnp.ndarray:
@@ -577,7 +582,7 @@ def liquid_cloud_optics_lw(
 
     # One absorption coefficient per LW band, indexed by band (#678). The
     # values are heuristic band-averages; see ``_LW_KABS_LIQUID``.
-    k_abs = _LW_KABS_LIQUID[band]
+    k_abs = jnp.asarray(_LW_KABS_LIQUID)[band]
 
     # Size dependence - smaller droplets have slightly higher absorption per unit mass
     size_factor = jnp.sqrt(12.0 / effective_radius)
@@ -614,7 +619,7 @@ def ice_cloud_optics_lw(
 
     # One absorption coefficient per LW band, indexed by band (#678). Ice is
     # generally less absorbing than liquid water; see ``_LW_KABS_ICE``.
-    k_abs = _LW_KABS_ICE[band]
+    k_abs = jnp.asarray(_LW_KABS_ICE)[band]
 
     # Size dependence - larger crystals have different absorption characteristics
     size_factor = jnp.sqrt(35.0 / effective_radius)

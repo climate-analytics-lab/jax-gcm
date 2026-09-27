@@ -4,8 +4,10 @@ from dinosaur.coordinate_systems import CoordinateSystem
 from jcm.utils import get_coords as _get_coords
 
 
-# Standard sigma boundaries used for Held-Suarez (same as SPEEDY 8-layer for consistency)
-DEFAULT_SIGMA_BOUNDARIES = jnp.array([0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0])
+# Standard sigma boundaries used for Held-Suarez (same as SPEEDY 8-layer for consistency).
+# A tuple of Python floats, materialised with ``jnp.asarray`` when coordinates are
+# built: a module-level ``jnp.array`` initialises the JAX backend on import (#859).
+DEFAULT_SIGMA_BOUNDARIES = (0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0)
 
 
 def get_held_suarez_coords(layers=8, spectral_truncation=31, nodal_shape=None, sigma_boundaries=None, spmd_mesh=None) -> CoordinateSystem:
@@ -30,7 +32,7 @@ def get_held_suarez_coords(layers=8, spectral_truncation=31, nodal_shape=None, s
     if sigma_boundaries is None:
         if layers != 8:
             raise ValueError(f"Default sigma boundaries only defined for 8 layers. Provide explicit sigma_boundaries for {layers} layers.")
-        sigma_boundaries = DEFAULT_SIGMA_BOUNDARIES
+        sigma_boundaries = jnp.asarray(DEFAULT_SIGMA_BOUNDARIES)
 
     return _get_coords(
         vertical_coords=sigma_boundaries,

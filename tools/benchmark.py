@@ -155,8 +155,7 @@ def _load_mirror_manifest():
     """Load ``jcm.data.mirror_manifest`` WITHOUT importing the ``jcm`` package.
 
     Same rationale (and mechanism) as :func:`_hf_fetch`: reaching it through
-    ``jcm`` executes ``jcm/__init__.py``, which initialises a JAX backend and
-    preallocates ~75 % of the device before the free-GPU gate. The manifest
+    ``jcm`` executes ``jcm/__init__.py`` and the whole model stack. The manifest
     read-side is import-free (json + pathlib), so a file-path load is safe and
     shares the availability source of truth with the runner (#751). Its
     ``load_manifest`` reads the sibling JSON via ``__file__``, so the file-path
@@ -172,8 +171,8 @@ def _load_mirror_manifest():
 
 #: The prescribed-emission keys honouring ``auto`` (their auto product is
 #: flagged in the manifest). Matches ``forcing/default.yaml`` and the runner.
-#: This harness deliberately does NOT import ``jcm`` (that would initialise a
-#: JAX backend and preallocate the GPU before the free-card gate), so the key
+#: This harness deliberately does NOT import ``jcm`` before the free-card gate
+#: (see :func:`_hf_fetch`), so the key
 #: list and the dust gate below are a second copy of
 #: ``jcm.forcing_assembly``'s — keep them in step.
 _DUST_COMPANION_KEYS = ("dust_preferential_file", "dust_soil_types_file",
@@ -187,8 +186,7 @@ def _load_expand_yearly_files():
 
     Same rationale (and mechanism) as :func:`_load_mirror_manifest`: reaching it
     as ``from jcm.forcing import expand_yearly_files`` would execute ``jcm.forcing``
-    — which imports JAX/dinosaur/``jcm`` at module top and so initialises a JAX
-    backend, preallocating the GPU before the free-card gate. The expansion lives
+    — which imports JAX/dinosaur/``jcm`` at module top. The expansion lives
     in the import-free engine ``jcm/data/input_resolution.py`` (stdlib-only at
     module top) precisely so the runner (via ``jcm.forcing``'s re-export) and
     this pre-GPU prefetch share ONE implementation of the ``{year}`` →
@@ -589,11 +587,14 @@ def _hf_fetch(path: str) -> str:
     """Prefetch one mirror file, WITHOUT importing the ``jcm`` package.
 
     ``jcm.data.remote.fetch`` is the function we want, but reaching it as
-    ``from jcm.data.remote import fetch`` executes ``jcm/__init__.py``,
-    which initialises a JAX backend -- and JAX preallocates ~75 % of the
-    device the instant it is touched. Doing that here, before the free-GPU
-    gate, makes the harness look like a 61 GiB tenant to its own gate; a
-    six-job sweep died that way. So load the module from its file with no
+    ``from jcm.data.remote import fetch`` executes ``jcm/__init__.py`` and
+    with it JAX, dinosaur and every physics package. ``import jcm`` keeps
+    the JAX backend uninitialised (#859, enforced by
+    ``jcm/import_side_effects_test.py``), but the pre-gate path should not
+    stake the gate on that invariant holding for every transitive
+    dependency: one backend touch here and JAX preallocates ~75 % of the
+    device, so the harness looks like a 61 GiB tenant to its own gate (a
+    six-job sweep died that way). So load the module from its file with no
     package context: ``remote.py`` has no intra-package imports, which is
     what makes this safe, and it stays the single source of truth for the
     dataset id rather than being copied in here.
@@ -718,6 +719,12 @@ def run(args) -> dict:
         # save_interval must be <= chunk_days or the chunk write dies with an
         # IndexError from to_xarray() on an empty time axis.
         f"run.save_interval={min(args.save_interval, chunk)}",
+        # A benchmark times fixed-length chunks of interval means; the
+        # calendar-month stream run/longrun.yaml now defaults to (#901) would
+        # refuse 5-day saves that cross month edges, and the per-chunk files
+        # are what --keep-output keeps.
+        "run.monthly_means=false",
+        "run.save_chunks=true",
         # With --allow-unhealthy the driver keeps integrating past a health
         # gate trip. Timing stays valid when it does: XLA runs the same
         # compiled program over the same shapes regardless of the values in

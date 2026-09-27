@@ -505,7 +505,7 @@ def ice_autoconversion(
     cloud_fraction: jnp.ndarray,
     dt: float,
     config: MicrophysicsParameters,
-    air_density: jnp.ndarray = jnp.array(1.0),
+    air_density: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Ice→snow autoconversion — ECHAM's Levkov aggregation (mo_cloud.f90:996-1052).
 
@@ -534,6 +534,11 @@ def ice_autoconversion(
         Grid-mean autoconversion rate (kg/kg/s).
 
     """
+    # Built at call time, not as a default argument: a jax array in a
+    # ``def`` default is created at import and initialises the JAX backend
+    # on ``import`` (#859).
+    if air_density is None:
+        air_density = jnp.array(1.0)
     qi_in_cloud = jnp.where(
         cloud_fraction > config.epsilon,
         cloud_ice / jnp.maximum(cloud_fraction, config.epsilon),

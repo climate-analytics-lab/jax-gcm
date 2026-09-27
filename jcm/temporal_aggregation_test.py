@@ -244,3 +244,50 @@ def test_sub_millisecond_bounds_are_rejected_not_shifted(unit, offset):
         temporal_aggregation.monthly_means(daily)
     with pytest.raises(ValueError, match="millisecond precision"):
         temporal_aggregation.MonthlyMeanAccumulator().update(daily)
+
+
+def _gridded_daily(start, stop, nan_day=None):
+    """Daily means on a small lat/lon grid with dotted names, as jcm writes."""
+    ds = _daily(start, stop)
+    n = ds.sizes["time"]
+    rng = np.random.default_rng(0)
+    field = rng.standard_normal((n, 3, 4))
+    if nan_day is not None:
+        field[nan_day, 1, 2] = np.nan
+    ds["clouds.qc"] = (("time", "lat", "lon"), field)
+    ds["clouds.qc"].attrs.update(cell_methods="time: mean", units="kg kg-1")
+    ds = ds.assign_coords(lat=[-30.0, 0.0, 30.0], lon=[0.0, 90.0, 180.0, 270.0],
+                          hybrid_a=("lat", [1.0, 2.0, 3.0]))
+    ds.lat.attrs["units"] = "degrees_north"
+    return ds
+
+
+@pytest.mark.parametrize("nan_day", [None, 3])
+def test_compact_restart_file_resumes_bit_identically(tmp_path, nan_day):
+    """``save``/``load`` (the chunked CLI's restart file, #901) is exact.
+
+    Covers a uniform valid duration (stored as one integer) and a missing
+    value (stored as a full array), a non-dimension coordinate, a static
+    variable and dotted field names.
+    """
+    ds = _gridded_daily("2000-02-20", "2000-03-05", nan_day=nan_day)
+    whole = temporal_aggregation.MonthlyMeanAccumulator()
+    closed = whole.update(ds)
+    final = whole.finish()
+
+    first = temporal_aggregation.MonthlyMeanAccumulator()
+    assert first.update(ds.isel(time=slice(0, 5))) is None
+    path = first.save(tmp_path / "state.monthly", clock="2000-02-25T00:00:00")
+    resumed, meta = temporal_aggregation.MonthlyMeanAccumulator.load(path)
+    assert meta == {"clock": "2000-02-25T00:00:00"}
+    closed_resumed = resumed.update(ds.isel(time=slice(5, None)))
+    xr.testing.assert_identical(closed_resumed, closed)
+    xr.testing.assert_identical(resumed.finish(), final)
+    assert not (tmp_path / "state.monthly.tmp").exists()
+
+
+def test_compact_restart_file_of_an_empty_accumulator(tmp_path):
+    empty = temporal_aggregation.MonthlyMeanAccumulator()
+    restored, _ = temporal_aggregation.MonthlyMeanAccumulator.load(
+        empty.save(tmp_path / "s"))
+    assert restored.finish() is None

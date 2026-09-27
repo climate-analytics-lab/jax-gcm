@@ -123,6 +123,10 @@ def _run_kwargs(cfg, model) -> dict:
     from jcm.initial_states import balanced_isothermal_state, jw_state
 
     run = cfg.run
+    # A calendar ``total_time`` ("12 months", run/longrun.yaml) is resolved
+    # against the start into the exact end_time, as the CLI does.
+    total_time, end_time = runners._run_duration(
+        cfg, run.get("start_time") or None)
     kwargs: dict = {
         "forcing": None,  # filled by the caller after build_forcing
         # Pass total_time/save_interval through as composed: ``Model.run`` parses
@@ -130,8 +134,8 @@ def _run_kwargs(cfg, model) -> dict:
         # string like ``"1 day"``/``"12 hours"``), so a float() cast here would
         # reject the string form the CLI accepts and break door equivalence.
         "save_interval": run.save_interval,
-        "total_time": run.total_time,
-        "end_time": run.get("end_time"),
+        "total_time": total_time,
+        "end_time": end_time,
         "output_averages": bool(run.output_averages),
         "snapshot_interval": run.get("snapshot_interval"),
         "snapshot_variables": tuple(run.get("snapshot_variables") or ()),

@@ -32,14 +32,15 @@ _LOGGING_BASELINE = {}
 def _disable_gpu_preallocation():
     """Force ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` for the test session.
 
-    XLA's default claims 75 % of the card at backend initialisation, and
-    merely *importing* a test module that reaches jcm triggers that (#859:
-    the SPEEDY lookup tables are built on jcm's import chain) — measured at
-    61,214 MiB of an 80 GB A100 for a process whose test then does no device
-    work at all. On a shared box that locks out colleagues; worse, it starves
-    this session's own subprocesses: the release-matrix regression integrates
-    each member in a worker process, and a worker can only use what the
-    parent pytest process left on the card. The worker's own
+    XLA's default claims 75 % of the card at backend initialisation —
+    61,214 MiB of an 80 GB A100. Importing jcm does not initialise a backend
+    (#859, enforced by ``jcm/import_side_effects_test.py``), but the first
+    test that builds any jax array does, and the pool is then held for the
+    rest of the session whatever the later tests need. On a shared box that
+    locks out colleagues; worse, it starves this session's own subprocesses:
+    the release-matrix regression integrates each member in a worker process,
+    and a worker can only use what the parent pytest process left on the
+    card. The worker's own
     ``XLA_PYTHON_CLIENT_PREALLOCATE=false`` governs the worker's pool, not
     the parent's, so it cannot give back memory the parent already holds —
     which is how the T106 and JAM members came to OOM under pytest while

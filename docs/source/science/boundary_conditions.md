@@ -85,10 +85,11 @@ The first four are mandatory together: ``mo_ham_dust.f90`` aborts without any of
 them, and running with the textures or regions missing would silently emit an
 untuned, all-coarse-soil flux, so ``_attach_dust`` raises instead. The monthly
 climatologies are stepped by month, never interpolated — the Fortran reads one
-record per call and marks the region mask ``EF_NOINTER``. ``WRAP_YEAR`` bins the
-year into twelve equal slices rather than calendar months, so records 2-11
-switch 1-2 days late; that is shared by every monthly climatology in the model
-and is tracked in #805 rather than changed here. The region mask is categorical and is refused at load if it is
+record per call and marks the region mask ``EF_NOINTER``. As for every
+twelve-record ``wrap_year`` climatology in the model, record *m* is held from
+the 1st of calendar month *m* on the run's Gregorian clock, leap years
+included, so each record switches exactly at the civil month boundary the
+Fortran's monthly read uses. The region mask is categorical and is refused at load if it is
 not integral in [1, 8], which is what a linear or conservative regrid would
 produce. The products come from the ECHAM-HAMMOZ input pool at the three
 resolutions HAMMOZ ships (``jcm/data/mirror/dust.py``, provenance in

@@ -4795,6 +4795,317 @@ class TestRunDateEndpoints(unittest.TestCase):
             self.assertEqual(initial.call_args.args[1], "2010-02-03T00:00:00")
 
 
+# --------------------------------------------------------------------------
+# Streaming calendar-month means from the chunked CLI (#901).
+
+#: 2000-02-20 + 15 days: a partial leap February (10 days, through Feb 29),
+#: the Mar 1 boundary, and a partial March (5 days).
+_MONTHLY_START = "2000-02-20"
+_MONTHLY_DAYS = 15
+
+
+def _monthly_cfg(prefix, chunk, total=_MONTHLY_DAYS, extra=()):
+    return _compose([
+        "physics=held_suarez", "grid=held_suarez_t31_l8",
+        "run.time_step=180", f"run.start_time={_MONTHLY_START}",
+        f"run.total_time={total}", "run.save_interval=1",
+        "run.output_averages=true", "run.monthly_means=true",
+        f"run.chunk_days={chunk}", f"run.output_prefix={prefix}", *extra])
+
+
+def _monthly_files(prefix) -> dict:
+    """``{YYYY-MM: Dataset}`` of a run's monthly files, provenance stripped."""
+    out = {}
+    for path in sorted(Path(prefix).parent.glob(
+            f"{Path(prefix).name}_monthly_*.nc")):
+        with xr.open_dataset(path) as ds:
+            ds = ds.load()
+        ds.attrs = {}
+        out[path.stem.rsplit("_", 1)[-1]] = ds
+    return out
+
+
+def _assert_same_months(test, got, want):
+    test.assertEqual(sorted(got), sorted(want))
+    for month in want:
+        xr.testing.assert_identical(got[month], want[month])
+
+
+@pytest.mark.slow
+class TestMonthlyMeansStream(unittest.TestCase):
+    """``run.monthly_means`` files are independent of chunking and restarts."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.tmp = Path(cls._tmp.name)
+        # Reference: one uninterrupted chunk, daily files kept for the batch
+        # comparison.
+        cls.ref_prefix = str(cls.tmp / "ref")
+        run(_monthly_cfg(cls.ref_prefix, chunk=_MONTHLY_DAYS))
+        cls.ref = _monthly_files(cls.ref_prefix)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def test_reference_months_have_real_bounds_and_coverage(self):
+        self.assertEqual(sorted(self.ref), ["2000-02", "2000-03"])
+        feb, mar = self.ref["2000-02"], self.ref["2000-03"]
+        np.testing.assert_array_equal(
+            feb.time_bounds.values[0].astype("datetime64[s]"),
+            np.array(["2000-02-20", "2000-03-01"], dtype="datetime64[s]"))
+        np.testing.assert_array_equal(
+            mar.time_bounds.values[0].astype("datetime64[s]"),
+            np.array(["2000-03-01", "2000-03-06"], dtype="datetime64[s]"))
+        self.assertAlmostEqual(float(feb.time_coverage_fraction.values[0]), 10 / 29)
+        self.assertAlmostEqual(float(mar.time_coverage_fraction.values[0]), 5 / 31)
+
+    def test_matches_batch_monthly_means_of_the_daily_output(self):
+        from jcm.temporal_aggregation import monthly_means
+
+        with xr.open_dataset(f"{self.ref_prefix}_day{_MONTHLY_DAYS}.nc") as d:
+            batch = monthly_means(d.load())
+        for i, month in enumerate(("2000-02", "2000-03")):
+            for name in ("temperature", "u_wind", "specific_humidity"):
+                # Streamed sums are sequential, the batch reduction pairwise:
+                # equal to rounding, not bit for bit.
+                np.testing.assert_allclose(
+                    self.ref[month][name].values[0], batch[name].values[i],
+                    rtol=1e-12, atol=0.0)
+
+    def test_chunk_length_does_not_change_the_monthly_files(self):
+        for chunk in (1, 7, 10, 43):
+            with self.subTest(chunk_days=chunk):
+                prefix = str(self.tmp / f"c{chunk}")
+                run(_monthly_cfg(prefix, chunk))
+                _assert_same_months(self, _monthly_files(prefix), self.ref)
+
+    def test_save_chunks_false_writes_only_monthly_files(self):
+        prefix = str(self.tmp / "monthly_only")
+        run(_monthly_cfg(prefix, 7, extra=["run.save_chunks=false"]))
+        self.assertEqual(list(self.tmp.glob("monthly_only_day*.nc")), [])
+        _assert_same_months(self, _monthly_files(prefix), self.ref)
+
+    def test_resume_seams_are_bit_identical(self):
+        # Mid-February; the end of Feb 28 (before the leap day); exactly on
+        # the Mar 1 month boundary.
+        for seam in (5, 9, 10):
+            with self.subTest(seam_days=seam):
+                prefix = str(self.tmp / f"seam{seam}")
+                ckpt = f"{prefix}.ckpt"
+                extra = [f"run.checkpoint_path={ckpt}"]
+                run(_monthly_cfg(prefix, 1, total=seam, extra=extra))
+                self.assertTrue(Path(f"{ckpt}.monthly").exists())
+                run(_monthly_cfg(prefix, 1, extra=extra))
+                _assert_same_months(self, _monthly_files(prefix), self.ref)
+
+    def test_kill_between_state_and_checkpoint_resumes_from_prev(self):
+        """A kill after ``.monthly`` but before the checkpoint is written.
+
+        The checkpoint is then one chunk older than ``.monthly``; the resume
+        must pair it with ``.monthly.prev`` — neither dropping nor
+        double-counting the chunk in between.
+        """
+        import shutil
+
+        prefix = str(self.tmp / "killed")
+        ckpt = f"{prefix}.ckpt"
+        extra = [f"run.checkpoint_path={ckpt}"]
+        run(_monthly_cfg(prefix, 5, total=10, extra=extra))
+        shutil.copyfile(f"{ckpt}.prev", ckpt)      # day-5 checkpoint
+        run(_monthly_cfg(prefix, 5, extra=extra))
+        _assert_same_months(self, _monthly_files(prefix), self.ref)
+
+    def test_repeated_kills_after_the_state_write_still_resume(self):
+        """Kill after staging the monthly state, before the checkpoint — twice.
+
+        The state matching the committed checkpoint must survive every
+        retry, so the third attempt still resumes and finishes bit-identically.
+        """
+        from jcm import runners as r
+
+        prefix = str(self.tmp / "twice")
+        ckpt = f"{prefix}.ckpt"
+        extra = [f"run.checkpoint_path={ckpt}"]
+        real = r._save_monthly_stream
+        mar1 = np.datetime64("2000-03-01", "s")
+
+        def killed_at_mar1(accumulator, path, model):
+            real(accumulator, path, model)
+            if r._clock64(model) == mar1:
+                raise RuntimeError("killed")
+
+        with mock.patch.object(r, "_save_monthly_stream", killed_at_mar1):
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, "killed"):
+                    run(_monthly_cfg(prefix, 5, extra=extra))
+        run(_monthly_cfg(prefix, 5, extra=extra))
+        _assert_same_months(self, _monthly_files(prefix), self.ref)
+
+    def test_kill_before_promotion_then_after_the_next_state_write(self):
+        """Kill after the checkpoint but before ``.new`` is promoted, then
+        kill the retry right after it stages the next chunk's state.
+
+        The retry must restore ``.new`` and complete its promotion, or the
+        next staging overwrites the only state matching the checkpoint.
+        """
+        from jcm import runners as r
+
+        prefix = str(self.tmp / "promote")
+        ckpt = f"{prefix}.ckpt"
+        extra = [f"run.checkpoint_path={ckpt}"]
+        real_commit, real_save = r._commit_monthly_stream, r._save_monthly_stream
+        calls = []
+
+        def commit_killed_at_day10(path):
+            calls.append(path)
+            if len(calls) == 2:
+                raise RuntimeError("killed")
+            real_commit(path)
+
+        def save_killed_at_mar6(accumulator, path, model):
+            real_save(accumulator, path, model)
+            if r._clock64(model) == np.datetime64("2000-03-06", "s"):
+                raise RuntimeError("killed")
+
+        with mock.patch.object(r, "_commit_monthly_stream",
+                               commit_killed_at_day10):
+            with self.assertRaisesRegex(RuntimeError, "killed"):
+                run(_monthly_cfg(prefix, 5, extra=extra))
+        with mock.patch.object(r, "_save_monthly_stream", save_killed_at_mar6):
+            with self.assertRaisesRegex(RuntimeError, "killed"):
+                run(_monthly_cfg(prefix, 5, extra=extra))
+        run(_monthly_cfg(prefix, 5, extra=extra))
+        _assert_same_months(self, _monthly_files(prefix), self.ref)
+
+    def test_restart_at_the_final_checkpoint(self):
+        """A restart with nothing left to integrate still owns the final month.
+
+        The final checkpoint is saved before the final flush, so its restored
+        stream holds the final month. If that month's file was written, the
+        restart leaves it and its sidecar byte-for-byte alone; if the previous
+        attempt died before writing it, the restart writes it — with the
+        run's parameter provenance, although no chunk ran to trace them.
+        """
+        import hashlib
+
+        from jcm import provenance
+
+        prefix = str(self.tmp / "final")
+        ckpt = f"{prefix}.ckpt"
+        extra = [f"run.checkpoint_path={ckpt}"]
+        run(_monthly_cfg(prefix, 5, extra=extra))
+        march = Path(f"{prefix}_monthly_2000-03.nc")
+        sidecar = Path(f"{march}.provenance.json")
+
+        def digests():  # hashes: a failing bytes compare would diff 2 MB
+            return tuple(hashlib.sha256(p.read_bytes()).hexdigest()
+                         for p in (march, sidecar))
+
+        before = digests()
+        with xr.open_dataset(march) as ds:
+            params_before = provenance.read_params(ds.attrs)
+            hash_before = ds.attrs["jcm_prov_run_hash"]
+        self.assertTrue(params_before)
+
+        run(_monthly_cfg(prefix, 5, extra=extra))
+        self.assertEqual(digests(), before)
+
+        # Month file written but the sidecar not (kill between the two), then
+        # neither: both are (re)written with the run's params provenance.
+        for missing in ((sidecar,), (march, sidecar)):
+            for path in missing:
+                path.unlink()
+            run(_monthly_cfg(prefix, 5, extra=extra))
+            self.assertTrue(sidecar.exists())
+            _assert_same_months(self, _monthly_files(prefix), self.ref)
+            with xr.open_dataset(march) as ds:
+                self.assertEqual(provenance.read_params(ds.attrs),
+                                 params_before)
+                self.assertEqual(ds.attrs["jcm_prov_run_hash"], hash_before)
+
+
+class TestMonthlyMeansConfig(unittest.TestCase):
+    """Refusals happen before integrating; calendar lengths resolve exactly."""
+
+    def _run_chunked(self, cfg, chunk_days=5):
+        import jax_datetime as jdt
+
+        from jcm.runners import run_chunked
+
+        model = types.SimpleNamespace(
+            start_time=jdt.to_datetime(_MONTHLY_START),
+            run_state=types.SimpleNamespace(
+                time=jdt.to_datetime(_MONTHLY_START)),
+            run=mock.Mock(side_effect=AssertionError("integrated")),
+            resume=mock.Mock(side_effect=AssertionError("integrated")))
+        return run_chunked(cfg, chunk_days=chunk_days, output_prefix="unused",
+                           model=model, forcing=object())
+
+    def test_interval_crossing_a_month_is_refused_before_integrating(self):
+        # 3-day saves from Feb 20: [Feb 29, Mar 3) crosses Mar 1.
+        cfg = _monthly_cfg("unused", 3, extra=["run.save_interval=3"])
+        with self.assertRaisesRegex(ValueError, "crosses the month boundary"):
+            self._run_chunked(cfg, chunk_days=3)
+
+    def test_monthly_means_need_interval_means(self):
+        cfg = _monthly_cfg("unused", 5, extra=["run.output_averages=false"])
+        with self.assertRaisesRegex(ValueError, "output_averages"):
+            self._run_chunked(cfg)
+
+    def test_chunks_must_continue_the_interval_grid(self):
+        cfg = _monthly_cfg("unused", 5, extra=["run.save_interval=2"])
+        with self.assertRaisesRegex(ValueError, "whole multiples"):
+            self._run_chunked(cfg)
+
+    def test_resume_without_monthly_state_is_refused(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            prefix = f"{tmp}/r"
+            ckpt = f"{prefix}.ckpt"
+            first = _monthly_cfg(prefix, 1, total=1, extra=[
+                f"run.checkpoint_path={ckpt}", "run.monthly_means=false"])
+            run(first)
+            with self.assertRaisesRegex(ValueError, "cannot resume"):
+                run(_monthly_cfg(prefix, 1, total=2,
+                                 extra=[f"run.checkpoint_path={ckpt}"]))
+
+    def test_no_output_at_all_is_refused_before_integrating(self):
+        cfg = _monthly_cfg("unused", 5, extra=["run.monthly_means=false",
+                                               "run.save_chunks=false"])
+        with self.assertRaisesRegex(ValueError, "no output"):
+            self._run_chunked(cfg)
+
+    def test_monthly_means_need_the_chunked_loop(self):
+        with self.assertRaisesRegex(ValueError, "chunk_days > 0"):
+            run(_monthly_cfg("unused", 0))
+
+    def test_calendar_total_time_resolves_against_the_start(self):
+        import jax_datetime as jdt
+
+        from jcm.runners import _configured_total_seconds
+
+        cfg = _compose(["run.total_time=1 month",
+                        f"run.start_time={_MONTHLY_START}"])
+        self.assertEqual(_configured_total_seconds(
+            cfg, jdt.to_datetime(_MONTHLY_START)), 29 * 86400)
+        year = _compose(["run.total_time=12 months"])
+        self.assertEqual(_configured_total_seconds(
+            year, jdt.to_datetime("2000-01-01")), 366 * 86400)
+        self.assertEqual(_configured_total_seconds(
+            year, jdt.to_datetime("2001-01-01")), 365 * 86400)
+
+    def test_longrun_is_a_calendar_year_of_monthly_means(self):
+        cfg = _compose(["run=longrun"])
+        self.assertEqual(str(cfg.run.total_time), "12 months")
+        self.assertTrue(cfg.run.monthly_means)
+        self.assertFalse(cfg.run.save_chunks)
+        self.assertEqual(float(cfg.run.save_interval), 1.0)
+
+
 class ResumeMirrorRevisionTest(unittest.TestCase):
     """A resume must not silently switch the run's mirror inputs."""
 

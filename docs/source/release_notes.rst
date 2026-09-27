@@ -26,9 +26,11 @@ One exact Gregorian clock and real monthly output
 """""""""""""""""""""""""""""""""""""""""""""""""
 
 - ``Model(start_time=...)`` replaces ``start_date`` and removes the
-  ``calendar`` switch. Runs use exactly one fixed ``total_time`` or absolute
-  ``end_time``; month/year duration aliases and silently truncated intervals
-  are rejected. The exact datetime and step counter travel with the resumable
+  ``calendar`` switch. Runs use exactly one ``total_time`` or absolute
+  ``end_time``; a month/year ``run.total_time`` (``12 months``) is resolved
+  against ``run.start_time`` into the exact end, while the fixed-duration APIs
+  (``save_interval``, ``Model.run``) reject month/year aliases, and silently
+  truncated intervals are rejected. The exact datetime and step counter travel with the resumable
   ``RunState`` and schema-2 checkpoints.
 - ``wrap_year`` climatologies select by real calendar position: twelve
   monthly records switch at civil month boundaries, including leap years
@@ -36,6 +38,13 @@ One exact Gregorian clock and real monthly output
   dates preserve their nominal date components on the Gregorian clock (#449).
   Whether a file repeats annually is declared, never inferred (see the #884
   entry below).
+- The chunked CLI streams calendar-month means (#901):
+  ``run.monthly_means=true`` writes ``{output_prefix}_monthly_YYYY-MM.nc``
+  independent of chunk length, with the pending month persisted and rotated
+  with the checkpoint; ``run.save_chunks=false`` drops the per-chunk files.
+  ``run=longrun`` and ``run=pyses_year`` now default to a calendar year
+  (``12 months``) of daily means in 5-day chunks written only as monthly
+  files — previously 365 days of 5-day means in 30-/10-day chunk files.
 - ``ModelPredictions.monthly_means()`` reduces bounded interval means by
   real month; save daily means with ``output_averages=True`` first. Observer
   sampling stays independent. Exact shared ``output_time_labels`` replaces
@@ -775,6 +784,28 @@ corrections, listed here because they change climate:
   conservatively remapped t63/t106 ``emissions_{pd,pi}`` bundles, so a cache
   holding the earlier emissions re-fetches once; prefetch before running
   offline.
+
+Importing jcm does not touch the GPU
+""""""""""""""""""""""""""""""""""""
+
+``import jcm`` — and importing any jcm module, including the physics packages
+directly — no longer initialises a JAX backend (#859). Previously the SPEEDY
+sigma tables on ``jcm``'s import chain were built as jax arrays at import, the
+first device query of the process, so on a GPU host a bare ``import jcm``
+brought up CUDA and, under JAX's default ``XLA_PYTHON_CLIENT_PREALLOCATE``,
+claimed 75 % of the card (61,222 MiB of an 80 GB A100) in a process that might
+never do device work — an orchestrator whose integrations run in subprocesses,
+or a REPL inspecting output. The device is now first touched when a model or
+physics term actually builds arrays. Module-level tables (the SPEEDY and
+Held-Suarez sigma boundaries, the grey cloud-optics band tables, the TTE
+Businger-Dyer roughness tables) are stored as Python floats and materialised
+where used, and ``def`` defaults that were jax arrays are ``None`` or numpy
+scalars. Two consequences: ``physical_constants.SIGMA_LAYER_BOUNDARIES`` and
+``held_suarez.utils.DEFAULT_SIGMA_BOUNDARIES`` are now tuples of floats (use
+``compute_sigma_boundaries(nlev)`` for an array), and the dtype of those tables
+follows the ``jax_enable_x64`` setting in force when they are used rather than
+whichever was in force at import. ``jcm/import_side_effects_test.py`` enforces
+the property for every module.
 
 
 Corrected physics

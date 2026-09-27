@@ -52,6 +52,29 @@ sponge:
 chunk_days: 0
 output_prefix: chunked_run
 
+# Calendar-month means from the chunked loop (#901). With ``chunk_days > 0``
+# and ``output_averages: true``, every chunk's interval means stream through
+# ``jcm.temporal_aggregation.MonthlyMeanAccumulator`` and each Gregorian month
+# is written to ``{output_prefix}_monthly_YYYY-MM.nc`` once the first interval
+# of the next month arrives — duration-weighted, accumulated in float64, and
+# independent of chunk length. A partial first/last month carries its actual
+# ``time_bounds`` plus ``time_coverage`` / ``time_coverage_fraction``.
+# Save intervals must tile the months from ``start_time`` (checked before
+# integrating; daily or sub-daily saves from a midnight start always do).
+# The pending month is persisted as ``{checkpoint_path}.monthly`` (rotated to
+# ``.monthly.prev``, copied beside ``archive_ckpt_every`` archives) with the
+# same health gating as the checkpoint, and restored on resume; a resume
+# whose checkpoint has no monthly state at the same instant is refused.
+# With ``bail_on_unhealthy: false`` the stream keeps following the
+# integration while the checkpoint (and so the persisted month) stays at the
+# last healthy chunk: a later resume re-integrates from there and rewrites
+# any month file closed since, so files and restart state never disagree.
+monthly_means: false
+# Write each chunk's interval means to ``{output_prefix}_day{N}.nc``. Set
+# false with ``monthly_means`` to keep only the monthly files: a year of
+# daily means is hundreds of GB for a JAM configuration at T63.
+save_chunks: true
+
 # Interval-instantaneous snapshot stream (jax-gcm#586): with
 # ``output_averages: true``, sample the listed 2-D diagnostics
 # instantaneously every ``snapshot_interval`` (days; must divide

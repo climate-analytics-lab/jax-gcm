@@ -734,11 +734,7 @@ def _configured_total_seconds(cfg: DictConfig, start_time) -> int:
     """
     from jcm.date import parse_duration_seconds, to_datetime
 
-    total = cfg.run.get("total_time")
-    end = cfg.run.get("end_time")
-    if (total is None) == (end is None):
-        raise ValueError("Set exactly one of run.total_time and run.end_time; "
-                         "set run.total_time=null when selecting an end_time.")
+    total, end = _run_duration(cfg, start_time)
     if end is None:
         return parse_duration_seconds(total)
     delta = to_datetime(str(end), name="end_time") - to_datetime(start_time)
@@ -746,6 +742,26 @@ def _configured_total_seconds(cfg: DictConfig, start_time) -> int:
     if seconds <= 0:
         raise ValueError("The configured run must have a positive finite duration.")
     return seconds
+
+
+def _run_duration(cfg: DictConfig, start_time) -> tuple:
+    """``(total_time, end_time)`` to hand the model, exactly one not None.
+
+    A calendar ``run.total_time`` (``"12 months"``, ``"1 year"``) is not a
+    fixed length, so it is resolved here — against ``start_time`` — into the
+    equivalent exact ``end_time``; everything downstream sees fixed seconds.
+    """
+    from jcm.date import resolve_calendar_end
+
+    total = cfg.run.get("total_time")
+    end = cfg.run.get("end_time")
+    if (total is None) == (end is None):
+        raise ValueError("Set exactly one of run.total_time and run.end_time; "
+                         "set run.total_time=null when selecting an end_time.")
+    calendar_end = resolve_calendar_end(total, start_time)
+    if calendar_end is not None:
+        return None, calendar_end
+    return total, end
 
 
 def configured_run_window(cfg: DictConfig, model):
@@ -1795,6 +1811,13 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
     # imported and the ozone source is decided, so the summary is accurate.
     logger.info("provenance: %s", provenance.summary())
     chunk_days = float(cfg.run.get("chunk_days", 0.0) or 0.0)
+    if cfg.run.get("monthly_means", False) and chunk_days <= 0:
+        raise ValueError(
+            "run.monthly_means streams monthly files from the chunked run loop; "
+            "set run.chunk_days > 0 (any length), or run.monthly_means=false "
+            "and reduce in Python with ModelPredictions.monthly_means().")
+    total_time, end_time = _run_duration(
+        cfg, getattr(model, "start_time", None))
     if chunk_days > 0:
         return run_chunked(
             cfg,
@@ -1808,8 +1831,8 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         return model.run(
             forcing=forcing,
             save_interval=cfg.run.save_interval,
-            total_time=cfg.run.get("total_time"),
-            end_time=cfg.run.get("end_time"),
+            total_time=total_time,
+            end_time=end_time,
             output_averages=cfg.run.output_averages,
             snapshot_interval=cfg.run.get("snapshot_interval"),
             snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
@@ -1833,8 +1856,8 @@ def _run_full(cfg: DictConfig, model: Model | None = None) -> ModelPredictions:
         initial_physics_state=initial_physics_state,
         forcing=forcing,
         save_interval=cfg.run.save_interval,
-        total_time=cfg.run.get("total_time"),
-        end_time=cfg.run.get("end_time"),
+        total_time=total_time,
+        end_time=end_time,
         output_averages=cfg.run.output_averages,
         snapshot_interval=cfg.run.get("snapshot_interval"),
         snapshot_variables=tuple(cfg.run.get("snapshot_variables") or ()),
@@ -2275,6 +2298,25 @@ def run_chunked(
 
     ckpt_path = cfg.run.get("checkpoint_path", None)
 
+    # Streaming calendar-month means (#901): every chunk's interval means feed
+    # one MonthlyMeanAccumulator; each month is written when the first
+    # interval of the next month arrives, so the files do not depend on the
+    # chunk length. The pending month is persisted with the checkpoint.
+    monthly = bool(cfg.run.get("monthly_means", False))
+    save_chunks = bool(cfg.run.get("save_chunks", True))
+    if not (monthly or save_chunks):
+        raise ValueError(
+            "run.save_chunks=false with run.monthly_means=false: the run would "
+            "produce no output. Set run.save_chunks=true or "
+            "run.monthly_means=true.")
+    accumulator = None
+    if monthly:
+        from jcm.temporal_aggregation import MonthlyMeanAccumulator
+
+        check_monthly_schedule(cfg, model.start_time, chunk_seconds,
+                               total_seconds)
+        accumulator = MonthlyMeanAccumulator()
+
     reports: list[dict] = []
     elapsed_seconds = 0
     elapsed_sim_days = 0.0
@@ -2303,8 +2345,13 @@ def run_chunked(
 
         ckpt_meta: dict = {}
         load_checkpoint(model, ckpt_path, metadata=ckpt_meta)
+        # Refuse a mirror-revision switch before touching the monthly state:
+        # a resume that is refused must not complete a ``.monthly.new``
+        # promotion on its way out.
         _check_resume_mirror_revision(
             ckpt_path, ckpt_meta.get("data_mirror_revision"))
+        if accumulator is not None:
+            accumulator = _restore_monthly_stream(ckpt_path, model)
         # The restored exact clock, not the float elapsed_days record.
         elapsed_seconds = _elapsed_seconds()
         elapsed_sim_days = elapsed_seconds / 86400.0
@@ -2316,6 +2363,8 @@ def run_chunked(
 
     chunk_idx = elapsed_seconds // chunk_seconds
     started_at_days = elapsed_sim_days
+    bailed = False
+    last_params = None
     while elapsed_seconds < total_seconds:
         cur_chunk_seconds = min(chunk_seconds, total_seconds - elapsed_seconds)
         cur_chunk = f"{cur_chunk_seconds} seconds"
@@ -2374,6 +2423,10 @@ def run_chunked(
         elapsed_sim_days = elapsed_seconds / 86400.0
 
         ds = preds.to_xarray()
+        # Feed the monthly stream before provenance attrs (which carry the
+        # per-chunk wall time) are stamped on the chunk dataset.
+        closed_months = (accumulator.update(_monthly_input(ds))
+                         if accumulator is not None else None)
         ok, report = check_health(ds, chunk_idx, elapsed_sim_days)
         report["wall_seconds"] = chunk_wall
         reports.append(report)
@@ -2394,12 +2447,14 @@ def run_chunked(
         # registry, so the record belongs to the model that produced THIS
         # chunk; pass them to both calls or the sidecar's run_hash will not
         # match the one in the attributes.
-        params = getattr(preds, "params", None)
-        ds.attrs.update(provenance.attrs(params))
-        ds.attrs["jcm_prov_chunk_wall_seconds"] = round(chunk_wall, 1)
-        ds.to_netcdf(nc_path)
-        provenance.write_sidecar(nc_path, params)
-        print(f"  Saved {nc_path}")
+        params = last_params = getattr(preds, "params", None)
+        if save_chunks:
+            ds.attrs.update(provenance.attrs(params))
+            ds.attrs["jcm_prov_chunk_wall_seconds"] = round(chunk_wall, 1)
+            ds.to_netcdf(nc_path)
+            provenance.write_sidecar(nc_path, params)
+            print(f"  Saved {nc_path}")
+        _write_monthly(closed_months, output_prefix, params)
         snap_ds = getattr(preds, "snapshot_dataset", lambda: None)()
         if snap_ds is not None:
             snap_path = (f"{output_prefix}_day{elapsed_sim_days:g}"
@@ -2419,10 +2474,19 @@ def run_chunked(
         if ckpt_path and ok:
             from jcm.checkpoint import save_checkpoint
 
+            if accumulator is not None:
+                # Staged as ``.monthly.new`` BEFORE the checkpoint and promoted
+                # only after it: until the new checkpoint is committed the
+                # state matching the old one is never overwritten, so any
+                # number of kills leaves one of ``.monthly`` / ``.monthly.new``
+                # at the checkpoint's instant.
+                _save_monthly_stream(accumulator, ckpt_path, model)
             cp = Path(ckpt_path)
             if cp.exists():
                 cp.replace(f"{ckpt_path}.prev")
             save_checkpoint(model, ckpt_path)
+            if accumulator is not None:
+                _commit_monthly_stream(ckpt_path)
             print(f"  Saved checkpoint to {ckpt_path}")
             archive_every = float(cfg.run.get("archive_ckpt_every", 0.0) or 0.0)
             # Archive at the first chunk boundary past each interval multiple,
@@ -2445,6 +2509,9 @@ def run_chunked(
                 day = f"{elapsed_sim_days:g}".replace(".", "p")
                 archive = f"{output_prefix}_day{day}.ckpt"
                 shutil.copyfile(ckpt_path, archive)
+                if accumulator is not None:
+                    shutil.copyfile(f"{ckpt_path}.monthly",
+                                    f"{archive}.monthly")
                 print(f"  Archived checkpoint {archive}")
         elif ckpt_path:
             print("  Checkpoint NOT updated (unhealthy chunk) — restart from "
@@ -2464,6 +2531,7 @@ def run_chunked(
             )
             if bail:
                 print(msg + "\nSTOPPING.")
+                bailed = True
                 break
             print(msg + "\nContinuing (bail_on_unhealthy=False).")
 
@@ -2479,7 +2547,221 @@ def run_chunked(
 
         chunk_idx += 1
 
+    # The run reached its end: flush the pending (possibly partial) month.
+    # Not after a bail — that month's remainder was never integrated.
+    if accumulator is not None and not bailed and elapsed_seconds >= total_seconds:
+        final = accumulator.finish()
+        if last_params is None:
+            # Resumed at the final checkpoint: no chunk ran. The checkpoint is
+            # saved before this flush, so its restored stream still holds the
+            # final month, which the previous attempt has usually written
+            # already — from the same trajectory, so leave that file and its
+            # sidecar alone rather than re-stamp them. It is written here
+            # only when the previous attempt died before writing it. No
+            # chunk has traced the model's parameters, so read them from the
+            # built physics, as the trace does (a resumed run rebuilds the
+            # same physics from the same config).
+            final = _unwritten_months(final, output_prefix)
+            last_params = _built_params(model)
+        _write_monthly(final, output_prefix, last_params)
+
     return reports
+
+
+def check_monthly_schedule(cfg: DictConfig, start_time, chunk_seconds: int,
+                           total_seconds: int) -> None:
+    """Refuse a ``run.monthly_means`` run whose intervals cross a month edge.
+
+    Checked before integrating, not at the first month boundary: every save
+    interval ``[start + k*save, start + (k+1)*save)`` over the run must end
+    on or before the first instant of the month it starts in, so that each
+    interval mean belongs to one calendar month (daily or sub-daily saves
+    from a midnight start always do). Splitting an interval at a month edge
+    is #903.
+    """
+    import numpy as np
+
+    from jcm.date import parse_duration_seconds, to_datetime
+
+    if not cfg.run.get("output_averages", False):
+        raise ValueError("run.monthly_means=true needs run.output_averages=true "
+                         "(monthly means are built from interval means).")
+    save = parse_duration_seconds(cfg.run.save_interval)
+    if chunk_seconds % save or total_seconds % save:
+        raise ValueError(
+            "run.monthly_means=true needs run.chunk_days and the run length to "
+            f"be whole multiples of run.save_interval ({save} s), so every "
+            "chunk continues the same interval grid.")
+    start = np.datetime64(to_datetime(start_time).to_datetime64(), "s")
+    starts = start + np.arange(total_seconds // save) * np.timedelta64(save, "s")
+    ends = starts + np.timedelta64(save, "s")
+    edges = (starts.astype("datetime64[M]") + np.timedelta64(1, "M")).astype(
+        "datetime64[s]")
+    crossing = np.flatnonzero(ends > edges)
+    if crossing.size:
+        k = int(crossing[0])
+        raise ValueError(
+            "run.monthly_means=true: save interval "
+            f"[{starts[k]}, {ends[k]}) crosses the month boundary {edges[k]}; "
+            "use a save_interval that tiles every month from run.start_time "
+            "(e.g. 1 day from a midnight start).")
+
+
+def _monthly_input(ds):
+    """Select the chunk's interval means as the monthly accumulator consumes them.
+
+    Only ``time: mean`` fields (plus the bounds) are averaged; dataset attrs
+    are dropped so per-chunk provenance cannot make chunks look different.
+    """
+    from jcm.temporal_aggregation import time_cell_operations
+
+    bounds = ds["time"].attrs.get("bounds", "time_bounds")
+    keep = [name for name, var in ds.data_vars.items()
+            if name == bounds or "time" not in var.dims
+            or time_cell_operations(var.attrs.get("cell_methods", ""))
+            == {"mean"}]
+    import numpy as np
+
+    out = ds[keep].copy(deep=False)
+    # ``to_xarray`` hands back JAX-backed arrays; on those ``astype(float64)``
+    # is silently float32 when x64 is off, so the accumulator's float64 sums
+    # (and a restart's bit-identity) need plain NumPy buffers.
+    for name in list(out.data_vars) + [c for c in out.coords
+                                       if c not in out.indexes]:
+        if not isinstance(out[name].data, np.ndarray):
+            out[name] = out[name].copy(data=np.asarray(out[name].values))
+    out.attrs = {}
+    return out
+
+
+def _write_monthly(months, output_prefix: str, params) -> list[str]:
+    """Write each month of ``months`` to ``{prefix}_monthly_YYYY-MM.nc``."""
+    if months is None:
+        return []
+    paths = []
+    for i in range(months.sizes["time"]):
+        month = months.isel(time=[i])
+        bounds = month["time"].attrs.get("bounds", "time_bounds")
+        path = _monthly_path(month, output_prefix)
+        # The means are float64 (the stream accumulates in float64). A source
+        # variable's file encoding can ride along through the arithmetic and
+        # would narrow them on write; a month re-emitted from a restored
+        # stream has none. Drop it so every path writes the same file.
+        for name in month.data_vars:
+            if name != bounds and month[name].dtype.kind == "f":
+                month[name].encoding = {}
+        month.attrs.update(provenance.attrs(params))
+        month.to_netcdf(path)
+        provenance.write_sidecar(path, params)
+        print(f"  Saved {path} (coverage "
+              f"{float(month['time_coverage_fraction'].values[0]):.3f})")
+        paths.append(path)
+    return paths
+
+
+def _monthly_path(month, output_prefix: str) -> str:
+    """Return the file a one-month dataset is written to."""
+    import numpy as np
+
+    bounds = month["time"].attrs.get("bounds", "time_bounds")
+    label = np.datetime_as_string(month[bounds].values[0, 0], unit="M")
+    return f"{output_prefix}_monthly_{label}.nc"
+
+
+def _unwritten_months(months, output_prefix: str):
+    """Drop the months whose file already exists with the same ``time_bounds``.
+
+    A file that cannot be read (e.g. truncated by a kill mid-write), covers
+    a different interval, or has no provenance sidecar counts as unwritten,
+    so it is rewritten.
+    """
+    import numpy as np
+    import xarray as xr
+
+    if months is None:
+        return None
+    keep = []
+    for i in range(months.sizes["time"]):
+        month = months.isel(time=[i])
+        bounds = month["time"].attrs.get("bounds", "time_bounds")
+        path = _monthly_path(month, output_prefix)
+        try:
+            with xr.open_dataset(path) as old:
+                written = np.array_equal(old[bounds].values,
+                                         month[bounds].values)
+        except (OSError, ValueError, KeyError):
+            written = False
+        # The sidecar is written after the file: without it the month's
+        # write was interrupted, so both are rewritten.
+        written = written and Path(f"{path}.provenance.json").exists()
+        if written:
+            print(f"  Kept {path} (already written for this interval)")
+        else:
+            keep.append(i)
+    return months.isel(time=keep) if keep else None
+
+
+def _built_params(model) -> dict:
+    """Return the parameter record :meth:`Model.run` captures at trace time."""
+    try:
+        return provenance.describe_params(getattr(model, "physics", None))
+    except Exception:  # noqa: BLE001 — provenance never fails a run
+        logger.warning("provenance: parameter capture failed", exc_info=True)
+        return {}
+
+
+def _clock64(model):
+    import numpy as np
+
+    return np.datetime64(model.run_state.time.to_datetime64(), "s")
+
+
+def _save_monthly_stream(accumulator, ckpt_path: str, model) -> None:
+    """Stage the pending month as ``.monthly.new`` for the next checkpoint."""
+    accumulator.save(Path(f"{ckpt_path}.monthly.new"),
+                     clock=str(_clock64(model)))
+
+
+def _commit_monthly_stream(ckpt_path: str) -> None:
+    """After the checkpoint: ``.monthly`` -> ``.prev``, ``.new`` -> ``.monthly``."""
+    state = Path(f"{ckpt_path}.monthly")
+    if state.exists():
+        state.replace(f"{ckpt_path}.monthly.prev")
+    Path(f"{ckpt_path}.monthly.new").replace(state)
+
+
+def _restore_monthly_stream(ckpt_path: str, model):
+    """Return the persisted pending month that describes the restored clock.
+
+    ``.monthly`` matches the committed checkpoint; after a kill between the
+    checkpoint and the promotion of the staged state it is
+    ``.monthly.new``, whose promotion is then completed; ``.monthly.prev``
+    pairs with ``.ckpt.prev``. A staged file at any other instant is
+    ignored. Anything else — no state,
+    or no file at the checkpoint's instant — is refused rather than silently
+    dropping or double-counting intervals.
+    """
+    from jcm.temporal_aggregation import MonthlyMeanAccumulator
+
+    clock = str(_clock64(model))
+    seen = []
+    for candidate in (f"{ckpt_path}.monthly", f"{ckpt_path}.monthly.new",
+                      f"{ckpt_path}.monthly.prev"):
+        if Path(candidate).exists():
+            accumulator, meta = MonthlyMeanAccumulator.load(candidate)
+            if meta.get("clock") == clock:
+                if candidate.endswith(".new"):
+                    # Finish the interrupted promotion now: the next chunk
+                    # stages over ``.new`` before its checkpoint commits.
+                    _commit_monthly_stream(ckpt_path)
+                return accumulator
+            seen.append(f"{candidate} @ {meta.get('clock')}")
+    raise ValueError(
+        f"run.monthly_means=true cannot resume {ckpt_path} at {clock}: no "
+        "monthly-stream state at that instant ("
+        + (", ".join(seen) if seen else "none written") + "). Resuming "
+        "would drop or double-count intervals of the pending month; start the "
+        "run fresh, or resume with run.monthly_means=false.")
 
 
 def resolve_output_path(cfg: DictConfig, hydra_cfg: Any) -> Path:

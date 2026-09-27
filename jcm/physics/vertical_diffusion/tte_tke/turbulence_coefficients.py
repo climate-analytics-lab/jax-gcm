@@ -228,8 +228,10 @@ def compute_exchange_coefficients(
 
 #: Businger-Dyer roughness tables [water, ice, land] — this scheme ignores
 #: ``state.roughness_length``, so its neutral drag must be built from these.
-_BD_Z0_HEAT = jnp.array([1e-4, 1e-4, 1e-2])
-_BD_Z0_MOMENTUM = jnp.array([1e-4, 1e-3, 1e-1])
+#: Tuples of Python floats, materialised with ``jnp.asarray`` where used: a
+#: module-level ``jnp.array`` initialises the JAX backend on import (#859).
+_BD_Z0_HEAT = (1e-4, 1e-4, 1e-2)
+_BD_Z0_MOMENTUM = (1e-4, 1e-3, 1e-1)
 
 
 def businger_dyer_neutral_drag(state, wind_speed):
@@ -242,7 +244,7 @@ def businger_dyer_neutral_drag(state, wind_speed):
     state's tile count, as the scheme's per-tile loop is.
     """
     z_ref = state.height_full[:, -1] - state.height_half[:, -1]
-    z0 = _BD_Z0_MOMENTUM[:state.roughness_length.shape[1]]
+    z0 = jnp.asarray(_BD_Z0_MOMENTUM[:state.roughness_length.shape[1]])
     bn = jnp.log(jnp.maximum(z_ref, 1.0)[:, None]
                  / jnp.maximum(z0, 1e-5)[None, :])
     # 0.4, not c.karman_const: it must match the von_karman this scheme
@@ -281,8 +283,8 @@ def compute_surface_exchange_coefficients(
     """
     ncol, nsfc_type = temperature_surface.shape
 
-    z0_heat = _BD_Z0_HEAT
-    z0_moisture = _BD_Z0_HEAT
+    z0_heat = jnp.asarray(_BD_Z0_HEAT)
+    z0_moisture = z0_heat
     # Momentum: one definition, shared with the 10 m reduction (below).
     _, cfn_m_all = businger_dyer_neutral_drag(state, wind_speed_surface)
     

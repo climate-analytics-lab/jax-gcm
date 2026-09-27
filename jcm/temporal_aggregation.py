@@ -8,6 +8,9 @@ inside a differentiated computation.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import xarray as xr
 
@@ -397,6 +400,114 @@ class MonthlyMeanAccumulator:
                                else sorted(self._variable_names)),
         }
 
+    # ------------------------------------------------------------------
+    # Compact restart file (run.monthly_means in the chunked CLI, #901).
+    # ``state_dict`` stores full ``DataArray.to_dict()`` payloads, which is
+    # fine for tests but not for a T63L47 JAM output set (~1 GB of float64
+    # sums): ``save``/``load`` write the same state as flax msgpack with the
+    # arrays as raw float64/int64 buffers and only small metadata as JSON.
+
+    def save(self, path, **meta) -> Path:
+        """Atomically write the pending month (and ``meta``) to ``path``.
+
+        ``meta`` is caller bookkeeping stored alongside the state (the chunked
+        runner records the model clock it describes). A valid-duration field
+        that is uniform — no missing values this month, the usual case — is
+        stored as one integer instead of a full array.
+        """
+        import flax.serialization
+
+        registry: dict = {}
+        sums = {name: _encode_array(value, registry)
+                for name, value in self._sums.items()}
+        valid = {}
+        for name, value in self._valid_duration_ms.items():
+            flat = np.asarray(value.values)
+            if flat.size and np.all(flat == flat.flat[0]):
+                valid[name] = {"uniform": int(flat.flat[0]),
+                               "like": json.dumps(name)}
+            else:
+                valid[name] = _encode_array(value, registry)
+        static = None
+        if self._static is not None:
+            static = {
+                "data_vars": {name: _encode_array(var, registry)
+                              for name, var in self._static.data_vars.items()},
+                "coords": json.dumps(list(self._static.coords)),
+                "attrs": _dumps(self._static.attrs),
+            }
+            for name in self._static.coords:
+                _register(self._static[name], name, registry)
+        payload = {
+            "format": 1,
+            "meta": _dumps({
+                "month": self._month,
+                "start": None if self._start is None else str(self._start),
+                "end": None if self._end is None else str(self._end),
+                "coverage_ms": self._coverage_ms,
+                "templates": self._templates,
+                "attrs": self._attrs,
+                "time_attrs": self._time_attrs,
+                "bounds_name": self._bounds_name,
+                "variable_names": (None if self._variable_names is None
+                                   else sorted(self._variable_names)),
+                "extra": meta,
+            }),
+            "coords": registry,
+            "sums": sums,
+            "valid": valid,
+            "static": static if static is not None else {},
+        }
+        path = Path(path)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_bytes(flax.serialization.msgpack_serialize(payload))
+        tmp.replace(path)
+        return path
+
+    @classmethod
+    def load(cls, path) -> tuple["MonthlyMeanAccumulator", dict]:
+        """Read :meth:`save`'s file; return ``(accumulator, meta)``."""
+        import flax.serialization
+
+        payload = flax.serialization.msgpack_restore(Path(path).read_bytes())
+        if int(payload.get("format", 0)) != 1:
+            raise ValueError(f"{path}: unknown monthly accumulator format.")
+        info = json.loads(payload["meta"])
+        registry = payload["coords"]
+        obj = cls()
+        obj._month = info["month"]
+        obj._start = (None if info["start"] is None
+                      else np.datetime64(info["start"], "ms"))
+        obj._end = (None if info["end"] is None
+                    else np.datetime64(info["end"], "ms"))
+        obj._coverage_ms = int(info["coverage_ms"])
+        obj._templates = info["templates"]
+        obj._attrs = info["attrs"]
+        obj._time_attrs = info["time_attrs"]
+        obj._bounds_name = info["bounds_name"]
+        names = info["variable_names"]
+        obj._variable_names = None if names is None else set(names)
+        obj._sums = {name: _decode_array(enc, registry)
+                     for name, enc in payload["sums"].items()}
+        for name, enc in payload["valid"].items():
+            if "uniform" in enc:
+                like = obj._sums[json.loads(enc["like"])]
+                obj._valid_duration_ms[name] = xr.full_like(
+                    like, int(enc["uniform"]), dtype=np.int64)
+            else:
+                obj._valid_duration_ms[name] = _decode_array(enc, registry)
+        static = payload.get("static") or {}
+        if static:
+            coords = {name: _decode_coord(name, registry)
+                      for name in json.loads(static["coords"])}
+            obj._static = xr.Dataset(
+                {name: _decode_array(enc, registry)
+                 for name, enc in static["data_vars"].items()},
+                coords=coords, attrs=json.loads(static["attrs"]))
+        if set(obj._sums) != set(obj._valid_duration_ms):
+            raise ValueError(f"{path}: inconsistent variable statistics.")
+        return obj, info.get("extra", {})
+
     @classmethod
     def from_state_dict(cls, state: dict) -> "MonthlyMeanAccumulator":
         """Restore :meth:`state_dict` without retaining any source frames."""
@@ -429,3 +540,65 @@ class MonthlyMeanAccumulator:
         elif obj._start is None or obj._end is None or obj._coverage_ms <= 0:
             raise ValueError("Pending accumulator state is missing its interval metadata.")
         return obj
+
+
+# --------------------------------------------------------------------------
+# restart-file helpers
+
+
+def _json_default(x):
+    if isinstance(x, np.generic):
+        return x.item()
+    if isinstance(x, np.ndarray):
+        return x.tolist()
+    raise TypeError(f"not JSON serialisable: {type(x).__name__}")
+
+
+def _dumps(obj) -> str:
+    return json.dumps(obj, default=_json_default)
+
+
+def _raw(values):
+    """Encode a numeric buffer as an ndarray and anything else as a JSON list."""
+    values = np.asarray(values)
+    shape = json.dumps(list(values.shape))     # msgpack loses 0-d shapes
+    if values.dtype.kind in "biuf":
+        return {"array": np.ascontiguousarray(values).reshape(-1),
+                "shape": shape}
+    return {"list": _dumps(values.astype(str).reshape(-1).tolist()),
+            "dtype": str(values.dtype), "shape": shape}
+
+
+def _unraw(enc):
+    shape = tuple(json.loads(enc["shape"]))
+    if "array" in enc:
+        return np.asarray(enc["array"]).reshape(shape)
+    return np.asarray(json.loads(enc["list"])).astype(
+        enc["dtype"]).reshape(shape)
+
+
+def _register(var, name, registry):
+    if name not in registry:
+        registry[name] = {"dims": json.dumps(list(var.dims)),
+                          "attrs": _dumps(dict(var.attrs)), **_raw(var.values)}
+
+
+def _encode_array(da: xr.DataArray, registry: dict) -> dict:
+    for name in da.coords:
+        _register(da.coords[name], name, registry)
+    return {"dims": json.dumps(list(da.dims)),
+            "coords": json.dumps(list(da.coords)),
+            "attrs": _dumps(dict(da.attrs)), **_raw(da.values)}
+
+
+def _decode_coord(name, registry):
+    enc = registry[name]
+    return xr.Variable(json.loads(enc["dims"]), _unraw(enc),
+                       json.loads(enc["attrs"]))
+
+
+def _decode_array(enc: dict, registry: dict) -> xr.DataArray:
+    coords = {name: _decode_coord(name, registry)
+              for name in json.loads(enc["coords"])}
+    return xr.DataArray(_unraw(enc), dims=json.loads(enc["dims"]),
+                        coords=coords, attrs=json.loads(enc["attrs"]))
