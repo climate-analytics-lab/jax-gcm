@@ -25,7 +25,9 @@ state_next
 
 The splitting error is `O(dt)` (Lie split (a), `state → physics →
 dynamics → next`). The dycore step is the only operation that advances
-`sim_time`.
+the backend's elapsed `sim_time`. The calendar date is a separate, exact
+clock that the trajectory scan carries and advances by `dt` each step (see
+`_op_split_trajectory` below).
 
 This mirrors operational GCM practice (ECHAM, CAM, IFS, E3SM): physics
 runs once per `dt` as forcing to the dynamics, rather than at each RK
@@ -56,19 +58,25 @@ error and Lie/Strang are both adequate.
 
 ### `Model._get_op_split_step_fn` (`jcm/model.py`)
 
-Builds the per-`dt` step closure `(state, physics_state) -> (state_next,
-physics_state_next)`. Internals:
+Builds the per-`dt` step closure `(state, physics_state, date) ->
+(state_next, physics_state_next)`. Internals:
 
-1. Resolve the current step's date and forcing slice from
-   `dycore.sim_time(state)`.
+1. Select the current step's forcing slice with `forcing.select(date)`.
+   `date` is the `DateData` the trajectory scan builds from its exact
+   datetime and integer step count. It is not derived from
+   `dycore.sim_time(state)`: that is a floating elapsed time in the
+   backend's own state, which restarts from zero on a fresh run and cannot
+   define a calendar date.
 2. Project the backend-native state with `dycore.to_physics_state`.
 3. Call `compute_physics_step_gridpoint` for
    `(physics_tendency, new_physics_state)`.
 4. Pass the native state and gridpoint tendency to `dycore.step`.
 
-The step is a pure function of `(state, physics_state)`. The
-`physics_state` carry is a JAX pytree and is the only cross-step state
-the integrator threads.
+The step is a pure function of `(state, physics_state, date)`. The
+`physics_state` carry is a JAX pytree and is the only cross-step physics
+state the integrator threads. The date and the forcing slice reach the
+physics only: `dycore.step` receives the native state and the gridpoint
+tendency.
 
 ### `DynamicalCore.step` (`jcm/dycore/base.py`)
 
@@ -103,7 +111,10 @@ of the next step.
 ### `_op_split_trajectory` (`jcm/model.py`)
 
 The trajectory builder. Takes the per-`dt` step function and threads
-`(state, physics_state)` through a nested `lax.scan`:
+`(state, physics_state, clock, step_count)` through a nested `lax.scan`.
+`clock` is the exact `jax_datetime` of the step and `step_count` its
+integer index; each inner step hands the step function
+`DateData(clock, step_count, dt)` and then advances both:
 
 - **Outer scan** — `outer_steps` saved frames.
 - **Inner scan** — `inner_steps` `dt` steps between saves.
