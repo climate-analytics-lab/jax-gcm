@@ -290,13 +290,13 @@ class TestPrevStepPublication(unittest.TestCase):
         """ComposablePhysics publishes ``_prev_step`` {q, dq/dt} and the
         xarray flattener drops it.
         """
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
         from jcm.forcing import ForcingData
         from jcm.physics_interface import PhysicsState
         from jcm.terrain import TerrainData
 
-        physics = echam_physics(radiation_scheme="grey")
+        physics = idealized_echam_physics()
         coords = get_speedy_coords(layers=8, spectral_truncation=21)
         physics.cache_coords(coords)
         nlev = 8

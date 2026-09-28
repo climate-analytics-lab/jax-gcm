@@ -146,15 +146,15 @@ class FrontogenesisProviderTest(unittest.TestCase):
         from jcm.dycore.pyses import build_forcing
         from jcm.dycore.pyses.pyses_dycore_test import T63_FORCING
         from jcm.model import Model
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
 
         from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
 
         dycore = _dycore()
         model = Model(
             dycore=dycore,
-            physics=echam_physics(
-                radiation_scheme="grey", gw_scheme="frontal",
+            physics=idealized_echam_physics(
+                gw_scheme="frontal",
                 # pySES computes omega internally but exposes no provider
                 # for it (#698), so ECHAM's ``lmfmid`` mid-level convection
                 # trigger cannot run on this backend. Turning it off with

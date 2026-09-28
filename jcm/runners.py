@@ -261,8 +261,8 @@ def build_physics(cfg: DictConfig):
               _target_: jcm.physics.convection.tiedtke_nordeng.TiedtkeConvection
               params:
                 entrpen: 4.0e-4
-            grey_two_stream_radiation:
-              _target_: jcm.physics.radiation.grey_two_stream.GreyTwoStreamRadiation
+            rrtmgp_radiation:
+              _target_: jcm.physics.radiation.rrtmgp.RRTMGPRadiation
 
     Override individual fields from the CLI without editing YAML, e.g.::
 

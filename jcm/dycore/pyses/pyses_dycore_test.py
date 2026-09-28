@@ -366,7 +366,7 @@ class TestCoupledEchamSmoke(unittest.TestCase):
     def test_model_drives_coupled_run(self):
         from jcm.model import Model
         from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
 
         dycore = PysesCamSEDycore(
             nx=3, npt=4, dt_seconds=900.0, terrain_file=T63_TERRAIN,
@@ -379,8 +379,7 @@ class TestCoupledEchamSmoke(unittest.TestCase):
             # mid-level convection trigger cannot run here — turn it off
             # with the reference's own switch, as the config comment in
             # ``dycore/pyses_ne30l47.yaml`` documents.
-            physics=echam_physics(
-                radiation_scheme="grey",
+            physics=idealized_echam_physics(
                 convection=ConvectionParameters.default(cu_lmfmid=False),
             ),
         )
@@ -404,7 +403,7 @@ class TestCoupledEchamSmoke(unittest.TestCase):
         """
         from jcm.model import Model
         from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
 
         dycore = PysesCamSEDycore(
             nx=3, npt=4, dt_seconds=900.0, terrain_file=T63_TERRAIN,
@@ -417,8 +416,7 @@ class TestCoupledEchamSmoke(unittest.TestCase):
             # mid-level convection trigger cannot run here — turn it off
             # with the reference's own switch, as the config comment in
             # ``dycore/pyses_ne30l47.yaml`` documents.
-            physics=echam_physics(
-                radiation_scheme="grey",
+            physics=idealized_echam_physics(
                 convection=ConvectionParameters.default(cu_lmfmid=False),
             ),
         )
@@ -445,14 +443,14 @@ class TestCoupledEchamSmoke(unittest.TestCase):
         exercises it); full-f32 ECHAM physics needs a physics-side
         dtype-stability fix and is tracked as an open issue.
         """
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.physics_interface import compute_physics_step_gridpoint
 
         dycore = PysesCamSEDycore(
             nx=3, npt=4, dt_seconds=900.0, terrain_file=T63_TERRAIN,
             physics_dtype=jnp.float64,
         )
-        physics = echam_physics(radiation_scheme="grey")
+        physics = idealized_echam_physics()
         specs = {s.name: s for s in physics.required_tracers()}
         dycore.tracer_specs = specs
         physics.cache_coords(dycore.coords)

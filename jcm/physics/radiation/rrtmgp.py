@@ -1079,7 +1079,7 @@ def _maybe_chunked_vmap(fn, in_axes):
 
 
 # The *noa spacing helpers live in ``aerosol_free`` so echam_physics() can
-# validate the setting for grey/emulated configs too, without importing
+# validate the setting for emulated and custom-term configs too, without importing
 # this module and its RRTMGP tables.
 from jcm.physics.radiation.aerosol_free import (  # noqa: E402
     NOA_KEYS,
@@ -1175,7 +1175,7 @@ class RRTMGPRadiation(PhysicsTerm):
         # dominates the step, so this is opt-in only.
         #
         # Validated through the shared helper, which echam_physics() also
-        # calls so a grey or emulated config is held to the same contract
+        # calls so any other radiation scheme is held to the same contract
         # rather than silently ignoring the argument.
         interval = resolve_aerosol_free_interval(aerosol_free_interval)
         # A cadence locked to the solar day never samples some columns in

@@ -12,7 +12,7 @@ import jax
 import pytest
 from unittest import TestCase
 
-from jcm.physics.echam.echam_terms import echam_physics
+from jcm.physics.echam.testing import idealized_echam_physics
 from jcm.physics_interface import PhysicsState
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
@@ -29,7 +29,9 @@ class TestChemistryIntegration(TestCase):
         coords = get_coords(sigma_boundaries, nodal_shape=(64, 32))
         self.terrain = TerrainData.aquaplanet(coords)
 
-        self.physics = echam_physics()
+        # Chemistry plumbing through the composed stack; the radiation
+        # scheme is irrelevant to it, so the cheap idealized composition.
+        self.physics = idealized_echam_physics()
         self.physics.cache_coords(coords)
 
         # Create test state

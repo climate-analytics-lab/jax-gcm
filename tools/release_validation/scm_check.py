@@ -55,8 +55,7 @@ N = int(DAYS * 86400 / DT)
 NLEV = 47
 
 vertical = get_echam_levels(NLEV)
-physics = echam_physics(cloud_scheme="2m", aerosol_module="jam",
-                        radiation_scheme="grey")
+physics = echam_physics(cloud_scheme="2m", aerosol_module="jam")
 scm = SingleColumnModel(
     physics=physics, vertical=vertical, lat_deg=0.0, lon_deg=150.0,
     dt_seconds=DT,

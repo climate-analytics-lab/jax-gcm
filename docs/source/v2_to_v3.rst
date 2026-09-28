@@ -13,10 +13,10 @@ coming from v1, read :doc:`v1_to_v2` first.
    :local:
    :depth: 1
 
-Read this first: the three changes that silently alter results
---------------------------------------------------------------
+Read this first: the four changes that silently alter results
+-------------------------------------------------------------
 
-Most items below fail loudly. These three do not, so check them before
+Most items below fail loudly. These four do not, so check them before
 comparing any v3 number against a v2 one.
 
 1. **Specific humidity is kg/kg everywhere** (:ref:`v3-q-units`). A v2-written
@@ -31,6 +31,9 @@ comparing any v3 number against a v2 one.
    **semi-Lagrangian tracer transport now has a mass fixer on by default**
    (:ref:`v3-mass-fixer`). Both change the climate of an unchanged
    configuration.
+4. **A bare** ``echam_physics()`` **composes RRTMGP**, not the grey two-stream
+   (:ref:`v3-echam-radiation`). A v2 script that relied on the factory default
+   now runs the real ECHAM radiation — slower, and a different climate.
 
 Installation and dependencies
 -----------------------------
@@ -372,13 +375,18 @@ A shape consequence worth knowing if you index a dycore-native state:
 ``specific_humidity`` stays **modal** for the implicit q↔Tᵥ coupling while
 every extra tracer is **nodal**, so the two no longer share a shape.
 
-``physics=echam`` composes RRTMGP
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. _v3-echam-radiation:
 
-``physics=echam`` used to compose the grey two-stream scheme, which is an
-unsupported pairing (the supported ones are grey-for-SPEEDY and
-RRTMGP-for-ECHAM). It now composes RRTMGP — and because that made the separate
-``echam-rrtmgp`` group redundant, **that group was deleted**:
+ECHAM composes RRTMGP from both doors; ``"grey"`` is rejected
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The grey two-stream radiation is an idealized scheme — in the same class as
+Betts-Miller convection — with no ECHAM reference and no validation in an ECHAM
+composition. v2 composed it into the ECHAM stack from both doors
+(``physics=echam`` and a bare ``echam_physics()``). In v3 both compose RRTMGP.
+
+On the CLI, ``physics=echam`` is the RRTMGP term list, so the separate
+``echam-rrtmgp`` group was redundant and **was deleted**:
 
 .. code-block:: console
 
@@ -386,14 +394,29 @@ RRTMGP-for-ECHAM). It now composes RRTMGP — and because that made the separate
    $ python -m jcm.main physics=echam          # v3 — the same term list
 
 (The ``+configuration=t63-echam-rrtmgp`` *configuration* preset is a different
-group and still exists.) **There is deliberately no CLI route to a grey-ECHAM
-composition.** The Python factory still defaults to grey for the cheap A/B, so
-the two doors disagree on purpose:
+group and still exists.) The factory-built presets (``echam-jam*``,
+``echam-forced-flux``) reject ``physics.radiation_scheme=grey``.
+
+In Python, ``echam_physics()`` defaults to ``radiation_scheme="rrtmgp"``; the
+accepted strings are ``"rrtmgp"`` and ``"emulated"`` (the neural-network
+emulator of RRTMGP, the fast option), and ``"grey"`` raises ``ValueError``.
+A study that wants the idealized scheme in the ECHAM stack composes it
+explicitly, as a term:
 
 .. code-block:: python
 
-   echam_physics()                          # grey (unchanged, cheap for tests)
-   echam_physics(radiation_scheme="rrtmgp")  # what physics=echam now gives you
+   from jcm.physics.echam.echam_terms import echam_physics
+   from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
+
+   echam_physics()                                           # RRTMGP
+   echam_physics(radiation_scheme="grey")                    # v3: ValueError
+   echam_physics(radiation_scheme=GreyTwoStreamRadiation())  # explicit, idealized
+
+Radiation parameters go to the term's constructor
+(``GreyTwoStreamRadiation(params=RadiationParameters.default(...))``); passing
+``radiation=`` alongside a term instance is rejected, since the instance carries
+its own. Tests that only need a cheap composition use
+``jcm.physics.echam.testing.idealized_echam_physics``, which does exactly this.
 
 JAM no longer composes MACv2-SP
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1051,6 +1074,10 @@ free.
    * - Betts-Miller / RCE
      - Python-only (``jcm.rce.rce_physics``); unit tests, no Hydra group
      - No packaged configuration
+   * - Grey two-stream radiation (idealized)
+     - Python-only, composed explicitly as a term (``jcm.rce``, cheap tests);
+       unit tests, no Hydra group
+     - No packaged configuration
 
 Betts-Miller is the default convection of the single-column RCE layer
 (``jcm.rce``), which is a Python entry point rather than a Hydra group: no
@@ -1059,6 +1086,11 @@ Betts-Miller is the default convection of the single-column RCE layer
 ``tools/release_validation/scm_check.py`` is **not** an RCE check despite
 borrowing ``jcm.rce``'s column setup — it drives ECHAM+JAM with Tiedtke
 convection on one prescribed column.
+
+The grey two-stream radiation is likewise an idealized scheme with no Hydra
+group: it is not an ECHAM radiation option (``echam_physics`` rejects
+``radiation_scheme="grey"``, :ref:`v3-echam-radiation`) and is composed only
+explicitly, as a ``GreyTwoStreamRadiation`` term.
 
 "Release-validated" means a member of ``tools/release_validation/matrix.yaml``:
 a full A100 year with 5-day means, scored by ``health.py`` against TOA net,
@@ -1198,16 +1230,13 @@ Validation gaps in the release matrix
 
 *Documented limitation (proposed) — #638.*
 
-Three things the matrix does not currently establish, each worth knowing before
+Two things the matrix does not currently establish, each worth knowing before
 quoting a validated configuration:
 
 * the **T106 members' multi-GPU mesh configurations have never been run for a
   full year**;
 * ``echam-jam`` at **L95** needs L95 oxidant and ozone inputs staged, which is
-  a data dependency rather than a code one;
-* the single-column JAM check (``scm_check.py``) composes **grey** radiation,
-  while the stated pairing policy for the matrix is RRTMGP for ECHAM. Either
-  the check or the policy should move.
+  a data dependency rather than a code one.
 
 A ``FAIL`` from ``health.py`` is also a recorded verdict rather than
 automatically a blocker: several members fail a gate by design until the

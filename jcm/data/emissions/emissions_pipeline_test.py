@@ -156,7 +156,7 @@ class EmissionsRaiseBurdenTest(unittest.TestCase):
 
     def _run(self, with_emissions: bool):
         from jcm.model import Model
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
@@ -165,8 +165,8 @@ class EmissionsRaiseBurdenTest(unittest.TestCase):
         terrain = TerrainData.aquaplanet(coords)
         model = Model(
             coords=coords, time_step=30, terrain=terrain,
-            physics=echam_physics(aerosol_module="jam", cloud_scheme="2m",
-                                  jam_anthropogenic=True),
+            physics=idealized_echam_physics(
+                aerosol_module="jam", cloud_scheme="2m", jam_anthropogenic=True),
         )
         from jcm.forcing import default_forcing
         forcing = default_forcing(coords.horizontal)
@@ -200,7 +200,7 @@ class PreSpeciatedRaisesBurdenTest(unittest.TestCase):
 
     def _run(self, with_emissions: bool):
         from jcm.model import Model
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
         from jcm.forcing import default_forcing
@@ -209,8 +209,8 @@ class PreSpeciatedRaisesBurdenTest(unittest.TestCase):
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
         model = Model(
             coords=coords, time_step=30, terrain=TerrainData.aquaplanet(coords),
-            physics=echam_physics(aerosol_module="jam", cloud_scheme="2m",
-                                  jam_prescribed_speciated=True),
+            physics=idealized_echam_physics(
+                aerosol_module="jam", cloud_scheme="2m", jam_prescribed_speciated=True),
         )
         forcing = default_forcing(coords.horizontal)
         if with_emissions:

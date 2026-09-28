@@ -117,10 +117,19 @@ any inefficiency. ``loadscope`` keeps each class on one worker so its tests
 still reuse each other's compiled executables. The fast job also sets
 ``JCM_TEST_CACHE_GROWTH_MB=256``, because every worker retains its own
 executables and two default-budget workers do not fit the runner; see
-:doc:`design/test_suite_memory`. The slow suite stays
-single-process for the same reason — its tests are full integrations with a
-much higher floor per worker. If
-the fast suite fails it cancels the whole run, taking the in-flight slow job
+:doc:`design/test_suite_memory`. The slow suite stays single-process per job
+for the same reason — its tests are full integrations with a much higher floor
+per worker, and RRTMGP's reverse pass in the ECHAM gradient harnesses peaks at
+~12-14 GB in one process. It is instead split by path into two parallel jobs,
+``slow-tests-radiation`` (the ECHAM gradient harnesses and
+``jcm/physics/radiation``) and ``slow-tests-rest`` (everything else, selected
+as the complement so a new slow test cannot fall out of CI); the split is
+defined in ``tools/ci/slow_shards.py``, whose ``check`` fails the run unless the
+two collections partition ``-m slow`` exactly. A third job,
+``slow-coverage``, combines the two shards' coverage data and enforces the 80%
+floor on the combined total. Locally the slow suite is still the one command
+above. If
+the fast suite fails it cancels the whole run, taking the in-flight slow jobs
 with it, so **a cancelled slow result never means the slow tests passed**. It
 does not tell you *why* on its own: ``cancel-in-progress: true`` cancels that
 job identically when a newer push supersedes the run, and so does cancelling

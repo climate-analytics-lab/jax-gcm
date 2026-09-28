@@ -3,7 +3,7 @@
 Every ECHAM parameterisation lives as a ``PhysicsTerm`` next to its
 underlying numerical implementation (``TiedtkeConvection``,
 ``SundqvistCloudFraction``, ``Echam1MMicrophysics``,
-``GreyTwoStreamRadiation``, …) and owns its own scheme-native
+``RRTMGPRadiation``, …) and owns its own scheme-native
 ``Parameters``. This module is the user-facing factory that wires the
 scheme-named terms together in a validated default ordering and returns
 a ready-to-run ``ComposablePhysics`` with column vectorisation enabled.
@@ -47,7 +47,6 @@ from jcm.physics.gravity_waves.hines import HinesGwd, HinesParameters
 from jcm.physics.gravity_waves.sso import LottMillerSso, SSOParameters
 from jcm.physics.physics_term import with_field_overrides
 from jcm.physics.physics_term import PhysicsTerm
-from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
 from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
 from jcm.physics.radiation.aerosol_free import (
     resolve_aerosol_free_interval,
@@ -67,6 +66,46 @@ from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
 )
 
 
+#: Raised for ``echam_physics(radiation_scheme="grey")``. The grey two-stream
+#: is an idealized scheme (like Betts-Miller convection): it has no ECHAM
+#: reference formulation and was never validated in an ECHAM composition, so
+#: the ECHAM factory does not offer it by name. It can still be composed
+#: explicitly as a term, which makes the idealized choice visible at the call
+#: site.
+GREY_RADIATION_REJECTION = (
+    "radiation_scheme='grey' is not an ECHAM radiation option: the grey "
+    "two-stream is an idealized scheme, not ECHAM physics (no ECHAM reference, "
+    "never validated in an ECHAM composition). echam_physics() offers "
+    "'rrtmgp' (default) and 'emulated' (the fast option). To run an idealized "
+    "composition with the grey scheme, build the term and pass the instance:\n"
+    "    from jcm.physics.radiation.grey_two_stream import "
+    "GreyTwoStreamRadiation\n"
+    "    physics = echam_physics(radiation_scheme=GreyTwoStreamRadiation())\n"
+    "(radiation parameters go to its constructor, params=...). The factory "
+    "derives the band structure and the JAM optics cadence from the term it is "
+    "given, so this is the one supported route."
+)
+
+
+def default_radiation_parameters(aerosol_module: str = "macv2sp"
+                                 ) -> RadiationParameters:
+    """``RadiationParameters`` the ECHAM factory uses when none are given.
+
+    ECHAM-HAM re-tunes the ice-cloud inhomogeneity for its two-moment +
+    Abdul-Razzak & Ghan configuration (``lcdnc_progn`` with ``ncd_activ = 2``:
+    ``zinhomi = 0.7`` at T63, L31 and L47 alike;
+    ``mo_cloud_optics.f90::setup_cloud_optics``). jcm's JAM stack is exactly
+    that pairing — the 2M scheme fed by ARG activation — so it takes HAM's
+    value; every other composition keeps ECHAM6's T63 ``zinhomi = 0.8``.
+
+    Public so a caller that builds its own radiation term for
+    ``echam_physics(radiation_scheme=<term>)`` can give it the same defaults
+    the string route would.
+    """
+    return RadiationParameters.default(
+        cloud_inhomogeneity_ice=0.7 if aerosol_module == "jam" else 0.8)
+
+
 def echam_physics(
     *,
     convection: ConvectionParameters | Mapping[str, Any] | None = None,
@@ -81,7 +120,7 @@ def echam_physics(
     sso: SSOParameters | Mapping[str, Any] | None = None,
     gw_scheme: str = "hines",
     checkpoint_terms: bool = True,
-    radiation_scheme: str | PhysicsTerm = "grey",
+    radiation_scheme: str | PhysicsTerm = "rrtmgp",
     emulator_weights_file: str | None = "auto",
     radiation_compute_cre: bool = True,
     cloud_scheme: str = "1m",
@@ -145,10 +184,12 @@ def echam_physics(
             ``MicrophysicsParameters`` (used when ``cloud_scheme="1m"``).
         microphysics_2m: Override for 2-moment microphysics
             ``CloudParams2M`` (used when ``cloud_scheme="2m"``).
-        radiation: Override for ``RadiationParameters`` (shared by all
-            three radiation backends). When omitted, the defaults are used
-            except that ``aerosol_module="jam"`` takes ECHAM-HAM's 2M + ARG
-            ice inhomogeneity ``cloud_inhomogeneity_ice = 0.7``.
+        radiation: Override for ``RadiationParameters`` of the named
+            radiation scheme. When omitted, :func:`default_radiation_parameters`
+            supplies them (``aerosol_module="jam"`` takes ECHAM-HAM's 2M + ARG
+            ice inhomogeneity ``cloud_inhomogeneity_ice = 0.7``). Rejected
+            alongside a radiation ``PhysicsTerm`` instance, which carries its
+            own parameters.
         vertical_diffusion: Override for TTE-TKE ``VDiffParameters``.
         surface: Override for ``SurfaceParameters``.
         aerosol: Override for MACv2-SP ``AerosolParameters``. Also
@@ -166,8 +207,15 @@ def echam_physics(
             the Hines source strength jointly if it shows), or ``"none"``.
         checkpoint_terms: Whether to checkpoint each term's compute
             (memory-saving for long backward passes).
-        radiation_scheme: ``"grey"`` (default), ``"rrtmgp"``,
-            ``"emulated"``, or a custom radiation ``PhysicsTerm``.
+        radiation_scheme: ``"rrtmgp"`` (default; the RRTMGP correlated-k
+            scheme), ``"emulated"`` (the neural-network emulator of RRTMGP,
+            the fast option), or a radiation ``PhysicsTerm`` instance, which
+            is composed as given; with a cadence-dependent sibling composed
+            (the JAM optics), the instance must expose its
+            ``RadiationParameters`` as ``.params`` (an ``nnx.Param``). ``"grey"`` raises ``ValueError``: the grey
+            two-stream is an idealized scheme, not ECHAM physics, so it is
+            composed only explicitly as
+            ``radiation_scheme=GreyTwoStreamRadiation()``.
         emulator_weights_file: ``radiation_scheme="emulated"`` only — the NN
             checkpoint. Case-sensitive value set: ``"auto"`` (default, and what
             an omitted or ``null`` config key resolves to) loads the packaged
@@ -333,10 +381,15 @@ def echam_physics(
             aerocom_erfari_sampling.md``.
 
     """
-    # Validate for EVERY radiation scheme, not just RRTMGP. The grey and
-    # emulated branches never construct RRTMGPRadiation, so leaving this to
-    # the term's own constructor let
-    # `echam_physics(radiation_scheme="grey", aerosol_free_interval=0)`
+    # Checked first so the grey request gets its own explanation rather than
+    # a message from whichever later validation it happens to trip.
+    if isinstance(radiation_scheme, str) and radiation_scheme == "grey":
+        raise ValueError(GREY_RADIATION_REJECTION)
+
+    # Validate for EVERY radiation scheme, not just RRTMGP. The emulated
+    # branch and a custom term never construct RRTMGPRadiation here, so
+    # leaving this to the term's own constructor would let
+    # `echam_physics(radiation_scheme="emulated", aerosol_free_interval=0)`
     # through in silence — exactly the class of silently-ignored argument
     # this knob is meant to abolish.
     resolve_aerosol_free_interval(aerosol_free_interval)
@@ -344,8 +397,9 @@ def echam_physics(
         raise ValueError(
             f"aerosol_free_interval={aerosol_free_interval!r} needs "
             "radiation_scheme='rrtmgp' — "
-            "the grey and emulated schemes carry no aerosol optics to zero, "
-            f"so radiation_scheme={radiation_scheme!r} would silently emit "
+            "the emulated scheme carries no aerosol optics to zero and a "
+            "radiation term instance is composed as given, so "
+            f"radiation_scheme={radiation_scheme!r} would silently emit "
             "all-zero *noa fluxes.")
 
     # ``None`` is normalised to the "auto" default: the Hydra builder strips
@@ -364,9 +418,9 @@ def echam_physics(
     if emulator_weights_file != "auto" and radiation_scheme != "emulated":
         raise ValueError(
             f"emulator_weights_file={emulator_weights_file!r} needs "
-            "radiation_scheme='emulated' — the grey and rrtmgp schemes load no "
-            f"NN checkpoint, so radiation_scheme={radiation_scheme!r} would "
-            "ignore it.")
+            "radiation_scheme='emulated' — any other radiation scheme loads "
+            f"no NN checkpoint, so radiation_scheme={radiation_scheme!r} "
+            "would ignore it.")
 
     # Field-override mappings (see the docstring) are set aside here, so the
     # resolution below builds exactly the object this factory would use
@@ -433,15 +487,20 @@ def echam_physics(
     clouds_p = clouds or CloudParameters.default()
     microphysics_p = microphysics or MicrophysicsParameters.default()
     microphysics_2m_p = microphysics_2m or CloudParams2M.default()
-    # ECHAM-HAM re-tunes the ice-cloud inhomogeneity for its two-moment +
-    # Abdul-Razzak & Ghan configuration (``lcdnc_progn`` with ``ncd_activ = 2``:
-    # ``zinhomi = 0.7`` at T63, L31 and L47 alike;
-    # ``mo_cloud_optics.f90::setup_cloud_optics``). jcm's JAM stack is exactly
-    # that pairing — the 2M scheme fed by ARG activation — so it takes HAM's
-    # value; every other composition keeps ECHAM6's T63 ``zinhomi = 0.8``
-    # (``RadiationParameters.default``). An explicit ``radiation=`` wins.
-    radiation_p = radiation or RadiationParameters.default(
-        cloud_inhomogeneity_ice=0.7 if aerosol_module == "jam" else 0.8)
+    if isinstance(radiation_scheme, PhysicsTerm):
+        # A radiation term instance carries its own parameters; the factory
+        # reads them back (below) rather than composing a second, possibly
+        # different, set. ``radiation=`` would be silently ignored, so it is
+        # rejected — pass the parameters to the term's constructor instead.
+        if radiation is not None:
+            raise ValueError(
+                "radiation= and a radiation_scheme term instance are mutually "
+                "exclusive — the instance carries its own RadiationParameters; "
+                "pass them to its constructor (params=...).")
+        radiation_p = None
+    else:
+        # An explicit ``radiation=`` wins over the factory default.
+        radiation_p = radiation or default_radiation_parameters(aerosol_module)
     vertical_diffusion_p = vertical_diffusion or VDiffParameters.default()
     surface_p = surface or SurfaceParameters.default()
     aerosol_p = aerosol or AerosolParameters.default()
@@ -467,6 +526,15 @@ def echam_physics(
                 "'radiation'."
             )
         rad_term = radiation_scheme
+        # Siblings that follow the radiation cadence (the JAM optics gate)
+        # must read it from the instance itself. Every in-tree radiation term
+        # holds its RadiationParameters as ``self.params``; a term that does
+        # not leaves ``radiation_p`` None, which is an error only where a
+        # sibling needs it (below), never a silent default.
+        _held = getattr(rad_term, "params", None)
+        _held = _held.get_value() if hasattr(_held, "get_value") else _held
+        radiation_p = (_held if isinstance(_held, RadiationParameters)
+                       else None)
     elif radiation_scheme == "rrtmgp":
         # compute_cre doubles the RRTMGP work on radiation steps (a second
         # full clear-sky solve) purely for the CRE diagnostic — production
@@ -475,8 +543,6 @@ def echam_physics(
             params=radiation_p,
             compute_cre=radiation_compute_cre,
             aerosol_free_interval=aerosol_free_interval)
-    elif radiation_scheme == "grey":
-        rad_term = GreyTwoStreamRadiation(params=radiation_p)
     elif radiation_scheme == "emulated":
         # "auto" (default) resolves the packaged trained checkpoint
         # (jcm/data/emulator_weights_per_band_u64.nc). The explicit "random"
@@ -493,8 +559,8 @@ def echam_physics(
     else:
         raise ValueError(
             f"Unknown radiation_scheme={radiation_scheme!r}. "
-            "Choose 'grey', 'rrtmgp', 'emulated', or pass a radiation "
-            "PhysicsTerm."
+            "Choose 'rrtmgp' (default), 'emulated', or pass a radiation "
+            "PhysicsTerm instance."
         )
     # Aerosol and cloud optics need the same band metadata as the selected
     # radiation term, so Python-created RRTMGP compositions must carry the
@@ -584,9 +650,20 @@ def echam_physics(
         # steps where radiation replays its cache (see
         # ``JamOpticsTerm.configure_radiation_gate``) — same post-compose
         # configuration pattern as ``configure_spa`` below.
-        for _t in jam_terms:
-            if hasattr(_t, "configure_radiation_gate"):
-                _t.configure_radiation_gate(radiation_p.radiation_interval)
+        # Only a composed gated term needs the cadence: with
+        # ``jam_optics=False`` there is none, and a radiation term that
+        # exposes no parameters is as valid as in any other composition.
+        _gated = [_t for _t in jam_terms
+                  if hasattr(_t, "configure_radiation_gate")]
+        if _gated and radiation_p is None:
+            raise ValueError(
+                f"The JAM optics follow the radiation cadence, but the "
+                f"radiation term {type(rad_term).__name__} "
+                "exposes no RadiationParameters: the factory reads "
+                "`<term>.params` (an nnx.Param holding RadiationParameters, "
+                "whose radiation_interval it uses).")
+        for _t in _gated:
+            _t.configure_radiation_gate(radiation_p.radiation_interval)
         # Aqueous chemistry + wet deposition need the current step's clouds, so
         # they run after the cloud microphysics term; the rest of the JAM chain
         # is the pre-cloud aerosol block.

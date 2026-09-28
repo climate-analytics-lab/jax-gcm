@@ -111,7 +111,9 @@ dycore = PysesCamSEDycore(
 model = Model(
     dycore=dycore,
     time_step=dycore.dt_seconds / 60.0,  # keep Model minutes == dycore dt
-    physics=echam_physics(radiation_scheme="grey"),
+    # pySES exposes no omega provider, so the Tiedtke mid-level trigger
+    # that needs it is switched off.
+    physics=echam_physics(cu_lmfmid=False),
 )
 forcing = build_forcing("jcm/data/bc/t63/forcing.nc", dycore)
 predictions = model.run(forcing=forcing, save_interval=1.0, total_time=5.0)
