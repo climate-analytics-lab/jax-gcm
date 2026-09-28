@@ -75,8 +75,8 @@ class RegistryTest(unittest.TestCase):
             reg2 = build_registry(d)
             self.assertNotIn("registry.json", reg2["files"])
 
-    def test_include_keeps_the_base_entry_of_a_file_out_of_scope(self):
-        # A stale copy outside the build's scope must not override the
+    def test_paths_keep_the_base_entry_of_every_other_file(self):
+        # A stale copy the build did not write must not override the
         # published entry.
         import tempfile
         from pathlib import Path
@@ -85,69 +85,146 @@ class RegistryTest(unittest.TestCase):
                 (Path(d) / name).write_bytes(b"new")
             base = {"files": {"emissions_pd.nc": {"sha256": "published",
                                                   "size": 9}}}
-            reg = build_registry(d, base=base, include=["forcing_*.nc"])
+            reg = build_registry(d, base=base, paths={"forcing_pd.nc"})
             self.assertEqual(reg["files"]["forcing_pd.nc"]["size"], 3)
             self.assertEqual(reg["files"]["emissions_pd.nc"]["sha256"],
                              "published")
 
 
+class LedgerTest(unittest.TestCase):
+    """Registry and upload act only on what this site's builds wrote."""
+
+    def _tree(self, d):
+        from pathlib import Path
+        root = Path(d)
+        (root / "upload" / "bundles" / "t63").mkdir(parents=True)
+        (root / "build").mkdir()
+        return root
+
+    def _patched(self, root, **extra):
+        from contextlib import ExitStack
+
+        from jcm.data.mirror import build_mirror as bm
+        stack = ExitStack()
+        for name, value in {"BUILD": root / "build",
+                            "UPLOAD": root / "upload", **extra}.items():
+            stack.enter_context(patch.object(bm, name, value))
+        return stack
+
+    def test_a_stage_records_only_the_files_it_writes(self):
+        from jcm.data.mirror import build_mirror as bm
+        with tempfile.TemporaryDirectory() as d:
+            root = self._tree(d)
+            stale = root / "upload" / "bundles" / "t63" / "emissions_pd.nc"
+            stale.write_bytes(b"old")
+            with self._patched(root):
+                before = bm._upload_snapshot()
+                (root / "upload" / "bundles" / "t63" / "forcing_pd.nc"
+                 ).write_bytes(b"new")
+                bm._record_writes(before)
+                self.assertEqual(bm._ledger(), {"bundles/t63/forcing_pd.nc"})
+                # A later stage adds to it; rewriting a file in place counts.
+                before = bm._upload_snapshot()
+                stale.write_bytes(b"rebuilt")
+                bm._record_writes(before)
+                self.assertEqual(bm._ledger(), {"bundles/t63/forcing_pd.nc",
+                                                "bundles/t63/emissions_pd.nc"})
+
+    def test_registry_merges_the_ledger_onto_the_tip_and_retires(self):
+        import json
+
+        from jcm.data.mirror import build_mirror as bm
+        with tempfile.TemporaryDirectory() as d:
+            root = self._tree(d)
+            t63 = root / "upload" / "bundles" / "t63"
+            (t63 / "forcing_pd.nc").write_bytes(b"new")
+            (t63 / "emissions_pd.nc").write_bytes(b"stale")
+            tip = {"files": {
+                "bundles/t63/emissions_pd.nc": {"sha256": "pub", "size": 3},
+                "bundles/t63/forcing_pd.nc": {"sha256": "old", "size": 3},
+                "bundles/t63/dust.nc": {"sha256": "gone", "size": 1}}}
+            with self._patched(root, _RETIRE=("bundles/*/dust.nc",),
+                               _PRODUCTS=frozenset({"forcing"})),                     patch.object(bm, "_published_registry",
+                                 lambda: (json.loads(json.dumps(tip)),
+                                          "a" * 40)):
+                bm._ledger_path().write_text('["bundles/t63/forcing_pd.nc"]')
+                bm.stage_registry()
+                reg = json.loads((root / "upload" / "registry.json"
+                                  ).read_text())["files"]
+                side = json.loads((root / "build" / "registry_base.json"
+                                   ).read_text())
+        self.assertEqual(reg["bundles/t63/forcing_pd.nc"]["size"], 3)
+        self.assertNotEqual(reg["bundles/t63/forcing_pd.nc"]["sha256"], "old")
+        self.assertEqual(reg["bundles/t63/emissions_pd.nc"]["sha256"], "pub")
+        self.assertNotIn("bundles/t63/dust.nc", reg)
+        self.assertEqual(side, {"parent_commit": "a" * 40,
+                                "retired": ["bundles/t63/dust.nc"]})
+
+    def test_upload_commits_the_ledger_onto_the_registry_base(self):
+        import contextlib
+        import io
+        import json
+        from types import SimpleNamespace
+
+        import huggingface_hub
+
+        from jcm.data.mirror import build_mirror as bm
+        commits = []
+
+        class _Api:
+            def create_commit(self, **kw):
+                commits.append(kw)
+                return SimpleNamespace(oid="f" * 40)
+
+        with tempfile.TemporaryDirectory() as d:
+            root = self._tree(d)
+            t63 = root / "upload" / "bundles" / "t63"
+            (t63 / "emissions_pd.nc").write_bytes(b"stale")
+            (t63 / "forcing_pd.nc").write_bytes(b"new")
+            registry = root / "upload" / "registry.json"
+            (root / "build" / "registry_base.json").write_text(json.dumps(
+                {"parent_commit": "a" * 40, "retired": ["bundles/t63/dust.nc"]}))
+            out = io.StringIO()
+            with self._patched(root),                     patch.object(huggingface_hub, "HfApi", _Api),                     contextlib.redirect_stdout(out):
+                bm._ledger_path().write_text('["bundles/t63/forcing_pd.nc"]')
+                # A file rewritten after the registry was hashed is refused.
+                registry.write_text(json.dumps({"files": {
+                    "bundles/t63/forcing_pd.nc": {"sha256": "x", "size": 3}}}))
+                os.utime(t63 / "forcing_pd.nc", ns=(1, 2 ** 62))
+                with self.assertRaises(SystemExit) as ctx:
+                    bm.stage_upload()
+                self.assertIn("rerun --stage registry", str(ctx.exception))
+                self.assertEqual(commits, [])
+                os.utime(t63 / "forcing_pd.nc", ns=(1, 1))
+                bm.stage_upload()
+                ledger_left = bm._ledger_path().exists()
+                rotated = (root / "build" / f"upload_ledger.{'f' * 12}.json"
+                           ).exists()
+        (kw,) = commits
+        self.assertEqual(kw["parent_commit"], "a" * 40)
+        added = sorted(op.path_in_repo for op in kw["operations"]
+                       if isinstance(op, huggingface_hub.CommitOperationAdd))
+        deleted = [op.path_in_repo for op in kw["operations"]
+                   if isinstance(op, huggingface_hub.CommitOperationDelete)]
+        self.assertEqual(added, ["bundles/t63/forcing_pd.nc", "registry.json"])
+        self.assertEqual(deleted, ["bundles/t63/dust.nc"])
+        self.assertIn('MIRROR_REVISION = "' + "f" * 40 + '"', out.getvalue())
+        self.assertFalse(ledger_left)
+        self.assertTrue(rotated)
+
 
 class MirrorRevisionStagesTest(unittest.TestCase):
-    def test_upload_prints_the_pin_line_and_pull_is_pinned(self):
+    def test_pull_is_pinned(self):
         import contextlib
         import io
         import tempfile
         from pathlib import Path
-        from types import SimpleNamespace
         from unittest import mock
 
         import huggingface_hub
 
         from jcm.data import remote
         from jcm.data.mirror import build_mirror as bm
-
-        uploads = []
-
-        with tempfile.TemporaryDirectory() as d:
-            upload, published = Path(d) / "upload", Path(d) / "published.json"
-            upload.mkdir()
-            published.write_text('{"files": {"a.nc": {}, "b.nc": {}}}')
-
-            class _Api:
-                def hf_hub_download(self, repo, name, **kw):
-                    return str(published)
-
-                def upload_folder(self, **kw):
-                    uploads.append(kw["allow_patterns"])
-                    return SimpleNamespace(oid="f" * 40)
-
-            def upload_with(registry, **scope):
-                (upload / "registry.json").write_text(registry)
-                out = io.StringIO()
-                with mock.patch.object(huggingface_hub, "HfApi", _Api), \
-                        mock.patch.object(bm, "UPLOAD", upload), \
-                        mock.patch.object(bm, "_pulled_tier_a",
-                                          lambda: False), \
-                        mock.patch.object(bm, "_PRODUCTS",
-                                          scope.get("products")), \
-                        contextlib.redirect_stdout(out):
-                    bm.stage_upload()
-                return out.getvalue()
-
-            # A full tree listing every published file uploads all of it.
-            out = upload_with('{"files": {"a.nc": {}, "b.nc": {}}}')
-            self.assertIn('MIRROR_REVISION = "' + "f" * 40 + '"', out)
-            self.assertEqual(uploads, [None])
-            # One that would drop a published entry is refused before upload.
-            with self.assertRaises(SystemExit) as ctx:
-                upload_with('{"files": {"a.nc": {}}}')
-            self.assertIn("b.nc", str(ctx.exception))
-            self.assertEqual(len(uploads), 1)
-            # A --products build uploads only its own files and the registry.
-            upload_with("{}", products=frozenset({"forcing"}))
-            self.assertIn("bundles/t63/forcing_amip/*.nc", uploads[-1])
-            self.assertIn("registry.json", uploads[-1])
-            self.assertFalse(any("emissions" in g for g in uploads[-1]))
 
         pulled = []
 
@@ -157,11 +234,9 @@ class MirrorRevisionStagesTest(unittest.TestCase):
             for name in ("era5_land_climo_2005-2014_0p25.nc",
                          "ceds_anthro.zarr", "bb4cmip7.zarr"):
                 (root / "products" / name).mkdir(parents=True)
-            (root / "registry.json").write_text("{}")
 
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(bm, "BUILD", Path(d)), \
-                mock.patch.object(bm, "_REMOTE_REGISTRY", Path(d) / "r.json"), \
                 mock.patch.object(huggingface_hub, "snapshot_download",
                                   snapshot), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -561,22 +636,6 @@ class SitesTest(unittest.TestCase):
             bm.main()
         self.assertIn("every transient grid", str(ctx.exception))
 
-    def test_a_grids_registry_needs_the_pulled_registry(self):
-        from jcm.data.mirror import build_mirror as bm
-        with tempfile.TemporaryDirectory() as d:
-            from pathlib import Path
-            root = Path(d)
-            with patch.object(bm, "_SELECTED", frozenset({"t127"})), \
-                    patch.object(bm, "BUILD", root / "build"), \
-                    patch.object(bm, "UPLOAD", root / "upload"), \
-                    patch.object(bm, "_REMOTE_REGISTRY",
-                                 root / "build" / "remote_registry.json"):
-                (root / "upload").mkdir()
-                with self.assertRaises(SystemExit) as ctx:
-                    bm.stage_registry()
-                self.assertIn("--stage pull", str(ctx.exception))
-
-
 class GridSelectionTest(unittest.TestCase):
     def test_grids_filter_and_transient_scope(self):
         from jcm.data.mirror import build_mirror as bm
@@ -589,46 +648,6 @@ class GridSelectionTest(unittest.TestCase):
             self.assertEqual(bm._grids(transient=True), {})
             self.assertFalse(bm._column_selected())
         self.assertEqual(bm._truncation("t255"), 255)
-
-    def test_a_products_only_registry_is_partial_too(self):
-        # --products without --grids still leaves a partial upload tree.
-        from jcm.data.mirror import build_mirror as bm
-        with tempfile.TemporaryDirectory() as d:
-            from pathlib import Path
-            root = Path(d)
-            with patch.object(bm, "_SELECTED", None), \
-                    patch.object(bm, "_PRODUCTS", frozenset({"emissions"})), \
-                    patch.object(bm, "BUILD", root / "build"), \
-                    patch.object(bm, "UPLOAD", root / "upload"), \
-                    patch.object(bm, "_REMOTE_REGISTRY",
-                                 root / "build" / "remote_registry.json"):
-                (root / "upload").mkdir()
-                self.assertTrue(bm._partial_build())
-                with self.assertRaises(SystemExit) as ctx:
-                    bm.stage_registry()
-                self.assertIn("partial build", str(ctx.exception))
-
-    def test_upload_scope_follows_products_and_grids(self):
-        from jcm.data.mirror import build_mirror as bm
-        with patch.object(bm, "_pulled_tier_a", lambda: False):
-            with patch.object(bm, "_SELECTED", None), \
-                    patch.object(bm, "_PRODUCTS", None):
-                self.assertIsNone(bm._upload_scope())
-            with patch.object(bm, "_SELECTED", None), \
-                    patch.object(bm, "_PRODUCTS", frozenset({"forcing"})):
-                scope = set(bm._upload_scope())
-            self.assertEqual(scope, {
-                *(f"bundles/{g}/forcing_{k}.nc" for g in bm.GRIDS
-                  for k in ("pd", "pi")),
-                *(f"bundles/{g}/forcing_{k}/*.nc" for g in bm.TRANSIENT_GRIDS
-                  for k in ("amip", "era5"))})
-            with patch.object(bm, "_SELECTED", frozenset({"t127"})), \
-                    patch.object(bm, "_PRODUCTS", None):
-                scope = bm._upload_scope()
-            self.assertIn("bundles/t127/dust_regions.nc", scope)
-            self.assertIn("bundles/t127_l*/ozone_pd.nc", scope)
-            self.assertIn("products/sso/sso_gmted2010_t127.nc", scope)
-            self.assertFalse(any("t63" in g for g in scope))
 
     def test_pulled_tier_a_marks_the_build_partial(self):
         from jcm.data.mirror import build_mirror as bm

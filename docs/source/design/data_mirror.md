@@ -257,19 +257,16 @@ are declared once in `jcm/data/mirror/sites.py` (auto-detected, or
 - **DKRZ Levante** holds the CMIP7 input4MIPs tree and the ECHAM-HAMMOZ and
   ECHAM6 pools under `/pool/data`, but not the RDA ERA5 archive. It therefore
   does not rebuild Tier A: `--stage pull` fetches the published Tier A products
-  (only the PI/PD climatology arrays of the emissions stores) and
-  `registry.json`, so a new grid regrids from exactly the data the published
-  grids were built from. The Lana DMS file and GMTED are downloaded once into
+  (only the PI/PD climatology arrays of the emissions stores), so a new grid
+  regrids from exactly the data the published grids were built from. The Lana DMS file and GMTED are downloaded once into
   `$JCM_MIRROR_ROOT/sources/`; the two WACCM CCMI REFC1 decade oxidant files
   are not on the public CESM inputdata server and are copied from Glade (the
   public `oxid_ozone_WACCM_CCMI_*_cycle` files are a different run, ccmi30
   1995–2004, and are not substitutes).
 
 `--grids` restricts every stage to a subset of the published grids, which is how
-a grid is added without rebuilding or re-uploading the others. The registry
-stage then merges the new hashes onto the pulled `registry.json` rather than
-rewriting it from the partial upload tree. The t127/t255 bundles were built on
-Levante with
+a grid is added without rebuilding or re-uploading the others. The t127/t255
+bundles were built on Levante with
 
 ```bash
 python -m jcm.data.mirror.build_mirror --grids t127,t255 \
@@ -288,23 +285,33 @@ out identical to the published Tier A), then
 `--grids t63,t106 --products emissions --stage bundles,amip`; `--products`
 limits those stages to the named bundle products so unchanged files are not
 republished. Any partial build — `--grids`, `--products`, or pulled Tier A —
-stages no Tier A and merges its registry onto the published one.
+stages no Tier A.
 
-A partial build hashes and uploads only the files its `--products` and
-`--grids` select (`_upload_scope`, patterns from the manifest product table);
-every other entry of the registry comes from the pulled published one. The
-upload tree is a long-lived working copy that another site's builds do not
-reach, so a stage run without the build's selection would republish whatever
-stale copies it holds. A full-tree upload is therefore refused when its
-registry lacks any published file. The forcing bundles are rebuilt on Glade
-this way, on a compute node (the builds and the upload's hashing exceed the
-10 GB login-node memory limit), with `amip` and `era5-transient` as separate
-invocations because both read `--years` and their published ranges differ:
+### What gets published
+
+Only what this site's builds wrote. The upload tree is a long-lived working
+copy that builds on another site never reach, so any file a build did not just
+write may be older than the published one, and republishing it would revert
+that. Each stage's writes into the upload tree are recorded in
+`build/upload_ledger.json` (the files whose stat changed across the stage).
+`--stage registry` takes the published `registry.json` at the mirror's current
+tip, re-hashes only the ledger's files and drops any `--retire` globs.
+`--stage upload` commits exactly those files, `registry.json` and the
+retirements, on top of that tip commit: if the mirror has moved since, the
+commit is refused rather than overwriting the newer registry. A landed upload
+sets the ledger aside (`upload_ledger.<commit>.json`). Nothing leaves the
+mirror except through `--retire`, so a build on a site that holds only part of
+the mirror cannot drop the rest.
+
+The forcing bundles are rebuilt on Glade on a compute node (the builds and the
+upload's hashing exceed the 10 GB login-node memory limit), with `amip` and
+`era5-transient` as separate invocations because both read `--years` and their
+published ranges differ:
 
 ```bash
-M="python -m jcm.data.mirror.build_mirror --products forcing"
-$M --stage pull,bundles
-$M --stage amip --years 1950,2022
+M="python -m jcm.data.mirror.build_mirror"
+$M --products forcing --stage bundles
+$M --products forcing --stage amip --years 1950,2022
 $M --stage era5-transient --years 1979,2024
 $M --stage manifest,registry,upload
 ```
@@ -334,15 +341,12 @@ $M --stage manifest,registry,upload
   T255, and says so in its attributes), and the region mask regenerated on every
   grid from the `setclonlatbox` recipe in the HAMMOZ file history, which
   reproduces the native T63/T127 masks cell for cell.
-- `registry.py` — hashes the upload tree (merged onto the published registry
-  for a `--grids` build).
-- `build_mirror.py --stage upload` — pushes to the HF dataset with
-  retries (the xet backend has aborted 44k-file pushes with transient
-  timeouts; uploads resume, committed files are skipped). Deliberately
-  excluded from `--stage all` — publishing is explicit. It prints the
-  commit it created; runs keep reading the pinned one until `MIRROR_REVISION`
-  is bumped. `--stage pull` reads the pinned commit too, so when extending the
-  tip set `JCM_MIRROR_REVISION` to the tip's sha first. Needs
+- `registry.py` — hashes the files a build wrote onto the published registry.
+- `build_mirror.py --stage upload` — commits the ledger to the HF dataset
+  with retries (the xet backend has aborted large pushes with transient
+  timeouts). Deliberately excluded from `--stage all` — publishing is
+  explicit. It prints the commit it created; runs keep reading the pinned one
+  until `MIRROR_REVISION` is bumped. Needs
   `hf auth login` with write access; run `python -m` from the repo
   checkout's own directory.
 

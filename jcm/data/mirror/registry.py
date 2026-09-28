@@ -5,45 +5,41 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from fnmatch import fnmatch
 from pathlib import Path
 
 
 def build_registry(root: str, base: dict | None = None,
-                   include: list[str] | None = None) -> dict:
-    """Hash the files under ``root``; entries override those of ``base``.
+                   paths=None) -> dict:
+    """Hash files under ``root``; entries override those of ``base``.
 
-    ``base`` is the published registry when ``root`` is a partial upload tree
-    (a ``--grids``/``--products`` build): its entries for files not rebuilt are
-    kept, so the uploaded ``registry.json`` still covers the whole mirror.
-    ``include`` (``fnmatch`` globs relative to ``root``) limits hashing to the
-    files the build owns, so a stale copy elsewhere in the tree cannot
-    override the published entry.
+    ``base`` is the published registry: its entries for files not re-hashed
+    are kept, so ``registry.json`` still covers the whole mirror. ``paths``
+    (relative to ``root``) names the files to hash — the ones a build wrote;
+    ``None`` hashes the whole tree.
     """
     reg = {"repo": "climate-analytics-lab/jax-gcm-data",
            "files": dict((base or {}).get("files", {}))}
     root_p = Path(root)
-    for p in sorted(root_p.rglob("*")):
-        if not p.is_file() or p.name == "registry.json":
-            continue
-        rel = str(p.relative_to(root_p))
-        if include is not None and not any(fnmatch(rel, g) for g in include):
-            continue
+    if paths is None:
+        files = [p for p in sorted(root_p.rglob("*"))
+                 if p.is_file() and p.name != "registry.json"]
+    else:
+        files = [root_p / rel for rel in sorted(paths)]
+    for p in files:
         h = hashlib.sha256()
         with open(p, "rb") as f:
             for chunk in iter(lambda: f.read(1 << 22), b""):
                 h.update(chunk)
-        reg["files"][rel] = {"sha256": h.hexdigest(),
-                             "size": p.stat().st_size}
+        reg["files"][str(p.relative_to(root_p))] = {
+            "sha256": h.hexdigest(), "size": p.stat().st_size}
     return reg
 
 
-def write_registry(root: str, base: dict | None = None,
-                   include: list[str] | None = None) -> str:
+def write_registry(root: str, base: dict | None = None, paths=None) -> str:
     """Write ``root/registry.json`` (merged onto ``base``, see build_registry)."""
     out = os.path.join(root, "registry.json")
     with open(out, "w") as f:
-        json.dump(build_registry(root, base, include), f, indent=1,
+        json.dump(build_registry(root, base, paths), f, indent=1,
                   sort_keys=True)
     return out
 
