@@ -984,6 +984,23 @@ Grey two-stream shortwave conserves energy
   ``E - P + precip_floor_source``. The grey RCE column reaches this regime
   once its clouds reflect, at ~0.06-0.09 mm/d.
 
+In-plume scavenging removes only the activated aerosol
+""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The convective tracer transport's in-plume scavenging carries each soluble
+  tracer in an activated and an interstitial share, as CAM ``aero_convproc``
+  carries cloud-borne and interstitial updraft aerosol: ``scav_ratio`` (0.99)
+  of the aerosol activates where it enters the cloudy plume and only that
+  share is removed with the precipitation, while the ``1 − scav_ratio`` that
+  did not activate rides to the top. Before, the fixed fraction was applied
+  again to the leftover at every level, so the non-activating share was
+  scavenged too and soluble aerosol reached the free troposphere at ~10⁻⁵ of
+  its boundary-layer value in a deep plume (``scm_check.py`` failed "soluble
+  also lofted but less", #923). **Changes results** for every JAM
+  configuration with convective transport: more soluble aerosol in the
+  convective outflow, while the column's convective scavenging rate changes
+  by about 1 %.
+
 
 Known limitations
 ^^^^^^^^^^^^^^^^^

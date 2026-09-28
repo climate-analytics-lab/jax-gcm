@@ -241,7 +241,13 @@ continuity; updraft concentration from an upward convex-mix scan; downdraft from
 the mirror continuity + downward scan. In-plume scavenging follows CAM
 ``aero_convproc`` (mirage2 form): a first-order removal from the plume's
 condensate-to-precip conversion, applied inside the ascent scan so aerosol
-scavenged low never detrains aloft. Only interstitial + gas tracers are
+scavenged low never detrains aloft. The plume carries each soluble tracer in
+an **activated** and an **interstitial** share, and only the activated share
+is removed: a fraction ``w`` (``ConvTransportParameters.scav_ratio``, 0.99)
+of the aerosol entering the cloudy plume activates — the whole plume at the
+first level with condensate, the air entrained at each condensing level
+above — and the ``1 − w`` that did not activate stays interstitial to the
+top. Only interstitial + gas tracers are
 transported. **This module's header is the gold-standard provenance-comment
 example** the rest of the tree is measured against.
 
@@ -276,7 +282,25 @@ convective flux, so a step can take at most the covered fraction.
 
 **What ECHAM/CAM does.** ECHAM transports every tracer through Tiedtke
 (``cuxtte`` / ``mo_cuascn`` xt budgeting); CAM's ``convtran`` does the same;
-in-plume scavenging is CAM ``aero_convproc`` (mirage2). The downdraft is ECHAM
+in-plume scavenging is CAM ``aero_convproc`` (mirage2). CAM
+(``aero_convproc.F90::aero_convproc_tend``) carries interstitial and
+cloud-borne updraft mixing ratios separately (``conu(1,:)``/``conu(2,:)``),
+activates at the first cloudy level and on entrained air above it
+(``activate_convproc`` / ``activate_convproc_method2``, the latter recomputing
+the activated fraction of the depleted interstitial mode), and removes only
+the cloud-borne share (``aqfrac`` = 1 for activated species, 0 for
+interstitial) at ``1 − exp(−cdt)`` per level, compounding up the ascent.
+HAMMOZ applies its convective in-cloud scavenging after the ascent
+(``mo_cufluxdts.f90::cuflx`` → ``cuflx_subm`` →
+``mo_hammoz_wetdep.f90::wetdep_interface`` → ``mo_ham_wetdep.f90::ham_wetdep``
+/ ``ic_scav``): at each level it removes ``csr_conv · peff`` of the updraft
+concentration ``pxtu`` that ``mo_cuascent.f90::cuasc`` built without
+scavenging, where ``csr_conv`` is the per-mode in-droplet fraction (0.99 for
+the soluble accumulation and coarse modes, ``mo_ham_m7ctl.f90``) and
+``peff = pmrateprecip/pmwc`` the fraction of the level's condensate converted
+to precipitation (``prep_wetdep_hydro``); the removal does not compound up the
+plume, is not bounded by what entered it, and ``xt_conv_massfix`` closes the
+column budget afterwards. The downdraft is ECHAM
 ``cudlfs`` / ``cuddraf`` / CAM ``convtran``'s ``cond`` loop. The in-cloud and
 below-cloud pathways are distinct sinks driven by different quantities in both
 references — ECHAM ``xtwetdep`` and CAM ``wetdepa`` take the in-cloud rate from
@@ -298,6 +322,22 @@ differently: it rescales the rain rate to the precipitating area, so the area
 cancels and its below-cloud term acts on the grid mean.
 
 **Why we differ.**
+- `science` (reference choice) — the in-plume removal is CAM's plume budget,
+  not HAMMOZ's per-level form: removal inside the ascent keeps the plume's
+  tracer budget closed (a level can remove at most what the plume carries),
+  where HAMMOZ's post-ascent ``csr_conv · peff`` of the unscavenged ``pxtu``
+  can remove more than entered the plume and relies on a mass fixer. With
+  the fixed activated fraction ``w`` standing in for CAM's activation
+  routines, the aerosol that did not activate where it met cloud is not
+  offered for activation again: re-applying a fixed ``w`` to the leftover at
+  every level would re-activate the non-activating tail layer after layer,
+  a compounding CAM limits by recomputing the depleted mode's activation and
+  HAMMOZ never applies. In the release-validation column
+  (``tools/release_validation/scm_check.py``: a deep plume removing 0.6-0.85
+  of its activated aerosol per layer through most of the cloud) the
+  difference is the soluble 150-600 hPa loading, 10⁻³-10⁻¹ of the
+  boundary-layer value over the first day rather than 10⁻⁵, at a column
+  scavenging rate within 1 %.
 - `science` (documented deviation) — the downdraft **seeds the level of free
   sinking by entraining environment air** (exact column telescoping, matching
   CAM's "environment entrainment only, no transformation in the downdraft"),
