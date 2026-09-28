@@ -12,6 +12,9 @@
 # ``echam_surface``, so the Tiedtke moisture-budget closure anchors to the
 # prescribed evaporation same-step).
 #
+# Per-scheme parameters go through the factory argument of that scheme, as on
+# ``echam-jam.yaml`` (e.g. ``+physics.convection.entrpen=4e-4``).
+#
 # The fluxes come from the ``forcing.prescribed_surface_flux`` block —
 # units/signs are the surface-exchange coupling contract's
 # (docs/source/design/surface_exchange.md): sensible heat [W/m2] and

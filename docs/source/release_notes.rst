@@ -651,6 +651,26 @@ Public model clock conversion
   compatibility alias in 3.0 and is planned for removal in a later release
   (#758).
 
+Scheme parameters on the factory-built presets
+""""""""""""""""""""""""""""""""""""""""""""""
+
+- The factory-built physics presets (``physics=echam-jam``,
+  ``echam-forced-flux``) take per-scheme parameters from the command line,
+  as the term-list presets always have (#933). The block is the
+  ``echam_physics`` argument: ``+physics.convection.entrpen=4e-4``,
+  ``+physics.radiation.cloud_inhomogeneity_liquid=0.7``. Each field is
+  applied on top of the object the factory would otherwise build, so the
+  factory's own choices for the other fields (the JAM radiation defaults,
+  ``cu_lmfmid``) are kept. Both preset styles share one conversion
+  (:func:`jcm.physics.physics_term.with_field_overrides`): an unknown field
+  is an error listing the valid fields (on the term-list presets too, where
+  it used to surface as a bare ``TypeError``), and numeric fields stay
+  differentiable pytree leaves. A mapping for a scheme the composition does
+  not include (``microphysics`` under ``cloud_scheme: 2m``) and ``cu_lmfmid``
+  set both as the scalar flag and in ``convection`` are rejected. In Python,
+  ``echam_physics`` accepts the same mappings in place of ``Parameters``
+  objects.
+
 Provenance records the parameters
 """""""""""""""""""""""""""""""""
 

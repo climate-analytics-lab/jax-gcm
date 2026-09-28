@@ -273,6 +273,17 @@ def build_physics(cfg: DictConfig):
     optionally its kwargs) at the CLI, or by composing a preset YAML
     that pulls in ``physics: echam`` via ``defaults`` and then
     overrides individual term entries.
+
+    A factory-built preset (``physics.builder`` set, e.g. ``echam-jam``)
+    has no ``terms`` node; its keys are the factory's keyword arguments,
+    and a per-scheme field is set through that scheme's argument::
+
+        python -m jcm.main physics=echam-jam \
+            +physics.convection.entrpen=4e-4
+
+    The factory applies the mapping on top of the ``Parameters`` object it
+    would otherwise build, through the same conversion as the term-list
+    path (:func:`~jcm.physics.physics_term.with_field_overrides`).
     """
     from omegaconf import OmegaConf
 
@@ -318,7 +329,10 @@ def build_physics(cfg: DictConfig):
 #: Physics ``builder`` names → factory callables returning a ``ComposablePhysics``
 #: with its own validated term ordering (and band_config/vectorize handled
 #: internally). The factory already orders the JAM aerosol chain (incl. the
-#: pre/post-cloud split), so the preset YAML only carries scalar flags.
+#: pre/post-cloud split), so the preset YAML only carries factory arguments:
+#: scalar flags, plus field-override mappings for the per-scheme ``Parameters``
+#: arguments, which each registered factory must accept and apply on top of
+#: its own resolved object (see ``echam_physics``).
 def _physics_factories():
     from jcm.physics.echam.echam_terms import echam_physics
     return {"echam_physics": echam_physics}
@@ -350,7 +364,11 @@ def _build_physics_from_factory(physics_cfg):
     """Build physics by delegating to a factory named by ``physics.builder``.
 
     The factory keyword args present in the YAML are forwarded; keys the
-    runner itself consumes (``_CONFIG_ONLY_PHYSICS_KEYS``) are skipped.
+    runner itself consumes (``_CONFIG_ONLY_PHYSICS_KEYS``) are skipped. A
+    per-scheme block (``physics.convection: {entrpen: 4e-4}``) arrives as a
+    plain mapping and is forwarded as one: only the factory knows the object
+    it would otherwise build, so it applies the fields on top of that object
+    (a runner-built object would reset the factory's own choices).
     Anything else is an ERROR — a typo'd or removed key silently falling
     back to defaults invalidates the experiment that set it.
     """
