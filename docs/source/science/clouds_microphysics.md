@@ -56,8 +56,7 @@ humidity — ECHAM's ``zlvdcp = alv/pcair`` / ``zlsdcp = als/pcair``
 condensation event by ``vtmpc2·q`` (~1.5 % in the moist tropics); the column
 enthalpy budget closes against this same moist ``cp``.
 
-The 2M scheme's utility fields are ECHAM's, shared through ``cloud_utils``
-(`science`):
+The 2M scheme's utility fields are ECHAM's, shared through ``cloud_utils``:
 
 - **Viscosity of air** in the snow Reynolds number of riming,
   ``pviscos = (1.512 + 0.0052·(T − 233.15))·10⁻⁵`` kg m⁻¹ s⁻¹ at the step-start
@@ -83,9 +82,11 @@ The 2M scheme's utility fields are ECHAM's, shared through ``cloud_utils``
   (``conv_effr2mvr``; ``effective_2_volmean_radius_param_Schuman_2011``, lines
   4059–4085; ``ice_volume_mean_radius_schumann``), with ``r_eff`` the
   Lohmann (2008) effective radius clipped to 10–150 µm. ECHAM uses it at every
-  threshold-velocity decision — section 4 (line 1288), the section-5
-  supersaturation correction (line 2374) and the WBF gate (line 1582) — and
-  so does jcm. Aggregation uses the plate radius
+  threshold-velocity decision; jcm ports three of them — section 4 (line
+  1288), the section-5 supersaturation correction (line 2374) and the WBF gate
+  (line 1582). The fourth, ECHAM's phase split of convective detrainment
+  (``lo2_2d``, lines 872–885), has no counterpart: the Tiedtke scheme splits
+  detrained condensate at ``tmelt`` (#941). Aggregation uses the plate radius
   ``zrih = −2261 + √(5113188 + 2809·r_eff³)`` µm³ (``ice_volume_mean_radius``,
   lines 3160–3166), as ECHAM does. The ICNC diagnosis (``prid`` in
   ``update_in_cloud_water``) also uses ``zrih`` of the existing ice, where

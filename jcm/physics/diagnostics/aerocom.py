@@ -840,7 +840,8 @@ class AerocomDiagnostics(PhysicsTerm):
         ``0.7·sqrt(2·TKE)`` sampled at the diagnosed cloud base; it is
         neither the 2M scheme's phase-criterion updraft
         (``cloud_utils.turbulent_updraft_velocity``, ``0.7·sqrt(TKE)``) nor
-        the JAM activation updraft (``sqrt(2·TKE/3)``, ``arg.py``).
+        the JAM activation updraft (``sqrt(2·TKE/3)``,
+        ``jam/activation/arg_term.py``).
         Convective precipitation is split rain/snow by the lowest-level
         temperature (the melt criterion the COSP hook already uses).
         """

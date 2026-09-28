@@ -164,7 +164,7 @@ def cloud_microphysics_2m(
     The large-scale vertical velocity is not plumbed to this scheme yet:
     ECHAM's ``zvervx`` (updraft for the WBF gate) uses only the TKE term
     here, and the ``knvb``/``lonacc`` inversion-level exception on
-    ``zauloc`` is omitted (it needs ``pvervel``) — tracked in #705.
+    ``zauloc`` is omitted (it needs ``pvervel``) — listed in #941.
 
     qnc / qni are stored per kg of air; the scheme interior uses per-m^3,
     so we convert at the boundary.
