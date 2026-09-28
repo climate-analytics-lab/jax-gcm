@@ -348,26 +348,19 @@ _UNRECORDED_STAGES = ("registry", "upload")
 
 
 def _ledger_path() -> Path:
-    """Upload-tree files written since the last upload, and since when."""
+    """Upload-tree files written since the last upload (a JSON list)."""
     return BUILD / "upload_ledger.json"
 
 
-def _ledger_state() -> dict:
-    path = _ledger_path()
-    if not path.exists():
-        return {"since": None, "paths": []}
-    return json.loads(path.read_text())
-
-
 def _ledger() -> set[str]:
-    return set(_ledger_state()["paths"])
+    path = _ledger_path()
+    return set(json.loads(path.read_text())) if path.exists() else set()
 
 
-def _write_ledger(since, paths) -> None:
+def _write_ledger(paths) -> None:
     # tmp + replace, so a crash mid-write never truncates the ledger.
     tmp = _ledger_path().with_suffix(".tmp")
-    tmp.write_text(json.dumps({"since": since, "paths": sorted(paths)},
-                              indent=1) + "\n")
+    tmp.write_text(json.dumps(sorted(paths), indent=1) + "\n")
     os.replace(tmp, _ledger_path())
 
 
@@ -393,19 +386,13 @@ def _record_writes(before: dict) -> dict:
     The registry and the upload act on the ledger alone. The upload tree is a
     long-lived working copy that builds on other sites never reach, so a file
     this site did not just write may be older than the published one, and
-    republishing it would revert that. ``since`` (UTC, set by the first entry)
-    lets :func:`stage_registry` refuse a file another site has published over
-    in the meantime. Returns the new snapshot, the next stage's ``before``.
+    republishing it would revert that. Returns the new snapshot, the next
+    stage's ``before``.
     """
-    import datetime
-
     after = _upload_snapshot()
     written = {p for p, st in after.items() if before.get(p) != st}
     if written:
-        state = _ledger_state()
-        since = state["since"] or datetime.datetime.now(
-            datetime.timezone.utc).isoformat()
-        _write_ledger(since, set(state["paths"]) | written)
+        _write_ledger(_ledger() | written)
     return after
 
 
@@ -428,18 +415,20 @@ def _mirror_tip() -> str:
     return HfApi().repo_info(DEFAULT_REPO, repo_type="dataset").sha
 
 
-def _commit_at(since: str) -> str:
-    """Return the mirror commit that was the tip at UTC time ``since``."""
-    import datetime
-
+def _published_dates(paths, revision: str) -> dict:
+    """``{path: datetime}`` of the last commit touching each path at ``revision``."""
     from huggingface_hub import HfApi
 
     from jcm.data.remote import DEFAULT_REPO
 
-    when = datetime.datetime.fromisoformat(since)
-    commits = HfApi().list_repo_commits(DEFAULT_REPO, repo_type="dataset")
-    return next((c.commit_id for c in commits if c.created_at <= when),
-                commits[-1].commit_id)
+    paths, api, dates = sorted(paths), HfApi(), {}
+    for i in range(0, len(paths), 200):
+        for f in api.get_paths_info(DEFAULT_REPO, paths[i:i + 200],
+                                    expand=True, revision=revision,
+                                    repo_type="dataset"):
+            if getattr(f, "last_commit", None) is not None:
+                dates[f.path] = f.last_commit.date
+    return dates
 
 
 def _truncation(grid: str) -> int:
@@ -610,19 +599,19 @@ def stage_bundles() -> None:
             d.mkdir(parents=True, exist_ok=True)
             for era, tag in (("pi", "pi1850"), ("pd", "pd2005-2014")):
                 if _want("ozone"):
-                    shutil.copy(BUILD / "ozone" /
+                    shutil.copy2(BUILD / "ozone" /
                                 f"ozone_fzj_cmip7_{tag}_{grid}_l{nlev}.nc",
                                 d / f"ozone_{era}.nc")
             for era, year in (("pi", 1850), ("pd", 2005)):
                 if _want("oxidants"):
-                    shutil.copy(
+                    shutil.copy2(
                         BUILD / "aux" / f"oxidants_waccm_echam_l{nlev}_"
                         f"{year}_t{trunc[grid]}.nc",
                         d / f"oxidants_{era}.nc")
         g = UPLOAD / "bundles" / grid
         if _want("dms"):
-            shutil.copy(BUILD / "aux" /
-                        f"dms_lana2011_climo_t{trunc[grid]}.nc", g / "dms.nc")
+            shutil.copy2(BUILD / "aux" /
+                         f"dms_lana2011_climo_t{trunc[grid]}.nc", g / "dms.nc")
 
     if not _column_buildable() or not _want("terrain"):
         print("bundles: done", flush=True)
@@ -632,8 +621,8 @@ def stage_bundles() -> None:
     # terrain.nc, matching the Gaussian bundles: the file is the fully
     # assembled terrain (LANDFRAC lsm + orog_gll), and the old sso.nc
     # name invited grabbing a raw SSO product instead (#596)
-    shutil.copy(BUILD / "sso" / "sso_gmted2010_ne30pg3.nc",
-                d / "terrain.nc")
+    shutil.copy2(BUILD / "sso" / "sso_gmted2010_ne30pg3.nc",
+                 d / "terrain.nc")
     # a rerun over a pre-#596 upload tree must not re-register the trap
     # file under its old name
     (d / "sso.nc").unlink(missing_ok=True)
@@ -1001,15 +990,18 @@ def stage_registry() -> None:
     unchanged data. SSO statistics (the terrain product's Tier A) are staged
     for the selected grids when terrain is among the products built.
     """
-    from jcm.data.mirror.registry import write_registry
+    from jcm.data.mirror.registry import build_registry
 
+    # A registry run that dies part-way must not leave the previous run's
+    # base for the upload to pair with a half-written registry.
+    (BUILD / "registry_base.json").unlink(missing_ok=True)
     before = _upload_snapshot()
     if not _partial_build():
         for name in ("ceds_anthro.zarr", "bb4cmip7.zarr",
                      "era5_land_climo_2005-2014_0p25.nc"):
             src, dst = BUILD / name, UPLOAD / "products" / name
             if src.exists() and not dst.exists():
-                shutil.copytree(src, dst) if src.is_dir() else shutil.copy(
+                shutil.copytree(src, dst) if src.is_dir() else shutil.copy2(
                     src, dst)
     if _want("terrain"):
         sso_dst = UPLOAD / "products" / "sso"
@@ -1021,10 +1013,9 @@ def stage_registry() -> None:
             dst = sso_dst / f.name
             # staging may have hardlinked build -> upload already
             if not (dst.exists() and dst.samefile(f)):
-                shutil.copy(f, dst)
+                shutil.copy2(f, dst)
     _record_writes(before)
-    state = _ledger_state()
-    written = set(state["paths"])
+    written = _ledger()
     gone = sorted(p for p in written if not (UPLOAD / p).is_file())
     if gone:
         # Removed after it was written: nothing to publish. Removing the
@@ -1032,7 +1023,7 @@ def stage_registry() -> None:
         print(f"registry: {len(gone)} written file(s) no longer exist, "
               f"dropped from the ledger: {', '.join(gone[:5])}", flush=True)
         written -= set(gone)
-        _write_ledger(state["since"], written)
+        _write_ledger(written)
     clash = sorted(p for p in written
                    if any(fnmatch.fnmatch(p, g) for g in _RETIRE))
     if clash:
@@ -1040,24 +1031,30 @@ def stage_registry() -> None:
                  f"({', '.join(clash[:5])}); narrow the globs")
     tip = _mirror_tip()
     base = _registry_at(tip)
-    if written:
-        # Another publish since this site started writing would be reverted.
-        then = _registry_at(_commit_at(state["since"]))["files"]
-        moved = sorted(p for p in written
-                       if base["files"].get(p) != then.get(p))
-        if moved:
-            sys.exit(f"registry: {len(moved)} file(s) this site wrote were "
-                     f"republished on the mirror since {state['since']} "
-                     f"({', '.join(moved[:5])}); rebuild them from the "
-                     f"current sources, or drop them from "
-                     f"{_ledger_path()}")
-    retired = sorted(p for p in base["files"]
-                     if any(fnmatch.fnmatch(p, g) for g in _RETIRE))
-    for p in retired:
-        del base["files"][p]
     stats = {p: list(st) for p, st in _upload_snapshot().items()
              if p in written}
-    print(write_registry(str(UPLOAD), base=base, paths=written), flush=True)
+    reg = build_registry(str(UPLOAD), base=base, paths=written)
+    # A published copy that differs from ours and was committed after our
+    # file's content (its mtime; build/ products are staged with copy2) came
+    # from another publish we have not rebuilt on, and would be reverted. Our
+    # own earlier publish matches our hash and passes.
+    differ = [p for p in written if p in base["files"]
+              and base["files"][p]["sha256"] != reg["files"][p]["sha256"]]
+    dates = _published_dates(differ, tip) if differ else {}
+    newer = sorted(p for p in differ if p in dates and dates[p].timestamp()
+                   > (UPLOAD / p).stat().st_mtime)
+    if newer:
+        sys.exit(f"registry: {len(newer)} file(s) this site wrote are older "
+                 f"than a different published copy ({', '.join(newer[:5])}); "
+                 "rebuild them from the current sources, or remove them from "
+                 f"{_ledger_path()} to keep the published copy")
+    retired = sorted(p for p in reg["files"]
+                     if any(fnmatch.fnmatch(p, g) for g in _RETIRE))
+    for p in retired:
+        del reg["files"][p]
+    tmp = UPLOAD / "registry.json.tmp"
+    tmp.write_text(json.dumps(reg, indent=1, sort_keys=True))
+    os.replace(tmp, UPLOAD / "registry.json")
     (BUILD / "registry_base.json").write_text(json.dumps(
         {"parent_commit": tip, "retire": list(_RETIRE), "retired": retired,
          "written": stats}, indent=1) + "\n")
@@ -1321,7 +1318,10 @@ def stage_upload() -> None:
             last = e
             print(f"upload attempt {attempt} failed: "
                   f"{type(e).__name__}: {e}", flush=True)
-            tip = _mirror_tip()
+            try:
+                tip = _mirror_tip()
+            except Exception:                       # noqa: BLE001
+                tip = base["parent_commit"]         # unknown: keep retrying
             if tip != base["parent_commit"]:
                 sys.exit(f"upload: the mirror tip is now {tip}, not "
                          f"{base['parent_commit']}. Either an earlier attempt "

@@ -37,10 +37,12 @@ def build_registry(root: str, base: dict | None = None,
 
 def write_registry(root: str, base: dict | None = None, paths=None) -> str:
     """Write ``root/registry.json`` (merged onto ``base``, see build_registry)."""
+    # Hash first, then replace: an interrupted run keeps the previous file.
+    reg = build_registry(root, base, paths)
     out = os.path.join(root, "registry.json")
-    with open(out, "w") as f:
-        json.dump(build_registry(root, base, paths), f, indent=1,
-                  sort_keys=True)
+    with open(out + ".tmp", "w") as f:
+        json.dump(reg, f, indent=1, sort_keys=True)
+    os.replace(out + ".tmp", out)
     return out
 
 

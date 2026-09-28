@@ -293,17 +293,20 @@ Only what this site's builds wrote. The upload tree is a long-lived working
 copy that builds on another site never reach, so any file a build did not just
 write may be older than the published one, and republishing it would revert
 that. Each stage's writes into the upload tree are recorded in
-`build/upload_ledger.json` (the files whose stat changed across the stage),
-with the time of the first entry. A stage that fails records nothing — the
-file it died writing may be truncated — so rerun it over the same selection.
+`build/upload_ledger.json` (the files whose stat changed across the stage). A
+stage that fails records nothing — the file it died writing may be truncated —
+so rerun it over the same selection.
 
 `--stage registry` takes the published `registry.json` at the mirror's current
 tip and re-hashes only the ledger's files. It refuses any of them whose
-published entry changed after the ledger's first entry: another site
-published over it in the meantime, and uploading would revert that. Rebuild
-such files from the current sources, or delete the ledger to discard the
-unpublished writes. `--retire <globs>` on the same run drops published files
-(a renamed product's old path); nothing else ever leaves the mirror.
+published copy differs and was committed after the local file's content was
+made (its mtime; products under `build/` are staged into the upload tree with
+their own mtime): that copy came from another publish this build has not
+rebuilt on, and uploading would revert it. Rebuild such a file from the
+current sources, or remove it from the ledger to keep the published copy. A
+site's own earlier publish of the same bytes passes. `--retire <globs>` on the
+same run drops published files (a renamed product's old path); nothing else
+ever leaves the mirror.
 
 `--stage upload` commits exactly the files the registry hashed, at the state
 it hashed them, plus `registry.json` and the retirements, on top of that tip
