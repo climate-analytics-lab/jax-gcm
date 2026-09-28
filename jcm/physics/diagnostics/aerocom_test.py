@@ -401,7 +401,8 @@ class CodexRegressionTest(unittest.TestCase):
         """With no qnc tracer (1M scheme) the m^-3 CloudData field is used.
 
         The 1M ``droplet_number`` is a characteristic IN-CLOUD value
-        (``base_cdnc * cdnc_factor``), nonzero even in clear sky — so the
+        (the prescribed profile times ``cdnc_factor``), nonzero even in clear
+        sky — so the
         in-cloud output must equal it (NOT droplet_number / cf, which
         inflated cloud-top CDNC by 1/cf), the grid mean must be cf-weighted
         (NOT the raw field, which counted droplets in clear sky), and the

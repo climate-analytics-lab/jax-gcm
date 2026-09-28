@@ -6,8 +6,6 @@ Includes wavelength-dependent optical properties across multiple spectral bands.
 
 """
 
-import math
-
 import jax.numpy as jnp
 import jax
 import numpy as np
@@ -21,9 +19,11 @@ import jcm.constants as c
 from jcm.physics.clouds.cloud_utils import (
     BREADTH_CONTINENTAL,
     BREADTH_MARITIME,
+    continental_columns,
     eff_ice_crystal_radius,
     eff_liquid_droplet_radius,
-    prescribed_cdnc_profile,
+    per_column,
+    prescribed_droplet_number,
 )
 from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
 
@@ -906,34 +906,6 @@ def echam_cloud_effective_radii(
     return r_liq, r_ice
 
 
-def continental_columns(terrain, forcing) -> jnp.ndarray:
-    """ECHAM's continental mask for cloud optics: land that is not glacier.
-
-    ``mo_cloud_optics.f90`` takes the continental breadth constant
-    ``WHERE (laland .AND. .NOT. laglac)`` and the prescribed droplet number
-    (``physc.f90`` section 3.12) takes the continental profile for
-    ``loland .AND. .NOT. loglac`` (or a lake). ECHAM6's default
-    (``lfractional_mask = .FALSE.``) reads ``loland`` from the binary
-    land-sea mask; jcm's land fraction ``fmask`` is fractional, so land is
-    ``fmask >= 0.5`` (the same split ``SundqvistCloudFraction`` uses).
-    ``loglac`` is any glacier cover on land (``glac > 0``), from
-    ``forcing.glacier_fraction`` where the forcing carries it. jcm carries no
-    lake map, so no ocean-classified cell is treated as a lake.
-
-    Returns a per-column boolean, shaped like ``terrain.fmask``. A term driven
-    without terrain (``terrain=None``: unit tests and bare column drivers)
-    has no land to classify, so every column is maritime.
-    """
-    if terrain is None:
-        return jnp.asarray(False)
-    land = terrain.fmask >= 0.5
-    glacier = getattr(forcing, "glacier_fraction", None)
-    if glacier is None:
-        return land
-    return jnp.logical_and(
-        land, ~(jnp.reshape(jnp.asarray(glacier), land.shape) > 0.0))
-
-
 def radiation_effective_radii(
     state, diagnostics: dict, forcing, terrain,
     cloud_water: jnp.ndarray,
@@ -959,12 +931,12 @@ def radiation_effective_radii(
       density -- the state the previous step's microphysics left, which is
       what ECHAM-HAM's radiation reads (``acdnc`` and ``icnc_instantan``,
       both written by the previous step's ``cloud_micro_2m``). Otherwise
-      (ECHAM 1M) ECHAM's prescribed profile
-      (:func:`~jcm.physics.clouds.cloud_utils.prescribed_cdnc_profile`) at
-      this step's pressure, scaled by the MACv2-SP Twomey factor
-      ``aerosol.cdnc_factor`` (Stevens et al. 2017 ``dNovrN``; the simple
-      plumes' ``x_cdnc`` "scale factor for cloud droplet number
-      concentration", ``mo_bc_aeropt_splumes.f90::add_bc_aeropt_splumes``).
+      (ECHAM 1M) :func:`~jcm.physics.clouds.cloud_utils.prescribed_droplet_number`,
+      ECHAM's prescribed profile at this step's pressure scaled by the
+      MACv2-SP Twomey factor ``aerosol.cdnc_factor`` -- the same call the 1M
+      microphysics makes. In MPI-ESM1.2 the simple plumes' factor
+      (``x_cdnc``, Stevens et al. 2017 ``dNovrN``) scales the droplet number
+      of the radiation only (Mauritsen et al. 2019, JAMES, section 2.2).
 
     Nothing here reads a radius from the ``clouds`` carry: the published
     ``clouds.r_eff_liq`` / ``clouds.r_eff_ice`` are a diagnostic of this
@@ -976,23 +948,16 @@ def radiation_effective_radii(
     cw_in = in_cloud_condensate(cloud_water, cloud_fraction, eps=cld_frac_min)
     ci_in = in_cloud_condensate(cloud_ice, cloud_fraction, eps=cld_frac_min)
     prognostic = "qnc" in state.tracers and "qni" in state.tracers
-    horiz = temperature.shape[1:]
-
-    def per_column(x):
-        # Per-column fields arrive in the host's own horizontal layout (the
-        # terrain and aerosol grids, or a scalar); lay them out like the state.
-        x = jnp.asarray(x)
-        if x.size == math.prod(horiz):
-            return x.reshape(horiz)
-        return jnp.broadcast_to(x, horiz)
-
-    continental = per_column(continental_columns(terrain, forcing))
+    continental = per_column(continental_columns(terrain, forcing),
+                             temperature.shape[1:])
     if prognostic:
         droplet_number = jnp.maximum(state.tracers["qnc"], 0.0) * air_density
         ice_number = jnp.maximum(state.tracers["qni"], 0.0) * air_density
     else:
-        cdnc_factor = per_column(diagnostics["aerosol"].cdnc_factor)
-        droplet_number = prescribed_cdnc_profile(pressure, continental) * cdnc_factor
+        # The one call the 1M microphysics makes too, so the two cannot see
+        # different droplet numbers (ECHAM passes both the same ``acdnc``).
+        droplet_number = prescribed_droplet_number(
+            pressure, terrain, forcing, diagnostics["aerosol"].cdnc_factor)
         ice_number = jnp.zeros_like(temperature)
     return echam_cloud_effective_radii(
         cw_in, ci_in, temperature, pressure,

@@ -1,7 +1,9 @@
 """Utility routines and constants for the 2-m cloud microphysics scheme (based on mo_cloud_utils from ECHAM6/ICON)."""
 
-import jax.numpy as jnp
+import math
 from math import pi
+
+import jax.numpy as jnp
 
 import jcm.constants as c
 from .lohmann_2m_params import CloudParams2M
@@ -288,6 +290,81 @@ def prescribed_cdnc_profile(
     zprat = jnp.minimum(8.0, 80000.0 / pressure) ** 2
     aloft = 1.0e6 * (zn1 + (zn2 - zn1) * jnp.exp(1.0 - zprat))
     return jnp.where(pressure < 80000.0, aloft, 1.0e6 * zn2)
+
+
+def continental_columns(terrain, forcing) -> jnp.ndarray:
+    """ECHAM's continental mask for cloud droplets: land that is not glacier.
+
+    ``physc.f90`` section 3.12 gives the prescribed droplet number its
+    continental profile for ``loland .AND. .NOT. loglac`` (or a lake), and
+    ``mo_cloud_optics.f90`` takes the continental breadth constant
+    ``WHERE (laland .AND. .NOT. laglac)``. ECHAM6's default
+    (``lfractional_mask = .FALSE.``) reads ``loland`` from the binary
+    land-sea mask; jcm's land fraction ``fmask`` is fractional, so land is
+    ``fmask >= 0.5`` (the same split ``SundqvistCloudFraction`` uses).
+    ``loglac`` is any glacier cover on land (``glac > 0``), from
+    ``forcing.glacier_fraction`` where the forcing carries it. jcm carries no
+    lake map, so no ocean-classified cell is treated as a lake.
+
+    Returns a per-column boolean, shaped like ``terrain.fmask``. A term driven
+    without terrain (``terrain=None``: unit tests and bare column drivers)
+    has no land to classify, so every column is maritime.
+    """
+    if terrain is None:
+        return jnp.asarray(False)
+    land = terrain.fmask >= 0.5
+    glacier = getattr(forcing, "glacier_fraction", None)
+    if glacier is None:
+        return land
+    return jnp.logical_and(
+        land, ~(jnp.reshape(jnp.asarray(glacier), land.shape) > 0.0))
+
+
+def per_column(x, horizontal_shape) -> jnp.ndarray:
+    """Lay a per-column field out in ``horizontal_shape``.
+
+    Per-column fields arrive in their producer's horizontal layout (the
+    terrain or aerosol grid, a flattened column vector, or a scalar); a
+    column-physics term needs them in the state's own layout so they
+    broadcast against ``(nlev, *horizontal_shape)`` fields.
+    """
+    x = jnp.asarray(x)
+    if x.size == math.prod(horizontal_shape):
+        return x.reshape(horizontal_shape)
+    return jnp.broadcast_to(x, horizontal_shape)
+
+
+def prescribed_droplet_number(
+    pressure: jnp.ndarray, terrain, forcing, cdnc_factor,
+) -> jnp.ndarray:
+    """Droplet number [1/m^3] of the 1-moment ECHAM configuration.
+
+    ECHAM's ``acdnc`` (:func:`prescribed_cdnc_profile` on the
+    :func:`continental_columns` mask) times the MACv2-SP Twomey factor
+    ``cdnc_factor``. ECHAM passes one ``acdnc`` to both its radiation
+    (``mo_cloud_optics.f90``) and its 1M cloud scheme (``mo_cloud.f90``,
+    ``pacdnc``), so this is the one call both jcm consumers make:
+    ``Echam1MMicrophysics`` and the radiation's
+    ``cloud_optics.radiation_effective_radii``.
+
+    The Twomey factor reaches both. In MPI-ESM1.2 it scales the radiation's
+    droplet number only and leaves the cloud microphysics' unperturbed
+    (Mauritsen et al. 2019, JAMES, section 2.2); the extra path through the
+    1M autoconversion is jcm's existing aerosol-cloud formulation, recorded
+    in #932 and kept as it is for v3.0.
+
+    Args:
+        pressure: full-level pressure [Pa], ``(nlev, *horiz)``.
+        terrain / forcing: for the continental mask; ``terrain=None`` is
+            all-maritime.
+        cdnc_factor: per-column Twomey factor, any layout with one value per
+            column (or a scalar).
+
+    """
+    horiz = jnp.shape(pressure)[1:]
+    continental = per_column(continental_columns(terrain, forcing), horiz)
+    return (prescribed_cdnc_profile(pressure, continental)
+            * per_column(cdnc_factor, horiz))
 
 
 def eff_liquid_droplet_radius(

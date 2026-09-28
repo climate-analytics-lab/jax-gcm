@@ -452,9 +452,11 @@ The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICO
    * - ``cvtfall``
      - Ice/snow terminal-velocity factor (ECHAM ``mo_echam_cloud_params`` value at T63; the 2M scheme uses the same)
      - 2.5
-   * - ``base_cdnc``
-     - Baseline CDNC in clean air (1/m³)
-     - 100e6
+
+The droplet number the autoconversion sees is not a parameter: it is ECHAM's
+prescribed ``acdnc`` profile times the MACv2-SP Twomey factor
+(:py:func:`~jcm.physics.clouds.cloud_utils.prescribed_droplet_number`), the same
+number the radiation forms the droplet radius from.
 
 **2-moment** — :py:func:`jcm.physics.clouds.lohmann_2m.cloud_microphysics_2m`
 
@@ -796,7 +798,7 @@ Aerosol Scheme (MACv2-SP)
 
 .. admonition:: Note vs. ICON-A
 
-   ICON-A typically uses the Kinne et al. (2013) aerosol climatology or the MACv2-SP scheme. The JAX-GCM implementation uses MACv2-SP with the addition of Angstrom spectral scaling (matching the Fortran implementation) and aerosol-cloud coupling through the CDNC modification of both cloud optics and microphysics autoconversion.
+   ICON-A typically uses the Kinne et al. (2013) aerosol climatology or the MACv2-SP scheme. The JAX-GCM implementation uses MACv2-SP with the addition of Angstrom spectral scaling (matching the Fortran implementation) and aerosol-cloud coupling through the CDNC modification of both cloud optics and microphysics autoconversion. MPI-ESM1.2 applies the MACv2-SP factor to the radiation's droplet number only and leaves the cloud microphysics' unperturbed (Mauritsen et al. 2019); the extra autoconversion path is jcm's recorded departure (#932).
 
 
 Chemistry

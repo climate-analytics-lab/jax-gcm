@@ -27,6 +27,7 @@ import tree_math
 import jcm.constants as c
 from jcm.physics.clouds.cloud_utils import (
     latent_heat_over_cp,
+    prescribed_droplet_number,
     moist_isobaric_heat_capacity,
 )
 
@@ -95,9 +96,6 @@ class MicrophysicsParameters:
     cvtfall: float       # Ice/snow terminal-velocity factor. ECHAM at nn==63
                          # (jcm's default grid) is 2.5 (mo_echam_cloud_params.f90
                          # :211); the 2M scheme uses 2.5 too (#675).
-
-    # Cloud droplet number concentration
-    base_cdnc: float     # Baseline CDNC in clean air (1/m³), modulated by aerosol cdnc_factor
 
     # Mixed-phase split for the saturation-adjustment step. Below
     # ``t_mix_min`` condensate becomes 100% ice; above ``t_mix_max`` it
@@ -197,7 +195,7 @@ class MicrophysicsParameters:
                 ccracl=6.0, cauloc=0.0, clmin=0.0, clmax=0.5,
                  ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
                  crhosno=100.0, ccsaut=95.0, ccsacl=0.1,
-                 cvtfall=2.5, base_cdnc=100.0e6,
+                 cvtfall=2.5,
                  t_mix_min=238.15, t_mix_max=273.15,
                  epsilon=1.0e-12, d_epsilon=1.0e-30,
                  cqtmin=1.0e-12, ccwmin=1.0e-7, clwprat=4.0,
@@ -224,7 +222,6 @@ class MicrophysicsParameters:
             ccsaut=jnp.array(ccsaut),
             ccsacl=jnp.array(ccsacl),
             cvtfall=jnp.array(cvtfall),
-            base_cdnc=jnp.array(base_cdnc),
             t_mix_min=jnp.array(t_mix_min),
             t_mix_max=jnp.array(t_mix_max),
             epsilon=jnp.array(epsilon),
@@ -797,6 +794,10 @@ def cloud_microphysics_column_sweep(
       tracked as a separate add when stability data justifies it.
     * **Rain freezing** below ``cthomi`` and the **Bergeron-Findeisen**
       ice-from-supercooled-water process (covered by the 2M scheme).
+    * **Bigg and contact freezing of supercooled cloud water** between
+      ``cthomi`` and ``tmelt`` (``mo_cloud.f90`` section 6.2, lines
+      830-885), the two ECHAM processes besides autoconversion that read
+      the droplet number (#939).
 
     """
     if config is None:
@@ -1367,11 +1368,11 @@ class Echam1MMicrophysics(PhysicsTerm):
     Consumes the post-condensation ``cloud_fraction``, ``qc``, ``qi``
     written to the public ``"clouds"`` key by
     :class:`~jcm.physics.clouds.sundqvist.SundqvistCloudFraction` so it
-    must be composed downstream of that term. Reads ``cdnc_factor`` from
-    the public ``"aerosol"`` key (set by
-    :class:`~jcm.physics.aerosol.Macv2SpAerosol`) to apply the Twomey
-    indirect effect on droplet number — when the aerosol term is absent,
-    falls back to the bare ``base_cdnc`` from the parameters.
+    must be composed downstream of that term. The droplet number is ECHAM's
+    prescribed ``acdnc`` profile scaled by ``cdnc_factor`` from the public
+    ``"aerosol"`` key (set by :class:`~jcm.physics.aerosol.Macv2SpAerosol`),
+    :func:`~jcm.physics.clouds.cloud_utils.prescribed_droplet_number`, the
+    call the radiation also makes.
 
     Reads ``pressure_full``, ``air_density``, ``layer_thickness`` from
     the moist-air diagnostics dict and the model timestep from
@@ -1454,14 +1455,18 @@ class Echam1MMicrophysics(PhysicsTerm):
         qi_interim = clouds.qi
         cloud_fraction = clouds.cloud_fraction
 
-        # Twomey effect: aerosol term provides per-column cdnc_factor
-        # (validated as a required upstream key at composition time).
-        cdnc_factor = diagnostics["aerosol"].cdnc_factor
-        cdnc_m3 = (
-            jnp.ones_like(state.temperature)
-            * params.base_cdnc
-            * cdnc_factor[jnp.newaxis, :]
-        )
+        # Droplet number: ECHAM's prescribed ``acdnc`` profile (physc.f90
+        # section 3.12; land/sea, 80/180 cm-3 below 800 hPa, 20 cm-3 aloft)
+        # times the MACv2-SP Twomey factor, from the SAME call the radiation
+        # makes (``prescribed_droplet_number``): ECHAM's ``cloud`` receives
+        # the ``acdnc`` its radiation used as ``pacdnc``. The in-cloud number
+        # enters the Beheng/KK autoconversion (``mo_cloud.f90`` 977:
+        # ``ztmp2 = pacdnc*1e-6``); ECHAM's other two uses, Bigg and contact
+        # freezing of cloud water between cthomi and tmelt (859, 876), have
+        # no counterpart in this port (#939).
+        cdnc_m3 = prescribed_droplet_number(
+            pressure_full, terrain, forcing,
+            diagnostics["aerosol"].cdnc_factor)
         droplet_number_per_kg = cdnc_m3 / air_density
 
         # ECHAM ``mo_cloud.f90`` column-sweep: per-layer saturation

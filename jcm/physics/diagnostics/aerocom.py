@@ -554,7 +554,9 @@ class AerocomDiagnostics(PhysicsTerm):
           carry init;
         * 1-moment (``echam_1m``) writes ``CloudData.droplet_number`` in
           **m^-3** as a characteristic **in-cloud** value
-          (``base_cdnc * cdnc_factor``), nonzero even in clear sky.
+          (ECHAM's prescribed profile times ``cdnc_factor``,
+          ``cloud_utils.prescribed_droplet_number``), nonzero even in clear
+          sky.
 
         Both a grid-mean and an in-cloud volumetric field are returned so
         each consumer takes the semantics it needs: the CMOR'd ``cdnc3d``
