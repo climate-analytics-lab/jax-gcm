@@ -71,9 +71,12 @@ class RegistryTest(unittest.TestCase):
             reg = json.loads(Path(path).read_text())
             self.assertIn("sub/a.nc", reg["files"])
             self.assertEqual(reg["files"]["sub/a.nc"]["size"], 5)
-            # registry.json itself is excluded
+            # registry.json itself, and an interrupted write's temp copy,
+            # are excluded
+            (Path(d) / "registry.json.tmp").write_text("{}")
             reg2 = build_registry(d)
             self.assertNotIn("registry.json", reg2["files"])
+            self.assertNotIn("registry.json.tmp", reg2["files"])
 
     def test_paths_keep_the_base_entry_of_every_other_file(self):
         # A stale copy the build did not write must not override the
@@ -391,8 +394,29 @@ class LedgerTest(unittest.TestCase):
             bm.main()
         with self._patched():
             self.assertEqual(bm._ledger(), {self.F})
-        self.assertIn("stage amip failed: nothing it wrote is recorded",
-                      out.getvalue())
+        self.assertIn("stage amip failed", out.getvalue())
+
+    def test_a_failed_rerun_unrecords_files_it_touched(self):
+        # A file recorded by an earlier run and truncated by a failing rerun
+        # must not stay publishable.
+        import contextlib
+        import io
+
+        from jcm.data.mirror import build_mirror as bm
+        self._write(self.F, b"good")
+
+        def bad():
+            (self.t63 / "forcing_pd.nc").write_bytes(b"tr")
+            raise RuntimeError("walltime")
+
+        with self._patched(STAGES={**bm.STAGES, "bundles": bad}), \
+                patch.object(bm, "check_sources", lambda *a, **k: None), \
+                patch("sys.argv", ["build_mirror", "--stage", "bundles"]), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaises(RuntimeError):
+            bm.main()
+        with self._patched():
+            self.assertEqual(bm._ledger(), set())
 
 
 class MirrorRevisionStagesTest(unittest.TestCase):

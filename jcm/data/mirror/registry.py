@@ -22,7 +22,8 @@ def build_registry(root: str, base: dict | None = None,
     root_p = Path(root)
     if paths is None:
         files = [p for p in sorted(root_p.rglob("*"))
-                 if p.is_file() and p.name != "registry.json"]
+                 if p.is_file()
+                 and p.name not in ("registry.json", "registry.json.tmp")]
     else:
         files = [root_p / rel for rel in sorted(paths)]
     for p in files:

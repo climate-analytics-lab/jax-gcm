@@ -376,6 +376,26 @@ def _sync(src: Path, dst: Path) -> None:
         shutil.copy2(s, d)
 
 
+#: The registry and its in-flight temp copy: outputs of hashing, never inputs.
+_REGISTRY_FILES = ("registry.json", "registry.json.tmp")
+
+
+def _forget_writes(before: dict) -> list[str]:
+    """Drop from the ledger every file changed since ``before``.
+
+    For a failed stage: a file it touched may be truncated, including one an
+    earlier run already recorded, so none of them may be published until a
+    rerun rewrites and re-records them.
+    """
+    after = _upload_snapshot()
+    touched = {p for p, st in after.items() if before.get(p) != st}
+    touched |= set(before) - set(after)
+    ledger = _ledger()
+    if ledger & touched:
+        _write_ledger(ledger - touched)
+    return sorted(touched)
+
+
 def _ledger_path() -> Path:
     """Upload-tree files written since the last upload (a JSON list)."""
     return BUILD / "upload_ledger.json"
@@ -402,7 +422,7 @@ def _upload_snapshot() -> dict[str, tuple]:
         for name in files:
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, UPLOAD)
-            if rel == "registry.json":
+            if rel in _REGISTRY_FILES:
                 continue
             st = os.stat(full)
             snap[rel] = (st.st_mtime_ns, st.st_size, st.st_ino)
@@ -1006,6 +1026,25 @@ def verify_remote_coverage(manifest: dict = None, repo_id: str = None) -> dict:
     return drift
 
 
+def _stage_tier_a() -> None:
+    """Stage Tier A (full builds) and the selected SSO statistics for upload."""
+    if not _partial_build():
+        for name in _TIER_A:
+            if (BUILD / name).exists():
+                _sync(BUILD / name, UPLOAD / "products" / name)
+    if _want("terrain"):
+        sso_dst = UPLOAD / "products" / "sso"
+        sso_dst.mkdir(parents=True, exist_ok=True)
+        for f in (BUILD / "sso").glob("*.nc"):
+            if (_SELECTED is not None
+                    and f.stem.rsplit("_", 1)[-1] not in _SELECTED):
+                continue
+            dst = sso_dst / f.name
+            # staging may have hardlinked build -> upload already
+            if not (dst.exists() and dst.samefile(f)):
+                shutil.copy2(f, dst)
+
+
 def stage_registry() -> None:
     """Stage Tier A into the upload tree and write ``registry.json``.
 
@@ -1025,21 +1064,11 @@ def stage_registry() -> None:
     # base for the upload to pair with a half-written registry.
     (BUILD / "registry_base.json").unlink(missing_ok=True)
     before = _upload_snapshot()
-    if not _partial_build():
-        for name in _TIER_A:
-            if (BUILD / name).exists():
-                _sync(BUILD / name, UPLOAD / "products" / name)
-    if _want("terrain"):
-        sso_dst = UPLOAD / "products" / "sso"
-        sso_dst.mkdir(parents=True, exist_ok=True)
-        for f in (BUILD / "sso").glob("*.nc"):
-            if (_SELECTED is not None
-                    and f.stem.rsplit("_", 1)[-1] not in _SELECTED):
-                continue
-            dst = sso_dst / f.name
-            # staging may have hardlinked build -> upload already
-            if not (dst.exists() and dst.samefile(f)):
-                shutil.copy2(f, dst)
+    try:
+        _stage_tier_a()
+    except BaseException:
+        _forget_writes(before)      # a copy cut short is not publishable
+        raise
     _record_writes(before)
     written = _ledger()
     gone = sorted(p for p in written if not (UPLOAD / p).is_file())
@@ -1476,10 +1505,10 @@ def main() -> None:
         try:
             STAGES[name]()
         except BaseException:
-            # The file being written when it died may be truncated, so none
-            # of this stage's writes are recorded.
-            print(f"stage {name} failed: nothing it wrote is recorded for "
-                  "upload; rerun it over the same selection", flush=True)
+            touched = _forget_writes(before)
+            print(f"stage {name} failed: the {len(touched)} file(s) it "
+                  "touched are not publishable until a rerun over the same "
+                  "selection rewrites them", flush=True)
             raise
         snap = _record_writes(before)
     if args.verify_remote:
