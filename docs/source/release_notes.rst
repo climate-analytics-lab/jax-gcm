@@ -1029,8 +1029,17 @@ Lohmann 2M utility fields are ECHAM's
   threshold's ice radius is ``0.9·r_eff``
   (``effective_2_volmean_radius_param_Schuman_2011``) instead of the plate
   radius ECHAM uses only for aggregation, which was up to three times
-  smaller. **Changes results** for every 2M configuration, including JAM:
-  MEASUREMENT_PLACEHOLDER See :doc:`science/clouds_microphysics`.
+  smaller. **Changes results** for every 2M configuration, including JAM.
+  Over days 5-10 of ``t63-echam-2m`` runs restarted from a 30-day spin-up of
+  the preset, global liquid water path falls from 60.6 to 41.0 g/m² (the
+  supercooled part from 42.7 to 23.8), ice water path rises from 2.95 to
+  3.4 g/m², large-scale snowfall rises 2.6-fold, total cloud cover falls by
+  3.4 points, the shortwave cloud effect weakens by 7.5 W/m² and the
+  longwave one by 3.6 W/m², and net TOA radiation rises by 3.7 W/m². The
+  riming viscosity accounts for most of the liquid and snowfall change. Ten
+  days measure the immediate response, not a new climate; the release-matrix
+  bands of the ``echam-2m`` and ``echam-jam`` members shift accordingly. See
+  :doc:`science/clouds_microphysics`.
 
 
 Known limitations
