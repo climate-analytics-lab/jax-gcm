@@ -64,10 +64,10 @@ PROFILE_FIELDS = (
     "temperature", "specific_humidity", "pressure_levels",
     "layer_thickness", "air_density", "cloud_water", "cloud_ice",
     "cloud_fraction", "ozone_vmr",
-    # RESOLVED effective radii (um): the microphysical value where the source
-    # provides one, the diagnostic fallback elsewhere. Stored resolved, and
-    # RRTMGP is driven with exactly these, so a feature and its label always
-    # describe the same cloud (see _resolved_effective_radii).
+    # Effective-radius FEATURES (um), nn_emulator.emulator_radius_features of
+    # the radii RRTMGP forms for the column. Stored as features, and RRTMGP is
+    # driven with exactly these, so a feature and its label always describe
+    # the same cloud (see _emulator_radius_features_batch).
     "r_eff_liq", "r_eff_ice",
 )
 INTERFACE_FIELDS = ("pressure_interfaces",)
@@ -439,50 +439,67 @@ def _layer_thickness(pressure_interfaces, air_density):
     return np.maximum(dp / (air_density * float(c.grav)), 10.0)
 
 
-def _resolved_effective_radii(batch):
-    """Return ``batch`` with ``r_eff_liq`` / ``r_eff_ice`` resolved.
+def _radiation_cloud_numbers(batch):
+    """In-cloud condensate [kg/kg] as the radiation sees it, per phase."""
+    import jax.numpy as jnp
 
-    A source supplies RAW radii (um), zero meaning "not provided". This
-    replaces them with the resolved values ``resolve_effective_radii``
-    produces — microphysical where given, the diagnostic fallback elsewhere —
-    and those are what get stored AND what the labeller hands RRTMGP. Storing
-    the raw values instead would let a stored feature (0 outside cloud)
-    describe a different cloud from the label RRTMGP computed from the
-    fallback. The resolved radii are strictly positive, so RRTMGP's own
-    fallback never re-triggers on them.
+    from jcm.physics.radiation.mcica import in_cloud_condensate
+    from jcm.physics.radiation.radiation_types import RadiationParameters
 
-    The ice fallback is a power law in the IN-CLOUD ice water content, so the
-    grid-mean condensate goes through the same ``in_cloud_path`` division and
-    ``_MAX_IN_CLOUD_CONDENSATE`` cap that ``radiation_scheme_rrtmgp`` applies
-    before building its radiation state.
+    eps = RadiationParameters.default().cld_frac_min
+    cf = jnp.asarray(batch["cloud_fraction"])
+    return (
+        in_cloud_condensate(jnp.asarray(batch["cloud_water"]), cf, eps=eps),
+        in_cloud_condensate(jnp.asarray(batch["cloud_ice"]), cf, eps=eps),
+    )
+
+
+def _state_effective_radii(batch, droplet_number_per_kg, ice_number_per_kg):
+    """Radii (um) RRTMGP forms for a sampled 2-moment state.
+
+    The same law and inputs as ``cloud_optics.radiation_effective_radii`` on
+    the 2-moment path: the in-cloud condensate the radiation sees, and the
+    droplet / crystal number from the ``qnc``/``qni`` tracers times the air
+    density. 0 where a phase is absent.
+    """
+    import jax.numpy as jnp
+
+    from jcm.physics.radiation.cloud_optics import echam_cloud_effective_radii
+
+    cw_in, ci_in = _radiation_cloud_numbers(batch)
+    rho = jnp.asarray(batch["air_density"])
+    r_liq, r_ice = echam_cloud_effective_radii(
+        cw_in, ci_in,
+        jnp.asarray(batch["temperature"]), jnp.asarray(batch["pressure_levels"]),
+        jnp.maximum(jnp.asarray(droplet_number_per_kg), 0.0) * rho,
+        jnp.maximum(jnp.asarray(ice_number_per_kg), 0.0) * rho,
+        False, prognostic_number=True,
+    )
+    return np.asarray(r_liq, np.float64), np.asarray(r_ice, np.float64)
+
+
+def _emulator_radius_features_batch(batch):
+    """Return ``batch`` with ``r_eff_liq`` / ``r_eff_ice`` as emulator features.
+
+    A source supplies the radii RRTMGP radiates with (um, 0 where a phase is
+    absent). This turns them into the network's radius features with
+    ``nn_emulator.emulator_radius_features`` -- the definition the online
+    emulator applies -- and those are what get stored AND what the labeller
+    hands RRTMGP, so a stored feature and its label describe the same cloud.
+    In a layer without the phase the feature is the trained fill, which
+    weights nothing in RRTMGP (that layer has no condensate path).
 
     Requires ``air_density`` and ``layer_thickness`` to be present already.
     """
-    import jax
     import jax.numpy as jnp
 
-    from jcm.physics.radiation.cloud_optics import resolve_effective_radii
-    from jcm.physics.radiation.mcica import in_cloud_path
-    from jcm.physics.radiation.rrtmgp import _MAX_IN_CLOUD_CONDENSATE
+    from jcm.physics.radiation.nn_emulator import emulator_radius_features
 
-    ice_in_cloud = jnp.minimum(
-        in_cloud_path(jnp.asarray(batch["cloud_ice"]),
-                      jnp.asarray(batch["cloud_fraction"])),
-        _MAX_IN_CLOUD_CONDENSATE,
-    )
-    in_cloud_ice_path = (
-        jnp.maximum(ice_in_cloud, 0.0)
-        * jnp.asarray(batch["air_density"])
-        * jnp.asarray(batch["layer_thickness"])
-    )
-    # cdnc_factor = 1 is what the labeller's AerosolData hands the liquid
-    # fallback.
-    r_liq, r_ice = jax.vmap(
-        resolve_effective_radii, in_axes=(0, 0, None, 0, 0),
-    )(
+    cw_in, ci_in = _radiation_cloud_numbers(batch)
+    # cdnc_factor = 1 is what the labeller's AerosolData carries.
+    r_liq, r_ice = emulator_radius_features(
         jnp.asarray(batch["r_eff_liq"]), jnp.asarray(batch["r_eff_ice"]),
-        jnp.asarray(1.0),
-        in_cloud_ice_path, jnp.asarray(batch["layer_thickness"]),
+        cw_in, ci_in, jnp.asarray(1.0),
     )
     out = dict(batch)
     out["r_eff_liq"] = np.asarray(r_liq, dtype=np.float64)
@@ -813,9 +830,10 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
 
     # Effective radii on the two spare LHS axes, spanning the observed ranges
     # (drizzling marine stratocumulus to continental haze; small cirrus
-    # crystals to large aggregates). Zero outside cloud means "not provided",
-    # so the clear part of every column exercises the diagnostic fallback the
-    # coupled model uses wherever the microphysics writes nothing.
+    # crystals to large aggregates), independent of the condensate so the
+    # network learns the flux's radius dependence directly. A layer without
+    # the phase gets the emulator's trained fill feature (see
+    # _emulator_radius_features_batch).
     cloudy = cloud_fraction > 0.0
     r_eff_liq = np.where(cloudy, (2.0 + 18.0 * u[:, 13])[:, None], 0.0)
     r_eff_ice = np.where(cloudy, (10.0 + 140.0 * u[:, 14])[:, None], 0.0)
@@ -864,7 +882,7 @@ def perturbation_sweep(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     (latitude, longitude, orbital_phase,
      synodic_phase, _) = _solar_geometry_for_cos_zenith(rng, target_mu0)
 
-    return _resolved_effective_radii(dict(
+    return _emulator_radius_features_batch(dict(
         temperature=temperature,
         specific_humidity=specific_humidity,
         pressure_levels=pressure_levels,
@@ -998,13 +1016,23 @@ def _load_trajectory_fields(state_file):
     out["cloud_ice"] = _first_var(ds, ["clouds.qi", "qi"], 0.0, shape_3d)[0]
     out["cloud_fraction"] = _first_var(
         ds, ["clouds.cloud_fraction"], 0.0, shape_3d)[0]
-    # Microphysical radii (um), written by the 2M scheme. Zero -- both as the
-    # fallback for a 1M run that wrote none, and level-by-level within a 2M
-    # run -- means "not provided" and selects the diagnostic parameterisation.
-    out["r_eff_liq"] = _first_var(
-        ds, ["clouds.r_eff_liq"], 0.0, shape_3d)[0]
-    out["r_eff_ice"] = _first_var(
-        ds, ["clouds.r_eff_ice"], 0.0, shape_3d)[0]
+    # Droplet / crystal number per kg (the 2-moment tracers). The radius
+    # features are formed from the SAMPLED state with the radiation's own law
+    # (_state_effective_radii), not read from ``clouds.r_eff_*``: that output is
+    # the radius of the radiation solve, formed from the step-start state and
+    # time-averaged in averaged output, so it does not describe the saved
+    # state. The emulator is supported with the 2-moment scheme only; a 1M
+    # file carries no land mask for ECHAM's prescribed droplet number.
+    missing = [n for n in ("qnc", "qni") if n not in ds]
+    if missing:
+        raise KeyError(
+            f"state file lacks the 2-moment number tracers {missing}: the "
+            "trajectory source forms the radius features from qnc/qni, so it "
+            "needs output of a cloud_scheme='2m' run (the emulator's "
+            "supported configuration)."
+        )
+    out["qnc"] = np.asarray(ds["qnc"].values)
+    out["qni"] = np.asarray(ds["qni"].values)
     # chemistry.ozone_vmr is ppmv on output (see rrtmgp._compute_full).
     out["ozone_vmr"] = _first_var(
         ds, ["chemistry.ozone_vmr"], 1.0, shape_3d)[0] * 1e-6
@@ -1066,8 +1094,8 @@ def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
     cloud_ice = take("cloud_ice")
     cloud_fraction = take("cloud_fraction")
     ozone_vmr = take("ozone_vmr")
-    r_eff_liq = take("r_eff_liq")
-    r_eff_ice = take("r_eff_ice")
+    qnc = take("qnc")
+    qni = take("qni")
 
     surface_temperature = take_2d("surface_temperature")
     surface_albedo_vis = take_2d("surface_albedo_vis")
@@ -1092,13 +1120,6 @@ def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
         cloud_water=cloud_water,
         cloud_ice=cloud_ice,
         cloud_fraction=cloud_fraction,
-        # Raw here; resolved below, once dz and rho exist. Carried in the
-        # batch (not in ``aux``) so _orient_toa_first flips them with the same
-        # per-column mask as pressure -- a misaligned radius profile would be
-        # silent and severe. ``aux`` is only for fields consumed and dropped
-        # before the batch is returned, which these are not.
-        r_eff_liq=r_eff_liq,
-        r_eff_ice=r_eff_ice,
         ozone_vmr=ozone_vmr,
         surface_temperature=surface_temperature,
         surface_albedo_vis=surface_albedo_vis,
@@ -1110,13 +1131,18 @@ def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
         synodic_phase=synodic_phase,
         co2_vmr=np.full(n_columns, 400e-6),
     )
+    # The number tracers ride in ``aux`` so _orient_toa_first flips them with
+    # the same per-column mask as pressure -- a misaligned number profile
+    # would give silently wrong radii -- and are consumed below.
     batch = _orient_toa_first(batch, aux=dict(
         aod_profile=aod_profile, ssa_profile=ssa_profile,
-        asy_profile=asy_profile,
+        asy_profile=asy_profile, qnc=qnc, qni=qni,
     ))
     aod_profile = batch.pop("aod_profile")
     ssa_profile = batch.pop("ssa_profile")
     asy_profile = batch.pop("asy_profile")
+    qnc = batch.pop("qnc")
+    qni = batch.pop("qni")
 
     # layer_thickness / air_density are recomputed rather than read from
     # the file so they are guaranteed consistent with the (re-oriented)
@@ -1125,7 +1151,9 @@ def trajectory_columns(n_columns, nlev, rng, n_bnd_sw, n_bnd_lw,
         batch["pressure_levels"], batch["temperature"])
     batch["layer_thickness"] = _layer_thickness(
         batch["pressure_interfaces"], batch["air_density"])
-    batch = _resolved_effective_radii(batch)
+    batch["r_eff_liq"], batch["r_eff_ice"] = _state_effective_radii(
+        batch, qnc, qni)
+    batch = _emulator_radius_features_batch(batch)
 
     aod_sw, ssa_sw, asy_sw = _per_band_optics(
         aod_profile, ssa_profile, asy_profile, angstrom, sw_centers_nm,

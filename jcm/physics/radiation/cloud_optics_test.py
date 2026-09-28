@@ -506,3 +506,151 @@ class TestCloudOpticsGradients:
         for name, gradient in zip(names, gradients):
             assert jnp.all(jnp.isfinite(gradient)), (
                 f"d/d{name} is not finite in a {kind} column: {gradient}")
+
+
+# ---------------------------------------------------------------------------
+# ECHAM effective radii the RRTMGP / emulator path radiates with (#929)
+# ---------------------------------------------------------------------------
+
+from jcm.physics.clouds.cloud_utils import (  # noqa: E402
+    breadth_factor,
+    prescribed_cdnc_profile,
+)
+from jcm.physics.clouds.lohmann_2m_params import CloudParams2M  # noqa: E402
+from jcm.physics.radiation.cloud_optics import (  # noqa: E402
+    echam_cloud_effective_radii,
+)
+
+
+def _echam_droplet_radius(q_in, p, t, cdnc_m3, zkap):
+    """``mo_cloud_optics.f90`` in its own units: g/m3, cm-3, zfact."""
+    import numpy as np
+
+    import jcm.constants as c
+    zlwc = q_in * 1000.0 * p / (c.rd * t)                    # g/m3
+    zcdnc = cdnc_m3 * 1.0e-6                                 # cm-3
+    zfact = 1.0e6 * (3.0e-9 / (4.0 * np.pi * 1000.0)) ** (1.0 / 3.0)
+    return zfact * zkap * (zlwc / zcdnc) ** (1.0 / 3.0)
+
+
+class TestPrescribedCdncProfile:
+    """ECHAM ``acdnc`` (physc.f90 section 3.12)."""
+
+    def test_boundary_layer_values(self):
+        p = jnp.array([80000.0, 95000.0])
+        assert jnp.allclose(prescribed_cdnc_profile(p, False), 80.0e6)
+        assert jnp.allclose(prescribed_cdnc_profile(p, True), 180.0e6)
+
+    def test_aloft_formula_and_continuity(self):
+        import numpy as np
+        p = np.array([50000.0, 20000.0, 79999.0, 1000.0])
+        zprat = np.minimum(8.0, 80000.0 / p) ** 2
+        want = 1.0e6 * (20.0 + 60.0 * np.exp(1.0 - zprat))
+        got = prescribed_cdnc_profile(jnp.asarray(p), False)
+        np.testing.assert_allclose(np.asarray(got), want, rtol=1e-5)
+        # Continuous at 800 hPa (zprat = 1) and 20 cm-3 in the upper air.
+        np.testing.assert_allclose(float(got[2]), 80.0e6, rtol=1e-4)
+        np.testing.assert_allclose(float(got[3]), 20.0e6, rtol=1e-5)
+
+
+class TestEchamCloudEffectiveRadii:
+    """Radius laws of ``mo_cloud_optics.f90::cloud_optics`` per cloud scheme."""
+
+    T = jnp.array([285.0, 265.0, 230.0])
+    P = jnp.array([90000.0, 60000.0, 30000.0])
+
+    def _radii(self, qc, qi, cdnc, icnc, continental, prognostic):
+        return echam_cloud_effective_radii(
+            qc, qi, self.T, self.P, cdnc, icnc, continental, prognostic)
+
+    def test_prescribed_number_droplet_radius_matches_fortran(self):
+        import numpy as np
+        qc = jnp.array([3.0e-4, 1.0e-4, 0.0])
+        for continental, zkap in ((False, 1.077), (True, 1.143)):
+            cdnc = prescribed_cdnc_profile(self.P, continental)
+            r_liq, _ = self._radii(qc, jnp.zeros(3), cdnc, jnp.zeros(3),
+                                   continental, False)
+            want = _echam_droplet_radius(
+                np.asarray(qc[:2]), np.asarray(self.P[:2]),
+                np.asarray(self.T[:2]), np.asarray(cdnc[:2]), zkap)
+            np.testing.assert_allclose(np.asarray(r_liq[:2]), want, rtol=1e-5)
+            assert float(r_liq[2]) == 0.0
+
+    def test_prescribed_number_crystal_radius_is_moss_foot(self):
+        import numpy as np
+
+        import jcm.constants as c
+        qi = jnp.array([0.0, 2.0e-5, 1.0e-4])
+        _, r_ice = self._radii(jnp.zeros(3), qi, jnp.full(3, 8.0e7),
+                               jnp.zeros(3), False, False)
+        iwc = np.asarray(qi) * 1000.0 * np.asarray(self.P) / (
+            c.rd * np.asarray(self.T))
+        np.testing.assert_allclose(
+            np.asarray(r_ice[1:]), 83.8 * iwc[1:] ** 0.216, rtol=1e-5)
+        assert float(r_ice[0]) == 0.0
+
+    def test_prognostic_number_uses_peng_lohmann_and_crystal_number(self):
+        import numpy as np
+
+        import jcm.constants as c
+        qc = jnp.array([3.0e-4, 1.0e-4, 0.0])
+        qi = jnp.array([0.0, 2.0e-5, 1.0e-4])
+        cdnc = jnp.array([1.0e8, 3.0e8, 5.0e7])
+        icnc = jnp.array([1.0e4, 5.0e4, 1.0e5])
+        r_liq, r_ice = self._radii(qc, qi, cdnc, icnc, True, True)
+        want_liq = _echam_droplet_radius(
+            np.asarray(qc[:2]), np.asarray(self.P[:2]),
+            np.asarray(self.T[:2]), np.asarray(cdnc[:2]),
+            np.asarray(breadth_factor(cdnc[:2])))
+        np.testing.assert_allclose(np.asarray(r_liq[:2]), want_liq, rtol=1e-5)
+        # Lohmann et al. (2008) plates at every temperature, incl. 230 K.
+        p2m = CloudParams2M.default()
+        iwc = np.asarray(qi) * 1000.0 * np.asarray(self.P) / (
+            c.rd * np.asarray(self.T))
+        want_ice = 0.5e4 * (iwc[1:] / float(p2m.fact_PK)
+                            / np.asarray(icnc[1:])) ** (1.0 / float(p2m.pow_PK))
+        np.testing.assert_allclose(np.asarray(r_ice[1:]), want_ice, rtol=1e-4)
+        assert float(r_liq[2]) == 0.0 and float(r_ice[0]) == 0.0
+
+    def test_radius_is_continuous_as_condensate_vanishes(self):
+        """No switch at the phase boundary: r -> 0 as the condensate -> 0+."""
+        q = jnp.array([1.0e-12, 1.0e-15, 1.0e-18])
+        for prognostic in (False, True):
+            r_liq, r_ice = echam_cloud_effective_radii(
+                q, q, jnp.full(3, 260.0), jnp.full(3, 70000.0),
+                jnp.full(3, 1.0e8), jnp.full(3, 1.0e5), False, prognostic)
+            assert jnp.all(jnp.diff(r_liq) < 0) and float(r_liq[-1]) < 0.01
+            assert jnp.all(jnp.diff(r_ice) < 0) and float(r_ice[-1]) < 0.2
+
+    @pytest.mark.parametrize("prognostic", [False, True], ids=["1m", "2m"])
+    @pytest.mark.parametrize(
+        "qc,qi", [(3.0e-4, 5.0e-5), (0.0, 0.0), (1.0e-20, 1.0e-20)],
+        ids=["cloudy", "clear", "vanishing"])
+    def test_gradients_finite(self, prognostic, qc, qi):
+        """Reverse pass finite at a cloudy, a clear and a vanishing-water cell."""
+        def total(x):
+            q_l, q_i, t, p, n_d, n_i = x
+            r_liq, r_ice = echam_cloud_effective_radii(
+                q_l, q_i, t, p, n_d, n_i, False, prognostic)
+            return jnp.sum(r_liq) + jnp.sum(r_ice)
+
+        x = (jnp.array([qc]), jnp.array([qi]), jnp.array([260.0]),
+             jnp.array([70000.0]), jnp.array([1.0e8]), jnp.array([1.0e5]))
+        grads = jax.grad(total)(x)
+        for g in grads:
+            assert bool(jnp.all(jnp.isfinite(g)))
+
+    @pytest.mark.parametrize("prognostic", [False, True], ids=["1m", "2m"])
+    def test_gradients_match_finite_differences_in_cloud(self, prognostic):
+        """AD agrees with a central difference at a cloudy cell."""
+        def radii(q_l, q_i, t, n_d, n_i):
+            return echam_cloud_effective_radii(
+                q_l, q_i, t, jnp.array([70000.0]), n_d, n_i, False,
+                prognostic)
+
+        check_gradients(
+            radii,
+            (jnp.array([3.0e-4]), jnp.array([5.0e-5]), jnp.array([260.0]),
+             jnp.array([1.0e8]), jnp.array([1.0e5])),
+            rtol=2e-3,
+        )

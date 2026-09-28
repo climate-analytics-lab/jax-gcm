@@ -75,7 +75,35 @@ def _make_inputs(nlev=10):
         aerosol_data=aerosol,
         ozone_vmr=None,
         co2_vmr=400e-6,
+        # The radii the RRTMGP term would form for this column (ECHAM 1M
+        # prescribed droplet number, maritime), so the scheme is exercised
+        # with the radius law it runs with in the model.
+        **_column_radii(atm, air_density),
     )
+
+
+def _column_radii(atm, air_density, cld_frac_min=1e-3):
+    """``r_eff_liq_um`` / ``r_eff_ice_um`` for a test column, ECHAM 1M inputs."""
+    from jcm.physics.clouds.cloud_utils import prescribed_cdnc_profile
+    from jcm.physics.radiation.cloud_optics import echam_cloud_effective_radii
+    from jcm.physics.radiation.mcica import in_cloud_condensate
+
+    cw = in_cloud_condensate(atm["cloud_water"], atm["cloud_fraction"],
+                             eps=cld_frac_min)
+    ci = in_cloud_condensate(atm["cloud_ice"], atm["cloud_fraction"],
+                             eps=cld_frac_min)
+    r_liq, r_ice = echam_cloud_effective_radii(
+        cw, ci, atm["temperature"], atm["pressure_levels"],
+        prescribed_cdnc_profile(atm["pressure_levels"], False),
+        jnp.zeros_like(atm["temperature"]), False, prognostic_number=False,
+    )
+    return dict(r_eff_liq_um=r_liq, r_eff_ice_um=r_ice)
+
+
+def _grey_inputs(inputs):
+    """Return ``inputs`` without the effective radii the grey scheme does not take."""
+    return {k: v for k, v in inputs.items()
+            if k not in ("r_eff_liq_um", "r_eff_ice_um")}
 
 
 def _solstice_solar(hour):
@@ -152,12 +180,11 @@ class TestRRTMGPTermCacheCoords:
 
 
 class TestRRTMGPEffectiveRadii:
-    """Effective-radius handling in the RRTMGP input prep (finding 2.36).
+    """The RRTMGP input prep hands the library exactly the radii it is given.
 
-    The ice fallback must be ECHAM's Moss/Foot power law on the in-cloud
-    IWC in g/m3 — thin cirrus gets small crystals — and microphysical
-    radii from the clouds carry (2M preffl/preffi) must override the
-    fallbacks where provided.
+    The radii are formed upstream from the current state
+    (``cloud_optics.radiation_effective_radii``); the prep only reorders and
+    converts them, with no substitution for a zero.
     """
 
     K_CIRRUS = 1  # TOA-first index of the cirrus layer
@@ -174,8 +201,6 @@ class TestRRTMGPEffectiveRadii:
         temperature = jnp.full(nlev, 250.0)
         air_density = pressure_levels / (c.rd * temperature)
         layer_thickness = jnp.full(nlev, dz)
-        # In-cloud mixing ratio giving exactly ``iwc_gm3`` of in-cloud ice
-        # (the rrtmgp caller hands prepare_radiation_state in-cloud values).
         cloud_ice = jnp.zeros(nlev).at[self.K_CIRRUS].set(
             iwc_gm3 * 1e-3 / air_density[self.K_CIRRUS]
         )
@@ -200,39 +225,8 @@ class TestRRTMGPEffectiveRadii:
         assert interior.shape == (nlev,)
         return interior[::-1] * 1e6
 
-    def test_thin_cirrus_gets_small_crystals(self):
-        """IWC = 1e-4 g/m3 must give r_eff_ice ~ 11.4 um through the prep.
-
-        The previous fabricated formula (T-ramp x clip(path-ratio*1e4))
-        yielded ~40-160 um here, saturating the LUT edge for thin cirrus.
-        """
-        from jcm.physics.radiation.rrtmgp import prepare_rrtmgp_data
-
-        nlev = 8
-        state, layer_thickness = self._make_state(nlev=nlev, iwc_gm3=1e-4)
-        out = prepare_rrtmgp_data(
-            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
-        )
-        r_ice = self._r_eff_um(out, "cloud_r_eff_ice", nlev)
-        expected = 83.8 * 1e-4 ** 0.216  # ~11.46 um (ECHAM Moss/Foot)
-        assert float(r_ice[self.K_CIRRUS]) < 15.0
-        assert np.isclose(float(r_ice[self.K_CIRRUS]), expected, rtol=1e-4)
-
-        # Denser cirrus: 0.01 g/m3 -> ~31 um
-        state, layer_thickness = self._make_state(nlev=nlev, iwc_gm3=1e-2)
-        out = prepare_rrtmgp_data(
-            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
-        )
-        r_ice = self._r_eff_um(out, "cloud_r_eff_ice", nlev)
-        assert np.isclose(
-            float(r_ice[self.K_CIRRUS]), 83.8 * 1e-2 ** 0.216, rtol=1e-4,
-        )
-
-    def test_provided_microphysical_radii_override_fallback(self):
-        """Clouds-carry radii (> 0) win; zeros keep the diagnostic fallback."""
-        from jcm.physics.radiation.cloud_optics import (
-            effective_radius_liquid,
-        )
+    def test_radii_pass_through_unchanged_including_zero(self):
+        """Given radii reach the library as given (um -> m), zeros included."""
         from jcm.physics.radiation.rrtmgp import prepare_rrtmgp_data
 
         nlev = 8
@@ -241,20 +235,20 @@ class TestRRTMGPEffectiveRadii:
         r_eff_liq_um = jnp.zeros(nlev).at[k + 2].set(9.5)
         r_eff_ice_um = jnp.zeros(nlev).at[k].set(25.0)
         out = prepare_rrtmgp_data(
-            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
+            state, layer_thickness, jnp.array(290.0),
             r_eff_liq_um=r_eff_liq_um, r_eff_ice_um=r_eff_ice_um,
         )
         r_liq = self._r_eff_um(out, "cloud_r_eff_liq", nlev)
         r_ice = self._r_eff_um(out, "cloud_r_eff_ice", nlev)
-        # Provided values pass through (um)
-        assert np.isclose(float(r_ice[k]), 25.0, rtol=1e-5)
-        assert np.isclose(float(r_liq[k + 2]), 9.5, rtol=1e-5)
-        # Unprovided levels fall back to the diagnostics
-        fallback_liq = float(effective_radius_liquid(jnp.array(1.0)))
-        assert np.isclose(float(r_liq[k]), fallback_liq, rtol=1e-5)
-        assert np.isclose(
-            float(r_ice[k + 1]), 83.8, rtol=1e-4,
-        )  # zero-IWC guard value
+        np.testing.assert_allclose(r_liq, r_eff_liq_um, rtol=1e-5, atol=0)
+        np.testing.assert_allclose(r_ice, r_eff_ice_um, rtol=1e-5, atol=0)
+
+    def test_scheme_requires_radii(self):
+        """No radius means no solve: there is no fallback to select."""
+        inputs = _make_inputs()
+        inputs.pop("r_eff_liq_um")
+        with pytest.raises(TypeError, match="radiation_effective_radii"):
+            radiation_scheme_rrtmgp(**inputs)
 
 
 class TestRRTMGPScheme:
@@ -559,7 +553,7 @@ class TestGreyVsRRTMGP:
     def test_heating_tendency_shapes_match(self):
         """Both schemes should return the same shaped arrays."""
         inputs = _make_inputs(nlev=10)
-        tend_grey, _ = radiation_scheme(**inputs)
+        tend_grey, _ = radiation_scheme(**_grey_inputs(inputs))
         tend_rrtm, _ = radiation_scheme_rrtmgp(**inputs)
 
         assert tend_grey.temperature_tendency.shape == tend_rrtm.temperature_tendency.shape
@@ -573,7 +567,7 @@ class TestGreyVsRRTMGP:
         the two are in the same ballpark (atol=0.1 K/s, rtol=100%).
         """
         inputs = _make_inputs(nlev=10)
-        tend_grey, _ = radiation_scheme(**inputs)
+        tend_grey, _ = radiation_scheme(**_grey_inputs(inputs))
         tend_rrtm, _ = radiation_scheme_rrtmgp(**inputs)
 
         # Both should have the same sign pattern in most levels
@@ -617,7 +611,7 @@ class TestGreyVsRRTMGP:
             synodic_phase=jnp.asarray(ot.synodic_phase, dtype=jnp.float32),
         )
 
-        tend_grey, _ = radiation_scheme(**inputs)
+        tend_grey, _ = radiation_scheme(**_grey_inputs(inputs))
         tend_rrtm, _ = radiation_scheme_rrtmgp(**inputs)
 
         assert jnp.all(jnp.isfinite(tend_grey.temperature_tendency))
@@ -1607,8 +1601,9 @@ class TestRRTMGPMoistureConversion:
             cloud_fraction=jnp.zeros(nlev),
             cos_zenith=jnp.array(0.5),
         )
+        zeros = jnp.zeros(nlev)
         out = prepare_rrtmgp_data(
-            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
+            state, layer_thickness, jnp.array(290.0), zeros, zeros,
         )
         # Vapour = q_t - q_c; cloud-free here so q_c == 0.
         vapour = out["q_t"][0, 0, 1:-1] - out["q_c"][0, 0, 1:-1]
@@ -1714,7 +1709,7 @@ class TestRRTMGPCloudInhomogeneity:
         0.8-factor types agree exactly.
         """
         base = _make_inputs(nlev=10)
-        diags = {k: radiation_scheme(**base, convection_type=jnp.int32(k))[1]
+        diags = {k: radiation_scheme(**_grey_inputs(base), convection_type=jnp.int32(k))[1]
                  for k in (0, 2, 4)}
         olr = {k: float(d.toa_lw_up) for k, d in diags.items()}
         assert all(np.isfinite(v) for v in olr.values())

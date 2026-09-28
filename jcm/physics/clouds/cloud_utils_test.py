@@ -92,7 +92,7 @@ class TestEffLiquidDropletRadius:
         got = eff_liquid_droplet_radius(
             qc, jnp.array(1.0), jnp.array(1.0e8), _EPS,
         )
-        # Radiation selects on ``r_eff > 0``, so these must be exact zeros.
+        # ECHAM writes 0 for a liquid-free layer (``re_droplets2d``).
         assert float(got[0]) == 0.0
         assert float(got[2]) == 0.0
         assert float(got[3]) == 0.0

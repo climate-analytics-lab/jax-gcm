@@ -1204,8 +1204,12 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # was suppressed ~1e6x by the c.ak/zdqsdt transcription bugs
         # (#667): with those fixed, summing both would remove
         # supersaturation twice per step with double the latent heating.
+        # The scheme's own preffl/preffi (ECHAM cloud_micro_2m outputs) are
+        # not published: the radii radiation uses, and the ``clouds.r_eff_*``
+        # diagnostic, are formed by the radiation term from the step's state,
+        # as in ECHAM's cloud_optics.
         (tend_all, surface_rain_flux, surface_snow_flux,
-         r_eff_liq_all, r_eff_ice_all, rain_formation_warm, rain_from_melt,
+         _preffl, _preffi, rain_formation_warm, rain_from_melt,
          autoconv_all, accretion_all, wbf_all,
          precip_form_all, precip_evap_all, cloud_fraction_all,
          negative_mass_repair_all, scav_ledger_all,
@@ -1258,11 +1262,6 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             # JAM wet scavenging (#499); see cloud_microphysics_2m.
             precip_formation_rate=precip_form_all.T,
             precip_evaporation_rate=precip_evap_all.T,
-            # Microphysical effective radii (um) for the radiation term
-            # (ECHAM preffl/preffi; consumed next step via the carry —
-            # same lag as every cross-term diagnostic).
-            r_eff_liq=r_eff_liq_all.T,
-            r_eff_ice=r_eff_ice_all.T,
             # Rain-source split [kg/m^2/s]: warm-chain formation vs snow
             # melt. Their ratio is the warm-rain fraction, the CloudSat-
             # style observable for the warm-rain calibration.

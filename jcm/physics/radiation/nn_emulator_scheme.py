@@ -28,6 +28,7 @@ from jcm.physics.radiation.radiation_types import (
 from jcm.physics.radiation.nn_emulator import (
     EmulatorWeights,
     InputScaling,
+    emulator_radius_features,
     init_emulator_weights,
     load_emulator_weights,
     preprocess_sw_inputs,
@@ -38,9 +39,8 @@ from jcm.physics.radiation.nn_emulator import (
     reconstruct_lw_interface_fluxes,
     flux_to_heating_rate,
 )
-from jcm.physics.radiation.cloud_optics import resolve_effective_radii
-from jcm.physics.radiation.mcica import expected_total_cover, in_cloud_path
-from jcm.physics.radiation.rrtmgp import _MAX_IN_CLOUD_CONDENSATE
+from jcm.physics.radiation.cloud_optics import radiation_effective_radii
+from jcm.physics.radiation.mcica import expected_total_cover, in_cloud_condensate
 import jcm.constants as c
 
 
@@ -144,24 +144,24 @@ def radiation_scheme_emulated(
     cwp = cloud_water * air_density * layer_thickness
     cip = cloud_ice * air_density * layer_thickness
 
-    # Effective radii, resolved against the same diagnostic fallbacks RRTMGP
-    # uses so a feature and the label it was trained against describe the same
-    # cloud. Zero (1M microphysics, cold start, or no caller-supplied value)
-    # selects the fallback rather than meaning "zero-radius droplets".
-    # The ice fallback is a power law in IN-CLOUD IWC, so it needs the
-    # in-cloud path (grid mean DIVIDED by cloud fraction), not the grid-mean
-    # `cip` above. Using `cip` here would feed an IWC too small by ~cf^2 and
-    # reintroduce exactly the feature/label mismatch this input exists to
-    # remove -- the label generator resolves from the in-cloud path.
-    ice_in_cloud = jnp.minimum(
-        in_cloud_path(cloud_ice, cloud_fraction), _MAX_IN_CLOUD_CONDENSATE,
-    )
-    zeros = jnp.zeros_like(temperature)
-    r_eff_liq_um, r_eff_ice_um = resolve_effective_radii(
-        zeros if r_eff_liq_um is None else r_eff_liq_um,
-        zeros if r_eff_ice_um is None else r_eff_ice_um,
+    # Effective radii: the radii RRTMGP radiates the same state with (the
+    # term forms them with ``radiation_effective_radii``, exactly as
+    # RRTMGPRadiation does), turned into the network's radius features by
+    # ``emulator_radius_features`` -- the one feature definition the training
+    # generator also uses, so a feature and its label describe the same cloud.
+    if r_eff_liq_um is None or r_eff_ice_um is None:
+        raise TypeError(
+            "radiation_scheme_emulated needs r_eff_liq_um and r_eff_ice_um: "
+            "form them with "
+            "jcm.physics.radiation.cloud_optics.radiation_effective_radii."
+        )
+    r_eff_liq_um, r_eff_ice_um = emulator_radius_features(
+        r_eff_liq_um, r_eff_ice_um,
+        in_cloud_condensate(cloud_water, cloud_fraction,
+                            eps=parameters.cld_frac_min),
+        in_cloud_condensate(cloud_ice, cloud_fraction,
+                            eps=parameters.cld_frac_min),
         aerosol_data.cdnc_factor,
-        ice_in_cloud * air_density * layer_thickness, layer_thickness,
     )
 
     n_sw = n_input_features(band_mode, aerosol_data.aod_sw_per_band.shape[0])
@@ -644,8 +644,16 @@ class NNEmulatorRadiation(PhysicsTerm):
             forcing.solar, self._lons.get_value(), self._lats.get_value(),
         ).astype(radiation.cos_zenith.dtype)
 
+        clouds_in = diagnostics["clouds"]
+        # The published radii are a DIAGNOSTIC of the radius fed to the
+        # network, never an input: a solve forms its radii from the current
+        # state, a cached step reports those of the solve its heating came
+        # from (as RRTMGPRadiation does).
+        radii_carried = (clouds_in.r_eff_liq, clouds_in.r_eff_ice)
+
         def _compute():
-            tend, rad = self._compute_full(state, diagnostics, forcing, params)
+            tend, rad, radii = self._compute_full(
+                state, diagnostics, forcing, terrain, params)
             # Pin the compute branch to the carry's leaf dtypes (see the
             # identical guard in rrtmgp.py / the grey scheme): keeps the
             # two lax.cond branches type-identical for float32 states
@@ -653,7 +661,10 @@ class NNEmulatorRadiation(PhysicsTerm):
             rad = jax.tree.map(lambda n, o: n.astype(o.dtype), rad, radiation)
             tend = jax.tree.map(
                 lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, rad
+            radii = jax.tree.map(
+                lambda n, o: n.reshape(o.shape).astype(o.dtype),
+                radii, radii_carried)
+            return tend, rad, radii
 
         def _use_cached():
             rad = rescale_cached_radiation(radiation, mu0_now)
@@ -662,9 +673,9 @@ class NNEmulatorRadiation(PhysicsTerm):
             # tendency arithmetic can promote through float64 scalars.
             tend = jax.tree.map(
                 lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, rad
+            return tend, rad, radii_carried
 
-        tendency, new_radiation = jax.lax.cond(
+        tendency, new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
             radiation_should_compute(diagnostics, params),
             _compute, _use_cached,
         )
@@ -680,20 +691,26 @@ class NNEmulatorRadiation(PhysicsTerm):
         # Mirror TOA fluxes onto the clouds sub-struct for CRE
         # diagnostics. Clear sky comes from dedicated network output
         # channels, so no second solve is needed.
-        clouds = diagnostics["clouds"].copy(
+        clouds = clouds_in.copy(
             toa_sw_up_all=new_radiation.toa_sw_up,
             toa_sw_up_clear=new_radiation.toa_sw_up_clear,
             toa_lw_up_all=new_radiation.toa_lw_up,
             toa_lw_up_clear=new_radiation.toa_lw_up_clear,
+            r_eff_liq=r_eff_liq,
+            r_eff_ice=r_eff_ice,
         )
         return tendency, {
             **diagnostics, "radiation": new_radiation, "clouds": clouds,
         }
 
     def _compute_full(
-        self, state, diagnostics, forcing, params,
+        self, state, diagnostics, forcing, terrain, params,
     ):
-        """Run the full NN-emulator scheme, return (tendency, RadiationData)."""
+        """Run the full NN-emulator scheme.
+
+        Returns ``(tendency, RadiationData, (r_eff_liq_um, r_eff_ice_um))``,
+        the radii ``(nlev, ncols)`` being the features the network was fed.
+        """
         nlev, ncols = state.temperature.shape
 
         latitudes = self._lats.get_value()
@@ -709,13 +726,13 @@ class NNEmulatorRadiation(PhysicsTerm):
         # CO2 is a prescribed forcing read straight from ForcingData.
         co2_vmr = ppmv_to_mole_fraction(forcing.co2_vmr)
 
-        # Microphysical effective radii from the clouds carry, sourced exactly
-        # as RRTMGP sources them so the emulator sees the cloud its labels
-        # describe. Zero (1M, or a cold start) selects the diagnostic fallback
-        # inside the scheme.
-        clouds_in = diagnostics["clouds"]
-        r_eff_liq_um = clouds_in.r_eff_liq.reshape(nlev, ncols)
-        r_eff_ice_um = clouds_in.r_eff_ice.reshape(nlev, ncols)
+        # Effective radii from THIS step's state, formed exactly as
+        # RRTMGPRadiation forms them, so the emulator is fed the radius the
+        # radiation it emulates would use for this state.
+        r_eff_liq_um, r_eff_ice_um = radiation_effective_radii(
+            state, diagnostics, forcing, terrain,
+            cloud_water, cloud_ice, cloud_fraction, params.cld_frac_min,
+        )
 
         surface_temperature_col = (
             diagnostics["surface"].surface_temperature.reshape(ncols)
@@ -860,7 +877,7 @@ class NNEmulatorRadiation(PhysicsTerm):
             specific_humidity=jnp.zeros((nlev, ncols)),
             tracers={},
         )
-        return tendency, rad_out
+        return tendency, rad_out, (r_eff_liq_um, r_eff_ice_um)
 
 
 def guard_ghg_forcing(physics, forcing) -> None:
