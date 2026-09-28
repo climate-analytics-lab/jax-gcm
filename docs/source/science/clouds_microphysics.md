@@ -78,7 +78,7 @@ The 2M scheme's utility fields are ECHAM's, shared through ``cloud_utils``
   ``fact_tke = 0.7``, zero at the lowest level (``mo_cloud_micro_2m.f90``
   lines 814–815; ``turbulent_updraft_velocity``). ECHAM's ``zvervx`` adds the
   large-scale ``−100·ω/(g·ρ)`` (line 816), which is not plumbed to the scheme
-  (#705).
+  (#941).
 - **Volume-mean ice radius of the WBF threshold** ``0.9·r_eff``
   (``conv_effr2mvr``; ``effective_2_volmean_radius_param_Schuman_2011``, lines
   4059–4085; ``ice_volume_mean_radius_schumann``), with ``r_eff`` the

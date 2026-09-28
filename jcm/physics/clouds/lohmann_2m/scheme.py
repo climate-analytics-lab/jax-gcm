@@ -313,7 +313,7 @@ def cloud_microphysics_2m(
     #   zvervx = −100·ω/(g·ρ) + 100·fact_tke·sqrt(TKE),
     # with the turbulent term zeroed at the lowest level (line 815). The
     # large-scale term −100·ω/(g·ρ) needs the pressure velocity, which is
-    # not plumbed to this scheme (#705); it is the term to add here.
+    # not plumbed to this scheme (#941); it is the term to add here.
     updraft_velocity = turbulent_updraft_velocity(tke, params)
 
     # Dynamic viscosity of air for the snow Reynolds number in riming,
