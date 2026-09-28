@@ -800,11 +800,11 @@ def echam_cloud_effective_radii(
     """Droplet and crystal effective radii (um) as ECHAM's radiation forms them.
 
     Port of the radius section of ``mo_cloud_optics.f90::cloud_optics``
-    (ECHAM6.3-HAM2.3, lines 356-373), which the radiation evaluates inside
+    (ECHAM6.3-HAM2.3, lines 339-374), which the radiation evaluates inside
     its own call from the in-cloud liquid / ice water content (``zlwc``,
     ``ziwc`` in g/m3) and the droplet / crystal number (``zcdnc`` in cm-3,
     ``zicnc`` in 1/m3) that ``mo_psrad_interface.f90::psrad_interface``
-    builds (lines 219-270)::
+    builds (lines 220-271)::
 
         zlwc = xm_liq*1000/cf * p/(rd*T)        [g/m3], 0 where cf <= 2 eps
         ziwc = xm_ice*1000/cf * p/(rd*T)        [g/m3]
@@ -826,7 +826,7 @@ def echam_cloud_effective_radii(
       the crystal radius is the Lohmann et al. (2008) plate law
       ``eff_ice_crystal_radius`` of the IWC and crystal number at every
       temperature (``cloud_optics`` applies it below ``cthomi`` as well:
-      ECHAM-HAM SF #176). ECHAM-HAM evaluates ``breadth_factor`` there on the
+      the ECHAM-HAM change labelled SF 176). ECHAM-HAM evaluates ``breadth_factor`` there on the
       droplet number already converted to cm-3, although the function takes
       1/m3 (``0.00045e-6*pcdnc + 1.18``), which pins its ``zkap`` at 1.18.
       jcm evaluates the relation in its documented units, as the 2-moment

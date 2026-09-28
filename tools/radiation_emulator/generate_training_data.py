@@ -213,9 +213,10 @@ def make_labeller(base_seed: int = 0):
             base_seed, True,
             _f32(batch["ozone_vmr"]),
             jnp.broadcast_to(_f32(batch["co2_vmr"])[:, None], (ncol, nlev)),
-            # ch4/n2o stay unprescribed, as before; the radii are positional
-            # after them, and they are the batch's RESOLVED values so the
-            # labels describe exactly the cloud the stored features do.
+            # ch4/n2o stay unprescribed (RRTMGP's defaults); the radii are
+            # positional after them, and they are the batch's stored radius
+            # features, so the labels describe exactly the cloud the stored
+            # features do.
             None, None,
             _f32(batch["r_eff_liq"]), _f32(batch["r_eff_ice"]),
         )

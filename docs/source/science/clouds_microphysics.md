@@ -114,18 +114,16 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   divides by a tiny cube (`differentiability`; the bare ``C/r³`` form's
   ``1/r⁶`` gradient overflowed float32 below r ≈ 3e-7 m, and using the
   parameter itself as the scale put the same overflow on its own gradient).
-- Both the 1M and 2M paths publish an LWC-dependent radiative liquid radius
-  from the shared ECHAM Martin/Bower law (``eff_liquid_droplet_radius``);
-  radiation reads it from the carried ``clouds`` state one step lagged, because
-  the ECHAM term order runs radiation before microphysics. The constant
-  ``effective_radius_liquid`` fallback therefore survives only where that carry
-  is still zero, resolved **cell by cell** — the cold-start first step, and
-  thereafter any cloudy cell that was clear the previous step (a level newly
-  turning cloudy falls back even mid-rollout in an otherwise-cloudy column) —
-  not the steady state the 1M ``physics=echam`` path used to run on. The
-  radiative **ice** radius remains limited: mixed-phase ICNC is
-  INP-limited (~1e3 m⁻³), pinning most warm-branch ``r_eff_ice`` at the 150 µm
-  clip (#728).
+- Neither microphysics scheme publishes the radiative effective radii: as in
+  ECHAM, the radiation forms them inside its own call from the step's
+  condensate and droplet/crystal number (``mo_cloud_optics.f90::cloud_optics``;
+  see {doc}`radiation`), from the laws in ``cloud_utils`` that the 2M scheme
+  also evaluates for its own ``preffl``/``preffi``. The 1M droplet number the
+  radiation uses is ECHAM's prescribed ``acdnc`` profile, while the 1M
+  autoconversion still sees a uniform 100 cm⁻³ × ``cdnc_factor`` (#936). The
+  radiative **ice** radius on the 2M path is limited by the crystal number:
+  mixed-phase ICNC is INP-limited (~1e3 m⁻³), which puts most warm-branch
+  crystals at the top of the size range the radiation's tables cover (#728).
 - Clear-sky evaporation of decorrelated condensate (the radiation-side contract in
   ``mcica.in_cloud_path``) is owned by the 2M scheme's clear-sky evaporation step.
 

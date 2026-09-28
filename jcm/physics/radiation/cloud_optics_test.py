@@ -145,7 +145,7 @@ def test_near_ir_sw_band_absorbs():
 
 
 def test_effective_radius_liquid():
-    """The fallback radius is a constant scaled by the Twomey factor.
+    """The grey scheme's liquid radius is a constant scaled by the Twomey factor.
 
     There is deliberately no land/ocean contrast: it was a CCN proxy that
     double-counted with cdnc_factor, and ECHAM's land term is a 6% spectral

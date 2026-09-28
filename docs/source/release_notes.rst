@@ -1012,6 +1012,36 @@ Convective-type cloud inhomogeneity
   ``convection.cloud_top``/``cloud_base`` now carry the updraft's level
   indices (top-first physics axis) instead of zeros (#870).
 
+Cloud effective radii from the current state
+""""""""""""""""""""""""""""""""""""""""""""
+
+- RRTMGP and the NN emulator form the droplet and crystal effective radii
+  inside the radiation call from the step's in-cloud condensate and
+  droplet/crystal number, as ECHAM's ``mo_cloud_optics.f90::cloud_optics``
+  does, clamped to the RRTMGP table range (2.5-21.5 µm droplets, 5-90 µm
+  crystals). The 1M configurations use ECHAM's prescribed droplet profile
+  (``acdnc``: 80 cm⁻³ maritime / 180 cm⁻³ continental below 800 hPa, falling
+  to 20 cm⁻³ aloft) scaled by the MACv2-SP Twomey factor, the Martin et al.
+  continental/maritime breadth factor and the Moss/Foot crystal radius; the
+  2M configurations (SPA and JAM) use the prognostic ``qnc``/``qni`` with
+  the Peng & Lohmann breadth factor and the Lohmann (2008) plate crystal
+  radius. The radii used to reach radiation one step late through the
+  ``clouds`` carry, with 0 meaning "not provided" and an 11 µm / Moss-Foot
+  fallback substituted per cell, so a cell that turned cloudy between steps
+  radiated with the fallback (#929). **Changes results** of every RRTMGP
+  configuration: over days 5-10 of a ``t63-echam-1m`` A/B the global-mean
+  TOA net rises by **2.0-2.1 W/m²** (reflected SW -1.7 to -1.9 W/m², SW
+  cloud radiative effect +1.7 to +1.9 W/m²), because ECHAM's profile has
+  fewer droplets than the uniform 100 cm⁻³ the 1M radius used; on
+  ``t63-echam-2m`` the shift is within a tenth of a W/m² at TOA
+  (OLR +0.18 W/m², LW cloud radiative effect -0.19 W/m²). ``clouds.r_eff_liq``
+  / ``clouds.r_eff_ice`` are now written by the radiation term (the radii it
+  used; 0 where the phase is absent) rather than by the microphysics.
+  **Breaking for direct callers:** ``resolve_effective_radii`` is removed,
+  and ``radiation_scheme_rrtmgp`` / ``radiation_scheme_emulated`` require
+  ``r_eff_liq_um`` / ``r_eff_ice_um`` (form them with
+  ``jcm.physics.radiation.cloud_optics.radiation_effective_radii``).
+
 RCE initial state seeds a mixed sub-cloud layer
 """""""""""""""""""""""""""""""""""""""""""""""
 
