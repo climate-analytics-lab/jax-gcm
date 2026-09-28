@@ -300,11 +300,15 @@ so rerun it over the same selection.
 `--stage registry` takes the published `registry.json` at the mirror's current
 tip and re-hashes only the ledger's files. It refuses any of them whose
 published copy differs and was committed after the local file's content was
-made (its mtime; products under `build/` are staged into the upload tree with
-their own mtime): that copy came from another publish this build has not
-rebuilt on, and uploading would revert it. Rebuild such a file from the
-current sources, or remove it from the ledger to keep the published copy. A
-site's own earlier publish of the same bytes passes. `--retire <globs>` on the
+made — its mtime, since products under `build/` are staged into the upload
+tree with their own; an undated copy, or one within five minutes, counts as
+newer. Uploading would revert that copy: rebuild the file from the current
+sources, or remove it from the ledger to keep the published copy. A site's own
+earlier publish of the same bytes passes. A build whose Tier A was pulled is
+also refused when the tip's Tier A differs from the pinned revision it pulled,
+since its bundles were regridded from the replaced inputs. The mtime shows when
+a file was made, not what it was made from: a bundle regridded today from
+local inputs another site has since replaced passes. `--retire <globs>` on the
 same run drops published files (a renamed product's old path); nothing else
 ever leaves the mirror.
 

@@ -347,6 +347,35 @@ _RETIRE: tuple[str, ...] = ()
 _UNRECORDED_STAGES = ("registry", "upload")
 
 
+#: Tier A products under ``build/`` that a full build stages into ``products/``.
+_TIER_A = ("ceds_anthro.zarr", "bb4cmip7.zarr",
+           "era5_land_climo_2005-2014_0p25.nc")
+
+#: Seconds a published copy may predate a local file and still count as newer:
+#: HF commit dates are whole seconds and the two clocks differ.
+_CLOCK_MARGIN_S = 300
+
+
+def _sync(src: Path, dst: Path) -> None:
+    """Copy file or tree ``src`` to ``dst`` wherever size or mtime differ.
+
+    ``copy2`` keeps each file's own mtime, the age of its content. Unlike a
+    copy-if-absent, a rebuilt ``src`` is restaged and a copy cut short by a
+    killed run is completed on the rerun.
+    """
+    pairs = ([(src, dst)] if src.is_file() else
+             [(f, dst / f.relative_to(src)) for f in src.rglob("*")
+              if f.is_file()])
+    for s, d in pairs:
+        ss = s.stat()
+        if d.exists():
+            ds = d.stat()
+            if (ds.st_size, ds.st_mtime_ns) == (ss.st_size, ss.st_mtime_ns):
+                continue
+        d.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(s, d)
+
+
 def _ledger_path() -> Path:
     """Upload-tree files written since the last upload (a JSON list)."""
     return BUILD / "upload_ledger.json"
@@ -997,12 +1026,9 @@ def stage_registry() -> None:
     (BUILD / "registry_base.json").unlink(missing_ok=True)
     before = _upload_snapshot()
     if not _partial_build():
-        for name in ("ceds_anthro.zarr", "bb4cmip7.zarr",
-                     "era5_land_climo_2005-2014_0p25.nc"):
-            src, dst = BUILD / name, UPLOAD / "products" / name
-            if src.exists() and not dst.exists():
-                shutil.copytree(src, dst) if src.is_dir() else shutil.copy2(
-                    src, dst)
+        for name in _TIER_A:
+            if (BUILD / name).exists():
+                _sync(BUILD / name, UPLOAD / "products" / name)
     if _want("terrain"):
         sso_dst = UPLOAD / "products" / "sso"
         sso_dst.mkdir(parents=True, exist_ok=True)
@@ -1031,18 +1057,34 @@ def stage_registry() -> None:
                  f"({', '.join(clash[:5])}); narrow the globs")
     tip = _mirror_tip()
     base = _registry_at(tip)
+    if written and _pulled_tier_a():
+        # Pulled Tier A is the pinned revision's; bundles regridded from it
+        # would reintroduce inputs the tip has since replaced.
+        from jcm.data.remote import mirror_revision
+
+        pinned = _registry_at(mirror_revision())["files"]
+        moved = sorted(p for p in {*pinned, *base["files"]}
+                       if p.startswith(tuple(f"products/{n}" for n in _TIER_A))
+                       and pinned.get(p) != base["files"].get(p))
+        if moved:
+            sys.exit(f"registry: the mirror tip's Tier A differs from the "
+                     f"pinned revision this build pulled ({moved[0]}, ...); "
+                     "set JCM_MIRROR_REVISION to the tip, re-pull and rebuild")
     stats = {p: list(st) for p, st in _upload_snapshot().items()
              if p in written}
     reg = build_registry(str(UPLOAD), base=base, paths=written)
     # A published copy that differs from ours and was committed after our
-    # file's content (its mtime; build/ products are staged with copy2) came
-    # from another publish we have not rebuilt on, and would be reverted. Our
-    # own earlier publish matches our hash and passes.
+    # file's content (its mtime; build/ products are staged with copy2) would
+    # be reverted: rebuild on it or keep it. Our own earlier publish matches
+    # our hash and passes.
     differ = [p for p in written if p in base["files"]
               and base["files"][p]["sha256"] != reg["files"][p]["sha256"]]
+    # Undated counts as newer; the margin absorbs whole-second commit dates
+    # and clock skew, erring towards refusing.
     dates = _published_dates(differ, tip) if differ else {}
-    newer = sorted(p for p in differ if p in dates and dates[p].timestamp()
-                   > (UPLOAD / p).stat().st_mtime)
+    newer = sorted(p for p in differ if p not in dates
+                   or dates[p].timestamp() > (UPLOAD / p).stat().st_mtime
+                   - _CLOCK_MARGIN_S)
     if newer:
         sys.exit(f"registry: {len(newer)} file(s) this site wrote are older "
                  f"than a different published copy ({', '.join(newer[:5])}); "
@@ -1220,8 +1262,7 @@ def _pulled_emissions() -> bool:
 
 def _pulled_tier_a() -> bool:
     """Whether any build-tree Tier A product came from --stage pull."""
-    return _pulled(("ceds_anthro.zarr", "bb4cmip7.zarr",
-                    "era5_land_climo_2005-2014_0p25.nc"))
+    return _pulled(_TIER_A)
 
 
 #: Tier A products the per-grid bundles regrid from. ``stage_pull`` fetches

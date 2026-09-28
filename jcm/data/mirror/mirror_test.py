@@ -164,10 +164,12 @@ class LedgerTest(unittest.TestCase):
         self._write("bundles/t63/emissions_pd.nc", b"stale", ledger=False)
         with self._patched():
             bm._write_ledger(bm._ledger() | {"bundles/t63/vanished.nc"})
+        import datetime
+        long_ago = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
         self._registry({"bundles/t63/emissions_pd.nc": {"sha256": "pub"},
                         self.F: {"sha256": "old"},
                         "bundles/t63/dust.nc": {"sha256": "gone"}},
-                       _RETIRE=("bundles/*/dust.nc",))
+                       {self.F: long_ago}, _RETIRE=("bundles/*/dust.nc",))
         reg = json.loads((self.root / "upload" / "registry.json"
                           ).read_text())["files"]
         side = json.loads((self.root / "build" / "registry_base.json"
@@ -198,6 +200,56 @@ class LedgerTest(unittest.TestCase):
         self._registry({self.F: {"sha256": "theirs"}}, earlier)
         # Our own earlier publish matches our hash: allowed.
         self._registry({self.F: {"sha256": self._sha(b"mine")}}, later)
+        # Within the clock margin, or undated, counts as newer: refused.
+        close = {self.F: mtime - datetime.timedelta(seconds=10)}
+        for dates in (close, {}):
+            with self.assertRaises(SystemExit):
+                self._registry({self.F: {"sha256": "theirs"}}, dates)
+
+    def test_tier_a_is_restaged_when_rebuilt_and_completed_when_cut_short(self):
+        from jcm.data.mirror import build_mirror as bm
+        build, upload = self.root / "build", self.root / "upload"
+        store = build / "ceds_anthro.zarr"
+        (store / "so2").mkdir(parents=True)
+        for i in range(3):
+            (store / "so2" / str(i)).write_bytes(b"chunk%d" % i)
+        climo = build / "era5_land_climo_2005-2014_0p25.nc"
+        climo.write_bytes(b"old-build")
+        os.utime(climo, (1, 1))
+        # A copy killed part-way: one chunk truncated, one missing.
+        dst = upload / "products" / "ceds_anthro.zarr" / "so2"
+        dst.mkdir(parents=True)
+        import shutil
+        (dst / "0").write_bytes(b"chunk0")
+        shutil.copystat(store / "so2" / "0", dst / "0")    # already copied
+        (dst / "1").write_bytes(b"ch")
+        for name in bm._TIER_A:
+            bm._sync(build / name, upload / "products" / name)
+        for i in range(3):
+            self.assertEqual((dst / str(i)).read_bytes(), b"chunk%d" % i)
+        staged = upload / "products" / climo.name
+        self.assertEqual(staged.stat().st_mtime, 1)       # the content's age
+        climo.write_bytes(b"rebuilt")
+        with self._patched():
+            bm._sync(climo, staged)
+        self.assertEqual(staged.read_bytes(), b"rebuilt")
+
+    def test_registry_refuses_bundles_from_pulled_tier_a_the_tip_replaced(self):
+        from jcm.data import remote
+        from jcm.data.mirror import build_mirror as bm
+        self._write(self.F, b"new")
+        tier_a = "products/ceds_anthro.zarr/zarr.json"
+        pinned = {"files": {tier_a: {"sha256": "pinned"}}}
+        tip = {tier_a: {"sha256": "newer"}}
+        registry_at = {remote.mirror_revision(): pinned}
+        with self._patched(_PRODUCTS=frozenset({"forcing"})), \
+                patch.object(bm, "_pulled_tier_a", lambda: True), \
+                patch.object(bm, "_mirror_tip", lambda: "tip"), \
+                patch.object(bm, "_registry_at", lambda rev: registry_at.get(
+                    rev, {"files": dict(tip)})), \
+                self.assertRaises(SystemExit) as ctx:
+            bm.stage_registry()
+        self.assertIn("differs from the pinned revision", str(ctx.exception))
 
     def test_registry_refuses_retiring_a_file_it_wrote(self):
         self._write(self.F, b"new")
