@@ -185,7 +185,7 @@ def convective_precip_fluxes(
     use_updraft_cover: bool = False,
     updraft_layer_mass: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
-           jnp.ndarray, jnp.ndarray]:
+           jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """ECHAM ``cuflx`` precipitation budget (mo_cufluxdts.f90:265-491).
 
     Walks the column top→bottom three times, exactly as the Fortran:
@@ -237,13 +237,15 @@ def convective_precip_fluxes(
 
     Returns:
         ``(rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux,
-        floor_source)`` — surface rain and snow fluxes, the production-only
-        diagnostic ``prain``, the per-layer snow melt, ``pdmfup`` including
-        the (negative) sub-cloud evaporation increments, the total
-        (rain + snow) precipitation flux ENTERING each layer from above, and
-        the column water [kg/m²/s] that ``cuflx``'s non-negative floor on
-        the rain and snow fluxes creates when the downdraft takes up more
-        rain than the plume generates.
+        floor_source, evap_fraction)`` — surface rain and snow fluxes, the
+        production-only diagnostic ``prain``, the per-layer snow melt,
+        ``pdmfup`` including the (negative) sub-cloud evaporation
+        increments, the total (rain + snow) precipitation flux ENTERING each
+        layer from above, the column water [kg/m²/s] that ``cuflx``'s
+        non-negative floor on the rain and snow fluxes creates when the
+        downdraft takes up more rain than the plume generates, and the
+        per-layer fraction of the falling precipitation that evaporates or
+        sublimates there — HAMMOZ's ``prevap`` (see below).
 
     """
     nlev = len(temperature)
@@ -368,9 +370,9 @@ def convective_precip_fluxes(
         zrfln = jnp.maximum(zrnew, 0.0)
         zdrfl = jnp.where(active, jnp.minimum(0.0, zrfln - zrfl), 0.0)
         zpsubcl_new = jnp.where(active, zrfln, zpsubcl)
-        return zpsubcl_new, zdrfl
+        return zpsubcl_new, (zdrfl, zpsubcl)
 
-    zpsubcl_final, zdrfl_per_level = lax.scan(
+    zpsubcl_final, (zdrfl_per_level, zpsubcl_sav) = lax.scan(
         evap_step, prfl + psfl,
         (k_idx, qs_env, humidity, dp_lev, cevapcu, zcucov_lev),
     )
@@ -406,8 +408,29 @@ def convective_precip_fluxes(
         [jnp.zeros_like(flux_bottom[:1]), flux_bottom[:-1]]
     )
 
+    # The evaporation fraction the aerosol scavenging interface releases
+    # scavenged aerosol by. ``cuflx`` hands ``wetdep_interface`` the
+    # per-level evaporation ``zfevapr + zfsubls = zdpevap·(prfl + psfl) /
+    # zpsubcl_sav`` (mo_cufluxdts.f90:443-455, the column totals after the
+    # floor over the flux entering the level) and the per-level flux
+    # ``zfrain + zfsnow`` of the first pass (lines 316-319, before any
+    # evaporation); ``prep_wetdep_hydro`` forms ``prevap`` as their ratio
+    # where that flux exceeds ``zmin`` and clips it to [0, 1]
+    # (mo_hammoz_wetdep.f90:462-469).
+    zdpevap = -zdrfl_per_level
+    has_sav = zpsubcl_sav > 1e-20
+    evap_lev = jnp.where(
+        has_sav, zdpevap * zrsum / jnp.where(has_sav, zpsubcl_sav, 1.0), 0.0)
+    zfprec = rain_lev + snow_lev
+    has_prec = zfprec > 1e-10
+    evap_fraction = jnp.where(
+        has_prec,
+        jnp.clip(evap_lev / jnp.where(has_prec, zfprec, 1.0), 0.0, 1.0),
+        0.0,
+    )
+
     return (rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux,
-            floor_source)
+            floor_source, evap_fraction)
 
 
 def calculate_tendencies(
@@ -538,7 +561,7 @@ def calculate_tendencies(
     # sub-cloud Kessler evaporation charged back into pdmfup), on the true
     # layer thickness.
     (rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj,
-     precip_flux, floor_source) = convective_precip_fluxes(
+     precip_flux, floor_source, evap_fraction) = convective_precip_fluxes(
         temperature, humidity, pressure, env.dp, kbase,
         updraft_state.pdmfup, downdraft_state.pdmfdp, dt,
         updraft_temperature=updraft_state.tu,
@@ -631,6 +654,11 @@ def calculate_tendencies(
         qi_conv=qi_conv,
         precip_formation=jnp.maximum(updraft_state.pdmfup, 0.0),
         precip_conv=precip_rate,
+        precip_efficiency=(
+            updraft_state.peff if updraft_state.peff is not None
+            else jnp.zeros_like(qc_conv)
+        ),
+        precip_evap_fraction=evap_fraction,
         precip_flux=precip_flux,
         precip_floor_source=floor_source,
         dqc_dt=dqc_dt,

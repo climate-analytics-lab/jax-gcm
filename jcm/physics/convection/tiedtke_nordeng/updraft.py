@@ -99,6 +99,51 @@ class UpdatedraftState(NamedTuple):
     kctop: jnp.ndarray | None = None  # Highest interface where the plume
                          # passed ECHAM's ascent test (``kctop``); ``nlev − 2``
                          # (``klevm1``) when it passed none.
+    peff: jnp.ndarray | None = None  # Fraction of the plume condensate
+                         # converted to precipitation in layer k — HAMMOZ's
+                         # convective ``peffwat``/``peffice`` combined over
+                         # the phases (see ``ham_precip_efficiency``); the
+                         # in-plume aerosol scavenging reads it.
+
+#: ``cuflx``'s liquid/ice partition of the plume condensate for the
+#: scavenging interface (mo_cufluxdts.f90:154-155, 281-287):
+#: ``zalpha = zcaa + (1 − zcaa)·exp(−zcab·Tc²)`` below 0 °C, 1 above.
+_ZCAA = 0.0059
+_ZCAB = 0.003102
+#: ``prep_wetdep_hydro``'s floor on a phase's condensate (``zmin``,
+#: mo_hammoz_wetdep.f90:409): a phase below it converts nothing.
+_HAM_ZMIN = 1.0e-10
+
+
+def ham_precip_efficiency(lu_pre, lu_post, tu):
+    """HAMMOZ's convective precipitation efficiency of one plume level.
+
+    ``cuasc`` stores the condensate before and after the layer's
+    conversion, ``pmwc = plu`` and ``pmrateprecip = plu − zlnew``
+    (mo_cuascent.f90:459-460); ``cuflx`` splits both by the updraft
+    temperature ``ptu`` with ``zalpha`` (mo_cufluxdts.f90:281-287); and
+    ``prep_wetdep_hydro`` forms ``peffwat = zmratepr/zmlwc`` and
+    ``peffice = zmrateps/zmiwc``, each zero where its phase holds no more
+    than ``zmin`` and clipped to [0, 1] (mo_hammoz_wetdep.f90:426-435).
+    ``ham_wetdep`` removes ``csr_conv·peff`` of the liquid share
+    ``1 − pice`` and of the ice share ``pice`` (``ic_scav``), so the
+    fraction of the level's in-plume aerosol that meets a converting phase
+    is the phase-weighted sum returned here. Where both phases exceed
+    ``zmin`` it is exactly ``(plu − zlnew)/plu``.
+    """
+    tc = tu - c.tmelt
+    cold = tc < 0.0
+    zalpha = jnp.where(
+        cold, _ZCAA + (1.0 - _ZCAA) * jnp.exp(-_ZCAB * tc * tc), 1.0)
+    has_cond = lu_pre > _HAM_ZMIN
+    ratio = jnp.clip(
+        (lu_pre - lu_post) / jnp.where(has_cond, lu_pre, 1.0), 0.0, 1.0)
+    liquid = zalpha * lu_pre > _HAM_ZMIN
+    ice = (1.0 - zalpha) * lu_pre > _HAM_ZMIN
+    weight = (jnp.where(liquid, zalpha, 0.0)
+              + jnp.where(ice, 1.0 - zalpha, 0.0))
+    return jnp.where(has_cond, ratio * weight, 0.0)
+
 
 def column_environment(
     temperature: jnp.ndarray,
@@ -626,7 +671,7 @@ def calculate_updraft(
         tu=tu_init, qu=qu_init, lu=lu_init,
         mfu=mfu_init, entr=zero, detr=zero,
         buoy=buoy_init, pdmfup=zero, plude=zero,
-        uu=uu_init, vu=vu_init, dmfen=zero,
+        uu=uu_init, vu=vu_init, dmfen=zero, peff=zero,
     )
     # Carry: the published profiles, the CONTINUING plume's flux, condensate
     # and winds (which differ from the published ones where part of the plume
@@ -812,6 +857,18 @@ def calculate_updraft(
             mfu_k = mfa_k + ov
             mfu_k_div = jnp.maximum(mfu_k, config.cmfcmin)
             lu_pub = (mfa_k * lu_after + ov * lu_new) / mfu_k_div
+            # HAMMOZ's precipitation efficiency of the level, carried by the
+            # flux that precipitates here: the continuing plume converts
+            # ``(lu_new − lu_after)/lu_new`` of its condensate and the
+            # overshoot none (cuasc stores no ``pmrateprecip`` above
+            # ``kctop``), so the flux-weighted value recovers both hard
+            # limits of the ascent test.
+            peff_k = jnp.where(
+                mfu_k > 0.0,
+                ham_precip_efficiency(lu_new, lu_after, tu_new)
+                * mfa_k / mfu_k_div,
+                0.0,
+            )
             plude_k = (s * plude_mix
                        + (1.0 - s) * (1.0 - cmfctop) * mfu_b * lu_b)
 
@@ -865,6 +922,7 @@ def calculate_updraft(
                 detr=st.detr.at[k].set(detr_rate),
                 buoy=st.buoy.at[k].set(zbuoyz_here),
                 pdmfup=st.pdmfup.at[k].set(pdmfup),
+                peff=st.peff.at[k].set(peff_k),
                 plude=st_dep.plude.at[k].add(plude_k),
                 uu=st.uu.at[k].set(uu_pub),
                 vu=st.vu.at[k].set(vu_pub),

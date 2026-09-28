@@ -267,6 +267,14 @@ class ConvectionTendencies(NamedTuple):
     dqc_dt: jnp.ndarray      # Cloud water tendency (kg/kg/s)
     dqi_dt: jnp.ndarray      # Cloud ice tendency (kg/kg/s)
 
+    # The aerosol scavenging interface (HAMMOZ ``cuflx_subm``): per-layer
+    # fraction of the plume condensate converted to precipitation
+    # (``peff``) and fraction of the falling precipitation evaporated
+    # (``prevap``), both [-] (nlev,). ``None`` from schemes that do not
+    # publish them; the wrapper then publishes zeros.
+    precip_efficiency: jnp.ndarray | None = None
+    precip_evap_fraction: jnp.ndarray | None = None
+
 
 @tree_math.struct
 class ConvectionData:
@@ -320,6 +328,16 @@ class ConvectionData:
     precip_formation: jnp.ndarray    # Per-layer updraft precip generation
                                      # [kg/m²/s] (nlev, ncols)
     qi_conv: jnp.ndarray             # Convective cloud ice [kg/kg] (nlev, ncols)
+    # The convective aerosol scavenging interface (HAMMOZ ``cuflx_subm`` →
+    # ``wetdep_interface``), both intensive, so not cap-scaled:
+    # ``precip_efficiency`` is the fraction of each layer's plume condensate
+    # converted to precipitation there (``peffwat``/``peffice`` of
+    # ``prep_wetdep_hydro`` from cuasc's ``pmrateprecip``/``pmwc``, combined
+    # over the phases); ``precip_evap_fraction`` is the fraction of the
+    # precipitation falling into the layer that evaporates or sublimates in
+    # it (``prevap``). [-] (nlev, ncols)
+    precip_efficiency: jnp.ndarray
+    precip_evap_fraction: jnp.ndarray
     # Convective heating / moistening rates actually applied to the column
     # (post-cap; see the ``_DTDT_MAX`` limiter in ``TiedtkeConvection``). These
     # are the genuine per-level convective tendencies — the thing that balances
@@ -349,6 +367,8 @@ class ConvectionData:
             precip_formation=jnp.zeros((nlev,) + nodal_shape),
             qc_conv=jnp.zeros((nlev,) + nodal_shape),
             qi_conv=jnp.zeros((nlev,) + nodal_shape),
+            precip_efficiency=jnp.zeros((nlev,) + nodal_shape),
+            precip_evap_fraction=jnp.zeros((nlev,) + nodal_shape),
             heating_rate=jnp.zeros((nlev,) + nodal_shape),
             moistening_rate=jnp.zeros((nlev,) + nodal_shape),
         )
@@ -404,6 +424,14 @@ CONVECTION_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
         "long_name": "per-layer updraft precipitation generation"},
     "convection.qi_conv": {
         "units": "kg kg-1", "long_name": "convective cloud ice mixing ratio"},
+    "convection.precip_efficiency": {
+        "units": "1",
+        "long_name": ("fraction of the updraft condensate converted to "
+                      "precipitation in each layer")},
+    "convection.precip_evap_fraction": {
+        "units": "1",
+        "long_name": ("fraction of the convective precipitation entering "
+                      "each layer that evaporates or sublimates there")},
     "convection.heating_rate": {
         "standard_name": "tendency_of_air_temperature_due_to_convection",
         "units": "K s-1", "long_name": "convective heating rate"},

@@ -1374,7 +1374,9 @@ def _tiedtke_convection_toa_first(
             precip_conv=precip_conv,
             precip_flux=jnp.zeros_like(qc),
             precip_floor_source=precip_conv,
-            dqc_dt=dqc_dt, dqi_dt=dqi_dt
+            dqc_dt=dqc_dt, dqi_dt=dqi_dt,
+            precip_efficiency=jnp.zeros_like(qc),
+            precip_evap_fraction=jnp.zeros_like(qc),
         )
         return tendencies, state
     
@@ -1979,6 +1981,18 @@ class TiedtkeConvection(PhysicsTerm):
             ),
             qc_conv=tendencies_all.qc_conv.T,
             qi_conv=tendencies_all.qi_conv.T,
+            # Ratios of the plume's own quantities: the cap's column scale
+            # cancels in both, so they are published unscaled.
+            precip_efficiency=(
+                tendencies_all.precip_efficiency.T
+                if tendencies_all.precip_efficiency is not None
+                else jnp.zeros_like(tendencies_all.qc_conv.T)
+            ),
+            precip_evap_fraction=(
+                tendencies_all.precip_evap_fraction.T
+                if tendencies_all.precip_evap_fraction is not None
+                else jnp.zeros_like(tendencies_all.qc_conv.T)
+            ),
             heating_rate=tendency.temperature,
             moistening_rate=tendency.specific_humidity,
         )
