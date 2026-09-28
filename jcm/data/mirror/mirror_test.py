@@ -94,123 +94,216 @@ class RegistryTest(unittest.TestCase):
 class LedgerTest(unittest.TestCase):
     """Registry and upload act only on what this site's builds wrote."""
 
-    def _tree(self, d):
-        from pathlib import Path
-        root = Path(d)
-        (root / "upload" / "bundles" / "t63").mkdir(parents=True)
-        (root / "build").mkdir()
-        return root
+    SINCE = "2026-09-28T00:00:00+00:00"
 
-    def _patched(self, root, **extra):
+    def setUp(self):
+        from pathlib import Path
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.t63 = self.root / "upload" / "bundles" / "t63"
+        self.t63.mkdir(parents=True)
+        (self.root / "build").mkdir()
+
+    def _patched(self, **extra):
         from contextlib import ExitStack
 
         from jcm.data.mirror import build_mirror as bm
         stack = ExitStack()
-        for name, value in {"BUILD": root / "build",
-                            "UPLOAD": root / "upload", **extra}.items():
+        for name, value in {"BUILD": self.root / "build",
+                            "UPLOAD": self.root / "upload", **extra}.items():
             stack.enter_context(patch.object(bm, name, value))
         return stack
 
+    def _registry(self, tip, then=None, **extra):
+        """Run stage_registry against a mocked mirror: ``tip``/``then`` files."""
+        import json
+
+        from jcm.data.mirror import build_mirror as bm
+        regs = {"tip": {"files": tip}, "then": {"files": then or tip}}
+        with self._patched(_PRODUCTS=frozenset({"forcing"}), **extra), \
+                patch.object(bm, "_mirror_tip", lambda: "tip"), \
+                patch.object(bm, "_commit_at", lambda since: "then"), \
+                patch.object(bm, "_registry_at",
+                             lambda rev: json.loads(json.dumps(regs[rev]))):
+            bm.stage_registry()
+
     def test_a_stage_records_only_the_files_it_writes(self):
         from jcm.data.mirror import build_mirror as bm
-        with tempfile.TemporaryDirectory() as d:
-            root = self._tree(d)
-            stale = root / "upload" / "bundles" / "t63" / "emissions_pd.nc"
-            stale.write_bytes(b"old")
-            with self._patched(root):
-                before = bm._upload_snapshot()
-                (root / "upload" / "bundles" / "t63" / "forcing_pd.nc"
-                 ).write_bytes(b"new")
-                bm._record_writes(before)
-                self.assertEqual(bm._ledger(), {"bundles/t63/forcing_pd.nc"})
-                # A later stage adds to it; rewriting a file in place counts.
-                before = bm._upload_snapshot()
-                stale.write_bytes(b"rebuilt")
-                bm._record_writes(before)
-                self.assertEqual(bm._ledger(), {"bundles/t63/forcing_pd.nc",
-                                                "bundles/t63/emissions_pd.nc"})
+        stale = self.t63 / "emissions_pd.nc"
+        stale.write_bytes(b"old")
+        with self._patched():
+            before = bm._upload_snapshot()
+            (self.t63 / "forcing_pd.nc").write_bytes(b"new")
+            after = bm._record_writes(before)
+            self.assertEqual(bm._ledger(), {"bundles/t63/forcing_pd.nc"})
+            since = bm._ledger_state()["since"]
+            self.assertIsNotNone(since)
+            # A later stage adds to it without moving ``since``; rewriting a
+            # file in place counts.
+            stale.write_bytes(b"rebuilt")
+            bm._record_writes(after)
+            self.assertEqual(bm._ledger(), {"bundles/t63/forcing_pd.nc",
+                                            "bundles/t63/emissions_pd.nc"})
+            self.assertEqual(bm._ledger_state()["since"], since)
 
     def test_registry_merges_the_ledger_onto_the_tip_and_retires(self):
         import json
 
         from jcm.data.mirror import build_mirror as bm
-        with tempfile.TemporaryDirectory() as d:
-            root = self._tree(d)
-            t63 = root / "upload" / "bundles" / "t63"
-            (t63 / "forcing_pd.nc").write_bytes(b"new")
-            (t63 / "emissions_pd.nc").write_bytes(b"stale")
-            tip = {"files": {
-                "bundles/t63/emissions_pd.nc": {"sha256": "pub", "size": 3},
-                "bundles/t63/forcing_pd.nc": {"sha256": "old", "size": 3},
-                "bundles/t63/dust.nc": {"sha256": "gone", "size": 1}}}
-            with self._patched(root, _RETIRE=("bundles/*/dust.nc",),
-                               _PRODUCTS=frozenset({"forcing"})),                     patch.object(bm, "_published_registry",
-                                 lambda: (json.loads(json.dumps(tip)),
-                                          "a" * 40)):
-                bm._ledger_path().write_text('["bundles/t63/forcing_pd.nc"]')
-                bm.stage_registry()
-                reg = json.loads((root / "upload" / "registry.json"
-                                  ).read_text())["files"]
-                side = json.loads((root / "build" / "registry_base.json"
-                                   ).read_text())
+        (self.t63 / "forcing_pd.nc").write_bytes(b"new")
+        (self.t63 / "emissions_pd.nc").write_bytes(b"stale")
+        tip = {"bundles/t63/emissions_pd.nc": {"sha256": "pub", "size": 3},
+               "bundles/t63/forcing_pd.nc": {"sha256": "old", "size": 3},
+               "bundles/t63/dust.nc": {"sha256": "gone", "size": 1}}
+        with self._patched():
+            bm._write_ledger(self.SINCE, {"bundles/t63/forcing_pd.nc",
+                                          "bundles/t63/vanished.nc"})
+        self._registry(tip, _RETIRE=("bundles/*/dust.nc",))
+        reg = json.loads((self.root / "upload" / "registry.json"
+                          ).read_text())["files"]
+        side = json.loads((self.root / "build" / "registry_base.json"
+                           ).read_text())
         self.assertEqual(reg["bundles/t63/forcing_pd.nc"]["size"], 3)
         self.assertNotEqual(reg["bundles/t63/forcing_pd.nc"]["sha256"], "old")
         self.assertEqual(reg["bundles/t63/emissions_pd.nc"]["sha256"], "pub")
         self.assertNotIn("bundles/t63/dust.nc", reg)
-        self.assertEqual(side, {"parent_commit": "a" * 40,
-                                "retired": ["bundles/t63/dust.nc"]})
+        self.assertEqual(side["parent_commit"], "tip")
+        self.assertEqual(side["retired"], ["bundles/t63/dust.nc"])
+        # A written file that has since gone is dropped, not published.
+        self.assertEqual(list(side["written"]), ["bundles/t63/forcing_pd.nc"])
+        with self._patched():
+            self.assertEqual(bm._ledger(), {"bundles/t63/forcing_pd.nc"})
 
-    def test_upload_commits_the_ledger_onto_the_registry_base(self):
+    def test_registry_refuses_a_file_republished_since_it_was_written(self):
+        from jcm.data.mirror import build_mirror as bm
+        (self.t63 / "forcing_pd.nc").write_bytes(b"mine")
+        with self._patched():
+            bm._write_ledger(self.SINCE, {"bundles/t63/forcing_pd.nc"})
+        with self.assertRaises(SystemExit) as ctx:
+            self._registry(
+                tip={"bundles/t63/forcing_pd.nc": {"sha256": "theirs"}},
+                then={"bundles/t63/forcing_pd.nc": {"sha256": "before"}})
+        self.assertIn("republished on the mirror", str(ctx.exception))
+
+    def test_registry_refuses_retiring_a_file_it_wrote(self):
+        from jcm.data.mirror import build_mirror as bm
+        (self.t63 / "forcing_pd.nc").write_bytes(b"new")
+        with self._patched():
+            bm._write_ledger(self.SINCE, {"bundles/t63/forcing_pd.nc"})
+        with self.assertRaises(SystemExit) as ctx:
+            self._registry({}, _RETIRE=("bundles/t63/forcing_*",))
+        self.assertIn("narrow the globs", str(ctx.exception))
+
+    def _upload(self, create_commit, tip="tip", **extra):
         import contextlib
         import io
-        import json
         from types import SimpleNamespace
 
         import huggingface_hub
 
         from jcm.data.mirror import build_mirror as bm
+        api = SimpleNamespace(create_commit=create_commit)
+        out = io.StringIO()
+        with self._patched(**extra), \
+                patch.object(huggingface_hub, "HfApi", lambda: api), \
+                patch.object(bm, "_mirror_tip", lambda: tip), \
+                patch("time.sleep", lambda s: None), \
+                contextlib.redirect_stdout(out):
+            bm.stage_upload()
+        return out.getvalue()
+
+    def test_upload_commits_exactly_what_the_registry_hashed(self):
+        from types import SimpleNamespace
+
+        import huggingface_hub
+
+        from jcm.data.mirror import build_mirror as bm
+        (self.t63 / "emissions_pd.nc").write_bytes(b"stale")
+        (self.t63 / "forcing_pd.nc").write_bytes(b"new")
+        with self._patched():
+            bm._write_ledger(self.SINCE, {"bundles/t63/forcing_pd.nc"})
+        self._registry({"bundles/t63/dust.nc": {"sha256": "x"}},
+                       _RETIRE=("bundles/*/dust.nc",))
         commits = []
 
-        class _Api:
-            def create_commit(self, **kw):
-                commits.append(kw)
-                return SimpleNamespace(oid="f" * 40)
+        def create_commit(**kw):
+            commits.append(kw)
+            return SimpleNamespace(oid="f" * 40)
 
-        with tempfile.TemporaryDirectory() as d:
-            root = self._tree(d)
-            t63 = root / "upload" / "bundles" / "t63"
-            (t63 / "emissions_pd.nc").write_bytes(b"stale")
-            (t63 / "forcing_pd.nc").write_bytes(b"new")
-            registry = root / "upload" / "registry.json"
-            (root / "build" / "registry_base.json").write_text(json.dumps(
-                {"parent_commit": "a" * 40, "retired": ["bundles/t63/dust.nc"]}))
-            out = io.StringIO()
-            with self._patched(root),                     patch.object(huggingface_hub, "HfApi", _Api),                     contextlib.redirect_stdout(out):
-                bm._ledger_path().write_text('["bundles/t63/forcing_pd.nc"]')
-                # A file rewritten after the registry was hashed is refused.
-                registry.write_text(json.dumps({"files": {
-                    "bundles/t63/forcing_pd.nc": {"sha256": "x", "size": 3}}}))
-                os.utime(t63 / "forcing_pd.nc", ns=(1, 2 ** 62))
-                with self.assertRaises(SystemExit) as ctx:
-                    bm.stage_upload()
-                self.assertIn("rerun --stage registry", str(ctx.exception))
-                self.assertEqual(commits, [])
-                os.utime(t63 / "forcing_pd.nc", ns=(1, 1))
-                bm.stage_upload()
-                ledger_left = bm._ledger_path().exists()
-                rotated = (root / "build" / f"upload_ledger.{'f' * 12}.json"
-                           ).exists()
+        # --retire belongs to the registry run; a different one is refused.
+        with self.assertRaises(SystemExit) as ctx:
+            self._upload(create_commit, _RETIRE=("other",))
+        self.assertIn("applied by --stage registry", str(ctx.exception))
+        # A file touched after the registry hashed it is refused.
+        stat = (self.t63 / "forcing_pd.nc").stat()
+        os.utime(self.t63 / "forcing_pd.nc",
+                 ns=(stat.st_atime_ns, stat.st_mtime_ns + 10 ** 9))
+        with self.assertRaises(SystemExit) as ctx:
+            self._upload(create_commit)
+        self.assertIn("changed since --stage registry", str(ctx.exception))
+        self.assertEqual(commits, [])
+        os.utime(self.t63 / "forcing_pd.nc",
+                 ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        out = self._upload(create_commit)
         (kw,) = commits
-        self.assertEqual(kw["parent_commit"], "a" * 40)
+        self.assertEqual(kw["parent_commit"], "tip")
         added = sorted(op.path_in_repo for op in kw["operations"]
                        if isinstance(op, huggingface_hub.CommitOperationAdd))
         deleted = [op.path_in_repo for op in kw["operations"]
                    if isinstance(op, huggingface_hub.CommitOperationDelete)]
         self.assertEqual(added, ["bundles/t63/forcing_pd.nc", "registry.json"])
         self.assertEqual(deleted, ["bundles/t63/dust.nc"])
-        self.assertIn('MIRROR_REVISION = "' + "f" * 40 + '"', out.getvalue())
-        self.assertFalse(ledger_left)
-        self.assertTrue(rotated)
+        self.assertIn('MIRROR_REVISION = "' + "f" * 40 + '"', out)
+        with self._patched():
+            self.assertEqual(bm._ledger(), set())
+        self.assertTrue((self.root / "build" / f"upload_ledger.{'f' * 12}.json"
+                         ).exists())
+
+    def test_upload_stops_once_the_tip_has_moved(self):
+        from jcm.data.mirror import build_mirror as bm
+        (self.t63 / "forcing_pd.nc").write_bytes(b"new")
+        with self._patched():
+            bm._write_ledger(self.SINCE, {"bundles/t63/forcing_pd.nc"})
+        self._registry({})
+        attempts = []
+
+        def create_commit(**kw):
+            attempts.append(kw)
+            raise RuntimeError("412 parent commit mismatch")
+
+        with self.assertRaises(SystemExit) as ctx:
+            self._upload(create_commit, tip="moved")
+        self.assertIn("mirror tip is now moved", str(ctx.exception))
+        self.assertEqual(len(attempts), 1)
+        with self._patched():
+            self.assertEqual(bm._ledger(), {"bundles/t63/forcing_pd.nc"})
+
+    def test_main_records_each_stage_and_nothing_from_a_failed_one(self):
+        import contextlib
+        import io
+
+        from jcm.data.mirror import build_mirror as bm
+
+        def good():
+            (self.t63 / "forcing_pd.nc").write_bytes(b"new")
+
+        def bad():
+            (self.t63 / "forcing_amip.nc").write_bytes(b"trunc")
+            raise RuntimeError("walltime")
+
+        stages = {**bm.STAGES, "bundles": good, "amip": bad}
+        out = io.StringIO()
+        with self._patched(STAGES=stages), \
+                patch.object(bm, "check_sources", lambda *a, **k: None), \
+                patch("sys.argv", ["build_mirror", "--stage", "bundles,amip"]), \
+                contextlib.redirect_stdout(out), \
+                self.assertRaises(RuntimeError):
+            bm.main()
+        with self._patched():
+            self.assertEqual(bm._ledger(), {"bundles/t63/forcing_pd.nc"})
+        self.assertIn("stage amip failed: nothing it wrote is recorded",
+                      out.getvalue())
 
 
 class MirrorRevisionStagesTest(unittest.TestCase):

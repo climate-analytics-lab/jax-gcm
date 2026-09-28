@@ -26,8 +26,8 @@ transient forcing/emissions/ozone, ``--years first,last`` — issue #610),
 ``era5-transient`` (yearly all-ERA5 forcing incl. transient land —
 issue #629), ``registry`` (the published registry at the tip, with the files
 this site's stages wrote re-hashed), ``upload`` (commit those files to the HF
-dataset; needs ``hf auth login`` with write access). ``--retire`` names
-published files to remove at the next registry/upload.
+dataset; needs ``hf auth login`` with write access). ``--retire`` on a
+``registry`` run names published files to remove; the upload deletes them.
 Outputs land in ``$JCM_MIRROR_ROOT`` (default: the site's scratch ``hf_mirror``):
 Tier A under ``build/``, the HF-shaped tree under ``upload/``.
 
@@ -348,13 +348,27 @@ _UNRECORDED_STAGES = ("registry", "upload")
 
 
 def _ledger_path() -> Path:
-    """Upload-tree paths written since the last upload (a JSON list)."""
+    """Upload-tree files written since the last upload, and since when."""
     return BUILD / "upload_ledger.json"
 
 
-def _ledger() -> set[str]:
+def _ledger_state() -> dict:
     path = _ledger_path()
-    return set(json.loads(path.read_text())) if path.exists() else set()
+    if not path.exists():
+        return {"since": None, "paths": []}
+    return json.loads(path.read_text())
+
+
+def _ledger() -> set[str]:
+    return set(_ledger_state()["paths"])
+
+
+def _write_ledger(since, paths) -> None:
+    # tmp + replace, so a crash mid-write never truncates the ledger.
+    tmp = _ledger_path().with_suffix(".tmp")
+    tmp.write_text(json.dumps({"since": since, "paths": sorted(paths)},
+                              indent=1) + "\n")
+    os.replace(tmp, _ledger_path())
 
 
 def _upload_snapshot() -> dict[str, tuple]:
@@ -373,37 +387,59 @@ def _upload_snapshot() -> dict[str, tuple]:
     return snap
 
 
-def _record_writes(before: dict) -> None:
+def _record_writes(before: dict) -> dict:
     """Add the upload-tree files created or changed since ``before`` to the ledger.
 
     The registry and the upload act on the ledger alone. The upload tree is a
     long-lived working copy that builds on other sites never reach, so a file
     this site did not just write may be older than the published one, and
-    republishing it would revert that.
+    republishing it would revert that. ``since`` (UTC, set by the first entry)
+    lets :func:`stage_registry` refuse a file another site has published over
+    in the meantime. Returns the new snapshot, the next stage's ``before``.
     """
+    import datetime
+
     after = _upload_snapshot()
     written = {p for p, st in after.items() if before.get(p) != st}
     if written:
-        _ledger_path().write_text(
-            json.dumps(sorted(_ledger() | written), indent=1) + "\n")
+        state = _ledger_state()
+        since = state["since"] or datetime.datetime.now(
+            datetime.timezone.utc).isoformat()
+        _write_ledger(since, set(state["paths"]) | written)
+    return after
 
 
-def _published_registry() -> tuple[dict, str]:
-    """Return the registry at the mirror's current tip, and the tip's commit.
-
-    The tip, not the pinned revision: the upload lands on the tip, so merging
-    onto the pin would drop entries published since the pin was last bumped.
-    """
+def _registry_at(revision: str) -> dict:
     from huggingface_hub import HfApi
 
     from jcm.data.remote import DEFAULT_REPO
 
-    api = HfApi()
-    tip = api.repo_info(DEFAULT_REPO, repo_type="dataset").sha
-    path = api.hf_hub_download(DEFAULT_REPO, "registry.json",
-                               repo_type="dataset", revision=tip,
-                               local_dir=str(BUILD / "published"))
-    return json.loads(Path(path).read_text()), tip
+    path = HfApi().hf_hub_download(
+        DEFAULT_REPO, "registry.json", repo_type="dataset", revision=revision,
+        local_dir=str(BUILD / "published" / revision))
+    return json.loads(Path(path).read_text())
+
+
+def _mirror_tip() -> str:
+    from huggingface_hub import HfApi
+
+    from jcm.data.remote import DEFAULT_REPO
+
+    return HfApi().repo_info(DEFAULT_REPO, repo_type="dataset").sha
+
+
+def _commit_at(since: str) -> str:
+    """Return the mirror commit that was the tip at UTC time ``since``."""
+    import datetime
+
+    from huggingface_hub import HfApi
+
+    from jcm.data.remote import DEFAULT_REPO
+
+    when = datetime.datetime.fromisoformat(since)
+    commits = HfApi().list_repo_commits(DEFAULT_REPO, repo_type="dataset")
+    return next((c.commit_id for c in commits if c.created_at <= when),
+                commits[-1].commit_id)
 
 
 def _truncation(grid: str) -> int:
@@ -987,15 +1023,44 @@ def stage_registry() -> None:
             if not (dst.exists() and dst.samefile(f)):
                 shutil.copy(f, dst)
     _record_writes(before)
-    base, tip = _published_registry()
+    state = _ledger_state()
+    written = set(state["paths"])
+    gone = sorted(p for p in written if not (UPLOAD / p).is_file())
+    if gone:
+        # Removed after it was written: nothing to publish. Removing the
+        # published copy is a --retire decision, never implicit.
+        print(f"registry: {len(gone)} written file(s) no longer exist, "
+              f"dropped from the ledger: {', '.join(gone[:5])}", flush=True)
+        written -= set(gone)
+        _write_ledger(state["since"], written)
+    clash = sorted(p for p in written
+                   if any(fnmatch.fnmatch(p, g) for g in _RETIRE))
+    if clash:
+        sys.exit(f"registry: --retire matches file(s) this site wrote "
+                 f"({', '.join(clash[:5])}); narrow the globs")
+    tip = _mirror_tip()
+    base = _registry_at(tip)
+    if written:
+        # Another publish since this site started writing would be reverted.
+        then = _registry_at(_commit_at(state["since"]))["files"]
+        moved = sorted(p for p in written
+                       if base["files"].get(p) != then.get(p))
+        if moved:
+            sys.exit(f"registry: {len(moved)} file(s) this site wrote were "
+                     f"republished on the mirror since {state['since']} "
+                     f"({', '.join(moved[:5])}); rebuild them from the "
+                     f"current sources, or drop them from "
+                     f"{_ledger_path()}")
     retired = sorted(p for p in base["files"]
                      if any(fnmatch.fnmatch(p, g) for g in _RETIRE))
     for p in retired:
         del base["files"][p]
-    written = _ledger()
+    stats = {p: list(st) for p, st in _upload_snapshot().items()
+             if p in written}
     print(write_registry(str(UPLOAD), base=base, paths=written), flush=True)
     (BUILD / "registry_base.json").write_text(json.dumps(
-        {"parent_commit": tip, "retired": retired}, indent=1) + "\n")
+        {"parent_commit": tip, "retire": list(_RETIRE), "retired": retired,
+         "written": stats}, indent=1) + "\n")
     print(f"registry: {len(written)} written file(s) over tip {tip[:8]}, "
           f"{len(retired)} retired", flush=True)
 
@@ -1211,9 +1276,10 @@ def stage_upload() -> None:
     one commit on the tip the registry was merged onto: if the mirror moved
     since ``--stage registry`` the commit is refused rather than overwriting
     the newer registry. Retries transient backend failures (the xet pipeline
-    has aborted mid-transfer with TimeoutError); a retry after a commit that
-    landed unacknowledged fails on the parent commit instead of committing
-    twice. The ledger is set aside once the commit lands. Needs a write token.
+    has aborted mid-transfer with TimeoutError) while the tip is unchanged;
+    once it has moved — another push, or an attempt that landed
+    unacknowledged — it stops and says so. The ledger is set aside once the
+    commit lands. Needs a write token.
     """
     import time
 
@@ -1222,17 +1288,20 @@ def stage_upload() -> None:
     from jcm.data.remote import DEFAULT_REPO
 
     side = BUILD / "registry_base.json"
-    registry = UPLOAD / "registry.json"
-    if not side.exists() or not registry.exists():
+    if not side.exists() or not (UPLOAD / "registry.json").exists():
         sys.exit("upload: run --stage registry first")
     base = json.loads(side.read_text())
-    listed = json.loads(registry.read_text())["files"]
+    if _RETIRE and list(_RETIRE) != base["retire"]:
+        sys.exit("upload: --retire is applied by --stage registry; rerun it "
+                 "with these globs")
+    # Exactly the files, at exactly the state, the registry hashed.
     written = sorted(_ledger())
-    stale = [p for p in written if p not in listed
-             or (UPLOAD / p).stat().st_mtime_ns > registry.stat().st_mtime_ns]
-    if stale:
-        sys.exit(f"upload: registry.json predates {len(stale)} written file(s) "
-                 f"({', '.join(stale[:3])}); rerun --stage registry")
+    snap = _upload_snapshot()
+    if (written != sorted(base["written"])
+            or any(list(snap.get(p, ())) != st
+                   for p, st in base["written"].items())):
+        sys.exit("upload: the upload tree changed since --stage registry; "
+                 "rerun it")
     ops = [CommitOperationAdd(path_in_repo=p, path_or_fileobj=str(UPLOAD / p))
            for p in [*written, "registry.json"]]
     ops += [CommitOperationDelete(path_in_repo=p) for p in base["retired"]]
@@ -1252,6 +1321,12 @@ def stage_upload() -> None:
             last = e
             print(f"upload attempt {attempt} failed: "
                   f"{type(e).__name__}: {e}", flush=True)
+            tip = _mirror_tip()
+            if tip != base["parent_commit"]:
+                sys.exit(f"upload: the mirror tip is now {tip}, not "
+                         f"{base['parent_commit']}. Either an earlier attempt "
+                         "landed (check that commit) or another push moved "
+                         "the tip; rerun --stage registry,upload.")
             time.sleep(60)
             continue
         if _ledger_path().exists():
@@ -1296,9 +1371,10 @@ def main() -> None:
                     help="inclusive year range for --stage amip, "
                          "e.g. 1950,2022")
     ap.add_argument("--retire", default=None,
-                    help="comma-separated globs of published files to remove "
-                         "at the next --stage registry/upload (e.g. a renamed "
-                         "product's old path); nothing else leaves the mirror")
+                    help="comma-separated globs of published files the "
+                         "--stage registry run removes (e.g. a renamed "
+                         "product's old path), deleted by the upload that "
+                         "follows; nothing else leaves the mirror")
     ap.add_argument("--verify-remote", action="store_true",
                     help="after staging, cross-check the manifest against the "
                          "live mirror (list_repo_files): transient coverage "
@@ -1347,14 +1423,24 @@ def main() -> None:
     BUILD.mkdir(parents=True, exist_ok=True)
     UPLOAD.mkdir(parents=True, exist_ok=True)
     check_sources(names)
+    snap = None
     for name in names:
         print(f"=== stage: {name} ===", flush=True)
         check_sources([name], include_build=True)
-        before = (None if name in _UNRECORDED_STAGES
-                  else _upload_snapshot())
-        STAGES[name]()
-        if before is not None:
-            _record_writes(before)
+        if name in _UNRECORDED_STAGES:
+            STAGES[name]()
+            snap = None
+            continue
+        before = snap if snap is not None else _upload_snapshot()
+        try:
+            STAGES[name]()
+        except BaseException:
+            # The file being written when it died may be truncated, so none
+            # of this stage's writes are recorded.
+            print(f"stage {name} failed: nothing it wrote is recorded for "
+                  "upload; rerun it over the same selection", flush=True)
+            raise
+        snap = _record_writes(before)
     if args.verify_remote:
         print("=== verify-remote ===", flush=True)
         drift = verify_remote_coverage()

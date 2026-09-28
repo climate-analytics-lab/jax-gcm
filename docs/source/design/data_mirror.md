@@ -293,15 +293,24 @@ Only what this site's builds wrote. The upload tree is a long-lived working
 copy that builds on another site never reach, so any file a build did not just
 write may be older than the published one, and republishing it would revert
 that. Each stage's writes into the upload tree are recorded in
-`build/upload_ledger.json` (the files whose stat changed across the stage).
+`build/upload_ledger.json` (the files whose stat changed across the stage),
+with the time of the first entry. A stage that fails records nothing — the
+file it died writing may be truncated — so rerun it over the same selection.
+
 `--stage registry` takes the published `registry.json` at the mirror's current
-tip, re-hashes only the ledger's files and drops any `--retire` globs.
-`--stage upload` commits exactly those files, `registry.json` and the
-retirements, on top of that tip commit: if the mirror has moved since, the
-commit is refused rather than overwriting the newer registry. A landed upload
-sets the ledger aside (`upload_ledger.<commit>.json`). Nothing leaves the
-mirror except through `--retire`, so a build on a site that holds only part of
-the mirror cannot drop the rest.
+tip and re-hashes only the ledger's files. It refuses any of them whose
+published entry changed after the ledger's first entry: another site
+published over it in the meantime, and uploading would revert that. Rebuild
+such files from the current sources, or delete the ledger to discard the
+unpublished writes. `--retire <globs>` on the same run drops published files
+(a renamed product's old path); nothing else ever leaves the mirror.
+
+`--stage upload` commits exactly the files the registry hashed, at the state
+it hashed them, plus `registry.json` and the retirements, on top of that tip
+commit. If the mirror has moved since, the commit is refused rather than
+overwriting the newer registry; a landed upload sets the ledger aside
+(`upload_ledger.<commit>.json`). Run one build invocation at a time per mirror
+root: the ledger is per root, not per process.
 
 The forcing bundles are rebuilt on Glade on a compute node (the builds and the
 upload's hashing exceed the 10 GB login-node memory limit), with `amip` and
