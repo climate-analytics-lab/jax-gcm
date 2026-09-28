@@ -931,9 +931,12 @@ orchestrator:
    )
    physics = echam_physics().replace("convection", convection)
 
-When replacing a wavelength-dependent radiation backend, the enclosing
-``ComposablePhysics.band_config`` must also be configured for that backend.
-The RRTMGP Hydra configurations perform this setup automatically.
+A different radiation term is composed by passing the instance to the
+factory, ``echam_physics(radiation_scheme=<term>)``: the factory derives the
+composition's ``band_config`` and the JAM optics cadence from that term.
+``replace("radiation", ...)`` does not re-derive them — it keeps the displaced
+term's band structure and cadence (#926) — so it is not the route for the
+radiation slot.
 
 Each ECHAM term is a ``PhysicsTerm`` subclass (``flax.nnx.Module``) with lazy
 imports — the underlying ECHAM physics functions are imported at call time,

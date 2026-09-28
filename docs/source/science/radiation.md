@@ -223,8 +223,9 @@ chain but assert nothing about radiation
 on a tropical column against RRTMGP its mid-tropospheric longwave cooling is
 roughly 150× too weak and its OLR ~70 % too high. It is not ECHAM physics — ECHAM
 runs PSrad/RRTMG — so the ECHAM factory does not offer it; it is composed
-explicitly, ``echam_physics(radiation_scheme=GreyTwoStreamRadiation())`` or
-``physics.replace("radiation", GreyTwoStreamRadiation())``.
+explicitly, by passing the term to the factory,
+``echam_physics(radiation_scheme=GreyTwoStreamRadiation())``, which derives the
+composition's band structure and the JAM optics cadence from that term.
 
 **Grey two-stream layer solution.** Each homogeneous layer's diffuse
 reflectance and transmittance are the exact two-stream result of Meador &

@@ -264,6 +264,9 @@ class TestEchamComposablePhysics(unittest.TestCase):
             self.assertIn(
                 "echam_physics(radiation_scheme=GreyTwoStreamRadiation())",
                 msg)
+            # One route only: ``replace`` keeps the displaced term's band
+            # config and JAM optics cadence, so it is not offered (#926).
+            self.assertNotIn("replace", msg)
 
     def test_unknown_radiation_string_lists_only_echam_options(self):
         from jcm.physics.echam.echam_terms import echam_physics
@@ -366,8 +369,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
             GreyTwoStreamRadiation,
         )
 
-        # The swap the grey rejection message offers, on the real stack:
-        # the new term takes the radiation slot in place.
+        # ``replace`` puts the new term in the radiation slot in place.
         real = echam_physics(checkpoint_terms=False)
         new_rad = GreyTwoStreamRadiation()
         swapped = real.replace("radiation", new_rad)

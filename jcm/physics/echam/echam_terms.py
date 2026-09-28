@@ -75,8 +75,9 @@ GREY_RADIATION_REJECTION = (
     "    from jcm.physics.radiation.grey_two_stream import "
     "GreyTwoStreamRadiation\n"
     "    physics = echam_physics(radiation_scheme=GreyTwoStreamRadiation())\n"
-    "or swap it into an existing composition with "
-    "physics.replace('radiation', GreyTwoStreamRadiation())."
+    "(radiation parameters go to its constructor, params=...). The factory "
+    "derives the band structure and the JAM optics cadence from the term it is "
+    "given, so this is the one supported route."
 )
 
 
