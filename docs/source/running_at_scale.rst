@@ -172,6 +172,18 @@ Two consequences worth committing to memory:
      python -m jcm.main physics=echam \
          +physics.terms.tiedtke_convection.params.entrpen=4e-4
 
+  The factory-built presets (``physics=echam-jam``, ``echam-forced-flux``:
+  those that set ``builder: echam_physics``) have no ``terms`` node; there the
+  block is the factory's per-scheme argument (``convection``, ``clouds``,
+  ``microphysics_2m``, ``radiation``, ``vertical_diffusion``, ...)::
+
+     python -m jcm.main physics=echam-jam \
+         +physics.convection.entrpen=4e-4 +physics.convection.tau=3600
+
+  The field is applied on top of what that preset would otherwise use, and
+  both styles share one conversion: an unknown field is an error listing the
+  valid ones, and a numeric field stays a differentiable parameter.
+
   Physical-constant overrides are the same story — ``constants`` starts as an
   empty mapping, so each base field is *added*::
 

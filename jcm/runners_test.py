@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import jax
 import numpy as np
 import pytest
 import xarray as xr
@@ -3115,6 +3116,153 @@ class TestEmulatorWeightsBuilderPath(unittest.TestCase):
         self.assertIsNotNone(term._weights_file)
         self.assertTrue(str(term._weights_file).endswith(
             "emulator_weights_per_band_u64.nc"))
+
+
+class TestFactoryPresetParameterOverrides(unittest.TestCase):
+    """Per-scheme parameters on the factory-built presets (#933).
+
+    ``physics.<scheme argument>.<field>=`` on ``echam-jam`` /
+    ``echam-forced-flux`` must behave like
+    ``physics.terms.<term>.params.<field>=`` on a term-list preset: the
+    field is set, every other field keeps what the preset would have used,
+    unknown fields are rejected, numeric fields stay differentiable leaves.
+    Construction only; nothing is integrated. The JAM core is the
+    placeholder because CI does not install the optional ``mam4_jax``.
+    """
+
+    _JAM = (*_NULL_EMISSIONS, "physics=echam-jam", "grid=echam_t42_l8_sigma",
+            "physics.jam_microphysics=placeholder")
+    _FORCED = ("physics=echam-forced-flux", "grid=echam_t42_l8_sigma")
+
+    @staticmethod
+    def _params(physics, category):
+        term = next(t for t in physics.terms if t.category == category)
+        return term.params.get_value()
+
+    def test_scheme_fields_reach_both_factory_presets(self):
+        # The Tiedtke retune knobs (#682: entrainment, the CAPE trigger and
+        # the closure timescale), a cloud-fraction field and a radiation
+        # field, on each factory-built preset.
+        overrides = [
+            "+physics.convection.entrpen=4e-4",
+            "+physics.convection.trigger_cape=150.0",
+            "+physics.convection.tau=3600.0",
+            "+physics.clouds.crs=0.95",
+            "+physics.radiation.cloud_inhomogeneity_liquid=0.7",
+        ]
+        for preset in (self._JAM, self._FORCED):
+            with self.subTest(preset=preset[-2:]):
+                physics = build_physics(_compose([*preset, *overrides]))
+                conv = self._params(physics, "convection")
+                self.assertAlmostEqual(float(conv.entrpen), 4e-4)
+                self.assertAlmostEqual(float(conv.trigger_cape), 150.0)
+                self.assertAlmostEqual(float(conv.tau), 3600.0)
+                self.assertAlmostEqual(
+                    float(self._params(physics, "cloud_fraction").crs), 0.95)
+                self.assertAlmostEqual(float(self._params(
+                    physics, "radiation").cloud_inhomogeneity_liquid), 0.7)
+
+    def test_2m_microphysics_field_reaches_the_jam_preset(self):
+        physics = build_physics(_compose(
+            [*self._JAM, "+physics.microphysics_2m.ccraut=5.0"]))
+        self.assertAlmostEqual(
+            float(self._params(physics, "clouds").ccraut), 5.0)
+
+    def test_one_field_override_leaves_every_other_value_identical(self):
+        # The override is applied on top of what the factory itself chose
+        # (e.g. the JAM radiation default cloud_inhomogeneity_ice = 0.7, not
+        # the class default 0.8), so exactly one recorded value may change.
+        from flax import nnx
+
+        from jcm.provenance import describe_params
+
+        base = build_physics(_compose([*self._JAM]))
+        tuned = build_physics(_compose(
+            [*self._JAM, "+physics.convection.entrpen=4e-4"]))
+        base_p, tuned_p = describe_params(base), describe_params(tuned)
+        self.assertEqual(base_p.keys(), tuned_p.keys())
+        changed = sorted(k for k in base_p if base_p[k] != tuned_p[k])
+        self.assertEqual(changed, ["tiedtke_convection.params.entrpen"])
+        # Same term list and same static (aux) configuration everywhere.
+        self.assertEqual([t.name for t in base.terms],
+                         [t.name for t in tuned.terms])
+        self.assertEqual(
+            jax.tree_util.tree_structure(nnx.state(base, nnx.Param)),
+            jax.tree_util.tree_structure(nnx.state(tuned, nnx.Param)))
+        self.assertAlmostEqual(float(self._params(
+            tuned, "radiation").cloud_inhomogeneity_ice), 0.7)
+
+    def test_radiation_override_keeps_the_factory_radiation_choice(self):
+        physics = build_physics(_compose(
+            [*self._JAM, "+physics.radiation.cloud_inhomogeneity_liquid=0.7"]))
+        rad = self._params(physics, "radiation")
+        self.assertAlmostEqual(float(rad.cloud_inhomogeneity_ice), 0.7)
+
+    def test_unknown_field_is_rejected_with_the_valid_names(self):
+        cfg = _compose([*self._JAM, "+physics.convection.entrpn=4e-4"])
+        with self.assertRaisesRegex(
+                ValueError, r"convection: unknown ConvectionParameters "
+                r"field\(s\) \['entrpn'\].*Valid fields: .*'entrpen'"):
+            build_physics(cfg)
+
+    def test_override_of_a_scheme_not_composed_is_rejected(self):
+        # echam-jam runs the 2M scheme; a 1M override would be ignored.
+        cfg = _compose([*self._JAM, "+physics.microphysics.ccraut=5.0"])
+        with self.assertRaisesRegex(ValueError, r"\['microphysics'\] would "
+                                    "be ignored"):
+            build_physics(cfg)
+
+    def test_cu_lmfmid_flag_and_mapping_conflict(self):
+        cfg = _compose([*self._FORCED, "+physics.cu_lmfmid=false",
+                        "+physics.convection.cu_lmfmid=true"])
+        with self.assertRaisesRegex(ValueError, "cu_lmfmid is set both"):
+            build_physics(cfg)
+        # Either alone works; the flag also survives a mapping of OTHER
+        # fields (it chooses the base the mapping is applied to).
+        for extra in (["+physics.cu_lmfmid=false"],
+                      ["+physics.convection.cu_lmfmid=false"],
+                      ["+physics.cu_lmfmid=false",
+                       "+physics.convection.entrpen=4e-4"]):
+            with self.subTest(extra=extra):
+                conv = self._params(build_physics(
+                    _compose([*self._FORCED, *extra])), "convection")
+                self.assertFalse(bool(conv.cu_lmfmid))
+
+    def test_parity_with_the_term_list_door(self):
+        # One conversion serves both doors, so the built parameter has the
+        # same value, Python type and dtype; the vdiff string alias shows
+        # the enum-like spellings normalize identically too.
+        term_list = build_physics(_compose([
+            "physics=echam", "grid=echam_t42_l8_sigma",
+            "++physics.terms.tiedtke_convection.params.entrpen=4e-4",
+            "++physics.terms.tte_tke_vertical_diffusion.params."
+            "surface_layer_scheme=businger_dyer",
+        ]))
+        factory = build_physics(_compose([
+            *self._FORCED, "+physics.convection.entrpen=4e-4",
+            "+physics.vertical_diffusion.surface_layer_scheme=businger_dyer",
+        ]))
+        for category, field in (("convection", "entrpen"),
+                                ("vertical_diffusion",
+                                 "surface_layer_scheme")):
+            a = getattr(self._params(term_list, category), field)
+            b = getattr(self._params(factory, category), field)
+            self.assertEqual(type(a), type(b), field)
+            self.assertEqual(np.asarray(a).dtype, np.asarray(b).dtype, field)
+            self.assertEqual(a, b, field)
+
+    def test_overridden_parameter_stays_a_differentiable_leaf(self):
+        physics = build_physics(_compose(
+            [*self._JAM, "+physics.convection.entrpen=4e-4"]))
+        conv = self._params(physics, "convection")
+        # A pytree leaf, not static aux data baked into the treedef.
+        self.assertTrue(any(leaf is conv.entrpen
+                            for leaf in jax.tree_util.tree_leaves(conv)))
+        grads = jax.grad(lambda p: p.entrpen ** 2 * p.tau,
+                         allow_int=True)(conv)
+        self.assertTrue(np.isfinite(grads.entrpen))
+        self.assertAlmostEqual(float(grads.entrpen),
+                               2 * 4e-4 * float(conv.tau), places=3)
 
 
 class TestEmulatorGhgGuard(unittest.TestCase):

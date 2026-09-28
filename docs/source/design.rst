@@ -135,8 +135,9 @@ no ``omega``, so ECHAM's mid-level convection trigger has to be turned off or
 The spelling of that override follows the physics group's own shape: the
 term-list presets take ``+physics.terms.tiedtke_convection.params.cu_lmfmid=false``
 as above, while the factory-built ones (``physics=echam-jam*``, which set
-``builder: echam_physics``) take the scalar ``+physics.cu_lmfmid=false`` and
-reject a ``terms`` node outright.
+``builder: echam_physics``) take the scalar ``+physics.cu_lmfmid=false`` (or,
+equivalently, ``+physics.convection.cu_lmfmid=false``; setting both is an
+error) and reject a ``terms`` node outright.
 
 The ``dycore`` group owns what is backend-specific: on ``pyses_*`` the
 resolution comes from ``nx``/``npt``/``nlev`` in that group and the ``grid``

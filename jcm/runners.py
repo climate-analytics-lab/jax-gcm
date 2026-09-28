@@ -36,6 +36,7 @@ from jcm.initial_states import (
     jw_state,
 )
 from jcm.model import Model, ModelPredictions
+from jcm.physics.physics_term import with_field_overrides
 from jcm.physics.radiation.band_config import RadiationBandConfig
 from jcm.single_column_model import select_column
 from jcm.terrain import TerrainData
@@ -234,22 +235,11 @@ def _build_term(term_name: str, term_entry: dict):
 
     init_kwargs: dict = {}
     for kwarg_name, params_cls in _parameters_specs_from_init(term_cls).items():
-        overrides = entry.pop(kwarg_name, None) or {}
-        base = params_cls.default()
-        params_obj = base.__class__(
-            **{**base.__dict__, **dict(overrides)}
-        )
-        # ``default()`` runs any config-time cross-field validation, but this
-        # direct constructor bypasses it — so a YAML override could re-create
-        # an illegal field COMBINATION (e.g. echam_1m's legacy ccraut-as-
-        # KK2000-threshold, #674) that the defaults alone never trip. Re-run
-        # the opt-in ``validate`` hook on the post-override object so ANY
-        # Parameters class can guard both construction doors. Config-time,
-        # concrete values only — never called under a jit trace.
-        validate = getattr(params_obj, "validate", None)
-        if callable(validate):
-            validate()
-        init_kwargs[kwarg_name] = params_obj
+        # The same conversion the factory-built presets use (echam_physics),
+        # so both preset styles give an override identical semantics.
+        init_kwargs[kwarg_name] = with_field_overrides(
+            params_cls.default(), entry.pop(kwarg_name, None),
+            scheme=f"physics.terms.{term_name}.{kwarg_name}")
 
     # Anything left is a plain-kwarg pass-through (e.g. UpperSponge's
     # n_sponge_levels, sponge_timescale_s).
@@ -283,6 +273,17 @@ def build_physics(cfg: DictConfig):
     optionally its kwargs) at the CLI, or by composing a preset YAML
     that pulls in ``physics: echam`` via ``defaults`` and then
     overrides individual term entries.
+
+    A factory-built preset (``physics.builder`` set, e.g. ``echam-jam``)
+    has no ``terms`` node; its keys are the factory's keyword arguments,
+    and a per-scheme field is set through that scheme's argument::
+
+        python -m jcm.main physics=echam-jam \
+            +physics.convection.entrpen=4e-4
+
+    The factory applies the mapping on top of the ``Parameters`` object it
+    would otherwise build, through the same conversion as the term-list
+    path (:func:`~jcm.physics.physics_term.with_field_overrides`).
     """
     from omegaconf import OmegaConf
 
@@ -328,7 +329,10 @@ def build_physics(cfg: DictConfig):
 #: Physics ``builder`` names → factory callables returning a ``ComposablePhysics``
 #: with its own validated term ordering (and band_config/vectorize handled
 #: internally). The factory already orders the JAM aerosol chain (incl. the
-#: pre/post-cloud split), so the preset YAML only carries scalar flags.
+#: pre/post-cloud split), so the preset YAML only carries factory arguments:
+#: scalar flags, plus field-override mappings for the per-scheme ``Parameters``
+#: arguments, which each registered factory must accept and apply on top of
+#: its own resolved object (see ``echam_physics``).
 def _physics_factories():
     from jcm.physics.echam.echam_terms import echam_physics
     return {"echam_physics": echam_physics}
@@ -360,7 +364,11 @@ def _build_physics_from_factory(physics_cfg):
     """Build physics by delegating to a factory named by ``physics.builder``.
 
     The factory keyword args present in the YAML are forwarded; keys the
-    runner itself consumes (``_CONFIG_ONLY_PHYSICS_KEYS``) are skipped.
+    runner itself consumes (``_CONFIG_ONLY_PHYSICS_KEYS``) are skipped. A
+    per-scheme block (``physics.convection: {entrpen: 4e-4}``) arrives as a
+    plain mapping and is forwarded as one: only the factory knows the object
+    it would otherwise build, so it applies the fields on top of that object
+    (a runner-built object would reset the factory's own choices).
     Anything else is an ERROR — a typo'd or removed key silently falling
     back to defaults invalidates the experiment that set it.
     """

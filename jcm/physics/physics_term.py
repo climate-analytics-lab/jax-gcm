@@ -395,3 +395,48 @@ class PhysicsTerm(nnx.Module):
             from jcm.physics.composable_physics import ComposablePhysics
             return ComposablePhysics(terms=[self])
         return NotImplemented
+
+
+def with_field_overrides(base, overrides: Mapping[str, Any] | None, *,
+                         scheme: str):
+    """Return ``base`` (a scheme ``Parameters`` object) with fields replaced.
+
+    The one conversion from a config mapping to a ``Parameters`` object, used
+    by both Hydra doors: ``runners._build_term`` (term-list presets, ``base``
+    is ``ParamsCls.default()``) and ``echam_physics`` (factory-built presets,
+    ``base`` is the object the factory would otherwise have used, so an
+    override of one field keeps the factory's own choices for the others).
+
+    Values are passed to the class constructor as given, so numeric fields
+    stay ordinary pytree leaves (differentiable, never static), and a class's
+    ``__post_init__`` normalizes its documented spellings (the string aliases
+    of enum-like fields). The constructor bypasses the cross-field checks in
+    ``default()``, so the opt-in ``validate`` hook is re-run on the result:
+    an override could otherwise re-create an illegal field combination (e.g.
+    echam_1m's legacy ccraut-as-KK2000-threshold, #674) that the defaults
+    alone never trip. Config-time, concrete values only; never under a trace.
+
+    Args:
+        base: The ``Parameters`` object whose unspecified fields are kept.
+        overrides: Field name to value; ``None`` or empty returns ``base``
+            rebuilt unchanged.
+        scheme: Name used in the error message (the config key or term name).
+
+    Raises:
+        ValueError: A key is not a field of ``base``'s class; the message
+            lists the valid fields, since a typo silently dropped would
+            invalidate the experiment that set it.
+
+    """
+    overrides = dict(overrides or {})
+    valid = {f.name for f in dataclasses.fields(base)}
+    unknown = sorted(set(overrides) - valid)
+    if unknown:
+        raise ValueError(
+            f"{scheme}: unknown {type(base).__name__} field(s) {unknown}. "
+            f"Valid fields: {sorted(valid)}.")
+    params = base.__class__(**{**base.__dict__, **overrides})
+    validate = getattr(params, "validate", None)
+    if callable(validate):
+        validate()
+    return params
