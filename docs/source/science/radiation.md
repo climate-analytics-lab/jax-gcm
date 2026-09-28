@@ -151,6 +151,34 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
 - `differentiability` — cloud-optics SSA/asymmetry combination uses double-
   ``where`` safe-denominator guards so backward-mode cloud-parameter gradients do
   not form ``0·inf`` on clear columns.
+- `differentiability` — the carried effective radius is a flag plus a value,
+  not a magnitude. ``r_eff = 0`` selects the fallback, and any positive value is
+  used as given, clipped by the library to its LUT range (2.5-21.5 µm for
+  liquid). The resolved radius therefore jumps at ``0+``, from the liquid
+  fallback (11 µm scaled by the Twomey factor) to the 2.5 µm floor. The model never lands in that band: a
+  carried radius is 0 or a Martin/Bower radius. The derivative of radiation with
+  respect to a carried zero is exactly 0, and the fallback's own inputs
+  (``cdnc_factor``, the in-cloud ice path) keep their gradients. A
+  finite-difference check that perturbs the cold-start carry's zeros is measuring
+  this selector, not the scheme. The switch the model does reach is a cell
+  turning cloudy between steps. The lagged carry then swaps the fallback for the
+  previous step's Martin/Bower radius as that step's cloud fraction crosses
+  ``1e-12``, whereas ECHAM (``mo_cloud_optics.f90::cloud_optics``) forms the
+  radius from the current step's LWC and CDNC with no lag (#929).
+- `differentiability` — the gas optics interpolate the k-distribution tables
+  linearly in temperature, log-pressure and the binary-species parameter η,
+  so the fluxes are continuous in temperature and humidity, with slope changes
+  only at table cell boundaries. On the per-term gradient harness's single
+  columns a joint temperature-plus-humidity perturbation, in float64, has a
+  central difference that agrees with AD to 1.5 % or better at every step from
+  6·10⁻⁵ down to 10⁻⁶. Three other things stop a finite-difference reference
+  for the whole RRTMGP term there. One is the effective-radius selector above.
+  Another is the condensate clip at levels where a condensate tracer is exactly
+  0. The third is the float32 primal: the library runs in float32 by
+  construction (see ``radiation_scheme_rrtmgp``), and the heating in the top
+  few-Pa layers is a difference of O(10³) W/m² fluxes, rounded to a few
+  10⁻⁷ K/s whatever the step. AD itself is unaffected: jvp and vjp agree to float32 reduction order, which
+  is the check the harness applies.
 
 **Status & known limitations.**
 - **Cloud inhomogeneity carries ECHAM's T63 values, not its per-resolution

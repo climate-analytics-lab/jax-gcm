@@ -326,23 +326,61 @@ _CHECKS: dict = {
     # holds, the two-sided reference does not. See ``_CHEMISTRY_RELAXATION_KINK``.
     "simple_chemistry": _Check(xfail_reference=_CHEMISTRY_RELAXATION_KINK),
 
-    # RRTMGP has no central difference at either point: along the seed-0
-    # direction the minus secant doubles as the step halves from 5e-4 down to
-    # 1e-6 (jump/eps — a discontinuity sitting exactly at the operating point)
-    # while the plus secant stays bounded on the stable column. Bisecting the
-    # direction by input leaf puts the jump on the JOINT perturbation of
-    # ``state/temperature`` and ``state/specific_humidity`` — each alone has a
-    # clean reference — and freezing every cloud input (cloud fraction and the
-    # condensate in state, clouds and thermo_run) leaves it unchanged, so it
-    # is not McICA's binary sub-column mask; where in the gas optics the
-    # switch sits is #924. What remains meaningful is the adjoint identity,
-    # which holds to at most 2.9e-5 over seeds 0-2 at both points (float32
-    # reduction order through the per-g-point solves; 1e-3 keeps ~35x
-    # headroom), and the liveness of the two inputs radiation reads from the
-    # state. The term returns heating only: its momentum and moisture
-    # tendencies are structural zeros, and its diagnostics carry fields that
-    # are legitimately zero here (the ``*_noa`` slots with no aerosol-free
-    # companion), hence the tendency-only output.
+    # RRTMGP has no central difference at either point, for three reasons
+    # that stack; none is a defect of the gas optics.
+    #
+    # 1. The jump (minus secant doubling as the step halves, 5e-4 down to
+    #    1e-6) is ``clouds/r_eff_liq`` and ``clouds/r_eff_ice``. The carried
+    #    microphysical radius is a flag plus a value: 0 means "not provided"
+    #    and ``resolve_effective_radii`` (cloud_optics.py) selects the
+    #    diagnostic fallback on ``r_eff > 0``. The replay is a cold start, so
+    #    both leaves are identically 0, their RMS is 0 and ``_tangent`` gives
+    #    them an absolute unit step; any cloudy level the step pushes above 0,
+    #    however slightly, swaps the 11 um fallback for the library's 2.5 um
+    #    LUT floor. Along that leaf alone the heating moves by 2.338e-5 K/s
+    #    at 959 hPa on the stable column at every step from 5e-4 to 1e-9 on
+    #    the side that crosses and by exactly 0 on the other, and the full
+    #    direction's minus side converges to that same offset (2.34e-5, in
+    #    float64 as in float32). The model never visits the (0, 2.5 um) band: a carried radius
+    #    is 0 or a physical Martin/Bower radius, so this is a selector, not
+    #    physics, and its derivative at 0 is exactly 0 in both AD modes.
+    #    ``state/temperature`` and ``state/specific_humidity``, jointly or
+    #    alone, carry no jump: in float64 their joint central difference
+    #    stays within 1 % of -27.3 at every rung from 1.25e-4 down to 1e-6.
+    # 2. With the radii and MACv2-SP's all-zero LW aerosol triple held fixed,
+    #    what remains is the condensate clip in ``prepare_radiation_state``
+    #    (the grey term's ``_CONDENSATE_CLIP_KINK``, on this scheme). It passes
+    #    one sign of the step and drops the other wherever a condensate tracer
+    #    is exactly 0. On the stable column ``state/tracers/qi`` is 0 at every
+    #    level, and in float64 the one-sided secants stay at +871 and -30. On
+    #    the convecting column ``qc`` is 0 at 9 of the 17 radiating cloudy
+    #    levels, and in float64 it puts the converged difference 2 % from AD
+    #    (-39.7 against -38.9). With ``qc`` also held fixed the two agree to
+    #    0.9 %.
+    # 3. What is left is float32. The glue runs the library in float32 by
+    #    construction, and at the top levels (1 and 4 Pa) the heating is a
+    #    difference of O(1e3) W/m2 fluxes across a layer a few Pa thick, so
+    #    it carries a rounding offset of a few 1e-7 K/s that does not shrink
+    #    with the step: along T and q alone the float32 differences stop
+    #    scaling with eps below 6e-5, where the float64 ones keep halving.
+    #    Divided by the step, that offset swamps the projection. In float64
+    #    the T-plus-q direction agrees with AD to 1.5 % or better at every
+    #    rung from 6e-5 down to 1e-6, at both points.
+    #    In float32, with the radii and LW aerosol held fixed, no convecting
+    #    rung passes both spread gates, and the stable column with qi also
+    #    held fixed gets no closer than 2.5 % between neighbours, against the
+    #    2 % the reference needs.
+    #
+    # Moving the operating point would not help (1) and (3), so the adjoint
+    # identity is the reference. It holds to at most 2.9e-5 over seeds 0-2
+    # at both points (float32 reduction order through the per-g-point solves;
+    # 1e-3 keeps ~35x headroom), and the two inputs radiation reads from the
+    # state must be live. The term returns heating only: its momentum and
+    # moisture tendencies are structural zeros, and its diagnostics carry
+    # fields that are legitimately zero here (the ``*_noa`` slots with no
+    # aerosol-free companion), hence the tendency-only output. The radius
+    # switch the model can actually reach, when a cell turns cloudy between
+    # steps, is #929.
     "rrtmgp_radiation": _Check(
         reference="adjoint", adjoint_rtol=1.0e-3, outputs="tendency",
         skip_outputs=("u_wind", "v_wind", "specific_humidity",

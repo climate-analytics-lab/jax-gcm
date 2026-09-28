@@ -7,6 +7,7 @@ Date: 2025-01-10
 """
 
 import jax
+import numpy as np
 import pytest
 import jax.numpy as jnp
 from jcm.physics.radiation.cloud_optics import (
@@ -14,6 +15,7 @@ from jcm.physics.radiation.cloud_optics import (
     effective_radius_liquid,
     effective_radius_ice,
     get_band_wavelength,
+    resolve_effective_radii,
 )
 from jcm.physics.radiation.constants import (
     SW_BAND_LIMITS,
@@ -506,3 +508,58 @@ class TestCloudOpticsGradients:
         for name, gradient in zip(names, gradients):
             assert jnp.all(jnp.isfinite(gradient)), (
                 f"d/d{name} is not finite in a {kind} column: {gradient}")
+
+
+class TestResolveEffectiveRadii:
+    """A carried radius is a flag plus a value, not a magnitude (#924).
+
+    ``r_eff = 0`` in the ``clouds`` carry means "not provided" and selects the
+    diagnostic fallback; any positive value is used as given. The resolved
+    radius is therefore discontinuous at ``0+``, which is what the per-term
+    gradient harness measured when it perturbed a cold-start carry's zeros.
+    These tests pin the three properties that make that harmless: the selector
+    picks as documented, the gradient with respect to a carried zero is
+    exactly 0 in both AD modes (the fallback does not leak a derivative into
+    the sentinel), and the fallback's own physical inputs stay live.
+    """
+
+    NLEV = 4
+
+    def _inputs(self, carried_liq, carried_ice):
+        return (jnp.asarray(carried_liq, jnp.float32),
+                jnp.asarray(carried_ice, jnp.float32),
+                jnp.asarray(1.3, jnp.float32),                      # cdnc_factor
+                jnp.full(self.NLEV, 0.02, jnp.float32),             # ice path
+                jnp.full(self.NLEV, 500.0, jnp.float32))            # thickness
+
+    def test_zero_selects_the_fallback_and_positive_is_used(self):
+        carried = jnp.array([0.0, 7.0, 0.0, 1.0e-6])
+        liq, ice = resolve_effective_radii(*self._inputs(carried, carried))
+        fallback_liq = effective_radius_liquid(jnp.float32(1.3))
+        fallback_ice = effective_radius_ice(jnp.float32(0.02 / 500.0 * 1e3))
+        np.testing.assert_allclose(liq, [fallback_liq, 7.0, fallback_liq, 1e-6],
+                                   rtol=1e-6)
+        np.testing.assert_allclose(ice, [fallback_ice, 7.0, fallback_ice, 1e-6],
+                                   rtol=1e-6)
+        # The jump at 0+: an arbitrarily small carried radius is taken at
+        # face value, not blended toward the fallback. The model never
+        # carries one (a carried radius is 0 or a physical Martin/Bower
+        # value), which is why this is a selector and not physics.
+        assert float(fallback_liq - liq[3]) > 5.0
+
+    def test_derivative_at_the_sentinel_is_zero_and_fallback_inputs_live(self):
+        args = self._inputs(jnp.zeros(self.NLEV), jnp.zeros(self.NLEV))
+
+        def total(*a):
+            liq, ice = resolve_effective_radii(*a)
+            return jnp.sum(liq) + jnp.sum(ice)
+
+        grads = jax.grad(total, argnums=(0, 1, 2, 3))(*args)
+        assert np.all(np.asarray(grads[0]) == 0.0)
+        assert np.all(np.asarray(grads[1]) == 0.0)
+        assert float(grads[2]) != 0.0                   # cdnc_factor
+        assert np.all(np.asarray(grads[3]) != 0.0)      # in-cloud ice path
+        _, forward = jax.jvp(
+            lambda r: resolve_effective_radii(r, *args[1:]),
+            (args[0],), (jnp.ones(self.NLEV, jnp.float32),))
+        assert all(np.all(np.asarray(leaf) == 0.0) for leaf in forward)
