@@ -886,3 +886,98 @@ class ReviewRegressionTest(unittest.TestCase):
         from tools.aerocom_cmor import NAME_MAP
         for src in ("aerocom_u200", "aerocom_v200", "aerocom_u700", "aerocom_v700"):
             self.assertNotEqual(NAME_MAP[src][2], "Surface", src)
+
+
+class ModeWidthPairingTest(unittest.TestCase):
+    """Each mode's lognormal is integrated with that mode's own width.
+
+    The synthetic modal state gives every mode a different radius and number
+    and the MAM4 modes have different widths (accumulation 1.8, Aitken 1.6,
+    coarse 1.8, primary carbon 1.6), so integrating any mode with another
+    mode's width moves N70/N100 measurably away from the hand computation.
+    """
+
+    NLEV, NCOL = 3, 2
+
+    def _jam_state(self, spec):
+        from jcm.physics.aerosol.jam.jam_state import JamAerosolState
+        shape = (len(spec.modes), self.NLEV, self.NCOL)
+        # Radii straddle the 70/100 nm thresholds so the width matters.
+        radii = {"acc": 60e-9, "ait": 30e-9, "cor": 1.0e-6, "pcm": 40e-9}
+        numbers = {"acc": 3.0e8, "ait": 9.0e8, "cor": 1.0e5, "pcm": 2.0e8}
+        masses = {"acc": 2.0e-9, "ait": 1.0e-10, "cor": 5.0e-9, "pcm": 3.0e-10}
+        dens = {"acc": 1700.0, "ait": 1600.0, "cor": 2400.0, "pcm": 1200.0}
+
+        def per_mode(table):
+            vals = np.array([table[m.short] for m in spec.modes])
+            return jnp.asarray(vals[:, None, None] * np.ones(shape))
+
+        r = per_mode(radii)
+        return JamAerosolState(
+            r_dry=r, r_wet=r, rho=per_mode(dens), kappa=jnp.full(shape, 0.5),
+            mass=per_mode(masses), number=per_mode(numbers))
+
+    def _run(self, term, spec):
+        nz, nx = self.NLEV, self.NCOL
+        p_half = jnp.linspace(1000.0, 101000.0, nz + 1)[:, None] * jnp.ones((1, nx))
+
+        class _State:
+            tracers: dict = {}
+
+        return term._aerosol_group(_State(), {"_jam_state": self._jam_state(spec)},
+                                   p_half)
+
+    def test_default_widths_come_from_the_spec_modes(self):
+        from math import erfc, log, sqrt
+
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        state = self._jam_state(MAM4_SPEC)
+        out = self._run(AerocomDiagnostics(groups=("aerosol",)), MAM4_SPEC)
+        for label, d_thresh in (("N70", 70e-9), ("N100", 100e-9)):
+            expected = sum(
+                float(state.number[m, 0, 0]) * 0.5 * erfc(
+                    log(d_thresh / (2.0 * float(state.r_dry[m, 0, 0])))
+                    / (sqrt(2.0) * log(mode.geom_std_dev)))
+                for m, mode in enumerate(MAM4_SPEC.modes))
+            np.testing.assert_allclose(
+                np.asarray(out[f"aerocom_{label}"]), expected, rtol=1e-5,
+                err_msg=f"aerocom_{label} does not pair each mode with its width")
+
+    def test_permuted_spec_gives_the_same_diagnostics(self):
+        import dataclasses
+
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        # Swap the first two modes: with a positional width table this pairs
+        # each of them with the other's width, so the permutation is only
+        # invisible when widths follow the modes.
+        m = MAM4_SPEC.modes
+        permuted = dataclasses.replace(MAM4_SPEC, modes=(m[1], m[0], *m[2:]))
+        ref = self._run(AerocomDiagnostics(groups=("aerosol",)), MAM4_SPEC)
+        term = AerocomDiagnostics(groups=("aerosol",))
+        term._jam_spec = permuted
+        out = self._run(term, permuted)
+        for label in ("N70", "N100", "PM1", "PM10"):
+            np.testing.assert_allclose(
+                np.asarray(out[f"aerocom_{label}"]),
+                np.asarray(ref[f"aerocom_{label}"]), rtol=1e-6, err_msg=label)
+
+    def test_explicit_widths_are_used_in_spec_order(self):
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        spec_widths = tuple(m.geom_std_dev for m in MAM4_SPEC.modes)
+        ref = self._run(AerocomDiagnostics(groups=("aerosol",)), MAM4_SPEC)
+        same = self._run(AerocomDiagnostics(groups=("aerosol",),
+                                            mode_sigma_g=spec_widths), MAM4_SPEC)
+        wider = self._run(AerocomDiagnostics(groups=("aerosol",),
+                                             mode_sigma_g=(2.2,) * 4), MAM4_SPEC)
+        for label in ("N70", "N100", "PM1", "PM10"):
+            np.testing.assert_allclose(np.asarray(same[f"aerocom_{label}"]),
+                                       np.asarray(ref[f"aerocom_{label}"]),
+                                       rtol=1e-6, err_msg=label)
+        self.assertFalse(np.allclose(np.asarray(wider["aerocom_N100"]),
+                                     np.asarray(ref["aerocom_N100"])))
+
+    def test_width_count_must_match_the_modal_state(self):
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        term = AerocomDiagnostics(groups=("aerosol",), mode_sigma_g=(1.6, 1.8, 1.8))
+        with self.assertRaisesRegex(ValueError, "one width per mode"):
+            self._run(term, MAM4_SPEC)
