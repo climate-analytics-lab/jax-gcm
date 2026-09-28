@@ -336,14 +336,15 @@ _CHECKS: dict = {
     #    diagnostic fallback on ``r_eff > 0``. The replay is a cold start, so
     #    both leaves are identically 0, their RMS is 0 and ``_tangent`` gives
     #    them an absolute unit step; any cloudy level the step pushes above 0,
-    #    however slightly, swaps the 11 um fallback for the library's 2.5 um
+    #    however slightly, swaps the ~11 um fallback for the library's 2.5 um
     #    LUT floor. Along that leaf alone the heating moves by 2.338e-5 K/s
     #    at 959 hPa on the stable column at every step from 5e-4 to 1e-9 on
     #    the side that crosses and by exactly 0 on the other, and the full
     #    direction's minus side converges to that same offset (2.34e-5, in
-    #    float64 as in float32). The model never visits the (0, 2.5 um) band: a carried radius
-    #    is 0 or a physical Martin/Bower radius, so this is a selector, not
-    #    physics, and its derivative at 0 is exactly 0 in both AD modes.
+    #    float64 as in float32). The model never visits the (0, 2.5 um)
+    #    band: a carried radius is 0 or a physical Martin/Bower radius. So
+    #    this is a selector, not physics, and its derivative at 0 is exactly
+    #    0 in both AD modes.
     #    ``state/temperature`` and ``state/specific_humidity``, jointly or
     #    alone, carry no jump: in float64 their joint central difference
     #    stays within 1 % of -27.3 at every rung from 1.25e-4 down to 1e-6.
@@ -371,11 +372,12 @@ _CHECKS: dict = {
     #    held fixed gets no closer than 2.5 % between neighbours, against the
     #    2 % the reference needs.
     #
-    # Moving the operating point would not help (1) and (3), so the adjoint
-    # identity is the reference. It holds to at most 2.9e-5 over seeds 0-2
-    # at both points (float32 reduction order through the per-g-point solves;
-    # 1e-3 keeps ~35x headroom), and the two inputs radiation reads from the
-    # state must be live. The term returns heating only: its momentum and
+    # Moving the operating point off the zero-condensate levels would remove
+    # (2) but not (1) or (3), so the adjoint identity is the reference. It
+    # holds to at most 2.9e-5 over seeds 0-2 at both points (float32
+    # reduction order through the per-g-point solves; 1e-3 keeps ~35x
+    # headroom), and the two inputs radiation reads from the state must be
+    # live. The term returns heating only: its momentum and
     # moisture tendencies are structural zeros, and its diagnostics carry
     # fields that are legitimately zero here (the ``*_noa`` slots with no
     # aerosol-free companion), hence the tendency-only output. The radius
