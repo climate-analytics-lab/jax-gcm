@@ -58,7 +58,6 @@ from rrtmgp import stretched_grid_util
 from rrtmgp.rrtmgp import RRTMGP
 
 
-
 # ---------------------------------------------------------------------------
 # Module-level RRTMGP instance (created once at import time)
 # ---------------------------------------------------------------------------

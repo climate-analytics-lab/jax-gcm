@@ -980,7 +980,8 @@ def radiation_effective_radii(
         droplet_number = jnp.maximum(state.tracers["qnc"], 0.0) * air_density
         ice_number = jnp.maximum(state.tracers["qni"], 0.0) * air_density
     else:
-        cdnc_factor = jnp.reshape(diagnostics["aerosol"].cdnc_factor, (ncols,))
+        cdnc_factor = jnp.broadcast_to(
+            jnp.reshape(diagnostics["aerosol"].cdnc_factor, (-1,)), (ncols,))
         droplet_number = prescribed_cdnc_profile(pressure, continental) * cdnc_factor
         ice_number = jnp.zeros_like(temperature)
     return echam_cloud_effective_radii(
