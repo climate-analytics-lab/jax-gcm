@@ -6,6 +6,8 @@ Includes wavelength-dependent optical properties across multiple spectral bands.
 
 """
 
+import math
+
 import jax.numpy as jnp
 import jax
 import numpy as np
@@ -825,9 +827,10 @@ def echam_cloud_effective_radii(
       the Peng & Lohmann (2003) ``breadth_factor`` of the droplet number, and
       the crystal radius is the Lohmann et al. (2008) plate law
       ``eff_ice_crystal_radius`` of the IWC and crystal number at every
-      temperature (``cloud_optics`` applies it below ``cthomi`` as well:
-      the ECHAM-HAM change labelled SF 176). ECHAM-HAM evaluates ``breadth_factor`` there on the
-      droplet number already converted to cm-3, although the function takes
+      temperature (``cloud_optics`` applies it below ``cthomi`` as well, a
+      change the ECHAM-HAM source labels SF 176). ECHAM-HAM evaluates
+      ``breadth_factor`` there on the droplet number already converted to
+      cm-3, although the function takes
       1/m3 (``0.00045e-6*pcdnc + 1.18``), which pins its ``zkap`` at 1.18.
       jcm evaluates the relation in its documented units, as the 2-moment
       microphysics' own ``preffl`` does (``kappa`` = 1.225 at 100 cm-3,
@@ -938,7 +941,7 @@ def radiation_effective_radii(
     cloud_fraction: jnp.ndarray,
     cld_frac_min,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Effective radii (um, ``(nlev, ncols)``) the ECHAM radiation uses this step.
+    """Effective radii (um, shaped like the state) the ECHAM radiation uses this step.
 
     The term-level glue shared by :class:`~jcm.physics.radiation.rrtmgp.RRTMGPRadiation`
     and :class:`~jcm.physics.radiation.nn_emulator_scheme.NNEmulatorRadiation`:
@@ -973,15 +976,22 @@ def radiation_effective_radii(
     cw_in = in_cloud_condensate(cloud_water, cloud_fraction, eps=cld_frac_min)
     ci_in = in_cloud_condensate(cloud_ice, cloud_fraction, eps=cld_frac_min)
     prognostic = "qnc" in state.tracers and "qni" in state.tracers
-    ncols = temperature.shape[-1]
-    continental = jnp.broadcast_to(
-        jnp.reshape(continental_columns(terrain, forcing), (-1,)), (ncols,))
+    horiz = temperature.shape[1:]
+
+    def per_column(x):
+        # Per-column fields arrive in the host's own horizontal layout (the
+        # terrain and aerosol grids, or a scalar); lay them out like the state.
+        x = jnp.asarray(x)
+        if x.size == math.prod(horiz):
+            return x.reshape(horiz)
+        return jnp.broadcast_to(x, horiz)
+
+    continental = per_column(continental_columns(terrain, forcing))
     if prognostic:
         droplet_number = jnp.maximum(state.tracers["qnc"], 0.0) * air_density
         ice_number = jnp.maximum(state.tracers["qni"], 0.0) * air_density
     else:
-        cdnc_factor = jnp.broadcast_to(
-            jnp.reshape(diagnostics["aerosol"].cdnc_factor, (-1,)), (ncols,))
+        cdnc_factor = per_column(diagnostics["aerosol"].cdnc_factor)
         droplet_number = prescribed_cdnc_profile(pressure, continental) * cdnc_factor
         ice_number = jnp.zeros_like(temperature)
     return echam_cloud_effective_radii(

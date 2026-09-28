@@ -746,3 +746,27 @@ class TestRadiationEffectiveRadii:
         r_liq_2m_pol, _ = self._radii(tracers=tracers, cdnc_factor=3.0)
         np.testing.assert_array_equal(np.asarray(r_liq_2m_pol),
                                       np.asarray(r_liq_2m))
+
+    def test_broadcasting_native_over_the_horizontal_layout(self):
+        """A (kx, ncols) and a (kx, ix, il) host give the same radii per column."""
+        from types import SimpleNamespace
+
+        from jcm.physics.radiation.cloud_optics import radiation_effective_radii
+        state, diagnostics, forcing, _, cf = self._inputs(fmask=[0.0, 0.9])
+        flat = radiation_effective_radii(
+            state, diagnostics, forcing, SimpleNamespace(fmask=jnp.array([0.0, 0.9])),
+            state.tracers["qc"], state.tracers["qi"], cf, 1.0e-3)
+        grid = lambda a: a.reshape(a.shape[:1] + (2, 1))  # noqa: E731
+        state3 = state.copy(
+            temperature=grid(state.temperature),
+            tracers={k: grid(v) for k, v in state.tracers.items()})
+        diag3 = {**diagnostics,
+                 "pressure_full": grid(diagnostics["pressure_full"]),
+                 "air_density": grid(diagnostics["air_density"])}
+        gridded = radiation_effective_radii(
+            state3, diag3, forcing,
+            SimpleNamespace(fmask=jnp.array([[0.0], [0.9]])),
+            grid(state.tracers["qc"]), grid(state.tracers["qi"]), grid(cf),
+            1.0e-3)
+        for a, b in zip(flat, gridded):
+            np.testing.assert_array_equal(np.asarray(grid(a)), np.asarray(b))
