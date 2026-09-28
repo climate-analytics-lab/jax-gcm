@@ -221,6 +221,21 @@ class TestEchamComposablePhysics(unittest.TestCase):
                 convection=ConvectionParameters.default(),
             )
 
+    def test_field_override_mapping_for_a_scheme_not_composed_is_rejected(self):
+        """A mapping the composition would ignore is an error (#933)."""
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        for kwargs, name in (
+                (dict(radiation_scheme=DummyRadiationTerm(),
+                      radiation={"solar_constant": 1360.0}), "radiation"),
+                (dict(gw_scheme="none", hines={"rmscon": 1.0}), "hines"),
+                (dict(cloud_scheme="1m", microphysics_2m={"ccraut": 5.0}),
+                 "microphysics_2m")):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(
+                        ValueError, rf"\['{name}'\] would be ignored"):
+                    echam_physics(checkpoint_terms=False, **kwargs)
+
     def test_echam_physics_accepts_custom_radiation_term(self):
         """A radiation PhysicsTerm can be passed directly."""
         from jcm.physics.echam.echam_terms import echam_physics
