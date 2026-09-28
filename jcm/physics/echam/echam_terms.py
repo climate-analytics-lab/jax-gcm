@@ -187,7 +187,9 @@ def echam_physics(
         radiation_scheme: ``"rrtmgp"`` (default; the RRTMGP correlated-k
             scheme), ``"emulated"`` (the neural-network emulator of RRTMGP,
             the fast option), or a radiation ``PhysicsTerm`` instance, which
-            is composed as given. ``"grey"`` raises ``ValueError``: the grey
+            is composed as given; with a cadence-dependent sibling composed
+            (the JAM optics), the instance must expose its
+            ``RadiationParameters`` as ``.params`` (an ``nnx.Param``). ``"grey"`` raises ``ValueError``: the grey
             two-stream is an idealized scheme, not ECHAM physics, so it is
             composed only explicitly as
             ``radiation_scheme=GreyTwoStreamRadiation()``.
@@ -445,15 +447,15 @@ def echam_physics(
                 "'radiation'."
             )
         rad_term = radiation_scheme
-        # The rest of the composition keys on the radiation parameters too
-        # (the JAM optics term recomputes band optics only at the radiation
-        # term's cadence), so they must be the instance's own. Every
-        # radiation term holds them as ``self.params``; one that does not
-        # falls back to the factory default.
+        # Siblings that follow the radiation cadence (the JAM optics gate)
+        # must read it from the instance itself. Every in-tree radiation term
+        # holds its RadiationParameters as ``self.params``; a term that does
+        # not leaves ``radiation_p`` None, which is an error only where a
+        # sibling needs it (below), never a silent default.
         _held = getattr(rad_term, "params", None)
         _held = _held.get_value() if hasattr(_held, "get_value") else _held
         radiation_p = (_held if isinstance(_held, RadiationParameters)
-                       else default_radiation_parameters(aerosol_module))
+                       else None)
     elif radiation_scheme == "rrtmgp":
         # compute_cre doubles the RRTMGP work on radiation steps (a second
         # full clear-sky solve) purely for the CRE diagnostic — production
@@ -569,6 +571,13 @@ def echam_physics(
         # steps where radiation replays its cache (see
         # ``JamOpticsTerm.configure_radiation_gate``) — same post-compose
         # configuration pattern as ``configure_spa`` below.
+        if radiation_p is None:
+            raise ValueError(
+                f"aerosol_module='jam' gates its optics on the radiation "
+                f"cadence, but the radiation term {type(rad_term).__name__} "
+                "exposes no RadiationParameters: the factory reads "
+                "`<term>.params` (an nnx.Param holding RadiationParameters, "
+                "whose radiation_interval it uses).")
         for _t in jam_terms:
             if hasattr(_t, "configure_radiation_gate"):
                 _t.configure_radiation_gate(radiation_p.radiation_interval)

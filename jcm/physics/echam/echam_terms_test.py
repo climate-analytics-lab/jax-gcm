@@ -306,6 +306,21 @@ class TestEchamComposablePhysics(unittest.TestCase):
                      if hasattr(t, "configure_radiation_gate"))
         self.assertEqual(optics._radiation_interval_s, 3600.0)
 
+    def test_jam_rejects_a_radiation_term_without_readable_params(self):
+        """JAM's optics follow the radiation cadence, read from ``.params``.
+
+        A term that exposes none is rejected with JAM rather than silently
+        given the default cadence, and accepted where no sibling needs it.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", jam_microphysics="placeholder")
+        with self.assertRaisesRegex(ValueError, r"\.params"):
+            echam_physics(radiation_scheme=DummyRadiationTerm(), **jam)
+        echam_physics(checkpoint_terms=False,
+                      radiation_scheme=DummyRadiationTerm())  # no raise
+
     def test_radiation_params_rejected_alongside_an_instance(self):
         """``radiation=`` would be silently ignored next to a term instance."""
         from jcm.physics.echam.echam_terms import echam_physics
