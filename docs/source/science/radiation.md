@@ -106,7 +106,10 @@ implementation is ``cloud_optics.echam_cloud_effective_radii``, fed by
     factor ``aerosol.cdnc_factor`` (the simple plumes' ``x_cdnc`` "scale factor
     for cloud droplet number concentration",
     ``mo_bc_aeropt_splumes.f90::add_bc_aeropt_splumes``); breadth ``zkap`` =
-    1.143 continental / 1.077 maritime.
+    1.143 continental / 1.077 maritime. The number is
+    ``cloud_utils.prescribed_droplet_number``, the one call the 1M
+    microphysics also makes, as ECHAM hands one ``acdnc`` to both (see
+    {doc}`clouds_microphysics`).
   - *2M* (``cloud_scheme="2m"`` with SPA, and the JAM composition where ARG
     activation feeds the droplet number): the prognostic ``qnc``/``qni``
     tracers times the air density, which is what ECHAM-HAM's radiation reads
@@ -273,9 +276,6 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   features costs nothing measurable. Retraining on data from the current
   generator (``tools/radiation_emulator/generate_training_data.py`` forms the
   features with the same functions) removes the fill (#881).
-- **The 1M microphysics does not yet use ECHAM's droplet profile.** Its
-  autoconversion sees a uniform 100 cm⁻³ × ``cdnc_factor``, while the 1M
-  radiation uses ECHAM's prescribed ``acdnc`` profile (#936).
 - **Thin-lid aerosol-radiation cutoff.** Online aerosol optics are zeroed above
   ``_AER_RAD_PMIN`` (``jcm/physics/aerosol/jam/optics/optics_term.py``) and the
   per-layer band τ is capped, to bound heating over ~1 Pa lid layers; aerosol mass

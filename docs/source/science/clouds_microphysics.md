@@ -32,6 +32,25 @@
   ``mo_cloud.f90`` single-moment branch. The ice/snow fall-speed factor
   ``cvtfall = 2.5`` is ECHAM's value for jcm's default T63 grid
   (``mo_echam_cloud_params.f90``, ``nn == 63``), the same the 2M scheme uses.
+  The **droplet number** is ECHAM's prescribed ``acdnc``
+  (``physc.f90`` §3.12; ICON-A ``mo_echam_phy_diag.f90::droplet_number``):
+  80 cm⁻³ over sea and 180 cm⁻³ over land that is not glacier from the surface
+  to 800 hPa, ``20 + (zn2 − 20)·exp(1 − min(8, 80000/p)²)`` cm⁻³ above,
+  continuous at 800 hPa and 20 cm⁻³ in the upper troposphere. ECHAM passes that
+  one field to its radiation and to ``cloud`` (``pacdnc``), and jcm's 1M term
+  and radiation make one shared call,
+  ``cloud_utils.prescribed_droplet_number``, so they cannot see different
+  numbers. In ``mo_cloud.f90`` the droplet number enters the Beheng
+  autoconversion (line 977, ``pacdnc·1e-6`` to the power −3.3; the jcm KK2000
+  option reads the same number) and the Bigg and contact freezing of
+  supercooled cloud water (lines 859, 876), which this port lacks (#939). The
+  profile is multiplied by the MACv2-SP Twomey factor ``cdnc_factor`` for the
+  autoconversion as well as for the radiation. MPI-ESM1.2 applies the factor
+  to the radiation's droplet number only and leaves the cloud microphysics'
+  unperturbed (Mauritsen et al. 2019, *JAMES*, doi:10.1029/2018MS001400,
+  §2.2); the autoconversion path is jcm's aerosol-cloud formulation, kept for
+  v3.0 and recorded in #932. The published ``clouds.droplet_number`` is this
+  in-cloud number.
 - **Lohmann 2-moment microphysics**
   (``jcm/physics/clouds/lohmann_2m/scheme.py`` — ``cloud_microphysics_2m`` and its
   ``Lohmann2MMicrophysics`` term) — the full two-moment process chain (droplet and
@@ -118,9 +137,8 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   ECHAM, the radiation forms them inside its own call from the step's
   condensate and droplet/crystal number (``mo_cloud_optics.f90::cloud_optics``;
   see {doc}`radiation`), from the laws in ``cloud_utils`` that the 2M scheme
-  also evaluates for its own ``preffl``/``preffi``. The 1M droplet number the
-  radiation uses is ECHAM's prescribed ``acdnc`` profile, while the 1M
-  autoconversion still sees a uniform 100 cm⁻³ × ``cdnc_factor`` (#936). The
+  also evaluates for its own ``preffl``/``preffi``. The 1M radiation and
+  microphysics see the same prescribed droplet number (above). The
   radiative **ice** radius on the 2M path is limited by the crystal number:
   mixed-phase ICNC is INP-limited (~1e3 m⁻³), which puts most warm-branch
   crystals at the top of the size range the radiation's tables cover (#728).
