@@ -36,6 +36,7 @@ from jcm.initial_states import (
     jw_state,
 )
 from jcm.model import Model, ModelPredictions
+from jcm.physics.physics_term import with_field_overrides
 from jcm.physics.radiation.band_config import RadiationBandConfig
 from jcm.single_column_model import select_column
 from jcm.terrain import TerrainData
@@ -234,22 +235,11 @@ def _build_term(term_name: str, term_entry: dict):
 
     init_kwargs: dict = {}
     for kwarg_name, params_cls in _parameters_specs_from_init(term_cls).items():
-        overrides = entry.pop(kwarg_name, None) or {}
-        base = params_cls.default()
-        params_obj = base.__class__(
-            **{**base.__dict__, **dict(overrides)}
-        )
-        # ``default()`` runs any config-time cross-field validation, but this
-        # direct constructor bypasses it — so a YAML override could re-create
-        # an illegal field COMBINATION (e.g. echam_1m's legacy ccraut-as-
-        # KK2000-threshold, #674) that the defaults alone never trip. Re-run
-        # the opt-in ``validate`` hook on the post-override object so ANY
-        # Parameters class can guard both construction doors. Config-time,
-        # concrete values only — never called under a jit trace.
-        validate = getattr(params_obj, "validate", None)
-        if callable(validate):
-            validate()
-        init_kwargs[kwarg_name] = params_obj
+        # The same conversion the factory-built presets use (echam_physics),
+        # so both preset styles give an override identical semantics.
+        init_kwargs[kwarg_name] = with_field_overrides(
+            params_cls.default(), entry.pop(kwarg_name, None),
+            scheme=f"physics.terms.{term_name}.{kwarg_name}")
 
     # Anything left is a plain-kwarg pass-through (e.g. UpperSponge's
     # n_sponge_levels, sponge_timescale_s).

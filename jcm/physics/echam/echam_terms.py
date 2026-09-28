@@ -11,10 +11,15 @@ a ready-to-run ``ComposablePhysics`` with column vectorisation enabled.
 The factory accepts per-scheme ``Parameters`` objects directly — there
 is no monolithic ECHAM ``Parameters`` aggregator. Each unspecified
 sub-Parameters falls through to its scheme's ``.default()`` constructor,
-so callers only have to pass the knobs they want to tune.
+so callers only have to pass the knobs they want to tune. A mapping of field
+overrides in place of an object (what a Hydra ``physics.<scheme>.<field>=``
+override delivers) is applied on top of the object the factory would
+otherwise use.
 """
 
 from __future__ import annotations
+
+from typing import Any, Mapping
 
 from jcm.physics.aerosol import Macv2SpAerosol
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
@@ -40,6 +45,7 @@ from jcm.physics.forcing.echam_boundary_conditions import (
 )
 from jcm.physics.gravity_waves.hines import HinesGwd, HinesParameters
 from jcm.physics.gravity_waves.sso import LottMillerSso, SSOParameters
+from jcm.physics.physics_term import with_field_overrides
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
 from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
@@ -63,16 +69,16 @@ from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
 
 def echam_physics(
     *,
-    convection: ConvectionParameters | None = None,
-    clouds: CloudParameters | None = None,
-    microphysics: MicrophysicsParameters | None = None,
-    microphysics_2m: CloudParams2M | None = None,
-    radiation: RadiationParameters | None = None,
-    vertical_diffusion: VDiffParameters | None = None,
-    surface: SurfaceParameters | None = None,
-    aerosol: AerosolParameters | None = None,
-    hines: HinesParameters | None = None,
-    sso: SSOParameters | None = None,
+    convection: ConvectionParameters | Mapping[str, Any] | None = None,
+    clouds: CloudParameters | Mapping[str, Any] | None = None,
+    microphysics: MicrophysicsParameters | Mapping[str, Any] | None = None,
+    microphysics_2m: CloudParams2M | Mapping[str, Any] | None = None,
+    radiation: RadiationParameters | Mapping[str, Any] | None = None,
+    vertical_diffusion: VDiffParameters | Mapping[str, Any] | None = None,
+    surface: SurfaceParameters | Mapping[str, Any] | None = None,
+    aerosol: AerosolParameters | Mapping[str, Any] | None = None,
+    hines: HinesParameters | Mapping[str, Any] | None = None,
+    sso: SSOParameters | Mapping[str, Any] | None = None,
     gw_scheme: str = "hines",
     checkpoint_terms: bool = True,
     radiation_scheme: str | PhysicsTerm = "grey",
@@ -113,6 +119,22 @@ def echam_physics(
     to the scheme's ``.default()``. There is no monolithic aggregator —
     the composition assembled here is the only place where the ECHAM
     stack's per-scheme parameters meet.
+
+    Each per-scheme argument also accepts a mapping of field overrides,
+    e.g. ``convection={"entrpen": 4e-4, "tau": 3600.0}``. It is applied on
+    top of the object this factory would otherwise use (its ``.default()``
+    or the factory's own choice, such as the ``aerosol_module``-dependent
+    radiation defaults or ``cu_lmfmid``), so the unspecified fields keep
+    those values. This is how the factory-built Hydra presets take
+    ``physics.convection.entrpen=...``; the conversion is the one the
+    term-list presets use (:func:`~jcm.physics.physics_term.
+    with_field_overrides`): an unknown field raises ``ValueError`` listing
+    the valid ones, and numeric fields stay differentiable pytree leaves.
+    A mapping for a scheme the composition does not include (``microphysics``
+    with ``cloud_scheme="2m"``, ``hines`` with ``gw_scheme`` ``"frontal"`` or
+    ``"none"``, ``radiation`` with a radiation term instance) and a mapping
+    that sets ``cu_lmfmid`` alongside the scalar ``cu_lmfmid`` flag are
+    rejected rather than ignored.
 
     Args:
         convection: Override for ``ConvectionParameters``.
@@ -245,9 +267,11 @@ def echam_physics(
             disables it. The trigger needs the dycore's ``omega``; a
             backend that cannot supply it (pySES, #698) must set this
             ``False`` or Model construction raises — hence the ne30
-            experiments turn it off (#715). Mutually exclusive with an
-            explicit ``convection`` override (set the field on that object
-            instead).
+            experiments turn it off (#715). Mutually exclusive with a
+            ``ConvectionParameters`` object (set the field on that object
+            instead) and with ``cu_lmfmid`` in a ``convection`` mapping;
+            with a mapping of other fields it sets the base the mapping is
+            applied to.
         prescribed_surface_fluxes: Forced surface mode (jax-gcm#301):
             compose ``TteTkeVerticalDiffusion(couple_surface=False)``
             (interior-only mixing — the implicit solve's surface Robin BC
@@ -343,16 +367,54 @@ def echam_physics(
             f"NN checkpoint, so radiation_scheme={radiation_scheme!r} would "
             "ignore it.")
 
+    # Field-override mappings (see the docstring) are set aside here, so the
+    # resolution below builds exactly the object this factory would use
+    # without them — including its own non-default choices (``cu_lmfmid``,
+    # the aerosol-dependent radiation defaults) — and are applied on top of
+    # that object once it exists. Applying them to the bare class default
+    # instead would let a one-field override silently reset those choices.
+    _scheme_args = dict(
+        convection=convection, clouds=clouds, microphysics=microphysics,
+        microphysics_2m=microphysics_2m, radiation=radiation,
+        vertical_diffusion=vertical_diffusion, surface=surface,
+        aerosol=aerosol, hines=hines, sso=sso)
+    field_overrides = {name: value for name, value in _scheme_args.items()
+                       if isinstance(value, Mapping)}
+    (convection, clouds, microphysics, microphysics_2m, radiation,
+     vertical_diffusion, surface, aerosol, hines, sso) = (
+        None if name in field_overrides else value
+        for name, value in _scheme_args.items())
+    # An override of a scheme that is not composed would be silently
+    # ignored, so it is rejected (the factory's rule for every argument).
+    _inactive = {
+        "microphysics": cloud_scheme != "1m",
+        "microphysics_2m": cloud_scheme != "2m",
+        "hines": gw_scheme not in ("hines", "both"),
+        "radiation": isinstance(radiation_scheme, PhysicsTerm),
+    }
+    _ignored = sorted(n for n in field_overrides if _inactive.get(n, False))
+    if _ignored:
+        raise ValueError(
+            f"Field overrides for {_ignored} would be ignored: that scheme is "
+            f"not composed (cloud_scheme={cloud_scheme!r}, "
+            f"gw_scheme={gw_scheme!r}; radiation overrides need a named "
+            "radiation_scheme, a term instance carries its own parameters).")
+    if cu_lmfmid is not None and "cu_lmfmid" in field_overrides.get(
+            "convection", {}):
+        raise ValueError(
+            "cu_lmfmid is set both as the scalar flag and in the convection "
+            "field overrides — set it in one place only.")
+
     # ``cu_lmfmid`` is the scalar escape hatch for the ECHAM mid-level
     # convection trigger (ECHAM ``lmfmid``, default on). With it on,
     # TiedtkeConvection declares an ``omega`` dycore requirement; a backend
     # that cannot supply omega — today pySES (#698) — then fails at Model
-    # construction, so the ne30 experiments turn it off. It is deliberately a
-    # scalar flag (not buried in the ``convection`` Parameters block) so it
-    # forwards through the Hydra ``echam_physics`` builder, which only relays
-    # scalar kwargs. Passing both is a silently-ignored-argument bug — the
-    # class this factory abolishes — so it is rejected; set cu_lmfmid on the
-    # ConvectionParameters you pass instead.
+    # construction, so the ne30 experiments turn it off. It is a scalar flag
+    # so a preset can pin it in one line (``physics.cu_lmfmid=false``).
+    # Passing it with a ConvectionParameters object is a silently-ignored-
+    # argument bug — the class this factory abolishes — so it is rejected;
+    # set cu_lmfmid on the object you pass instead. With a field-override
+    # mapping the flag chooses the base the mapping is applied to.
     if cu_lmfmid is not None:
         if convection is not None:
             raise ValueError(
@@ -380,6 +442,18 @@ def echam_physics(
     aerosol_p = aerosol or AerosolParameters.default()
     hines_p = hines or HinesParameters.default()
     sso_p = sso or SSOParameters.default()
+    if field_overrides:
+        _resolved = dict(
+            convection=convection_p, clouds=clouds_p,
+            microphysics=microphysics_p, microphysics_2m=microphysics_2m_p,
+            radiation=radiation_p, vertical_diffusion=vertical_diffusion_p,
+            surface=surface_p, aerosol=aerosol_p, hines=hines_p, sso=sso_p)
+        _resolved.update({
+            name: with_field_overrides(_resolved[name], fields, scheme=name)
+            for name, fields in field_overrides.items()})
+        (convection_p, clouds_p, microphysics_p, microphysics_2m_p,
+         radiation_p, vertical_diffusion_p, surface_p, aerosol_p, hines_p,
+         sso_p) = _resolved.values()
 
     if isinstance(radiation_scheme, PhysicsTerm):
         if radiation_scheme.category != "radiation":
