@@ -230,7 +230,10 @@ class TestEchamComposablePhysics(unittest.TestCase):
                       radiation={"solar_constant": 1360.0}), "radiation"),
                 (dict(gw_scheme="none", hines={"rmscon": 1.0}), "hines"),
                 (dict(cloud_scheme="1m", microphysics_2m={"ccraut": 5.0}),
-                 "microphysics_2m")):
+                 "microphysics_2m"),
+                (dict(aerosol_module="jam", cloud_scheme="2m",
+                      jam_microphysics="placeholder",
+                      aerosol={"spa_exponent": 0.4}), "aerosol")):
             with self.subTest(name=name):
                 with self.assertRaisesRegex(
                         ValueError, rf"\['{name}'\] would be ignored"):

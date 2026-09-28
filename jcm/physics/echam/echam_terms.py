@@ -132,7 +132,8 @@ def echam_physics(
     the valid ones, and numeric fields stay differentiable pytree leaves.
     A mapping for a scheme the composition does not include (``microphysics``
     with ``cloud_scheme="2m"``, ``hines`` with ``gw_scheme`` ``"frontal"`` or
-    ``"none"``, ``radiation`` with a radiation term instance) and a mapping
+    ``"none"``, ``aerosol`` with ``aerosol_module="jam"``, ``radiation``
+    with a radiation term instance) and a mapping
     that sets ``cu_lmfmid`` alongside the scalar ``cu_lmfmid`` flag are
     rejected rather than ignored.
 
@@ -391,13 +392,17 @@ def echam_physics(
         "microphysics_2m": cloud_scheme != "2m",
         "hines": gw_scheme not in ("hines", "both"),
         "radiation": isinstance(radiation_scheme, PhysicsTerm),
+        # JAM composes no MACv2-SP and its 2M activation reads ARG, not the
+        # SPA knobs, so AerosolParameters is unused there.
+        "aerosol": aerosol_module == "jam",
     }
     _ignored = sorted(n for n in field_overrides if _inactive.get(n, False))
     if _ignored:
         raise ValueError(
             f"Field overrides for {_ignored} would be ignored: that scheme is "
             f"not composed (cloud_scheme={cloud_scheme!r}, "
-            f"gw_scheme={gw_scheme!r}; radiation overrides need a named "
+            f"gw_scheme={gw_scheme!r}, aerosol_module={aerosol_module!r}; "
+            "radiation overrides need a named "
             "radiation_scheme, a term instance carries its own parameters).")
     if cu_lmfmid is not None and "cu_lmfmid" in field_overrides.get(
             "convection", {}):

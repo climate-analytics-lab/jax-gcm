@@ -12,7 +12,7 @@
 #         +physics.convection.entrpen=4e-4 +physics.convection.tau=3600
 #
 # (``convection``, ``clouds``, ``microphysics_2m``, ``radiation``,
-# ``vertical_diffusion``, ``surface``, ``aerosol``, ``hines``, ``sso``; see
+# ``vertical_diffusion``, ``surface``, ``hines``, ``sso``; see
 # ``echam_physics``.) Unset fields keep their defaults.
 #
 # End-to-end usage (supply emissions on the model grid; auto-routes by content):

@@ -666,7 +666,8 @@ Scheme parameters on the factory-built presets
   is an error listing the valid fields (on the term-list presets too, where
   it used to surface as a bare ``TypeError``), and numeric fields stay
   differentiable pytree leaves. A mapping for a scheme the composition does
-  not include (``microphysics`` under ``cloud_scheme: 2m``) and ``cu_lmfmid``
+  not include (``microphysics`` under ``cloud_scheme: 2m``, the MACv2-SP ``aerosol``
+  under ``aerosol_module: jam``) and ``cu_lmfmid``
   set both as the scalar flag and in ``convection`` are rejected. In Python,
   ``echam_physics`` accepts the same mappings in place of ``Parameters``
   objects.
