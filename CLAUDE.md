@@ -319,7 +319,11 @@ random failures (`docs/source/design/test_suite_memory.md`).
 Ruff is the only linter (config in `pyproject.toml`); no formatter, no type
 checker, no pre-commit hooks. Tests are `*_test.py` co-located with their
 module. CI gates on ruff (~20 s) and then runs the fast tests at 90%
-coverage and, on pull requests, the slow tests at 80% **in parallel**. On a
+coverage and, on pull requests, the slow tests at 80% **in parallel**. The
+slow suite runs as two path shards (`slow-tests-radiation`, `slow-tests-rest`;
+the split and a check that it partitions `-m slow` live in
+`tools/ci/slow_shards.py`), and `slow-coverage` enforces the 80% floor on
+their combined coverage; locally it is still the one `-m slow` command above. On a
 PR a fast-suite test failure cancels the run so the slow suite stops with it
 rather than grinding on for another ~49 minutes — so a cancelled slow result
 never means the slow tests passed. It does not identify the cause on its own:

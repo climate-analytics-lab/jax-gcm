@@ -21,8 +21,8 @@ looks like a test failure:
 
 * under `pytest -n`, the symptom is `worker gwN crashed` and an arbitrary,
   run-dependent subset of "failures" (issue #704);
-* in the single-process CI slow job, it is exit 143/137 with every completed
-  test passing (issue #745);
+* in a single-process CI slow job (each of the two slow shards is one), it is
+  exit 143/137 with every completed test passing (issue #745);
 * in a long single-process run on Derecho, it is a segfault inside
   `backend_compile_and_load` (issue #729).
 

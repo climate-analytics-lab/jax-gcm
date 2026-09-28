@@ -58,7 +58,9 @@ round-tripping through the device.
 
 **CI thresholds**: ruff gates the run, then the fast tests at **90%**
 coverage and the slow tests at **80%** (pull requests only) run in parallel
-behind it; on a PR, if the fast suite goes red the run is cancelled, taking
+behind it — the slow suite as two path shards (`slow-tests-radiation`,
+`slow-tests-rest`, defined in `tools/ci/slow_shards.py`) whose coverage the
+`slow-coverage` job combines before enforcing the floor; on a PR, if the fast suite goes red the run is cancelled, taking
 the slow suite with it, and `fast-tests` itself reports as cancelled rather
 than failed (the failing step is still red inside it). A cancelled slow result
 therefore never means *passing* — and never means *the fast suite failed*
