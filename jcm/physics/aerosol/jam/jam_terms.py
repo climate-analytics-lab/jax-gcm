@@ -67,6 +67,7 @@ from jcm.physics.aerosol.jam.sedimentation.sedi_term import (
     StokesSedimentation,
     SedParameters,
 )
+from jcm.physics.aerosol.jam.wetdep.convective_fractions import convective_csr
 from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
     WetScavenging,
     WetDepParameters,
@@ -219,9 +220,9 @@ def jam_aerosol_physics(
         convective_transport: bulk mass-flux transport of the interstitial
             aerosol and gas tracers through Tiedtke updrafts and
             downdrafts with compensating subsidence (ECHAM ``cuxtte``
-            analogue; #602 item 2, #622), including CAM
-            ``aero_convproc``-style in-plume scavenging of the soluble
-            (activatable-mode) tracers (#621) — which moves the
+            analogue; #602 item 2, #622), including in-plume scavenging
+            of every aerosol mode at HAMMOZ's per-mode ``csr_conv`` and
+            the plume's precipitation efficiency (#621) — which moves the
             convective in-cloud wet-removal pathway out of
             ``WetScavenging`` (``in_plume_convective``). Cloud-borne
             mirrors are deliberately excluded — their updraft processing
@@ -297,24 +298,23 @@ def jam_aerosol_physics(
         interstitial_names = tuple(
             n for n in transport_names if not n.startswith(("mc_", "nc_"))
         )
-        # In-plume scavenging weights (jax-gcm#621): soluble = the
-        # activatable modes' interstitial tracers; insoluble aerosol and
-        # the gas precursors ride the plume unscavenged. WetScavenging
-        # retires its own environment-profile convective pathway in turn
-        # (``in_plume_convective`` below).
-        soluble = set()
+        # In-plume scavenging (jax-gcm#621): every aerosol tracer of a mode
+        # takes HAMMOZ's convective in-droplet fraction ``csr_conv`` of the
+        # M7 class the mode corresponds to (number and mass alike;
+        # ``wetdep.convective_fractions.HAM_CSR_CONV`` holds the mapping and
+        # its reasoning); the gas precursors ride the plume unscavenged.
+        # WetScavenging retires its own environment-profile convective
+        # pathway in turn (``in_plume_convective`` below).
+        csr_of: dict[str, float] = {}
         for mode in spec.modes:
-            if mode.can_activate:
-                soluble.add(number_name(mode.short))
-                soluble.update(
-                    mass_name(sp, mode.short) for sp in mode.species
-                )
+            csr = convective_csr(mode.name)
+            csr_of[number_name(mode.short)] = csr
+            for sp in mode.species:
+                csr_of[mass_name(sp, mode.short)] = csr
         transport_terms.append(
             ConvectiveTracerTransport(
                 interstitial_names, params=conv_transport,
-                scav_weights=tuple(
-                    1.0 if n in soluble else 0.0 for n in interstitial_names
-                ),
+                csr_conv=tuple(csr_of.get(n, 0.0) for n in interstitial_names),
             )
         )
     # Carry-stored cloud-borne phase (#602 item 3, the measured decision

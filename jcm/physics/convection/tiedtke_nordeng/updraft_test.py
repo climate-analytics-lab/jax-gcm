@@ -582,9 +582,8 @@ class TestCloudBaseBuoyancyGate(unittest.TestCase):
         # the sub-cloud evaporation: the flux entering the bottom layer is
         # then exactly the surface precipitation, and any discrepancy is the
         # phase bookkeeping alone.
-        rain_sfc, snow_sfc, _prain, _melt, _up, flux, _src = convective_precip_fluxes(
-            T, q, p, dp, nlev, pdmfup, pdmfdp, 900.0,
-        )
+        rain_sfc, snow_sfc, _prain, _melt, _up, flux, _src, _evap = (
+            convective_precip_fluxes(T, q, p, dp, nlev, pdmfup, pdmfdp, 900.0))
         surface_precip = float(rain_sfc) + float(snow_sfc)
         # The rain leg is driven negative and floored; the snow survives.
         np.testing.assert_allclose(surface_precip, 2.0e-4, rtol=1e-6)

@@ -47,8 +47,12 @@ ESCOMP/CAM: mode names, ``nspec_amode``, ``lspectype_amode`` from
 ``mam_pcarbon_aging_1subarea``. The surrounding process chain (emissions,
 deposition, scavenging, aqueous chemistry) follows the **ECHAM-HAMMOZ** lineage.
 The JAM harness is therefore an **E3SM/MAM4 microphysics core inside a
-HAMMOZ-lineage process harness**, with specific CAM borrowings where HAMMOZ has
-structural gaps (below). See {doc}`../design/jam_carbon_aging`.
+HAMMOZ-lineage process harness**. That is the provenance rule for JAM: the MAM4
+microphysics core is the only CAM-derived part, and every aerosol/model
+interaction — convective transport and scavenging, wet and dry deposition,
+emissions, activation coupling, optics coupling — follows ECHAM-HAM where
+possible. The interactions that still take a CAM form are inventoried in #932.
+See {doc}`../design/jam_carbon_aging`.
 
 **Why we differ.**
 - `science` — where MAM4 (E3SM) and HAM disagree on a coefficient (e.g. the
@@ -238,17 +242,87 @@ plume profiles (and is a no-op on the first step, before any exist). Transient
 aerosol–convection coupling therefore trails the driving convection by one
 ``dt``; the same lag applies to the in-plume scavenging below. Detrainment from plume
 continuity; updraft concentration from an upward convex-mix scan; downdraft from
-the mirror continuity + downward scan. In-plume scavenging follows CAM
-``aero_convproc`` (mirage2 form): a first-order removal from the plume's
-condensate-to-precip conversion, applied inside the ascent scan so aerosol
-scavenged low never detrains aloft. Only interstitial + gas tracers are
+the mirror continuity + downward scan. Only interstitial + gas tracers are
 transported. **This module's header is the gold-standard provenance-comment
 example** the rest of the tree is measured against.
 
-The in-plume removal rate is keyed to the plume's own condensate,
-``ConvectionData.qc_conv + qi_conv``, which the Tiedtke ledger publishes as the
-updraft liquid water where the mass flux is active. Its liquid/ice split is
-taken at the **updraft** temperature, not the environment's.
+In-plume scavenging takes ECHAM-HAM's parameters, inputs and processes inside a
+closed plume budget:
+
+- **In-condensate fraction.** Each aerosol tracer carries HAMMOZ's convective
+  in-droplet fraction ``csr_conv`` of its mode
+  (``ConvTransportParameters.csr_conv``, differentiable, number and mass alike).
+  That fraction of the aerosol entering the cloudy plume joins the condensate
+  once, where it meets cloud — the whole plume at the first level holding
+  condensate above HAMMOZ's ``zmin = 1e-10``, the air entrained at each such
+  level above — and the ``1 − csr_conv`` outside the condensate rides the plume
+  to the top.
+- **Removal.** Each cloudy level removes, from the share in the condensate of
+  the air that continues through its top, the fraction of the plume
+  condensate converted to precipitation there,
+  ``ConvectionData.precip_efficiency``: HAMMOZ's ``peff = pmrateprecip/pmwc``,
+  published by ``TiedtkeConvection`` from the ascent's condensate before and
+  after conversion. The removal happens inside the ascent scan, so the plume
+  carries the scavenged concentration up.
+- **Release.** The removed aerosol falls with the convective precipitation; top
+  to bottom, the running deposit loses ``ConvectionData.precip_evap_fraction``
+  of itself to the environment at each level (HAMMOZ ``prevap``, the fraction
+  of the falling precipitation that evaporates or sublimates there). What
+  reaches the surface is the wet deposition (``_conv_scav_flux``, folded into
+  ``wet_*`` by ``WetScavenging``). ``WetScavenging`` releases the aerosol its
+  convective carrier washes out below cloud by the same ``prevap``, so each
+  kilogram the convective precipitation carries is released once.
+
+Within one layer, crossed by the updraft from its bottom interface to its top,
+the order and the concentration each step sees are ECHAM-HAM's:
+
+1. Entrainment and detrainment in flux form: the detrained air leaves at the
+   concentration the plume brought into the layer, and the continuing flux
+   carries ``M_k·x_k = M_{k+1}·x_{k+1} + E·q_env − D·x_{k+1}``
+   (``mo_cuascent.f90:421-424``). Where continuity has a terminating layer
+   detrain more than arrived, the excess is its own entrained air leaving at
+   the environment's value.
+2. The entrained aerosol of a layer holding condensate joins the condensate at
+   ``csr_conv`` (the whole plume at the first such layer).
+3. Conversion at the layer's top interface on the continuing flux ``pmfu(jk)``
+   (``mo_cuascent.f90:446-462``) and removal of ``peff`` of the share in the
+   condensate from that flux, ``zdep = pxtu·csr_conv·peff·pmfu(jk)``
+   (``mo_ham_wetdep.f90:250, 325, 545-555``). Air detrained in the layer has
+   seen none of it.
+4. The continuing plume carries the scavenged concentration into the next
+   layer.
+5. The downdraft mixes in flux form the same way (``mo_cudescent.f90:293-296``)
+   and removes nothing (``ham_wetdep`` changes ``pmfuxt`` only).
+6. The removed aerosol falls with the precipitation and is released top to
+   bottom by ``prevap`` (``mo_ham_wetdep.f90:329-373``).
+
+The environment air a layer entrains is its own full-level value, where ECHAM
+entrains the half-level ``pxtenh(jk+1)`` (the mean of the layer and the one
+below): taking the layer's own air keeps each layer's exchange with the plume
+local and positive.
+
+The mode mapping (``jcm/physics/aerosol/jam/wetdep/convective_fractions.py``)
+takes each MAM4 mode's value from the M7 class it corresponds to by solubility
+and size (M7 boundaries at dry radii of 5 nm, 50 nm and 500 nm):
+
+| JAM (MAM4) mode | M7 class | ``csr_conv`` | reason |
+|---|---|---|---|
+| accumulation (d 53-440 nm) | AS | 0.99 | soluble, accumulation size |
+| coarse (d 1-4 µm) | CS | 0.99 | soluble, coarse size |
+| Aitken (d 9-52 nm) | KS | 0.60 | soluble, Aitken size |
+| primary carbon (d 10-100 nm) | KI | 0.20 | insoluble, Aitken size |
+
+MAM4 carries dust and sea salt internally mixed in the soluble accumulation and
+coarse modes, so they take 0.99.
+
+The Tiedtke interface fields are on the scheme's half levels: ``pmwc`` is the
+plume condensate at a layer's top interface before that layer's conversion and
+``pmrateprecip`` the amount converted, both of the precipitating (continuing)
+plume; where the smooth ascent test lets part of the flux overshoot, the
+published efficiency is weighted by the precipitating share of the flux, which
+recovers both hard limits of ECHAM's test. It equals
+``pdmfup/(pdmfup + pmfu·plu)`` of the published ledger wherever both phases hold
+more than ``zmin``.
 
 Convective **below-cloud** (impaction) scavenging in
 ``jcm/physics/aerosol/jam/wetdep/wetdep_term.py::WetScavenging`` is driven by the
@@ -276,7 +350,27 @@ convective flux, so a step can take at most the covered fraction.
 
 **What ECHAM/CAM does.** ECHAM transports every tracer through Tiedtke
 (``cuxtte`` / ``mo_cuascn`` xt budgeting); CAM's ``convtran`` does the same;
-in-plume scavenging is CAM ``aero_convproc`` (mirage2). The downdraft is ECHAM
+HAMMOZ scavenges in convective cloud after the ascent
+(``mo_cufluxdts.f90::cuflx`` → ``mo_submodel_interface.f90::cuflx_subm`` →
+``mo_hammoz_wetdep.f90::wetdep_interface`` → ``mo_ham_wetdep.f90::ham_wetdep``
+/ ``ic_scav``). ``mo_cuascent.f90::cuasc`` builds the updraft tracer ``pxtu``
+by entrainment and detrainment alone (lines 421-424) and stores ``pmwc = plu``
+and ``pmrateprecip = plu − zlnew`` (lines 459-460); ``cuflx`` splits both by the
+updraft temperature (``zalpha``, lines 281-287) and forms the deviation flux
+``pmfuxt − pmfu·pxtenh`` (line 217); ``prep_wetdep_hydro`` forms
+``peffwat``/``peffice`` (lines 426-435) and ``prevap`` (lines 462-469);
+``get_icscavfrac`` takes ``csr_conv(kmod)`` for convective cloud at every
+temperature (``mo_ham_m7ctl.f90``: 0.20, 0.60, 0.99, 0.99, 0.20, 0.40, 0.40 for
+NS, KS, AS, CS, KI, AI, CI); ``ic_scav`` removes ``pxtu·csr_conv·peff`` level by
+level where the convective cloud cover is set (``kctop..kcbot``); and
+``ham_wetdep`` releases ``prevap`` of the running deposit downward
+(``zdxtevapic``, ``zdxtevapbc``). ``ham_wetdep`` then sets ``pmfuxt =
+pxtp1c·pmfu`` (line 385), the scavenged total updraft flux in place of the
+deviation flux, and ``cudtdq`` applies its divergence (``mo_cufluxdts.f90:689``).
+``mo_tracer_processes.f90::xt_conv_massfix``, bracketing ``cumastr``, adds to
+every level ``−|Δxt·Δp/g| / Σ|Δxt·Δp/g|`` times the column error
+``Σ Δxt·Δp/g + pxtbound`` of the step's convective tendency ``Δxt`` against the
+wet deposition ``pxtbound``; it does not enforce positivity. The downdraft is ECHAM
 ``cudlfs`` / ``cuddraf`` / CAM ``convtran``'s ``cond`` loop. The in-cloud and
 below-cloud pathways are distinct sinks driven by different quantities in both
 references — ECHAM ``xtwetdep`` and CAM ``wetdepa`` take the in-cloud rate from
@@ -298,14 +392,30 @@ differently: it rescales the rain rate to the precipitating area, so the area
 cancels and its below-cloud term acts on the grid mean.
 
 **Why we differ.**
+- `science` (documented deviation) — the in-plume removal takes HAMMOZ's
+  ``csr_conv``, ``peff`` and ``prevap`` inside a closed plume budget instead of
+  HAMMOZ's bookkeeping. In HAMMOZ the environment tendency at level k is
+  ``[F(k+1)·(1 − f(k+1)) − F(k)]/(Δp/g)`` with ``F = pmfu·pxtu`` unscavenged
+  and ``f = csr_conv·peff``: the column total telescopes to the deposition,
+  but the overwrite of the deviation flux drops the updraft's compensating
+  subsidence for every wet-deposited tracer and each cloudy level pays for the
+  removal at the level below with no bound on what it holds, so tracers go
+  negative (and ``xt_conv_massfix``, which only restores the column total, has
+  nothing to repair beyond round-off). In the release-validation column that
+  form drives the soluble column burden to −0.4 of its seed within six hours;
+  clipped at zero it deposits several times the seed a day, and it moves a
+  tracer with no removal at all upward out of the boundary layer. Here the
+  removal acts on the plume's own concentration and the share in the
+  condensate is taken once, so the budget closes exactly and positively and
+  no mass fixer is ported; offering the ``1 − csr_conv`` leftover to the fixed
+  fraction again at every level would scavenge the part that stayed out of the
+  droplets layer after layer, which HAMMOZ's non-compounding form does not do.
 - `science` (documented deviation) — the downdraft **seeds the level of free
   sinking by entraining environment air** (exact column telescoping, matching
   CAM's "environment entrainment only, no transformation in the downdraft"),
-  rather than ECHAM ``cudlfs``'s 50/50 updraft/wet-bulb-environment mix. Aerosol
-  resuspension by evaporating convective precip (CAM ``dcondt_prevap``) is not
-  modelled — the removed flux goes straight to the surface, matching the existing
-  wet-deposition treatment. When active, ``WetScavenging`` retires its
-  own environment-profile convective in-cloud pathway to avoid double-counting.
+  rather than ECHAM ``cudlfs``'s 50/50 updraft/wet-bulb-environment mix. When
+  the transport term is composed, ``WetScavenging`` retires its own
+  environment-profile convective in-cloud pathway to avoid double-counting.
 - `science` (reference disagreement) — the convective carrier follows HAMMOZ's
   updraft-area footprint with ``Λ`` at the grid-mean flux; the stratiform
   carrier follows CAM's cancellation (see [aerosol removal](#aerosol-removal-below-cloud-scavenging-settling-and-the-removal-chain)).

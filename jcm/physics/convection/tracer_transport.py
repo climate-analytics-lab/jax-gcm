@@ -23,16 +23,18 @@ subsidence, plus the mirrored downdraft leg (jax-gcm#622):
   below cloud base the published flux carries cuflx's linear-in-pressure
   sub-cloud taper, so each sub-cloud layer supplies air in proportion to
   its mass — ECHAM's ``pmfuxt`` taper).
-* Updraft tracer concentration from an upward scan:
-  ``q_up_k = (M_{k+1}·q_up_{k+1} + E_k·q_k) / (M_{k+1} + E_k)`` — a
-  convex mix, so the plume concentration is bounded by the environment
-  profile it entrained.
+* Updraft tracer concentration from an upward scan in cuasc's flux form
+  (mo_cuascent.f90:421-424): detrained air leaves at the incoming
+  concentration and the continuing flux carries
+  ``M_k·q_up_k = (M_{k+1} − D_k)·q_up_{k+1} + E_k·q_k`` — a convex mix,
+  so the plume concentration is bounded by the environment profile it
+  entrained.
 * The downdraft (ECHAM ``cudlfs``/``cuddraf``, CAM ``convtran``'s
   ``cond`` loop) is the mirror image: the same continuity derivation on
   the downdraft profile turns the level-of-free-sinking seed into
   entrainment of that layer's air and the surface taper into sub-cloud
-  detrainment, and a downward scan carries the in-downdraft
-  concentration. Deviation from the Fortran: ``cudlfs`` seeds the
+  detrainment, and a downward scan in cuddraf's flux form carries the
+  in-downdraft concentration. Deviation from the Fortran: ``cudlfs`` seeds the
   downdraft with a 50/50 updraft/wet-bulb-environment mix, which moves
   plume-processed air across without a matching debit in the updraft
   budget; entraining environment air instead keeps the column budget
@@ -45,24 +47,42 @@ subsidence, plus the mirrored downdraft leg (jax-gcm#622):
   mass is conserved exactly up to the scavenging sink (all flux sums
   telescope; each plume's own budget closes by construction).
 
-In-plume scavenging (jax-gcm#621) follows CAM's ``aero_convproc``
-(mirage2 form): the fraction of the plume's condensate converted to
-precipitation in a layer sets a first-order removal,
-``cdt = pdmfup / (M_u·q_cond)`` and removed fraction
-``w·(1 − exp(−cdt))``, applied to the in-plume concentration inside the
-ascent scan after entrainment mixing — so aerosol scavenged low in the
-plume never detrains aloft. The updraft-area fraction cancels in
-``cdt`` (CAM's Note1: the cam5 variant needs the unknown updraft
-fraction; the mirage2 form does not). ``w`` is a per-tracer weight
-(soluble/activatable modes only) times the differentiable
-``scav_ratio``; the removed flux deposits at the surface (like CAM's
-``dconudt_wetdep``; per-tracer surface fluxes are published under
-``_conv_scav_flux`` for the JAM wetdep ledger, which retires its own
-environment-profile convective in-cloud pathway when this one is
-active — jax-gcm#621's double-counting reconciliation). Aerosol
-resuspension by evaporating convective precip is not modelled (CAM's
-``dcondt_prevap``) — the removed flux goes straight to the surface,
-matching the existing wetdep treatment of convective scavenging.
+In-plume scavenging (jax-gcm#621) takes ECHAM-HAM's parameters, inputs
+and processes (``mo_cufluxdts.f90::cuflx`` → ``cuflx_subm`` →
+``mo_hammoz_wetdep.f90::wetdep_interface`` → ``mo_ham_wetdep.f90::
+ham_wetdep``/``ic_scav``) inside a closed plume budget:
+
+* **Activation.** A per-tracer fraction ``csr`` of the aerosol entering the
+  cloudy plume is in the condensate — HAMMOZ's convective in-droplet
+  fraction ``csr_conv`` of the tracer's mode. It is taken once, where the
+  aerosol meets condensate: the whole plume at the first level holding
+  condensate, the air entrained at each such level above. The ``1 − csr``
+  that is not in the condensate rides the plume up.
+* **Removal.** At each level the activated share loses the fraction of the
+  plume condensate converted to precipitation there,
+  ``ConvectionData.precip_efficiency`` — HAMMOZ's ``peff =
+  pmrateprecip/pmwc`` from cuasc's condensate before and after conversion,
+  per phase as ``prep_wetdep_hydro`` forms it. The removal happens inside
+  the ascent scan, so the plume carries the scavenged concentration up and
+  detrains it.
+* **Release.** The removed aerosol falls with the precipitation, top to
+  bottom; at each level the running total loses
+  ``ConvectionData.precip_evap_fraction`` of itself back to the environment
+  there — HAMMOZ's ``prevap``, the fraction of the falling precipitation
+  that evaporates or sublimates (``ham_wetdep``'s ``zdxtevapic``). What
+  reaches the surface is the wet deposition, published per tracer under
+  ``_conv_scav_flux`` for the JAM ``wet_*`` ledger (``WetScavenging``
+  retires its own environment-profile convective in-cloud pathway when
+  this term is composed, jax-gcm#621).
+
+HAMMOZ applies ``csr_conv·peff`` after the ascent to the unscavenged
+``pxtu`` and overwrites the updraft's deviation flux with the total one
+(``ham_wetdep``'s ``pmfuxt = pxtp1c·pmfu``), which drops the compensating
+subsidence of every wet-deposited tracer and lets a level remove more than
+the plume carries; ``xt_conv_massfix`` restores the column total but not
+positivity. Here the removal acts on the plume's own concentration, so the
+column budget closes exactly and positively and no mass fixer is needed
+(``docs/source/science/aerosol.md`` records the comparison).
 
 Explicit stability: the per-column ledger is scaled so the combined
 subsidence Courant number stays ≤ 1 (the scheme's own cloud-base CFL cap
@@ -91,10 +111,9 @@ from jcm.physics_interface import PhysicsTendency
 #: squared-underflow window.
 _MF_FLOOR = 1.0e-10
 
-#: In-plume condensate threshold for scavenging [kg/kg] — CAM
-#: ``aero_convproc`` ``clw_cut``: below this the updraft is effectively
-#: precipitation-free and the removal-rate division is unreliable.
-_CLW_CUT = 1.0e-6
+#: In-plume condensate below which a level holds no cloud [kg/kg] —
+#: HAMMOZ ``prep_wetdep_hydro``'s ``zmin`` (mo_hammoz_wetdep.f90:409).
+_COND_MIN = 1.0e-10
 
 
 @tree_math.struct
@@ -102,17 +121,47 @@ class ConvTransportParameters:
     """Tunable knobs for convective tracer transport (differentiable)."""
 
     transport_scale: jnp.ndarray   # multiplies the mass-flux ledger
-    scav_ratio: jnp.ndarray        # in-plume scavenging ratio for soluble
-                                   # tracers [-] (CAM ``aqfrac`` analogue)
+    csr_conv: jnp.ndarray          # (K,) per-tracer fraction of the aerosol
+                                   # entering the cloudy plume that is in
+                                   # the condensate [-] (HAMMOZ ``csr_conv``)
 
     @classmethod
-    def default(cls) -> "ConvTransportParameters":
-        # scav_ratio mirrors the JAM wetdep ``conv_scav_ratio`` default it
-        # supersedes for transported species.
+    def default(cls, csr_conv=()) -> "ConvTransportParameters":
+        """Build unit transport scale with the given per-tracer ``csr_conv``."""
         return cls(
             transport_scale=jnp.asarray(1.0),
-            scav_ratio=jnp.asarray(0.99),
+            csr_conv=jnp.asarray(csr_conv, dtype=jnp.float32),
         )
+
+
+def release_scavenged(removed: jnp.ndarray, evap_fraction: jnp.ndarray
+                      ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Carry scavenged aerosol down with the precipitation, releasing it.
+
+    HAMMOZ's re-evaporation ledger (``mo_ham_wetdep.f90::ham_wetdep``,
+    lines 329-373): top to bottom, the level's removal joins the running
+    deposition total, and ``prevap`` of that total returns to the
+    environment at the same level. ``removed`` is the per-level removal
+    flux ``(K, nlev, *horiz)`` [tracer·kg/m²/s] on the top-first axis,
+    ``evap_fraction`` the per-level ``prevap`` ``(nlev, *horiz)``.
+
+    Returns ``(released, surface)``: the per-level release flux shaped like
+    ``removed`` and the flux reaching the surface ``(K, *horiz)``, with
+    ``sum(removed) = sum(released) + surface`` exactly.
+    """
+    e = jnp.clip(evap_fraction, 0.0, 1.0)
+
+    def fall(total, xs):
+        r_k, e_k = xs
+        total = total + r_k
+        rel = e_k[jnp.newaxis] * total
+        return total - rel, rel
+
+    surface, released = jax.lax.scan(
+        fall, jnp.zeros_like(removed[:, 0]),
+        (jnp.moveaxis(removed, 1, 0), e),
+    )
+    return jnp.moveaxis(released, 0, 1), surface
 
 
 def convective_tracer_tendency(
@@ -126,18 +175,22 @@ def convective_tracer_tendency(
                                              # layer TOP [kg/m²/s], ≤ 0
     entrain_down: jnp.ndarray | None = None,  # (nlev, ncols) per-layer
                                               # downdraft entrainment [kg/m²/s]
-    scav_weights: jnp.ndarray | None = None,  # (K,) per-tracer removal weight
-    precip_formation: jnp.ndarray | None = None,  # (nlev, ncols) updraft
-                                                  # precip generation [kg/m²/s]
+    csr_conv: jnp.ndarray | None = None,  # (K,) in-condensate fraction
+    precip_efficiency: jnp.ndarray | None = None,  # (nlev, ncols) HAMMOZ
+                                                   # ``peff`` [-]
     plume_condensate: jnp.ndarray | None = None,  # (nlev, ncols) in-updraft
                                                   # qc+qi [kg/kg]
+    evap_fraction: jnp.ndarray | None = None,  # (nlev, ncols) HAMMOZ
+                                               # ``prevap`` [-]
 ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Bulk-plume + subsidence tracer tendency and scavenged surface flux.
 
     Returns ``(dq, scav_flux)``: the environment tendency [.../s] shaped
-    like ``q``, and the per-tracer scavenged surface flux
-    ``(K, ncols)`` [tracer·kg/m²/s] satisfying
+    like ``q``, and the per-tracer wet deposition at the surface
+    ``(K, ncols)`` [tracer·kg/m²/s] — removal minus release — satisfying
     ``sum_k(dq·dm) = −scav_flux`` exactly (zero without scavenging).
+    Scavenging acts when ``csr_conv`` is given, with ``precip_efficiency``
+    and ``plume_condensate``; ``evap_fraction`` (optional) releases.
     """
     dm = air_density * layer_thickness
     mfu = jnp.maximum(mfu, 0.0)
@@ -206,85 +259,145 @@ def convective_tracer_tendency(
     detrain_dn = detrain_dn * scale
     entrain_dn = entrain_dn * scale
 
-    # In-plume scavenging profile (jax-gcm#621, CAM aero_convproc
-    # mirage2 form): cdt = precip formed / plume condensate flux is the
-    # first-order removal exponent over the layer transit — the updraft
-    # area fraction cancels. Gated exactly like CAM: only where the
-    # plume holds condensate and precip actually forms.
-    m_up = mfu_below + entrain_eff                    # post-mix plume flux
-    if scav_weights is not None:
-        pf = jnp.maximum(precip_formation, 0.0)
-        cond_flux = m_up * jnp.maximum(plume_condensate, 0.0)
-        cdt = jnp.where(
-            (pf > 0.0) & (plume_condensate > _CLW_CUT) & (m_up > _MF_FLOOR),
-            pf / jnp.maximum(cond_flux, _MF_FLOOR * _CLW_CUT),
-            0.0,
-        )
-        base_frac = -jnp.expm1(-cdt)                  # ∈ [0, 1)
-        w = jnp.clip(scav_weights, 0.0, 1.0)
+    # In-plume scavenging profile: HAMMOZ's per-level conversion fraction
+    # of the plume condensate, on the flux that continues through the
+    # layer's top interface (the flux it was diagnosed against); a layer
+    # holds cloud where that plume carries condensate above ``zmin``.
+    if csr_conv is not None:
+        live_up = mfu > _MF_FLOOR
+        base_frac = jnp.where(
+            live_up, jnp.clip(precip_efficiency, 0.0, 1.0), 0.0)
+        cloudy = (plume_condensate > _COND_MIN) & live_up
+        w = jnp.clip(csr_conv, 0.0, 1.0)
     else:
-        base_frac = jnp.zeros_like(m_up)
+        base_frac = jnp.zeros_like(mfu)
+        cloudy = jnp.zeros(mfu.shape, dtype=bool)
         w = jnp.zeros(q.shape[0], dtype=q.dtype)
 
-    # Upward plume scan for the in-plume concentration (surface -> top),
-    # removing the scavenged share right after entrainment mixing (CAM
-    # applies dconudt_wetdep to conu inside the same ascent loop) so what
-    # detrains aloft is the already-scavenged concentration.
-    def ascend(q_up_below, xs):
-        m_below_k, e_k, q_k, m_up_k, frac_k = xs
-        denom = m_below_k + e_k
-        q_mix = jnp.where(
-            (denom > _MF_FLOOR)[jnp.newaxis],
-            (m_below_k[jnp.newaxis] * q_up_below + e_k[jnp.newaxis] * q_k)
-            / jnp.maximum(denom, _MF_FLOOR)[jnp.newaxis],
-            q_k,
-        )
-        # Scavenge only the nonnegative part: spectral ringing leaves
-        # negative lobes on near-zero tracers, and removing a negative
-        # concentration would INJECT plume mass and drive the wet_*
-        # ledger negative (same floor WetScavenging applies to its
-        # removal reads). Transport of the signed value is untouched.
-        # ``w`` reshapes against q_mix's rank so a bare (K, nlev) column
-        # works the same as a (K, nlev, ncols) block.
-        removed = (
-            w.reshape((-1,) + (1,) * (q_mix.ndim - 1))
-            * frac_k[jnp.newaxis] * jnp.maximum(q_mix, 0.0)
-        )
-        q_up_k = q_mix - removed
-        r_k = m_up_k[jnp.newaxis] * removed           # (K, ncols) flux
-        return q_up_k, (q_up_k, r_k)
+    # Upward plume scan (surface -> top). Within one layer k, crossed from
+    # its bottom interface (flux ``M_{k+1}``) to its top (``M_k``), the
+    # order is ECHAM-HAM's:
+    #
+    # 1. Entrainment and detrainment, in flux form: the layer's entrained
+    #    air joins and its detrained air leaves at the INCOMING plume
+    #    concentration, so the continuing flux carries
+    #    ``M_k·x_k = M_{k+1}·x_{k+1} + E·q_k − D·x_{k+1}``
+    #    (mo_cuascent.f90:421-424; the downdraft likewise,
+    #    mo_cudescent.f90:293-296). Detrained air has seen none of this
+    #    layer's conversion. Where continuity has the layer detrain more
+    #    than arrived from below (the terminating layer's whole entrainment
+    #    is published), the excess is entrained air leaving again at the
+    #    environment's value.
+    # 2. The entrained (fresh) aerosol of a layer holding condensate joins
+    #    it at ``csr`` — the whole plume at the first such layer.
+    # 3. The layer converts ``peff`` of the continuing plume's condensate to
+    #    precipitation at its top interface (cuasc 446-462, on ``pmfu(jk)``)
+    #    and the same fraction of the aerosol in the condensate leaves with
+    #    it: ``zdep = pxtu·csr_conv·peff·pmfu(jk)`` (mo_ham_wetdep.f90:250,
+    #    325, 545-555), i.e. removal from the CONTINUING flux ``M_k``.
+    # 4. The continuing plume carries the scavenged concentration into the
+    #    next layer, so removal compounds on the share in the condensate;
+    #    the ``1 − csr`` share outside it rides up.
+    # 5. The downdraft (below) transports and removes nothing
+    #    (``ham_wetdep`` touches ``pmfuxt`` only).
+    # 6. The removed aerosol falls with the precipitation and is released
+    #    top to bottom by ``prevap`` (``release_scavenged``).
+    #
+    # The environment air a layer entrains is its own full-level value;
+    # ECHAM entrains the half-level ``pxtenh(jk+1)``, which charges part of
+    # the sink to the layer below and needs no separate budget. Using the
+    # layer's own air keeps each layer's exchange local and positive.
+    #
+    # The plume carries each tracer in three pools: ``fresh`` (not yet met
+    # cloud), ``act`` (in the condensate, ``csr`` of the fresh aerosol at a
+    # layer holding condensate — HAMMOZ's level-independent ``csr_conv``)
+    # and ``inact`` (the ``1 − csr`` share outside it, which stays out for
+    # the rest of the ascent; offering the leftover to the fixed fraction
+    # again at every level would put the part that stayed out of the
+    # droplets back into them layer after layer, a compounding HAMMOZ does
+    # not have). Per-level pools are (K, *horiz); ``w`` broadcasts against
+    # them, so a bare (K, nlev) column works the same as a (K, nlev, ncols)
+    # block.
+    w_b = w.reshape((-1,) + (1,) * (q.ndim - 2))
+
+    def ascend(pools_below, xs):
+        act_b, inact_b, fresh_b = pools_below
+        m_below_k, e_k, d_k, m_k, q_k, frac_k, cloudy_k = xs
+        # Step 1: detrainment leaves at the incoming concentration, up to
+        # what arrived; any excess is this layer's entrained air.
+        d_in = jnp.minimum(d_k, m_below_k)
+        d_env = d_k - d_in
+        x_b = act_b + inact_b + fresh_b
+        det_k = (d_in[jnp.newaxis] * x_b + d_env[jnp.newaxis] * q_k)
+        live = (m_k > _MF_FLOOR)[jnp.newaxis]
+        inv = 1.0 / jnp.maximum(m_k, _MF_FLOOR)
+        keep = ((m_below_k - d_in) * inv)[jnp.newaxis]
+        ent = ((e_k - d_env) * inv)[jnp.newaxis]
+        # A layer the plume does not leave through its top resets the
+        # plume to the local air, all of it fresh; the value only seeds
+        # the next live layer.
+        act = jnp.where(live, keep * act_b, 0.0)
+        inact = jnp.where(live, keep * inact_b, 0.0)
+        fresh = jnp.where(live, keep * fresh_b + ent * q_k, q_k)
+        # Step 2.
+        c = cloudy_k[jnp.newaxis]
+        act = act + jnp.where(c, w_b * fresh, 0.0)
+        inact = inact + jnp.where(c, (1.0 - w_b) * fresh, 0.0)
+        fresh = jnp.where(c, 0.0, fresh)
+        # Step 3. Scavenge only the nonnegative part: spectral ringing
+        # leaves negative lobes on near-zero tracers, and removing a
+        # negative concentration would INJECT plume mass and drive the
+        # wet_* ledger negative. Transport of the signed value is untouched.
+        removed = jnp.where(live, frac_k[jnp.newaxis] * jnp.maximum(act, 0.0),
+                            0.0)
+        act = act - removed
+        r_k = m_k[jnp.newaxis] * removed              # (K, ncols) flux
+        return (act, inact, fresh), (det_k, r_k)
 
     q_lev = jnp.moveaxis(q, 1, 0)                     # (nlev, K, ncols)
-    _, (q_up_rev, r_rev) = jax.lax.scan(
+    zero_pool = jnp.zeros_like(q_lev[-1])
+    _, (det_rev, r_rev) = jax.lax.scan(
         ascend,
-        q_lev[-1],                                    # seeded, overwritten at base
-        (mfu_below, entrain_eff, q_lev, m_up, base_frac),
+        (zero_pool, zero_pool, q_lev[-1]),            # seeded, overwritten at base
+        (mfu_below, entrain_eff, detrain, mfu, q_lev, base_frac, cloudy),
         reverse=True,
     )
-    q_up = jnp.moveaxis(q_up_rev, 0, 1)               # (K, nlev, ncols)
-    scav_flux = jnp.sum(r_rev, axis=0)                # (K, ncols)
+    det_up = jnp.moveaxis(det_rev, 0, 1)              # (K, nlev, ncols)
+    removed = jnp.moveaxis(r_rev, 0, 1)               # (K, nlev, ncols)
+    # Step 6: the removed aerosol falls with the precipitation and returns
+    # to the environment where it evaporates (HAMMOZ ``zdxtevapic``).
+    if evap_fraction is not None:
+        released, scav_flux = release_scavenged(removed, evap_fraction)
+    else:
+        released = jnp.zeros_like(removed)
+        scav_flux = jnp.sum(removed, axis=1)
 
-    # Downward plume scan for the in-downdraft concentration (top ->
-    # surface) — cuddraf's tracer budget: mix the arriving flux with the
-    # layer's entrained environment air; detrainment leaves at the mixed
-    # concentration, so the plume budget closes exactly like the updraft.
+    # Downward plume scan (top -> surface), cuddraf's tracer budget
+    # (mo_cudescent.f90:293-296): the layer's entrained air joins and its
+    # detrained air leaves at the incoming downdraft concentration, the
+    # excess over what arrived being entrained air leaving again, as in
+    # the updraft.
     def descend(q_dn_above, xs):
-        m_in_k, e_k, q_k = xs
-        denom = m_in_k + e_k
-        q_mix = jnp.where(
-            (denom > _MF_FLOOR)[jnp.newaxis],
-            (m_in_k[jnp.newaxis] * q_dn_above + e_k[jnp.newaxis] * q_k)
-            / jnp.maximum(denom, _MF_FLOOR)[jnp.newaxis],
+        m_in_k, e_k, d_k, m_out_k, q_k = xs
+        d_in = jnp.minimum(d_k, m_in_k)
+        d_env = d_k - d_in
+        det_k = d_in[jnp.newaxis] * q_dn_above + d_env[jnp.newaxis] * q_k
+        live = (m_out_k > _MF_FLOOR)[jnp.newaxis]
+        inv = 1.0 / jnp.maximum(m_out_k, _MF_FLOOR)
+        q_out = jnp.where(
+            live,
+            ((m_in_k - d_in) * inv)[jnp.newaxis] * q_dn_above
+            + ((e_k - d_env) * inv)[jnp.newaxis] * q_k,
             q_k,
         )
-        return q_mix, q_mix
+        return q_out, det_k
 
-    _, q_dn_lev = jax.lax.scan(
+    _, det_dn_lev = jax.lax.scan(
         descend,
         q_lev[0],                                     # seeded, overwritten at LFS
-        (md_in, entrain_dn, q_lev),
+        (md_in, entrain_dn, detrain_dn, md_out, q_lev),
     )
-    q_dn = jnp.moveaxis(q_dn_lev, 0, 1)               # (K, nlev, ncols)
+    det_dn = jnp.moveaxis(det_dn_lev, 0, 1)           # (K, nlev, ncols)
 
     # Compensating advection: environment air enters each layer from
     # above at the layer-top updraft flux and leaves to the layer below
@@ -296,14 +409,15 @@ def convective_tracer_tendency(
     q_above = jnp.concatenate([q[:, :1], q[:, :-1]], axis=1)
     q_below = jnp.concatenate([q[:, 1:], q[:, -1:]], axis=1)
     dq = (
-        detrain[jnp.newaxis] * q_up
+        det_up
         - entrain_eff[jnp.newaxis] * q
         + mfu[jnp.newaxis] * q_above
         - mfu_below[jnp.newaxis] * q
-        + detrain_dn[jnp.newaxis] * q_dn
+        + det_dn
         - entrain_dn[jnp.newaxis] * q
         + md_out[jnp.newaxis] * q_below
         - md_in[jnp.newaxis] * q
+        + released
     ) / dm[jnp.newaxis]
     return dq, scav_flux
 
@@ -322,31 +436,40 @@ class ConvectiveTracerTransport(PhysicsTerm):
         self,
         tracer_names: tuple[str, ...],
         params: ConvTransportParameters | None = None,
-        scav_weights: tuple[float, ...] | None = None,
+        csr_conv: tuple[float, ...] | None = None,
     ):
-        """Hold the tracer list, params and per-tracer scavenging weights.
+        """Hold the tracer list, params and per-tracer in-condensate fractions.
 
-        ``scav_weights`` (aligned with ``tracer_names``) selects which
-        tracers the in-plume scavenging acts on — 1 for soluble aerosol,
-        0 for insoluble aerosol and gases; ``None`` disables scavenging
-        entirely. The static mask multiplies the differentiable
-        ``params.scav_ratio``.
+        ``csr_conv`` (aligned with ``tracer_names``) is the fraction of each
+        tracer entering the cloudy plume that is in the condensate — HAMMOZ's
+        per-mode ``csr_conv`` for aerosol, 0 for gases; ``None`` disables
+        scavenging entirely. It is the default of the differentiable
+        ``params.csr_conv``; tracers given a positive value publish a
+        ``_conv_scav_flux`` entry.
         """
         if not tracer_names:
             raise ValueError(
                 "ConvectiveTracerTransport needs a non-empty tracer list."
             )
-        if scav_weights is not None and len(scav_weights) != len(tracer_names):
+        if csr_conv is not None and len(csr_conv) != len(tracer_names):
             raise ValueError(
-                "scav_weights must align with tracer_names: got "
-                f"{len(scav_weights)} weights for {len(tracer_names)} tracers."
+                "csr_conv must align with tracer_names: got "
+                f"{len(csr_conv)} fractions for {len(tracer_names)} tracers."
             )
         self._tracer_names = tuple(tracer_names)
-        self._scav_weights = (
-            tuple(float(x) for x in scav_weights)
-            if scav_weights is not None else None
+        self._csr_conv = (
+            tuple(float(x) for x in csr_conv) if csr_conv is not None else None
         )
-        self.params = nnx.Param(params or ConvTransportParameters.default())
+        if params is None:
+            params = ConvTransportParameters.default(
+                self._csr_conv if self._csr_conv is not None
+                else (0.0,) * len(tracer_names))
+        elif jnp.shape(params.csr_conv) != (len(tracer_names),):
+            raise ValueError(
+                "params.csr_conv must hold one fraction per tracer: got shape "
+                f"{jnp.shape(params.csr_conv)} for {len(tracer_names)} tracers."
+            )
+        self.params = nnx.Param(params)
 
     def __call__(self, state, diagnostics, forcing, terrain):
         params = self.params.get_value()
@@ -363,14 +486,12 @@ class ConvectiveTracerTransport(PhysicsTerm):
             q = jnp.stack([
                 state.tracers.get(nm, zeros) for nm in self._tracer_names
             ])
-            if self._scav_weights is not None:
+            if self._csr_conv is not None:
                 scav_kwargs = dict(
-                    scav_weights=(
-                        jnp.asarray(self._scav_weights, dtype=q.dtype)
-                        * params.scav_ratio
-                    ),
-                    precip_formation=conv.precip_formation,
+                    csr_conv=jnp.asarray(params.csr_conv, dtype=q.dtype),
+                    precip_efficiency=conv.precip_efficiency,
                     plume_condensate=conv.qc_conv + conv.qi_conv,
+                    evap_fraction=conv.precip_evap_fraction,
                 )
             else:
                 scav_kwargs = {}
@@ -388,9 +509,9 @@ class ConvectiveTracerTransport(PhysicsTerm):
             tracer_tends = {
                 nm: dq[k] for k, nm in enumerate(self._tracer_names)
             }
-        if self._scav_weights is not None:
-            # Per-tracer surface deposition of in-plume scavenged mass
-            # [kg/m²/s], for downstream wet-deposition bookkeeping (the
+        if self._csr_conv is not None:
+            # Per-tracer surface deposition of in-plume scavenged mass net
+            # of its release below [kg/m²/s], for downstream wet-deposition bookkeeping (the
             # JAM wetdep term folds these into the AeroCom ``wet_*``
             # fluxes). Underscore key: internal handoff, not a
             # user-facing output field. Published UNCONDITIONALLY (zeros
@@ -402,7 +523,7 @@ class ConvectiveTracerTransport(PhysicsTerm):
             diagnostics["_conv_scav_flux"] = {
                 nm: scav_flux[k]
                 for k, nm in enumerate(self._tracer_names)
-                if self._scav_weights[k] > 0.0
+                if self._csr_conv[k] > 0.0
             }
 
         tendency = PhysicsTendency(

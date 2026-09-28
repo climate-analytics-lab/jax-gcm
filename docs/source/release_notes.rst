@@ -1035,6 +1035,37 @@ Grey two-stream shortwave conserves energy
   ``E - P + precip_floor_source``. The grey RCE column reaches this regime
   once its clouds reflect, at ~0.06-0.09 mm/d.
 
+Convective scavenging follows ECHAM-HAM
+"""""""""""""""""""""""""""""""""""""""
+
+- The convective tracer transport's in-plume scavenging takes ECHAM-HAM's
+  parameters, inputs and processes. Each aerosol mode carries HAMMOZ's
+  convective in-droplet fraction ``csr_conv`` of the M7 class it corresponds
+  to (accumulation 0.99, coarse 0.99, Aitken 0.60, primary carbon 0.20;
+  dust and sea salt, carried in MAM4's soluble modes, take 0.99). That share
+  joins the condensate once where the aerosol meets cloud; each cloudy level
+  removes from it HAMMOZ's precipitation efficiency ``peff =
+  pmrateprecip/pmwc``; and the removed aerosol is released where the
+  convective precipitation evaporates (``prevap``), as is the aerosol the
+  convective carrier washes out below cloud. HAMMOZ's own bookkeeping
+  (removal from the unscavenged updraft concentration, the total-flux
+  overwrite and ``xt_conv_massfix``) is not ported: it drops the
+  compensating subsidence and drives tracers negative, where the closed
+  plume budget used here conserves exactly and stays positive; see
+  :doc:`science/aerosol`. ``TiedtkeConvection`` publishes the two new
+  interface fields ``convection.precip_efficiency`` and
+  ``convection.precip_evap_fraction``. **Changes results** for every JAM
+  configuration with convective transport: soluble aerosol reaches the
+  convective outflow at about 1 % of its boundary-layer concentration
+  instead of ~10⁻⁵ (``scm_check.py`` failed "soluble also lofted but less",
+  #923), fresh primary carbon is now scavenged in convective cloud (it was
+  not), and Aitken-mode aerosol is scavenged less (#928). **Breaking for
+  direct callers:** ``ConvTransportParameters.scav_ratio`` is replaced by
+  the per-tracer ``csr_conv``, ``ConvectiveTracerTransport``'s
+  ``scav_weights`` by ``csr_conv``, and ``convective_tracer_tendency``
+  takes ``csr_conv``, ``precip_efficiency``, ``plume_condensate`` and
+  ``evap_fraction``.
+
 
 Known limitations
 ^^^^^^^^^^^^^^^^^
