@@ -571,16 +571,20 @@ def echam_physics(
         # steps where radiation replays its cache (see
         # ``JamOpticsTerm.configure_radiation_gate``) — same post-compose
         # configuration pattern as ``configure_spa`` below.
-        if radiation_p is None:
+        # Only a composed gated term needs the cadence: with
+        # ``jam_optics=False`` there is none, and a radiation term that
+        # exposes no parameters is as valid as in any other composition.
+        _gated = [_t for _t in jam_terms
+                  if hasattr(_t, "configure_radiation_gate")]
+        if _gated and radiation_p is None:
             raise ValueError(
-                f"aerosol_module='jam' gates its optics on the radiation "
-                f"cadence, but the radiation term {type(rad_term).__name__} "
+                f"The JAM optics follow the radiation cadence, but the "
+                f"radiation term {type(rad_term).__name__} "
                 "exposes no RadiationParameters: the factory reads "
                 "`<term>.params` (an nnx.Param holding RadiationParameters, "
                 "whose radiation_interval it uses).")
-        for _t in jam_terms:
-            if hasattr(_t, "configure_radiation_gate"):
-                _t.configure_radiation_gate(radiation_p.radiation_interval)
+        for _t in _gated:
+            _t.configure_radiation_gate(radiation_p.radiation_interval)
         # Aqueous chemistry + wet deposition need the current step's clouds, so
         # they run after the cloud microphysics term; the rest of the JAM chain
         # is the pre-cloud aerosol block.
