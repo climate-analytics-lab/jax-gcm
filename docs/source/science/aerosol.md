@@ -257,12 +257,13 @@ closed plume budget:
   condensate above HAMMOZ's ``zmin = 1e-10``, the air entrained at each such
   level above — and the ``1 − csr_conv`` outside the condensate rides the plume
   to the top.
-- **Removal.** Each cloudy level removes, from the share in the condensate, the
-  fraction of the plume condensate converted to precipitation there,
+- **Removal.** Each cloudy level removes, from the share in the condensate of
+  the air that continues through its top, the fraction of the plume
+  condensate converted to precipitation there,
   ``ConvectionData.precip_efficiency``: HAMMOZ's ``peff = pmrateprecip/pmwc``,
   published by ``TiedtkeConvection`` from the ascent's condensate before and
   after conversion. The removal happens inside the ascent scan, so the plume
-  detrains the scavenged concentration.
+  carries the scavenged concentration up.
 - **Release.** The removed aerosol falls with the convective precipitation; top
   to bottom, the running deposit loses ``ConvectionData.precip_evap_fraction``
   of itself to the environment at each level (HAMMOZ ``prevap``, the fraction
@@ -271,6 +272,34 @@ closed plume budget:
   ``wet_*`` by ``WetScavenging``). ``WetScavenging`` releases the aerosol its
   convective carrier washes out below cloud by the same ``prevap``, so each
   kilogram the convective precipitation carries is released once.
+
+Within one layer, crossed by the updraft from its bottom interface to its top,
+the order and the concentration each step sees are ECHAM-HAM's:
+
+1. Entrainment and detrainment in flux form: the detrained air leaves at the
+   concentration the plume brought into the layer, and the continuing flux
+   carries ``M_k·x_k = M_{k+1}·x_{k+1} + E·q_env − D·x_{k+1}``
+   (``mo_cuascent.f90:421-424``). Where continuity has a terminating layer
+   detrain more than arrived, the excess is its own entrained air leaving at
+   the environment's value.
+2. The entrained aerosol of a layer holding condensate joins the condensate at
+   ``csr_conv`` (the whole plume at the first such layer).
+3. Conversion at the layer's top interface on the continuing flux ``pmfu(jk)``
+   (``mo_cuascent.f90:446-462``) and removal of ``peff`` of the share in the
+   condensate from that flux, ``zdep = pxtu·csr_conv·peff·pmfu(jk)``
+   (``mo_ham_wetdep.f90:250, 325, 545-555``). Air detrained in the layer has
+   seen none of it.
+4. The continuing plume carries the scavenged concentration into the next
+   layer.
+5. The downdraft mixes in flux form the same way (``mo_cudescent.f90:293-296``)
+   and removes nothing (``ham_wetdep`` changes ``pmfuxt`` only).
+6. The removed aerosol falls with the precipitation and is released top to
+   bottom by ``prevap`` (``mo_ham_wetdep.f90:329-373``).
+
+The environment air a layer entrains is its own full-level value, where ECHAM
+entrains the half-level ``pxtenh(jk+1)`` (the mean of the layer and the one
+below): taking the layer's own air keeps each layer's exchange with the plume
+local and positive.
 
 The mode mapping (``jcm/physics/aerosol/jam/wetdep/convective_fractions.py``)
 takes each MAM4 mode's value from the M7 class it corresponds to by solubility

@@ -436,10 +436,11 @@ class ScavengingTest(unittest.TestCase):
 
     def test_air_entrained_in_cloud_joins_the_condensate(self):
         # Aerosol entrained above cloud base joins the condensate at csr
-        # where it enters, and loses peff at that layer (from the whole
-        # mixed plume) and at the cloudy layers above from the share that
-        # did not detrain there.
-        csr, peff, lateral, mf = 0.9, 0.6, 0.01, 0.05
+        # where it enters. The layer detrains the same mass flux, but at
+        # the INCOMING plume concentration (cuasc's flux form), which holds
+        # none of this tracer, so all of it continues and loses peff at
+        # that layer and at the two cloudy layers above.
+        csr, peff, lateral = 0.9, 0.6, 0.01
         q, mfu, entrain, rho, dz, cond, eff = self._setup(peff=peff)
         entrain = entrain.at[6].set(lateral)
         qe = jnp.zeros((1, 10, 1)).at[0, 6].set(1.0e-9)
@@ -448,10 +449,45 @@ class ScavengingTest(unittest.TestCase):
             csr_conv=jnp.asarray([csr]),
             precip_efficiency=eff, plume_condensate=cond,
         )
-        stay = mf / (mf + lateral)
-        expected = lateral * 1.0e-9 * csr * (
-            peff + stay * (1.0 - peff) * (1.0 - (1.0 - peff) ** 2))
+        expected = lateral * 1.0e-9 * csr * (1.0 - (1.0 - peff) ** 3)
         np.testing.assert_allclose(float(scav[0, 0]), expected, rtol=1e-5)
+
+    def test_detrained_air_leaves_before_this_layers_removal(self):
+        # One cloudy layer where half the incoming plume detrains
+        # (mo_cuascent.f90:421-424) and the rest continues and
+        # precipitates (cuasc 446-462 on pmfu(jk)); HAMMOZ deposits
+        # zdep = pxtu·csr_conv·peff·pmfu(jk) (mo_ham_wetdep.f90:250, 325).
+        # So the deposition is peff·csr·x·M_k on the CONTINUING flux, the
+        # detrained half leaves unscavenged at x, and mass closes.
+        nlev, mf, x, csr, peff = 6, 0.04, 1.0e-9, 0.99, 0.6
+        rho = jnp.full((nlev, 1), 1.0)
+        dz = jnp.full((nlev, 1), 400.0)
+        # Plume enters layer 3 from below at mf (base supply in layer 4),
+        # half detrains in layer 3, the rest leaves through its top and
+        # detrains entirely in layer 2.
+        mfu = jnp.zeros((nlev, 1)).at[4, 0].set(mf).at[3, 0].set(0.5 * mf)
+        entrain = jnp.zeros((nlev, 1)).at[4, 0].set(mf)
+        q = jnp.zeros((1, nlev, 1)).at[0, 4, 0].set(x)
+        cond = jnp.zeros((nlev, 1)).at[3, 0].set(5.0e-4)
+        eff = jnp.zeros((nlev, 1)).at[3, 0].set(peff)
+        dq, scav = convective_tracer_tendency(
+            q, mfu, entrain, rho, dz, 1800.0,
+            csr_conv=jnp.asarray([csr]),
+            precip_efficiency=eff, plume_condensate=cond,
+        )
+        np.testing.assert_allclose(float(scav[0, 0]),
+                                   peff * csr * x * 0.5 * mf, rtol=1e-5)
+        dm = rho * dz
+        # Layer 3 receives the detrained half unscavenged (x·mf/2) less
+        # the compensating subsidence it passes down (none: the
+        # environment above is clean); layer 2 the scavenged remainder.
+        np.testing.assert_allclose(float(dq[0, 3, 0] * dm[3, 0]),
+                                   0.5 * mf * x, rtol=1e-5)
+        np.testing.assert_allclose(float(dq[0, 2, 0] * dm[2, 0]),
+                                   0.5 * mf * x * (1.0 - csr * peff),
+                                   rtol=1e-5)
+        net = float(jnp.sum(dq[0] * dm))
+        self.assertLess(abs(net + float(scav[0, 0])), 1e-6 * mf * x)
 
     def test_evaporation_releases_the_falling_deposit(self):
         # HAMMOZ's re-evaporation ledger: top to bottom, prevap of the

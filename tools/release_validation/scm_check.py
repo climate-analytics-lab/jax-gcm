@@ -130,11 +130,13 @@ check("convective transport lofts insoluble aerosol",
 # Air leaving the boundary layer in the plume carries a fraction ``csr`` of
 # each aerosol tracer in the condensate (HAMMOZ ``csr_conv``: 0.99 for the
 # accumulation mode, 0.20 for primary carbon); each cloudy layer removes
-# the precipitation efficiency ``peff`` of that share, and the rest rides
-# up. Per unit of boundary-layer tracer the plume therefore detrains at
-# level k
+# the precipitation efficiency ``peff`` of that share from the air that
+# continues through its top, and the rest rides up. A layer's detrained
+# air leaves at the concentration the plume brought into it (cuasc's flux
+# form), before that layer's conversion, so per unit of boundary-layer
+# tracer the plume detrains into layer k
 #
-#     S_k(csr) = (1 − csr) + csr · Π_{cloudy j at or below k} (1 − peff_j),
+#     S_k(csr) = (1 − csr) + csr · Π_{cloudy j below k} (1 − peff_j),
 #
 # the same dilution by entrained air applying to both tracers. The two
 # tracers start with equal boundary-layer seeds, and the soluble one never
@@ -164,7 +166,9 @@ if conv is not None:
     cond_snap = (np.asarray(conv.qc_conv) + np.asarray(conv.qi_conv))[SNAP]
     mfu_snap = np.asarray(conv.mass_flux_up)[SNAP].reshape(-1)
     cloudy = (cond_snap.reshape(-1) > 1e-10) & (mfu_snap > 0.0)
-    survive = np.cumprod(np.where(cloudy, 1.0 - peff, 1.0)[::-1])[::-1]
+    # Π over the cloudy layers strictly below each layer (top-first axis).
+    through = np.cumprod(np.where(cloudy, 1.0 - peff, 1.0)[::-1])[::-1]
+    survive = np.append(through[1:], 1.0)
     s_ratio = (((1 - csr_sol) + csr_sol * survive)
                / ((1 - csr_ins) + csr_ins * survive))[ft]
     dm = np.diff(np.asarray(vertical.a_boundaries)
