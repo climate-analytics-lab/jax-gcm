@@ -176,6 +176,27 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   retrain). The convective-type dependence does not widen that gap: the emulated
   configuration is 2M, where no column is re-typed and RRTMGP also applies the
   uniform 0.8 liquid factor.
+- **Out-of-range RRTMGP inputs.** Water vapour: jax-rrtmgp clips the
+  humidity it receives at zero and treats an absent absorber as absent (the
+  zero relative abundance is guarded), so a dry or slightly negative layer
+  gives finite fluxes. ECHAM instead bounds the input below at machine epsilon
+  (``mo_radiation.f90``: ``xq_vap = MAX(qm_vap, EPSILON(1.0_wp))``). The two
+  give the same radiation: a model-top humidity anywhere from 1e-12 kg/kg
+  down to zero, or negative, gives the same heating rate, so jcm adds no bound
+  of its own. Temperature: RRTMGP's gas-optics and Planck tables cover
+  160–355 K. RRTMGP proper rejects anything outside that range
+  (``mo_gas_optics_rrtmgp.F90``), and the RRTMG that ECHAM6 runs extrapolates
+  linearly (``mo_lrtm_driver.f90::planckFunction``, ``mo_rrtm_coeffs.f90``).
+  jax-rrtmgp clamps above 355 K. **Below 160 K it reflects the table about
+  its first point**, so a layer colder than 160 K emits as a correspondingly
+  warmer one and cools *faster* as it cools (jax-rrtmgp#39). A layer that
+  radiative cooling pushes below 160 K therefore runs away. The single-column
+  RRTMGP RCE of the full ECHAM stack does exactly that at its 1 Pa layer and
+  goes non-finite (#920). In the saved year-long 3-D ECHAM–RRTMGP runs no
+  cell reaches 160 K: the coldest is 168.6 K, and the top layer stays between
+  245 and 268 K. A cold summer-mesopause top layer could still get there. ``rrtmgp_test.py::TestRRTMGPColdLayerEmission``
+  carries the check as a strict expected failure until jcm pins a fixed
+  release.
 - **Thin-lid aerosol-radiation cutoff.** Online aerosol optics are zeroed above
   ``_AER_RAD_PMIN`` (``jcm/physics/aerosol/jam/optics/optics_term.py``) and the
   per-layer band τ is capped, to bound heating over ~1 Pa lid layers; aerosol mass

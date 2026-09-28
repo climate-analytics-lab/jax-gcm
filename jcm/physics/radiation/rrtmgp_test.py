@@ -1079,6 +1079,52 @@ class TestRRTMGPVerticalOrientation:
         )
 
 
+class TestRRTMGPColdLayerEmission:
+    """A layer's LW cooling must weaken as the layer cools.
+
+    Emission falls with temperature, so an optically thin layer that is
+    colder emits less and cools less. RRTMGP's gas-optics and Planck tables
+    span 160-355 K. A layer that stays in that range behaves physically. A
+    layer colder than 160 K is looked up by jax-rrtmgp's
+    ``create_linear_interpolant``, which reflects the table about its first
+    point (jax-rrtmgp#39): a 150 K layer gets the Planck source and
+    absorption of a 170 K layer, so its cooling grows as it cools. That is
+    the mechanism that takes the whole-model RRTMGP RCE column's 1 Pa layer
+    from 160 K to 35.6 K by day 48 and then to NaN (#920). The reference
+    kernels do not reflect: RRTMGP rejects out-of-range temperatures, and
+    RRTMG as ECHAM6 runs it (``mo_lrtm_driver.f90::planckFunction``,
+    ``mo_rrtm_coeffs.f90``) extrapolates linearly.
+    """
+
+    def _top_lw_heating(self, top_temperature):
+        nlev = 20
+        inputs = _make_inputs(nlev=nlev)
+        inputs["compute_cre"] = False
+        # The model-top layer is the one at the lowest pressure; select it
+        # by pressure rather than by an assumed index.
+        k_top = int(np.argmin(np.asarray(inputs["pressure_levels"])))
+        inputs["temperature"] = inputs["temperature"].at[k_top].set(
+            top_temperature)
+        _, diag = radiation_scheme_rrtmgp(**inputs)
+        return float(np.asarray(diag.lw_heating_rate)[k_top])
+
+    def test_in_table_cooling_weakens_as_the_layer_cools(self):
+        # Inside the table the response has the physical sign.
+        assert self._top_lw_heating(170.0) > self._top_lw_heating(190.0)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="jax-rrtmgp mirrors the temperature tables below 160 K "
+               "(climate-analytics-lab/jax-rrtmgp#39); remove this marker "
+               "when jcm pins a jax-rrtmgp release that fixes it",
+    )
+    def test_below_table_cooling_weakens_as_the_layer_cools(self):
+        # A 150 K layer must cool less than a 160 K one. Under the mirrored
+        # lookup it cools exactly as much as a 170 K layer (more than at
+        # 160 K), which is the runaway.
+        assert self._top_lw_heating(150.0) > self._top_lw_heating(160.0)
+
+
 class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
     """The aerosol-free companion solve every Nth radiation step (#583).
 
