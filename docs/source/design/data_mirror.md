@@ -290,22 +290,24 @@ limits those stages to the named bundle products so unchanged files are not
 republished. Any partial build — `--grids`, `--products`, or pulled Tier A —
 stages no Tier A and merges its registry onto the published one.
 
-The forcing bundles are rebuilt on Glade, on a compute node (the builds and the
-upload's hashing exceed the 10 GB login-node memory limit), with `amip` and
-`era5-transient` as separate invocations because both read `--years` and their
-published ranges differ:
+A partial build hashes and uploads only the files its `--products` and
+`--grids` select (`_upload_scope`, patterns from the manifest product table);
+every other entry of the registry comes from the pulled published one. The
+upload tree is a long-lived working copy that another site's builds do not
+reach, so a stage run without the build's selection would republish whatever
+stale copies it holds. A full-tree upload is therefore refused when its
+registry lacks any published file. The forcing bundles are rebuilt on Glade
+this way, on a compute node (the builds and the upload's hashing exceed the
+10 GB login-node memory limit), with `amip` and `era5-transient` as separate
+invocations because both read `--years` and their published ranges differ:
 
 ```bash
-python -m jcm.data.mirror.build_mirror --products forcing --stage bundles
-python -m jcm.data.mirror.build_mirror --products forcing --stage amip --years 1950,2022
-python -m jcm.data.mirror.build_mirror --stage era5-transient --years 1979,2024
-python -m jcm.data.mirror.build_mirror --stage manifest,registry
+M="python -m jcm.data.mirror.build_mirror --products forcing"
+$M --stage pull,bundles
+$M --stage amip --years 1950,2022
+$M --stage era5-transient --years 1979,2024
+$M --stage manifest,registry,upload
 ```
-
-Before uploading, check that every staged `forcing*` file has only
-`lat`/`lon`/`time` dimensions and a size close to its published copy. A
-regrid that reads the wrong axes still writes a file, only a much larger
-one with an extra source-grid dimension.
 
 - `sso.py` — streams the GMTED2010 DEM in latitude strips, accumulating
   Lott–Miller gradient-tensor statistics onto Gaussian bins or, for

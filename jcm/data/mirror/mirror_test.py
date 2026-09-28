@@ -75,6 +75,21 @@ class RegistryTest(unittest.TestCase):
             reg2 = build_registry(d)
             self.assertNotIn("registry.json", reg2["files"])
 
+    def test_include_keeps_the_base_entry_of_a_file_out_of_scope(self):
+        # A stale copy outside the build's scope must not override the
+        # published entry.
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("forcing_pd.nc", "emissions_pd.nc"):
+                (Path(d) / name).write_bytes(b"new")
+            base = {"files": {"emissions_pd.nc": {"sha256": "published",
+                                                  "size": 9}}}
+            reg = build_registry(d, base=base, include=["forcing_*.nc"])
+            self.assertEqual(reg["files"]["forcing_pd.nc"]["size"], 3)
+            self.assertEqual(reg["files"]["emissions_pd.nc"]["sha256"],
+                             "published")
+
 
 
 class MirrorRevisionStagesTest(unittest.TestCase):
@@ -91,15 +106,48 @@ class MirrorRevisionStagesTest(unittest.TestCase):
         from jcm.data import remote
         from jcm.data.mirror import build_mirror as bm
 
-        class _Api:
-            def upload_folder(self, **kw):
-                return SimpleNamespace(oid="f" * 40)
+        uploads = []
 
-        out = io.StringIO()
-        with mock.patch.object(huggingface_hub, "HfApi", _Api), \
-                contextlib.redirect_stdout(out):
-            bm.stage_upload()
-        self.assertIn('MIRROR_REVISION = "' + "f" * 40 + '"', out.getvalue())
+        with tempfile.TemporaryDirectory() as d:
+            upload, published = Path(d) / "upload", Path(d) / "published.json"
+            upload.mkdir()
+            published.write_text('{"files": {"a.nc": {}, "b.nc": {}}}')
+
+            class _Api:
+                def hf_hub_download(self, repo, name, **kw):
+                    return str(published)
+
+                def upload_folder(self, **kw):
+                    uploads.append(kw["allow_patterns"])
+                    return SimpleNamespace(oid="f" * 40)
+
+            def upload_with(registry, **scope):
+                (upload / "registry.json").write_text(registry)
+                out = io.StringIO()
+                with mock.patch.object(huggingface_hub, "HfApi", _Api), \
+                        mock.patch.object(bm, "UPLOAD", upload), \
+                        mock.patch.object(bm, "_pulled_tier_a",
+                                          lambda: False), \
+                        mock.patch.object(bm, "_PRODUCTS",
+                                          scope.get("products")), \
+                        contextlib.redirect_stdout(out):
+                    bm.stage_upload()
+                return out.getvalue()
+
+            # A full tree listing every published file uploads all of it.
+            out = upload_with('{"files": {"a.nc": {}, "b.nc": {}}}')
+            self.assertIn('MIRROR_REVISION = "' + "f" * 40 + '"', out)
+            self.assertEqual(uploads, [None])
+            # One that would drop a published entry is refused before upload.
+            with self.assertRaises(SystemExit) as ctx:
+                upload_with('{"files": {"a.nc": {}}}')
+            self.assertIn("b.nc", str(ctx.exception))
+            self.assertEqual(len(uploads), 1)
+            # A --products build uploads only its own files and the registry.
+            upload_with("{}", products=frozenset({"forcing"}))
+            self.assertIn("bundles/t63/forcing_amip/*.nc", uploads[-1])
+            self.assertIn("registry.json", uploads[-1])
+            self.assertFalse(any("emissions" in g for g in uploads[-1]))
 
         pulled = []
 
@@ -559,6 +607,28 @@ class GridSelectionTest(unittest.TestCase):
                 with self.assertRaises(SystemExit) as ctx:
                     bm.stage_registry()
                 self.assertIn("partial build", str(ctx.exception))
+
+    def test_upload_scope_follows_products_and_grids(self):
+        from jcm.data.mirror import build_mirror as bm
+        with patch.object(bm, "_pulled_tier_a", lambda: False):
+            with patch.object(bm, "_SELECTED", None), \
+                    patch.object(bm, "_PRODUCTS", None):
+                self.assertIsNone(bm._upload_scope())
+            with patch.object(bm, "_SELECTED", None), \
+                    patch.object(bm, "_PRODUCTS", frozenset({"forcing"})):
+                scope = set(bm._upload_scope())
+            self.assertEqual(scope, {
+                *(f"bundles/{g}/forcing_{k}.nc" for g in bm.GRIDS
+                  for k in ("pd", "pi")),
+                *(f"bundles/{g}/forcing_{k}/*.nc" for g in bm.TRANSIENT_GRIDS
+                  for k in ("amip", "era5"))})
+            with patch.object(bm, "_SELECTED", frozenset({"t127"})), \
+                    patch.object(bm, "_PRODUCTS", None):
+                scope = bm._upload_scope()
+            self.assertIn("bundles/t127/dust_regions.nc", scope)
+            self.assertIn("bundles/t127_l*/ozone_pd.nc", scope)
+            self.assertIn("products/sso/sso_gmted2010_t127.nc", scope)
+            self.assertFalse(any("t63" in g for g in scope))
 
     def test_pulled_tier_a_marks_the_build_partial(self):
         from jcm.data.mirror import build_mirror as bm

@@ -336,6 +336,36 @@ def _partial_build() -> bool:
             or _pulled_tier_a())
 
 
+def _upload_scope() -> list[str] | None:
+    """Upload-tree globs this run owns; ``None`` for a full build.
+
+    A partial build hashes and publishes only these. Anything else in the upload
+    tree is a copy left by an earlier build, possibly since superseded on the
+    mirror by a build from another site, and republishing it would revert that.
+    Patterns come from :data:`_MANIFEST_PRODUCTS` narrowed by ``--products``
+    (matched on the name's first word: ``forcing_amip`` is ``forcing``) and
+    ``--grids``; the dust inputs have no ``--products`` name and so are in scope
+    only when ``--products`` is not given.
+    """
+    if not _partial_build():
+        return None
+    gauss = list(_grids())
+    grids = {"gaussian": gauss,
+             "gaussian+column": gauss + [g for g in _COLUMN_GRIDS
+                                         if _column_selected()],
+             "transient": list(_grids(transient=True))}
+    scope = []
+    for row in _MANIFEST_PRODUCTS:
+        if row.get("source") == "packaged" or not _want(row["name"].split("_")[0]):
+            continue
+        scope += [row["path"].format(grid=g, nlev="*", year="*")
+                  for g in grids[row["grids"]]]
+    if _want("terrain"):
+        scope += [f"products/sso/sso_gmted2010_{g}.nc"
+                  for g in grids["gaussian+column"]]
+    return scope
+
+
 def _truncation(grid: str) -> int:
     """``"t127"`` -> 127 — the relation ``jcm.forcing_assembly`` uses."""
     return int(grid[1:])
@@ -924,7 +954,8 @@ def stage_registry() -> None:
                      "Tier A) must merge onto the published registry.json — "
                      "run --stage pull first.")
         base = json.loads(_REMOTE_REGISTRY.read_text())
-    print(write_registry(str(UPLOAD), base=base), flush=True)
+    print(write_registry(str(UPLOAD), base=base, include=_upload_scope()),
+          flush=True)
 
 
 def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
@@ -1152,9 +1183,25 @@ def stage_upload() -> None:
 
     from huggingface_hub import HfApi
 
-    from jcm.data.remote import DEFAULT_REPO
+    from jcm.data.remote import DEFAULT_REPO, mirror_revision
 
     api = HfApi()
+    scope = _upload_scope()
+    if scope is None:
+        # A full tree replaces the registry wholesale, so it must still list
+        # every published file; one built on a site holding only part of the
+        # mirror would silently drop the rest.
+        published = json.loads(Path(api.hf_hub_download(
+            DEFAULT_REPO, "registry.json", repo_type="dataset",
+            revision=mirror_revision())).read_text())["files"]
+        local = json.loads((UPLOAD / "registry.json").read_text())["files"]
+        dropped = sorted(set(published) - set(local))
+        if dropped:
+            sys.exit(f"upload: registry.json drops {len(dropped)} published "
+                     f"file(s) ({', '.join(dropped[:5])}, ...). Rebuild with "
+                     "the --products/--grids this run built so the registry "
+                     "merges onto the published one and only those files are "
+                     "uploaded.")
     last = None
     for attempt in range(1, 6):
         print(f"upload attempt {attempt}", flush=True)
@@ -1162,6 +1209,8 @@ def stage_upload() -> None:
             commit = api.upload_folder(
                 repo_id=DEFAULT_REPO, repo_type="dataset",
                 folder_path=str(UPLOAD),
+                allow_patterns=(None if scope is None
+                                else [*scope, "registry.json"]),
                 commit_message="Mirror update via build_mirror --stage upload")
             # Runs read the pinned commit, so the upload changes nothing they
             # see until the pin is bumped; print the line that does it.

@@ -5,15 +5,20 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from fnmatch import fnmatch
 from pathlib import Path
 
 
-def build_registry(root: str, base: dict | None = None) -> dict:
-    """Hash every file under ``root``; entries override those of ``base``.
+def build_registry(root: str, base: dict | None = None,
+                   include: list[str] | None = None) -> dict:
+    """Hash the files under ``root``; entries override those of ``base``.
 
     ``base`` is the published registry when ``root`` is a partial upload tree
-    (a ``--grids`` build): its entries for files not rebuilt are kept, so the
-    uploaded ``registry.json`` still covers the whole mirror.
+    (a ``--grids``/``--products`` build): its entries for files not rebuilt are
+    kept, so the uploaded ``registry.json`` still covers the whole mirror.
+    ``include`` (``fnmatch`` globs relative to ``root``) limits hashing to the
+    files the build owns, so a stale copy elsewhere in the tree cannot
+    override the published entry.
     """
     reg = {"repo": "climate-analytics-lab/jax-gcm-data",
            "files": dict((base or {}).get("files", {}))}
@@ -21,21 +26,25 @@ def build_registry(root: str, base: dict | None = None) -> dict:
     for p in sorted(root_p.rglob("*")):
         if not p.is_file() or p.name == "registry.json":
             continue
+        rel = str(p.relative_to(root_p))
+        if include is not None and not any(fnmatch(rel, g) for g in include):
+            continue
         h = hashlib.sha256()
         with open(p, "rb") as f:
             for chunk in iter(lambda: f.read(1 << 22), b""):
                 h.update(chunk)
-        rel = str(p.relative_to(root_p))
         reg["files"][rel] = {"sha256": h.hexdigest(),
                              "size": p.stat().st_size}
     return reg
 
 
-def write_registry(root: str, base: dict | None = None) -> str:
+def write_registry(root: str, base: dict | None = None,
+                   include: list[str] | None = None) -> str:
     """Write ``root/registry.json`` (merged onto ``base``, see build_registry)."""
     out = os.path.join(root, "registry.json")
     with open(out, "w") as f:
-        json.dump(build_registry(root, base), f, indent=1, sort_keys=True)
+        json.dump(build_registry(root, base, include), f, indent=1,
+                  sort_keys=True)
     return out
 
 
