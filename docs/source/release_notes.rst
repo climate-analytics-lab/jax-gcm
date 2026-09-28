@@ -788,7 +788,7 @@ corrections, listed here because they change climate:
   and a branch name is refused). Two machines therefore no longer read
   different copies of a republished bundle depending on their caches. Runs,
   checkpoints, release-validation launches, benchmarks and fixture bands
-  record the commit. The pin is the 2026-09-28 upload, whose forcing bundles
+  record the commit. The pin is the 2026-09-28 commit whose forcing bundles
   carry the land-surface convention below (``lsm``, ``forest``, ``glac``) on
   top of the conservatively remapped t63/t106 ``emissions_{pd,pi}``, so a
   cache holding earlier bundles re-fetches once; prefetch before running
