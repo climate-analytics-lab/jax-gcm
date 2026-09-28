@@ -38,7 +38,8 @@ treatment):
   activatable modes only. With ``in_plume_convective=True`` this
   environment-profile pathway is retired: the composed
   ``ConvectiveTracerTransport`` scavenges inside the updraft instead
-  (jax-gcm#621, CAM ``aero_convproc``-style) and this term only folds
+  (jax-gcm#621, HAMMOZ ``csr_conv·peff`` in a closed plume budget) and
+  this term only folds
   the transport term's surface fluxes into the ``wet_*`` ledger.
 * **Re-evaporation re-injection** — aerosol scavenged by the stratiform
   pathways is carried in the falling precip; where that precip evaporates
@@ -47,9 +48,10 @@ treatment):
   cloud-borne-scavenged material also re-enters as interstitial). The
   aerosol-in-precip flux is integrated top to bottom per tracer, exactly
   mirroring HAMMOZ ``mo_ham_wetdep``'s re-evaporation ledger; the flux
-  reaching the bottom is the net surface wet deposition. Convectively
-  scavenged aerosol is deposited directly (the convection scheme exposes no
-  evaporation profile yet).
+  reaching the bottom is the net surface wet deposition. Aerosol the
+  convective carrier scavenges below cloud is released the same way by the
+  convective precipitation's own evaporation fraction
+  (``ConvectionData.precip_evap_fraction``, HAMMOZ ``prevap``).
 
 ``ConvectionData`` is read via ``diagnostics.get("convection")`` with a
 zero-precip fallback so the term still composes without a convection
@@ -87,6 +89,7 @@ from jcm.physics.aerosol.jam.wetdep.impaction import (
     build_impaction_table,
     table_log_coefficients,
 )
+from jcm.physics.convection.tracer_transport import release_scavenged
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 
 _EPS = 1.0e-30
@@ -516,7 +519,12 @@ class WetScavenging(PhysicsTerm):
             conv_flux_in = jnp.zeros_like(state.temperature)
             conv_cover = jnp.zeros_like(state.temperature)
             rate_conv_incloud = jnp.zeros_like(state.temperature)
+            conv_evap_fraction = jnp.zeros_like(state.temperature)
         else:
+            # HAMMOZ ``prevap`` of the convective precipitation: the
+            # convectively scavenged aerosol it carries returns to the
+            # environment where it evaporates (below).
+            conv_evap_fraction = conv.precip_evap_fraction
             # Local carrier flux for impaction — the convective precip
             # falling into this layer, as in ECHAM xtwetdep / CAM. It is
             # zero above the first precip-forming level, which is itself
@@ -702,8 +710,7 @@ class WetScavenging(PhysicsTerm):
         # families) ride the falling precip; ``reinjection_budget``
         # releases them where the carrier evaporates, with impaction
         # joining the incoming carrier and in-cloud scavenging the newly
-        # formed one (see its docstring). Convectively scavenged aerosol
-        # deposits directly (no convective evap profile yet).
+        # formed one (see its docstring).
         rate_safe = jnp.maximum(rate_arr, _RATE_FLOOR)
         live = rate_arr > _RATE_FLOOR
         share_below = jnp.where(live, below_arr / rate_safe, 0.0)
@@ -713,7 +720,16 @@ class WetScavenging(PhysicsTerm):
             removed_flux * share_below, removed_flux * share_form,
             evap_fraction,
         )
-        reinject_tend = reinjected / dm[jnp.newaxis]
+        # The convective share rides the convective precipitation and is
+        # released by its own evaporation fraction, as ``ham_wetdep``
+        # releases the below-cloud deposit (``zdxtevapbc``) of the
+        # convective call; the in-plume removal of the transport term is
+        # released there, so each kilogram is released once.
+        share_conv = jnp.where(live, conv_arr / rate_safe, 0.0)
+        reinjected_conv, _conv_surface = release_scavenged(
+            removed_flux * share_conv, conv_evap_fraction,
+        )
+        reinject_tend = (reinjected + reinjected_conv) / dm[jnp.newaxis]
 
         all_tends = {nm: dq_stack[k] for k, nm in enumerate(names)}
         for k, target in enumerate(reinject_to):
