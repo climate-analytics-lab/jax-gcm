@@ -115,6 +115,17 @@ class TestGaussianBuilders(unittest.TestCase):
                                        err_msg=tdim)
 
 
+    def test_a_stray_source_dim_is_refused_at_write(self):
+        from jcm.data.mirror.bundles import _to_lonlat
+
+        da = xr.DataArray(np.zeros((2, 3, 4)), name="stl",
+                          dims=("lat", "lon", "latitude"))
+        with self.assertRaisesRegex(ValueError, "latitude"):
+            _to_lonlat(da)
+        dims, _ = _to_lonlat(da.isel(latitude=0).expand_dims(time=2))
+        self.assertEqual(dims, ("lon", "lat", "time"))
+
+
 class TestPysesColumnSampler(unittest.TestCase):
     def test_checkerboard_gives_exact_area_shares(self):
         from jcm.dycore.pyses.forcing import sample_forcing_to_columns
