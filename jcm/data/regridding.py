@@ -552,8 +552,11 @@ def regrid_conditional_fraction(field, weight, regrid, *, lo=0.0, hi=1.0):
     ``regrid`` maps a source array to its target-grid counterpart.
     """
     if isinstance(field, xr.DataArray):
-        num = regrid(field * weight)
-        den = regrid(weight * xr.ones_like(field))
+        # Keep ``field``'s dim order: positional regrids (``interp_to``) take
+        # the last two dims as (lat, lon), and ``weight * field`` would put a
+        # leading time/month dim last.
+        num = regrid((field * weight).transpose(*field.dims))
+        den = regrid((weight * xr.ones_like(field)).transpose(*field.dims))
         plain = regrid(field)
         has = den > 1e-6
         out = xr.where(has, num / xr.where(has, den, 1.0), plain)
