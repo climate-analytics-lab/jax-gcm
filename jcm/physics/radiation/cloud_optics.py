@@ -771,6 +771,14 @@ def cloud_optics(
     return sw_optics, lw_optics
 
 
+#: Size range [um] of the jax-rrtmgp cloud-optics lookup tables the radii are
+#: clamped to: droplet radius 2.5-21.5 um (``radliq_lwr``/``radliq_upr``) and
+#: crystal radius 5-90 um (the tables are in diameter, ``radice_lwr`` =
+#: 10 um to ``radice_upr`` = 180 um). ``cloud_optics_test`` checks them
+#: against the loaded tables.
+RRTMGP_LIQUID_RADIUS_RANGE_UM = (2.5, 21.5)
+RRTMGP_ICE_RADIUS_RANGE_UM = (5.0, 90.0)
+
 #: Floor on the droplet / crystal number in the radius laws [1/m^3]: ECHAM's
 #: ``cqtmin`` (``mo_cloud_micro_2m.f90``: ``zcdnc = MAX(zcdnc, cqtmin)``), the
 #: value ECHAM's number fields never go below. It only keeps the division
@@ -830,15 +838,22 @@ def echam_cloud_effective_radii(
     (``eff_liquid_droplet_radius``, ``eff_ice_crystal_radius``), shared with
     the 2-moment microphysics. The air density is ECHAM's ``p/(rd*T)``.
 
-    ECHAM clamps each radius to its optics table (``relmin``/``relmax``,
-    ``reimin``/``reimax``) where it interpolates; here the jax-rrtmgp library
-    does the equivalent clip against its own tables, so the raw law is
-    returned. Where a phase has no in-cloud condensate the radius is exactly
-    0 (ECHAM writes 0 to ``re_droplets2d`` / ``re_crystals2d`` in a clear
-    layer): that layer has no condensate path, so the value never weights an
-    optical property. Every power is evaluated behind a double ``where``, so
-    the reverse pass is finite in clear cells and as the condensate goes to
-    zero.
+    ECHAM clamps each radius to the size range of the optics table it
+    interpolates (``re_droplets = MAX(relmin, MIN(relmax, ...))``, likewise
+    ``reimin``/``reimax``). jcm radiates through jax-rrtmgp's tables, so the
+    radius is clamped to theirs (``RRTMGP_LIQUID_RADIUS_RANGE_UM``,
+    ``RRTMGP_ICE_RADIUS_RANGE_UM``): the value returned is the radius the
+    optics actually use (the library applies the same clip internally, so the
+    RRTMGP forward is unaffected by it), which is also what the emulator is
+    fed and what ``clouds.r_eff_*`` reports. A cell holding condensate but
+    (near-)zero number, where the law runs far past the table, therefore
+    radiates with and reports the largest tabulated size, as in ECHAM. Where
+    a phase has no in-cloud condensate the radius is exactly 0 (ECHAM writes
+    0 to ``re_droplets2d`` / ``re_crystals2d`` in a clear layer): that layer
+    has no condensate path, so the value never weights an optical property.
+    Every power is evaluated behind a double ``where``, so the reverse pass
+    is finite in clear cells and as the condensate goes to zero; the clamp
+    passes no gradient outside the table range, like the library's.
 
     Broadcasting-native: all array arguments broadcast against each other
     (level on axis 0, any trailing horizontal axes; ``continental`` may be
@@ -875,13 +890,16 @@ def echam_cloud_effective_radii(
     if prognostic_number:
         # The Pruppacher & Klett mass-size constants are the 2-moment scheme's
         # (fixed parameters in ECHAM's mo_cloud_utils); ``eff_ice_crystal_radius``
-        # returns exactly 0 where there is no ice and floors the number itself.
+        # guards its own power and floors the number itself.
         r_ice = eff_ice_crystal_radius(
             iwc_gm3, ice_number, CloudParams2M.default())
     else:
-        # ``effective_radius_ice`` keeps a finite placeholder in ice-free cells
-        # (its own double-where); report ECHAM's 0 there instead.
-        r_ice = jnp.where(iwc_gm3 > 0.0, effective_radius_ice(iwc_gm3), 0.0)
+        # Double-where guarded; the ice-free placeholder is replaced by 0 below.
+        r_ice = effective_radius_ice(iwc_gm3)
+    r_liq = jnp.where(cloud_water_in_cloud > 0.0,
+                      jnp.clip(r_liq, *RRTMGP_LIQUID_RADIUS_RANGE_UM), 0.0)
+    r_ice = jnp.where(cloud_ice_in_cloud > 0.0,
+                      jnp.clip(r_ice, *RRTMGP_ICE_RADIUS_RANGE_UM), 0.0)
     return r_liq, r_ice
 
 

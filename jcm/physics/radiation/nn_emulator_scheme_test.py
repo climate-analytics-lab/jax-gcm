@@ -101,6 +101,9 @@ def _column(ncols=None):
         surface_albedo_vis=scalar(0.1), surface_albedo_nir=scalar(0.25),
         surface_emissivity=scalar(0.98),
         ozone_vmr=prof(5e-6),
+        # The radii the term would form for this column (any positive
+        # physical values; the scheme turns them into features).
+        r_eff_liq_um=prof(10.0), r_eff_ice_um=prof(30.0),
     )
 
 
@@ -122,6 +125,7 @@ def _run(band_mode="per_band", specific_humidity=None, weights=None):
         col["surface_albedo_nir"], col["surface_emissivity"],
         _solar(), 0.0, 0.0, RadiationParameters.default(), _aerosol(),
         col["ozone_vmr"], 400e-6, weights, None, None, band_mode,
+        col["r_eff_liq_um"], col["r_eff_ice_um"],
     )
 
 
@@ -203,7 +207,7 @@ class DiagnosticsContractTest(unittest.TestCase):
                     col["surface_emissivity"], solar, lon, 0.0,
                     RadiationParameters.default(), _aerosol(),
                     col["ozone_vmr"], 400e-6, weights, None, None,
-                    "per_band",
+                    "per_band", col["r_eff_liq_um"], col["r_eff_ice_um"],
                 )
                 expected = get_solar_sin_altitude(ot, lon, 0.0)
                 np.testing.assert_allclose(
@@ -382,7 +386,8 @@ class PerBandVmapTest(unittest.TestCase):
         tend, diag = jax.vmap(
             radiation_scheme_emulated,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0,
-                     None, 0, 0, None, 0, 1, None, None, None, None, None),
+                     None, 0, 0, None, 0, 1, None, None, None, None, None,
+                     1, 1),
             out_axes=(0, 0), axis_size=ncols,
         )(
             col["temperature"], col["specific_humidity"],
@@ -394,6 +399,7 @@ class PerBandVmapTest(unittest.TestCase):
             _solar(), jnp.zeros(ncols), jnp.zeros(ncols),
             RadiationParameters.default(), aer, col["ozone_vmr"], 400e-6,
             weights, None, None, "per_band",
+            col["r_eff_liq_um"], col["r_eff_ice_um"],
         )
         self.assertEqual(
             tend.temperature_tendency.shape, (ncols, NLEV))
@@ -470,8 +476,9 @@ class TermComputeFullTest(unittest.TestCase):
                 cloud_fraction=jnp.full(shape, 0.4)),
         }
         forcing = SimpleNamespace(solar=_solar(), co2_vmr=jnp.asarray(400.0))
-        return term._compute_full(
-            state, diagnostics, forcing, params), shape, ncols, nlev
+        tendency, rad_out, _radii = term._compute_full(
+            state, diagnostics, forcing, None, params)
+        return (tendency, rad_out), shape, ncols, nlev
 
     def test_zero_tendency_holds_on_the_cached_substep(self):
         """The cost-only mode must cover the cached branch too.

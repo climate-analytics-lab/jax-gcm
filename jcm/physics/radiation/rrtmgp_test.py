@@ -547,6 +547,85 @@ class TestRRTMGPTermComputeAndCache(_RRTMGPTermFixture):
         )
 
 
+class TestRRTMGPTermEffectiveRadii(_RRTMGPTermFixture):
+    """The term radiates with radii of the CURRENT state (#929).
+
+    ECHAM forms the droplet and crystal radii inside its radiation call
+    (``mo_cloud_optics.f90::cloud_optics``); nothing about them may be read
+    back from the carried ``clouds`` diagnostic.
+    """
+
+    def _cloudy(self, prognostic=False):
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+        # Leave the top level clear, so "phase absent" is exercised too.
+        clouds = diagnostics["clouds"]
+        diagnostics = {**diagnostics, "clouds": clouds.copy(
+            cloud_fraction=clouds.cloud_fraction.at[0].set(0.0))}
+        if prognostic:
+            nlev, ncols = self.NLEV, self.NCOLS
+            state = state.copy(tracers={
+                **state.tracers,
+                "qnc": jnp.full((nlev, ncols), 3.0e8),
+                "qni": jnp.full((nlev, ncols), 2.0e4),
+            })
+        return term, state, diagnostics, forcing
+
+    def _expected(self, state, diagnostics, forcing, term):
+        from jcm.physics.radiation.cloud_optics import radiation_effective_radii
+        from jcm.physics.clouds.cloud_data import radiation_cloud_fields
+
+        cw, ci, cf = radiation_cloud_fields(state, diagnostics)
+        return radiation_effective_radii(
+            state, diagnostics, forcing, None, cw, ci, cf,
+            term.params.get_value().cld_frac_min)
+
+    @pytest.mark.parametrize("prognostic", [False, True], ids=["1m", "2m"])
+    def test_published_radii_are_the_current_state_law(self, prognostic):
+        term, state, diagnostics, forcing = self._cloudy(prognostic)
+        _, out = term(state, diagnostics, forcing, None)
+        want_liq, want_ice = self._expected(state, diagnostics, forcing, term)
+        got = out["clouds"]
+        np.testing.assert_allclose(np.asarray(got.r_eff_liq),
+                                   np.asarray(want_liq), rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(got.r_eff_ice),
+                                   np.asarray(want_ice), rtol=1e-6)
+        # The clear top level reports ECHAM's 0; cloudy levels a radius.
+        assert np.all(np.asarray(got.r_eff_liq)[0] == 0.0)
+        assert np.all(np.asarray(got.r_eff_liq)[1:] > 0.0)
+        assert np.all(np.asarray(got.r_eff_ice)[1:] > 0.0)
+
+    def test_prognostic_and_prescribed_number_differ(self):
+        """The 2M tracers, not ECHAM's 1M profile, set the 2M radius."""
+        term, state, diagnostics, forcing = self._cloudy(False)
+        _, out_1m = term(state, diagnostics, forcing, None)
+        term, state, diagnostics, forcing = self._cloudy(True)
+        _, out_2m = term(state, diagnostics, forcing, None)
+        assert not np.allclose(np.asarray(out_1m["clouds"].r_eff_liq)[1:],
+                               np.asarray(out_2m["clouds"].r_eff_liq)[1:])
+
+    def test_carried_radius_is_never_an_input(self):
+        """Any carried radius, zero or not, leaves the heating unchanged."""
+        term, state, diagnostics, forcing = self._cloudy()
+        tend_zero, _ = term(state, diagnostics, forcing, None)
+        clouds = diagnostics["clouds"]
+        carried = {**diagnostics, "clouds": clouds.copy(
+            r_eff_liq=jnp.full_like(clouds.r_eff_liq, 3.0),
+            r_eff_ice=jnp.full_like(clouds.r_eff_ice, 120.0))}
+        tend_carried, _ = term(state, carried, forcing, None)
+        np.testing.assert_array_equal(np.asarray(tend_zero.temperature),
+                                      np.asarray(tend_carried.temperature))
+
+    def test_cached_step_reports_the_radii_of_its_solve(self):
+        term, state, diagnostics, forcing = self._cloudy()
+        _, out1 = term(state, diagnostics, forcing, None)
+        wetter = state.copy(tracers={
+            **state.tracers, "qc": state.tracers["qc"] * 8.0})
+        _, out2 = term(wetter, out1, forcing, None)      # cached step
+        np.testing.assert_array_equal(np.asarray(out2["clouds"].r_eff_liq),
+                                      np.asarray(out1["clouds"].r_eff_liq))
+
+
 class TestGreyVsRRTMGP:
     """Compare grey and RRTMGP schemes for structural agreement."""
 
