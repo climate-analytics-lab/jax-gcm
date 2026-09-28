@@ -836,6 +836,20 @@ follows the ``jax_enable_x64`` setting in force when they are used rather than
 whichever was in force at import. ``jcm/import_side_effects_test.py`` enforces
 the property for every module.
 
+ECHAM physics traces with 64-bit mode on
+""""""""""""""""""""""""""""""""""""""""
+
+With ``jax_enable_x64`` on, which importing ``mam4_jax`` does unless
+``MAM4_JAX_ENABLE_X64=0`` is set, every ECHAM configuration failed at trace
+time (#945). The Tiedtke no-convection state built its cloud-base and
+cloud-top indices as int64 while the convecting branch returned int32.
+Separately, the RRTMGP aerosol-free companion with
+``aerosol_free_interval > 1`` returned float32 fluxes from the solve branch and
+float64 fluxes from the hold branch. The convection indices are now int32 in
+every branch. The companion's fluxes and fractions now keep the dtype of the
+slots they fill. A fast test steps the composed package under x64, so CI covers
+this without the ``mam4`` extra. The float32 forward result is bit-identical.
+
 
 Corrected physics
 ^^^^^^^^^^^^^^^^^
