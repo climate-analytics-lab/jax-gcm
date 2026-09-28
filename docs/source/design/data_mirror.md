@@ -313,11 +313,14 @@ same run drops published files (a renamed product's old path); nothing else
 ever leaves the mirror.
 
 `--stage upload` commits exactly the files the registry hashed, at the state
-it hashed them, plus `registry.json` and the retirements, on top of that tip
-commit. If the mirror has moved since, the commit is refused rather than
-overwriting the newer registry; a landed upload sets the ledger aside
-(`upload_ledger.<commit>.json`). Run one build invocation at a time per mirror
-root: the ledger is per root, not per process.
+it hashed them, starting from that tip commit. It uses batches within Hugging
+Face's per-commit limits (25k LFS files, 1 GB of small files), each committed
+on the previous one, then `registry.json` and the retirements last, so the
+registry moves only once every file has landed. If the mirror moves in
+between, the upload stops rather than overwriting it. Each landed batch is
+recorded, so a rerun resumes after it, and the final commit sets the ledger
+aside (`upload_ledger.<commit>.json`). Run one build invocation at a time per
+mirror root: the ledger is per root, not per process.
 
 The forcing bundles are rebuilt on Glade on a compute node (the builds and the
 upload's hashing exceed the 10 GB login-node memory limit), with `amip` and

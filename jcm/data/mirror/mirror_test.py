@@ -296,22 +296,36 @@ class LedgerTest(unittest.TestCase):
             bm.stage_upload()
         return out.getvalue()
 
-    def test_upload_commits_exactly_what_the_registry_hashed(self):
+    def _recorder(self, fail=(), tip="tip"):
+        """Mock create_commit: records calls, raises on call numbers in fail.
+
+        Also returns the mirror tip it implies: the last landed commit.
+        """
         from types import SimpleNamespace
+        calls, state = [], {"tip": tip}
 
+        def create_commit(**kw):
+            calls.append(kw)
+            if len(calls) in fail:
+                raise TimeoutError("xet")
+            state["tip"] = f"c{len(calls)}".ljust(40, "0")
+            return SimpleNamespace(oid=state["tip"])
+        return create_commit, calls, lambda: state["tip"]
+
+    @staticmethod
+    def _ops(kw, kind):
         import huggingface_hub
+        cls = getattr(huggingface_hub, kind)
+        return sorted(op.path_in_repo for op in kw["operations"]
+                      if isinstance(op, cls))
 
+    def test_upload_commits_exactly_what_the_registry_hashed(self):
         from jcm.data.mirror import build_mirror as bm
         self._write("bundles/t63/emissions_pd.nc", b"stale", ledger=False)
         path = self._write(self.F, b"new")
         self._registry({"bundles/t63/dust.nc": {"sha256": "x"}},
                        _RETIRE=("bundles/*/dust.nc",))
-        commits = []
-
-        def create_commit(**kw):
-            commits.append(kw)
-            return SimpleNamespace(oid="f" * 40)
-
+        create_commit, calls, _ = self._recorder()
         # --retire belongs to the registry run; a different one is refused.
         with self.assertRaises(SystemExit) as ctx:
             self._upload(create_commit, _RETIRE=("other",))
@@ -322,54 +336,73 @@ class LedgerTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             self._upload(create_commit)
         self.assertIn("changed since --stage registry", str(ctx.exception))
-        self.assertEqual(commits, [])
+        self.assertEqual(calls, [])
         os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
         out = self._upload(create_commit)
-        (kw,) = commits
-        self.assertEqual(kw["parent_commit"], "tip")
-        added = sorted(op.path_in_repo for op in kw["operations"]
-                       if isinstance(op, huggingface_hub.CommitOperationAdd))
-        deleted = [op.path_in_repo for op in kw["operations"]
-                   if isinstance(op, huggingface_hub.CommitOperationDelete)]
-        self.assertEqual(added, [self.F, "registry.json"])
-        self.assertEqual(deleted, ["bundles/t63/dust.nc"])
-        self.assertIn('MIRROR_REVISION = "' + "f" * 40 + '"', out)
+        # The files, then the registry and retirements on top of them.
+        files, registry = calls
+        self.assertEqual(files["parent_commit"], "tip")
+        self.assertEqual(self._ops(files, "CommitOperationAdd"), [self.F])
+        self.assertEqual(registry["parent_commit"], "c1".ljust(40, "0"))
+        self.assertEqual(self._ops(registry, "CommitOperationAdd"),
+                         ["registry.json"])
+        self.assertEqual(self._ops(registry, "CommitOperationDelete"),
+                         ["bundles/t63/dust.nc"])
+        oid = "c2".ljust(40, "0")
+        self.assertIn(f'MIRROR_REVISION = "{oid}"', out)
         with self._patched():
             self.assertEqual(bm._ledger(), set())
-        self.assertTrue((self.root / "build" / f"upload_ledger.{'f' * 12}.json"
+        self.assertTrue((self.root / "build" / f"upload_ledger.{oid[:12]}.json"
                          ).exists())
 
-    def test_upload_stops_once_the_tip_has_moved_and_retries_otherwise(self):
-        from types import SimpleNamespace
+    def test_upload_batches_and_resumes_after_the_last_landed_batch(self):
+        names = [f"bundles/t63/forcing_amip/{y}.nc" for y in (1950, 1951, 1952)]
+        (self.t63 / "forcing_amip").mkdir()
+        for n in names:
+            self._write(n, n.encode())
+        self._registry({})
+        # One file per commit; the second batch fails until retries run out.
+        create_commit, calls, tip = self._recorder(fail=range(2, 7))
+        with self.assertRaises(RuntimeError):
+            self._upload(create_commit, tip=tip, _BATCH_FILES=1)
+        self.assertEqual(self._ops(calls[0], "CommitOperationAdd"), names[:1])
+        # The rerun starts after the landed batch, on its commit.
+        rerun, calls, tip = self._recorder(tip=tip())
+        self._upload(rerun, tip=tip, _BATCH_FILES=1)
+        self.assertEqual([self._ops(c, "CommitOperationAdd") for c in calls],
+                         [names[1:2], names[2:], ["registry.json"]])
+        self.assertEqual(calls[0]["parent_commit"], "c1".ljust(40, "0"))
 
+    def test_batches_respect_the_file_and_small_file_budgets(self):
+        from jcm.data.mirror import build_mirror as bm
+        for i in range(5):
+            self._write(f"bundles/t63/s{i}.nc", b"x" * 100, ledger=False)
+        with self._patched(_BATCH_FILES=2):
+            self.assertEqual([len(b) for b in bm._batches(
+                [f"bundles/t63/s{i}.nc" for i in range(5)])], [2, 2, 1])
+        with self._patched(_BATCH_SMALL_BYTES=250):
+            self.assertEqual([len(b) for b in bm._batches(
+                [f"bundles/t63/s{i}.nc" for i in range(5)])], [2, 2, 1])
+
+    def test_upload_stops_once_the_tip_has_moved_and_retries_otherwise(self):
         from jcm.data.mirror import build_mirror as bm
         self._write(self.F, b"new")
         self._registry({})
-        attempts = []
-
-        def failing(**kw):
-            attempts.append(kw)
-            raise RuntimeError("412 parent commit mismatch")
-
+        failing, calls, _ = self._recorder(fail=range(1, 10))
         with self.assertRaises(SystemExit) as ctx:
             self._upload(failing, tip=lambda: "moved")
         self.assertIn("mirror tip is now moved", str(ctx.exception))
-        self.assertEqual(len(attempts), 1)
+        self.assertEqual(len(calls), 1)
         with self._patched():
             self.assertEqual(bm._ledger(), {self.F})
 
         # A failure that also breaks the tip query is retried, not fatal.
-        def flaky(**kw):
-            attempts.append(kw)
-            if len(attempts) < 3:
-                raise TimeoutError("xet")
-            return SimpleNamespace(oid="e" * 40)
-
         def no_network():
             raise ConnectionError("down")
 
+        flaky, calls, _ = self._recorder(fail=(1, 2))
         self._upload(flaky, tip=no_network)
-        self.assertEqual(len(attempts), 3)
+        self.assertEqual(len(calls), 4)       # 2 failures, files, registry
 
     def test_main_records_each_stage_and_nothing_from_a_failed_one(self):
         import contextlib

@@ -1336,23 +1336,77 @@ def stage_pull() -> None:
     print("pull: done", flush=True)
 
 
-def stage_upload() -> None:
-    """Commit the ledger's files, ``registry.json`` and the retirements to HF.
+#: Per-commit budget, well inside HF's ``create_commit`` limits (25k LFS files,
+#: 1 GB of regular files, which HF stores for files under ~10 MB).
+_BATCH_FILES = 2000
+_BATCH_SMALL_BYTES = 500 * 2 ** 20
+_SMALL_FILE = 10 * 2 ** 20
 
-    Only what this site's builds wrote is pushed (:func:`_record_writes`), as
-    one commit on the tip the registry was merged onto: if the mirror moved
-    since ``--stage registry`` the commit is refused rather than overwriting
-    the newer registry. Retries transient backend failures (the xet pipeline
-    has aborted mid-transfer with TimeoutError) while the tip is unchanged;
-    once it has moved — another push, or an attempt that landed
-    unacknowledged — it stops and says so. The ledger is set aside once the
-    commit lands. Needs a write token.
+
+def _batches(paths) -> list[list[str]]:
+    """Split ``paths`` into commits within the file and small-file budgets."""
+    batches, cur, small = [], [], 0
+    for p in paths:
+        size = (UPLOAD / p).stat().st_size
+        add = size if size < _SMALL_FILE else 0
+        if cur and (len(cur) >= _BATCH_FILES
+                    or small + add > _BATCH_SMALL_BYTES):
+            batches.append(cur)
+            cur, small = [], 0
+        cur.append(p)
+        small += add
+    return [*batches, cur] if cur else batches
+
+
+def _commit(ops, parent: str, message: str):
+    """``create_commit`` on ``parent``, retrying while the tip stays there.
+
+    Once the tip has moved — another push, or an attempt that landed
+    unacknowledged — it stops and says so rather than retrying against a
+    parent the server will refuse.
     """
     import time
 
-    from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
+    from huggingface_hub import HfApi
 
     from jcm.data.remote import DEFAULT_REPO
+
+    last = None
+    for attempt in range(1, 6):
+        try:
+            return HfApi().create_commit(
+                repo_id=DEFAULT_REPO, repo_type="dataset", operations=ops,
+                parent_commit=parent, commit_message=message)
+        except Exception as e:                      # noqa: BLE001
+            last = e
+            print(f"upload attempt {attempt} failed: "
+                  f"{type(e).__name__}: {e}", flush=True)
+            try:
+                tip = _mirror_tip()
+            except Exception:                       # noqa: BLE001
+                tip = parent                        # unknown: keep retrying
+            if tip != parent:
+                sys.exit(f"upload: the mirror tip is now {tip}, not {parent}. "
+                         "Either an earlier attempt landed (check that "
+                         "commit) or another push moved the tip; rerun "
+                         "--stage registry,upload.")
+            time.sleep(60)
+    raise RuntimeError("upload failed after 5 attempts") from last
+
+
+def stage_upload() -> None:
+    """Commit the ledger's files, ``registry.json`` and the retirements to HF.
+
+    Only what this site's builds wrote is pushed (:func:`_record_writes`), in
+    batches that fit HF's per-commit limits, each committed on the previous
+    one starting from the tip the registry was merged onto; ``registry.json``
+    and the retirements come last, so the registry moves only once every file
+    has landed. If the mirror moves in between, the upload stops rather than
+    overwrite it (:func:`_commit`). Each landed batch is recorded in
+    ``registry_base.json``, so a rerun resumes after it. The ledger is set
+    aside once the registry commit lands. Needs a write token.
+    """
+    from huggingface_hub import CommitOperationAdd, CommitOperationDelete
 
     side = BUILD / "registry_base.json"
     if not side.exists() or not (UPLOAD / "registry.json").exists():
@@ -1369,46 +1423,37 @@ def stage_upload() -> None:
                    for p, st in base["written"].items())):
         sys.exit("upload: the upload tree changed since --stage registry; "
                  "rerun it")
-    ops = [CommitOperationAdd(path_in_repo=p, path_or_fileobj=str(UPLOAD / p))
-           for p in [*written, "registry.json"]]
-    ops += [CommitOperationDelete(path_in_repo=p) for p in base["retired"]]
-    print(f"upload: {len(written)} file(s) + registry.json, "
+    done = set(base.get("uploaded", []))
+    batches = _batches([p for p in written if p not in done])
+    print(f"upload: {len(written)} file(s) ({len(done)} already landed) in "
+          f"{len(batches)} batch(es) + registry.json, "
           f"{len(base['retired'])} retired, onto {base['parent_commit'][:8]}",
           flush=True)
-    api = HfApi()
-    last = None
-    for attempt in range(1, 6):
-        print(f"upload attempt {attempt}", flush=True)
-        try:
-            commit = api.create_commit(
-                repo_id=DEFAULT_REPO, repo_type="dataset", operations=ops,
-                parent_commit=base["parent_commit"],
-                commit_message="Mirror update via build_mirror --stage upload")
-        except Exception as e:                      # noqa: BLE001
-            last = e
-            print(f"upload attempt {attempt} failed: "
-                  f"{type(e).__name__}: {e}", flush=True)
-            try:
-                tip = _mirror_tip()
-            except Exception:                       # noqa: BLE001
-                tip = base["parent_commit"]         # unknown: keep retrying
-            if tip != base["parent_commit"]:
-                sys.exit(f"upload: the mirror tip is now {tip}, not "
-                         f"{base['parent_commit']}. Either an earlier attempt "
-                         "landed (check that commit) or another push moved "
-                         "the tip; rerun --stage registry,upload.")
-            time.sleep(60)
-            continue
-        if _ledger_path().exists():
-            _ledger_path().rename(BUILD / f"upload_ledger.{commit.oid[:12]}.json")
-        side.unlink()
-        # Runs read the pinned commit, so the upload changes nothing they
-        # see until the pin is bumped; print the line that does it.
-        print(f"upload: done, mirror revision {commit.oid}\n"
-              f"  to make runs read it, set in jcm/data/remote.py:\n"
-              f"    MIRROR_REVISION = \"{commit.oid}\"", flush=True)
-        return
-    raise RuntimeError("upload failed after 5 attempts") from last
+    message = "Mirror update via build_mirror --stage upload"
+    for i, batch in enumerate(batches, 1):
+        commit = _commit(
+            [CommitOperationAdd(path_in_repo=p,
+                                path_or_fileobj=str(UPLOAD / p))
+             for p in batch],
+            base["parent_commit"], f"{message} ({i}/{len(batches)})")
+        base["parent_commit"] = commit.oid
+        base["uploaded"] = sorted(done.union(*batches[:i]))
+        side.write_text(json.dumps(base, indent=1) + "\n")
+        print(f"upload: batch {i}/{len(batches)} landed as {commit.oid[:8]}",
+              flush=True)
+    commit = _commit(
+        [CommitOperationAdd(path_in_repo="registry.json",
+                            path_or_fileobj=str(UPLOAD / "registry.json")),
+         *(CommitOperationDelete(path_in_repo=p) for p in base["retired"])],
+        base["parent_commit"], f"{message} (registry)")
+    if _ledger_path().exists():
+        _ledger_path().rename(BUILD / f"upload_ledger.{commit.oid[:12]}.json")
+    side.unlink()
+    # Runs read the pinned commit, so the upload changes nothing they
+    # see until the pin is bumped; print the line that does it.
+    print(f"upload: done, mirror revision {commit.oid}\n"
+          f"  to make runs read it, set in jcm/data/remote.py:\n"
+          f"    MIRROR_REVISION = \"{commit.oid}\"", flush=True)
 
 
 STAGES = {"pull": stage_pull, "sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
