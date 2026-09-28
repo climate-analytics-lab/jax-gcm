@@ -299,7 +299,10 @@ def jam_aerosol_physics(
         )
         # In-plume scavenging weights (jax-gcm#621): soluble = the
         # activatable modes' interstitial tracers; insoluble aerosol and
-        # the gas precursors ride the plume unscavenged. WetScavenging
+        # the gas precursors ride the plume unscavenged. The weight times
+        # ``scav_ratio`` is the activated fraction, one value for every
+        # activatable mode where HAMMOZ sets ``csr_conv`` per mode
+        # (jax-gcm#928). WetScavenging
         # retires its own environment-profile convective pathway in turn
         # (``in_plume_convective`` below).
         soluble = set()
