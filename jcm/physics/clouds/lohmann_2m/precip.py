@@ -464,7 +464,7 @@ def riming_collection_efficiency(
 ) -> jnp.ndarray:
     """Return the collection efficiency ``zcsacl`` of droplets by snow flakes.
 
-    ECHAM ``precip_formation_cold`` (``mo_cloud_micro_2m.f90:3197-3265``,
+    ECHAM ``precip_formation_cold`` (``mo_cloud_micro_2m.f90:3198-3250``,
     Lohmann 2004, *J. Atmos. Sci.* 61): the droplet (``zudrop``) and snow
     (``zusnow``, constant 447 µm maximum dimension) fall speeds give the
     Stokes number; the snow Reynolds number

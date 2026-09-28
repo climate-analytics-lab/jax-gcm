@@ -65,7 +65,7 @@ The 2M scheme's utility fields are ECHAM's, shared through ``cloud_utils``
   ``air_dynamic_viscosity``). It puts the Reynolds number of the 447 µm planar
   flake at about 15–30 through the troposphere, and the collection efficiency
   of 10–20 µm droplets at about 0.8 (``precip.riming_collection_efficiency``,
-  ``mo_cloud_micro_2m.f90::precip_formation_cold``, lines 3197–3265; Lohmann
+  ``mo_cloud_micro_2m.f90::precip_formation_cold``, lines 3198–3250; Lohmann
   2004). The thermal conductivity of air ``zkair`` (line 715) is a different
   quantity; it enters only the diffusional-growth factors.
 - **Ice fall-speed air-density factor**

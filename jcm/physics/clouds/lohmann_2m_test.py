@@ -2909,7 +2909,7 @@ class TestEchamUtilityWiring2M:
         With the viscosity of air (~1.6e-5 kg/m/s) the snow Reynolds number is
         ~20, the ``5 < Re < 40`` fit applies and the collection efficiency of
         10-20 um droplets is ~0.8 (ECHAM ``precip_formation_cold``,
-        mo_cloud_micro_2m.f90:3216-3265). A viscosity three orders of
+        mo_cloud_micro_2m.f90:3216-3250). A viscosity three orders of
         magnitude too large pins the efficiency at its 0.01 floor.
         """
         from jcm.physics.clouds.lohmann_2m import precip as precip_mod
