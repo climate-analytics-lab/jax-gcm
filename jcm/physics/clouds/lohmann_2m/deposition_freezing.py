@@ -16,7 +16,7 @@ from jcm.physics import thermodynamics
 
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
-    ice_volume_mean_radius,
+    ice_volume_mean_radius_schumann,
     threshold_vert_vel,
 )
 from .types import microphysics_dt_constants
@@ -76,9 +76,10 @@ def mixed_phase_deposition_and_corrections(
        humidity (`specific_humidity_tmp`) from existing condensation/deposition rates.
     2. Update ice mass mixing ratio (`zxip1`) including detrainment, evaporation,
        Tompkins source (`pgenti`), and deposition.
-    3. Compute effective ice crystal radius from `zxip1` and `icnc` (via
-       `ice_volume_mean_radius`, which clips and converts to volume-mean via the
-       Schumann et al. (2011) parameterisation.
+    3. Compute the volume-mean ice crystal radius from `zxip1` and `icnc` via
+       `ice_volume_mean_radius_schumann`: the Lohmann (2008) effective radius,
+       clipped, times ``conv_effr2mvr = 0.9`` (ECHAM
+       `effective_2_volmean_radius_param_Schuman_2011`, line 2374).
     4. Compute Bergeron-Findeisen threshold vertical velocity (`zvervmax`) from
        saturation vapour pressures, ICNC, ice radius, and `peta`.
     5. Determine phase mask `lo2`:
@@ -181,11 +182,12 @@ def mixed_phase_deposition_and_corrections(
     zxip1 = jnp.maximum(zxip1, 0.0)
 
     # -------------------------------------------------------------------------
-    # 3. Effective ice crystal radius → volume-mean radius (Schumann 2011)
+    # 3. Effective ice crystal radius → volume-mean radius 0.9·r_eff
+    #    (ECHAM effective_2_volmean_radius_param_Schuman_2011, line 2374)
     #    Convert: grid-mean kg/kg → in-cloud g/m^3
     # -------------------------------------------------------------------------
     ice_gm3 = 1000.0 * zxip1 * air_density / jnp.maximum(cloud_fraction, params.clc_min)
-    zrice = ice_volume_mean_radius(ice_gm3, icnc, params)   # [m]
+    zrice = ice_volume_mean_radius_schumann(ice_gm3, icnc, params)   # [m]
 
     # -------------------------------------------------------------------------
     # 4. Bergeron-Findeisen threshold vertical velocity

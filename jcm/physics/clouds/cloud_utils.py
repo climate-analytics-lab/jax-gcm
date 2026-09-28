@@ -79,11 +79,17 @@ def eff_ice_crystal_radius(
 def ice_volume_mean_radius(
     ice_in_cloud_gm3: jnp.ndarray, icnc: jnp.ndarray, params: CloudParams2M,
 ) -> jnp.ndarray:
-    """Volume-mean ice crystal radius (Fortran ``prid``/``zrice``/``zris``) in METRES.
+    """Plate volume-mean ice crystal radius (Fortran ``zris``) in METRES.
 
     Chains the Lohmann (2008) effective radius, the ``[ceffmin, ceffmax]`` clip,
-    and the Schumann (2011) effective -> volume-mean conversion
-    ``zrih = -2261 + sqrt(5113188 + 2809 r_eff^3)``, ``r_vol = 1e-6 zrih^(1/3)``.
+    and the plate relation ``zrih = -2261 + sqrt(5113188 + 2809 r_eff^3)``,
+    ``r_vol = 1e-6 zrih^(1/3)`` that ECHAM uses for the aggregation timescale
+    in ``precip_formation_cold`` (``mo_cloud_micro_2m.f90:3160-3166``; the 1M
+    Levkov aggregation in ``mo_cloud.f90:1031-1036`` uses the same relation).
+    ECHAM's Wegener-Bergeron-Findeisen threshold uses a different conversion,
+    :func:`ice_volume_mean_radius_schumann`. jcm also passes this radius to
+    ``update_in_cloud_water`` as ``prid`` for the ICNC diagnosis, where ECHAM
+    passes its temperature-parameterised ``zrid`` (lines 945-956; #941).
 
     Metres is load-bearing: callers invert this as
     ``N = rho q_i / ((4/3) pi r_vol^3 rho_ice)``, so returning the microns that
@@ -109,6 +115,100 @@ def ice_volume_mean_radius(
     # above keeps r_eff >= ceffmin, so zrih >= ~550 and the floor never binds
     # in the forward pass.
     return 1.0e-6 * jnp.maximum(zrih, params.eps) ** (1.0 / 3.0)
+
+def ice_volume_mean_radius_schumann(
+    ice_in_cloud_gm3: jnp.ndarray, icnc: jnp.ndarray, params: CloudParams2M,
+) -> jnp.ndarray:
+    """Volume-mean ice crystal radius for the WBF threshold (ECHAM ``zrice``) in METRES.
+
+    Chains the Lohmann (2008) effective radius, the ``[ceffmin, ceffmax]`` clip
+    and ECHAM's ``effective_2_volmean_radius_param_Schuman_2011``,
+    ``r_vol = max(1e-6, conv_effr2mvr·1e-6·r_eff)`` with ``conv_effr2mvr = 0.9``
+    (``mo_cloud_micro_2m.f90:4059-4085``, a simple fit to the Schumann et al.
+    2011 r/r_eff data). This is the radius ECHAM hands to
+    ``threshold_vert_vel`` at every Wegener-Bergeron-Findeisen decision: the
+    section-4 phase choice ``lo2`` (line 1288), the section-5 supersaturation
+    correction (``mixed_phase_deposition_and_corrections``, line 2374) and the
+    WBF gate (line 1582). The plate relation of :func:`ice_volume_mean_radius`
+    is ECHAM's for aggregation only.
+
+    Parameters
+    ----------
+    ice_in_cloud_gm3 : jnp.ndarray
+        IN-CLOUD ice mass concentration [g/m^3].
+    icnc : jnp.ndarray
+        Ice crystal number concentration [1/m^3].
+
+    """
+    r_eff_um = jnp.clip(
+        eff_ice_crystal_radius(ice_in_cloud_gm3, icnc, params),
+        params.ceffmin,
+        params.ceffmax,
+    )
+    return effective_2_volmean_radius_param_Schuman_2011(r_eff_um, params)
+
+def turbulent_updraft_velocity(
+    tke: jnp.ndarray, params: CloudParams2M,
+) -> jnp.ndarray:
+    """Turbulent part of ECHAM's cloud-scheme updraft ``zvervx`` [cm/s].
+
+    ``100·fact_tke·sqrt(TKE)`` with ``fact_tke = 0.7``, set to zero at the
+    lowest model level (``mo_cloud_micro_2m.f90:814-815``). ECHAM's
+    ``zvervx`` (line 816) adds the large-scale term ``−100·ω/(g·ρ)``; that
+    one is the caller's to add (it needs the pressure velocity).
+
+    Parameters
+    ----------
+    tke : jnp.ndarray
+        Turbulent kinetic energy [m²/s²], vertical on axis 0 (top first, so
+        the last index is the lowest level) and any horizontal axes after it.
+
+    """
+    nlev = tke.shape[0]
+    is_lowest_level = (jnp.arange(nlev) == nlev - 1).reshape(
+        (nlev,) + (1,) * (tke.ndim - 1))
+    # Double-where on the root: at TKE = 0 (laminar layers, a cold start)
+    # sqrt has an infinite derivative.
+    positive_tke = tke > 0.0
+    turbulent = 100.0 * params.fact_tke * jnp.where(
+        positive_tke, jnp.sqrt(jnp.where(positive_tke, tke, 1.0)), 0.0)
+    return jnp.where(is_lowest_level, 0.0, turbulent)
+
+def air_dynamic_viscosity(temperature: jnp.ndarray) -> jnp.ndarray:
+    """Dynamic viscosity of air [kg m^-1 s^-1] (ECHAM ``pviscos``).
+
+    ``pviscos = (1.512 + 0.0052·(T − 233.15))·1e-5``, a linear fit in
+    temperature (``mo_cloud_utils.f90::get_util_var``, line 132), evaluated at
+    the step-start temperature ``ptm1``. The 2M scheme uses it only in the snow
+    Reynolds number of riming (``precip_formation_cold``,
+    ``mo_cloud_micro_2m.f90:3216``). Not to be confused with the thermal
+    conductivity of air ``zkair = 4.1867e-3·(5.69 + 0.017·(T − tmelt))``
+    (line 715), which enters the diffusional-growth factors instead.
+    """
+    return (1.512 + 0.0052 * (temperature - 233.15)) * 1.0e-5
+
+def ice_fall_speed_air_density_factor(
+    pressure: jnp.ndarray, temperature: jnp.ndarray,
+) -> jnp.ndarray:
+    """Air-density correction of the cloud-ice fall speed (ECHAM ``paaa``), dimensionless.
+
+    ``paaa = (p/30000)^(-0.178)·(T/233)^(-0.394)``
+    (``mo_cloud_utils.f90::get_util_var``, line 129), the Heymsfield & Iaquinta
+    (2000, *J. Atmos. Sci.* 57, 916-938) pressure and temperature correction of
+    the crystal fall speed, equal to 1 at 300 hPa and 233 K. Evaluated at the
+    full-level pressure and step-start temperature. The 2M scheme uses it
+    only in the ice sedimentation fall speed ``zxifallmc = fall·α·m^β·paaa``
+    (``mo_cloud_micro_2m.f90:2224``), which moves ice mass and number alike.
+
+    Parameters
+    ----------
+    pressure : jnp.ndarray
+        Full-level pressure ``papm1`` [Pa].
+    temperature : jnp.ndarray
+        Temperature ``ptm1`` [K].
+
+    """
+    return (pressure / 30000.0) ** (-0.178) * (temperature / 233.0) ** (-0.394)
 
 def minimum_CDNC(pxwat, params: CloudParams2M):
     """Set the minimum cloud droplet number concentration, either statically or dynamically.

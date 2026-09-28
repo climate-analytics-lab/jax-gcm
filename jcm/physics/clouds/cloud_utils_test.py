@@ -9,11 +9,15 @@ import pytest
 
 import jcm.constants as c
 from .cloud_utils import (
+    air_dynamic_viscosity,
     breadth_factor,
     eff_liquid_droplet_radius,
+    ice_fall_speed_air_density_factor,
     ice_volume_mean_radius,
+    ice_volume_mean_radius_schumann,
     latent_heat_over_cp,
     moist_isobaric_heat_capacity,
+    turbulent_updraft_velocity,
 )
 from .lohmann_2m_params import CloudParams2M
 from jcm.testing import check_gradients
@@ -180,9 +184,10 @@ class TestIceVolumeMeanRadius:
         # A crystal radius in metres is O(1e-5); in microns it would be O(10).
         assert jnp.all(r > 1.0e-6) and jnp.all(r < 1.0e-3), r
 
-    def test_matches_the_schumann_chain(self):
+    def test_matches_the_zrih_plate_chain(self):
         ice_gm3, icnc = jnp.array([1.0e-2]), jnp.array([5.0e4])
-        # Independent transcription: Lohmann (2008) r_eff, clip, Schumann (2011).
+        # Independent transcription: Lohmann (2008) r_eff, clip, and the
+        # zrih plate relation of ECHAM precip_formation_cold.
         base = ice_gm3 / (self._P.fact_PK * icnc)
         r_eff = np.clip(
             0.5e4 * base ** (1.0 / self._P.pow_PK),
@@ -220,10 +225,95 @@ class TestIceVolumeMeanRadius:
         assert jnp.all(jnp.isfinite(g)), g
 
 
+class TestEchamUtilityFormulas2M:
+    """Pin the 2M scheme's ECHAM utility fields against hand-computed values.
+
+    Each expected number below was evaluated by hand, in double precision,
+    from the Fortran expression named in the test, at three states: 500 hPa /
+    253 K, 300 hPa / 233 K and 900 hPa / 280 K. A change to any of these
+    formulas fails here.
+    """
+
+    _P = CloudParams2M.default()
+
+    def test_air_dynamic_viscosity_is_echam_pviscos(self):
+        # mo_cloud_utils.f90:132
+        #   pviscos = (1.512 + 0.0052*(ptm1 - 233.15))*1e-5
+        t = jnp.array([253.0, 233.0, 280.0])
+        np.testing.assert_allclose(
+            air_dynamic_viscosity(t), [1.61522e-5, 1.51122e-5, 1.75562e-5],
+            rtol=1e-6)
+
+    def test_viscosity_is_not_the_thermal_conductivity(self):
+        # zkair = 4.1867e-3*(5.69 + 0.017*(T - tmelt)) (mo_cloud_micro_2m.f90:715)
+        # is ~0.022 W/m/K; the viscosity of air is ~1.6e-5 kg/m/s.
+        visc = float(air_dynamic_viscosity(jnp.array(253.0)))
+        assert 1.4e-5 < visc < 1.8e-5, visc
+
+    def test_ice_fall_speed_factor_is_echam_paaa(self):
+        # mo_cloud_utils.f90:129
+        #   paaa = (papm1/30000)**(-0.178) * (ptm1/233)**(-0.394)
+        p = jnp.array([5.0e4, 3.0e4, 9.0e4])
+        t = jnp.array([253.0, 233.0, 280.0])
+        np.testing.assert_allclose(
+            ice_fall_speed_air_density_factor(p, t),
+            [0.8839336560446575, 1.0, 0.7649453081492176], rtol=1e-6)
+
+    def test_turbulent_updraft_is_echam_zvervx_tke_term(self):
+        # mo_cloud_micro_2m.f90:814-815
+        #   ztmp1_2d = 100*fact_tke*SQRT(ptkem1);  ztmp1_2d(:,klev) = 0
+        # Levels top-first: the last entry is the lowest level.
+        tke = jnp.array([0.5, 2.0, 0.1, 0.0, 3.0])
+        np.testing.assert_allclose(
+            turbulent_updraft_velocity(tke, self._P),
+            [49.49747468305833, 98.99494936611666, 22.135943621178654,
+             0.0, 0.0],
+            rtol=1e-6)
+
+    def test_turbulent_updraft_broadcasts_over_columns(self):
+        """Vertical on axis 0: a (nlev, ncols) block matches each column."""
+        tke = jnp.array([[0.5, 2.0], [0.1, 0.0], [3.0, 1.0]])
+        block = turbulent_updraft_velocity(tke, self._P)
+        for j in range(tke.shape[1]):
+            np.testing.assert_allclose(
+                block[:, j], turbulent_updraft_velocity(tke[:, j], self._P))
+        np.testing.assert_array_equal(block[-1], 0.0)
+
+    def test_turbulent_updraft_gradient_finite_at_zero_tke(self):
+        g = jax.grad(
+            lambda x: turbulent_updraft_velocity(x, self._P).sum(),
+        )(jnp.array([0.0, 0.0, 0.0]))
+        assert jnp.all(jnp.isfinite(g)), g
+
+    def test_wbf_radius_is_echam_schumann_conversion(self):
+        # mo_cloud_micro_2m.f90:4069 prvolmean = MAX(1e-6, conv_effr2mvr*1e-6*prieff)
+        # with prieff the Lohmann (2008) r_eff clipped to [10, 150] um:
+        #   0.01 g/m3, 5e4 /m3  -> r_eff 68.2478 um  -> 61.4230 um
+        #   0.001 g/m3, 1e5 /m3 -> r_eff 20.3432 um  -> 18.3089 um
+        #   0.05 g/m3, 2e3 /m3  -> r_eff 480 um, clipped to 150 -> 135 um
+        ice = jnp.array([1.0e-2, 1.0e-3, 5.0e-2])
+        icnc = jnp.array([5.0e4, 1.0e5, 2.0e3])
+        np.testing.assert_allclose(
+            ice_volume_mean_radius_schumann(ice, icnc, self._P),
+            [6.142299068876813e-05, 1.8308900872019986e-05, 1.35e-4],
+            rtol=1e-5)
+
+    def test_wbf_radius_differs_from_the_aggregation_radius(self):
+        """At the 150 um clip the aggregation radius is a third of the WBF one.
+
+        The plate ``zrih`` radius is ECHAM's for aggregation only.
+        """
+        ice, icnc = jnp.array([5.0e-2]), jnp.array([2.0e3])
+        wbf = float(ice_volume_mean_radius_schumann(ice, icnc, self._P)[0])
+        agg = float(ice_volume_mean_radius(ice, icnc, self._P)[0])
+        np.testing.assert_allclose(agg, 4.565022535069957e-05, rtol=1e-5)
+        assert wbf / agg > 2.9
+
+
 class TestCloudUtilsGradients:
     """AD against a central difference for the radius helpers (#820).
 
-    All green. ``ice_volume_mean_radius`` carries the Schumann (2011)
+    All green. ``ice_volume_mean_radius`` carries the ``zrih`` plate
     ``-2261 + sqrt(5113188 + 2809*r**3)`` inversion, whose square root would
     be the obvious hazard; the ``ceffmin``/``ceffmax`` clip above it keeps the
     argument near 5e6 and the operating points below stay inside the clip, so
@@ -240,6 +330,30 @@ class TestCloudUtilsGradients:
                 ice, number, self._PARAMS),
             (jnp.array([1.0e-3, 1.0e-2, 5.0e-2]),
              jnp.array([1.0e4, 5.0e4, 2.0e5])),
+            rtol=1e-3)
+
+    def test_ice_volume_mean_radius_schumann(self):
+        """The same operating points, through the 0.9·r_eff conversion."""
+        check_gradients(
+            lambda ice, number: ice_volume_mean_radius_schumann(
+                ice, number, self._PARAMS),
+            (jnp.array([1.0e-3, 1.0e-2, 5.0e-2]),
+             jnp.array([1.0e4, 5.0e4, 2.0e5])),
+            rtol=1e-3)
+
+    def test_ice_fall_speed_air_density_factor(self):
+        """Upper and lower troposphere; both powers are smooth there."""
+        check_gradients(
+            ice_fall_speed_air_density_factor,
+            (jnp.array([3.0e4, 5.0e4, 9.0e4]),
+             jnp.array([233.0, 253.0, 280.0])),
+            rtol=1e-3)
+
+    def test_turbulent_updraft_velocity(self):
+        """Positive TKE above the lowest level (which is a constant 0)."""
+        check_gradients(
+            lambda tke: turbulent_updraft_velocity(tke, self._PARAMS)[:-1],
+            (jnp.array([0.1, 0.5, 2.0, 1.0]),),
             rtol=1e-3)
 
     def test_eff_liquid_droplet_radius(self):
