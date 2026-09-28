@@ -366,6 +366,80 @@ class ScavengingTest(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(scav1),
                                    np.asarray(scav3[:, 0]), rtol=1e-6)
 
+    def _deep_plume(self, cdt, nlev=10, lateral=0.0):
+        """Base-fed plume, cloudy layers 4-7 at a set removal exponent."""
+        rho, dz = self._grid_like(nlev)
+        mf = 0.05
+        mfu, entrain = _plume(nlev=nlev, mf=mf)
+        lev = jnp.arange(nlev)[:, None]
+        cloudy = (lev >= 4) & (lev <= 7)
+        if lateral:
+            # Lateral pickup at cloudy layer 6, balanced by detrainment of
+            # the same amount (continuity keeps the flux profile), so the
+            # entrained air meets cloud only above the base.
+            entrain = entrain.at[6].set(lateral)
+        cond = jnp.where(cloudy, 5.0e-4, 0.0)
+        # cdt = pf / (m_up · condensate) with m_up = mf (+ lateral at 6).
+        m_up = jnp.full((nlev, 1), mf).at[6].add(lateral)
+        pf = jnp.where(cloudy, cdt * m_up * 5.0e-4, 0.0)
+        return mfu, entrain, rho, dz, cond, pf, mf
+
+    def _grid_like(self, nlev):
+        rho = jnp.linspace(0.4, 1.2, nlev)[:, None]
+        return rho, jnp.full((nlev, 1), 400.0)
+
+    def test_unactivated_share_is_not_reactivated(self):
+        # The fraction w activates ONCE, where the plume first meets cloud;
+        # only that activated share is removed with the converted
+        # condensate, and the 1 − w interstitial share rides to the top
+        # (CAM aero_convproc removes cloud-borne conu only). Four cloudy
+        # layers at removal fraction f remove w·(1 − (1 − f)^4) of the
+        # cloud-base supply — not 1 − (1 − w·f)^4, the result of treating
+        # the leftover as fresh activatable aerosol at every level.
+        w, cdt = 0.9, float(np.log(10.0))          # f = 1 − e^−cdt = 0.9
+        f = 1.0 - np.exp(-cdt)
+        mfu, entrain, rho, dz, cond, pf, mf = self._deep_plume(cdt)
+        q_base = 1.0e-9
+        q = jnp.zeros((1, 10, 1)).at[0, 8:].set(q_base)
+        dq, scav = convective_tracer_tendency(
+            q, mfu, entrain, rho, dz, 1800.0,
+            scav_weights=jnp.asarray([w]),
+            precip_formation=pf, plume_condensate=cond,
+        )
+        expected = mf * q_base * w * (1.0 - (1.0 - f) ** 4)
+        np.testing.assert_allclose(float(scav[0, 0]), expected, rtol=1e-5)
+        compounded = mf * q_base * (1.0 - (1.0 - w * f) ** 4)
+        self.assertGreater(compounded / expected, 1.1)   # the two differ
+        # What detrains at the top (layer 2) is the surviving plume air:
+        # the interstitial 1 − w plus the unremoved activated share.
+        dm = rho * dz
+        survive = (1.0 - w) + w * (1.0 - f) ** 4
+        np.testing.assert_allclose(
+            float(dq[0, 2, 0] * dm[2, 0]), mf * q_base * survive, rtol=1e-5,
+        )
+
+    def test_air_entrained_in_cloud_activates(self):
+        # Aerosol entrained above cloud base activates at w where it
+        # enters (HAMMOZ's level-independent csr_conv), and is then
+        # removed only in the cloudy layers from there up: at layer 6 from
+        # the whole mixed plume, at 5 and 4 from the share that did not
+        # detrain at 6 (continuity detrains the lateral pickup there).
+        w, cdt, lateral = 0.9, float(np.log(10.0)), 0.01
+        f = 1.0 - np.exp(-cdt)
+        mfu, entrain, rho, dz, cond, pf, mf = self._deep_plume(
+            cdt, lateral=lateral)
+        q_env = 1.0e-9
+        q = jnp.zeros((1, 10, 1)).at[0, 6].set(q_env)   # only at layer 6
+        _, scav = convective_tracer_tendency(
+            q, mfu, entrain, rho, dz, 1800.0,
+            scav_weights=jnp.asarray([w]),
+            precip_formation=pf, plume_condensate=cond,
+        )
+        stay = mf / (mf + lateral)
+        expected = lateral * q_env * w * (
+            f + stay * (1.0 - f) * (1.0 - (1.0 - f) ** 2))
+        np.testing.assert_allclose(float(scav[0, 0]), expected, rtol=1e-5)
+
     def test_dry_plume_scavenges_nothing(self):
         # No condensate (below CAM's clw_cut) -> gate closed everywhere.
         q, mfu, entrain, rho, dz, _, pf = self._setup()
@@ -587,6 +661,16 @@ class ComposedColumnScavengingTest(unittest.TestCase):
         self.assertGreater(pom, 1e-20, "nothing was lofted at all")
         self.assertLess(so4, 0.5 * pom,
                         f"soluble {so4:.2e} not depleted vs insoluble {pom:.2e}")
+        # ...but some of it IS lofted: the unactivated 1 − scav_ratio share
+        # rides the plume to the free troposphere, so relative to its own
+        # boundary-layer loading the soluble tracer aloft sits near the
+        # percent level (~0.1 after a day here), not at the ~1e-5 a plume
+        # that re-activates its interstitial tail at every level leaves.
+        bl = p > 850.0e2
+        so4_bl = np.asarray(preds.tracer_states["m_so4_acc"])[-1][bl].mean()
+        self.assertGreater(so4, 1.0e-3 * so4_bl,
+                           f"soluble FT {so4:.2e} vs its BL {so4_bl:.2e}: "
+                           "the interstitial share is being scavenged")
 
 if __name__ == "__main__":
     unittest.main()
