@@ -1013,6 +1013,25 @@ Grey two-stream shortwave conserves energy
   ``E - P + precip_floor_source``. The grey RCE column reaches this regime
   once its clouds reflect, at ~0.06-0.09 mm/d.
 
+Lohmann 2M utility fields are ECHAM's
+"""""""""""""""""""""""""""""""""""""
+
+- Four fields of the two-moment cloud scheme now follow ECHAM6.3-HAM2.3
+  (#942). The snow Reynolds number of riming divides by the viscosity of air
+  ``pviscos`` (``mo_cloud_utils.f90``, line 132) instead of the thermal
+  conductivity of air, which was ~1400 times larger and held the collection
+  efficiency of droplets by snow at its 0.01 floor; it is now ~0.8. The ice
+  fall-speed factor is ``paaa = (p/30000)^-0.178·(T/233)^-0.394`` (line 129)
+  instead of ``(1.3/ρ)^0.4``, so cloud ice falls 30-35 % slower aloft. The
+  turbulent updraft of the phase and Wegener-Bergeron-Findeisen criteria is
+  ``100·fact_tke·√TKE``, zero at the lowest level
+  (``mo_cloud_micro_2m.f90``, lines 814-815), instead of ``√(2·TKE)``. The
+  threshold's ice radius is ``0.9·r_eff``
+  (``effective_2_volmean_radius_param_Schuman_2011``) instead of the plate
+  radius ECHAM uses only for aggregation, which was up to three times
+  smaller. **Changes results** for every 2M configuration, including JAM:
+  MEASUREMENT_PLACEHOLDER See :doc:`science/clouds_microphysics`.
+
 
 Known limitations
 ^^^^^^^^^^^^^^^^^

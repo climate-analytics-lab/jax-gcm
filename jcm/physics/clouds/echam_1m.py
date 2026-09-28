@@ -511,7 +511,8 @@ def ice_autoconversion(
 
     The aggregation timescale comes from the Moss (1995) effective radius
     of the in-cloud ice (``zrieff = 83.8·(IWC g/m³)^0.216`` µm), converted
-    to a volume-mean size (Schumann form) and fed into Levkov's ``zdt2``;
+    to a volume-mean size with the plate relation ``zrih``
+    (mo_cloud.f90:1031-1036) and fed into Levkov's ``zdt2``;
     the rate coefficient ``ccsaut/zdt2`` is integrated IMPLICITLY
     (``x·(1 − 1/(1 + rate·dt·x))``) so per-step depletion is bounded with
     no artificial qi threshold and no 1/dt in the physical rate. The

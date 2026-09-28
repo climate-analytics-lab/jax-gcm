@@ -52,8 +52,13 @@ Formulation choices inside the sweep, for provenance:
 - The WBF threshold updraft `peta` is ECHAM's diffusional-growth ζ
   (`mo_cloud_micro_2m.f90` line 856), recomputed after freezing so the
   post-freezing crystal population sets the threshold.
-- Diagnostic cirrus ICNC (`nic_cirrus = 1`) uses the Schumann volume-mean
-  radius, in metres.
+- The WBF threshold updraft is compared with ECHAM's `zvervx` turbulent term
+  `100·fact_tke·√TKE` (zero at the lowest level), and the threshold uses
+  ECHAM's volume-mean radius `0.9·r_eff` at all three decisions (section-4
+  `lo2`, section-5 correction, WBF gate).
+- Diagnostic cirrus ICNC (`nic_cirrus = 1`) inverts the plate (`zrih`)
+  volume-mean radius of the existing ice, in metres; ECHAM passes a
+  temperature-parameterised radius there (#941).
 
 ## The state-splitting convention
 
