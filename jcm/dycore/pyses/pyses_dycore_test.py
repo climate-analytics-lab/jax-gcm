@@ -316,8 +316,18 @@ class TestPysesDycoreProtocol(unittest.TestCase):
             "skipped_scalar": jnp.zeros((2,)),
         }
         preds = Predictions(dynamics=stacked, physics=physics, times=None)
-        ds = self.dycore.to_xarray(
-            preds, np.array([0.0, self.dycore.dt_seconds / 86400.0]))
+        # The labels a Model run hands every backend: exact datetime64[ms]
+        # from ``ModelPredictions.time_labels``, one timestep apart.
+        start = np.datetime64("2000-01-01T00:00:00", "ms")
+        times = start + np.array(
+            [0, int(self.dycore.dt_seconds) * 1000], dtype="timedelta64[ms]")
+        ds = self.dycore.to_xarray(preds, times)
+        np.testing.assert_array_equal(ds["time"].values, times)
+        # A bare elapsed-days axis carries no reference date, so it cannot be
+        # labelled exactly; the backend refuses it rather than guessing one.
+        with self.assertRaisesRegex(TypeError, "exact datetime64"):
+            self.dycore.to_xarray(
+                preds, np.array([0.0, self.dycore.dt_seconds / 86400.0]))
         self.assertIn("lat", ds.coords)
         self.assertIn("lon", ds.coords)
         self.assertEqual(ds["temperature"].dims, ("time", "level", "lon", "lat"))

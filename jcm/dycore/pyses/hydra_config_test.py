@@ -93,7 +93,14 @@ class PysesHydraConfigTest(unittest.TestCase):
         happened twice in one campaign (a health-check argument here, and the
         scoreable-gate decision of #780), each time in code that ran fine on
         every config that names its own timestep. Drive a real fresh chunk end
-        to end: integrate, health-check, budget report, netCDF, checkpoint.
+        to end: integrate, health-check, budget report, the calendar-month
+        stream, checkpoint.
+
+        ``run=pyses_year`` writes calendar-month means only
+        (``save_chunks: false``): a chunk leaves the checkpoint and, beside
+        it, the pending month it resumes from, and the end of the run flushes
+        that (here partial) month to its monthly file. There is no per-chunk
+        netCDF; the dinosaur sibling above covers that path.
         """
         pytest.importorskip("pyses")
         import tempfile
@@ -106,21 +113,30 @@ class PysesHydraConfigTest(unittest.TestCase):
                 "dycore=pyses_ne30l47", "physics=held_suarez", "run=pyses_year",
                 "dycore.nx=3", "dycore.n_sponge=8",
                 # One short chunk: the first fresh chunk is the whole point.
-                "run.total_time=0.05", "run.chunk_days=0.05",
-                "run.save_interval=0.05",
+                # Its length must be a whole number of the dycore's 900 s
+                # steps (Model.run rejects any other save interval), so six
+                # steps: 0.0625 d = 5400 s.
+                "run.total_time=0.0625", "run.chunk_days=0.0625",
+                "run.save_interval=0.0625",
                 f"run.output_prefix={tmpdir}/deleg",
                 f"run.checkpoint_path={tmpdir}/deleg.ckpt",
             ])
             self.assertIsNone(cfg.run.time_step)   # the point of the config
             reports = run(cfg)
 
-            # Everything the crash happened BETWEEN: the integration finished,
-            # so the chunk must have reached disk and the checkpoint written.
+            # Everything the crash happened BETWEEN: the integration finished
+            # and passed its health check, so the checkpoint, the pending
+            # month that pairs with it, and the month flushed at the end of
+            # the run must all be on disk.
             self.assertIsInstance(reports, list)
             self.assertGreaterEqual(len(reports), 1)
             self.assertTrue(reports[0]["ok"], reports[0].get("reasons"))
-            self.assertTrue(list(Path(tmpdir).glob("deleg_day*.nc")))
             self.assertTrue(Path(f"{tmpdir}/deleg.ckpt").exists())
+            self.assertTrue(Path(f"{tmpdir}/deleg.ckpt.monthly").exists())
+            self.assertEqual(
+                [p.name for p in Path(tmpdir).glob("deleg_monthly_*.nc")],
+                ["deleg_monthly_2000-01.nc"])
+            self.assertFalse(list(Path(tmpdir).glob("deleg_day*.nc")))
 
     def test_dinosaur_default_unchanged(self):
         from jcm.dycore.dinosaur.dycore import DinosaurDycore
