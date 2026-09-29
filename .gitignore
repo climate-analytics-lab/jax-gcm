@@ -31,6 +31,8 @@ jcm/outputs
 *.json
 # Packaged mirror manifest (the resolver's data-driven availability table)
 !jcm/data/mirror_manifest.json
+# ECHAM Fortran reference test data: provenance and the known-gaps table
+!jcm/data/test/echam_cloud_reference/*.json
 *.png
 outputs/
 runs/
