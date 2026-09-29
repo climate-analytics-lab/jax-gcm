@@ -451,15 +451,12 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     whole model. The radiation is the idealized grey two-stream
     (``idealized_echam_physics``), so what this pins is the ECHAM moist
     physics' ledgers and equilibrium under a simple radiative driver, not the
-    radiative equilibrium of ECHAM physics. The same column with RRTMGP goes
-    non-finite on day 48. Its 1 Pa layer cools below the 160 K bottom of
-    RRTMGP's temperature tables, where jax-rrtmgp reflects the table
-    (jax-rrtmgp#39): cooling grows as the layer cools, the layer runs away to
-    35.6 K and the microphysics returns NaN. With that lookup extrapolating
-    linearly the RRTMGP column stays finite, but it is not yet an equilibrium
-    this test could pin. Over days 40-80 it is overcast, the atmosphere's net
-    radiative cooling is ~4 W/m², precipitation is 0.6 of evaporation, and
-    column water is still rising 0.16 mm/d (#920). Humidity is prognostic
+    radiative equilibrium of ECHAM physics. The same column with RRTMGP
+    stays finite, its 1 Pa layer settling at 160.2 K, the cold edge of
+    RRTMGP's temperature tables. It is not yet an equilibrium this test could
+    pin: over days 40-80 it is overcast, the atmosphere's net radiative
+    cooling is ~4 W/m², precipitation is 0.6 of evaporation, and column water
+    is still rising 0.17 mm/d (#920). Humidity is prognostic
     (the surface evaporation supplies it; the fixed-RH closure is
     incompatible with the model's own moisture physics).
 

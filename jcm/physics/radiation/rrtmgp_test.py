@@ -6,6 +6,8 @@ to verify structural correctness and reasonable agreement.
 Date: 2025-08-01
 """
 
+from importlib.metadata import version as _installed_version
+
 import pytest
 import jax
 import numpy as np
@@ -28,6 +30,22 @@ from jcm.physics.radiation.grey_two_stream.radiation_scheme_test import (
     calculate_air_density,
     calculate_layer_thickness,
 )
+
+
+def _release(version_string):
+    """Leading numeric components of a version string, as a tuple."""
+    parts = []
+    for part in version_string.split("."):
+        if not part.isdigit():
+            break
+        parts.append(int(part))
+    return tuple(parts)
+
+
+# Releases up to 0.4.0 reflect a lookup below a table's first point about
+# that point; later ones extend the table linearly.
+_JAX_RRTMGP_REFLECTS_BELOW_TABLE = (
+    _release(_installed_version("jax-rrtmgp")) <= (0, 4, 0))
 
 
 def _make_inputs(nlev=10):
@@ -1084,16 +1102,14 @@ class TestRRTMGPColdLayerEmission:
 
     Emission falls with temperature, so an optically thin layer that is
     colder emits less and cools less. RRTMGP's gas-optics and Planck tables
-    span 160-355 K. A layer that stays in that range behaves physically. A
-    layer colder than 160 K is looked up by jax-rrtmgp's
-    ``create_linear_interpolant``, which reflects the table about its first
-    point (jax-rrtmgp#39): a 150 K layer gets the Planck source and
-    absorption of a 170 K layer, so its cooling grows as it cools. That is
-    the mechanism that takes the whole-model RRTMGP RCE column's 1 Pa layer
-    from 160 K to 35.6 K by day 48 and then to NaN (#920). The reference
-    kernels do not reflect: RRTMGP rejects out-of-range temperatures, and
-    RRTMG as ECHAM6 runs it (``mo_lrtm_driver.f90::planckFunction``,
-    ``mo_rrtm_coeffs.f90``) extrapolates linearly.
+    span 160-355 K, and radiative cooling can take a thin model-top layer to
+    that edge. Below it jax-rrtmgp extends the absorption coefficients and
+    the Planck source linearly along the first table interval, floored at
+    zero, as RRTMGP's kernels and the RRTMG that ECHAM6 runs do
+    (``mo_gas_optics_rrtmgp_kernels.F90``;
+    ``mo_lrtm_driver.f90::planckFunction``, ``mo_rrtm_coeffs.f90``). The
+    response therefore keeps its physical sign across the edge, which is
+    what holds the layer there instead of letting it run away.
     """
 
     def _top_lw_heating(self, top_temperature):
@@ -1112,20 +1128,22 @@ class TestRRTMGPColdLayerEmission:
         # Inside the table the response has the physical sign.
         assert self._top_lw_heating(170.0) > self._top_lw_heating(190.0)
 
-    # ``raises=AssertionError``: only the mirrored lookup's wrong sign is the
-    # expected failure. An exception from the cold call (a library that
-    # rejects sub-160 K input, or an unrelated regression) fails the test.
+    # jax-rrtmgp 0.4.0 and earlier reflect the table about its first point
+    # below 160 K, which gives the opposite sign. jcm's requirement still
+    # admits 0.4.0, so there the test is a strict expected failure:
+    # ``raises=AssertionError`` admits only that wrong sign, and an exception
+    # from the cold call fails the test. The condition reads the installed
+    # version, so a source install that carries the newer lookup but still
+    # reports 0.4.0 needs ``--runxfail``.
     @pytest.mark.xfail(
+        condition=_JAX_RRTMGP_REFLECTS_BELOW_TABLE,
         strict=True,
         raises=AssertionError,
-        reason="jax-rrtmgp mirrors the temperature tables below 160 K "
-               "(climate-analytics-lab/jax-rrtmgp#39); remove this marker "
-               "when jcm pins a jax-rrtmgp release that fixes it",
+        reason="jax-rrtmgp <= 0.4.0 reflects the temperature tables below "
+               "160 K instead of extending them",
     )
     def test_below_table_cooling_weakens_as_the_layer_cools(self):
-        # A 150 K layer must cool less than a 160 K one. Under the mirrored
-        # lookup it cools exactly as much as a 170 K layer (more than at
-        # 160 K), which is the runaway.
+        # A 150 K layer must cool less than a 160 K one.
         assert self._top_lw_heating(150.0) > self._top_lw_heating(160.0)
 
 
