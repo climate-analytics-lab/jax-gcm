@@ -233,5 +233,5 @@ process to 12.7 GB, alone as well as in the full selection (measured on a
 workstation, 2026-09-29). The next heaviest, the pySES coupled-ECHAM smokes,
 leave the process at 5-6.5 GB. A second xdist worker running one of those
 beside that compile would take the 16 GB runner past its ceiling, so the job
-does not use xdist. Serially the selection took 13 minutes on the
-workstation.
+does not use xdist. Serially the selection takes about 10 minutes of test
+time on the CI runner (13 on the workstation).

@@ -247,7 +247,7 @@ jobs:
   # Single process, like the slow shards and for the same reason: the pySES
   # delegating-config chunk (`hydra_config_test`) peaks at ~12.7 GB compiling
   # the production CAM-SE step, which leaves no room for a second worker on
-  # the 16 GB runner. Serial it took 13 min on a workstation (2026-09-29).
+  # the 16 GB runner.
   #
   # Cancellation is the same as the slow jobs': it hangs off `lint`, runs in
   # parallel with the suites, and a fast-suite failure cancels the run with it,
@@ -256,9 +256,9 @@ jobs:
   extras-tests:
     needs: lint
     runs-on: ubuntu-latest
-    # ~13 min serial on a workstation, ~40 expected here at the usual ~3x,
-    # plus setup; 80 is twice that.
-    timeout-minutes: 80
+    # First green run (PR #952): 11 min, of which 10 min of tests and under a
+    # minute of setup. 30 leaves the headroom of the other jobs' timeouts.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v3
       - uses: ./.github/actions/setup-jcm
