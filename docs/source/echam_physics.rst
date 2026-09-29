@@ -346,19 +346,19 @@ diffusion term (column-mode tests, dry dynamical-core runs).
 Cloud Cover
 ^^^^^^^^^^^
 
-**Type**: Diagnostic cloud cover scheme based on Sundqvist et al. (1989)
+**Type**: ECHAM6.3's diagnostic cloud cover, ``mo_cover.f90::cover`` (Sundqvist et al. 1989; Lohmann and Roeckner 1996)
 
-**Description**: Diagnoses cloud fraction from relative humidity using a threshold-based approach. Cloud fraction increases from zero at a critical relative humidity to full cover at saturation.
+**Description**: Diagnoses cloud cover from relative humidity: zero at or below a critical relative humidity, full at saturation, ``1 - sqrt(1 - b0)`` in between, with ECHAM's stratocumulus enhancement at a low-level inversion over ice-free ocean. The values are ECHAM's, checked column by column against the ECHAM Fortran; the derivatives of the clip and of the inversion test are those of smooth surrogates. See :doc:`science/clouds_microphysics` for the formulation, the vapour-pressure switch and the time level.
 
 **Key Features**:
 
-- RH-based diagnostic cloud fraction
-- Critical RH varies with height (lower threshold at top of atmosphere, higher near surface)
-- Power-law interpolation between surface and TOA thresholds
-- Mixed-phase partitioning between liquid and ice based on temperature
-- Separate treatment above and below freezing
+- Critical relative humidity ``crt + (crs - crt)·exp(1 - (p_s/p)^nex)``
+- Saturation over ice or water by ECHAM's ``lo2`` rule (ice below ``t_ice``, or below 0 °C where cloud ice exceeds ``csecfrl``)
+- ECHAM's inversion search between its levels ``jbmin`` and the surface, computed from the model's own vertical grid
+- No stratospheric cutoff, as in ECHAM
+- Resolution-dependent defaults for ``crt``, ``crs``, ``nex``, ``nadd``, ``csatsc``, ``cinv`` and ``csecfrl`` (ECHAM's table, interpolated between its truncations; built by ``echam_physics(coords=...)``)
 
-**Configurable Parameters** (:py:class:`CloudParameters`):
+**Configurable Parameters** (:py:class:`~jcm.physics.clouds.sundqvist.CloudParameters`; T63 defaults shown):
 
 .. list-table::
    :header-rows: 1
@@ -366,26 +366,34 @@ Cloud Cover
 
    * - Parameter
      - Description
-     - Default
+     - Default (T63)
    * - ``crt``
-     - Critical RH aloft for cloud formation
+     - Critical RH aloft
      - 0.75
    * - ``crs``
-     - Critical RH near the surface for cloud formation
+     - Critical RH at the surface
      - 0.975
    * - ``nex``
-     - Exponent for the ECHAM ``mo_cover`` RH profile
+     - Exponent of the critical-RH profile
      - 2.0
-   * - ``t_ice``
-     - Temperature for pure ice phase (K)
-     - 238.15
    * - ``csatsc``
-     - Saturation factor for stratocumulus
+     - Stratocumulus saturation factor at an inversion
      - 0.7
-
-.. admonition:: Gap vs. ICON-A
-
-   ICON-A uses the Sundqvist et al. (1989) scheme with additional tuning for the representation of marine stratocumulus and Arctic low clouds. The JAX-GCM implementation captures the core RH-based diagnostic but may lack some of the refined tuning parameters.
+   * - ``cinv``
+     - Inversion stability threshold, as a fraction of the dry adiabatic lapse rate
+     - 0.25
+   * - ``csecfrl``
+     - Cloud ice [kg/kg] above which ice saturation applies below 0 °C
+     - 5e-6
+   * - ``t_ice``
+     - Homogeneous-freezing temperature ``cthomi`` (K)
+     - 238.15
+   * - ``nadd`` (static)
+     - Extra levels below the inversion that are enhanced
+     - 0
+   * - ``smooth_b0``, ``smooth_inv_thr`` (static)
+     - Widths of the derivative surrogates (0 selects the reference derivative)
+     - 0.02, 2e-4 K/m
 
 
 Cloud Microphysics

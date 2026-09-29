@@ -899,12 +899,11 @@ def cloud_microphysics_2m(
     # sets cf = clip(RH, 0.01, 1) wherever a clear cell has any condensation
     # or deposition — is a second, RH-based cloud-cover closure, and
     # ``SundqvistCloudFraction`` is the one this stack uses. Publishing the
-    # raw value substitutes it: an ice-supersaturated stratospheric column
-    # above ``cloud_top_pressure_pa``, which Sundqvist deliberately reports
-    # as cloud-free, comes back overcast (cf = 1) on ~1e-6 kg/kg of ice, and
-    # COSP, AeroCom and the JAM cloud-borne / aqueous / wetdep terms all read
-    # it. Clipping to the incoming cover keeps the emptying behaviour and
-    # drops the closure substitution.
+    # raw value substitutes it: a clear cell (cover exactly 0, below the
+    # critical humidity) with a trace of ice deposition comes back with
+    # cf = clip(RH, 0.01, 1), and COSP, AeroCom and the JAM cloud-borne /
+    # aqueous / wetdep terms all read it. Clipping to the incoming cover
+    # keeps the emptying behaviour and drops the closure substitution.
     cloud_fraction_final = jnp.minimum(cloud_fraction_final, cloud_fraction_in)
 
     # update_tendencies' tracer_tendency_{cdnc,icnc} is already in per-kg-
