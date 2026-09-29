@@ -29,10 +29,14 @@ from jcm.terrain import TerrainData
 
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
+    air_dynamic_viscosity,
+    ice_fall_speed_air_density_factor,
     ice_volume_mean_radius,
+    ice_volume_mean_radius_schumann,
     latent_heat_over_cp,
     minimum_CDNC,
     threshold_vert_vel,
+    turbulent_updraft_velocity,
 )
 from .types import MicrophysicsTendencies_2M, ScavengingLedger
 from .sedimentation_melt import melting_snow_and_ice, sedimentation_ice
@@ -160,7 +164,7 @@ def cloud_microphysics_2m(
     The large-scale vertical velocity is not plumbed to this scheme yet:
     ECHAM's ``zvervx`` (updraft for the WBF gate) uses only the TKE term
     here, and the ``knvb``/``lonacc`` inversion-level exception on
-    ``zauloc`` is omitted (it needs ``pvervel``) — tracked in #705.
+    ``zauloc`` is omitted (it needs ``pvervel``) — listed in #941.
 
     qnc / qni are stored per kg of air; the scheme interior uses per-m^3,
     so we convert at the boundary.
@@ -304,20 +308,26 @@ def cloud_microphysics_2m(
     bergeron_eta = (zeta_a / zeta_b * zeta_c
                     * 4.0 * pi * params.crhoi * params.cap * inv_rho)
 
-    # Updraft velocity [cm/s] from TKE (ECHAM zvervx; the large-scale
-    # vertical-velocity contribution is not plumbed yet).
-    updraft_velocity = params.fact_tke * jnp.sqrt(
-        jnp.maximum(2.0 * tke, 0.0)) * 100.0
+    # Updraft velocity [cm/s] of the Wegener-Bergeron-Findeisen and phase
+    # (lo2) criteria, ECHAM zvervx (mo_cloud_micro_2m.f90:814-816):
+    #   zvervx = −100·ω/(g·ρ) + 100·fact_tke·sqrt(TKE),
+    # with the turbulent term zeroed at the lowest level (line 815). The
+    # large-scale term −100·ω/(g·ρ) needs the pressure velocity, which is
+    # not plumbed to this scheme (#941); it is the term to add here.
+    updraft_velocity = turbulent_updraft_velocity(tke, params)
 
-    # Dynamic viscosity of air (ECHAM zviscos, Pruppacher & Klett 13-18a).
-    dynamic_viscosity = 4.1867e-3 * (
-        5.69 + 0.017 * (temperature_m1 - c.tmelt))
+    # Dynamic viscosity of air for the snow Reynolds number in riming,
+    # ECHAM pviscos (mo_cloud_utils.f90::get_util_var, line 132).
+    dynamic_viscosity = air_dynamic_viscosity(temperature_m1)
 
     # Geometry / density helpers.
     pressure_thickness = air_density * params.grav * layer_thickness
     dp_over_g = pressure_thickness * c.rgrav
     zqrho = 1.3 * inv_rho                      # ECHAM zqrho = 1.3/ρ
-    air_density_correction = zqrho ** 0.4      # ECHAM zaaa
+    # Ice fall-speed air-density factor, ECHAM paaa
+    # (mo_cloud_utils.f90::get_util_var, line 129).
+    air_density_correction = ice_fall_speed_air_density_factor(
+        pressure, temperature_m1)
     melt_mask = temperature_m1 > params.tmelt  # ECHAM ll_mlt (ptm1)
 
     # Heterogeneous mixed-phase INP [1/m³]: prefer the online JAM source
@@ -446,12 +456,16 @@ def cloud_microphysics_2m(
 
         # --- Phase decision lo2 (ECHAM section 4 end) ------------------
         # Ice-vs-liquid regime from the Korolev/Mazin threshold updraft,
-        # computed on the post-sedimentation ice. ``zrice`` is the
-        # volume-mean radius in METRES (ECHAM prid); the shared helper
-        # carries the clip + Schumann conversion so this copy cannot
-        # drift from precip.py / deposition_freezing.py (#725).
+        # computed on the post-sedimentation ice. ``zrice`` is ECHAM's
+        # volume-mean radius for this threshold (0.9·r_eff, line 1288), in
+        # METRES; the shared helper is also what deposition_freezing.py
+        # and the WBF gate below use, so the three decisions cannot drift.
         ice_gm3 = 1000.0 * zxip1 * rho_k / cf_safe
-        zrice = ice_volume_mean_radius(ice_gm3, icnc_melt, params)
+        zrice = ice_volume_mean_radius_schumann(ice_gm3, icnc_melt, params)
+        # Radius update_in_cloud_water inverts to diagnose ICNC (``prid``).
+        # jcm uses the plate radius of the existing ice here; ECHAM passes
+        # its temperature-parameterised zrid (lines 945-956), #941.
+        prid_radius = ice_volume_mean_radius(ice_gm3, icnc_melt, params)
         zvervmax = threshold_vert_vel(
             sat_vap_pres_water=esw_k, sat_vap_pres_ice=esi_k,
             icnc=icnc_melt, ice_radius=zrice, eta=eta_k, params=params)
@@ -534,7 +548,7 @@ def cloud_microphysics_2m(
             inp_dep_k,          # newly_formed_ice: cirrus dep-INP (#494)
             zqp1tmp, zqsp1tmp,
             rho_k,
-            zrice,              # prid: volume-mean ice radius [m]
+            prid_radius,        # prid: volume-mean ice radius [m]
             t_m1_k,             # ptm1 (activation gates on step-start T)
             ll_cc,
             icnc_melt,
@@ -598,7 +612,8 @@ def cloud_microphysics_2m(
         # post-freezing in-cloud ice (ECHAM 1580-1594).
         # ``zxib`` is already in-cloud, so no cloud-fraction division here.
         ice_gm3_wbf = 1000.0 * zxib * rho_k
-        zrice_wbf = ice_volume_mean_radius(ice_gm3_wbf, icnc_het, params)
+        zrice_wbf = ice_volume_mean_radius_schumann(
+            ice_gm3_wbf, icnc_het, params)
         zvervmax_wbf = threshold_vert_vel(
             sat_vap_pres_water=esw_k, sat_vap_pres_ice=esi_k,
             icnc=icnc_het, ice_radius=zrice_wbf, eta=eta_k, params=params)

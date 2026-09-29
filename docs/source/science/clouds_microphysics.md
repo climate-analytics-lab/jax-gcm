@@ -56,6 +56,42 @@ humidity — ECHAM's ``zlvdcp = alv/pcair`` / ``zlsdcp = als/pcair``
 condensation event by ``vtmpc2·q`` (~1.5 % in the moist tropics); the column
 enthalpy budget closes against this same moist ``cp``.
 
+The 2M scheme's utility fields are ECHAM's, shared through ``cloud_utils``:
+
+- **Viscosity of air** in the snow Reynolds number of riming,
+  ``pviscos = (1.512 + 0.0052·(T − 233.15))·10⁻⁵`` kg m⁻¹ s⁻¹ at the step-start
+  temperature (``mo_cloud_utils.f90::get_util_var``, line 132;
+  ``air_dynamic_viscosity``). It puts the Reynolds number of the 447 µm planar
+  flake at about 15–30 through the troposphere, and the collection efficiency
+  of 10–20 µm droplets at about 0.8 (``precip.riming_collection_efficiency``,
+  ``mo_cloud_micro_2m.f90::precip_formation_cold``, lines 3198–3250; Lohmann
+  2004). The thermal conductivity of air ``zkair`` (line 715) is a different
+  quantity; it enters only the diffusional-growth factors.
+- **Ice fall-speed air-density factor**
+  ``paaa = (p/30000)^−0.178·(T/233)^−0.394`` (``get_util_var``, line 129;
+  Heymsfield & Iaquinta 2000; ``ice_fall_speed_air_density_factor``), 1 at
+  300 hPa and 233 K, scaling the sedimentation speed of ice mass and number
+  alike (``sedimentation_ice``, ``mo_cloud_micro_2m.f90`` line 2224).
+- **Turbulent updraft** of the phase choice ``lo2`` and the
+  Wegener–Bergeron–Findeisen gate, ``100·fact_tke·√TKE`` cm s⁻¹ with
+  ``fact_tke = 0.7``, zero at the lowest level (``mo_cloud_micro_2m.f90``
+  lines 814–815; ``turbulent_updraft_velocity``). ECHAM's ``zvervx`` adds the
+  large-scale ``−100·ω/(g·ρ)`` (line 816), which is not plumbed to the scheme
+  (#941).
+- **Volume-mean ice radius of the WBF threshold** ``0.9·r_eff``
+  (``conv_effr2mvr``; ``effective_2_volmean_radius_param_Schuman_2011``, lines
+  4059–4085; ``ice_volume_mean_radius_schumann``), with ``r_eff`` the
+  Lohmann (2008) effective radius clipped to 10–150 µm. ECHAM uses it at every
+  threshold-velocity decision; jcm ports three of them — section 4 (line
+  1288), the section-5 supersaturation correction (line 2374) and the WBF gate
+  (line 1582). The fourth, ECHAM's phase split of convective detrainment
+  (``lo2_2d``, lines 872–885), has no counterpart: the Tiedtke scheme splits
+  detrained condensate at ``tmelt`` (#941). Aggregation uses the plate radius
+  ``zrih = −2261 + √(5113188 + 2809·r_eff³)`` µm³ (``ice_volume_mean_radius``,
+  lines 3160–3166), as ECHAM does. The ICNC diagnosis (``prid`` in
+  ``update_in_cloud_water``) also uses ``zrih`` of the existing ice, where
+  ECHAM passes a temperature-parameterised radius (lines 945–956; #941).
+
 Cloud parameters are ``flax.struct.dataclass`` leaves (differentiable), threaded
 through the scheme via ``nnx.Param``; only genuine code-path switches
 (``nic_cirrus``, ``ldyn_cdnc_min``) are static aux.

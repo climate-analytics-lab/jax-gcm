@@ -453,6 +453,92 @@ def precip_formation_warm(
             autoconversion_rate, droplet_number_removal_rate,
             autoconversion_only, accretion_only)
 
+def riming_collection_efficiency(
+    riming_mask: jnp.ndarray,               # ll2 (cells where riming runs)
+    air_density: jnp.ndarray,               # prho [kg/m^3]
+    inverse_air_density_rcp: jnp.ndarray,   # prho_rcp [m^3/kg]
+    in_cloud_liquid: jnp.ndarray,           # pxlb [kg/kg]
+    droplet_number: jnp.ndarray,            # pcdnc [1/m^3]
+    dynamic_viscosity: jnp.ndarray,         # pviscos [kg/m/s]
+    params: CloudParams2M,
+) -> jnp.ndarray:
+    """Return the collection efficiency ``zcsacl`` of droplets by snow flakes.
+
+    ECHAM ``precip_formation_cold`` (``mo_cloud_micro_2m.f90:3198-3250``,
+    Lohmann 2004, *J. Atmos. Sci.* 61): the droplet (``zudrop``) and snow
+    (``zusnow``, constant 447 µm maximum dimension) fall speeds give the
+    Stokes number; the snow Reynolds number
+    ``zrey = ρ·d_planar·u_snow/pviscos`` selects the critical Stokes number
+    and the fit. ``dynamic_viscosity`` must be the viscosity of air, ECHAM's
+    ``pviscos`` (:func:`jcm.physics.clouds.cloud_utils.air_dynamic_viscosity`,
+    ~1.6e-5 kg/m/s), which puts ``zrey`` at about 15-30 between 900 and
+    300 hPa (the ``5 < zrey < 40`` fit). The result is clipped to
+    ``[0.01, 1]``; it is meaningful only where ``riming_mask`` holds (the
+    caller zeroes it elsewhere).
+    """
+    # droplet mean radius proxy (zdw). Double-where guard: the cube root has
+    # an infinite derivative when in_cloud_liquid == 0, and everything
+    # downstream of zdw (zcsacl) is where-masked on riming_mask — safe base
+    # 1.0 in the masked region keeps forward values unchanged and gradients
+    # finite.
+    zdw_base = jnp.where(
+        riming_mask,
+        6.0 * params.pirho_rcp * air_density * in_cloud_liquid / jnp.maximum(droplet_number, params.eps),
+        1.0,
+    )
+    zdw = zdw_base ** (1.0 / 3.0)
+    zdw = jnp.maximum(zdw, 1.0e-6)
+
+    zudrop = 1.19e4 * 2500.0 * zdw**2 * (1.3 * inverse_air_density_rcp) ** 0.35
+
+    # planar snowflake max dimension (constant)
+    zdplanar = 447.0e-6
+
+    zusnow = 2.34 * jnp.maximum(100.0 * zdplanar, 1.0e-30) ** 0.3 * (1.3 * inverse_air_density_rcp) ** 0.35
+
+    zstokes = 2.0 * c.rgrav * (zusnow - zudrop) * zudrop / zdplanar
+    # Floors are PHYSICAL minima, not cqtmin = 1e-12: the collection-
+    # efficiency curves below take log10(zstokes) and zrey**(-1.12), whose
+    # derivatives at a 1e-12 floor reach ~1e12 inside the selected branch
+    # (real cells with small droplets land there) and compound through the
+    # adjoint. A Stokes number below 1e-3 or a snow Reynolds number below
+    # 1e-2 means no collection on any physical fit's domain, so the floors
+    # only bound slopes the fits were never valid for.
+    zstokes = jnp.maximum(zstokes, 1.0e-3)
+
+    zrey = air_density * zdplanar * zusnow / jnp.maximum(dynamic_viscosity, params.eps)
+    zrey = jnp.maximum(zrey, 1.0e-2)
+
+    ll3 = zrey <= 5.0
+    ll4 = jnp.logical_and(zrey > 5.0, zrey < 40.0)
+    ll5 = zrey >= 40.0
+
+    zstcrit = jnp.ones_like(zrey)
+    zstcrit = jnp.where(ll3, 5.52 * zrey ** (-1.12), zstcrit)
+    zstcrit = jnp.where(ll4, 1.53 * zrey ** (-0.325), zstcrit)
+
+    zcsacl = 0.2 * (jnp.log10(zstokes) - jnp.log10(zstcrit) - 2.236) ** 2
+    zcsacl = jnp.minimum(zcsacl, 1.0 - params.cqtmin)
+    zcsacl = jnp.maximum(zcsacl, 0.0)
+    # 1e-4 floor (efficiency capped at ~0.995), not 1e-30: sqrt at the old
+    # floor has slope 5e14 on the SELECTED branch when the fit saturates,
+    # another per-call adjoint amplifier for no physical content.
+    zcsacl = jnp.sqrt(jnp.maximum(1.0 - zcsacl, 1.0e-4))
+
+    ll6 = jnp.logical_and(ll5, zstokes <= 0.06)
+    ll7 = jnp.logical_and(ll5, jnp.logical_and(zstokes > 0.06, zstokes <= 0.25))
+    ll8 = jnp.logical_and(ll5, jnp.logical_and(zstokes > 0.25, zstokes <= 1.00))
+
+    zcsacl = jnp.where(ll5, (zstokes + 1.1) ** 2 / (zstokes + 1.6) ** 2, zcsacl)
+    zcsacl = jnp.where(ll6, 1.034 * zstokes ** 1.085, zcsacl)
+    zcsacl = jnp.where(ll7, 0.787 * zstokes ** 0.988, zcsacl)
+    zcsacl = jnp.where(ll8, 0.7475 * jnp.log10(zstokes) + 0.65, zcsacl)
+
+    zcsacl = jnp.clip(zcsacl, 0.01, 1.0)
+
+    return zcsacl
+
+
 def precip_formation_cold(
     cloud_mask: jnp.ndarray,                      # ld_cc
     autoconversion_factor: jnp.ndarray,            # pauloc
@@ -580,64 +666,12 @@ def precip_formation_cold(
         ),
     )
 
-    # droplet mean radius proxy (zdw). Double-where guard: the cube root has
-    # an infinite derivative when in_cloud_liquid == 0, and everything
-    # downstream of zdw (zcsacl) is where-masked on ll2 — safe base 1.0 in
-    # the masked region keeps forward values unchanged and gradients finite.
-    zdw_base = jnp.where(
-        ll2,
-        6.0 * params.pirho_rcp * air_density * in_cloud_liquid / jnp.maximum(droplet_number, params.eps),
-        1.0,
+    # Collection efficiency of cloud droplets by planar snow flakes,
+    # from the Stokes and snow Reynolds numbers (Lohmann 2004).
+    zcsacl = riming_collection_efficiency(
+        ll2, air_density, inverse_air_density_rcp, in_cloud_liquid,
+        droplet_number, dynamic_viscosity, params,
     )
-    zdw = zdw_base ** (1.0 / 3.0)
-    zdw = jnp.maximum(zdw, 1.0e-6)
-
-    zudrop = 1.19e4 * 2500.0 * zdw**2 * (1.3 * inverse_air_density_rcp) ** 0.35
-
-    # planar snowflake max dimension (constant)
-    zdplanar = 447.0e-6
-
-    zusnow = 2.34 * jnp.maximum(100.0 * zdplanar, 1.0e-30) ** 0.3 * (1.3 * inverse_air_density_rcp) ** 0.35
-
-    zstokes = 2.0 * c.rgrav * (zusnow - zudrop) * zudrop / zdplanar
-    # Floors are PHYSICAL minima, not cqtmin = 1e-12: the collection-
-    # efficiency curves below take log10(zstokes) and zrey**(-1.12), whose
-    # derivatives at a 1e-12 floor reach ~1e12 inside the selected branch
-    # (real cells with small droplets land there) and compound through the
-    # adjoint. A Stokes number below 1e-3 or a snow Reynolds number below
-    # 1e-2 means no collection on any physical fit's domain, so the floors
-    # only bound slopes the fits were never valid for.
-    zstokes = jnp.maximum(zstokes, 1.0e-3)
-
-    zrey = air_density * zdplanar * zusnow / jnp.maximum(dynamic_viscosity, params.eps)
-    zrey = jnp.maximum(zrey, 1.0e-2)
-
-    ll3 = zrey <= 5.0
-    ll4 = jnp.logical_and(zrey > 5.0, zrey < 40.0)
-    ll5 = zrey >= 40.0
-
-    zstcrit = jnp.ones_like(zrey)
-    zstcrit = jnp.where(ll3, 5.52 * zrey ** (-1.12), zstcrit)
-    zstcrit = jnp.where(ll4, 1.53 * zrey ** (-0.325), zstcrit)
-
-    zcsacl = 0.2 * (jnp.log10(zstokes) - jnp.log10(zstcrit) - 2.236) ** 2
-    zcsacl = jnp.minimum(zcsacl, 1.0 - params.cqtmin)
-    zcsacl = jnp.maximum(zcsacl, 0.0)
-    # 1e-4 floor (efficiency capped at ~0.995), not 1e-30: sqrt at the old
-    # floor has slope 5e14 on the SELECTED branch when the fit saturates,
-    # another per-call adjoint amplifier for no physical content.
-    zcsacl = jnp.sqrt(jnp.maximum(1.0 - zcsacl, 1.0e-4))
-
-    ll6 = jnp.logical_and(ll5, zstokes <= 0.06)
-    ll7 = jnp.logical_and(ll5, jnp.logical_and(zstokes > 0.06, zstokes <= 0.25))
-    ll8 = jnp.logical_and(ll5, jnp.logical_and(zstokes > 0.25, zstokes <= 1.00))
-
-    zcsacl = jnp.where(ll5, (zstokes + 1.1) ** 2 / (zstokes + 1.6) ** 2, zcsacl)
-    zcsacl = jnp.where(ll6, 1.034 * zstokes ** 1.085, zcsacl)
-    zcsacl = jnp.where(ll7, 0.787 * zstokes ** 0.988, zcsacl)
-    zcsacl = jnp.where(ll8, 0.7475 * jnp.log10(zstokes) + 0.65, zcsacl)
-
-    zcsacl = jnp.clip(zcsacl, 0.01, 1.0)
     zcsacl = jnp.where(ll2, zcsacl, 0.0)
 
     # lambda_snow proxy and collection coefficient. Double-where guard on
