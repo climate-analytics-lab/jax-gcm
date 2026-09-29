@@ -38,6 +38,11 @@ from jcm.initial_states import (
 from jcm.model import Model, ModelPredictions
 from jcm.physics.physics_term import with_field_overrides
 from jcm.physics.radiation.band_config import RadiationBandConfig
+from jcm.physics.resolution_defaults import (
+    default_parameters,
+    defaults_flag_kwargs,
+    spectral_truncation,
+)
 from jcm.single_column_model import select_column
 from jcm.terrain import TerrainData
 from jcm.utils import get_coords
@@ -209,7 +214,7 @@ def _parameters_specs_from_init(term_cls) -> dict[str, type]:
     return specs
 
 
-def _build_term(term_name: str, term_entry: dict):
+def _build_term(term_name: str, term_entry: dict, truncation: int | None = 63):
     """Instantiate a single ``PhysicsTerm`` from a YAML term entry.
 
     Each ``cfg.physics.terms.<name>`` block names a term class via
@@ -221,6 +226,11 @@ def _build_term(term_name: str, term_entry: dict):
     other kwargs are passed through as plain ``__init__`` arguments
     (used by terms like ``UpperSponge`` that take primitive values
     rather than Parameters dataclasses).
+
+    A Parameters class with resolution-dependent defaults gets the defaults
+    for ``truncation`` (the run's grid) as the base of the overrides, and a
+    term that accepts ``params_are_defaults`` is told so, which lets its
+    ``cache_coords`` check the grid (:mod:`jcm.physics.resolution_defaults`).
     """
     from hydra.utils import get_class
 
@@ -236,10 +246,13 @@ def _build_term(term_name: str, term_entry: dict):
     init_kwargs: dict = {}
     for kwarg_name, params_cls in _parameters_specs_from_init(term_cls).items():
         # The same conversion the factory-built presets use (echam_physics),
-        # so both preset styles give an override identical semantics.
+        # so both preset styles give an override identical semantics: the
+        # base is the scheme's defaults for the run's grid.
         init_kwargs[kwarg_name] = with_field_overrides(
-            params_cls.default(), entry.pop(kwarg_name, None),
+            default_parameters(params_cls, truncation),
+            entry.pop(kwarg_name, None),
             scheme=f"physics.terms.{term_name}.{kwarg_name}")
+    init_kwargs.update(defaults_flag_kwargs(term_cls, True))
 
     # Anything left is a plain-kwarg pass-through (e.g. UpperSponge's
     # n_sponge_levels, sponge_timescale_s).
@@ -247,7 +260,7 @@ def _build_term(term_name: str, term_entry: dict):
     return term_cls(**init_kwargs)
 
 
-def build_physics(cfg: DictConfig):
+def build_physics(cfg: DictConfig, coords=None):
     r"""Build a ``ComposablePhysics`` from ``cfg.physics.terms``.
 
     ``cfg.physics.terms`` is an ordered mapping from term name to a
@@ -284,6 +297,11 @@ def build_physics(cfg: DictConfig):
     The factory applies the mapping on top of the ``Parameters`` object it
     would otherwise build, through the same conversion as the term-list
     path (:func:`~jcm.physics.physics_term.with_field_overrides`).
+
+    ``coords`` is the model grid when it is known before the physics (the
+    dinosaur path builds it first). Schemes with resolution-dependent
+    defaults then take the defaults for its truncation; without it they take
+    the T63 defaults (:mod:`jcm.physics.resolution_defaults`).
     """
     from omegaconf import OmegaConf
 
@@ -297,7 +315,7 @@ def build_physics(cfg: DictConfig):
     # configured without re-expressing that ordering as flat YAML.
     if physics_cfg.get("builder", None) is not None:
         return _build_physics_from_factory(
-            _resolve_nudging_dependent_physics(cfg, physics_cfg))
+            _resolve_nudging_dependent_physics(cfg, physics_cfg), coords)
 
     terms_raw = physics_cfg.get("terms", None)
     if terms_raw is None:
@@ -307,6 +325,7 @@ def build_physics(cfg: DictConfig):
             "subclass."
         )
     terms_cfg = OmegaConf.to_container(terms_raw, resolve=True) or {}
+    truncation = 63 if coords is None else spectral_truncation(coords)
 
     terms = []
     for term_name, term_entry in terms_cfg.items():
@@ -315,7 +334,7 @@ def build_physics(cfg: DictConfig):
             # an explicit ``null`` in the YAML — useful when inheriting
             # a default term list and dropping a term in the override.
             continue
-        terms.append(_build_term(term_name, term_entry))
+        terms.append(_build_term(term_name, term_entry, truncation))
 
     physics = ComposablePhysics(
         terms=terms,
@@ -360,7 +379,7 @@ def _resolve_nudging_dependent_physics(cfg, physics_cfg):
     return OmegaConf.merge(physics_cfg, {"jam_dust_nudged": enabled})
 
 
-def _build_physics_from_factory(physics_cfg):
+def _build_physics_from_factory(physics_cfg, coords=None):
     """Build physics by delegating to a factory named by ``physics.builder``.
 
     The factory keyword args present in the YAML are forwarded; keys the
@@ -396,6 +415,10 @@ def _build_physics_from_factory(physics_cfg):
         )
     kwargs = {k: v for k, v in cfg_dict.items()
               if k in accepted and v is not None}
+    # The grid, for the schemes whose defaults depend on the resolution; it
+    # is an object, not a config key, so it never comes from the YAML.
+    if coords is not None and "coords" in accepted:
+        kwargs["coords"] = coords
     return factory(**kwargs)
 
 
@@ -952,7 +975,7 @@ def build_model(cfg: DictConfig) -> Model:
         )
 
     coords = build_coords(cfg)
-    physics = build_physics(cfg)
+    physics = build_physics(cfg, coords)
     physics = maybe_add_sponge(physics, cfg)
     physics = maybe_add_nudging(physics, cfg, coords)
     terrain = build_terrain(cfg, coords)
@@ -2126,7 +2149,7 @@ def _run_prescribed(cfg: DictConfig, time_step_model: Model | None = None):
     dt_seconds = resolve_effective_time_step_seconds(cfg, time_step_model)
 
     coords = build_coords(cfg)
-    physics = build_physics(cfg)
+    physics = build_physics(cfg, coords)
     terrain = build_terrain(cfg, coords)
     forcing = build_forcing(cfg, coords)
     guard_emulator_ghg_forcing(physics, forcing)
@@ -2174,9 +2197,11 @@ def _run_scm(cfg: DictConfig, time_step_model: Model | None = None):
     dt_seconds = resolve_effective_time_step_seconds(cfg, time_step_model)
 
     _reject_full_mode_only_knobs(cfg)
-    physics = build_physics(cfg)
-    # Build coords just to grab the vertical coord; horizontal grid is unused.
+    # The configured grid: its vertical coordinate is the column's, and its
+    # truncation chooses the resolution-dependent parameter defaults, so the
+    # column runs with the parameters of the run it was taken from.
     coords = build_coords(cfg)
+    physics = build_physics(cfg, coords)
     # The SCM builds no ForcingData; pass None so the config-trap check runs in
     # its scm-aware branch (it reads run.mode=scm from cfg). In scm mode the
     # gridded-surface/transient/MACv2-weight traps are gated off and a JAM run
