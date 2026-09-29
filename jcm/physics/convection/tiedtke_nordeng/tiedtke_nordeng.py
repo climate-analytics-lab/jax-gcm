@@ -93,17 +93,18 @@ def initialize_convection(temperature: jnp.ndarray,
     mfu = jnp.zeros_like(temperature)
     mfd = jnp.zeros_like(temperature)
     
-    # Initialize convection diagnostics
-    # int32 EXPLICITLY: under jax x64 (the JAM configuration) a bare
-    # jnp.array(0) is int64, and the activation lax.cond then sees
-    # int64 (inactive state) vs int32 (active branch) ktype — a
-    # trace-time branch-type mismatch.
+    # Initialize convection diagnostics. The level indices and the type flag
+    # are int32 EXPLICITLY: a bare ``jnp.array(0)`` is int64 whenever
+    # ``jax_enable_x64`` is on (importing ``mam4_jax`` turns it on), and this
+    # state is the no-convection branch of the activation ``lax.cond``,
+    # whose other branch returns the int32 indices of the updraft scan.
     ktype = jnp.array(0, dtype=jnp.int32)  # No convection initially
-    kbase = jnp.array(nlev - 1)  # Surface level
-    ktop = jnp.array(0)   # Top level
-    
-    # Initialize precipitation
-    prate = jnp.array(0.0)
+    kbase = jnp.array(nlev - 1, dtype=jnp.int32)  # Surface level
+    ktop = jnp.array(0, dtype=jnp.int32)   # Top level
+
+    # Initialize precipitation (in the working float dtype, like the
+    # profiles above, rather than the x64-dependent default of 0.0).
+    prate = jnp.zeros((), dtype=jnp.result_type(temperature))
     
     return ConvectionState(
         tu=tu, qu=qu, lu=lu, uu=uu, vu=vu,
@@ -1348,8 +1349,9 @@ def _tiedtke_convection_toa_first(
             # not a flux).
             entr=updraft_state.entr,
             ktype=jnp.where(ldcum, type_final, 0).astype(jnp.int32),
-            kbase=jnp.array(base_final),
-            ktop=actual_ktop, prate=tendencies.precip_conv,
+            kbase=jnp.asarray(base_final, dtype=jnp.int32),
+            ktop=jnp.asarray(actual_ktop, dtype=jnp.int32),
+            prate=tendencies.precip_conv,
             entrain_up=updraft_state.dmfen,
             entrain_down=downdraft_state.dmfen,
         )
@@ -1380,22 +1382,25 @@ def _tiedtke_convection_toa_first(
         )
         return tendencies, state
     
-    # Apply convection if active. Both branches are pinned to the input
-    # temperature dtype: under jax_enable_x64 (float64 dycore, float32
-    # physics) a few float64 constants inside the full-convection branch
-    # promote dudt/dvdt/dqc_dt/dqi_dt, and lax.cond requires the branch
-    # output types to match exactly.
+    # Apply convection if active. lax.cond requires the two branches'
+    # output types to match exactly, and whether an untyped literal is 32-
+    # or 64-bit depends on ``jax_enable_x64``, so both branches are pinned
+    # to one dtype per kind: float leaves to the input temperature dtype
+    # (under x64 a few float64 constants inside the full-convection branch
+    # promote dudt/dvdt/dqc_dt/dqi_dt), integer leaves — the ktype/kbase/
+    # ktop indices — to int32, the index dtype the updraft scan produces.
+    def _pin_leaf(x):
+        if jnp.issubdtype(x.dtype, jnp.floating):
+            return x.astype(temperature.dtype)
+        if jnp.issubdtype(x.dtype, jnp.integer):
+            return x.astype(jnp.int32)
+        return x
+
     def _pin(fn):
         def wrapped():
             tend, st = fn()
-            tend = jax.tree.map(lambda x: x.astype(temperature.dtype), tend)
-            st = jax.tree.map(
-                lambda x: x.astype(temperature.dtype)
-                if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
-                else x,
-                st,
-            )
-            return tend, st
+            return (jax.tree.map(_pin_leaf, tend),
+                    jax.tree.map(_pin_leaf, st))
         return wrapped
 
     tendencies, updated_state = lax.cond(

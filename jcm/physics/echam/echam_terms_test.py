@@ -624,3 +624,96 @@ class TestRadiationReadsLaggedConvectionType(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _integer_leaves(tree):
+    """``{path: dtype}`` of every non-float array leaf of ``tree``."""
+    return {
+        jax.tree_util.keystr(path): leaf.dtype
+        for path, leaf in jax.tree_util.tree_flatten_with_path(tree)[0]
+        if hasattr(leaf, "dtype") and not jnp.issubdtype(leaf.dtype, jnp.floating)
+    }
+
+
+class TestSixtyFourBitMode(unittest.TestCase):
+    """The composed ECHAM package traces and steps with x64 on (#945).
+
+    ``jax_enable_x64`` is on whenever ``mam4_jax`` has been imported, and
+    pySES runs float32 physics under it. Every ``lax.cond`` / ``lax.switch``
+    / ``lax.scan`` in the package must then return identical dtypes from its
+    branches, which untyped literals (int64 / float64 under x64) break. The
+    flag is flipped only through the ``jax.enable_x64`` context manager, so
+    the process-global setting is left as found; ``mam4_jax`` is not
+    imported, so this runs in CI without the optional extra.
+    """
+
+    def _model(self, **physics_kwargs):
+        from jcm.model import Model
+        from jcm.physics.echam.echam_terms import echam_physics
+        coords = get_coords(np.linspace(0, 1, 9), spectral_truncation=21)
+        return Model(coords=coords, time_step=30,
+                     terrain=TerrainData.aquaplanet(coords),
+                     physics=echam_physics(**physics_kwargs))
+
+    def test_default_package_steps_with_int32_carry_indices(self):
+        with jax.enable_x64(True):
+            model = self._model()
+            pred = model.run(save_interval=1 / 48, total_time=1 / 48)
+            self.assertTrue(bool(jnp.all(jnp.isfinite(pred.dynamics.temperature))))
+            carry = model._final_physics_state
+            for leaf in jax.tree.leaves(carry):
+                if hasattr(leaf, "dtype") and jnp.issubdtype(leaf.dtype, jnp.inexact):
+                    self.assertTrue(bool(jnp.all(jnp.isfinite(leaf))))
+            ints = _integer_leaves(carry)
+            # The convection ktype / cloud_base / cloud_top and the
+            # radiation sub-cycle counter.
+            self.assertGreaterEqual(len(ints), 4)
+            for path, dtype in ints.items():
+                self.assertEqual(dtype, jnp.int32, path)
+
+    def _trace(self, state_dtype, **physics_kwargs):
+        """Trace one physics step at ``state_dtype`` with x64 on."""
+        with jax.enable_x64(True):
+            model = self._model(**physics_kwargs)
+            physics = model.physics
+            coords = model.coords
+            nodal = coords.horizontal.nodal_shape
+            shape_3d = (coords.nodal_shape[0],) + nodal
+            state = PhysicsState.zeros(shape_3d).copy(
+                temperature=jnp.full(shape_3d, 288.0),
+                normalized_surface_pressure=jnp.ones(nodal),
+                tracers={spec.name: jnp.zeros(shape_3d)
+                         for spec in physics.required_tracers()},
+            )
+            forcing = ForcingData.zeros(nodal)
+            for term in physics.terms:
+                forcing = term.augment_probe_forcing(forcing)
+
+            def cast(tree):
+                return jax.tree.map(
+                    lambda x: x.astype(state_dtype)
+                    if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
+                    else x, tree)
+
+            return jax.eval_shape(physics.compute_tendencies, cast(state),
+                                  cast(forcing), cast(model.terrain))
+
+    def _assert_traced(self, out, state_dtype):
+        for path, dtype in _integer_leaves(out).items():
+            self.assertEqual(dtype, jnp.int32, path)
+        # No float leaf escapes the working precision.
+        for leaf in jax.tree.leaves(out):
+            if jnp.issubdtype(leaf.dtype, jnp.floating):
+                self.assertEqual(leaf.dtype, state_dtype)
+
+    def test_float32_physics_under_x64_traces(self):
+        # pySES's physics_dtype=float32 mode.
+        self._assert_traced(self._trace(jnp.float32), jnp.float32)
+
+    def test_rrtmgp_aerosol_free_companion_traces_under_x64(self):
+        # The held-vs-solved ``*noa`` cond (aerosol_free_interval > 1).
+        for dtype in (jnp.float32, jnp.float64):
+            with self.subTest(dtype=dtype):
+                out = self._trace(dtype, radiation_scheme="rrtmgp",
+                                  aerosol_free_interval=2)
+                self._assert_traced(out, dtype)
