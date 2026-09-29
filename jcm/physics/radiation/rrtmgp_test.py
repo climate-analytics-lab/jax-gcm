@@ -1112,8 +1112,12 @@ class TestRRTMGPColdLayerEmission:
         # Inside the table the response has the physical sign.
         assert self._top_lw_heating(170.0) > self._top_lw_heating(190.0)
 
+    # ``raises=AssertionError``: only the mirrored lookup's wrong sign is the
+    # expected failure. An exception from the cold call (a library that
+    # rejects sub-160 K input, or an unrelated regression) fails the test.
     @pytest.mark.xfail(
         strict=True,
+        raises=AssertionError,
         reason="jax-rrtmgp mirrors the temperature tables below 160 K "
                "(climate-analytics-lab/jax-rrtmgp#39); remove this marker "
                "when jcm pins a jax-rrtmgp release that fixes it",
