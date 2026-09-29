@@ -952,9 +952,16 @@ def radiation_effective_radii(
     decided by the composition's tracers, so an override cannot switch a
     1-moment composition to the prognostic-number law.
     """
-    temperature = state.temperature if temperature is None else temperature
     pressure = diagnostics["pressure_full"]
-    air_density = diagnostics["air_density"]
+    if temperature is None:
+        temperature = state.temperature
+        air_density = diagnostics["air_density"]
+    else:
+        # The density of the overriding temperature, so the number tracers
+        # convert with the same p/(rd T) that ``echam_cloud_effective_radii``
+        # uses for the water content (``diagnostics["air_density"]`` is that
+        # law at the step-start temperature).
+        air_density = pressure / (c.rd * temperature)
     cw_in = in_cloud_condensate(cloud_water, cloud_fraction, eps=cld_frac_min)
     ci_in = in_cloud_condensate(cloud_ice, cloud_fraction, eps=cld_frac_min)
     prognostic = "qnc" in state.tracers and "qni" in state.tracers
