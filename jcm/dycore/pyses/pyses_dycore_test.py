@@ -5,7 +5,8 @@ non-lat/lon layout, tracer seeding, forward stepping) plus the developer
 prototype's self-checks (finite-top L47 grid, periodic interpolation, real
 geography, native nu_top sponge, bounded coupled steps).
 
-Skipped automatically when the optional ``pyses`` dependency is missing.
+Needs the optional ``pyses`` extra (``requires_extra``): skipped without it,
+and run by the ``extras-tests`` CI job, which installs it.
 Run on CPU: ``JAX_PLATFORMS=cpu pytest jcm/dycore/pyses -q``. The heavy
 dycore fixture (SE grid + USSA initial state, ~30 s) is built once per
 class; the coupled ECHAM smokes are ``@pytest.mark.slow``.
@@ -20,8 +21,6 @@ os.environ.setdefault("PYSES_USE_CPU", "1")
 import numpy as np
 import pytest
 
-pytest.importorskip("pyses")
-
 import jax.numpy as jnp
 
 from jcm.dycore import list_dycores
@@ -32,6 +31,8 @@ from jcm.dycore.pyses.interp import interp_grid_to_points
 from jcm.physics.echam.echam_coords import EchamCoords
 from jcm.physics.physics_term import TracerSpec
 from jcm.physics_interface import PhysicsState, PhysicsTendency
+
+pytestmark = pytest.mark.requires_extra("pyses")
 
 _T63_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "bc", "t63")
 T63_TERRAIN = os.path.abspath(os.path.join(_T63_DIR, "terrain.nc"))

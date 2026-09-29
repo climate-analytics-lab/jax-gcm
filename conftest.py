@@ -62,6 +62,28 @@ def _disable_gpu_preallocation():
 _disable_gpu_preallocation()
 
 
+def _register_optional_extras(config):
+    """Register the ``requires_extra`` plugin in ``tools/ci/optional_extras.py``.
+
+    It owns the one sanctioned way a test gates on an optional extra and the
+    checks that keep such tests visible to the CI job that installs the
+    extras; see its module docstring. Loaded by path because ``tools/`` is
+    not a package, and registered from here so every session in this
+    repository, xdist workers included, runs under it.
+    """
+    import importlib.util
+
+    name = "jcm_optional_extras"
+    if config.pluginmanager.has_plugin(name):
+        return
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "tools", "ci", "optional_extras.py")
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    config.pluginmanager.register(module, name)
+
+
 def pytest_configure(config):
     """Record the session's starting global config (#729, #815).
 
@@ -72,6 +94,7 @@ def pytest_configure(config):
     the baseline meant to detect it.
     """
     _disable_gpu_preallocation()
+    _register_optional_extras(config)
 
     global _X64_BASELINE
     import jax
