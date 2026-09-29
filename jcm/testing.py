@@ -675,3 +675,83 @@ def check_gradients(f, args, *, rtol=None, atol=0.0, steps=DEFAULT_STEPS,
             ad, value, rtol=rtol, atol=atol,
             err_msg=(f"{name} disagrees with the central difference at "
                      f"eps={eps:.2e}"))
+
+
+def check_surrogate_gradient(f, exact, surrogate, args, *, seed=0,
+                             rtol=1e-6, atol=0.0, adjoint_rtol=1e-4):
+    """Check a function built by ``with_surrogate_gradient``.
+
+    Such a function deliberately fails ``check_gradients``'s difference
+    reference: its derivative is that of ``surrogate``, not of its own value
+    (``jcm.physics.surrogate_gradient``). What it has to satisfy instead is
+    checked here, along the same name-seeded direction ``check_gradients``
+    uses:
+
+    * its value equals ``exact``'s bit for bit;
+    * its jvp and its vjp equal ``surrogate``'s, leaf by leaf;
+    * every derivative is finite, and its two AD modes are adjoint.
+
+    Whether ``surrogate`` is a sensible stand-in for ``exact`` is a separate
+    question, answered by ``check_gradients(surrogate, ...)`` (a smooth
+    function has a converging difference reference) and by a test of the
+    distance between the two functions.
+
+    Args:
+        f: the wrapped function, called as ``f(*args)``.
+        exact: the reference formulation that defines the value.
+        surrogate: the smooth function that defines the derivatives.
+        args: tuple of arguments; any pytree.
+        seed: mixes into the per-leaf seeding, to check a second direction.
+        rtol: relative tolerance between ``f``'s and ``surrogate``'s
+            derivatives. They are the same computation, so this only absorbs
+            a different order of float32 operations under ``jit``.
+        atol: absolute tolerance for the same comparison.
+        adjoint_rtol: tolerance for jvp against vjp.
+
+    Raises:
+        AssertionError: if any of the three properties fails.
+
+    """
+    value = f(*args)
+    reference = exact(*args)
+    names = _leaf_names(value)
+    for name, got, want in zip(names, jax.tree.leaves(value),
+                               jax.tree.leaves(reference)):
+        np.testing.assert_array_equal(
+            np.asarray(got), np.asarray(want),
+            err_msg=f"{name}: value differs from the reference formulation")
+
+    tangent = _tangent(args, seed)
+    primal_out, vjp_fun = jax.vjp(f, *args)
+    _, jvp_out = jax.jvp(f, args, tangent)
+    _, surrogate_vjp = jax.vjp(surrogate, *args)
+    _, surrogate_jvp = jax.jvp(surrogate, args, tangent)
+    cotangent = _cotangent(primal_out, seed + 1)
+    input_grads = vjp_fun(cotangent)
+    surrogate_grads = surrogate_vjp(cotangent)
+
+    for name, got, want in zip(names, jax.tree.leaves(jvp_out),
+                               jax.tree.leaves(surrogate_jvp)):
+        if not _is_differentiable(got):
+            continue
+        assert np.all(np.isfinite(np.asarray(got))), (
+            f"{name}: jvp is not finite")
+        np.testing.assert_allclose(
+            np.asarray(got), np.asarray(want), rtol=rtol, atol=atol,
+            err_msg=f"{name}: jvp is not the surrogate's")
+    for name, got, want in zip(_leaf_names(args),
+                               jax.tree.leaves(input_grads),
+                               jax.tree.leaves(surrogate_grads)):
+        if not _is_differentiable(got):
+            continue
+        assert np.all(np.isfinite(np.asarray(got))), (
+            f"{name}: vjp is not finite")
+        np.testing.assert_allclose(
+            np.asarray(got), np.asarray(want), rtol=rtol, atol=atol,
+            err_msg=f"{name}: vjp is not the surrogate's")
+
+    forward = _inner_prod(jvp_out, cotangent)
+    reverse = _inner_prod(tangent, input_grads)
+    np.testing.assert_allclose(
+        forward, reverse, rtol=adjoint_rtol, atol=atol,
+        err_msg="jvp and vjp are not adjoint")
