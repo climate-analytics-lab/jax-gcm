@@ -44,6 +44,7 @@ from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 # keep working unchanged.
 from jcm.physics.convection.tiedtke_nordeng.types import (  # noqa: F401
     CONVECTION_OUTPUT_ATTRS,
+    INDEX_DTYPE,
     ConvectionData,
     ConvectionParameters,
     ConvectionState,
@@ -93,15 +94,14 @@ def initialize_convection(temperature: jnp.ndarray,
     mfu = jnp.zeros_like(temperature)
     mfd = jnp.zeros_like(temperature)
     
-    # Initialize convection diagnostics
-    # int32 EXPLICITLY: under jax x64 (the JAM configuration) a bare
-    # jnp.array(0) is int64, and the activation lax.cond then sees
-    # int64 (inactive state) vs int32 (active branch) ktype — a
-    # trace-time branch-type mismatch.
-    ktype = jnp.array(0, dtype=jnp.int32)  # No convection initially
-    kbase = jnp.array(nlev - 1)  # Surface level
-    ktop = jnp.array(0)   # Top level
-    
+    # Initialize convection diagnostics. Level indices are int32 explicitly:
+    # under jax x64 a bare ``jnp.array(0)`` is int64, while the active
+    # convection branch carries int32 indices, and the activation
+    # ``lax.cond`` requires both branches' output types to match exactly.
+    ktype = jnp.array(0, dtype=INDEX_DTYPE)  # No convection initially
+    kbase = jnp.array(nlev - 1, dtype=INDEX_DTYPE)  # Surface level
+    ktop = jnp.array(0, dtype=INDEX_DTYPE)   # Top level
+
     # Initialize precipitation
     prate = jnp.array(0.0)
     
@@ -1347,9 +1347,9 @@ def _tiedtke_convection_toa_first(
             # Fractional entrainment (1/m) is rescale-invariant (a rate,
             # not a flux).
             entr=updraft_state.entr,
-            ktype=jnp.where(ldcum, type_final, 0).astype(jnp.int32),
-            kbase=jnp.array(base_final),
-            ktop=actual_ktop, prate=tendencies.precip_conv,
+            ktype=jnp.where(ldcum, type_final, 0).astype(INDEX_DTYPE),
+            kbase=jnp.asarray(base_final).astype(INDEX_DTYPE),
+            ktop=actual_ktop.astype(INDEX_DTYPE), prate=tendencies.precip_conv,
             entrain_up=updraft_state.dmfen,
             entrain_down=downdraft_state.dmfen,
         )
@@ -1380,21 +1380,34 @@ def _tiedtke_convection_toa_first(
         )
         return tendencies, state
     
-    # Apply convection if active. Both branches are pinned to the input
-    # temperature dtype: under jax_enable_x64 (float64 dycore, float32
-    # physics) a few float64 constants inside the full-convection branch
-    # promote dudt/dvdt/dqc_dt/dqi_dt, and lax.cond requires the branch
-    # output types to match exactly.
+    # Apply convection if active. Both branches are pinned to a common
+    # dtype signature, because ``lax.cond`` requires the branch output types
+    # to match exactly:
+    #   * floating leaves take the input temperature dtype: under
+    #     jax_enable_x64 (float64 dycore, float32 physics) a few float64
+    #     constants inside the full-convection branch promote
+    #     dudt/dvdt/dqc_dt/dqi_dt;
+    #   * integer leaves (the ``ktype``/``kbase``/``ktop`` level indices)
+    #     take ``INDEX_DTYPE``: under x64 a Python-int-built index
+    #     (``jnp.array(0)``, ``jnp.arange``, ``argmax``) defaults to int64
+    #     while the scanned ascent carries int32.
+    # The state builders above already emit ``INDEX_DTYPE`` indices; this pin
+    # keeps the invariant local to the ``cond`` so an index produced by a
+    # future intermediate cannot reopen the mismatch.
+    def _pin_leaf(x):
+        if not hasattr(x, "dtype"):
+            return x
+        if jnp.issubdtype(x.dtype, jnp.floating):
+            return x.astype(temperature.dtype)
+        if jnp.issubdtype(x.dtype, jnp.integer):
+            return x.astype(INDEX_DTYPE)
+        return x
+
     def _pin(fn):
         def wrapped():
             tend, st = fn()
             tend = jax.tree.map(lambda x: x.astype(temperature.dtype), tend)
-            st = jax.tree.map(
-                lambda x: x.astype(temperature.dtype)
-                if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
-                else x,
-                st,
-            )
+            st = jax.tree.map(_pin_leaf, st)
             return tend, st
         return wrapped
 

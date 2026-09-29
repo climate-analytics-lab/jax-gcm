@@ -11,6 +11,13 @@ import jax.numpy as jnp
 from typing import NamedTuple
 import tree_math
 
+# Dtype of every level-index / type-code leaf a convection state carries
+# (``ktype``, ``kbase``, ``ktop``). Fixed rather than left to JAX's default
+# integer width, which is int64 under ``jax_enable_x64`` and int32 otherwise:
+# the index-producing paths (scan carries, ``argmax``, Python-int seeds)
+# would then disagree on dtype, and ``lax.cond`` branches must match exactly.
+INDEX_DTYPE = jnp.int32
+
 
 @tree_math.struct
 class ConvectionParameters:

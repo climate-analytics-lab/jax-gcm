@@ -777,6 +777,80 @@ def test_wrapper_publishes_mass_flux_ledger_for_tracer_transport():
     assert entrain.max() > 0.0
 
 
+class TestIndexDtypeUnderX64:
+    """The convection state's level indices are int32 in every x64 mode.
+
+    Under ``jax_enable_x64`` a Python-int-built index defaults to int64 while
+    the ascent scan carries int32, so the activation ``lax.cond`` that picks
+    between the full scheme and the inactive state saw two dtypes for
+    ``ktop`` and raised at trace time (#927). Importing ``veros`` flips x64
+    process-wide, so any ECHAM-composed model coupled to it hit this on
+    ``bootstrap_state``. ``jax.enable_x64`` is a scoped context, and the
+    root ``conftest.py`` additionally restores the session default after each
+    test, so nothing here leaks into other tests.
+    """
+
+    INDEX_FIELDS = ("ktype", "kbase", "ktop")
+
+    def _run(self, unstable, float_dtype):
+        atm = create_test_atmosphere(unstable=unstable)
+        atm = {k: v.astype(float_dtype) for k, v in atm.items()}
+        nlev = atm['temperature'].shape[0]
+        zeros = jnp.zeros(nlev, float_dtype)
+        # An unstable column also needs the moisture-convergence drivers for
+        # the scheme to classify it deep (see ``deep_convection_drivers``);
+        # without them it ties to shallow and stays inactive.
+        drivers = (
+            {k: v.astype(float_dtype)
+             for k, v in deep_convection_drivers(atm).items()}
+            if unstable else {}
+        )
+        return tiedtke_nordeng_convection(
+            atm['temperature'], atm['humidity'], atm['pressure'],
+            atm['layer_thickness'], atm['rho'],
+            atm['u_wind'], atm['v_wind'], zeros, zeros,
+            dt=3600.0, config=ConvectionParameters.default(), **drivers,
+        )
+
+    def test_index_dtype_is_int32_under_x64(self):
+        # Float32 physics (the model's working dtype under an x64 process)
+        # and float64 physics both go through the cond; an unstable and a
+        # stable column exercise the active and the inactive branch outputs.
+        with jax.enable_x64():
+            for float_dtype in (jnp.float32, jnp.float64):
+                for unstable in (True, False):
+                    _tend, state = self._run(unstable, float_dtype)
+                    for name in self.INDEX_FIELDS:
+                        assert getattr(state, name).dtype == jnp.int32, (
+                            name, float_dtype, unstable)
+
+    def test_index_dtype_unchanged_without_x64(self):
+        assert not jax.config.read("jax_enable_x64")
+        for unstable in (True, False):
+            _tend, state = self._run(unstable, jnp.float32)
+            for name in self.INDEX_FIELDS:
+                assert getattr(state, name).dtype == jnp.int32
+
+    def test_x64_values_match_x32(self):
+        # The pin changes dtypes, never values: the cloud base and top of an
+        # unstable column agree between the two precision modes.
+        _t32, s32 = self._run(True, jnp.float32)
+        with jax.enable_x64():
+            _t64, s64 = self._run(True, jnp.float32)
+        assert int(s32.ktype) > 0, "test column did not convect"
+        for name in self.INDEX_FIELDS:
+            assert int(getattr(s64, name)) == int(getattr(s32, name)), name
+
+    def test_initial_state_indices_are_int32_under_x64(self):
+        with jax.enable_x64():
+            atm = create_test_atmosphere()
+            state = convection_module.initialize_convection(
+                atm['temperature'], atm['humidity'], atm['pressure'],
+                atm['u_wind'], atm['v_wind'], ConvectionParameters.default())
+            for name in self.INDEX_FIELDS:
+                assert getattr(state, name).dtype == jnp.int32, name
+
+
 class TestMassFluxCFLCap:
     """The cloud-base mass flux must respect the layer-mass / dt CFL cap
     that ECHAM enforces in ``mo_cumastr.f90:582-583``::
