@@ -37,9 +37,16 @@ skipped by the default jobs *and* never selected by the extras job:
   would never report a skip at all. ``optional_extras_test.py`` runs it over
   the repository in the fast suite, and the extras job runs ``check``.
 
-What neither check can see is a gate that names its module only at run time
-(``find_spec(name)`` with ``name`` computed) *and* skips with a reason that
-does not name the package. Write the marker instead.
+What neither check can see is a gate whose module the scan cannot resolve
+statically (a computed name, or an import of some other module that imports
+the extra) *and* that skips with a reason not naming the package. Write the
+marker instead.
+
+Failing every collection-time skip under ``JCM_REQUIRE_EXTRAS=1`` is
+deliberate and applies to modules the selection would deselect too: a module
+skipped at collection cannot be inspected for marked tests, so the job cannot
+tell a hidden gated test from an unrelated one. A module that must skip for
+another reason (no GPU, say) should skip per test, where the marker is visible.
 
 :data:`EXTRAS` must name every extra ``pyproject.toml`` declares (``check``
 enforces it), and the extras job installs exactly ``pip-extras``, so a new
@@ -93,7 +100,7 @@ _NAME_RE = re.compile(
     r"(?<![A-Za-z0-9_./-])("
     + "|".join(sorted({re.escape(n) for names in PACKAGE_NAMES.values()
                        for n in names}, key=len, reverse=True))
-    + r")(?![A-Za-z0-9_-])", re.IGNORECASE)
+    + r")(?![A-Za-z0-9_])", re.IGNORECASE)
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -186,17 +193,25 @@ _PROBE_CALLS = ("importorskip", "find_spec")
 _IMPORT_CALLS = ("import_module", "__import__")
 #: jcm's own loaders that import an extra: guarding one is gating on it.
 _EXTRA_LOADERS = {"require_pyses": "pyses"}
+#: jcm modules that import an extra at import time: guarding one is gating on
+#: that extra. (``jcm.dycore.pyses`` imports ``pyses`` lazily, so it is not
+#: one.)
+_EXTRA_BACKED_MODULES = {"jcm.physics.aerosol.jam.microphysics.mam4_jax": "mam4"}
 
 
 def _module_constants(tree: ast.Module) -> dict[str, str]:
     """Module-level ``NAME = "string"`` bindings, to resolve probe arguments."""
     consts = {}
     for node in tree.body:
-        if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and isinstance(node.value, ast.Constant)
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+        elif isinstance(node, ast.AnnAssign):
+            target = node.target
+        else:
+            continue
+        if (isinstance(target, ast.Name) and isinstance(node.value, ast.Constant)
                 and isinstance(node.value.value, str)):
-            consts[node.targets[0].id] = node.value.value
+            consts[target.id] = node.value.value
     return consts
 
 
@@ -237,9 +252,14 @@ def gate_violations(source: str, filename: str = "<string>") -> list[str]:
     found = []
 
     def extra_of_arg(call):
-        if not call.args:
+        # The module is the first positional argument, or passed by keyword
+        # (importorskip's ``modname``, import_module's and find_spec's
+        # ``name``).
+        arg = call.args[0] if call.args else next(
+            (k.value for k in call.keywords if k.arg in ("modname", "name")),
+            None)
+        if arg is None:
             return None, None
-        arg = call.args[0]
         name = None
         if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
             name = arg.value
@@ -266,7 +286,8 @@ def gate_violations(source: str, filename: str = "<string>") -> list[str]:
                 elif isinstance(inner, ast.ImportFrom) and not inner.level:
                     names = [inner.module]
                 for name in names:
-                    extra = _extra_of_module(name)
+                    extra = _extra_of_module(name) or _EXTRA_BACKED_MODULES.get(
+                        name)
                     if extra:
                         flag(inner, f"a guarded `import {name}`", extra)
                 if not isinstance(inner, ast.Call):

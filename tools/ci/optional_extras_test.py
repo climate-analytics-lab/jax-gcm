@@ -46,6 +46,10 @@ def test_the_root_conftest_registers_the_plugin(request):
     '    from jcosp import config\n',
     'from jcm.dycore.pyses._pyses import require_pyses\ntry:\n'
     '    require_pyses()\nexcept ImportError:\n    pass\n',
+    'M: str = "pyses"\nimport importlib.util\nimportlib.util.find_spec(M)\n',
+    'import pytest\npytest.importorskip(modname="mam4_jax")\n',
+    'try:\n    from jcm.physics.aerosol.jam.microphysics.mam4_jax import X\n'
+    'except ImportError:\n    X = None\n',
 ])
 def test_each_unmarked_gate_form_is_flagged(source):
     assert len(optional_extras.gate_violations(source)) == 1
@@ -75,6 +79,7 @@ def test_uses_that_are_not_gates_are_not_flagged(source):
     ("could not import 'mam4_jax.coupling'", {"mam4"}),
     ("needs >= 2 devices", set()),
     ("pysesx and xgcsfs are other packages", set()),
+    ("requires pySES-0.1.3", {"pyses"}),
     # jcm's own modules and paths that merely contain a package's name.
     ("jcm/dycore/pyses/forcing.nc absent", set()),
     ("could not import jcm.dycore.pyses.x: CUDA not available", set()),
