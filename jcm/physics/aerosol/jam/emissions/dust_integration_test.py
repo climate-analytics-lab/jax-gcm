@@ -83,7 +83,7 @@ class DustEndToEndTest(unittest.TestCase):
 
     def _model(self, physics=None):
         from jcm.model import Model
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
@@ -92,8 +92,8 @@ class DustEndToEndTest(unittest.TestCase):
         terrain = TerrainData.aquaplanet(coords)
         return coords, Model(
             coords=coords, time_step=30, terrain=terrain,
-            physics=physics or echam_physics(aerosol_module="jam",
-                                             cloud_scheme="2m"))
+            physics=physics or idealized_echam_physics(
+                aerosol_module="jam", cloud_scheme="2m"))
 
     def test_emission_is_confined_to_the_gated_cells(self):
         """A field on disk reaches the term on the right columns, and only there.

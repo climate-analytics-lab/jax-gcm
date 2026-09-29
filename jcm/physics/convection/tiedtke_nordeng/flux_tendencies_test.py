@@ -165,7 +165,7 @@ class TestSubCloudEvaporationCover(unittest.TestCase):
     def test_evaporation_depletes_surface_rain_and_stays_finite(self):
         total_gen = float(jnp.sum(self.pdmfup))
         for flag in (False, True):
-            rain_sfc, snow_sfc, _, _, pdmfup_adj, precip_flux, _ = self._run(flag)
+            rain_sfc, snow_sfc, _, _, pdmfup_adj, precip_flux, _, _ = self._run(flag)
             self.assertTrue(np.all(np.isfinite(np.asarray(rain_sfc))))
             self.assertTrue(np.all(np.isfinite(np.asarray(pdmfup_adj))))
             self.assertTrue(np.all(np.isfinite(np.asarray(precip_flux))))
@@ -173,6 +173,26 @@ class TestSubCloudEvaporationCover(unittest.TestCase):
             self.assertLess(float(rain_sfc), total_gen)
             self.assertGreaterEqual(float(rain_sfc), 0.0)
             self.assertAlmostEqual(float(snow_sfc), 0.0)
+
+    def test_evap_fraction_is_ham_prevap(self):
+        """HAMMOZ ``prevap``: the fraction of the falling precip evaporated.
+
+        Below the precipitating levels no precip forms, so ``prevap`` of a
+        sub-cloud layer is the fraction of the flux entering it that does
+        not leave through its bottom (``zfevapr/zfrain`` of cuflx and
+        ``prep_wetdep_hydro``), and it is zero where nothing evaporates.
+        """
+        for flag in (False, True):
+            out = self._run(flag)
+            flux, evap = np.asarray(out[5]), np.asarray(out[7])
+            rain_sfc = float(out[0])
+            below = np.append(flux[1:], rain_sfc)
+            for k in (3, 4):
+                np.testing.assert_allclose(
+                    evap[k], (flux[k] - below[k]) / flux[k], rtol=1e-5)
+            self.assertGreater(float(evap[3]), 0.0)
+            np.testing.assert_array_equal(evap[:2], 0.0)
+            self.assertTrue(np.all((evap >= 0.0) & (evap <= 1.0)))
 
     def test_non_ham_path_ignores_the_updraft_flux(self):
         # With the constant 0.05 cover the updraft fields are unused, so the

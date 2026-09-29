@@ -4,8 +4,8 @@ Split out of :mod:`jcm.physics.radiation.rrtmgp` so that
 :func:`jcm.physics.echam.echam_terms.echam_physics` can validate the
 setting for *every* radiation scheme. Importing ``rrtmgp`` eagerly loads
 the RRTMGP gas-optics tables and requires the optional ``jax-rrtmgp``
-dependency, so a grey-radiation config must not have to pay for it just to
-be told it passed a nonsensical value.
+dependency, so a composition with another radiation scheme must not have to
+pay for it just to be told it passed a nonsensical value.
 
 The whole API is ONE integer, ``aerosol_free_interval``:
 

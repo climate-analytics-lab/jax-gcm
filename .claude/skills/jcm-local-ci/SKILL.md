@@ -67,6 +67,11 @@ JAX_PLATFORMS=cpu pytest -n 4 -m "slow" --cov=jcm \
 coverage report --rcfile=.coveragerc-pr --fail-under=80
 ```
 
+Gate 3 runs the whole slow suite in one command. CI runs the same tests as two
+parallel path shards (`slow-tests-radiation` / `slow-tests-rest`, defined with
+their partition check in `tools/ci/slow_shards.py`) and enforces the 80% floor
+on their combined coverage in `slow-coverage`; the local gate is equivalent.
+
 The trailing `coverage report` is not redundant — it mirrors the two
 enforcement steps CI gained in #786, and it is the one that exits non-zero
 on plugin behaviour nobody controls. See the "Coverage differs by suite"

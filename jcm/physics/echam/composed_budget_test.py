@@ -33,7 +33,7 @@ import jcm.constants as c
 class TestComposedColumnWaterClosure(unittest.TestCase):
     def test_full_echam_step_water_budget(self):
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.physics.radiation.radiation_types import RadiationParameters
         from jcm.rce import rce_column, rce_initial_state, run_rce
 
@@ -44,8 +44,7 @@ class TestComposedColumnWaterClosure(unittest.TestCase):
         # grid is where a ledger kept in any other mass would show up here.
         nlev = 47
         vertical = get_echam_levels(nlev)
-        physics = echam_physics(
-            radiation_scheme="grey",
+        physics = idealized_echam_physics(
             radiation=RadiationParameters.default(solar_constant=420.0),
         )
         scm = rce_column(

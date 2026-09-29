@@ -109,14 +109,14 @@ def _build_model_and_step(physics_factory, n_steps: int):
 
 def _full_physics():
     from jcm.physics.dissipation import UpperSponge
-    return echam_physics(radiation_scheme="grey") + UpperSponge(
+    return echam_physics() + UpperSponge(
         n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
     )
 
 
 def _no_surface_physics():
     from jcm.physics.dissipation import UpperSponge
-    return echam_physics(radiation_scheme="grey").remove("surface") + UpperSponge(
+    return echam_physics().remove("surface") + UpperSponge(
         n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
     )
 

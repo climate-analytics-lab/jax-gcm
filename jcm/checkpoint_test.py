@@ -690,14 +690,14 @@ class TestCompositionCoverage(unittest.TestCase):
 
     def test_echam_round_trip_and_condensate_metadata(self):
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.utils import get_coords
 
         def build():
             coords = get_coords(get_echam_levels(47), spectral_truncation=21)
             return Model(coords=coords,
                          terrain=TerrainData.aquaplanet(coords),
-                         physics=echam_physics(radiation_scheme="grey"))
+                         physics=idealized_echam_physics())
 
         payload, _, _ = self._round_trip(build)
         tracers = payload["dycore_tracers"]
@@ -733,7 +733,7 @@ class TestSurfaceOpticsAcrossRestart(unittest.TestCase):
 
     def _build(self):
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.physics.radiation.radiation_types import RadiationParameters
         from jcm.utils import get_coords
 
@@ -741,8 +741,7 @@ class TestSurfaceOpticsAcrossRestart(unittest.TestCase):
         return Model(
             coords=coords, terrain=TerrainData.aquaplanet(coords),
             time_step=self.DT_MIN,
-            physics=echam_physics(
-                radiation_scheme="grey",
+            physics=idealized_echam_physics(
                 radiation=RadiationParameters.default(
                     radiation_interval=self.EVERY * self.DT_MIN * 60.0)))
 

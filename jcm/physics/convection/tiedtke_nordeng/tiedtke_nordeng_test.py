@@ -6,6 +6,7 @@ Date: 2025-01-09
 import jax.numpy as jnp
 import numpy as np
 import jax
+import pytest
 from types import SimpleNamespace
 import jcm.constants as c
 
@@ -1591,6 +1592,65 @@ class TestConvectivePrecipitation:
         assert abs(float(precip) - expected) < 1e-12, \
             f"Precipitation rate {float(precip):.6e} should equal " \
             f"sum(pdmfup)={expected:.6e}"
+
+
+class TestSixtyFourBitMode:
+    """The scheme traces identically with ``jax_enable_x64`` on (#945).
+
+    Importing ``mam4_jax`` turns x64 on, and pySES runs float32 physics under
+    it, so the scheme must trace with the flag on for both float32 and
+    float64 inputs. The activation ``lax.cond`` requires both branches to
+    return identical dtypes, and an untyped literal is 32- or 64-bit
+    depending on the flag: the no-convection state's indices were once
+    int64 while the convecting branch's were int32. ``jax.enable_x64`` is a
+    context manager, so the process-global flag is left as found.
+    """
+
+    def _run(self, unstable, dtype):
+        atm = create_test_atmosphere(nlev=40, unstable=unstable)
+        drivers = deep_convection_drivers(atm) if unstable else {}
+        atm = {k: v.astype(dtype) for k, v in atm.items()}
+        drivers = {k: v.astype(dtype) for k, v in drivers.items()}
+        nlev = atm['temperature'].shape[0]
+        run = jax.jit(tiedtke_nordeng_convection, static_argnames=('dt',))
+        return run(
+            atm['temperature'], atm['humidity'], atm['pressure'],
+            atm['layer_thickness'], atm['rho'], atm['u_wind'], atm['v_wind'],
+            jnp.zeros(nlev, dtype), jnp.zeros(nlev, dtype),
+            dt=3600.0, config=ConvectionParameters.default(), **drivers,
+        )
+
+    def _assert_dtypes(self, tendencies, state, dtype):
+        for name in ('ktype', 'kbase', 'ktop'):
+            assert getattr(state, name).dtype == jnp.int32, name
+        for leaf in jax.tree.leaves((tendencies, state)):
+            if jnp.issubdtype(leaf.dtype, jnp.floating):
+                assert leaf.dtype == dtype
+            assert bool(jnp.all(jnp.isfinite(leaf)))
+
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+    def test_convecting_column(self, dtype):
+        with jax.enable_x64(True):
+            tendencies, state = self._run(True, dtype)
+            assert int(state.ktype) > 0
+            self._assert_dtypes(tendencies, state, dtype)
+
+    @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
+    def test_quiescent_column(self, dtype):
+        with jax.enable_x64(True):
+            tendencies, state = self._run(False, dtype)
+            assert int(state.ktype) == 0
+            self._assert_dtypes(tendencies, state, dtype)
+
+    def test_initial_state_indices_are_int32(self):
+        with jax.enable_x64(True):
+            atm = create_test_atmosphere(nlev=10, unstable=False)
+            state = convection_module.initialize_convection(
+                atm['temperature'], atm['humidity'], atm['pressure'],
+                atm['u_wind'], atm['v_wind'], ConvectionParameters.default())
+            for name in ('ktype', 'kbase', 'ktop'):
+                assert getattr(state, name).dtype == jnp.int32, name
+            assert state.prate.dtype == atm['temperature'].dtype
 
 
 class TestConvectionNumericalStability:

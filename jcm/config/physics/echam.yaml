@@ -32,11 +32,9 @@ terms:
     _target_: jcm.physics.chemistry.SimpleChemistry
   sundqvist_cloud_fraction:
     _target_: jcm.physics.clouds.sundqvist.SundqvistCloudFraction
-  # RRTMGP is the supported ECHAM radiation (grey is a SPEEDY/debug
-  # scheme; an ECHAM run composed with grey is an unsupported hybrid and
-  # was never validated). For a cheap grey A/B use the Python factory,
-  # ``echam_physics(radiation_scheme="grey")`` — there is deliberately
-  # no supported CLI route to a grey-ECHAM composition.
+  # RRTMGP is the ECHAM radiation; ``echam-emulated-2m`` swaps in its
+  # neural-network emulator, the fast option. The grey two-stream is an
+  # idealized scheme, not ECHAM physics, and no preset composes it.
   rrtmgp_radiation:
     _target_: jcm.physics.radiation.rrtmgp.RRTMGPRadiation
   # ECHAM physc ordering: vdiff (with the surface exchange in its

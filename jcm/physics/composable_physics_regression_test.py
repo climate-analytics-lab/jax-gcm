@@ -206,12 +206,22 @@ class TestEchamReferenceTrajectory(_Float32ReferenceTest):
 
     Regenerated 2026-09-26 for the energy-conserving grey shortwave (#855:
     delta-Eddington layers, the two-stream direct-beam source and the adding
-    solve). ``echam_physics()`` defaults to the grey scheme, whose clouds had
-    booked the scattered part of the direct beam as absorption and now reflect
-    it, so the day-1 shortwave heating of every cloudy column changes. The
-    shift is 39 % in u and 41 % in v (winds spun up from rest, so a small
+    solve). ``echam_physics()`` then defaulted to the grey scheme, whose clouds
+    had booked the scattered part of the direct beam as absorption and now
+    reflect it, so the day-1 shortwave heating of every cloudy column changed.
+    The shift was 39 % in u and 41 % in v (winds spun up from rest, so a small
     absolute change), 0.8 % in specific humidity and < 0.05 % in temperature,
-    surface pressure and condensate. The speedy reference is unchanged.
+    surface pressure and condensate. The speedy reference was unchanged.
+
+    Regenerated 2026-09-27 for RRTMGP (#918): ``echam_physics()`` composes the
+    ECHAM radiation, RRTMGP, and the grey two-stream — an idealized scheme with
+    no ECHAM reference — is no longer offered by the factory, so a regression
+    reference for the ECHAM stack must be an RRTMGP trajectory. Generated with
+    ``regenerate_regression_references.sh`` (clean Python 3.11 env, jax/jaxlib
+    0.10.2). Against the grey reference the shift is 1.3 % in temperature,
+    30 % in specific humidity, 68 % in u and 83 % in v (winds spun up from
+    rest) and 0.02 % in surface pressure; the condensate is identically zero in
+    both (zero forcing, one day). The speedy reference is unchanged.
     """
 
     @pytest.mark.slow

@@ -215,6 +215,28 @@ Packaged config-tree contract; the ``experiment`` group is renamed
   particular composes ``+experiment@atmosphere=<name>`` and must update in the
   same release cycle.
 
+The ECHAM factory composes RRTMGP; ``radiation_scheme="grey"`` is rejected
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``echam_physics()`` defaults to ``radiation_scheme="rrtmgp"`` and accepts
+  exactly ``"rrtmgp"`` and ``"emulated"`` (the neural-network emulator of
+  RRTMGP, the fast option) or a radiation ``PhysicsTerm`` instance (#918).
+  **Breaking:** ``radiation_scheme="grey"`` raises ``ValueError``, and a bare
+  ``echam_physics()`` — which used to compose the grey two-stream — now runs
+  RRTMGP, silently changing the climate and cost of an unchanged script. The
+  grey two-stream is an idealized scheme (like Betts-Miller convection) with no
+  ECHAM reference and no validation in an ECHAM composition; it remains
+  available as a scheme, composed explicitly with
+  ``echam_physics(radiation_scheme=GreyTwoStreamRadiation())``. The
+  factory-built Hydra presets reject ``physics.radiation_scheme=grey`` with the
+  same message. A radiation term instance now drives the rest of the
+  composition with its own parameters (the JAM optics cadence follows its
+  ``radiation_interval``), and ``radiation=`` alongside an instance is
+  rejected. Cheap tests compose the idealized stack through
+  ``jcm.physics.echam.testing.idealized_echam_physics``. The package gradient
+  harnesses, the ECHAM regression reference and the single-column JAM release
+  check run RRTMGP. See :ref:`v3-echam-radiation`.
+
 Forcing time alignment is declared, never inferred
 """"""""""""""""""""""""""""""""""""""""""""""""""
 
@@ -836,6 +858,20 @@ follows the ``jax_enable_x64`` setting in force when they are used rather than
 whichever was in force at import. ``jcm/import_side_effects_test.py`` enforces
 the property for every module.
 
+ECHAM physics traces with 64-bit mode on
+""""""""""""""""""""""""""""""""""""""""
+
+With ``jax_enable_x64`` on, which importing ``mam4_jax`` does unless
+``MAM4_JAX_ENABLE_X64=0`` is set, every ECHAM configuration failed at trace
+time (#945). The Tiedtke no-convection state built its cloud-base and
+cloud-top indices as int64 while the convecting branch returned int32.
+Separately, the RRTMGP aerosol-free companion with
+``aerosol_free_interval > 1`` returned float32 fluxes from the solve branch and
+float64 fluxes from the hold branch. The convection indices are now int32 in
+every branch. The companion's fluxes and fractions now keep the dtype of the
+slots they fill. A fast test steps the composed package under x64, so CI covers
+this without the ``mam4`` extra. The float32 forward result is bit-identical.
+
 
 Corrected physics
 ^^^^^^^^^^^^^^^^^
@@ -1013,6 +1049,37 @@ Grey two-stream shortwave conserves energy
   ``E - P + precip_floor_source``. The grey RCE column reaches this regime
   once its clouds reflect, at ~0.06-0.09 mm/d.
 
+Convective scavenging follows ECHAM-HAM
+"""""""""""""""""""""""""""""""""""""""
+
+- The convective tracer transport's in-plume scavenging takes ECHAM-HAM's
+  parameters, inputs and processes. Each aerosol mode carries HAMMOZ's
+  convective in-droplet fraction ``csr_conv`` of the M7 class it corresponds
+  to (accumulation 0.99, coarse 0.99, Aitken 0.60, primary carbon 0.20;
+  dust and sea salt, carried in MAM4's soluble modes, take 0.99). That share
+  joins the condensate once where the aerosol meets cloud; each cloudy level
+  removes from it HAMMOZ's precipitation efficiency ``peff =
+  pmrateprecip/pmwc``; and the removed aerosol is released where the
+  convective precipitation evaporates (``prevap``), as is the aerosol the
+  convective carrier washes out below cloud. HAMMOZ's own bookkeeping
+  (removal from the unscavenged updraft concentration, the total-flux
+  overwrite and ``xt_conv_massfix``) is not ported: it drops the
+  compensating subsidence and drives tracers negative, where the closed
+  plume budget used here conserves exactly and stays positive; see
+  :doc:`science/aerosol`. ``TiedtkeConvection`` publishes the two new
+  interface fields ``convection.precip_efficiency`` and
+  ``convection.precip_evap_fraction``. **Changes results** for every JAM
+  configuration with convective transport: soluble aerosol reaches the
+  convective outflow at about 1 % of its boundary-layer concentration
+  instead of ~10⁻⁵ (``scm_check.py`` failed "soluble also lofted but less",
+  #923), fresh primary carbon is now scavenged in convective cloud (it was
+  not), and Aitken-mode aerosol is scavenged less (#928). **Breaking for
+  direct callers:** ``ConvTransportParameters.scav_ratio`` is replaced by
+  the per-tracer ``csr_conv``, ``ConvectiveTracerTransport``'s
+  ``scav_weights`` by ``csr_conv``, and ``convective_tracer_tendency``
+  takes ``csr_conv``, ``precip_efficiency``, ``plume_condensate`` and
+  ``evap_fraction``.
+
 Lohmann 2M utility fields are ECHAM's
 """""""""""""""""""""""""""""""""""""
 
@@ -1102,11 +1169,9 @@ Accepted limitations (proposed)
   composed but inert. The emission calibration is a T63 quantity, which is
   the resolution every shipped JAM configuration runs at; online aerosol on
   the cubed sphere is separate work. See :doc:`science/boundary_conditions`.
-- **The release-validation matrix has three gaps**: the T106 members' multi-GPU
-  mesh configurations have never been run for a full year, ``echam-jam`` at
-  L95 needs L95 oxidant and ozone inputs staged, and the single-column
-  JAM check (``scm_check.py``) composes grey radiation against the matrix's own
-  RRTMGP-for-ECHAM pairing policy (#638).
+- **The release-validation matrix has two gaps**: the T106 members' multi-GPU
+  mesh configurations have never been run for a full year, and ``echam-jam``
+  at L95 needs L95 oxidant and ozone inputs staged (#638).
 
 Regression fixtures follow the supported matrix
 """""""""""""""""""""""""""""""""""""""""""""""

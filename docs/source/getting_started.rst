@@ -217,10 +217,9 @@ composes the whole canonical forcing set for a composition in one call:
    coords = get_coords(vertical_coords=get_echam_levels(47),
                        spectral_truncation=63)          # ECHAM T63L47 hybrid
 
-   # JAM reads the 2-moment scheme's process ledger, and RRTMGP consumes the
-   # aerosol optics the grey scheme would ignore — so these three go together.
-   physics = echam_physics(aerosol_module="jam", cloud_scheme="2m",
-                           radiation_scheme="rrtmgp")
+   # JAM reads the 2-moment scheme's process ledger, so the two go together;
+   # RRTMGP (the default radiation) consumes JAM's per-band aerosol optics.
+   physics = echam_physics(aerosol_module="jam", cloud_scheme="2m")
    terrain = TerrainData.from_coords(coords)   # flat ocean; terrain_file= for orography
    model = Model(coords=coords, terrain=terrain, physics=physics)
 

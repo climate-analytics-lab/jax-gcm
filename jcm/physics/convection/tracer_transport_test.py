@@ -11,6 +11,7 @@ from jcm.physics.convection.tracer_transport import (
     ConvTransportParameters,
     ConvectiveTracerTransport,
     convective_tracer_tendency,
+    release_scavenged,
 )
 from jcm.physics_interface import PhysicsState
 
@@ -269,60 +270,89 @@ class DowndraftLegTest(unittest.TestCase):
 
 
 class ScavengingTest(unittest.TestCase):
-    """CAM aero_convproc-style in-plume removal (jax-gcm#621)."""
+    """HAMMOZ-parameterised in-plume removal in a closed plume (jax-gcm#621)."""
 
-    def _setup(self, nlev=10, ncols=1):
+    def _setup(self, nlev=10, ncols=1, peff=0.5):
         rho = jnp.linspace(0.4, 1.2, nlev)[:, None] * jnp.ones((1, ncols))
         dz = jnp.full((nlev, ncols), 400.0)
         mfu, entrain = _plume(nlev=nlev, ncols=ncols)
-        # Condensate and precip formation inside the cloudy layers only.
+        # Condensate and precipitation efficiency inside the cloudy layers.
         lev = jnp.arange(nlev)[:, None]
         cloudy = (lev >= 4) & (lev <= 7)
         cond = jnp.where(cloudy, 5.0e-4, 0.0) * jnp.ones((1, ncols))
-        pf = jnp.where(cloudy, 1.0e-5, 0.0) * jnp.ones((1, ncols))
+        eff = jnp.where(cloudy, peff, 0.0) * jnp.ones((1, ncols))
         q = jnp.stack([
             jnp.zeros((nlev, ncols)).at[8:].set(1.0e-9),
             jnp.zeros((nlev, ncols)).at[8:].set(1.0e-9),
         ])
-        return q, mfu, entrain, rho, dz, cond, pf
+        return q, mfu, entrain, rho, dz, cond, eff
 
     def test_budget_closes_to_scavenged_flux(self):
         # Column change must equal MINUS the scavenged surface flux,
-        # per tracer, exactly.
-        q, mfu, entrain, rho, dz, cond, pf = self._setup()
-        dq, scav = convective_tracer_tendency(
-            q, mfu, entrain, rho, dz, 1800.0,
-            scav_weights=jnp.asarray([1.0, 0.5]),
-            precip_formation=pf, plume_condensate=cond,
-        )
-        dm = rho * dz
-        for k in range(2):
-            net = float(jnp.sum(dq[k] * dm))
-            self.assertGreater(float(scav[k, 0]), 0.0)
-            self.assertLessEqual(
-                abs(net + float(scav[k, 0])),
-                1e-6 * float(jnp.sum(jnp.abs(dq[k]) * dm)),
+        # per tracer, exactly — with and without the release below.
+        q, mfu, entrain, rho, dz, cond, eff = self._setup()
+        evap = jnp.zeros_like(cond).at[8:].set(0.3)
+        for ev in (None, evap):
+            dq, scav = convective_tracer_tendency(
+                q, mfu, entrain, rho, dz, 1800.0,
+                csr_conv=jnp.asarray([0.99, 0.2]),
+                precip_efficiency=eff, plume_condensate=cond,
+                evap_fraction=ev,
             )
+            dm = rho * dz
+            for k in range(2):
+                net = float(jnp.sum(dq[k] * dm))
+                self.assertGreater(float(scav[k, 0]), 0.0)
+                self.assertLessEqual(
+                    abs(net + float(scav[k, 0])),
+                    1e-6 * float(jnp.sum(jnp.abs(dq[k]) * dm)),
+                )
+
+    def test_closes_to_round_off_without_a_mass_fixer(self):
+        # HAMMOZ needs ``xt_conv_massfix`` because its post-ascent removal
+        # and total-flux overwrite are not a plume budget; here the removal
+        # is taken from the plume itself, so column change + deposition is
+        # zero to float round-off in float64.
+        prior = jax.config.read("jax_enable_x64")
+        jax.config.update("jax_enable_x64", True)
+        try:
+            q, mfu, entrain, rho, dz, cond, eff = (
+                jnp.asarray(a, jnp.float64) for a in self._setup())
+            mfd, e_dn = _downdraft()
+            evap = jnp.zeros_like(cond).at[8:].set(0.3)
+            dq, scav = convective_tracer_tendency(
+                q, mfu, entrain, rho, dz, 1800.0,
+                mfd=jnp.asarray(mfd, jnp.float64),
+                entrain_down=jnp.asarray(e_dn, jnp.float64),
+                csr_conv=jnp.asarray([0.99, 0.2], jnp.float64),
+                precip_efficiency=eff, plume_condensate=cond,
+                evap_fraction=evap,
+            )
+            dm = rho * dz
+            for k in range(2):
+                gross = float(jnp.sum(jnp.abs(dq[k]) * dm))
+                resid = float(jnp.sum(dq[k] * dm) + scav[k, 0])
+                self.assertLess(abs(resid), 1e-13 * gross)
+        finally:
+            jax.config.update("jax_enable_x64", prior)
 
     def test_scavenging_thins_what_detrains_aloft(self):
-        # With removal inside the ascent, less tracer survives to the
-        # detrainment layers than in the conservative plume.
-        q, mfu, entrain, rho, dz, cond, pf = self._setup()
+        q, mfu, entrain, rho, dz, cond, eff = self._setup()
         dq0, _ = convective_tracer_tendency(q, mfu, entrain, rho, dz, 1800.0)
         dq1, _ = convective_tracer_tendency(
             q, mfu, entrain, rho, dz, 1800.0,
-            scav_weights=jnp.asarray([1.0, 1.0]),
-            precip_formation=pf, plume_condensate=cond,
+            csr_conv=jnp.asarray([0.99, 0.99]),
+            precip_efficiency=eff, plume_condensate=cond,
         )
         self.assertLess(float(dq1[0, 2, 0]), float(dq0[0, 2, 0]))
 
-    def test_zero_weights_recover_conservative_plume(self):
-        q, mfu, entrain, rho, dz, cond, pf = self._setup()
+    def test_zero_fractions_recover_conservative_plume(self):
+        q, mfu, entrain, rho, dz, cond, eff = self._setup()
         dq0, _ = convective_tracer_tendency(q, mfu, entrain, rho, dz, 1800.0)
         dq1, scav = convective_tracer_tendency(
             q, mfu, entrain, rho, dz, 1800.0,
-            scav_weights=jnp.zeros(2),
-            precip_formation=pf, plume_condensate=cond,
+            csr_conv=jnp.zeros(2),
+            precip_efficiency=eff, plume_condensate=cond,
         )
         np.testing.assert_allclose(np.asarray(dq1), np.asarray(dq0))
         np.testing.assert_array_equal(np.asarray(scav), 0.0)
@@ -332,12 +362,12 @@ class ScavengingTest(unittest.TestCase):
         # scavenging a negative in-plume concentration would inject mass
         # and turn the deposition flux negative (Codex P1 on #636). The
         # flux must stay >= 0 and the budget must still close to it.
-        q, mfu, entrain, rho, dz, cond, pf = self._setup()
+        q, mfu, entrain, rho, dz, cond, eff = self._setup()
         q = q.at[0].set(-1.0e-10)                 # all-negative tracer 0
         dq, scav = convective_tracer_tendency(
             q, mfu, entrain, rho, dz, 1800.0,
-            scav_weights=jnp.ones(2),
-            precip_formation=pf, plume_condensate=cond,
+            csr_conv=jnp.ones(2),
+            precip_efficiency=eff, plume_condensate=cond,
         )
         self.assertGreaterEqual(float(scav.min()), 0.0)
         np.testing.assert_array_equal(np.asarray(scav[0]), 0.0)
@@ -352,40 +382,180 @@ class ScavengingTest(unittest.TestCase):
     def test_bare_column_matches_ncols_one(self):
         # Broadcasting-native: (K, nlev) column inputs must agree with the
         # same column as a (K, nlev, 1) block (the SCM driver shape).
-        q, mfu, entrain, rho, dz, cond, pf = self._setup()
-        args3 = dict(scav_weights=jnp.asarray([1.0, 0.5]),
-                     precip_formation=pf, plume_condensate=cond)
+        q, mfu, entrain, rho, dz, cond, eff = self._setup()
+        evap = jnp.zeros_like(cond).at[8:].set(0.3)
         dq3, scav3 = convective_tracer_tendency(
-            q, mfu, entrain, rho, dz, 1800.0, **args3)
+            q, mfu, entrain, rho, dz, 1800.0,
+            csr_conv=jnp.asarray([0.99, 0.2]), precip_efficiency=eff,
+            plume_condensate=cond, evap_fraction=evap)
         dq1, scav1 = convective_tracer_tendency(
             q[..., 0], mfu[:, 0], entrain[:, 0], rho[:, 0], dz[:, 0],
-            1800.0, scav_weights=jnp.asarray([1.0, 0.5]),
-            precip_formation=pf[:, 0], plume_condensate=cond[:, 0])
+            1800.0, csr_conv=jnp.asarray([0.99, 0.2]),
+            precip_efficiency=eff[:, 0], plume_condensate=cond[:, 0],
+            evap_fraction=evap[:, 0])
         np.testing.assert_allclose(np.asarray(dq1), np.asarray(dq3[..., 0]),
                                    rtol=1e-6, atol=1e-30)
         np.testing.assert_allclose(np.asarray(scav1),
                                    np.asarray(scav3[:, 0]), rtol=1e-6)
 
     def test_dry_plume_scavenges_nothing(self):
-        # No condensate (below CAM's clw_cut) -> gate closed everywhere.
-        q, mfu, entrain, rho, dz, _, pf = self._setup()
+        # No condensate above HAMMOZ's zmin -> nothing activates, nothing
+        # is removed even where a conversion fraction is supplied.
+        q, mfu, entrain, rho, dz, _, eff = self._setup()
         _, scav = convective_tracer_tendency(
             q, mfu, entrain, rho, dz, 1800.0,
-            scav_weights=jnp.ones(2),
-            precip_formation=pf,
-            plume_condensate=jnp.full(mfu.shape, 1.0e-7),
+            csr_conv=jnp.ones(2), precip_efficiency=eff,
+            plume_condensate=jnp.full(mfu.shape, 1.0e-11),
         )
         np.testing.assert_array_equal(np.asarray(scav), 0.0)
 
+    def test_in_condensate_share_is_taken_once(self):
+        # ``csr`` of the aerosol joins the condensate ONCE, where the plume
+        # first meets cloud; only that share loses ``peff`` per cloudy
+        # layer and the ``1 − csr`` share rides to the top. Four cloudy
+        # layers remove csr·(1 − (1 − peff)^4) of the cloud-base supply —
+        # not 1 − (1 − csr·peff)^4, the result of offering the leftover to
+        # the fixed fraction again at every level.
+        csr, peff = 0.9, 0.6
+        q, mfu, entrain, rho, dz, cond, eff = self._setup(peff=peff)
+        mf, q_base = 0.05, 1.0e-9
+        dq, scav = convective_tracer_tendency(
+            q[:1], mfu, entrain, rho, dz, 1800.0,
+            csr_conv=jnp.asarray([csr]),
+            precip_efficiency=eff, plume_condensate=cond,
+        )
+        expected = mf * q_base * csr * (1.0 - (1.0 - peff) ** 4)
+        np.testing.assert_allclose(float(scav[0, 0]), expected, rtol=1e-5)
+        compounded = mf * q_base * (1.0 - (1.0 - csr * peff) ** 4)
+        self.assertGreater(compounded / expected, 1.05)
+        dm = rho * dz
+        survive = (1.0 - csr) + csr * (1.0 - peff) ** 4
+        np.testing.assert_allclose(
+            float(dq[0, 2, 0] * dm[2, 0]), mf * q_base * survive, rtol=1e-5,
+        )
+
+    def test_air_entrained_in_cloud_joins_the_condensate(self):
+        # Aerosol entrained above cloud base joins the condensate at csr
+        # where it enters. The layer detrains the same mass flux, but at
+        # the INCOMING plume concentration (cuasc's flux form), which holds
+        # none of this tracer, so all of it continues and loses peff at
+        # that layer and at the two cloudy layers above.
+        csr, peff, lateral = 0.9, 0.6, 0.01
+        q, mfu, entrain, rho, dz, cond, eff = self._setup(peff=peff)
+        entrain = entrain.at[6].set(lateral)
+        qe = jnp.zeros((1, 10, 1)).at[0, 6].set(1.0e-9)
+        _, scav = convective_tracer_tendency(
+            qe, mfu, entrain, rho, dz, 1800.0,
+            csr_conv=jnp.asarray([csr]),
+            precip_efficiency=eff, plume_condensate=cond,
+        )
+        expected = lateral * 1.0e-9 * csr * (1.0 - (1.0 - peff) ** 3)
+        np.testing.assert_allclose(float(scav[0, 0]), expected, rtol=1e-5)
+
+    def test_detrained_air_leaves_before_this_layers_removal(self):
+        # One cloudy layer where half the incoming plume detrains
+        # (mo_cuascent.f90:421-424) and the rest continues and
+        # precipitates (cuasc 446-462 on pmfu(jk)); HAMMOZ deposits
+        # zdep = pxtu·csr_conv·peff·pmfu(jk) (mo_ham_wetdep.f90:250, 325).
+        # So the deposition is peff·csr·x·M_k on the CONTINUING flux, the
+        # detrained half leaves unscavenged at x, and mass closes.
+        nlev, mf, x, csr, peff = 6, 0.04, 1.0e-9, 0.99, 0.6
+        rho = jnp.full((nlev, 1), 1.0)
+        dz = jnp.full((nlev, 1), 400.0)
+        # Plume enters layer 3 from below at mf (base supply in layer 4),
+        # half detrains in layer 3, the rest leaves through its top and
+        # detrains entirely in layer 2.
+        mfu = jnp.zeros((nlev, 1)).at[4, 0].set(mf).at[3, 0].set(0.5 * mf)
+        entrain = jnp.zeros((nlev, 1)).at[4, 0].set(mf)
+        q = jnp.zeros((1, nlev, 1)).at[0, 4, 0].set(x)
+        cond = jnp.zeros((nlev, 1)).at[3, 0].set(5.0e-4)
+        eff = jnp.zeros((nlev, 1)).at[3, 0].set(peff)
+        dq, scav = convective_tracer_tendency(
+            q, mfu, entrain, rho, dz, 1800.0,
+            csr_conv=jnp.asarray([csr]),
+            precip_efficiency=eff, plume_condensate=cond,
+        )
+        np.testing.assert_allclose(float(scav[0, 0]),
+                                   peff * csr * x * 0.5 * mf, rtol=1e-5)
+        dm = rho * dz
+        # Layer 3 receives the detrained half unscavenged (x·mf/2) less
+        # the compensating subsidence it passes down (none: the
+        # environment above is clean); layer 2 the scavenged remainder.
+        np.testing.assert_allclose(float(dq[0, 3, 0] * dm[3, 0]),
+                                   0.5 * mf * x, rtol=1e-5)
+        np.testing.assert_allclose(float(dq[0, 2, 0] * dm[2, 0]),
+                                   0.5 * mf * x * (1.0 - csr * peff),
+                                   rtol=1e-5)
+        net = float(jnp.sum(dq[0] * dm))
+        self.assertLess(abs(net + float(scav[0, 0])), 1e-6 * mf * x)
+
+    def test_evaporation_releases_the_falling_deposit(self):
+        # HAMMOZ's re-evaporation ledger: top to bottom, prevap of the
+        # running deposit returns to the environment at each level; what
+        # is left reaches the surface. Two sub-cloud layers evaporating
+        # 30 % and 50 % leave 0.7·0.5 of the in-cloud removal.
+        q, mfu, entrain, rho, dz, cond, eff = self._setup()
+        kw = dict(csr_conv=jnp.asarray([0.99, 0.2]), precip_efficiency=eff,
+                  plume_condensate=cond)
+        dq0, scav0 = convective_tracer_tendency(
+            q, mfu, entrain, rho, dz, 1800.0, **kw)
+        evap = jnp.zeros_like(cond).at[8].set(0.3).at[9].set(0.5)
+        dq1, scav1 = convective_tracer_tendency(
+            q, mfu, entrain, rho, dz, 1800.0, evap_fraction=evap, **kw)
+        np.testing.assert_allclose(np.asarray(scav1),
+                                   0.35 * np.asarray(scav0), rtol=1e-5)
+        dm = rho * dz
+        released = (dq1 - dq0) * dm[jnp.newaxis]
+        np.testing.assert_allclose(np.asarray(released[:, 8, 0]),
+                                   0.3 * np.asarray(scav0[:, 0]), rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(released[:, 9, 0]),
+                                   0.35 * np.asarray(scav0[:, 0]), rtol=1e-5)
+
+    def test_release_scavenged_conserves(self):
+        removed = jnp.asarray(np.random.default_rng(0).uniform(
+            0, 1, (3, 6, 2)))
+        evap = jnp.asarray(np.random.default_rng(1).uniform(0, 1, (6, 2)))
+        released, surface = release_scavenged(removed, evap)
+        np.testing.assert_allclose(
+            np.asarray(released.sum(axis=1) + surface),
+            np.asarray(removed.sum(axis=1)), rtol=1e-6)
+        self.assertGreaterEqual(float(released.min()), 0.0)
+
+    def test_gradients_finite_precipitating_and_dry(self):
+        # The removal and release are products of clipped fractions with
+        # the plume pools; the pools' guarded divisions keep reverse-mode
+        # finite in a precipitating column and in one with no plume at all.
+        q, mfu, entrain, rho, dz, cond, eff = self._setup()
+        evap = jnp.zeros_like(cond).at[8:].set(0.3)
+        cases = {
+            "precipitating": (mfu, entrain, cond, eff, evap),
+            "dry": (jnp.zeros_like(mfu), jnp.zeros_like(entrain),
+                    jnp.zeros_like(cond), jnp.zeros_like(eff),
+                    jnp.zeros_like(evap)),
+        }
+        for name, (m, e, c_, pe, ev) in cases.items():
+            def loss(qq, csr, pe_, ev_):
+                dq, scav = convective_tracer_tendency(
+                    qq, m, e, rho, dz, 1800.0, csr_conv=csr,
+                    precip_efficiency=pe_, plume_condensate=c_,
+                    evap_fraction=ev_)
+                return jnp.sum(dq ** 2) * 1e20 + jnp.sum(scav) * 1e9
+            grads = jax.grad(loss, argnums=(0, 1, 2, 3))(
+                q, jnp.asarray([0.99, 0.2]), pe, ev)
+            for g in grads:
+                self.assertTrue(bool(jnp.all(jnp.isfinite(g))), name)
+
 
 class _Conv:
-    def __init__(self, mfu, entrain, mfd=None, e_dn=None, pf=None, cond=None):
+    def __init__(self, mfu, entrain, mfd=None, e_dn=None, eff=None, cond=None,
+                 evap=None):
         zeros = jnp.zeros_like(mfu)
         self.mass_flux_up = mfu
         self.entrain_up = entrain
         self.mass_flux_down = mfd if mfd is not None else zeros
         self.entrain_down = e_dn if e_dn is not None else zeros
-        self.precip_formation = pf if pf is not None else zeros
+        self.precip_efficiency = eff if eff is not None else zeros
+        self.precip_evap_fraction = evap if evap is not None else zeros
         self.qc_conv = cond if cond is not None else zeros
         self.qi_conv = zeros
 
@@ -415,7 +585,7 @@ class ConvectiveTracerTransportTermTest(unittest.TestCase):
                 cloudy = (lev >= 4) & (lev <= 7)
                 kwargs["cond"] = jnp.where(cloudy, 5.0e-4, 0.0) * jnp.ones(
                     (1, ncols))
-                kwargs["pf"] = jnp.where(cloudy, 1.0e-5, 0.0) * jnp.ones(
+                kwargs["eff"] = jnp.where(cloudy, 0.5, 0.0) * jnp.ones(
                     (1, ncols))
             diagnostics["convection"] = _Conv(mfu, entrain, **kwargs)
         return state, diagnostics
@@ -445,7 +615,7 @@ class ConvectiveTracerTransportTermTest(unittest.TestCase):
         # tracers there.
         state, diagnostics = self._setup(with_scav=True)
         term = ConvectiveTracerTransport(
-            ("m_so4_acc",), scav_weights=(1.0,),
+            ("m_so4_acc",), csr_conv=(0.99,),
         )
         tend, diag_out = term(state, diagnostics, None, None)
         flux = diag_out["_conv_scav_flux"]["m_so4_acc"]
@@ -459,7 +629,7 @@ class ConvectiveTracerTransportTermTest(unittest.TestCase):
         # structural probe's carry mismatches the stepped one (the
         # aerocom end-to-end repro: 73- vs 74-child carry TypeError).
         state, diagnostics = self._setup(with_conv=False)
-        term = ConvectiveTracerTransport(("m_so4_acc",), scav_weights=(1.0,))
+        term = ConvectiveTracerTransport(("m_so4_acc",), csr_conv=(0.99,))
         _, diag_out = term(state, diagnostics, None, None)
         np.testing.assert_array_equal(
             np.asarray(diag_out["_conv_scav_flux"]["m_so4_acc"]), 0.0,
@@ -471,7 +641,7 @@ class ConvectiveTracerTransportTermTest(unittest.TestCase):
             **state.tracers, "so2": jnp.full((10, 1), 1.0e-9),
         })
         term = ConvectiveTracerTransport(
-            ("m_so4_acc", "so2"), scav_weights=(1.0, 0.0),
+            ("m_so4_acc", "so2"), csr_conv=(0.99, 0.0),
         )
         _, diag_out = term(state, diagnostics, None, None)
         self.assertIn("m_so4_acc", diag_out["_conv_scav_flux"])
@@ -484,7 +654,7 @@ class ConvectiveTracerTransportTermTest(unittest.TestCase):
             term = ConvectiveTracerTransport(
                 ("m_so4_acc",),
                 params=ConvTransportParameters(
-                    transport_scale=scale, scav_ratio=jnp.asarray(0.99),
+                    transport_scale=scale, csr_conv=jnp.zeros(1),
                 ),
             )
             tend, _ = term(state, diagnostics, None, None)
@@ -494,31 +664,41 @@ class ConvectiveTracerTransportTermTest(unittest.TestCase):
         self.assertTrue(np.isfinite(float(g)))
         self.assertNotEqual(float(g), 0.0)
 
-    def test_grad_through_scav_ratio(self):
+    def test_grad_through_csr_conv(self):
         state, diagnostics = self._setup(with_scav=True)
 
-        def loss(ratio):
+        def loss(csr):
             term = ConvectiveTracerTransport(
                 ("m_so4_acc",),
                 params=ConvTransportParameters(
-                    transport_scale=jnp.asarray(1.0), scav_ratio=ratio,
+                    transport_scale=jnp.asarray(1.0), csr_conv=csr,
                 ),
-                scav_weights=(1.0,),
+                csr_conv=(0.99,),
             )
             tend, _ = term(state, diagnostics, None, None)
             return jnp.sum(tend.tracers["m_so4_acc"] ** 2)
 
-        g = jax.grad(loss)(jnp.asarray(0.99))
-        self.assertTrue(np.isfinite(float(g)))
-        self.assertNotEqual(float(g), 0.0)
+        g = jax.grad(loss)(jnp.asarray([0.99]))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(g))))
+        self.assertNotEqual(float(g[0]), 0.0)
+
+    def test_default_params_take_the_given_fractions(self):
+        term = ConvectiveTracerTransport(("a", "b"), csr_conv=(0.6, 0.2))
+        np.testing.assert_allclose(
+            np.asarray(term.params.get_value().csr_conv), [0.6, 0.2])
+
+    def test_misshapen_param_fractions_rejected(self):
+        with self.assertRaises(ValueError):
+            ConvectiveTracerTransport(
+                ("a", "b"), params=ConvTransportParameters.default((0.5,)))
 
     def test_empty_tracer_list_rejected(self):
         with self.assertRaises(ValueError):
             ConvectiveTracerTransport(())
 
-    def test_misaligned_scav_weights_rejected(self):
+    def test_misaligned_csr_conv_rejected(self):
         with self.assertRaises(ValueError):
-            ConvectiveTracerTransport(("a", "b"), scav_weights=(1.0,))
+            ConvectiveTracerTransport(("a", "b"), csr_conv=(1.0,))
 
 
 class ComposedColumnScavengingTest(unittest.TestCase):
@@ -539,7 +719,7 @@ class ComposedColumnScavengingTest(unittest.TestCase):
     @pytest.mark.slow
     def test_soluble_tracer_is_scavenged_out_of_the_convective_column(self):
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.rce import (
             JAM_COLUMN_FT_WINDOW,
             convergent_initial_physics_data,
@@ -549,8 +729,7 @@ class ComposedColumnScavengingTest(unittest.TestCase):
 
         nlev, dt, nsteps = 47, 900.0, 96          # one day
         vertical = get_echam_levels(nlev)
-        physics = echam_physics(cloud_scheme="2m", aerosol_module="jam",
-                                radiation_scheme="grey")
+        physics = idealized_echam_physics(cloud_scheme="2m", aerosol_module="jam")
         scm = SingleColumnModel(physics=physics, vertical=vertical,
                                 lat_deg=0.0, lon_deg=150.0, dt_seconds=dt)
         # The SAME prescribed column and seeds the release-validation check
@@ -587,6 +766,16 @@ class ComposedColumnScavengingTest(unittest.TestCase):
         self.assertGreater(pom, 1e-20, "nothing was lofted at all")
         self.assertLess(so4, 0.5 * pom,
                         f"soluble {so4:.2e} not depleted vs insoluble {pom:.2e}")
+        # ...but some of it IS lofted: the 1 − csr_conv share outside the condensate
+        # rides the plume to the free troposphere, so relative to its own
+        # boundary-layer loading the soluble tracer aloft sits near the
+        # percent level (~0.1 after a day here), not at the ~1e-5 a plume
+        # that re-activates its interstitial tail at every level leaves.
+        bl = p > 850.0e2
+        so4_bl = np.asarray(preds.tracer_states["m_so4_acc"])[-1][bl].mean()
+        self.assertGreater(so4, 1.0e-3 * so4_bl,
+                           f"soluble FT {so4:.2e} vs its BL {so4_bl:.2e}: "
+                           "the interstitial share is being scavenged")
 
 if __name__ == "__main__":
     unittest.main()

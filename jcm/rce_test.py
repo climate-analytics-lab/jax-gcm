@@ -133,9 +133,9 @@ class TestRcePhysicsComposition(unittest.TestCase):
         (``cdnc_factor = 1``), leaving the rest of the stack -- clouds
         included -- in place.
         """
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
 
-        full = echam_physics(radiation_scheme="grey")
+        full = idealized_echam_physics()
         physics = full.replace("aerosol", AerosolFree())
         self.assertEqual(
             [t.category for t in physics.terms],
@@ -442,13 +442,17 @@ class TestRceIntegrationRrtmgp(unittest.TestCase):
 
 @pytest.mark.slow
 class TestRceWholeModelTiedtke(unittest.TestCase):
-    """RCE on the *full* ECHAM physics stack with Tiedtke convection.
+    """RCE on the *full* ECHAM term stack with Tiedtke convection.
 
     Unlike the minimal radiative-convective ``rce_physics`` stack, this drives
-    the complete ``echam_physics()`` column — surface turbulent fluxes, TTE-TKE
-    vertical diffusion, 1-moment microphysics, Sundqvist clouds, Tiedtke-Nordeng
+    the complete ECHAM column — surface turbulent fluxes, TTE-TKE vertical
+    diffusion, 1-moment microphysics, Sundqvist clouds, Tiedtke-Nordeng
     convection and radiation — as a genuine single-column integration of the
-    whole model. Humidity is prognostic (the surface evaporation supplies it; the
+    whole model. The radiation is the idealized grey two-stream
+    (``idealized_echam_physics``), so what this pins is the ECHAM moist
+    physics' ledgers and equilibrium under a simple radiative driver, not the
+    radiative equilibrium of ECHAM physics: the same column with RRTMGP goes
+    non-finite (#920). Humidity is prognostic (the surface evaporation supplies it; the
     fixed-RH closure is incompatible with the model's own moisture physics).
 
     The assertions are on the **time mean**: a single-column mass-flux scheme in
@@ -492,11 +496,10 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     """
 
     def test_whole_model_column_reaches_physical_time_mean_rce(self):
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
 
         nlev = 47
-        physics = echam_physics(
-            radiation_scheme="grey",
+        physics = idealized_echam_physics(
             radiation=RadiationParameters.default(solar_constant=420.0),
         ).replace("aerosol", AerosolFree())
         scm = rce_column(

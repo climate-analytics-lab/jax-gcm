@@ -118,7 +118,7 @@ class TestEchamLandT31L47Hybrid(unittest.TestCase):
         succeed (otherwise the test harness itself is broken).
         """
         final = _run_one_step(
-            echam_physics(radiation_scheme="grey"),
+            echam_physics(),
             _t31l47_terrain_aqua(),
         )
         self.assertTrue(_state_is_finite(final))
@@ -131,7 +131,7 @@ class TestEchamLandT31L47Hybrid(unittest.TestCase):
         in ``echam_t63_land_repro_test.py``.
         """
         final = _run_one_step(
-            echam_physics(radiation_scheme="grey"),
+            echam_physics(),
             _t31l47_terrain_real(),
         )
         self.assertTrue(_state_is_finite(final))

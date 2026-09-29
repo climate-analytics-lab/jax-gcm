@@ -1079,7 +1079,7 @@ def _maybe_chunked_vmap(fn, in_axes):
 
 
 # The *noa spacing helpers live in ``aerosol_free`` so echam_physics() can
-# validate the setting for grey/emulated configs too, without importing
+# validate the setting for emulated and custom-term configs too, without importing
 # this module and its RRTMGP tables.
 from jcm.physics.radiation.aerosol_free import (  # noqa: E402
     NOA_KEYS,
@@ -1175,7 +1175,7 @@ class RRTMGPRadiation(PhysicsTerm):
         # dominates the step, so this is opt-in only.
         #
         # Validated through the shared helper, which echam_physics() also
-        # calls so a grey or emulated config is held to the same contract
+        # calls so any other radiation scheme is held to the same contract
         # rather than silently ignoring the argument.
         interval = resolve_aerosol_free_interval(aerosol_free_interval)
         # A cadence locked to the solar day never samples some columns in
@@ -1529,14 +1529,24 @@ class RRTMGPRadiation(PhysicsTerm):
                 prev_frac = tuple(getattr(diagnostics["radiation"], f)
                                   for f in _FRAC_FIELDS)
 
+                # The two branches must return identical dtypes, and mixing
+                # the solve's flux dtype with the carried fraction's dtype
+                # (which differ under jax_enable_x64: the solve returns the
+                # fluxes in its own working precision, the fraction slot is
+                # whatever the carry holds) promotes in one branch only. So
+                # each *noa flux is pinned to the dtype of the fresh all-sky
+                # flux it stands in for, and each fraction to the dtype of
+                # its carried slot.
                 def _companion():
                     """Solve, and refresh the stored effect fraction."""
                     vals = _solve_aerosol_free()
                     fracs = [
                         update_effect_fraction(_fresh_toa[k], noa_v,
-                                               prev_frac[i])
+                                               prev_frac[i]
+                                               ).astype(prev_frac[i].dtype)
                         for i, (k, noa_v) in enumerate(zip(_KEYS, vals))
                     ]
+                    vals = tuple(v.astype(f.dtype) for v, f in zip(vals, fresh))
                     return vals, tuple(fracs)
 
                 def _held():
@@ -1548,7 +1558,9 @@ class RRTMGPRadiation(PhysicsTerm):
                     on a dark column would then report no aerosol effect for
                     the rest of the interval — including after sunrise.
                     """
-                    return hold_all(fresh, prev_frac), prev_frac
+                    held = hold_all(fresh, prev_frac)
+                    return (tuple(h.astype(f.dtype) for h, f in zip(held, fresh)),
+                            prev_frac)
 
                 noa_vals, new_frac = jax.lax.cond(
                     jnp.mod(rad_call, self._aerosol_free_interval) == 0,

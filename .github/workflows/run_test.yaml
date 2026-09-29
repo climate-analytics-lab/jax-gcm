@@ -55,7 +55,8 @@ name: Run Unit Tests via Pytest
 # Safe because no branch has protection rules: with a required status check,
 # a filtered-out job never reports and the PR blocks forever on a pending
 # check. Revisit this if branch protection is ever enabled — and note the job
-# names changed with this layout (`build` -> `lint`/`fast-tests`/`slow-tests`).
+# names: `lint`, `fast-tests`, and the slow suite's `slow-tests-radiation`,
+# `slow-tests-rest` and `slow-coverage` (see the slow jobs below).
 # The two lists are duplicated deliberately: GitHub Actions does not resolve
 # YAML anchors/aliases in workflow files, so `&x`/`*x` would silently not do
 # what it looks like. Keep them in sync by hand.
@@ -220,17 +221,69 @@ jobs:
   # rather than after it (see the header) and are cut short by its cancel step
   # if it goes red. A cancelled result here therefore never means "slow suite
   # passed" — but it does not pin the cause either, because
-  # `cancel-in-progress` cancels this job just the same when a newer push
+  # `cancel-in-progress` cancels these jobs just the same when a newer push
   # supersedes the run, as does cancelling by hand. Read the `fast-tests` job
   # to tell the three apart.
-  # Uses .coveragerc-pr which omits utility / orchestration modules already
-  # well-covered by the fast suite, so the 80% threshold reflects main-path
-  # integration coverage.
-  slow-tests:
+  #
+  # The slow suite runs as TWO parallel shards plus a coverage job. Single-
+  # process it had grown past this job's 110-minute timeout (~115 min of tests
+  # once the ECHAM gradient harnesses moved to RRTMGP, #918), and xdist is not
+  # an option here: RRTMGP's reverse pass is the heaviest thing in the suite
+  # (~12-14 GB peak in one process), so two workers would not fit the runner.
+  # The split is by path and lives in ONE place, tools/ci/slow_shards.py:
+  # `radiation` (the ECHAM gradient harnesses and jcm/physics/radiation, ~52
+  # min of tests) and `rest` (everything else, ~63 min), where `rest` is the
+  # complement of `radiation` — so a new slow test file lands in `rest` by
+  # construction — and `slow_shards.py check` fails the `radiation` job unless
+  # the two collections partition `-m slow` exactly.
+  #
+  # Coverage is judged on the COMBINED data: each shard uploads its
+  # `.coverage` file and `slow-coverage` combines them and enforces the 80 %
+  # floor against .coveragerc-pr. A shard alone covers only part of the
+  # integration path, so neither enforces a floor itself.
+  slow-tests-radiation:
     needs: lint
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 110
+    # ~52 min of tests measured in CI plus ~4 min setup and shard check.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/actions/setup-jcm
+
+      # Recorded so memory questions about this job can be answered from the
+      # log (RRTMGP's reverse pass peaks at ~12-14 GB in one process).
+      - name: Report runner resources
+        run: nproc && free -m
+
+      - name: Check the slow-suite shards partition the suite
+        run: python tools/ci/slow_shards.py check
+
+      - name: Test with pytest (slow suite, radiation shard)
+        run: |
+          pytest -v -s -m "slow" $(python tools/ci/slow_shards.py args radiation) \
+            --cov=jcm --cov-config=.coveragerc-pr
+          mv .coverage .coverage.radiation
+          python -c "import coverage; print(coverage.__version__)" > coverage-version.txt
+
+      # include-hidden-files: upload-artifact@v4 skips dotfiles by default,
+      # and the coverage data file is one.
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: slow-coverage-radiation
+          path: |
+            .coverage.radiation
+            coverage-version.txt
+          include-hidden-files: true
+          retention-days: 3
+
+  slow-tests-rest:
+    needs: lint
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # ~63 min of tests measured in CI plus ~3 min setup.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v3
 
@@ -251,19 +304,66 @@ jobs:
 
       - uses: ./.github/actions/setup-jcm
 
-      - name: Test with pytest (slow suite)
-        run: |
-          pytest -v -s -m "slow" --cov=jcm --cov-config=.coveragerc-pr --cov-fail-under=80
+      - name: Report runner resources
+        run: nproc && free -m
 
-      # Belt to the --cov-fail-under braces above. The floor is enforced twice
-      # on purpose: `--cov-fail-under` lives in a plugin whose enforcement
-      # semantics have already changed under us once (pytest-cov 6.0.0 made the
-      # check honour the reporting precision, silently turning this 80 floor
-      # into a 79.5 floor until `.coveragerc-pr` set `precision = 2` — #786),
-      # whereas this step is a plain non-zero exit from coverage itself.
-      # It reads the same `.coverage` file pytest-cov has just combined across
-      # the xdist workers, so it re-reports the identical total rather than
-      # re-measuring anything, and it costs about a second.
+      - name: Test with pytest (slow suite, rest shard)
+        run: |
+          pytest -v -s -m "slow" $(python tools/ci/slow_shards.py args rest) \
+            --cov=jcm --cov-config=.coveragerc-pr
+          mv .coverage .coverage.rest
+          python -c "import coverage; print(coverage.__version__)" > coverage-version.txt
+
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: slow-coverage-rest
+          path: |
+            .coverage.rest
+            coverage-version.txt
+          include-hidden-files: true
+          retention-days: 3
+
+  # The 80 % floor on the combined slow-suite coverage, against .coveragerc-pr
+  # (which omits utility / orchestration modules already well covered by the
+  # fast suite, so the floor reflects main-path integration coverage).
+  slow-coverage:
+    needs: [slow-tests-radiation, slow-tests-rest]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The sources are needed: coverage reports against the files it measured.
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Download coverage data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: slow-coverage-*
+          path: coverage-data
+      # The same coverage version the shards measured with, so the data files
+      # are read by the code that wrote them.
+      - name: Install coverage
+        run: pip install "coverage==$(cat coverage-data/slow-coverage-radiation/coverage-version.txt)"
+      - name: Combine the shards
+        run: |
+          coverage combine --rcfile=.coveragerc-pr \
+            coverage-data/slow-coverage-radiation/.coverage.radiation \
+            coverage-data/slow-coverage-rest/.coverage.rest
+
+      # The floor is enforced twice, by two different routes. The first is
+      # coverage's own `report --fail-under`, judged at the rcfile's reporting
+      # precision (`precision = 2`, the #786 fix: at precision 0 an 80 floor
+      # was a 79.5 floor). The second re-reads the unrounded total from the
+      # JSON report and compares it in plain Python, so a change to either
+      # coverage's rounding or its fail-under semantics cannot silently disarm
+      # the gate. (pytest-cov's `--cov-fail-under` cannot be one of the two
+      # any more: no single pytest process sees the combined data.)
       - name: Enforce slow-test coverage floor
         run: |
           coverage report --rcfile=.coveragerc-pr --fail-under=80
+          coverage json --rcfile=.coveragerc-pr -o slow-coverage.json
+          python -c "import json, sys; t = json.load(open('slow-coverage.json'))['totals']['percent_covered']; print(f'combined slow coverage {t:.4f} %'); sys.exit(0 if t >= 80 else 1)"

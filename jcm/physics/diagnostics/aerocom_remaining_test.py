@@ -346,7 +346,7 @@ class PlevOmegaTest(unittest.TestCase):
         from jcm.dycore.dinosaur.dycore import DinosaurDycore
         from jcm.model import Model
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
@@ -356,9 +356,8 @@ class PlevOmegaTest(unittest.TestCase):
             dt_seconds=900.0, compute_omega=True)
         model = Model(
             dycore=dycore, time_step=15.0,
-            physics=echam_physics(radiation_scheme="grey",
-                                  enable_aerocom=True,
-                                  aerocom_groups=("plev",)),
+            physics=idealized_echam_physics(enable_aerocom=True,
+                                            aerocom_groups=("plev",)),
         )
         ds = model.run(total_time="1 hour", save_interval="1 hour").to_xarray()
         for key in ("aerocom_wap", "aerocom_w500", "aerocom_w700"):
@@ -585,11 +584,12 @@ if __name__ == "__main__":
 class AerosolFreeRadiationTest(unittest.TestCase):
     """The #583 noa fluxes: a second solve with aerosol optics zeroed."""
 
-    def test_grey_scheme_is_rejected(self):
-        from jcm.physics.echam.echam_terms import echam_physics
-        with self.assertRaises(ValueError):
-            echam_physics(radiation_scheme="grey",
-                          aerosol_free_interval=1)
+    def test_non_rrtmgp_radiation_is_rejected(self):
+        # A radiation term with no aerosol optics to zero (here the idealized
+        # grey term) cannot produce *noa fluxes.
+        from jcm.physics.echam.testing import idealized_echam_physics
+        with self.assertRaisesRegex(ValueError, "radiation_scheme='rrtmgp'"):
+            idealized_echam_physics(aerosol_free_interval=1)
 
     def test_aerosol_free_interval_reaches_the_radiation_term(self):
         """The factory setting must actually configure the built term.
