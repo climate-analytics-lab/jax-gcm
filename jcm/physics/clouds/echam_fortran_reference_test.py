@@ -523,8 +523,49 @@ def _write_known_gaps(mode: str) -> None:
     print(f"{len(gaps)} known gaps written ({len(old)} before)")
 
 
+def show(kind: str, column: str, variant: str = "sonntag", prec: str = "float64") -> None:
+    """Print one column level by level: pressure, ECHAM and jcm increments of
+    every field that fails, and (cloud, sonntag) the ECHAM intermediates that
+    are non-zero at that level -- to localise a failure to one process.
+    """
+    inp = echam_inputs(kind, variant)
+    ref = echam_outputs(kind, variant)
+    run = run_jcm_cover if kind == "cover" else run_jcm_cloud
+    with echam_constants(), precision(prec):
+        got = run(inp)
+    j = column_names(kind).index(column)
+    ri, gi = increments(kind, inp, ref), increments(kind, inp, got)
+    fields = comparison(kind, variant, prec)[column]
+    print(f"{kind} {column} [{variant}, {prec}]: {_failure_message(fields) or 'passes'}")
+    z = load(kind)
+    diag = {k.split("/")[-1]: z[k][:, j] for k in z if k.startswith(f"diag/{variant}/")}
+    for k in ri:
+        if fields[k][1] <= 1.0 or ri[k].shape[0] == 1:
+            if fields[k][1] > 1.0:
+                print(f"  {k}: ECHAM {ri[k][0, j]:.6e}  jcm {gi[k][0, j]:.6e}")
+            continue
+        print(f"  {k} (level, p[hPa], ECHAM, jcm):")
+        for lev in range(ri[k].shape[0]):
+            r, g = ri[k][lev, j], gi[k][lev, j]
+            if max(abs(r), abs(g)) <= ATOL[k]:
+                continue
+            active = [n for n, v in diag.items()
+                      if n.startswith("z") and abs(v[lev]) > 1e-14 and n not in ("zqsm1", "ztp1", "zqp1",
+                                                                             "ztp1tmp", "ztp1tmp_pre54",
+                                                                             "zqp1tmp_pre54", "zqsp1tmp",
+                                                                             "zrieff", "zcolleffi",
+                                                                             "zdqsat1", "zxlb_7", "zxib_7")]
+            print(f"    {lev:2d} {inp['papm1'][lev, j] / 100:7.1f} {r: .6e} {g: .6e}"
+                  + (f"   ECHAM active: {' '.join(active)}" if active else ""))
+
+
 if __name__ == "__main__":
     import sys
-    if len(sys.argv) != 2 or sys.argv[1] not in ("--prune", "--init"):
-        raise SystemExit("usage: echam_fortran_reference_test.py --prune|--init")
-    _write_known_gaps(sys.argv[1][2:])
+    args = sys.argv[1:]
+    if args[:1] == ["--show"] and len(args) >= 3:
+        show(*args[1:])
+    elif len(args) == 1 and args[0] in ("--prune", "--init"):
+        _write_known_gaps(args[0][2:])
+    else:
+        raise SystemExit("usage: echam_fortran_reference_test.py --prune | --init | "
+                         "--show <cover|cloud> <column> [variant] [precision]")
