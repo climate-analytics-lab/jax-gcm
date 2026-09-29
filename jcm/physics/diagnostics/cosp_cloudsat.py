@@ -96,7 +96,9 @@ from flax import nnx
 
 import jcm.constants as c
 from jcm.forcing import ForcingData
+from jcm.physics.diagnostics.aerocom import _post_physics_tracer
 from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.radiation.cloud_optics import post_physics_effective_radii
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
 
@@ -122,18 +124,20 @@ def _post_micro_condensate(clouds, diagnostics):
             clouds.qi if qi is None else qi)
 
 
-def _layer_optical_depth(clouds, pressure_half, qc, qi):
+def _layer_optical_depth(r_eff_liq_um, r_eff_ice_um, pressure_half, qc, qi):
     """Gridbox-mean 0.67 um layer cloud optical depth for the MODIS optics.
 
     Geometric-optics limit ``tau = 3 W / (2 rho r_eff)`` with ``W`` the layer
     condensate path — the same large-size-parameter form the MODIS simulator
-    assumes for its retrievals. Effective radii are floored so a
+    assumes for its retrievals. The radii [um] are those of ``qc``/``qi``
+    (``post_physics_effective_radii``). They are floored so a
     condensate-free layer (r_eff = 0) cannot divide by zero; the guard is
-    only reached where the numerator is zero too.
+    reached only where the numerator is zero too, or the cover is below
+    ~1e-12 and the layer has no cloudy sub-column.
     """
     dm = jnp.diff(pressure_half, axis=0) / c.grav
-    r_liq = jnp.maximum(clouds.r_eff_liq * 1e-6, 1e-9)
-    r_ice = jnp.maximum(clouds.r_eff_ice * 1e-6, 1e-9)
+    r_liq = jnp.maximum(r_eff_liq_um * 1e-6, 1e-9)
+    r_ice = jnp.maximum(r_eff_ice_um * 1e-6, 1e-9)
     tau_liq = 1.5 * qc * dm / (1000.0 * r_liq)
     tau_ice = 1.5 * qi * dm / (917.0 * r_ice)
     return tau_liq + tau_ice
@@ -210,7 +214,7 @@ class CloudsatCosp(PhysicsTerm):
     # ``requires_audit_test`` exists to catch.
     requires: ClassVar[tuple[str, ...]] = (
         "clouds", "convection", "pressure_full", "pressure_half",
-        "height_full", "height_half")
+        "height_full", "height_half", "air_density")
     # Static key set: the diagnostics dict is part of the scan carry, so
     # every enabled simulator must publish the same keys on every step.
     provides: ClassVar[tuple[str, ...]] = (
@@ -295,6 +299,20 @@ class CloudsatCosp(PhysicsTerm):
             specific_humidity = thermo_run["specific_humidity"]
         nlev, ncols = temperature.shape
 
+        # Effective radii of the condensate every simulator below reads, not
+        # the radiation's (``clouds.r_eff_*``, formed from the step-start
+        # condensate before the microphysics ran): a layer the microphysics
+        # filled after the radiation solve would otherwise carry condensate
+        # with a radius of 0. See ``post_physics_effective_radii``.
+        prognostic = "qnc" in state.tracers and "qni" in state.tracers
+        number_tracers = ((_post_physics_tracer(state, diagnostics, "qnc"),
+                           _post_physics_tracer(state, diagnostics, "qni"))
+                          if prognostic else None)
+        r_liq_um, r_ice_um = post_physics_effective_radii(
+            state, diagnostics, forcing, terrain, qc_pm, qi_pm,
+            clouds.cloud_fraction, temperature,
+            number_tracers=number_tracers)
+
         # Convective surface precip spread below the convective condensate
         # top (stopgap; see module docstring). The mask is 1 from the first
         # level (from the top) with convective condensate down to the
@@ -311,8 +329,8 @@ class CloudsatCosp(PhysicsTerm):
         # remaining hydrometeor slots always use the PSD defaults.
         reff = jnp.zeros((nlev, ncols, jconfig.N_HYDRO),
                          dtype=temperature.dtype)
-        reff = reff.at[..., jconfig.I_LSCLIQ].set(clouds.r_eff_liq * 1e-6)
-        reff = reff.at[..., jconfig.I_LSCICE].set(clouds.r_eff_ice * 1e-6)
+        reff = reff.at[..., jconfig.I_LSCLIQ].set(r_liq_um * 1e-6)
+        reff = reff.at[..., jconfig.I_LSCICE].set(r_ice_um * 1e-6)
 
         inputs = CloudsatInputs(
             pressure=diagnostics["pressure_full"],
@@ -363,7 +381,7 @@ class CloudsatCosp(PhysicsTerm):
             # condensate, see _lw_emissivity), the skin temperature and a
             # day mask; its boxptop also completes the MODIS low-cloud CTP
             # substitution, exactly as in cosp.F90.
-            dtau_s = _layer_optical_depth(clouds, p_half, qc_pm, qi_pm)
+            dtau_s = _layer_optical_depth(r_liq_um, r_ice_um, p_half, qc_pm, qi_pm)
             dtau_c = jnp.zeros_like(dtau_s)
             isccp_kwargs = {}
             if self.enable_isccp:
@@ -432,8 +450,8 @@ class CloudsatCosp(PhysicsTerm):
             })
 
         if self.enable_calipso:
-            extra.update(self._calipso(inputs, out, clouds, p_half,
-                                       temperature, diagnostics))
+            extra.update(self._calipso(inputs, out, (r_liq_um, r_ice_um),
+                                       p_half, temperature, diagnostics))
 
         zero_tendencies = PhysicsTendency.zeros(state.temperature.shape)
         return zero_tendencies, {
@@ -449,7 +467,7 @@ class CloudsatCosp(PhysicsTerm):
             **extra,
         }
 
-    def _calipso(self, inputs, cs, clouds, p_half, temperature, diagnostics):
+    def _calipso(self, inputs, cs, radii_um, p_half, temperature, diagnostics):
         """CALIPSO layered cloud cover on the radar's SCOPS realization.
 
         Reuses ``cs.frac_out``/``cs.prec_frac`` so the lidar sees exactly the
@@ -463,6 +481,8 @@ class CloudsatCosp(PhysicsTerm):
         from jcosp.lidar.diagnostics import lidar_column
         from jcosp.lidar.optics import lidar_optics
         from jcosp.lidar.simulator import lidar_subcolumn
+
+        r_liq_um, r_ice_um = radii_um
 
         sub = distribute_hydrometeors(
             cs.frac_out, cs.prec_frac, inputs.pressure, inputs.temperature,
@@ -478,13 +498,15 @@ class CloudsatCosp(PhysicsTerm):
             # NOTE the convention differs from the radar path above: the
             # radar reads reff == 0 as "use the PSD defaults", whereas
             # ``lidar_optics`` reads radius <= 0 as "this class is absent
-            # from the volume" and returns no particle backscatter. So a
-            # configuration that leaves the effective radii unset reports
-            # ZERO lidar cloud cover rather than falling back to defaults.
-            ls_radliq=clouds.r_eff_liq * 1e-6,
-            ls_radice=clouds.r_eff_ice * 1e-6,
-            cv_radliq=jnp.zeros_like(clouds.r_eff_liq),
-            cv_radice=jnp.zeros_like(clouds.r_eff_ice),
+            # from the volume" and returns no particle backscatter. The
+            # large-scale radii are formed from the condensate the lidar
+            # reads (``post_physics_effective_radii``), so they are positive
+            # wherever that condensate sits in resolved cover; the
+            # convective classes carry no condensate here and a radius of 0.
+            ls_radliq=r_liq_um * 1e-6,
+            ls_radice=r_ice_um * 1e-6,
+            cv_radliq=jnp.zeros_like(r_liq_um),
+            cv_radice=jnp.zeros_like(r_ice_um),
             pressure=inputs.pressure, pressure_half=p_half,
             temperature=inputs.temperature)
 

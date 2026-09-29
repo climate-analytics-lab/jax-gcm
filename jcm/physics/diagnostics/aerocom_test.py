@@ -752,6 +752,116 @@ class PostPhysicsTracerTest(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(self._call(-1.0)), 0.0)
 
 
+class CloudGroupRadiiTest(unittest.TestCase):
+    """The cloud group's radii are those of the condensate it reads.
+
+    ``clouds.r_eff_*`` are the radii the radiation used: formed from the
+    step-start condensate before the microphysics ran, and held between
+    radiation solves. The cloud group reads the post-microphysics condensate
+    (``thermo_run``), so a layer the microphysics filled after the solve
+    carries condensate where the radiation's radius is 0; paired with that
+    radius, the 1 nm floor in ``_cloud_optical_depth`` turns it into an
+    optical depth ~1e4 times too large. The group therefore forms its own
+    radii with the same ECHAM law (``post_physics_effective_radii``).
+    """
+
+    NLEV, NLAT, NLON = 10, 64, 32
+
+    def _setup(self, radiation_radius_um, number_tendency=None):
+        from jcm.forcing import ForcingData
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.diagnostics.moist_air_state import MoistAirColumnState
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+        from jcm.utils import get_coords
+
+        nlev, ncols = self.NLEV, self.NLAT * self.NLON
+        coords = get_coords(np.linspace(0, 1, nlev + 1),
+                            nodal_shape=(self.NLAT, self.NLON))
+        terrain = TerrainData.aquaplanet(coords)
+        forcing = ForcingData.zeros((self.NLAT, self.NLON))
+        temperature = jnp.broadcast_to(
+            jnp.linspace(210.0, 290.0, nlev)[:, None], (nlev, ncols))
+        # ``number_tendency`` switches to the 2-moment law: qnc/qni tracers,
+        # with a running tendency on qnc [1/kg/s] that the post-physics
+        # droplet number must include.
+        tracers = ({} if number_tendency is None else
+                   {"qnc": jnp.full((nlev, ncols), 1.0e8),
+                    "qni": jnp.full((nlev, ncols), 1.0e6)})
+        state = PhysicsState.zeros(
+            (nlev, ncols), temperature=temperature, tracers=tracers,
+            geopotential=jnp.broadcast_to(
+                9.81 * jnp.linspace(18000.0, 100.0, nlev)[:, None],
+                (nlev, ncols)),
+            normalized_surface_pressure=jnp.ones((ncols,)))
+        prep = MoistAirColumnState()
+        prep.cache_coords(coords)
+        _, diagnostics = prep(state, {"_dt_seconds": 900.0}, forcing, terrain)
+
+        # A warm liquid deck in the even columns that exists only after the
+        # microphysics: step-start CloudData holds no condensate, the running
+        # view does, and the radiation's radius is whatever the caller says.
+        cf = np.zeros((nlev, ncols))
+        qc = np.zeros((nlev, ncols))
+        cols = np.arange(0, ncols, 2)
+        cf[7:9, cols] = 0.7
+        qc[7:9, cols] = 4e-5
+        clouds = CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=jnp.asarray(cf),
+            r_eff_liq=jnp.full((nlev, ncols), radiation_radius_um),
+            r_eff_ice=jnp.full((nlev, ncols), radiation_radius_um))
+        diagnostics = {
+            **diagnostics, "clouds": clouds,
+            "aerosol": AerosolData.zeros((ncols,), nlev),
+            "thermo_run": {**diagnostics["thermo_run"],
+                           "qc": jnp.asarray(qc),
+                           "qi": jnp.zeros((nlev, ncols))}}
+        if number_tendency is not None:
+            diagnostics["_tendency_run"] = {"tracers": {
+                "qnc": jnp.full((nlev, ncols), number_tendency),
+                "qni": jnp.zeros((nlev, ncols))}}
+        return state, diagnostics, forcing, terrain
+
+    def test_radii_follow_the_condensate_not_the_radiation(self):
+        term = AerocomDiagnostics(groups=("cloud",))
+        outs = [term(*self._setup(r))[1] for r in (0.0, 20.0)]
+        for key in ("aerocom_cdr", "aerocom_cod", "aerocom_lcc",
+                    "aerocom_clt"):
+            np.testing.assert_array_equal(
+                np.asarray(outs[0][key]), np.asarray(outs[1][key]),
+                err_msg=f"{key} depends on the radiation's radii")
+        cloudy = np.arange(0, self.NLAT * self.NLON, 2)
+        cdr = np.asarray(outs[0]["aerocom_cdr"])[cloudy]
+        self.assertTrue((cdr > 0.0).all())
+        # Grid-mean path 4e-5 kg/kg over two ~1e4 kg/m2 layers is ~0.8
+        # kg/m2; at a table radius (2.5-21.5 um) that is an optical depth of
+        # 50-500, where the 1 nm floor would give ~1e6.
+        cod = np.asarray(outs[0]["aerocom_cod"])[cloudy]
+        self.assertTrue(((cod > 10.0) & (cod < 1.0e3)).all(), cod[:4])
+        # The CMOR'd 3-D radius is the one behind these products.
+        cdr3d = np.asarray(outs[0]["aerocom_cdr3d"])
+        self.assertTrue((cdr3d[7:9, cloudy] > 0.0).all())
+        np.testing.assert_array_equal(
+            np.asarray(outs[0]["aerocom_cdr3d"]),
+            np.asarray(outs[1]["aerocom_cdr3d"]))
+
+    def test_two_moment_radii_use_the_post_physics_droplet_number(self):
+        """With qnc/qni, the droplet number is the saved one, not step-start.
+
+        A running qnc tendency that doubles the droplet number over the step
+        (1e8 /kg + 1e8/900 /kg/s x 900 s) must shrink the droplets.
+        """
+        term = AerocomDiagnostics(groups=("cloud",))
+        still = term(*self._setup(0.0, number_tendency=0.0))[1]
+        doubled = term(*self._setup(0.0, number_tendency=1.0e8 / 900.0))[1]
+        cloudy = np.arange(0, self.NLAT * self.NLON, 2)
+        r_still = np.asarray(still["aerocom_cdr3d"])[7:9][:, cloudy]
+        r_doubled = np.asarray(doubled["aerocom_cdr3d"])[7:9][:, cloudy]
+        self.assertTrue((r_still > 0.0).all())
+        self.assertTrue((r_doubled < r_still).all())
+
+
 class EmissionFluxResetTest(unittest.TestCase):
     """emi_* must measure ONE step, not the run so far.
 
@@ -814,9 +924,10 @@ class ReviewRegressionTest(unittest.TestCase):
         term = AerocomDiagnostics()
 
         class _Clouds:
-            r_eff_liq = jnp.full((nz, nx), 10.0)   # um
-            r_eff_ice = jnp.full((nz, nx), 30.0)
             cloud_fraction = jnp.full((nz, nx), 0.5)
+
+        r_liq_m = jnp.full((nz, nx), 10.0e-6)
+        r_ice_m = jnp.full((nz, nx), 30.0e-6)
 
         p_half = jnp.linspace(1000.0, 101000.0, nz + 1)[:, None] * jnp.ones((1, nx))
         temperature = jnp.full((nz, nx), 260.0)
@@ -824,7 +935,8 @@ class ReviewRegressionTest(unittest.TestCase):
 
         def lcc_sum(qc):
             out = term._cloud_group(
-                _Clouds(), temperature, p_half, cdnc_ic, qc, qc)
+                _Clouds(), temperature, p_half, cdnc_ic, qc, qc,
+                r_liq_m, r_ice_m)
             return jnp.sum(out["aerocom_lcc"] + out["aerocom_cod"])
 
         # One probe inside each dtype's underflow-square window: 5e-31

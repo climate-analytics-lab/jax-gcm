@@ -117,7 +117,10 @@ class CloudData:
     # radiation term (RRTMGP or the emulator) from the state it radiated,
     # 0 where the phase had no in-cloud condensate; on a cached radiation step
     # it holds the radii of the solve the heating came from. No term reads it
-    # as an input to the radiation (see ``cloud_optics.radiation_effective_radii``).
+    # as an input to the radiation (see ``cloud_optics.radiation_effective_radii``),
+    # and the post-physics diagnostics (COSP, AeroCom) do not read it either:
+    # they describe the post-microphysics condensate, so they form its radii
+    # with the same law (``cloud_optics.post_physics_effective_radii``).
     r_eff_liq: jnp.ndarray
     r_eff_ice: jnp.ndarray
     # Previous-timestep (t-dt) 2M number concentrations carried across
