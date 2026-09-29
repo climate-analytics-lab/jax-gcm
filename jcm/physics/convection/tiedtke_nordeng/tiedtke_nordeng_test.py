@@ -825,16 +825,18 @@ class TestIndexDtypeUnderX64:
                             name, float_dtype, unstable)
 
     def test_index_dtype_unchanged_without_x64(self):
-        assert not jax.config.read("jax_enable_x64")
-        for unstable in (True, False):
-            _tend, state = self._run(unstable, jnp.float32)
-            for name in self.INDEX_FIELDS:
-                assert getattr(state, name).dtype == jnp.int32
+        # Explicitly x64-off: the session default follows JAX_ENABLE_X64.
+        with jax.enable_x64(False):
+            for unstable in (True, False):
+                _tend, state = self._run(unstable, jnp.float32)
+                for name in self.INDEX_FIELDS:
+                    assert getattr(state, name).dtype == jnp.int32
 
     def test_x64_values_match_x32(self):
         # The pin changes dtypes, never values: the cloud base and top of an
         # unstable column agree between the two precision modes.
-        _t32, s32 = self._run(True, jnp.float32)
+        with jax.enable_x64(False):
+            _t32, s32 = self._run(True, jnp.float32)
         with jax.enable_x64():
             _t64, s64 = self._run(True, jnp.float32)
         assert int(s32.ktype) > 0, "test column did not convect"
