@@ -97,6 +97,21 @@ def test_below_cutoff_uses_c1_continuation_slope(dtype):
     np.testing.assert_allclose(actual, expected, rtol=4e-6, atol=0.0)
 
 
+@pytest.mark.parametrize("cutoff", [1.0e-11, 1.0e-10, 1.0e-9])
+def test_surrogate_slope_is_finite_nonnegative_and_bounded(cutoff):
+    values = jnp.concatenate((
+        jnp.asarray([0.0]),
+        jnp.logspace(-30, np.log10(cutoff), 64),
+    ))
+    slopes = jax.vmap(jax.grad(
+        lambda x: _ice_fall_speed_density_power(x, 1.0e-30, cutoff)
+    ))(values)
+    maximum = (2.0 - _EXPONENT) * cutoff ** (_EXPONENT - 1.0)
+    assert jnp.all(jnp.isfinite(slopes))
+    assert jnp.all(slopes >= 0.0)
+    assert jnp.all(slopes <= maximum)
+
+
 @pytest.mark.parametrize("dtype", [jnp.float32, jnp.float64])
 def test_cutoff_zero_and_resolved_ice_use_true_legacy_derivative(dtype):
     epsilon = jnp.asarray(1.0e-30, dtype=dtype)
@@ -173,6 +188,34 @@ def test_full_sweep_forward_parity_but_gradient_difference():
     legacy_grad = jax.grad(lambda x: objective(x, 0.0))(ice)
     assert jnp.all(jnp.isfinite(surrogate_grad))
     assert jnp.any(surrogate_grad != legacy_grad)
+
+
+def test_full_sweep_jvp_vjp_are_local_transposes():
+    config = MicrophysicsParameters.default()
+    ice = jnp.asarray([2e-7, 2e-12, 1e-20, 3e-11, 8e-6, 0.0])
+    column = _cold_column(ice)
+    density = column[6]
+
+    def outputs(cloud_ice, air_density):
+        inputs = (*column[:4], cloud_ice, column[5], air_density, *column[7:])
+        tendency, state = cloud_microphysics_column_sweep(
+            *inputs, 900.0, config, None, _CUTOFF)
+        return tendency.dqidt, state.precip_snow
+
+    ice_dot = jnp.linspace(-0.2, 0.3, ice.size) * jnp.maximum(ice, 1e-20)
+    density_dot = jnp.linspace(0.1, -0.1, density.size) * density
+    cotangent = (jnp.linspace(-0.3, 0.4, ice.size), jnp.asarray(0.7))
+    _, tangent = jax.jvp(outputs, (ice, density), (ice_dot, density_dot))
+    _, pullback = jax.vjp(outputs, ice, density)
+    ice_bar, density_bar = pullback(cotangent)
+    tangent_dot = sum(jnp.vdot(x, y) for x, y in zip(
+        jax.tree.leaves(tangent), jax.tree.leaves(cotangent), strict=True))
+    input_dot = jnp.vdot(ice_dot, ice_bar) + jnp.vdot(
+        density_dot, density_bar)
+    assert jnp.isfinite(tangent_dot)
+    assert jnp.isfinite(input_dot)
+    assert jnp.abs(tangent_dot) > 1e-12
+    np.testing.assert_allclose(tangent_dot, input_dot, rtol=2e-5, atol=1e-15)
 
 
 def test_default_term_derivative_cutoff_is_static_under_jit():

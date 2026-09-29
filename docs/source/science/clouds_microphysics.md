@@ -86,11 +86,15 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   differentiability-driven numerical treatment related to the
   gradient-regularisation work in #843. It bounds the formal ``q_i -> 0+``
   local slope without deleting ice or changing any forward result or the
-  resolved-ice derivative. A one-date, zero-radiation calibration diagnostic
-  found finite three- and eight-step gradients and three successful updates,
-  but this is not full-model reverse-mode qualification, physical validation
-  of the threshold, or evidence that every coupled multi-step gradient is
-  useful.
+  resolved-ice derivative. On one cached date, a zero-radiation numerical
+  diagnostic found finite reverse-mode gradients and three ordinary-loss-
+  accepted updates at three and eight steps. This is not physical validation
+  of the threshold, multi-date or weather-quality validation, or evidence that
+  every coupled multi-step gradient is useful. Separately compiled full-rollout
+  JVP and reverse gradients also disagreed substantially; the same behavior
+  occurred with ordinary AD through an altered-forward C1 comparison, showing
+  that it is not unique to this custom derivative; its cause remains
+  unresolved.
 - **Ice treatment is much unresolved** and depends on choices that exist in no
   single reference. The live heterogeneous ice-nucleating-particle path is a
   prognostic JAM ``ice_nuclei`` field where an online dust/BC source exists —
