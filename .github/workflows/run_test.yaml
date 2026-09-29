@@ -55,8 +55,9 @@ name: Run Unit Tests via Pytest
 # Safe because no branch has protection rules: with a required status check,
 # a filtered-out job never reports and the PR blocks forever on a pending
 # check. Revisit this if branch protection is ever enabled — and note the job
-# names: `lint`, `fast-tests`, and the slow suite's `slow-tests-radiation`,
-# `slow-tests-rest` and `slow-coverage` (see the slow jobs below).
+# names: `lint`, `fast-tests`, the slow suite's `slow-tests-radiation`,
+# `slow-tests-rest` and `slow-coverage` (see the slow jobs below), and
+# `extras-tests`.
 # The two lists are duplicated deliberately: GitHub Actions does not resolve
 # YAML anchors/aliases in workflow files, so `&x`/`*x` would silently not do
 # what it looks like. Keep them in sync by hand.
@@ -138,8 +139,7 @@ jobs:
       # share fixtures and shapes and therefore reuse each other's compiled
       # executables (docs/source/design/test_suite_memory.md); splitting a
       # class across workers would make each recompile, which is the very cost
-      # being parallelised away. It also keeps `jcm/dycore/pyses/`'s
-      # x64-for-the-life-of-the-class fixtures intact.
+      # being parallelised away.
       #
       # `-n auto` resolves to 2 workers on this runner class (the log says
       # `created: 2/2 workers`), and that is the whole ceiling: 67 min serial
@@ -179,12 +179,15 @@ jobs:
       # Every fast-suite test failure is also a failure of the slow suite, ~35
       # minutes later, so stop paying for it the moment we know. There is no
       # REST endpoint to cancel a single job, so cancelling the run is the only
-      # way to reach a sibling that is already in progress.
+      # way to reach a sibling that is already in progress — which takes
+      # `extras-tests` down too: its result cannot make a PR with a failing
+      # fast suite green, so its remaining time is spent for nothing.
       #
       # Two deliberate narrowings, because this step trades a signal for time:
       #
       # `pull_request` ONLY. On a push to main/dev there is no slow job to
-      # cancel (it is skipped), so the cancel would buy nothing and cost the
+      # cancel (it is skipped), so the cancel would buy little (the extras
+      # job's remaining time) and cost the
       # failure notification — GitHub emails on workflow failure but not on
       # cancellation, and with `cancel-in-progress` on, a cancelled run on dev
       # is indistinguishable from one superseded by the next push. A red dev
@@ -216,6 +219,76 @@ jobs:
         run: |
           gh run cancel "${{ github.run_id }}" \
             || echo "::notice::Could not cancel the run (expected on fork PRs); the slow suite will run to completion."
+
+  # The tests the optional extras gate. Every other job installs `pip install
+  # -e .` with no extras, so coverage is measured at dependency parity, and
+  # every test that needs `pyses`, `mam4-jax`, `jax-cosp` or `gcsfs` skips
+  # there. This job installs all of them and runs exactly those tests, fast and
+  # slow together. The extras exercise code far outside their own packages (a
+  # Tiedtke change broke the MAM4 and pySES paths in #945), so it runs
+  # wherever the fast suite does: every pull request and every push to
+  # main/dev, with no path filter beyond the workflow's documentation-only
+  # paths-ignore.
+  #
+  # tools/ci/optional_extras.py keeps it from rotting silently:
+  # - selection is `-m requires_extra`, the one sanctioned way a test gates on
+  #   an extra, so a marked test is picked up by construction; the fast suite
+  #   fails any test that gates some other way (a static scan, and a skip whose
+  #   reason names an extra's package), since the default jobs would skip it
+  #   and this job would never select it;
+  # - JCM_REQUIRE_EXTRAS=1 makes the session refuse to start unless every
+  #   extra `pyproject.toml` declares is importable, and fails any selected
+  #   test that skips — here a skip is a test that did not run;
+  # - the install list is `optional_extras.py pip-extras`, which `check` holds
+  #   equal to pyproject's extras, so a new extra is installed here unasked.
+  #
+  # No coverage gate: the floors belong to the dependency-parity jobs.
+  #
+  # Single process, like the slow shards and for the same reason: the pySES
+  # delegating-config chunk (`hydra_config_test`) peaks at ~12.7 GB compiling
+  # the production CAM-SE step, which leaves no room for a second worker on
+  # the 16 GB runner. Serial it took 13 min on a workstation (2026-09-29).
+  #
+  # Cancellation is the same as the slow jobs': it hangs off `lint`, runs in
+  # parallel with the suites, and a fast-suite failure cancels the run with it,
+  # so a cancelled result never means these tests passed. Its own failure does
+  # not cancel anything — it says nothing about the tests the others run.
+  extras-tests:
+    needs: lint
+    runs-on: ubuntu-latest
+    # ~13 min serial on a workstation, ~40 expected here at the usual ~3x,
+    # plus setup; 80 is twice that.
+    timeout-minutes: 80
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/actions/setup-jcm
+        with:
+          # Its own pip-cache key: the extras' wheels must not land in the
+          # cache the dependency-parity jobs restore.
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+
+      # On top of the dependency-parity install, so the two environments
+      # differ by exactly the extras. pyses requires torch, whose default
+      # PyPI wheel brings the CUDA stack (~4.4 GB installed) to a CPU-only
+      # runner; the CPU build satisfies the same requirement.
+      - name: Install every optional extra
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
+
+      - name: Report runner resources
+        run: nproc && free -m
+
+      - name: Check the extras gating
+        run: python tools/ci/optional_extras.py check
+
+      - name: Test with pytest (extras-gated tests)
+        env:
+          JCM_REQUIRE_EXTRAS: '1'
+        run: |
+          pytest -v -rs --durations=25 -m requires_extra
 
   # Slow tests only make sense on a PR. They start alongside the fast suite
   # rather than after it (see the header) and are cut short by its cancel step
