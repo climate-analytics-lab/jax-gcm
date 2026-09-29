@@ -212,9 +212,12 @@ class CloudsatCosp(PhysicsTerm):
     # for the optical-depth integral, and passed straight to the simulators —
     # so it belongs here. An undeclared unconditional read is exactly what
     # ``requires_audit_test`` exists to catch.
+    # ``air_density`` and, on the 1-moment law, ``aerosol`` feed
+    # ``post_physics_effective_radii`` (the radii of the condensate the
+    # simulators read); every ``echam_physics`` composition carries both.
     requires: ClassVar[tuple[str, ...]] = (
         "clouds", "convection", "pressure_full", "pressure_half",
-        "height_full", "height_half", "air_density")
+        "height_full", "height_half", "air_density", "aerosol")
     # Static key set: the diagnostics dict is part of the scan carry, so
     # every enabled simulator must publish the same keys on every step.
     provides: ClassVar[tuple[str, ...]] = (

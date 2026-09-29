@@ -417,11 +417,14 @@ class AerocomDiagnostics(PhysicsTerm):
 
     name: ClassVar[str] = "aerocom_diagnostics"
     category: ClassVar[str] = "diagnostics"
-    # ``air_density`` is read by ``post_physics_effective_radii`` (the cloud
-    # group's radii); every composition that enables this term carries it
-    # (``MoistAirColumnState``).
+    # ``air_density`` and, on the 1-moment law, ``aerosol`` (its Twomey
+    # factor scales the prescribed droplet number) are read by
+    # ``post_physics_effective_radii`` for the cloud group's radii. Every
+    # ``echam_physics`` composition carries both (``MoistAirColumnState``,
+    # and MACv2-SP or JAM); declaring them makes a composition without them
+    # fail when it is built rather than when it is traced.
     requires: ClassVar[tuple[str, ...]] = (
-        "clouds", "pressure_full", "pressure_half", "air_density")
+        "clouds", "pressure_full", "pressure_half", "air_density", "aerosol")
     # Every key this term can publish. The emitted set must be static (the
     # diagnostics dict is part of the scan carry), so each selected group
     # writes all of its keys, zero-filled where the active configuration

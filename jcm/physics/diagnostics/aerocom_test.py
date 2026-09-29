@@ -240,6 +240,19 @@ class TermConfigTest(unittest.TestCase):
         self.assertIn("clouds", term.requires)
         self.assertIn("aerocom_clt", term.provides)
 
+    def test_radius_inputs_are_declared(self):
+        """``post_physics_effective_radii`` reads air_density and aerosol.
+
+        Both diagnostics that call it declare them, so ``_validate_ordering``
+        rejects a composition without them when it is built instead of a
+        KeyError at trace time (the reads sit in a helper the static
+        ``requires_audit_test`` cannot see).
+        """
+        from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
+        for cls in (AerocomDiagnostics, CloudsatCosp):
+            for key in ("air_density", "aerosol"):
+                self.assertIn(key, cls.requires, f"{cls.__name__}: {key}")
+
 
 if __name__ == "__main__":
     unittest.main()
