@@ -228,13 +228,38 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   not form ``0·inf`` on clear columns.
 - `differentiability` — the effective radius is a function of the current
   state only (condensate, cloud fraction, droplet/crystal number, temperature,
-  pressure), continuous up to the table clamp; no radius is carried between
-  steps and no float value doubles as a "not provided" flag. The cube-root and
-  ``IWC^0.216`` / ``IWC^(1/2.475)`` powers are evaluated on a positive base
-  behind a double ``where``, so the reverse pass is finite in clear layers and
-  as the condensate goes to zero, where the radius sits at the table minimum
-  and the clamp passes no gradient (``cloud_optics_test.py``,
+  pressure); no radius is carried between steps and no float value doubles as
+  a "not provided" flag. Wherever a phase is present the radius is continuous
+  in the state up to the table clamp; where its condensate is exactly 0 the
+  phase is absent, the radius is reported as 0, and the layer carries no
+  optical depth of that phase. The cube-root and ``IWC^0.216`` /
+  ``IWC^(1/2.475)`` powers are evaluated on a positive base behind a double
+  ``where``, so the reverse pass is finite in clear layers and as the
+  condensate goes to zero, where the radius sits at the table minimum and the
+  clamp passes no gradient (``cloud_optics_test.py``,
   ``TestEchamCloudEffectiveRadii``).
+- `differentiability` — the gas optics interpolate the k-distribution tables
+  linearly in temperature, log-pressure and the binary-species fraction η, so
+  the fluxes are continuous in temperature and humidity, with slope changes
+  only at table cell boundaries. On the per-term gradient harness's single
+  columns (``term_gradients_test.py``), with the library promoted to float64,
+  a joint temperature-plus-humidity perturbation has a central difference
+  that agrees with AD to 1.5 % or better at every step from 1.25·10⁻⁴ down to
+  6·10⁻⁸. Two other things stop a finite-difference reference for the whole
+  RRTMGP term there. One is inputs that sit exactly at zero. Where a
+  condensate tracer is 0 the term has a kink (tracked in #843, where the grey
+  scheme's identical clip is catalogued): a negative step is clipped in
+  ``prepare_radiation_state`` and changes nothing, a positive step radiates,
+  and AD returns the cloud-free side's derivative, 0. The cloudy side is
+  steeper at small steps than its limit, because the Moss/Foot ice radius
+  shrinks with the ice content until it reaches the table floor. The
+  identically-zero MACv2-SP longwave aerosol inputs also keep the one-sided
+  secants apart. The other is the float32 primal: the library runs in float32
+  by construction (see ``radiation_scheme_rrtmgp``), and the heating of the
+  top few-Pa layers is a difference of two large fluxes, whose float32
+  rounding (6·10⁻⁸ to 3·10⁻⁷ K/s at the 1 and 4 Pa levels) does not shrink
+  with the step as the response does. AD itself is unaffected: jvp and vjp
+  agree to float32 reduction order, which is the check the harness applies.
 
 **Status & known limitations.**
 - **Cloud inhomogeneity carries ECHAM's T63 values, not its per-resolution
