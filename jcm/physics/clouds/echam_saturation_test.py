@@ -57,26 +57,30 @@ def test_coefficients_are_echams():
 
 def test_values_at_known_points():
     """Sonntag (1990): 611.2 Pa over water at 0 degC, 611.15 over ice."""
-    assert float(es.es_water(273.15)) == pytest.approx(611.2, rel=2e-4)
-    assert float(es.es_ice(273.15)) == pytest.approx(611.15, rel=2e-4)
-    assert float(es.es_water(293.15)) == pytest.approx(2339.2, rel=2e-3)
-    assert float(es.es_ice(253.15)) == pytest.approx(103.2, rel=3e-3)
+    assert float(es.sonntag_es_water(273.15)) == pytest.approx(611.2, rel=2e-4)
+    assert float(es.sonntag_es_ice(273.15)) == pytest.approx(611.15, rel=2e-4)
+    assert float(es.sonntag_es_water(293.15)) == pytest.approx(2339.2, rel=2e-3)
+    assert float(es.sonntag_es_ice(253.15)) == pytest.approx(103.2, rel=3e-3)
+    # jcm's Tetens pair
+    assert float(es.tetens_es_water(273.15)) == pytest.approx(610.78)
+    assert float(es.tetens_es_ice(273.15)) == pytest.approx(610.78)
 
 
 def test_the_spline_tabulates_the_fit_to_float_precision():
     """The fit differs from ECHAM's 0.025 K spline by < 1e-10 of the value."""
     t = np.random.default_rng(0).uniform(150.0, 330.0, 20000)
-    for coefficients, func in ((es.WATER_COEFFICIENTS, es.es_water),
-                               (es.ICE_COEFFICIENTS, es.es_ice)):
+    for coefficients, func in ((es.WATER_COEFFICIENTS, es.sonntag_es_water),
+                               (es.ICE_COEFFICIENTS, es.sonntag_es_ice)):
         spline = _echam_spline(t, coefficients)
         fit = np.asarray(func(jnp.asarray(t)))
         assert np.max(np.abs(fit / spline - 1.0)) < 1e-10
 
 
+@pytest.mark.parametrize("formula", ["sonntag", "tetens"])
 @pytest.mark.parametrize("phase", ["water", "ice"])
-def test_log_derivative_is_the_fits(phase):
-    es_f = getattr(es, f"es_{phase}")
-    dln = getattr(es, f"dlnes_dT_{phase}")
+def test_log_derivative_is_the_formulas(phase, formula):
+    es_f = getattr(es, f"{formula}_es_{phase}")
+    dln = getattr(es, f"{formula}_dlnes_dT_{phase}")
     t = jnp.linspace(180.0, 320.0, 15)
     ad = jax.vmap(jax.grad(lambda x: jnp.log(es_f(x))))(t)
     np.testing.assert_allclose(np.asarray(dln(t)), np.asarray(ad), rtol=1e-12)
@@ -100,3 +104,27 @@ def test_qsat_form_and_cap():
     np.testing.assert_allclose(got[:2], direct[:2], rtol=1e-12)
     capped = 0.5 / (1.0 - c.vtmpc1 * 0.5)
     assert got[2] == pytest.approx(capped)
+
+
+def test_the_switch_selects_the_formula(monkeypatch):
+    """One setting chooses the formula; its default is jcm's Tetens pair."""
+    assert es.SATURATION_FORMULA == "tetens"
+    t = jnp.array([230.0, 260.0, 290.0])
+    for name, water, ice in (("tetens", es.tetens_es_water, es.tetens_es_ice),
+                             ("sonntag", es.sonntag_es_water,
+                              es.sonntag_es_ice)):
+        monkeypatch.setattr(es, "SATURATION_FORMULA", name)
+        np.testing.assert_array_equal(es.es_water(t), water(t))
+        np.testing.assert_array_equal(es.es_ice(t), ice(t))
+        np.testing.assert_array_equal(
+            es.dlnes_dT_water(t), getattr(es, f"{name}_dlnes_dT_water")(t))
+        np.testing.assert_array_equal(
+            es.dlnes_dT_ice(t), getattr(es, f"{name}_dlnes_dT_ice")(t))
+
+
+def test_set_saturation_formula_validates(monkeypatch):
+    monkeypatch.setattr(es, "SATURATION_FORMULA", "tetens")
+    es.set_saturation_formula("sonntag")
+    assert es.SATURATION_FORMULA == "sonntag"
+    with pytest.raises(ValueError, match="tetens"):
+        es.set_saturation_formula("goff-gratch")
