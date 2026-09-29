@@ -747,6 +747,54 @@ class TestRadiationEffectiveRadii:
         np.testing.assert_array_equal(np.asarray(r_liq_2m_pol),
                                       np.asarray(r_liq_2m))
 
+    @pytest.mark.parametrize("prognostic", [False, True], ids=["1m", "2m"])
+    def test_gradients_are_live_in_both_modes(self, prognostic):
+        """Both AD modes match a difference, and every physical input is live.
+
+        The radii are a function of the current state alone, so each input
+        reaches RRTMGP through the radius with an ordinary derivative in
+        cloud: the condensate, the cloud fraction that makes it in-cloud, the
+        temperature in the water content, and the droplet number's own input
+        (the Twomey factor for 1M, the number tracers for 2M).
+        ``check_gradients`` compares jvp and vjp each against a central
+        difference and asserts every named leaf live.
+        """
+        from jcm.physics.radiation.cloud_optics import radiation_effective_radii
+
+        shape = (3, 2)
+        # 1e6 crystals per kg puts the Lohmann plates at ~36 um, inside the
+        # table; the 1e4 the selection test uses is clamped at 90 um, where
+        # the crystal radius passes no gradient.
+        tracers = ({"qnc": jnp.full(shape, 1.0e8), "qni": jnp.full(shape, 1e6)}
+                   if prognostic else None)
+        state, diagnostics, forcing, terrain, cf = self._inputs(
+            fmask=[0.0, 0.9], tracers=tracers)
+        inputs = {"qc": state.tracers["qc"], "qi": state.tracers["qi"],
+                  "cloud_fraction": cf, "temperature": state.temperature}
+        if prognostic:
+            inputs.update(qnc=state.tracers["qnc"], qni=state.tracers["qni"])
+        else:
+            inputs["cdnc_factor"] = diagnostics["aerosol"].cdnc_factor
+
+        def radii(x):
+            number = ({"qnc": x["qnc"], "qni": x["qni"]} if prognostic else {})
+            s = state.copy(temperature=x["temperature"],
+                           tracers={"qc": x["qc"], "qi": x["qi"], **number})
+            d = diagnostics if prognostic else {
+                **diagnostics,
+                "aerosol": diagnostics["aerosol"].copy(
+                    cdnc_factor=x["cdnc_factor"])}
+            return radiation_effective_radii(
+                s, d, forcing, terrain, x["qc"], x["qi"],
+                x["cloud_fraction"], 1.0e-3)
+
+        number_inputs = (("['qnc']", "['qni']") if prognostic
+                         else ("['cdnc_factor']",))
+        check_gradients(
+            radii, (inputs,), rtol=2e-3,
+            live_inputs=("['qc']", "['qi']", "['cloud_fraction']",
+                         "['temperature']", *number_inputs))
+
     def test_broadcasting_native_over_the_horizontal_layout(self):
         """A (kx, ncols) and a (kx, ix, il) host give the same radii per column."""
         from types import SimpleNamespace
