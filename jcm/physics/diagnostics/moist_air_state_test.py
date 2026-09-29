@@ -192,7 +192,10 @@ class TestOneRelativeHumidity(unittest.TestCase):
     def test_published_rh_is_water_rh_after_the_cover_runs(self):
         import jax.numpy as jnp
 
-        from jcm.physics.clouds.sundqvist import SundqvistCloudFraction
+        from jcm.physics.clouds.sundqvist import (
+            CloudParameters,
+            SundqvistCloudFraction,
+        )
 
         ncols = 2
         state = _state((ncols,))
@@ -222,7 +225,10 @@ class TestOneRelativeHumidity(unittest.TestCase):
         # sea ice) — the Sc enhancement is irrelevant to this check.
         forcing = type("F", (), {"sice_am": None})()
         terrain = type("T", (), {"fmask": jnp.ones(ncols)})()
-        _, after = SundqvistCloudFraction()(state, diags, forcing, terrain)
+        # Explicit parameters: this 8-level T21 grid has no ECHAM defaults.
+        cover = SundqvistCloudFraction(CloudParameters.default())
+        cover.cache_coords(_coords())
+        _, after = cover(state, diags, forcing, terrain)
         np.testing.assert_array_equal(
             np.asarray(after["relative_humidity"]),
             np.asarray(diags["relative_humidity"]))

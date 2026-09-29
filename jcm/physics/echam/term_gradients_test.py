@@ -446,6 +446,20 @@ _CHECKS: dict = {
     "echam_1m_microphysics": _Check(
         reference="adjoint", adjoint_rtol=2.0e-3, live_inputs=_ENVIRONMENT,
         skip_outputs=("u_wind", "v_wind", "wbf")),
+    # On the stable column ECHAM's cover is exactly 0 at every level but the
+    # enhanced inversion level, where it is exactly 1 (the 0.88 relative
+    # humidity there over csatsc = 0.7 is supersaturated): the deck's
+    # humidity sits below the critical value everywhere else. The 1M
+    # therefore evaporates all the seeded condensate, in the clear cells by
+    # the clear-cell rule and in the overcast one by the evaporation cap at
+    # the available condensate. Neither depends on the running temperature
+    # or humidity, and no precipitation process runs, so those input
+    # gradients and the process diagnostics' gradients are exactly zero.
+    # The cell checks the tendencies, which depend on the condensate, and
+    # asserts no live environment inputs; the convecting column keeps both.
+    ("echam_1m_microphysics", "stable"): _Check(
+        reference="adjoint", adjoint_rtol=2.0e-3, outputs="tendency",
+        skip_outputs=("u_wind", "v_wind")),
     # The convecting column keeps the default adjoint tolerance and fails it;
     # see ``_ONE_MOMENT_SATURATION_CANCELLATION`` for why that is recorded
     # rather than absorbed. Everything else about the cell is the term entry
