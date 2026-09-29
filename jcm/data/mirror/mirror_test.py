@@ -71,35 +71,399 @@ class RegistryTest(unittest.TestCase):
             reg = json.loads(Path(path).read_text())
             self.assertIn("sub/a.nc", reg["files"])
             self.assertEqual(reg["files"]["sub/a.nc"]["size"], 5)
-            # registry.json itself is excluded
+            # registry.json itself, and an interrupted write's temp copy,
+            # are excluded
+            (Path(d) / "registry.json.tmp").write_text("{}")
             reg2 = build_registry(d)
             self.assertNotIn("registry.json", reg2["files"])
+            self.assertNotIn("registry.json.tmp", reg2["files"])
 
+    def test_paths_keep_the_base_entry_of_every_other_file(self):
+        # A stale copy the build did not write must not override the
+        # published entry.
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("forcing_pd.nc", "emissions_pd.nc"):
+                (Path(d) / name).write_bytes(b"new")
+            base = {"files": {"emissions_pd.nc": {"sha256": "published",
+                                                  "size": 9}}}
+            reg = build_registry(d, base=base, paths={"forcing_pd.nc"})
+            self.assertEqual(reg["files"]["forcing_pd.nc"]["size"], 3)
+            self.assertEqual(reg["files"]["emissions_pd.nc"]["sha256"],
+                             "published")
+
+
+class LedgerTest(unittest.TestCase):
+    """Registry and upload act only on what this site's builds wrote."""
+
+    F = "bundles/t63/forcing_pd.nc"
+
+    def setUp(self):
+        from pathlib import Path
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.t63 = self.root / "upload" / "bundles" / "t63"
+        self.t63.mkdir(parents=True)
+        (self.root / "build").mkdir()
+
+    def _patched(self, **extra):
+        from contextlib import ExitStack
+
+        from jcm.data.mirror import build_mirror as bm
+        stack = ExitStack()
+        for name, value in {"BUILD": self.root / "build",
+                            "UPLOAD": self.root / "upload", **extra}.items():
+            stack.enter_context(patch.object(bm, name, value))
+        return stack
+
+    def _write(self, rel, data, ledger=True):
+        from jcm.data.mirror import build_mirror as bm
+        path = self.root / "upload" / rel
+        path.write_bytes(data)
+        if ledger:
+            with self._patched():
+                bm._write_ledger(bm._ledger() | {rel})
+        return path
+
+    def _registry(self, tip_files, dates=None, **extra):
+        """Run stage_registry against a mocked mirror tip."""
+        import json
+
+        from jcm.data.mirror import build_mirror as bm
+        dates = dates or {}
+        with self._patched(_PRODUCTS=frozenset({"forcing"}), **extra), \
+                patch.object(bm, "_mirror_tip", lambda: "tip"), \
+                patch.object(bm, "_registry_at", lambda rev: json.loads(
+                    json.dumps({"files": tip_files}))), \
+                patch.object(bm, "_published_dates", lambda paths, rev: {
+                    p: dates[p] for p in paths if p in dates}):
+            bm.stage_registry()
+
+    def _sha(self, data):
+        import hashlib
+        return hashlib.sha256(data).hexdigest()
+
+    def test_a_stage_records_only_the_files_it_writes(self):
+        from jcm.data.mirror import build_mirror as bm
+        stale = self._write("bundles/t63/emissions_pd.nc", b"old", ledger=False)
+        with self._patched():
+            before = bm._upload_snapshot()
+            (self.t63 / "forcing_pd.nc").write_bytes(b"new")
+            after = bm._record_writes(before)
+            self.assertEqual(bm._ledger(), {self.F})
+            # A later stage adds to it; rewriting a file in place counts.
+            stale.write_bytes(b"rebuilt")
+            bm._record_writes(after)
+            self.assertEqual(bm._ledger(),
+                             {self.F, "bundles/t63/emissions_pd.nc"})
+
+    def test_registry_merges_the_ledger_onto_the_tip_and_retires(self):
+        import json
+
+        from jcm.data.mirror import build_mirror as bm
+        self._write(self.F, b"new")
+        self._write("bundles/t63/emissions_pd.nc", b"stale", ledger=False)
+        with self._patched():
+            bm._write_ledger(bm._ledger() | {"bundles/t63/vanished.nc"})
+        import datetime
+        long_ago = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
+        self._registry({"bundles/t63/emissions_pd.nc": {"sha256": "pub"},
+                        self.F: {"sha256": "old"},
+                        "bundles/t63/dust.nc": {"sha256": "gone"}},
+                       {self.F: long_ago}, _RETIRE=("bundles/*/dust.nc",))
+        reg = json.loads((self.root / "upload" / "registry.json"
+                          ).read_text())["files"]
+        side = json.loads((self.root / "build" / "registry_base.json"
+                           ).read_text())
+        self.assertEqual(reg[self.F]["sha256"], self._sha(b"new"))
+        self.assertEqual(reg["bundles/t63/emissions_pd.nc"]["sha256"], "pub")
+        self.assertNotIn("bundles/t63/dust.nc", reg)
+        self.assertEqual(side["parent_commit"], "tip")
+        self.assertEqual(side["retired"], ["bundles/t63/dust.nc"])
+        # A written file that has since gone is dropped, not published.
+        self.assertEqual(list(side["written"]), [self.F])
+        with self._patched():
+            self.assertEqual(bm._ledger(), {self.F})
+
+    def test_registry_refuses_only_a_newer_different_published_copy(self):
+        import datetime
+        path = self._write(self.F, b"mine")
+        mtime = datetime.datetime.fromtimestamp(path.stat().st_mtime,
+                                                datetime.timezone.utc)
+        later = {self.F: mtime + datetime.timedelta(hours=1)}
+        earlier = {self.F: mtime - datetime.timedelta(hours=1)}
+        # Another site published after our content was made: refused.
+        with self.assertRaises(SystemExit) as ctx:
+            self._registry({self.F: {"sha256": "theirs"}}, later)
+        self.assertIn("older than a different published copy",
+                      str(ctx.exception))
+        # Ours is newer (rebuilt after their publish): allowed.
+        self._registry({self.F: {"sha256": "theirs"}}, earlier)
+        # Our own earlier publish matches our hash: allowed.
+        self._registry({self.F: {"sha256": self._sha(b"mine")}}, later)
+        # Within the clock margin, or undated, counts as newer: refused.
+        close = {self.F: mtime - datetime.timedelta(seconds=10)}
+        for dates in (close, {}):
+            with self.assertRaises(SystemExit):
+                self._registry({self.F: {"sha256": "theirs"}}, dates)
+
+    def test_tier_a_is_restaged_when_rebuilt_and_completed_when_cut_short(self):
+        from jcm.data.mirror import build_mirror as bm
+        build, upload = self.root / "build", self.root / "upload"
+        store = build / "ceds_anthro.zarr"
+        (store / "so2").mkdir(parents=True)
+        for i in range(3):
+            (store / "so2" / str(i)).write_bytes(b"chunk%d" % i)
+        climo = build / "era5_land_climo_2005-2014_0p25.nc"
+        climo.write_bytes(b"old-build")
+        os.utime(climo, (1, 1))
+        # A copy killed part-way: one chunk truncated, one missing.
+        dst = upload / "products" / "ceds_anthro.zarr" / "so2"
+        dst.mkdir(parents=True)
+        import shutil
+        (dst / "0").write_bytes(b"chunk0")
+        shutil.copystat(store / "so2" / "0", dst / "0")    # already copied
+        (dst / "1").write_bytes(b"ch")
+        for name in bm._TIER_A:
+            bm._sync(build / name, upload / "products" / name)
+        for i in range(3):
+            self.assertEqual((dst / str(i)).read_bytes(), b"chunk%d" % i)
+        staged = upload / "products" / climo.name
+        self.assertEqual(staged.stat().st_mtime, 1)       # the content's age
+        climo.write_bytes(b"rebuilt")
+        with self._patched():
+            bm._sync(climo, staged)
+        self.assertEqual(staged.read_bytes(), b"rebuilt")
+
+    def test_registry_refuses_bundles_from_pulled_tier_a_the_tip_replaced(self):
+        from jcm.data import remote
+        from jcm.data.mirror import build_mirror as bm
+        self._write(self.F, b"new")
+        tier_a = "products/ceds_anthro.zarr/zarr.json"
+        pinned = {"files": {tier_a: {"sha256": "pinned"}}}
+        tip = {tier_a: {"sha256": "newer"}}
+        registry_at = {remote.mirror_revision(): pinned}
+        with self._patched(_PRODUCTS=frozenset({"forcing"})), \
+                patch.object(bm, "_pulled_tier_a", lambda: True), \
+                patch.object(bm, "_mirror_tip", lambda: "tip"), \
+                patch.object(bm, "_registry_at", lambda rev: registry_at.get(
+                    rev, {"files": dict(tip)})), \
+                self.assertRaises(SystemExit) as ctx:
+            bm.stage_registry()
+        self.assertIn("differs from the pinned revision", str(ctx.exception))
+
+    def test_registry_refuses_retiring_a_file_it_wrote(self):
+        self._write(self.F, b"new")
+        with self.assertRaises(SystemExit) as ctx:
+            self._registry({}, _RETIRE=("bundles/t63/forcing_*",))
+        self.assertIn("narrow the globs", str(ctx.exception))
+
+    def test_an_interrupted_registry_run_leaves_nothing_to_upload(self):
+        from jcm.data.mirror import build_mirror as bm
+        self._write(self.F, b"new")
+        self._registry({})
+        registry = (self.root / "upload" / "registry.json").read_text()
+        with self._patched(), \
+                patch.object(bm, "_mirror_tip", lambda: "tip"), \
+                patch.object(bm, "_registry_at",
+                             lambda rev: (_ for _ in ()).throw(OSError)), \
+                self.assertRaises(OSError):
+            bm.stage_registry()
+        self.assertFalse((self.root / "build" / "registry_base.json").exists())
+        self.assertEqual((self.root / "upload" / "registry.json").read_text(),
+                         registry)
+        with self.assertRaises(SystemExit) as ctx:
+            self._upload(lambda **kw: None)
+        self.assertIn("run --stage registry first", str(ctx.exception))
+
+    def _upload(self, create_commit, tip=lambda: "tip", **extra):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+
+        import huggingface_hub
+
+        from jcm.data.mirror import build_mirror as bm
+        api = SimpleNamespace(create_commit=create_commit)
+        out = io.StringIO()
+        with self._patched(**extra), \
+                patch.object(huggingface_hub, "HfApi", lambda: api), \
+                patch.object(bm, "_mirror_tip", tip), \
+                patch("time.sleep", lambda s: None), \
+                contextlib.redirect_stdout(out):
+            bm.stage_upload()
+        return out.getvalue()
+
+    def _recorder(self, fail=(), tip="tip"):
+        """Mock create_commit: records calls, raises on call numbers in fail.
+
+        Also returns the mirror tip it implies: the last landed commit.
+        """
+        from types import SimpleNamespace
+        calls, state = [], {"tip": tip}
+
+        def create_commit(**kw):
+            calls.append(kw)
+            if len(calls) in fail:
+                raise TimeoutError("xet")
+            state["tip"] = f"c{len(calls)}".ljust(40, "0")
+            return SimpleNamespace(oid=state["tip"])
+        return create_commit, calls, lambda: state["tip"]
+
+    @staticmethod
+    def _ops(kw, kind):
+        import huggingface_hub
+        cls = getattr(huggingface_hub, kind)
+        return sorted(op.path_in_repo for op in kw["operations"]
+                      if isinstance(op, cls))
+
+    def test_upload_commits_exactly_what_the_registry_hashed(self):
+        from jcm.data.mirror import build_mirror as bm
+        self._write("bundles/t63/emissions_pd.nc", b"stale", ledger=False)
+        path = self._write(self.F, b"new")
+        self._registry({"bundles/t63/dust.nc": {"sha256": "x"}},
+                       _RETIRE=("bundles/*/dust.nc",))
+        create_commit, calls, _ = self._recorder()
+        # --retire belongs to the registry run; a different one is refused.
+        with self.assertRaises(SystemExit) as ctx:
+            self._upload(create_commit, _RETIRE=("other",))
+        self.assertIn("applied by --stage registry", str(ctx.exception))
+        # A file touched after the registry hashed it is refused.
+        stat = path.stat()
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10 ** 9))
+        with self.assertRaises(SystemExit) as ctx:
+            self._upload(create_commit)
+        self.assertIn("changed since --stage registry", str(ctx.exception))
+        self.assertEqual(calls, [])
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        out = self._upload(create_commit)
+        # The files, then the registry and retirements on top of them.
+        files, registry = calls
+        self.assertEqual(files["parent_commit"], "tip")
+        self.assertEqual(self._ops(files, "CommitOperationAdd"), [self.F])
+        self.assertEqual(registry["parent_commit"], "c1".ljust(40, "0"))
+        self.assertEqual(self._ops(registry, "CommitOperationAdd"),
+                         ["registry.json"])
+        self.assertEqual(self._ops(registry, "CommitOperationDelete"),
+                         ["bundles/t63/dust.nc"])
+        oid = "c2".ljust(40, "0")
+        self.assertIn(f'MIRROR_REVISION = "{oid}"', out)
+        with self._patched():
+            self.assertEqual(bm._ledger(), set())
+        self.assertTrue((self.root / "build" / f"upload_ledger.{oid[:12]}.json"
+                         ).exists())
+
+    def test_upload_batches_and_resumes_after_the_last_landed_batch(self):
+        names = [f"bundles/t63/forcing_amip/{y}.nc" for y in (1950, 1951, 1952)]
+        (self.t63 / "forcing_amip").mkdir()
+        for n in names:
+            self._write(n, n.encode())
+        self._registry({})
+        # One file per commit; the second batch fails until retries run out.
+        create_commit, calls, tip = self._recorder(fail=range(2, 7))
+        with self.assertRaises(RuntimeError):
+            self._upload(create_commit, tip=tip, _BATCH_FILES=1)
+        self.assertEqual(self._ops(calls[0], "CommitOperationAdd"), names[:1])
+        # The rerun starts after the landed batch, on its commit.
+        rerun, calls, tip = self._recorder(tip=tip())
+        self._upload(rerun, tip=tip, _BATCH_FILES=1)
+        self.assertEqual([self._ops(c, "CommitOperationAdd") for c in calls],
+                         [names[1:2], names[2:], ["registry.json"]])
+        self.assertEqual(calls[0]["parent_commit"], "c1".ljust(40, "0"))
+
+    def test_batches_respect_the_file_and_small_file_budgets(self):
+        from jcm.data.mirror import build_mirror as bm
+        for i in range(5):
+            self._write(f"bundles/t63/s{i}.nc", b"x" * 100, ledger=False)
+        with self._patched(_BATCH_FILES=2):
+            self.assertEqual([len(b) for b in bm._batches(
+                [f"bundles/t63/s{i}.nc" for i in range(5)])], [2, 2, 1])
+        with self._patched(_BATCH_SMALL_BYTES=250):
+            self.assertEqual([len(b) for b in bm._batches(
+                [f"bundles/t63/s{i}.nc" for i in range(5)])], [2, 2, 1])
+
+    def test_upload_stops_once_the_tip_has_moved_and_retries_otherwise(self):
+        from jcm.data.mirror import build_mirror as bm
+        self._write(self.F, b"new")
+        self._registry({})
+        failing, calls, _ = self._recorder(fail=range(1, 10))
+        with self.assertRaises(SystemExit) as ctx:
+            self._upload(failing, tip=lambda: "moved")
+        self.assertIn("mirror tip is now moved", str(ctx.exception))
+        self.assertEqual(len(calls), 1)
+        with self._patched():
+            self.assertEqual(bm._ledger(), {self.F})
+
+        # A failure that also breaks the tip query is retried, not fatal.
+        def no_network():
+            raise ConnectionError("down")
+
+        flaky, calls, _ = self._recorder(fail=(1, 2))
+        self._upload(flaky, tip=no_network)
+        self.assertEqual(len(calls), 4)       # 2 failures, files, registry
+
+    def test_main_records_each_stage_and_nothing_from_a_failed_one(self):
+        import contextlib
+        import io
+
+        from jcm.data.mirror import build_mirror as bm
+
+        def good():
+            (self.t63 / "forcing_pd.nc").write_bytes(b"new")
+
+        def bad():
+            (self.t63 / "forcing_amip.nc").write_bytes(b"trunc")
+            raise RuntimeError("walltime")
+
+        stages = {**bm.STAGES, "bundles": good, "amip": bad}
+        out = io.StringIO()
+        with self._patched(STAGES=stages), \
+                patch.object(bm, "check_sources", lambda *a, **k: None), \
+                patch("sys.argv", ["build_mirror", "--stage", "bundles,amip"]), \
+                contextlib.redirect_stdout(out), \
+                self.assertRaises(RuntimeError):
+            bm.main()
+        with self._patched():
+            self.assertEqual(bm._ledger(), {self.F})
+        self.assertIn("stage amip failed", out.getvalue())
+
+    def test_a_failed_rerun_unrecords_files_it_touched(self):
+        # A file recorded by an earlier run and truncated by a failing rerun
+        # must not stay publishable.
+        import contextlib
+        import io
+
+        from jcm.data.mirror import build_mirror as bm
+        self._write(self.F, b"good")
+
+        def bad():
+            (self.t63 / "forcing_pd.nc").write_bytes(b"tr")
+            raise RuntimeError("walltime")
+
+        with self._patched(STAGES={**bm.STAGES, "bundles": bad}), \
+                patch.object(bm, "check_sources", lambda *a, **k: None), \
+                patch("sys.argv", ["build_mirror", "--stage", "bundles"]), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaises(RuntimeError):
+            bm.main()
+        with self._patched():
+            self.assertEqual(bm._ledger(), set())
 
 
 class MirrorRevisionStagesTest(unittest.TestCase):
-    def test_upload_prints_the_pin_line_and_pull_is_pinned(self):
+    def test_pull_is_pinned(self):
         import contextlib
         import io
         import tempfile
         from pathlib import Path
-        from types import SimpleNamespace
         from unittest import mock
 
         import huggingface_hub
 
         from jcm.data import remote
         from jcm.data.mirror import build_mirror as bm
-
-        class _Api:
-            def upload_folder(self, **kw):
-                return SimpleNamespace(oid="f" * 40)
-
-        out = io.StringIO()
-        with mock.patch.object(huggingface_hub, "HfApi", _Api), \
-                contextlib.redirect_stdout(out):
-            bm.stage_upload()
-        self.assertIn('MIRROR_REVISION = "' + "f" * 40 + '"', out.getvalue())
 
         pulled = []
 
@@ -109,11 +473,9 @@ class MirrorRevisionStagesTest(unittest.TestCase):
             for name in ("era5_land_climo_2005-2014_0p25.nc",
                          "ceds_anthro.zarr", "bb4cmip7.zarr"):
                 (root / "products" / name).mkdir(parents=True)
-            (root / "registry.json").write_text("{}")
 
         with tempfile.TemporaryDirectory() as d, \
                 mock.patch.object(bm, "BUILD", Path(d)), \
-                mock.patch.object(bm, "_REMOTE_REGISTRY", Path(d) / "r.json"), \
                 mock.patch.object(huggingface_hub, "snapshot_download",
                                   snapshot), \
                 contextlib.redirect_stdout(io.StringIO()):
@@ -513,22 +875,6 @@ class SitesTest(unittest.TestCase):
             bm.main()
         self.assertIn("every transient grid", str(ctx.exception))
 
-    def test_a_grids_registry_needs_the_pulled_registry(self):
-        from jcm.data.mirror import build_mirror as bm
-        with tempfile.TemporaryDirectory() as d:
-            from pathlib import Path
-            root = Path(d)
-            with patch.object(bm, "_SELECTED", frozenset({"t127"})), \
-                    patch.object(bm, "BUILD", root / "build"), \
-                    patch.object(bm, "UPLOAD", root / "upload"), \
-                    patch.object(bm, "_REMOTE_REGISTRY",
-                                 root / "build" / "remote_registry.json"):
-                (root / "upload").mkdir()
-                with self.assertRaises(SystemExit) as ctx:
-                    bm.stage_registry()
-                self.assertIn("--stage pull", str(ctx.exception))
-
-
 class GridSelectionTest(unittest.TestCase):
     def test_grids_filter_and_transient_scope(self):
         from jcm.data.mirror import build_mirror as bm
@@ -541,24 +887,6 @@ class GridSelectionTest(unittest.TestCase):
             self.assertEqual(bm._grids(transient=True), {})
             self.assertFalse(bm._column_selected())
         self.assertEqual(bm._truncation("t255"), 255)
-
-    def test_a_products_only_registry_is_partial_too(self):
-        # --products without --grids still leaves a partial upload tree.
-        from jcm.data.mirror import build_mirror as bm
-        with tempfile.TemporaryDirectory() as d:
-            from pathlib import Path
-            root = Path(d)
-            with patch.object(bm, "_SELECTED", None), \
-                    patch.object(bm, "_PRODUCTS", frozenset({"emissions"})), \
-                    patch.object(bm, "BUILD", root / "build"), \
-                    patch.object(bm, "UPLOAD", root / "upload"), \
-                    patch.object(bm, "_REMOTE_REGISTRY",
-                                 root / "build" / "remote_registry.json"):
-                (root / "upload").mkdir()
-                self.assertTrue(bm._partial_build())
-                with self.assertRaises(SystemExit) as ctx:
-                    bm.stage_registry()
-                self.assertIn("partial build", str(ctx.exception))
 
     def test_pulled_tier_a_marks_the_build_partial(self):
         from jcm.data.mirror import build_mirror as bm

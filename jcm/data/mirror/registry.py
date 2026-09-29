@@ -8,34 +8,42 @@ import os
 from pathlib import Path
 
 
-def build_registry(root: str, base: dict | None = None) -> dict:
-    """Hash every file under ``root``; entries override those of ``base``.
+def build_registry(root: str, base: dict | None = None,
+                   paths=None) -> dict:
+    """Hash files under ``root``; entries override those of ``base``.
 
-    ``base`` is the published registry when ``root`` is a partial upload tree
-    (a ``--grids`` build): its entries for files not rebuilt are kept, so the
-    uploaded ``registry.json`` still covers the whole mirror.
+    ``base`` is the published registry: its entries for files not re-hashed
+    are kept, so ``registry.json`` still covers the whole mirror. ``paths``
+    (relative to ``root``) names the files to hash — the ones a build wrote;
+    ``None`` hashes the whole tree.
     """
     reg = {"repo": "climate-analytics-lab/jax-gcm-data",
            "files": dict((base or {}).get("files", {}))}
     root_p = Path(root)
-    for p in sorted(root_p.rglob("*")):
-        if not p.is_file() or p.name == "registry.json":
-            continue
+    if paths is None:
+        files = [p for p in sorted(root_p.rglob("*"))
+                 if p.is_file()
+                 and p.name not in ("registry.json", "registry.json.tmp")]
+    else:
+        files = [root_p / rel for rel in sorted(paths)]
+    for p in files:
         h = hashlib.sha256()
         with open(p, "rb") as f:
             for chunk in iter(lambda: f.read(1 << 22), b""):
                 h.update(chunk)
-        rel = str(p.relative_to(root_p))
-        reg["files"][rel] = {"sha256": h.hexdigest(),
-                             "size": p.stat().st_size}
+        reg["files"][str(p.relative_to(root_p))] = {
+            "sha256": h.hexdigest(), "size": p.stat().st_size}
     return reg
 
 
-def write_registry(root: str, base: dict | None = None) -> str:
+def write_registry(root: str, base: dict | None = None, paths=None) -> str:
     """Write ``root/registry.json`` (merged onto ``base``, see build_registry)."""
+    # Hash first, then replace: an interrupted run keeps the previous file.
+    reg = build_registry(root, base, paths)
     out = os.path.join(root, "registry.json")
-    with open(out, "w") as f:
-        json.dump(build_registry(root, base), f, indent=1, sort_keys=True)
+    with open(out + ".tmp", "w") as f:
+        json.dump(reg, f, indent=1, sort_keys=True)
+    os.replace(out + ".tmp", out)
     return out
 
 

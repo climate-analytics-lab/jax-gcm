@@ -831,9 +831,10 @@ corrections, listed here because they change climate:
   and a branch name is refused). Two machines therefore no longer read
   different copies of a republished bundle depending on their caches. Runs,
   checkpoints, release-validation launches, benchmarks and fixture bands
-  record the commit. The pin is the 2026-09-24 upload carrying the
-  conservatively remapped t63/t106 ``emissions_{pd,pi}`` bundles, so a cache
-  holding the earlier emissions re-fetches once; prefetch before running
+  record the commit. The pin is the 2026-09-28 commit whose forcing bundles
+  carry the land-surface convention below (``lsm``, ``forest``, ``glac``) on
+  top of the conservatively remapped t63/t106 ``emissions_{pd,pi}``, so a
+  cache holding earlier bundles re-fetches once; prefetch before running
   offline.
 
 Importing jcm does not touch the GPU
@@ -908,9 +909,10 @@ ECHAM surface albedo and frozen-surface saturation
 - New optional static forcing fields ``forest`` and ``glac``
   (``ForcingData.forest_fraction`` / ``glacier_fraction``) carry the land
   cover the land albedo reads; the bundle builders write them from ERA5
-  ``cvh`` and the permanent-snow mask. Bundles published before this change
-  lack them and load with both ``None`` (no forest masking; ice sheets keep
-  their ERA5 background albedo of ≈0.8). ``snowc`` is the snow-covered
+  ``cvh`` and the permanent-snow mask, and every published forcing bundle
+  carries them from the pinned mirror commit on. A bundle without them loads
+  with both ``None`` (no forest masking; ice sheets keep their ERA5
+  background albedo of ≈0.8). ``snowc`` is the snow-covered
   fraction of the non-glacier land, so the snow-covered share of the land
   is ``glac + (1 − glac)·snowc`` (``jcm.forcing.land_snow_cover``, also
   read by the JAM dust snow gate). Forcing files now also carry ``lsm``, the
