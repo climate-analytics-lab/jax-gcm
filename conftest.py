@@ -11,12 +11,6 @@ import sys
 
 import pytest
 
-# The pySES backend needs float64 for the whole life of the objects its
-# ``setUpClass`` fixtures build, so its tests are exempt from the x64 pinning
-# below; ``jcm/dycore/pyses/conftest.py`` schedules them last instead.
-_PYSES_TESTS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "jcm", "dycore", "pyses") + os.sep
-
 _X64_BASELINE = False
 
 # Level and propagation of every ``jcm`` logger as the session found them,
@@ -105,6 +99,18 @@ def pytest_configure(config):
         _LOGGING_BASELINE[name] = (logger.level, logger.propagate)
 
 
+def _builds_pyses_backend(item):
+    """Whether ``item`` needs the pySES backend (``requires_extra("pyses")``)."""
+    return any("pyses" in mark.args
+               for mark in item.iter_markers("requires_extra"))
+
+
+def _restore_x64():
+    import jax
+    if bool(jax.config.read("jax_enable_x64")) != _X64_BASELINE:
+        jax.config.update("jax_enable_x64", _X64_BASELINE)
+
+
 @pytest.fixture(autouse=True)
 def _pin_jax_x64(request):
     """Hold ``jax_enable_x64`` at the session default around each test (#729).
@@ -113,19 +119,33 @@ def _pin_jax_x64(request):
     dependencies) flips the flag process-wide, which silently runs every later
     test in that process/xdist worker in float64 and fails dtype assertions
     that have nothing to do with aerosols.
+
+    pySES-backend tests are the exception: they run with the flag on for the
+    life of their class (see :func:`pytest_runtest_setup`).
     """
-    import jax
-    if str(getattr(request.node, "path", "")).startswith(_PYSES_TESTS):
+    if _builds_pyses_backend(request.node):
         yield
         return
-
-    def _restore():
-        if bool(jax.config.read("jax_enable_x64")) != _X64_BASELINE:
-            jax.config.update("jax_enable_x64", _X64_BASELINE)
-
-    _restore()
+    _restore_x64()
     yield
-    _restore()
+    _restore_x64()
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_setup(item):
+    """Turn ``jax_enable_x64`` on before a pySES-backend test's fixtures.
+
+    The CAM-SE backend needs float64 for the whole life of the grids and
+    dycores its ``setUpClass`` fixtures build, which is why those tests are
+    exempt from the pin above. pySES turns the flag on itself only when it is
+    first imported, so a class built after some other test has restored the
+    session default would otherwise be built in float32. ``tryfirst``, and a
+    hook rather than a fixture, because a class fixture is set up before any
+    function-scoped fixture could act.
+    """
+    if _builds_pyses_backend(item):
+        import jax
+        jax.config.update("jax_enable_x64", True)
 
 
 def _jcm_logger_names():
@@ -282,10 +302,21 @@ def pytest_runtest_teardown(item, nextitem):
     mappings the caches are dropped at once, even inside a class, because the
     kernel's map-count cap aborts the worker outright.
 
+    It also ends a run of pySES-backend tests: ``jax_enable_x64`` goes back to
+    the session default before the next test's class fixtures are built (see
+    :func:`pytest_runtest_setup`).
+
     Runs ``trylast`` so pytest's own teardown has already dropped the
     class-scoped fixtures' references by the time the GC runs.
     """
     global _rss_at_last_clear
+    # Leaving a run of pySES-backend tests: put the flag back before the next
+    # test's fixtures are built. Only the pin protects a function-scoped
+    # test; a class fixture is built first, and xdist's ``--dist loadscope``
+    # does not keep the pySES tests together at the end of a worker's queue.
+    if _builds_pyses_backend(item) and (
+            nextitem is None or not _builds_pyses_backend(nextitem)):
+        _restore_x64()
     maps = _memory_map_count()
     over_maps = maps is not None and maps > _MAX_MAP_COUNT
     if (not over_maps and nextitem is not None
