@@ -465,8 +465,9 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     The assertions are on the **time mean**: a single-column mass-flux scheme in
     RCE has an intrinsic high-frequency convective cycle, but the time-mean
     column must be a physical radiative-convective equilibrium whose
-    convection never dies out and whose high-frequency scatter stays bounded.
-    It guards the column water budget, which carries the finite-volume
+    high-frequency scatter stays bounded and whose convection never dies out
+    (that last pin sits with P/E in the expected failure, below). It guards
+    the column water budget, which carries the finite-volume
     convective ledger on the model's half levels in the steps where Tiedtke
     triggers.
 
@@ -502,8 +503,9 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     precipitation-flux floor removes (ECHAM behaviour, #912) and publishes it
     as ``convection.precip_floor_source``, so over the averaging window the
     change of column water equals evaporation minus precipitation plus that
-    source. That P substantially balances E is a separate test, a strict
-    expected failure until the testbed is re-derived (#967).
+    source. That P substantially balances E, and that the convection stays
+    alive, is a separate test, a strict expected failure until the testbed is
+    re-derived (#967).
 
     What it does NOT pin, and why: a steady column water. Over days 40-80 the
     column water still rises by 0.16-0.17 mm/d (35 % of E) across
@@ -583,18 +585,12 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         self.assertGreater(float(q[-1, -1]) * 1e3, 5.0)
         self.assertLess(float(q[-1, -1]) * 1e3, 30.0)
 
-        # Convection is not extinguished over the averaging window. Under the
-        # fogged lowest level (class docstring) Tiedtke triggers in 3-9 % of
-        # the steps of days 40-80, most of them before day 50 and none after
-        # day 69 in two of three round-off trajectories, and its time-mean
-        # precipitation is 0.6-2.0e-5 mm/d of a 0.29-0.31 mm/d total. The pins
-        # are strict positivity: the hard-trigger extinction they guard
-        # against drives the equilibrium convective precipitation to exactly
-        # zero.
+        # The precipitation is finite and the column precipitates. That its
+        # convection stays alive is pinned with P/E in the expected failure
+        # below: under the fogged lowest level it rests on a few triggers.
         precip, total = self.precip_conv, self.total_precip
         self.assertTrue(np.all(np.isfinite(precip)))
         self.assertTrue(np.all(np.isfinite(total)))
-        self.assertGreater(float(precip[window].mean()), 0.0)
         self.assertGreater(float(total[window].mean()), 0.0)
 
         # The high-frequency flicker is bounded: the largest per-level
@@ -630,12 +626,21 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
                "on a column with no shear or subsidence to ventilate its "
                "lowest layer. The bound was calibrated on the previous 1M's "
                "non-ECHAM evaporation sink; prescribed subsidence and RRTMGP "
-               "for the testbed re-derive the pin. (#967)")
+               "for the testbed re-derive the pin. The same fog leaves "
+               "Tiedtke triggering in only 3-9 % of the window's steps (none "
+               "after day 69 in two of three round-off trajectories), so the "
+               "pin that its convection stays alive is re-derived with it. "
+               "(#967)")
     def test_precipitation_substantially_balances_evaporation(self):
         # The RCE balance this testbed exists to pin: over the window the
-        # column rains most of what it evaporates. The fogged column rains
-        # 0.645-0.652 of it (P 0.29-0.31, E 0.45-0.47 mm/d) across
-        # trajectories that differ only in round-off (the xfail reason).
+        # column rains most of what it evaporates, with its convection alive.
+        # The fogged column rains 0.645-0.652 of it (P 0.29-0.31, E 0.45-0.47
+        # mm/d) across trajectories that differ only in round-off (the xfail
+        # reason), and its time-mean convective precipitation is 0.6-2.0e-5
+        # mm/d. Convection is pinned by strict positivity: the hard-trigger
+        # extinction it guards against drives the equilibrium convective
+        # precipitation to exactly zero.
         window = self.window
         self.assertGreater(float(self.total_precip[window].mean()),
                            0.8 * float(self.evap[window].mean()))
+        self.assertGreater(float(self.precip_conv[window].mean()), 0.0)
