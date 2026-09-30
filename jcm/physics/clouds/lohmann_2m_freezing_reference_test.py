@@ -21,10 +21,8 @@ What is compared
   (ECHAM's gate on every cell, each HAM input in its slot, omega = 0); and the
   freezing EFFECT on the end-of-step crystal number and condensate (each
   column minus the aerosol-free ``frz_none``) against ECHAM's, at a stated
-  tolerance: the liquid reaching 6.2 has passed jcm's section-5 condensation,
-  whose saturation formula (Tetens) differs from ECHAM's Sonntag tables by
-  1-8 % below 273 K. The ``frz_omega`` column is a strict xfail: the scheme
-  has no large-scale omega (#705).
+  tolerance. The ``frz_omega`` column is a strict xfail: the scheme has no
+  large-scale omega (#705).
 
 Constants and parameters are ECHAM's for the comparison (as in
 ``lohmann_2m_fortran_reference_test.py``, whose helpers are reused).
@@ -252,13 +250,12 @@ def _freezing_effect_error(step, which):
 
 FREEZING_COLUMNS = ("frz_dust", "frz_bc", "frz_both", "frz_dust_nocool")
 
-# The liquid that reaches 6.2 leaves jcm's section-5 adjustment, whose saturation
-# formula (Tetens) differs from ECHAM's Sonntag tables by 1-8 % below 273 K: without
-# any aerosol (frz_none) the end-of-step liquid already differs by up to 5 %. The
-# freezing effect inherits that; the measured worst case over these columns and both
-# steps is 9.3 % (frz_bc, cloud ice at 239 K). A mis-wired input misses by far more:
-# frz_omega, whose only difference is the large-scale omega jcm lacks, misses by 17-100 %.
-EFFECT_TOL = 0.12
+# Without any aerosol (frz_none) jcm's end-of-step liquid is ECHAM's to 7e-5 of the
+# column maximum, and the measured worst freezing effect over these columns and both
+# steps is 2.4e-3 (frz_bc, liquid); the tolerance leaves a factor of four. A mis-wired
+# input misses by far more: frz_omega, whose only difference is the large-scale omega
+# jcm lacks, misses by 18-100 %.
+EFFECT_TOL = 1e-2
 
 
 @pytest.mark.parametrize("step", STEPS)

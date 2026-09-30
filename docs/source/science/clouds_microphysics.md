@@ -411,5 +411,5 @@ mixed-phase freezing against the compiled ``cloud_micro_interface`` with the HAM
 freezing inputs set: ``het_mxphase_freezing`` agrees to round-off on every
 freezing column; the large-scale-``ω`` column is a strict xfail, #705);
 ``lohmann_2m_freezing_test.py`` (gradients, and the aerosol-free path pinned to
-dev 8393799c). Design
+its output before the ECHAM-HAM rates). Design
 reference: {doc}`../design/lohmann_2m_column_processes`.
