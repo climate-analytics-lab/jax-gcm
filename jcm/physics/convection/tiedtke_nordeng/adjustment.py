@@ -31,10 +31,10 @@ import jax.numpy as jnp
 from jax import lax
 from typing import Tuple
 
-import jcm.constants as c
-# Analytic (qs, dqs/dT) for the cuadjtq Newton step; shared with the updraft
-# module via jcm.physics.convection.saturation.
-from jcm.physics.convection.saturation import (
+# Analytic (qs, dqs/dT) of ECHAM's ``ua`` table for the cuadjtq Newton step
+# (Sonntag 1990, jcm.physics.thermodynamics) and its latent-heat switch.
+from jcm.physics.convection.tiedtke_nordeng.cuadjtq import _lcp
+from jcm.physics.thermodynamics import (
     saturation_specific_humidity_and_derivative as _qsat_and_dqsat_dt,
 )
 
@@ -71,16 +71,11 @@ def cuadjtq(
 
     """
     def _newton(T, q):
-        # Phase-consistent latent heat (ECHAM cuadjtq pairs the ice
-        # saturation table with L_s below the melting point — review
-        # finding 2.7; a fixed L_v under-releases mixed-phase latent heat
-        # by ~13 %). The es switch in the shared saturation module flips
-        # at tmelt, so L flips with it. DRY ``cpd`` is the reference here:
-        # cuadjtq reads ``L/cp`` from the ``tlucub``/``tlucuc`` tables built
-        # with ``zalvdcp = alv/cpd``, ``zalsdcp = als/cpd``
-        # (mo_echam_convect_tables.f90:214-215, 254-258) — unlike the
-        # cumastr static-energy ledger, which uses the moist ``zcpq``.
-        L_cp = jnp.where(T >= c.tmelt, c.alhc, c.alhs) / c.cpd
+        # Phase-consistent latent heat: ECHAM cuadjtq pairs the ``ua`` table
+        # (ice at and below tmelt) with ``lookup_ubc``'s ``L/cpd`` on the same
+        # switch — dry ``cpd``, not the cumastr ledger's moist ``zcpq``
+        # (see ``cuadjtq._lcp``).
+        L_cp = _lcp(T)
         qs, dqs_dT = _qsat_and_dqsat_dt(T, pressure)
         cond = (q - qs) / (1.0 + L_cp * dqs_dT)
         # Apply the kcall sign clip exactly as ECHAM does.

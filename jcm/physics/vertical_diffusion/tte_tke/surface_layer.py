@@ -126,10 +126,11 @@ def compute_surface_exchange_coefficients_echam_louis(
     # ``zlteta1 = θ − (zfaxe/cpd)·θ/T·zx`` with the same phase-switched L.
     thetal_air = theta_air - (Lv / cp) * theta_air / T_air * qx_air
 
-    # Saturation over water at/above tmelt and over ice below, for the air
-    # (``zqss``) and every tile surface: ECHAM reads both from the ``tlucua``
-    # table (``lookup_ua_list_spline`` in precalc_ocean/_ice/_land), which
-    # switches phase at the melting point with no mixed-phase blend.
+    # Saturation of the air (``zqss``) and every tile surface: ECHAM reads
+    # both from the ``ua`` table (``lookup_ua_spline`` in vdiff,
+    # ``lookup_ua_list_spline`` in precalc_ocean/_ice/_land): Sonntag (1990)
+    # over ice at and below tmelt and over water above, with no mixed-phase
+    # blend (``phase="auto"`` of jcm.physics.thermodynamics).
     qsat_air = saturation_specific_humidity(T_air, p_air)
     qtl = qv_air + qx_air                                          # zqtl
 

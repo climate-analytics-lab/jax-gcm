@@ -29,11 +29,11 @@ from .half_levels import (
     half_level_environment,
     reconstruct_pressure_half,
 )
-# The ECHAM cuadjtq-style damped Newton adjustment. It lives in
-# jcm.physics.convection.saturation so that ``calculate_cape_cin`` (in
-# tiedtke_nordeng.py, which this module imports from) can call it too;
-# re-exported here under its historical name for callers and tests.
-from jcm.physics.convection.saturation import (
+# The ECHAM cuadjtq-style damped Newton adjustment. It lives in the leaf
+# module ``cuadjtq`` so that ``calculate_cape_cin`` (in tiedtke_nordeng.py,
+# which this module imports from) can call it too; re-exported here under its
+# historical name for callers and tests.
+from jcm.physics.convection.tiedtke_nordeng.cuadjtq import (
     cuadjtq_newton as saturation_adjustment,
 )
 from jcm.physics.thermodynamics import moist_isobaric_heat_capacity

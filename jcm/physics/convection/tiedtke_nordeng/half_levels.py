@@ -32,7 +32,7 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 import jcm.constants as c
-from jcm.physics.convection.saturation import saturation_mixing_ratio
+from jcm.physics.convection.tiedtke_nordeng.cuadjtq import saturation_mixing_ratio
 from .adjustment import cuadjtq
 
 

@@ -705,7 +705,7 @@ def test_wrapper_publishes_mass_flux_ledger_for_tracer_transport():
     convergence of 0.5·E.
     """
     import numpy as np
-    from jcm.physics.convection.saturation import (
+    from jcm.physics.thermodynamics import (
         saturation_specific_humidity,
     )
     from jcm.constants import rd
