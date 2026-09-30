@@ -32,6 +32,7 @@ from ..cloud_utils import (
     ice_volume_mean_radius,
     latent_heat_over_cp,
     minimum_CDNC,
+    sundqvist_condensation,
     threshold_vert_vel,
 )
 from .types import MicrophysicsTendencies_2M, ScavengingLedger
@@ -442,7 +443,6 @@ def cloud_microphysics_2m(
 
         zxib = jnp.maximum(zxib, 0.0)
         zxlb = jnp.maximum(zxlb, 0.0)
-        zxilb = zxib + zxlb
 
         # --- Phase decision lo2 (ECHAM section 4 end) ------------------
         # Ice-vs-liquid regime from the Korolev/Mazin threshold updraft,
@@ -483,27 +483,18 @@ def cloud_microphysics_2m(
                             + lsdcp_k * (sub_k + zxievap + xisub_k)))
         zdqsat = (zdqsat * zdqsdt
                   / (1.0 + cf_k * zlc * zdqsdt))
-        zqcdif = (dq_up_k - zdqsat) * cf_k
-        # Bounds: dissipation limited to the available condensate,
+        # The bounds and the phase split are the 1M scheme's too (shared
+        # helper): dissipation limited to the available condensate,
         # condensation to (almost) the available vapour (ECHAM qsec·zqp1,
-        # qsec = 1 − cqtmin ≈ xsec).
-        zqcdif = jnp.clip(zqcdif, -zxilb * cf_k, params.xsec * zqp1)
-
-        ll_dissip = zqcdif < 0.0
-        zifrac = jnp.clip(zxib / jnp.maximum(zxilb, params.epsec), 0.0, 1.0)
-        frac = jnp.where(ll_dissip, zifrac, 1.0)
-        zcnd0 = jnp.where(ll_dissip, zqcdif * (1.0 - zifrac), 0.0)
+        # qsec = 1 − cqtmin ≈ xsec); in the liquid-growth regime the full
+        # zqcdif condenses (the saturation adjustment of ECHAM #485).
+        _zqcdif, zcnd0, zdep0 = sundqvist_condensation(
+            dq_up_k, zdqsat, cf_k, zxib, zxlb, zqp1,
+            lo2.astype(zqp1.dtype), params.xsec, params.epsec)
         if params.nic_cirrus == 2:
             # ECHAM: zdep = zqinucl·zifrac — the Kärcher-Lohmann
             # nucleated vapour, which jcm does not compute (#552).
             zdep0 = zero_s
-        else:
-            zdep0 = zqcdif * frac
-        ll_growth_liq = jnp.logical_and(~ll_dissip, ~lo2)
-        zdep0 = jnp.where(ll_growth_liq, 0.0, zdep0)
-        # Saturation adjustment for water condensation (ECHAM #485): in
-        # the liquid-growth regime the full zqcdif condenses.
-        zcnd0 = jnp.where(ll_growth_liq, zqcdif, zcnd0)
 
         # --- 5.4 Supersaturation corrections ---------------------------
         (zcnd, zdep, ztp1tmp, zqp1tmp, zqsp1tmp,
