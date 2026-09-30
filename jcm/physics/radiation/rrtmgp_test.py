@@ -1152,6 +1152,42 @@ class TestRRTMGPVerticalOrientation:
         )
 
 
+class TestRRTMGPColdLayerEmission:
+    """A layer's LW cooling must weaken as the layer cools.
+
+    Emission falls with temperature, so an optically thin layer that is
+    colder emits less and cools less. RRTMGP's gas-optics and Planck tables
+    span 160-355 K, and radiative cooling can take a thin model-top layer to
+    that edge. Below it jax-rrtmgp extends the absorption coefficients and
+    the Planck source linearly along the first table interval, floored at
+    zero, as RRTMGP's kernels and the RRTMG that ECHAM6 runs do
+    (``mo_gas_optics_rrtmgp_kernels.F90``;
+    ``mo_lrtm_driver.f90::planckFunction``, ``mo_rrtm_coeffs.f90``). The
+    response therefore keeps its physical sign across the edge, which is
+    what holds the layer there instead of letting it run away.
+    """
+
+    def _top_lw_heating(self, top_temperature):
+        nlev = 20
+        inputs = _make_inputs(nlev=nlev)
+        inputs["compute_cre"] = False
+        # The model-top layer is the one at the lowest pressure; select it
+        # by pressure rather than by an assumed index.
+        k_top = int(np.argmin(np.asarray(inputs["pressure_levels"])))
+        inputs["temperature"] = inputs["temperature"].at[k_top].set(
+            top_temperature)
+        _, diag = radiation_scheme_rrtmgp(**inputs)
+        return float(np.asarray(diag.lw_heating_rate)[k_top])
+
+    def test_in_table_cooling_weakens_as_the_layer_cools(self):
+        # Inside the table the response has the physical sign.
+        assert self._top_lw_heating(170.0) > self._top_lw_heating(190.0)
+
+    def test_below_table_cooling_weakens_as_the_layer_cools(self):
+        # A 150 K layer must cool less than a 160 K one.
+        assert self._top_lw_heating(150.0) > self._top_lw_heating(160.0)
+
+
 class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
     """The aerosol-free companion solve every Nth radiation step (#583).
 

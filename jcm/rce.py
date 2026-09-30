@@ -190,9 +190,11 @@ _RH_TAPER_BASE_PA = 1.0e4   # 100 hPa: full RH at and below this (troposphere)
 _RH_TAPER_TOP_PA = 2.0e3    # 20 hPa: RH forced to zero at and above this
 
 # Stratospheric specific-humidity floor [kg/kg] ≈ 1.6 ppmv. The taper drives RH
-# (and hence ``q``) to zero aloft, but RRTMGP's gas optics returns NaN on a zero
-# water-vapour amount, so we floor ``q`` at a small, physically realistic
-# stratospheric value (real lower-stratosphere H₂O is ~3–5 ppmv) rather than zero.
+# (and hence ``q``) to zero aloft; the floor keeps a small, physically realistic
+# stratospheric water vapour (real lower-stratosphere H₂O is ~3–5 ppmv) instead
+# of a bone-dry stratosphere. It is a climatological choice, not a numerical
+# guard: RRTMGP's gas optics treat an absent absorber as absent (jax-rrtmgp
+# guards the zero relative abundance), so a hard zero is finite.
 _STRATOSPHERE_Q_FLOOR = 1.0e-6
 
 
@@ -203,7 +205,7 @@ def _fixed_rh_specific_humidity(pfull, surface_pressure_pa, temperature, rh):
     (``p ≥`` :data:`_RH_TAPER_BASE_PA`), tapers linearly to zero across the
     stratosphere (:data:`_RH_TAPER_BASE_PA` → :data:`_RH_TAPER_TOP_PA`), and the
     resulting ``q`` is floored at :data:`_STRATOSPHERE_Q_FLOOR` so the dry top
-    still carries a trace amount (a hard zero NaNs RRTMGP). Holding the *whole
+    still carries a realistic stratospheric trace amount. Holding the *whole
     troposphere* at the uniform environmental RH (rather than tapering from the
     surface) is what keeps the column moist enough for Betts-Miller to convect —
     the validated homebrew RCE setup. The result is kg/kg, the canonical
