@@ -945,43 +945,37 @@ class DinosaurDycore(DynamicalCore):
         return state.replace(sim_time=jnp.asarray(sim_time))
 
     # ------------------------------------------------------------------
-    # Output & terrain (Phase-1 thin shims; full relocation in a follow-up)
+    # Output & terrain
     # ------------------------------------------------------------------
 
-    def to_xarray(self, predictions: Predictions, times, *, additional_coords=None):
+    def to_xarray(self, predictions: Predictions, times, *,
+                  additional_coords=None, physics=None):
         """Convert a saved trajectory to an :class:`xarray.Dataset`.
 
-        Phase-1 implementation delegates to :func:`jcm.utils.data_to_xarray`
-        unchanged — the modal-axis dispatch in
-        :func:`jcm.utils._infer_dims_shape_and_coords` still runs against the
-        dinosaur ``CoordinateSystem``. A subsequent PR moves that logic in
-        here so a future cubed-sphere backend can supply its own version
-        without monkey-patching ``utils``.
+        The same Dataset :meth:`jcm.predictions.ModelPredictions.to_xarray`
+        builds for a dinosaur run, before the time bounds, cell methods and
+        provenance it adds: this is where that conversion lives
+        (:func:`jcm.predictions.gridded_trajectory_dataset`), and
+        ``ModelPredictions`` delegates here. Physics diagnostics are named by
+        ``physics``, else by :attr:`output_physics` — the physics the
+        :class:`~jcm.model.Model` composed this dycore with — so a direct
+        ``model.dycore.to_xarray(predictions, labels)`` writes the variables
+        the model's own output does. ``times`` must be the frames' exact
+        ``datetime64`` labels; they are kept as given.
 
         The result is put through :func:`jcm.cf_metadata.finalize_output`, so
         this shares the surface-first vertical convention and CF metadata with
         every other backend rather than handing back the physics-internal
         TOA-first frame.
-
-        Not called in production: :class:`jcm.predictions.ModelPredictions`
-        builds the dinosaur trajectory itself. It does not yet handle a real
-        run's nested ``physics`` dict or keep the exact ``datetime64`` time
-        axis the protocol documents (#951).
         """
-        # Avoid the otherwise-circular import (utils does not currently depend
-        # on dycore, but a top-level import here would still be fine; deferred
-        # to keep import-time cost on this module low).
-        from jcm import cf_metadata
-        from jcm.utils import data_to_xarray
+        # Deferred: jcm.predictions imports the dycore protocol module.
+        from jcm.predictions import gridded_trajectory_dataset
 
-        ds = data_to_xarray(
-            predictions.dynamics.asdict() | predictions.physics,
-            coords=self.coords,
-            serialize_coords_to_attrs=False,
-            times=times - times[0],
-            additional_coords=additional_coords or {},
+        return gridded_trajectory_dataset(
+            predictions, times, coords=self.coords,
+            physics=physics if physics is not None else self.output_physics,
+            additional_coords=additional_coords,
         )
-        return cf_metadata.finalize_output(ds, vertical=self.coords.vertical)
 
     def build_terrain(self, *, source_file=None, **kwargs) -> TerrainData:
         """Construct a :class:`TerrainData` against the dinosaur basis.

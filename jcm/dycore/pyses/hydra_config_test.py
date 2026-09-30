@@ -139,6 +139,47 @@ class PysesHydraConfigTest(unittest.TestCase):
                 ["deleg_monthly_2000-01.nc"])
             self.assertFalse(list(Path(tmpdir).glob("deleg_day*.nc")))
 
+    @pytest.mark.slow
+    @pytest.mark.requires_extra("pyses")
+    def test_speedy_physics_completes_a_fresh_first_chunk(self):
+        """``physics=speedy`` must step on pySES, not only build (#797).
+
+        pySES runs float64 dynamics with float32 physics under
+        ``jax_enable_x64``, while its forcing and SPEEDY's cached vertical
+        tables stay float64. SPEEDY's ``lax.cond`` branches that recompute
+        from those inputs therefore came out float64 against a float32
+        pass-through branch, and the first physics step raised
+        ``TypeError: cond branches must have equal output types``. The
+        build-only test above cannot see it; this is the issue's command,
+        run to the end of its one chunk (six 900 s steps: 0.0625 d).
+        """
+        import tempfile
+
+        import numpy as np
+        import xarray as xr
+
+        from jcm.runners import run
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = _cfg([
+                "dycore=pyses_ne30l47", "physics=speedy", "run=pyses_year",
+                "dycore.nx=3", "dycore.n_sponge=8",
+                "run.total_time=0.0625", "run.chunk_days=0.0625",
+                "run.save_interval=0.0625",
+                f"run.output_prefix={tmpdir}/speedy",
+                f"run.checkpoint_path={tmpdir}/speedy.ckpt",
+            ])
+            reports = run(cfg)
+            self.assertIsInstance(reports, list)
+            self.assertTrue(reports[0]["ok"], reports[0].get("reasons"))
+            with xr.open_dataset(f"{tmpdir}/speedy_monthly_2000-01.nc") as ds:
+                self.assertTrue(np.isfinite(ds["temperature"].values).all())
+                # SPEEDY's diagnostics are named by field, as on dinosaur,
+                # not by pytree position, and carry plumbing stays out.
+                self.assertIn("surface_flux.hfluxn", ds)
+                self.assertFalse([name for name in ds.data_vars
+                                  if name.startswith("_")])
+
     def test_dinosaur_default_unchanged(self):
         from jcm.dycore.dinosaur.dycore import DinosaurDycore
         from jcm.runners import build_model

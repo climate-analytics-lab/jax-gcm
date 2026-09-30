@@ -610,6 +610,10 @@ class Model:
         # ``TracerSpec.nondimensionalize=False``.
         self.dycore.required_tracers_ok(self.physics.required_tracers())
         self.dycore.tracer_specs = tracer_specs
+        # The physics names its own diagnostics in output; binding it here
+        # lets ``model.dycore.to_xarray(...)`` write the variables the
+        # model's own output does without the caller restating the physics.
+        self.dycore.output_physics = self.physics
         # Settle a physics-decides (``advection=None``) transport scheme now
         # that the dycore knows the tracer set: SPEEDY asks for the Eulerian
         # core it was formulated on, which the dycore grants only for a
