@@ -873,6 +873,35 @@ every branch. The companion's fluxes and fractions now keep the dtype of the
 slots they fill. A fast test steps the composed package under x64, so CI covers
 this without the ``mam4`` extra. The float32 forward result is bit-identical.
 
+JAM runs float32 physics under 64-bit mode without mixed-dtype scatters
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+With ``jax_enable_x64`` on and float32 physics (pySES, or any run that imports
+``mam4_jax``), the float parameters are float64 while the state is float32, and
+three JAM/ECHAM sites scattered float64 values into float32 tendencies — a JAX
+``FutureWarning`` now and an error in later JAX releases (#770): the DMS
+emission, the dry deposition of every deposited moment, and the ECHAM land
+surface's soil heat tendency. Each value is now pinned to its operand's dtype.
+A fast test traces the ECHAM+JAM package under x64 with ``FutureWarning`` as an
+error. Results with x64 off are unchanged.
+
+Finite parameter gradients at degenerate inputs
+"""""""""""""""""""""""""""""""""""""""""""""""
+
+Several schemes returned a NaN derivative — with respect to the state or to a
+tunable parameter — at an ordinary degenerate input, although their value was
+fine (#663): JAM activation and ice nucleation at zero TKE (activation's
+``tke_factor`` among them), JAM in-cloud sulfur chemistry in every clear-sky
+cell, the TTE-TKE Businger-Dyer surface-layer option on a stable surface,
+Lott-Miller SSO on an exactly calm column and just above its orography-std
+floor, Hines' dissipation and diffusion coefficient (``spectrum_width_factor``
+among the affected parameters), and RRTMGP with the sun exactly overhead.
+Each is a guard on the branch its value discards, so forward results are
+bit-identical. RRTMGP's ``cloud_decorrelation_km`` no longer blocks tracing the
+radiation parameters. A slow test now differentiates every term's outputs with
+respect to every float parameter of the ECHAM, ECHAM+JAM (2M), grey and SPEEDY
+packages.
+
 
 Corrected physics
 ^^^^^^^^^^^^^^^^^
