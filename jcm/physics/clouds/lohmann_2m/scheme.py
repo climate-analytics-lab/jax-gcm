@@ -1171,8 +1171,11 @@ class Lohmann2MMicrophysics(PhysicsTerm):
 
     Reads the post-condensation ``cloud_fraction`` / ``qc`` / ``qi`` from
     the public ``"clouds"`` key (set by :class:`SundqvistCloudFraction`
-    upstream), TKE from ``"vertical_diffusion"``, and the SPA-style
-    activated CDNC floor from the public ``"aerosol"`` Nccn. Writes the
+    upstream), together with this step's convective detrainment
+    ``clouds.conv_detrainment_qc/qi`` (written by ``TiedtkeConvection``,
+    zero without a convection term), TKE from ``"vertical_diffusion"``, and
+    the SPA-style activated CDNC floor from the public ``"aerosol"`` Nccn.
+    Writes the
     surface rain / snow precip flux into ``"clouds"`` along with the
     qnc / qni state-carry needed for the next step's update.
 
@@ -1269,11 +1272,11 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # tendencies are relative to (the host's additive sum with the
         # upstream tendencies telescopes back to the correct final state),
         # while the STEP-START state supplies ECHAM's (ptm1, pqm1, pxlm1,
-        # pxim1) anchors: saturation evaluates there, and the differences
-        # play the role of the accumulated tendencies in the condensation
-        # closure and the clear-sky-evaporation split (see
-        # ``cloud_microphysics_2m``). Falls back to the step-start state if
-        # no upstream term seeded ``thermo_run``.
+        # pxim1) anchors: saturation evaluates there, and the differences,
+        # less the detrained condensate, play the role of the accumulated
+        # tendencies in the condensation closure and the clear-sky-
+        # evaporation split (see ``cloud_microphysics_2m``). Falls back to
+        # the step-start state if no upstream term seeded ``thermo_run``.
         thermo_run = diagnostics.get("thermo_run")
         if thermo_run is None:
             temperature_in = state.temperature
@@ -1286,6 +1289,14 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         qc_interim = clouds.qc
         qi_interim = clouds.qi
         cloud_fraction = clouds.cloud_fraction
+        # This step's convective detrainment, kg/kg per step: the liquid and
+        # ice parts the convection term added to ``clouds.qc/qi`` (ECHAM
+        # ztmst·pxtecl / ztmst·pxteci; zero without a convection term, as
+        # the cover term resets the fields every step). The scheme needs it
+        # apart from the other increments: it is not sedimented this step,
+        # carries its own crystal number and is re-split by lo2.
+        detrained_qc = dt * clouds.conv_detrainment_qc
+        detrained_qi = dt * clouds.conv_detrainment_qi
 
         zeros = jnp.zeros_like(state.temperature)
         qnc = state.tracers.get("qnc", zeros)
@@ -1373,7 +1384,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
          rain_flux_all, snow_flux_all) = jax.vmap(
             cloud_microphysics_2m,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                     None, None, 1, 1, 1, 1),
+                     None, None, 1, 1, 1, 1, 1, 1),
             out_axes=(0,) * 17,
         )(
             temperature_in, specific_humidity_in, pressure_full,
@@ -1381,6 +1392,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             cloud_fraction, air_density, layer_thickness, tke,
             activated_cdnc, ice_nuclei, ice_nuclei_deposition, dt, params_2m,
             state.temperature, state.specific_humidity, qc_m1, qi_m1,
+            detrained_qc, detrained_qi,
         )
 
         tendency = PhysicsTendency(

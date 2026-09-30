@@ -765,3 +765,110 @@ class TestColumnAndVmapAgree:
                             jax.tree.leaves(batched)):
                 np.testing.assert_allclose(np.asarray(y)[i], np.asarray(x),
                                            rtol=1e-5, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# The term wrapper
+# ---------------------------------------------------------------------------
+
+
+class TestTermPassesDetrainment:
+    """``Lohmann2MMicrophysics`` hands ``clouds.conv_detrainment_*`` to the scheme.
+
+    The convection term adds its detrained condensate to ``clouds.qc/qi`` and
+    publishes the two parts as kg/kg/s. A turbulent, crystal-free mixed-phase
+    column receives detrained ICE at one level: the term must pass
+    ``dt·conv_detrainment_*`` to the column function (the tendencies equal a
+    direct call with those arguments, and differ from one without them), and
+    the scheme's lo2 criterion must reclassify the ice as liquid.
+    """
+
+    NLEV, NCOLS, K, D, DT = 8, 3, 3, 2e-5, 900.0
+
+    def _inputs(self):
+        from types import SimpleNamespace
+
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = self.NLEV, self.NCOLS
+        shape = (nlev, ncols)
+        p_col = jnp.linspace(4e4, 7e4, nlev)
+        t_col = jnp.full(nlev, 258.0)
+        q_col = 0.98 * _qsat(t_col, p_col, "water")
+        col = lambda v: v[:, None] * jnp.ones((1, ncols))  # noqa: E731
+        pressure, temperature, humidity = col(p_col), col(t_col), col(q_col)
+        rate_qi = jnp.zeros(shape).at[self.K].set(self.D / self.DT)
+        clouds = CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=jnp.full(shape, 0.6),
+            qc=jnp.zeros(shape), qi=rate_qi * self.DT,
+            conv_detrainment_qc=jnp.zeros(shape),
+            conv_detrainment_qi=rate_qi,
+        )
+        state = PhysicsState.zeros(
+            shape, temperature=temperature, specific_humidity=humidity,
+            tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape),
+                     "qnc": jnp.zeros(shape), "qni": jnp.zeros(shape)})
+        diagnostics = {
+            "_dt_seconds": self.DT,
+            "pressure_full": pressure,
+            "air_density": pressure / (287.05 * temperature),
+            "layer_thickness": jnp.full(shape, 500.0),
+            "clouds": clouds,
+            "aerosol": AerosolData.zeros((ncols,), nlev),
+            "vertical_diffusion": SimpleNamespace(tke=jnp.full(shape, 0.5)),
+        }
+        return state, diagnostics
+
+    def _direct(self, state, diagnostics, with_detrainment):
+        clouds = diagnostics["clouds"]
+        n = self.NLEV
+        outs = []
+        for j in range(self.NCOLS):
+            kwargs = {}
+            if with_detrainment:
+                kwargs = dict(
+                    detrained_qc=self.DT * clouds.conv_detrainment_qc[:, j],
+                    detrained_qi=self.DT * clouds.conv_detrainment_qi[:, j])
+            outs.append(cloud_microphysics_2m(
+                state.temperature[:, j], state.specific_humidity[:, j],
+                diagnostics["pressure_full"][:, j], clouds.qc[:, j],
+                clouds.qi[:, j], jnp.zeros(n), jnp.zeros(n),
+                clouds.cloud_fraction[:, j], diagnostics["air_density"][:, j],
+                diagnostics["layer_thickness"][:, j],
+                diagnostics["vertical_diffusion"].tke[:, j],
+                jnp.zeros(n), jnp.zeros(n), jnp.zeros(n), self.DT, _P,
+                temperature_m1=state.temperature[:, j],
+                specific_humidity_m1=state.specific_humidity[:, j],
+                qc_m1=state.tracers["qc"][:, j],
+                qi_m1=state.tracers["qi"][:, j], **kwargs)[0])
+        return outs
+
+    def test_detrainment_reaches_the_scheme_and_is_reclassified(self):
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+
+        state, diagnostics = self._inputs()
+        tendency, _ = Lohmann2MMicrophysics()(state, diagnostics, None, None)
+        with_d = self._direct(state, diagnostics, with_detrainment=True)
+        without_d = self._direct(state, diagnostics, with_detrainment=False)
+        for j in range(self.NCOLS):
+            for name, term, direct in (
+                    ("qi", tendency.tracers["qi"], with_d[j].dqidt),
+                    ("qc", tendency.tracers["qc"], with_d[j].dqcdt),
+                    ("T", tendency.temperature, with_d[j].dtedt)):
+                np.testing.assert_allclose(np.asarray(term[:, j]),
+                                           np.asarray(direct), rtol=1e-5,
+                                           atol=1e-12, err_msg=name)
+            # Without the detrainment arguments the detrained ice would be an
+            # upstream increment: sedimented, and kept as ice.
+            gap = float(jnp.abs(tendency.tracers["qc"][self.K, j]
+                                - without_d[j].dqcdt[self.K]))
+            assert gap > 0.1 * self.D / self.DT, gap
+        # The host's end state (provisional clouds.qi + dt·tendency): the
+        # detrained ice is liquid now, none of it left as ice.
+        clouds = diagnostics["clouds"]
+        qi_end = clouds.qi + self.DT * tendency.tracers["qi"]
+        qc_end = clouds.qc + self.DT * tendency.tracers["qc"]
+        assert float(jnp.max(jnp.abs(qi_end[self.K]))) < 1e-12
+        assert float(jnp.min(qc_end[self.K])) > 0.3 * self.D
