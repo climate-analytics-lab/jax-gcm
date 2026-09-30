@@ -1423,10 +1423,12 @@ The cloud schemes take ECHAM's anchor, increments and detrainment
   the fresh carry and ``valid = 0`` (logged at INFO), and the carried anchor
   applies from the next step, with no schema change
   (:doc:`design/checkpoint_compatibility`).
-- The term order is unchanged. Gravity-wave and orographic drag and the
-  upper sponge run after the cloud scheme, so their heating (at most
-  0.03 K/day in the troposphere at T63) reaches it through the anchor one
-  step later; ECHAM runs them before ``cloud`` (``physc.f90`` l.835-884).
+- The term order is unchanged. Gravity-wave and orographic drag run after
+  the cloud scheme, so their heating (at most 0.03 K/day in the troposphere
+  at T63) reaches it through the anchor one step later; ECHAM runs them
+  before ``cloud`` (``physc.f90`` l.835-884). The upper sponge, which has no
+  counterpart in ``physc``, also runs after the scheme and is part of the
+  anchor.
 - **Changes results** for every 2M configuration, including JAM, together
   with the cover entry above and the overlap entry below. Over days 5-10 of
   ``t63-echam-2m`` / ``t63-echam-jam`` runs restarted from 30-day spin-ups

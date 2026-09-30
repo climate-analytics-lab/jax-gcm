@@ -297,7 +297,7 @@ gravity-wave and orographic drag, the upper sponge) are part of `x_ap`, so
 their heating enters the anchor rather than an increment. In ECHAM the
 gravity-wave and orographic drag run before `cloud`
 (`physc.f90:835-884`); their tropospheric heating in jcm is at most
-0.03 K/day at T63.
+0.03 K/day at T63. The sponge has no counterpart in `physc`.
 
 This is not ECHAM's parallel (leapfrog) split, where every process of a step
 sees the same time level; nothing here needs it.

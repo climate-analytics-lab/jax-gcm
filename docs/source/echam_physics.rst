@@ -39,8 +39,11 @@ Process Coupling
 ^^^^^^^^^^^^^^^^
 
 Every ``ComposablePhysics`` term receives the same prognostic input state and
-the returned tendencies are summed. Terms execute in ECHAM's ``physc`` order and
-see what earlier terms did through the running tendency sum
+the returned tendencies are summed. Terms execute in ECHAM's ``physc`` order
+(radiation, vertical diffusion, convection, cloud microphysics), except that
+gravity-wave and orographic drag run after the cloud scheme
+(``physc.f90`` runs them before ``cucall``), and see what earlier terms did
+through the running tendency sum
 (``_tendency_run``), the running thermodynamic state (``thermo_run``) and the
 cross-step carry, so the coupling is partly sequential and the order is
 load-bearing. The cloud microphysics receives ECHAM's inputs this way: the
