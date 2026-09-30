@@ -133,7 +133,8 @@ def fetch_run(run: str, dest, *, site: dict, pod: str,
     because a run still being written grows between the listing and the copy
     (see :func:`_incomplete`). A name in ``keep`` that already exists in
     ``dest`` is a caller's own record: it is never overwritten, and when the
-    volume's copy differs nothing is copied and the difference is returned.
+    volume's copy differs or is absent nothing is copied and that is
+    returned.
     """
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -141,21 +142,26 @@ def fetch_run(run: str, dest, *, site: dict, pod: str,
         # Inside the try: a pod that never reaches Running must be deleted too.
         _start(site, pod, run)
         files = remote_files(site, pod, run)
-        kept = [f for f in keep if f in files and (dest / f).is_file()]
+        kept = [f for f in keep if (dest / f).is_file()]
         wanted = {f: sm for f, sm in files.items()
                   if (with_checkpoints or not CHECKPOINT.search(f))
                   and f not in kept}
         # A differing record means the volume holds another launch under this
-        # run name: copying its outputs next to this record would pass them
-        # off as the recorded launch's, so nothing is copied.
-        foreign = [f for f in kept
-                   if _kubectl(site, "exec", pod, "--", "cat",
-                               f"/runs/{run}/{f}", timeout=120).stdout
-                   != (dest / f).read_text()]
+        # run name, and an absent one a run no launch recorded (the pod writes
+        # it before anything else): copying either's outputs next to this
+        # record would pass them off as the recorded launch's, so nothing is
+        # copied.
+        foreign = [f"{f}: /runs/{run}/{f} " + (
+            "is absent, so the run on the volume is not the launch recorded "
+            "here" if f not in files else
+            f"differs from {dest / f}, so the run on the volume is a "
+            "different launch") + "; nothing copied"
+            for f in kept
+            if f not in files or _kubectl(
+                site, "exec", pod, "--", "cat", f"/runs/{run}/{f}",
+                timeout=120).stdout != (dest / f).read_text()]
         if foreign:
-            return [f"{f}: /runs/{run}/{f} differs from {dest / f}, so the "
-                    "run on the volume is a different launch; nothing copied"
-                    for f in foreign]
+            return foreign
         todo = sorted(f for f, (n, t) in wanted.items()
                       if not _same(dest / f, n, t))
         gib = sum(wanted[f][0] for f in todo) / 2**30

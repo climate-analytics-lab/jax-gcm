@@ -394,9 +394,9 @@ directory) through a
 throwaway CPU pod that mounts the volume read-only
 (`kubernetes-jcm-runs/scripts/fetch_run.py`), skipping checkpoints unless
 `--with-checkpoints` (the JAM archives run to ~1 GB each), and never over the
-local `launch.json` that `--resume` reads: when the volume's copy differs,
-another launch owns that run name, and nothing is copied (fetch it elsewhere
-with `fetch_run.py <run> <dest>` if it is wanted). The copy is incremental: a file already copied at the volume's
+local `launch.json` that `--resume` reads: when the volume's copy differs or
+is absent, the run on the volume is not this launch, and nothing is copied
+(fetch it elsewhere with `fetch_run.py <run> <dest>` if it is wanted). The copy is incremental: a file already copied at the volume's
 size and modification time is skipped, so re-running it after an interrupted
 stream copies only what is missing, short or rewritten since, and it exits
 non-zero while anything is missing or short. One member that fails (never

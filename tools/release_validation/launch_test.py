@@ -1243,3 +1243,21 @@ fi
     later = log.read_text().splitlines()
     assert later == [f"install --no-cache-dir --disable-pip-version-check "
                      f"-c {lock} -e /work/jcm[mam4]"]
+
+
+def test_fetch_refuses_a_run_with_no_launch_record(scratch, volume):
+    """Outputs no launch recorded are not copied in under this machine's record."""
+    import fetch_run
+    dest = scratch / "orphan"
+    dest.mkdir(parents=True)
+    (volume / "launch.json").unlink()                # a legacy / cleaned run
+    (dest / "launch.json").write_text('{"digest": "mine"}\n')
+    bad = fetch_run.fetch_run("mx_speedy_t31_ft", dest,
+                              site=launch.sites.get("nautilus"), pod="p",
+                              keep=("launch.json",))
+    assert len(bad) == 1 and "is absent" in bad[0] and "nothing copied" in bad[0]
+    assert sorted(p.name for p in dest.iterdir()) == ["launch.json"]
+    # With no local record either (a run launched elsewhere), it is copied.
+    assert fetch_run.fetch_run("mx_speedy_t31_ft", scratch / "elsewhere",
+                               site=launch.sites.get("nautilus"), pod="p",
+                               keep=("launch.json",)) == []
