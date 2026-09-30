@@ -290,7 +290,9 @@ class _Check:
     #: inventory of the struct rather than a check.
     outputs: str = "all"
     #: Output keys dropped even from the ledger, each because the term returns
-    #: that field as a structural zero rather than computing it.
+    #: that field as a structural zero rather than computing it. An entry
+    #: ``"<key>/<field>"`` whose key is a provided struct drops that one field
+    #: of it and keeps the rest.
     skip_outputs: tuple[str, ...] = ()
     xfail_reference: str | None = None
     xfail_finiteness: str | None = None
@@ -390,11 +392,15 @@ _CHECKS: dict = {
     # and live in the temperature and humidity. That the derivative is the
     # surrogate's, that the surrogate is smooth, and how far it lies from the
     # value are checked on the functions themselves in ``sundqvist_test.py``.
-    # Its tendency ledger is structurally zero (the cover emits none).
+    # Its tendency ledger is structurally zero (the cover emits none), and so
+    # are the step's convective-detrainment fields of ``clouds``, which the
+    # cover resets for ``TiedtkeConvection`` to write.
     "sundqvist_cloud_fraction": _Check(
         reference="adjoint",
         skip_outputs=("u_wind", "v_wind", "temperature", "specific_humidity",
-                      "tracers/qc", "tracers/qi"),
+                      "tracers/qc", "tracers/qi",
+                      "clouds/conv_detrainment_qc",
+                      "clouds/conv_detrainment_qi"),
         live_inputs=("[0]/temperature", "[0]/specific_humidity")),
 
     # TTE-TKE, the 1M microphysics and Hines each cross an internal activation
@@ -712,6 +718,15 @@ def _term_function(replay: _Replay, term_name: str,
         }
         if outputs == "all":
             out.update({k: updated[k] for k in provides if k in updated})
+        dropped_fields: dict[str, set[str]] = {}
+        for entry in skip_outputs:
+            key, _, field = entry.partition("/")
+            if field and dataclasses.is_dataclass(out.get(key)):
+                dropped_fields.setdefault(key, set()).add(field)
+        for key, fields in dropped_fields.items():
+            out[key] = {f.name: getattr(out[key], f.name)
+                        for f in dataclasses.fields(out[key])
+                        if f.name not in fields}
         return {k: v for k, v in out.items() if k not in skip_outputs}
 
     if term_name == "rrtmgp_radiation":
