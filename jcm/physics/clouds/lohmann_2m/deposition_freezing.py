@@ -837,31 +837,52 @@ def WBF_process(
     )
 
 
+# Standard conditions of DeMott et al. (2010): "Both aerosol and IN
+# concentrations were corrected to standard temperature and pressure
+# conditions (STP; 273.15 K, 1013.5 mb)" (Methods, Datasets). The pressure is
+# taken as printed; it differs from the conventional 1013.25 hPa by 0.02 %.
+_DEMOTT_STP_TEMPERATURE = 273.15   # [K]
+_DEMOTT_STP_PRESSURE = 101350.0    # [Pa]
+
+
 def demott2010_inp(
     temperature: jnp.ndarray,
     n_aer_coarse_cm3: float,
+    air_density: jnp.ndarray,
 ) -> jnp.ndarray:
     """Ice nucleating particle concentration via DeMott et al. (2010).
 
-    Returns INP concentration in 1/m³ for the mixed-phase temperature range
-    (−9 °C to −35 °C, i.e. 264 K to 238 K). Outside this range, returns 0.
+    Returns the AMBIENT INP concentration in 1/m³ for the mixed-phase
+    temperature range (−9 °C to −35 °C, i.e. 264 K to 238 K). Outside this
+    range, returns 0.
+
+    DeMott et al. (2010, eq. 1) give ``n_IN`` per STANDARD litre from the
+    number of aerosol particles larger than 0.5 μm per standard cm³, both at
+    the paper's STP (273.15 K, 1013.5 mb). ``n_aer_coarse_cm3`` is already a
+    standard-condition number, so only the result is converted, by the ratio
+    of the ambient air density to the dry-air density at that STP: the same
+    number of particles per unit mass of air occupies a larger volume aloft.
 
     Args:
         temperature: Temperature [K].
         n_aer_coarse_cm3: Total aerosol number > 0.5 μm diameter [cm⁻³ STP].
+        air_density: Ambient air density [kg/m³].
 
     Reference:
-        DeMott et al. (2010), PNAS, doi:10.1073/pnas.0910818107
+        DeMott et al. (2010), PNAS 107, 11217-11222,
+        doi:10.1073/pnas.0910818107
 
     """
-    a, b, c, d = 5.94e-5, 3.33, 0.0264, 0.0033
+    a, b, c_exp, d = 5.94e-5, 3.33, 0.0264, 0.0033
     delta_T = 273.16 - temperature
     delta_T_clipped = jnp.clip(delta_T, 0.0, 35.0)
     n_aer_safe = jnp.maximum(n_aer_coarse_cm3, 0.01)
 
-    # n_INP in std L⁻¹ → convert to m⁻³ (* 1e3)
-    n_inp_per_litre = a * delta_T_clipped ** b * n_aer_safe ** (c * delta_T_clipped + d)
-    n_inp_per_m3 = n_inp_per_litre * 1e3
+    # n_INP in std L⁻¹ → std m⁻³ (× 1e3) → ambient m⁻³ (× ρ/ρ_STP).
+    n_inp_per_std_litre = (
+        a * delta_T_clipped ** b * n_aer_safe ** (c_exp * delta_T_clipped + d))
+    rho_stp = _DEMOTT_STP_PRESSURE / (c.rd * _DEMOTT_STP_TEMPERATURE)
+    n_inp_per_m3 = n_inp_per_std_litre * 1e3 * air_density / rho_stp
 
     # Only active in the valid range (238 K to 264 K)
     active = (temperature <= 264.0) & (temperature >= 238.0)

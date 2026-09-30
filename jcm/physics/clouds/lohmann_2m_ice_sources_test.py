@@ -12,12 +12,13 @@ import numpy as np
 
 import jcm.constants as c
 from jcm.physics import thermodynamics
+from jcm.testing import check_gradients
 
 from .cloud_utils import (
     detrained_ice_crystal_number,
     ice_volume_mean_radius_from_temperature,
 )
-from .lohmann_2m import cloud_microphysics_2m
+from .lohmann_2m import cloud_microphysics_2m, demott2010_inp
 from .lohmann_2m_params import CloudParams2M
 
 _P = CloudParams2M.default()
@@ -190,3 +191,108 @@ class TestDetrainedIceCrystalNumber:
         assert self._call(cf=float(_P.clc_min))[0] == cqtmin
         assert self._call(cf=0.0)[0] == cqtmin
         assert self._call(detr=0.0)[0] == cqtmin
+
+
+# ---------------------------------------------------------------------------
+# ICE-6, DeMott density, the freezing substitute's number cap
+# ---------------------------------------------------------------------------
+
+
+def _supercooled_liquid_column(n=8):
+    """Mixed-phase deck, turbulent so WBF stays shut.
+
+    The deck holds ice mass above ``ccwmin`` but only ~70 crystals/m³, fewer
+    than DeMott's ~300 at 256 K: the heterogeneous-freezing substitute then
+    creates crystals, and they survive the step (in an ice-free deck the few
+    hundred frozen droplets weigh less than ``ccwmin`` and the negative-mass
+    repair removes them again).
+    """
+    T = jnp.full(n, 256.0)
+    p = jnp.linspace(4e4, 7e4, n)
+    rho = p / (287.0 * T)
+    qc = jnp.zeros(n).at[2:6].set(3e-4)
+    deck = qc > 0
+    return dict(T=T, q=_qsat(T, p, "water"), p=p, rho=rho, qc=qc,
+                qi=jnp.where(deck, 3e-5, 0.0), cf=jnp.where(deck, 0.8, 0.0),
+                qnc=jnp.where(deck, 5e7, 0.0), qni=jnp.where(deck, 100.0, 0.0),
+                tke=jnp.full(n, 5.0))
+
+
+def _outputs_equal(out_a, out_b):
+    for x, y in zip(jax.tree.leaves(out_a[0]), jax.tree.leaves(out_b[0])):
+        if not np.array_equal(np.asarray(x), np.asarray(y)):
+            return False
+    return float(out_a[1]) == float(out_b[1]) and float(out_a[2]) == float(out_b[2])
+
+
+class TestInpFloor:
+    """``n_inp = max(ice_nuclei, DeMott)`` — the #953 stopgap."""
+
+    def test_tiny_online_inp_leaves_the_demott_floor(self):
+        col = _supercooled_liquid_column()
+        base = _run(col)
+        tiny = _run(dict(col, inp=jnp.where(col["qc"] > 0, 1e-3, 0.0)))
+        assert _outputs_equal(base, tiny), (
+            "a tiny online INP switched the DeMott floor off")
+        # ...and the floor is doing something here: fewer coarse aerosol
+        # (a smaller DeMott INP) makes fewer crystals.
+        cleaner = _run(col, params=_P.replace(n_aer_coarse=0.01))
+        fewer = float(jnp.sum((base[0].dqnidt - cleaner[0].dqnidt)
+                              * col["rho"]))
+        assert fewer > 0.0, "the DeMott floor is inactive in this fixture"
+
+    def test_large_online_inp_wins(self):
+        col = _supercooled_liquid_column()
+        base = _run(col)
+        large = _run(dict(col, inp=jnp.where(col["qc"] > 0, 1e5, 0.0)))
+        extra = float(jnp.sum((large[0].dqnidt - base[0].dqnidt) * col["rho"]))
+        assert extra > 0.0, "a large online INP did not raise the ICNC"
+
+    def test_floor_gradient_matches_a_central_difference(self):
+        """d/d n_aer_coarse where the DeMott floor sets the new crystals."""
+        col = _supercooled_liquid_column()
+
+        def f(n_aer_coarse):
+            return _tendency_outputs(
+                _run(col, params=_P.replace(n_aer_coarse=n_aer_coarse)))
+
+        grad = jax.grad(lambda x: jnp.sum(f(x)[5] ** 2))(_P.n_aer_coarse)
+        assert bool(jnp.isfinite(grad)) and float(grad) != 0.0
+        check_gradients(f, (_P.n_aer_coarse,), rtol=1e-2, seed=0,
+                        adjoint_rtol=1e-3)
+
+
+class TestDeMottAmbientDensity:
+    """DeMott (2010) is per standard litre; the scheme needs ambient m^-3."""
+
+    def test_density_scaling(self):
+        T = jnp.array([260.0, 250.0, 240.0], dtype=jnp.float32)
+        rho_stp = 101350.0 / (c.rd * 273.15)
+        at_stp = np.asarray(demott2010_inp(T, 0.5, rho_stp))
+        d_t = 273.16 - np.asarray(T, dtype=np.float64)
+        per_std_litre = 5.94e-5 * d_t ** 3.33 * 0.5 ** (0.0264 * d_t + 0.0033)
+        np.testing.assert_allclose(at_stp, 1e3 * per_std_litre, rtol=1e-5)
+        half = np.asarray(demott2010_inp(T, 0.5, 0.5 * rho_stp))
+        np.testing.assert_allclose(half, 0.5 * at_stp, rtol=1e-6)
+
+
+class TestFreezingSubstituteNumberCap:
+    """New crystals cannot exceed the droplets available."""
+
+    def test_inp_beyond_the_droplet_number_changes_nothing(self):
+        col = _supercooled_liquid_column()
+        deck = col["qc"] > 0
+        a = _run(dict(col, inp=jnp.where(deck, 1e9, 0.0)))
+        b = _run(dict(col, inp=jnp.where(deck, 1e12, 0.0)))
+        assert _outputs_equal(a, b), (
+            "INP above CDNC kept adding crystals")
+        # The deck froze, and it holds no more crystals than it had droplets.
+        assert float(jnp.sum(a[0].dqcdt * col["rho"])) < 0.0
+        # The working CDNC is floored at the fixed minimum (40 /cm³).
+        icnc_end = np.asarray((col["qni"] + DT * a[0].dqnidt) * col["rho"])
+        icnc_start = np.asarray(col["qni"] * col["rho"])
+        cdnc_start = np.maximum(np.asarray(col["qnc"] * col["rho"]),
+                                1e6 * float(_P.cdnc_min_fixed))
+        deck = np.asarray(deck)
+        assert np.all(icnc_end[deck]
+                      <= 1.0001 * (cdnc_start + icnc_start)[deck])

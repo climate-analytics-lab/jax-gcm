@@ -764,29 +764,38 @@ class TestMixedPhaseDepositionAndCorrections2M:
 
 
 class TestDeMott2010INP:
+    # The paper's standard density (273.15 K, 1013.5 mb): at it the ambient
+    # and standard-condition concentrations coincide, which is the frame
+    # these shape tests are written in. The density conversion itself is
+    # pinned in lohmann_2m_ice_sources_test.py.
+    @staticmethod
+    def _rho_stp():
+        import jcm.constants as c
+        return 101350.0 / (c.rd * 273.15)
+
     def test_zero_outside_valid_range(self):
         T = jnp.array([280.0, 265.0, 237.0, 200.0], dtype=jnp.float32)
-        n_inp = demott2010_inp(T, 0.5)
+        n_inp = demott2010_inp(T, 0.5, self._rho_stp())
         assert float(n_inp[0]) == 0.0  # too warm
         assert float(n_inp[2]) == 0.0  # too cold
         assert float(n_inp[3]) == 0.0  # way too cold
 
     def test_nonzero_in_valid_range(self):
         T = jnp.array([260.0, 250.0, 240.0], dtype=jnp.float32)
-        n_inp = demott2010_inp(T, 0.5)
+        n_inp = demott2010_inp(T, 0.5, self._rho_stp())
         assert jnp.all(n_inp > 0.0)
         # Colder → more INP
         assert float(n_inp[2]) > float(n_inp[1]) > float(n_inp[0])
 
     def test_more_aerosol_more_inp(self):
         T = jnp.array([250.0], dtype=jnp.float32)
-        n_low = demott2010_inp(T, 0.1)
-        n_high = demott2010_inp(T, 2.0)
+        n_low = demott2010_inp(T, 0.1, self._rho_stp())
+        n_high = demott2010_inp(T, 2.0, self._rho_stp())
         assert float(n_high[0]) > float(n_low[0])
 
     def test_output_in_per_m3(self):
         T = jnp.array([250.0], dtype=jnp.float32)
-        n_inp = demott2010_inp(T, 0.5)
+        n_inp = demott2010_inp(T, 0.5, self._rho_stp())
         # Should be order 1e3–1e6 per m³ for typical conditions
         assert float(n_inp[0]) > 1.0
         assert float(n_inp[0]) < 1e10

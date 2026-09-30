@@ -76,8 +76,8 @@ def cloud_microphysics_2m(
     layer_thickness: jnp.ndarray,   # (nlev,)  m   (dz, full-level layer depths)
     tke: jnp.ndarray,               # (nlev,)  m²/s²  turbulent kinetic energy
     activated_cdnc: jnp.ndarray,    # (nlev,)  1/m³   aerosol-activated CDNC (from MACv2-SP)
-    ice_nuclei: jnp.ndarray,        # (nlev,)  1/m³   immersion het INP (JAM #494); 0 → DeMott floor
-    ice_nuclei_deposition: jnp.ndarray,  # (nlev,) 1/m³  deposition INP → cirrus nucleation
+    ice_nuclei: jnp.ndarray,        # (nlev,)  1/m³   immersion het INP (JAM #494); floored by DeMott
+    ice_nuclei_deposition: jnp.ndarray,  # (nlev,) 1/m³  deposition INP (pnicex; read only at nic_cirrus=2)
     dt: jnp.ndarray,                # scalar   seconds
     params: CloudParams2M,          # tunable parameters
     temperature_m1: jnp.ndarray | None = None,        # (nlev,) K   step-start T (ECHAM ptm1)
@@ -330,11 +330,15 @@ def cloud_microphysics_2m(
         pressure, temperature_m1)
     melt_mask = temperature_m1 > params.tmelt  # ECHAM ll_mlt (ptm1)
 
-    # Heterogeneous mixed-phase INP [1/m³]: prefer the online JAM source
-    # (immersion on prognostic dust/BC, #494); fall back to the DeMott
-    # (2010) diagnostic on prescribed coarse aerosol where it is empty.
-    demott_floor = demott2010_inp(temperature_m1, params.n_aer_coarse)
-    n_inp = jnp.where(ice_nuclei > 0.0, ice_nuclei, demott_floor)
+    # Heterogeneous mixed-phase INP [1/m³] for jcm's freezing substitute
+    # (section 6.2): the larger of the online JAM immersion INP (#494) and
+    # the DeMott (2010) diagnostic on prescribed coarse aerosol, converted
+    # to ambient density. The maximum is a stopgap: the online INP runs far
+    # below DeMott, and preferring it wherever it is non-zero switched the
+    # DeMott floor off in every JAM cell (#953 tracks the cause).
+    demott_floor = demott2010_inp(
+        temperature_m1, params.n_aer_coarse, air_density)
+    n_inp = jnp.maximum(ice_nuclei, demott_floor)
 
     # ------------------------------------------------------------------
     # The flux-coupled column sweep: ECHAM's column_processes loop
@@ -545,7 +549,7 @@ def cloud_microphysics_2m(
             act_cdnc_k,
             zcnd, zdep,
             zero_s, zero_s,     # Tompkins sources
-            inp_dep_k,          # newly_formed_ice: cirrus dep-INP (#494)
+            inp_dep_k,          # pnicex: read only by the nic_cirrus=2 branch
             zqp1tmp, zqsp1tmp,
             rho_k,
             prid_radius,        # prid: volume-mean ice radius [m]
@@ -577,8 +581,14 @@ def cloud_microphysics_2m(
         # ECHAM ll_mxphase_frz: liquid present, mixed-phase window on the
         # corrected temperature, droplets at/above the floor, cloud
         # present. The jcm INP substitution (JAM immersion / DeMott
-        # fallback) freezes droplets up to the INP number, moving number,
-        # mass AND fusion heat together (#662 finding 3).
+        # fallback) freezes one mean-mass droplet per new crystal up to the
+        # INP number, moving number, mass AND fusion heat together (#662
+        # finding 3). The new crystals are capped by the droplets
+        # available, as the frozen mass is capped by the liquid, so an INP
+        # number above CDNC cannot create crystals from nothing. This
+        # substitute is jcm's closure; ECHAM's het_mxphase_freezing (not
+        # wired) caps the frozen number at the droplets above cdnc_min
+        # (2818-2820), and this one leaves at least cqtmin.
         ll_mxfrz = (
             (zxlb > params.cqtmin)
             & (ztp1tmp < params.tmelt)
@@ -586,9 +596,12 @@ def cloud_microphysics_2m(
             & (cdnc_f >= cdnc_min_k)
             & cloud_flag
         )
-        icnc_het = jnp.where(
-            jnp.logical_and(ll_mxfrz, n_inp_k > icnc_f), n_inp_k, icnc_f)
-        new_crystals = jnp.maximum(icnc_het - icnc_f, 0.0)
+        new_crystals = jnp.where(
+            ll_mxfrz,
+            jnp.minimum(jnp.maximum(n_inp_k - icnc_f, 0.0), cdnc_f),
+            0.0,
+        )
+        icnc_het = icnc_f + new_crystals
         mean_droplet_mass = jnp.where(
             cdnc_f > params.epsec,
             zxlb * rho_k / jnp.maximum(cdnc_f, params.epsec),
@@ -1203,9 +1216,11 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             )
             activated_cdnc = jnp.where(arg_cdnc > 1.0, arg_cdnc, cdnc_min_floor)
 
-        # Online heterogeneous ice nuclei (JAM #494); 0 where absent so the
-        # core falls back to its DeMott floor. Immersion drives the mixed-phase
-        # het freezing; deposition drives the cirrus nucleation hook.
+        # Online heterogeneous ice nuclei (JAM #494); 0 where absent, leaving
+        # the core's DeMott floor. Immersion INP drives the mixed-phase
+        # freezing substitute. Deposition INP reaches ``update_in_cloud_water``
+        # as ECHAM's ``pnicex``, which only the nic_cirrus=2 branch reads, so
+        # it is inert at the default nic_cirrus=1.
         zeros_2d = jnp.zeros_like(state.temperature)
         ice_nuclei = diagnostics.get("ice_nuclei", zeros_2d)
         ice_nuclei_deposition = diagnostics.get(
