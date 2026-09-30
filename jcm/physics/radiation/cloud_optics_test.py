@@ -7,6 +7,7 @@ Date: 2025-01-10
 """
 
 import jax
+import numpy as np
 import pytest
 import jax.numpy as jnp
 from jcm.physics.radiation.cloud_optics import (
@@ -144,7 +145,7 @@ def test_near_ir_sw_band_absorbs():
 
 
 def test_effective_radius_liquid():
-    """The fallback radius is a constant scaled by the Twomey factor.
+    """The grey scheme's liquid radius is a constant scaled by the Twomey factor.
 
     There is deliberately no land/ocean contrast: it was a CCN proxy that
     double-counted with cdnc_factor, and ECHAM's land term is a 6% spectral
@@ -506,3 +507,373 @@ class TestCloudOpticsGradients:
         for name, gradient in zip(names, gradients):
             assert jnp.all(jnp.isfinite(gradient)), (
                 f"d/d{name} is not finite in a {kind} column: {gradient}")
+
+
+# ---------------------------------------------------------------------------
+# ECHAM effective radii the RRTMGP / emulator path radiates with (#929)
+# ---------------------------------------------------------------------------
+
+from jcm.physics.clouds.cloud_utils import (  # noqa: E402
+    breadth_factor,
+    prescribed_cdnc_profile,
+)
+from jcm.physics.clouds.lohmann_2m_params import CloudParams2M  # noqa: E402
+from jcm.physics.radiation.cloud_optics import (  # noqa: E402
+    echam_cloud_effective_radii,
+)
+
+
+def _echam_droplet_radius(q_in, p, t, cdnc_m3, zkap):
+    """``mo_cloud_optics.f90`` in its own units: g/m3, cm-3, zfact."""
+    import jcm.constants as c
+    zlwc = q_in * 1000.0 * p / (c.rd * t)                    # g/m3
+    zcdnc = cdnc_m3 * 1.0e-6                                 # cm-3
+    zfact = 1.0e6 * (3.0e-9 / (4.0 * np.pi * 1000.0)) ** (1.0 / 3.0)
+    return zfact * zkap * (zlwc / zcdnc) ** (1.0 / 3.0)
+
+
+class TestPrescribedCdncProfile:
+    """ECHAM ``acdnc`` (physc.f90 section 3.12)."""
+
+    def test_boundary_layer_values(self):
+        p = jnp.array([80000.0, 95000.0])
+        assert jnp.allclose(prescribed_cdnc_profile(p, False), 80.0e6)
+        assert jnp.allclose(prescribed_cdnc_profile(p, True), 180.0e6)
+
+    def test_aloft_formula_and_continuity(self):
+        p = np.array([50000.0, 20000.0, 79999.0, 1000.0])
+        zprat = np.minimum(8.0, 80000.0 / p) ** 2
+        want = 1.0e6 * (20.0 + 60.0 * np.exp(1.0 - zprat))
+        got = prescribed_cdnc_profile(jnp.asarray(p), False)
+        np.testing.assert_allclose(np.asarray(got), want, rtol=1e-5)
+        # Continuous at 800 hPa (zprat = 1) and 20 cm-3 in the upper air.
+        np.testing.assert_allclose(float(got[2]), 80.0e6, rtol=1e-4)
+        np.testing.assert_allclose(float(got[3]), 20.0e6, rtol=1e-5)
+
+
+class TestEchamCloudEffectiveRadii:
+    """Radius laws of ``mo_cloud_optics.f90::cloud_optics`` per cloud scheme."""
+
+    T = jnp.array([285.0, 265.0, 230.0])
+    P = jnp.array([90000.0, 60000.0, 30000.0])
+
+    def _radii(self, qc, qi, cdnc, icnc, continental, prognostic):
+        return echam_cloud_effective_radii(
+            qc, qi, self.T, self.P, cdnc, icnc, continental, prognostic)
+
+    def test_prescribed_number_droplet_radius_matches_fortran(self):
+        qc = jnp.array([3.0e-4, 1.0e-4, 0.0])
+        for continental, zkap in ((False, 1.077), (True, 1.143)):
+            cdnc = prescribed_cdnc_profile(self.P, continental)
+            r_liq, _ = self._radii(qc, jnp.zeros(3), cdnc, jnp.zeros(3),
+                                   continental, False)
+            want = _echam_droplet_radius(
+                np.asarray(qc[:2]), np.asarray(self.P[:2]),
+                np.asarray(self.T[:2]), np.asarray(cdnc[:2]), zkap)
+            np.testing.assert_allclose(np.asarray(r_liq[:2]), want, rtol=1e-5)
+            assert float(r_liq[2]) == 0.0
+
+    def test_prescribed_number_crystal_radius_is_moss_foot(self):
+        import jcm.constants as c
+        qi = jnp.array([0.0, 2.0e-5, 1.0e-4])
+        _, r_ice = self._radii(jnp.zeros(3), qi, jnp.full(3, 8.0e7),
+                               jnp.zeros(3), False, False)
+        iwc = np.asarray(qi) * 1000.0 * np.asarray(self.P) / (
+            c.rd * np.asarray(self.T))
+        np.testing.assert_allclose(
+            np.asarray(r_ice[1:]), 83.8 * iwc[1:] ** 0.216, rtol=1e-5)
+        assert float(r_ice[0]) == 0.0
+
+    def test_prognostic_number_uses_peng_lohmann_and_crystal_number(self):
+        import jcm.constants as c
+        qc = jnp.array([3.0e-4, 1.0e-4, 0.0])
+        qi = jnp.array([0.0, 2.0e-5, 1.0e-4])
+        cdnc = jnp.array([1.0e8, 3.0e8, 5.0e7])
+        icnc = jnp.array([1.0e4, 5.0e4, 3.0e5])
+        r_liq, r_ice = self._radii(qc, qi, cdnc, icnc, True, True)
+        want_liq = _echam_droplet_radius(
+            np.asarray(qc[:2]), np.asarray(self.P[:2]),
+            np.asarray(self.T[:2]), np.asarray(cdnc[:2]),
+            np.asarray(breadth_factor(cdnc[:2])))
+        np.testing.assert_allclose(np.asarray(r_liq[:2]), want_liq, rtol=1e-5)
+        # Lohmann et al. (2008) plates at every temperature, incl. 230 K.
+        p2m = CloudParams2M.default()
+        iwc = np.asarray(qi) * 1000.0 * np.asarray(self.P) / (
+            c.rd * np.asarray(self.T))
+        want_ice = 0.5e4 * (iwc[1:] / float(p2m.fact_PK)
+                            / np.asarray(icnc[1:])) ** (1.0 / float(p2m.pow_PK))
+        np.testing.assert_allclose(np.asarray(r_ice[1:]), want_ice, rtol=1e-4)
+        assert float(r_liq[2]) == 0.0 and float(r_ice[0]) == 0.0
+
+    def test_vanishing_condensate_takes_the_smallest_tabulated_size(self):
+        """As condensate -> 0+ the law runs below the table: the clamp holds it.
+
+        ECHAM's ``MAX(relmin, ...)``; the radius stays continuous in the
+        condensate down to 0+, and the layer's path (hence the radius's
+        radiative weight) vanishes with it.
+        """
+        from jcm.physics.radiation.cloud_optics import (
+            RRTMGP_ICE_RADIUS_RANGE_UM, RRTMGP_LIQUID_RADIUS_RANGE_UM)
+        q = jnp.array([1.0e-12, 1.0e-15, 1.0e-18])
+        for prognostic in (False, True):
+            r_liq, r_ice = echam_cloud_effective_radii(
+                q, q, jnp.full(3, 260.0), jnp.full(3, 70000.0),
+                jnp.full(3, 1.0e8), jnp.full(3, 1.0e5), False, prognostic)
+            np.testing.assert_array_equal(
+                np.asarray(r_liq), RRTMGP_LIQUID_RADIUS_RANGE_UM[0])
+            np.testing.assert_array_equal(
+                np.asarray(r_ice), RRTMGP_ICE_RADIUS_RANGE_UM[0])
+
+    def test_condensate_without_number_takes_the_largest_tabulated_size(self):
+        """A droplet-free cell with water radiates with the table's maximum."""
+        from jcm.physics.radiation.cloud_optics import (
+            RRTMGP_LIQUID_RADIUS_RANGE_UM)
+        r_liq, _ = echam_cloud_effective_radii(
+            jnp.array([1.0e-4]), jnp.array([0.0]), jnp.array([280.0]),
+            jnp.array([80000.0]), jnp.array([0.0]), jnp.array([0.0]),
+            False, True)
+        assert float(r_liq[0]) == RRTMGP_LIQUID_RADIUS_RANGE_UM[1]
+
+    def test_clamp_ranges_are_the_loaded_rrtmgp_tables(self):
+        from jcm.physics.radiation.cloud_optics import (
+            RRTMGP_ICE_RADIUS_RANGE_UM, RRTMGP_LIQUID_RADIUS_RANGE_UM)
+        from jcm.physics.radiation.rrtmgp import _ensure_rrtmgp
+        optics = _ensure_rrtmgp().optics_lib
+        for table in (optics.cloud_optics_lw, optics.cloud_optics_sw):
+            assert (float(table.radius_liq_lower),
+                    float(table.radius_liq_upper)) == RRTMGP_LIQUID_RADIUS_RANGE_UM
+            assert (0.5 * float(table.diameter_ice_lower),
+                    0.5 * float(table.diameter_ice_upper)) == RRTMGP_ICE_RADIUS_RANGE_UM
+
+    @pytest.mark.parametrize("prognostic", [False, True], ids=["1m", "2m"])
+    @pytest.mark.parametrize(
+        "qc,qi", [(3.0e-4, 5.0e-5), (0.0, 0.0), (1.0e-20, 1.0e-20)],
+        ids=["cloudy", "clear", "vanishing"])
+    def test_gradients_finite(self, prognostic, qc, qi):
+        """Reverse pass finite at a cloudy, a clear and a vanishing-water cell."""
+        def total(x):
+            q_l, q_i, t, p, n_d, n_i = x
+            r_liq, r_ice = echam_cloud_effective_radii(
+                q_l, q_i, t, p, n_d, n_i, False, prognostic)
+            return jnp.sum(r_liq) + jnp.sum(r_ice)
+
+        x = (jnp.array([qc]), jnp.array([qi]), jnp.array([260.0]),
+             jnp.array([70000.0]), jnp.array([1.0e8]), jnp.array([3.0e5]))
+        grads = jax.grad(total)(x)
+        for g in grads:
+            assert bool(jnp.all(jnp.isfinite(g)))
+
+    @pytest.mark.parametrize("prognostic", [False, True], ids=["1m", "2m"])
+    def test_gradients_match_finite_differences_in_cloud(self, prognostic):
+        """AD agrees with a central difference at a cloudy cell."""
+        def radii(q_l, q_i, t, n_d, n_i):
+            return echam_cloud_effective_radii(
+                q_l, q_i, t, jnp.array([70000.0]), n_d, n_i, False,
+                prognostic)
+
+        check_gradients(
+            radii,
+            (jnp.array([3.0e-4]), jnp.array([5.0e-5]), jnp.array([260.0]),
+             jnp.array([1.0e8]), jnp.array([3.0e5])),
+            rtol=2e-3,
+        )
+
+
+class TestRadiationEffectiveRadii:
+    """Term-level input assembly (``radiation_effective_radii``)."""
+
+    def _inputs(self, cdnc_factor=1.0, tracers=None, fmask=None):
+        from types import SimpleNamespace
+
+        import jcm.constants as c
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = 3, 2
+        shape = (nlev, ncols)
+        p = jnp.broadcast_to(jnp.array([30000.0, 70000.0, 90000.0])[:, None],
+                             shape)
+        t = jnp.broadcast_to(jnp.array([240.0, 270.0, 285.0])[:, None], shape)
+        state = PhysicsState.zeros(
+            shape, temperature=t,
+            tracers={"qc": jnp.full(shape, 1.0e-4),
+                     "qi": jnp.full(shape, 2.0e-5), **(tracers or {})})
+        diagnostics = {
+            "pressure_full": p,
+            "air_density": p / (c.rd * t),
+            "aerosol": AerosolData.zeros((ncols,), nlev).copy(
+                cdnc_factor=jnp.full((ncols,), cdnc_factor)),
+        }
+        terrain = (None if fmask is None
+                   else SimpleNamespace(fmask=jnp.asarray(fmask)))
+        forcing = SimpleNamespace(glacier_fraction=None)
+        cf = jnp.full(shape, 0.5)
+        return state, diagnostics, forcing, terrain, cf
+
+    def _radii(self, **kw):
+        from jcm.physics.radiation.cloud_optics import radiation_effective_radii
+        state, diagnostics, forcing, terrain, cf = self._inputs(**kw)
+        return radiation_effective_radii(
+            state, diagnostics, forcing, terrain,
+            state.tracers["qc"], state.tracers["qi"], cf, 1.0e-3)
+
+    def test_twomey_factor_shrinks_the_prescribed_number_droplets(self):
+        r_clean, _ = self._radii(cdnc_factor=1.0)
+        r_polluted, _ = self._radii(cdnc_factor=2.0)
+        # N doubles, so r scales by 2**(-1/3) exactly.
+        np.testing.assert_allclose(np.asarray(r_polluted / r_clean),
+                                   2.0 ** (-1.0 / 3.0), rtol=1e-5)
+
+    def test_land_gets_the_continental_profile_and_breadth(self):
+        r_sea, _ = self._radii(fmask=[0.0, 0.0])
+        r_mixed, _ = self._radii(fmask=[0.0, 0.9])
+        np.testing.assert_array_equal(np.asarray(r_mixed[:, 0]),
+                                      np.asarray(r_sea[:, 0]))
+        # Surface layer: N 180 vs 80 cm-3 and zkap 1.143 vs 1.077.
+        ratio = float(r_mixed[2, 1] / r_sea[2, 1])
+        np.testing.assert_allclose(
+            ratio, (1.143 / 1.077) * (80.0 / 180.0) ** (1.0 / 3.0), rtol=1e-5)
+
+    def test_number_tracers_select_the_prognostic_law(self):
+        shape = (3, 2)
+        tracers = {"qnc": jnp.full(shape, 1.0e8), "qni": jnp.full(shape, 1e4)}
+        r_liq_2m, r_ice_2m = self._radii(tracers=tracers)
+        r_liq_1m, r_ice_1m = self._radii()
+        assert not np.allclose(np.asarray(r_liq_2m), np.asarray(r_liq_1m))
+        assert not np.allclose(np.asarray(r_ice_2m), np.asarray(r_ice_1m))
+        # The 2M droplet number does not see the MACv2-SP Twomey factor: the
+        # aerosol reaches it through activation instead.
+        r_liq_2m_pol, _ = self._radii(tracers=tracers, cdnc_factor=3.0)
+        np.testing.assert_array_equal(np.asarray(r_liq_2m_pol),
+                                      np.asarray(r_liq_2m))
+
+    def test_post_physics_radii_use_the_later_state(self):
+        """The diagnostics' radii see the post-physics inputs and thin cover.
+
+        ``post_physics_effective_radii`` is the same law with the
+        post-physics temperature and number tracers in place of the
+        step-start ones, and a cover floor of ~1e-12 in place of the
+        radiation's ``2 * cld_frac_min`` optical-depth guard: a cover of
+        1.5e-3 is clear to the radiation but cloud to AeroCom and COSP.
+        """
+        from jcm.physics.radiation.cloud_optics import (
+            post_physics_effective_radii, radiation_effective_radii)
+        shape = (3, 2)
+        tracers = {"qnc": jnp.full(shape, 1.0e8), "qni": jnp.full(shape, 1e6)}
+        state, diagnostics, forcing, terrain, cf = self._inputs(
+            tracers=tracers)
+        qc, qi = state.tracers["qc"], state.tracers["qi"]
+        same = post_physics_effective_radii(
+            state, diagnostics, forcing, terrain, qc, qi, cf,
+            state.temperature, number_tracers=(tracers["qnc"], tracers["qni"]))
+        ref = radiation_effective_radii(
+            state, diagnostics, forcing, terrain, qc, qi, cf, 1.0e-3)
+        for a, b in zip(same, ref):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+        # Twice the droplets: the post-physics number tracer is what counts.
+        more, _ = post_physics_effective_radii(
+            state, diagnostics, forcing, terrain, qc, qi, cf,
+            state.temperature,
+            number_tracers=(2.0 * tracers["qnc"], tracers["qni"]))
+        assert bool(jnp.all(more < same[0]))
+        # A later temperature enters the water content and the number
+        # density alike, through the one p/(rd T).
+        import jcm.constants as c
+        from jcm.physics.radiation.cloud_optics import (
+            echam_cloud_effective_radii)
+        from jcm.physics.radiation.mcica import in_cloud_condensate
+        t_later = state.temperature + 10.0
+        warmer = post_physics_effective_radii(
+            state, diagnostics, forcing, terrain, qc, qi, cf, t_later,
+            number_tracers=(tracers["qnc"], tracers["qni"]))
+        rho_later = diagnostics["pressure_full"] / (c.rd * t_later)
+        want = echam_cloud_effective_radii(
+            in_cloud_condensate(qc, cf, eps=1.0e-12),
+            in_cloud_condensate(qi, cf, eps=1.0e-12),
+            t_later, diagnostics["pressure_full"],
+            tracers["qnc"] * rho_later, tracers["qni"] * rho_later,
+            False, True)
+        for a, b in zip(warmer, want):
+            np.testing.assert_allclose(np.asarray(a), np.asarray(b),
+                                       rtol=1e-6)
+        assert not np.allclose(np.asarray(warmer[0]), np.asarray(same[0]))
+        thin = jnp.full(shape, 1.5e-3)
+        r_rad, _ = radiation_effective_radii(
+            state, diagnostics, forcing, terrain, qc, qi, thin, 1.0e-3)
+        r_diag, _ = post_physics_effective_radii(
+            state, diagnostics, forcing, terrain, qc, qi, thin,
+            state.temperature, number_tracers=(tracers["qnc"], tracers["qni"]))
+        assert float(jnp.max(r_rad)) == 0.0
+        assert bool(jnp.all(r_diag > 0.0))
+
+    @pytest.mark.parametrize("prognostic", [False, True], ids=["1m", "2m"])
+    def test_gradients_are_live_in_both_modes(self, prognostic):
+        """Both AD modes match a difference, and every physical input is live.
+
+        The radii are a function of the current state alone, so each input
+        reaches RRTMGP through the radius with an ordinary derivative in
+        cloud: the condensate, the cloud fraction that makes it in-cloud, the
+        temperature in the water content, and the droplet number's own input
+        (the Twomey factor for 1M, the number tracers for 2M).
+        ``check_gradients`` compares jvp and vjp each against a central
+        difference and asserts every named leaf live.
+        """
+        from jcm.physics.radiation.cloud_optics import radiation_effective_radii
+
+        shape = (3, 2)
+        # 1e6 crystals per kg puts the Lohmann plates at ~36 um, inside the
+        # table; the 1e4 the selection test uses is clamped at 90 um, where
+        # the crystal radius passes no gradient.
+        tracers = ({"qnc": jnp.full(shape, 1.0e8), "qni": jnp.full(shape, 1e6)}
+                   if prognostic else None)
+        state, diagnostics, forcing, terrain, cf = self._inputs(
+            fmask=[0.0, 0.9], tracers=tracers)
+        inputs = {"qc": state.tracers["qc"], "qi": state.tracers["qi"],
+                  "cloud_fraction": cf, "temperature": state.temperature}
+        if prognostic:
+            inputs.update(qnc=state.tracers["qnc"], qni=state.tracers["qni"])
+        else:
+            inputs["cdnc_factor"] = diagnostics["aerosol"].cdnc_factor
+
+        def radii(x):
+            number = ({"qnc": x["qnc"], "qni": x["qni"]} if prognostic else {})
+            s = state.copy(temperature=x["temperature"],
+                           tracers={"qc": x["qc"], "qi": x["qi"], **number})
+            d = diagnostics if prognostic else {
+                **diagnostics,
+                "aerosol": diagnostics["aerosol"].copy(
+                    cdnc_factor=x["cdnc_factor"])}
+            return radiation_effective_radii(
+                s, d, forcing, terrain, x["qc"], x["qi"],
+                x["cloud_fraction"], 1.0e-3)
+
+        number_inputs = (("['qnc']", "['qni']") if prognostic
+                         else ("['cdnc_factor']",))
+        check_gradients(
+            radii, (inputs,), rtol=2e-3,
+            live_inputs=("['qc']", "['qi']", "['cloud_fraction']",
+                         "['temperature']", *number_inputs))
+
+    def test_broadcasting_native_over_the_horizontal_layout(self):
+        """A (kx, ncols) and a (kx, ix, il) host give the same radii per column."""
+        from types import SimpleNamespace
+
+        from jcm.physics.radiation.cloud_optics import radiation_effective_radii
+        state, diagnostics, forcing, _, cf = self._inputs(fmask=[0.0, 0.9])
+        flat = radiation_effective_radii(
+            state, diagnostics, forcing, SimpleNamespace(fmask=jnp.array([0.0, 0.9])),
+            state.tracers["qc"], state.tracers["qi"], cf, 1.0e-3)
+        grid = lambda a: a.reshape(a.shape[:1] + (2, 1))  # noqa: E731
+        state3 = state.copy(
+            temperature=grid(state.temperature),
+            tracers={k: grid(v) for k, v in state.tracers.items()})
+        diag3 = {**diagnostics,
+                 "pressure_full": grid(diagnostics["pressure_full"]),
+                 "air_density": grid(diagnostics["air_density"])}
+        gridded = radiation_effective_radii(
+            state3, diag3, forcing,
+            SimpleNamespace(fmask=jnp.array([[0.0], [0.9]])),
+            grid(state.tracers["qc"]), grid(state.tracers["qi"]), grid(cf),
+            1.0e-3)
+        for a, b in zip(flat, gridded):
+            np.testing.assert_array_equal(np.asarray(grid(a)), np.asarray(b))

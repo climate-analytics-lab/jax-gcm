@@ -1011,18 +1011,19 @@ class TestColumnSweepParameterGradients:
         )
 
 
-class TestEcham1MPublishesEffectiveRadius:
-    """The term must publish an LWC-dependent ``clouds.r_eff_liq``.
+class TestEcham1MLeavesTheRadiusToRadiation:
+    """The 1M term publishes no effective radius.
 
-    Regression guard for the #717 fix: without a published radius RRTMGP falls
-    back to ``effective_radius_liquid``, a constant ~11 um independent of liquid
-    water content.
+    ECHAM's radiation forms the droplet radius itself from the step's state
+    (``mo_cloud_optics.f90::cloud_optics``), and jcm's radiation term owns the
+    ``clouds.r_eff_*`` diagnostic (#929), so the microphysics must leave it as
+    it found it.
     """
 
     NLEV = 8
     NCOLS = 3
 
-    def _run_term(self, qc_profile, cdnc_factor=None):
+    def _run_term(self, qc_profile, cdnc_factor=None, carried=0.0):
         from .echam_1m import Echam1MMicrophysics
         from .cloud_data import CloudData
         from jcm.physics.aerosol.aerosol_types import AerosolData
@@ -1046,6 +1047,8 @@ class TestEcham1MPublishesEffectiveRadius:
 
         clouds = CloudData.zeros((ncols,), nlev).copy(
             cloud_fraction=cloud_fraction, qc=qc, qi=jnp.zeros(shape),
+            r_eff_liq=jnp.full(shape, carried),
+            r_eff_ice=jnp.full(shape, carried),
         )
         aerosol = AerosolData.zeros((ncols,), nlev)
         if cdnc_factor is not None:
@@ -1066,41 +1069,138 @@ class TestEcham1MPublishesEffectiveRadius:
             "aerosol": aerosol,
         }
         _, out = Echam1MMicrophysics()(state, diagnostics, None, None)
-        return np.asarray(out["clouds"].r_eff_liq)
+        return out["clouds"]
 
-    def test_cloud_free_levels_are_exactly_zero(self):
+    def test_carried_radius_is_left_untouched(self):
         qc = jnp.zeros((self.NLEV, self.NCOLS)).at[5].set(3e-4)
-        r_eff = self._run_term(qc)
-        cloudy = np.zeros((self.NLEV, self.NCOLS), dtype=bool)
-        cloudy[5] = True
-        assert (r_eff[~cloudy] == 0.0).all()
-        assert (r_eff[cloudy] > 0.0).all()
+        for carried in (0.0, 7.5):
+            clouds = self._run_term(qc, carried=carried)
+            np.testing.assert_array_equal(np.asarray(clouds.r_eff_liq), carried)
+            np.testing.assert_array_equal(np.asarray(clouds.r_eff_ice), carried)
 
-    def test_radius_is_not_the_constant_fallback(self):
-        # ``effective_radius_liquid(1.0, 0.5)`` = 14*0.5 + 8*0.5 = 11 um.
-        qc = jnp.zeros((self.NLEV, self.NCOLS)).at[5].set(3e-4)
-        r_eff = self._run_term(qc)
-        assert not np.allclose(r_eff[5], 11.0)
-        assert np.all((r_eff[5] > 2.0) & (r_eff[5] < 30.0))
 
-    def test_radius_increases_with_liquid_water_content(self):
-        # Same CDNC in every column; only the LWC differs.
-        qc = jnp.zeros((self.NLEV, self.NCOLS)).at[5].set(
-            jnp.array([5e-5, 2e-4, 8e-4])
-        )
-        r_eff = self._run_term(qc)
-        assert np.all(np.diff(r_eff[5]) > 0.0)
+class TestEcham1MDropletNumberIsEchamsAcdnc:
+    """The 1M droplet number is ECHAM's prescribed ``acdnc`` (#936).
 
-    def test_radius_varies_in_the_vertical(self):
-        qc = jnp.zeros((self.NLEV, self.NCOLS)).at[3].set(1e-4).at[5].set(6e-4)
-        r_eff = self._run_term(qc)
-        assert np.all(r_eff[5] > r_eff[3])
+    ECHAM passes one ``acdnc`` to the radiation and to ``cloud``; jcm's 1M
+    term and radiation must see the same number, through one call.
+    """
 
-    def test_twomey_smaller_droplets_for_more_aerosol(self):
-        qc = jnp.zeros((self.NLEV, self.NCOLS)).at[5].set(3e-4)
-        r_clean = self._run_term(qc, cdnc_factor=jnp.ones((self.NCOLS,)))
-        r_polluted = self._run_term(qc, cdnc_factor=jnp.full((self.NCOLS,), 2.0))
-        assert np.all(r_polluted[5] < r_clean[5])
+    NLEV = 6
+    NCOLS = 2
+    # 800 hPa sits exactly on a level: the profile's regime boundary.
+    P_COL = np.array([20000.0, 50000.0, 79000.0, 80000.0, 81000.0, 95000.0])
+
+    def _inputs(self, qc_level=4, fmask=(0.0, 0.9), cdnc_factor=(1.0, 1.4)):
+        from types import SimpleNamespace
+
+        from .cloud_data import CloudData
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics_interface import PhysicsState
+        from .sundqvist import saturation_specific_humidity
+
+        nlev, ncols = self.NLEV, self.NCOLS
+        shape = (nlev, ncols)
+        p_col = jnp.asarray(self.P_COL)
+        t_col = jnp.linspace(235.0, 293.0, nlev)
+        q_col = jax.vmap(saturation_specific_humidity)(p_col, t_col)
+        pressure = p_col[:, None] * jnp.ones((1, ncols))
+        temperature = t_col[:, None] * jnp.ones((1, ncols))
+        qc = jnp.zeros(shape).at[qc_level:].set(3.0e-4)
+        cf = jnp.where(qc > 0.0, 0.6, 0.0)
+        state = PhysicsState.zeros(
+            shape, temperature=temperature,
+            specific_humidity=q_col[:, None] * jnp.ones((1, ncols)),
+            tracers={"qc": qc, "qi": jnp.zeros(shape)})
+        diagnostics = {
+            "_dt_seconds": 600.0,
+            "pressure_full": pressure,
+            "air_density": pressure / (287.05 * temperature),
+            "layer_thickness": jnp.full(shape, 500.0),
+            "clouds": CloudData.zeros((ncols,), nlev).copy(
+                cloud_fraction=cf, qc=qc, qi=jnp.zeros(shape)),
+            "aerosol": AerosolData.zeros((ncols,), nlev).copy(
+                cdnc_factor=jnp.asarray(cdnc_factor)),
+        }
+        terrain = SimpleNamespace(fmask=jnp.asarray(fmask))
+        forcing = SimpleNamespace(glacier_fraction=None)
+        return state, diagnostics, forcing, terrain
+
+    def test_same_droplet_number_as_the_radiation(self):
+        """The 1M term's number is the one the radiation's radius is formed from."""
+        from .echam_1m import Echam1MMicrophysics
+        from jcm.physics.clouds.cloud_data import radiation_cloud_fields
+        from jcm.physics.radiation.cloud_optics import (
+            echam_cloud_effective_radii, radiation_effective_radii)
+        from jcm.physics.radiation.mcica import in_cloud_condensate
+
+        state, diagnostics, forcing, terrain = self._inputs()
+        _, out = Echam1MMicrophysics()(state, diagnostics, forcing, terrain)
+        n_micro = out["clouds"].droplet_number
+        cw, ci, cf = radiation_cloud_fields(state, diagnostics)
+        r_rad, _ = radiation_effective_radii(
+            state, diagnostics, forcing, terrain, cw, ci, cf, 1.0e-3)
+        r_from_micro, _ = echam_cloud_effective_radii(
+            in_cloud_condensate(cw, cf, eps=1.0e-3),
+            in_cloud_condensate(ci, cf, eps=1.0e-3),
+            state.temperature, diagnostics["pressure_full"], n_micro,
+            jnp.zeros_like(n_micro), jnp.asarray([False, True]), False)
+        np.testing.assert_array_equal(np.asarray(r_rad),
+                                      np.asarray(r_from_micro))
+        # And it is the Fortran profile, not a constant: sea / land column,
+        # Twomey factor 1.0 / 1.4 (physc.f90 section 3.12, cm-3).
+        n = np.asarray(n_micro) * 1.0e-6
+        np.testing.assert_allclose(n[-1], [80.0, 180.0 * 1.4], rtol=1e-6)
+        np.testing.assert_allclose(n[3], [80.0, 180.0 * 1.4], rtol=1e-6)
+        zprat = (80000.0 / self.P_COL[0]) ** 2
+        np.testing.assert_allclose(
+            n[0], [20.0 + 60.0 * np.exp(1.0 - zprat),
+                   1.4 * (20.0 + 160.0 * np.exp(1.0 - zprat))], rtol=1e-5)
+
+    def test_glacier_is_maritime(self):
+        from types import SimpleNamespace
+
+        from jcm.physics.clouds.cloud_utils import prescribed_droplet_number
+        p = jnp.asarray(self.P_COL)[:, None] * jnp.ones((1, 2))
+        n = prescribed_droplet_number(
+            p, SimpleNamespace(fmask=jnp.array([0.9, 0.9])),
+            SimpleNamespace(glacier_fraction=jnp.array([0.0, 0.3])), 1.0)
+        np.testing.assert_allclose(np.asarray(n[-1]) * 1e-6, [180.0, 80.0])
+
+    def test_gradients_finite_across_800_hpa(self):
+        """The 800 hPa regime switch leaves the term's reverse pass finite.
+
+        The number's pressure derivative is finite on both sides and zero
+        where the profile is constant.
+        """
+        from .echam_1m import Echam1MMicrophysics
+        from jcm.physics.clouds.cloud_utils import prescribed_cdnc_profile
+
+        state, diagnostics, forcing, terrain = self._inputs(qc_level=1)
+        term = Echam1MMicrophysics()
+
+        def total(pressure, temperature):
+            d = {**diagnostics, "pressure_full": pressure}
+            tend, out = term(state.copy(temperature=temperature), d,
+                             forcing, terrain)
+            return (jnp.sum(tend.temperature) + jnp.sum(tend.tracers["qc"])
+                    + jnp.sum(out["clouds"].droplet_number) * 1e-8)
+
+        gp, gt = jax.grad(total, argnums=(0, 1))(
+            diagnostics["pressure_full"], state.temperature)
+        assert bool(jnp.all(jnp.isfinite(gp))) and bool(jnp.all(jnp.isfinite(gt)))
+        # dN/dp of the profile itself: finite on both sides of 800 hPa and
+        # zero in the boundary-layer regime (the value is constant there).
+        dndp = jax.vmap(jax.grad(
+            lambda q: prescribed_cdnc_profile(q, False)))(
+                jnp.asarray(self.P_COL))
+        assert bool(jnp.all(jnp.isfinite(dndp)))
+        np.testing.assert_array_equal(np.asarray(dndp)[3:], 0.0)
+        # Just above 800 hPa: d/dp of 1e6*(20 + 60*exp(1 - (8e4/p)^2)).
+        want = 1e6 * 60.0 * 2.0 * 8.0e4 ** 2 / 79000.0 ** 3 * np.exp(
+            1.0 - (8.0e4 / 79000.0) ** 2)
+        np.testing.assert_allclose(float(dndp[2]), want, rtol=1e-4)
+
 
 class TestCloudFractionWriteBack1M:
     """The 1M term clears the cover of cells it empties (#687).
