@@ -2664,7 +2664,7 @@ class TestPrecipFluxProfiles2M:
         # nothing can be falling out of the top layer). Allow an f32-roundoff
         # floor: the flux-coupled scan can land a physically-zero level at a
         # few 1e-16, ~12 orders below the ~1e-3 rain signal (surfaces under
-        # the HAM ccsaut/ccraut default retune), so a hard ``>= 0`` is too
+        # the default ccsaut/ccraut), so a hard ``>= 0`` is too
         # tight — use the same 1e-12 tolerance as the equality checks above.
         assert jnp.all(rain_prof >= -1e-12)
         assert jnp.all(snow_prof >= -1e-12)

@@ -66,10 +66,10 @@ terms:
     params:
       # This preset activates CDNC through MACv2-SP simple plumes (SPA), not
       # AR&G, so it keeps ECHAM's generic ``mo_echam_cloud_params`` ccsaut /
-      # ccraut. The scheme DEFAULT is the ECHAM-HAM prognostic-CDNC / AR&G
-      # retune (ccsaut=900, ccraut=10.6, mo_activ.f90 under ncd_activ==2 +
-      # cdnc_min_fixed==40) — that branch is the JAM+ARG route this preset
-      # does not run, so restore the base values here.
+      # ccraut. The scheme DEFAULT ccraut is the ECHAM-HAM prognostic-CDNC /
+      # AR&G retune (10.6, mo_activ.f90 under ncd_activ==2 +
+      # cdnc_min_fixed==40), the JAM+ARG route this preset does not run, so
+      # the generic 15 is set here; ccsaut is the generic 95 in both.
       ccsaut: 95.0
       ccraut: 15.0
   # Publishes the package-independent surface-exchange coupling struct

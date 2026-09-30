@@ -174,9 +174,19 @@ class CloudParams2M:
         cn0s: float = 3e6,
         crhoi: float = 500.0,
         crhosno: float = 100.0,
-        # mo_activ.f90's prognostic-CDNC retune (T63, AR&G, cdnc_min=40);
-        # the SPA route pins the base 95.0/15.0 in its presets.
-        ccsaut: float = 900.0,
+        # Ice aggregation: ECHAM's generic value (mo_echam_cloud_params.f90).
+        # ECHAM-HAM retunes it to 900 for its prognostic-CDNC / AR&G setup
+        # (mo_activ.f90, activ_initialize, T63L47, cdnc_min_fixed = 40). That
+        # retune belongs with HAM's own aerosol and its insoluble dust mode,
+        # which jcm's MAM4-based JAM does not reproduce, so the JAM member
+        # keeps the generic 95 until it does (maintainer decision; a tuning
+        # target of the #682 retune). On one 10-day T63 JAM run, 900 gives an
+        # ice water path of 7 g/m² and 95 gives 22.
+        ccsaut: float = 95.0,
+        # Warm autoconversion: ECHAM-HAM's retune for the same setup
+        # (mo_activ.f90). It acts on cloud droplets whose number comes from
+        # AR&G activation, which JAM runs, so the dust-mode argument above
+        # does not reach it. The SPA presets pin the generic 15.
         ccraut: float = 10.6,
         ceffmax: float = 150.0,
         ceffmin: float = 10.0,
