@@ -369,3 +369,83 @@ class TracerMassFixerTest(unittest.TestCase):
         # step's own reference; over 5 dry adiabatic steps the drift must
         # be at the clip/roundoff level, not the raw SL leak.
         self.assertAlmostEqual(m5 / m0, 1.0, places=6)
+
+
+class AfterPhysicsStateTest(unittest.TestCase):
+    """``after_physics_state`` is the state the dynamics really starts from.
+
+    It differs from the gridpoint add ``x + dt·P`` by what the spectral
+    projection of the tendency drops (temperature and humidity are modal),
+    and it equals the state ``step`` hands to its dynamics.
+    """
+
+    def _setup(self):
+        import jax
+        import jax.numpy as jnp
+
+        from jcm.physics.physics_term import TracerSpec
+        from jcm.physics_interface import PhysicsTendency
+
+        dycore = _small_dycore(tracer_specs={"qc": TracerSpec(name="qc")})
+        state = dycore.initial_state(None, random_seed=0)
+        grid = dycore.to_physics_state(state)
+        shape = grid.temperature.shape
+        # Grid-scale noise: plenty of it lies beyond the T21 truncation.
+        noise = jax.random.normal(jax.random.PRNGKey(3), shape)
+        tendency = PhysicsTendency(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=1e-4 * noise,
+            specific_humidity=1e-9 * jnp.abs(noise),
+            tracers={"qc": 1e-10 * jnp.abs(noise)},
+        )
+        return dycore, state, grid, tendency
+
+    def test_differs_from_the_gridpoint_add_by_the_projection_residual(self):
+        import numpy as np
+
+        from jcm.dycore.base import DynamicalCore
+
+        dycore, state, grid, tendency = self._setup()
+        after = dycore.after_physics_state(state, tendency)
+        naive = DynamicalCore.after_physics_state(dycore, state, tendency)
+        dt = dycore.dt_seconds
+        for name in ("temperature", "specific_humidity"):
+            residual = np.asarray(getattr(after, name) - getattr(naive, name))
+            added = dt * np.asarray(getattr(tendency, name))
+            # A large share of grid-scale noise is truncated away.
+            rel = np.sqrt(np.mean(residual ** 2)) / np.sqrt(np.mean(added ** 2))
+            self.assertGreater(rel, 0.1, name)
+        # The semi-Lagrangian qc stays nodal: no projection, no residual.
+        np.testing.assert_allclose(np.asarray(after.tracers["qc"]),
+                                   np.asarray(naive.tracers["qc"]),
+                                   rtol=1e-6, atol=1e-14)
+
+    def test_equals_what_step_advances_from(self):
+        import numpy as np
+
+        from jcm.dycore.dinosaur.state_bridge import dynamics_state_to_physics_state
+
+        dycore, state, grid, tendency = self._setup()
+        after = dycore.after_physics_state(state, tendency)
+        # With the dynamics, the filters and the mass fixer switched off,
+        # ``step`` returns exactly the state it would have advanced from.
+        dycore._dynamics_step_fn = lambda s: s
+        dycore._filters = []
+        dycore._sl_options = {**dycore._sl_options, "mass_fixer": False}
+        advanced_from = dynamics_state_to_physics_state(
+            dycore.step(state, tendency), dycore._primitive,
+            tracer_specs=dycore.tracer_specs,
+            nodal_tracers=dycore._nodal_tracers)
+        for name in ("temperature", "specific_humidity", "u_wind", "v_wind"):
+            np.testing.assert_array_equal(np.asarray(getattr(after, name)),
+                                          np.asarray(getattr(advanced_from, name)))
+        np.testing.assert_array_equal(np.asarray(after.tracers["qc"]),
+                                      np.asarray(advanced_from.tracers["qc"]))
+
+    def test_no_tendency_is_the_unfiltered_state(self):
+        import numpy as np
+
+        dycore, state, grid, _ = self._setup()
+        after = dycore.after_physics_state(state, None)
+        np.testing.assert_array_equal(np.asarray(after.temperature),
+                                      np.asarray(grid.temperature))
