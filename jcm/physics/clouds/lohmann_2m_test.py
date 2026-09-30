@@ -1686,6 +1686,61 @@ class TestColumnWaterConservation2M:
             f"(gross movement {gross:.3e}, precip {P:.3e})"
         )
 
+    def test_water_budget_closes_with_convective_detrainment(self):
+        """The same closure with detrained condensate in qc/qi (#941).
+
+        Convection hands the scheme liquid in warm layers and ice in cold
+        ones (``detrained_qc``/``detrained_qi``, already inside ``qc``/``qi``),
+        over step-start anchors that differ from the provisional state. The
+        scheme keeps the detrained ice out of this step's sedimentation,
+        gives it crystal number and re-splits it by ``lo2``; every one of
+        those moves mass between the scheme's own ledger entries only.
+        """
+        import numpy as np
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 20
+        T_m1 = jnp.linspace(225.0, 300.0, nlev)
+        p = jnp.linspace(2e4, 1e5, nlev)
+        rho = p / (287.0 * T_m1)
+        q_m1 = 0.95 * jax.vmap(saturation_specific_humidity)(p, T_m1)
+        qc_m1 = jnp.zeros(nlev).at[10:16].set(1e-3)
+        qi_m1 = jnp.zeros(nlev).at[3:8].set(2e-4)
+        idx = jnp.arange(nlev)
+        detr = jnp.where((idx >= 2) & (idx < 15), 3e-5, 0.0)
+        warm = T_m1 > 273.15
+        det_qc = jnp.where(warm, detr, 0.0)
+        det_qi = jnp.where(warm, 0.0, detr)
+        cf = jnp.where((qc_m1 + qi_m1 + detr) > 0, 0.7, 0.0)
+        qnc = jnp.where(qc_m1 > 0, 5e7, 0.0)
+        qni = jnp.where(qi_m1 > 0, 1e4, 0.0)
+
+        tend, rain_sfc, snow_sfc, *_ = cloud_microphysics_2m(
+            T_m1 + 0.4, q_m1 * 1.01, p, qc_m1 + det_qc, qi_m1 + det_qi,
+            qnc, qni, cf, rho, jnp.full(nlev, 500.0),
+            jnp.full(nlev, 0.3), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, CloudParams2M.default(),
+            temperature_m1=T_m1, specific_humidity_m1=q_m1,
+            qc_m1=qc_m1, qi_m1=qi_m1,
+            detrained_qc=det_qc, detrained_qi=det_qi,
+        )
+        mref = np.asarray(rho * 500.0)
+        dw = np.asarray(tend.dqdt + tend.dqcdt + tend.dqidt)
+        P = float(rain_sfc + snow_sfc)
+        gross = float(np.sum((np.abs(np.asarray(tend.dqdt))
+                              + np.abs(np.asarray(tend.dqcdt))
+                              + np.abs(np.asarray(tend.dqidt))) * mref))
+        gross += abs(P)
+        residual = float(np.sum(dw * mref) + P)
+        assert gross > 0.0
+        assert abs(residual) < max(1e-5 * gross, 1e-12), (
+            f"water open by {residual:.3e} kg/m2/s with detrainment "
+            f"(gross {gross:.3e})"
+        )
+
     def test_precip_process_rates_close_the_warm_ledger(self):
         """The #499 per-level formation/evaporation rates are the true ledger.
 
@@ -3004,8 +3059,10 @@ class TestEchamUtilityWiring2M:
         150 um clip, where ECHAM's radius for this threshold is 135 um
         (``effective_2_volmean_radius_param_Schuman_2011``) and the
         aggregation radius ``zrih`` would be 45.6 um. The threshold is
-        evaluated three times per level: the section-4 ``lo2`` and the WBF
-        gate in the scheme, and the section-5 ``lo2`` inside
+        evaluated four times per level: the section-1 detrainment criterion
+        ``lo2_2d`` (mo_cloud_micro_2m.f90:872-885, one vectorised call over
+        the column before the sweep), the section-4 ``lo2`` and the WBF gate
+        inside the sweep, and the section-5 ``lo2`` inside
         ``mixed_phase_deposition_and_corrections``.
         """
         from jcm.physics.clouds.lohmann_2m import deposition_freezing as df_mod
@@ -3015,9 +3072,13 @@ class TestEchamUtilityWiring2M:
         in_section5 = self._spy(monkeypatch, df_mod, "threshold_vert_vel", pick)
         self._run(self._column())
         for name, records in (("scheme", in_scheme), ("section 5", in_section5)):
-            radius = np.array([float(r[0]) for r in records])
-            expected_calls = 2 * self.NLEV if name == "scheme" else self.NLEV
-            assert len(radius) == expected_calls, (name, len(radius))
+            # The section-1 call records the whole column at once; the
+            # per-level calls inside the sweep record one value each.
+            radius = np.concatenate([np.ravel(r[0]) for r in records])
+            expected_calls = 2 * self.NLEV + 1 if name == "scheme" else self.NLEV
+            expected_values = 3 * self.NLEV if name == "scheme" else self.NLEV
+            assert len(records) == expected_calls, (name, len(records))
+            assert len(radius) == expected_values, (name, len(radius))
             np.testing.assert_allclose(radius.max(), 1.35e-4, rtol=1e-5,
                                        err_msg=name)
             # Ice-free levels sit on the lower clip, 0.9 x 10 um.

@@ -30,6 +30,7 @@ from jcm.terrain import TerrainData
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
     air_dynamic_viscosity,
+    detrained_ice_crystal_number,
     ice_fall_speed_air_density_factor,
     ice_volume_mean_radius_from_temperature,
     ice_volume_mean_radius_schumann,
@@ -84,6 +85,8 @@ def cloud_microphysics_2m(
     specific_humidity_m1: jnp.ndarray | None = None,  # (nlev,)     step-start q (ECHAM pqm1)
     qc_m1: jnp.ndarray | None = None,                 # (nlev,)     step-start qc (ECHAM pxlm1)
     qi_m1: jnp.ndarray | None = None,                 # (nlev,)     step-start qi (ECHAM pxim1)
+    detrained_qc: jnp.ndarray | None = None,  # (nlev,) kg/kg per step: liquid detrainment (ECHAM ztmst·pxtecl)
+    detrained_qi: jnp.ndarray | None = None,  # (nlev,) kg/kg per step: ice detrainment (ECHAM ztmst·pxteci)
 ) -> tuple[
     MicrophysicsTendencies_2M,      # per-level tendencies
     jnp.ndarray, jnp.ndarray,       # surface rain / snow flux [kg/m^2/s]
@@ -108,7 +111,11 @@ def cloud_microphysics_2m(
     sweep is MG/PUMAS's (3.1) and warm precipitation runs after condensation
     and activation (7.1):
 
-      4.    Ice sedimentation (:func:`sedimentation_ice`), then
+      4.    Ice sedimentation (:func:`sedimentation_ice`) of the ice
+            present BEFORE this step's convective detrainment (ECHAM
+            ``zxip1 = pxim1 + ztmst·pxite``, 1227-1248), after which the
+            crystal number of the detrained ice ``znidetr`` joins the ICNC
+            (1251-1252), then
       3.1   melting of snow / falling ice / in-cloud ice
             (:func:`melting_snow_and_ice`). NOTE this sediment→melt order
             is deliberately MG/PUMAS's (micro_pumas_v1: sediment 3093 →
@@ -117,10 +124,11 @@ def cloud_microphysics_2m(
             sinks cannot claim the same mass (#662 finding 2).
       3.2/3 Snow/ice sublimation + rain evaporation on the incoming
             fluxes (:func:`sublimation_snow_and_ice_evaporation_rain`).
-      (4b)  In-cloud condensate prep with clear-sky evaporation
-            ``zxlevap``/``zxievap`` (ECHAM 1310-1385): condensate in
-            cells with no cloud, and the clear-sky share of positive
-            upstream increments, evaporates back to vapour (#667).
+      (4b)  Phase decision ``lo2`` (ECHAM 1276-1298); then the in-cloud
+            condensate prep with clear-sky evaporation
+            ``zxlevap``/``zxievap`` (1319-1385): condensate in cells with
+            no cloud, and the clear-sky share of positive increments,
+            evaporates back to vapour.
       5.    Grid-scale condensation source ``zqcdif`` → ``zcnd``/``zdep``
             (the Sundqvist moisture-convergence closure, ECHAM 1389-1470)
             followed by the supersaturation corrections
@@ -152,14 +160,30 @@ def cloud_microphysics_2m(
     State-splitting convention (operator-split host vs ECHAM leapfrog):
     the primary ``temperature``/``specific_humidity``/``qc``/``qi`` are
     the POST-UPSTREAM provisional state (ECHAM ``ptm1 + ztmst·ptte``
-    etc.), which is what the returned tendencies are relative to. The
-    optional ``*_m1`` arguments are the step-start state (ECHAM ``ptm1``/
-    ``pqm1``/``pxlm1``/``pxim1``): saturation anchors evaluate there, and
-    the differences ``(x - x_m1)`` play the role of ECHAM's accumulated
-    tendencies ``ztmst·pqte``/``ztmst·pxlte`` in the condensation closure
-    and the clear-sky-evaporation split. When omitted they default to the
-    provisional state (zero upstream increments), which reduces section 5
-    to a pure saturation adjustment.
+    etc.), which is what the returned tendencies are relative to; ``qc``
+    and ``qi`` include this step's convective detrainment. The optional
+    ``*_m1`` arguments are the step-start state (ECHAM ``ptm1``/``pqm1``/
+    ``pxlm1``/``pxim1``): saturation anchors evaluate there, and the
+    differences ``(x - x_m1)`` — less the detrained condensate for ``qc``
+    and ``qi`` — play the role of ECHAM's accumulated tendencies
+    ``ztmst·ptte``/``ztmst·pqte``/``ztmst·pxlte``/``ztmst·pxite`` in the
+    condensation closure and the clear-sky-evaporation split. In the
+    composed ECHAM stack the term wrapper forms them from the running
+    thermodynamic view, so they carry this step's vertical-diffusion and
+    convection increments; the dynamics and radiation increments that
+    ECHAM also accumulates in those tendencies do not reach the scheme
+    (#940). When omitted, the ``*_m1`` arguments default to the
+    provisional state less the detrained condensate (zero upstream
+    increments), which reduces section 5 to a pure saturation adjustment.
+
+    Convective detrainment arrives separately as ``detrained_qc`` /
+    ``detrained_qi`` [kg/kg per step], the liquid and ice parts of the
+    condensate the convection scheme added to ``qc``/``qi`` this step
+    (ECHAM ``ztmst·pxtecl``/``ztmst·pxteci``; default zero). ECHAM's 2M
+    uses only their sum ``zxtec`` (the boundary condition 'Detrained
+    condensate', 555-570): it is not sedimented this step and it brings
+    its own crystal number ``znidetr`` where ECHAM's ``ll_cv`` holds. The
+    phases stay as the convection scheme split them.
 
     The large-scale vertical velocity is not plumbed to this scheme yet:
     ECHAM's ``zvervx`` (updraft for the WBF gate) uses only the TKE term
@@ -173,10 +197,14 @@ def cloud_microphysics_2m(
         temperature_m1 = temperature
     if specific_humidity_m1 is None:
         specific_humidity_m1 = specific_humidity
+    if detrained_qc is None:
+        detrained_qc = jnp.zeros_like(qc)
+    if detrained_qi is None:
+        detrained_qi = jnp.zeros_like(qi)
     if qc_m1 is None:
-        qc_m1 = qc
+        qc_m1 = qc - detrained_qc
     if qi_m1 is None:
-        qi_m1 = qi
+        qi_m1 = qi - detrained_qi
 
     eps_dt = jnp.finfo(qc.dtype).eps
     zero = jnp.zeros_like(qc)
@@ -194,8 +222,13 @@ def cloud_microphysics_2m(
     # ------------------------------------------------------------------
     dT_up = temperature - temperature_m1          # ztmst·ptte
     dq_up = specific_humidity - specific_humidity_m1  # ztmst·pqte
-    dqc_up = qc - qc_m1                           # ztmst·(pxlte + detrainment)
-    dqi_up = qi - qi_m1                           # ztmst·(pxite + detrainment)
+    # The condensate increments EXCLUDE this step's convective detrainment:
+    # ECHAM keeps it out of pxlte/pxite and hands it to the 2M separately as
+    # zxtec (555-570), and the sweep treats it by its own rules (not
+    # sedimented this step, own crystal number).
+    dqc_up = (qc - qc_m1) - detrained_qc          # ztmst·pxlte
+    dqi_up = (qi - qi_m1) - detrained_qi          # ztmst·pxite
+    zxtec = detrained_qc + detrained_qi           # ztmst·zxtec, both phases
 
     # ------------------------------------------------------------------
     # Entry floor on the number tracers
@@ -240,11 +273,12 @@ def cloud_microphysics_2m(
     # Flooring the droplet number by that same minimum keeps a realistic
     # cloud-water reservoir.
     # minimum_CDNC expects the in-cloud water content in kg/m³ (only
-    # consumed when ldyn_cdnc_min=True); passing grid-mean kg/kg fed the
-    # dynamic branch values ~ρ·cf too small (review finding 2.24).
+    # consumed when ldyn_cdnc_min=True), of the liquid present BEFORE this
+    # step's detrainment, as ECHAM evaluates it on pxlm1 + ztmst·pxlte (597).
     inv_cf_min = 1.0 / jnp.maximum(cloud_fraction, params.epsec)
     qc_in_cloud_kgm3 = jnp.where(
-        cloud_fraction > params.epsec, qc * inv_cf_min * air_density, 0.0,
+        cloud_fraction > params.epsec,
+        (qc_m1 + dqc_up) * inv_cf_min * air_density, 0.0,
     )
     cdnc0 = jnp.maximum(cdnc0, minimum_CDNC(qc_in_cloud_kgm3, params))
 
@@ -318,10 +352,38 @@ def cloud_microphysics_2m(
     # not plumbed to this scheme (#941); it is the term to add here.
     updraft_velocity = turbulent_updraft_velocity(tke, params)
 
+    # ------------------------------------------------------------------
+    # Section-1 crystal number of convective detrainment (ECHAM 858-982)
+    # ------------------------------------------------------------------
     # Temperature-parameterised volume-mean crystal radius zrid [m] at the
-    # step-start temperature (945-956): the radius the section-5.5 ICNC
+    # step-start temperature (945-956): the size detrained crystals are
+    # created at (znidetr below) and the radius the section-5.5 ICNC
     # diagnosis inverts (prid, 1511).
     zrid = ice_volume_mean_radius_from_temperature(temperature_m1, params)
+
+    # Section-1 Wegener-Bergeron-Findeisen criterion lo2_2d (858-885): the
+    # Korolev/Mazin threshold updraft of the ice present BEFORE this step's
+    # detrainment (pxim1 + ztmst·pxite, 860-861) at the step-start crystal
+    # number, against the updraft. It has no temperature terms; the
+    # temperature gates are ll_cv's (958-963) and the section-4 lo2's.
+    # ``icnc0`` is the entry-floored number: ECHAM's CDNC↔ICNC phase
+    # consistency step (607-628) has no counterpart in this scheme.
+    zxip1_sec1 = jnp.maximum(qi_m1 + dqi_up, 0.0)
+    ice_gm3_sec1 = (1000.0 * zxip1_sec1 * air_density
+                    / jnp.maximum(cloud_fraction, params.clc_min))
+    zrice_sec1 = ice_volume_mean_radius_schumann(ice_gm3_sec1, icnc0, params)
+    zvervmax_sec1 = threshold_vert_vel(
+        sat_vap_pres_water=es_water, sat_vap_pres_ice=es_ice,
+        icnc=icnc0, ice_radius=zrice_sec1, eta=bergeron_eta, params=params)
+    lo2_2d = 0.01 * updraft_velocity < zvervmax_sec1
+
+    # In-cloud crystal number of the detrained ice znidetr [1/m³]
+    # (958-982), added to the post-sedimentation ICNC in the sweep. ECHAM's
+    # cirrus nucleation zninucl (986-999) and the zicncq floors (1119-1131)
+    # are not part of this scheme.
+    znidetr = detrained_ice_crystal_number(
+        zxtec, temperature_m1, lo2_2d, cloud_fraction, air_density, zrid,
+        params)
 
     # Dynamic viscosity of air for the snow Reynolds number in riming,
     # ECHAM pviscos (mo_cloud_utils.f90::get_util_var, line 132).
@@ -358,7 +420,7 @@ def cloud_microphysics_2m(
         (rain_flux, snow_flux, ice_flux, ice_flux_n,
          falling_ice_frac, precip_cover) = carry
         (cf_k, t_m1_k, q_m1_k, dT_up_k, dq_up_k, dqc_up_k, dqi_up_k,
-         qc_m1_k, qi_m1_k, qc_run_k, qi_run_k, zrid_k,
+         qc_m1_k, qi_m1_k, det_qc_k, det_qi_k, zrid_k, znidetr_k,
          p_k, rho_k, inv_rho_k, dp_k, dpg_k, dz_k, adc_k, zqrho_k,
          cdnc0_k, icnc0_k,
          esw_k, esi_k, qsw_k, qsi_k, dqsw_k, dqsi_k,
@@ -369,27 +431,50 @@ def cloud_microphysics_2m(
         zero_s = jnp.zeros_like(cf_k)
 
         # --- 4. Sedimentation of cloud ice (grid-mean) -----------------
-        # Acts on the provisional grid-mean ice (ECHAM zxip1 = pxim1 +
-        # ztmst·pxite, with the upstream increments folded into qi here).
+        # Acts on the ice present BEFORE this step's convective
+        # detrainment, ECHAM zxip1 = pxim1 + ztmst·pxite (1227-1228):
+        # pxite excludes the detrained condensate, which ECHAM carries
+        # separately as zxtec. The detrained ice therefore does not fall
+        # this step; it joins the in-cloud state after sedimentation
+        # through zxidt (1316), with its own crystal number (below).
+        # ECHAM floors the input at EPSILON(1._dp) = 2.2e-16; this scheme
+        # floors at 0, because the float32 epsilon (1.2e-7 kg/kg) is a
+        # sizeable amount of ice.
+        zxip1_pre = qi_m1_k + dqi_up_k
         (zxip1, icnc_sedi, ice_flux, ice_flux_n, falling_ice_frac,
          mrateps_sedi_k) = sedimentation_ice(
             cf_k, adc_k, dp_k, rho_k, inv_rho_k,
-            jnp.maximum(qi_run_k, 0.0), icnc0_k,
+            jnp.maximum(zxip1_pre, 0.0), icnc0_k,
             ice_flux, ice_flux_n, falling_ice_frac,
             dt, params,
         )
-        sedi_tend = (zxip1 - qi_run_k) / dt
+        # ECHAM pxite = (zxip1 − pxim1)/ztmst (1248): the post-sedimentation
+        # ice relative to the UNFLOORED pre-sedimentation ice, so that
+        # pxim1 + ztmst·pxite reconstructs zxip1 exactly in the ledger.
+        sedi_tend = (zxip1 - zxip1_pre) / dt
+
+        # The crystal number of the detrained ice joins the post-
+        # sedimentation ICNC, capped at icemax (1251-1252). ECHAM's floor at
+        # icemin (1253) is not applied: the scheme keeps the ICNC lower
+        # bound at 0 and re-diagnoses number-less ice in
+        # update_in_cloud_water (see the entry floor).
+        icnc_sedi = jnp.minimum(icnc_sedi + znidetr_k, params.icemax)
 
         # --- 3.1 Melting (fluxes + in-cloud ice) -----------------------
         # Runs after sedimentation (MG/PUMAS order, see docstring); the
         # running ice tendency is threaded THROUGH the routine so
-        # ``pimlt = max(qi + ztmst·pxite, 0)`` reconstructs the ice left
-        # AFTER sedimentation and the two sinks cannot claim the same
-        # mass (#662 finding 2).
+        # ``pimlt = max(zxip1_pre + ztmst·pxite, 0)`` reconstructs the ice
+        # left AFTER sedimentation and the two sinks cannot claim the same
+        # mass (#662 finding 2). The number melted (``zicncq``) and the
+        # number reset (``picnc``) are both the post-znidetr ICNC: ECHAM's
+        # zicncq includes znidetr (982), and znidetr is only its cqtmin
+        # floor where melting acts (ll_cv needs T_m1 < tmelt, melting
+        # T_m1 > tmelt), so ECHAM's melt-then-add order and this
+        # add-then-melt order give the same number.
         (icnc_melt, _qmel, cdnc_melt,
          rain_flux, snow_flux, ice_flux, ice_flux_n,
          ice_tend_k, pimlt_k, psmlt_a, pximlt_k) = melting_snow_and_ice(
-            melt_k, t_m1_k, qi_run_k, dp_k,
+            melt_k, t_m1_k, zxip1_pre, dp_k,
             icnc_sedi, lsdcp_k, lvdcp_k,
             icnc_sedi,
             jnp.array(0.0),  # qmel accumulator
@@ -420,23 +505,40 @@ def cloud_microphysics_2m(
             params,
         )
 
-        # --- In-cloud condensate prep + clear-sky evaporation ----------
-        # ECHAM 1310-1385. The step's total non-microphysical increments
-        # (upstream + sedimentation + melting) are split ECHAM-style: in
-        # cloudy cells positive increments enter the in-cloud state at
-        # their grid-mean magnitude while their clear-sky share
-        # ``(1−paclc)·max(增, 0)`` evaporates (the two add back to the full
-        # grid-mean increment); negative increments deplete in-cloud
-        # values clamped at zero; in cloud-FREE cells the entire
-        # condensate — carried plus incremented — evaporates. This is the
-        # clear-sky condensate sink the scheme previously lacked (#667):
-        # a cf=0 cell holding qc/qi now returns it to vapour with the
-        # matching latent cooling instead of carrying it untouchable.
+        # --- Phase decision lo2 (ECHAM section 4 end, 1276-1298) -------
+        # Ice-vs-liquid regime from the Korolev/Mazin threshold updraft,
+        # computed on the post-sedimentation, pre-detrainment ice and on
+        # the ICNC that already carries znidetr (1251 precedes 1281).
+        # ``zrice`` is ECHAM's volume-mean radius for this threshold
+        # (0.9·r_eff, line 1288), in METRES; the shared helper is also
+        # what the section-1 criterion, deposition_freezing.py and the WBF
+        # gate below use, so the four decisions cannot drift.
         ll_cc = cf_k > params.clc_min
         cf_safe = jnp.maximum(cf_k, params.clc_min)
+        ice_gm3 = 1000.0 * zxip1 * rho_k / cf_safe
+        zrice = ice_volume_mean_radius_schumann(ice_gm3, icnc_melt, params)
+        zvervmax = threshold_vert_vel(
+            sat_vap_pres_water=esw_k, sat_vap_pres_ice=esi_k,
+            icnc=icnc_melt, ice_radius=zrice, eta=eta_k, params=params)
+        lo2 = jnp.logical_or(
+            t_m1_k < params.cthomi,
+            jnp.logical_and(t_m1_k < params.tmelt,
+                            0.01 * verv_k < zvervmax),
+        )
 
-        zxidt = dqi_up_k + dt * ice_tend_k
-        zxldt = dqc_up_k + pximlt_k + pimlt_k
+        # --- In-cloud condensate prep + clear-sky evaporation ----------
+        # ECHAM 1319-1385. The step's total non-microphysical increments
+        # (upstream + detrainment + sedimentation + melting) are split
+        # ECHAM-style: in cloudy cells positive increments enter the
+        # in-cloud state at their grid-mean magnitude while their
+        # clear-sky share ``(1−paclc)·max(increment, 0)`` evaporates (the
+        # two add back to the full grid-mean increment); negative
+        # increments deplete in-cloud values clamped at zero; in
+        # cloud-FREE cells the entire condensate — carried plus
+        # incremented — evaporates, returning it to vapour with the
+        # matching latent cooling.
+        zxidt = dqi_up_k + det_qi_k + dt * ice_tend_k     # 1316
+        zxldt = dqc_up_k + det_qc_k + pximlt_k + pimlt_k  # 1317
         ll_ipos = zxidt > 0.0
         ll_lpos = zxldt > 0.0
         zxidtstar = jnp.maximum(zxidt, 0.0)
@@ -464,23 +566,6 @@ def cloud_microphysics_2m(
         zxib = jnp.maximum(zxib, 0.0)
         zxlb = jnp.maximum(zxlb, 0.0)
         zxilb = zxib + zxlb
-
-        # --- Phase decision lo2 (ECHAM section 4 end) ------------------
-        # Ice-vs-liquid regime from the Korolev/Mazin threshold updraft,
-        # computed on the post-sedimentation ice. ``zrice`` is ECHAM's
-        # volume-mean radius for this threshold (0.9·r_eff, line 1288), in
-        # METRES; the shared helper is also what deposition_freezing.py
-        # and the WBF gate below use, so the three decisions cannot drift.
-        ice_gm3 = 1000.0 * zxip1 * rho_k / cf_safe
-        zrice = ice_volume_mean_radius_schumann(ice_gm3, icnc_melt, params)
-        zvervmax = threshold_vert_vel(
-            sat_vap_pres_water=esw_k, sat_vap_pres_ice=esi_k,
-            icnc=icnc_melt, ice_radius=zrice, eta=eta_k, params=params)
-        lo2 = jnp.logical_or(
-            t_m1_k < params.cthomi,
-            jnp.logical_and(t_m1_k < params.tmelt,
-                            0.01 * verv_k < zvervmax),
-        )
 
         # --- 5. Condensation source zqcdif → zcnd / zdep ---------------
         # The Sundqvist moisture-convergence closure (ECHAM 1389-1470):
@@ -538,7 +623,10 @@ def cloud_microphysics_2m(
             rho_k, ztp1,
             zxievap,
             zxip1,
-            zero_s,             # detrainment tendency (folded into qi)
+            # pxite: the ice part of the detrainment [kg/kg/s], ECHAM zxite
+            # (1490), which the routine adds to the post-sedimentation
+            # zxip1 for its own lo2 test (2361-2362).
+            det_qi_k / dt,
             verv_k,
             zcnd0, zdep0,       # INOUT, seeded from section 5
             dt,
@@ -804,7 +892,7 @@ def cloud_microphysics_2m(
     scan_inputs = (
         cloud_fraction, temperature_m1, specific_humidity_m1,
         dT_up, dq_up, dqc_up, dqi_up,
-        qc_m1, qi_m1, qc, qi, zrid,
+        qc_m1, qi_m1, detrained_qc, detrained_qi, zrid, znidetr,
         pressure, air_density, inv_rho, pressure_thickness, dp_over_g,
         layer_thickness, air_density_correction, zqrho,
         cdnc0, icnc0,
@@ -855,11 +943,12 @@ def cloud_microphysics_2m(
         icnc=icnc_final,
         cdnc=cdnc_final,
         # ECHAM's pxim1/pxlm1 are the grid-mean condensate the increments
-        # accumulate on. Here the upstream increments are already inside
-        # ``qi``/``qc`` and the seeds below carry only the scheme's own
-        # tendencies, so the reconstruction pxim1 + ztmst·(upstream+own)
-        # + increments equals ``qi + ztmst·own + increments`` — the same
-        # number, with the negative-mass guard testing the actual
+        # accumulate on, and pxitec/pxltec the detrainment. Here the
+        # upstream increments and the detrainment are already inside
+        # ``qi``/``qc``, so ``qi``/``qc`` stand for pxim1 + ztmst·(pxite +
+        # pxitec) / pxlm1 + ztmst·(pxlte + pxltec), and the seeds below
+        # carry only the scheme's own tendencies: the reconstruction is the
+        # same number, with the negative-mass guard testing the actual
         # end-of-step grid-mean state against ``ccwmin`` (#662 finding 6).
         ice_mmr_prev=qi,
         liq_mmr_prev=qc,

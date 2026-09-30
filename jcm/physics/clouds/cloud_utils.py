@@ -126,14 +126,13 @@ def ice_volume_mean_radius_schumann(
     ``r_vol = max(1e-6, conv_effr2mvr·1e-6·r_eff)`` with ``conv_effr2mvr = 0.9``
     (``mo_cloud_micro_2m.f90:4059-4085``, a simple fit to the Schumann et al.
     2011 r/r_eff data). This is the radius ECHAM hands to
-    ``threshold_vert_vel`` at every Wegener-Bergeron-Findeisen decision. jcm
-    uses it at the three it ports: the section-4 phase choice ``lo2``
-    (line 1288), the section-5 supersaturation correction
+    ``threshold_vert_vel`` at every Wegener-Bergeron-Findeisen decision, and
+    jcm uses it at all four: the section-1 criterion ``lo2_2d`` that gates the
+    crystal number of detrained ice (lines 872-885), the section-4 phase choice
+    ``lo2`` (line 1288), the section-5 supersaturation correction
     (``mixed_phase_deposition_and_corrections``, line 2374) and the WBF gate
-    (line 1582). ECHAM's fourth, the phase split of convective detrainment
-    ``lo2_2d`` (lines 872-885), has no counterpart: jcm's Tiedtke scheme
-    splits detrained condensate at ``tmelt`` (#941). The plate relation of
-    :func:`ice_volume_mean_radius` is ECHAM's for aggregation only.
+    (line 1582). The plate relation of :func:`ice_volume_mean_radius` is
+    ECHAM's for aggregation only.
 
     Parameters
     ----------

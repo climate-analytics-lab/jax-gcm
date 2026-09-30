@@ -9,6 +9,7 @@ own closures around them. Kept apart from ``lohmann_2m_test.py`` (already
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import jcm.constants as c
 from jcm.physics import thermodynamics
@@ -192,6 +193,104 @@ class TestDetrainedIceCrystalNumber:
         assert self._call(cf=float(_P.clc_min))[0] == cqtmin
         assert self._call(cf=0.0)[0] == cqtmin
         assert self._call(detr=0.0)[0] == cqtmin
+
+    def test_number_joins_after_sedimentation_capped_at_icemax(
+            self, monkeypatch):
+        """``picnc = min(picnc_sedimented + znidetr, icemax)`` (F 1251-1252).
+
+        Records the ICNC sedimentation returns and the number melting then
+        receives, per level: the difference is exactly ``znidetr``, until
+        the sum reaches ``icemax``.
+        """
+        n = 6
+        T = jnp.full(n, 228.0)                       # below cthomi
+        p = jnp.linspace(2.5e4, 4e4, n)
+        rho = p / (287.0 * T)
+        det = jnp.array([0.0, 2e-6, 2e-5, 2e-4, 2e-3, 0.0])
+        col = dict(T=T, q=_qsat(T, p, "ice"), p=p, rho=rho,
+                   cf=jnp.full(n, 0.5), qc=jnp.zeros(n), qi=det,
+                   qi_m1=jnp.zeros(n), qc_m1=jnp.zeros(n),
+                   det_qi=det, det_qc=jnp.zeros(n))
+        sedi = _spy(monkeypatch, scheme_mod, "sedimentation_ice",
+                    lambda a, k, out: (a[3], out[1]))
+        melt = _spy(monkeypatch, scheme_mod, "melting_snow_and_ice",
+                    lambda a, k, out: (a[4],))
+        _run(col)
+        zrid = ice_volume_mean_radius_from_temperature(T, _P)
+        lo2_2d = jnp.zeros(n, dtype=bool)            # irrelevant below cthomi
+        znidetr = np.asarray(detrained_ice_crystal_number(
+            det, T, lo2_2d, col["cf"], rho, zrid, _P))
+        assert len(sedi) == n and len(melt) == n
+        seen = []
+        for (rho_k, icnc_sed), (icnc_melt_in,) in zip(sedi, melt):
+            k = _level_of(rho, float(rho_k))
+            expected = min(float(icnc_sed) + znidetr[k], float(_P.icemax))
+            np.testing.assert_allclose(float(icnc_melt_in), expected,
+                                       rtol=1e-5)
+            seen.append(float(icnc_melt_in))
+        assert max(seen) == pytest.approx(float(_P.icemax))  # the cap binds
+        assert min(seen) < 1e3                                # and not always
+
+
+# ---------------------------------------------------------------------------
+# ICE-1: detrained ice is not sedimented this step
+# ---------------------------------------------------------------------------
+
+
+class TestDetrainedIceIsNotSedimented:
+    """Sedimentation sees ``pxim1 + ztmst·pxite`` only (F 1227-1248)."""
+
+    N = 8
+    K = 3
+
+    def _column(self, where):
+        n, k = self.N, self.K
+        T = jnp.full(n, 225.0)
+        p = jnp.linspace(2e4, 3.5e4, n)
+        rho = p / (287.0 * T)
+        mass = jnp.zeros(n).at[k].set(2e-4)
+        col = dict(T=T, q=_qsat(T, p, "ice"), p=p, rho=rho,
+                   cf=jnp.zeros(n).at[k].set(1.0),
+                   qc=jnp.zeros(n), qc_m1=jnp.zeros(n),
+                   det_qc=jnp.zeros(n), qi=mass)
+        if where == "detrained":
+            col.update(qi_m1=jnp.zeros(n), det_qi=mass, qni=jnp.zeros(n))
+        else:
+            # The same mass carried from the step start as a few large
+            # crystals, which do fall.
+            col.update(qi_m1=mass, det_qi=jnp.zeros(n),
+                       qni=jnp.where(mass > 0, 2e3, 0.0))
+        return col
+
+    def _flux_out_of_level(self, monkeypatch, col):
+        records = _spy(monkeypatch, scheme_mod, "sedimentation_ice",
+                       lambda a, k, out: (a[3], out[2]))
+        out = _run(col)
+        for rho_k, flux in records:
+            if _level_of(col["rho"], float(rho_k)) == self.K:
+                return float(flux), out
+        raise AssertionError("level not recorded")
+
+    def test_detrained_ice_does_not_fall_this_step(self, monkeypatch):
+        col = self._column("detrained")
+        flux, out = self._flux_out_of_level(monkeypatch, col)
+        assert flux == 0.0, f"detrained ice sedimented: flux {flux:.3e}"
+        _, _, _, qi_end = _end_state(col, out)
+        # Full cover (no clear-sky share), ice saturation (no deposition):
+        # the level keeps the detrained mass up to the scheme's own sinks.
+        assert float(qi_end[self.K]) > 0.5 * float(col["det_qi"][self.K])
+        # Nothing reaches the levels below through sedimentation.
+        assert float(jnp.max(jnp.abs(out[0].dqidt[self.K + 1:]))) < 1e-12
+        assert_column_budgets_close("detrained ice", col, out)
+
+    def test_carried_ice_does_fall(self, monkeypatch):
+        col = self._column("carried")
+        flux, out = self._flux_out_of_level(monkeypatch, col)
+        assert flux > 1e-7, "carried ice did not sediment — fixture is off"
+        _, _, _, qi_end = _end_state(col, out)
+        detrained_end = _end_state(
+            self._column("detrained"), _run(self._column("detrained")))[3]
+        assert float(qi_end[self.K]) < float(detrained_end[self.K])
 
 
 # ---------------------------------------------------------------------------
