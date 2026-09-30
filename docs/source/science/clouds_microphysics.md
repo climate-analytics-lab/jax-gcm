@@ -380,7 +380,7 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   formulated to keep cloud parameters differentiable; there is no import-time
   default parameter instance (that would sever gradients / overrides).
 - `differentiability` — the 1M scheme keeps ECHAM's values at every switch
-  and power law and gives four of them a surrogate derivative
+  and power law and gives six of them a surrogate derivative
   ({doc}`../design/surrogate_gradients`): the ``lo2`` phase switch (logistic in
   temperature, width ``phase_switch_width`` = 1 K, and in the cloud ice
   relative to ``csecfrl``, width ``phase_switch_ice_width`` = 0.1 of
@@ -395,8 +395,8 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   ice content), and the mean droplet radius of
   contact freezing (the same parabola in the in-cloud liquid below
   ``contact_freezing_liquid_cutoff`` = 1e-10 kg/kg, about a 0.08 µm droplet).
-  The KK2000 option's threshold is a hard gate with a logistic surrogate of
-  width ``smooth_ccraut``. All widths are static fields; zero selects the
+  The sixth is the KK2000 option's threshold, a hard gate with a logistic
+  surrogate of width ``smooth_ccraut``. All widths are static fields; zero selects the
   reference derivative. Switches whose value jumps but which keep their
   reference derivative: the clear-cell criterion ``paclc > 0`` (its jump has
   no smooth continuation without a model of partial-cell evaporation, which
