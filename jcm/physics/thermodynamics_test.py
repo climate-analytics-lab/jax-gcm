@@ -95,6 +95,28 @@ class TestAgainstEchamTables(unittest.TestCase):
         self.assertGreaterEqual(t.max(), 330.0)
 
 
+class TestOutsideTheTableRange(unittest.TestCase):
+    """Outside ECHAM's [50, 400] K, ``es`` is held flat and so is its slope."""
+
+    def test_analytic_slope_is_the_derivative_of_the_clipped_fit(self):
+        """In float64, where ``es`` near 50 K does not underflow to zero."""
+        with jax.enable_x64(True):
+            t = jnp.array([40.0, 45.0, 60.0, 300.0, 390.0, 410.0, 450.0])
+            for es, slope in ((thermo.es_water, thermo.dlnes_dT_water),
+                              (thermo.es_ice, thermo.dlnes_dT_ice),
+                              (thermo.es_ua, thermo.dlnes_dT_ua)):
+                ad = jax.vmap(jax.grad(lambda x, f=es: jnp.log(f(x))))(t)
+                np.testing.assert_allclose(np.asarray(slope(t)),
+                                           np.asarray(ad), rtol=1e-12,
+                                           atol=0.0)
+        outside = np.array([True, True, False, False, False, True, True])
+        np.testing.assert_array_equal(
+            np.asarray(thermo.dlnes_dT_water(t))[outside], 0.0)
+        _, dqs = thermo.saturation_specific_humidity_and_derivative(
+            jnp.array([30.0, 450.0]), jnp.array([9.0e4, 9.0e4]))
+        np.testing.assert_array_equal(np.asarray(dqs), 0.0)
+
+
 class TestPhaseRule(unittest.TestCase):
     """ECHAM's ``ua`` table: ice at and below tmelt, water above."""
 
