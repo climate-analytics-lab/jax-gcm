@@ -80,8 +80,9 @@ ICE_COEFFICIENTS = (-6024.5282, 29.32707, 1.0613868, -1.3198825, -0.49382577)
 
 #: Bounds of ECHAM's tables (``tlbound``/``tubound``, l.108-109). ECHAM stops
 #: with a lookup error outside them; here the temperature is clipped to them,
-#: which changes nothing inside and keeps the fit finite outside (the clip
-#: also zeroes the temperature gradient there).
+#: which changes nothing inside and keeps the fit finite outside. ``es`` is then
+#: flat outside, and the analytic slopes are zero there to match it, so a
+#: Newton step and automatic differentiation see the same function.
 ECHAM_TABLE_T_MIN = 50.0
 ECHAM_TABLE_T_MAX = 400.0
 
@@ -108,7 +109,10 @@ def _ln_es(temperature, coefficients):
 def _dln_es_dT(temperature, coefficients):
     a1, _, a3, a4, a5 = coefficients
     t = jnp.clip(temperature, ECHAM_TABLE_T_MIN, ECHAM_TABLE_T_MAX)
-    return -a1 / (t * t) + a3 * 0.01 + a4 * 2.0e-5 * t + a5 / t
+    slope = -a1 / (t * t) + a3 * 0.01 + a4 * 2.0e-5 * t + a5 / t
+    in_table = ((temperature >= ECHAM_TABLE_T_MIN)
+                & (temperature <= ECHAM_TABLE_T_MAX))
+    return jnp.where(in_table, slope, 0.0)
 
 
 def es_water(temperature):
@@ -132,12 +136,18 @@ def es_ice(temperature):
 
 
 def dlnes_dT_water(temperature):
-    """``d ln(es_water)/dT`` [1/K], the analytic slope ECHAM tabulates."""
+    """``d ln(es_water)/dT`` [1/K], the analytic slope ECHAM tabulates.
+
+    Zero outside ECHAM's table range, where :func:`es_water` is held flat.
+    """
     return _dln_es_dT(temperature, WATER_COEFFICIENTS)
 
 
 def dlnes_dT_ice(temperature):
-    """``d ln(es_ice)/dT`` [1/K], the analytic slope ECHAM tabulates."""
+    """``d ln(es_ice)/dT`` [1/K], the analytic slope ECHAM tabulates.
+
+    Zero outside ECHAM's table range, where :func:`es_ice` is held flat.
+    """
     return _dln_es_dT(temperature, ICE_COEFFICIENTS)
 
 
