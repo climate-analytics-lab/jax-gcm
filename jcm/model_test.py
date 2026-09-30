@@ -2726,9 +2726,12 @@ class TestPostPhysicsAnchor(unittest.TestCase):
             np.asarray(forced.physics["_prev_step"]["q_tendency"][1][k])
             - np.asarray(still.physics["_prev_step"]["q_tendency"][1][k]))
 
-        anchor = forced.physics["_post_physics_state"]
-        t_anchor = float(anchor["temperature"][0][k, 0])
-        q_anchor = float(anchor["specific_humidity"][0][k, 0])
+        # The anchor the second step used: the slot the first step carried
+        # (saved outputs omit it, so it is read from a one-step run's carry).
+        anchor = self._run(self._two_moment_physics(), cooling, steps=1,
+                           initial=initial)[0].physics_carry["_post_physics_state"]
+        t_anchor = float(anchor["temperature"][k, 0])
+        q_anchor = float(anchor["specific_humidity"][k, 0])
         pressure_k = float(jnp.linspace(5.0e4, 1.0e5, self.NLEV)[k])
         _, dqsdt = thermodynamics.saturation_specific_humidity_and_derivative(
             jnp.asarray(t_anchor), jnp.asarray(pressure_k), phase="water")
@@ -2800,9 +2803,12 @@ class TestPostPhysicsAnchor(unittest.TestCase):
                 - np.asarray(still.physics["_prev_step"]["q_tendency"][1][k]))
 
         forced, got = condensed(self._one_moment_physics)
-        anchor = forced.physics["_post_physics_state"]
-        t_anchor = jnp.asarray(float(anchor["temperature"][0][k, 0]))
-        q_anchor = float(anchor["specific_humidity"][0][k, 0])
+        # The anchor the second step used, from a one-step run's carry (saved
+        # outputs omit the slot).
+        anchor = self._run(self._one_moment_physics(), cooling, steps=1,
+                           initial=initial)[0].physics_carry["_post_physics_state"]
+        t_anchor = jnp.asarray(float(anchor["temperature"][k, 0]))
+        q_anchor = float(anchor["specific_humidity"][k, 0])
         p_k = float(jnp.linspace(5.0e4, 1.0e5, self.NLEV)[k])
         es_w = float(es.es_water(t_anchor))
         des_w = es_w * float(es.dlnes_dT_water(t_anchor))
@@ -2821,12 +2827,40 @@ class TestPostPhysicsAnchor(unittest.TestCase):
         self.assertLess(float(np.max(np.abs(blind))), 0.02 * zqcdif)
 
     def test_averaged_output_mode_carries_the_slot(self):
-        """The averaging accumulator's template has the slot too (same structure)."""
+        """The carry keeps the slot under averaged output; the average omits it."""
         cooling = jnp.zeros(self.NLEV).at[self.CLOUD_LEVEL].set(-5.0e-4)
         model, preds = self._run(self._two_moment_physics(), cooling, steps=4,
                                  initial=self._cloudy_initial_state(),
                                  output_averages=True)
         self.assertEqual(float(model.physics_carry["_post_physics_state"]["valid"]),
                          1.0)
+        self.assertNotIn("_post_physics_state", preds.physics)
         for leaf in jax.tree.leaves(preds.dynamics):
             self.assertTrue(np.isfinite(np.asarray(leaf)).all())
+
+    def test_saved_outputs_omit_the_slot_and_resume_continues_from_the_carry(self):
+        """Snapshot and averaged outputs omit the anchor; a resume reads it from the carry.
+
+        Two steps then a one-step resume give the same state as three steps
+        in one run, so the anchor the resumed step used is the carried one.
+        """
+        from jcm.forcing import ForcingData
+
+        cooling = jnp.zeros(self.NLEV).at[self.CLOUD_LEVEL].set(-5.0e-4)
+        initial = self._cloudy_initial_state()
+        step_days = self.DT / 86400.0
+        model, preds = self._run(self._two_moment_physics(), cooling, steps=2,
+                                 initial=initial)
+        self.assertNotIn("_post_physics_state", preds.physics)
+        self.assertIn("_prev_step", preds.physics)
+        resumed = model.resume(
+            forcing=ForcingData.zeros(model.dycore.coords.horizontal.nodal_shape),
+            save_interval=step_days, total_time=step_days)
+        self.assertNotIn("_post_physics_state", resumed.physics)
+        self.assertEqual(float(model.physics_carry["_post_physics_state"]["valid"]), 1.0)
+        _, straight = self._run(self._two_moment_physics(), cooling, steps=3,
+                                initial=initial)
+        for a, b in zip(jax.tree.leaves(resumed.dynamics),
+                        jax.tree.leaves(straight.dynamics)):
+            np.testing.assert_allclose(np.asarray(a)[-1], np.asarray(b)[-1],
+                                       rtol=1e-6, atol=1e-12)
