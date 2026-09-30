@@ -22,15 +22,14 @@
   condensate-flux latent heat to the phase (``alhs`` below the melting point,
   ``alhc`` above) and writes a tendency to the surface layer (ECHAM's
   ``jk == klev`` branch). Moisture convergence *classifies* deep vs shallow
-  (ECHAM's ``mo_cumastr.f90`` test), while the cloud-base *closure* routes
-  independently of that type: any active surface plume takes the
-  moisture-budget flux ``E/(q_u−q_e)`` where it is valid (ECHAM's ``zlo1``
-  test — near-saturated cloud bases and negligible evaporation fail it) and
-  ECHAM's constant fallback ``zmfub = 0.01 kg m⁻² s⁻¹``
-  (``mo_cumastr.f90:567``) otherwise, so surface evaporation, not CAPE, sets
-  the steady-state flux of a healthy plume; the deep amplitude is then set by
+  (ECHAM's ``mo_cumastr.f90`` test), and the moisture budget of the sub-cloud
+  layer both *gates* a surface plume and sets its first-guess cloud-base flux
+  ``zmfub = zdqpbl/(g·max(zqumqe, zdqmin))``: the moisture the layers below
+  the cloud base gain per step, exported by the cloud-base parcel's water
+  excess (see the decision chain below). The deep amplitude is then set by
   the Nordeng ``zmfub1 = zcape·zmfub/(zheat·tau)`` rescale, which is where the
-  CAPE-consumption timescale ``tau`` lives. Mid-level (``cubasmc``) plumes take
+  CAPE-consumption timescale ``tau`` lives, and the shallow one by the
+  moisture re-closure after the downdraft. Mid-level (``cubasmc``) plumes take
   neither: their base flux is the resolved ascent that triggered them. The saturation
   adjustment ``cuadjtq`` (``cuadjtq.py``) is ``mo_cuadjust.f90::cuadjtq``: one
   damped Newton step clipped by ``kcall`` (``0`` both signs for ``cuini``,
@@ -63,9 +62,66 @@
   reference at RH ``rhbm`` over ``tau_bm``, with ``do_shallower`` / ``do_changeqref``
   siblings. Written broadcasting-native (vertical on axis 0).
 
-**Tiedtke's** activation is a **smooth sigmoid trigger** on CAPE rather than a hard
-``cape > threshold`` branch, so tau / entrainment / threshold parameters carry
-nonzero gradients near the trigger. Tiedtke-Nordeng's saturation is ECHAM's
+**Tiedtke's decisions are ECHAM's.** Whether a column convects, which plume it
+carries, where the plume stops and where it rains are hard comparisons in
+``cumastr``/``cuasc``, and the port makes each exactly as ECHAM6.3 does:
+
+1. ``cubase`` finds a buoyant cloud base (the section below), or ``cubasmc`` a
+   mid-level one where no surface plume is possible.
+2. ``zlo1`` (``mo_cumastr.f90:560-579``): a ``cubase`` column convects only
+   if its sub-cloud layer gains moisture, ``zdqpbl = Σ_{jk ≥ kcbot} pqte·Δp >
+   0``, and the cloud-base parcel carries more water than the environment
+   there, ``zqumqe = pqu + plu − pqenh > zdqmin = max(0.01·pqenh, 1e-10)``.
+   ``pqte`` is the whole pre-convection moisture tendency, the same-step
+   vertical diffusion (which contains the surface evaporation it delivered)
+   plus the one-step-lagged dynamics; a standalone caller that gives only the
+   surface evaporation has it delivered to the lowest layer. A column that
+   fails the gate is not convective, and ``cubasmc`` may seed a mid-level
+   plume in it instead.
+3. The type: deep exactly where ``zdqcv = Σ pqte·Δp`` exceeds
+   ``zhelp = max(0, 1.1·E·g)`` (``ktype = FSEL(zhelp − zdqcv, 2, 1)``,
+   lines 571-574), else shallow; a deep plume thinner than 200 hPa after the
+   first ascent is demoted to shallow.
+4. The ascent test at each interface (``mo_cuascent.f90:436-466``): the plume
+   continues only if it condensed there, its buoyancy ``zbuo`` (plus
+   ``zlift`` on a mid-level plume's first step) is positive, it carries at
+   least 1 % of the cloud-base flux and the interface lies at or below the
+   cloud-top bound. The first interface that fails ends the ascent: no level
+   above it is visited (the ``klab = 0`` latch, line 294), and a fraction
+   ``cmfctop`` of the flux overshoots into it. A plume that passes no
+   interface above cloud base leaves ``kctop = klevm1`` and the column
+   non-convective (line 541); a column that the first ascent leaves
+   non-convective runs no surface plume in the second.
+5. Precipitation starts where the interface lies ``zdnoprc`` or more above
+   cloud base (1.5e4 Pa over sea, 3e4 Pa wherever the column holds land).
+
+ECHAM has no CAPE trigger, and neither does the port.
+``jcm/data/test/echam_cumastr_reference`` holds what ECHAM6.3's compiled
+``cucall`` returns for 600 columns — whole-model RCE column states, where the
+first ascent test above a cloud base at ``klevm1`` decides whether the column
+convects, and the same states under a resolved ascent (mid-level plumes) or a
+moisture convergence (deep plumes): in float64 with ECHAM's physical constants the port takes the same
+decision (convective or not, type, cloud base, cloud top) on every column,
+and its cloud-base mass flux, surface precipitation and per-level tendencies
+agree to 2e-12 of ECHAM's (``cumastr_reference_test.py``).
+
+Each decision's derivative is a named surrogate's (``switches.py``; see
+{doc}`../design/surrogate_gradients`): the value is ECHAM's, and the
+derivative is that of a logistic of the switching quantity, of width
+``ascent_buoyancy_width`` (0.01 K), ``ascent_mass_flux_width`` (2e-3 of the
+cloud-base flux), ``ascent_condensate_width`` (1e-8 kg/kg, a rescaled
+logistic that is exactly zero without condensation),
+``precip_onset_width`` (2000 Pa), ``deep_convergence_width`` and
+``sub_cloud_supply_width`` (2e-7 kg m⁻² s⁻¹) or
+``cloud_base_excess_width`` (0.1 of ``zdqmin``). They are static fields of
+``ConvectionParameters``; zero selects the reference derivative. The
+per-level ascent test is one surrogate, used for the continuing flux, the
+overshoot and, at the first interface above a cloud base at ``klevm1``, the
+column's ``ldcum``; the chain of decisions that makes ``ldcum`` weights the
+whole ledger and the published mass fluxes, each link only where the links
+before it passed, so a column that is off carries the derivative of the
+switch that turned it off, applied to the convection it would have had.
+Tiedtke-Nordeng's saturation is ECHAM's
 ``ua`` table, Sonntag (1990) over ice at and below the melting point and over
 water above (``jcm/physics/convection/tiedtke_nordeng/cuadjtq.py`` on
 ``jcm/physics/thermodynamics.py``; see {doc}`constants`), with the ``cuadjtq``
@@ -84,12 +140,23 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 64, 1959-1976 (Isca ``betts_miller.f90``).
 
 **Why we differ.**
-- `differentiability` — the hard ``ldcum`` activation and the deep/shallow
-  split are replaced by smooth sigmoid weights, so those convective parameters
-  are differentiable. **Mid-level selection stays discrete** (a boolean
-  ``use_midlev`` that forces full trigger weight, as ECHAM's ``cubasmc``
-  conditions ARE the activation), so gradients do not flow across mid-level
-  onset.
+- `differentiability` — the decisions are ECHAM's in the value and carry the
+  derivatives of logistic surrogates (above). **The level choices stay
+  discrete**: the ``cubase`` cloud base, the mid-level seed level and its
+  trigger conditions, the cloud-top bound and the 200 hPa demotion are level
+  indices or trigger identities and carry no derivative, so gradients do not
+  flow across the onset of a cloud base or of a mid-level plume.
+- `science` — jcm's physical constants are unified across its schemes, and
+  the vapour gas constant is ``rv = 461.0`` J/(kg K) against ECHAM's 461.51.
+  That moves the saturation humidity and the virtual-temperature coefficient
+  by 0.11 %, which moves marginal decisions: the ascent test at the first
+  interface above a cloud base at ``klevm1`` sits within hundredths of a
+  kelvin of zero in the whole-model RCE column, and on that column's own
+  days 40-80 states the port convects in 10.9 % of the steps where ECHAM6.3
+  convects in 24.3 %, never where ECHAM does not; with ECHAM's ``rv`` it takes
+  ECHAM's decision on every step. On the 600 reference columns jcm's
+  constants change 53 decisions, ECHAM's ``rv`` alone brings back all but
+  two, and ECHAM's latent heats those two.
 - `science` / `compute` (stopgap) — ECHAM bounds the mass flux, not the
   heating: the cloud-base flux and the per-level entrainment are held to the
   layer's air mass per step (``zmfmax = layer_mass/dt``, ``mo_cumastr.f90``
@@ -108,10 +175,11 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   the parcel-vs-environment balance has gone pathological (healthy tropical deep
   convection is ~1 K/hr). It has no ECHAM counterpart; whether it can go is
   a measurement of where it fires and of stability without it (#961).
-- Cloud-base closure falls back to ECHAM's constant ``zmfub = 0.01`` first
-  guess when the moisture-budget denominator collapses under a near-saturated
-  cloud base or spectral supersaturation ringing; deep columns then take the
-  Nordeng CAPE rescale, so ``tau`` still sets their amplitude.
+- A ``cubase`` column whose sub-cloud layer loses moisture (vertical
+  diffusion carrying more out through the cloud base than the surface and
+  the dynamics bring in), or whose cloud-base parcel is within 1 % of the
+  environment's humidity, is not convective, as in ECHAM; only ``cubasmc``
+  can then give it a plume.
 - SPEEDY and Betts-Miller are idealized alternatives; Betts-Miller is
   specific-humidity-formulated (Isca's mixing-ratio form differs at second order).
 - **Tiedtke creates water where the downdraft out-takes the plume's rain
@@ -127,10 +195,11 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 
 **Code pointers.**
 - ``jcm/physics/convection/tiedtke_nordeng/`` — ``tiedtke_nordeng.py``
-  (``TiedtkeConvection``, the CFL cap, the ``moisture_valid`` closure gate
-  [ECHAM zlo1], ``_DTDT_MAX``), ``cuadjtq.py`` (``cuadjtq``,
+  (``TiedtkeConvection``, the CFL cap, ``_DTDT_MAX``), ``switches.py`` (the
+  decisions' exact values and surrogates: ``ascent_test``,
+  ``threshold_switch``, ``relative_threshold_switch``), ``cuadjtq.py`` (``cuadjtq``,
   ``saturation_mixing_ratio``, ``cuadjtq_newton``, ``cuadjtq_newton_evap``), ``flux_tendencies.py``
-  (``convective_precip_fluxes`` [ECHAM cuflx], ``mass_flux_closure_blend``),
+  (``convective_precip_fluxes`` [ECHAM cuflx]),
   ``updraft.py``, ``downdraft.py``.
 - ``jcm/physics/convection/speedy_convection.py`` — ``diagnose_convection``.
 - ``jcm/physics/convection/betts_miller/`` — ``betts_miller.py``,
@@ -144,7 +213,9 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 modes), ``updraft_test.py``,
 ``downdraft_test.py``, ``deep_shallow_test.py``, ``midlevel_trigger_test.py``,
 ``rce_integration_test.py``, ``convection_units_test.py``,
-``smooth_gradients_test.py``, ``cuasc_port_test.py``,
+``cumastr_reference_test.py`` (ECHAM6.3's compiled convection on 600
+columns), ``switches_test.py`` and ``surrogate_gradients_test.py`` (the
+decisions' surrogate derivatives), ``cuasc_port_test.py``,
 ``ledger_entrainment_test.py``);
 ``betts_miller/betts_miller_test.py``; ``speedy_convection_test.py``.
 
@@ -201,8 +272,8 @@ arrays, and the surface interface carries no flux:
   condense, is not buoyant (condensate-loaded virtual temperature against the
   half-level environment, with ``zlift`` on a mid-level plume's first step),
   carries less than 1 % of the cloud-base flux, or lies above the cloud-top
-  bound ``kctop0``. The last interface that passed is the cloud top
-  ``kctop``. At the interface above it a fraction ``cmfctop`` of the flux
+  bound ``kctop0``; no interface above it is visited. The last interface that
+  passed is the cloud top ``kctop``. At the interface above it a fraction ``cmfctop`` of the flux
   there overshoots with the properties the ascent gave it and no
   precipitation; the rest detrains in that layer with the plume's condensate,
   and the overshoot's own condensate detrains in the layer above. A plume
@@ -222,9 +293,7 @@ arrays, and the surface interface carries no flux:
   ascent passes no interface is non-convective; a surface-plume column whose
   first ascent fails in this way may still take a mid-level plume in the
   second, as ``cuasc``'s ``cubasmc`` would seed it. The deep ``zmfub1`` is
-  floored at 0.001 kg m⁻² s⁻¹ (``mo_cumastr.f90``; jcm scales the floor by
-  the smooth trigger weight so an inactive column stays inactive) before the
-  CFL cap.
+  floored at 0.001 kg m⁻² s⁻¹ (``mo_cumastr.f90:902``) before the CFL cap.
 - ``cudlfs``/``cuddraf`` (``downdraft.py``) search the interfaces strictly
   inside the realized cloud for the level of free sinking and descend
   interface to interface, charging the rain the downdraft evaporates to the
@@ -258,27 +327,25 @@ arrays, and the surface interface carries no flux:
 ``mo_cumastr.f90::cumastr``.
 
 **Why we differ.**
-- `science` — both plume seeds carry the dry static energy they are defined
-  with: the lowest interface's (``pcpen·pten + pgeo`` of the bottom level, from
-  which ``ptenh(klev)`` is built) and the ``cubasmc`` seed's (``pcpen·pten +
-  pgeo`` of its level). ECHAM re-forms each seed's flux with a different heat
-  capacity (``pcpcu(klev)``; ``pcpen(kk+1)`` of the level below), which does
-  not conserve that energy and shifts the first step by ``Δcp/cp`` of two
-  levels — about 0.1 K for ``cubase``, over a kelvin across a humidity jump
-  for ``cubasmc``.
 - `science` — the ``cubase`` sub-cloud plume wind is the pressure-weighted
   mean over ALL sub-cloud layers; ECHAM's loop accumulates only the layers it
   visits after the cloud base is set, so for a base above the lowest two
   interfaces its weights do not sum to one.
-- `differentiability` — the continuous parts of the ascent test are smooth
-  gates whose product is the fraction of the plume that continues through an
-  interface; the rest takes the overshoot path. Buoyancy and the 1 % flux
-  floor are sigmoids; the condensation test is a rescaled sigmoid of the
-  condensed amount that is exactly zero where nothing condenses and within
-  2e-4 of one ten ``smooth_term_cond`` widths above, so a plume that stops condensing stops exactly
-  as in the reference. Each width → 0 recovers the hard test. The level
-  choices (``klwmin``, ``ictop0``, ``khmin``, ``kctop0``, the entrainment
-  bands) stay discrete, as level indices.
+- `differentiability` — the ascent test and the precipitation onset are
+  ECHAM's switches in the value with surrogate derivatives (the decision
+  chain above). The level choices (``klwmin``, ``ictop0``, ``khmin``,
+  ``kctop0``, the entrainment bands) stay discrete, as level indices.
+- `science` — ``cuflx`` cancels a downdraft whose level of free sinking, found
+  in the first ascent's cloud, lies above the final plume's top
+  (``mo_cufluxdts.f90:189``), and then zeroes it only from ``kctop − 1``
+  down, leaving the absolute (not deviation) fluxes of any downdraft level
+  above that in its ledger. jcm removes the whole downdraft, which is the same
+  wherever the level of free sinking is at most one interface above the top
+  (every case in the reference data).
+- `science` — the sub-cloud rain evaporation's ``cevapcu`` profile uses the
+  column's ``p/p_s`` for ECHAM's ``ceta``, the grid's full-level hybrid
+  coordinate at the reference surface pressure: the same on a sigma grid,
+  and within the ``p_s/101325`` ratio of the ``a`` term on a hybrid one.
 - `science` — the overshoot never reaches the top interface of the model:
   jcm's ascent test fails above interface 2 (0-based), where a flux through
   the model top would leave the column. ECHAM's level loop could place the
@@ -373,9 +440,13 @@ upward), which flattens any dry-neutral or dry-unstable layer before the
 parcel is compared against it.
 
 **Why we differ.** We do not: the walk runs on the reference's half levels
-(see the half-level section above). jcm's own trigger diagnostic, the
-surface-parcel CAPE of ``calculate_cape_cin``, stays on full levels and starts
-its moist ascent at the first full level above the cloud-base interface.
+(see the half-level section above), and the parcel starts with ECHAM's seed
+energy ``pcpcu(klev)·ptenh(klev) + pgeoh(klev)``, the lowest interface's
+environment with the half-level heat capacity — about 0.13 K colder, per
+g/kg of humidity drop between the lowest two levels, than the bottom full
+level's ``pcpen·pten + pgeo``. The ``cubasmc`` seed likewise carries ECHAM's
+``pcpen(kk+1)·ptu(kk+1) + pgeoh(kk+1)``. ``calculate_cape_cin``, a
+surface-parcel CAPE diagnostic, is not part of the scheme.
 
 **Status & known limitations.**
 - The trigger is **strict by construction, and this is the reference's

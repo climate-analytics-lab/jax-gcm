@@ -73,6 +73,29 @@ denominator. That is a property of the value, and it stays in the value.
    recorded in the process section of `docs/source/science/`, with the
    surrogate and its width.
 
+## Chains of decisions
+
+A quantity that is on only when several switches all pass is a product of
+their 0/1 values, and the product rule gives it no derivative where two or
+more of them are 0: each factor's surrogate slope is multiplied by another
+factor's zero. Weight each link only where the links before it passed,
+``w = s1·where(s1, s2·where(s2, s3, 1), 1)``. The value is the same product;
+where the chain fails, its derivative is that of the first switch that failed,
+which is the decision that turned the quantity off.
+
+## Where it is used
+
+| Site | Exact value | Surrogate | Width |
+|---|---|---|---|
+| Tiedtke ascent test, each interface (`convection/tiedtke_nordeng/switches.py::ascent_test`) | `cuasc`'s `pqu < zqold`, `zbuo > 0`, `pmfu ≥ 0.01·pmfub` (`mo_cuascent.f90:436-451`) | product of a rescaled logistic of the condensate and logistics of `zbuo` and of the flux fraction | `ascent_condensate_width` 1e-8 kg/kg, `ascent_buoyancy_width` 0.01 K, `ascent_mass_flux_width` 2e-3 |
+| Tiedtke precipitation onset (`updraft.py`) | `zpbase − paphp1 ≥ zdnoprc` (l.452-454) | logistic of the depth excess | `precip_onset_width` 2000 Pa |
+| Tiedtke deep/shallow type (`tiedtke_nordeng.py`) | `zdqcv > zhelp` (`mo_cumastr.f90:571-574`) | logistic | `deep_convergence_width` 2e-7 kg m⁻² s⁻¹ |
+| Tiedtke `zlo1` gate (`tiedtke_nordeng.py`) | `zdqpbl > 0` and `zqumqe > zdqmin` (l.563-566) | logistic, and logistic relative to `zdqmin` | `sub_cloud_supply_width` 2e-7 kg m⁻² s⁻¹, `cloud_base_excess_width` 0.1 |
+| Tiedtke `ldcum` | the chain `zlo1` → first ascent → final ascent (`mo_cuascent.f90:541`) | the links' surrogates, chained as above; it weights the whole ledger and the published mass fluxes | – |
+
+The cloud cover and the one-moment microphysics use it as recorded in their
+science pages.
+
 ## What a user has to know
 
 The gradient is not the derivative of the value. A finite-difference check of

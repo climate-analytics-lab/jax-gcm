@@ -696,11 +696,10 @@ def mass_flux_closure(
 
     Returns ECHAM's constant fallback ``zmfub = 0.01 kg m⁻² s⁻¹``
     (``mo_cumastr.f90:567``), floored/capped to ``[cmfcmin, cmfcmax]``. This
-    is the value ECHAM uses for the cloud-base mass flux when the boundary-
-    layer moisture-budget closure ``zdqpbl/(g·Δq)`` is not applicable; the
-    live scheme (``tiedtke_nordeng_convection``) applies that moisture
-    closure directly and the Nordeng ``zmfub1`` rescale for deep columns, so
-    this function supplies only the constant fallback.
+    is the first-guess flux ECHAM gives a column whose cloud-base moisture
+    budget fails ``zlo1``, which it then makes non-convective;
+    ``tiedtke_nordeng_convection`` uses ``ECHAM_MFUB_FALLBACK`` directly for
+    the plume that gate rejects.
 
     It replaces the former ``cape/(g·τ)`` "closure", which had units of
     m s⁻¹ — dimensionally a velocity, not a mass flux (review finding 2.5).
@@ -720,39 +719,6 @@ def mass_flux_closure(
 
     """
     del cape, cin, moisture_conv, ktype
-    return jnp.clip(
-        jnp.asarray(ECHAM_MFUB_FALLBACK), config.cmfcmin, config.cmfcmax,
-    )
-
-
-def mass_flux_closure_blend(
-    cape: jnp.ndarray,
-    cin: jnp.ndarray,
-    moisture_conv: jnp.ndarray,
-    type_weights: jnp.ndarray,
-    config: ConvectionParameters,
-) -> jnp.ndarray:
-    """Type-weighted cloud-base mass-flux fallback.
-
-    Type-weighted counterpart of :func:`mass_flux_closure`. Because ECHAM's
-    fallback (``mo_cumastr.f90:567``) is the SAME constant ``0.01 kg m⁻² s⁻¹``
-    for all convection types, the type weighting is degenerate and this
-    returns the same faithful constant as :func:`mass_flux_closure`. Kept as
-    a separate entry point for the (differentiable) live call site.
-
-    Args:
-        cape: CAPE (J/kg) — unused.
-        cin: CIN (J/kg) — unused.
-        moisture_conv: Low-level moisture convergence (kg/m2/s) — unused.
-        type_weights: ``(3,)`` (deep, shallow, mid) weights — unused (the
-            fallback constant is type-independent).
-        config: Convection configuration (supplies the clip bounds).
-
-    Returns:
-        Cloud base mass flux (kg/m2/s).
-
-    """
-    del cape, cin, moisture_conv, type_weights
     return jnp.clip(
         jnp.asarray(ECHAM_MFUB_FALLBACK), config.cmfcmin, config.cmfcmax,
     )

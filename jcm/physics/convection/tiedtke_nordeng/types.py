@@ -97,7 +97,7 @@ class ConvectionParameters:
                              # above the level of non-buoyancy (``cmfctop``)
     cu_mfub1_min: float      # Floor on the Nordeng deep cloud-base mass flux
                              # ``zmfub1`` [kg/m²/s] (mo_cumastr.f90:902,
-                             # ``0.001``), applied scaled by the trigger weight
+                             # ``0.001``)
 
     # Downdraft parameters
     cmfdeps: float           # Downdraft mass flux fraction for LFS threshold

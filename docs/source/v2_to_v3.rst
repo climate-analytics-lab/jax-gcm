@@ -432,6 +432,63 @@ A shape consequence worth knowing if you index a dycore-native state:
 ``specific_humidity`` stays **modal** for the implicit q↔Tᵥ coupling while
 every extra tracer is **nodal**, so the two no longer share a shape.
 
+.. _v3-tiedtke-parameters:
+
+Tiedtke: no CAPE trigger; the surrogate widths are renamed and static
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The Tiedtke-Nordeng scheme takes ECHAM's trigger, type, ascent-termination and
+precipitation-onset decisions exactly, and each carries the derivative of a
+logistic surrogate (see :ref:`v3-tiedtke-decisions`). ECHAM has no CAPE
+trigger, so its parameters are gone, and the widths that used to smooth the
+forward model now shape only the derivative. They are static fields of
+``ConvectionParameters`` (``pytree_node=False``), so they are not optimised
+and a gradient with respect to them does not exist:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 30 38 32
+
+   * - v2 field
+     - v3
+     - Units
+   * - ``trigger_cape``, ``smooth_trigger_j``
+     - removed (ECHAM has no CAPE trigger)
+     - –
+   * - ``smooth_rh``
+     - removed (no code read it)
+     - –
+   * - ``smooth_term_buoy``
+     - ``ascent_buoyancy_width``, default 0.01
+     - K (was m/s²)
+   * - ``smooth_term_mf``
+     - ``ascent_mass_flux_width``, default 2e-3
+     - fraction of the cloud-base flux
+   * - ``smooth_term_cond``
+     - ``ascent_condensate_width``, default 1e-8
+     - kg/kg
+   * - ``smooth_precip_pa``
+     - ``precip_onset_width``, default 2000
+     - Pa
+   * - ``cu_dqcv_width``
+     - ``deep_convergence_width``, default 2e-7
+     - kg m⁻² s⁻¹
+   * - –
+     - ``sub_cloud_supply_width`` (2e-7 kg m⁻² s⁻¹) and
+       ``cloud_base_excess_width`` (0.1 of ``zdqmin``), new
+     - the ``zlo1`` gate
+
+An override of a removed or renamed field is rejected with the list of valid
+fields, from Hydra (``+physics.convection.trigger_cape=...``,
+``physics.terms.tiedtke_convection.params.smooth_term_buoy=...``) and from
+``ConvectionParameters.default(...)``. A tuning experiment that varied
+``trigger_cape`` has no ECHAM counterpart to move to; the ECHAM parameters of
+the trigger are ``cu_cminbuoy``/``cu_cmaxbuoy``/``cu_cbfac`` (the sub-grid
+buoyancy excess ``zlift``) and the entrainment rates. Setting a width to zero
+selects the reference derivative, which is zero across each decision.
+``ConvectionParameters`` is a ``flax.struct`` dataclass: ``.replace`` works
+as before, while ``tree_math`` arithmetic on it (``params * 2``) does not.
+
 .. _v3-echam-radiation:
 
 ECHAM composes RRTMGP from both doors; ``"grey"`` is rejected
@@ -1053,6 +1110,34 @@ evidence, not climate validation.
 provider on automatically for a capable backend; on pySES, which has none, use
 ECHAM's own ``cu_lmfmid=false`` switch (see
 :ref:`v3-limitation-omega`).
+
+.. _v3-tiedtke-decisions:
+
+Convection: ECHAM's decisions, exactly
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Tiedtke-Nordeng decides as ECHAM6.3 does, in the value, where the 2.x scheme
+smoothed the decisions themselves (#968): a surface plume convects where
+``cubase`` finds a buoyant cloud base, the sub-cloud layer gains moisture and
+the cloud-base parcel carries more water than its environment (``cumastr``'s
+``zlo1`` gate), and the first ascent passes an interface above cloud base; the
+ascent ends at the first interface whose test fails; deep and shallow are
+ECHAM's moisture-convergence test; the precipitation onset is ECHAM's
+``zdnoprc`` depth; there is no CAPE trigger. The seeds carry ECHAM's static
+energy, the sub-cloud supply integrates the whole pre-convection moisture
+tendency (dynamics included) with no evaporation floor, a downdraft whose
+level of free sinking lies above the final top is cancelled, and a failed
+first ascent leaves no surface plume for the second. On 600 columns the port
+takes ECHAM6.3's decision on every one, and matches its fluxes and tendencies
+to 2e-12, when it runs with ECHAM's physical constants
+(``cumastr_reference_test.py``). jcm keeps its own constants: they change 53
+of those 600 decisions, 51 of them through ``rv`` (461.0 against ECHAM's
+461.51); see :doc:`science/convection`.
+
+**This changes results for every ECHAM configuration.** The derivatives are
+those of logistic surrogates, so a finite-difference check of the scheme
+disagrees with AD near a decision, by design
+(:doc:`design/surrogate_gradients`).
 
 Two-moment microphysics: the process chain is inside the column scan
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

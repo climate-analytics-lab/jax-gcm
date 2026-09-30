@@ -429,8 +429,9 @@ def calculate_updraft(
             ocean, 1=land). Selects ECHAM's per-surface ``zdnoprc``
             threshold via ``config.cu_dnoprc_ocean`` and
             ``config.cu_dnoprc_land``.
-        type_weights: Smooth (deep, shallow, mid) weights; ``None`` falls
-            back to the one-hot of ``ktype``.
+        type_weights: (deep, shallow, mid) weights: one-hot in the value,
+            with the derivative of the deep/shallow test's surrogate
+            (``switches``); ``None`` means the one-hot of ``ktype``.
         lift: ECHAM ``zlift`` [K], the sub-grid buoyancy excess, applied to
             the buoyancy test at the first ascent step of a mid-level plume
             (the only step whose lower interface is ``klab == 1``).
@@ -564,7 +565,7 @@ def calculate_updraft(
     # from ``klevm1`` down to ``kcbot + 1`` (lines 516-523), with
     # ``zdz = (pgeo(jk−1) − pgeo(jk))/g``. The cloud-base interface's own
     # term is added by the first ascent step below. ECHAM forms it for deep
-    # (cubase) plumes; the smooth deep weight scales its use.
+    # (cubase) plumes; the deep weight scales its use.
     geo_above = jnp.concatenate([env.geo[:1], env.geo[:-1]])
     zdz_above = (geo_above - env.geo) / c.grav
     t_sub = (cubase_seed_static_energy(env) - env.geoh) / env.cpcu

@@ -1,7 +1,8 @@
 """Tiedtke-Nordeng Mass-Flux Convection Scheme
 
 This module implements the Tiedtke-Nordeng convection parameterization
-in JAX, based on the ICON atmospheric model implementation.
+in JAX, a port of ECHAM6.3's ``mo_cumastr.f90`` and the routines it calls
+(``jcm/data/test/echam_cumastr_reference`` compares it with them compiled).
 
 The scheme includes:
 - Deep convection with CAPE closure
@@ -471,11 +472,13 @@ def calculate_cape_cin(temperature: jnp.ndarray,
     absurdly low temperatures and gives massive bogus negative buoyancy
     — are not counted.
 
-    This is jcm's trigger diagnostic, not a port: ECHAM ``cumastr`` has no
-    surface-parcel CAPE (its trigger is the ``cubase`` buoyancy walk and its
-    closure CAPE is the in-plume ``zcape``, which involves no ``cp``). The
-    textbook dry-``cpd`` Poisson lift and pseudo-adiabat therefore stay as
-    they are; ECHAM's moist ``cp`` belongs to the ported plume and ledger.
+    A sounding diagnostic, not part of the scheme: ECHAM ``cumastr`` has no
+    surface-parcel CAPE (its trigger is the ``cubase`` buoyancy walk, the
+    ``zlo1`` moisture-budget gate and the first ascent test, and its closure
+    CAPE is the in-plume ``zcape``), and :func:`tiedtke_nordeng_convection`
+    does not call this function. The textbook dry-``cpd`` Poisson lift and
+    pseudo-adiabat therefore stay as they are; ECHAM's moist ``cp`` belongs
+    to the ported plume and ledger.
 
     Works for either input ordering:
       * TOA-first (level 0 = TOA, ICON/ECHAM convention used by the
@@ -1826,12 +1829,9 @@ class TiedtkeConvection(PhysicsTerm):
             # ``kctop``. The 1M cloud scheme reads ``cloud_top`` for ECHAM's
             # shallow-convection liquid test (``mo_cloud.f90``, the radiation
             # ``ktype = 4``); they carry a meaning only where ``ktype > 0``.
-            # ECHAM's ``kctop`` is the last level the parcel is still buoyant
-            # (``cuasc``); jcm's differentiable, sigmoid-softened plume
-            # termination has no hard last-buoyant level, so the top is the
-            # highest level the updraft still reaches with mass flux above
-            # ``cmfcmin`` (``actual_ktop``) — which can sit one level above
-            # ECHAM's in a marginally buoyant overshoot.
+            # ``cloud_top`` is ECHAM's ``kctop``, the last interface whose
+            # ascent test the plume passed (``cuasc``); the cloud-top
+            # overshoot reaches the interface above it.
             cloud_base=(
                 _state_all.kbase.reshape(-1).astype(jnp.int32)
                 if _state_all is not None
