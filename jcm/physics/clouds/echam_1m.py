@@ -337,6 +337,7 @@ class MicrophysicsState(NamedTuple):
     precip_snow: jnp.ndarray     # surface snow [kg/m^2/s] (*horiz)
     cloud_fraction: jnp.ndarray  # cover after the 8.4 write-back (paclc)
     intermediates: SweepIntermediates
+    echam_locals: dict           # ECHAM-named locals (``LevelOutputs``)
 
 
 class MicrophysicsTendencies(NamedTuple):
@@ -684,12 +685,13 @@ def autoconversion(
                   config)
 
 
-def _levkov_depletion(zxib, air_density, dt, config):
+def _levkov_depletion(zxib, air_density, dt, config, return_radius=False):
     """In-cloud ice aggregated to snow over ``dt`` (F:996-1001, 1026-1052).
 
     Levkov et al. (1992) with the Moss (1995) effective radius
     ``zrieff = 83.8·(IWC g/m^3)**0.216`` clipped to ``[ceffmin, ceffmax]``,
-    integrated implicitly: ``zxib·(1 − 1/(1 + ccsaut/zdt2·dt·zxib))``.
+    integrated implicitly: ``zxib·(1 − 1/(1 + ccsaut/zdt2·dt·zxib))``. With
+    ``return_radius`` the pair ``(zsaut, zrieff)``.
     """
     ztmp3 = (zxib * air_density * 1000.0) ** 0.216
     zrieff = jnp.minimum(jnp.maximum(83.8 * ztmp3, config.ceffmin), config.ceffmax)
@@ -698,7 +700,8 @@ def _levkov_depletion(zxib, air_density, dt, config):
     zc1 = 17.5 * air_density / _CRHOI * zqrho_033
     zdt2 = -6.0 / zc1 * (zrih / 3.0 - 2.0)
     rate = config.ccsaut / zdt2
-    return zxib * (1.0 - 1.0 / (1.0 + rate * dt * zxib))
+    zsaut = zxib * (1.0 - 1.0 / (1.0 + rate * dt * zxib))
+    return (zsaut, zrieff) if return_radius else zsaut
 
 
 def ice_autoconversion(
@@ -827,6 +830,10 @@ class LevelOutputs(NamedTuple):
     snow_flux: jnp.ndarray       # snow + sedimenting-ice flux leaving the level
     cloud_fraction: jnp.ndarray  # cover after the 8.4 write-back
     intermediates: SweepIntermediates
+    # Every local the Fortran reference harness records, under its ECHAM
+    # name (the reference data's ``diag/<variant>/*`` keys), at the same point
+    # of the routine, zero where ECHAM does not reach it; plus ``prelhum``.
+    echam_locals: dict
 
 
 def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt):
@@ -843,6 +850,10 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     use_kk2000 = config.autoconversion_scheme == MicrophysicsParameters.SCHEME_KK2000
     tiny = jnp.finfo(jnp.result_type(inputs.tm1)).tiny
     zrfl, zsfl, zclcpre, zxiflux = carry
+    # ECHAM's locals at the points the reference harness records them (see
+    # ``LevelOutputs.echam_locals``); zero where ECHAM does not reach them.
+    loc = {"zclcpre_in": zclcpre, "zrfl_in": zrfl, "zsfl_in": zsfl,
+           "zxiflux_in": zxiflux}
     (tm1, qm1, dtemp, dq, xlp, xip, paclc, p, dp, rho, dz, cdnc, cdnc_aut,
      pcair, zauloc_off, top, bottom) = inputs
 
@@ -856,6 +867,7 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zlvdcp = c.alhc * zrc
     zlsdcp = c.alhs * zrc
     zlfdcp = zlsdcp - zlvdcp
+    loc.update(ua_m1=ua_m1, dua_m1=dua_m1, uaw_m1=uaw_m1, duaw_m1=duaw_m1)
     zcons2 = 1.0 / (dt * c.grav)
     zmass = zcons2 * dp          # zcons2*zdp: kg/m^2/s per kg/kg
     zdpg = dp / c.grav
@@ -921,6 +933,8 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zevp = jnp.maximum(zevp, 0.0)
     zevp = jnp.minimum(zevp, zrfl / zmass)
     zevp = jnp.where(rain_on, zevp, 0.0)
+    loc.update(zsmlt=zsmlt, zimlt=zimlt, zsub=zsub, zevp=zevp,
+               zrfl_melt=zrfl, zsfl_melt=zsfl)
 
     # ---- 4. Sedimentation of cloud ice (F:580-611) ----
     # The ice relaxes towards the influx-fed equilibrium
@@ -944,6 +958,7 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zqsed = (zxitop - zxibot) / zmass
     zxised = zxip1 + zqsed
     zxiflux = zxibot
+    loc.update(zqsed=zqsed, zxised=zxised, zxiflux_sed=zxiflux)
 
     # ---- 4. lo2 on the provisional temperature (F:647-650) ----
     zlo2 = ice_phase_weight(tm1 + dtemp, zxised, config.csecfrl,
@@ -959,6 +974,8 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zxlevap = jnp.where(locc, 0.0, jnp.maximum(0.0, zxlp1c))
     zxib = jnp.where(locc, zxip1c * zclcauxi, 0.0)
     zxlb = jnp.where(locc, zxlp1c * zclcauxi, 0.0)
+    loc.update(lo2=zlo2, zclcaux_in=paclc, zxlevap=zxlevap, zxievap=zxievap,
+               zxlb_in=zxlb, zxib_in=zxib)
 
     # ---- 5. Condensation in the cloudy part (F:696-750) ----
     zlc = _blend(zlo2, zlsdcp, zlvdcp)
@@ -980,8 +997,10 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zxlb = jnp.maximum(zxlb, 0.0)
     prelhum = jnp.maximum(jnp.minimum(qm1 / zqsm1, 1.0), 0.0)
     zdqsat = (zdtdt + zstar1) * zdqsat1
-    _zqcdif, zcnd, zdep = sundqvist_condensation(
+    zqcdif, zcnd, zdep = sundqvist_condensation(
         dq, zdqsat, paclc, zxib, zxlb, zqp1, zlo2, qsec, _ZEPSEC)
+    loc.update(zqsm1=zqsm1, zdtdt=zdtdt, zqp1=zqp1, ztp1=ztp1, zdqsat1=zdqsat1,
+               zqcdif=zqcdif, zcnd_pre54=zcnd, zdep_pre54=zdep)
 
     # ---- 5.4 Supersaturation of the whole box (F:754-784) ----
     # Saturation and the phase switch are re-evaluated at the temperature
@@ -994,11 +1013,15 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
                                config.cthomi, phase_width, ice_width)
     ua_p1, dua_p1 = _ua(ztp1tmp)
     uaw_p1, duaw_p1 = _uaw(ztp1tmp)
-    zes = jnp.minimum(_blend(zlo2_54, ua_p1, uaw_p1) * zpapm1_inv, 0.5)
+    zua_54 = _blend(zlo2_54, ua_p1, uaw_p1)
+    zdua_54 = _blend(zlo2_54, dua_p1, duaw_p1)
+    loc.update(ztp1tmp_pre54=ztp1tmp, zqp1tmp_pre54=zqp1tmp, ua_54=zua_54,
+               dua_54=zdua_54, ub_54=ub, lo2_54=zlo2_54)
+    zes = jnp.minimum(zua_54 * zpapm1_inv, 0.5)
     zcor = 1.0 / (1.0 - c.vtmpc1 * zes)
     zqsp1tmp = zes * zcor
     zoversat = zqsp1tmp * 0.01
-    zdqsdt = zpapm1_inv * zcor ** 2 * _blend(zlo2_54, dua_p1, duaw_p1)
+    zdqsdt = zpapm1_inv * zcor ** 2 * zdua_54
     zlc = _blend(zlo2_54, zlsdcp, zlvdcp)
     zlcdqsdt = jnp.where(zes - 0.4 >= 0.0, zqsp1tmp * zcor * ub, zlc * zdqsdt)
     zqcon = 1.0 / (1.0 + zlcdqsdt)
@@ -1006,6 +1029,7 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zupdate = _blend(zlo2_54, zdep, zcnd) + zcor
     zdep = _blend(zlo2_54, zupdate, zdep)
     zcnd = _blend(zlo2_54, zcnd, zupdate)
+    loc.update(zqsp1tmp=zqsp1tmp, zcnd=zcnd, zdep=zdep)
 
     # ---- 5.5 In-cloud update; a clear cell with new condensate (F:793-813) ----
     # A clear cell that gained condensate in 5.4 is treated as fully
@@ -1020,6 +1044,7 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zxib = jnp.where(promote, zdepos, zxib)
     zxlb = jnp.where(promote, zcond, zxlb)
     ztp1tmp = ztp1 + zlvdcp * zcnd + zlsdcp * zdep
+    loc.update(zclcaux=zclcaux, zxlb_55=zxlb, zxib_55=zxib, ztp1tmp=ztp1tmp)
 
     # ---- 6.1 Freezing of all cloud water at or below cthomi (F:821-828) ----
     freeze_all = temperature_switch(config.cthomi - ztp1tmp, phase_width,
@@ -1027,6 +1052,7 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zfrl = freeze_all * zxlb * zclcaux
     zxib = zxib + freeze_all * zxlb
     zxlb = (1.0 - freeze_all) * zxlb
+    loc.update(zfrl_hom=zfrl)
 
     # ---- 6.2 Bigg and contact freezing between cthomi and tmelt (F:832-885) ----
     mixed = (ztp1tmp > config.cthomi) & (ztp1tmp < c.tmelt) & (zxlb > 0.0)
@@ -1043,6 +1069,7 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zxlb = jnp.where(mixed, zxlb - zfrl_62, zxlb)
     zxib = jnp.where(mixed, zxib + zfrl_62, zxib)
     zfrl = jnp.where(mixed, zfrl_62 * zclcaux, zfrl)
+    loc.update(zfrl=zfrl, zxlb_6=zxlb, zxib_6=zxib)
 
     # ---- 7. Precipitation formation (F:911-948) ----
     zxlb = jnp.maximum(zxlb, 1.0e-20)
@@ -1054,6 +1081,7 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     # after melting and before evaporation (F:934-948).
     zxrp1 = _safe_pow(zrfl * zclcpre_inv / (12.45 * zqrho_sqrt), 8.0 / 9.0, has_pre)
     zxsp1 = _safe_pow(zsfl * zclcpre_inv / config.cvtfall, 1.0 / 1.16, has_pre)
+    loc.update(zauloc=zauloc, zxrp1=zxrp1, zxsp1=zxsp1)
 
     active = (zclcaux > 0.0) & ((zxlb > config.cqtmin) | (zxib > config.cqtmin))
     zclcstar = jnp.minimum(zclcaux, zclcpre)
@@ -1078,7 +1106,8 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
 
     # 7.2 Cold phase: aggregation, accretion of ice and riming by snow
     # (F:1026-1100). The effective radius uses the ice before zsaut.
-    zsaut = jnp.where(active, _levkov_depletion(zxib, rho, dt, config), 0.0)
+    zsaut, zrieff = _levkov_depletion(zxib, rho, dt, config, return_radius=True)
+    zsaut = jnp.where(active, zsaut, 0.0)
     zxib_w = zxib - zsaut
     zxsp2 = zauloc * rho * zsaut
     zcolleffi = jnp.exp(0.025 * (ztp1tmp - c.tmelt))
@@ -1106,6 +1135,11 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zsacl = zsacl1 + zsacl2
     zspr = jnp.where(active, zclcaux * (zsaut + zsaci2) + zclcstar * zsaci1, 0.0)
     zrpr = jnp.where(active, zrpr, 0.0)
+    loc.update(zraut=zraut, zrac1=zrac1, zrac2=zrac2,
+               zrieff=jnp.where(active, zrieff, 0.0), zsaut=zsaut,
+               zsaci1=zsaci1, zsaci2=zsaci2, zsacl1=zsacl1, zsacl2=zsacl2,
+               zcolleffi=jnp.where(active, zcolleffi, 0.0),
+               zrpr=zrpr, zspr=zspr, zsacl=zsacl, zxlb_7=zxlb_w, zxib_7=zxib_w)
 
     # ---- 7.3 Flux and precipitating-fraction update (F:1112-1224) ----
     zzdrr = zmass * zrpr
@@ -1121,6 +1155,9 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zzdrr = zzdrr + zsnmlt_b
     zzdrs = zzdrs - zsnmlt_b
     zsmlt = zsmlt + zsnmlt_b / zmass
+    # ECHAM leaves zxiflux set at the lowest level (F:1121); the carry and
+    # the frozen-flux profile drop it there, where it has joined the snow.
+    zxiflux_echam = zxiflux
     zxiflux = jnp.where(bottom, 0.0, zxiflux)
 
     zpretot = zrfl + zsfl
@@ -1142,6 +1179,8 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     snow_sub_flux = zmass * zsub
     zrfl = zrfl + zzdrr - rain_evap_flux
     zsfl = zsfl + zzdrs - snow_sub_flux
+    loc.update(zclcpre_out=zclcpre, zrfl_out=zrfl, zsfl_out=zsfl,
+               zsmlt_final=zsmlt, zxiflux_final=zxiflux_echam)
 
     # ---- 8.3 Tendencies (F:1242-1251) ----
     zqvte = (-zcnd + zevp + zxlevap - zdep + zsub + zxievap) / dt
@@ -1166,6 +1205,9 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zxite = zxite + zdxicor
     zqvte = zqvte - zdxlcor - zdxicor
     ztte = ztte + zlvdcp * zdxlcor + zlsdcp * zdxicor
+    loc.update(zdxlcor=zdxlcor, zdxicor=zdxicor, prelhum=prelhum)
+    echam_locals = {k: jnp.broadcast_to(v, jnp.shape(tm1)).astype(tm1.dtype)
+                    for k, v in loc.items()}
 
     inter = SweepIntermediates(
         zevp=zevp, zsub=zsub, zsmlt=zsmlt, zimlt=zimlt, zqsed=zqsed,
@@ -1177,7 +1219,7 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
         ztte, zqvte, zxlte, zxite,
         rain_source, snow_source, rain_evap_flux, snow_sub_flux,
         zclcaux * zraut / dt, (zclcaux * zrac2 + zclcstar * zrac1) / dt,
-        zrfl, zsfl + zxiflux, paclc_out, inter,
+        zrfl, zsfl + zxiflux, paclc_out, inter, echam_locals,
     )
     return (zrfl, zsfl, zclcpre, zxiflux), out
 
@@ -1229,10 +1271,10 @@ def cloud_microphysics_column_sweep(
       absorb (F:706-734), and ``lo2`` reads ``ptm1 + ztmst·ptte``
       (F:647-650).
     - ``detrained_liquid``, ``detrained_ice``: ``ztmst·pxtecl``,
-      ``ztmst·pxteci``, the convective detrainment (zero if omitted). ECHAM
-      uses the condensate only as ``pxlm1 + ztmst·(pxlte + pxtecl)``, so a
-      detrainment already inside the condensate increments gives the same
-      result.
+      ``ztmst·pxteci``, the convective detrainment (zero if omitted), clipped
+      at zero as ECHAM clips it (F:384-385). ECHAM uses the condensate only as
+      ``pxlm1 + ztmst·(pxlte + pxtecl)``, so a detrainment already inside the
+      condensate increments gives the same result.
     - ``cloud_fraction``: ``paclc`` from the cover scheme. A cell is clear if
       and only if ``paclc`` is not positive (F:621).
     - ``droplet_number``: ``pacdnc`` [1/m^3], the droplet number of Bigg and
@@ -1289,8 +1331,10 @@ def cloud_microphysics_column_sweep(
         detrained_liquid = jnp.zeros_like(cloud_water_m1)
     if detrained_ice is None:
         detrained_ice = jnp.zeros_like(cloud_ice_m1)
-    # ECHAM's provisional condensate pxlm1 + ztmst*(pxlte + pxtecl), the only
-    # form in which the routine reads the condensate (F:438, 581, 666-680).
+    # ECHAM clips the detrainment at zero on entry (F:384-385) and reads the
+    # condensate only as pxlm1 + ztmst*(pxlte + pxtecl) (F:438, 581, 666-680).
+    detrained_liquid = jnp.maximum(jnp.asarray(detrained_liquid).astype(dtype), 0.0)
+    detrained_ice = jnp.maximum(jnp.asarray(detrained_ice).astype(dtype), 0.0)
     cloud_water = cloud_water_m1 + (cloud_water_increment + detrained_liquid)
     cloud_ice = cloud_ice_m1 + (cloud_ice_increment + detrained_ice)
     if autoconversion_droplet_number is None:
@@ -1322,7 +1366,7 @@ def cloud_microphysics_column_sweep(
         (zero, zero, zero, zero), inputs)
     (dtedt, dqdt, dqcdt, dqidt, rain_source, snow_source, rain_evap_flux,
      snow_sub_flux, autoconv_rate, accretion_rate, rain_flux, snow_flux,
-     cloud_fraction_out, inter) = per_level
+     cloud_fraction_out, inter, echam_locals) = per_level
 
     tendencies = MicrophysicsTendencies(
         dtedt=dtedt, dqdt=dqdt, dqcdt=dqcdt, dqidt=dqidt,
@@ -1342,6 +1386,7 @@ def cloud_microphysics_column_sweep(
         precip_rain=zrfl_sfc, precip_snow=zsfl_sfc,
         cloud_fraction=cloud_fraction_out,
         intermediates=inter,
+        echam_locals=echam_locals,
     )
     return tendencies, state
 # ---------------------------------------------------------------------------

@@ -1,4 +1,8 @@
 {
  "about": "Comparisons of jcm against the ECHAM6.3 reference that fail today, run as xfail(strict=True) by echam_fortran_reference_test.py. Remove an entry when it is fixed (the --prune option does this and never adds).",
- "gaps": {}
+ "gaps": {
+  "cloud_locals|sonntag|float32|bigg_contact_land": "float32 round-off, not formulation: this column matches in float64 (every local and output) and its float32 outputs pass. The incoming snow flux at 700 hPa is 4e-10 kg/m2/s, a residual of trace snow production and melt about 1e6 times smaller than the column's fluxes, and carries 0.4 % float32 error; zxsp1 = (zsfl/zclcpre/cvtfall)**(1/1.16) inherits it: max|err| 2.1e-11 (1.08x tol, scale 5e-9 to 9e-9).",
+  "cloud_locals|sonntag|float32|bigg_contact_sea": "float32 round-off, not formulation: this column matches in float64 (every local and output) and its float32 outputs pass. The incoming snow flux at 700 hPa is 4e-10 kg/m2/s, a residual of trace snow production and melt about 1e6 times smaller than the column's fluxes, and carries 0.4 % float32 error; zxsp1 = (zsfl/zclcpre/cvtfall)**(1/1.16) inherits it: max|err| 1.6e-11 (1.45x tol, scale 5e-9 to 9e-9).",
+  "cloud_locals|sonntag|float32|lo2_ice_memory": "float32 round-off, not formulation: this column matches in float64 (every local and output) and its float32 outputs pass. At 700 hPa an incoming snow flux of 1.7e-4 kg/m2/s melts completely; ECHAM (double) leaves the (1 - zxsec)*zsfl = 1.7e-16 remainder, while in float32 1 - 1e-12 rounds to 1 and the flux arithmetic leaves 7.9e-12 (the float32 ulp of that flux is 1.5e-11). That exceeds cqtmin = 1e-12, so the next level's zpresum <= cqtmin test (F:1196) keeps zclcpre = 0.5 where ECHAM sets 0: zclcpre_in/zclcpre_out differ by 0.5 (500x tol)."
+ }
 }

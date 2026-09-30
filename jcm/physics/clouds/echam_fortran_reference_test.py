@@ -13,7 +13,10 @@ What is compared
 * ``cover``: ``paclc``.
 * ``cloud``: the routine's increments -- ``ptte``/``pqte`` (out - in),
   ``pxlte``/``pxite`` (out - in - detrainment), the surface fluxes
-  ``prsfl``/``pssfl``, the written-back cover ``paclc``, and ``ktype``.
+  ``prsfl``/``pssfl``, the written-back cover ``paclc``, and ``ktype``; and
+  (``test_cloud_intermediates_match_echam``, sonntag variant) every local the
+  harness records, ``prelhum``, the heat and water budget checks and the total
+  cover.
 
 Reference variant
 -----------------
@@ -341,6 +344,57 @@ def run_jcm_cloud(inp: dict, nn: int = 63) -> dict:
         "paclc": f(out["clouds"].cloud_fraction),
         "ktype": np.asarray(out["convection"].ktype).astype(np.int64),
     }
+
+
+def run_jcm_cloud_intermediates(inp: dict, nn: int = 63) -> dict:
+    """ECHAM ``cloud`` (1M) -> jcm ``cloud_microphysics_column_sweep``'s locals.
+
+    Calls the column function with ECHAM's arguments (anchor ptm1/pqm1/pxlm1/
+    pxim1, increments ztmst*ptte/pqte/pxlte/pxite, detrainment
+    ztmst*pxtecl/pxteci, paclc, papm1, the layer dp from paphm1,
+    papm1/(rd*ptvm1), pacdnc, pcair) and returns ``MicrophysicsState
+    .echam_locals``: every local the harness records, under its ECHAM name,
+    (nlev, ncol) top-first, plus ``prelhum``, and the column diagnostics of
+    ECHAM's section 10 formed from jcm's outputs: the heat and water budget
+    checks ``pch_concloud``/``pcw_concloud`` and the total cover
+    ``aclcov_na`` (``jcm.analysis.total_cloud_cover``), each ``(1, ncol)``.
+    """
+    import xarray as xr
+
+    from jcm.analysis import total_cloud_cover
+    from jcm.physics.clouds.echam_1m import (
+        MicrophysicsParameters, cloud_microphysics_column_sweep)
+
+    if nn == 63:
+        prm = {k: float(load("cloud")[f"param/sonntag/{k}"])
+               for k in ("cvtfall", "csecfrl", "clwprat")}
+    else:
+        prm = {k: float(load_resolution()[f"T{nn}/param/{k}"])
+               for k in ("cvtfall", "csecfrl", "clwprat")}
+    dt = float(inp["ptime_step_len"])
+    a = lambda x: jnp.asarray(x)  # noqa: E731
+    dp = np.diff(inp["paphm1"], axis=0)
+    rho = inp["papm1"] / (c.rd * inp["ptvm1"])
+    tend, st = cloud_microphysics_column_sweep(
+        a(inp["ptm1"]), a(inp["pqm1"]), a(inp["pxlm1"]), a(inp["pxim1"]),
+        a(inp["ptte"] * dt), a(inp["pqte"] * dt), a(inp["pxlte"] * dt),
+        a(inp["pxite"] * dt), a(inp["paclc"]), a(inp["papm1"]), a(dp), a(rho),
+        a(dp / (c.grav * rho)), a(inp["pacdnc"]), dt,
+        MicrophysicsParameters.default(**prm),
+        detrained_liquid=a(inp["pxtecl"] * dt), detrained_ice=a(inp["pxteci"] * dt),
+        heat_capacity=a(inp["pcair"]))
+    got = {k: np.asarray(v, np.float64) for k, v in st.echam_locals.items()}
+    f = functools.partial(np.asarray, dtype=np.float64)
+    dpg = dp / c.grav
+    rain, snow = f(st.precip_rain), f(st.precip_snow)
+    # mo_cloud.f90:1257-1258, 1293-1294, 1401-1416 (instantaneous, not x dt).
+    got["pch_concloud"] = (np.sum(inp["pcair"] * f(tend.dtedt) * dpg, axis=0)
+                           - (c.alhc * rain + c.alhs * snow))[None]
+    got["pcw_concloud"] = (np.sum((f(tend.dqdt) + f(tend.dqcdt) + f(tend.dqidt)) * dpg,
+                                  axis=0) + rain + snow)[None]
+    got["aclcov_na"] = np.asarray(total_cloud_cover(
+        xr.DataArray(f(st.cloud_fraction), dims=("level", "col"))))[None]
+    return got
 # ===========================================================================
 # end of adapters
 # ===========================================================================
@@ -456,6 +510,98 @@ def test_cloud_matches_echam(variant, prec, column):
     _check("cloud", variant, prec, column)
 
 
+# Absolute floors of the intermediate comparison, per quantity, in the
+# intermediates' own units: the output floors (ATOL) times the reference time
+# step (1200 s) for per-step amounts and temperatures.
+_STEP = 1200.0
+_ATOL_LOCAL_F64 = {
+    **{k: 1e-16 * _STEP for k in (
+        "zsmlt", "zimlt", "zsub", "zevp", "zqsed", "zxised", "zxlevap", "zxievap",
+        "zxlb_in", "zxib_in", "zxlb_55", "zxib_55", "zxlb_6", "zxib_6", "zxlb_7",
+        "zxib_7", "zqp1", "zqcdif", "zcnd_pre54", "zdep_pre54", "zcnd", "zdep",
+        "zqp1tmp_pre54", "zqsm1", "zqsp1tmp", "zfrl_hom", "zfrl", "zraut", "zrac1",
+        "zrac2", "zsaut", "zsaci1", "zsaci2", "zsacl1", "zsacl2", "zrpr", "zspr",
+        "zsacl", "zsmlt_final")},
+    **{k: 1e-16 for k in ("zrfl_in", "zsfl_in", "zxiflux_in", "zrfl_melt",
+                          "zsfl_melt", "zxiflux_sed", "zrfl_out", "zsfl_out",
+                          "zxiflux_final", "zdxlcor", "zdxicor", "zxrp1", "zxsp1")},
+    **{k: 1e-13 * _STEP for k in ("ztp1", "ztp1tmp_pre54", "ztp1tmp", "zdtdt")},
+    **{k: 1e-12 for k in ("lo2", "lo2_54", "zclcaux_in", "zclcaux", "zclcpre_in",
+                          "zclcpre_out", "prelhum", "zauloc", "zcolleffi", "zrieff")},
+    **{k: 0.0 for k in ("ua_m1", "dua_m1", "uaw_m1", "duaw_m1", "ua_54", "dua_54",
+                        "ub_54", "zdqsat1")},
+    # Section 10 column diagnostics. The budget checks are round-off residuals
+    # of a closed ledger (ECHAM's and jcm's are both ~0); their floors are the
+    # output floors integrated over the column: 1e-13 K/s x cp x 1e4 kg/m2 for
+    # heat, the flux floor for water.
+    "pch_concloud": 1e-6, "pcw_concloud": 1e-16, "aclcov_na": 1e-12,
+}
+
+
+def _local_cases():
+    out = []
+    names = column_names("cloud")
+    for prec in ("float64", "float32"):
+        for col in names:
+            tags = str(load("cloud")["meta/tags"][names.index(col)])
+            if prec == "float32" and "f64_only" in tags:
+                continue
+            key = ("cloud_locals", "sonntag", prec, col)
+            marks = ([pytest.mark.xfail(strict=True, reason=KNOWN_GAPS[key])]
+                     if key in KNOWN_GAPS else [])
+            out.append(pytest.param(prec, col, marks=marks,
+                                    id=f"sonntag-{prec}-{col}"))
+    return out
+
+
+@functools.lru_cache(maxsize=None)
+def local_comparison(prec: str) -> dict:
+    """Per column: {local: (max_abs_err, max_err/tol, scale)} (sonntag variant)."""
+    z = load("cloud")
+    inp = echam_inputs("cloud", "sonntag")
+    with echam_constants(), precision(prec), saturation_formula("sonntag"):
+        got = run_jcm_cloud_intermediates(inp)
+    ref = {k.split("/")[-1]: z[k] for k in z if k.startswith("diag/sonntag/")}
+    ref["prelhum"] = z["out/sonntag/prelhum"]
+    for k in ("pch_concloud", "pcw_concloud", "aclcov_na"):
+        ref[k] = z[f"out/sonntag/{k}"][None]
+    rtol = RTOL_F64 if prec == "float64" else RTOL_F32
+    scale_atol = 1.0 if prec == "float64" else 1e4
+    # The budget checks are residuals of a closed ledger, so their scale is
+    # that of the terms that cancel in them: ECHAM's surface precipitation and
+    # column-integrated increments (heat in W/m2, water in kg/m2/s).
+    out = echam_outputs("cloud", "sonntag")
+    inc = increments("cloud", inp, out)
+    dpg = np.diff(inp["paphm1"], axis=0) / c.grav
+    water_terms = (out["prsfl"] + out["pssfl"] + np.sum(
+        (np.abs(inc["pqte"]) + np.abs(inc["pxlte"]) + np.abs(inc["pxite"])) * dpg,
+        axis=0))
+    heat_terms = (c.alhc * out["prsfl"] + c.alhs * out["pssfl"]
+                  + np.sum(np.abs(inp["pcair"] * inc["ptte"]) * dpg, axis=0))
+    ledger_scale = {"pcw_concloud": water_terms, "pch_concloud": heat_terms}
+    res = {}
+    for j, col in enumerate(column_names("cloud")):
+        fields = {}
+        for k, r in ref.items():
+            r_j, g_j = r[:, j], got[k][:, j]
+            scale = (float(ledger_scale[k][j]) if k in ledger_scale
+                     else float(np.max(np.abs(r_j))))
+            tol = _ATOL_LOCAL_F64[k] * scale_atol + rtol * scale
+            err = np.abs(g_j - r_j)
+            fields[k] = (float(err.max()), float(np.max(err / np.maximum(tol, 1e-300))),
+                         scale)
+        res[col] = fields
+    return res
+
+
+@pytest.mark.parametrize("prec,column", _local_cases())
+def test_cloud_intermediates_match_echam(prec, column):
+    """Every local the harness records, and prelhum, against ECHAM's (sonntag)."""
+    fields = local_comparison(prec)[column]
+    msg = _failure_message(fields)
+    assert not msg, f"cloud locals [sonntag, {prec}] column {column}: {msg}"
+
+
 def _res_cases(kind):
     out = []
     for nn in (31, 127, 255):
@@ -559,6 +705,14 @@ def _write_known_gaps(mode: str) -> None:
         k = "|".join(key)
         if mode == "init" and failing:
             gaps[k] = _gap_reason(kind, col, fields)
+        elif mode == "prune" and k in old and failing:
+            gaps[k] = old[k]
+    for param in _local_cases():
+        prec, col = param.values
+        k = "|".join(("cloud_locals", "sonntag", prec, col))
+        failing = bool(_failure_message(local_comparison(prec)[col]))
+        if mode == "init" and failing:
+            gaps[k] = _gap_reason("cloud", col, local_comparison(prec)[col])
         elif mode == "prune" and k in old and failing:
             gaps[k] = old[k]
     doc = {
