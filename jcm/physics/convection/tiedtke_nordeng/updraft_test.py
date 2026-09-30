@@ -668,3 +668,80 @@ class TestCloudBaseBuoyancyGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAscentEndsAtTheFirstFailure(unittest.TestCase):
+    """``cuasc`` visits no interface above the first failed ascent test.
+
+    On reference columns (``jcm/data/test/echam_cumastr_reference``) the
+    published plume above the overshoot interface keeps ``cuini``'s
+    environment (``ptu = ptenh``, ``pqu = pqenh``, ``plu = 0``) and carries no
+    flux, as ECHAM's ``klab = 0`` latch leaves it (mo_cuascent.f90:294).
+    """
+
+    _INPUTS = ("temperature", "humidity", "pressure", "layer_thickness", "rho",
+               "u_wind", "v_wind", "qc", "qi", "land_fraction",
+               "moisture_supply", "moisture_tend_profile", "thvsig", "omega",
+               "qte_dynamics", "layer_mass", "humidity_m1", "pressure_half")
+
+    @classmethod
+    def _column(cls, group, ktype):
+        import os
+        path = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir,
+                            os.pardir, "data", "test",
+                            "echam_cumastr_reference", "echam_cumastr.npz")
+        with np.load(path) as z:
+            rows = np.where((z["group"] == group) & (z["echam_ktype"] == ktype))[0]
+            i = int(rows[0])
+            return {k: jnp.asarray(z[f"input_{k}"][i]) for k in cls._INPUTS}
+
+    @staticmethod
+    def _run(a, **changes):
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            tiedtke_nordeng_convection,
+        )
+        a = {**a, **changes}
+        return tiedtke_nordeng_convection(
+            a["temperature"], a["humidity"], a["pressure"],
+            a["layer_thickness"], a["rho"], a["u_wind"], a["v_wind"], a["qc"],
+            a["qi"], 900.0, None, a["land_fraction"], a["moisture_supply"],
+            a["moisture_tend_profile"], a["thvsig"], a["omega"],
+            a["qte_dynamics"], a["layer_mass"], a["humidity_m1"], False,
+            a["pressure_half"])
+
+    def test_plume_above_the_overshoot_is_the_environment(self):
+        from jcm.physics.convection.tiedtke_nordeng.updraft import (
+            column_environment,
+        )
+        from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
+        for group, ktype in (("rce_warm", 2), ("deep_rce_warm", 1)):
+            a = self._column(group, ktype)
+            _, state = self._run(a)
+            env = column_environment(
+                a["temperature"], a["humidity"], a["pressure"],
+                moist_isobaric_heat_capacity(a["humidity_m1"]),
+                a["pressure_half"], condensate=a["qc"] + a["qi"])
+            above = int(state.ktop) - 1   # the overshoot interface
+            self.assertEqual(int(state.ktype), ktype)
+            np.testing.assert_array_equal(
+                np.asarray(state.tu[:above]), np.asarray(env.tenh[:above]))
+            np.testing.assert_array_equal(
+                np.asarray(state.qu[:above]), np.asarray(env.qenh[:above]))
+            np.testing.assert_array_equal(np.asarray(state.lu[:above]), 0.0)
+            np.testing.assert_array_equal(np.asarray(state.mfu[:above]), 0.0)
+            self.assertGreater(float(state.mfu[above]), 0.0)
+
+    def test_precipitation_onset_takes_the_land_depth_with_any_land(self):
+        """Use ECHAM's land ``zdnoprc`` for any land fraction.
+
+        ECHAM takes the land depth wherever ``loland``, which ``physc`` sets
+        for any land fraction (``slf > 0``).
+        """
+        a = self._column("deep_rce_warm", 1)
+        sea, _ = self._run(a, land_fraction=jnp.asarray(0.0))
+        coast, _ = self._run(a, land_fraction=jnp.asarray(0.3))
+        land, _ = self._run(a, land_fraction=jnp.asarray(1.0))
+        np.testing.assert_array_equal(np.asarray(coast.precip_formation),
+                                      np.asarray(land.precip_formation))
+        self.assertFalse(np.array_equal(np.asarray(sea.precip_formation),
+                                        np.asarray(land.precip_formation)))
