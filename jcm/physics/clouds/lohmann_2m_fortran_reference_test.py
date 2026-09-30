@@ -564,9 +564,11 @@ def test_detrained_ice_end_to_end(step):
 
     These are WIRING checks, not the exact comparison (that is test_znidetr_matches_echam
     and the block tests above): the end state also passes through the section-5
-    deposition and the aggregation number sink, which depend on the saturation formula
-    (jcm's Tetens differs from ECHAM's Sonntag tables by 1-8 % below 273 K). Measured
-    against the #941 core: ICNC within 3.4e-3, cold-cell ice within 7.4e-4; the
+    deposition and the aggregation number sink, which this module does not compare
+    block by block. Measured: ICNC within 4.1e-3, cold-cell ice within 9.2e-5. The
+    residual is not the saturation: jcm's is the Sonntag (1990) fit ECHAM's tables
+    hold, and evaluating it on the tables' 1 mK knots (NINT(1000*T), F 3932-3933) with
+    their forward-difference slope changes neither number by more than 0.2 %. The
     tolerances are 1e-2 and 5e-3.
     """
     prec = "float64"

@@ -1254,7 +1254,10 @@ ECHAM physics saturation is ECHAM's Sonntag (1990)
   spread by 0.3 / 0.06 W/m² in net TOA radiation over the same window,
   which is the noise of these numbers. Ten days measure the immediate
   response, not a new climate; the release-matrix bands of every ECHAM
-  member shift (#943).
+  member shift (#943). These numbers compare dev at ``f3780690``, before the
+  cloud-droplet (#929, #936) and detrained-ice (#941) entries above, with this
+  change at ``b56ceebf`` (term by term, and the 1M runs) and at ``5ad09de1``
+  (the 2M runs).
 - Unchanged, bit for bit: SPEEDY, Held-Suarez, Betts-Miller and the RCE
   testbed, JAM's ARG activation, MAM4 humidity and ice nucleation, the public
   relative-humidity diagnostic, the AeroCom diagnostics and the initial-state

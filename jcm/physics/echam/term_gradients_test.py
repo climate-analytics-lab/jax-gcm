@@ -290,9 +290,9 @@ class _Check:
     #: inventory of the struct rather than a check.
     outputs: str = "all"
     #: Output keys dropped even from the ledger, each because the term returns
-    #: that field as a structural zero rather than computing it. An entry
-    #: ``"<key>/<field>"`` whose key is a provided struct drops that one field
-    #: of it and keeps the rest.
+    #: that field as a structural zero rather than computing it. A
+    #: ``"key/field"`` entry drops one field of a struct-valued diagnostic
+    #: (see ``_drop_outputs``).
     skip_outputs: tuple[str, ...] = ()
     xfail_reference: str | None = None
     xfail_finiteness: str | None = None
@@ -689,6 +689,33 @@ def _replay(point_name: str, idealized: bool = False) -> _Replay:
     return _REPLAY_CACHE[key]
 
 
+def _drop_outputs(out: dict, skip_outputs: tuple[str, ...]) -> dict:
+    """``out`` without the ``skip_outputs`` entries.
+
+    An entry that is a key of ``out`` drops that output (``"u_wind"``,
+    ``"tracers/qc"``). A ``"key/field"`` entry that is not drops one field of
+    the dataclass-valued output at ``key``, whose remaining fields are then
+    checked as a dict: ``"clouds/conv_detrainment_qc"`` is a structural zero of
+    the cover term, which clears it for the convection downstream, while the
+    rest of the ``clouds`` it returns is live. A field the struct does not have
+    is an error, so a renamed field cannot silently stop being skipped.
+    """
+    kept = {k: v for k, v in out.items() if k not in skip_outputs}
+    for entry in skip_outputs:
+        key, sep, field = entry.partition("/")
+        if entry in out or not sep or key not in kept:
+            continue
+        node = kept[key]
+        if dataclasses.is_dataclass(node):
+            node = {f.name: getattr(node, f.name)
+                    for f in dataclasses.fields(node)}
+        if not isinstance(node, dict) or field not in node:
+            raise KeyError(f"skip_outputs entry {entry!r}: output {key!r} "
+                           f"has no field {field!r}")
+        kept[key] = {k: v for k, v in node.items() if k != field}
+    return kept
+
+
 def _term_function(replay: _Replay, term_name: str,
                    outputs: str = "all", skip_outputs: tuple[str, ...] = ()):
     """``(state, diagnostics, forcing, terrain) -> (tendency, provided)``.
@@ -718,16 +745,7 @@ def _term_function(replay: _Replay, term_name: str,
         }
         if outputs == "all":
             out.update({k: updated[k] for k in provides if k in updated})
-        dropped_fields: dict[str, set[str]] = {}
-        for entry in skip_outputs:
-            key, _, field = entry.partition("/")
-            if field and dataclasses.is_dataclass(out.get(key)):
-                dropped_fields.setdefault(key, set()).add(field)
-        for key, fields in dropped_fields.items():
-            out[key] = {f.name: getattr(out[key], f.name)
-                        for f in dataclasses.fields(out[key])
-                        if f.name not in fields}
-        return {k: v for k, v in out.items() if k not in skip_outputs}
+        return _drop_outputs(out, skip_outputs)
 
     if term_name == "rrtmgp_radiation":
         # Compiled once rather than dispatched op by op: RRTMGP is thousands
@@ -791,6 +809,24 @@ def test_every_term_is_covered():
     """``_TERM_NAMES`` is the composition, so a new term cannot slip through."""
     physics = echam_physics(checkpoint_terms=False)
     assert tuple(term.name for term in physics.terms) == _TERM_NAMES
+
+
+def test_drop_outputs_drops_keys_and_struct_fields():
+    """``skip_outputs`` drops whole outputs and single fields of a struct output.
+
+    A field the struct does not have is rejected.
+    """
+    from jcm.physics.clouds.cloud_data import CloudData
+    clouds = CloudData.zeros((2,), 3)
+    out = {"u_wind": jnp.zeros(3), "tracers/qc": jnp.zeros(3), "clouds": clouds}
+    kept = _drop_outputs(out, ("u_wind", "tracers/qc",
+                                "clouds/conv_detrainment_qc"))
+    assert set(kept) == {"clouds"}
+    names = {f.name for f in dataclasses.fields(clouds)}
+    assert set(kept["clouds"]) == names - {"conv_detrainment_qc"}
+    assert kept["clouds"]["cloud_fraction"] is clouds.cloud_fraction
+    with pytest.raises(KeyError, match="no field 'not_a_field'"):
+        _drop_outputs(out, ("clouds/not_a_field",))
 
 
 @pytest.mark.parametrize("point_name", sorted(_POINTS))
