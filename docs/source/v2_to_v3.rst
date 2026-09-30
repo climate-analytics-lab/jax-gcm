@@ -270,7 +270,86 @@ Related, and visible without any code change:
   ``[-90, 90]``, or a non-finite value, raises instead of being clamped to the
   polar-most row. A ``lon_deg`` already in ``[0, 360)`` is unchanged *except*
   within half a cell of 360°, which used to fall back to the last axis centre
-  and now wraps to the first.
+  and now wraps to the first. A request the state file does not cover now
+  raises too (:ref:`v3-scm-coverage`).
+
+.. _v3-scm-coverage:
+
+Single-column runs refuse a column the state file does not cover
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``select_column`` (``run.mode=scm``) used to run whatever column was nearest
+the request, however far away: ``lat_deg=90`` on a ``lat = 20..80`` regional
+file ran the 80°N row, and a single-column file ran its one column for any
+request. It now raises ``ValueError`` naming the request, the file's coverage
+and the distance to the nearest column. A request is covered when it lies
+inside the file's axis span extended by half a grid cell at each end;
+longitude wraps only when the file's longitudes close the circle, a latitude
+end already within one row spacing of its pole reaches the pole, and a
+length-1 axis covers only its own coordinate (to 1e-4°). **A global state
+file — every file jcm writes — is unaffected.** To keep running a regional
+or single-column file, request a point it covers; for a single-column file
+that is its own ``lat``/``lon``:
+
+.. code-block:: console
+
+   # v2: silently ran the (71N, 190E) column
+   $ python -m jcm.main run.mode=scm run.state_file=site.nc \
+       run.column.lat_deg=-20 run.column.lon_deg=0
+
+   # v3: request the column the file holds
+   $ python -m jcm.main run.mode=scm run.state_file=site.nc \
+       run.column.lat_deg=71 run.column.lon_deg=190
+
+.. _v3-dycore-to-xarray:
+
+``DynamicalCore.to_xarray`` keeps the exact time labels
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``model.dycore.to_xarray(predictions, times)`` used to rewrite ``times`` into
+an elapsed axis (``times - times[0]``) and failed on any real run's nested
+physics diagnostics. It now takes the frames' exact ``datetime64`` labels,
+keeps them as the time axis, and raises ``TypeError`` on a numeric axis; the
+physics diagnostics are named as every jcm output names them, by the physics
+that produced them (a ``Model`` binds its physics to its dycore, and
+``physics=`` overrides it). The dataset is the one
+``ModelPredictions.to_xarray()`` writes, before the time bounds, cell methods
+and provenance it adds. ``ModelPredictions.to_xarray()`` is the public door
+and delegates to the dycore itself, so code that called the dycore to
+serialize a run's output should call it instead:
+
+.. code-block:: python
+
+   # v2: elapsed_days relabelled the frames from zero
+   ds = model.dycore.to_xarray(raw_predictions, elapsed_days)
+
+   # v3: the complete, CF-labelled file, on the run's own dates
+   ds = model.run(...).to_xarray()
+
+A backend implementing the protocol receives ``physics`` as a new
+keyword-only argument (see :class:`jcm.dycore.base.DynamicalCore`).
+
+.. _v3-new-warnings:
+
+Two silent limitations now warn
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Neither changes a result; both used to give no sign at all.
+
+* **A physics parameter edited in place after the physics has run.**
+  Parameters are compiled into a run the first time the physics runs, so an
+  in-place edit afterwards is not reliably seen by later runs, even of a new
+  ``Model`` built on the same physics object at the same grid — a
+  sensitivity loop that edits
+  one physics object computes the first value every time. The next run now
+  raises a ``UserWarning`` naming each changed field (once per field, per
+  model). Build the physics anew with the changed value, and a ``Model`` from
+  it; see :doc:`advanced_features` for the loop pattern.
+* **PrescribedStateModel over physics with carry slots.** Each time is
+  evaluated independently, so carried physics state — TTE-TKE turbulence,
+  JAM's cloud-borne aerosol — is re-diagnosed from a cold start at every time
+  (:ref:`v3-limitation-prescribed-carry`). Construction now warns once,
+  naming the slots.
 
 ``set_constants`` now reaches the modules it promised
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1459,6 +1538,27 @@ the cap covers ten names (the water fields plus ``qnc``/``qni`` and the three
 VMRs) while the ledger covers only ``specific_humidity`` and
 ``qc``/``qi``/``qr``/``qs``. JAM aerosol and gas tracers are deliberately
 **not** capped; their removal is bounded where it is produced.
+
+.. _v3-limitation-prescribed-carry:
+
+``PrescribedStateModel`` re-diagnoses carried state from a cold start
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+*Documented limitation (proposed) — #623.*
+
+``PrescribedStateModel`` (``run.mode=prescribed``) evaluates every state
+independently with a ``vmap``, passing no cross-step physics carry. Each time
+is therefore diagnosed as a cold start, every carry slot at the value its term
+assumes without one. Slots a term rebuilds each step lose nothing; state that
+accumulates across steps does: TTE-TKE turbulence takes its spin-up value, and
+JAM's cloud-borne aerosol — whose only copy lives in the carry under the
+default storage — is an empty reservoir, so wet deposition, aqueous chemistry,
+ice nucleation and the AeroCom burdens re-diagnosed from a saved state see no
+cloud-borne phase. Construction warns once, naming the slots.
+
+To analyse the cloud-borne phase of a saved run, read that run's own
+``jam_cloud_borne.*`` output. Threading the carry (a scan over the states
+rather than a ``vmap``) is a structural change left for after v3.0.
 
 No ne30 dust product; dust tuning is a T63 quantity
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

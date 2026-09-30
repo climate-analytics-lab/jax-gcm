@@ -114,7 +114,12 @@ class DmsEmissions(PhysicsTerm):
 
         # Surface flux → lowest-layer mixing-ratio tendency [kg/kg/s].
         dms_rate = flux_dms / (air_density[-1] * dz[-1])
-        g_dms = jnp.zeros_like(state.temperature).at[-1].set(dms_rate)
+        # Pinned to the tendency's dtype: under x64 the float parameters are
+        # float64 even when the physics runs in float32 (pySES), and a
+        # float64 value scattered into a float32 operand is a JAX
+        # FutureWarning today and an error in later releases (#770).
+        g_dms = jnp.zeros_like(state.temperature).at[-1].set(
+            dms_rate.astype(state.temperature.dtype))
         tracer_tends = {gas_name("dms"): g_dms}
 
         tendency = PhysicsTendency(

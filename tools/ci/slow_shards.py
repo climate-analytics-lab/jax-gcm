@@ -3,7 +3,7 @@
 The slow suite (``pytest -m slow``) is split across two parallel CI jobs in
 ``.github/workflows/run_test.yaml`` because it no longer fits one job's timeout
 on the hosted runner: the RRTMGP-based ECHAM gradient harnesses alone take
-~46 min there. The split is by path and is defined only here:
+~60 min there. The split is by path and is defined only here:
 
 ``radiation``
     The ECHAM gradient harnesses and the radiation package — the RRTMGP-heavy
@@ -31,8 +31,8 @@ import sys
 from pathlib import Path
 
 #: Paths of the ``radiation`` shard, relative to the repository root. Chosen so
-#: the two shards take a similar time in CI (~52 and ~63 min of tests on the
-#: 2026-09-28 per-file timings).
+#: the two shards take a similar time in CI (~68 and ~62 min of tests,
+#: measured on PR #970).
 RADIATION_PATHS = (
     "jcm/physics/echam/term_gradients_test.py",
     "jcm/physics/echam/gradient_finiteness_test.py",

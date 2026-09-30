@@ -7,6 +7,8 @@ skin temperature varies with latitude through the daily-cycle term.
 import functools
 import unittest
 
+import pytest
+
 import jax
 import jax.numpy as jnp
 from jax.test_util import check_vjp, check_jvp
@@ -316,6 +318,54 @@ class TestSurfaceFluxesUnit(unittest.TestCase):
 
             _, physics_data = get_surface_fluxes(**args)
             self.assertTrue(jnp.all(jnp.isfinite(physics_data.surface_flux.hfluxn)))
+
+    @pytest.mark.filterwarnings(
+        "error:scatter inputs have incompatible types:FutureWarning")
+    def test_pyses_precision_split_keeps_every_cond_branch_float32(self):
+        """The pySES precision split must type-check on every cond branch.
+
+        The pySES backend turns ``jax_enable_x64`` on process-wide and runs
+        its physics in float32 (``dycore.physics_dtype``), but not every
+        input follows: ``SpeedyCoords``' vertical tables are built as
+        float64, and so is the forcing. The near-surface humidity blend
+        chooses between a branch that recomputes from the extrapolated
+        (float64) near-surface temperature and one that passes the float32
+        lowest-level humidity through, so the recomputed branch comes out
+        float64 unless it is pinned, and ``lax.cond`` rejects the pair
+        before anything runs (#797); ``lax.cond`` traces both branches
+        whatever ``fhum0`` is. (The skin energy balance recomputes from the
+        same inputs its operand was built from, so it needs no pin.) The
+        lowest-level tendencies scatter those float64 values into float32
+        fields, which JAX deprecates when implicit, hence the warning filter.
+
+        The flag is set with ``jax.config.update`` and restored in a
+        ``finally``, so a failure cannot leak float64 into later tests.
+        """
+        def cast(tree, dtype):
+            return jax.tree.map(
+                lambda leaf: jnp.asarray(leaf, dtype)
+                if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)
+                else leaf, tree)
+
+        prior = bool(jax.config.read("jax_enable_x64"))
+        jax.config.update("jax_enable_x64", True)
+        try:
+            args = build_inputs()
+            coords64 = args["physics_data"].speedy_coords
+            self.assertEqual(coords64.wvi.dtype, jnp.float64)
+            args["state"] = cast(args["state"], jnp.float32)
+            args["terrain"] = cast(args["terrain"], jnp.float32)
+            args["physics_data"] = cast(
+                args["physics_data"], jnp.float32).copy(speedy_coords=coords64)
+            args["forcing"] = cast(args["forcing"], jnp.float64)
+
+            tendencies, physics_data = get_surface_fluxes(**args)
+            self.assertEqual(tendencies.temperature.dtype, jnp.float32)
+            self.assertEqual(tendencies.specific_humidity.dtype, jnp.float32)
+            self.assertTrue(
+                jnp.all(jnp.isfinite(physics_data.surface_flux.hfluxn)))
+        finally:
+            jax.config.update("jax_enable_x64", prior)
 
     def test_fluxes_are_linear_in_the_land_fraction(self):
         """Each published flux is the fmask weighting of its two components.

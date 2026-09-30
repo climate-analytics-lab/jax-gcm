@@ -94,11 +94,14 @@ class Predictions:
         times: Frame timestamps (filled in by :class:`Model` after the scan).
         time_bounds: Exact lower/upper interval bounds with shape
             ``(n_frames, 2)``.
-        time_cell_method: JAX boolean; true when frames are interval means,
-            false for instantaneous samples. Serialization maps true to the
-            CF ``"time: mean"`` cell method.
-        time_bounds: Exact lower/upper interval bounds for every frame.
-        time_cell_method: JAX scalar boolean; true identifies interval means.
+        time_cell_method: JAX scalar boolean, one per trajectory; true when
+            frames are interval means, false for instantaneous samples.
+            Serialization maps true to the CF ``"time: mean"`` cell method.
+            Stacking trajectories (a ``lax.scan`` over chunks, or
+            ``jax.tree.map(jnp.stack, ...)``) stacks it with every other
+            leaf, to one entry per trajectory; read it through
+            :meth:`jcm.predictions.ModelPredictions.is_interval_mean`, which
+            accepts a stack whose entries agree.
 
     """
 
@@ -150,12 +153,23 @@ class DynamicalCore(abc.ABC):
             time it is constructed (so callers who pass a pre-built dycore
             still get the right specs); backends read it from
             :meth:`initial_state`, :meth:`to_physics_state`, and :meth:`step`.
+        output_physics: The physics package whose diagnostics
+            :meth:`to_xarray` names when it is not given one explicitly.
+            :class:`Model` writes it at construction, as it does
+            ``tracer_specs``, so ``model.dycore.to_xarray(...)`` names a
+            run's diagnostics exactly as the model's own output does.
+            ``None`` on a dycore no Model has composed. The dycore never
+            steps it: it is output metadata, not physics coupling. A dycore
+            shared by two Models holds the later one's, as it does its
+            ``tracer_specs``; ``ModelPredictions.to_xarray`` passes its own
+            physics and is unaffected.
     """
 
     coords: Any
     dt_seconds: float
     terrain: "TerrainData"
     tracer_specs: dict
+    output_physics: Any = None
 
     # ------------------------------------------------------------------
     # State construction
@@ -351,13 +365,23 @@ class DynamicalCore(abc.ABC):
         times: "np.ndarray",
         *,
         additional_coords: Mapping[str, Any] | None = None,
+        physics: Any = None,
     ) -> "xr.Dataset":
         """Convert a saved trajectory to an :class:`xarray.Dataset`.
 
         ``times`` are the frames' exact ``datetime64`` labels, as
         :meth:`jcm.predictions.ModelPredictions.time_labels` computes them
-        from the run's clock; a bare elapsed-time axis carries no reference
-        date and cannot label CF output exactly.
+        from the run's clock; they become the ``time`` coordinate unchanged.
+        A bare elapsed-time axis carries no reference date and cannot label
+        CF output exactly.
+
+        ``predictions.physics`` is the run's diagnostics as the model
+        returns them (nested dicts and typed structs). They are named with
+        :func:`jcm.predictions.physics_output_fields`, the one flattening
+        every jcm output uses, by ``physics`` — the package that produced
+        them — or, when that is omitted, by :attr:`output_physics`.
+        :meth:`~jcm.predictions.ModelPredictions.to_xarray` always passes its
+        own physics.
 
         Backends whose native horizontal layout differs from the desired output
         grid (e.g. a cubed-sphere SE backend producing a lat/lon dataset)

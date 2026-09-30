@@ -30,6 +30,7 @@ from flax import nnx
 
 from jcm import profiling
 from jcm.physics_interface import (
+    OUTPUT_ARRAY_TYPES,
     POST_PHYSICS_STATE_KEY,
     Physics,
     PhysicsState,
@@ -1003,7 +1004,7 @@ class ComposablePhysics(nnx.Module, Physics):
             out_key = k.lstrip("_") if k.startswith("_") else k
             if not out_key:
                 continue
-            if isinstance(v, jax.Array):
+            if isinstance(v, OUTPUT_ARRAY_TYPES):
                 items[rename.get(out_key, out_key)] = v
             elif isinstance(v, dict) and k not in self._UNFLATTENED_DICTS:
                 # Plain dict-of-arrays diagnostic (e.g. the carry-stored
@@ -1013,7 +1014,7 @@ class ComposablePhysics(nnx.Module, Physics):
                 # Zero-size entries (empty band tables and the like) have no
                 # xarray shape and are skipped.
                 for sk, sv in v.items():
-                    if isinstance(sv, jax.Array) and sv.size:
+                    if isinstance(sv, OUTPUT_ARRAY_TYPES) and sv.size:
                         full_key = f"{out_key}{sep}{sk}"
                         items[rename.get(full_key, full_key)] = sv
             elif hasattr(v, "__dict__") and v.__dict__:
@@ -1041,7 +1042,7 @@ class ComposablePhysics(nnx.Module, Physics):
             ncols = spatial_shape[0] * spatial_shape[1]
             for k in list(items.keys()):
                 v = items[k]
-                if not isinstance(v, jax.Array):
+                if not isinstance(v, OUTPUT_ARRAY_TYPES):
                     continue
                 if ncols not in v.shape:
                     continue
@@ -1050,6 +1051,14 @@ class ComposablePhysics(nnx.Module, Physics):
                 if len(ncols_axes) != 1:
                     continue
                 axis = ncols_axes[0]
+                # A field already on the horizontal grid stays as it is. It
+                # can only be mistaken for a flattened one when a horizontal
+                # axis has length 1 — the pySES ``(1, ncol)`` physics layout,
+                # whose column count equals its other axis — so skip an axis
+                # that is already half of the ``(nlon, nlat)`` pair.
+                if spatial_shape in (v.shape[max(axis - 1, 0):axis + 1],
+                                     v.shape[axis:axis + 2]):
+                    continue
                 new_shape = (v.shape[:axis] + spatial_shape
                              + v.shape[axis + 1:])
                 items[k] = v.reshape(new_shape)
@@ -1059,7 +1068,7 @@ class ComposablePhysics(nnx.Module, Physics):
             original_keys = list(items.keys())
             for k in original_keys:
                 v = items[k]
-                if not isinstance(v, jax.Array):
+                if not isinstance(v, OUTPUT_ARRAY_TYPES):
                     continue
                 s = v.shape
                 if (

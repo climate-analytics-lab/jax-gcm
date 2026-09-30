@@ -322,13 +322,21 @@ class TestPysesDycoreProtocol(unittest.TestCase):
         start = np.datetime64("2000-01-01T00:00:00", "ms")
         times = start + np.array(
             [0, int(self.dycore.dt_seconds) * 1000], dtype="timedelta64[ms]")
-        ds = self.dycore.to_xarray(preds, times)
+        # No Model composed this dycore, so nothing has bound its output
+        # physics: the diagnostics are named by the physics passed here,
+        # with the flattening every backend shares.
+        from jcm.physics.composable_physics import ComposablePhysics
+        naming = ComposablePhysics(terms=[], vectorize_columns=True)
+        with self.assertRaisesRegex(TypeError, "no physics package"):
+            self.dycore.to_xarray(preds, times)
+        ds = self.dycore.to_xarray(preds, times, physics=naming)
         np.testing.assert_array_equal(ds["time"].values, times)
         # A bare elapsed-days axis carries no reference date, so it cannot be
         # labelled exactly; the backend refuses it rather than guessing one.
         with self.assertRaisesRegex(TypeError, "exact datetime64"):
             self.dycore.to_xarray(
-                preds, np.array([0.0, self.dycore.dt_seconds / 86400.0]))
+                preds, np.array([0.0, self.dycore.dt_seconds / 86400.0]),
+                physics=naming)
         self.assertIn("lat", ds.coords)
         self.assertIn("lon", ds.coords)
         self.assertEqual(ds["temperature"].dims, ("time", "level", "lon", "lat"))

@@ -357,6 +357,44 @@ and applies unchanged to any backend. The contract an override must satisfy
 extinction, no Python branching on traced values) is in
 :doc:`design/jam_optics_mode_seam`.
 
+Changing a physics parameter between runs
+-----------------------------------------
+
+Physics parameters are compiled into a run as constants the first time the
+physics runs (``Model._run_from_state`` takes the model as a static jit
+argument), and each physics term's trace is cached with them. Editing a
+parameter in place afterwards is therefore not reliably seen — not by later
+runs of that model, and not by a new ``Model`` built on the same physics
+object at the same grid — so a sweep that edits one physics object would
+compute the first
+value every time. Such an edit makes the next run raise a ``UserWarning``
+naming the changed field (once per field, per model), and the run's provenance
+record carries ``live_parameters_differ_from_compiled``. An edit made before
+the physics first runs is simply the value it compiles with.
+
+To run with a changed parameter, build the physics anew with it
+(``speedy_physics(parameters=...)``, ``echam_physics(...)``) and a new
+``Model`` from that. In a loop, build both inside one ``jax.jit`` so the
+rebuild is traced once and the parameter is a traced value (which also makes
+it differentiable):
+
+.. code-block:: python
+
+   import jax
+   from jcm.model import Model
+   from jcm.physics.speedy.params import Parameters
+   from jcm.physics.speedy.speedy_terms import speedy_physics
+
+   def mean_temperature(albsea):
+       params = Parameters.default()
+       params = params.replace(
+           mod_radcon=params.mod_radcon.replace(albsea=albsea))
+       model = Model(coords=coords, physics=speedy_physics(parameters=params))
+       return model.run(save_interval=1.0, total_time=5.0).dynamics.temperature.mean()
+
+   sweep = jax.jit(mean_temperature)
+   values = [sweep(a) for a in (0.05, 0.07, 0.09)]   # one compilation
+
 External steppers and transformed predictions
 ---------------------------------------------
 
@@ -409,6 +447,36 @@ transformed trajectory to xarray:
 The rebuilt parameter record is labelled as a live-model read rather than a
 trace-time claim. If observer or snapshot arrays were not pytree children, pass
 their run-specific metadata explicitly to ``with_context``.
+
+**A trajectory stacked over chunks.** A coupler that calls
+``run_from_state_with_carry`` once per coupling step inside its own
+``lax.scan`` gets a ``ModelPredictions`` whose every leaf has a leading chunk
+axis — including the per-trajectory flag that says whether the frames are
+interval means, which then holds one entry per chunk. Read it with
+``predictions.is_interval_mean()``: it returns the flag when every chunk
+agrees and raises ``ValueError`` when a stack mixes means with instantaneous
+samples, which have no common time labelling. ``time_labels()`` works on the
+stacked object directly and keeps the chunk axis. To serialize, merge the
+chunk axis into the time axis and reattach the context:
+
+.. code-block:: python
+
+   _, stacked = jax.lax.scan(coupling_step, run_state, None, length=n_steps)
+   stacked.is_interval_mean()            # one answer for the whole stack
+   stacked.time_labels().shape           # (n_steps, frames_per_step)
+
+   merged = jax.tree.map(
+       lambda x: x.reshape((-1,) + x.shape[2:]) if x.ndim >= 2 else x, stacked)
+   ds = merged.with_context(model).to_xarray()
+
+**Converting through the dycore.** Each backend owns its trajectory
+conversion, and ``ModelPredictions.to_xarray()`` delegates to
+``model.dycore.to_xarray(predictions, labels, physics=...)``. The physics
+names its own diagnostics (``jcm.predictions.physics_output_fields``, the one
+flattening every output uses), and a ``Model`` binds its physics to its dycore
+as ``dycore.output_physics``, so a direct call on ``model.dycore`` writes the
+variables the model's output does. ``labels`` must be the exact ``datetime64``
+labels from ``time_labels()``; they become the time axis as given.
 
 Two related plumbing details, both of which bite only once you drive the
 model yourself:

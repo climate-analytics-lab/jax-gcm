@@ -159,8 +159,12 @@ class SlinnDryDeposition(PhysicsTerm):
                 # Floored at 0: removal on a negative (ringing) value
                 # would inject mass (see the wetdep note).
                 q = jnp.maximum(view.get(nm, zeros), 0.0)
+                # The removed fraction carries the float64 parameters under
+                # x64 (pySES runs float32 physics there), so the value is
+                # pinned to the tracer's dtype before the scatter (#770).
                 tracer_tends[nm] = jnp.zeros_like(q).at[-1].set(
-                    -(removed_frac_by_moment[moment] * q[-1]) / dt
+                    (-(removed_frac_by_moment[moment] * q[-1]) / dt
+                     ).astype(q.dtype)
                 )
 
         if carry_mode(self._spec):

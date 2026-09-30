@@ -55,6 +55,14 @@ further (``_Check.outputs`` / ``_Check.skip_outputs``) where the term returns a
 field as a structural zero — a microphysics scheme's momentum tendency, a
 gravity-wave scheme's moisture tendency — because the ``"adjoint"`` reference
 requires every output it is given to be live.
+
+The last section turns the same replay on the *parameters*: every float leaf
+of every term's ``nnx.Param`` structs, for the ECHAM package, the aerosol-cloud
+package (JAM feeding the Lohmann 2M scheme), the idealized grey radiation and
+SPEEDY, must carry a finite derivative of the term's outputs — one subtest per
+leaf, so a failure names the term, the operating point and the parameter.
+That is where a masked fractional power of a parameter times a vanishing field
+(#663) shows up, and where a closed-over or untraceable parameter does.
 """
 
 from __future__ import annotations
@@ -129,7 +137,8 @@ _POINTS = {
     # moist layer, with a well-mixed sub-cloud layer (ECHAM's ``cubase`` lifts
     # a dry parcel from the lowest level, so an unmixed sounding cannot trigger
     # Tiedtke at any physical ``zlift``), a deep condensate load, and enough
-    # orography to activate Lott-Miller.
+    # orography to activate Lott-Miller (whose term is handed the column as
+    # land, ``_term_terrain``).
     "convecting": _OperatingPoint(
         sst=302.0, rh_boundary_layer=0.95, rh_free_troposphere=0.7,
         moist_depth_m=9000.0, inversion_k=0.0, wind=8.0,
@@ -530,8 +539,10 @@ def _steady_sun(day_fraction=0.22, time_of_day=0.5) -> SolarGeometry:
     )
 
 
-def _column_state(vertical, tracer_names, point: _OperatingPoint):
-    """Build the ``(nlev, 1)`` sounding of ``point``.
+def _column_state(vertical, tracer_names, point: _OperatingPoint,
+                  horizontal: tuple[int, ...] = (1,),
+                  background: dict | None = None):
+    """Build the ``(nlev, *horizontal)`` sounding of ``point``.
 
     Dry-adiabatic below ``mixed_layer_top_m`` and at 6.5 K/km above it, capped
     at a 200 K stratosphere. The mixed layer is physics, not cosmetics: a
@@ -540,14 +551,24 @@ def _column_state(vertical, tracer_names, point: _OperatingPoint):
     any physical ``zlift``, which is why the RCE helpers build the same shape.
 
     The vertical axis is whatever ``vertical`` gives — ECHAM's hybrid
-    coefficients are top-first — and nothing here assumes which end is which:
-    every profile is written as a function of ``height``.
+    coefficients are top-first, as are SPEEDY's sigma levels — and nothing
+    here assumes which end is which: every profile is written as a function
+    of ``height``. ``horizontal`` is the host layout: ``(1,)`` for the ECHAM
+    column-vectorised terms, ``(1, 1)`` for SPEEDY's ``(kx, ix, il)`` grid.
+    ``background`` gives other tracers a mixing ratio instead of 0: the
+    value is the one at the surface, decaying with a 2 km scale height, the
+    shape of a boundary-layer aerosol (a uniform profile would leave every
+    transport process with no gradient to act on).
     """
     ps = c.p0
-    a_half = jnp.asarray(vertical.a_boundaries)
-    b_half = jnp.asarray(vertical.b_boundaries)
-    p_half = a_half + b_half * ps
-    p_full = 0.5 * (p_half[:-1] + p_half[1:])
+    if hasattr(vertical, "a_boundaries"):
+        a_half = jnp.asarray(vertical.a_boundaries)
+        b_half = jnp.asarray(vertical.b_boundaries)
+        p_half = a_half + b_half * ps
+        p_full = 0.5 * (p_half[:-1] + p_half[1:])
+    else:
+        p_full = jnp.asarray(vertical.centers) * ps
+    nlev = p_full.shape[0]
 
     height = -7.6e3 * jnp.log(p_full / ps)
     dry_lapse = c.grav / c.cpd
@@ -590,7 +611,7 @@ def _column_state(vertical, tracer_names, point: _OperatingPoint):
     # upper-tropospheric jet does.
     jet = 0.3 + 3.0 * jnp.exp(-((height - 11.0e3) / 7.0e3) ** 2)
 
-    column = lambda x: jnp.asarray(x).reshape(_NLEV, 1)
+    column = lambda x: jnp.asarray(x).reshape((nlev,) + horizontal)
     seeded = {"qc": column(liquid), "qi": column(ice)}
     return PhysicsState(
         u_wind=column(point.wind * jet),
@@ -598,8 +619,10 @@ def _column_state(vertical, tracer_names, point: _OperatingPoint):
         temperature=column(temperature),
         specific_humidity=column(humidity),
         geopotential=column(c.grav * height),
-        normalized_surface_pressure=jnp.full((1,), ps / c.p0),
-        tracers={name: seeded.get(name, jnp.zeros((_NLEV, 1)))
+        normalized_surface_pressure=jnp.full(horizontal, ps / c.p0),
+        tracers={name: seeded.get(name, column(
+                     (background or {}).get(name, 0.0)
+                     * jnp.exp(-height / 2.0e3)))
                  for name in tracer_names},
     )
 
@@ -613,44 +636,66 @@ class _Replay:
     forcing: ForcingData
     terrain: TerrainData
     snapshots: dict
+    #: The cold-start carry the pass began from, and every diagnostic at its
+    #: end — the carry the model's next step would begin from.
+    carry: dict = dataclasses.field(default_factory=dict)
+    final: dict = dataclasses.field(default_factory=dict)
 
 
-_REPLAY_CACHE: dict[tuple[str, bool], _Replay] = {}
+_REPLAY_CACHE: dict[tuple[str, str], _Replay] = {}
+
+# The compositions a replay can run. ``echam`` is the package this module is
+# about; ``idealized`` puts the grey radiation in the radiation slot for the
+# grey term's own checks; ``echam_jam_2m`` is the aerosol-cloud package (JAM
+# modal aerosol feeding the Lohmann 2M scheme), whose terms the ECHAM default
+# never builds and whose parameters the parameter-gradient checks below would
+# otherwise never see.
+_FACTORIES = {
+    "echam": lambda: echam_physics(checkpoint_terms=False),
+    "idealized": lambda: idealized_echam_physics(checkpoint_terms=False),
+    "echam_jam_2m": lambda: echam_physics(
+        aerosol_module="jam", cloud_scheme="2m", checkpoint_terms=False),
+}
 
 
-def _replay(point_name: str, idealized: bool = False) -> _Replay:
-    """Run the package once, snapshotting the diagnostics each term is given.
+def _jam_background(tracer_names) -> dict:
+    """Give the aerosol-cloud package's tracers a clean marine aerosol.
 
-    Reproduces ``ComposablePhysics._compute_tendencies_columns`` on a one-column
-    grid — the same ``_dt_seconds`` / ``_band_config`` injection and the same
-    running ``_tendency_run`` accumulator — so each term sees the diagnostics it
-    would see on the model's first step. There is no dycore, so
-    ``_dycore_fields`` is absent and Tiedtke's ``cubasmc`` mid-level trigger
-    reads its documented zero-omega fallback (no resolved ascent, trigger
-    dormant).
-
-    ``idealized=True`` replays the idealized composition (grey radiation in
-    the radiation slot) instead of ECHAM's, for the grey term's own check.
+    An aerosol-free column leaves every JAM process that acts on the
+    population — activation, ice nucleation, in-cloud chemistry, cloud-borne
+    exchange, transport — with nothing to act on, so its parameters would
+    move nothing and a derivative check on them would be of zeros. The
+    numbers (a few hundred Aitken and ~100 accumulation-mode particles per mg
+    of air, sub-ppb sulfur gases, coarse sea salt) are marine; the 1 ppb of
+    every species in the accumulation mode is closer to a lightly polluted
+    boundary layer. Only the orders of magnitude matter here.
     """
-    key = (point_name, idealized)
-    if key in _REPLAY_CACHE:
-        return _REPLAY_CACHE[key]
+    number = {"n_ait": 3.0e8, "n_acc": 1.0e8, "n_cor": 1.0e6, "n_pcm": 1.0e7}
+    gases = {"g_so2": 1.0e-10, "g_h2so4": 1.0e-13, "g_dms": 1.0e-10,
+             "g_soag": 1.0e-11}
+    mass_by_mode = {"ait": 1.0e-10, "acc": 1.0e-9, "cor": 1.0e-9,
+                    "pcm": 1.0e-10}
+    out = {}
+    for name in tracer_names:
+        if name in number:
+            out[name] = number[name]
+        elif name in gases:
+            out[name] = gases[name]
+        elif name.startswith("m_"):
+            mode = name.rsplit("_", 1)[-1]
+            out[name] = (1.0e-8 if name == "m_ss_cor"
+                         else mass_by_mode.get(mode, 0.0))
+    return out
 
-    point = _POINTS[point_name]
-    vertical = get_echam_levels(_NLEV)
-    coords = ColumnCoordinates.at_location(vertical, point.latitude_deg, 0.0)
-    factory = idealized_echam_physics if idealized else echam_physics
-    physics = factory(checkpoint_terms=False)
-    physics.cache_coords(coords)
 
-    state = _column_state(
-        vertical, [spec.name for spec in physics.required_tracers()], point)
-    terrain = TerrainData.single_column(orog=point.orography_m)
-    # Ocean-like surface boundary values rather than the zeros the factory
-    # defaults to: a zero albedo or a zero soil wetness is a leaf pinned at the
-    # edge of its range, which would have to be frozen like the tile fractions
-    # above instead of carrying a real derivative.
-    forcing = ForcingData.zeros((1, 1)).copy(
+def _ocean_forcing(point: _OperatingPoint) -> ForcingData:
+    """Ocean-like surface boundary values rather than the factory's zeros.
+
+    A zero albedo or a zero soil wetness is a leaf pinned at the edge of its
+    range, which would have to be frozen like the tile fractions above
+    instead of carrying a real derivative.
+    """
+    return ForcingData.zeros((1, 1)).copy(
         sea_surface_temperature=jnp.full((1, 1), point.sst + 1.0),
         stl_am=jnp.full((1, 1), point.sst),
         alb0=jnp.full((1, 1), 0.07),
@@ -658,14 +703,29 @@ def _replay(point_name: str, idealized: bool = False) -> _Replay:
         solar=_steady_sun(),
     )
 
-    diagnostics = dict(physics.initial_carry_state(coords))
+
+def _run_and_snapshot(physics, coords, state, forcing, terrain,
+                      carry: dict | None = None) -> tuple[dict, dict, dict]:
+    """Run ``physics``' terms in order, recording what each one is handed.
+
+    The same ``_dt_seconds`` / ``_band_config`` injection and running
+    ``_tendency_run`` accumulator as ``ComposablePhysics`` (both hosts publish
+    it), whatever the state's layout. ``carry`` replaces the cold start
+    ``initial_carry_state`` returns. Returns ``(snapshots, carry, final)``:
+    each term's input diagnostics by name, the carry the pass began from, and
+    the diagnostics at its end.
+    """
+    shape = state.temperature.shape
+    carry = dict(physics.initial_carry_state(coords)
+                 if carry is None else carry)
+    diagnostics = dict(carry)
     diagnostics["_dt_seconds"] = physics.dt_seconds
     diagnostics["_band_config"] = physics.band_config
     running = {
-        "u_wind": jnp.zeros((_NLEV, 1)), "v_wind": jnp.zeros((_NLEV, 1)),
-        "temperature": jnp.zeros((_NLEV, 1)),
-        "specific_humidity": jnp.zeros((_NLEV, 1)),
-        "tracers": {name: jnp.zeros((_NLEV, 1)) for name in state.tracers},
+        "u_wind": jnp.zeros(shape), "v_wind": jnp.zeros(shape),
+        "temperature": jnp.zeros(shape),
+        "specific_humidity": jnp.zeros(shape),
+        "tracers": {name: jnp.zeros(shape) for name in state.tracers},
     }
     snapshots = {}
     for term in physics.terms:
@@ -682,11 +742,73 @@ def _replay(point_name: str, idealized: bool = False) -> _Replay:
                 name: running["tracers"][name] + tendency.tracers.get(name, 0.0)
                 for name in running["tracers"]},
         }
+    return snapshots, carry, diagnostics
+
+
+def _replay(point_name: str, idealized: bool = False,
+            composition: str = "echam") -> _Replay:
+    """Run the package once, snapshotting the diagnostics each term is given.
+
+    Reproduces ``ComposablePhysics._compute_tendencies_columns`` on a one-column
+    grid (see ``_run_and_snapshot``), so each term sees the diagnostics it
+    would see on the model's first step. There is no dycore, so
+    ``_dycore_fields`` is absent and Tiedtke's ``cubasmc`` mid-level trigger
+    reads its documented zero-omega fallback (no resolved ascent, trigger
+    dormant). The carry is the cold start ``initial_carry_state`` returns (TKE
+    at its 0.01 m²/s² floor, no cloud-borne aerosol, no previous step's
+    convection), an operating point the model really starts from.
+
+    ``composition`` names a ``_FACTORIES`` entry; ``idealized=True`` is the
+    ``"idealized"`` one, the grey radiation in the radiation slot, for the
+    grey term's own check.
+    """
+    if idealized:
+        composition = "idealized"
+    key = (point_name, composition)
+    if key in _REPLAY_CACHE:
+        return _REPLAY_CACHE[key]
+
+    point = _POINTS[point_name]
+    vertical = get_echam_levels(_NLEV)
+    coords = ColumnCoordinates.at_location(vertical, point.latitude_deg, 0.0)
+    physics = _FACTORIES[composition]()
+    physics.cache_coords(coords)
+
+    tracer_names = [spec.name for spec in physics.required_tracers()]
+    state = _column_state(vertical, tracer_names, point,
+                          background=_jam_background(tracer_names))
+    terrain = TerrainData.single_column(orog=point.orography_m)
+    forcing = _ocean_forcing(point)
+    if composition == "echam_jam_2m":
+        # ~2.5 nmol/L of seawater DMS [kg/m³]; JAM's DMS emissions emit
+        # nothing from the zero concentration ``ForcingData`` defaults to.
+        forcing = forcing.copy(dms_seawater=jnp.full((1, 1), 1.5e-7))
+    snapshots, carry, final = _run_and_snapshot(
+        physics, coords, state, forcing, terrain)
 
     _REPLAY_CACHE[key] = _Replay(
         physics=physics, state=state, forcing=forcing, terrain=terrain,
-        snapshots=snapshots)
+        snapshots=snapshots, carry=carry, final=final)
     return _REPLAY_CACHE[key]
+
+
+# Lott-Miller scales its whole drag by the land fraction (the ``*
+# land_fraction`` in ``lott_miller.py::sso_drag``), and both soundings sit over
+# ocean, which the surface tiles and the fixed ``fmask`` input are chosen for.
+# Handed the replay's terrain, the SSO term returns exact zeros at the
+# convecting hill as well as the flat stable column, so every check of it —
+# finiteness, reference, parameters — would be a check of zero. That one term
+# is therefore handed the column as land; no term upstream of it reads the
+# difference, and the land fraction stays a fixed input (``_FIXED_INPUTS``).
+_LAND_TERMS = ("lott_miller_sso",)
+
+
+def _term_terrain(replay: _Replay, term_name: str) -> TerrainData:
+    """Return the replay's terrain, as land for a term that acts over land only."""
+    if term_name not in _LAND_TERMS:
+        return replay.terrain
+    return dataclasses.replace(
+        replay.terrain, fmask=jnp.ones_like(replay.terrain.fmask))
 
 
 def _drop_outputs(out: dict, skip_outputs: tuple[str, ...]) -> dict:
@@ -753,7 +875,8 @@ def _term_function(replay: _Replay, term_name: str,
         # which takes the process past the kernel's memory-map limit
         # (vm.max_map_count) partway through the step ladder and aborts it.
         call = jax.jit(call)
-    return call, (replay.state, free, replay.forcing, replay.terrain)
+    return call, (replay.state, free, replay.forcing,
+                  _term_terrain(replay, term_name))
 
 
 def _assert_derivatives_are_finite(f, args, label):
@@ -992,3 +1115,402 @@ def test_convection_parameter_gradients(point_name):
             if jnp.issubdtype(jnp.result_type(leaf), jnp.floating)), (
             "no convection parameter carries a gradient on a convecting "
             "column — a trigger has been re-hardened")
+
+
+# ---------------------------------------------------------------------------
+# Parameter gradients: every tunable leaf of every term (#663)
+# ---------------------------------------------------------------------------
+#
+# The checks above differentiate each term with respect to its *arguments*;
+# the ``nnx.Param`` leaves a calibration run optimises are closed-over
+# constants there. A derivative can be finite with respect to the state and
+# NaN with respect to a parameter in the same column — a masked fractional
+# power whose base is a parameter times a vanishing field (``tke_factor *
+# TKE``) is exactly that — so this section splits every term's parameters out
+# and differentiates the term's own outputs with respect to each float leaf.
+# The term's outputs are its tendency ledger and every diagnostic it writes
+# (see ``_parameter_gradients``), contracted with the same per-leaf
+# RMS-scaled cotangent as above, so no output leaf can hide behind a larger
+# one.
+
+# ECHAM terms with float parameter leaves, by composition. A term that sits in
+# more than one composition is checked in the first that builds it; the
+# aerosol-cloud package adds the JAM chain and the Lohmann 2M scheme.
+_ECHAM_PARAMETER_TERMS = (
+    "echam_boundary_conditions",
+    "macv2_sp_aerosol",
+    "simple_chemistry",
+    "sundqvist_cloud_fraction",
+    "rrtmgp_radiation",
+    "tte_tke_vertical_diffusion",
+    "tiedtke_convection",
+    "echam_1m_microphysics",
+    "hines_gwd",
+    "lott_miller_sso",
+)
+_JAM_2M_PARAMETER_TERMS = (
+    "jam_cloud_borne_store",
+    "jam_seasalt_emissions",
+    "jam_dms_emissions",
+    "jam_dust_emissions",
+    "tracer_vertical_diffusion",
+    "convective_tracer_transport",
+    "jam_prescribed_oxidants",
+    "jam_sulfur_gas_chemistry",
+    "arg_activation",
+    "jam_ice_nucleation",
+    "jam_sedimentation",
+    "jam_dry_deposition",
+    "lohmann_2m_microphysics",
+    "jam_cloud_borne_exchange",
+    "jam_aqueous_sulfur",
+    "jam_wet_deposition",
+)
+_SPEEDY_PARAMETER_TERMS = (
+    "speedy_forcing",
+    "speedy_convection",
+    "speedy_large_scale_condensation",
+    "speedy_clouds",
+    "speedy_shortwave_radiation",
+    "speedy_downward_longwave",
+    "speedy_surface_flux",
+    "speedy_upward_longwave",
+    "speedy_vertical_diffusion",
+)
+_PARAMETER_TERMS = {
+    "echam": _ECHAM_PARAMETER_TERMS,
+    "echam_jam_2m": _JAM_2M_PARAMETER_TERMS,
+    "idealized": ("grey_two_stream_radiation",),
+    "speedy": _SPEEDY_PARAMETER_TERMS,
+}
+
+# The two soundings, plus a third ECHAM-family point for the class this
+# section exists for: ``laminar`` is the ``stable`` column with the TKE every
+# term reads set to exactly zero (``_laminar_replay``), the value
+# ``VerticalDiffusionData.zeros`` holds (the TTE-TKE term's own fallback when
+# no carry is present). The model's cold start carries 0.01 m²/s², so neither
+# standard point reaches zero TKE, and a root of TKE times a parameter — JAM
+# activation's ``sqrt(tke_factor * TKE)`` — has a NaN derivative with respect
+# to that parameter there unless its base is guarded. SPEEDY carries no TKE,
+# so it runs at the two soundings.
+_ECHAM_PARAMETER_POINTS = ("convecting", "stable")
+_SPEEDY_PARAMETER_POINTS = ("convecting", "stable")
+# The degenerate input at the laminar point is the TKE, so it is checked for
+# the terms that read it — all of them built by the aerosol-cloud package,
+# which also re-checks TTE-TKE itself on a zero-TKE carry.
+_LAMINAR_TERMS = ("tte_tke_vertical_diffusion", "arg_activation",
+                  "jam_ice_nucleation", "lohmann_2m_microphysics")
+
+# SPEEDY's standard vertical grid; the soundings are the same functions of
+# height as the ECHAM columns, sampled at its sigma levels.
+_SPEEDY_LEVELS = 8
+
+
+def _laminar_replay(composition: str) -> _Replay:
+    """Return the ``stable`` replay with the TKE every term reads set to zero.
+
+    Each snapshot's ``vertical_diffusion`` entry — the carry for the terms
+    before TTE-TKE, TTE-TKE's own output for those after it — is replaced by
+    one whose TKE is exactly zero, so a term sees a laminar column however
+    far downstream it sits. Only the TKE differs from ``stable``, which is
+    why no second replay is needed.
+    """
+    key = ("laminar", composition)
+    if key in _REPLAY_CACHE:
+        return _REPLAY_CACHE[key]
+    stable = _replay("stable", composition=composition)
+
+    def laminar(snapshot):
+        vd = snapshot.get("vertical_diffusion")
+        if vd is None:
+            return snapshot
+        return {**snapshot, "vertical_diffusion": dataclasses.replace(
+            vd, tke=jnp.zeros_like(vd.tke))}
+
+    _REPLAY_CACHE[key] = dataclasses.replace(
+        stable, snapshots={name: laminar(snapshot)
+                           for name, snapshot in stable.snapshots.items()})
+    return _REPLAY_CACHE[key]
+
+
+def _speedy_replay(point_name: str) -> _Replay:
+    """SPEEDY's package on the ``(kx, 1, 1)`` column of one sounding."""
+    from dinosaur import sigma_coordinates
+
+    from jcm.physics.speedy.speedy_coords import compute_sigma_boundaries
+    from jcm.physics.speedy.speedy_terms import speedy_physics
+
+    key = (point_name, "speedy")
+    if key in _REPLAY_CACHE:
+        return _REPLAY_CACHE[key]
+    point = _POINTS[point_name]
+    vertical = sigma_coordinates.SigmaCoordinates(
+        compute_sigma_boundaries(_SPEEDY_LEVELS))
+    coords = ColumnCoordinates.at_location(vertical, point.latitude_deg, 0.0)
+    physics = speedy_physics(checkpoint_terms=False)
+    physics.cache_coords(coords)
+    state = _column_state(vertical, [], point, horizontal=(1, 1))
+    terrain = TerrainData.single_column(orog=point.orography_m)
+    forcing = _ocean_forcing(point)
+    snapshots, carry, final = _run_and_snapshot(
+        physics, coords, state, forcing, terrain)
+    _REPLAY_CACHE[key] = _Replay(
+        physics=physics, state=state, forcing=forcing, terrain=terrain,
+        snapshots=snapshots, carry=carry, final=final)
+    return _REPLAY_CACHE[key]
+
+
+def _warm_replay(point_name: str, composition: str) -> _Replay:
+    """Return ``point_name``'s replay with last step's diagnostics carried in.
+
+    ``ComposablePhysics`` starts each step from the previous step's
+    diagnostics (less its step-local keys), so a term that runs before the
+    one producing a field reads last step's value of it. On the replay's
+    single pass that is the cold start, and for the tracer-transport terms —
+    mixing by the previous step's exchange coefficients, convective transport
+    by its mass fluxes (absent before the first step), the cloud-borne
+    store's mixing of the cloud-borne carry — the cold start is all zeros, so
+    their parameters move nothing. Here each term is handed the pass's final
+    diagnostics as the previous step's, overlaid with what this step wrote
+    before it. It is an approximation of the second step, not the second
+    step: the state is unchanged, and what the earlier terms wrote is the
+    cold pass's output, not recomputed from the warm carry.
+    """
+    key = (point_name, f"{composition}/warm")
+    if key in _REPLAY_CACHE:
+        return _REPLAY_CACHE[key]
+    cold = _replay(point_name, composition=composition)
+    carried = {k: v for k, v in
+               cold.physics._drop_step_local(cold.final).items()
+               if k not in _HOST_KEYS}
+
+    def warm(snapshot):
+        written = {k: v for k, v in snapshot.items()
+                   if not (k in cold.carry and v is cold.carry[k])}
+        return {**carried, **written}
+
+    _REPLAY_CACHE[key] = dataclasses.replace(
+        cold, snapshots={name: warm(snapshot)
+                         for name, snapshot in cold.snapshots.items()})
+    return _REPLAY_CACHE[key]
+
+
+# Terms that act on the previous step's carry and nothing else, checked on
+# the warm replay (``_warm_replay``).
+_WARM_TERMS = ("jam_cloud_borne_store", "tracer_vertical_diffusion",
+               "convective_tracer_transport")
+
+
+def _parameter_replay(composition: str, point_name: str,
+                      term_name: str) -> _Replay:
+    if composition == "speedy":
+        return _speedy_replay(point_name)
+    if point_name == "laminar":
+        return _laminar_replay(composition)
+    if term_name in _WARM_TERMS:
+        return _warm_replay(point_name, composition)
+    return _replay(point_name, composition=composition)
+
+
+def _resolve(node, entry):
+    """Descend one ``nnx.State`` path step on the module that produced it."""
+    key = getattr(entry, "key", getattr(entry, "name", getattr(entry, "idx", None)))
+    if isinstance(node, (list, tuple)):
+        return node[int(key)]
+    if isinstance(node, dict):
+        return node[key]
+    return getattr(node, str(key))
+
+
+def _parameter_names(term, params) -> list[str]:
+    """``<attribute>/<field>`` for every leaf of ``params``, in flatten order.
+
+    ``nnx.State`` reports a parameter struct's leaves positionally
+    (``['params']/.value/#5``), which names nothing a reader can find. Each
+    leaf is instead attributed to the ``nnx.Param`` that holds it — found by
+    walking the state path on the term itself — and named after its field in
+    that Param's value by ``jcm.testing._leaf_names``. A Param's leaves
+    flatten contiguously and in its value's own order, so they are assigned
+    in sequence and the count is checked.
+    """
+    groups: dict[tuple, list[int]] = {}
+    variables: dict[tuple, tuple[str, object]] = {}
+    flat = jax.tree_util.tree_flatten_with_path(params)[0]
+    for index, (path, _) in enumerate(flat):
+        node, parts = term, []
+        for depth, entry in enumerate(path):
+            if isinstance(node, nnx.Variable):
+                prefix = tuple(path[:depth])
+                break
+            node = _resolve(node, entry)
+            parts.append(str(getattr(entry, "key", getattr(entry, "name", entry))))
+        else:
+            raise AssertionError(f"{term.name}: no nnx.Param on path {path}")
+        groups.setdefault(prefix, []).append(index)
+        variables[prefix] = ("/".join(parts), node.get_value())
+    names = [""] * len(flat)
+    for prefix, indices in groups.items():
+        attribute, value = variables[prefix]
+        fields = _leaf_names(value)
+        assert len(fields) == len(indices), (
+            f"{term.name}/{attribute}: {len(fields)} named leaves for "
+            f"{len(indices)} state leaves")
+        for index, field in zip(indices, fields):
+            # flax struct fields come back as ``.name`` attribute keys, and a
+            # bare-array Param has the empty name.
+            field = "/".join(part.lstrip(".") for part in field.split("/"))
+            names[index] = f"{attribute}/{field}" if field else attribute
+    return names
+
+
+_PARAMETER_GRADIENTS: dict[tuple[str, str, str], list] = {}
+
+# What ``_run_and_snapshot`` injects for every term, as ``ComposablePhysics``
+# does; no term's output.
+_HOST_KEYS = ("_dt_seconds", "_band_config", "_tendency_run")
+
+
+def _parameter_gradients(composition: str, point_name: str,
+                         term_name: str) -> list[tuple[str, np.ndarray]]:
+    """``[(name, d<outputs, cotangent>/d leaf)]`` for every float Param leaf.
+
+    The outputs are the tendency ledger and every diagnostic the term writes,
+    contracted with ``_cotangent``'s per-leaf RMS-scaled direction.
+
+    Integer leaves (the radiation overlap code, the surface-layer scheme
+    selector) choose a code path and carry no derivative, and the radiation
+    reads its overlap code as a Python int, so they are closed over rather
+    than traced.
+    """
+    key = (composition, point_name, term_name)
+    if key in _PARAMETER_GRADIENTS:
+        return _PARAMETER_GRADIENTS[key]
+    replay = _parameter_replay(composition, point_name, term_name)
+    term = next(t for t in replay.physics.terms if t.name == term_name)
+    graphdef, params, rest = nnx.split(term, nnx.Param, ...)
+    leaves, treedef = jax.tree_util.tree_flatten(params)
+    names = _parameter_names(term, params)
+    floats = [i for i, leaf in enumerate(leaves)
+              if jnp.issubdtype(jnp.result_type(leaf), jnp.floating)]
+    snapshot = replay.snapshots[term_name]
+    terrain = _term_terrain(replay, term_name)
+
+    def call(float_leaves):
+        full = list(leaves)
+        for index, value in zip(floats, float_leaves):
+            full[index] = value
+        rebuilt = nnx.merge(
+            graphdef, jax.tree_util.tree_unflatten(treedef, full), rest)
+        tendency, updated = rebuilt(
+            replay.state, dict(snapshot), replay.forcing, terrain)
+        # Every diagnostic the term writes, not only those it declares in
+        # ``provides``: a scheme's parameters often act only through a carry
+        # slot or a plumbing field a later term reads (SPEEDY's cloud cover
+        # and radiation fluxes, the cloud-borne store), and restricting the
+        # check to ``provides`` would leave those parameters with nothing to
+        # move. An entry the term hands back untouched is the very object it
+        # was given, so identity picks out what it wrote; the keys the host
+        # injects are not the term's.
+        written = {k: v for k, v in updated.items()
+                   if k not in _HOST_KEYS
+                   and (k not in snapshot or v is not snapshot[k])}
+        return tendency, written
+
+    if term_name == "rrtmgp_radiation":
+        # Compiled once, for the memory-map reason ``_term_function`` gives.
+        call = jax.jit(call)
+    primal, vjp_fun = jax.vjp(call, [leaves[i] for i in floats])
+    gradients = vjp_fun(_cotangent(primal, 1))[0]
+    result = [(names[i], np.asarray(g)) for i, g in zip(floats, gradients)]
+    _PARAMETER_GRADIENTS[key] = result
+    return result
+
+
+def _parameter_cases():
+    cases = []
+    for composition, terms in _PARAMETER_TERMS.items():
+        points = (_SPEEDY_PARAMETER_POINTS if composition == "speedy"
+                  else _ECHAM_PARAMETER_POINTS)
+        cases.extend((composition, term_name, point_name)
+                     for term_name in terms for point_name in points)
+    cases.extend(("echam_jam_2m", term_name, "laminar")
+                 for term_name in _LAMINAR_TERMS)
+    return [pytest.param(*case, id="-".join(case)) for case in cases]
+
+
+def test_every_parameterised_term_is_covered():
+    """Each composition's parameterised terms are exactly the tuple above.
+
+    A term that gains a float parameter, or a new term with one, fails here
+    until it is listed, so no tunable leaf can go unchecked; one that loses
+    them fails too, rather than leaving a vacuous case behind.
+    """
+    from jcm.physics.speedy.speedy_terms import speedy_physics
+
+    factories = {**_FACTORIES,
+                 "speedy": lambda: speedy_physics(checkpoint_terms=False)}
+    seen: set[str] = set()
+    for composition in ("echam", "echam_jam_2m", "idealized", "speedy"):
+        physics = factories[composition]()
+        parameterised = []
+        for term in physics.terms:
+            _, params, _ = nnx.split(term, nnx.Param, ...)
+            if term.name not in seen and any(
+                    jnp.issubdtype(jnp.result_type(leaf), jnp.floating)
+                    for leaf in jax.tree.leaves(params)):
+                parameterised.append(term.name)
+            seen.add(term.name)
+        assert tuple(parameterised) == _PARAMETER_TERMS[composition], composition
+
+
+@pytest.mark.parametrize("composition,term_name,point_name", _parameter_cases())
+def test_term_parameter_gradients_are_finite(composition, term_name,
+                                             point_name, subtests):
+    """d(term outputs)/d(parameter) is finite, one subtest per parameter leaf."""
+    for name, gradient in _parameter_gradients(
+            composition, point_name, term_name):
+        with subtests.test(parameter=name):
+            assert np.all(np.isfinite(gradient)), (
+                f"{composition}/{term_name} at {point_name}: the derivative "
+                f"with respect to {name} is not finite")
+
+
+# Terms whose parameters no fixture here can move, each with the reason. The
+# liveness test asserts they stay dead, so the entry is revisited the day a
+# fixture change brings one to life rather than silently exempting it.
+_INACTIVE_ON_THESE_COLUMNS = {
+    ("echam_jam_2m", "jam_dust_emissions"): (
+        "both columns are ocean with no Tegen dust source in the forcing, "
+        "and the surface wind is below the saltation threshold anyway; "
+        "jcm/physics/aerosol/jam/emissions/dust_test.py differentiates the "
+        "soil table, the wetness and the alpha/region scalings at an "
+        "emitting state"),
+}
+
+
+@pytest.mark.parametrize(
+    "composition,term_name",
+    [pytest.param(comp, term, id=f"{comp}-{term}")
+     for comp, terms in _PARAMETER_TERMS.items() for term in terms])
+def test_term_parameters_reach_the_outputs(composition, term_name):
+    """Some parameter of the term moves its outputs at some operating point.
+
+    Finiteness alone is vacuous for a parameter that the term never reads —
+    a closed-over constant, or a leaf the ``nnx.Param`` no longer reaches,
+    returns a zero that is trivially finite. This fences the term as a
+    whole; which leaf is live at which point is the physics' business.
+    """
+    points = (_SPEEDY_PARAMETER_POINTS if composition == "speedy"
+              else _ECHAM_PARAMETER_POINTS)
+    live = [name for point_name in points
+            for name, gradient in _parameter_gradients(
+                composition, point_name, term_name)
+            if np.any(gradient != 0.0)]
+    reason = _INACTIVE_ON_THESE_COLUMNS.get((composition, term_name))
+    if reason is not None:
+        assert not live, (
+            f"{composition}/{term_name} is listed as inactive ({reason}) but "
+            f"{live} now move its outputs: drop it from the table")
+        return
+    assert live, (f"{composition}/{term_name}: no parameter has a non-zero "
+                  f"derivative at any of {points}")

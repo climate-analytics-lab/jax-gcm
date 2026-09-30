@@ -1865,3 +1865,48 @@ class TestRRTMGPCloudInhomogeneity:
             [0, 2, 4])
         np.testing.assert_array_equal(
             np.asarray(lagged_convection_type({}, 3)), [0, 0, 0])
+
+
+def test_zenith_angle_differentiates_with_the_sun_overhead():
+    """cos(zenith) round-trips mu0 in value and derivative at mu0 == 1 (#663).
+
+    RRTMGP takes cos(zenith) back from the angle, so the round trip must be
+    the identity: value bit for bit (the library then sees the same mu0), and
+    derivative 1, including where float32 rounds a near-overhead cos_zenith
+    to exactly 1 while the geometry still moves it.
+    """
+    from jax_solar import OrbitalTime, get_solar_sin_altitude
+
+    from jcm.physics.radiation.rrtmgp import _solar_zenith_angle
+
+    mu = jnp.asarray([1.0, 0.999, 0.5, 0.0], jnp.float32)
+    round_trip = jnp.cos(_solar_zenith_angle(mu))
+    assert float(round_trip[0]) == 1.0
+    np.testing.assert_allclose(np.asarray(round_trip), np.asarray(mu),
+                               atol=1e-6)
+    grad = np.asarray(jax.vmap(jax.grad(
+        lambda m: jnp.cos(_solar_zenith_angle(m))))(mu))
+    np.testing.assert_allclose(grad[:3], 1.0, rtol=1e-3)
+    # Night: the clip passes no derivative below mu0 = 0.
+    assert float(jax.grad(lambda m: jnp.cos(_solar_zenith_angle(m)))(
+        jnp.float32(-0.3))) == 0.0
+
+    # The sun overhead to float32 precision (latitude 5 deg, day fraction
+    # 0.2505, local time 0.5025): cos_zenith rounds to exactly 1, but the
+    # point is not the exact maximum, so it still moves with the orbital
+    # phase, and the round trip must pass that derivative through unchanged.
+    two_pi = np.float32(2 * np.pi)
+    synodic = two_pi * jnp.float32(0.5025)
+
+    def mu0(phase):
+        return get_solar_sin_altitude(
+            OrbitalTime(orbital_phase=phase, synodic_phase=synodic),
+            jnp.float32(0.0), jnp.float32(5.0))
+
+    phase = two_pi * jnp.float32(0.2505)
+    assert float(mu0(phase)) == 1.0
+    direct = float(jax.grad(mu0)(phase))
+    assert direct != 0.0
+    through = float(jax.grad(
+        lambda p: jnp.cos(_solar_zenith_angle(mu0(p))))(phase))
+    np.testing.assert_allclose(through, direct, rtol=1e-4)

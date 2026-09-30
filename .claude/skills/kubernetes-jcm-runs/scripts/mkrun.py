@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import shlex
 import subprocess
 import sys
 
@@ -120,45 +121,80 @@ def length_overrides(a) -> list:
             f"run.save_chunks={'true' if a.save_chunks else 'false'}"]
 
 
-def build(a, resolved) -> dict:
-    S = site_profile.get(a.site)
-    name = f"jcm-run-{a.name}".lower().replace("_", "-")[:60]
-    rundir = f"/runs/{a.name}"
-    clone = "\n".join(
-        f'git clone --filter=blob:none --no-checkout {url} /work/{d} '
-        f'&& git -C /work/{d} fetch --depth 1 origin {sha} '
-        f'&& git -C /work/{d} checkout --detach {sha}'
-        for d, (url, sha) in resolved.items()
-    )
-    pythonpath = ":".join(
-        f"/work/{d}" for d in ("jax-rrtmgp", "mam4-jax"))
-    overrides = " ".join([
-        f"physics={a.physics}",
-        f"grid={a.grid}",
-        "init=jw", "init.rh=0.0",
-        *forcing_overrides(a),
-        "run=longrun",
-        *length_overrides(a),
-        f"run.time_step={a.dt}",
-        f"run.output_prefix={rundir}/{a.name}",
-        f"++run.checkpoint_path={rundir}/{a.name}.ckpt",
-        # Stop on NaN. The opposite of the benchmark default: a year that has
-        # gone unstable should not keep consuming a GPU.
-        "++run.bail_on_unhealthy=true",
-        *a.extra,
-    ])
-    days = target_days(a)
-    script = f"""set -euo pipefail
-echo "=== node $NODE_NAME | $(nvidia-smi --query-gpu=name --format=csv,noheader) | attempt $(date -u +%FT%TZ) ==="
-mkdir -p /work {rundir}
-{clone}
-cd /work/jcm
-# MAM4-JAX declares diffrax and matplotlib; neither is in the jcm image, and
+def extra_pip_setup(site: dict) -> str:
+    """Shell that installs what the jcm image lacks (``extra_pip``, sites.py).
+
+    ``mkrun.py``'s ``setup`` for :func:`job_manifest`. A door that needs a
+    different environment passes its own instead.
+    """
+    return f"""# MAM4-JAX declares diffrax and matplotlib; neither is in the jcm image, and
 # the JAM condensation backend imports diffrax at module load. Installing it
 # here can in principle drag jax with it, which would silently swap the CUDA
 # build for a CPU one — so the install is followed by a hard GPU check rather
 # than trusting it. A CPU fallback would "work" and report timings 100x slow.
-pip install --no-cache-dir {' '.join(repr(x) for x in S['extra_pip'])} 2>&1 | tail -2
+pip install --no-cache-dir {' '.join(repr(x) for x in site['extra_pip'])} 2>&1 | tail -2"""
+
+
+def checkpoint_of(overrides: list[str]) -> str:
+    """Return the checkpoint jcm will write: the LAST ``run.checkpoint_path``.
+
+    Hydra applies overrides in order, so a later ``++run.checkpoint_path`` (a
+    door's ``--extra``) wins over the one the door composed.
+    """
+    ckpts = [o.split("=", 1)[1] for o in overrides
+             if o.lstrip("+").startswith("run.checkpoint_path=")]
+    if not ckpts:
+        raise ValueError("the overrides set no run.checkpoint_path, so the run "
+                         "could not resume after an eviction")
+    return ckpts[-1]
+
+
+def job_manifest(*, site: dict, job_name: str, label: str, rundir: str,
+                 overrides: list[str], days: int,
+                 resolved: dict, setup: str, python_env: str,
+                 retries: int, gpus: int, cpu: int, memory: str,
+                 gpu_product: str | None = None, env: tuple = (),
+                 guard: str = "") -> dict:
+    """Build the production-run Job; every door that keeps its output uses it.
+
+    The Job clones ``resolved`` (``{dir: (url, sha)}``) at their pinned SHAs,
+    runs ``setup`` (the shell lines that install what the image lacks), refuses
+    to run on a CPU fallback, runs ``python -m jcm.main`` with ``overrides``
+    (each shell-quoted; ``python_env`` is the ``VAR=value`` prefix for that
+    command) teeing into ``<rundir>/run.log``, and then fails the Job unless
+    THIS attempt stayed healthy and reached day ``days`` — because
+    ``run_chunked`` returns normally when its health gate trips. Each retry
+    resumes from the checkpoint the overrides name (:func:`checkpoint_of`),
+    so ``retries`` (``backoffLimit``) is the eviction budget. ``guard`` is
+    shell run right after the rundir exists and before anything is cloned,
+    for a door that must refuse a rundir before spending the attempt; ``env``
+    adds container env entries after the base ones.
+    """
+    checkpoint = checkpoint_of(overrides)
+    # One command per line, so ``set -e`` stops at whichever fails (in an
+    # ``a && b && c`` list a failure of ``a`` or ``b`` does not stop the
+    # script), and the checkout is removed first: a container restarted in
+    # the same Pod keeps /work (an emptyDir), so its clone would fail on the
+    # existing directory and the attempt would go on with whatever a killed
+    # earlier attempt left there — a checkout without a working tree
+    # included, which then fails every retry.
+    clone = "\n".join(
+        f"rm -rf /work/{d}\n"
+        f"git clone --filter=blob:none --no-checkout {url} /work/{d}\n"
+        f"git -C /work/{d} fetch --depth 1 origin {sha}\n"
+        f"git -C /work/{d} checkout --detach {sha}"
+        for d, (url, sha) in resolved.items()
+    )
+    # Quoted, so an override carrying shell metacharacters (a Hydra list
+    # ``[a,b]``, quotes, ``~key``) reaches Hydra as written; the plain
+    # ``key=value`` overrides every door emits pass through unchanged.
+    overrides = " ".join(shlex.quote(o) for o in overrides)
+    script = f"""set -euo pipefail
+echo "=== node $NODE_NAME | $(nvidia-smi --query-gpu=name --format=csv,noheader) | attempt $(date -u +%FT%TZ) ==="
+mkdir -p /work {rundir}
+{guard}{clone}
+cd /work/jcm
+{setup}
 python - <<'PYCHK'
 import sys, jax
 d = jax.devices()
@@ -174,8 +210,8 @@ done
 # jcm resumes automatically when the checkpoint exists, so a pod that was
 # evicted mid-year picks up from the last completed chunk rather than
 # starting over. That is what makes a multi-day run viable here.
-if [ -f "{rundir}/{a.name}.ckpt" ]; then
-  echo "=== resuming from $(ls -la {rundir}/{a.name}.ckpt | awk '{{print $5}}') byte checkpoint ==="
+if [ -f "{checkpoint}" ]; then
+  echo "=== resuming from $(ls -la {shlex.quote(checkpoint)} | awk '{{print $5}}') byte checkpoint ==="
 fi
 # run.log is append-only ACROSS pod restarts (that is what makes the
 # eviction-resume design debuggable), so every gate below must read only THIS
@@ -189,7 +225,7 @@ fi
 # Record the byte offset first and slice from it.
 ATTEMPT_START=$(stat -c%s "{rundir}/run.log" 2>/dev/null || echo 0)
 set +e
-PYTHONPATH={pythonpath} MAM4_JAX_ENABLE_X64={"0" if a.f32 else "1"} \\
+{python_env} \\
   python -m jcm.main {overrides} 2>&1 | tee -a {rundir}/run.log
 RC=${{PIPESTATUS[0]}}
 set -e
@@ -245,7 +281,7 @@ if [ -z "$LAST" ]; then
   fi
   echo "FATAL: this attempt wrote no output and resumed at day ${{RESUMED:-0}}"
   echo "       of {days} — no progress made. Check for a stale or foreign"
-  echo "       checkpoint at {rundir}/{a.name}.ckpt."
+  echo "       checkpoint at {checkpoint}."
   exit 1
 fi
 if [ "$LAST" -lt {days} ]; then
@@ -257,24 +293,24 @@ exit $RC
 """
     return {
         "apiVersion": "batch/v1", "kind": "Job",
-        "metadata": {"name": name, "namespace": S["namespace"],
-                     "labels": {"jcm-run": a.name}},
+        "metadata": {"name": job_name, "namespace": site["namespace"],
+                     "labels": {"jcm-run": label}},
         "spec": {
             # Survive eviction: each retry re-runs the script, which resumes
             # from the checkpoint. Contrast the benchmark generator, where a
             # retry would silently re-time on a different node.
-            "backoffLimit": a.retries,
+            "backoffLimit": retries,
             # No TTL — production output and its Job history are kept until
             # deliberately removed.
             "template": {
                 "spec": {
                     "restartPolicy": "OnFailure",
                     "nodeSelector": (
-                        {"nvidia.com/gpu.product": a.gpu_product}
-                        if a.gpu_product
-                        else dict(S["gpu_selector"])),
+                        {"nvidia.com/gpu.product": gpu_product}
+                        if gpu_product
+                        else dict(site["gpu_selector"])),
                     "containers": [{
-                        "name": "run", "image": S["image"],
+                        "name": "run", "image": site["image"],
                         "command": ["/bin/bash", "-c", script],
                         "env": [
                             {"name": "NODE_NAME", "valueFrom": {"fieldRef": {
@@ -289,12 +325,13 @@ exit $RC
                             # of repeating the fetch on every attempt.
                             {"name": "JCM_ERA5_CACHE",
                              "value": "/runs/_era5-cache"},
+                            *env,
                         ],
                         "resources": {
-                            "limits": {S["gpu_resource"]: a.gpus,
-                                       "cpu": str(a.cpu), "memory": a.memory},
-                            "requests": {S["gpu_resource"]: a.gpus,
-                                         "cpu": str(a.cpu), "memory": a.memory},
+                            "limits": {site["gpu_resource"]: gpus,
+                                       "cpu": str(cpu), "memory": memory},
+                            "requests": {site["gpu_resource"]: gpus,
+                                         "cpu": str(cpu), "memory": memory},
                         },
                         "volumeMounts": [
                             {"name": "runs", "mountPath": "/runs"},
@@ -304,7 +341,7 @@ exit $RC
                     }],
                     "volumes": [
                         {"name": "runs", "persistentVolumeClaim": {
-                            "claimName": S["runs_pvc"]}},
+                            "claimName": site["runs_pvc"]}},
                         {"name": "work", "emptyDir": {}},
                         {"name": "dshm", "emptyDir": {"medium": "Memory"}},
                     ],
@@ -316,6 +353,37 @@ exit $RC
             },
         },
     }
+
+
+def build(a, resolved) -> dict:
+    """Build the production Job for ``mkrun.py``'s command line (``a``)."""
+    S = site_profile.get(a.site)
+    rundir = f"/runs/{a.name}"
+    checkpoint = f"{rundir}/{a.name}.ckpt"
+    overrides = [
+        f"physics={a.physics}",
+        f"grid={a.grid}",
+        "init=jw", "init.rh=0.0",
+        *forcing_overrides(a),
+        "run=longrun",
+        *length_overrides(a),
+        f"run.time_step={a.dt}",
+        f"run.output_prefix={rundir}/{a.name}",
+        f"++run.checkpoint_path={checkpoint}",
+        # Stop on NaN. The opposite of the benchmark default: a year that has
+        # gone unstable should not keep consuming a GPU.
+        "++run.bail_on_unhealthy=true",
+        *a.extra,
+    ]
+    return job_manifest(
+        site=S, job_name=f"jcm-run-{a.name}".lower().replace("_", "-")[:60],
+        label=a.name, rundir=rundir, overrides=overrides, days=target_days(a), resolved=resolved,
+        setup=extra_pip_setup(S),
+        python_env=("PYTHONPATH="
+                    + ":".join(f"/work/{d}" for d in ("jax-rrtmgp", "mam4-jax"))
+                    + f" MAM4_JAX_ENABLE_X64={'0' if a.f32 else '1'}"),
+        retries=a.retries, gpus=a.gpus, cpu=a.cpu, memory=a.memory,
+        gpu_product=a.gpu_product)
 
 
 def main() -> int:

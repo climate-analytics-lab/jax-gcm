@@ -181,3 +181,21 @@ class TestPysesTestsHoldX64:
         assert conftest._builds_pyses_backend(self._Item(("pyses",)))
         assert not conftest._builds_pyses_backend(self._Item(("cosp",)))
         assert not conftest._builds_pyses_backend(self._Item())
+
+
+class TestRunsDoNotEnableTheSharedCompilationCache:
+    """``runners.run()`` in a test leaves JAX's persistent cache alone (#880)."""
+
+    def test_maybe_enable_is_a_no_op_under_the_fixture(self):
+        import jax
+
+        from jcm.runners import maybe_enable_compilation_cache
+
+        before = jax.config.jax_compilation_cache_dir
+        try:
+            maybe_enable_compilation_cache()
+            assert jax.config.jax_compilation_cache_dir == before
+        finally:
+            # A regressed fixture must not leave the cache pointed at the
+            # shared directory for the rest of this worker.
+            jax.config.update("jax_compilation_cache_dir", before)

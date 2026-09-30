@@ -184,6 +184,29 @@ class AqueousTermTest(unittest.TestCase):
         g = jax.grad(loss)(jnp.asarray(1.0))
         self.assertTrue(np.isfinite(float(g)))
 
+    def test_cloud_water_gradient_is_finite_in_clear_sky(self):
+        """No cloud water, or no cloud at all, still differentiates (#663).
+
+        The chemistry is evaluated everywhere and kept only where active, so
+        a clear-sky cell must not hand the discarded evaluation a zero LWC.
+        """
+        for cloud_fraction, qc in ((0.6, 0.0), (0.0, 0.0), (0.6, 2.0e-4)):
+            state, diagnostics = self._setup(cloud_fraction=cloud_fraction)
+            shape = state.temperature.shape
+
+            def loss(qc_field, cf_field):
+                clouds = types.SimpleNamespace(
+                    cloud_fraction=cf_field, qc=qc_field)
+                tend, _ = AqueousSulfur()(
+                    state, {**diagnostics, "clouds": clouds}, None, None)
+                return sum(jnp.sum(v) for v in tend.tracers.values())
+
+            grads = jax.grad(loss, argnums=(0, 1))(
+                jnp.full(shape, qc), jnp.full(shape, cloud_fraction))
+            for g in grads:
+                self.assertTrue(np.all(np.isfinite(np.asarray(g))),
+                                msg=f"cf={cloud_fraction}, qc={qc}")
+
 
 class SimpleAqueousSchemeTest(unittest.TestCase):
     def _setup(self, h2o2=1.0e10, so2=1.0e-10, nlev=3, ncols=2):

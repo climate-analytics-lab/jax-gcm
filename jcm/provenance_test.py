@@ -487,16 +487,15 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
         term.params.set_value(
             term.params.get_value().replace(entmax=jnp.array(0.25)))
 
-        with self.assertLogs("jcm.predictions", level="WARNING") as logged:
-            preds = ModelPredictions(None, None, physics, params=traced)
+        preds = ModelPredictions(None, None, physics, params=traced)
         self.assertEqual(
             preds.params["speedy_convection.params.entmax"],
             traced["speedy_convection.params.entmax"])
-        # ...and the divergence is surfaced rather than papered over: the
-        # user's parameter change may not have reached the run at all,
-        # which is a scientific error they need told about.
+        # ...and the divergence is recorded rather than papered over: the
+        # user's parameter change may not have reached the run at all.
+        # (Telling the user is the Model's job, before such a run starts;
+        # see TestParameterBindingAndCompilation in model_test.)
         self.assertIn("live_parameters_differ_from_compiled", preds.params)
-        self.assertIn("Rebuild the Model", "".join(logged.output))
 
     def test_no_false_alarm_when_live_matches_compiled(self):
         from jcm.predictions import ModelPredictions
@@ -545,8 +544,8 @@ class ModelPredictionsCaptureTest(unittest.TestCase):
 
         # A longer window retraces ``_run_from_state``; the record still
         # reports the first trace's values, and says the live module has
-        # since diverged from them.
-        with self.assertLogs("jcm.predictions", level="WARNING"):
+        # since diverged from them, as the run's warning does.
+        with self.assertWarnsRegex(UserWarning, key):
             second = model.run(save_interval=0.25, total_time=0.5)
         self.assertEqual(second.params[key], as_compiled)
         self.assertIn("live_parameters_differ_from_compiled", second.params)

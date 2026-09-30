@@ -239,20 +239,13 @@ class TestSSOGradients:
             assert jnp.all(jnp.isfinite(grad)), (
                 f"d/d{name} is not finite for {label}")
 
-    @pytest.mark.xfail(
-        strict=True, raises=AssertionError,
-        reason="an exactly calm column (u = v = 0 at every level) returns a "
-               "NaN gradient with respect to both wind components. Any "
-               "non-zero wind is finite — 1e-4 m/s already is — so this is a "
-               "norm evaluated at its cone tip, not a floor that is too "
-               "small; the candidates are the low-level wind norms at "
-               "lott_miller.py:377/442/466 and the tendency norms at "
-               ":699-700/717/737. Not fixed here: each is a separate "
-               "double-where and the forward result has to be shown "
-               "unchanged for every one. Tracked for the gradient-smoothing "
-               "follow-up. (#843)")
     def test_calm_column_wind_gradient_is_finite(self):
-        """Record the exactly-calm column as an open NaN, not a tolerance."""
+        """An exactly calm column (u = v = 0 everywhere) differentiates.
+
+        The updated wind is zero at every level there, so the KE-conserving
+        rescale's quotient must not be formed over its zero denominator
+        (#663).
+        """
         column = _make_alps_column(nlev=30)
         column["u_wind"] = jnp.zeros_like(column["u_wind"])
         column["v_wind"] = jnp.zeros_like(column["v_wind"])
@@ -265,20 +258,14 @@ class TestSSOGradients:
         for name, grad in zip(self.KEYS, grads):
             assert jnp.all(jnp.isfinite(grad)), f"d/d{name} is not finite"
 
-    @pytest.mark.xfail(
-        strict=True, raises=AssertionError,
-        reason="d/d(orography_std) is NaN for orography_std in roughly "
-               "[1e-6, 1e-5] — at and just above ``_MIN_OROG_STD`` "
-               "(lott_miller.py:111), the floor ``_safe_denom`` stops "
-               "applying. Below the floor and at realistic values (0.5 m, "
-               "400 m) it is finite, so the floor protects one side of "
-               "itself and not the other. Not fixed here; tracked for the "
-               "gradient-smoothing follow-up. 1e-8 is included because the "
-               "reverse pass is NaN there too once every input is displaced "
-               "together, even though d/d(orography_std) alone is finite. (#843)")
     @pytest.mark.parametrize("orography_std", [1.0e-8, 1.0e-6, 1.0e-5])
     def test_gradient_at_the_orography_floor_is_finite(self, orography_std):
-        """Record the band around ``_MIN_OROG_STD`` as an open NaN."""
+        """The band around ``_MIN_OROG_STD`` differentiates, against a reference.
+
+        Just above the floor the blocked-flow drag stops the wind in one step,
+        so the updated wind is zero — the same zero denominator of the
+        KE-conserving rescale that the calm column above reaches (#663).
+        """
         column = _make_alps_column(nlev=30, orography_std=orography_std)
         check_gradients(
             self._scheme_fn(column, SSOParameters.default()),
