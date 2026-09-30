@@ -512,10 +512,12 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   step late: those terms run after it (≤ 0.03 K/day in the troposphere).
 - **1M: the ``lonacc`` zeroing of the local-rain factor** at the cover's
   inversion level is implemented in the column function but not supplied by
-  the term (it needs the cover's inversion level); it is inert at ECHAM6.3's
-  ``cauloc = 0``, as are the local-rain accretion and the in-layer snow, which
-  the Fortran comparison therefore does not exercise (unit tests pin their
-  formulas).
+  the term, which needs the cover's inversion level (``knvb``) and the
+  large-scale vertical velocity; #705 tracks that plumbing, for the 2M's
+  matching ``zauloc`` gate too. It is inert at ECHAM6.3, which fixes
+  ``cauloc = 0`` as a parameter (``mo_echam_cloud_params.f90`` l.71), as are
+  the local-rain accretion and the in-layer snow, which the Fortran
+  comparison therefore does not exercise (unit tests pin their formulas).
 
 **Code pointers.**
 - ``jcm/physics/clouds/sundqvist.py`` — ``SundqvistCloudFraction``,

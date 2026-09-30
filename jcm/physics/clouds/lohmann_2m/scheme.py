@@ -197,7 +197,7 @@ def cloud_microphysics_2m(
     The large-scale vertical velocity is not plumbed to this scheme yet:
     ECHAM's ``zvervx`` (updraft for the WBF gate) uses only the TKE term
     here, and the ``knvb``/``lonacc`` inversion-level exception on
-    ``zauloc`` is omitted (it needs ``pvervel``) — listed in #941.
+    ``zauloc`` is omitted (it needs ``pvervel``) — tracked in #705.
 
     qnc / qni are stored per kg of air; the scheme interior uses per-m^3,
     so we convert at the boundary.
@@ -395,7 +395,7 @@ def cloud_microphysics_2m(
     #   zvervx = −100·ω/(g·ρ) + 100·fact_tke·sqrt(TKE),
     # with the turbulent term zeroed at the lowest level (line 815). The
     # large-scale term −100·ω/(g·ρ) needs the pressure velocity, which is
-    # not plumbed to this scheme (#941); it is the term to add here.
+    # not plumbed to this scheme (#705); it is the term to add here.
     updraft_velocity = turbulent_updraft_velocity(tke, params)
 
     # ------------------------------------------------------------------
