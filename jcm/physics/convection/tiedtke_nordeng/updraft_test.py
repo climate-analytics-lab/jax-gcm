@@ -1,11 +1,8 @@
-"""Tests for the updraft saturation adjustment.
+"""Tests for the updraft: its saturation adjustment and its cloud top.
 
-Regression tests covering the iterative Newton-Raphson saturation adjustment
-that matches ECHAM/ICON `cuadjtq` (see `../../../../atm_phy_echam/mo_cuadjust.f90`).
-
-The original JAX implementation was a single-pass saturation step which left
-updraft parcels supersaturated between iterations, under-releasing latent
-heating and giving unrealistic RCE temperature profiles.
+The updraft's saturation adjustment is ECHAM's ``cuadjtq`` with ``kcall = 1``
+(``mo_cuadjust.f90``; compared against the compiled routine in
+``cuadjtq_test.py``): two damped Newton steps, the first condensation-only.
 """
 
 import unittest
@@ -13,6 +10,7 @@ import jax.numpy as jnp
 import numpy as np
 
 import jcm.constants as c
+from jcm.physics.convection.tiedtke_nordeng.cuadjtq import cuadjtq
 from jcm.physics.convection.tiedtke_nordeng.updraft import saturation_adjustment
 from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import saturation_mixing_ratio
 
@@ -83,25 +81,29 @@ class TestSaturationAdjustmentNewton(unittest.TestCase):
         self.assertAlmostEqual(dT / expected_dT, 1.0, delta=0.02)
         self.assertGreater(dT, 0.0, "Condensation must warm the parcel")
 
-    def test_convergence_strong_supersaturation(self):
-        """Under very strong supersaturation, the iterative Newton scheme
-        must still converge — the single-pass version under-converged here.
+    def test_strong_supersaturation_takes_echam_two_steps(self):
+        """At 5x saturation ECHAM's two Newton steps leave a large residual.
+
+        ``qs`` is convex in T, so the first step over-condenses and the one
+        unclipped refinement re-evaporates only part of the excess: the
+        parcel ends subsaturated, closer to saturation than after the first
+        step. ECHAM takes no further step, and neither does jcm.
         """
         T, p = 300.0, 95000.0
         qsat_T = float(saturation_mixing_ratio(
             jnp.asarray(p), jnp.asarray(T)
         ))
-        total_q = 5.0 * qsat_T  # 5x saturated — truly unphysical but exercises
-                                 # the iteration's robustness
+        total_q = 5.0 * qsat_T  # unphysical, to expose the step count
         T_adj, vapor, liquid = self._run(T, total_q, p)
-        qsat_final = float(saturation_mixing_ratio(
-            jnp.asarray(p), T_adj
-        ))
-        rel_error = abs(float(vapor) - qsat_final) / qsat_final
-        self.assertLess(rel_error, 0.01,
-                        f"High-supersaturation case: vapor={float(vapor):.6f} "
-                        f"vs qsat(T_adj)={qsat_final:.6f}, "
-                        f"relative error = {rel_error:.3%}")
+        T_1, vapor_1, _ = cuadjtq(jnp.asarray(T, jnp.float32),
+                                  jnp.asarray(total_q, jnp.float32),
+                                  jnp.asarray(p, jnp.float32),
+                                  kcall=1, refine=False)
+        rh = float(vapor / saturation_mixing_ratio(jnp.asarray(p), T_adj))
+        rh_1 = float(vapor_1 / saturation_mixing_ratio(jnp.asarray(p), T_1))
+        self.assertLess(rh_1, rh)
+        self.assertLess(rh, 1.0)
+        self.assertGreater(float(liquid), 0.0)
 
     def test_batched(self):
         """The adjustment should vectorise correctly across multiple parcels."""

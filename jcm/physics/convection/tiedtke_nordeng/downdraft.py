@@ -20,13 +20,15 @@ from jax import lax
 from typing import NamedTuple, Tuple
 
 import jcm.constants as c
-from jcm.physics.convection.tiedtke_nordeng.cuadjtq import cuadjtq_newton_evap
+from jcm.physics.convection.tiedtke_nordeng.cuadjtq import (
+    cuadjtq,
+    cuadjtq_newton_evap,
+)
 from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 from .tiedtke_nordeng import (
     ConvectionParameters
 )
 from .half_levels import HalfLevelEnvironment
-from .adjustment import cuadjtq
 
 
 class DowndraftState(NamedTuple):

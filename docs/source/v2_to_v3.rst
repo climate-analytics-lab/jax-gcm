@@ -331,9 +331,18 @@ follow their own references, in ``jcm.physics.convection.saturation``
 
    # v2
    from jcm.physics.convection.saturation import cuadjtq_newton, saturation_mixing_ratio
+   from jcm.physics.convection.tiedtke_nordeng.adjustment import cuadjtq
    # v3
    from jcm.physics.convection.tiedtke_nordeng.cuadjtq import (
-       cuadjtq_newton, saturation_mixing_ratio)
+       cuadjtq, cuadjtq_newton, saturation_mixing_ratio)
+
+The three adjustments are one routine, ECHAM's ``mo_cuadjust.f90::cuadjtq``:
+``cuadjtq_newton`` and ``cuadjtq_newton_evap`` are its ``kcall = 1`` and
+``kcall = 2`` modes and take no ``n_refine`` argument, and the
+``tiedtke_nordeng.adjustment`` module is gone. Each takes ECHAM's two steps,
+a clipped first and one unclipped refinement, so a strongly supersaturated
+parcel keeps ECHAM's residual below saturation (6e-5 of ``qs`` at 30 %
+supersaturation and 290 K) rather than being iterated to it.
 
 ``jcm.physics.clouds.sundqvist.saturation_vapor_pressure_water`` and
 ``saturation_vapor_pressure_ice`` are removed; use ``thermodynamics.es_water``
