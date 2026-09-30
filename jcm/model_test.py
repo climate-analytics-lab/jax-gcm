@@ -2514,6 +2514,81 @@ class TestPostPhysicsAnchor(unittest.TestCase):
         self.assertEqual(float(slot["valid"]), 1.0)
         self.assertEqual(set(slot["tracers"]), {"qc", "qi"})
 
+    def test_anchor_carries_this_steps_physics_tendency(self):
+        """The anchor is the post-physics state, not the pre-physics one.
+
+        An upstream term with a constant tendency ``P`` runs before the probe.
+        From step 2 the probe's increment is ``dt·D`` (the prescribed dynamics)
+        plus ``dt·P`` of this step's running tendency. An anchor that dropped
+        the physics tendency (``after_physics_state(state, None)``) would put
+        the previous step's ``dt·P`` into the "dynamics" as well, and a cloud
+        scheme would undo part of its own last step.
+        """
+        from typing import ClassVar
+
+        from jcm.physics.clouds.cloud_inputs import cloud_scheme_inputs
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.physics_term import PhysicsTerm, TracerSpec
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
+
+        p_t, p_q = 2.0e-5, 4.0e-10          # K/s and kg/kg/s, upstream physics
+
+        class _Heater(PhysicsTerm):
+            name: ClassVar[str] = "heater"
+            category: ClassVar[str] = "heater"
+            requires: ClassVar[tuple[str, ...]] = ()
+            provides: ClassVar[tuple[str, ...]] = ()
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                shape = state.temperature.shape
+                return PhysicsTendency.zeros(
+                    shape, temperature=jnp.full(shape, p_t),
+                    specific_humidity=jnp.full(shape, p_q)), diagnostics
+
+        class _Probe(PhysicsTerm):
+            name: ClassVar[str] = "probe"
+            category: ClassVar[str] = "probe"
+            requires: ClassVar[tuple[str, ...]] = ()
+            provides: ClassVar[tuple[str, ...]] = ("probe",)
+            requires_post_physics_fields: ClassVar[tuple[str, ...]] = (
+                "temperature", "specific_humidity", "qc", "qi")
+
+            @classmethod
+            def required_tracers(cls):
+                return (TracerSpec("qc", units="kg/kg"),
+                        TracerSpec("qi", units="kg/kg"))
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                inputs = cloud_scheme_inputs(state, diagnostics)
+                return PhysicsTendency.zeros(state.temperature.shape), {
+                    **diagnostics,
+                    "probe": {"d_temperature": inputs.increment.temperature,
+                              "d_humidity": inputs.increment.specific_humidity},
+                }
+
+        d_t = -jnp.linspace(1e-5, 6e-5, self.NLEV)
+        d_q = jnp.linspace(1e-9, 3e-9, self.NLEV)
+        physics = ComposablePhysics([_Heater(), _Probe()], vectorize_columns=True,
+                                    dt_seconds=self.DT)
+        shape = (self.NLEV, 3, 2)
+        initial = PhysicsState(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=jnp.full(shape, 270.0),
+            specific_humidity=jnp.full(shape, 2e-3),
+            geopotential=jnp.zeros(shape),
+            normalized_surface_pressure=jnp.ones(shape[1:]))
+        _, preds = self._run(physics, d_t, d_q, steps=3, initial=initial)
+        probe = preds.physics["probe"]
+        expected_t = np.broadcast_to(self.DT * (np.asarray(d_t) + p_t)[:, None],
+                                     (self.NLEV, 6))
+        expected_q = np.broadcast_to(self.DT * (np.asarray(d_q) + p_q)[:, None],
+                                     (self.NLEV, 6))
+        for k in (1, 2):
+            np.testing.assert_allclose(np.asarray(probe["d_temperature"][k]),
+                                       expected_t, rtol=2e-3, atol=1e-5)
+            np.testing.assert_allclose(np.asarray(probe["d_humidity"][k]),
+                                       expected_q, rtol=1e-3, atol=1e-11)
+
     def test_composition_without_a_reader_carries_no_slot(self):
         """SPEEDY and Held-Suarez do not pay for the slot; the ECHAM stacks do."""
         from jcm.model import Model
