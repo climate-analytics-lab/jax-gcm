@@ -1,11 +1,17 @@
 """Diagnose physics tendencies from a prescribed atmospheric state series.
 
 .. note:: Carry-resident physics state is NOT threaded here (jax-gcm#623):
-   each evaluated time sees a fresh (zero) cross-step carry, so prognostic
-   carry slots — TTE-TKE turbulence, and the carry-stored cloud-borne
-   aerosol phase (#602 item 3, the JAM storage) — re-diagnose as their
-   cold-start values. For cloud-borne analysis of a saved run, read the
+   each evaluated time sees an empty cross-step carry, so every carry slot
+   takes the value its term assumes without one. Slots a term rebuilds
+   every step lose nothing; state that accumulates across steps does —
+   TTE-TKE turbulence re-diagnoses from zero, and the carry-stored
+   cloud-borne aerosol phase (#602 item 3, the JAM storage), whose only
+   copy lives in the carry, from an empty reservoir. Constructing a
+   ``PrescribedStateModel`` over physics that declares carry slots warns
+   once, naming them. For cloud-borne analysis of a saved run, read the
    run's own ``jam_cloud_borne.*`` output rather than re-diagnosing.
+   Threading the carry (a scan rather than a ``vmap`` over times) is a
+   structural change that is not made here.
 
 
 ``PrescribedStateModel`` computes physics tendencies for each timestep
@@ -177,6 +183,15 @@ class PrescribedStatePredictions:
 class PrescribedStateModel:
     """Compute physics tendencies for a prescribed state time series.
 
+    Each time is evaluated independently (a ``vmap``), so the physics'
+    cross-step carry is not threaded from one time to the next: every time
+    is diagnosed from a cold start, with each carry slot at the value its
+    term assumes without one. That is exact for slots a term rebuilds every
+    step, and a spin-up value for state that accumulates across steps
+    (TTE-TKE turbulence; JAM's cloud-borne aerosol, which re-diagnoses as an
+    empty reservoir). Construction warns once, naming the slots, whenever
+    the physics declares any (``Physics.initial_carry_state``).
+
     Args:
         physics: Physics package whose ``compute_tendencies`` is called per step.
         coords: ``CoordinateSystem`` used for grids and ``physics.cache_coords``.
@@ -217,11 +232,50 @@ class PrescribedStateModel:
             "2000-01-01" if start_time is None else start_time,
             name="start_time")
         self.physics.cache_coords(coords)
+        self._warn_on_severed_carry(coords)
         # Hand the timestep down to the composable-physics container so its
         # terms read a single ``dt`` source — mirrors the wiring in ``Model``
         # and ``SingleColumnModel``.
         if hasattr(self.physics, "dt_seconds"):
             self.physics.dt_seconds = self.dt_seconds
+
+    def _warn_on_severed_carry(self, coords) -> None:
+        """Warn once when the physics keeps state this model cannot thread.
+
+        Evaluating every time independently is what makes this model a
+        ``vmap`` rather than a scan, and it is valid for any physics; for a
+        composition with carry slots it just means that state is
+        re-diagnosed from a cold start at each time (#623). So it warns
+        rather than refuses. Prognostic slots — the only copy of a physical
+        quantity, such as JAM's cloud-borne aerosol — are called out, since
+        for them the cold start is an empty reservoir rather than a stale
+        estimate.
+        """
+        initial_carry_state = getattr(self.physics, "initial_carry_state", None)
+        # Only the slot names are needed; ``eval_shape`` gets them without
+        # allocating the seed (tens of MB for a JAM composition at T63).
+        slots = (sorted(jax.eval_shape(lambda: initial_carry_state(coords)))
+                 if initial_carry_state else [])
+        if not slots:
+            return
+        prognostic = [slot for slot in getattr(
+            self.physics, "prognostic_carry_slots", tuple)() if slot in slots]
+        detail = (f" {', '.join(prognostic)} holds prognostic state (its only "
+                  "copy lives in the carry), so it is re-diagnosed as empty."
+                  if prognostic else "")
+        import warnings
+
+        warnings.warn(
+            "PrescribedStateModel evaluates each time independently, so the "
+            "physics' cross-step carry slots "
+            f"({', '.join(slots)}) are not threaded from one time to the "
+            "next: each time is re-diagnosed from a cold start, with every "
+            "slot at the value its term assumes when no carry is passed. Slots "
+            "a term rebuilds every step are unaffected; state that "
+            "accumulates across steps (such as TTE-TKE turbulence) takes its "
+            f"spin-up value.{detail} To analyse such state from a saved run, "
+            "read that run's own output of it (e.g. jam_cloud_borne.*).",
+            UserWarning, stacklevel=3)
 
     @staticmethod
     def _exact_offsets(times):
