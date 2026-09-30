@@ -15,7 +15,7 @@ from jcm.physics.radiation.mcica import (
     generate_subcolumns,
     in_cloud_path,
 )
-from jcm.physics.radiation.mcica import _alpha_from_overlap
+from jcm.physics.radiation.mcica import _alpha_from_overlap, _rank_chain
 from jcm.testing import check_gradients
 
 
@@ -98,6 +98,131 @@ def test_maximum_random_correlates_within_cloud_bank():
     corr = float(jnp.sum(a * b) / jnp.sqrt(jnp.sum(a * a) * jnp.sum(b * b)))
     # Maximum-random within a continuous bank → identical sub-columns.
     assert corr > 0.99
+
+
+def _echam_total_cover(cloud_fraction):
+    """``mo_radiation.f90`` l.436-442, ECHAM's maximum-random ``cld_cvr``, as its loop runs."""
+    cf = jnp.clip(jnp.asarray(cloud_fraction), 0.0, 1.0)
+    eps = jnp.finfo(cf.dtype).eps
+    clear = 1.0 - cf[0]
+    for k in range(1, cf.shape[0]):
+        clear = clear * (1.0 - jnp.maximum(cf[k], cf[k - 1])) / (
+            1.0 - jnp.minimum(cf[k - 1], 1.0 - eps))
+    return 1.0 - clear
+
+
+def _bank_maximum_cover(cloud_fraction):
+    """One rank per contiguous bank: ``1 − Π_banks (1 − max cover in the bank)``."""
+    clear, bank_max = 1.0, 0.0
+    for c in list(np.asarray(cloud_fraction, np.float64)) + [0.0]:
+        if c > 0.0:
+            bank_max = max(bank_max, c)
+        else:
+            clear *= 1.0 - bank_max
+            bank_max = 0.0
+    return 1.0 - clear
+
+
+def _sampled_cover(cloud_fraction, n, seed):
+    masks = generate_subcolumns(
+        jnp.asarray(cloud_fraction, jnp.float32),
+        _layer_thickness(nlev=len(cloud_fraction)), n_subcols=n,
+        overlap="maximum_random", key=jax.random.PRNGKey(seed))
+    return float(jnp.mean(jnp.max(masks, axis=1)))
+
+
+def test_maximum_random_is_echams_sampler_on_a_bank_with_an_interior_minimum():
+    """ECHAM's sampler keeps a sub-column's rank only under its own cloud.
+
+    ``mo_cld_sampling.f90`` l.66-83: in a bank 0.5 / 0.2 / 0.5 a sub-column
+    clear in the thin middle layer redraws its rank in the clear part, so the
+    two outer layers overlap partly at random. The total cover is ECHAM's
+    ``cld_cvr``, 1 − 0.5·0.8/0.8·0.5/0.8 = 0.6875, not the 0.5 of one rank
+    shared through the bank.
+    """
+    cf = [0.5, 0.2, 0.5]
+    expected = float(_echam_total_cover(jnp.asarray(cf)))
+    assert expected == pytest.approx(0.6875, abs=1e-6)
+    n = 100_000
+    sampled = _sampled_cover(cf, n, seed=5)
+    sigma = np.sqrt(expected * (1.0 - expected) / n)
+    assert abs(sampled - expected) < 5.0 * sigma
+    assert sampled > 0.6
+    assert float(expected_total_cover(
+        jnp.asarray(cf), _layer_thickness(nlev=3))) == pytest.approx(
+            expected, abs=1e-6)
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_maximum_random_cover_is_echams_product_on_random_profiles(seed):
+    """Sampled and expected cover both equal ECHAM's ``cld_cvr``."""
+    rng = np.random.default_rng(100 + seed)
+    cf = (rng.uniform(size=12) * (rng.uniform(size=12) > 0.3)).astype(np.float32)
+    expected = float(_echam_total_cover(jnp.asarray(cf)))
+    n = 40_000
+    sigma = np.sqrt(max(expected * (1.0 - expected), 1e-6) / n)
+    assert abs(_sampled_cover(cf, n, seed) - expected) < 5.0 * sigma
+    np.testing.assert_allclose(
+        float(expected_total_cover(jnp.asarray(cf), _layer_thickness(nlev=12))),
+        expected, rtol=1e-6)
+
+
+@pytest.mark.parametrize("fractions", [
+    [0.2, 0.4, 0.6, 0.0, 0.7, 0.3],      # monotone banks
+    [0.1, 0.5, 0.8, 0.5, 0.2, 0.0, 0.4],  # a single-peaked bank
+    [0.0, 0.5, 0.5, 0.5, 0.0, 0.3, 0.3],  # uniform banks
+])
+def test_maximum_random_without_interior_minimum_keeps_the_bank_maximum(fractions):
+    """Where no bank's cover dips inside it, the two rules give one cover.
+
+    With the cover rising to a single peak and falling after it, a
+    sub-column that is cloudy anywhere in a bank is cloudy at the peak, and
+    one that is clear at the peak is clear in the whole bank, so keeping the
+    rank under cloud or through the whole bank makes no difference to the
+    column cover: ECHAM's ``cld_cvr`` reduces to ``1 − Π (1 − max of each
+    bank)``, the cover of a shared bank rank.
+    """
+    cf = jnp.asarray(fractions, jnp.float32)
+    bank = _bank_maximum_cover(fractions)
+    np.testing.assert_allclose(float(_echam_total_cover(cf)), bank, rtol=1e-6)
+    np.testing.assert_allclose(
+        float(expected_total_cover(cf, _layer_thickness(nlev=len(fractions)))),
+        bank, rtol=1e-6)
+    n = 40_000
+    sigma = np.sqrt(bank * (1.0 - bank) / n)
+    assert abs(_sampled_cover(fractions, n, seed=3) - bank) < 5.0 * sigma
+
+
+@pytest.mark.parametrize("overlap", ["random", "exponential"])
+def test_random_and_exponential_samplers_are_the_rank_chain(overlap):
+    """Those two rules draw exactly the Raisanen chain of ``_alpha_from_overlap``.
+
+    The masks are rebuilt here from the same key splits and draws; the
+    maximum-random rule's own chain leaves these two paths bit for bit
+    as they are.
+    """
+    cf = jnp.asarray(np.random.default_rng(4).uniform(size=_NLEV), jnp.float32)
+    dz = jnp.linspace(200.0, 800.0, _NLEV)
+    key = jax.random.PRNGKey(31)
+    masks = generate_subcolumns(cf, dz, n_subcols=64, overlap=overlap,
+                                decorrelation_km=2.0, key=key)
+    alpha = _alpha_from_overlap(cf, dz, overlap, 2.0)
+
+    def per_subcol(s_key):
+        u_key, y_key = jax.random.split(s_key)
+        u = jax.random.uniform(u_key, (_NLEV,))
+        y = jax.random.uniform(y_key, (_NLEV - 1,))
+        return (_rank_chain(u, y, alpha) < cf).astype(jnp.float32)
+
+    rebuilt = jax.vmap(per_subcol)(jax.random.split(key, 64))
+    np.testing.assert_array_equal(np.asarray(masks), np.asarray(rebuilt))
+
+
+def test_maximum_random_has_no_decorrelation_factor():
+    """The rule keeps ranks by the sub-column's cloud, not by a correlation."""
+    with pytest.raises(ValueError, match="maximum_random"):
+        _alpha_from_overlap(_uniform_cloud(), _layer_thickness(),
+                            "maximum_random", 2.0)
 
 
 def test_exponential_overlap_decays_with_distance():
@@ -235,7 +360,13 @@ def test_effective_fraction_removes_spurious_cover_from_optically_empty_layer():
 
 
 def _unrolled_expected_total_cover(cloud_fraction, layer_thickness, overlap):
-    """Evaluate the former recurrence as an independent test oracle."""
+    """Evaluate the expected cover by an independent test oracle.
+
+    ECHAM's ``cld_cvr`` loop for maximum-random; the rank-segment recurrence,
+    unrolled, for the two correlation rules.
+    """
+    if overlap == "maximum_random":
+        return _echam_total_cover(cloud_fraction)
     cf = jnp.clip(cloud_fraction, 0.0, 1.0)
     alpha = _alpha_from_overlap(cf, layer_thickness, overlap, 2.0)
     clear = [jnp.ones(cf.shape[1:]), 1.0 - cf[0]]
@@ -393,7 +524,8 @@ class TestMcicaGradients:
             lambda f, dz: expected_total_cover(f, dz, overlap=overlap),
             (cloud_fraction, _GRADIENT_DZ), rtol=1e-3, seed=seed)
 
-    def test_subcolumn_masks_carry_no_gradient(self):
+    @pytest.mark.parametrize("overlap", ["exponential", "maximum_random"])
+    def test_subcolumn_masks_carry_no_gradient(self, overlap):
         """The sampler is a hard Bernoulli draw, so its gradient is zero.
 
         ``per_subcol`` returns ``(r < cloud_fraction).astype(float32)``: a
@@ -415,14 +547,14 @@ class TestMcicaGradients:
         key = jax.random.PRNGKey(20260918)
         masks = generate_subcolumns(
             _DECK_CLOUD, _GRADIENT_DZ, n_subcols=32,
-            overlap="exponential", key=key)
+            overlap=overlap, key=key)
         # The draw is a real one, not an all-clear column that would make the
         # zero gradient uninteresting.
         assert 0.0 < float(jnp.mean(masks)) < 1.0
 
         gradients = jax.grad(
             lambda f, dz: jnp.sum(generate_subcolumns(
-                f, dz, n_subcols=32, overlap="exponential", key=key) ** 2),
+                f, dz, n_subcols=32, overlap=overlap, key=key) ** 2),
             argnums=(0, 1),
         )(_DECK_CLOUD, _GRADIENT_DZ)
         for name, gradient in zip(("cloud_fraction", "layer_thickness"),

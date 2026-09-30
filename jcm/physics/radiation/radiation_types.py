@@ -57,19 +57,18 @@ class RadiationParameters:
     # Cloud overlap rule of partial-cloud radiation: the RRTMGP McICA
     # sampler, the grey scheme's clear/cloudy beam weight and the emulator's
     # total-cover diagnostic. 0 = random; 1 = maximum-random
-    # (Geleyn-Hollingsworth: maximum within a contiguous cloud bank, random
-    # across a clear layer); 2 = generalised exponential (Raisanen et al.
-    # 2004) with the decorrelation length below. The default is
+    # (Geleyn-Hollingsworth: maximum overlap of adjacent cloudy layers,
+    # random across a clear layer); 2 = generalised exponential (Raisanen et
+    # al. 2004) with the decorrelation length below. The default is
     # maximum-random, ECHAM6.3's default (``i_overlap = 1``,
-    # mo_radiation_parameters.f90 l.71), whose sampler
-    # (mo_cld_sampling.f90::sample_cld_state) offers maximum-random, maximum
-    # and random only; exponential is a jcm option with no ECHAM
-    # counterpart. jcm's maximum-random sampler keeps one rank through each
-    # contiguous bank, ECHAM's keeps a sub-column's rank only below a cloudy
-    # cell of it (l.66-83); the two give the same total cover except where a
-    # bank's cover has an interior minimum, where ECHAM's is larger (see
-    # docs/source/science/radiation.md). The int codes are the module-level
-    # CLOUD_OVERLAP_* constants; readers resolve the code at trace time.
+    # mo_radiation_parameters.f90 l.71), sampled as ECHAM's
+    # mo_cld_sampling.f90::sample_cld_state samples it (l.66-83: a
+    # sub-column keeps its rank only under its own cloud), whose expected
+    # total cover is ECHAM's cld_cvr (mo_radiation.f90 l.436-442). ECHAM's
+    # sampler offers maximum-random, maximum and random only; exponential is
+    # a jcm option with no ECHAM counterpart. The int codes are the
+    # module-level CLOUD_OVERLAP_* constants; readers resolve the code at
+    # trace time.
     cloud_overlap: int
     # Decorrelation length [km] of the exponential rule (code 2); inert under
     # random and maximum-random.

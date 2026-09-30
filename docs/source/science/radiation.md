@@ -36,15 +36,21 @@ term list):
 **Partial-cloud / overlap** differs by backend. **RRTMGP** uses full **McICA**
 (``jcm/physics/radiation/mcica.py``): one stochastic binary cloud profile per
 g-point, seeded deterministically per column and model step, with three overlap
-rules — random, maximum-random (Geleyn-Hollingsworth: maximum within a
-contiguous cloud bank, random across a clear layer), and
+rules — random, maximum-random (Geleyn-Hollingsworth: maximum overlap of
+adjacent cloudy layers, random across a clear layer), and
 generalised-exponential with a decorrelation length
 (``RadiationParameters.cloud_overlap``, ``cloud_decorrelation_km``). The
 default is **maximum-random**, ECHAM6.3's default (``i_overlap = 1``,
-``mo_radiation_parameters.f90`` l.71, sampled by
-``mo_cld_sampling.f90::sample_cld_state``). ECHAM's sampler also offers
-random overlap (and maximum, which jcm does not); exponential is a jcm option
-with no ECHAM counterpart. The **grey** backend instead combines one clear and one cloudy
+``mo_radiation_parameters.f90`` l.71), sampled as ECHAM's
+``mo_cld_sampling.f90::sample_cld_state`` samples it (l.66-83): from the
+lowest level up, a sub-column keeps its rank where it is cloudy in the level
+below and otherwise draws a new rank in that level's clear part, so its
+expected total cover is ECHAM's ``cld_cvr``, the adjacent-layer
+Geleyn-Hollingsworth product (``mo_radiation.f90`` l.436-442). The rank
+comparisons are piecewise constant in the cover, as the ``r < cf`` test of
+every rule is, so the sampled masks carry no cover gradient and need no
+surrogate. ECHAM's sampler also offers random overlap (and maximum, which jcm
+does not); exponential is a jcm option with no ECHAM counterpart. The **grey** backend instead combines one clear and one cloudy
 beam weighted by the overlap-derived total cover (``column_total_cover``); the
 **NN emulator's** fluxes carry whatever overlap its RRTMGP training labels
 embedded — the network sees only layer cloud fractions and paths, so the
@@ -216,7 +222,7 @@ offers maximum-random, maximum and random, and no exponential rule. Its
 maximum-random sampler (l.66-83) keeps a sub-column's rank below a cloudy cell
 of that sub-column and redraws it in the clear part otherwise, and the total
 cover it reports is the adjacent-layer Geleyn-Hollingsworth product
-(``mo_radiation.f90`` l.436-442). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
+(``mo_radiation.f90`` l.436-442); jcm's McICA samples the same rule. Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
 **RRTMGP** (Pincus, Mlawer & Delamere 2019) with liquid effective radius from
 ``cloud_optical_properties.F90`` (``reltab``). MACv2-SP is Stevens et al. (2017),
 ``mo_bc_aeropt_splumes.f90``. The NN emulator architecture is Ukkonen (2024),
@@ -288,14 +294,6 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   agree to float32 reduction order, which is the check the harness applies.
 
 **Status & known limitations.**
-- **jcm's maximum-random sampler keeps one rank through each contiguous cloud
-  bank**, where ECHAM's keeps a sub-column's rank only below a cloudy cell of
-  it (``mo_cld_sampling.f90`` l.66-83). The two give the same total cover,
-  1 − ∏ over banks of (1 − the bank's maximum), wherever each bank's cover
-  has no interior minimum, and ECHAM's gives more where it has one: a bank of
-  0.5, 0.2, 0.5 covers 0.50 in jcm and 0.69 (the Geleyn-Hollingsworth product)
-  in ECHAM. ``expected_total_cover`` follows jcm's sampler; the AeroCom
-  diagnostic and the offline ``aclcov`` follow ECHAM's product.
 - **The packaged NN emulator was trained on exponential overlap.** Its training
   labels are RRTMGP fluxes under the exponential rule at 2 km, the default when
   they were generated, so under the maximum-random default its fluxes and its
