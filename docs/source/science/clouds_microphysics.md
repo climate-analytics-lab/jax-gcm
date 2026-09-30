@@ -366,8 +366,10 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   1 K), the ice fall speed ``cvtfall·(ρ·q_i)^0.16`` (below
   ``ice_fall_speed_gradient_cutoff`` = 1e-7 kg/m³ the derivative is that of a
   parabola through the origin that matches the power law's value and slope at
-  the cutoff; thin cirrus holds 1e-6 to 1e-4 kg/m³, so the cutoff lies below
-  real cloud, and the largest slope is 1.4e6), and the mean droplet radius of
+  the cutoff, and below zero, for negative provisional ice, that of the
+  parabola's tangent at the origin; thin cirrus holds 1e-6 to 1e-4 kg/m³, so
+  the cutoff lies below real cloud, and the largest slope is 1.4e6 for every
+  ice content), and the mean droplet radius of
   contact freezing (the same parabola in the in-cloud liquid below
   ``contact_freezing_liquid_cutoff`` = 1e-10 kg/kg, about a 0.08 µm droplet).
   The KK2000 option's threshold is a hard gate with a logistic surrogate of

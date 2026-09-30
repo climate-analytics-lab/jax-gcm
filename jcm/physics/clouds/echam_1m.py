@@ -153,9 +153,11 @@ class MicrophysicsParameters:
     phase_switch_ice_width: float = struct.field(pytree_node=False, default=0.1)
     # Below this ice content [kg/m^3] the derivative of the ice fall speed
     # cvtfall*(rho*xi)**0.16 is that of a parabola through the origin, C1 at
-    # the cutoff, instead of the unbounded slope of the power law; the largest
-    # slope is then (2 - 0.16)*cutoff**(-0.84), about 1.4e6. Thin cirrus holds
-    # about 1e-6 to 1e-4 kg/m^3, so 1e-7 lies below real cloud.
+    # the cutoff, instead of the unbounded slope of the power law, and below
+    # zero (negative provisional ice) that of the parabola's tangent at the
+    # origin; the largest slope is then (2 - 0.16)*cutoff**(-0.84), about
+    # 1.4e6, for every ice content. Thin cirrus holds about 1e-6 to
+    # 1e-4 kg/m^3, so 1e-7 lies below real cloud.
     ice_fall_speed_gradient_cutoff: float = struct.field(pytree_node=False,
                                                          default=1.0e-7)
     # Below this in-cloud liquid [kg/kg] the derivative of the contact-freezing
@@ -478,17 +480,24 @@ def ice_phase_weight(temperature, cloud_ice, csecfrl, cthomi, width, ice_width):
 
 def _c1_power(y, exponent, cutoff):
     """``y**exponent`` above ``cutoff``; below it the parabola through the origin
-    that matches the value and slope at ``cutoff``.
+    that matches the value and slope at ``cutoff``, continued below the origin
+    by its tangent there.
 
-    With ``a = exponent`` and ``t = min(y, cutoff)/cutoff``:
-    ``cutoff**a·((2 - a)·t + (a - 1)·t²)`` below the cutoff and
-    ``max(y, cutoff)**a`` above it. The ``min``/``max`` keep the unselected
-    branch free of a singular slope. The slope is at most
-    ``(2 - a)·cutoff**(a - 1)``, and on ``[0, cutoff]`` the parabola differs
-    from ``y**a`` by less than ``cutoff**a``.
+    With ``a = exponent``, ``t = min(y, cutoff)/cutoff`` and
+    ``t₊ = max(t, 0)``: ``cutoff**a·((2 - a)·t + (a - 1)·t₊²)`` below the
+    cutoff and ``max(y, cutoff)**a`` above it. The ``min``/``max`` keep the
+    unselected branch free of a singular slope. The slope is
+    ``(2 - a)·cutoff**(a - 1)`` at and below the origin and falls to
+    ``a·cutoff**(a - 1)`` at the cutoff, so that is its bound for every
+    ``y``, negative arguments included: the provisional ice of the sweep is
+    negative after an advective undershoot, where the reference value is
+    flat on ECHAM's floor. On ``[0, cutoff]`` the parabola differs from
+    ``y**a`` by less than ``cutoff**a``.
     """
     t = jnp.minimum(y, cutoff) / cutoff
-    low = cutoff ** exponent * ((2.0 - exponent) * t + (exponent - 1.0) * t * t)
+    t_pos = jnp.maximum(t, 0.0)
+    low = cutoff ** exponent * ((2.0 - exponent) * t
+                                + (exponent - 1.0) * t_pos * t_pos)
     high = jnp.maximum(y, cutoff) ** exponent
     return jnp.where(y < cutoff, low, high)
 

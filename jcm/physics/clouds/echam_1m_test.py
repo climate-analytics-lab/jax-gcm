@@ -1049,10 +1049,21 @@ class TestSurrogates:
         above = np.asarray(grid) >= cutoff
         assert np.all(dist[above] == 0.0)
         assert np.max(dist) < cutoff ** 0.16
-        # The slope is bounded by (2 - a)·cutoff**(a - 1) everywhere.
-        slope = jax.vmap(jax.grad(lambda x: wrapped(x, 1e-16)))(grid)
+        # The slope is bounded by (2 - a)·cutoff**(a - 1) everywhere, negative
+        # provisional ice (an advective undershoot, where the value is flat on
+        # ECHAM's floor) included: there it is the tangent at the origin.
+        bound = (2 - 0.16) * cutoff ** (-0.84)
+        negative = -jnp.geomspace(1e-3, 1e-12, 200)
+        slope = jax.vmap(jax.grad(lambda x: wrapped(x, 1e-16)))(
+            jnp.concatenate([negative, grid]))
         assert np.all(np.isfinite(np.asarray(slope)))
-        assert np.max(np.asarray(slope)) <= (2 - 0.16) * cutoff ** (-0.84) * (1 + 1e-12)
+        assert np.max(np.asarray(slope)) <= bound * (1 + 1e-12)
+        assert np.min(np.asarray(slope)) > 0.0
+        np.testing.assert_allclose(np.asarray(slope)[:200], bound, rtol=1e-12)
+        # ... and the value there is ECHAM's floored one.
+        np.testing.assert_array_equal(
+            np.asarray(wrapped(negative, jnp.full_like(negative, 1e-16))),
+            np.asarray(exact(negative, jnp.full_like(negative, 1e-16))))
         # No ice and a trace of ice have nearly the same slope.
         g0 = f(jax.grad(lambda x: wrapped(x, 1e-16))(0.0))
         g1 = f(jax.grad(lambda x: wrapped(x, 1e-16))(1e-30))
