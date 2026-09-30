@@ -165,8 +165,8 @@ over water.
   ``dqsat_dT_from_es`` and the phase-selected
   ``saturation_specific_humidity(_and_derivative)``.
 - ``jcm/physics/convection/tiedtke_nordeng/cuadjtq.py`` —
-  ``saturation_mixing_ratio``, ``cuadjtq_newton``, ``cuadjtq_newton_evap``
-  (the convection's saturation and its adjustment).
+  ``saturation_mixing_ratio``, ``cuadjtq``, ``cuadjtq_newton``,
+  ``cuadjtq_newton_evap`` (the convection's saturation and its adjustment).
 - ``jcm/physics/clouds/sundqvist.py::_qs_cover`` — the cover's ``lo2``
   saturation.
 
@@ -174,3 +174,7 @@ over water.
 functions with ECHAM's own compiled tables in float64 (rtol 1e-11 in ``es``,
 4e-9 in the slope) and float32 (2e-5, 2e-6), pins the phase rule, the jump at
 the melting point, ECHAM's ``qs`` form and its slope.
+``jcm/physics/convection/tiedtke_nordeng/cuadjtq_test.py`` compares the
+convection's saturation adjustment with ECHAM's compiled ``cuadjtq`` in all
+three ``kcall`` modes, float64 and float32
+(``jcm/data/test/echam_cuadjtq_reference/``).

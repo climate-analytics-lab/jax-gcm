@@ -32,8 +32,10 @@ from typing import NamedTuple
 import jax.numpy as jnp
 
 import jcm.constants as c
-from jcm.physics.convection.tiedtke_nordeng.cuadjtq import saturation_mixing_ratio
-from .adjustment import cuadjtq
+from jcm.physics.convection.tiedtke_nordeng.cuadjtq import (
+    cuadjtq,
+    saturation_mixing_ratio,
+)
 
 
 class HalfLevelEnvironment(NamedTuple):

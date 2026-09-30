@@ -1855,12 +1855,12 @@ class TiedtkeConvection(PhysicsTerm):
         # symmetrically. Healthy deep convection over the warmest tropical
         # SSTs gives ~1 K/hr at the most active level; the cap only fires
         # when the column's parcel-vs-environment energy balance has gone
-        # pathological. The companion cloud-base mass-flux CFL cap inside
-        # ``tiedtke_nordeng_convection`` bounds the column-integrated mass
-        # flux but does not contain per-level latent-heat spikes inside
-        # the updraft loop — ECHAM bounds those via the per-level moist-
-        # adjustment limits in ``mo_cuadjust.f90`` which we have not yet
-        # ported. Until that lands this cap is the safety net.
+        # pathological. ECHAM limits the mass flux, not the heating: the
+        # cloud-base CFL cap inside ``tiedtke_nordeng_convection`` and the
+        # per-level entrainment limits of the ascent (``zmfmax``,
+        # mo_cumastr.f90 / mo_cuascent.f90::cuasc, both ported) have no
+        # tendency bound, and this cap is jcm's own safety net with no
+        # ECHAM counterpart (#961).
         # Where the cap fires, scale the WHOLE per-level ledger by the same
         # factor rather than clipping T alone: clipping only the heating
         # decoupled the T/q pair (moistening continued at the uncapped rate
@@ -1878,8 +1878,7 @@ class TiedtkeConvection(PhysicsTerm):
         # rescale is exactly how ECHAM's own zmfub1 amplitude scaling
         # acts, so proportionality inside the ledger is preserved and
         # column conservation is exact by linearity. The cap itself
-        # remains the documented stopgap for the unported mo_cuadjust
-        # per-level limits.
+        # remains the documented stopgap (#961).
         cap_scale = _tendency_cap_scale(tendencies_all.dtedt)
         cap_scale_col = cap_scale[:, 0]
 
