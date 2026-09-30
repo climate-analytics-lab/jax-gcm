@@ -2415,7 +2415,7 @@ class TestPostPhysicsAnchor(unittest.TestCase):
     NLEV = 6
 
     def _run(self, physics, d_temperature, d_humidity=0.0, steps=3,
-             initial=None):
+             initial=None, **run_kwargs):
         from jcm.forcing import ForcingData
         from jcm.model import Model
 
@@ -2427,7 +2427,8 @@ class TestPostPhysicsAnchor(unittest.TestCase):
         step_days = self.DT / 86400.0
         preds = model.run(initial_state=state,
                           forcing=ForcingData.zeros(dycore.coords.horizontal.nodal_shape),
-                          save_interval=step_days, total_time=steps * step_days)
+                          save_interval=step_days, total_time=steps * step_days,
+                          **run_kwargs)
         return model, preds
 
     def test_dynamics_increment_equals_the_prescribed_dynamics(self):
@@ -2647,3 +2648,14 @@ class TestPostPhysicsAnchor(unittest.TestCase):
             np.asarray(blind_forced.physics["_prev_step"]["q_tendency"][1][k])
             - np.asarray(blind_still.physics["_prev_step"]["q_tendency"][1][k]))
         self.assertLess(float(np.max(np.abs(blind))), 0.02 * zqcdif)
+
+    def test_averaged_output_mode_carries_the_slot(self):
+        """The averaging accumulator's template has the slot too (same structure)."""
+        cooling = jnp.zeros(self.NLEV).at[self.CLOUD_LEVEL].set(-5.0e-4)
+        model, preds = self._run(self._two_moment_physics(), cooling, steps=4,
+                                 initial=self._cloudy_initial_state(),
+                                 output_averages=True)
+        self.assertEqual(float(model.physics_carry["_post_physics_state"]["valid"]),
+                         1.0)
+        for leaf in jax.tree.leaves(preds.dynamics):
+            self.assertTrue(np.isfinite(np.asarray(leaf)).all())
