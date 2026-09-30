@@ -1127,11 +1127,11 @@ ECHAM's moisture-convergence test; the precipitation onset is ECHAM's
 energy, the sub-cloud supply integrates the whole pre-convection moisture
 tendency (dynamics included) with no evaporation floor, a downdraft whose
 level of free sinking lies above the final top is cancelled, and a failed
-first ascent leaves no surface plume for the second. On 738 columns the port
+first ascent leaves no surface plume for the second. On 758 columns the port
 takes ECHAM6.3's decision on every one, and matches its fluxes and tendencies
 to 2e-12, when it runs with ECHAM's physical constants
-(``cumastr_reference_test.py``). jcm keeps its own constants: they change 63
-of those 738 decisions, 61 of them through ``rv`` (461.0 against ECHAM's
+(``cumastr_reference_test.py``). jcm keeps its own constants: they change 70
+of those 758 decisions, 68 of them through ``rv`` (461.0 against ECHAM's
 461.51); see :doc:`science/convection`.
 
 **This changes results for every ECHAM configuration.** The derivatives are

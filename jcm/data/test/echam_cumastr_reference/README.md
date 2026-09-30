@@ -1,7 +1,7 @@
-# ECHAM6.3 convection, evaluated on 738 columns
+# ECHAM6.3 convection, evaluated on 758 columns
 
 `echam_cumastr.npz` holds what ECHAM6.3-HAM2.3 (r7492)
-`mo_cumastr.f90::cucall` returns for 738 single-column states: the convective
+`mo_cumastr.f90::cucall` returns for 758 single-column states: the convective
 decisions (`ldcum`, `ktype`, `kcbot`, `kctop`), the final cloud-base mass
 flux, the surface rain and snow, and the temperature and humidity tendencies
 per level. `jcm/physics/convection/tiedtke_nordeng/cumastr_reference_test.py`
@@ -26,6 +26,7 @@ radiative-convective column of `jcm/rce_test.py::TestRceWholeModelTiedtke`
 | `zlo1_rce_fogged`, `zlo1_rce_warm` | every captured column where `cubase` finds a cloud base and `zlo1` rejects it | 27 | the `zdqpbl > 0` gate |
 | `zlo1_excess_rce_fogged`, `zlo1_excess_rce_warm` | 40 captured columns of each, the two levels above the lowest made nearly as humid as it | 80 | the `zqumqe > zdqmin` gate |
 | `zlo1_midlevel_rce_fogged`, `zlo1_midlevel_rce_warm` | 15 captured columns of each, with a synthetic sub-cloud divergence under a resolved ascent | 30 | a surface plume `zlo1` rejects and a mid-level plume in the first ascent |
+| `subcloud_evaporation_rce_fogged`, `subcloud_evaporation_rce_warm` | 10 captured columns of each whose convective rain evaporates below cloud base | 20 | the `cevapcu` profile of the sub-cloud evaporation |
 | `downdraft_cancel_rce_fogged` | the one captured column whose downdraft `cuflx` cancels (level of free sinking above the final top) | 1 | `IF (kdtop < kctop) lddraf = .FALSE.` |
 
 The RCE columns are stratified by what jcm's scheme did at the time of
@@ -96,13 +97,13 @@ the full-level geopotential `pgeo`, built as jcm's
 The cloud base, the final cloud-base mass flux and the `ldcum` flag are not
 among `cucall`'s arguments. They were read from a second build of the same
 routines with assignments to a diagnostics module added and nothing else
-changed; the two builds return bit-identical outputs on all 738 columns.
+changed; the two builds return bit-identical outputs on all 758 columns.
 
 ## Arrays
 
 | name | unit | meaning |
 |---|---|---|
-| `input_<argument>` | as jcm's | the arguments of `tiedtke_nordeng_convection`, top-first, `(738, 47)` or `(738,)`; `input_pressure_half` is `(738, 48)` |
+| `input_<argument>` | as jcm's | the arguments of `tiedtke_nordeng_convection`, top-first, `(758, 47)` or `(758,)`; `input_pressure_half` is `(758, 48)` |
 | `dt` | s | the time step, 900 |
 | `group`, `sample_class`, `source_step` | – | see above |
 | `eta_full` | – | the `eta` of ECHAM's `cevapcu` profile |

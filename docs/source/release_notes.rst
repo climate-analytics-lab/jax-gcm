@@ -1277,13 +1277,13 @@ Tiedtke-Nordeng takes ECHAM's decisions
 - Each decision's derivative is that of a logistic surrogate
   (``tiedtke_nordeng/switches.py``, :doc:`design/surrogate_gradients`); the
   value does not depend on the widths.
-- ECHAM6.3's compiled convection, run on 738 columns (whole-model RCE states,
+- ECHAM6.3's compiled convection, run on 758 columns (whole-model RCE states,
   and the same states under a synthetic ascent, convergence or divergence
   that exercise the mid-level and deep plumes and the ``zlo1`` gate), is the reference
   (``jcm/data/test/echam_cumastr_reference``): with ECHAM's physical
   constants jcm takes its decision on every column and matches its cloud-base
   flux, precipitation and tendencies to 2e-12. jcm keeps its own constants,
-  which change 63 of the 738 decisions, 61 of them through ``rv`` (461.0
+  which change 70 of the 758 decisions, 68 of them through ``rv`` (461.0
   against 461.51); on the whole-model RCE column's days 40-80 states the port
   then convects in 10.9 % of the steps where ECHAM convects in 24.3 %.
 - **Breaking:** ``ConvectionParameters`` loses ``trigger_cape``,
