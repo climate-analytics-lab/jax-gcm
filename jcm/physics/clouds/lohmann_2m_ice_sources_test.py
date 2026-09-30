@@ -1,9 +1,25 @@
 """Ice sources and number bookkeeping of the Lohmann 2M scheme (#941).
 
 The rules ECHAM6.3-HAM2.3 applies to convectively detrained condensate and
-to the ice crystal number in ``mo_cloud_micro_2m.f90`` (F below), and jcm's
-own closures around them. Kept apart from ``lohmann_2m_test.py`` (already
-~3000 lines) so the #941 contract reads as one unit.
+to the ice crystal number, which the 2M column function carries alongside
+the rest of ``mo_cloud_micro_2m.f90`` (F below):
+
+- detrained ice is not sedimented in the step it arrives (F 1227-1248);
+- it carries its own crystal number ``znidetr`` at the temperature-
+  parameterised radius ``zrid`` (F 945-982, 1251-1252);
+- ``zrid`` is also the radius of the ICNC diagnosis (F 1511, 2616);
+- the section-4 phase criterion ``lo2`` re-splits the detrained condensate,
+  with the matching latent-heat correction (F 1276-1317);
+- the number tendencies are taken against the raw step-start tracers
+  (F 1781, 3625-3628);
+
+plus jcm's own closures: the JAM/DeMott INP maximum (a stopgap tracked in
+#953), DeMott (2010) per standard litre converted to ambient density, and
+the mixed-phase freezing substitute capped by the droplets available.
+
+Kept apart from ``lohmann_2m_test.py`` (already ~3000 lines) so the #941
+contract reads as one unit; the column water/enthalpy budgets with
+detrainment present extend the conservation classes there.
 """
 
 import jax
@@ -18,6 +34,7 @@ from jcm.testing import check_gradients
 from .cloud_utils import (
     detrained_ice_crystal_number,
     ice_volume_mean_radius_from_temperature,
+    latent_heat_over_cp,
 )
 from .lohmann_2m import cloud_microphysics_2m, demott2010_inp
 from .lohmann_2m import scheme as scheme_mod
@@ -352,6 +369,98 @@ class TestIcncDiagnosisRadius:
 
 
 # ---------------------------------------------------------------------------
+# ICE-4: the detrained condensate is re-split by lo2
+# ---------------------------------------------------------------------------
+
+
+class TestDetrainmentPhaseSplit:
+    """``zxtec`` goes to ice where ``lo2`` holds, liquid elsewhere (F 1301-1317).
+
+    The re-split makes the scheme's result independent of how the
+    convection scheme split the condensate, PROVIDED the provisional
+    temperature carries the latent heat of that split (convection heats ice
+    with Ls, liquid with Lv). Each test runs the same detrainment both ways
+    and requires identical end states — which pins the reclassification
+    and its fusion-heat correction together, exactly.
+    """
+
+    N = 8
+    K = 3
+    D = 2e-5
+
+    def _pair(self, T_value, tke):
+        n = self.N
+        T = jnp.full(n, T_value)
+        p = jnp.linspace(4e4, 7e4, n)
+        rho = p / (287.0 * T)
+        q = 0.98 * _qsat(T, p, "water")
+        lvdcp, lsdcp = latent_heat_over_cp(q)
+        d = jnp.zeros(n).at[self.K].set(self.D)
+        base = dict(p=p, rho=rho, q=q, q_m1=q, T_m1=T, cf=jnp.full(n, 0.6),
+                    tke=jnp.full(n, tke), qc_m1=jnp.zeros(n),
+                    qi_m1=jnp.zeros(n))
+        as_ice = dict(base, T=T + (lsdcp - lvdcp) * d, qc=jnp.zeros(n),
+                      qi=d, det_qc=jnp.zeros(n), det_qi=d)
+        as_liquid = dict(base, T=T, qc=d, qi=jnp.zeros(n), det_qc=d,
+                         det_qi=jnp.zeros(n))
+        return as_ice, as_liquid, (lsdcp - lvdcp)
+
+    def _assert_same_end_state(self, a, out_a, b, out_b):
+        # The tolerances are float32 round-off of the provisional
+        # temperature (one ulp at 250 K is 1.5e-5 K, which the saturation
+        # adjustment turns into ~1e-10 kg/kg); a missing or wrong fusion-heat
+        # correction shifts T by (Ls−Lv)/cp·D ≈ 7e-3 K.
+        for name, x, y, tol in zip(
+                ("T", "q", "qc", "qi"), _end_state(a, out_a),
+                _end_state(b, out_b), (1e-4, 2e-9, 2e-9, 2e-9)):
+            np.testing.assert_allclose(np.asarray(x), np.asarray(y),
+                                       atol=tol, rtol=0, err_msg=name)
+        np.testing.assert_allclose(float(out_a[1] + out_a[2]),
+                                   float(out_b[1] + out_b[2]),
+                                   rtol=1e-5, atol=1e-12)
+
+    def test_below_cthomi_detrained_liquid_ends_as_ice(self):
+        as_ice, as_liquid, _ = self._pair(230.0, tke=0.5)
+        out_i, out_l = _run(as_ice), _run(as_liquid)
+        self._assert_same_end_state(as_ice, out_i, as_liquid, out_l)
+        _, _, qc_end, qi_end = _end_state(as_liquid, out_l)
+        assert abs(float(qc_end[self.K])) < 1e-12, "liquid survived < cthomi"
+        assert float(qi_end[self.K]) > 0.3 * self.D
+        assert_column_budgets_close("liquid→ice", as_liquid, out_l)
+        assert_column_budgets_close("ice kept", as_ice, out_i)
+
+    def test_mixed_phase_without_lo2_detrained_ice_ends_as_liquid(self):
+        # Turbulent (TKE > 0) and crystal-free: the updraft exceeds the
+        # Korolev/Mazin threshold, so lo2 is false and the ice is liquid.
+        as_ice, as_liquid, fusion_over_cp = self._pair(258.0, tke=0.5)
+        out_i, out_l = _run(as_ice), _run(as_liquid)
+        self._assert_same_end_state(as_ice, out_i, as_liquid, out_l)
+        _, _, qc_end, qi_end = _end_state(as_ice, out_i)
+        assert float(qc_end[self.K]) > 0.3 * self.D, "ice not made liquid"
+        assert abs(float(qi_end[self.K])) < 1e-12
+        # The reclassified mass ``move = D`` carries −(Ls−Lv)/cp·move/dt:
+        # it is the whole difference between the two temperature tendencies.
+        diff = np.asarray(out_i[0].dtedt - out_l[0].dtedt)
+        expected = -np.asarray(fusion_over_cp) * self.D / DT
+        np.testing.assert_allclose(diff[self.K], expected[self.K],
+                                   rtol=1e-3)
+        np.testing.assert_allclose(np.delete(diff, self.K), 0.0, atol=1e-9)
+        assert_column_budgets_close("ice→liquid", as_ice, out_i)
+        assert_column_budgets_close("liquid kept", as_liquid, out_l)
+
+    def test_mixed_phase_with_lo2_detrained_liquid_ends_as_ice(self):
+        # Quiescent (TKE = 0): the updraft never exceeds the threshold, so
+        # lo2 holds and the condensate is ice.
+        as_ice, as_liquid, _ = self._pair(258.0, tke=0.0)
+        out_i, out_l = _run(as_ice), _run(as_liquid)
+        self._assert_same_end_state(as_ice, out_i, as_liquid, out_l)
+        _, _, qc_end, qi_end = _end_state(as_liquid, out_l)
+        assert abs(float(qc_end[self.K])) < 1e-12
+        assert float(qi_end[self.K]) > 0.3 * self.D
+        assert_column_budgets_close("mixed liquid→ice", as_liquid, out_l)
+
+
+# ---------------------------------------------------------------------------
 # ICE-5: number tendencies against the raw tracers
 # ---------------------------------------------------------------------------
 
@@ -535,3 +644,124 @@ class TestFreezingSubstituteNumberCap:
         deck = np.asarray(deck)
         assert np.all(icnc_end[deck]
                       <= 1.0001 * (cdnc_start + icnc_start)[deck])
+
+
+# ---------------------------------------------------------------------------
+# Gradients and shapes
+# ---------------------------------------------------------------------------
+
+
+class TestIceSourceGradients:
+    """AD through zrid, znidetr, the DeMott floor and the raw-tracer tendency.
+
+    The column carries condensate, cover and detrainment at every level, off
+    the scheme's exact-zero switches (see ``TestSchemeGradients2M``), cold
+    enough that detrained ice keeps its number (ll_cv) and with a
+    liquid-bearing, crystal-poor layer where the DeMott floor is active.
+    """
+
+    NLEV = 12
+
+    def _column(self):
+        n = self.NLEV
+        T = jnp.linspace(222.0, 262.0, n)
+        p = jnp.linspace(2.0e4, 6.5e4, n)
+        rho = p / (287.0 * T)
+        q = 0.97 * _qsat(T, p, "ice")
+        qi_m1 = jnp.full(n, 4.1e-6).at[2:6].set(6.3e-5)
+        qc_m1 = jnp.full(n, 2.3e-6).at[8:11].set(2.1e-4)
+        det_qi = jnp.full(n, 3.3e-6).at[3:7].set(1.7e-5)
+        det_qc = jnp.full(n, 1.1e-7)
+        return dict(
+            T=T + 0.2, T_m1=T, q=q, q_m1=q, p=p, rho=rho,
+            qc_m1=qc_m1, qi_m1=qi_m1, det_qc=det_qc, det_qi=det_qi,
+            qc=qc_m1 + det_qc, qi=qi_m1 + det_qi,
+            qnc=5.3e7 * qc_m1 / 2.1e-4 + 1.0e6,
+            qni=jnp.full(n, 3.1e3).at[2:6].set(2.2e4).at[8:11].set(40.0),
+            cf=jnp.full(n, 0.21).at[2:7].set(0.62).at[8:11].set(0.71),
+            tke=jnp.full(n, 0.13),
+        )
+
+    def _fn(self, col):
+        def f(conv_effr2mvr, n_aer_coarse, det_qi, qni):
+            params = _P.replace(conv_effr2mvr=conv_effr2mvr,
+                                n_aer_coarse=n_aer_coarse)
+            c2 = dict(col, det_qi=det_qi, qi=col["qi_m1"] + det_qi, qni=qni)
+            return _tendency_outputs(_run(c2, params=params))
+        return f
+
+    def _args(self, col):
+        return (_P.conv_effr2mvr, _P.n_aer_coarse, col["det_qi"], col["qni"])
+
+    @pytest.mark.parametrize("seed", [0, 5])
+    def test_gradients_match_a_central_difference(self, seed):
+        col = self._column()
+        check_gradients(self._fn(col), self._args(col), rtol=1e-2,
+                        seed=seed, adjoint_rtol=1e-3)
+
+    def test_new_inputs_carry_live_finite_gradients(self):
+        col = self._column()
+        f = self._fn(col)
+        grads = jax.grad(
+            lambda *a: sum(jnp.sum(x ** 2) for x in f(*a)),
+            argnums=(0, 1, 2, 3))(*self._args(col))
+        for name, g in zip(("conv_effr2mvr", "n_aer_coarse", "det_qi", "qni"),
+                           grads):
+            assert bool(jnp.all(jnp.isfinite(g))), name
+            # This column's crystals (detrained, and sedimented in from the
+            # ice aloft) outnumber the DeMott INP everywhere, so the floor
+            # is legitimately inactive here; TestInpFloor pins its gradient.
+            if name != "n_aer_coarse":
+                assert bool(jnp.any(g != 0.0)), f"d/d{name} is zero"
+
+    def test_gradients_finite_at_degenerate_points(self):
+        base = self._column()
+        n = self.NLEV
+        zeros = jnp.zeros(n)
+        for label, over in (
+                ("no detrainment", dict(det_qi=zeros, det_qc=zeros)),
+                ("zero raw number", dict(qni=zeros)),
+                ("negative raw number", dict(qni=jnp.full(n, -50.0))),
+                ("clear column", dict(cf=zeros)),
+        ):
+            col = dict(base, **over)
+            f = self._fn(col)
+            args = (_P.conv_effr2mvr, _P.n_aer_coarse, col["det_qi"],
+                    col["qni"])
+            grads = jax.grad(
+                lambda *a: sum(jnp.sum(x ** 2) for x in f(*a)),
+                argnums=(0, 1, 2, 3))(*args)
+            for g in grads:
+                assert bool(jnp.all(jnp.isfinite(g))), label
+
+
+class TestColumnAndVmapAgree:
+    """A ``(kx,)`` column and a vmapped batch agree per column."""
+
+    def test_vmap_matches_single_columns(self):
+        g = TestIceSourceGradients()
+        cols = [g._column(), dict(g._column(), tke=jnp.full(g.NLEV, 0.9)),
+                dict(g._column(), det_qi=jnp.zeros(g.NLEV),
+                     qi=g._column()["qi_m1"])]
+        keys = ("T", "q", "p", "qc", "qi", "qnc", "qni", "cf", "rho", "tke",
+                "T_m1", "q_m1", "qc_m1", "qi_m1", "det_qc", "det_qi")
+        stacked = {k: jnp.stack([col[k] for col in cols], axis=0)
+                   for k in keys}
+        n = g.NLEV
+
+        def one(T, q, p, qc, qi, qnc, qni, cf, rho, tke, T_m1, q_m1,
+                qc_m1, qi_m1, det_qc, det_qi):
+            return cloud_microphysics_2m(
+                T, q, p, qc, qi, qnc, qni, cf, rho, jnp.full(n, 500.0), tke,
+                jnp.full(n, 5e7), jnp.zeros(n), jnp.zeros(n), DT, _P,
+                temperature_m1=T_m1, specific_humidity_m1=q_m1,
+                qc_m1=qc_m1, qi_m1=qi_m1,
+                detrained_qc=det_qc, detrained_qi=det_qi)
+
+        batched = jax.vmap(one)(*(stacked[k] for k in keys))
+        for i, col in enumerate(cols):
+            single = _run(col)
+            for x, y in zip(jax.tree.leaves(single),
+                            jax.tree.leaves(batched)):
+                np.testing.assert_allclose(np.asarray(y)[i], np.asarray(x),
+                                           rtol=1e-5, atol=1e-12)

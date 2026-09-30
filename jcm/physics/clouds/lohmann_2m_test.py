@@ -2072,7 +2072,7 @@ class TestColumnEnthalpyConservation2M:
     DT = 1800.0
 
     @staticmethod
-    def _run(cols):
+    def _run(cols, **extra):
         from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
         from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
 
@@ -2083,6 +2083,7 @@ class TestColumnEnthalpyConservation2M:
             T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke,
             jnp.full(nlev, 5e7), inp, z,
             TestColumnEnthalpyConservation2M.DT, CloudParams2M.default(),
+            **extra,
         )
         return tend, float(rain_sfc), float(snow_sfc)
 
@@ -2102,12 +2103,18 @@ class TestColumnEnthalpyConservation2M:
         )
 
     @staticmethod
-    def _assert_enthalpy_closes(name, cols):
-        """Assert the identity above and return (residual, gross) [W/m²]."""
+    def _assert_enthalpy_closes(name, cols, **extra):
+        """Assert the identity above and return (residual, gross) [W/m²].
+
+        ``extra`` passes step-start anchors and detrainment through; the
+        humidity anchor must stay the fixture's ``q`` (the cp below uses it).
+        """
         import numpy as np
         import jcm.constants as c
 
-        tend, rain_sfc, snow_sfc = TestColumnEnthalpyConservation2M._run(cols)
+        assert "specific_humidity_m1" not in extra
+        tend, rain_sfc, snow_sfc = TestColumnEnthalpyConservation2M._run(
+            cols, **extra)
         _, q, _, _, _, _, _, _, rho, dz, _, _ = cols
         mass = np.asarray(rho * dz)                       # [kg/m²] per level
 
@@ -2227,6 +2234,46 @@ class TestColumnEnthalpyConservation2M:
         _, _, snow_sfc = self._run(cols)
         assert snow_sfc > 0.0, "fallout never reached the ground"
         self._assert_enthalpy_closes("cold ice to surface", cols)
+
+    @pytest.mark.parametrize("fixture, phase, tke", [
+        ("warm", "liquid", None),
+        ("mixed", "ice", 0.0),      # lo2 holds: the ice stays ice
+        ("mixed", "ice", 5.0),      # lo2 fails: ice re-split to liquid
+        ("mixed", "liquid", 0.0),   # liquid re-split to ice
+        ("mixed", "liquid", 5.0),
+        ("cold", "ice", None),
+    ])
+    def test_enthalpy_closes_with_convective_detrainment(
+            self, fixture, phase, tke):
+        """Detrained condensate in ``qc``/``qi`` keeps the identity exact (#941).
+
+        The fixture's condensate becomes the step-start state and
+        convection adds 4e-5 kg/kg of liquid or ice in the cloudy layers
+        (plus a clear layer above them). The re-split by ``lo2`` moves
+        mass between qc and qi with the fusion heat at the scheme's moist
+        cp, in either direction, so the identity holds whichever phase the
+        convection chose and whichever ``lo2`` decides.
+        """
+        if fixture == "warm":
+            cols = self._warm_liquid()
+        elif fixture == "mixed":
+            cols = self._wbf_mixed_phase(tke=tke)
+        else:
+            cols = self._cold_ice_to_surface()
+        T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke_col, inp = cols
+        nlev = T.shape[0]
+        cloudy = (qc + qi) > 0
+        first = int(jnp.argmax(cloudy))
+        layers = cloudy.at[max(first - 1, 0)].set(True)
+        det = jnp.where(layers, 4e-5, 0.0)
+        det_qc = det if phase == "liquid" else jnp.zeros(nlev)
+        det_qi = det if phase == "ice" else jnp.zeros(nlev)
+        cols = (T, q, p, qc + det_qc, qi + det_qi, qnc, qni,
+                jnp.where(layers, jnp.maximum(cf, 0.5), cf),
+                rho, dz, tke_col, inp)
+        self._assert_enthalpy_closes(
+            f"{fixture}/{phase}/tke={tke}", cols,
+            qc_m1=qc, qi_m1=qi, detrained_qc=det_qc, detrained_qi=det_qi)
 
     def test_enthalpy_closes_cloud_ice_above_freezing(self):
         """Cloud ice above 0 °C must melt exactly once.

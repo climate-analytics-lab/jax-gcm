@@ -129,7 +129,8 @@ def ice_volume_mean_radius_schumann(
     ``threshold_vert_vel`` at every Wegener-Bergeron-Findeisen decision, and
     jcm uses it at all four: the section-1 criterion ``lo2_2d`` that gates the
     crystal number of detrained ice (lines 872-885), the section-4 phase choice
-    ``lo2`` (line 1288), the section-5 supersaturation correction
+    ``lo2`` that also re-splits the detrained condensate (line 1288), the
+    section-5 supersaturation correction
     (``mixed_phase_deposition_and_corrections``, line 2374) and the WBF gate
     (line 1582). The plate relation of :func:`ice_volume_mean_radius` is
     ECHAM's for aggregation only.

@@ -124,8 +124,10 @@ def cloud_microphysics_2m(
             sinks cannot claim the same mass (#662 finding 2).
       3.2/3 Snow/ice sublimation + rain evaporation on the incoming
             fluxes (:func:`sublimation_snow_and_ice_evaporation_rain`).
-      (4b)  Phase decision ``lo2`` (ECHAM 1276-1298); then the in-cloud
-            condensate prep with clear-sky evaporation
+      (4b)  Phase decision ``lo2`` (ECHAM 1276-1298), which also
+            re-splits the detrained condensate into ice and liquid with
+            the matching latent-heat correction (1301-1317); then the
+            in-cloud condensate prep with clear-sky evaporation
             ``zxlevap``/``zxievap`` (1319-1385): condensate in cells with
             no cloud, and the clear-sky share of positive increments,
             evaporates back to vapour.
@@ -181,9 +183,9 @@ def cloud_microphysics_2m(
     condensate the convection scheme added to ``qc``/``qi`` this step
     (ECHAM ``ztmst·pxtecl``/``ztmst·pxteci``; default zero). ECHAM's 2M
     uses only their sum ``zxtec`` (the boundary condition 'Detrained
-    condensate', 555-570): it is not sedimented this step and it brings
-    its own crystal number ``znidetr`` where ECHAM's ``ll_cv`` holds. The
-    phases stay as the convection scheme split them.
+    condensate', 555-570): it is not sedimented this step, it brings its
+    own crystal number ``znidetr`` where ECHAM's ``ll_cv`` holds, and the
+    section-4 ``lo2`` criterion re-splits it into ice and liquid.
 
     The large-scale vertical velocity is not plumbed to this scheme yet:
     ECHAM's ``zvervx`` (updraft for the WBF gate) uses only the TKE term
@@ -225,7 +227,7 @@ def cloud_microphysics_2m(
     # The condensate increments EXCLUDE this step's convective detrainment:
     # ECHAM keeps it out of pxlte/pxite and hands it to the 2M separately as
     # zxtec (555-570), and the sweep treats it by its own rules (not
-    # sedimented this step, own crystal number).
+    # sedimented this step, own crystal number, re-split by lo2).
     dqc_up = (qc - qc_m1) - detrained_qc          # ztmst·pxlte
     dqi_up = (qi - qi_m1) - detrained_qi          # ztmst·pxite
     zxtec = detrained_qc + detrained_qi           # ztmst·zxtec, both phases
@@ -420,7 +422,7 @@ def cloud_microphysics_2m(
         (rain_flux, snow_flux, ice_flux, ice_flux_n,
          falling_ice_frac, precip_cover) = carry
         (cf_k, t_m1_k, q_m1_k, dT_up_k, dq_up_k, dqc_up_k, dqi_up_k,
-         qc_m1_k, qi_m1_k, det_qc_k, det_qi_k, zrid_k, znidetr_k,
+         qc_m1_k, qi_m1_k, det_qc_k, zxtec_k, zrid_k, znidetr_k,
          p_k, rho_k, inv_rho_k, dp_k, dpg_k, dz_k, adc_k, zqrho_k,
          cdnc0_k, icnc0_k,
          esw_k, esi_k, qsw_k, qsi_k, dqsw_k, dqsi_k,
@@ -526,10 +528,37 @@ def cloud_microphysics_2m(
                             0.01 * verv_k < zvervmax),
         )
 
+        # --- Re-split of the detrained condensate (1301-1317) ----------
+        # ECHAM's 2M ignores the convection scheme's phase split of the
+        # detrained condensate and assigns the whole of zxtec by lo2: ice
+        # where lo2 holds, liquid elsewhere (zxite2/zxlte2, 1310-1314).
+        # ``move`` is the net mass this reclassifies from the convection's
+        # ice to liquid (> 0) or from its liquid to ice (< 0). Convection
+        # heated the detrained condensate with the latent heat of its own
+        # phase, so the reclassification carries the fusion-heat
+        # difference, added to the temperature increment before section 5
+        # exactly where ECHAM modifies ptte (1301-1307; zdtdt =
+        # ztmst·ptte − …, 1406). ECHAM's gate
+        # ``ztconv <= tmelt .AND. .NOT. lo2`` (1302-1303) reads the
+        # temperature the convection scheme split the condensate on
+        # (ztconv is cudtdq's pten, mo_cumastr.f90:248), so it is exactly
+        # "convection counted it as ice, lo2 makes it liquid", which here is
+        # ``detrained_qi`` with lo2 false. Two deliberate deviations keep
+        # the scheme's column enthalpy identity exact: (1) the correction
+        # divides by the per-level MOIST cp (lsdcp − lvdcp, #706) where
+        # ECHAM divides by cpd (1305); (2) it also acts in the other
+        # direction, which ECHAM leaves uncorrected: condensate convection
+        # counted as liquid (its temperature above tmelt while T_m1 is
+        # below it) that lo2 makes ice.
+        ice_part = jnp.where(lo2, zxtec_k, 0.0)      # ztmst·zxite2
+        liq_part = jnp.where(lo2, 0.0, zxtec_k)      # ztmst·zxlte2
+        move = liq_part - det_qc_k
+        split_dT = -(lsdcp_k - lvdcp_k) * move
+
         # --- In-cloud condensate prep + clear-sky evaporation ----------
         # ECHAM 1319-1385. The step's total non-microphysical increments
-        # (upstream + detrainment + sedimentation + melting) are split
-        # ECHAM-style: in cloudy cells positive increments enter the
+        # (upstream + re-split detrainment + sedimentation + melting) are
+        # split ECHAM-style: in cloudy cells positive increments enter the
         # in-cloud state at their grid-mean magnitude while their
         # clear-sky share ``(1−paclc)·max(increment, 0)`` evaporates (the
         # two add back to the full grid-mean increment); negative
@@ -537,8 +566,8 @@ def cloud_microphysics_2m(
         # cloud-FREE cells the entire condensate — carried plus
         # incremented — evaporates, returning it to vapour with the
         # matching latent cooling.
-        zxidt = dqi_up_k + det_qi_k + dt * ice_tend_k     # 1316
-        zxldt = dqc_up_k + det_qc_k + pximlt_k + pimlt_k  # 1317
+        zxidt = dqi_up_k + ice_part + dt * ice_tend_k     # 1316
+        zxldt = dqc_up_k + liq_part + pximlt_k + pimlt_k  # 1317
         ll_ipos = zxidt > 0.0
         ll_lpos = zxldt > 0.0
         zxidtstar = jnp.maximum(zxidt, 0.0)
@@ -576,7 +605,7 @@ def cloud_microphysics_2m(
         zqsm1 = jnp.where(lo2, qsi_k, qsw_k)
         zdqsdt = jnp.where(lo2, dqsi_k, dqsw_k)
 
-        zdtdt = (dT_up_k
+        zdtdt = (dT_up_k + split_dT
                  - lvdcp_k * (evp_k + zxlevap)
                  - (lsdcp_k - lvdcp_k) * (psmlt_a + pximlt_k + pimlt_k)
                  - lsdcp_k * (sub_k + zxievap + xisub_k))
@@ -623,10 +652,10 @@ def cloud_microphysics_2m(
             rho_k, ztp1,
             zxievap,
             zxip1,
-            # pxite: the ice part of the detrainment [kg/kg/s], ECHAM zxite
-            # (1490), which the routine adds to the post-sedimentation
-            # zxip1 for its own lo2 test (2361-2362).
-            det_qi_k / dt,
+            # pxite: the ice part of the re-split detrainment [kg/kg/s],
+            # ECHAM zxite (1490), which the routine adds to the
+            # post-sedimentation zxip1 for its own lo2 test (2361-2362).
+            ice_part / dt,
             verv_k,
             zcnd0, zdep0,       # INOUT, seeded from section 5
             dt,
@@ -886,13 +915,14 @@ def cloud_microphysics_2m(
             auto_only_k, accr_only_k,
             rain_flux, frozen_flux_k,
             wbf_transfer_k, ll_liqcl_k, ll_icecl_k,
+            move, split_dT,
         )
         return carry_out, level_out
 
     scan_inputs = (
         cloud_fraction, temperature_m1, specific_humidity_m1,
         dT_up, dq_up, dqc_up, dqi_up,
-        qc_m1, qi_m1, detrained_qc, detrained_qi, zrid, znidetr,
+        qc_m1, qi_m1, detrained_qc, zxtec, zrid, znidetr,
         pressure, air_density, inv_rho, pressure_thickness, dp_over_g,
         layer_thickness, air_density_correction, zqrho,
         cdnc0, icnc0,
@@ -922,7 +952,8 @@ def cloud_microphysics_2m(
      zmratepr, zmrateps, zmsnowacl,
      autoconv_only, accretion_only,
      rain_flux_profile, snow_flux_profile,
-     wbf_transfer, ll_liqcl, ll_icecl) = scan_outs
+     wbf_transfer, ll_liqcl, ll_icecl,
+     detrainment_move, detrainment_split_dT) = scan_outs
 
     # Surface precipitation fluxes: the carry at the bottom of the column.
     (surface_rain_flux, surface_snow_flux, _, _, _, _) = _final_carry
@@ -943,15 +974,17 @@ def cloud_microphysics_2m(
         icnc=icnc_final,
         cdnc=cdnc_final,
         # ECHAM's pxim1/pxlm1 are the grid-mean condensate the increments
-        # accumulate on, and pxitec/pxltec the detrainment. Here the
-        # upstream increments and the detrainment are already inside
-        # ``qi``/``qc``, so ``qi``/``qc`` stand for pxim1 + ztmst·(pxite +
-        # pxitec) / pxlm1 + ztmst·(pxlte + pxltec), and the seeds below
-        # carry only the scheme's own tendencies: the reconstruction is the
-        # same number, with the negative-mass guard testing the actual
-        # end-of-step grid-mean state against ``ccwmin`` (#662 finding 6).
-        ice_mmr_prev=qi,
-        liq_mmr_prev=qc,
+        # accumulate on, and pxitec/pxltec (zxite/zxlte) the re-split
+        # detrainment. Here the upstream increments and the detrainment
+        # are already inside ``qi``/``qc`` as convection split it, so the
+        # re-split provisional state ``qi − move`` / ``qc + move`` stands
+        # for pxim1 + ztmst·(pxite + pxitec) / pxlm1 + ztmst·(pxlte +
+        # pxltec), and the seeds below carry only the scheme's own
+        # tendencies: the reconstruction is the same number, with the
+        # negative-mass guard testing the actual end-of-step grid-mean
+        # state against ``ccwmin`` (#662 finding 6).
+        ice_mmr_prev=qi - detrainment_move,
+        liq_mmr_prev=qc + detrainment_move,
         # ECHAM convention: pxtm1_cdnc / pxtm1_icnc are the step-start
         # tracer values in per-kg-of-air, RAW (1781; see the entry floor).
         # The working cdnc/icnc are per-m³, so the tendency subtracts
@@ -1035,11 +1068,15 @@ def cloud_microphysics_2m(
     dqncdt = dqncdt_perkg
     dqnidt = dqnidt_perkg
 
+    # The ledger ran on the re-split provisional state; the host adds the
+    # returned tendencies to ITS provisional (qc, qi, temperature), which
+    # still holds convection's split, so the reclassification and its
+    # fusion-heat correction are returned as tendencies too.
     tendencies = MicrophysicsTendencies_2M(
-        dtedt=dtedt,
+        dtedt=dtedt + detrainment_split_dT / dt,
         dqdt=dqdt,
-        dqcdt=dqcdt,
-        dqidt=dqidt,
+        dqcdt=dqcdt + detrainment_move / dt,
+        dqidt=dqidt - detrainment_move / dt,
         dqncdt=dqncdt,
         dqnidt=dqnidt,
         dqrdt=dqrdt,
