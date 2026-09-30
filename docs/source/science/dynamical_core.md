@@ -29,6 +29,7 @@ transported. The **pySES** backend instead carries every declared tracer as a
 pySES passive tracer in physical units — advected and vertically remapped by
 the spectral-element dynamics itself (with sub-cycling for the tracer CFL) —
 so transport differs between the backends by construction.
+
 **The post-physics state.** ``DynamicalCore.after_physics_state`` returns the
 gridpoint state the dynamics starts from, after the physics tendency is
 applied: the dinosaur backend's ``state + dt·T(P)`` with its own spectral
@@ -40,8 +41,9 @@ schemes, whose dynamics increment is the next state minus it (see
 difference from ``x + dt·P`` is the part of the physics tendency the
 truncation drops. In a spun-up T63L47 2M run that is 6.0–6.4 K/day rms in
 temperature and 2.0–2.1 g/kg/day in humidity, against 7.6–7.7 K/day and
-0.9–1.1 g/kg/day of true dynamics, so a dynamics increment reconstructed
-from ``x + dt·P`` would be dominated by it.
+0.9–1.1 g/kg/day of true dynamics: a humidity increment reconstructed from
+``x + dt·P`` would be dominated by it, and a temperature increment would be
+of the same order as the dynamics.
 
 **Moist coupling and the mass mixing-ratio contract.** On hybrid coordinates the
 dynamics is moist: the virtual temperature is

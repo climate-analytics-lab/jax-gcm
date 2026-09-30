@@ -197,7 +197,7 @@ def cloud_microphysics_2m(
     The large-scale vertical velocity is not plumbed to this scheme yet:
     ECHAM's ``zvervx`` (updraft for the WBF gate) uses only the TKE term
     here, and the ``knvb``/``lonacc`` inversion-level exception on
-    ``zauloc`` is omitted (it needs ``pvervel``) — listed in #941.
+    ``zauloc`` is omitted (it needs ``pvervel``) — tracked in #705.
 
     qnc / qni are stored per kg of air; the scheme interior uses per-m^3,
     so we convert at the boundary.
@@ -395,7 +395,7 @@ def cloud_microphysics_2m(
     #   zvervx = −100·ω/(g·ρ) + 100·fact_tke·sqrt(TKE),
     # with the turbulent term zeroed at the lowest level (line 815). The
     # large-scale term −100·ω/(g·ρ) needs the pressure velocity, which is
-    # not plumbed to this scheme (#941); it is the term to add here.
+    # not plumbed to this scheme (#705); it is the term to add here.
     updraft_velocity = turbulent_updraft_velocity(tke, params)
 
     # ------------------------------------------------------------------
@@ -1245,8 +1245,16 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     # the cover term; this term fills the precip / 2M / process-rate fields.
     output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS
 
-    def __init__(self, params: 'CloudParams2M | None' = None):
-        """Hold the scheme-native :class:`CloudParams2M`."""
+    def __init__(self, params: 'CloudParams2M | None' = None, *,
+                 params_are_defaults: bool = False):
+        """Hold the scheme-native :class:`CloudParams2M`.
+
+        ``params_are_defaults`` marks parameters that are the resolution
+        defaults of a grid rather than the caller's own choice (the factory
+        and the Hydra runner set it), so ``cache_coords`` can check them
+        against the grid; parameters left ``None`` are defaults too.
+        """
+        self.params_are_defaults = params is None or params_are_defaults
         if params is None:
             params = CloudParams2M.default()
         self.params = nnx.Param(params)
@@ -1257,6 +1265,17 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         self._spa_prefactor = nnx.Param(jnp.array(1.0))
         self._spa_exponent = nnx.Param(jnp.array(0.5))
         self._spa_cap_smoothing = nnx.Param(jnp.array(0.0))
+
+    def cache_coords(self, coords) -> None:
+        """Warn if default parameters were built for another grid.
+
+        The parameters were fixed at construction and are not re-resolved;
+        parameters the caller supplied are not checked.
+        """
+        if self.params_are_defaults:
+            from jcm.physics.resolution_defaults import check_defaults_grid
+            check_defaults_grid(type(self).__name__,
+                                self.params.get_value().defaults_truncation, coords)
 
     def configure_spa(self, prefactor: float, exponent: float,
                       cap_smoothing: float = 0.0) -> None:
@@ -1305,8 +1324,6 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         params_2m = self.params.get_value()
 
         pressure_full = diagnostics["pressure_full"]
-        air_density = diagnostics["air_density"]
-        layer_thickness = diagnostics["layer_thickness"]
 
         # ECHAM's cloud_micro_interface inputs (physc.f90:1073-1081): the
         # anchor state at the previous time level, the increments since then
@@ -1320,6 +1337,20 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             state, diagnostics, tracers=("qc", "qi", "qnc", "qni"))
         anchor, increment = inputs.anchor, inputs.increment
         provisional = inputs.provisional
+
+        # Air density: ECHAM's zrho = papm1/(rd·ptvm1)
+        # (mo_cloud_micro_2m.f90:578), the anchor's virtual density, with
+        # ptvm1 = ptm1·(1 + vtmpc1·pqm1 − (pxlm1 + pxim1)) (physc.f90:267-268),
+        # as the 1M forms it. The layer depth goes with it, dz = Δp/(ρ·g) (the
+        # virtual-temperature depth, as ECHAM's zdz from the geopotential), so
+        # the layer mass the column forms as ρ·g·dz stays the moist-air
+        # diagnostics' Δp.
+        virtual_temperature = anchor.temperature * (
+            1.0 + c.vtmpc1 * anchor.specific_humidity
+            - (anchor.tracers["qc"] + anchor.tracers["qi"]))
+        air_density = pressure_full / (c.rd * virtual_temperature)
+        layer_mass = diagnostics["air_density"] * diagnostics["layer_thickness"]
+        layer_thickness = layer_mass / air_density
 
         clouds = diagnostics["clouds"]
         cloud_fraction = clouds.cloud_fraction

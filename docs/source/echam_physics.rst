@@ -39,8 +39,11 @@ Process Coupling
 ^^^^^^^^^^^^^^^^
 
 Every ``ComposablePhysics`` term receives the same prognostic input state and
-the returned tendencies are summed. Terms execute in ECHAM's ``physc`` order and
-see what earlier terms did through the running tendency sum
+the returned tendencies are summed. Terms execute in ECHAM's ``physc`` order
+(radiation, vertical diffusion, convection, cloud microphysics), except that
+gravity-wave and orographic drag run after the cloud scheme
+(``physc.f90`` runs them before ``cucall``), and see what earlier terms did
+through the running tendency sum
 (``_tendency_run``), the running thermodynamic state (``thermo_run``) and the
 cross-step carry, so the coupling is partly sequential and the order is
 load-bearing. The cloud microphysics receives ECHAM's inputs this way: the
@@ -409,7 +412,7 @@ Cloud Cover
      - Homogeneous-freezing temperature ``cthomi`` (K)
      - 238.15
    * - ``nadd`` (static)
-     - Extra levels below the inversion that are enhanced
+     - Offset of the second enhanced level below the inversion level (ECHAM enhances levels ``jb`` and ``jb + nadd`` only)
      - 0
    * - ``smooth_b0``, ``smooth_inv_thr`` (static)
      - Widths of the derivative surrogates (0 selects the reference derivative)
@@ -431,7 +434,7 @@ ECHAM's order:
 
 1. **Melting** of the incoming snow and of cloud ice above ``tmelt``;
    **sublimation** of the incoming snow (Lin et al. 1983) and **evaporation** of
-   the incoming rain (Rotstayn 1997), at the step-start state.
+   the incoming rain (Rotstayn 1997), at the anchor state (below).
 2. **Ice sedimentation** (the analytic exponential integral, with ECHAM's
    ``EPSILON(1._wp)`` floor on the ice), the ``lo2`` phase switch, and the return
    of all condensate of a cloud-free cell to vapour.

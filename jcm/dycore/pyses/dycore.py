@@ -881,10 +881,15 @@ class PysesCamSEDycore(DynamicalCore):
         the nonlinear moisture conversion do to the tendency; no dynamics is
         evaluated.
 
-        ``coupling="hybrid"`` lumps only the tracers (moisture included), so
-        they are formed the same way while the winds and temperature, which
-        pyses dribbles across the dynamics substeps and which therefore pass
-        through no single post-physics state, take the gridpoint add.
+        ``coupling="hybrid"`` lumps the tracers (moisture included) and
+        dribbles the dynamics forcing over the tracer sub-steps, adding
+        ``forcing["dynamics"]`` once per sub-step with the sub-step's dt
+        (``run_dycore.py::_advance_coupling_step``). Those pieces sum to
+        ``physics_dt·forcing["dynamics"]``, the same DSS-projected forcing the
+        lump adds, so the post-physics winds and temperature are formed from
+        the lump too: the part of the tendency the GLL representation cannot
+        hold is then not counted as dynamics, as for the tracers. The
+        interleaving with the dynamics sub-steps is dynamics.
         ``coupling="dribble_all"`` dribbles everything and takes the protocol
         default (:meth:`DynamicalCore.after_physics_state`).
         """
@@ -907,22 +912,12 @@ class PysesCamSEDycore(DynamicalCore):
         physics_dt = self.timestep_config["physics_dt"]
         tracers = sum_tracers_series([ms["tracers"], forcing["tracers"]],
                                      [1.0, physics_dt], self.model)
-        dynamics = ms["dynamics"]
-        if coupling == coupling_types.lump_all:
-            dynamics = sum_dynamics_series([dynamics, forcing["dynamics"]],
-                                           [1.0, physics_dt], self.model)
-        after = self.to_physics_state({
+        dynamics = sum_dynamics_series([ms["dynamics"], forcing["dynamics"]],
+                                       [1.0, physics_dt], self.model)
+        return self.to_physics_state({
             "model_state": {**ms, "dynamics": dynamics, "tracers": tracers},
             "sim_time": state["sim_time"],
         })
-        if coupling == coupling_types.lump_all:
-            return after
-        dt = self.dt_seconds
-        return after.copy(
-            u_wind=after.u_wind + dt * physics_tendency.u_wind,
-            v_wind=after.v_wind + dt * physics_tendency.v_wind,
-            temperature=after.temperature + dt * physics_tendency.temperature,
-        )
 
     # ------------------------------------------------------------------
     # Sim-time accounting

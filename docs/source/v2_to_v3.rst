@@ -13,10 +13,10 @@ coming from v1, read :doc:`v1_to_v2` first.
    :local:
    :depth: 1
 
-Read this first: the four changes that silently alter results
+Read this first: the five changes that silently alter results
 -------------------------------------------------------------
 
-Most items below fail loudly. These four do not, so check them before
+Most items below fail loudly. These five do not, so check them before
 comparing any v3 number against a v2 one.
 
 1. **Specific humidity is kg/kg everywhere** (:ref:`v3-q-units`). A v2-written
@@ -34,6 +34,13 @@ comparing any v3 number against a v2 one.
 4. **A bare** ``echam_physics()`` **composes RRTMGP**, not the grey two-stream
    (:ref:`v3-echam-radiation`). A v2 script that relied on the factory default
    now runs the real ECHAM radiation — slower, and a different climate.
+5. **The default cloud overlap is maximum-random, and the ECHAM 1M cloud
+   scheme and cloud cover are ECHAM6.3's** (:ref:`v3-cloud-overlap`,
+   :ref:`v3-echam-1m`). Nothing fails, and every ECHAM configuration's
+   results change by more than the run-to-run spread: most in the ``echam``
+   (1M) presets' net TOA radiation, cloud cover and liquid water path, less
+   in the 2M and JAM presets. Cloud and radiation numbers from before this
+   change, and any tuning of them, are not comparable.
 
 Installation and dependencies
 -----------------------------
@@ -356,6 +363,116 @@ re-exported is gone; ECHAM convection's is ``thermodynamics.es_ua``.
 ``jcm.physics.surface.echam.AtmosphericForcing`` takes a required ``surface_pressure``
 [Pa], the pressure the tile saturation divides by. See
 :doc:`science/constants`.
+
+ECHAM cloud parameters are built for the grid
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The cloud cover's ``CloudParameters``, the 1M's ``MicrophysicsParameters`` and
+the 2M's ``CloudParams2M`` (its ``cvtfall`` only) default to ECHAM6.3's values
+for the run's spectral truncation (``mo_echam_cloud_params.f90::sucloud``),
+interpolated between ECHAM's truncations, instead of T63's at every grid. Pass the grid when you build the
+physics; without it you get the T63 defaults, and a term running on another
+truncation warns once, naming both grids. The Hydra runner passes the grid
+itself.
+
+.. code-block:: python
+
+   from jcm.physics.clouds.echam_1m import MicrophysicsParameters
+   from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+   from jcm.physics.clouds.sundqvist import CloudParameters
+   from jcm.physics.echam.echam_terms import echam_physics
+
+   echam_physics(coords=coords)                      # the grid's defaults
+   CloudParameters.for_grid(coords, crs=0.99)        # grid defaults, crs overridden
+   CloudParameters.default(truncation=127)           # keyword-only
+   MicrophysicsParameters.default(truncation=127)    # cvtfall, csecfrl, clwprat
+   CloudParams2M.default(truncation=127)             # cvtfall (the 2M's own)
+
+An explicit ``Parameters`` object is used as given, so code that built its own
+keeps its values; a field override (``echam_physics(clouds={"crs": 0.99})``,
+``+physics.terms.sundqvist_cloud_fraction.params.crs=0.99`` on a term-list
+preset, ``+physics.clouds.crs=0.99`` on a factory-built one) replaces that
+field on top of the grid's defaults. See :doc:`design/resolution_defaults`.
+
+The two classes changed shape:
+
+- Both are flax dataclasses. Numeric fields are differentiable leaves; the
+  fields that select a code path or configure only a derivative are static
+  (``pytree_node=False``).
+- ``CloudParameters`` no longer has ``inversion_z_max``, ``inversion_z_min``,
+  ``cloud_top_pressure_pa``, ``epsilon``, ``t_mix_min``, ``t_mix_max``,
+  ``smooth_inv_score`` or ``smooth_inv_depth`` (``CloudParameters.default``
+  raises ``ValueError`` on one), and gains ``csecfrl`` and the static ``nadd``
+  and ``defaults_truncation``. The inversion search levels ``jbmin``/``jbmax``
+  are derived from the vertical grid and are not parameters.
+- ``MicrophysicsParameters`` no longer has ``t_mix_min``, ``t_mix_max`` or
+  ``d_epsilon``, and gains the leaves ``csecfrl`` and ``cthomi``.
+  ``autoconversion_scheme`` and ``smooth_ccraut`` are static, as are the new
+  ``autoconversion_twomey`` (on by default), ``defaults_truncation`` and the
+  surrogate widths ``phase_switch_width``, ``phase_switch_ice_width``,
+  ``ice_fall_speed_gradient_cutoff`` and ``contact_freezing_liquid_cutoff``
+  (see :doc:`design/surrogate_gradients`). ``MicrophysicsParameters.default``
+  sets a static field by keyword.
+
+Direct callers of the scheme functions:
+
+- ``echam_1m.cloud_microphysics_column_sweep`` takes ECHAM's arguments: the
+  anchor (``temperature_m1``, ``specific_humidity_m1``, ``cloud_water_m1``,
+  ``cloud_ice_m1``) and the increments over the step as separate arrays,
+  plus ``pressure_thickness``, with the detrainment and the other optional
+  inputs keyword-only. Build them with
+  ``jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs``.
+- ``lohmann_2m.cloud_microphysics_2m`` takes the anchor first. Its leading
+  arguments are now ``temperature_m1``, ``specific_humidity_m1``,
+  ``pressure``, ``qc_m1``, ``qi_m1``, ``qnc_m1`` and ``qni_m1`` (ECHAM's
+  ``ptm1``, ``pqm1``, ``pxlm1``, ``pxim1`` and the number tracers), and the
+  increments over the step (``temperature_increment``,
+  ``humidity_increment``, ``qc_increment``, ``qi_increment``,
+  ``qnc_increment``, ``qni_increment``) follow ``params`` as optional
+  arguments that default to zero, with ``detrained_qc``/``detrained_qi``
+  after them. **An old positional call that passed the provisional state
+  still runs**: that state is now read as the anchor and the omitted
+  increments are zero, so the step's condensation is silently lost. Keyword
+  callers fail loudly. Build the arguments with
+  ``jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs``.
+- ``sundqvist.calculate_cloud_fraction`` is ECHAM's ``cover``: its arguments
+  are now ``(temperature, specific_humidity, cloud_ice, pressure,
+  surface_pressure, geopotential, config, inversion_range,
+  enhance_allowed)``, with ``inversion_range`` = ECHAM's ``(jbmin, jbmax)``
+  from ``echam_cloud_defaults.inversion_levels(coords)``. An old positional
+  call (five to seven arguments) raises ``TypeError``.
+- ``sundqvist.condensation_evaporation`` is removed; it had no caller in the
+  ECHAM stacks. The Sundqvist saturation functions are covered in the
+  Sonntag section above.
+
+The post-physics state and the convective detrainment
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The ECHAM cloud schemes anchor on the previous step's post-physics state, so
+the model carries it. Two additive interfaces serve that, and the convective
+detrainment reaches both cloud schemes through one channel:
+
+- ``DynamicalCore.after_physics_state(state, physics_tendency)`` returns the
+  gridpoint state after the physics tendency and before the dynamics. The
+  base class implements it as the gridpoint forward-Euler add; a backend
+  whose ``step`` applies the tendency in another representation (a spectral
+  projection, element nodes) overrides it with that application, as the
+  Dinosaur and pySES backends do.
+- A physics term that needs the anchor declares
+  ``requires_post_physics_fields`` (a ``ClassVar`` tuple of field names); the
+  composition then carries ``_post_physics_state`` with a ``valid`` flag.
+  Read it through ``cloud_scheme_inputs`` rather than directly.
+- A convection scheme that detrains condensate writes this step's rate to
+  ``clouds.conv_detrainment_qc`` / ``conv_detrainment_qi`` [kg kg⁻¹ s⁻¹], as
+  ``TiedtkeConvection`` does, and returns the same detrained condensate as
+  part of its qc/qi tendency; the cloud schemes subtract ``dt × rate`` from
+  the running condensate tendency and treat it as ECHAM's
+  ``pxtecl``/``pxteci``, so a rate published without being in the returned
+  tendency would leave a negative condensate increment. A scheme that does
+  not write them (Betts-Miller) reads as no detrainment.
+
+Checkpoints written without the slot restore with it seeded and
+``valid = 0``; see :ref:`v3-checkpoints`.
 
 Widened, not broken: ``vertical_interp_log_p``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -704,6 +821,36 @@ What now errors, and the fix:
 but the ozone bundles end in 2022, and holding 2022 ozone for 2023–24 is the
 preset's stated choice. Its transient emissions, if you add them, stay
 ``strict``.
+
+.. _v3-cloud-overlap:
+
+Cloud overlap defaults to maximum-random
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``RadiationParameters.cloud_overlap`` defaults to maximum-random (code 1),
+ECHAM6.3's default, instead of exponential overlap with a 2 km decorrelation
+length (code 2). RRTMGP's McICA sampler draws it by ECHAM's rank rule, and
+``radiation.total_cloud_cover`` follows it (ECHAM's ``cld_cvr`` in
+expectation). The grey scheme's fluxes are the same under both rules; the
+emulator's fluxes carry the overlap it was trained on (exponential, #881).
+Over days 5-10 of ``t63-echam-1m`` the switch alone lowers that cover by
+1.0 point and raises the net TOA radiation by 0.55 W/m², a small part of the
+cloud changes below. To keep exponential overlap:
+
+.. code-block:: python
+
+   from jcm.physics.radiation.radiation_types import (
+       CLOUD_OVERLAP_EXPONENTIAL, RadiationParameters)
+
+   RadiationParameters.default(cloud_overlap=CLOUD_OVERLAP_EXPONENTIAL,  # 2
+                               cloud_decorrelation_km=2.0)
+
+.. code-block:: console
+
+   $ python -m jcm.main +configuration=t63-echam-1m \
+       +physics.terms.rrtmgp_radiation.params.cloud_overlap=2    # term-list presets
+   $ python -m jcm.main +configuration=t63-echam-jam \
+       +physics.radiation.cloud_overlap=2                        # factory presets
 
 Other config-surface changes
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1057,6 +1204,35 @@ radiative effect done before this change should be redone. Code that passed
 ``MicrophysicsParameters.default(base_cdnc=...)`` must drop the argument;
 direct callers of ``radiation_scheme_rrtmgp`` pass the radii from
 ``jcm.physics.radiation.cloud_optics.radiation_effective_radii``.
+
+.. _v3-echam-1m:
+
+The ECHAM 1M cloud scheme and cloud cover are ECHAM6.3's
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The 1M scheme is ECHAM6.3's ``mo_cloud.f90::cloud`` and the cover its
+``mo_cover.f90::cover``, compared against the compiled Fortran process by
+process (see the release notes). The change a v2 user will notice is that the
+1M no longer relaxes partially cloudy cells toward the grid-mean saturation
+every step: condensation follows the step's increments, the dynamics among
+them, and ECHAM's binary ``lo2`` switch sets the phase instead of a linear
+238-273 K blend. Radiation sees the cover only where there is condensate, and
+the default overlap is maximum-random (above).
+
+Over days 5-10 of ``t63-echam-1m`` from a spun-up state the global net TOA
+radiation rises by **6.4 W/m²** (shortwave cloud effect **+24.4**, longwave
+**−17.7 W/m²**), the liquid water path falls from **112 to 70 g/m²**, total
+cloud cover (``radiation.total_cloud_cover``) from **71 to 55 %**, and the
+supercooled liquid fraction at 243-248 K from **0.72 to 0.10**;
+precipitation rises by 0.11 mm/day. The 2M and JAM presets move by
+**−0.6 / −0.7 W/m²** net TOA with the cover **6.6 / 6.7 points** lower and
+the liquid water path **+6.8 / +5.9 g/m²** higher, and precipitation
+unchanged. Identical-physics runs spread by about 0.2 W/m². Ten days measure
+the immediate response, not a climate. Any tuning of the 1M cloud water, the
+cloud radiative effects or the mixed-phase partition done before this change
+should be redone, and every configuration whose truncation is not T63 (the
+shipped T106 and T119 members, whose values are interpolated between T63 and
+T127, and T127 or T255 grids) now takes its truncation's cloud parameters.
 
 SPEEDY shortwave heating is applied every step
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

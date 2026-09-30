@@ -1,8 +1,10 @@
 """Monte Carlo Independent Column Approximation (McICA) sub-column generator.
 
-Implements the Räisänen et al. (2004) stochastic sub-column generator
-used by RRTMGP-class radiation schemes to handle subgrid cloud
-variability + vertical overlap. Each
+Stochastic sub-column generators for RRTMGP-class radiation schemes, which
+handle subgrid cloud variability and vertical overlap: the Räisänen et al.
+(2004) generator for the random and generalised-exponential rules, and
+ECHAM6.3's ``mo_cld_sampling.f90::sample_cld_state`` chain for
+maximum-random. Each
 sub-column is a binary cloud profile: cloudy or clear at every level.
 Radiation is then run *as if the column were homogeneous* in each
 sub-column; averaging across many sub-columns (or across radiation
@@ -19,14 +21,22 @@ Three overlap rules are supported:
 
 - ``"random"``      independent draws at each level (no overlap).
 - ``"maximum_random"`` ECHAM6.3's rule and jcm's default (``i_overlap =
-  1``, ``mo_radiation_parameters.f90`` l.71), sampled as
-  ``mo_cld_sampling.f90::sample_cld_state`` samples it (l.66-83): from the
-  lowest level up, a sub-column keeps its rank where it is cloudy in the
-  level below, so adjacent cloudy layers overlap maximally, and otherwise
-  draws a fresh rank in the clear part of the level below, so layers
-  separated by clear air overlap randomly. Its expected total cover is the
-  adjacent-layer Geleyn-Hollingsworth (1979) product ECHAM reports as
-  ``cld_cvr`` (``mo_radiation.f90`` l.436-442; :func:`expected_total_cover`).
+  1``, ``mo_radiation_parameters.f90`` l.71), the rank chain of
+  ``mo_cld_sampling.f90::sample_cld_state`` (l.66-83). ECHAM runs that chain
+  top-down on the surface-first column ``psrad_interface`` hands its
+  radiation (``mo_psrad_interface.f90`` l.221-227, 459, 476): each level
+  keeps the rank of the level above where the sub-column is cloudy there and
+  otherwise draws a fresh rank in that level's clear part. jcm runs the same
+  rule bottom-up on its top-first column: each level keeps the rank of the
+  level below where the sub-column is cloudy there, and otherwise redraws in
+  that level's clear part. The two directions give every sub-column cloud
+  pattern the same probability (verified exactly, by enumerating the
+  patterns of random profiles, and by ``mcica_test.py``), so in both
+  adjacent cloudy layers overlap maximally and layers separated by clear air
+  overlap randomly. Its expected total cover is the adjacent-layer
+  Geleyn-Hollingsworth (1979) product ECHAM reports as ``cld_cvr``
+  (``mo_radiation.f90`` l.436-442; :func:`expected_total_cover`), the same
+  read from either end.
 - ``"exponential"``  generalised-exponential overlap with a configurable
   decorrelation length (jcm default 2 km), a jcm option: ECHAM6.3's
   sampler has no exponential rule.
@@ -177,15 +187,18 @@ def _alpha_from_overlap(
 
 
 def _maximum_random_ranks(u: jnp.ndarray, cloud_fraction: jnp.ndarray) -> jnp.ndarray:
-    """ECHAM's maximum-random rank chain for one sub-column, TOA-first.
+    """ECHAM's maximum-random rank rule for one sub-column, TOA-first.
 
-    ``mo_cld_sampling.f90::sample_cld_state`` (l.66-83), in this module's
-    convention (a cell is cloudy where its rank is below the cover; ECHAM
-    tests ``rank > 1 - cover``, the same rule for ``1 - rank``): the lowest
-    level takes ``u`` as its rank, and each level above keeps the rank of
-    the level below where the sub-column is cloudy there and otherwise takes
-    ``cf_below + u_k·(1 − cf_below)``, uniform over the clear part of the
-    level below. ``u`` is ``[nlev]`` uniforms. Sequential in k from the
+    The rule of ``mo_cld_sampling.f90::sample_cld_state`` (l.66-83), in this
+    module's convention (a cell is cloudy where its rank is below the cover;
+    ECHAM tests ``rank > 1 - cover``, the same rule for ``1 - rank``), run
+    from the bottom up: the lowest level takes ``u`` as its rank, and each
+    level above keeps the rank of the level below where the sub-column is
+    cloudy there and otherwise takes ``cf_below + u_k·(1 − cf_below)``,
+    uniform over the clear part of the level below. ECHAM runs the chain
+    from the top down on its surface-first column (see the module
+    docstring); the two directions give every cloud pattern the same
+    probability. ``u`` is ``[nlev]`` uniforms. Sequential in k from the
     bottom → reversed ``lax.scan``.
 
     The ranks depend on the cover only through the redraw's clear-part

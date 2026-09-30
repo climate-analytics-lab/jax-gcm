@@ -532,7 +532,7 @@ class TestCoverSurrogate:
         assert gap[far].max() < 1e-3
 
     def test_slope_is_bounded(self):
-        """Surrogate slope peaks near ``1/(2 sqrt(w ln 2))``; finite everywhere."""
+        """Surrogate slope below ``1/(2 sqrt(w ln 2))`` (peak 2.26 at w = 0.02); finite."""
         x = jnp.linspace(-1.0, 5.0, 6001)
         slope = np.asarray(jax.vmap(jax.grad(
             lambda v: cover_from_b0(v, self.WIDTH)))(x))
@@ -609,6 +609,25 @@ class TestJaxTransformations:
         g = jax.jit(jax.grad(total))(jnp.asarray(t))
         assert np.all(np.isfinite(np.asarray(g)))
         assert np.any(np.asarray(g) != 0.0)
+
+    @pytest.mark.parametrize("zero", ["smooth_b0", "smooth_inv_thr", "both"])
+    def test_zero_widths_give_a_finite_derivative(self, zero):
+        """A surrogate width of 0 selects the reference derivative, never a NaN."""
+        fields = ({"smooth_b0": 0.0, "smooth_inv_thr": 0.0} if zero == "both"
+                  else {zero: 0.0})
+        params = CloudParameters.default(**fields)
+        t, ph, pf, geo = _l47_column(inversion_level=42)
+        qi = np.zeros_like(t)
+        q = jnp.asarray(0.95 * _qs_numpy(t, qi, pf))
+
+        def total(temp, hum):
+            return calculate_cloud_fraction(
+                temp, hum, jnp.asarray(qi), jnp.asarray(pf),
+                jnp.asarray(ph[-1]), jnp.asarray(geo), params,
+                L47_RANGE)[0].sum()
+
+        for g in jax.grad(total, argnums=(0, 1))(jnp.asarray(t), q):
+            assert np.all(np.isfinite(np.asarray(g)))
 
     def test_parameter_gradients_are_live(self):
         """crt, crs, csatsc carry gradients through the surrogate."""

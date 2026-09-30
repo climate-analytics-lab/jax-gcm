@@ -41,18 +41,24 @@ adjacent cloudy layers, random across a clear layer), and
 generalised-exponential with a decorrelation length
 (``RadiationParameters.cloud_overlap``, ``cloud_decorrelation_km``). The
 default is **maximum-random**, ECHAM6.3's default (``i_overlap = 1``,
-``mo_radiation_parameters.f90`` l.71), sampled as ECHAM's
-``mo_cld_sampling.f90::sample_cld_state`` samples it (l.66-83): from the
-lowest level up, a sub-column keeps its rank where it is cloudy in the level
-below and otherwise draws a new rank in that level's clear part, so its
-expected total cover is ECHAM's ``cld_cvr``, the adjacent-layer
-Geleyn-Hollingsworth product (``mo_radiation.f90`` l.436-442). The rank
+``mo_radiation_parameters.f90`` l.71), with the rank rule of ECHAM's
+``mo_cld_sampling.f90::sample_cld_state`` (l.66-83). ECHAM runs that chain
+from the top down on the surface-first column its ``psrad_interface`` hands
+the radiation (``mo_psrad_interface.f90`` l.221-227): a sub-column keeps the
+rank of the level above where it is cloudy there and otherwise draws a new
+rank in that level's clear part. jcm runs the same rule from the bottom up on
+its top-first column; the two directions give every sub-column cloud pattern
+the same probability, so the expected total cover is ECHAM's ``cld_cvr``,
+the adjacent-layer Geleyn-Hollingsworth product (``mo_radiation.f90``
+l.436-442). The rank
 comparisons are piecewise constant in the cover, as the ``r < cf`` test of
 every rule is, so the sampled masks carry no cover gradient and need no
 surrogate. ECHAM's sampler also offers random overlap (and maximum, which jcm
 does not); exponential is a jcm option with no ECHAM counterpart. The **grey**
-backend instead combines one clear and one cloudy beam weighted by the
-overlap-derived total cover (``column_total_cover``); the
+backend instead combines one clear and one cloudy beam weighted by
+``column_total_cover``, which is the column's largest cover under both
+maximum-random and exponential overlap (a closed-form approximation, not
+ECHAM's adjacent-layer product above) and ``1 - ∏(1 - f)`` under random; the
 **NN emulator's** fluxes carry whatever overlap its RRTMGP training labels
 embedded — the network sees only layer cloud fractions and paths, so the
 runtime ``cloud_overlap`` / ``cloud_decorrelation_km`` knobs change its
@@ -305,8 +311,12 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
 - **Cloud inhomogeneity carries ECHAM's T63 values, not its per-resolution
   table.** ECHAM raises the ice factor at higher truncation (``zinhomi = 0.85``
   at T127+) and uses ``zinhoml3 = 0.4`` at T31; jcm takes the T63 values at
-  every resolution and exposes them as parameters, the same T63 convention as
-  the other ECHAM cloud constants. The 2M + SPA composition (no ECHAM-HAM
+  every resolution and exposes them as parameters. The cover's and the
+  microphysics' constants, by contrast, take ECHAM's per-truncation defaults
+  ({doc}`../design/resolution_defaults`, which also gives why these two are
+  held: ``RadiationParameters`` cannot record the truncation its defaults were
+  built for, and ECHAM-HAM's JAM value of ``zinhomi`` is defined at T63
+  only). The 2M + SPA composition (no ECHAM-HAM
   counterpart: HAM activates with Lin-Leaitch or ARG) keeps ECHAM6's
   ``zinhomi = 0.8``. On RRTMGP, a mixed-phase layer in a ``ktype = 4``
   column weights its combined ssa/asymmetry by the scaled rather than the

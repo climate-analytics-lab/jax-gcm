@@ -13,6 +13,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 import tree_math
 
+from jcm.physics.surrogate_gradient import with_surrogate_gradient
+
 
 @tree_math.struct
 class CloudData:
@@ -354,9 +356,12 @@ def radiation_cloud_fields(state, diagnostics):
     """Return the cloud fields radiation sees, as ECHAM hands them over.
 
     ECHAM ``physc`` calls ``cover`` before radiation and passes radiation
-    the diagnosed cover with the step-start grid-mean condensate
-    ``xlm1``/``xim1`` (``physc.f90`` l.566-573); the cloud microphysics runs
-    later. Inside ``radiation`` (``mo_radiation.f90`` l.428-434) the
+    the diagnosed cover with the grid-mean condensate ``xlm1``/``xim1`` of
+    the previous time level (``physc.f90`` l.566-573); the cloud
+    microphysics runs later. jcm passes the ``qc``/``qi`` of the state the
+    physics receives, which contains the last step's dynamics: the time level
+    of the cover's inputs, one dynamics step after ECHAM's (the cloud schemes'
+    anchor, the carried post-physics state, is where jcm maps ``xlm1``). Inside ``radiation`` (``mo_radiation.f90`` l.428-434) the
     condensate is clipped at zero, ``xq = MAX(qm, 0)``, and the cover is
     kept only where there is condensate,
     ``xc_frc = MERGE(cld_frc, 0, xq_liq > 0 .OR. xq_ice > 0)``. That masked
@@ -366,17 +371,40 @@ def radiation_cloud_fields(state, diagnostics):
     ``qc``/``qi`` tracers clipped at zero, and the diagnosed
     ``clouds.cloud_fraction`` zeroed where both are zero.
 
-    The mask is ECHAM's hard test, derivative included. A cell it clears has
-    no condensate, so it has no optical depth either way and contributes to
-    no flux through its own optics.
+    Derivatives. The clip takes the one-sided derivative at zero (1 at
+    ``q >= 0``, 0 below; :func:`_nonnegative`), not the 1/2 of a symmetric
+    ``max`` tie, so a pure-ice cell keeps its full sensitivity to liquid
+    and a pure-liquid cell to ice. The mask is ECHAM's hard test with its
+    reference derivative: in a cell with cover but no condensate the
+    radiation's derivative with respect to that cell's condensate is zero,
+    although a trace of condensate switches its optics on. A surrogate on
+    the mask would not change that, because the in-cloud path's clear-cell
+    guard (``mcica.in_cloud_path``) and McICA's sampled sub-column masks
+    select on the masked value. Reaching the one-sided derivative would need
+    the radiation's derivative pass to see the unmasked cover, with a matching
+    treatment of that guard and of the sampling; that is tracked in #973.
     """
     clouds = diagnostics["clouds"]
     zeros = jnp.zeros_like(state.temperature)
-    cloud_water = jnp.maximum(state.tracers.get("qc", zeros), 0.0)
-    cloud_ice = jnp.maximum(state.tracers.get("qi", zeros), 0.0)
+    cloud_water = _nonnegative(state.tracers.get("qc", zeros))
+    cloud_ice = _nonnegative(state.tracers.get("qi", zeros))
     return (cloud_water, cloud_ice,
             condensate_masked_cover(clouds.cloud_fraction, cloud_water,
                                     cloud_ice))
+
+
+def _nonnegative(q):
+    """ECHAM's ``MAX(q, 0)``, with the one-sided derivative at zero.
+
+    The value is ``jnp.maximum(q, 0)`` exactly. The derivative is that of
+    ``where(q >= 0, q, 0)``: 1 at and above zero, 0 below, where a symmetric
+    ``max`` gives 1/2 at the tie. Zero condensate is a state the model
+    visits constantly (every pure-ice or pure-liquid cell), and the useful
+    derivative there is the one-sided one.
+    """
+    return with_surrogate_gradient(
+        lambda x: jnp.maximum(x, 0.0),
+        lambda x: jnp.where(x >= 0.0, x, 0.0))(q)
 
 
 def condensate_masked_cover(cloud_fraction, cloud_water, cloud_ice):

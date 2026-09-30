@@ -345,9 +345,11 @@ class CloudsatCosp(PhysicsTerm):
             # the nlev+1 interfaces top-first.
             zhalf=diagnostics["height_half"][1:],
             # ECHAM hands COSP the cover its radiation used (``cosp_f3d =
-            # cld_frc``, mo_psrad_interface.f90 l.414): the cover masked to
-            # cells with condensate (mo_radiation.f90 l.433-434). Masked
-            # here by the condensate COSP itself is given.
+            # cld_frc``, mo_psrad_interface.f90 l.414): the step-start cover
+            # masked to cells with condensate (mo_radiation.f90 l.433-434).
+            # This term simulates the post-physics state instead, so it
+            # applies ECHAM's mask to the post-microphysics cover with the
+            # post-physics condensate it is given.
             cloud_frac=condensate_masked_cover(
                 clouds.cloud_fraction, qc_pm, qi_pm),
             conv_frac=jnp.zeros_like(clouds.cloud_fraction),

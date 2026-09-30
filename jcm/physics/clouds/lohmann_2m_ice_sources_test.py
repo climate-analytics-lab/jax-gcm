@@ -1086,10 +1086,17 @@ class TestTermPassesDetrainment:
 
         The anchor is the received state (no carried post-physics state) and
         the only change since it is the convection term's ice; without the
-        detrainment arguments that ice is an upstream increment instead.
+        detrainment arguments that ice is an upstream increment instead. The
+        air density is ECHAM's ``papm1/(rd·ptvm1)`` at the anchor, as the term
+        forms it, with the layer depth that keeps the diagnostics' layer mass.
         """
         clouds = diagnostics["clouds"]
         n = self.NLEV
+        virtual_temperature = state.temperature * (
+            1.0 + c.vtmpc1 * state.specific_humidity
+            - (state.tracers["qc"] + state.tracers["qi"]))
+        rho = diagnostics["pressure_full"] / (c.rd * virtual_temperature)
+        dz = (diagnostics["air_density"] * diagnostics["layer_thickness"]) / rho
         outs = []
         for j in range(self.NCOLS):
             detr_qc = self.DT * clouds.conv_detrainment_qc[:, j]
@@ -1103,8 +1110,7 @@ class TestTermPassesDetrainment:
                 diagnostics["pressure_full"][:, j],
                 state.tracers["qc"][:, j], state.tracers["qi"][:, j],
                 jnp.zeros(n), jnp.zeros(n),
-                clouds.cloud_fraction[:, j], diagnostics["air_density"][:, j],
-                diagnostics["layer_thickness"][:, j],
+                clouds.cloud_fraction[:, j], rho[:, j], dz[:, j],
                 diagnostics["vertical_diffusion"].tke[:, j],
                 jnp.zeros(n), jnp.zeros(n), jnp.zeros(n), self.DT, _P,
                 **kwargs)[0])

@@ -29,8 +29,9 @@ accumulated diagnostics; the ``ktype`` re-typing of section 10 is
 r7492 ``src/mo_cloud.f90``.
 
 The test module ``echam_fortran_reference_test.py`` compares this function,
-output by output and intermediate by intermediate, with the unmodified
-Fortran routine run on the same columns.
+output by output and, under the Sonntag variant at T63, intermediate by
+intermediate, with the Fortran routine run on the same columns: its code is
+unmodified and its saturation tables are evaluated analytically.
 """
 
 import math
@@ -84,6 +85,13 @@ class MicrophysicsParameters:
     configure only the derivative (surrogate widths and cutoffs, see
     ``docs/source/design/surrogate_gradients.md``) or select a jcm option; the
     value of the scheme never depends on a width.
+
+    ``csecfrl`` and ``cthomi`` are ECHAM's single ``csecfrl`` and ``cthomi``
+    (``mo_echam_cloud_params.f90`` l.76, l.54), which ECHAM's cover and cloud
+    scheme share; jcm's cover holds its own copy
+    (``CloudParameters.csecfrl``/``t_ice``). The defaults agree, an override
+    of one copy leaves the other unchanged, and ``echam_physics`` warns when
+    the copies it builds differ.
     """
 
     # --- Warm-phase precipitation (mo_echam_cloud_params.f90) ---
@@ -149,13 +157,16 @@ class MicrophysicsParameters:
     # cthomi (F:821-828).
     phase_switch_width: float = struct.field(pytree_node=False, default=1.0)
     # Width of the logistic surrogate of lo2's ice-memory criterion
-    # (ice > csecfrl), as a fraction of csecfrl.
+    # (ice > csecfrl), as a fraction of csecfrl; 0 keeps that criterion's
+    # reference (zero) derivative.
     phase_switch_ice_width: float = struct.field(pytree_node=False, default=0.1)
     # Below this ice content [kg/m^3] the derivative of the ice fall speed
     # cvtfall*(rho*xi)**0.16 is that of a parabola through the origin, C1 at
-    # the cutoff, instead of the unbounded slope of the power law; the largest
-    # slope is then (2 - 0.16)*cutoff**(-0.84), about 1.4e6. Thin cirrus holds
-    # about 1e-6 to 1e-4 kg/m^3, so 1e-7 lies below real cloud.
+    # the cutoff, instead of the unbounded slope of the power law, and below
+    # zero (negative provisional ice) that of the parabola's tangent at the
+    # origin; the largest slope is then (2 - 0.16)*cutoff**(-0.84), about
+    # 1.4e6, for every ice content. Thin cirrus holds about 1e-6 to
+    # 1e-4 kg/m^3, so 1e-7 lies below real cloud.
     ice_fall_speed_gradient_cutoff: float = struct.field(pytree_node=False,
                                                          default=1.0e-7)
     # Below this in-cloud liquid [kg/kg] the derivative of the contact-freezing
@@ -446,7 +457,10 @@ def ice_phase_pair(width, ice_width):
     same logical formula with each comparison a logistic:
     ``s_cold + (1 - s_cold)·s_warm·s_ice``, ``s_cold`` in
     ``(cthomi - T)/width``, ``s_warm`` in ``(tmelt - T)/width``, ``s_ice`` in
-    ``(xi - csecfrl)/(ice_width·csecfrl)``.
+    ``(xi - csecfrl)/(ice_width·csecfrl)``. ``ice_width = 0`` keeps the
+    reference step ``xi > csecfrl`` in ``s_ice``, so the ice criterion has its
+    reference (zero) derivative while the temperature comparisons keep theirs
+    of width ``width``.
     """
     def exact(t, xi, csec, cth):
         ice = lo2_ice_phase(t, xi, csec, cth)
@@ -455,7 +469,11 @@ def ice_phase_pair(width, ice_width):
     def surrogate(t, xi, csec, cth):
         s_cold = jax.nn.sigmoid((cth - t) / width)
         s_warm = jax.nn.sigmoid((c.tmelt - t) / width)
-        s_ice = jax.nn.sigmoid((xi - csec) / (ice_width * csec))
+        if ice_width == 0:
+            # The ice criterion keeps its reference (zero) derivative.
+            s_ice = jnp.where(xi > csec, jnp.ones_like(t), jnp.zeros_like(t))
+        else:
+            s_ice = jax.nn.sigmoid((xi - csec) / (ice_width * csec))
         return s_cold + (1.0 - s_cold) * s_warm * s_ice
 
     return exact, surrogate
@@ -464,7 +482,8 @@ def ice_phase_pair(width, ice_width):
 def ice_phase_weight(temperature, cloud_ice, csecfrl, cthomi, width, ice_width):
     """ECHAM's ``lo2`` as 1 (ice) or 0 (liquid), with a surrogate derivative.
 
-    See :func:`ice_phase_pair`. ``width = 0`` keeps the reference derivative.
+    See :func:`ice_phase_pair`. ``width = 0`` keeps the reference derivative
+    of the whole switch; ``ice_width = 0`` that of its ice criterion alone.
     """
     exact, surrogate = ice_phase_pair(width, ice_width)
     if width == 0:
@@ -478,17 +497,24 @@ def ice_phase_weight(temperature, cloud_ice, csecfrl, cthomi, width, ice_width):
 
 def _c1_power(y, exponent, cutoff):
     """``y**exponent`` above ``cutoff``; below it the parabola through the origin
-    that matches the value and slope at ``cutoff``.
+    that matches the value and slope at ``cutoff``, continued below the origin
+    by its tangent there.
 
-    With ``a = exponent`` and ``t = min(y, cutoff)/cutoff``:
-    ``cutoff**a·((2 - a)·t + (a - 1)·t²)`` below the cutoff and
-    ``max(y, cutoff)**a`` above it. The ``min``/``max`` keep the unselected
-    branch free of a singular slope. The slope is at most
-    ``(2 - a)·cutoff**(a - 1)``, and on ``[0, cutoff]`` the parabola differs
-    from ``y**a`` by less than ``cutoff**a``.
+    With ``a = exponent``, ``t = min(y, cutoff)/cutoff`` and
+    ``t₊ = max(t, 0)``: ``cutoff**a·((2 - a)·t + (a - 1)·t₊²)`` below the
+    cutoff and ``max(y, cutoff)**a`` above it. The ``min``/``max`` keep the
+    unselected branch free of a singular slope. The slope is
+    ``(2 - a)·cutoff**(a - 1)`` at and below the origin and falls to
+    ``a·cutoff**(a - 1)`` at the cutoff, so that is its bound for every
+    ``y``, negative arguments included: the provisional ice of the sweep is
+    negative after an advective undershoot, where the reference value is
+    flat on ECHAM's floor. On ``[0, cutoff]`` the parabola differs from
+    ``y**a`` by less than ``cutoff**a``.
     """
     t = jnp.minimum(y, cutoff) / cutoff
-    low = cutoff ** exponent * ((2.0 - exponent) * t + (exponent - 1.0) * t * t)
+    t_pos = jnp.maximum(t, 0.0)
+    low = cutoff ** exponent * ((2.0 - exponent) * t
+                                + (exponent - 1.0) * t_pos * t_pos)
     high = jnp.maximum(y, cutoff) ** exponent
     return jnp.where(y < cutoff, low, high)
 
@@ -901,7 +927,14 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     # Only below a precipitating level (nclcpre, F:442), on the incoming
     # fluxes after melting, at the step-start (ptm1, pqm1).
     has_pre = zclcpre > 0.0
-    zclcpre_inv = jnp.where(has_pre, 1.0 / jnp.where(has_pre, zclcpre, 1.0), 0.0)
+    # 1/zclcpre reaches the level only through products with the incoming
+    # rain or snow flux (3.2, 3.3 and the contents of section 7), so its value
+    # is discarded where neither is positive. The division is guarded by that
+    # condition too: a tiny positive zclcpre (a weighted mean of 7.3 above can
+    # underflow to ~1e-25) would otherwise overflow the reverse-mode rule of
+    # the division to 0·inf in float32 where the value is not used.
+    inv_used = has_pre & ((zrfl > 0.0) | (zsfl > 0.0))
+    zclcpre_inv = jnp.where(inv_used, 1.0 / jnp.where(inv_used, zclcpre, 1.0), 0.0)
 
     # 3.2 Lin et al. (1983), over ice saturation from the mixed table (F:451-506).
     zesi = jnp.minimum(ua_m1 * zpapm1_inv, 0.5)
@@ -1177,14 +1210,19 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     # precipitation is taken to come from this level's cloud (F:1129, 1177).
     zclcpre = jnp.where(zpredel - zpretot >= 0.0, zclcaux, zclcpre)
     zpresum = zpretot + zpredel
-    tiny_sum = zpresum < tiny
+    # ECHAM sets zclcpre to 0 where zpresum <= cqtmin (F:1148, 1196). The
+    # division is guarded by that same condition, not only by the dtype's
+    # tiny: between the two the quotient is discarded, but its reverse-mode
+    # rule -(0·x)·zpresum**-2 overflows to 0·inf in float32.
+    discard = config.cqtmin - zpresum >= 0.0
+    no_division = discard | (zpresum < tiny)
     zclcpre1 = jnp.where(
-        tiny_sum, 0.0,
+        no_division, 0.0,
         (zclcaux * zpredel + zclcpre * zpretot)
-        / jnp.where(tiny_sum, 1.0, zpresum))
+        / jnp.where(no_division, 1.0, zpresum))
     zclcpre1 = jnp.maximum(zclcpre, zclcpre1)
     zclcpre1 = jnp.minimum(1.0, jnp.maximum(0.0, zclcpre1))
-    zclcpre = jnp.where(config.cqtmin - zpresum >= 0.0, 0.0, zclcpre1)
+    zclcpre = jnp.where(discard, 0.0, zclcpre1)
 
     rain_evap_flux = zmass * zevp
     snow_sub_flux = zmass * zsub
@@ -1634,8 +1672,12 @@ class Echam1MMicrophysics(PhysicsTerm):
         clouds = clouds.copy(
             # ECHAM's section 8.4 write-back: a cell whose end-of-step
             # condensate is below ``ccwmin`` in both phases has no cloud
-            # (F:1280). Radiation, COSP, AeroCom and the JAM cloud terms read
-            # this cover.
+            # (F:1280). The terms after the cloud scheme (COSP, AeroCom, the
+            # JAM cloud terms) read this cover, and it is the saved
+            # ``clouds.cloud_fraction``. Radiation does not: it runs before
+            # the cloud scheme and reads the cover term's value, which the
+            # next step recomputes, as ECHAM's cover recomputes aclc before
+            # radiation (physc.f90:543, 566).
             cloud_fraction=micro_state.cloud_fraction,
             # The published fluxes are floored at zero. ECHAM's flux update
             # (F:1211-1212) leaves a round-off remainder, of either sign, where

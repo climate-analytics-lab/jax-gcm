@@ -1033,6 +1033,23 @@ class TestSurrogates:
         dist = np.abs(np.asarray(exact(tt, xx, cs, ct) - sur(tt, xx, cs, ct)))
         assert np.max(dist[np.asarray(far)]) <= 2 * float(jax.nn.sigmoid(-5.0))
 
+    def test_ice_phase_zero_ice_width_keeps_the_reference_ice_derivative(self):
+        """``ice_width = 0``: no derivative in the ice, the temperature logistics kept."""
+        cth = c.tmelt - 35.0
+        t = jnp.array([230.0, 255.0, 255.0, 255.0, 272.5])
+        xi = jnp.array([0.0, 4.9e-6, 5e-6, 6e-6, 1e-4])
+        csec = jnp.full(5, 5e-6)
+        w = ice_phase_weight(t, xi, csec, jnp.full(5, cth), 1.0, 0.0)
+        np.testing.assert_array_equal(
+            np.asarray(w), np.asarray(lo2_ice_phase(t, xi, csec, cth), float))
+        g_t, g_xi, g_cs = jax.vmap(jax.grad(
+            lambda a, b, s_: ice_phase_weight(a, b, s_, cth, 1.0, 0.0),
+            argnums=(0, 1, 2)))(t, xi, csec)
+        for g in (g_t, g_xi, g_cs):
+            assert np.all(np.isfinite(np.asarray(g)))
+        assert np.all(np.asarray(g_xi) == 0.0) and np.all(np.asarray(g_cs) == 0.0)
+        assert np.any(np.asarray(g_t) != 0.0)
+
     def test_ice_fall_speed(self):
         cutoff = 1e-7
         exact, sur = ice_fall_speed_pair(cutoff)
@@ -1049,10 +1066,21 @@ class TestSurrogates:
         above = np.asarray(grid) >= cutoff
         assert np.all(dist[above] == 0.0)
         assert np.max(dist) < cutoff ** 0.16
-        # The slope is bounded by (2 - a)·cutoff**(a - 1) everywhere.
-        slope = jax.vmap(jax.grad(lambda x: wrapped(x, 1e-16)))(grid)
+        # The slope is bounded by (2 - a)·cutoff**(a - 1) everywhere, negative
+        # provisional ice (an advective undershoot, where the value is flat on
+        # ECHAM's floor) included: there it is the tangent at the origin.
+        bound = (2 - 0.16) * cutoff ** (-0.84)
+        negative = -jnp.geomspace(1e-3, 1e-12, 200)
+        slope = jax.vmap(jax.grad(lambda x: wrapped(x, 1e-16)))(
+            jnp.concatenate([negative, grid]))
         assert np.all(np.isfinite(np.asarray(slope)))
-        assert np.max(np.asarray(slope)) <= (2 - 0.16) * cutoff ** (-0.84) * (1 + 1e-12)
+        assert np.max(np.asarray(slope)) <= bound * (1 + 1e-12)
+        assert np.min(np.asarray(slope)) > 0.0
+        np.testing.assert_allclose(np.asarray(slope)[:200], bound, rtol=1e-12)
+        # ... and the value there is ECHAM's floored one.
+        np.testing.assert_array_equal(
+            np.asarray(wrapped(negative, jnp.full_like(negative, 1e-16))),
+            np.asarray(exact(negative, jnp.full_like(negative, 1e-16))))
         # No ice and a trace of ice have nearly the same slope.
         g0 = f(jax.grad(lambda x: wrapped(x, 1e-16))(0.0))
         g1 = f(jax.grad(lambda x: wrapped(x, 1e-16))(1e-30))
@@ -1249,6 +1277,110 @@ class TestSweepGradients:
                                             rho, dz, n, DT, cfg0)
         for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b)):
             np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+    @pytest.mark.parametrize("fields", [
+        {"phase_switch_width": 0.0},
+        {"phase_switch_ice_width": 0.0},
+        {"ice_fall_speed_gradient_cutoff": 0.0},
+        {"contact_freezing_liquid_cutoff": 0.0},
+        {"autoconversion_scheme": "kk2000", "smooth_ccraut": 0.0},
+        {"phase_switch_width": 0.0, "phase_switch_ice_width": 0.0,
+         "ice_fall_speed_gradient_cutoff": 0.0,
+         "contact_freezing_liquid_cutoff": 0.0},
+    ])
+    @pytest.mark.parametrize("dtype", ["float32", "float64"])
+    def test_every_zero_width_gives_a_finite_derivative(self, fields, dtype):
+        """A width or cutoff of 0 selects the reference derivative, never a NaN."""
+        with jax.enable_x64(dtype == "float64"):
+            dt_ = jnp.float32 if dtype == "float32" else jnp.float64
+            cfg = MicrophysicsParameters.default(**fields)
+            (t, q, dtemp, dq, qc, qi), (cf, p, dp, rho, dz, n) = (
+                tuple(jnp.asarray(a, dt_) for a in part) for part in self._args())
+            cf = cf * jnp.linspace(0.8, 1.1, cf.shape[0]).astype(dt_)
+
+            def total(t_, q_, qi_):
+                tend, st = run_sweep(t_, q_, dtemp, dq, qc, qi_, cf, p, dp, rho,
+                                     dz, n, DT, cfg)
+                return (jnp.sum(tend.dtedt) + jnp.sum(tend.dqidt) * 1e3
+                        + st.precip_rain + st.precip_snow)
+
+            grads = jax.grad(total, argnums=(0, 1, 2))(t, q, qi)
+            for g in grads:
+                assert np.all(np.isfinite(np.asarray(g))), fields
+
+    def test_float32_derivative_where_the_precipitation_nearly_cancels(self):
+        """A float32 column whose lowest-level ``zpresum`` is ~1e-19 keeps a finite gradient.
+
+        Ice deposited aloft falls as snow that sublimates to a round-off
+        remainder (-2e-18 kg/m²/s), which nearly cancels the ``EPSILON``-floor
+        ice flux reaching the lowest level. ECHAM discards the precipitating
+        fraction there (``zpresum <= cqtmin``, F:1196); the division that forms
+        it is guarded by that same condition, since between the dtype's tiny
+        and ``cqtmin`` its reverse-mode rule ``-(0·x)·zpresum**-2`` overflows
+        to ``0·inf`` in float32.
+        """
+        with jax.enable_x64(False):
+            dtype = jnp.float32
+            nlev = 47
+            p = jnp.linspace(1000.0, 100000.0, nlev).astype(dtype)
+            t = jnp.linspace(200.0, 295.0, nlev).astype(dtype)
+            # e_s·rd/rv/p over water, formed in float32 as the case was found.
+            esw = _es_and_derivative(t, ice=False)[0]
+            q = (0.55 * jnp.minimum(esw * c.rd / c.rv / p, 0.01)).astype(dtype)
+            dp = jnp.full(nlev, 99000.0 / nlev, dtype)
+            rho = p / (c.rd * t)
+            dz = dp / (rho * c.grav)
+            z = jnp.zeros(nlev, dtype)
+            n = jnp.full(nlev, 8e7, dtype)
+
+            def loss(t_):
+                tend, st = run_sweep(t_, q, z, z, z, z, z, p, dp, rho, dz, n, DT)
+                return st.precip_rain + st.precip_snow + jnp.sum(tend.dtedt)
+
+            # The column reaches the case: some level's zpresum lies between
+            # the float32 tiny and 1e-18 (formed as the sweep forms it).
+            _, st = run_sweep(t, q, z, z, z, z, z, p, dp, rho, dz, n, DT)
+            loc = {k: np.asarray(v, np.float64) for k, v in st.echam_locals.items()}
+            zmass_ = np.asarray(dp, np.float64) / (DT * c.grav)
+            presum = loc["zrfl_melt"] + loc["zsfl_melt"] + zmass_ * (
+                loc["zrpr"] + loc["zspr"] + loc["zsacl"])
+            presum[-1] += loc["zxiflux_sed"][-1]
+            assert np.any((presum > np.finfo(np.float32).tiny) & (presum < 1e-18))
+            g = jax.grad(loss)(t)
+            assert np.all(np.isfinite(np.asarray(g)))
+
+    def test_float32_derivative_under_a_vanishing_precipitating_fraction(self):
+        """A tiny incoming ``zclcpre`` with no incoming rain or snow: finite in float32.
+
+        ``1/zclcpre`` reaches only products with the incoming fluxes (3.2,
+        3.3 and the section-7 contents); where both fluxes are zero its value
+        is discarded, and its division is guarded there, so a precipitating
+        fraction of 1e-25 (a weighted mean that underflowed above) does not
+        overflow the division's reverse-mode rule.
+        """
+        with jax.enable_x64(False):
+            dtype = jnp.float32
+            cfg = jax.tree.map(
+                lambda x: x.astype(dtype)
+                if jnp.issubdtype(jnp.result_type(x), jnp.floating) else x,
+                MicrophysicsParameters.default())
+            d = dict(tm1=285.0, qm1=0.003, dtemp=0.0, dq=0.0, xlp=0.0, xip=0.0,
+                     paclc=0.3, p=90000.0, dp=2000.0, rho=1.1, dz=180.0,
+                     cdnc=8e7, cdnc_aut=8e7, pcair=1010.0)
+            inp = LevelInputs(
+                **{k: jnp.asarray(v, dtype) for k, v in d.items()},
+                zauloc_off=jnp.asarray(False), top=jnp.asarray(False),
+                bottom=jnp.asarray(False))
+
+            def total(zclcpre_in):
+                zero = jnp.zeros((), dtype)
+                new_carry, out = _sweep_level((zero, zero, zclcpre_in, zero), inp,
+                                              cfg, jnp.asarray(DT, dtype))
+                return jnp.sum(jnp.stack(new_carry)) + out.ztte + out.zqvte
+
+            for zclcpre in (1e-25, 1e-10):
+                g = jax.grad(total)(jnp.asarray(zclcpre, dtype))
+                assert np.isfinite(float(g)), zclcpre
 
     def test_parameter_gradients_live(self):
         base = MicrophysicsParameters.default()

@@ -107,21 +107,28 @@ a default, so a backend that does not override it keeps working:
 | --- | --- |
 | protocol default | `to_physics_state(state) + dt·P`, exact for a backend that adds the tendency on the physics grid |
 | `DinosaurDycore` | the gridpoint conversion of `state + dt·T(P)`, formed by the same `_apply_physics_tendency` that `step` uses; `T` is the spectral projection, so for temperature and humidity the result differs from `x + dt·P` by what the truncation drops. The tracer filter of `to_physics_state` is not applied: this is what the dynamics advances from, not what physics is handed |
-| `PysesCamSEDycore` | with `lump_all` coupling, the forcing of `step` (FV→GLL scatter, DSS projection, `q→r` chain rule) added with pySES's own `sum_dynamics_series`/`sum_tracers_series`, gathered back to the pg2 columns. With `hybrid` the tracers come from that lump and the winds and temperature, which pySES dribbles over its substeps, from the gridpoint add; `dribble_all` has no post-physics state and takes the default |
+| `PysesCamSEDycore` | with `lump_all` coupling, the forcing of `step` (FV→GLL scatter, DSS projection, `q→r` chain rule) added with pySES's own `sum_dynamics_series`/`sum_tracers_series`, gathered back to the pg2 columns. With `hybrid` too, since pySES dribbles the same projected dynamics forcing over its tracer sub-steps in pieces that sum to `physics_dt × forcing`; `dribble_all` has no post-physics state and takes the default |
 
 No backend evaluates its dynamics for this. `Model` calls it only when the
 composed physics asks (below), so SPEEDY, Held-Suarez and the idealised
 stacks do no extra work. Under `jit` the Dinosaur add is the same
 computation `step` performs on the same inputs.
 
-The consumer is a tendency-driven cloud scheme. The scheme leaves the cloudy
-part of a cell saturated at the post-physics state; the next step's
-`to_physics_state` minus the carried post-physics state is then the dynamics
-of the step alone, which is what ECHAM's `ptte`/`pqte` hold at `cloud`
+The consumer is a tendency-driven cloud scheme. The carried post-physics
+state is the state the dynamics advanced from, so the next step's
+`to_physics_state` minus it is the dynamics of the step alone, which is what
+ECHAM's `ptte`/`pqte` hold at `cloud`
 (see [coupling within physics](#coupling-within-physics)). Reconstructing the
 same state as `x_{n-1} + dt·P` would count the projected-out part of the
 physics tendency as dynamics: at T63L47 that residual is 2.0–2.1 g/kg/day rms
-in humidity, against 0.9–1.1 g/kg/day of true dynamics.
+in humidity, against 0.9–1.1 g/kg/day of true dynamics. The same projection
+means that on Dinosaur the anchor is not exactly the state the cloud scheme
+left saturated: the part of the scheme's own latent heating and drying that
+the truncation discards (about 22 % of each physics increment of T and q,
+#954) is not treated as an increment, so the anchor's cloudy part carries
+that residual super- or subsaturation, which only the section-5.4 whole-box
+check reaches (in overcast boxes). It is exact for a backend that adds on
+the physics grid and for Dinosaur's semi-Lagrangian gridpoint tracers.
 
 ### `compute_physics_step_gridpoint` (`jcm/physics_interface.py`)
 
@@ -290,7 +297,7 @@ gravity-wave and orographic drag, the upper sponge) are part of `x_ap`, so
 their heating enters the anchor rather than an increment. In ECHAM the
 gravity-wave and orographic drag run before `cloud`
 (`physc.f90:835-884`); their tropospheric heating in jcm is at most
-0.03 K/day at T63.
+0.03 K/day at T63. The sponge has no counterpart in `physc`.
 
 This is not ECHAM's parallel (leapfrog) split, where every process of a step
 sees the same time level; nothing here needs it.

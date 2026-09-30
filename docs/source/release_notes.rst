@@ -575,8 +575,10 @@ Radiation, clouds and gravity waves
   bundle.
 - **New** ``radiation.total_cloud_cover`` **diagnostic**: cover as the McICA
   sub-columns see it, under the same overlap rule the flux solve integrates.
-  It is identically zero under the grey two-stream scheme, and the NN emulator
-  publishes the analytic expectation of that draw rather than sampling it.
+  Under the grey two-stream scheme it is the weight of the cloudy beam (the
+  column's largest cover under maximum-random and exponential overlap), and
+  the NN emulator publishes the analytic expectation of the McICA draw
+  rather than sampling it.
   This is *not* the same number as ``jcm.analysis.total_cloud_cover``, the
   maximum-random-overlap post-processing function the release-validation gate
   scores — see :doc:`design/cloud_cover_gate`.
@@ -872,6 +874,23 @@ float64 fluxes from the hold branch. The convection indices are now int32 in
 every branch. The companion's fluxes and fractions now keep the dtype of the
 slots they fill. A fast test steps the composed package under x64, so CI covers
 this without the ``mam4`` extra. The float32 forward result is bit-identical.
+
+Reference-exact values with surrogate derivatives
+"""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``jcm.physics.surrogate_gradient.with_surrogate_gradient(exact, surrogate)``
+  returns a function whose value is ``exact``'s, bit for bit, and whose
+  derivatives in forward and reverse mode are those of ``surrogate``,
+  obtained by differentiating ``surrogate`` itself rather than from a
+  hand-written rule. A non-smooth point inside the range a scheme visits (a
+  clip, a phase switch, a power law with an unbounded slope) keeps the
+  reference value and still gives an optimiser a bounded, informative
+  derivative. A surrogate's width is a static (``pytree_node=False``) field of
+  the scheme's parameters, and a width of 0 selects the reference derivative.
+  ``jcm.testing.check_surrogate_gradient`` checks such a function: its value
+  equals ``exact``'s, its jvp and vjp equal ``surrogate``'s, and its two AD
+  modes are adjoint. The ECHAM cover and 1M schemes use it (see the corrected
+  physics entries). See :doc:`design/surrogate_gradients`.
 
 
 Corrected physics
@@ -1205,8 +1224,8 @@ ECHAM physics saturation is ECHAM's Sonntag (1990)
   tiles and the 2M ice saturations; water at all temperatures (``uaw``) for
   the 1M rain evaporation and the 2M water saturations; ECHAM's ``lo2``
   choice between the two for the cloud cover and the 2M condensation. The
-  dev 1M saturation adjustment keeps its linear blend of the two fits
-  (#940). The Tetens forms it replaces were up to 0.15 % off between 273
+  1M's condensation takes the same ``lo2`` choice (see the 1M entry
+  below). The Tetens forms it replaces were up to 0.15 % off between 273
   and 330 K, 1.2-2.4 % between 238 and 273 K and 8-16 % between 200 and
   238 K. ``qs`` is ECHAM's ``x/(1 − vtmpc1·x)`` with
   ``x = MIN(es·rd/rv/p, 0.5)``, so the ratio is ``rd/rv`` (0.62265),
@@ -1251,6 +1270,259 @@ ECHAM physics saturation is ECHAM's Sonntag (1990)
   functions; ``surface.echam.AtmosphericForcing`` takes a required
   ``surface_pressure``.
   See :doc:`v2_to_v3` and :doc:`science/constants`.
+
+The ECHAM 1M cloud scheme is ECHAM6.3's ``cloud``
+"""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``Echam1MMicrophysics`` runs ECHAM6.3's ``mo_cloud.f90::cloud`` (r7492)
+  section by section, in ECHAM's order, at every level of one top-down
+  column sweep (#940). Its condensation is driven by the step's increments,
+  ``zqcdif = (Δq − Δq_sat)·paclc`` with the cloudy part saturated at the
+  anchor (``mo_cloud.f90`` l.696-750), so partial cloud evaporates only where
+  the increments dry it, not by a relaxation of the grid mean toward
+  saturation. ``lo2`` is ECHAM's binary phase switch, evaluated at
+  ``ptm1 + ptte·dt`` with the sedimented ice and again in section 5.4
+  (l.647-650, 763-764); it selects the latent heat, the ice or water
+  saturation and the phase of new condensate. The sweep carries snow
+  sublimation (l.442-507), homogeneous freezing of cloud water at and below
+  ``cthomi`` (l.821-828), Bigg and contact freezing (l.832-885, #939), a
+  clear cell that gains condensate acting as cloudy for the microphysics
+  (l.800-810), the whole-box supersaturation check (l.754-784), the
+  precipitating-fraction reset to the local cover (l.1129, 1177) and the
+  return of condensate below ``ccwmin`` to vapour with the cover write-back
+  (l.1264-1288). Melt, snow sublimation and rain evaporation are evaluated at
+  the anchor, before condensation as in ECHAM, with ECHAM's caps, and
+  sedimenting ice keeps ECHAM's ``EPSILON`` floor (l.583). The section-5
+  bounds and phase split are shared with the 2M
+  (``cloud_utils.sundqvist_condensation``) in the 2M's operation order. See
+  :doc:`science/clouds_microphysics`.
+- **Compared with the compiled Fortran.**
+  ``jcm/physics/clouds/echam_fortran_reference_test.py`` runs jcm against
+  numbers from ECHAM6.3's own routine, with its code unmodified and its
+  saturation lookup tables replaced by the analytic formula they tabulate (the
+  two agree to 3e-11 of each column's scale), compiled in a local harness (the
+  ECHAM source is not in this repository), under ECHAM's constants. Every
+  output passes on 42 designed and sampled columns, at T63 in float64 (41
+  columns in float32; one tests exact melting point thresholds) under ECHAM's
+  Sonntag saturation and under jcm's Tetens as a variant kept for localising
+  disagreements, and at T31, T127 and T255 in float64. The 73 locals the
+  harness records are compared under Sonntag at T63, in float64 and float32.
+  Everything passes except three float32 locals recorded in
+  ``jcm/data/test/echam_cloud_reference/known_gaps.json`` as strict expected
+  failures: two Bigg/contact columns whose 4e-10 kg m⁻² s⁻¹ trace snow flux
+  carries 0.4 % float32 error, and one 1.7e-16 melt remainder that flips a
+  ``zclcpre`` test. Those columns pass in float64, and their float32 outputs
+  pass.
+- Where ECHAM's value is not smooth inside the range the model visits, it is
+  kept exactly and the derivative is that of a named smooth surrogate (see
+  *Reference-exact values with surrogate derivatives* under New capabilities):
+  ``lo2``, the melt of cloud ice above ``tmelt``, the
+  freezing of cloud water at ``cthomi``, the ice fall speed (a C1 parabola
+  below 1e-7 kg m⁻³, superseding #887), the contact-freezing radius and the
+  KK2000 gate. The widths are static fields of ``MicrophysicsParameters``; a
+  width of 0 selects the reference derivative. The clear-cell test, the
+  ``zclcpre`` reset, the ``ccwmin`` correction and the ``ub`` branch keep the
+  reference derivative.
+- ``MicrophysicsParameters`` is a flax dataclass. Its numeric fields, now
+  including ``csecfrl`` and ``cthomi``, are differentiable leaves;
+  ``cvtfall``, ``csecfrl`` and ``clwprat`` default to their truncation's
+  values (entry below); ``autoconversion_scheme``, ``autoconversion_twomey``
+  (on, as the droplet entry above describes) and the surrogate widths are
+  static. **Breaking:** ``t_mix_min``, ``t_mix_max`` and ``d_epsilon`` are
+  removed, ``smooth_ccraut`` and ``autoconversion_scheme`` are static, and
+  ``cloud_microphysics_column_sweep`` takes the anchor and the increments as
+  separate arguments. See :doc:`v2_to_v3`.
+- **Changes results** for every 1M configuration. Over days 5-10 of
+  ``t63-echam-1m`` runs restarted from a 30-day spin-up, the changes of this
+  entry and of the cover, inputs and overlap entries below together (jcm
+  82c2f294 against dev 8393799c) move the global net TOA radiation from −5.57 to +0.87 W/m²: the shortwave cloud effect
+  weakens from −71.48 to −47.05 W/m² and the longwave one from 32.48 to
+  14.82 W/m² (OLR +17.94 W/m²). Liquid water path falls from 111.8 to
+  69.85 g/m² (−49.4 g/m² over ocean) and the liquid held below 273.15 K from
+  76.69 to 23.93 g/m²; ice water path rises from 16.37 to 18.65 g/m². The
+  supercooled liquid fraction of the condensate falls from 0.817 to 0.414 at
+  253-258 K and from 0.722 to 0.098 at 243-248 K. Total cloud cover
+  (``radiation.total_cloud_cover``) falls from 71.07 to 55.18 %,
+  precipitation rises from 2.536 to 2.645 mm/day (convective +0.137,
+  large-scale −0.029 mm/day), column water vapour falls by 0.79 kg/m², and at
+  300 hPa the humidity falls by 15 % and the temperature by 0.90 K. The
+  lowest model level does not fog: its mean cover falls from 0.197 to 0.168.
+  Runs of identical physics from the same state spread by at most
+  0.19 W/m² in net TOA radiation, 0.30 W/m² in either cloud effect,
+  0.9 g/m² in liquid water path, 0.26 % in cover and 0.006 mm/day in
+  precipitation, which is the noise of these numbers. Ten days measure the immediate response, not a new climate;
+  the release-matrix bands of every ECHAM member are regenerated after this
+  change (#943).
+
+The ECHAM cloud cover is ECHAM6.3's ``cover``; radiation masks it by condensate
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``SundqvistCloudFraction`` computes ECHAM6.3's ``mo_cover.f90::cover``
+  (#940). The cover is ECHAM's exact ``1 − sqrt(1 − b0)`` with ``b0`` clipped
+  to ``[0, 1]`` (``mo_cover.f90`` l.249-251): exactly 0 at or below the
+  critical humidity and exactly 1 at saturation. The stratocumulus
+  enhancement uses ECHAM's inversion search, from the lowest level up to
+  ``jbmin``, enhancing only at or above ``jbmax`` (l.164-207, 234-247), with
+  ``jbmin``/``jbmax`` derived from the model's own levels by ``sucloud``'s
+  rule (``mo_echam_cloud_params.f90`` l.132-162; 40/45 on L47, 88/93 on L95).
+  There is no stratospheric cutoff: ECHAM computes the cover at every level
+  (``ktdia = 1``, ``physc.f90`` l.444). The derivatives of the clip and of the
+  inversion stability test are those of named surrogates (``smooth_b0``,
+  ``smooth_inv_thr``, static; 0 selects the reference derivative); the
+  choice of inversion level keeps its zero derivative. The cover reads the
+  state the physics receives, where ECHAM's reads the previous time level
+  (``physc.f90`` l.543-548); :doc:`science/clouds_microphysics` records the
+  difference.
+- **Radiation sees the cover only where there is condensate**, as ECHAM's
+  does (``mo_radiation.f90`` l.428-434): ``cloud_data.radiation_cloud_fields``,
+  which RRTMGP, the grey two-stream and the emulator read, returns the
+  step-start ``qc``/``qi`` clipped at zero and the cover zeroed where neither
+  phase is positive. ``clouds.cloud_fraction`` itself is unchanged; COSP masks
+  its cover with the condensate it is given.
+- Compared with the compiled Fortran on 25 cover columns: all pass at T63 in
+  float64 and float32 under Sonntag and Tetens saturation, and at T31, T127
+  and T255 in float64.
+- **Breaking:** ``CloudParameters`` is a flax dataclass built for a
+  truncation (``CloudParameters.default(truncation=...)``,
+  ``CloudParameters.for_grid(coords)``); ``inversion_z_max``,
+  ``inversion_z_min``, ``cloud_top_pressure_pa``, ``epsilon``, ``t_mix_min``,
+  ``t_mix_max``, ``smooth_inv_score`` and ``smooth_inv_depth`` are removed,
+  ``csecfrl`` and ``nadd`` are added, and
+  ``sundqvist.condensation_evaporation``, which had no production caller, is
+  gone. See :doc:`v2_to_v3`.
+- **Changes results** for every ECHAM configuration (measured with the 1M
+  entry above and the inputs entry below).
+
+The cloud schemes take ECHAM's anchor, increments and detrainment
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The 1M and the Lohmann 2M receive the inputs of ECHAM's tendency-driven
+  cloud routines (``physc.f90`` l.1073-1081; ``mo_cloud.f90`` l.706-730) from
+  one helper, ``jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs``: the
+  anchor ``ptm1``/``pqm1``/``pxlm1``/``pxim1`` is the previous step's
+  post-physics state; the increment is the dynamics of the last step plus
+  ``dt`` times the running tendency of every term composed before the cloud
+  scheme (radiation, vertical diffusion with its condensate change, the
+  surface, convection); and the convective detrainment arrives by itself, as
+  ECHAM's ``pxtecl``/``pxteci``, from ``clouds.conv_detrainment_qc`` /
+  ``conv_detrainment_qi``. Large-scale ascent and cloud-top radiative cooling
+  therefore condense in a partly cloudy cell in the step they happen. See
+  :doc:`design/operator_split_physics`.
+- ``DynamicalCore.after_physics_state(state, physics_tendency)`` returns the
+  gridpoint state after the physics tendency and before the dynamics.
+  ``Model`` records it each step in the physics carry slot
+  ``_post_physics_state``, with a ``valid`` flag, when a composed term
+  declares ``requires_post_physics_fields``, as the 1M and 2M terms do.
+  Dinosaur applies the tendency through the same spectral projection its
+  ``step`` uses; pySES adds the lumped forcing of its coupling step, which
+  under ``lump_all`` and ``hybrid`` coupling (the shipped ne30 presets) forms
+  every field of the anchor, so the GLL projection residual is not counted as
+  dynamics in the temperature increment; the base class's default is the
+  gridpoint forward-Euler add. Where no valid anchor exists
+  (the first step, a checkpoint written before the slot, the single-column
+  and RCE hosts) the anchor is the state the physics receives and the
+  dynamics increment is zero.
+- The 2M's air density is ECHAM's ``papm1/(rd·ptvm1)`` at the anchor, the
+  virtual density (``mo_cloud_micro_2m.f90`` l.578), as the 1M's is, instead
+  of the dry density of the state the term received; the layer depth that
+  goes with it keeps the layer mass. The per-m³ quantities of the 2M and JAM
+  presets (water contents, number concentrations, autoconversion,
+  sedimentation) change by about 1 % at 15 g/kg humidity.
+- Checkpoints written before the slot existed restore with it seeded from
+  the fresh carry and ``valid = 0`` (logged at INFO), and the carried anchor
+  applies from the next step, with no schema change
+  (:doc:`design/checkpoint_compatibility`).
+- The term order is unchanged. Gravity-wave and orographic drag run after
+  the cloud scheme, so their heating (at most 0.03 K/day in the troposphere
+  at T63) reaches it through the anchor one step later; ECHAM runs them
+  before ``cloud`` (``physc.f90`` l.835-884). The upper sponge, which has no
+  counterpart in ``physc``, also runs after the scheme and is part of the
+  anchor.
+- **Changes results** for every 2M configuration, including JAM, together
+  with the cover entry above and the overlap entry below. Over days 5-10 of
+  ``t63-echam-2m`` / ``t63-echam-jam`` runs restarted from 30-day spin-ups
+  (jcm 82c2f294 against dev 8393799c), the global net TOA radiation falls by
+  0.57 / 0.66 W/m² (shortwave cloud effect −0.62 / −0.42, longwave
+  +0.05 / −0.25 W/m²), total cloud cover (``radiation.total_cloud_cover``)
+  falls from 66.8 to 60.2 % / 68.7 to 61.9 %, liquid water path rises from
+  33.4 to 40.2 g/m² / 44.4 to 50.3 g/m², ice water path changes by
+  −0.14 / −0.01 g/m² (of 27.0 / 8.8), in-cloud droplet number falls by
+  1.5 / 1.9 cm⁻³, and precipitation moves by at most 0.001 mm/day. The
+  supercooled liquid fraction of the 2M rises by up to 0.08 (at 253-268 K).
+  The lowest model level does not fog: its mean cover falls from 0.164 to
+  0.144 / 0.158 to 0.142. The 2M's longwave change, JAM's ice water path and
+  both precipitation changes are within the spread of identical-physics runs
+  (0.13 W/m², 0.07 g/m², 0.006 mm/day); the other changes are outside it.
+
+Default cloud overlap is maximum-random, sampled by ECHAM's rule
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``RadiationParameters.cloud_overlap`` defaults to maximum-random (code 1,
+  ``CLOUD_OVERLAP_MAXIMUM_RANDOM``), ECHAM6.3's default (``i_overlap = 1``,
+  ``mo_radiation_parameters.f90`` l.71), instead of exponential overlap with
+  a 2 km decorrelation length, which ECHAM's sampler does not offer. The
+  McICA sampler draws it with the rank rule of ECHAM's
+  ``mo_cld_sampling.f90::sample_cld_state`` (l.66-83): a sub-column keeps its
+  rank only where it is cloudy in the adjacent level, so adjacent cloudy
+  layers overlap maximally and layers separated by clear air overlap
+  randomly, including across a layer with cover but no condensate (entry
+  above). ECHAM runs the chain top-down on its surface-first column and jcm
+  bottom-up on its top-first one; the two give every sub-column cloud
+  pattern the same probability. Its expected
+  total cover is ECHAM's ``cld_cvr`` (``mo_radiation.f90`` l.436-442), which
+  is what the emulator's ``radiation.total_cloud_cover`` reports; RRTMGP
+  reports the cover of its drawn sub-columns.
+- **Changes results** for every RRTMGP configuration. The grey two-stream
+  weights its cloudy beam by the column's largest cover under both
+  maximum-random and exponential overlap, so its fluxes do not change with
+  this default; the emulator's fluxes carry the overlap of their training
+  labels, so only its total-cover diagnostic changes. Exponential overlap
+  remains available as ``cloud_overlap=2`` (``CLOUD_OVERLAP_EXPONENTIAL``,
+  with ``cloud_decorrelation_km``).
+- Measured at fixed branch physics over the same days 5-10 (the branch
+  rerun with ``cloud_overlap=2``), the switch lowers total cloud cover by
+  1.02 / 0.55 / 0.94 points and raises the net TOA radiation by
+  0.55 / 0.22 / 0.35 W/m² in ``t63-echam-1m`` / ``t63-echam-2m`` /
+  ``t63-echam-jam``, through a weaker shortwave cloud effect (+0.84 / +0.45 /
+  +0.63 W/m²); the 2M's TOA change is at the 0.19 W/m² spread of
+  identical-physics runs. Liquid water path, the lowest-level cover and
+  precipitation stay within that spread, except JAM's large-scale
+  precipitation (−0.010 mm/d, 1.8 times the largest spread), and part of the
+  cover change is by construction, since ``radiation.total_cloud_cover`` is the sampled cover
+  under the rule in use. The switch is a small part of the changes the 1M and
+  inputs entries above measure: at least 86 % of the fall in total cover
+  comes from the rest.
+- The packaged NN radiation emulator was trained on RRTMGP fluxes under
+  exponential overlap at 2 km. Under the maximum-random default its
+  ``radiation.total_cloud_cover`` follows the configured rule while its
+  fluxes keep the training overlap, until it is retrained (#881).
+
+ECHAM cloud parameters default to their truncation's values
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The cloud cover's ``crs``, ``crt``, ``nex``, ``csatsc``, ``cinv``,
+  ``csecfrl`` and ``nadd``, the 1M's ``cvtfall``, ``csecfrl`` and
+  ``clwprat`` and the 2M's ``cvtfall`` take ECHAM6.3's per-truncation values
+  (``mo_echam_cloud_params.f90::sucloud`` l.198-237) for the run's grid,
+  chosen when the physics is built: by ``echam_physics(coords=...)``, and by
+  both Hydra doors, which give the physics the grid (the factory presets
+  receive ``coords``; the term-list presets build each term's parameters with
+  ``jcm.physics.resolution_defaults.default_parameters``; the pySES door
+  builds the physics the model runs with its dycore's grid). Without a grid the
+  defaults are ECHAM's T63 values. They remain differentiable parameters: an
+  explicit ``Parameters`` object is used as given, and a field override
+  replaces its field on top of the grid's defaults.
+- Between ECHAM's truncations (T31, T63, T127, T255) the values are
+  interpolated linearly in the truncation number, and integer fields take the
+  nearer truncation's value. T106, which ECHAM does not support, gets
+  ``crs = 0.987765625``, ``cvtfall = 2.8359375``, ``csecfrl = 8.359375e-6``
+  and T63's value of every other field. Outside T31-T255 the end row is held,
+  and a grid without a spectral truncation (pySES) takes the T63 row; both
+  warn once. A term whose factory-built defaults were made for another grid
+  than the one it runs on warns once, naming both.
+- **Changes results** at every truncation but T63, including the
+  ``t106-echam-1m`` and ``t106-echam-2m`` members. See
+  :doc:`design/resolution_defaults`.
 
 
 Tiedtke-Nordeng takes ECHAM's decisions
@@ -1334,11 +1606,14 @@ Positivity corrections are an explicit water-budget source
   aggressive ``dt/tau`` configurations. Because nudging is user-configured
   outside the physics tendency, any truncation there is not included in the
   physics positivity-correction diagnostics.
-- The existing ``thermo_run`` and Tiedtke qc/qi floors remain as guards on the
-  provisional inter-term state consumed by downstream microphysics. They can
-  influence those downstream tendencies but do not directly update the
-  prognostic state, so they are intentionally outside the reported interface
-  correction; the diagnostics quantify the final positivity cap only.
+- The ``thermo_run`` and Tiedtke ``clouds.qc``/``qi`` floors keep those
+  inter-term condensate views non-negative for the terms that read them
+  (JAM's aqueous chemistry, the COSP and AeroCom diagnostics); the cloud
+  schemes take their condensate from ``cloud_scheme_inputs`` instead. The
+  floors can influence what those terms compute but do not directly update
+  the prognostic state, so they are intentionally outside the reported
+  interface correction; the diagnostics quantify the final positivity cap
+  only.
 
 Accepted limitations (proposed)
 """""""""""""""""""""""""""""""
@@ -1450,6 +1725,18 @@ Calibration and capability gaps
   ``+configuration=`` group composes, and its coverage is the ``rce_test.py`` /
   ``betts_miller_test.py`` unit suites rather than the release-validation
   matrix.
+- **The whole-model single-column RCE fogs its lowest level under the ECHAM
+  1M.** The column of ``rce_test.py::TestRceWholeModelTiedtke`` (grey
+  radiation, SST 300 K, a prescribed uniform 5 m/s wind, no subsidence) fogs
+  its lowest level from about day 10, and over days 40-80 it rains 0.65 of
+  what it evaporates (P 0.29-0.31, E 0.45-0.47 mm/day) against the test's
+  0.8. ECHAM6.3's compiled ``cover``, ``cloud`` and ``cumastr``, fed the
+  column's captured states, make the same fog and keep convection off in all
+  but a few percent of the steps, so this is ECHAM's behaviour on a column with nothing to ventilate its
+  lowest layer. That pin, calibrated on the previous 1M, is a strict expected
+  failure until the testbed is re-derived with prescribed subsidence and
+  RRTMGP (#967); the column's other pins stay live. The T63 climate of the
+  1M, 2M and JAM presets shows no low-cloud rise.
 
 :ref:`The migration guide <v3-support-matrix>` carries the support matrix and
 the evidence behind each accepted-limitation verdict.

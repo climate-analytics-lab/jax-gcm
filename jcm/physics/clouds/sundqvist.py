@@ -65,6 +65,14 @@ class CloudParameters:
     table, :func:`~jcm.physics.clouds.echam_cloud_defaults.echam_cloud_defaults`):
     build them with :meth:`default` ``(truncation=...)`` or :meth:`for_grid`.
 
+    ``csecfrl`` and ``t_ice`` are ECHAM's ``csecfrl`` and ``cthomi``
+    (``mo_echam_cloud_params.f90`` l.76, l.54), one value each, which
+    ECHAM's cover and cloud scheme share. jcm holds a second copy in the
+    cloud scheme's parameters (``MicrophysicsParameters.csecfrl``/``cthomi``;
+    the 2M's ``CloudParams2M.cthomi``); the defaults agree, and an override of
+    one copy leaves the other unchanged. ``echam_physics`` warns when the
+    copies it builds differ.
+
     Static fields (``pytree_node=False``):
 
     * ``nadd`` selects which extra level below the inversion is enhanced, a
@@ -386,9 +394,10 @@ def _cover_surrogate(b0_raw, width):
     0 and 1 exponentially. ``1 - b0_s`` is formed as
     ``w·(softplus((1 - x)/w) - softplus(-x/w))``, which stays accurate where
     it is small. Because ``b0_s < 1`` for every finite ``x``, the square
-    root's slope is bounded: the surrogate's ``d cover/d b0`` peaks at about
-    ``1/(2·sqrt(w·ln 2))`` (4.2 at ``w = 0.02``), where the reference is
-    unbounded as ``b0 -> 1`` and zero on both plateaux. The surrogate differs
+    root's slope is bounded: the surrogate's ``d cover/d b0`` is below
+    ``1/(2·sqrt(w·ln 2))`` (4.2 at ``w = 0.02``; the measured peak is 2.26, at
+    ``b0 = 0.98``), where the reference is unbounded as ``b0 -> 1`` and zero
+    on both plateaux. The surrogate differs
     from the reference by at most ``sqrt(w·ln 2)`` (0.12 at ``w = 0.02``),
     at ``b0 = 1``.
     """
@@ -530,8 +539,11 @@ class SundqvistCloudFraction(PhysicsTerm):
     **Time level.** ``state`` is the state the physics receives this step,
     which already contains this step's dynamics. ECHAM's ``cover`` reads the
     ``t - Δt`` fields with no tendency of any kind (``physc.f90`` l.543-548),
-    a state one dynamics step earlier. Reading ECHAM's state would take the
-    previous step's post-physics state from the carry, which does not hold it.
+    a state one dynamics step earlier. In 1M and 2M runs the carry holds the
+    previous step's post-physics temperature, humidity, ``qc`` and ``qi``
+    (the cloud schemes' anchor), but not its pressures or geopotential,
+    which the cover also reads; the cover reads the received state by the
+    maintainer's decision.
     Like ECHAM's, this term runs first in the step, before radiation.
     Writes ``cloud_fraction``, plus a pass-through of the ``qc`` / ``qi`` the
     downstream microphysics starts from, into the public ``"clouds"`` key
