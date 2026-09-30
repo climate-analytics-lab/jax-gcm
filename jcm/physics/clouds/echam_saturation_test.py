@@ -115,3 +115,42 @@ def test_the_formula_is_echams_and_tetens_is_a_test_utility(monkeypatch):
         for fn in ("es_water", "es_ice", "dlnes_dT_water", "dlnes_dT_ice"):
             np.testing.assert_array_equal(
                 getattr(es, fn)(t), getattr(es, f"{name}_{fn}")(t))
+
+
+@pytest.mark.parametrize("dtype", [np.float32, np.float64])
+def test_the_sonntag_functions_are_thermodynamics_to_the_bit(dtype):
+    """Every name both modules expose agrees with ``thermodynamics`` bit for bit.
+
+    The coefficient tuples, the table bounds and ``qsat_from_es`` are the same
+    objects. ``es_water``, ``es_ice`` and their log derivatives, the
+    default-formula functions the cover and the 1M call, return
+    ``thermodynamics``' bits, eagerly and under ``jit``, and so do their
+    derivatives, on a scan across ECHAM's table range and past its clip at
+    both ends, including ``tmelt`` and the triple point.
+    """
+    from jcm.physics import thermodynamics as th
+
+    assert es.SATURATION_FORMULA == "sonntag"
+    for name in ("WATER_COEFFICIENTS", "ICE_COEFFICIENTS", "ECHAM_TABLE_T_MIN",
+                 "ECHAM_TABLE_T_MAX", "qsat_from_es"):
+        assert getattr(es, name) is getattr(th, name), name
+    t = jnp.asarray(np.concatenate(
+        [np.linspace(40.0, 410.0, 7401), [c.tmelt, 273.16]]).astype(dtype))
+    for name in ("es_water", "es_ice", "dlnes_dT_water", "dlnes_dT_ice"):
+        mine, theirs = getattr(es, name), getattr(th, name)
+        assert getattr(es, f"sonntag_{name}") is theirs, name
+        np.testing.assert_array_equal(np.asarray(mine(t)),
+                                      np.asarray(theirs(t)), err_msg=name)
+        np.testing.assert_array_equal(np.asarray(jax.jit(mine)(t)),
+                                      np.asarray(jax.jit(theirs)(t)),
+                                      err_msg=name)
+        np.testing.assert_array_equal(
+            np.asarray(jax.vmap(jax.grad(mine))(t)),
+            np.asarray(jax.vmap(jax.grad(theirs))(t)), err_msg=name)
+    p = jnp.full_like(t, 50000.0)
+    np.testing.assert_array_equal(
+        np.asarray(es.qsat_from_es(es.es_ice(t), p)),
+        np.asarray(th.saturation_specific_humidity(t, p, phase="ice")))
+    np.testing.assert_array_equal(
+        np.asarray(es.qsat_from_es(es.es_water(t), p)),
+        np.asarray(th.saturation_specific_humidity(t, p, phase="water")))

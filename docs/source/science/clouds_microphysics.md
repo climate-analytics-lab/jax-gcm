@@ -63,8 +63,8 @@
   term composed before the 1M term (radiation, vertical diffusion with its
   condensate, the surface, convection) on the step-start state as anchor, with
   the convective detrainment passed separately as ECHAM's ``pxtecl``/``pxteci``.
-  The saturation vapour pressure and its slope are ECHAM's Sonntag (1990) fit,
-  from ``echam_saturation``, the module the cover reads. ``cvtfall``,
+  The saturation vapour pressure and its slope are ECHAM's Sonntag (1990) fit
+  of ``thermodynamics``, read through ``echam_saturation`` as the cover reads it. ``cvtfall``,
   ``csecfrl`` and ``clwprat`` are ordinary tunable parameters whose defaults follow ECHAM's per-truncation
   values (T63: 2.5, 5e-6, 4.0). The **droplet number** is ECHAM's prescribed
   ``acdnc`` (``physc.f90`` §3.12; ICON-A ``mo_echam_phy_diag.f90::droplet_number``):
@@ -212,7 +212,8 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
 - Cover, saturation vapour pressure — ECHAM's: the Sonntag (1990) fit that
   ECHAM's lookup tables hold (``mo_echam_convect_tables.f90``), evaluated
   analytically rather than through the 0.025 K spline (they agree to 1e-10),
-  from ``jcm/physics/clouds/echam_saturation.py``. With it the cover
+  from ``jcm/physics/thermodynamics.py`` through
+  ``jcm/physics/clouds/echam_saturation.py``. With it the cover
   reproduces every column of ECHAM's own reference.
 - Radiation's cover, `science` — ECHAM's radiation uses the cover only where
   the step-start grid-mean condensate it radiates is positive
@@ -348,7 +349,8 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
 - ``jcm/physics/clouds/sundqvist.py`` — ``SundqvistCloudFraction``,
   ``calculate_cloud_fraction``.
 - ``jcm/physics/clouds/echam_saturation.py`` — ``es_water``, ``es_ice``,
-  ``lo2_ice_phase``, ``qsat_from_es``.
+  ``lo2_ice_phase``, ``qsat_from_es``: the Sonntag functions of
+  thermodynamics.py under the default formula.
 - ``jcm/physics/clouds/cloud_data.py`` — ``radiation_cloud_fields``,
   ``condensate_masked_cover``.
 - ``jcm/physics/clouds/echam_cloud_defaults.py`` — ``echam_cloud_defaults``,
