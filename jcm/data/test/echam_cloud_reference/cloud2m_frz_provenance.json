@@ -1,0 +1,110 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "tree": "echam6.3.0-ham2.3-moz1.0.r7492 (ECHAM6.3-HAM2.3-MOZ1.0, HAMMOZ svn r7492)",
+  "routine": "mo_cloud_micro_2m.f90::cloud_micro_interface; het_mxphase_freezing F 2675-2840 called at F 1541-1568",
+  "compiled_unmodified": [
+   "mo_cloud_micro_2m.f90",
+   "mo_cloud_utils.f90",
+   "mo_echam_cloud_params.f90",
+   "mo_echam_convect_tables.f90",
+   "mo_kind.f90",
+   "mo_math_constants.f90",
+   "mo_physical_constants.f90"
+  ],
+  "md5": {
+   "mo_kind.f90": "f7db37634d715105ed356b1a260a85ac",
+   "mo_math_constants.f90": "243280e0c9c1d4835bb13d24797820a7",
+   "mo_physical_constants.f90": "564906f3c4d084a935584d64a5b0d7a3",
+   "mo_echam_cloud_params.f90": "79141c43dbee90134ba3254ac72583d2",
+   "mo_echam_convect_tables.f90": "ce2f14c2d84e7aa5c30149456671da0c",
+   "mo_cloud_utils.f90": "a69253d9410d93ef09e9845177eafe5c",
+   "mo_cloud_micro_2m.f90": "4e0dbb96328930e934a959fa608af6db"
+  }
+ },
+ "mode": "full interface (the whole cloud_micro_interface) as the #941 reference, with the HAM freezing inputs (ham_IN_setup outputs) returned by the cloud_subm_1 stub from the driver's input file instead of zeros",
+ "configuration": {
+  "nic_cirrus": 1,
+  "nauto": 2,
+  "cdnc_min_fixed_cm3": 40,
+  "nn": 63,
+  "lctrl_het_mxphase_frz": true,
+  "lctrl_WBF": true,
+  "aerosol": "activation 0 (cdncact = 0), zascs = 0, HAM freezing inputs per column (in/frac*, in/rwet*)",
+  "pvervel": "0 except column frz_omega"
+ },
+ "timesteps": {
+  "dt1200": {
+   "delta_time": 600.0,
+   "time_step_len": 1200.0
+  },
+  "dt720": {
+   "delta_time": 720.0,
+   "time_step_len": 720.0
+  }
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -D__LP64__ -ffp-contract=off -fimplicit-none",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "repository": "private scratch copy of local branch harness/echam-cloud-2m 7dbfc93f (fortran_harness/echam_cloud2m) extended for #953: stub returns frz_in, driver magic 7943, het diagnostic points, py/columns_frz.py, py/build_reference_frz.py",
+  "commit": "016032d12768defa315c1841276575458cdcdc94",
+  "uncommitted_changes": true,
+  "stub_mo_submodel_interface_header": "Harness stub (own code). The two HAM hooks the 2M cloud scheme calls UNCONDITIONALLY (unlike the 1M, which guards them with lanysubmodel):  * cloud_subm_1 (mo_cloud_micro_2m.f90:726-734): aerosol activation and the aerosol inputs of the freezing parameterisations. The real routine (mo_submodel_interface.f90:1372-1560) needs HAM/CCN-climatology aerosol. This stub returns the AEROSOL-FREE configuration jcm's 2M corresponds to: pcdncact = cdncact_in (driver-set; the harness uses 0, so the cloud-base activation zqlnuc (lines 742-756) and the 5.5 activation in update_in_cloud_water add no droplets), pascs    = ascs_in (driver-set; 0 makes the nic_cirrus = 1 nucleation zninucl = MAX(MIN(., zascs - zicncq), 0) (lines 990-999) exactly 0: jcm does not implement zninucl), wet radii and dust/BC fractions = frz_in (driver-set; the #941 columns use 0, for which het_mxphase_freezing freezes nothing: every term is proportional to a fraction, and the diffusivities are MERGEd to 0 for zero radius, lines 2755-2771; the #953 freezing columns set them to drive het_mxphase_freezing, F 2675-2840), papnx/paprx/papsigx = 0 (read only for nic_cirrus = 2), ld_het = .FALSE. (read only for nic_cirrus /= 1). * cloud_subm_2 (lines 1808-1818): HAM wet chemistry / in-cloud scavenging. It changes only aerosol-tracer tendencies (never CDNC/ICNC, T, q, xl, xi); the harness has no aerosol tracers, so the stub is a no-op."
+ },
+ "checks": {
+  "patch_neutrality": {
+   "dt1200": true,
+   "dt720": true
+  },
+  "O0_vs_O2_max_abs": {
+   "dt1200": 0.0,
+   "dt720": 0.0
+  },
+  "batch_independence": {
+   "dt1200": true,
+   "dt720": true
+  },
+  "reproduces_941_fixture": {
+   "dt1200": true,
+   "dt720": true
+  }
+ },
+ "diagnostics_kept": [
+  "hf_mask",
+  "hf_cdnc_in",
+  "hf_icnc_in",
+  "hf_xlb_in",
+  "hf_xib_in",
+  "hf_tp1tmp",
+  "hf_cdncmin",
+  "hf_icnc",
+  "hf_cdnc",
+  "hf_xib",
+  "hf_xlb",
+  "hf_frl",
+  "hf_dfbcki",
+  "hf_dfduai",
+  "hf_dfduci",
+  "hf_frzcnt",
+  "hf_ztte",
+  "hf_frzimm",
+  "hf_frl_ic",
+  "hf_frln",
+  "rho",
+  "frl_hom",
+  "icnc_61",
+  "uicw_aclc",
+  "uicw_xlb",
+  "uicw_xib",
+  "uicw_cdnc",
+  "uicw_icnc",
+  "tp1tmp",
+  "cdnc_min_in",
+  "vervx",
+  "frl",
+  "icnc_6",
+  "xib_6",
+  "xlb_6"
+ ]
+}

@@ -1,0 +1,38 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "routine": "mo_ham_freezing.f90::ham_IN_setup (lines 52-190) with get_aerofreez_nc (297-465), aero_massvolratio (198-270), aero_nc_surfw (272-295)",
+  "compiled_unmodified": [
+   "mo_ham_freezing.f90",
+   "mo_kind.f90"
+  ],
+  "md5": {
+   "mo_kind.f90": "f7db37634d715105ed356b1a260a85ac",
+   "mo_ham_freezing.f90": "cea316e15cba208fb0012befc0a2d4c7"
+  }
+ },
+ "stubs": "fortran_harness/echam_hamfrz/stubs/mo_ham_stubs.f90: declarations only (M7 layout: modes nucs aits accs coas aiti acci coai, species SO4 BC OC SS DU, mo_ham_init membership); mo_exception and mo_time_control reused from the 1M/2M harnesses",
+ "configuration": {
+  "nham_subm": "HAM_M7",
+  "lhetfreeze": false,
+  "time_step_len": 720.0,
+  "densities_kg_m3": {
+   "so4": 1841.0,
+   "bc": 2000.0,
+   "oc": 2000.0,
+   "ss": 2165.0,
+   "du": 2650.0
+  }
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -ffp-contract=off -fimplicit-none",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "commit": "832feced60121af6f5180f921f76fe28393af600",
+  "uncommitted_changes": true,
+  "repository": "private scratch harness (fortran_harness/echam_hamfrz), not pushed"
+ },
+ "checks": {
+  "O0_vs_O2_max_abs": 0.0
+ }
+}

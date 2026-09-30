@@ -1,215 +1,203 @@
-"""Tests for heterogeneous ice nucleation (dust/BC) (#494)."""
+"""Tests for the JAM aerosol inputs to mixed-phase freezing (#953).
+
+The partition against the compiled HAM routine is in
+``ham_freezing_reference_test.py``; here: a hand-computed MAM4 cell, the MAM4 ->
+HAM class mapping, the term's contract, gradients and the model wiring.
+"""
 
 import unittest
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
-from jcm.physics.aerosol.jam.ice_nucleation.in_populations import in_populations
+from jcm.physics.aerosol.jam.activation.arg_term import JamActivationData
+from jcm.physics.aerosol.jam.ice_nucleation.ham_freezing import (
+    MAM4_FREEZING_CLASSES,
+    HamFreezingClasses,
+    ham_freezing_aerosol,
+)
 from jcm.physics.aerosol.jam.ice_nucleation.ice_term import IceNucleation
-from jcm.physics.aerosol.jam.ice_nucleation.lohmann_diehl import lohmann_diehl_inp
-from jcm.physics.aerosol.jam.ice_nucleation.niemand import niemand_inp
-from jcm.physics.aerosol.jam.ice_nucleation.params import IceNucleationParameters
+from jcm.physics.aerosol.jam.jam_state import JamAerosolState
+from jcm.physics.aerosol.jam.tracer_layout import number_name
 from jcm.physics_interface import PhysicsState
+from jcm.testing import check_gradients
 
-_SHAPE = (4, 2)
+_SHAPE = (3, 2)
+_RHO = 0.7
 
 
-def _pops(du=2.0e-10, bc=1.0e-11, frac_du_soluble=0.9):
+def _masses(du_acc=2e-10, so4_acc=1e-9, bc_acc=1e-11, du_cor=3e-9, ss_cor=1e-9,
+            bc_pcm=5e-11, poa_pcm=2e-10):
+    """Per-(species, class) masses [kg/kg] for every species of the MAM4 classes HAM uses."""
+    vals = {("du", "acc"): du_acc, ("so4", "acc"): so4_acc, ("bc", "acc"): bc_acc,
+            ("du", "cor"): du_cor, ("ss", "cor"): ss_cor, ("bc", "pcm"): bc_pcm,
+            ("poa", "pcm"): poa_pcm}
+    out = {}
+    for short in ("acc", "cor", "pcm"):
+        for sp in MAM4_SPEC.mode(short).species:
+            out[(sp, short)] = jnp.full(_SHAPE, vals.get((sp, short), 0.0))
+    return out
+
+
+def _partition(masses, nact_acc=3e7, nact_cor=5e4, n_pcm=5e8, cdncact=5e7, r_pcm=3e-8):
+    full = lambda v: jnp.full(_SHAPE, v)  # noqa: E731
+    return ham_freezing_aerosol(
+        MAM4_SPEC, MAM4_FREEZING_CLASSES, masses, {"pcm": full(n_pcm)},
+        {"acc": full(nact_acc), "cor": full(nact_cor), "ait": full(0.0)},
+        {"acc": full(1e-7), "ait": full(2e-8), "cor": full(1e-6), "pcm": full(r_pcm)},
+        full(_RHO), full(cdncact))
+
+
+class HamFreezingPartitionTest(unittest.TestCase):
+    def test_hand_computed_mam4_cell(self):
+        """HAM's surface weighting by hand for one MAM4 cell (mo_ham_freezing.f90:198-465)."""
+        fa = _partition(_masses())
+        rho_d = {s.name: s.density for s in MAM4_SPEC.species}
+        # soluble classes: volume ratio of dust over the class's dry species (with HAM's
+        # 1000/density weights, which cancel in the ratio), to the 2/3, times the activated
+        # number of the class, over the activated CDNC
+        v = lambda m, sp: m / rho_d[sp]  # noqa: E731
+        acc_vol = v(1e-9, "so4") + v(2e-10, "du") + v(1e-11, "bc")
+        cor_vol = v(3e-9, "du") + v(1e-9, "ss")
+        n_du = (v(2e-10, "du") / acc_vol) ** (2 / 3) * 3e7 + (v(3e-9, "du") / cor_vol) ** (2 / 3) * 5e4
+        n_bc = (v(1e-11, "bc") / acc_vol) ** (2 / 3) * 3e7
+        np.testing.assert_allclose(np.asarray(fa.dust_soluble), n_du / 5e7, rtol=2e-6)
+        np.testing.assert_allclose(np.asarray(fa.bc_soluble), n_bc / 5e7, rtol=2e-6)
+        # the insoluble class is primary carbon: BC mass ratio to the 2/3, over its own number
+        np.testing.assert_allclose(np.asarray(fa.bc_insoluble), (5e-11 / 2.5e-10) ** (2 / 3), rtol=2e-6)
+        # The same by hand on paper (MAM4 densities so4 1770, du 2600, bc 1700, ss 1900):
+        # accumulation dust volume ratio 7.692e-14/6.478e-13 = 0.11875, to the 2/3 = 0.2416,
+        # x 3e7; coarse 1.1538e-12/1.6802e-12 = 0.6867 -> 0.7784 x 5e4; sum 7.287e6 / 5e7.
+        np.testing.assert_allclose(float(fa.dust_soluble[0, 0]), 0.145735, rtol=1e-5)
+
+    def test_mam4_has_no_insoluble_dust(self):
+        """MAM4 carries all its dust in the soluble accumulation and coarse modes, so HAM's
+        contact inputs for dust are zero and only the primary-carbon radius is set.
+        """
+        fa = _partition(_masses(du_acc=1e-8, du_cor=1e-7))
+        for f in ("dust_insoluble_accumulation", "dust_insoluble_coarse",
+                  "wet_radius_insoluble_accumulation", "wet_radius_insoluble_coarse"):
+            self.assertTrue(np.all(np.asarray(getattr(fa, f)) == 0.0), f)
+        np.testing.assert_array_equal(np.asarray(fa.wet_radius_insoluble_aitken),
+                                      np.asarray(jnp.full(_SHAPE, 3e-8)))
+
+    def test_no_aerosol_no_activation(self):
+        fa = _partition(_masses(0, 0, 0, 0, 0, 0, 0), nact_acc=0.0, nact_cor=0.0, n_pcm=0.0,
+                        cdncact=0.0)
+        for f in ("dust_soluble", "bc_soluble", "bc_insoluble"):
+            self.assertTrue(np.all(np.asarray(getattr(fa, f)) == 0.0), f)
+
+    def test_fraction_clipped_at_one(self):
+        fa = _partition(_masses(du_acc=1e-8, so4_acc=0.0, bc_acc=0.0), nact_acc=1e8, cdncact=1e7)
+        np.testing.assert_array_equal(np.asarray(fa.dust_soluble), 1.0)
+
+    def test_class_roles_are_validated(self):
+        with self.assertRaises(ValueError):
+            HamFreezingClasses(soluble=("pcm",)).validate(MAM4_SPEC)
+        with self.assertRaises(ValueError):
+            HamFreezingClasses(soluble=("acc",), insoluble_aitken="acc").validate(MAM4_SPEC)
+
+
+class HamFreezingGradientTest(unittest.TestCase):
+    """The fractions are differentiable in the aerosol, the activation and the CDNC, with a
+    finite derivative at zero aerosol and where the MIN(., 1) clip binds.
+    """
+
+    def _f(self, du_acc, du_cor, bc_acc, nact_acc, cdncact):
+        m = _masses()
+        m[("du", "acc")], m[("du", "cor")], m[("bc", "acc")] = du_acc, du_cor, bc_acc
+        full = lambda v: jnp.full(_SHAPE, 1.0) * v  # noqa: E731
+        fa = ham_freezing_aerosol(
+            MAM4_SPEC, MAM4_FREEZING_CLASSES, m, {"pcm": full(5e8)},
+            {"acc": nact_acc, "cor": full(5e4), "ait": full(0.0)},
+            {s: full(1e-7) for s in ("acc", "ait", "cor", "pcm")}, full(_RHO), cdncact)
+        return fa.dust_soluble, fa.bc_soluble
+
+    def test_gradients_typical(self):
+        with jax.enable_x64(True):
+            full = lambda v: jnp.full(_SHAPE, v, jnp.float64)  # noqa: E731
+            check_gradients(self._f, (full(2e-10), full(3e-9), full(1e-11), full(3e7), full(5e7)),
+                            rtol=1e-4, live_inputs=("[0]", "[1]", "[2]", "[3]", "[4]"))
+
+    def test_gradients_finite_at_zero_aerosol_and_clip(self):
+        full = lambda v: jnp.full(_SHAPE, v)  # noqa: E731
+        for args in ((full(0.0), full(0.0), full(0.0), full(0.0), full(0.0)),
+                     (full(1e-8), full(1e-7), full(1e-11), full(1e8), full(1e5))):
+            g = jax.grad(lambda *a: sum(jnp.sum(x) for x in self._f(*a)),
+                         argnums=(0, 1, 2, 3, 4))(*args)
+            for x in g:
+                self.assertTrue(bool(jnp.all(jnp.isfinite(x))))
+
+
+def _term_inputs(du_cb=0.0):
     tracers = {}
-    for m in MAM4_SPEC.modes:
-        if "du" in m.species:
-            tracers[mass_name("du", m.short)] = jnp.full(_SHAPE, du)
-        if "bc" in m.species:
-            tracers[mass_name("bc", m.short)] = jnp.full(_SHAPE, bc)
-    rho = jnp.full(_SHAPE, 1.0)
-    return in_populations(
-        MAM4_SPEC, tracers, rho, jnp.asarray(frac_du_soluble)
-    )
-
-
-class InPopulationsTest(unittest.TestCase):
-    def test_positive_and_scales_with_mass(self):
-        lo = _pops(du=1.0e-11)
-        hi = _pops(du=1.0e-9)
-        self.assertGreater(float(hi["du_number_sol"][0, 0]),
-                           float(lo["du_number_sol"][0, 0]))
-        for v in lo.values():
-            self.assertTrue(np.all(np.asarray(v) >= 0.0))
-
-    def test_solubility_split(self):
-        p = _pops(frac_du_soluble=0.75)
-        np.testing.assert_allclose(
-            float(p["du_number_sol"][0, 0])
-            / (float(p["du_number_sol"][0, 0]) + float(p["du_number_insol"][0, 0])),
-            0.75, rtol=1e-5,
-        )
-
-    def test_cloud_borne_dust_counts_as_soluble(self):
-        # Cloud-borne (mc_) dust is in droplets → immersion-active (soluble),
-        # and does not add to the insoluble pool.
-        base = {}
-        cb = {}
-        for m in MAM4_SPEC.modes:
-            if "du" in m.species:
-                base[mass_name("du", m.short)] = jnp.full(_SHAPE, 1.0e-10)
-                cb[mass_name("du", m.short)] = jnp.full(_SHAPE, 1.0e-10)
-                cb[mass_name("du", m.short, cloud_borne=True)] = jnp.full(_SHAPE, 5.0e-11)
-        rho = jnp.full(_SHAPE, 1.0)
-        p0 = in_populations(MAM4_SPEC, base, rho, jnp.asarray(0.9))
-        p1 = in_populations(MAM4_SPEC, cb, rho, jnp.asarray(0.9))
-        self.assertGreater(
-            float(p1["du_number_sol"][0, 0]), float(p0["du_number_sol"][0, 0])
-        )
-        np.testing.assert_allclose(
-            float(p1["du_number_insol"][0, 0]),
-            float(p0["du_number_insol"][0, 0]), rtol=1e-5,
-        )
-
-
-class NiemandTest(unittest.TestCase):
-    def test_immersion_rises_as_temperature_drops(self):
-        params = IceNucleationParameters.default()
-        pops = _pops()
-        warm, _ = niemand_inp(pops, jnp.full(_SHAPE, 268.0), jnp.full(_SHAPE, 1.0), params)
-        cold, _ = niemand_inp(pops, jnp.full(_SHAPE, 250.0), jnp.full(_SHAPE, 1.0), params)
-        self.assertGreater(float(cold[0, 0]), float(warm[0, 0]))
-
-    def test_capped_by_available_number(self):
-        pops = _pops(du=1.0e-9)
-        imm, dep = niemand_inp(pops, jnp.full(_SHAPE, 240.0), jnp.full(_SHAPE, 1.2),
-                               IceNucleationParameters.default())
-        total = pops["du_number_sol"] + pops["bc_number_sol"] + \
-            pops["du_number_insol"] + pops["bc_number_insol"]
-        self.assertTrue(np.all(np.asarray(imm + dep) <= np.asarray(total) + 1e-6))
-
-    def test_deposition_rises_with_ice_supersaturation(self):
-        params = IceNucleationParameters.default()
-        pops = _pops()
-        _, sub = niemand_inp(pops, jnp.full(_SHAPE, 245.0), jnp.full(_SHAPE, 1.0), params)
-        _, sup = niemand_inp(pops, jnp.full(_SHAPE, 245.0), jnp.full(_SHAPE, 1.3), params)
-        self.assertGreater(float(sup[0, 0]), float(sub[0, 0]))
-
-
-class LohmannDiehlTest(unittest.TestCase):
-    def _imm(self, t=255.0, cooling=1.0e-3, du=2.0e-10, bc=1.0e-11, s_ice=1.0):
-        imm, _ = lohmann_diehl_inp(
-            _pops(du=du, bc=bc), jnp.full(_SHAPE, t), jnp.full(_SHAPE, s_ice),
-            jnp.full(_SHAPE, cooling), jnp.asarray(1800.0),
-            IceNucleationParameters.default(),
-        )
-        return imm
-
-    def test_dust_dominates_bc(self):
-        dusty = float(self._imm(du=2.0e-10, bc=0.0)[0, 0])
-        sooty = float(self._imm(du=0.0, bc=2.0e-10)[0, 0])
-        self.assertGreater(dusty, sooty)
-
-    def test_more_ascent_more_freezing(self):
-        self.assertGreater(
-            float(self._imm(cooling=5.0e-3)[0, 0]),
-            float(self._imm(cooling=1.0e-4)[0, 0]),
-        )
-
-    def test_finite(self):
-        imm, dep = lohmann_diehl_inp(
-            _pops(), jnp.full(_SHAPE, 255.0), jnp.full(_SHAPE, 1.2),
-            jnp.full(_SHAPE, 1.0e-3), jnp.asarray(1800.0),
-            IceNucleationParameters.default(),
-        )
-        self.assertTrue(np.all(np.isfinite(np.asarray(imm + dep))))
+    for short, sp, v in (("acc", "du", 2e-10), ("acc", "so4", 1e-9), ("acc", "bc", 1e-11),
+                         ("cor", "du", 3e-9), ("cor", "ss", 1e-9), ("pcm", "bc", 5e-11),
+                         ("pcm", "poa", 2e-10)):
+        tracers[mass_name(sp, short)] = jnp.full(_SHAPE, v)
+    tracers[number_name("pcm")] = jnp.full(_SHAPE, 5e8)
+    state = PhysicsState.zeros(_SHAPE).copy(temperature=jnp.full(_SHAPE, 255.0), tracers=tracers)
+    n_modes = len(MAM4_SPEC.modes)
+    number = jnp.stack([jnp.full(_SHAPE, v) for v in (1e8, 1e9, 1e5, 5e8)])
+    frac = jnp.stack([jnp.full(_SHAPE, v) for v in (0.3, 0.0, 0.5, 0.0)])
+    aer = JamAerosolState.zeros((_SHAPE[1],), _SHAPE[0], n_modes).copy(
+        number=number, r_wet=jnp.stack([jnp.full(_SHAPE, v) for v in (1e-7, 2e-8, 1e-6, 3e-8)]))
+    act = JamActivationData(number_frac=frac, mass_frac=frac)
+    diagnostics = {"air_density": jnp.full(_SHAPE, _RHO), "_jam_state": aer,
+                   "_jam_activation": act,
+                   "activated_cdnc": jnp.sum(frac * number, axis=0) * _RHO}
+    if du_cb:
+        diagnostics["_jam_cloud_borne"] = {
+            mass_name("du", "acc", cloud_borne=True): jnp.full(_SHAPE, du_cb)}
+    return state, diagnostics
 
 
 class IceNucleationTermTest(unittest.TestCase):
-    def _setup(self, scheme="niemand"):
-        tracers = {}
-        for m in MAM4_SPEC.modes:
-            if "du" in m.species:
-                tracers[mass_name("du", m.short)] = jnp.full(_SHAPE, 2.0e-10)
-            if "bc" in m.species:
-                tracers[mass_name("bc", m.short)] = jnp.full(_SHAPE, 1.0e-11)
-        state = PhysicsState.zeros(_SHAPE).copy(
-            temperature=jnp.full(_SHAPE, 250.0),
-            specific_humidity=jnp.full(_SHAPE, 2.0e-4),
-            tracers=tracers,
-        )
-        diagnostics = {
-            "pressure_full": jnp.full(_SHAPE, 4.0e4),
-            "air_density": jnp.full(_SHAPE, 0.6),
-            "_dt_seconds": 1800.0,
-        }
-        return state, diagnostics
+    def test_publishes_freezing_aerosol(self):
+        state, diagnostics = _term_inputs()
+        _, diags = IceNucleation()(state, diagnostics, None, None)
+        fa = diags["freezing_aerosol"]
+        for f in ("dust_soluble", "bc_soluble", "bc_insoluble", "dust_insoluble_accumulation"):
+            x = np.asarray(getattr(fa, f))
+            self.assertEqual(x.shape, _SHAPE)
+            self.assertTrue(np.all((x >= 0.0) & (x <= 1.0)), f)
+        self.assertGreater(float(fa.dust_soluble[0, 0]), 0.0)
+        # HAM's nact_strat is ARG's per-class activated number (0.3 x 1e8 and 0.5 x 1e5 per
+        # kg, times rho) and pcdncact their sum
+        expect = _partition(_masses(), nact_acc=0.3 * 1e8 * _RHO, nact_cor=0.5 * 1e5 * _RHO,
+                            cdncact=(0.3 * 1e8 + 0.5 * 1e5) * _RHO)
+        np.testing.assert_allclose(np.asarray(fa.dust_soluble), np.asarray(expect.dust_soluble),
+                                   rtol=1e-5)
 
-    def test_invalid_scheme_raises(self):
-        with self.assertRaises(ValueError):
-            IceNucleation(scheme="bogus")
+    def test_cloud_borne_mass_is_part_of_the_class(self):
+        """HAM has one phase per class; jcm's cloud-borne dust belongs to the composition."""
+        s0, d0 = _term_inputs()
+        s1, d1 = _term_inputs(du_cb=5e-10)
+        f0 = IceNucleation()(s0, d0, None, None)[1]["freezing_aerosol"]
+        f1 = IceNucleation()(s1, d1, None, None)[1]["freezing_aerosol"]
+        self.assertGreater(float(f1.dust_soluble[0, 0]), float(f0.dust_soluble[0, 0]))
 
-    def test_both_schemes_produce_finite_ice_nuclei(self):
-        for scheme in ("niemand", "lohmann_diehl"):
-            state, diagnostics = self._setup()
-            _, diags = IceNucleation(scheme=scheme)(state, diagnostics, None, None)
-            for key in ("ice_nuclei", "ice_nuclei_deposition"):
-                inp = diags[key]
-                self.assertEqual(inp.shape, _SHAPE)
-                self.assertTrue(np.all(np.isfinite(np.asarray(inp))))
-            self.assertGreater(float(jnp.max(diags["ice_nuclei"])), 0.0)
-
-    def test_grad_through_params_finite(self):
-        state, diagnostics = self._setup()
-
-        def loss(scale):
-            base = IceNucleationParameters.default()
-            p = IceNucleationParameters(
-                frac_du_soluble=base.frac_du_soluble,
-                bc_efficiency=base.bc_efficiency,
-                deposition_scale=base.deposition_scale,
-                scale=scale,
-            )
-            _, diags = IceNucleation(params=p)(state, diagnostics, None, None)
-            return jnp.sum(diags["ice_nuclei"] ** 2)
-
-        g = jax.grad(loss)(jnp.asarray(1.0))
-        self.assertTrue(np.isfinite(float(g)) and float(g) != 0.0)
-
-
-class FactoryWiringTest(unittest.TestCase):
-    def test_ice_term_present_with_default_scheme(self):
+    def test_factory_places_it_after_activation(self):
         from jcm.physics.aerosol.jam import jam_aerosol_physics
-
-        term = next(
-            t for t in jam_aerosol_physics()
-            if t.category == "aerosol_ice_nucleation"
-        )
-        self.assertEqual(term.name, "jam_ice_nucleation")
-        self.assertEqual(term._scheme, "niemand")
-
-    def test_scheme_threads_through(self):
-        from jcm.physics.aerosol.jam import jam_aerosol_physics
-
-        term = next(
-            t for t in jam_aerosol_physics(ice_scheme="lohmann_diehl")
-            if t.category == "aerosol_ice_nucleation"
-        )
-        self.assertEqual(term._scheme, "lohmann_diehl")
+        terms = jam_aerosol_physics()
+        cats = [t.category for t in terms]
+        self.assertLess(cats.index("aerosol_activation"), cats.index("aerosol_ice_nucleation"))
+        term = terms[cats.index("aerosol_ice_nucleation")]
+        self.assertEqual(term.provides, ("freezing_aerosol",))
 
 
+@pytest.mark.slow
 class IceNucleationModelTest(unittest.TestCase):
-    """End-to-end WIRING guards: each het-ice scheme path compiles and runs
-    inside the full ECHAM+JAM+2M model, and the ``ice_nuclei`` coupling
-    diagnostic the 2M scheme consumes is emitted.
-
-    These deliberately do NOT assert nonzero ice nuclei or scheme-dependent
-    output: on a 3-step cold-start T21 aquaplanet the prognostic dust/BC
-    burdens are still ~0, so both schemes measurably produce ``ice_nuclei``
-    ≡ 0 and bitwise-identical ``qni`` (verified) — the scheme *physics*
-    (active fractions, temperature windows, scheme differences) is pinned
-    by the unit tests above on synthetic aerosol inputs. What these guard
-    is the trace/compile/coupling path per scheme flag.
+    """End-to-end wiring: the ECHAM+JAM+2M model runs with ECHAM-HAM's freezing and
+    publishes its inputs. On a 3-step cold-start T21 aquaplanet the dust is still ~0, so
+    this guards the trace/compile/coupling path; the physics is pinned by the unit and
+    Fortran-reference tests.
     """
 
-    def _run(self, scheme):
+    def test_runs_finite_and_publishes_inputs(self):
         import numpy as onp
 
         from jcm.model import Model
@@ -218,40 +206,17 @@ class IceNucleationModelTest(unittest.TestCase):
         from jcm.utils import get_coords
 
         coords = get_coords(onp.linspace(0, 1, 21), spectral_truncation=21)
-        terrain = TerrainData.aquaplanet(coords)
-        model = Model(
-            coords=coords, time_step=30, terrain=terrain,
-            physics=idealized_echam_physics(
-                aerosol_module="jam", cloud_scheme="2m", jam_ice_scheme=scheme,
-            ),
-        )
-        return model.run(save_interval=0.0625, total_time=0.0625)
-
-    def _check(self, scheme):
-        preds = self._run(scheme)
+        model = Model(coords=coords, time_step=30, terrain=TerrainData.aquaplanet(coords),
+                      physics=idealized_echam_physics(aerosol_module="jam", cloud_scheme="2m"))
+        preds = model.run(save_interval=0.0625, total_time=0.0625)
         dyn = preds.dynamics
         self.assertFalse(bool(jnp.any(jnp.isnan(dyn.temperature))))
         for key in ("qi", "qni"):
             self.assertFalse(bool(jnp.any(jnp.isnan(dyn.tracers[key]))))
-        # The coupling contract with the 2M scheme: the term emits the
-        # ``ice_nuclei`` diagnostic (finite, non-negative; zero is expected
-        # at cold start — see class docstring).
-        self.assertIn("ice_nuclei", preds.physics)
-        inp = np.asarray(preds.physics["ice_nuclei"])
-        self.assertTrue(np.all(np.isfinite(inp)))
-        self.assertTrue(np.all(inp >= 0.0))
-
-    def test_niemand_runs_finite(self):
-        self._check("niemand")
-
-    def test_lohmann_diehl_runs_finite(self):
-        self._check("lohmann_diehl")
-
-
-# Mark the model-level tests slow.
-import pytest  # noqa: E402
-
-IceNucleationModelTest = pytest.mark.slow(IceNucleationModelTest)
+        fa = preds.physics["freezing_aerosol"]
+        for f in ("dust_soluble", "bc_soluble", "bc_insoluble"):
+            x = np.asarray(getattr(fa, f))
+            self.assertTrue(np.all(np.isfinite(x)) and np.all((x >= 0) & (x <= 1)), f)
 
 
 if __name__ == "__main__":
