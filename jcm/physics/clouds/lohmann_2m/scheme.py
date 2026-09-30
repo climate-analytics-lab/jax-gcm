@@ -236,17 +236,29 @@ def cloud_microphysics_2m(
     # Entry floor on the number tracers
     # ------------------------------------------------------------------
     # ECHAM's section-1 numbers are ρ·(pxtm1 + ztmst·pxtte) floored at
-    # cqtmin (600-605), with no upper bound: ICNC is capped at icemax only
-    # once the detrained crystal number has joined it (1252), and CDNC is
-    # not capped at all. The floor here is 0 rather than cqtmin (1e-12 /m³,
-    # the same state to every consumer). It keeps the dynamical core's
+    # cqtmin = 1e-12 /m³ (600-605), with no upper bound: ICNC is capped at
+    # icemax only once the detrained crystal number has joined it (1252),
+    # and CDNC is not capped at all. The floor keeps the dynamical core's
     # spectral ringing — small negative tracer values — out of
     # ``update_in_cloud_water``, whose ``delta_cdnc = activated_cdnc -
-    # droplet_number`` step would amplify it. For ICNC it is also
-    # deliberately below ECHAM's ``icemin``: arrivals at or below ``icemin``
-    # are re-diagnosed from ice mass in ``update_in_cloud_water`` (the
-    # ``<=`` test fires either way), so an icemin floor would only inject a
-    # spurious icemin-per-step tracer source into ice-free cells.
+    # droplet_number`` step would amplify it.
+    #
+    # The floor is cqtmin, not 0, because the two are different states to
+    # the Korolev/Mazin threshold updraft, which is proportional to ICNC:
+    # at ICNC = 0 it is exactly 0, and the strict section-1 criterion
+    # ``lo2_2d = 0.01·zvervx < zvervmax`` (885) is then false at zero
+    # updraft (the lowest level, 815, or TKE = 0), where at cqtmin it is
+    # true. In an ice-free mixed-phase cell — the normal state after the
+    # negative-mass repair has removed the number with the ice — a 0 floor
+    # would fail ``ll_cv`` there and drop the crystal number of the
+    # detrained ice ``znidetr``, leaving that ice number-less.
+    #
+    # For ICNC the floor is deliberately below ECHAM's ``icemin``, whose
+    # floors (1127-1131, 1253) this scheme does not apply: arrivals at or
+    # below ``icemin`` are re-diagnosed from ice mass in
+    # ``update_in_cloud_water`` (the ``<=`` test fires either way), so an
+    # icemin floor would only inject a spurious icemin-per-step tracer
+    # source into ice-free cells.
     #
     # The floor shapes only the WORKING numbers. The number tendencies are
     # taken against the RAW step-start tracers, as ECHAM passes
@@ -258,12 +270,11 @@ def cloud_microphysics_2m(
     qnc_raw = qnc
     qni_raw = qni
     inv_rho = 1.0 / jnp.maximum(air_density, eps_dt)
-    qnc = jnp.maximum(qnc, 0.0)
-    qni = jnp.maximum(qni, 0.0)
 
-    # Number-per-kg-of-air → per-m^3 at the scheme's API boundary.
-    cdnc0 = qnc * air_density
-    icnc0 = qni * air_density
+    # Number-per-kg-of-air → per-m^3 at the scheme's API boundary, where
+    # ECHAM applies the floor (per m³, 600-605).
+    cdnc0 = jnp.maximum(qnc * air_density, params.cqtmin)
+    icnc0 = jnp.maximum(qni * air_density, params.cqtmin)
 
     # Minimum cloud-droplet number — the SAME ECHAM ``minimum_CDNC`` the warm
     # microphysics uses below (the dynamic max-radius floor or the fixed
@@ -368,7 +379,9 @@ def cloud_microphysics_2m(
     # detrainment (pxim1 + ztmst·pxite, 860-861) at the step-start crystal
     # number, against the updraft. It has no temperature terms; the
     # temperature gates are ll_cv's (958-963) and the section-4 lo2's.
-    # ``icnc0`` is the entry-floored number: ECHAM's CDNC↔ICNC phase
+    # ``icnc0`` is the number floored at cqtmin on entry, as ECHAM's is
+    # (604-605); that floor is what lets an ice-free cell pass this strict
+    # test at zero updraft (see the entry floor). ECHAM's CDNC↔ICNC phase
     # consistency step (607-628) has no counterpart in this scheme.
     zxip1_sec1 = jnp.maximum(qi_m1 + dqi_up, 0.0)
     ice_gm3_sec1 = (1000.0 * zxip1_sec1 * air_density
@@ -457,9 +470,9 @@ def cloud_microphysics_2m(
 
         # The crystal number of the detrained ice joins the post-
         # sedimentation ICNC, capped at icemax (1251-1252). ECHAM's floor at
-        # icemin (1253) is not applied: the scheme keeps the ICNC lower
-        # bound at 0 and re-diagnoses number-less ice in
-        # update_in_cloud_water (see the entry floor).
+        # icemin (1253) is not applied: the ICNC lower bound stays cqtmin
+        # (znidetr's own floor, 978, as at entry) and number-less ice is
+        # re-diagnosed in update_in_cloud_water (see the entry floor).
         icnc_sedi = jnp.minimum(icnc_sedi + znidetr_k, params.icemax)
 
         # --- 3.1 Melting (fluxes + in-cloud ice) -----------------------

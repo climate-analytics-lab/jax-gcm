@@ -35,6 +35,7 @@ from .cloud_utils import (
     detrained_ice_crystal_number,
     ice_volume_mean_radius_from_temperature,
     latent_heat_over_cp,
+    turbulent_updraft_velocity,
 )
 from .lohmann_2m import cloud_microphysics_2m, demott2010_inp
 from .lohmann_2m import scheme as scheme_mod
@@ -247,6 +248,126 @@ class TestDetrainedIceCrystalNumber:
             seen.append(float(icnc_melt_in))
         assert max(seen) == pytest.approx(float(_P.icemax))  # the cap binds
         assert min(seen) < 1e3                                # and not always
+
+
+# ---------------------------------------------------------------------------
+# The section-1 criterion lo2_2d and the entry floor it depends on
+# ---------------------------------------------------------------------------
+
+
+class TestSectionOneCriterion:
+    """``lo2_2d = 0.01·zvervx < zvervmax`` on the pre-detrainment state (F 858-885).
+
+    Its inputs are the ice present before this step's detrainment,
+    ``max(pxim1 + ztmst·pxite, 0)`` (F 859-860), and the step-start crystal
+    number floored at ``cqtmin`` (F 604-605).
+    """
+
+    def test_inputs_are_the_pre_detrainment_ice_and_floored_number(
+            self, monkeypatch):
+        n = 8
+        T = jnp.array([236.0, 245.0, 250.0, 255.0, 258.0, 260.0, 262.0,
+                       265.0])
+        p = jnp.linspace(3e4, 6.5e4, n)
+        rho = p / (287.0 * T)
+        qi_m1 = jnp.array([0.0, 2e-6, 1e-5, 0.0, 5e-6, 3e-6, 1e-5, 2e-6])
+        # The pure upstream increment; at level 4 it takes more than the
+        # step-start ice, which the criterion must see as no ice at all.
+        dqi_up = jnp.array([0.0, 1e-6, -2e-6, 0.0, -8e-6, 0.0, 4e-6, 0.0])
+        det_qi = jnp.array([0.0, 3e-6, 1e-5, 2e-5, 5e-6, 0.0, 2e-6, 1e-5])
+        qni = jnp.array([-50.0, 0.0, 2e3, 0.0, 1e4, -1.0, 3e2, 50.0])
+        cf = jnp.array([0.5, 0.3, 0.8, 0.6, 0.005, 0.7, 0.9, 0.4])
+        tke = jnp.array([0.2, 0.0, 0.2, 0.0, 0.2, 0.05, 0.0, 0.2])
+        col = dict(T=T, q=_qsat(T, p, "ice"), p=p, rho=rho, cf=cf, tke=tke,
+                   qc=jnp.zeros(n), qc_m1=jnp.zeros(n), det_qc=jnp.zeros(n),
+                   qi_m1=qi_m1, det_qi=det_qi, qi=qi_m1 + dqi_up + det_qi,
+                   qni=qni)
+        vmax = _spy(monkeypatch, scheme_mod, "threshold_vert_vel",
+                    lambda a, k, out: (k["icnc"], k["ice_radius"], out))
+        crit = _spy(monkeypatch, scheme_mod, "detrained_ice_crystal_number",
+                    lambda a, k, out: (a[2],))
+        _run(col)
+        # The section-1 call is the one on whole columns; the sweep's
+        # per-level calls (section 4, WBF) are on scalars.
+        sec1 = [r for r in vmax if r[0].ndim == 1]
+        assert len(sec1) == 1 and len(crit) == 1
+        icnc, radius, zvervmax = sec1[0]
+
+        icnc0 = np.maximum(np.asarray(qni * rho), float(_P.cqtmin))
+        np.testing.assert_allclose(icnc, icnc0, rtol=1e-6)
+        assert np.all(icnc > 0.0)
+
+        def schumann(ice):
+            ice_gm3 = (1000.0 * ice * rho
+                       / jnp.maximum(cf, float(_P.clc_min)))
+            return np.asarray(scheme_mod.ice_volume_mean_radius_schumann(
+                ice_gm3, jnp.asarray(icnc0, jnp.float32), _P))
+
+        pre = schumann(jnp.maximum(qi_m1 + dqi_up, 0.0))
+        np.testing.assert_allclose(radius, pre, rtol=1e-6)
+        # ...and not the radius of the ice including this step's detrainment.
+        post = schumann(qi_m1 + dqi_up + det_qi)
+        assert np.any(np.abs(post - pre) > 1e-3 * pre)
+
+        updraft = np.asarray(turbulent_updraft_velocity(tke, _P))
+        lo2_2d = crit[0][0]
+        np.testing.assert_array_equal(lo2_2d, 0.01 * updraft < zvervmax)
+        assert lo2_2d.any() and not lo2_2d.all()
+
+    @pytest.mark.parametrize("where", ["quiescent", "lowest level"])
+    def test_ice_free_cell_keeps_the_detrained_crystal_number(
+            self, monkeypatch, where):
+        """At zero updraft an ice-free cell passes ``lo2_2d`` (F 815, 885).
+
+        With no crystals and no ice the threshold updraft is set by the
+        cqtmin floor, so it is tiny but positive, and a zero updraft (no
+        TKE, or the lowest level, where ECHAM zeroes the turbulent term)
+        is below it: ``ll_cv`` holds and the detrained ice arrives with
+        its crystal number. A 0 floor would make the threshold exactly 0,
+        fail the strict test, and leave the ice number-less. A raw tracer
+        of 0 and one of cqtmin/ρ are the same state after the floor.
+        """
+        n = 8
+        k = 3 if where == "quiescent" else n - 1
+        T = jnp.full(n, 258.0)
+        p = jnp.linspace(4e4, 7e4, n)
+        rho = p / (287.0 * T)
+        det = jnp.zeros(n).at[k].set(2e-5)
+        col = dict(T=T, q=0.98 * _qsat(T, p, "water"), p=p, rho=rho,
+                   cf=jnp.full(n, 0.6),
+                   tke=jnp.full(n, 0.0 if where == "quiescent" else 0.5),
+                   qc=jnp.zeros(n), qc_m1=jnp.zeros(n), det_qc=jnp.zeros(n),
+                   qi=det, qi_m1=jnp.zeros(n), det_qi=det)
+        crit = _spy(monkeypatch, scheme_mod, "detrained_ice_crystal_number",
+                    lambda a, k_, out: (a[2], out))
+
+        at_zero = dict(col, qni=jnp.zeros(n))
+        out_zero = _run(at_zero)
+        lo2_2d, znidetr = crit[-1]
+        assert bool(lo2_2d[k]), "ice-free cell failed lo2_2d at zero updraft"
+        zrid = ice_volume_mean_radius_from_temperature(T, _P)
+        expected = float(detrained_ice_crystal_number(
+            det, T, jnp.ones(n, dtype=bool), col["cf"], rho, zrid, _P)[k])
+        np.testing.assert_allclose(float(znidetr[k]), expected, rtol=1e-5)
+        assert expected > 1e5
+
+        icnc_end = np.asarray((at_zero["qni"] + DT * out_zero[0].dqnidt)
+                              * rho)
+        # The cold chain removes crystals, nothing here adds any: the end
+        # ICNC is a sizeable fraction of the detrained number.
+        assert 0.05 * expected < icnc_end[k] <= 1.0001 * expected, (
+            icnc_end[k], expected)
+
+        at_cqtmin = dict(col, qni=float(_P.cqtmin) / rho)
+        out_cqtmin = _run(at_cqtmin)
+        for x, y in zip(_end_state(at_zero, out_zero),
+                        _end_state(at_cqtmin, out_cqtmin)):
+            np.testing.assert_allclose(np.asarray(x), np.asarray(y),
+                                       rtol=1e-6, atol=1e-12)
+        np.testing.assert_allclose(
+            icnc_end,
+            np.asarray((at_cqtmin["qni"] + DT * out_cqtmin[0].dqnidt) * rho),
+            rtol=1e-5, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -468,11 +589,12 @@ class TestDetrainmentPhaseSplit:
 class TestNumberTendencyAgainstRawTracer:
     """``pxtte = (n/ρ − pxtm1)/ztmst`` with the RAW ``pxtm1`` (F 1781, 3625).
 
-    The entry floor at 0 shapes the working numbers only, so the end-of-step
-    tracer ``raw + dt·tendency`` is the scheme's own number: a negative raw
-    tracer ends exactly where a zero one does. There is no upper bound on
-    entry (ECHAM has none, F 600-605): ICNC is capped at ``icemax`` once the
-    detrained number has joined it (F 1252), and CDNC is not capped at all.
+    The entry floor at ``cqtmin`` (F 600-605) shapes the working numbers
+    only, so the end-of-step tracer ``raw + dt·tendency`` is the scheme's
+    own number: a negative raw tracer ends exactly where a zero one does.
+    There is no upper bound on entry (ECHAM has none, F 600-605): ICNC is
+    capped at ``icemax`` once the detrained number has joined it (F 1252),
+    and CDNC is not capped at all.
     """
 
     N = 8
