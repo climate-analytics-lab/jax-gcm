@@ -1414,11 +1414,20 @@ The cloud schemes take ECHAM's anchor, increments and detrainment
   ``_post_physics_state``, with a ``valid`` flag, when a composed term
   declares ``requires_post_physics_fields``, as the 1M and 2M terms do.
   Dinosaur applies the tendency through the same spectral projection its
-  ``step`` uses and pySES as its coupling mode adds it; the base class's
-  default is the gridpoint forward-Euler add. Where no valid anchor exists
+  ``step`` uses; pySES adds the lumped forcing of its coupling step, which
+  under ``lump_all`` and ``hybrid`` coupling (the shipped ne30 presets) forms
+  every field of the anchor, so the GLL projection residual is not counted as
+  dynamics in the temperature increment; the base class's default is the
+  gridpoint forward-Euler add. Where no valid anchor exists
   (the first step, a checkpoint written before the slot, the single-column
   and RCE hosts) the anchor is the state the physics receives and the
   dynamics increment is zero.
+- The 2M's air density is ECHAM's ``papm1/(rd·ptvm1)`` at the anchor, the
+  virtual density (``mo_cloud_micro_2m.f90`` l.578), as the 1M's is, instead
+  of the dry density of the state the term received; the layer depth that
+  goes with it keeps the layer mass. The per-m³ quantities of the 2M and JAM
+  presets (water contents, number concentrations, autoconversion,
+  sedimentation) change by about 1 % at 15 g/kg humidity.
 - Checkpoints written before the slot existed restore with it seeded from
   the fresh carry and ``valid = 0`` (logged at INFO), and the carried anchor
   applies from the next step, with no schema change
