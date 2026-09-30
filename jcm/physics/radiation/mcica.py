@@ -1,8 +1,8 @@
 """Monte Carlo Independent Column Approximation (McICA) sub-column generator.
 
-Implements the Räisänen et al. (2004) generalized exponential-random
-overlap stochastic sub-column generator used by RRTMGP-class radiation
-schemes to handle subgrid cloud variability + vertical overlap. Each
+Implements the Räisänen et al. (2004) stochastic sub-column generator
+used by RRTMGP-class radiation schemes to handle subgrid cloud
+variability + vertical overlap. Each
 sub-column is a binary cloud profile: cloudy or clear at every level.
 Radiation is then run *as if the column were homogeneous* in each
 sub-column; averaging across many sub-columns (or across radiation
@@ -19,9 +19,17 @@ Three overlap rules are supported:
 
 - ``"random"``      independent draws at each level (no overlap).
 - ``"maximum_random"`` maximum within continuous cloud banks, random
-  across clear layers (Geleyn-Hollingsworth 1979).
+  across clear layers (Geleyn-Hollingsworth 1979): one rank through each
+  contiguous bank. It is jcm's default and ECHAM6.3's rule
+  (``i_overlap = 1``, ``mo_radiation_parameters.f90`` l.71). ECHAM's
+  sampler (``mo_cld_sampling.f90::sample_cld_state`` l.66-83) keeps a
+  sub-column's rank only below a cloudy cell of it and redraws it in the
+  clear part otherwise; the total cover is the same unless a bank's cover
+  has an interior minimum, where ECHAM's is larger (the adjacent-layer
+  Geleyn-Hollingsworth product, ``mo_radiation.f90`` l.436-442).
 - ``"exponential"``  generalised-exponential overlap with a configurable
-  decorrelation length (ECHAM6 default ~2 km).
+  decorrelation length (jcm default 2 km), a jcm option: ECHAM6.3's
+  sampler has no exponential rule.
 
 Determinism: the caller is responsible for constructing a PRNG key that
 reflects whatever stochastic axes it cares about (model step, column
@@ -191,7 +199,7 @@ def generate_subcolumns(
     layer_thickness: jnp.ndarray,
     *,
     n_subcols: int,
-    overlap: _OverlapRule = "exponential",
+    overlap: _OverlapRule = "maximum_random",
     decorrelation_km: float = 2.0,
     key: jax.Array,
 ) -> jnp.ndarray:
@@ -205,8 +213,8 @@ def generate_subcolumns(
             schemes (like grey two-stream) that don't have enough
             spectral subdivision to absorb the stochastic noise.
         overlap: overlap assumption.
-        decorrelation_km: vertical decorrelation length for
-            ``"exponential"`` overlap. ECHAM6 default ≈ 2 km.
+        decorrelation_km: vertical decorrelation length [km] of the
+            ``"exponential"`` rule; inert under the other two.
         key: a JAX PRNG key. Construct deterministically via
             ``jax.random.fold_in`` over whatever stochastic axes the
             caller wants reproducible (model_step, column index,
@@ -291,7 +299,7 @@ def column_total_cover(
 def expected_total_cover(
     cloud_fraction: jnp.ndarray,
     layer_thickness: jnp.ndarray,
-    overlap: _OverlapRule = "exponential",
+    overlap: _OverlapRule = "maximum_random",
     decorrelation_km: float = 2.0,
 ) -> jnp.ndarray:
     """Closed-form expectation of the sub-column total cloud cover.

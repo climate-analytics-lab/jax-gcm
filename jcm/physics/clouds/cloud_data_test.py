@@ -87,14 +87,21 @@ def test_condensate_free_layer_separates_two_cloud_banks_in_mcica():
     cover, so the empty layer breaks the bank: the two clouds overlap
     randomly, total cover 1 - 0.5·0.5 = 0.75. Unmasked, the empty layer's
     diagnosed 0.5 would bridge them into one maximally overlapped bank, 0.5.
-    Under the exponential rule (jcm's default) the correlation does not
-    depend on the cover, so the mask removes only the empty layer's own,
+    The maximum-random checks run on the default overlap rule, which is
+    ECHAM's. Under the exponential rule (a jcm option) the correlation does
+    not depend on the cover, so the mask removes only the empty layer's own,
     optically empty, sampled cloud.
     """
     import jax
     import numpy as np
     from jcm.physics.radiation.mcica import (
         effective_cloud_fraction, expected_total_cover, generate_subcolumns)
+    from jcm.physics.radiation.radiation_types import (
+        RadiationParameters, cloud_overlap_name)
+
+    default_rule = cloud_overlap_name(
+        int(RadiationParameters.default().cloud_overlap))
+    assert default_rule == "maximum_random"
 
     qc = jnp.array([[1e-5], [0.0], [1e-5]])
     qi = jnp.zeros((3, 1))
@@ -103,14 +110,14 @@ def test_condensate_free_layer_separates_two_cloud_banks_in_mcica():
     cf = effective_cloud_fraction(cf[:, 0])
     dz = jnp.full(3, 500.0)
 
-    masked = float(expected_total_cover(cf, dz, "maximum_random"))
+    masked = float(expected_total_cover(cf, dz, default_rule))
     unmasked = float(expected_total_cover(jnp.full(3, 0.5), dz,
-                                          "maximum_random"))
+                                          default_rule))
     assert masked == pytest.approx(0.75) == _echam_total_cover(np.asarray(cf))
     assert unmasked == pytest.approx(0.5)
 
     masks = generate_subcolumns(cf, dz, n_subcols=20000,
-                                overlap="maximum_random",
+                                overlap=default_rule,
                                 key=jax.random.PRNGKey(0))
     sampled = float(jnp.mean(jnp.max(masks, axis=1)))
     assert sampled == pytest.approx(0.75, abs=0.01)

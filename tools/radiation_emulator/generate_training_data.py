@@ -124,6 +124,16 @@ def band_counts():
     )
 
 
+def _default_overlap_label() -> str:
+    """Name of the overlap rule the labels embed (``RadiationParameters.default()``)."""
+    from jcm.physics.radiation.radiation_types import (
+        RadiationParameters,
+        cloud_overlap_name,
+    )
+    return cloud_overlap_name(
+        int(RadiationParameters.default().cloud_overlap)).replace("_", "-")
+
+
 def make_labeller(base_seed: int = 0):
     """Return ``run(batch, model_step) -> dict`` of per-seed flux labels.
 
@@ -1455,8 +1465,11 @@ def main(argv=None):
         # bookkeeping: it belongs with the data it describes.
         n_columns_attempted=int(quality["n_attempted"]),
         n_columns_rejected=int(quality["n_rejected"]),
-        rrtmgp_config="rrtmgp-gas-lw-g128 / rrtmgp-gas-sw-g112, "
-                      "McICA exponential overlap, compute_cre=True",
+        # The overlap the labels embed: make_labeller runs RRTMGP with
+        # RadiationParameters.default(), so it is read from there.
+        rrtmgp_config=("rrtmgp-gas-lw-g128 / rrtmgp-gas-sw-g112, McICA "
+                       f"{_default_overlap_label()} overlap, "
+                       "compute_cre=True"),
         vertical_convention="level 0 = model top (TOA-first)",
         generation_seconds=round(elapsed, 2),
         jax_platform=os.environ.get("JAX_PLATFORMS", "default"),

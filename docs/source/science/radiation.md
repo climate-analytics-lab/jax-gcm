@@ -36,17 +36,24 @@ term list):
 **Partial-cloud / overlap** differs by backend. **RRTMGP** uses full **McICA**
 (``jcm/physics/radiation/mcica.py``): one stochastic binary cloud profile per
 g-point, seeded deterministically per column and model step, with three overlap
-rules — random, maximum-random (Geleyn-Hollingsworth), and
-generalised-exponential with a decorrelation length. The **grey** backend
-instead combines one clear and one cloudy beam weighted by the overlap-derived
-total cover (``column_total_cover``); the **NN emulator's** fluxes carry
-whatever overlap its RRTMGP training labels embedded — the network sees only
-layer cloud fractions and paths, so the runtime ``cloud_overlap`` /
-``cloud_decorrelation_km`` knobs change its *reported total-cover diagnostic*
-(a post-hoc ``expected_total_cover``) and not its heating or fluxes; **SPEEDY**
-carries its own cloud formulation. Swapping backends therefore changes the
-cloud-overlap treatment, not just the gas optics. The AeroCom
-total-cloud-cover diagnostic uses the maximum-random closure.
+rules — random, maximum-random (Geleyn-Hollingsworth: maximum within a
+contiguous cloud bank, random across a clear layer), and
+generalised-exponential with a decorrelation length
+(``RadiationParameters.cloud_overlap``, ``cloud_decorrelation_km``). The
+default is **maximum-random**, ECHAM6.3's default (``i_overlap = 1``,
+``mo_radiation_parameters.f90`` l.71, sampled by
+``mo_cld_sampling.f90::sample_cld_state``). ECHAM's sampler also offers
+random overlap (and maximum, which jcm does not); exponential is a jcm option
+with no ECHAM counterpart. The **grey** backend instead combines one clear and one cloudy
+beam weighted by the overlap-derived total cover (``column_total_cover``); the
+**NN emulator's** fluxes carry whatever overlap its RRTMGP training labels
+embedded — the network sees only layer cloud fractions and paths, so the
+runtime ``cloud_overlap`` / ``cloud_decorrelation_km`` knobs change its
+*reported total-cover diagnostic* (a post-hoc ``expected_total_cover``) and
+not its heating or fluxes; **SPEEDY** carries its own cloud formulation.
+Swapping backends therefore changes the cloud-overlap treatment, not just the
+gas optics. The AeroCom total-cloud-cover diagnostic uses the maximum-random
+closure.
 
 **Offline**, the total cloud cover jcm reports from saved output is also
 maximum-random — ECHAM's own ``aclcov`` (``mo_cloud.f90`` §10.2), as
@@ -203,8 +210,13 @@ radius.
 **What ECHAM/CAM does.** ECHAM6-HAM2.3 runs the **PSrad/RRTMG** two-stream
 correlated-k scheme (``mo_psrad_interface.f90``; Pincus & Stevens 2013; RRTMG:
 Mlawer et al. 1997, Iacono et al. 2008) with **McICA** sub-column sampling (Pincus,
-Barker & Morcrette 2003) and generalised exponential-random overlap (Räisänen et
-al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
+Barker & Morcrette 2003) and maximum-random overlap by default (``i_overlap = 1``,
+``mo_radiation_parameters.f90`` l.71): ``mo_cld_sampling.f90::sample_cld_state``
+offers maximum-random, maximum and random, and no exponential rule. Its
+maximum-random sampler (l.66-83) keeps a sub-column's rank below a cloudy cell
+of that sub-column and redraws it in the clear part otherwise, and the total
+cover it reports is the adjacent-layer Geleyn-Hollingsworth product
+(``mo_radiation.f90`` l.436-442). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
 **RRTMGP** (Pincus, Mlawer & Delamere 2019) with liquid effective radius from
 ``cloud_optical_properties.F90`` (``reltab``). MACv2-SP is Stevens et al. (2017),
 ``mo_bc_aeropt_splumes.f90``. The NN emulator architecture is Ukkonen (2024),
@@ -276,6 +288,19 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   agree to float32 reduction order, which is the check the harness applies.
 
 **Status & known limitations.**
+- **jcm's maximum-random sampler keeps one rank through each contiguous cloud
+  bank**, where ECHAM's keeps a sub-column's rank only below a cloudy cell of
+  it (``mo_cld_sampling.f90`` l.66-83). The two give the same total cover,
+  1 − ∏ over banks of (1 − the bank's maximum), wherever each bank's cover
+  has no interior minimum, and ECHAM's gives more where it has one: a bank of
+  0.5, 0.2, 0.5 covers 0.50 in jcm and 0.69 (the Geleyn-Hollingsworth product)
+  in ECHAM. ``expected_total_cover`` follows jcm's sampler; the AeroCom
+  diagnostic and the offline ``aclcov`` follow ECHAM's product.
+- **The packaged NN emulator was trained on exponential overlap.** Its training
+  labels are RRTMGP fluxes under the exponential rule at 2 km, the default when
+  they were generated, so under the maximum-random default its fluxes and its
+  published ``total_cloud_cover`` describe different overlaps until it is
+  retrained (#881).
 - **Cloud inhomogeneity carries ECHAM's T63 values, not its per-resolution
   table.** ECHAM raises the ice factor at higher truncation (``zinhomi = 0.85``
   at T127+) and uses ``zinhoml3 = 0.4`` at T31; jcm takes the T63 values at
