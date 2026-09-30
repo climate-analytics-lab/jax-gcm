@@ -315,15 +315,20 @@ What the Kubernetes door adds, and why:
   (`JCM_MIRROR_REVISION`, recorded in `mirror_revision.json` exactly as on
   the PBS path). They are still prefetched here first, so a missing input
   refuses before a GPU is claimed.
-- **One run directory, one launch.** Each launch is recorded as
+- **One run directory, one launch, one start.** Each launch is recorded as
   `$SCRATCH/jam_runs/<run>/launch.json` — the code pin, image, override list,
   length and Job name, with a digest — beside the manifest (`job.json`) and
-  the mirror record. The pod writes the same record into the rundir on its
-  first attempt and refuses any Job whose definition differs, or a checkpoint
-  no record claims: the generating node cannot see the volume, and without
-  this a reused tag (another machine, a deleted Job) would resume someone
-  else's integration and report it as its own (#701). Regenerating the same
-  launch is a no-op, so inspect-then-`--submit` works; a different definition
+  the mirror record. The generating node cannot see the volume, so the pod
+  does what `check_fresh` does for a PBS rundir: it writes the same record
+  into the rundir on its first attempt and refuses a Job whose definition
+  differs or a checkpoint no record claims, and a Job launched without
+  `--resume` refuses a checkpoint that another Job wrote (the Job's own
+  retries pass: it lists its uid, from the pod's
+  `batch.kubernetes.io/controller-uid` label, in the rundir's `JOBS`).
+  Without this a reused tag — another machine, or a fresh relaunch after the
+  Job was deleted — would resume an existing integration and report it as its
+  own (#701). Regenerating the same launch is a no-op, and keeps its recorded
+  mirror commit, so inspect-then-`--submit` works; a different definition
   under a recorded tag is refused.
 - **Resuming.** Evictions need nothing: every retry (`--retries`, default 20,
   is the eviction budget) resumes from the checkpoint. `--resume` re-emits the
@@ -336,9 +341,12 @@ What the Kubernetes door adds, and why:
   restarts until its retries are spent, holding its GPU in back-off:
   `kubectl delete job <name>` once the log shows why.
 - `--job-prefix` (default `jcm-run`, mkrun.py's) gives a campaign sharing the
-  namespace its own Job names. A Job name longer than 63 characters is
-  refused rather than truncated, because truncation could fold two arms onto
-  one Job.
+  namespace its own Job names. A Job name longer than 63 characters, or a
+  tag or suffix with capitals, is refused rather than truncated or
+  lowercased, because either would fold two runs onto one Job.
+- `--memory` (default `64Gi`) is the pod's host memory. An OOM-killed
+  container restarts at its checkpoint and dies there again, so raise it and
+  `--resume`; it, like `--retries`, is not part of the launch definition.
 
 ### Retune arms (#682)
 
@@ -374,9 +382,11 @@ command line, so repeat them.
 `--fetch` copies `/runs/<run>/` into `$SCRATCH/jam_runs/<run>/` through a
 throwaway CPU pod that mounts the volume read-only
 (`kubernetes-jcm-runs/scripts/fetch_run.py`), skipping checkpoints unless
-`--with-checkpoints` (the JAM archives run to ~1 GB each). The copy is
-incremental and size-checked: re-running it after an interrupted stream copies
-only what is missing or short, and it exits non-zero while anything is.
+`--with-checkpoints` (the JAM archives run to ~1 GB each), and never over the
+local `launch.json` that `--resume` reads (a differing copy on the volume is
+reported). The copy is incremental and size-checked: re-running it after an
+interrupted stream copies only what is missing or short, and it exits
+non-zero while anything is.
 
 Copying was chosen over scoring inside a pod because it needs less new code:
 one small copy helper, after which `health.py`, `aerosol_stats.py` and

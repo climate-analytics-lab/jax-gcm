@@ -135,8 +135,22 @@ def extra_pip_setup(site: dict) -> str:
 pip install --no-cache-dir {' '.join(repr(x) for x in site['extra_pip'])} 2>&1 | tail -2"""
 
 
+def checkpoint_of(overrides: list[str]) -> str:
+    """Return the checkpoint jcm will write: the LAST ``run.checkpoint_path``.
+
+    Hydra applies overrides in order, so a later ``++run.checkpoint_path`` (a
+    door's ``--extra``) wins over the one the door composed.
+    """
+    ckpts = [o.split("=", 1)[1] for o in overrides
+             if o.lstrip("+").startswith("run.checkpoint_path=")]
+    if not ckpts:
+        raise ValueError("the overrides set no run.checkpoint_path, so the run "
+                         "could not resume after an eviction")
+    return ckpts[-1]
+
+
 def job_manifest(*, site: dict, job_name: str, label: str, rundir: str,
-                 checkpoint: str, overrides: list[str], days: int,
+                 overrides: list[str], days: int,
                  resolved: dict, setup: str, python_env: str,
                  retries: int, gpus: int, cpu: int, memory: str,
                  gpu_product: str | None = None, env: tuple = (),
@@ -150,22 +164,13 @@ def job_manifest(*, site: dict, job_name: str, label: str, rundir: str,
     command) teeing into ``<rundir>/run.log``, and then fails the Job unless
     THIS attempt stayed healthy and reached day ``days`` — because
     ``run_chunked`` returns normally when its health gate trips. Each retry
-    resumes from ``checkpoint``, so ``retries`` (``backoffLimit``) is the
-    eviction budget. ``guard`` is shell run right after the rundir exists and
-    before anything is cloned, for a door that must refuse a rundir before
-    spending the attempt; ``env`` adds container env entries after the base
-    ones.
-
-    ``checkpoint`` must be the path the overrides' LAST ``run.checkpoint_path``
-    names: the resume notice and the no-progress gate read it, and a mismatch
-    would have them inspect a file jcm never writes.
+    resumes from the checkpoint the overrides name (:func:`checkpoint_of`),
+    so ``retries`` (``backoffLimit``) is the eviction budget. ``guard`` is
+    shell run right after the rundir exists and before anything is cloned,
+    for a door that must refuse a rundir before spending the attempt; ``env``
+    adds container env entries after the base ones.
     """
-    ckpts = [o.split("=", 1)[1] for o in overrides
-             if o.lstrip("+").startswith("run.checkpoint_path=")]
-    if not ckpts or ckpts[-1] != checkpoint:
-        raise ValueError(f"the overrides set run.checkpoint_path to "
-                         f"{ckpts[-1] if ckpts else 'nothing'}, but the "
-                         f"completion gate would read {checkpoint}")
+    checkpoint = checkpoint_of(overrides)
     clone = "\n".join(
         f'git clone --filter=blob:none --no-checkout {url} /work/{d} '
         f'&& git -C /work/{d} fetch --depth 1 origin {sha} '
@@ -364,8 +369,7 @@ def build(a, resolved) -> dict:
     ]
     return job_manifest(
         site=S, job_name=f"jcm-run-{a.name}".lower().replace("_", "-")[:60],
-        label=a.name, rundir=rundir, checkpoint=checkpoint,
-        overrides=overrides, days=target_days(a), resolved=resolved,
+        label=a.name, rundir=rundir, overrides=overrides, days=target_days(a), resolved=resolved,
         setup=extra_pip_setup(S),
         python_env=("PYTHONPATH="
                     + ":".join(f"/work/{d}" for d in ("jax-rrtmgp", "mam4-jax"))

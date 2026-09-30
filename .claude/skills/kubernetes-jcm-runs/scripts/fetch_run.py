@@ -109,26 +109,36 @@ def remote_files(site: dict, pod: str, run: str) -> dict[str, int]:
 
 
 def fetch_run(run: str, dest, *, site: dict, pod: str,
-              with_checkpoints: bool = False) -> list[str]:
+              with_checkpoints: bool = False, keep=()) -> list[str]:
     """Copy ``/runs/<run>/`` into ``dest``; return what is still missing or short.
 
-    An empty list means ``dest`` now holds every (non-checkpoint) file at the
-    volume's size.
+    An empty list means ``dest`` now holds every (non-checkpoint) file at
+    least at the size the volume listed — at least, because a run still
+    being written grows between the listing and the copy. A name in ``keep``
+    that already exists in ``dest`` is never overwritten (a caller's own
+    record); a size difference from the volume's copy is reported instead.
     """
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
-    _start(site, pod, run)
     try:
+        # Inside the try: a pod that never reaches Running must be deleted too.
+        _start(site, pod, run)
         files = remote_files(site, pod, run)
         wanted = {f: n for f, n in files.items()
-                  if with_checkpoints or not CHECKPOINT.search(f)}
+                  if (with_checkpoints or not CHECKPOINT.search(f))
+                  and not (f in keep and (dest / f).is_file())}
+        for f in keep:
+            if f in files and (dest / f).is_file() \
+                    and (dest / f).stat().st_size != files[f]:
+                print(f"# NOTE: /runs/{run}/{f} differs from {dest / f}; the "
+                      "local one is kept", file=sys.stderr)
         todo = sorted(f for f, n in wanted.items()
                       if not (dest / f).is_file()
                       or (dest / f).stat().st_size != n)
         gib = sum(wanted[f] for f in todo) / 2**30
         print(f"# {run}: {len(todo)} of {len(wanted)} files to copy "
-              f"({gib:.2f} GiB; {len(files) - len(wanted)} checkpoint files "
-              "skipped)", file=sys.stderr)
+              f"({gib:.2f} GiB; {len(files) - len(wanted)} kept or checkpoint "
+              "files skipped)", file=sys.stderr)
         if todo:
             src = subprocess.Popen(
                 ["kubectl", "-n", site["namespace"], "exec", pod, "--",
@@ -147,7 +157,7 @@ def fetch_run(run: str, dest, *, site: dict, pod: str,
                  "--wait=false", timeout=120)
     return [f"{f} ({'missing' if not (dest / f).is_file() else 'short'})"
             for f, n in sorted(wanted.items())
-            if not (dest / f).is_file() or (dest / f).stat().st_size != n]
+            if not (dest / f).is_file() or (dest / f).stat().st_size < n]
 
 
 def main() -> int:

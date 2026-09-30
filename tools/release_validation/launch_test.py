@@ -631,7 +631,10 @@ def test_resume_reuses_the_recorded_launch(scratch, gitrepo, remote, capsys):
     remote["refs/heads/dev"] = _commit(gitrepo, "b")          # HEAD moves on
     [resumed] = _k8s(gitrepo, capsys, "--tag", "rs", "--suffix", "arm1",
                      "--resume")
-    assert _script(resumed) == _script(fresh)
+    # The same Job, except that it may continue a checkpoint another Job wrote.
+    assert "[ 0 -eq 0 ]" in _script(fresh)
+    assert _script(resumed) == _script(fresh).replace("[ 0 -eq 0 ]",
+                                                      "[ 1 -eq 0 ]")
     assert f"checkout --detach {first}" in _script(resumed)
     assert _jcm_main_overrides(resumed)[-1] == "+physics.convection.tau=3600.0"
 
@@ -663,55 +666,81 @@ def test_relaunch_is_idempotent_but_a_new_definition_is_refused(
         _k8s(gitrepo, capsys, "--tag", "id", "--days", "7")
 
 
-def _guard(tmp_path, digest):
+def _guard(tmp_path, digest, resume=False):
     rundir = tmp_path / "vol" / "run"
     rundir.mkdir(parents=True, exist_ok=True)
     defn = {"digest": digest, "run": "run"}
-    return rundir, launch.rundir_guard(str(rundir), f"{rundir}/ckpt", defn)
+    return rundir, launch.rundir_guard(str(rundir), f"{rundir}/ckpt", defn,
+                                       resume)
 
 
-def _bash(script):
+def _bash(script, **env):
     return subprocess.run(["bash", "-c", "set -euo pipefail\n" + script],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True,
+                          env={**os.environ, **env})
 
 
-def test_rundir_guard_ties_the_volume_to_one_launch(tmp_path, scratch,
-                                                    gitrepo, remote, capsys):
-    """The pod refuses a rundir that another launch integrates (#701).
+def test_rundir_guard_ties_the_volume_to_one_launch_and_one_start(
+        tmp_path, scratch, gitrepo, remote, capsys):
+    """The pod refuses what check_fresh refuses on a PBS rundir (#701).
 
     The generating node cannot see the volume, so the guard is the only thing
-    that stops a reused tag from silently resuming someone else's run.
+    that stops a reused tag, or a fresh relaunch after its Job was deleted,
+    from silently resuming an existing run and reporting it as its own.
     """
-    rundir, guard = _guard(tmp_path, "aaaa")
-    assert _bash(guard).returncode == 0                  # first attempt
-    assert '"digest": "aaaa"' in (rundir / "launch.json").read_text()
-    (rundir / "ckpt").write_bytes(b"x")
-    assert _bash(guard).returncode == 0                  # retry / resume
-    other = _bash(_guard(tmp_path, "bbbb")[1])
-    assert other.returncode == 1 and "different launch" in other.stdout
+    rundir, fresh = _guard(tmp_path, "aaaa")
+    _, resume = _guard(tmp_path, "aaaa", resume=True)
+    no_uid = _bash(fresh, JOB_UID="")
+    assert no_uid.returncode == 1 and "JOB_UID is empty" in no_uid.stdout
+    assert not (rundir / "launch.json").exists()
+    assert _bash(fresh, JOB_UID="u1").returncode == 0      # first attempt
+    assert (rundir / "launch.json").read_text() == launch.launch_record_text(
+        {"digest": "aaaa", "run": "run"})
+    (rundir / "ckpt").write_bytes(b"x")                    # it integrates
+    assert _bash(fresh, JOB_UID="u1").returncode == 0      # its own retry
+    other = _bash(fresh, JOB_UID="u2")                     # a fresh relaunch
+    assert other.returncode == 1 and "written by another Job" in other.stdout
+    assert _bash(resume, JOB_UID="u2").returncode == 0     # --resume
+    assert (rundir / "JOBS").read_text().split() == ["u1", "u2"]
+    foreign = _bash(_guard(tmp_path, "bbbb", resume=True)[1], JOB_UID="u3")
+    assert foreign.returncode == 1 and "different launch" in foreign.stdout
     (rundir / "launch.json").unlink()
-    orphan = _bash(guard)
+    orphan = _bash(resume, JOB_UID="u2")
     assert orphan.returncode == 1 and "unknown origin" in orphan.stdout
-    # And the Job runs exactly this guard, before it clones anything.
+    # And the Job runs exactly this guard, before it clones anything, with its
+    # uid from the label the Job controller puts on every pod it creates.
     remote["refs/heads/dev"] = _commit(gitrepo, "a")
     [job] = _k8s(gitrepo, capsys, "--tag", "g")
     defn = json.loads((scratch / "jam_runs" / "mx_speedy_t31_g"
                        / launch.LAUNCH_RECORD).read_text())
     shipped = launch.rundir_guard("/runs/mx_speedy_t31_g",
                                   "/runs/mx_speedy_t31_g/checkpoint.msgpack",
-                                  defn)
+                                  defn, resume=False)
     script = _script(job)
     assert shipped in script
     assert script.index(shipped) < script.index("git clone")
+    env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert {"name": "JOB_UID", "valueFrom": {"fieldRef": {"fieldPath": (
+        "metadata.labels['batch.kubernetes.io/controller-uid']")}}} in env
 
 
 def test_job_name_must_be_a_dns_label():
-    """Refused, not truncated: truncation would fold two arms onto one Job."""
-    assert launch.job_name("jcm-run", "mx_a_B1") == "jcm-run-mx-a-b1"
+    """Refused, not folded: truncating or lowercasing merges two runs' Jobs."""
+    assert launch.job_name("jcm-run", "mx_a_b1") == "jcm-run-mx-a-b1"
     with pytest.raises(SystemExit, match="63"):
         launch.job_name("jcm-run", "mx_echam_jam_t63_l95_31d9f6ff_" + "x" * 30)
     with pytest.raises(SystemExit, match="alphanumeric"):
         launch.job_name("jcm-run", "mx_a_tag_")
+    with pytest.raises(SystemExit, match="lower case"):
+        launch.job_name("jcm-run", "mx_a_B1")       # --tag B1 vs --tag b1
+
+
+def test_upper_case_tag_is_refused_on_kubernetes(scratch, gitrepo, remote,
+                                                 capsys):
+    remote["refs/heads/dev"] = _commit(gitrepo, "a")
+    with pytest.raises(SystemExit, match="lower case"):
+        _k8s(gitrepo, capsys, "--tag", "T1")
+    assert not (scratch / "jam_runs").exists()
 
 
 def test_submit_applies_every_job_after_vetting_all(
@@ -762,32 +791,60 @@ def test_k8s_only_flags_are_refused_on_pbs(scratch, repo):
             _launch(repo, *flag)
 
 
-def test_engine_refuses_a_checkpoint_the_gate_would_not_read():
-    """The completion gate must inspect the checkpoint jcm actually writes."""
-    with pytest.raises(ValueError, match="completion gate"):
-        launch.mkrun.job_manifest(
-            site=launch.sites.get("nautilus"), job_name="j", label="l",
-            rundir="/runs/r", checkpoint="/runs/r/checkpoint.msgpack",
-            overrides=["run.checkpoint_path=/runs/other.msgpack"], days=1,
-            resolved={}, setup="", python_env="", retries=0, gpus=1, cpu=1,
-            memory="1Gi")
+def test_engine_gate_reads_the_checkpoint_jcm_writes():
+    """The last run.checkpoint_path wins in Hydra, so the gate reads that one."""
+    ovs = ["run.checkpoint_path=/runs/r/checkpoint.msgpack",
+           "++run.checkpoint_path=/runs/r/arm.msgpack"]
+    assert launch.mkrun.checkpoint_of(ovs) == "/runs/r/arm.msgpack"
+    job = launch.mkrun.job_manifest(
+        site=launch.sites.get("nautilus"), job_name="j", label="l",
+        rundir="/runs/r", overrides=ovs, days=1, resolved={}, setup="",
+        python_env="", retries=0, gpus=1, cpu=1, memory="1Gi")
+    assert 'if [ -f "/runs/r/arm.msgpack" ]' in _script(job)
+    with pytest.raises(ValueError, match="no run.checkpoint_path"):
+        launch.mkrun.checkpoint_of(["run.total_time=1"])
+
+
+def test_regenerating_a_launch_keeps_its_recorded_mirror_commit(
+        scratch, gitrepo, remote, capsys, monkeypatch):
+    """Inspect-then-submit must not re-point a running Job's mirror record.
+
+    The digest leaves the mirror commit out (jcm's own resume check guards
+    it), so without this a regenerated launch would record whatever commit
+    this process reads now, and a later --resume would export it.
+    """
+    from jcm.data import remote as mirror
+    first = mirror.MIRROR_REVISION
+    remote["refs/heads/dev"] = _commit(gitrepo, "a")
+    _k8s(gitrepo, capsys, "--tag", "rg")
+    monkeypatch.setattr(mirror, "MIRROR_REVISION", "d" * 40)   # pin moves
+    monkeypatch.delenv("JCM_MIRROR_REVISION")
+    [job] = _k8s(gitrepo, capsys, "--tag", "rg")
+    assert _env(job)["JCM_MIRROR_REVISION"] == first
+    monkeypatch.setenv("JCM_MIRROR_REVISION", "c" * 40)       # explicit
+    with pytest.raises(SystemExit, match="force-mirror-revision"):
+        _k8s(gitrepo, capsys, "--tag", "rg")
 
 
 FAKE_KUBECTL = r"""#!/usr/bin/env bash
-# Stand-in kubectl: pods are no-ops, the "volume" /runs is $FAKE_VOLUME.
+# Stand-in kubectl: pods are no-ops, the "volume" /runs is $FAKE_VOLUME, and
+# every call is logged to $FAKE_VOLUME.log.
 while [ "$1" = "-n" ]; do shift 2; done
+echo "$*" >> "$FAKE_VOLUME.log"
 case "$1" in
   apply) cat > /dev/null; echo "pod created" ;;
   delete) echo deleted ;;
   get)
     if [ "$2" = job ]; then echo "jobs.batch \"$3\" NotFound" >&2; exit 1; fi
-    echo -n Running ;;
+    echo -n "${FAKE_PHASE:-Running}" ;;
   exec)
     shift 3   # exec POD --
     if [ "$1" = sh ]; then
       exec sh -c "${3//\/runs/$FAKE_VOLUME}"
     fi
     if [ -n "${FAKE_TAR_FAIL:-}" ]; then exit 2; fi
+    # A run still being written: its log grows after the listing.
+    if [ -n "${FAKE_GROW:-}" ]; then echo more >> "$FAKE_VOLUME/$FAKE_GROW"; fi
     args=(); for x in "$@"; do args+=("${x//\/runs/$FAKE_VOLUME}"); done
     exec "${args[@]}" ;;
 esac
@@ -828,6 +885,11 @@ def test_fetch_copies_the_run_but_not_its_checkpoints(scratch, volume,
                           "mx_speedy_t31_ft_day5.nc",
                           "mx_speedy_t31_ft_day5.nc.provenance.json"])
     assert (local / "mx_speedy_t31_ft_day5.nc").read_bytes() == b"n" * 1000
+    # A later fetch never replaces the local launch record --resume reads.
+    (local / "launch.json").write_text('{"digest": "local"}\n')
+    launch.main(["--site", "nautilus", "--repo", str(gitrepo), "--fetch",
+                 "--members", MEMBER, "--tag", "ft"])
+    assert (local / "launch.json").read_text() == '{"digest": "local"}\n'
 
 
 def test_fetch_is_incremental_and_reports_a_short_copy(scratch, volume,
@@ -887,3 +949,41 @@ def test_pod_records_the_resolved_dependency_versions(tmp_path):
     assert lines[0].startswith("deps: jcm==")
     for dist in launch._RECORDED_DISTS:
         assert f" {dist}==" in f" {lines[0][6:]}"
+
+
+def test_fetch_keeps_the_local_launch_record(scratch, volume, capsys):
+    """The local record is what --resume re-emits; the volume's never replaces it."""
+    import fetch_run
+    dest = scratch / "keep"
+    dest.mkdir(parents=True)
+    (dest / "launch.json").write_text('{"digest": "mine"}\n')
+    capsys.readouterr()
+    assert fetch_run.fetch_run("mx_speedy_t31_ft", dest,
+                               site=launch.sites.get("nautilus"), pod="p",
+                               keep=("launch.json",)) == []
+    assert (dest / "launch.json").read_text() == '{"digest": "mine"}\n'
+    assert "differs" in capsys.readouterr().err
+
+
+def test_fetch_of_a_run_still_being_written_is_not_short(scratch, volume,
+                                                          monkeypatch):
+    """A file that grows between the listing and the copy is complete, not short."""
+    import fetch_run
+    monkeypatch.setenv("FAKE_GROW", "mx_speedy_t31_ft/run.log")
+    dest = scratch / "grow"
+    listed = (volume / "run.log").stat().st_size
+    assert fetch_run.fetch_run("mx_speedy_t31_ft", dest,
+                               site=launch.sites.get("nautilus"), pod="p") == []
+    assert (dest / "run.log").stat().st_size > listed
+
+
+def test_fetch_deletes_a_reader_pod_that_never_ran(scratch, volume,
+                                                   monkeypatch):
+    """A leaked reader keeps the volume attached: delete it on every path."""
+    import fetch_run
+    monkeypatch.setenv("FAKE_PHASE", "Failed")
+    with pytest.raises(SystemExit, match="never reached Running"):
+        fetch_run.fetch_run("mx_speedy_t31_ft", scratch / "x",
+                            site=launch.sites.get("nautilus"), pod="p")
+    calls = pathlib.Path(os.environ["FAKE_VOLUME"] + ".log").read_text().splitlines()
+    assert calls[-1].startswith("delete pod p")

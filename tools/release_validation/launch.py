@@ -546,14 +546,18 @@ def job_name(prefix: str, run: str) -> str:
     """Return the Kubernetes Job name for ``run``; refuse rather than truncate.
 
     A Job name must be a DNS label (at most 63 of ``a-z0-9-``, alphanumeric at
-    both ends). Truncating would fold two long arm names onto one Job.
+    both ends). Truncating would fold two long arm names onto one Job, and so
+    would lowercasing: ``--tag T1`` and ``--tag t1`` are two rundirs, so an
+    upper-case tag or suffix is refused here. ``_`` -> ``-`` cannot fold two
+    runs, as no run name contains ``-``.
     """
-    name = f"{prefix}-{run}".lower().replace("_", "-")
+    name = f"{prefix}-{run}".replace("_", "-")
     if len(name) > 63 or not _DNS_LABEL.match(name):
         raise SystemExit(
             f"Job name {name!r} ({len(name)} characters) is not a valid "
             "Kubernetes name: at most 63 of a-z, 0-9 and '-', alphanumeric at "
-            "both ends. Shorten --suffix, --tag or --job-prefix.")
+            "both ends. Shorten --suffix, --tag or --job-prefix, and write "
+            "them in lower case.")
     return name
 
 
@@ -580,22 +584,47 @@ def read_launch(local: Path) -> dict | None:
     return json.loads(record.read_text()) if record.exists() else None
 
 
-def rundir_guard(rundir: str, checkpoint: str, defn: dict) -> str:
-    """Shell that ties the volume's run directory to ONE launch definition.
+def launch_record_text(defn: dict) -> str:
+    """Return the launch record's bytes, identical locally and in the rundir."""
+    return json.dumps(defn, indent=1, sort_keys=True) + "\n"
 
-    The first attempt of a launch writes the definition into the rundir; every
-    later attempt, eviction retry or ``--resume`` of the same definition
-    passes, and a Job with a different definition — a reused tag launched
-    from another machine, or relaunched with other overrides after the first
-    Job was deleted — is refused instead of silently continuing someone
-    else's integration and reporting it as its own (#701). The generating
-    node cannot see the volume, so this check has to run in the pod; it runs
-    before cloning, so a refusal costs seconds. The record is written to a
-    temporary name and renamed, so a pod killed mid-write cannot leave a
-    truncated record that would refuse the launch's own retry.
+
+#: The Job's own uid, from the label the Job controller puts on its pods: the
+#: same on every retry of one Job, different for any other Job.
+JOB_UID_ENV = {"name": "JOB_UID", "valueFrom": {"fieldRef": {
+    "fieldPath": "metadata.labels['batch.kubernetes.io/controller-uid']"}}}
+
+
+def rundir_guard(rundir: str, checkpoint: str, defn: dict,
+                 resume: bool) -> str:
+    """Shell that ties the volume's run directory to ONE launch and one start.
+
+    Two rules, both the Kubernetes form of what ``check_fresh`` does for a PBS
+    rundir, which the generating node here cannot see:
+
+    * the first attempt writes the launch definition into the rundir, and a
+      Job with a different definition — a reused tag launched from another
+      machine, or relaunched with other overrides — is refused, as is a
+      checkpoint no record claims, instead of silently continuing someone
+      else's integration and reporting it as its own (#701);
+    * a Job launched fresh (not ``--resume``) is refused when the rundir
+      already holds a checkpoint written by any other Job: a member is a
+      fresh year, and continuing an earlier one is ``--resume``'s job. The
+      Job's own retries pass, because it lists its uid in ``JOBS`` before its
+      first chunk.
+
+    It runs before cloning, so each refused attempt costs seconds, but under
+    ``restartPolicy: OnFailure`` the Job restarts until its retries are
+    spent: delete it. The record is written to a temporary name and renamed,
+    so a pod killed mid-write cannot leave a truncated record that would
+    refuse the launch's own retry.
     """
-    record = json.dumps(defn, indent=1, sort_keys=True)
-    return f"""if [ -f {rundir}/{LAUNCH_RECORD} ]; then
+    return f"""if [ -z "${{JOB_UID:-}}" ]; then
+  echo "FATAL: JOB_UID is empty: the pod cannot tell its own Job's retries from"
+  echo "       another Job's, so it cannot tell whether {checkpoint} is its own."
+  exit 1
+fi
+if [ -f {rundir}/{LAUNCH_RECORD} ]; then
   if ! grep -qF '"digest": "{defn["digest"]}"' {rundir}/{LAUNCH_RECORD}; then
     echo "FATAL: {rundir} holds a different launch (its {LAUNCH_RECORD}); refusing"
     echo "       to integrate this one on top of it. Resume that launch as"
@@ -608,25 +637,33 @@ elif [ -f {checkpoint} ]; then
   exit 1
 else
   cat > {rundir}/.{LAUNCH_RECORD}.tmp <<'LAUNCH'
-{record}
+{launch_record_text(defn).rstrip(chr(10))}
 LAUNCH
   mv {rundir}/.{LAUNCH_RECORD}.tmp {rundir}/{LAUNCH_RECORD}
 fi
+if [ -f {checkpoint} ] && [ {int(resume)} -eq 0 ] \\
+    && ! grep -qxF "$JOB_UID" {rundir}/JOBS 2>/dev/null; then
+  echo "FATAL: {checkpoint} exists, written by another Job: this launch is"
+  echo "       fresh, and a member is a fresh year. --resume continues that"
+  echo "       run; a fresh one needs a new --tag or --suffix."
+  exit 1
+fi
+grep -qxF "$JOB_UID" {rundir}/JOBS 2>/dev/null || echo "$JOB_UID" >> {rundir}/JOBS
 """
 
 
 def k8s_job(defn: dict, site: dict, mirror: tuple, retries: int,
-            memory: str = "64Gi") -> dict:
+            memory: str = "64Gi", resume: bool = False) -> dict:
     """Build the Kubernetes Job for one launch definition.
 
     ``mirror`` is :func:`mirror_commit`'s ``(commit, opt_in, source)``.
     ``retries`` and ``memory`` are how the Job runs, not what it integrates,
     so they are not part of the definition and a ``--resume`` may change them.
+    ``resume`` lets the Job continue a checkpoint another Job wrote.
     """
     rundir = f"/runs/{defn['run']}"
-    checkpoint = f"{rundir}/checkpoint.msgpack"
     commit, optin = mirror[0], mirror[1]
-    env = [{"name": "JCM_MIRROR_REVISION", "value": commit}]
+    env = [JOB_UID_ENV, {"name": "JCM_MIRROR_REVISION", "value": commit}]
     if optin:
         env.append({"name": "JCM_ALLOW_MIRROR_REVISION_CHANGE", "value": "1"})
     env += [
@@ -638,12 +675,13 @@ def k8s_job(defn: dict, site: dict, mirror: tuple, retries: int,
     ]
     return mkrun.job_manifest(
         site={**site, "image": defn["image"]}, job_name=defn["job"],
-        label=defn["run"], rundir=rundir, checkpoint=checkpoint,
+        label=defn["run"], rundir=rundir,
         overrides=defn["overrides"], days=defn["days"],
         resolved={"jcm": (JCM_URL, defn["pins"]["jcm"])},
         setup=pinned_setup(rundir), python_env="MAM4_JAX_ENABLE_X64=0",
         retries=retries, gpus=1, cpu=8, memory=memory, env=tuple(env),
-        guard=rundir_guard(rundir, checkpoint, defn))
+        guard=rundir_guard(rundir, mkrun.checkpoint_of(defn["overrides"]),
+                           defn, resume))
 
 
 def _kubectl(site: dict, *args, input=None, timeout=300):
@@ -743,13 +781,19 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
               file=sys.stderr)
 
     plan = []
+    # Launches already recorded with this very definition (inspect, then
+    # --submit): their mirror commit is the recorded one, as on a resume, so
+    # regenerating a launch cannot re-point a running Job's record.
+    regenerated = set()
     for member in wanted:
         run = run_name(member, run_tag, suffix)
         local = Path(scratch) / "jam_runs" / run
         recorded = read_launch(local)
         if a.fetch:
-            plan.append((member, local, recorded or {"run": run, "job": job_name(
-                a.job_prefix, run)}))
+            # The recorded Job name when there is one (a --job-prefix other
+            # than the default); fetching a run launched elsewhere derives it.
+            job = (recorded or {}).get("job") or job_name(a.job_prefix, run)
+            plan.append((member, local, {"run": run, "job": job}))
             continue
         if a.resume:
             if recorded is None:
@@ -772,6 +816,8 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
                 "recorded; a new definition needs a new --tag or --suffix "
                 "(or delete that record if it was never submitted).")
         plan.append((member, local, defn))
+        if recorded is not None:
+            regenerated.add(run)
 
     if a.fetch:
         problems = {}
@@ -780,9 +826,12 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
             if status == "active":
                 print(f"# NOTE: Job {defn['job']} is still running; this copy "
                       "is a snapshot of an unfinished run", file=sys.stderr)
+            # The local launch record is what --resume re-emits; the
+            # volume's copy is the same bytes unless another launch owns the
+            # rundir, which fetch_run reports rather than copying over it.
             bad = fetch_run.fetch_run(
                 defn["run"], local, site=site, pod=f"{defn['job']}-fetch",
-                with_checkpoints=a.with_checkpoints)
+                with_checkpoints=a.with_checkpoints, keep=(LAUNCH_RECORD,))
             if bad:
                 problems[member] = bad
         if problems:
@@ -792,9 +841,9 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
 
     # The same mirror-commit rules as the PBS path, recorded in the local
     # record dir: the pod exports the commit the launch was generated at.
-    mirror = {defn["run"]: mirror_commit(str(local), a.resume,
-                                         a.force_mirror_revision)
-              for _, local, defn in plan}
+    mirror = {defn["run"]: mirror_commit(
+        str(local), a.resume or defn["run"] in regenerated,
+        a.force_mirror_revision) for _, local, defn in plan}
     commits = {m[0] for m in mirror.values()}
     if len(commits) > 1:
         raise SystemExit(
@@ -816,9 +865,9 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
     for _, local, defn in plan:
         local.mkdir(parents=True, exist_ok=True)
         write_mirror_record(str(local), *mirror[defn["run"]][::2])
-        (local / LAUNCH_RECORD).write_text(
-            json.dumps(defn, indent=1, sort_keys=True))
-        job = k8s_job(defn, site, mirror[defn["run"]], a.retries, a.memory)
+        (local / LAUNCH_RECORD).write_text(launch_record_text(defn))
+        job = k8s_job(defn, site, mirror[defn["run"]], a.retries, a.memory,
+                      a.resume)
         (local / "job.json").write_text(json.dumps(job, indent=2))
         print(f"# {defn['member']}: Job {defn['job']} -> PVC "
               f"{site['runs_pvc']}:/runs/{defn['run']} (record: {local})",
