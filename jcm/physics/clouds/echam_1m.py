@@ -1670,11 +1670,16 @@ class Echam1MMicrophysics(PhysicsTerm):
             # (F:1280). Radiation, COSP, AeroCom and the JAM cloud terms read
             # this cover.
             cloud_fraction=micro_state.cloud_fraction,
-            precip_rain=micro_state.precip_rain,
-            precip_snow=micro_state.precip_snow,
+            # The published fluxes are floored at zero. ECHAM's flux update
+            # (F:1211-1212) leaves a round-off remainder, of either sign, where
+            # evaporation or sublimation takes the whole incoming flux; the
+            # sweep keeps it, and the consumers of these fields (the surface,
+            # COSP) take precipitation as non-negative.
+            precip_rain=jnp.maximum(micro_state.precip_rain, 0.0),
+            precip_snow=jnp.maximum(micro_state.precip_snow, 0.0),
             # Flux profiles for the satellite simulators (COSP/CloudSat).
-            rain_flux=micro_state.rain_flux,
-            snow_flux=micro_state.snow_flux,
+            rain_flux=jnp.maximum(micro_state.rain_flux, 0.0),
+            snow_flux=jnp.maximum(micro_state.snow_flux, 0.0),
             # Process rates for JAM wet scavenging (#499), grid-mean kg/kg/s:
             # formation is the condensate-to-precipitation ledger, evaporation
             # the rain evaporation plus the snow sublimation.
