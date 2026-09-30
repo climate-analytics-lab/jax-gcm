@@ -387,7 +387,8 @@ def land_surface_physics_step(
     # Simplified surface humidity from ECHAM's ``ua`` table at the surface
     # temperature, as precalc_land reads it (mo_surface_land.f90 l.190):
     # Sonntag (1990) over ice at and below tmelt, over water above, with
-    # ECHAM's ``qs`` form at the surface pressure (``ua/paphm1``, l.194-195). ECHAM pairs that saturation with ``alv`` for the
+    # ECHAM's ``qs`` form at the surface pressure (``ua/paphm1``, l.194-195).
+    # ECHAM pairs that saturation with ``alv`` for the
     # snow-free evaporation too (JSBACH charges ``als − alv`` only to the
     # snow share), which is what this simplified tile's ``alhc`` does.
     e_sat = thermodynamics.es_ua(surface_temp)
