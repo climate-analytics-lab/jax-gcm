@@ -41,9 +41,9 @@ Which classes of a population play HAM's roles is declared by
 
 The class composition is the class's whole population, interstitial plus
 cloud-borne: HAM has one phase per class, which jcm's explicit cloud-borne
-store splits in two. Masses are floored at zero before the ratios (transport
-can leave round-off negatives, which have no composition meaning); HAM's
-tracers enter unfloored.
+store splits in two. The caller (:class:`~jcm.physics.aerosol.jam.ice_nucleation.ice_term.IceNucleation`)
+floors the masses and numbers at zero, because transport can leave round-off
+negatives, which have no composition meaning; HAM's tracers enter unfloored.
 """
 
 from __future__ import annotations

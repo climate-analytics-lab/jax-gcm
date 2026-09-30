@@ -1254,9 +1254,12 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     the public ``"clouds"`` key (set by :class:`SundqvistCloudFraction`
     upstream), together with this step's convective detrainment
     ``clouds.conv_detrainment_qc/qi`` (written by ``TiedtkeConvection``,
-    zero without a convection term), TKE from ``"vertical_diffusion"``, and
-    the SPA-style activated CDNC floor from the public ``"aerosol"`` Nccn.
-    Writes the
+    zero without a convection term), TKE from ``"vertical_diffusion"``, the
+    activated CDNC (JAM's ``activated_cdnc``, or the SPA-style floor from the
+    public ``"aerosol"`` Nccn), and, where a prognostic aerosol publishes
+    them, ECHAM-HAM's heterogeneous-freezing inputs ``"freezing_aerosol"``
+    (a :class:`HeterogeneousFreezingAerosol`), which switch section 6.2 from
+    the DeMott closure to ECHAM's contact + immersion rates. Writes the
     surface rain / snow precip flux into ``"clouds"`` along with the
     qnc / qni state-carry needed for the next step's update.
 
