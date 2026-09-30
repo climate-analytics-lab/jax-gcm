@@ -126,6 +126,10 @@ class DynamicalCore(abc.ABC):
         physics-dynamics seam is purely operator-split (Lie a): the gridpoint
         ``physics_tendency`` is forward-Euler-added to the state and the dycore
         then takes one ``dt`` of dynamics.
+      * Reporting the state between those two stages
+        (:meth:`after_physics_state`) when it applies the tendency in a
+        representation other than the physics grid; the default covers a
+        backend that adds on the physics grid.
       * Building its own terrain (orography is smoothed against the dycore's own
         basis — spectral truncation for dinosaur, SE projection for pyses, ...).
       * Converting a trajectory to xarray for output (the cubed-sphere → lat/lon

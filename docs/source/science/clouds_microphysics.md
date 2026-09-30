@@ -66,6 +66,28 @@
   ``micro_mg`` / PUMAS ``qsmall`` / ``mincld`` / ``dcs`` constants. See
   {doc}`../design/lohmann_2m_column_processes`.
 
+  **What drives its condensation.** The 2M is tendency-driven, as ECHAM's
+  ``cloud_micro_interface``: section 5 condenses ``zqcdif = (ztmst·pqte −
+  zdqsat)·paclc``, the humidity increment the saturation humidity does not
+  absorb, into the cloudy part of the cell, which is taken to be saturated at
+  the anchor. The term takes ECHAM's inputs from
+  ``jcm/physics/clouds/cloud_inputs.py::cloud_scheme_inputs``: the anchor
+  (``ptm1``, ``pqm1``, ``pxlm1``, ``pxim1`` and the number tracers) is the
+  previous step's post-physics state, carried by the model; the increments
+  are the dynamics of the last step plus every term upstream of the scheme —
+  radiation, vertical diffusion with its condensate change, the surface and
+  convection; and the convective detrainment arrives by itself as
+  ``detrained_qc``/``detrained_qi`` (``pxtecl``/``pxteci``), used where ECHAM
+  uses ``pxlte + pxtecl``. So large-scale ascent and cloud-top radiative
+  cooling condense in a partly cloudy cell in the step they happen, without
+  waiting for the whole cell to saturate. Every quantity ECHAM evaluates at
+  the previous time level (the saturation humidities, the subsaturations for
+  evaporation and sublimation, the moist heat capacity) is evaluated at this
+  anchor. On a first step, after a restart from a checkpoint without the
+  carried state and in the single-column and RCE hosts, the anchor is the
+  step-start state and the dynamics increment is zero. See
+  {doc}`../design/operator_split_physics`.
+
 Both schemes convert a condensed/evaporated/frozen mixing-ratio increment to a
 temperature increment with ``L / cp`` where ``cp`` is the **moist** isobaric
 heat capacity ``cpd·(1 + vtmpc2·q)`` evaluated per-level at the step-start
