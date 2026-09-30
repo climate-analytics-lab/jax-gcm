@@ -338,19 +338,26 @@ def sedimentation_ice(
     zxiflx_from_level = zcons2 * zxi_delta * pressure_thickness
 
     # --- In-cloud sedimentation diagnostic (pmrateps in Fortran)
-    # Signed, as ECHAM has it (mo_cloud_micro_2m.f90:2264-2265): negative
+    # Signed, as ECHAM has it (mo_cloud_micro_2m.f90:2258-2265): negative
     # where the layer absorbs more of the falling ice than it sheds. It
     # seeds the in-cloud snow-formation ledger (``zmrateps``) where the cold
-    # chain does not overwrite it; the JAM consumers of that ledger floor it
-    # at zero themselves.
+    # chain does not overwrite it, so the published ledger
+    # ``clouds.incloud_snow_formation`` can be negative. Its JAM consumers
+    # floor the snow part on its own, apart from the liquid rain-formation
+    # and riming parts, as HAM does (mo_hammoz_wetdep.f90:428-435).
     pmrateps_in_cloud = zxi_delta / jnp.maximum(cloud_fraction, params.clc_min)
     ice_sedimentation_rate_in_cloud = jnp.where(has_cloud, pmrateps_in_cloud, zxi_delta)
 
     # --- Update fraction covered by falling ice
-    # ECHAM passes the signed flux from this level (2275-2277): an
-    # absorbing level (negative contribution) weights the incoming cover up
-    # against the smaller total flux, and the result is clipped to [0, 1]
-    # inside the helper.
+    # ECHAM passes the signed flux from this level (2275-2277). An
+    # absorbing level (negative contribution) keeps the incoming cover as
+    # the "from above" share and weights it against the level's own cover
+    # over the smaller total flux: the cover rises where the level's cloud
+    # fraction is below the incoming cover and falls where it is above,
+    # down to 0 at the [0, 1] clip inside the helper. A cover clipped to 0
+    # switches off falling-ice sublimation (ll_falling_ice) in the levels
+    # below while ice still falls, until a level sheds ice of its own —
+    # ECHAM's behaviour, kept.
     falling_ice_fraction = gridbox_frac_falling_hydrometeor(
         precip_flux_from_above=ice_flux,
         precip_frac_from_above=falling_ice_fraction,

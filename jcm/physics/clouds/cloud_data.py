@@ -121,7 +121,10 @@ class CloudData:
     # The formation rates are IN-CLOUD [kg/kg/s]: rain formation
     # (zmratepr), snow formation (zmrateps, including the ice-
     # sedimentation carrier), and riming of droplets by snow (zmsnowacl,
-    # a LIQUID sink into frozen precip). ``process_cloud_fraction`` is
+    # a LIQUID sink into frozen precip). Snow formation can be NEGATIVE:
+    # its sedimentation seed is signed, as ECHAM's, and negative where the
+    # level absorbs more falling ice than it sheds; consumers floor it
+    # apart from the liquid rates, as HAM does. ``process_cloud_fraction`` is
     # the cover the processes ran under (nonzero in cells the write-back
     # cleared). ``condensate_evaporation_rate`` is the grid-mean
     # cloud-condensate evaporation ledger (zxlevap+zxievap) — the
@@ -296,7 +299,9 @@ CLOUD_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     "clouds.incloud_rain_formation": {
         "units": "kg kg-1 s-1", "long_name": "in-cloud rain formation rate"},
     "clouds.incloud_snow_formation": {
-        "units": "kg kg-1 s-1", "long_name": "in-cloud snow formation rate"},
+        "units": "kg kg-1 s-1",
+        "long_name": ("in-cloud snow formation rate (signed: negative where "
+                      "the level absorbs sedimenting ice)")},
     "clouds.incloud_riming": {
         "units": "kg kg-1 s-1",
         "long_name": "in-cloud riming of droplets by snow"},
