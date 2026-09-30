@@ -1477,8 +1477,9 @@ Default cloud overlap is maximum-random, sampled by ECHAM's rule
   ``t63-echam-jam``, through a weaker shortwave cloud effect (+0.84 / +0.45 /
   +0.63 W/m²); the 2M's TOA change is at the 0.19 W/m² spread of
   identical-physics runs. Liquid water path, the lowest-level cover and
-  precipitation stay within that spread, and part of the cover change is by
-  construction, since ``radiation.total_cloud_cover`` is the sampled cover
+  precipitation stay within that spread, except JAM's large-scale
+  precipitation (−0.010 mm/d, 1.8 times the largest spread), and part of the
+  cover change is by construction, since ``radiation.total_cloud_cover`` is the sampled cover
   under the rule in use. The switch is a small part of the changes the 1M and
   inputs entries above measure: at least 86 % of the fall in total cover
   comes from the rest.
