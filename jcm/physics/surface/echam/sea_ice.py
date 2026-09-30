@@ -162,15 +162,15 @@ def sea_ice_physics_step(
     air_density = (atmospheric_state.pressure /
                   (c.rd * atmospheric_state.temperature))
 
-    # Surface saturation humidity — over ICE, unconditionally: this is a
-    # sea-ice tile and the latent-heat flux below uses the sublimation
-    # latent heat ``alhs``, so the saturation surface must be ice for the
-    # flux pair to be thermodynamically consistent. Shared ECHAM
-    # coefficients from jcm.physics.thermodynamics; the simplified
-    # ``eps·es/p`` conversion (vs the full ``eps·es/(p−(1−eps)·es)``) is
-    # kept — the difference is <0.5 % at these temperatures.
-    e_sat = thermodynamics.saturation_vapor_pressure(surface_temp, phase="ice")
-    q_sat_surface = c.eps * e_sat / atmospheric_state.pressure
+    # Surface saturation humidity from ECHAM's ``ua`` table at the ice
+    # surface temperature, as precalc_ice reads it (mo_surface_ice.f90
+    # l.592-597): Sonntag (1990) over ice at and below tmelt
+    # — where a sea-ice surface always is — paired with the sublimation
+    # latent heat ``alhs`` below; ECHAM's ``qs`` form at the surface pressure
+    # (``ua/paphm1``).
+    e_sat = thermodynamics.es_ua(surface_temp)
+    q_sat_surface = thermodynamics.qsat_from_es(
+        e_sat, atmospheric_state.surface_pressure)
 
     # Temperature and humidity differences. Positive convention: flux UP
     # from surface into the atmosphere when the surface is warmer / wetter

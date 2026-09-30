@@ -297,12 +297,25 @@ class AqueousSulfur(PhysicsTerm):
                 h2o2=jnp.maximum(ox.h2o2, 0.0), rho=rho,
             )
         else:
+            # The chemistry is evaluated everywhere and kept only where
+            # ``active``, so in a cloud-free cell it runs on the LWC it
+            # would discard. At LWC = 0 its initial pH divides by the
+            # ``_TINY`` floor, and that quotient's derivative (``1/den**2``,
+            # far below float32's range) is infinite: the ``where`` below
+            # multiplies it by its zero cotangent, which in every clear-sky
+            # cell — the usual state — makes the derivative with respect to
+            # cloud water NaN. Handing the discarded evaluation the smallest
+            # LWC the scheme counts as cloud keeps it inside the range the
+            # HAM formulas are written for (the double-where on the argument,
+            # as the ``zxrp1_base`` guard in ``clouds/echam_1m.py`` does it);
+            # active cells see their own LWC, so the value is the same.
+            lwc_active = jnp.where(active, lwc_incloud, _ZLWCMIN)
             dso4 = params.rate_scale * _aqueous_so4(
                 so2=jnp.maximum(so2, 0.0),
                 so4=jnp.maximum(so4_total, 0.0),
                 h2o2=jnp.maximum(ox.h2o2, 0.0),
                 o3=jnp.maximum(ox.o3, 0.0),
-                lwc=lwc_incloud,
+                lwc=lwc_active,
                 rho=rho,
                 temperature=state.temperature,
                 dt=dt,

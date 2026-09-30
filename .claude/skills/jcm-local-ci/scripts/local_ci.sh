@@ -74,21 +74,55 @@ if [ "$LOCAL_FAST" = 1 ]; then
     echo "LOCAL_FAST_EXIT=$LOCAL_FAST_STATUS"
 fi
 
+# Each gate run gets its own log, named by the tree it tests and when it was
+# submitted, and every result line carries the same tag, so a verdict can only
+# be read against the tree that produced it: with one shared path a discarded
+# run's green line passes for the current tree's (#788). The tag is HEAD's
+# short sha, plus "+dirty.<hash>" when the worktree differs from HEAD
+# (tracked edits or untracked, non-ignored files, which pytest would collect
+# too); the hash is of that difference — the tracked diff and every untracked
+# file's contents — so two different dirty trees on one commit get different
+# tags. The timestamp keeps two runs of one tree apart.
+# The job recomputes the tag when it starts, because it tests the worktree as
+# it is then, not as it was at submission.
+tree_tag() {
+    local sha
+    sha=$(git -C "$1" rev-parse --short HEAD 2>/dev/null) || { echo nogit; return; }
+    if [ -n "$(git -C "$1" status --porcelain)" ]; then
+        sha="$sha+dirty.$( { git -C "$1" diff HEAD; git -C "$1" status --porcelain
+            git -C "$1" ls-files -z --others --exclude-standard \
+                | (cd "$1" && xargs -0 -r sha1sum); } | sha1sum | cut -c1-7)"
+    fi
+    echo "$sha"
+}
+TREE_SHA=$(tree_tag "$REPO")
+RUN_TAG="$TREE_SHA.$(date -u +%Y%m%dT%H%M%SZ)"
+LOG="$REPO/jcm_ci.$RUN_TAG.log"
+
 echo "=== submitting both gates to the develop queue ==="
 JOB=$(mktemp --suffix=.pbs)
 cat > "$JOB" <<EOF
 #!/bin/bash
-#PBS -N jcm_ci
+#PBS -N jcm_ci_${RUN_TAG//[^A-Za-z0-9_]/_}
 #PBS -A $ACCOUNT
 #PBS -q develop
 #PBS -l select=1:ncpus=16:mem=200GB
 #PBS -l walltime=03:00:00
 #PBS -m abe
 #PBS -j oe
-#PBS -o $REPO/jcm_ci.log
+#PBS -o $LOG
 set -uo pipefail
 source $VENV/bin/activate
 cd $REPO
+
+# The verdict is on the worktree as it is now, which an edit or a commit made
+# while this job waited in the queue may have changed since submission.
+$(declare -f tree_tag)
+TESTED=\$(tree_tag $REPO)
+echo "submitted=$TREE_SHA tested=\$TESTED"
+if [ "\$TESTED" != "$TREE_SHA" ]; then
+    echo "WARNING: the worktree changed between submission ($TREE_SHA) and job start (\$TESTED); every verdict below is for \$TESTED"
+fi
 export JAX_PLATFORMS=cpu
 export JAX_COMPILATION_CACHE_DIR=$JAX_COMPILATION_CACHE_DIR
 export PYTHONPATH=$PYTHONPATH
@@ -104,23 +138,25 @@ echo "=== fast gate (not slow, cov>=90) ==="
 pytest -n 12 -m "not slow" --cov=jcm --cov-fail-under=90 -q || FAST_STATUS=\$?
 # Belt for the plugin's own fail-under (#786): same data file, coverage's exit.
 [ "\$FAST_STATUS" -eq 0 ] && { coverage report --fail-under=90 || FAST_STATUS=\$?; }
-echo "FAST_EXIT=\$FAST_STATUS"
+echo "FAST_EXIT=\$FAST_STATUS tree=$RUN_TAG tested=\$TESTED"
 
 echo "=== slow gate (slow only, cov>=80 vs .coveragerc-pr) ==="
 pytest -n 4 -m "slow" --cov=jcm --cov-config=.coveragerc-pr --cov-fail-under=80 \
     || SLOW_STATUS=\$?
 [ "\$SLOW_STATUS" -eq 0 ] && { coverage report --rcfile=.coveragerc-pr \
     --fail-under=80 || SLOW_STATUS=\$?; }
-echo "SLOW_EXIT=\$SLOW_STATUS"
+echo "SLOW_EXIT=\$SLOW_STATUS tree=$RUN_TAG tested=\$TESTED"
 
 if [ "\$FAST_STATUS" -ne 0 ] || [ "\$SLOW_STATUS" -ne 0 ]; then
-    echo "GATES FAILED (fast=\$FAST_STATUS slow=\$SLOW_STATUS)"
+    echo "GATES FAILED (fast=\$FAST_STATUS slow=\$SLOW_STATUS) tree=$RUN_TAG tested=\$TESTED"
     exit 1
 fi
-echo "GATES PASSED"
+echo "GATES PASSED tree=$RUN_TAG tested=\$TESTED"
 EOF
 qsub "$JOB"
-echo "watch: grep -E 'FAST_EXIT|SLOW_EXIT|GATES' $REPO/jcm_ci.log"
+echo "tree: $RUN_TAG"
+echo "log:  $LOG"
+echo "watch: grep -E 'FAST_EXIT|SLOW_EXIT|GATES' $LOG"
 
 # A failed local fast gate must not look like a clean wrapper run; the job is
 # still submitted, since it is the authoritative gate.

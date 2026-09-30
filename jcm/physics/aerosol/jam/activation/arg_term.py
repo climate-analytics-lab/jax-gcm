@@ -97,7 +97,19 @@ class ArgActivation(PhysicsTerm):
             w = diagnostics["updraft_velocity"]
         elif "vertical_diffusion" in diagnostics:
             tke = diagnostics["vertical_diffusion"].tke
-            w = jnp.sqrt(jnp.maximum(params.tke_factor * tke, 0.0))
+            # Double-where on the root's argument, as
+            # ``tke_budget.py::echam_tke_source_update`` guards the same
+            # root. Zero TKE is a laminar layer's value, and there
+            # ``sqrt(maximum(x, 0))`` is not protected: ``maximum`` ties at 0
+            # and hands half of ``sqrt'(0) = inf`` back, which makes the
+            # derivative with respect to TKE and to ``tke_factor`` NaN. The
+            # value is the same (0 either way, and ``w_min`` floors it
+            # below), and the derivative reported at 0 is 0, which is the
+            # reference derivative there: ``w_min`` is the active floor.
+            w_sq = params.tke_factor * tke
+            turbulent = w_sq > 0.0
+            w = jnp.where(
+                turbulent, jnp.sqrt(jnp.where(turbulent, w_sq, 1.0)), 0.0)
         else:
             w = jnp.full(shape, params.updraft_default)
         return jnp.maximum(w, params.w_min)

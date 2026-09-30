@@ -1900,10 +1900,13 @@ class TestColumnWaterConservation2M:
         nucleation physics forbids that state: above S_crit(T) =
         2.349 - T/259 (Koop et al. 2000), solution droplets freeze in
         seconds. One microphysics step must bring S_ice at 190 K from
-        1.74 to at/below the threshold, with bounded latent heating.
+        1.74 to at/below the threshold, with bounded latent heating. With
+        ``nic_cirrus = 1`` the ECHAM deposition branch alone already brings
+        it to ~1.01, so this checks the outcome rather than the floor, which
+        over-deposits to ~0.89 (#963).
         """
         import numpy as np
-        import jcm.constants as c
+        from jcm.physics import thermodynamics
         from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
         from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
 
@@ -1911,8 +1914,9 @@ class TestColumnWaterConservation2M:
         T = jnp.full(nlev, 190.2)
         p = jnp.linspace(3000.0, 4500.0, nlev)
         rho = p / (287.0 * T)
-        esi = 610.78 * np.exp(21.875 * (190.2 - 273.15) / (190.2 - 7.66))
-        qsi = c.eps * esi / np.asarray(p)
+        # The scheme's own ice saturation (ECHAM's ``ua`` table), so the
+        # start really is at S_ice = 1.74, above the 1.615 threshold.
+        qsi = np.asarray(thermodynamics.saturation_specific_humidity(T, p))
         q = jnp.asarray(1.74 * qsi)
         qi = jnp.full(nlev, 1.5e-4)
         tend, _, _, *_ = cloud_microphysics_2m(
@@ -2839,8 +2843,7 @@ class TestSchemeGradients2M:
     ``cloud_microphysics_2m`` is 175 ``where`` and 131 ``max``/``min`` deep and
     had no scheme-level gradient check at all. It comes out clean: on a column
     carrying condensate and cover in every layer, AD matches a converged
-    secant, and in float64 (outside the suite, which pins float32 for #729)
-    jvp and vjp agree to 1e-16 with the difference converging to them.
+    secant.
 
     The operating point matters more than anything else here. The scheme
     switches on exact zeros — ``qc``, ``qi``, the number concentrations and the
@@ -2900,20 +2903,38 @@ class TestSchemeGradients2M:
 
     @pytest.mark.parametrize("seed", [0, 3])
     def test_column_gradients_match_a_central_difference(self, seed):
-        """One column, off every condensate switch.
+        """One column, off every condensate switch, in float64.
 
-        ``adjoint_rtol=1e-3`` rather than the 1e-4 default, with its
-        derivation: the identity holds to 1e-16 under x64, so the float32 gap
-        — measured at 1.5e-7 to 2.4e-4 over four direction seeds here — is
-        round-off through the column ``lax.scan``, the same double sum
-        contracted in opposite orders by the two AD modes.
+        float64 inputs because in float32 the secant through this 16-level
+        scan is round-off limited: its best rung sits at the smallest step and
+        disagrees with AD by ~2 %, while with float64 inputs the difference
+        converges to AD at rtol 1e-4. ``adjoint_rtol=1e-3``: the scheme's
+        parameter struct stays float32, so jvp and vjp still contract a
+        partly float32 double sum in opposite orders (measured 2.6e-5). The
+        scoped ``enable_x64`` leaves the session's float32 default (#729)
+        untouched.
+        """
+        with jax.enable_x64(True):
+            column = {k: jnp.asarray(v, jnp.float64)
+                      for k, v in self._column().items()}
+            args = tuple(column[k] for k in (
+                "temperature", "humidity", "qc", "qi", "qnc", "qni",
+                "cloud_fraction", "air_density"))
+            check_gradients(self._scheme_fn(column), args,
+                            rtol=1e-4, seed=seed, adjoint_rtol=1e-3)
+
+    def test_column_gradients_float32(self):
+        """The same column in float32, the model's working precision.
+
+        rtol 3e-2: the float32 secant bottoms out at the smallest rung,
+        ~2 % from AD, which the float64 check above shows is round-off.
         """
         column = self._column()
         args = tuple(column[k] for k in (
             "temperature", "humidity", "qc", "qi", "qnc", "qni",
             "cloud_fraction", "air_density"))
         check_gradients(self._scheme_fn(column), args,
-                        rtol=1e-2, seed=seed, adjoint_rtol=1e-3)
+                        rtol=3e-2, seed=0, adjoint_rtol=1e-3)
 
     def test_gradients_are_finite_at_degenerate_operating_points(self):
         """Zero TKE, a clear column and zero droplet number stay finite.

@@ -150,29 +150,20 @@ class ModelPredictions:
         """Return *traced*, flagging a live/compiled parameter divergence.
 
         A mismatch means the caller edited a parameter in place after the
-        model was first compiled with a different value. jcm binds physics
+        physics was first compiled with a different value. jcm binds physics
         parameters when the physics is first traced (``Model`` is a static
-        jit argument), and whether a later edit reaches a later run depends
-        on which of JAX's compilation caches that run hits (#735), so the
-        results are unreliable either way. That is a scientific error the
-        user needs told about, not something for provenance to paper over
-        by quietly recording the compiled values and moving on.
+        jit argument), and a later edit is not reliably seen by a later run
+        (#735), so the results are unreliable either way. The record says so
+        rather than quietly holding the compiled values; the user is told
+        by the ``UserWarning`` :meth:`jcm.model.Model.run_from_state_with_carry`
+        raises before such a run starts, once per changed field.
         """
         live = provenance.describe_params(physics)
         if live == traced:
             return traced
-        logger.warning(
-            "provenance: the live parameters differ from those this model "
-            "was first compiled with. jcm binds physics parameters when the "
-            "physics is first traced (Model._run_from_state takes `self` as "
-            "a static argument), and an in-place parameter change afterwards "
-            "may or may not reach a later run, depending on JAX's "
-            "compilation caches. Results after such a change are therefore "
-            "unreliable, whatever this record says. Rebuild the Model to "
-            "change parameters.")
         flagged = dict(traced)
         flagged["live_parameters_differ_from_compiled"] = (
-            "parameters were edited in place after this model was first "
+            "parameters were edited in place after this physics was first "
             "compiled; the record holds the first-compiled values and the "
             "run's results are unreliable")
         return flagged
@@ -205,6 +196,54 @@ class ModelPredictions:
         """
         return self._predictions.times
 
+    def is_interval_mean(self) -> bool:
+        """Whether the frames are interval means rather than instantaneous samples.
+
+        The flag (``Predictions.time_cell_method``) is one boolean per
+        trajectory. A caller that stacks trajectories — a coupler running one
+        :meth:`~jcm.model.Model.run_from_state_with_carry` per coupling step
+        inside its own ``lax.scan``, or ``jax.tree.map(lambda *xs:
+        jnp.stack(xs), *chunks)`` — stacks the flag along with every other
+        leaf, so it arrives with one entry per stacked trajectory. That is
+        still a single answer when the entries agree, and this returns it.
+        :meth:`time_labels` and :meth:`to_xarray` read the flag only through
+        here, so a stacked trajectory labels directly (the labels keep its
+        stacking axes) and serializes as one run once those axes are merged
+        into the time axis.
+
+        Returns:
+            ``True`` for interval means, ``False`` for instantaneous samples.
+            Predictions that carry no flag (built without one) are treated as
+            instantaneous, the labelling they had before the flag existed.
+
+        Raises:
+            ValueError: If the stacked entries disagree — a stack that mixes
+                interval-mean and instantaneous trajectories has no single
+                time labelling — or if the flag has no entries at all (a
+                stack of zero trajectories).
+
+        """
+        flag = getattr(self._predictions, "time_cell_method", None)
+        if flag is None:
+            return False
+        values = np.asarray(jax.device_get(flag)).astype(bool).reshape(-1)
+        if values.size == 0:
+            raise ValueError(
+                "time_cell_method has no entries (a stack of zero "
+                "trajectories), so whether the frames are interval means is "
+                "undefined.")
+        if values.all():
+            return True
+        if not values.any():
+            return False
+        raise ValueError(
+            f"This stacked trajectory mixes interval means and instantaneous "
+            f"samples: {int(values.sum())} of the {values.size} stacked "
+            "time_cell_method entries are interval means. Frames of the two "
+            "kinds are labelled differently (interval midpoint vs sample "
+            "time), so there is no single time axis for them; label or "
+            "serialize each kind separately.")
+
     def time_labels(self) -> np.ndarray:
         """Exact ``datetime64[ms]`` host labels of the output frames.
 
@@ -212,14 +251,14 @@ class ModelPredictions:
         labelled at the midpoint of their exact bounds, computed in
         milliseconds, so an odd-length interval's half-second midpoint is
         exact (the traced clock can only hold whole seconds).
+
+        A stacked trajectory (see :meth:`is_interval_mean`) keeps its leading
+        stacking axes: the labels have the shape of ``times``.
         """
-        cell_method = getattr(self._predictions, "time_cell_method", None)
         bounds = getattr(self._predictions, "time_bounds", None)
-        is_mean = (cell_method is not None
-                   and bool(np.asarray(jax.device_get(cell_method))))
-        if is_mean and bounds is not None:
+        if self.is_interval_mean() and bounds is not None:
             bounds = output_time_labels(bounds)
-            return bounds[:, 0] + (bounds[:, 1] - bounds[:, 0]) // 2
+            return bounds[..., 0] + (bounds[..., 1] - bounds[..., 0]) // 2
         return output_time_labels(self.times)
 
     @property
@@ -501,7 +540,6 @@ class ModelPredictions:
         """
         ds = self._trajectory_dataset()
         bounds = getattr(self._predictions, "time_bounds", None)
-        cell_method = getattr(self._predictions, "time_cell_method", None)
         if bounds is not None:
             bounds = output_time_labels(bounds)
             if bounds.shape != (ds.sizes["time"], 2):
@@ -516,9 +554,7 @@ class ModelPredictions:
                     "lower and upper bounds of each represented time interval"),
             )
             ds["time"].attrs["bounds"] = "time_bounds"
-        is_mean = (cell_method is not None
-                   and bool(np.asarray(jax.device_get(cell_method))))
-        if is_mean:
+        if self.is_interval_mean():
             if bounds is None:
                 raise ValueError("Interval-mean predictions require time_bounds.")
             # The traced whole-second clock cannot represent a half-second
@@ -569,30 +605,26 @@ class ModelPredictions:
         return ds
 
     def _raw_categorical_names(self) -> set[str]:
-        """Names of integer/boolean diagnostics in the raw predictions.
+        """Output names of the integer/boolean physics diagnostics.
 
-        Physics leaves are named by their dotted pytree path, the name a
-        backend that flattens ``predictions.physics`` itself gives them
-        (``PysesCamSEDycore.to_xarray``). The dinosaur path keeps each
-        field's dtype in its Dataset, so the dtype check in :meth:`to_xarray`
-        already catches its categorical fields; both backends therefore omit
-        the same diagnostics.
+        Decided on the raw prediction dtypes, under the names every backend
+        writes them with (:func:`physics_output_fields`): a backend that
+        regrids (pySES boxes columns onto lat/lon, in float64) has turned an
+        integer diagnostic such as Tiedtke's ``ktype`` into a float by the
+        time the Dataset exists, so the Dataset's dtypes alone cannot tell.
         """
-        from jax.tree_util import tree_flatten_with_path
-
-        physics = getattr(self._predictions, "physics", None)
-        if physics is None:
+        predictions = self._predictions
+        physics = getattr(predictions, "physics", None)
+        dynamics = getattr(predictions, "dynamics", None)
+        if physics is None or dynamics is None:
             return set()
-        names = set()
-        leaves, _ = tree_flatten_with_path(physics)
-        for path, leaf in leaves:
-            dtype = getattr(leaf, "dtype", None)
-            if dtype is None or not (np.issubdtype(dtype, np.integer)
-                                     or np.issubdtype(dtype, np.bool_)):
-                continue
-            names.add(".".join(
-                str(getattr(p, "key", getattr(p, "name", p))) for p in path))
-        return names
+        fields = physics_output_fields(
+            physics, self._physics, dynamics.u_wind.shape[1:])
+        return {
+            name for name, leaf in fields.items()
+            if np.issubdtype(leaf.dtype, np.integer)
+            or np.issubdtype(leaf.dtype, np.bool_)
+        }
 
     def monthly_means(self):
         """Return bounds-aware Gregorian monthly means as an xarray Dataset.
@@ -606,133 +638,251 @@ class ModelPredictions:
         return temporal_aggregation.monthly_means(self.to_xarray())
 
     def _trajectory_dataset(self):
-        """Build the trajectory Dataset, before provenance stamping."""
-        # Backends whose native horizontal layout is not the separable
-        # lat/lon grid the legacy path below assumes (pySES cubed-sphere
-        # columns) own their trajectory conversion per the DynamicalCore
-        # protocol; delegate whenever the grid has no modal axes.
-        if self._dycore is not None and not hasattr(
-                self._coords.horizontal, "modal_axes"):
-            times = self.time_labels()
-            ds = self._dycore.to_xarray(self._predictions, times)
-            # The dycore's ``to_xarray`` has already run
-            # ``cf_metadata.finalize_output`` (CSV attrs and the curated
-            # ``_VARIABLE_ATTRS`` are on). Apply the per-term output metadata
-            # here too, so pySES output carries the radiation/cloud/convection
-            # units the dinosaur path gets (#740). Ordering is safe: the
-            # term-declared names (``radiation.*`` and other diagnostics) are
-            # disjoint from ``cf_metadata._VARIABLE_ATTRS`` (vertical coords,
-            # core prognostics), so stamping term attrs after finalize does not
-            # upset the documented CSV < term < cf_metadata precedence.
-            return _apply_term_output_attrs(ds, self._physics)
+        """Build the trajectory Dataset, before provenance stamping.
 
-        # float0s are placeholders representing the lack of tangent space for non-differentiable variables.
-        # jax.numpy arrays cannot have float0 dtype, so jcm handles them with numpy arrays;
-        # substituting jax.numpy arrays here allows us to handle Predictions objects that contain derivatives.
-        float0s_to_nans = lambda pytree: tree_map(
-            lambda x: jnp.full_like(x, jnp.nan, dtype=float) if x.dtype == jax.dtypes.float0 else x,
-            pytree,
-        )
-
-        dynamics_predictions = float0s_to_nans(self.dynamics)
-        physics_predictions = float0s_to_nans(self.physics)
-
-        nodal_shape = dynamics_predictions.u_wind.shape[1:]
-
-        # Per-physics flattening of the diagnostic struct into a dict of named fields.
-        physics_preds_dict = self._physics.data_struct_to_dict(physics_predictions, nodal_shape=nodal_shape)
-
+        Every backend owns its trajectory conversion (the DynamicalCore
+        protocol), so whenever a dycore is attached this delegates to it,
+        handing it this object's physics: the physics names its own
+        diagnostics (:func:`physics_output_fields`), whichever backend lays
+        them out. Without a dycore (a ``with_context(coords, physics)``
+        restore) the lat/lon build the dinosaur backend uses is called
+        directly on the attached coordinates.
+        """
         times = self.time_labels()
-        coords = jax.device_get(self._coords)
+        if times.ndim != 1:
+            # Every backend lays out one time axis; say how to get one rather
+            # than let each fail in its own way.
+            raise ValueError(
+                f"This trajectory is stacked (time labels of shape "
+                f"{times.shape}): merge its stacking axes into the time axis "
+                "before converting it, e.g. jax.tree.map(lambda x: "
+                "x.reshape((-1,) + x.shape[2:]) if x.ndim >= 2 else x, "
+                "predictions), then reattach context with with_context.")
+        if self._dycore is None:
+            return gridded_trajectory_dataset(
+                self._predictions, times, coords=self._coords,
+                physics=self._physics)
+        ds = self._dycore.to_xarray(
+            self._predictions, times, physics=self._physics)
+        if hasattr(self._coords.horizontal, "modal_axes"):
+            # The lat/lon build has applied the per-term output metadata
+            # itself, between the units tables and ``finalize_output``.
+            return ds
+        # A backend with no modal axes (pySES) has already run
+        # ``cf_metadata.finalize_output`` (CSV attrs and the curated
+        # ``_VARIABLE_ATTRS`` are on). Apply the per-term output metadata
+        # here too, so pySES output carries the radiation/cloud/convection
+        # units the dinosaur path gets (#740). Ordering is safe: the
+        # term-declared names (``radiation.*`` and other diagnostics) are
+        # disjoint from ``cf_metadata._VARIABLE_ATTRS`` (vertical coords,
+        # core prognostics), so stamping term attrs after finalize does not
+        # upset the documented CSV < term < cf_metadata precedence.
+        return _apply_term_output_attrs(ds, self._physics)
 
-        additional_coords = {}
-        if self._physics.cached_coords is not None and hasattr(self._physics.cached_coords, 'xarray_additional_coords'):
-            additional_coords = dict(self._physics.cached_coords.xarray_additional_coords())
-        # Aerosol-mode coordinate so per-mode JAM state fields (``jam_state.*``,
-        # shaped ``(mode, level, lon, lat)``) serialize with a named ``mode`` dim
-        # rather than failing the shape→dims lookup. Sourced from the aerosol
-        # population spec carried by the microphysics term.
-        for _term in getattr(self._physics, 'terms', []):
-            _spec = getattr(_term, 'spec', None)
-            if _spec is not None and hasattr(_spec, 'mode_shorts'):
-                _mode_shorts = list(_spec.mode_shorts)
-                # data_to_xarray assigns dims purely by array shape, so a mode
-                # axis whose length equals the vertical layer count is genuinely
-                # indistinguishable from the level axis — a (mode, level, lon,
-                # lat) field can't be disambiguated from (level, …). This only
-                # bites the unphysical case n_modes == n_levels (MAM4 has 4
-                # modes, so only an L4 run). Fail early and specifically rather
-                # than deep inside data_to_xarray's generic shape lookup.
-                if len(_mode_shorts) == coords.vertical.layers:
-                    raise ValueError(
-                        f"Aerosol mode count ({len(_mode_shorts)}) equals the "
-                        f"vertical layer count ({coords.vertical.layers}); the "
-                        "per-mode aerosol state can't be given a distinct 'mode' "
-                        "dimension because data_to_xarray infers dims from shape "
-                        "alone. Use a vertical resolution other than "
-                        f"{coords.vertical.layers} levels to serialize jam_state."
-                    )
-                additional_coords['mode'] = np.asarray(_mode_shorts)
-                break
-        # Spectral-band coordinates for the JAM per-band optics fields
-        # (#584): ``*_sw_per_band`` / ``*_lw_per_band`` are
-        # ``(time, band, level, lon, lat)`` and need a named band dim or
-        # the shape→dims lookup fails (first hit by the first full-output
-        # echam-jam run after #584). Lengths come from the arrays
-        # themselves (RRTMGP: 14 SW / 16 LW); the additional_coords
-        # collision check still guards a band count equal to the layer
-        # count.
-        # Band count 1 (grey radiation) is skipped: a length-1 coord here
-        # would shadow the existing ``(1, ...)`` surface-axis mappings for
-        # every other field; those fields already serialize via that axis.
-        for _key, _val in physics_preds_dict.items():
-            for _suffix, _dim in (('_sw_per_band', 'sw_band'),
-                                  ('_lw_per_band', 'lw_band')):
-                if (_key.endswith(_suffix) and _dim not in additional_coords
-                        and getattr(_val, 'ndim', 0) >= 2
-                        and _val.shape[1] > 1):
-                    additional_coords[_dim] = np.arange(_val.shape[1])
 
-        pred_ds = data_to_xarray(
-            dynamics_predictions.asdict() | physics_preds_dict,
-            coords=coords, serialize_coords_to_attrs=False,
-            times=np.arange(times.shape[0]),
-            additional_coords=additional_coords,
-        )
+def _float0s_to_nans(pytree):
+    """Replace ``float0`` leaves with NaN arrays of the same shape.
 
-        # Attach units / descriptions from the physics-specific units tables.
-        # ``Physics`` is a structural contract, so a physics predating
-        # ``units_table_paths`` still produces output, just undocumented.
-        table_paths = getattr(self._physics, "units_table_paths", tuple)()
-        units_df = pd.concat(
-            [pd.read_csv(p) for p in (DYNAMICS_UNITS_TABLE_CSV_PATH, *table_paths)],
-            ignore_index=True)
-        # First table listed wins a duplicated variable name: the dynamics
-        # table is authoritative, then terms in composition order.
-        units_df = units_df.drop_duplicates(subset="Variable", keep="first")
-        for var, unit, desc in zip(units_df["Variable"], units_df["Units"], units_df["Description"]):
-            if var in pred_ds:
-                pred_ds[var].attrs["units"] = unit
-                pred_ds[var].attrs["description"] = desc
+    ``float0`` marks the absent tangent space of a non-differentiable leaf.
+    jax.numpy arrays cannot hold that dtype, so a Predictions pytree of
+    derivatives carries them as numpy arrays; substituting NaN arrays lets
+    such a pytree serialize like any other.
+    """
+    return tree_map(
+        lambda x: (jnp.full_like(x, jnp.nan, dtype=float)
+                   if x.dtype == jax.dtypes.float0 else x),
+        pytree,
+    )
 
-        # Per-term output metadata (#740). Each PhysicsTerm declares CF/units
-        # attributes for the diagnostics it computes (``output_attrs``, keyed by
-        # the dotted output names) — the home for metadata the per-physics CSVs
-        # never listed, notably the whole radiation flux set. Applied AFTER the
-        # CSV loop so a term declaration overrides the CSV (more specific wins),
-        # but BEFORE ``cf_metadata.finalize_output`` so its own curated names
-        # (vertical coordinates, core prognostics) still win last. Shared with
-        # the non-modal delegation branch above.
-        _apply_term_output_attrs(pred_ds, self._physics)
 
-        # Exact model timestamps replace the temporary positional coordinate.
-        pred_ds["time"] = ("time", times)
+def physics_output_fields(physics_predictions, physics, nodal_shape) -> dict:
+    """Name a trajectory's physics diagnostics the way every jcm output does.
 
-        # Put the file into the output convention: BOTH vertical axes
-        # surface-first, with the sigma/hybrid coordinates and CF attributes
-        # that say so. ``cf_metadata`` owns the flip — doing it inline here is
-        # how ``level`` came to be flipped while ``level_i`` was not (#710).
-        return cf_metadata.finalize_output(pred_ds, vertical=coords.vertical)
+    The one flattening behind every trajectory Dataset — the chunked CLI's
+    files, :meth:`ModelPredictions.to_xarray` and each backend's
+    :meth:`~jcm.dycore.base.DynamicalCore.to_xarray` — so a variable has the
+    same name whichever of them wrote it. The physics package owns the
+    naming (:meth:`~jcm.physics_interface.Physics.data_struct_to_dict`):
+    nested dicts and typed structs flatten to dotted names, carry plumbing
+    such as ``_prev_step`` is dropped, per-term renames and withheld fields
+    apply, and column-vectorized fields get their horizontal axes back.
+
+    Args:
+        physics_predictions: The ``physics`` leaf of a
+            :class:`~jcm.dycore.base.Predictions`, as a run returns it.
+        physics: The physics package that produced it.
+        nodal_shape: The dynamics fields' shape without the time axis, which
+            locates the horizontal axes of each diagnostic.
+
+    Returns:
+        A flat ``{output name: array}`` dict; empty when there are no
+        physics diagnostics.
+
+    Raises:
+        TypeError: If there are diagnostics but no physics package to name
+            them: their names are not recoverable from the arrays alone.
+
+    """
+    if physics_predictions is None or (
+            isinstance(physics_predictions, dict) and not physics_predictions):
+        return {}
+    flatten = getattr(physics, "data_struct_to_dict", None)
+    if flatten is None:
+        raise TypeError(
+            "These predictions carry physics diagnostics, but no physics "
+            "package was given to name them: output names (and which carry "
+            "fields are plumbing rather than output) belong to the physics "
+            "that produced them. Pass physics= (for example model.physics), "
+            "or convert through ModelPredictions.to_xarray().")
+    return flatten(_float0s_to_nans(physics_predictions),
+                   nodal_shape=nodal_shape)
+
+
+def _physics_additional_coords(physics, physics_fields, vertical_layers):
+    """Named non-spatial axes the lat/lon build needs for physics fields.
+
+    ``data_to_xarray`` assigns dims by array shape alone, so any extra axis
+    a physics diagnostic carries (aerosol modes, spectral bands) needs a
+    named coordinate of its own length.
+    """
+    additional_coords = {}
+    cached = getattr(physics, "cached_coords", None)
+    if cached is not None and hasattr(cached, "xarray_additional_coords"):
+        additional_coords = dict(cached.xarray_additional_coords())
+    # Aerosol-mode coordinate so per-mode JAM state fields (``jam_state.*``,
+    # shaped ``(mode, level, lon, lat)``) serialize with a named ``mode`` dim
+    # rather than failing the shape→dims lookup. Sourced from the aerosol
+    # population spec carried by the microphysics term.
+    for term in getattr(physics, "terms", []):
+        spec = getattr(term, "spec", None)
+        if spec is not None and hasattr(spec, "mode_shorts"):
+            mode_shorts = list(spec.mode_shorts)
+            # data_to_xarray assigns dims purely by array shape, so a mode
+            # axis whose length equals the vertical layer count is genuinely
+            # indistinguishable from the level axis — a (mode, level, lon,
+            # lat) field can't be disambiguated from (level, …). This only
+            # bites the unphysical case n_modes == n_levels (MAM4 has 4
+            # modes, so only an L4 run). Fail early and specifically rather
+            # than deep inside data_to_xarray's generic shape lookup.
+            if len(mode_shorts) == vertical_layers:
+                raise ValueError(
+                    f"Aerosol mode count ({len(mode_shorts)}) equals the "
+                    f"vertical layer count ({vertical_layers}); the "
+                    "per-mode aerosol state can't be given a distinct 'mode' "
+                    "dimension because data_to_xarray infers dims from shape "
+                    "alone. Use a vertical resolution other than "
+                    f"{vertical_layers} levels to serialize jam_state."
+                )
+            additional_coords["mode"] = np.asarray(mode_shorts)
+            break
+    # Spectral-band coordinates for the JAM per-band optics fields
+    # (#584): ``*_sw_per_band`` / ``*_lw_per_band`` are
+    # ``(time, band, level, lon, lat)`` and need a named band dim or
+    # the shape→dims lookup fails (first hit by the first full-output
+    # echam-jam run after #584). Lengths come from the arrays
+    # themselves (RRTMGP: 14 SW / 16 LW); the additional_coords
+    # collision check still guards a band count equal to the layer
+    # count.
+    # Band count 1 (grey radiation) is skipped: a length-1 coord here
+    # would shadow the existing ``(1, ...)`` surface-axis mappings for
+    # every other field; those fields already serialize via that axis.
+    for key, value in physics_fields.items():
+        for suffix, dim in (("_sw_per_band", "sw_band"),
+                            ("_lw_per_band", "lw_band")):
+            if (key.endswith(suffix) and dim not in additional_coords
+                    and getattr(value, "ndim", 0) >= 2
+                    and value.shape[1] > 1):
+                additional_coords[dim] = np.arange(value.shape[1])
+    return additional_coords
+
+
+def gridded_trajectory_dataset(predictions, times, *, coords, physics,
+                               additional_coords=None):
+    """Build the trajectory Dataset of a separable lat/lon (modal) grid.
+
+    The dinosaur backend's :meth:`~jcm.dycore.base.DynamicalCore.to_xarray`,
+    and the build :meth:`ModelPredictions.to_xarray` uses when no dycore is
+    attached. Physics diagnostics are named by :func:`physics_output_fields`,
+    documented from the physics' units tables and per-term ``output_attrs``,
+    and the file is put into the output convention
+    (:func:`jcm.cf_metadata.finalize_output`: both vertical axes
+    surface-first, with CF metadata).
+
+    Args:
+        predictions: A :class:`~jcm.dycore.base.Predictions` trajectory with a
+            leading time axis on every field.
+        times: The frames' exact ``datetime64`` labels
+            (:meth:`ModelPredictions.time_labels`). They become the ``time``
+            coordinate as given; an elapsed-time axis carries no date and is
+            rejected.
+        coords: The coordinate system the fields are laid out on.
+        physics: The physics package that produced ``predictions.physics``.
+        additional_coords: Extra named coordinates for non-spatial axes,
+            added to those the physics fields need.
+
+    Returns:
+        The trajectory :class:`xarray.Dataset`, before the time bounds, cell
+        methods and provenance :meth:`ModelPredictions.to_xarray` adds.
+
+    """
+    labels = output_time_labels(times)
+    dynamics = _float0s_to_nans(predictions.dynamics)
+    if labels.shape != dynamics.u_wind.shape[:1]:
+        # A stacked trajectory (chunks from a scan) has leading stacking axes
+        # on every leaf; it is one time axis only after they are merged.
+        raise ValueError(
+            f"times must hold one label per frame: got shape {labels.shape} "
+            f"for fields with leading shape {dynamics.u_wind.shape[:1]}. A "
+            "stacked trajectory must have its stacking axes merged into the "
+            "time axis first (see ModelPredictions.is_interval_mean).")
+    physics_fields = physics_output_fields(
+        predictions.physics, physics, dynamics.u_wind.shape[1:])
+    coords = jax.device_get(coords)
+    extra_coords = _physics_additional_coords(
+        physics, physics_fields, coords.vertical.layers)
+    extra_coords.update(additional_coords or {})
+
+    ds = data_to_xarray(
+        dynamics.asdict() | physics_fields,
+        coords=coords, serialize_coords_to_attrs=False,
+        times=np.arange(labels.shape[0]),
+        additional_coords=extra_coords,
+    )
+
+    # Attach units / descriptions from the physics-specific units tables.
+    # ``Physics`` is a structural contract, so a physics predating
+    # ``units_table_paths`` still produces output, just undocumented.
+    table_paths = getattr(physics, "units_table_paths", tuple)()
+    units_df = pd.concat(
+        [pd.read_csv(p) for p in (DYNAMICS_UNITS_TABLE_CSV_PATH, *table_paths)],
+        ignore_index=True)
+    # First table listed wins a duplicated variable name: the dynamics
+    # table is authoritative, then terms in composition order.
+    units_df = units_df.drop_duplicates(subset="Variable", keep="first")
+    for var, unit, desc in zip(units_df["Variable"], units_df["Units"],
+                               units_df["Description"]):
+        if var in ds:
+            ds[var].attrs["units"] = unit
+            ds[var].attrs["description"] = desc
+
+    # Per-term output metadata (#740). Each PhysicsTerm declares CF/units
+    # attributes for the diagnostics it computes (``output_attrs``, keyed by
+    # the dotted output names) — the home for metadata the per-physics CSVs
+    # never listed, notably the whole radiation flux set. Applied AFTER the
+    # CSV loop so a term declaration overrides the CSV (more specific wins),
+    # but BEFORE ``cf_metadata.finalize_output`` so its own curated names
+    # (vertical coordinates, core prognostics) still win last.
+    _apply_term_output_attrs(ds, physics)
+
+    # The exact frame labels replace the positional coordinate the
+    # shape-based dims lookup needed.
+    ds["time"] = ("time", labels)
+
+    # Put the file into the output convention: BOTH vertical axes
+    # surface-first, with the sigma/hybrid coordinates and CF attributes
+    # that say so. ``cf_metadata`` owns the flip — doing it inline here is
+    # how ``level`` came to be flipped while ``level_i`` was not (#710).
+    return cf_metadata.finalize_output(ds, vertical=coords.vertical)
 
 
 def _model_predictions_flatten(mp):

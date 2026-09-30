@@ -982,6 +982,7 @@ class PysesCamSEDycore(DynamicalCore):
         times,
         *,
         additional_coords: Mapping[str, Any] | None = None,
+        physics: Any = None,
     ):
         """Regrid a saved trajectory onto a regular lat/lon xarray Dataset.
 
@@ -992,14 +993,17 @@ class PysesCamSEDycore(DynamicalCore):
         coordinates plus hybrid ``(a, b)`` tables are attached by
         :func:`jcm.cf_metadata.finalize_output` so analysis selects by
         coordinate value, never by blind index. Physics diagnostics from
-        ``predictions.physics`` are included wherever their trailing shape
-        matches the column layout (``(1, ncol)``, or a level/interface axis
-        followed by it); other leaves are skipped.
+        ``predictions.physics`` are named by ``physics`` (else
+        :attr:`output_physics`) through
+        :func:`jcm.predictions.physics_output_fields`, exactly as the
+        dinosaur backend names them, and included wherever their trailing
+        shape matches the column layout (``(1, ncol)``, or a level/interface
+        axis followed by it); other fields are skipped.
         """
         import xarray as xr
-        from jax.tree_util import tree_flatten_with_path
 
         from jcm import cf_metadata
+        from jcm.predictions import physics_output_fields
 
         rg = self._regrid_targets()
 
@@ -1049,15 +1053,12 @@ class PysesCamSEDycore(DynamicalCore):
         for tracer_name, arr in dyn.tracers.items():
             add_field(tracer_name, arr)
 
-        if predictions.physics is not None:
-            leaves, _ = tree_flatten_with_path(predictions.physics)
-            for path, leaf in leaves:
-                if not hasattr(leaf, "shape"):
-                    continue
-                name = ".".join(
-                    str(getattr(p, "key", getattr(p, "name", p))) for p in path
-                )
-                add_field(name, leaf)
+        fields = physics_output_fields(
+            predictions.physics,
+            physics if physics is not None else self.output_physics,
+            np.shape(dyn.u_wind)[1:])
+        for name, leaf in fields.items():
+            add_field(name, leaf)
 
         for key, value in (additional_coords or {}).items():
             ds.coords[key] = value

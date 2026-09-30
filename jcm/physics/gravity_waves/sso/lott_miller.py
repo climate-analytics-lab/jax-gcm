@@ -732,15 +732,28 @@ def _orodrag(paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
     zust = pum1 + pdtime * zdudt
     zvst = pvm1 + pdtime * zdvdt
     zdis_pre = 0.5 * (pum1 ** 2 + pvm1 ** 2 - zust ** 2 - zvst ** 2)
-    # If zdis < 0: rescale tendencies so KE conserved.
-    safe_denom = jnp.maximum(zust ** 2 + zvst ** 2, 1e-30)
-    zred = jnp.sqrt(jnp.maximum((pum1 ** 2 + pvm1 ** 2) / safe_denom, 1.0e-30))
+    # If zdis < 0: rescale tendencies so KE conserved. ECHAM forms the
+    # quotient only inside that branch (mo_ssortns.f90::orodrag, ``IF
+    # (zdis<0)``), where |u_st|² > |u|² ≥ 0 keeps its denominator positive,
+    # so the discarded evaluation gets a denominator of 1 instead (the
+    # double-where, as the ``zxrp1_base`` guard in ``clouds/echam_1m.py``
+    # does it). A floor under the denominator is not enough: where the
+    # updated wind is zero — an exactly calm level, or the blocked-flow drag
+    # stopping the flow in one step when ``orography_std`` sits just above
+    # ``_MIN_OROG_STD`` — the floored quotient's derivative (``1/den**2``,
+    # below float32's range) is infinite, and the ``where``'s zero cotangent
+    # makes every wind and orography gradient NaN.
+    # The floor on the ratio keeps sqrt's derivative finite at a calm level
+    # inside the branch (ratio 0).
+    rescale = zdis_pre < 0.0
+    speed2_new = jnp.where(rescale, zust ** 2 + zvst ** 2, 1.0)
+    zred = jnp.sqrt(jnp.maximum((pum1 ** 2 + pvm1 ** 2) / speed2_new, 1.0e-30))
     zust_corr = zust * zred
     zvst_corr = zvst * zred
     new_du = (zust_corr - pum1) / pdtime
     new_dv = (zvst_corr - pvm1) / pdtime
-    zdudt = jnp.where(zdis_pre < 0.0, new_du, zdudt)
-    zdvdt = jnp.where(zdis_pre < 0.0, new_dv, zdvdt)
+    zdudt = jnp.where(rescale, new_du, zdudt)
+    zdvdt = jnp.where(rescale, new_dv, zdvdt)
     zust_final = pum1 + pdtime * zdudt
     zvst_final = pvm1 + pdtime * zdvdt
     zdis = 0.5 * (pum1 ** 2 + pvm1 ** 2 - zust_final ** 2 - zvst_final ** 2)

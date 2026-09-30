@@ -51,10 +51,34 @@ plus ``qnc``/``qni`` for the two-moment one — is loaded from the file when it
 carries it. Pass an explicit mapping to rename variables, or
 ``run.tracer_vars={}`` to load none.
 
+``run.mode=scm`` runs the column nearest to ``run.column.lat_deg`` /
+``lon_deg``, and refuses a request the state file does not cover rather than
+running a column that may be far from it. A request is covered when it lies
+inside the file's axis span extended by half a grid cell at each end:
+
+* longitude wraps only when the file's longitudes close the circle, as a
+  global file's do (jcm writes 0-360); a regional or sector extraction —
+  including one across the 0/360 seam — covers its own arc and no more;
+* a latitude end whose outermost row is closer to the pole than one row
+  spacing reaches the pole, which keeps every global grid (Gaussian ones
+  included, whose outermost centre stops short of 90) accepting the whole of
+  [-90, 90], while a regional file (``lat = 20..80``) refuses the pole;
+* a length-1 axis has no spacing to take half of, so a single-column file
+  accepts only its own coordinates (to within 1e-4 degrees, which absorbs a
+  float32 axis).
+
+The error names the request, the file's coverage and the distance to the
+nearest column. A global state file — which is what jcm writes — accepts any
+request, resolved to the same cell as always.
+
 ``run.mode=prescribed`` evaluates each state at its own time: the file's
 ``time`` coordinate gives the offsets from the first state, so date-aligned
 forcing is selected (and its coverage checked) at the snapshot dates, not at
-synthetic model steps. Where the first state sits:
+synthetic model steps. Each state is diagnosed on its own, so physics state
+carried between steps — TTE-TKE turbulence, JAM's cloud-borne aerosol — is
+re-diagnosed from a cold start at every time; a physics with such carry slots
+warns once, naming them (``jcm.prescribed_state_model.PrescribedStateModel``).
+Where the first state sits:
 
 * a file with a decoded date axis (``datetime64``/``cftime`` — any v3 output)
   dates itself, so ``run.start_time`` may be left unset;
@@ -293,13 +317,11 @@ because they report what the run resolved your request *to*:
 
 * ``run.mode=scm`` logs the grid cell the requested ``column.lat_deg`` /
   ``lon_deg`` landed on. It stays INFO rather than becoming a warning because
-  a global state file — which is what jcm writes — always resolves the
-  request to a cell that contains it: longitude is matched on the circle, so
-  a westward ``lon_deg`` such as ``-120`` is the 120W you meant, and a
-  ``lat_deg`` outside [-90, 90], or either value non-finite, is refused
-  outright. A *regional* or single-column state file can still resolve to a
-  distant column, and at the ``WARNING`` default nothing says so — see
-  issue #818.
+  a resolved request always lies in the cell it landed on: longitude is
+  matched on the circle, so a westward ``lon_deg`` such as ``-120`` is the
+  120W you meant; a ``lat_deg`` outside [-90, 90], or either value
+  non-finite, is refused outright; and so is a request a regional or
+  single-column state file does not cover (the rule above).
 * ``run.mode=prescribed`` / ``scm`` log which tracers the state file actually
   contributed. (The complementary message — tracers the physics declared and
   the file does *not* carry — is a warning, so it stays audible.)

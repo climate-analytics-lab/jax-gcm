@@ -252,7 +252,8 @@ class FakeCubedSphereDycore(DynamicalCore):
     # Output (regrid to lat/lon — for the canary this is a stub)
     # ------------------------------------------------------------------
 
-    def to_xarray(self, predictions: Predictions, times, *, additional_coords=None):
+    def to_xarray(self, predictions: Predictions, times, *,
+                  additional_coords=None, physics=None):
         # A real SE backend would precompute a cubed-sphere → lat/lon weight
         # matrix here and emit a regular grid. For protocol-validation the
         # native cubed-sphere layout is enough.

@@ -236,6 +236,82 @@ class TestPrescribedStateModel(unittest.TestCase):
         )
 
 
+class TestPrescribedStateModelCarryWarning(unittest.TestCase):
+    """Physics with carry slots gets one warning that they are severed (#623).
+
+    Each time is evaluated independently, so state a composition keeps in
+    its cross-step carry is re-diagnosed from a cold start at every time.
+    That is valid, so it warns rather than refuses, once, naming the slots;
+    a composition without carry slots stays silent.
+    """
+
+    @staticmethod
+    def _carry_warnings(caught):
+        return [str(w.message) for w in caught
+                if "cross-step carry slots" in str(w.message)]
+
+    def _construct(self, physics, coords):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model = PrescribedStateModel(physics=physics, coords=coords)
+        return model, self._carry_warnings(caught)
+
+    def test_no_carry_slots_no_warning(self):
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+        for physics in (held_suarez_physics(), speedy_physics()):
+            with self.subTest(physics=type(physics).__name__):
+                _, messages = self._construct(physics, coords)
+                self.assertEqual(messages, [])
+
+    def test_a_raw_physics_carry_of_any_pytree_is_handled(self):
+        """``initial_carry_state`` may return any pytree, or ``None``.
+
+        A raw ``Physics`` whose carry is an array has cross-step state with
+        no slot names, which still gets the warning; one whose carry is
+        ``None`` or empty has none and stays silent.
+        """
+        from jcm.physics_interface import Physics
+
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+
+        class _Raw(Physics):
+            def __init__(self, carry):
+                self._carry = carry
+
+            def initial_carry_state(self, coords):
+                return self._carry
+
+        for carry, expected in ((None, 0), ({}, 0), ((), 0),
+                                (jnp.zeros((8, 2048)), 1)):
+            with self.subTest(carry=type(carry).__name__):
+                _, messages = self._construct(_Raw(carry), coords)
+                self.assertEqual(len(messages), expected)
+                if expected:
+                    self.assertIn("unnamed", messages[0])
+
+    def test_tte_tke_and_cloud_borne_slots_are_named(self):
+        from jcm.physics.aerosol.jam.cloud_borne_store import (
+            CARRY_KEY, CloudBorneCarryStore)
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.testing import idealized_echam_physics
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        physics = idealized_echam_physics(checkpoint_terms=False)
+        physics = physics + CloudBorneCarryStore()
+        _, messages = self._construct(physics, coords)
+        self.assertEqual(len(messages), 1)
+        message = messages[0]
+        for slot in ("vertical_diffusion", CARRY_KEY):
+            self.assertIn(slot, message)
+        self.assertIn("re-diagnosed from a cold start", message)
+        self.assertIn(f"{CARRY_KEY} holds prognostic state", message)
+
+
 # Slow-marked companion — see jcm/runners_test.py for rationale.
 
 @pytest.mark.slow

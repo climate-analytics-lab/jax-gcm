@@ -42,7 +42,11 @@ all constituents likewise.
 first step — it reads the previous step's ``kh`` carry, which is seeded to
 zero on step 0 (zero exchange coefficient, zero tendency)
 and reads the previous step's ``kh`` carry, because vdiff runs after the aerosol
-block in the ECHAM ordering.
+block in the ECHAM ordering. The interior Richardson number is the dry one,
+``N² = (g/T̄)·(∂T/∂z + g/cpd)`` (``compute_richardson_number``); ECHAM's
+``vdiff`` forms it from moist, cloud-weighted buoyancy with the ``ua``
+saturation of each half level, which the surface layer here already does
+(#962).
 
 **Code pointers.**
 - ``jcm/physics/vertical_diffusion/tte_tke/`` — ``vertical_diffusion.py``
@@ -58,11 +62,12 @@ block in the ECHAM ordering.
 ## Surface saturation and latent heat
 
 **What we do.** The saturation specific humidity of every surface tile, and of
-the air at the lowest level in the surface-layer Richardson number, is taken
-over water at or above the melting point and over ice below it
-(``jcm/physics/thermodynamics.py::saturation_specific_humidity``,
-``phase="auto"``): the sea-ice tile (at ``min(SST, 271.38 K)``) always
-saturates over ice, frozen land does below 273.15 K. The latent heat in the
+the air at the lowest level in the surface-layer Richardson number, is ECHAM's
+``ua`` table: Sonntag (1990) over ice at and below the melting point and over
+water above it (``jcm/physics/thermodynamics.py::saturation_specific_humidity``,
+``phase="auto"``; see {doc}`constants`): the sea-ice tile (at
+``min(SST, 271.38 K)``) always saturates over ice, frozen land does at and
+below 273.15 K. The latent heat in the
 surface-layer buoyancy is the condensation heat when the lowest-level air is at
 or above the melting point and the sublimation heat below, and the
 liquid-water potential temperature subtracts ``(L/c_p)·(θ/T)·q_x`` with the same

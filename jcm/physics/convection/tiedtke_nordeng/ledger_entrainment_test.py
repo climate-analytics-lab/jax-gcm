@@ -322,7 +322,7 @@ def _deep_unstable_column(nlev, dz_m):
         rho_k = p[k + 1] / (c.rd * T[k + 1])
         p[k] = p[k + 1] - rho_k * c.grav * dz_m
     p = np.clip(p, 5.0e3, None)
-    from jcm.physics.convection.saturation import (
+    from jcm.physics.thermodynamics import (
         saturation_specific_humidity_and_derivative as qsd,
     )
     qs, _ = qsd(jnp.array(T), jnp.array(p))

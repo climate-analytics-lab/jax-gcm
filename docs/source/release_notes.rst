@@ -99,9 +99,11 @@ jcm configures no logging; ``Model(log_level=...)`` removed
   ``job_logging`` regardless.
 - An application that silences logging now gets silence — jcm will not
   override it, which it previously did by design (#735). Findings that must
-  survive a quiet application are recorded in the run's provenance instead;
-  the parameters-changed-after-compilation warning, the case #735 was about,
-  is also the ``live_parameters_differ_from_compiled`` provenance key.
+  survive a quiet application are recorded in the run's provenance instead,
+  or raised as Python warnings rather than log records: the
+  parameters-changed-after-compilation case #735 was about is a
+  ``UserWarning`` and the ``live_parameters_differ_from_compiled`` provenance
+  key.
 - **A default CLI run prints less.** ``run.log_level`` (default ``WARNING``)
   now actually takes effect: previously it was applied only by
   ``Model.__init__``, so it did nothing at all in ``run.mode=prescribed`` and
@@ -122,6 +124,47 @@ jcm configures no logging; ``Model(log_level=...)`` removed
   seam** — a request within half a cell of 360 used to fall back to the
   axis's last centre and now correctly wraps to its first, so such a run
   selects a different column than it did before.
+- **Breaking:** a single-column request the state file does not cover is
+  refused (#818). A regional or single-column file used to run its nearest
+  column however far away (``lat_deg=90`` ran the 80°N row of a
+  ``lat = 20..80`` file; a single-column file ran its one column for any
+  request); ``select_column`` now raises, naming the request, the file's
+  coverage and the distance to the nearest column. Coverage is the axis span
+  extended by half a grid cell at each end, with longitude periodic only when
+  the file's longitudes close the circle, a latitude end within one row
+  spacing of its pole reaching the pole, and a length-1 axis covering only its
+  own coordinate. Global files — what jcm writes — are unaffected. See
+  :ref:`v3-scm-coverage`.
+
+One trajectory conversion for every backend
+"""""""""""""""""""""""""""""""""""""""""""
+
+- ``DinosaurDycore.to_xarray`` converts a real run (#951): it failed on the
+  nested physics diagnostics every run returns (``_prev_step``,
+  ``water_positivity_correction``) and rewrote the exact ``datetime64``
+  labels into an elapsed axis. It is now where the dinosaur trajectory
+  conversion lives, ``ModelPredictions.to_xarray()`` delegates to the
+  attached dycore for every backend, and the labels are kept as given; a
+  numeric axis raises ``TypeError``.
+- The physics names its own diagnostics, once, for every model trajectory
+  output (``ModelPredictions.to_xarray()``, the chunked CLI's files and each
+  backend's ``DynamicalCore.to_xarray``):
+  ``jcm.predictions.physics_output_fields`` (the physics'
+  ``data_struct_to_dict``) is used by the dinosaur and pySES conversions
+  alike, and a trajectory fetched to the host with ``jax.device_get`` now
+  writes the same variables (host arrays were dropped). The
+  ``run.mode=prescribed`` output keeps its own minimal ``diag.*`` layout. **Breaking for protocol implementers:**
+  ``DynamicalCore.to_xarray`` takes a keyword-only ``physics``, and a dycore
+  carries the ``output_physics`` a ``Model`` binds to it at construction, so
+  a direct ``model.dycore.to_xarray(...)`` names the variables the model's
+  output does; a call with diagnostics and no physics to name them raises.
+- **pySES output names physics diagnostics as the dinosaur output does.**
+  It used to take each leaf's pytree path, which named SPEEDY's typed
+  structs by position (``_condensation.0``, ``_shortwave_rad.10``) and wrote
+  the ``_prev_step`` carry plumbing; it now writes ``condensation.dqlsc`` and
+  the rest of the dinosaur names, drops what the dinosaur output drops
+  (``_prev_step``, per-term withheld fields), applies per-term output renames,
+  and splits multi-channel fields per channel. See :ref:`v3-dycore-to-xarray`.
 
 Specific humidity has one kg/kg contract
 """"""""""""""""""""""""""""""""""""""""
@@ -506,6 +549,17 @@ Dynamical cores and grids
   frontogenesis physics-fields provider. Selected from Hydra with
   ``dycore=pyses_ne30l{47,95}`` or the ``+configuration=ma-ne30-l{47,95}``
   presets. See :doc:`design/pyses_cam_se_dycore`.
+- ``physics=speedy`` runs on the pySES backend (#797). Under pySES's
+  float64-dynamics / float32-physics split the forcing and SPEEDY's cached
+  vertical tables stay float64, so the ``lax.cond`` branches that recompute
+  from them (the shortwave cloud and flux caches, the near-surface humidity
+  blend) came out float64 against a float32 pass-through branch and the
+  first physics step raised a ``TypeError``. The recomputed branches are
+  pinned to their operand's dtypes (``jcm.utils.cast_like``), and the scatters
+  that write those float64 values into float32 fields (lowest-level surface
+  tendencies, longwave boundary temperatures, shortwave fluxes, large-scale
+  condensation) cast explicitly, which JAX deprecates doing implicitly. Both
+  are no-ops in an all-float32 or all-float64 run.
 - **Semi-Lagrangian is the Dinosaur backend's default tracer transport.**
   Every extra tracer rides nodally with a Bermejo-Staniforth quasi-monotone
   limiter, so aerosol non-negativity is structural in transport rather than
@@ -661,6 +715,15 @@ Public state and transformed-output contracts
   boundaries. The explicit ``with_context(coords, physics, ...)`` form supports
   custom drivers; re-derived live parameters are labelled so they cannot be
   mistaken for trace-time provenance (#756).
+- ``ModelPredictions.is_interval_mean()`` is the public reading of whether a
+  trajectory's frames are interval means (#907). A coupler scanning
+  ``run_from_state_with_carry`` over chunks gets the per-trajectory flag
+  stacked with every other leaf; the accessor returns it when the chunks
+  agree and raises ``ValueError`` when a stack mixes means with
+  instantaneous samples. ``time_labels()`` and ``to_xarray()`` read the flag
+  through it, so a stacked trajectory labels directly (keeping its chunk
+  axis) and serializes once the chunk axis is merged into time — no private
+  field has to be rewritten. See :doc:`advanced_features`.
 
 Public model clock conversion
 """""""""""""""""""""""""""""
@@ -728,11 +791,26 @@ Provenance records the parameters
   afterwards does not reach the computation. Reading the module at the
   handoff would therefore stamp a trajectory with values that never ran.
   Where the live values disagree with the compiled ones, the record
-  reports the compiled ones and both a log warning and a
-  ``live_parameters_differ_from_compiled`` key say so: that disagreement
-  means an in-place parameter change did nothing to the run. Rebuild the
-  ``Model`` to change parameters; making the mutation take effect (or
-  fail loudly) is tracked in #735.
+  reports the compiled ones and a ``live_parameters_differ_from_compiled``
+  key says so (as does the warning below): that disagreement means an
+  in-place parameter change may not have reached the run. Build the physics
+  anew to change parameters.
+- **An in-place parameter change after the physics has run now fails
+  loudly** (#735). The change still does not reliably reach a later run —
+  of that model, or of a new ``Model`` built on the same physics object at
+  the same grid, since each checkpointed term's trace is cached — so the
+  next such run raises a ``UserWarning`` before it starts, naming each
+  changed field once per model; a sensitivity loop that edits one physics
+  object therefore hears about it on its second iteration instead of
+  returning a flat response. Where a new Model can reuse those traces, the
+  first-compiled parameter record is the physics object's, so the record
+  holds the values the traces were built with, flagged; a physics without
+  per-term checkpointing (Held-Suarez), or a new grid, retraces with the
+  live values and neither warns nor flags. An edit made before the physics
+  first runs is simply the value it compiles with. Making edits take effect would need the
+  parameters passed through the jit as traced arguments, a change to the
+  compiled hot path; the supported loop builds the physics and the ``Model``
+  inside one ``jax.jit`` (:doc:`advanced_features`).
 - The record travels on the predictions object, so it reaches every
   output stream that object produces (trajectory, snapshots and the
   per-observer datasets), including a bare
@@ -873,6 +951,35 @@ every branch. The companion's fluxes and fractions now keep the dtype of the
 slots they fill. A fast test steps the composed package under x64, so CI covers
 this without the ``mam4`` extra. The float32 forward result is bit-identical.
 
+JAM runs float32 physics under 64-bit mode without mixed-dtype scatters
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+With ``jax_enable_x64`` on and float32 physics (pySES, or any run that imports
+``mam4_jax``), the float parameters are float64 while the state is float32, and
+three JAM/ECHAM sites scattered float64 values into float32 tendencies — a JAX
+``FutureWarning`` now and an error in later JAX releases (#770): the DMS
+emission, the dry deposition of every deposited moment, and the ECHAM land
+surface's soil heat tendency. Each value is now pinned to its operand's dtype.
+A fast test traces the ECHAM+JAM package under x64 with ``FutureWarning`` as an
+error. Results with x64 off are unchanged.
+
+Finite parameter gradients at degenerate inputs
+"""""""""""""""""""""""""""""""""""""""""""""""
+
+Several schemes returned a NaN derivative — with respect to the state or to a
+tunable parameter — at an ordinary degenerate input, although their value was
+fine (#663): JAM activation and ice nucleation at zero TKE (activation's
+``tke_factor`` among them), JAM in-cloud sulfur chemistry in every clear-sky
+cell, the TTE-TKE Businger-Dyer surface-layer option on a stable surface,
+Lott-Miller SSO on an exactly calm column and just above its orography-std
+floor, Hines' dissipation and diffusion coefficient (``spectrum_width_factor``
+among the affected parameters), and RRTMGP with the sun exactly overhead.
+Each is a guard on the branch its value discards, so forward results are
+bit-identical. RRTMGP's ``cloud_decorrelation_km`` no longer blocks tracing the
+radiation parameters. A slow test now differentiates every term's outputs with
+respect to every float parameter of the ECHAM, ECHAM+JAM (2M), grey and SPEEDY
+packages.
+
 
 Corrected physics
 ^^^^^^^^^^^^^^^^^
@@ -900,7 +1007,7 @@ ECHAM surface albedo and frozen-surface saturation
   0.22 → 0.50-0.64). See :doc:`science/surface`.
 - The surface saturation humidity of every ECHAM tile (and of the
   lowest-level air in the surface-layer Richardson number) is taken over ice
-  below the melting point and over water above, as ECHAM's ``tlucua`` table
+  at and below the melting point and over water above, as ECHAM's ``tlucua`` table
   does, instead of the Sundqvist mixed-phase blend; the latent heat in the
   surface-layer buoyancy switches with the air temperature. The reported
   latent heat flux is ``alhs·E`` over sea ice and carries the sublimation share
@@ -1192,6 +1299,67 @@ Lohmann 2M detrained ice carries ECHAM's crystal number
   ``echam-2m`` and ``echam-jam`` members shift accordingly. See
   :doc:`science/clouds_microphysics`.
 
+ECHAM physics saturation is ECHAM's Sonntag (1990)
+""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- Every ECHAM scheme takes its saturation vapour pressure from
+  ``jcm.physics.thermodynamics``, which evaluates the Sonntag (1990) fit
+  ECHAM's lookup tables hold, with the table ECHAM reads at each site
+  (#956): ice at and below the melting point and water above (``ua``) for
+  Tiedtke-Nordeng convection, the TTE-TKE vertical diffusion, the surface
+  tiles and the 2M ice saturations; water at all temperatures (``uaw``) for
+  the 1M rain evaporation and the 2M water saturations; ECHAM's ``lo2``
+  choice between the two for the cloud cover and the 2M condensation. The
+  dev 1M saturation adjustment keeps its linear blend of the two fits
+  (#940). The Tetens forms it replaces were up to 0.15 % off between 273
+  and 330 K, 1.2-2.4 % between 238 and 273 K and 8-16 % between 200 and
+  238 K. ``qs`` is ECHAM's ``x/(1 − vtmpc1·x)`` with
+  ``x = MIN(es·rd/rv/p, 0.5)``, so the ratio is ``rd/rv`` (0.62265),
+  consistent with ``vtmpc1``, rather than ``c.eps``.
+- Tiedtke-Nordeng's saturation adjustment is ECHAM's ``cuadjtq`` (#957): one
+  Newton step clipped by ``kcall``, then one unclipped refinement where the
+  first step moved. It matches ECHAM's compiled routine to rounding.
+- **Changes results** for every ECHAM configuration. Evaluated term by term
+  on one saved T63 state, the diagnosed cloud fraction of levels colder than
+  238 K, where the ice fit now sits 1.3-9 % above the old one, falls from
+  2.2 % to 0.8 % (1M preset) and from 3.1 % to 2.4 % (2M preset); the cloud
+  microphysics tendencies move by 10 % (1M) and 18 % (2M) RMS, 32-48 % below
+  238 K, the convection's by 15 % and the vertical diffusion's moisture
+  tendency by 0.6 %. Over days 5-10 of ``t63-echam-1m`` / ``t63-echam-2m``
+  runs restarted from 30-day spin-ups of each preset, the global net TOA
+  radiation goes from −10.26 to −9.71 / 8.62 to 8.79 W/m², the shortwave
+  cloud effect from −78.4 to −76.5 / −38.5 to −38.1 W/m², the longwave one
+  from 34.6 to 33.1 / 13.7 to 13.3 W/m², liquid water path from 129.9 to
+  127.1 / 41.0 to 40.5 g/m², ice water path from 16.6 to 16.1 / 3.51 to
+  3.57 g/m², total cloud cover from 71.6 to 71.0 / 66.0 to 65.9 %, and
+  precipitation from 2.52 to 2.53 mm/day (1M; the 2M's stays at 2.66);
+  humidity at
+  200 hPa rises by 2 / 3 % (by 2.4 / 3.3 % in the tropics), and no
+  band-mean upper-tropospheric temperature (90-60-30° bands) moves by more
+  than 0.07 K. Rebuilds of this change that differ only at the 1e-4 level
+  spread by 0.3 / 0.06 W/m² in net TOA radiation over the same window,
+  which is the noise of these numbers. Ten days measure the immediate
+  response, not a new climate; the release-matrix bands of every ECHAM
+  member shift (#943). These numbers compare dev at ``f3780690``, before the
+  cloud-droplet (#929, #936) and detrained-ice (#941) entries above, with this
+  change at ``b56ceebf`` (term by term, and the 1M runs) and at ``5ad09de1``
+  (the 2M runs).
+- Unchanged, bit for bit: SPEEDY, Held-Suarez, Betts-Miller and the RCE
+  testbed, JAM's ARG activation, MAM4 humidity and ice nucleation, the public
+  relative-humidity diagnostic, the AeroCom diagnostics and the initial-state
+  injectors.
+- **Breaking:** ``jcm.physics.convection.tiedtke_nordeng.adjustment`` is
+  removed; ``cuadjtq``, ``cuadjtq_newton`` and ``cuadjtq_newton_evap`` live in
+  ``tiedtke_nordeng.cuadjtq``, the last two without ``n_refine``.
+  ``convection.saturation`` no longer carries the ``cuadjtq`` helpers or
+  ``saturation_specific_humidity_and_derivative``,
+  ``tiedtke_nordeng.tiedtke_nordeng`` no longer re-exports a Tetens
+  ``saturation_vapor_pressure``, ``thermodynamics`` drops its Tetens
+  constants, and ``clouds.sundqvist`` its two ``saturation_vapor_pressure_*``
+  functions; ``surface.echam.AtmosphericForcing`` takes a required
+  ``surface_pressure``.
+  See :doc:`v2_to_v3` and :doc:`science/constants`.
+
 JAM mixed-phase freezing follows ECHAM-HAM
 """"""""""""""""""""""""""""""""""""""""""
 
@@ -1255,6 +1423,9 @@ JAM mixed-phase freezing follows ECHAM-HAM
     1.1 days, with 79 % of the removal dry. ECHAM6.3-HAM2.3 has 16.5 Tg,
     5.3 days and 39 % dry (Tegen et al. 2019). The emission is comparable.
     This also limits the JAM immersion freezing.
+
+  These numbers compare dev at ``8393799c`` with this change at
+  ``138506ba``, both before the Sonntag entry above.
 
   See :doc:`science/clouds_microphysics` and :doc:`science/aerosol`.
 
@@ -1322,6 +1493,12 @@ Accepted limitations (proposed)
 - **The release-validation matrix has two gaps**: the T106 members' multi-GPU
   mesh configurations have never been run for a full year, and ``echam-jam``
   at L95 needs L95 oxidant and ozone inputs staged (#638).
+- **PrescribedStateModel re-diagnoses carried state from a cold start.** Each
+  time is evaluated independently, so TTE-TKE turbulence takes its spin-up
+  value and JAM's carry-stored cloud-borne aerosol is an empty reservoir at
+  every re-diagnosed time; construction warns once, naming the slots. Read a
+  saved run's own ``jam_cloud_borne.*`` output instead; threading the carry
+  is left for after v3.0 (#623, :ref:`v3-limitation-prescribed-carry`).
 
 Regression fixtures follow the supported matrix
 """""""""""""""""""""""""""""""""""""""""""""""
