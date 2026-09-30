@@ -345,7 +345,10 @@ What the Kubernetes door adds, and why:
   `--submit` it replaces the finished Job of that name (Jobs are immutable;
   the output stays on the volume and its log in `run.log`) and never touches
   a running one. `--force-mirror-revision` works as on the PBS path, and
-  only with `--resume`: a fresh Job never carries the opt-in.
+  only with `--resume`: a fresh Job never carries the opt-in. The pod also
+  writes the mirror record into the rundir beside the launch record, so a
+  launch copied to another machine with `--fetch` resumes there at the
+  mirror commit it runs at; `--resume` without a mirror record is refused.
 - A Job that fails deterministically (a refused rundir, a bad override)
   restarts until its retries are spent, holding its GPU in back-off:
   `kubectl delete job <name>` once the log shows why.
@@ -376,7 +379,9 @@ done
 ```
 
 `--init` takes an `hf://bundles/<grid>_<levels>/init_states/...` state or a
-path on the volume; `--extra` overrides land last, so they win. Warm-start
+path on the volume; `--extra` overrides land last, so they win — except the
+run length (`run.total_time`, `run.end_time`), which is refused there: it is
+`--days`, the target the completion gate checks. Warm-start
 from something that does not move: a permanent archive
 (`<prefix>_day<N>.ckpt`, written every 30 days by the JAM members) or the
 final checkpoint of a finished run — not the rotating `checkpoint.msgpack` of

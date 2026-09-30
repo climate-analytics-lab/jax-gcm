@@ -1261,3 +1261,67 @@ def test_fetch_refuses_a_run_with_no_launch_record(scratch, volume):
     assert fetch_run.fetch_run("mx_speedy_t31_ft", scratch / "elsewhere",
                                site=launch.sites.get("nautilus"), pod="p",
                                keep=("launch.json",)) == []
+
+
+@pytest.mark.parametrize("extra", ["run.total_time=3", "+run.total_time=3",
+                                   "++run.end_time=2001-01-01"])
+def test_extra_cannot_set_the_run_length(scratch, repo, gitrepo, remote,
+                                         capsys, extra):
+    """The length is --days, which the Kubernetes day-count gate follows.
+
+    Set through --extra, jcm would stop at the new length while the gate kept
+    the old target, and every retry would fail a finished run.
+    """
+    remote["refs/heads/dev"] = _commit(gitrepo, "a")
+    with pytest.raises(SystemExit, match="--days"):
+        _k8s(gitrepo, capsys, "--tag", "len", "--extra", extra)
+    assert not (scratch / "nautilus_runs").exists()
+    with pytest.raises(SystemExit, match="--days"):
+        _launch(repo, "--tag", "len", "--extra", extra)
+    assert not list((repo / "runs").glob("*.pbs"))
+
+
+def test_pod_writes_the_mirror_record_beside_the_launch_record(tmp_path):
+    rundir = tmp_path / "run"
+    rundir.mkdir()
+    record = json.dumps({"commit": "c" * 40, "source": "pinned"}, indent=1)
+    guard = launch.rundir_guard(str(rundir), f"{rundir}/ckpt",
+                                {"digest": "a"}, False, record)
+    assert _bash(guard, JOB_UID="u").returncode == 0
+    assert json.loads((rundir / launch.MIRROR_RECORD).read_text()) == \
+        json.loads(record)
+
+
+def test_a_fetched_launch_resumes_at_its_own_mirror_commit(
+        tmp_path, scratch, volume, gitrepo, remote, capsys, monkeypatch):
+    """Machine B fetches machine A's launch and resumes it on A's mirror commit.
+
+    The pod writes both records into the rundir; without the mirror record B
+    would resume at its own checkout's pin, which may have moved.
+    """
+    from jcm.data import remote as mirror
+    first = mirror.MIRROR_REVISION
+    remote["refs/heads/dev"] = _commit(gitrepo, "a")
+    [job] = _k8s(gitrepo, capsys, "--tag", "ft")               # machine A
+    a_local = scratch / "nautilus_runs" / "mx_speedy_t31_ft"
+    script = _script(job)
+    mirror_text = (a_local / launch.MIRROR_RECORD).read_text()
+    assert mirror_text.rstrip("\n") in script                  # the pod's copy
+    for name in (launch.LAUNCH_RECORD, launch.MIRROR_RECORD):   # what it wrote
+        (volume / name).write_text((a_local / name).read_text())
+    monkeypatch.setenv("SCRATCH", str(tmp_path / "machine_b"))
+    launch.main(["--site", "nautilus", "--repo", str(gitrepo), "--fetch",
+                 "--members", MEMBER, "--tag", "ft"])
+    monkeypatch.setattr(mirror, "MIRROR_REVISION", "d" * 40)   # B's pin moved
+    monkeypatch.delenv("JCM_MIRROR_REVISION")
+    [resumed] = _k8s(gitrepo, capsys, "--tag", "ft", "--resume")
+    assert _env(resumed)["JCM_MIRROR_REVISION"] == first
+
+
+def test_resume_needs_a_mirror_record(scratch, gitrepo, remote, capsys):
+    remote["refs/heads/dev"] = _commit(gitrepo, "a")
+    _k8s(gitrepo, capsys, "--tag", "nm")
+    (scratch / "nautilus_runs" / "mx_speedy_t31_nm"
+     / launch.MIRROR_RECORD).unlink()
+    with pytest.raises(SystemExit, match="mirror commit the run reads"):
+        _k8s(gitrepo, capsys, "--tag", "nm", "--resume")

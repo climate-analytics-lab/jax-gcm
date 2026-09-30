@@ -359,6 +359,24 @@ def init_overrides(init: str | None, fetch_here: bool) -> list[str]:
     return ["init=from_state", f"init.file={init}"]
 
 
+#: The run-length keys of the run schema (``jcm/config/run/default.yaml``: a
+#: length in ``total_time`` or an endpoint in ``end_time``). A job's length is
+#: ``--days``; set here, the length would move while the Kubernetes Job's
+#: day-count gate kept the old target, failing a finished run on every retry.
+RUN_LENGTH_KEYS = ("run.total_time", "run.end_time")
+
+
+def check_extra(extra) -> list[str]:
+    """Return ``--extra`` when no override in it sets the run's length."""
+    for o in extra:
+        key = o.split("=", 1)[0].lstrip("+~")
+        if key in RUN_LENGTH_KEYS:
+            raise SystemExit(
+                f"--extra {o!r} sets the run length; use --days, which the "
+                "completion gate follows.")
+    return list(extra)
+
+
 def member_overrides(run: str, m: dict, d: dict, rundir: str, *,
                      init: str | None = None, extra=(),
                      fetch_here: bool = True) -> list[str]:
@@ -371,7 +389,7 @@ def member_overrides(run: str, m: dict, d: dict, rundir: str, *,
     """
     return (overrides(run, m, d, rundir, fetch_here)
             + [f"hydra.run.dir={rundir}"]
-            + init_overrides(init, fetch_here) + list(extra))
+            + init_overrides(init, fetch_here) + check_extra(extra))
 
 
 PBS = """#!/bin/bash
@@ -694,7 +712,7 @@ JOB_UID_ENV = {"name": "JOB_UID", "valueFrom": {"fieldRef": {
 
 
 def rundir_guard(rundir: str, checkpoint: str, defn: dict,
-                 resume: bool) -> str:
+                 resume: bool, mirror_record: str | None = None) -> str:
     """Shell that ties the volume's run directory to ONE launch and one start.
 
     Two rules, both the Kubernetes form of what ``check_fresh`` does for a PBS
@@ -713,6 +731,11 @@ def rundir_guard(rundir: str, checkpoint: str, defn: dict,
 
     A warm start from a path on the volume is checked here too (jcm reads it
     at every attempt's startup), since the generating node cannot see it.
+
+    ``mirror_record`` (the launcher's ``mirror_revision.json``) is written
+    into the rundir on every attempt that passes, beside the launch record,
+    so a launch copied to another machine by ``--fetch`` carries the mirror
+    commit it runs at and can be resumed there on it.
 
     It runs before cloning, so each refused attempt costs seconds, but under
     ``restartPolicy: OnFailure`` the Job restarts until its retries are
@@ -757,17 +780,24 @@ if [ -f {ckpt} ] && [ {int(resume)} -eq 0 ] \\
   exit 1
 fi
 grep -qxF "$JOB_UID" {rundir}/JOBS 2>/dev/null || echo "$JOB_UID" >> {rundir}/JOBS
-"""
+""" + (f"""cat > {rundir}/.{MIRROR_RECORD}.tmp <<'MIRROR'
+{mirror_record.rstrip(chr(10))}
+MIRROR
+mv {rundir}/.{MIRROR_RECORD}.tmp {rundir}/{MIRROR_RECORD}
+""" if mirror_record is not None else "")
 
 
 def k8s_job(defn: dict, site: dict, mirror: tuple, retries: int,
-            memory: str = "64Gi", resume: bool = False) -> dict:
+            memory: str = "64Gi", resume: bool = False,
+            mirror_record: str | None = None) -> dict:
     """Build the Kubernetes Job for one launch definition.
 
     ``mirror`` is :func:`mirror_commit`'s ``(commit, opt_in, source)``.
     ``retries`` and ``memory`` are how the Job runs, not what it integrates,
     so they are not part of the definition and a ``--resume`` may change them.
-    ``resume`` lets the Job continue a checkpoint another Job wrote.
+    ``resume`` lets the Job continue a checkpoint another Job wrote;
+    ``mirror_record`` is the local ``mirror_revision.json`` the pod copies
+    into the rundir.
     """
     rundir = f"/runs/{defn['run']}"
     commit, optin = mirror[0], mirror[1]
@@ -789,7 +819,7 @@ def k8s_job(defn: dict, site: dict, mirror: tuple, retries: int,
         setup=pinned_setup(rundir), python_env="MAM4_JAX_ENABLE_X64=0",
         retries=retries, gpus=1, cpu=8, memory=memory, env=tuple(env),
         guard=rundir_guard(rundir, mkrun.checkpoint_of(defn["overrides"]),
-                           defn, resume))
+                           defn, resume, mirror_record))
 
 
 def _kubectl(site: dict, *args, input=None, timeout=300):
@@ -915,6 +945,13 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
                     f"no recorded launch for {run} in {local}: --resume "
                     "continues a launch made from this machine; pass the "
                     "--tag (and --suffix) it was launched under.")
+            if not (local / MIRROR_RECORD).exists():
+                # Without it mirror_commit would take this checkout's pin,
+                # which may have moved since the launch.
+                raise SystemExit(
+                    f"no {MIRROR_RECORD} for {run} in {local}: the mirror "
+                    "commit the run reads is unknown here. --fetch copies "
+                    "the one the pod wrote into its rundir.")
             plan.append((member, local, recorded))
             continue
         rundir = f"/runs/{run}"
@@ -999,7 +1036,7 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
         write_mirror_record(str(local), *mirror[defn["run"]][::2])
         (local / LAUNCH_RECORD).write_text(launch_record_text(defn))
         job = k8s_job(defn, site, mirror[defn["run"]], a.retries, a.memory,
-                      a.resume)
+                      a.resume, (local / MIRROR_RECORD).read_text())
         (local / "job.json").write_text(json.dumps(job, indent=2))
         print(f"# {defn['member']}: Job {defn['job']} -> PVC "
               f"{site['runs_pvc']}:/runs/{defn['run']} (record: {local})",
