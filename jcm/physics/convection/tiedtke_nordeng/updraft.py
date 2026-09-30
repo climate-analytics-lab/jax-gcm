@@ -40,7 +40,10 @@ from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 
 
 
-from jcm.physics.thermodynamics import saturation_specific_humidity_and_derivative
+from jcm.physics.thermodynamics import (
+    es_ua,
+    saturation_specific_humidity_and_derivative,
+)
 
 
 #: ECHAM ``cuentr``'s shallow-convection entrainment band: a shallow plume
@@ -276,7 +279,12 @@ def saturated_mse_hat(env: HalfLevelEnvironment) -> jnp.ndarray:
     zhsat = env.cpcu * env.tenh + env.geoh + zalvs * env.qsenh
     p = jnp.maximum(env.paph[:-1], 1.0)
     _, dqsdt = saturation_specific_humidity_and_derivative(env.tenh, p)
-    zgam = zalvs / env.cpcu * dqsdt
+    # ECHAM forms γ as ``zalvdcp·zdqsdt`` (L/pcpcu) where ``zes < 0.4`` and as
+    # ``zqsat·zcor·ub`` above (mo_cumastr.f90 l.609-618), with lookup_ubc's
+    # ``ub = (L/cpd)·d ln es/dT``: the same dqs/dT over cpd instead of pcpcu.
+    # ``zes >= 0.4`` only within a few Pa of the model top.
+    zes = es_ua(env.tenh) * (c.rd / c.rv) / p
+    zgam = zalvs / jnp.where(zes >= 0.4, c.cpd, env.cpcu) * dqsdt
     zzz = env.cpcu * env.tenh * c.vtmpc1
     return zhsat - (
         (zzz + zgam * zzz) / (1.0 + zgam * zzz / zalvs)
