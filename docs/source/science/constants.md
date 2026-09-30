@@ -155,10 +155,12 @@ saturation adjustment blends the two fits linearly between 238.15 K and
 ``tmelt`` instead of switching with ``lo2`` (#940). The idealised schemes
 keep their own references: Betts-Miller and JAM's MAM4 humidity and ice
 nucleation use the Tetens form of ``jcm/physics/convection/saturation.py``,
-JAM's ARG activation and placeholder microphysics their own WMO Magnus fit,
-SPEEDY its own ``speedy_humidity.get_qsat``, the RCE testbed's fixed-RH
-closure its own Tetens blend, and the public ``relative_humidity`` diagnostic
-Bolton (1980) over water. The ECHAM surface's 2 m humidity diagnostic
+JAM's placeholder microphysics a WMO Magnus fit, SPEEDY its own
+``speedy_humidity.get_qsat``, the RCE testbed's fixed-RH closure its own
+Tetens blend, and the public ``relative_humidity`` diagnostic Bolton (1980)
+over water. JAM's ARG activation uses the same Magnus fit where ECHAM-HAM's
+activation reads the 2M scheme's Sonntag ``zesw_2d``, a deviation tracked in
+#932. The ECHAM surface's 2 m humidity diagnostic
 (``surface/echam/turbulent_fluxes.py::compute_surface_humidity``), which no
 tendency reads, keeps its Clausius-Clapeyron form.
 

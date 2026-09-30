@@ -1121,10 +1121,12 @@ ECHAM physics saturation is ECHAM's Sonntag (1990)
   tiles and the 2M ice saturations; water at all temperatures (``uaw``) for
   the 1M rain evaporation and the 2M water saturations; ECHAM's ``lo2``
   choice between the two for the cloud cover and the 2M condensation. The
-  Tetens forms it replaces were up to 0.15 % off between 273 and 330 K,
-  1.2-2.4 % between 238 and 273 K and 8-16 % below. ``qs`` is ECHAM's
-  ``x/(1 − vtmpc1·x)`` with ``x = MIN(es·rd/rv/p, 0.5)``, so the ratio is
-  ``rd/rv`` (0.62265), consistent with ``vtmpc1``, rather than ``c.eps``.
+  dev 1M saturation adjustment keeps its linear blend of the two fits
+  (#940). The Tetens forms it replaces were up to 0.15 % off between 273
+  and 330 K, 1.2-2.4 % between 238 and 273 K and 8-16 % between 200 and
+  238 K. ``qs`` is ECHAM's ``x/(1 − vtmpc1·x)`` with
+  ``x = MIN(es·rd/rv/p, 0.5)``, so the ratio is ``rd/rv`` (0.62265),
+  consistent with ``vtmpc1``, rather than ``c.eps``.
 - Tiedtke-Nordeng's saturation adjustment is ECHAM's ``cuadjtq`` (#957): one
   Newton step clipped by ``kcall``, then one unclipped refinement where the
   first step moved. It matches ECHAM's compiled routine to rounding.
@@ -1143,8 +1145,8 @@ ECHAM physics saturation is ECHAM's Sonntag (1990)
   3.53 g/m², total cloud cover from 71.6 to 71.0 / 66.0 to 65.9 %, and
   precipitation from 2.52 to 2.53 / 2.66 to 2.65 mm/day; humidity at
   200 hPa rises by 2 / 3 % (by 2.4 / 3.3 % in the tropics), and no
-  latitude band's upper-tropospheric temperature moves by more than
-  0.07 K. Rebuilds of this change that differ only at the 1e-4 level spread
+  band-mean upper-tropospheric temperature (90-60-30° bands) moves by more
+  than 0.07 K. Rebuilds of this change that differ only at the 1e-4 level spread
   by 0.3 / 0.06 W/m² in net TOA radiation over the same window, which is the
   noise of these numbers. Ten days measure the immediate response, not a new climate; the
   release-matrix bands of every ECHAM member shift (#943).
@@ -1155,10 +1157,13 @@ ECHAM physics saturation is ECHAM's Sonntag (1990)
 - **Breaking:** ``jcm.physics.convection.tiedtke_nordeng.adjustment`` is
   removed; ``cuadjtq``, ``cuadjtq_newton`` and ``cuadjtq_newton_evap`` live in
   ``tiedtke_nordeng.cuadjtq``, the last two without ``n_refine``.
-  ``convection.saturation`` no longer carries the ``cuadjtq`` helpers,
-  ``thermodynamics`` its Tetens constants, and ``clouds.sundqvist`` its two
-  ``saturation_vapor_pressure_*`` functions;
-  ``surface.echam.AtmosphericForcing`` takes a required ``surface_pressure``.
+  ``convection.saturation`` no longer carries the ``cuadjtq`` helpers or
+  ``saturation_specific_humidity_and_derivative``,
+  ``tiedtke_nordeng.tiedtke_nordeng`` no longer re-exports a Tetens
+  ``saturation_vapor_pressure``, ``thermodynamics`` drops its Tetens
+  constants, and ``clouds.sundqvist`` its two ``saturation_vapor_pressure_*``
+  functions; ``surface.echam.AtmosphericForcing`` takes a required
+  ``surface_pressure``.
   See :doc:`v2_to_v3` and :doc:`science/constants`.
 
 

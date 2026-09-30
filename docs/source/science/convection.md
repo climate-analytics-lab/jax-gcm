@@ -297,7 +297,7 @@ Operational notes:
   so such a column stays shallow unless it starts under convergence —
   ``jcm/rce.py::convergent_initial_physics_data`` supplies that for the JAM
   aerosol-pathway checks.
-- Near the model top (a few Pa) ``cuini``'s saturation adjustment works with
+- In the top few levels (below ~150 Pa) ``cuini``'s saturation adjustment works with
   ECHAM's capped ``x = MIN(es·rd/rv/p, 0.5)``, so its saturation humidity sits
   at ``0.5/(1 − 0.5·vtmpc1) ≈ 0.72`` and its interface values are not
   physical, as in the reference; no plume reaches them.
