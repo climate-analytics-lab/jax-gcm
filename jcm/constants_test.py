@@ -386,24 +386,35 @@ class DryDepositionHonoursOverrideTest(_OverrideCase):
         self.assertLess(tenth_g, baseline)
 
 
-class IceNucleationHonoursOverrideTest(_OverrideCase):
-    """``ice_nucleation/ice_term.py`` bound grav and cpd."""
+class HetMxphaseFreezingHonoursOverrideTest(_OverrideCase):
+    """``lohmann_2m/deposition_freezing.py::het_mxphase_freezing`` reads grav and cpd.
 
-    def test_cooling_rate_is_proportional_to_gravity(self):
-        from jcm.physics.aerosol.jam.ice_nucleation.ice_term import (
-            IceNucleation,
+    Its immersion rate carries ECHAM's cooling ``fact_tke*sqrt(TKE)*g/cpd``
+    (mo_cloud_micro_2m.f90:2800-2802), linear in g while the frozen fraction is
+    small (dust immersion only, no contact nuclei, a warm supercooled cell).
+    """
+
+    def test_immersion_freezing_is_proportional_to_gravity(self):
+        from jcm.physics.clouds.lohmann_2m.deposition_freezing import (
+            het_mxphase_freezing,
         )
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
 
-        term = IceNucleation()
-        temperature = jnp.full((2,), 250.0)
+        one = jnp.ones((1,))
+        zero = jnp.zeros((1,))
 
-        def cooling_rate():
-            # No vertical-diffusion diagnostic, so the fallback updraft is
-            # used and the rate is exactly w·g/cp.
-            return term._cooling_rate({}, temperature)[0]
+        def frozen():
+            p = CloudParams2M.default()
+            out = het_mxphase_freezing(
+                one > 0, 6.0e4 * one, 0.1 * one, zero, 0.5 * one, zero, zero,
+                0.3 * one, zero, zero, 0.8 * one, 1.25 * one, zero, zero, zero,
+                252.0 * one, 4e7 * one, 1e3 * one, 8e7 * one, zero, zero,
+                2e-4 * one, 720.0, p.cqtmin, p)
+            return out[2][0]
 
-        baseline, doubled_g = self.under_grav(2.0, cooling_rate)
-        self.assertAlmostEqual(doubled_g / baseline, 2.0, places=5)
+        baseline, doubled_g = self.under_grav(2.0, frozen)
+        # 1 - exp(-x) at x ~ 3e-3 and float32: 2.0 to within 0.1 %.
+        self.assertAlmostEqual(doubled_g / baseline, 2.0, delta=5e-3)
 
 
 class TurbulenceDefaultArgHonoursOverrideTest(_OverrideCase):
