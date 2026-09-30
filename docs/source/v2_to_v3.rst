@@ -307,16 +307,19 @@ The module's public functions keep their names and signatures and change
 their values. ``saturation_vapor_pressure``, ``saturation_specific_humidity``
 and ``saturation_specific_humidity_and_derivative`` evaluate the Sonntag
 (1990) fit that ECHAM's lookup tables hold instead of the Tetens form. The
-old values sat, relative to the new, up to 0.15 % off above 273 K, 1.3 % (ice)
-and 2.4 % (water) off between 238 and 273 K, and 8.4 % and 16 % off between
-200 and 238 K. Three further differences a caller will notice:
+old values sat, relative to the new, up to 0.15 % off between 273 and 330 K,
+1.3 % (ice) and 2.4 % (water) off between 238 and 273 K, and 8.4 % and 16 %
+off between 200 and 238 K. Three further differences a caller will notice:
 
 - ``phase="auto"`` is ECHAM's ``ua`` table, ice **at and below** ``tmelt``
   (previously water at ``tmelt``).
 - ``qs`` is ECHAM's ``x/(1 − vtmpc1·x)`` with ``x = MIN(es·rd/rv/p, 0.5)``:
   the ratio is ``rd/rv`` (0.62265) rather than ``c.eps`` (0.622), and the cap
-  applies to ``x`` rather than to ``qs``. The derivative keeps ECHAM's slope
-  under the cap instead of returning zero there.
+  applies to ``x`` rather than to ``qs``, so ``qs`` reaches
+  ``0.5/(1 − 0.5·vtmpc1) ≈ 0.72`` at very low pressure rather than 0.5 (also
+  for ``tiedtke_nordeng.cuadjtq.saturation_mixing_ratio``, which no longer
+  clips). The derivative keeps ECHAM's slope under the cap instead of
+  returning zero there.
 - The Tetens constants ``C1ES``, ``C3LES``, ``C4LES``, ``C3IES`` and
   ``C4IES`` are gone from the module.
 
@@ -324,8 +327,8 @@ New functions: ``es_water``, ``es_ice``, ``es_ua``, ``ua_ice_phase``,
 ``dlnes_dT_water``, ``dlnes_dT_ice``, ``dlnes_dT_ua``, ``qsat_from_es`` and
 ``dqsat_dT_from_es``. The Tetens form lives on only for the schemes that
 follow their own references, in ``jcm.physics.convection.saturation``
-(Betts-Miller and the JAM aerosol modules), which no longer carries the
-``cuadjtq`` helpers:
+(Betts-Miller, and JAM's MAM4 humidity and ice nucleation), which no longer
+carries the ``cuadjtq`` helpers or ``saturation_specific_humidity_and_derivative``:
 
 .. code-block:: python
 
@@ -346,7 +349,13 @@ supersaturation and 290 K) rather than being iterated to it.
 
 ``jcm.physics.clouds.sundqvist.saturation_vapor_pressure_water`` and
 ``saturation_vapor_pressure_ice`` are removed; use ``thermodynamics.es_water``
-and ``thermodynamics.es_ice``. See :doc:`science/constants`.
+and ``thermodynamics.es_ice``. ``sundqvist.saturation_specific_humidity``
+keeps its signature and blends the two Sonntag fits. The Tetens
+``saturation_vapor_pressure`` that ``tiedtke_nordeng.tiedtke_nordeng``
+re-exported is gone; ECHAM convection's is ``thermodynamics.es_ua``.
+``jcm.physics.surface.echam.AtmosphericForcing`` takes a required ``surface_pressure``
+[Pa], the pressure the tile saturation divides by. See
+:doc:`science/constants`.
 
 Widened, not broken: ``vertical_interp_log_p``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
