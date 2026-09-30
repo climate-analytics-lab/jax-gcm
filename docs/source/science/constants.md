@@ -103,16 +103,16 @@ ECHAM chooses it:
   above. Tiedtke-Nordeng convection throughout (``cuini``, ``cubase``,
   ``cuasc``, ``cudlfs``/``cuddraf`` and the ``cuadjtq`` adjustment, whose
   latent heat switches at the same point), the TTE-TKE vertical diffusion,
-  the ocean, land and sea-ice surface saturation, and every "ice" saturation
-  of the 2M scheme.
+  the ocean, land and sea-ice surface saturation, the 1M snow sublimation,
+  and every "ice" saturation of the 2M scheme.
 - ``es_water`` — ECHAM's ``uaw`` table: water at all temperatures. The 1M
   rain evaporation and the 2M scheme's water saturation (rain evaporation,
   Bergeron-Findeisen, the water branch of its condensation).
 - ``es_ice`` or ``es_water`` per cell by the ``lo2`` switch — the cloud
-  cover's saturation (ice where ``T < cthomi`` or where ``T < tmelt`` with
-  cloud ice above ``csecfrl``) and the 2M condensation (ice where
-  ``T < cthomi`` or where ``T < tmelt`` and the updraft is below the
-  Korolev-Mazin threshold).
+  cover's saturation and the 1M condensation and whole-box supersaturation
+  check (ice where ``T < cthomi`` or where ``T < tmelt`` with cloud ice above
+  ``csecfrl``), and the 2M condensation (ice where ``T < cthomi`` or where
+  ``T < tmelt`` and the updraft is below the Korolev-Mazin threshold).
 
 The saturation specific humidity is ECHAM's ``x = MIN(es·rd/rv/p, 0.5)``,
 ``qs = x/(1 − vtmpc1·x)``, and its slope the one ECHAM's Newton adjustments
@@ -150,9 +150,7 @@ through ``wv_sat_methods``.
 **Status & known limitations.** jcm's constants are its own unified set, not
 ECHAM's (``rv = 461.0`` against ECHAM's 461.51, ``rd = akap·cpd``), so
 ``rd/rv`` is 0.62265 where ECHAM's is 0.62196. The saturation formula is
-unaffected; the ``qs`` built from it follows the constants. The 1M scheme's
-saturation adjustment blends the two fits linearly between 238.15 K and
-``tmelt`` instead of switching with ``lo2`` (#940). The idealised schemes
+unaffected; the ``qs`` built from it follows the constants. The idealised schemes
 keep their own references: Betts-Miller and the JAM aerosol modules use the
 Tetens form of ``jcm/physics/convection/saturation.py``, SPEEDY its own
 ``speedy_humidity.get_qsat``, the RCE testbed's fixed-RH closure its own
@@ -167,8 +165,13 @@ over water.
 - ``jcm/physics/convection/tiedtke_nordeng/cuadjtq.py`` —
   ``saturation_mixing_ratio``, ``cuadjtq``, ``cuadjtq_newton``,
   ``cuadjtq_newton_evap`` (the convection's saturation and its adjustment).
-- ``jcm/physics/clouds/sundqvist.py::_qs_cover`` — the cover's ``lo2``
-  saturation.
+- ``jcm/physics/clouds/echam_saturation.py`` — ``lo2_ice_phase``, the cloud
+  schemes' phase switch, and ``es_water`` / ``es_ice``, the cover's and the
+  1M's saturation: the Sonntag functions of thermodynamics.py under the
+  default formula. The Tetens pair it also holds is a test utility for the
+  Fortran reference's Tetens variant.
+- ``jcm/physics/clouds/sundqvist.py::cover_saturation_specific_humidity`` —
+  the cover's saturation, over ice or water by the lo2 switch.
 
 **Validation evidence.** ``jcm/physics/thermodynamics_test.py`` compares the
 functions with ECHAM's own compiled tables in float64 (rtol 1e-11 in ``es``,
