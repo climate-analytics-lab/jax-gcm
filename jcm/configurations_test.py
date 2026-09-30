@@ -324,10 +324,11 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         # (the JAM variant below skips there without the mam4-jax extra).
         self._assert_door_matches_cli("t63-echam-rrtmgp")
 
+    @pytest.mark.requires_extra("mam4")
     def test_jam_load_equivalent_to_cli_composition(self):
-        # JAM composes the optional mam4-jax microphysics; CI installs no extras
-        # so skip cleanly there, run here where the GPL dep is present.
-        pytest.importorskip("mam4_jax.coupling")
+        # JAM composes the optional mam4-jax microphysics, so this runs where
+        # the GPL extra is installed (the extras-tests CI job) and skips in the
+        # default jobs, which install none.
         self._assert_door_matches_cli("t63-echam-jam")
 
 

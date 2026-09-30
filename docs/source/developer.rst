@@ -102,8 +102,8 @@ isolation the root ``conftest.py`` provides.
 What CI runs
 ^^^^^^^^^^^^
 
-``ruff check .`` is a gate, not a parallel job: it runs first and both test
-jobs hang off it, so a lint error costs about twenty seconds instead of two
+``ruff check .`` is a gate, not a parallel job: it runs first and every test
+job hangs off it, so a lint error costs about twenty seconds instead of two
 runner-hours. Behind it the fast suite (90% coverage) and — on pull requests
 only — the slow suite (80%, against ``.coveragerc-pr``) run in parallel.
 
@@ -141,6 +141,49 @@ Two limits by design: the cancel only fires on pull requests, since a push to
 mute the failure notification; and it is best-effort, because a pull request
 from a fork gets a read-only token, so there the slow suite runs to
 completion.
+
+Another job, ``extras-tests``, covers what the others cannot see. Every
+other job installs ``pip install -e .`` with no optional extras, so that
+coverage is measured against the default install, and every test that needs
+``jcm[pyses]``, ``jcm[mam4]``, ``jcm[cosp]`` or ``jcm[era5]`` skips there.
+``extras-tests`` installs all of them and runs exactly those tests, fast and
+slow together, in one process (a pySES production-config chunk peaks near
+13 GB, which leaves no room for a second worker), with no coverage floor. It
+runs on every pull request and every push to ``main`` and ``dev``, since the
+code these extras exercise is reached from far outside their own packages. On
+a pull request a fast-suite failure cancels it along with the slow jobs.
+
+A test declares that it needs an extra with the marker, and only with it:
+
+.. code-block:: python
+
+   @pytest.mark.requires_extra("pyses")      # or a module-level pytestmark
+   def test_something_on_the_cam_se_backend(self): ...
+
+The marker skips the test when the extra is missing and is how
+``extras-tests`` selects it (``-m requires_extra``). Import the extra inside
+the test (or its fixtures), never at module scope: the module must still be
+collected where the extra is absent.
+``tools/ci/optional_extras.py`` makes the job fail rather than rot:
+
+- with ``JCM_REQUIRE_EXTRAS=1``, as the job sets it, the session refuses to
+  start unless every extra ``pyproject.toml`` declares is importable, and a
+  selected test that skips for any reason is a failure;
+- a test that gates on an extra some other way would be skipped by the
+  default jobs and never selected by ``extras-tests``, so it is caught twice:
+  in every job, a skip of an unmarked test (or module) whose reason names an
+  extra's package is reported as a failure; and a fast-suite test scans every
+  test file for ``importorskip`` or ``find_spec`` of an extra's module and for
+  a guarded ``import`` of one, which catches the forms that never report a
+  skip at all.
+
+To reproduce the job, use a separate environment so your coverage runs stay at
+dependency parity:
+
+.. code-block:: console
+
+   $ pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
+   $ JCM_REQUIRE_EXTRAS=1 pytest -rs -m requires_extra
 
 The workflow is triggered by pull requests, and by pushes to ``main`` and
 ``dev`` only. A branch with no open pull request gets no CI at all, so run the

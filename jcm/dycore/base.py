@@ -278,6 +278,11 @@ class DynamicalCore(abc.ABC):
     ) -> "xr.Dataset":
         """Convert a saved trajectory to an :class:`xarray.Dataset`.
 
+        ``times`` are the frames' exact ``datetime64`` labels, as
+        :meth:`jcm.predictions.ModelPredictions.time_labels` computes them
+        from the run's clock; a bare elapsed-time axis carries no reference
+        date and cannot label CF output exactly.
+
         Backends whose native horizontal layout differs from the desired output
         grid (e.g. a cubed-sphere SE backend producing a lat/lon dataset)
         perform the regrid here. The protocol does not constrain the output

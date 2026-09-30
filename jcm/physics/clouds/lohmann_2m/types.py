@@ -54,7 +54,11 @@ class ScavengingLedger(NamedTuple):
     1243, overwritten by aggregation + ice accretion where the cold chain
     runs, per the Fortran MERGE at 3310), and ``liquid_riming`` is
     ``zmsnowacl`` (cloud droplets collected by falling snow — a LIQUID
-    sink into the frozen precip).
+    sink into the frozen precip). ``snow_formation`` can be NEGATIVE: the
+    sedimentation seed is signed, as ECHAM's (2258-2265), and is negative
+    in a level that absorbs more falling ice than it sheds. Consumers floor
+    it on its own, apart from the liquid rates, as HAM does
+    (mo_hammoz_wetdep.f90:428-435).
 
     ``process_cloud_fraction`` is the cover the processes actually ran
     under (pre-write-back ``paclc``): the in-droplet share of interstitial
@@ -71,7 +75,7 @@ class ScavengingLedger(NamedTuple):
     incloud_liquid: jnp.ndarray            # zmlwc [kg/kg, in-cloud]
     incloud_ice: jnp.ndarray               # zmiwc [kg/kg, in-cloud]
     rain_formation: jnp.ndarray            # zmratepr/dt [kg/kg/s, in-cloud]
-    snow_formation: jnp.ndarray            # zmrateps/dt [kg/kg/s, in-cloud]
+    snow_formation: jnp.ndarray            # zmrateps/dt [kg/kg/s, in-cloud; signed]
     liquid_riming: jnp.ndarray             # zmsnowacl/dt [kg/kg/s, in-cloud]
     process_cloud_fraction: jnp.ndarray    # paclc at process time [1]
     condensate_evaporation: jnp.ndarray    # (zxlevap+zxievap)/dt [kg/kg/s]

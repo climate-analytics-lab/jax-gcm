@@ -177,10 +177,10 @@ _TERM_NAMES = (
 )
 
 _CONDENSATE_CLIP_KINK = (
-    "jcm/physics/radiation/grey_two_stream/radiation_scheme.py:266-267 — "
+    "jcm/physics/radiation/grey_two_stream/radiation_scheme.py:314-315 — "
     "cloud_water = jnp.maximum(cloud_water, 0.0), and the same for cloud_ice, "
     "applied to the condensate this scheme reads straight from the state "
-    "tracers (cloud_data.py:311, radiation_cloud_fields, ECHAM's cover-then-"
+    "tracers (cloud_data.py:317, radiation_cloud_fields, ECHAM's cover-then-"
     "radiation order). The seeded deck leaves that tracer at exactly 0 in most "
     "layers, so the clip sits ON the operating point: the plus and minus "
     "displacements are clipped in disjoint sets of layers, the two one-sided "
@@ -326,23 +326,60 @@ _CHECKS: dict = {
     # holds, the two-sided reference does not. See ``_CHEMISTRY_RELAXATION_KINK``.
     "simple_chemistry": _Check(xfail_reference=_CHEMISTRY_RELAXATION_KINK),
 
-    # RRTMGP has no central difference at either point: along the seed-0
-    # direction the minus secant doubles as the step halves from 5e-4 down to
-    # 1e-6 (jump/eps — a discontinuity sitting exactly at the operating point)
-    # while the plus secant stays bounded on the stable column. Bisecting the
-    # direction by input leaf puts the jump on the JOINT perturbation of
-    # ``state/temperature`` and ``state/specific_humidity`` — each alone has a
-    # clean reference — and freezing every cloud input (cloud fraction and the
-    # condensate in state, clouds and thermo_run) leaves it unchanged, so it
-    # is not McICA's binary sub-column mask; where in the gas optics the
-    # switch sits is #924. What remains meaningful is the adjoint identity,
-    # which holds to at most 2.9e-5 over seeds 0-2 at both points (float32
-    # reduction order through the per-g-point solves; 1e-3 keeps ~35x
-    # headroom), and the liveness of the two inputs radiation reads from the
-    # state. The term returns heating only: its momentum and moisture
-    # tendencies are structural zeros, and its diagnostics carry fields that
-    # are legitimately zero here (the ``*_noa`` slots with no aerosol-free
-    # companion), hence the tendency-only output.
+    # RRTMGP has no central difference at either point, so the adjoint
+    # identity is its reference. The gas optics are not the obstruction: they
+    # interpolate their tables linearly in temperature, log-pressure and the
+    # binary-species fraction, and along ``state/temperature`` and
+    # ``state/specific_humidity`` alone, with the library promoted to float64,
+    # the central difference agrees with AD to 1.5 % or better at every rung
+    # from 1.25e-4 down to 6e-8 at both points. Two things are, and they
+    # stack.
+    #
+    # 1. Inputs that sit exactly at zero. Where a condensate tracer is 0 the
+    #    term has a kink: a negative step is clipped by
+    #    ``prepare_radiation_state`` (grey_two_stream/radiation_scheme.py:
+    #    221-222, the grey term's ``_CONDENSATE_CLIP_KINK`` on this scheme's
+    #    path) and changes nothing, a positive step radiates, and AD returns
+    #    the cloud-free side's derivative, 0. ``qi`` is 0 at every level of
+    #    the stable column, and ``qc`` is 0 at 9 of the 17 convecting levels
+    #    the radiation treats as cloudy (cloud fraction above 2e-3). Along
+    #    ``qi`` alone on the stable column in float64, AD is exactly 0 and the
+    #    secant into cloud is +919 at the last rung and still rising: the
+    #    Moss/Foot radius (83.8 IWC^0.216) gets smaller as the step does, so
+    #    the extinction per unit ice keeps growing until the radius reaches
+    #    the table floor, at an ice content far below these steps on an
+    #    all-zero leaf. With the ice radius pinned at that floor the same
+    #    secant converges to +852. Along the full seed-0
+    #    direction the stable column's float64 secants end at D- = +724 and
+    #    D+ = -188 against an AD value of -196, and on the convecting column
+    #    the condensate keeps them about 9 % apart down to the last rung.
+    #    MACv2-SP's longwave aerosol triple (``aod/ssa/asy_lw_per_band``) is
+    #    identically 0 at both points too, and on the stable column, with the
+    #    condensate held fixed, it alone keeps the float64 secants from
+    #    agreeing above a step of 1e-7. With the condensate tracers and every
+    #    identically-zero input held fixed, the float64 central difference
+    #    agrees with AD to 1.5 % or better at every rung from 3e-5 down to
+    #    6e-8 at both points. The clip is the physics (negative condensate
+    #    must not radiate); the kink is tracked in #843.
+    # 2. float32. The library runs in float32 by construction (see
+    #    ``radiation_scheme_rrtmgp``), and the heating of the top few-Pa
+    #    layers is a difference of two large fluxes. Along T and q alone at a
+    #    step of 1e-6, the float32 heating at the 1 and 4 Pa levels moves by
+    #    6e-8 to 3e-7 K/s where float64 moves by about 1e-9. From a step of
+    #    6.25e-5 to 1e-6 (62x smaller) the float64 change falls 27x to 72x
+    #    and the float32 one 1x to 15x, so it is rounding, not response. With
+    #    the inputs of (1) held fixed, the float32 ladder still finds no
+    #    usable rung at either point.
+    #
+    # Holding the zero-valued inputs fixed would remove (1) but not (2), and
+    # would stop checking the condensate's gradient where it is non-zero, so
+    # the reference is the adjoint identity. It holds to at most 4.9e-5 over
+    # seeds 0-5 at both points (float32 reduction order through the
+    # per-g-point solves; 1e-3 keeps ~20x headroom), and the two inputs
+    # radiation reads from the state must be live. The term returns heating
+    # only: its momentum and moisture tendencies are structural zeros, and its
+    # diagnostics carry fields that are legitimately zero here (the ``*_noa``
+    # slots with no aerosol-free companion), hence the tendency-only output.
     "rrtmgp_radiation": _Check(
         reference="adjoint", adjoint_rtol=1.0e-3, outputs="tendency",
         skip_outputs=("u_wind", "v_wind", "specific_humidity",

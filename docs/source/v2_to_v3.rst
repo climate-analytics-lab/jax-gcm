@@ -980,6 +980,27 @@ the value to the new structure, e.g.
 ``SurfaceOpticsParameters(albedo=EchamSurfaceAlbedoParameters(snow_albedo_max=0.75))``;
 the emissivities are unchanged.
 
+Cloud droplets follow ECHAM
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+RRTMGP and the emulator form the droplet and crystal radii inside the
+radiation call from the step's condensate and droplet/crystal number, as
+ECHAM's ``cloud_optics`` does, instead of reading the microphysics' radius
+one step late with an 11 µm fallback wherever it was missing; and the 1M
+radiation and 1M autoconversion both see ECHAM's prescribed droplet profile
+(fewer droplets than the uniform 100 cm⁻³ the 1M scheme used). Over days
+5-10 of a ``t63-echam-1m`` A/B the global-mean TOA net rises by
+**3.4 W/m²** (2.1 from the radius alone), almost all of it a weaker
+shortwave cloud radiative effect (**+4.1 W/m²**), and the liquid water path
+falls by **16 %** (32 % over ocean) as the autoconversion speeds up;
+precipitation does not change. On ``t63-echam-2m`` the TOA net moves by less
+than the run-to-run spread (0.1 W/m²). Ten days measure the immediate
+effect, not a climate. Any tuning of the 1M cloud water or shortwave cloud
+radiative effect done before this change should be redone. Code that passed
+``MicrophysicsParameters.default(base_cdnc=...)`` must drop the argument;
+direct callers of ``radiation_scheme_rrtmgp`` pass the radii from
+``jcm.physics.radiation.cloud_optics.radiation_effective_radii``.
+
 SPEEDY shortwave heating is applied every step
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

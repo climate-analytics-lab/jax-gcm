@@ -79,12 +79,24 @@ class CitationParsingTest(unittest.TestCase):
                          [("x/y", "4")])
 
     def test_register_cross_repo_ref_is_kept_out_of_home_citations(self):
-        """The real register's ``jax-rrtmgp#37`` must not read as ``#37``."""
-        text = (tg.SCIENCE / "radiation.md").read_text()
-        self.assertIn("jax-rrtmgp#37", text)
-        rrtmgp = (f"{tg.HOME_OWNER}/jax-rrtmgp", "37")
-        self.assertIn("radiation.md", tg.all_citations()[rrtmgp])
-        self.assertNotIn("radiation.md", tg.pages_citing(37))
+        """A page's ``jax-rrtmgp#37`` is filed under jax-rrtmgp, not as ``#37``.
+
+        Runs on a page written here, so it does not depend on which
+        cross-repository gaps the live register happens to cite.
+        """
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "radiation.md"
+            page.write_text("scaled tau until the library takes a per-phase "
+                            "scale (jax-rrtmgp#37); the cover mask is (#870).\n")
+            with mock.patch.object(tg, "SCIENCE", Path(tmp)):
+                rrtmgp = (f"{tg.HOME_OWNER}/jax-rrtmgp", "37")
+                self.assertIn("radiation.md", tg.all_citations()[rrtmgp])
+                self.assertNotIn("radiation.md", tg.pages_citing(37))
+                self.assertIn("radiation.md", tg.pages_citing(870))
 
     def test_labels(self):
         self.assertEqual(tg.ref_label(tg.HOME_REPO, 5), "#5")

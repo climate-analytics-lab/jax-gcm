@@ -321,6 +321,24 @@ class CloudBorneExchangeTest(unittest.TestCase):
             np.asarray(diagnostics[CARRY_KEY][nm]), rtol=1e-7,
         )
 
+    def test_negative_snow_formation_does_not_cancel_rainout(self):
+        # The snow-formation ledger is signed: its sedimentation seed is
+        # negative where the level absorbs more falling ice than it sheds.
+        # HAM floors the ice and liquid efficiencies separately
+        # (mo_hammoz_wetdep.f90:428-435), so an equal and opposite snow
+        # term must not hide the rain formation: the rained-out cell stays
+        # live and keeps its reservoir for wetdep, exactly as without it.
+        state, diagnostics = self._ledger_setup(form_ic=1.0e-4)
+        shape = state.temperature.shape
+        diagnostics["clouds"].incloud_snow_formation = jnp.full(
+            shape, -1.0e-4 / 1800.0)
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        np.testing.assert_allclose(
+            np.asarray(out[CARRY_KEY][nm]),
+            np.asarray(diagnostics[CARRY_KEY][nm]), rtol=1e-7,
+        )
+
     def test_evaporated_cell_resuspends_fully(self):
         # A cell cleared by evaporation (positive evaporation ledger,
         # nothing formed, pool gone) releases the WHOLE reservoir in one

@@ -34,6 +34,32 @@ class CloudData:
     qc: jnp.ndarray                  # Cloud water [kg/kg] (nlev, ncols)
     qi: jnp.ndarray                  # Cloud ice [kg/kg] (nlev, ncols)
 
+    # Convective detrainment of cloud condensate [kg/kg/s], grid-mean,
+    # (nlev, ncols): ECHAM's ``pxtecl`` (liquid) / ``pxteci`` (ice). They
+    # are the part of this step's ``clouds.qc`` / ``clouds.qi`` increment
+    # that the convection term ADDED, exactly as applied (after its
+    # tendency cap), written by ``TiedtkeConvection`` every step and zero
+    # otherwise: ``SundqvistCloudFraction`` resets them when it seeds the
+    # step's ``clouds`` from the carry, so a step without convection — or
+    # a restart into a stack without it — can never re-apply a previous
+    # step's detrainment.
+    #
+    # The split is Tiedtke's own: all liquid where the environment
+    # temperature it received exceeds tmelt, all ice otherwise (``cudtdq``,
+    # mo_cufluxdts.f90:646-666, keyed to ``pten``). The 1M scheme uses that
+    # split as-is — ECHAM's mo_cloud adds ``pxtecl``/``pxteci`` straight
+    # into its provisional condensate, which is what the ``clouds.qc/qi``
+    # advance already delivers — so its contract does not depend on these
+    # fields. The Lohmann 2M scheme needs them separately because ECHAM's
+    # 2M ignores that split: it re-splits the TOTAL detrained condensate
+    # by its own WBF criterion (mo_cloud_micro_2m.f90:1300-1316), sediments
+    # only the pre-detrainment ice, gives the detrained ice a crystal
+    # number, and undoes the ice latent heat convection booked for
+    # condensate it reclassifies as liquid — all of which need the
+    # detrained part distinguished from the rest of the increment.
+    conv_detrainment_qc: jnp.ndarray  # Detrained cloud liquid [kg/kg/s] (nlev, ncols)
+    conv_detrainment_qi: jnp.ndarray  # Detrained cloud ice    [kg/kg/s] (nlev, ncols)
+
     # Surface precipitation (from microphysics autoconversion)
     precip_rain: jnp.ndarray         # Rain precipitation [kg/m²/s] (ncols,)
     precip_snow: jnp.ndarray         # Snow precipitation [kg/m²/s] (ncols,)
@@ -95,7 +121,10 @@ class CloudData:
     # The formation rates are IN-CLOUD [kg/kg/s]: rain formation
     # (zmratepr), snow formation (zmrateps, including the ice-
     # sedimentation carrier), and riming of droplets by snow (zmsnowacl,
-    # a LIQUID sink into frozen precip). ``process_cloud_fraction`` is
+    # a LIQUID sink into frozen precip). Snow formation can be NEGATIVE:
+    # its sedimentation seed is signed, as ECHAM's, and negative where the
+    # level absorbs more falling ice than it sheds; consumers floor it
+    # apart from the liquid rates, as HAM does. ``process_cloud_fraction`` is
     # the cover the processes ran under (nonzero in cells the write-back
     # cleared). ``condensate_evaporation_rate`` is the grid-mean
     # cloud-condensate evaporation ledger (zxlevap+zxievap) — the
@@ -112,14 +141,21 @@ class CloudData:
     # Cloud properties
     droplet_number: jnp.ndarray  # Droplet number concentration [1/m³] (nlev, ncols)
 
+    # Droplet / crystal effective radii [um] (nlev, ncols) the radiation used
+    # (ECHAM ``re_droplets2d``/``re_crystals2d``): a DIAGNOSTIC written by the
+    # radiation term (RRTMGP or the emulator) from the state it radiated,
+    # 0 where the phase had no in-cloud condensate; on a cached radiation step
+    # it holds the radii of the solve the heating came from. No term reads it
+    # as an input to the radiation (see ``cloud_optics.radiation_effective_radii``),
+    # and the post-physics diagnostics (COSP, AeroCom) do not read it either:
+    # they describe the post-microphysics condensate, so they form its radii
+    # with the same law (``cloud_optics.post_physics_effective_radii``).
+    r_eff_liq: jnp.ndarray
+    r_eff_ice: jnp.ndarray
     # Previous-timestep (t-dt) 2M number concentrations carried across
     # steps so the 2M ``update_tendencies_and_important_vars`` step has
     # the tm1 state it needs. Stored per kg of air (matching the
     # qnc/qni tracer convention).
-    # Microphysical effective radii [um] (nlev, ncols); 0 = not provided
-    # (1M / cold start) — radiation falls back to its diagnostic formulas.
-    r_eff_liq: jnp.ndarray
-    r_eff_ice: jnp.ndarray
     qnc_prev: jnp.ndarray            # Previous-step cloud droplet number [1/kg] (nlev, ncols)
     qni_prev: jnp.ndarray            # Previous-step ice crystal number    [1/kg] (nlev, ncols)
 
@@ -146,6 +182,8 @@ class CloudData:
             cloud_fraction=jnp.zeros((nlev,) + nodal_shape),
             qc=jnp.zeros((nlev,) + nodal_shape),
             qi=jnp.zeros((nlev,) + nodal_shape),
+            conv_detrainment_qc=jnp.zeros((nlev,) + nodal_shape),
+            conv_detrainment_qi=jnp.zeros((nlev,) + nodal_shape),
             precip_rain=jnp.zeros(nodal_shape),
             precip_snow=jnp.zeros(nodal_shape),
             rain_flux=jnp.zeros((nlev,) + nodal_shape),
@@ -178,6 +216,8 @@ class CloudData:
             'cloud_fraction': self.cloud_fraction,
             'qc': self.qc,
             'qi': self.qi,
+            'conv_detrainment_qc': self.conv_detrainment_qc,
+            'conv_detrainment_qi': self.conv_detrainment_qi,
             'precip_rain': self.precip_rain,
             'precip_snow': self.precip_snow,
             'rain_flux': self.rain_flux,
@@ -224,6 +264,12 @@ CLOUD_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     "clouds.qi": {
         "standard_name": "mass_fraction_of_cloud_ice_in_air",
         "units": "kg kg-1", "long_name": "cloud ice mixing ratio"},
+    "clouds.conv_detrainment_qc": {
+        "units": "kg kg-1 s-1",
+        "long_name": "convective detrainment of cloud liquid water"},
+    "clouds.conv_detrainment_qi": {
+        "units": "kg kg-1 s-1",
+        "long_name": "convective detrainment of cloud ice"},
     "clouds.precip_rain": {
         "standard_name": "rainfall_flux",
         "units": "kg m-2 s-1", "long_name": "surface rainfall flux"},
@@ -260,7 +306,9 @@ CLOUD_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     "clouds.incloud_rain_formation": {
         "units": "kg kg-1 s-1", "long_name": "in-cloud rain formation rate"},
     "clouds.incloud_snow_formation": {
-        "units": "kg kg-1 s-1", "long_name": "in-cloud snow formation rate"},
+        "units": "kg kg-1 s-1",
+        "long_name": ("in-cloud snow formation rate (signed: negative where "
+                      "the level absorbs sedimenting ice)")},
     "clouds.incloud_riming": {
         "units": "kg kg-1 s-1",
         "long_name": "in-cloud riming of droplets by snow"},
@@ -274,9 +322,11 @@ CLOUD_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
             "number_concentration_of_cloud_liquid_water_particles_in_air",
         "units": "m-3", "long_name": "cloud droplet number concentration"},
     "clouds.r_eff_liq": {
-        "units": "um", "long_name": "cloud droplet effective radius"},
+        "units": "um",
+        "long_name": "cloud droplet effective radius used by the radiation"},
     "clouds.r_eff_ice": {
-        "units": "um", "long_name": "cloud ice effective radius"},
+        "units": "um",
+        "long_name": "cloud ice effective radius used by the radiation"},
     "clouds.qnc_prev": {
         "units": "kg-1",
         "long_name": "previous-step cloud droplet number per kg air"},

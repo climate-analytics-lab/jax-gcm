@@ -5,8 +5,9 @@ description: Run the jax-gcm CI gates locally on Derecho when GitHub Actions min
 
 # Local CI for jax-gcm
 
-Reproduces the three CI gates from `.github/workflows/run_test.yaml` +
-`run_linter.yaml`, plus the Claude review, without GitHub Actions.
+Reproduces the CI gates from `.github/workflows/run_test.yaml` +
+`run_linter.yaml` (lint, fast, slow and extras), plus the Claude review,
+without GitHub Actions.
 
 ## One command
 
@@ -66,6 +67,24 @@ JAX_PLATFORMS=cpu pytest -n 4 -m "slow" --cov=jcm \
     --cov-config=.coveragerc-pr --cov-fail-under=80
 coverage report --rcfile=.coveragerc-pr --fail-under=80
 ```
+
+```bash
+# 4. extras-tests — every test an optional extra gates, fast and slow, in a
+#    SEPARATE venv (installing the extras into the coverage venv breaks
+#    dependency parity for gates 2 and 3):
+pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
+python tools/ci/optional_extras.py check
+JCM_REQUIRE_EXTRAS=1 JAX_PLATFORMS=cpu pytest -v -rs -m requires_extra
+```
+
+Gate 4 mirrors the `extras-tests` job. Under `JCM_REQUIRE_EXTRAS=1` the
+session refuses to start without every extra and a selected test that skips
+is a failure, so a green run means every gated test ran. It is serial on
+purpose, as in CI: the pySES delegating-config chunk peaks at ~12.7 GB. About
+13 min on the dev workstation. A test gates on an extra only through
+`@pytest.mark.requires_extra(...)`; any other gate fails gates 2/3 (see
+`tools/ci/optional_extras.py`). `local_ci.sh` does not run it: it needs its
+own venv, so run the three commands yourself.
 
 Gate 3 runs the whole slow suite in one command. CI runs the same tests as two
 parallel path shards (`slow-tests-radiation` / `slow-tests-rest`, defined with

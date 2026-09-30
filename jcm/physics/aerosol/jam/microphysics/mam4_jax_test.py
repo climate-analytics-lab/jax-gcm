@@ -1,9 +1,12 @@
 """Tests for the MAM4-JAX microphysics core wrapper (issue #490).
 
-Skipped unless the optional GPL-3.0 ``mam4-jax`` dependency is installed
-(``pip install jcm[mam4]``); CI without the extra simply skips them. The
-wrapper enables ``jax_enable_x64`` on construction, so each test restores the
-prior flag in ``tearDown`` to keep sibling tests on jcm's default float32.
+Needs the optional GPL-3.0 ``mam4-jax`` dependency (``pip install jcm[mam4]``,
+marked ``requires_extra("mam4")``): skipped without it, and run by the
+``extras-tests`` CI job, which installs it. The wrapper enables
+``jax_enable_x64`` on construction, so each test restores the prior flag in
+``tearDown`` to keep sibling tests on jcm's default float32. ``mam4_jax`` is
+imported only inside the tests, never at collection, so collecting this
+module cannot flip the flag for its neighbours (#729).
 """
 
 import unittest
@@ -13,16 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-# Importing mam4_jax flips jax_enable_x64 on globally (it needs float64), so
-# restore the flag around the import to keep *collection* of this module from
-# corrupting sibling tests' float32 dtype assertions. The ``finally`` matters:
-# a missing/too-old mam4-jax leaves x64 on via the partial import before
-# ``importorskip`` raises ``Skipped`` (issue #729).
-_x64_at_import = jax.config.read("jax_enable_x64")
-try:
-    pytest.importorskip("mam4_jax.coupling")
-finally:
-    jax.config.update("jax_enable_x64", _x64_at_import)
+pytestmark = pytest.mark.requires_extra("mam4")
 
 
 def _column_state(nlev=4, ncols=2):

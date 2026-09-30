@@ -599,7 +599,7 @@ class TestRadiationReadsLaggedConvectionType(unittest.TestCase):
         def solve(ktype):
             d = {**diag, "clouds": clouds,
                  "convection": diag["convection"].replace(ktype=ktype)}
-            _, out = rad._compute_full(state_cols, d, forcing, params)
+            _, out, _radii = rad._compute_full(state_cols, d, forcing, None, params)
             return (np.asarray(out.sw_heating_rate),        # (nlev, ncols)
                     np.asarray(out.toa_sw_up), np.asarray(out.cos_zenith))
 
@@ -717,3 +717,98 @@ class TestSixtyFourBitMode(unittest.TestCase):
                 out = self._trace(dtype, radiation_scheme="rrtmgp",
                                   aerosol_free_interval=2)
                 self._assert_traced(out, dtype)
+
+
+class TestConvectiveDetrainmentCarry(unittest.TestCase):
+    """``clouds.conv_detrainment_*`` hold THIS step's detrainment, composed.
+
+    The ``clouds`` struct rides the cross-step carry, so a step starts from
+    the previous step's detrainment fields. Through the whole ECHAM stack
+    (grey radiation, for cost) a carry holding a stale value must come out
+    as zero when no convection term is composed, and as exactly this step's
+    applied detrainment when one is — under both cloud schemes, whose
+    microphysics terms copy the struct through.
+    """
+
+    _STALE_QC, _STALE_QI = 1.0e-3, 2.0e-3
+
+    def _run(self, physics):
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        physics.cache_coords(coords)
+        nlev = 8
+        nlon, nlat = coords.horizontal.nodal_shape
+        ncols = nlon * nlat
+        shape = (nlev, nlon, nlat)
+        state = PhysicsState.zeros(
+            shape,
+            temperature=jnp.full(shape, 280.0),
+            specific_humidity=jnp.full(shape, 4e-3),
+            normalized_surface_pressure=jnp.ones((nlon, nlat)),
+            tracers={spec.name: jnp.zeros(shape)
+                     for spec in physics.required_tracers()},
+        )
+        carry = physics.initial_carry_state(coords)
+        carry["clouds"] = carry["clouds"].copy(
+            conv_detrainment_qc=jnp.full((nlev, ncols), self._STALE_QC),
+            conv_detrainment_qi=jnp.full((nlev, ncols), self._STALE_QI),
+        )
+        _, diag = jax.jit(physics.compute_tendencies)(
+            state, ForcingData.zeros((nlon, nlat)),
+            TerrainData.aquaplanet(coords), carry,
+        )
+        return diag["clouds"]
+
+    def test_zero_without_a_convection_term(self):
+        from jcm.physics.echam.testing import idealized_echam_physics
+
+        for scheme in ("1m", "2m"):
+            with self.subTest(cloud_scheme=scheme):
+                physics = idealized_echam_physics(
+                    cloud_scheme=scheme).remove("convection")
+                self.assertFalse(
+                    [t for t in physics.terms if t.category == "convection"])
+                clouds = self._run(physics)
+                np.testing.assert_array_equal(
+                    np.asarray(clouds.conv_detrainment_qc), 0.0)
+                np.testing.assert_array_equal(
+                    np.asarray(clouds.conv_detrainment_qi), 0.0)
+
+    def test_this_steps_detrainment_with_convection(self):
+        import jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng as tn
+        from jcm.physics.convection.tiedtke_nordeng.types import (
+            ConvectionTendencies)
+        from jcm.physics.echam.testing import idealized_echam_physics
+
+        det_qc, det_qi = 1.0e-8, 3.0e-8
+
+        # A known detrainment with no heating (cap inactive), so the value
+        # the composed stack must publish is exact.
+        def fake_convection(temperature, *args, **kwargs):
+            zeros = jnp.zeros_like(temperature)
+            return ConvectionTendencies(
+                dtedt=zeros, dqdt=zeros, dudt=zeros, dvdt=zeros,
+                qc_conv=zeros, qi_conv=zeros, precip_formation=zeros,
+                precip_conv=jnp.zeros((), temperature.dtype),
+                precip_flux=zeros,
+                precip_floor_source=jnp.zeros((), temperature.dtype),
+                dqc_dt=jnp.full_like(temperature, det_qc),
+                dqi_dt=jnp.full_like(temperature, det_qi),
+            ), None
+
+        monkey = pytest.MonkeyPatch()
+        try:
+            monkey.setattr(tn, "tiedtke_nordeng_convection", fake_convection)
+            for scheme in ("1m", "2m"):
+                with self.subTest(cloud_scheme=scheme):
+                    clouds = self._run(
+                        idealized_echam_physics(cloud_scheme=scheme))
+                    np.testing.assert_allclose(
+                        np.asarray(clouds.conv_detrainment_qc), det_qc,
+                        rtol=1e-6)
+                    np.testing.assert_allclose(
+                        np.asarray(clouds.conv_detrainment_qi), det_qi,
+                        rtol=1e-6)
+        finally:
+            monkey.undo()

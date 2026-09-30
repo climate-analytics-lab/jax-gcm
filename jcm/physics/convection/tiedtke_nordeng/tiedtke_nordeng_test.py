@@ -685,16 +685,8 @@ def test_term_jvp_wrt_diagnostics_is_finite_on_a_quiescent_column():
         assert bool(jnp.all(jnp.isfinite(field))), field
 
 
-def test_wrapper_publishes_mass_flux_ledger_for_tracer_transport():
-    """The convection diagnostic carries the updraft ledger (#602 item 2).
-
-    ``mass_flux_up`` / ``entrain_up`` were zero-filled before the
-    convective tracer transport landed; a real convecting column must now
-    publish a physical ledger: non-negative fluxes, nonzero where deep
-    convection is active, and no entrainment where there is no carrying
-    flux entering from below (``entrain_up = entr·mfu_below·dz`` by
-    construction, so the cloud-base supply appears via plume continuity,
-    not as entrainment).
+def _deep_convecting_column(clouds=None):
+    """Build a 16-level column the REAL scheme classifies as deep convection.
 
     The fixture is 16 levels, not the 8-level toy the other wrapper tests
     use: on 8 levels the first ascent step spans ~175 hPa, the plume dies
@@ -703,8 +695,10 @@ def test_wrapper_publishes_mass_flux_ledger_for_tracer_transport():
     classification itself comes through the honest #699 route: surface
     evaporation plus a ``_prev_step`` carry implying resolved moisture
     convergence of 0.5·E.
+
+    Returns ``(state, diagnostics, terrain, dt)``; ``clouds`` replaces the
+    zero ``CloudData`` the diagnostics otherwise carry.
     """
-    import numpy as np
     from jcm.physics.thermodynamics import (
         saturation_specific_humidity,
     )
@@ -749,7 +743,8 @@ def test_wrapper_publishes_mass_flux_ledger_for_tracer_transport():
         "pressure_full": p,
         "layer_thickness": dz,
         "air_density": rho,
-        "clouds": CloudData.zeros((ncols,), nlev),
+        "clouds": (CloudData.zeros((ncols,), nlev) if clouds is None
+                   else clouds),
         "surface": surface,
         "vertical_diffusion": vdiff,
         "_prev_step": {
@@ -759,7 +754,21 @@ def test_wrapper_publishes_mass_flux_ledger_for_tracer_transport():
         },
     }
     terrain = SimpleNamespace(fmask=jnp.zeros(ncols))
+    return state, diagnostics, terrain, dt
 
+
+def test_wrapper_publishes_mass_flux_ledger_for_tracer_transport():
+    """The convection diagnostic carries the updraft ledger (#602 item 2).
+
+    ``mass_flux_up`` / ``entrain_up`` were zero-filled before the
+    convective tracer transport landed; a real convecting column must now
+    publish a physical ledger: non-negative fluxes, nonzero where deep
+    convection is active, and no entrainment where there is no carrying
+    flux entering from below (``entrain_up = entr·mfu_below·dz`` by
+    construction, so the cloud-base supply appears via plume continuity,
+    not as entrainment).
+    """
+    state, diagnostics, terrain, _ = _deep_convecting_column()
     _, diagnostics_out = TiedtkeConvection()(
         state, diagnostics, forcing=None, terrain=terrain,
     )
@@ -776,6 +785,157 @@ def test_wrapper_publishes_mass_flux_ledger_for_tracer_transport():
     np.testing.assert_array_equal(entrain[mfu_below == 0.0], 0.0)
     # Entrainment fires somewhere the plume is active.
     assert entrain.max() > 0.0
+
+
+def test_wrapper_publishes_detrainment_exactly_as_added_to_clouds():
+    """``clouds.conv_detrainment_qc/qi`` are ECHAM's ``pxtecl``/``pxteci``.
+
+    On a column the real scheme convects in, the published fields must be
+    the cloud-tracer tendency the term returns (which is the detrained
+    condensate alone — the in-plume condensate flux enters the vapour
+    budget), split by phase at tmelt on the environment temperature the
+    term received (cudtdq, mo_cufluxdts.f90:646-666), and ``dt`` times them
+    must be exactly the increment the term applies to ``clouds.qc/qi``.
+    """
+    nlev, ncols = 16, 1
+    qc0 = jnp.full((nlev, ncols), 1.0e-6)
+    qi0 = jnp.full((nlev, ncols), 2.0e-6)
+    clouds_in = CloudData.zeros((ncols,), nlev).copy(qc=qc0, qi=qi0)
+    state, diagnostics, terrain, dt = _deep_convecting_column(clouds_in)
+
+    tendency, out = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+    clouds = out["clouds"]
+    assert int(out["convection"].ktype[0]) == 1, "fixture stopped convecting"
+
+    det_qc = np.asarray(clouds.conv_detrainment_qc)
+    det_qi = np.asarray(clouds.conv_detrainment_qi)
+    np.testing.assert_array_equal(det_qc, np.asarray(tendency.tracers["qc"]))
+    np.testing.assert_array_equal(det_qi, np.asarray(tendency.tracers["qi"]))
+    np.testing.assert_allclose(
+        det_qc + det_qi,
+        np.asarray(tendency.tracers["qc"] + tendency.tracers["qi"]),
+        rtol=0, atol=0,
+    )
+    assert det_qc.min() >= 0.0 and det_qi.min() >= 0.0
+    # The column spans tmelt, so both phases must be exercised.
+    assert det_qc.max() > 0.0 and det_qi.max() > 0.0, "fixture lost a phase"
+
+    # Tiedtke's own phase split: liquid only where T > tmelt, ice elsewhere.
+    warm = np.asarray(state.temperature) > c.tmelt
+    np.testing.assert_array_equal(det_qc[~warm], 0.0)
+    np.testing.assert_array_equal(det_qi[warm], 0.0)
+
+    # dt * field is the clouds increment wherever the provisional floor at 0
+    # did not bind (everywhere here: detrainment is non-negative).
+    unfloored_qc = np.asarray(qc0 + dt * tendency.tracers["qc"]) >= 0.0
+    unfloored_qi = np.asarray(qi0 + dt * tendency.tracers["qi"]) >= 0.0
+    np.testing.assert_allclose(
+        np.asarray(clouds.qc - qc0)[unfloored_qc], (dt * det_qc)[unfloored_qc],
+        rtol=1e-6, atol=1e-12)
+    np.testing.assert_allclose(
+        np.asarray(clouds.qi - qi0)[unfloored_qi], (dt * det_qi)[unfloored_qi],
+        rtol=1e-6, atol=1e-12)
+
+
+def test_published_detrainment_carries_the_tendency_cap(monkeypatch):
+    """The fields are the POST-cap detrainment, like the qc/qi advance.
+
+    A fake scheme returns heating 2x over ``_DTDT_MAX`` (so the column's
+    ``cap_scale`` is 0.5) and known detrainment; the published fields must
+    be half of it, i.e. exactly what was added to ``clouds.qc/qi``.
+    """
+    nlev, ncols = 4, 2
+    shape = (nlev, ncols)
+    dt = 900.0
+    dqc_col = jnp.array([0.0, 1.0e-7, 3.0e-7, 0.0])
+    dqi_col = jnp.array([4.0e-7, 2.0e-7, 0.0, 0.0])
+
+    def fake_convection(
+        temperature, humidity, pressure, layer_thickness, air_density,
+        u_wind, v_wind, qc, qi, dt_seconds, params, land_fraction,
+        moisture_supply, *extra, **_kwargs,
+    ):
+        zeros = jnp.zeros_like(temperature)
+        return ConvectionTendencies(
+            dtedt=jnp.ones_like(temperature) * 2.0 * convection_module._DTDT_MAX,
+            dqdt=zeros, dudt=zeros, dvdt=zeros,
+            qc_conv=zeros, qi_conv=zeros,
+            precip_formation=zeros, precip_flux=zeros,
+            precip_floor_source=jnp.zeros((), temperature.dtype),
+            precip_conv=jnp.zeros((), temperature.dtype),
+            dqc_dt=dqc_col, dqi_dt=dqi_col,
+        ), None
+
+    monkeypatch.setattr(
+        convection_module, "tiedtke_nordeng_convection", fake_convection,
+    )
+    state = PhysicsState.zeros(
+        shape,
+        temperature=jnp.ones(shape) * 280.0,
+        specific_humidity=jnp.ones(shape) * 1.0e-3,
+        tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape)},
+    )
+    diagnostics = {
+        "_dt_seconds": dt,
+        "pressure_full": jnp.ones(shape) * 80000.0,
+        "layer_thickness": jnp.ones(shape) * 500.0,
+        "air_density": jnp.ones(shape),
+        "clouds": CloudData.zeros((ncols,), nlev),
+    }
+    tendency, out = TiedtkeConvection()(
+        state, diagnostics, forcing=None,
+        terrain=SimpleNamespace(fmask=jnp.zeros(ncols)),
+    )
+    clouds = out["clouds"]
+    expected_qc = 0.5 * np.broadcast_to(np.asarray(dqc_col)[:, None], shape)
+    expected_qi = 0.5 * np.broadcast_to(np.asarray(dqi_col)[:, None], shape)
+    np.testing.assert_allclose(
+        np.asarray(clouds.conv_detrainment_qc), expected_qc, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(clouds.conv_detrainment_qi), expected_qi, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(clouds.qc), dt * expected_qc, rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(clouds.qi), dt * expected_qi, rtol=1e-6)
+
+
+def test_detrainment_from_a_previous_step_never_survives_into_this_one():
+    """The ``clouds`` carry holds LAST step's detrainment; it must not leak.
+
+    ``SundqvistCloudFraction`` seeds each step's ``clouds`` from the
+    cross-step carry, upstream of convection. It resets the detrainment
+    fields, so between it and convection they read zero, and convection
+    then writes this step's values — never the carried ones.
+    """
+    from jcm.physics.clouds.sundqvist import SundqvistCloudFraction
+
+    nlev, ncols = 16, 1
+    stale = CloudData.zeros((ncols,), nlev).copy(
+        conv_detrainment_qc=jnp.full((nlev, ncols), 1.0e-3),
+        conv_detrainment_qi=jnp.full((nlev, ncols), 2.0e-3),
+    )
+    state, diagnostics, terrain, _ = _deep_convecting_column(stale)
+    diagnostics["surface_pressure"] = jnp.full((ncols,), 1.0e5)
+    forcing = SimpleNamespace(sice_am=None)
+
+    _, after_cover = SundqvistCloudFraction()(
+        state, diagnostics, forcing, terrain)
+    np.testing.assert_array_equal(
+        np.asarray(after_cover["clouds"].conv_detrainment_qc), 0.0)
+    np.testing.assert_array_equal(
+        np.asarray(after_cover["clouds"].conv_detrainment_qi), 0.0)
+
+    tendency, after_conv = TiedtkeConvection()(
+        state, after_cover, forcing=None, terrain=terrain)
+    np.testing.assert_array_equal(
+        np.asarray(after_conv["clouds"].conv_detrainment_qc),
+        np.asarray(tendency.tracers["qc"]))
+    np.testing.assert_array_equal(
+        np.asarray(after_conv["clouds"].conv_detrainment_qi),
+        np.asarray(tendency.tracers["qi"]))
+    assert float(jnp.max(tendency.tracers["qc"] + tendency.tracers["qi"])) > 0.0
 
 
 class TestMassFluxCFLCap:
