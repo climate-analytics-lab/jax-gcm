@@ -61,8 +61,8 @@
   (``echam_fortran_reference_test.py``). The increments ``Δq``, ``ΔT``,
   ``Δq_c``, ``Δq_i`` are ``dt`` times the running tendency of every physics
   term composed before the 1M term (radiation, vertical diffusion with its
-  condensate, the surface, convection with its detrained condensate) on the
-  step-start state as anchor. ``cvtfall``, ``csecfrl`` and ``clwprat`` are
+  condensate, the surface, convection) on the step-start state as anchor, with
+  the convective detrainment passed separately as ECHAM's ``pxtecl``/``pxteci``. ``cvtfall``, ``csecfrl`` and ``clwprat`` are
   ordinary tunable parameters whose defaults follow ECHAM's per-truncation
   values (T63: 2.5, 5e-6, 4.0). The **droplet number** is ECHAM's prescribed
   ``acdnc`` (``physc.f90`` §3.12; ICON-A ``mo_echam_phy_diag.f90::droplet_number``):
@@ -242,14 +242,12 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   crystals at the top of the size range the radiation's tables cover (#728).
 - Clear-sky evaporation of decorrelated condensate (the radiation-side contract in
   ``mcica.in_cloud_path``) is owned by the 2M scheme's clear-sky evaporation step.
-- **1M: saturation vapour pressure.** ECHAM tabulates Sonntag (1990)
-  (``mo_echam_convect_tables.f90``); the 1M sweep takes ``e_s`` and its
-  derivative from jcm's Tetens form (``sundqvist.saturation_vapor_pressure_*``),
-  chosen in one import. They differ by 1-2 % in the mixed phase and up to 16 %
-  below 238 K. Against the Fortran run with jcm's Tetens every column matches
-  at float64 and float32 tolerance; against ECHAM's own Sonntag the columns
-  that depend on saturation differ by that amount, and match when the sweep's
-  ``e_s`` is Sonntag.
+- **1M: saturation vapour pressure** comes from ``echam_saturation``, the
+  module the cover reads too, whose formula switch selects ECHAM's Sonntag
+  (1990) fit or jcm's Tetens pair for both at once. Against the Fortran every
+  column matches at float64 and float32 tolerance under either formula when
+  the Fortran uses the same one (the reference's ``sonntag`` and ``tetens``
+  variants), and at T31, T127 and T255.
 - **1M: the dynamics is not in the increments.** ECHAM's increments at
   ``cloud`` contain the dynamics of the step (advection and the adiabatic
   term); jcm's contain the upstream physics only, because the dynamics is
