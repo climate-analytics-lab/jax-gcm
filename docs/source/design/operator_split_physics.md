@@ -254,8 +254,7 @@ reordering coupled terms is a known-unstable configuration.
 | --- | --- | --- | --- |
 | `_tendency_run` | the sum of the tendencies of the terms already run (winds, T, q, every tracer) | the host, before each term, on both hosts | the cloud schemes (their increments), the JAM removal split, AeroCom |
 | `thermo_run` | a running (T, q, qc, qi), seeded to `x_n` | the terms that call `advance_thermo_run`: vertical diffusion, the prescribed surface flux, Tiedtke, and the cloud scheme after its own tendency. Radiation does not | Tiedtke (its provisional state), Sundqvist (its condensate), COSP, AeroCom |
-| `clouds` | the cover and a condensate view | Sundqvist (cover; condensate from `thermo_run`), Tiedtke (adds its detrainment), the cloud scheme | radiation, aerosol, COSP |
-| `_convective_detrainment` | this step's detrained qc/qi rate; step-local, never carried | Tiedtke | the cloud schemes |
+| `clouds` | the cover, a condensate view, and this step's detrained qc/qi rate (`conv_detrainment_qc`/`_qi`) | Sundqvist (cover; condensate from `thermo_run`; resets the detrainment to zero), Tiedtke (adds its detrainment to the condensate and writes it as the detrainment rate), the cloud scheme | radiation, aerosol, COSP; the cloud schemes (the detrainment) |
 | `_prev_step` (carry) | the previous step's q and applied q tendency | the host, after the physics | Tiedtke's deep/shallow test |
 | `_post_physics_state` (carry) | the previous step's post-physics state and a validity flag | `Model`, after the physics, from `after_physics_state`; present only when a term declares `requires_post_physics_fields` | the cloud schemes (their anchor) |
 
@@ -269,13 +268,13 @@ convective detrainment passed separately (`pxtecl`, `pxteci`,
 `physc.f90:1081`). Condensation is the humidity increment the saturation
 humidity does not absorb, `zqcdif = (ztmst·pqte − zdqsat)·paclc`
 (`mo_cloud.f90:706-730`). `jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs`
-forms the same inputs from the hand-offs, and the Lohmann 2M calls it:
+forms the same inputs from the hand-offs, and both cloud schemes call it:
 
 - anchor := the previous step's post-physics state `x_ap` from the carry;
 - increment := `(x_n − x_ap) + dt·P_upstream − detrainment`, where
   `x_n − x_ap` is the dynamics of the last step and `P_upstream` is
   `_tendency_run` at the cloud scheme;
-- detrainment := `dt ×` `_convective_detrainment`, by itself;
+- detrainment := `dt ×` `clouds.conv_detrainment_qc` / `_qi`, by itself;
 - provisional state := anchor + increment + detrainment, which is
   `x_n + dt·P_upstream`, bit for bit the state the scheme's tendencies are
   relative to.

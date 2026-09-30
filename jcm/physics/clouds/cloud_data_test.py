@@ -1,9 +1,16 @@
 """Tests for shared cloud diagnostics."""
 
+import dataclasses
+
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
-from jcm.physics.clouds.cloud_data import CloudData, radiation_cloud_fields
+from jcm.physics.clouds.cloud_data import (
+    CLOUD_OUTPUT_ATTRS,
+    CloudData,
+    radiation_cloud_fields,
+)
 from jcm.physics_interface import PhysicsState
 
 
@@ -132,3 +139,78 @@ def test_condensate_free_layer_separates_two_cloud_banks_in_mcica():
                                        key=jax.random.PRNGKey(1))
     np.testing.assert_array_equal(exp_masked[:, [0, 2]],
                                   exp_unmasked[:, [0, 2]])
+
+
+def test_zeros_seeds_the_detrainment_fields():
+    """The seed carries the convective detrainment as (nlev, ncols) zeros."""
+    nlev, ncols = 5, 3
+    clouds = CloudData.zeros((ncols,), nlev)
+    for name in ("conv_detrainment_qc", "conv_detrainment_qi"):
+        field = getattr(clouds, name)
+        assert field.shape == (nlev, ncols)
+        assert jnp.all(field == 0.0)
+
+
+def test_copy_round_trips_every_field():
+    """``copy()`` keeps every field and replaces only the ones it is given.
+
+    Enumerated from the struct itself so a field added to the class but
+    forgotten in ``copy()`` fails here rather than raising (or, worse,
+    silently reverting) inside a term.
+    """
+    nlev, ncols = 4, 2
+    base = CloudData.zeros((ncols,), nlev)
+    names = [f.name for f in dataclasses.fields(CloudData)]
+    distinct = base.copy(**{
+        name: jnp.full(getattr(base, name).shape, float(i + 1))
+        for i, name in enumerate(names)
+    })
+    same = distinct.copy()
+    for name in names:
+        assert jnp.array_equal(getattr(same, name), getattr(distinct, name)), name
+
+    new_qi = jnp.full((nlev, ncols), -7.0)
+    changed = distinct.copy(conv_detrainment_qi=new_qi)
+    assert jnp.array_equal(changed.conv_detrainment_qi, new_qi)
+    for name in names:
+        if name != "conv_detrainment_qi":
+            assert jnp.array_equal(
+                getattr(changed, name), getattr(distinct, name)), name
+
+
+def test_every_field_has_output_attrs():
+    """Every ``clouds.<field>`` written to output has units and a long name."""
+    names = {f"clouds.{f.name}" for f in dataclasses.fields(CloudData)}
+    assert names == set(CLOUD_OUTPUT_ATTRS)
+    for key, attrs in CLOUD_OUTPUT_ATTRS.items():
+        assert attrs.get("units"), key
+        assert attrs.get("long_name"), key
+    for name in ("conv_detrainment_qc", "conv_detrainment_qi"):
+        assert CLOUD_OUTPUT_ATTRS[f"clouds.{name}"]["units"] == "kg kg-1 s-1"
+
+
+def test_checkpoint_without_detrainment_fields_restores_them_as_zeros():
+    """A checkpoint written before the fields existed still restores.
+
+    Restores match carry leaves by name and fill a leaf the file lacks from
+    a freshly built carry (``CloudData.zeros``), so the detrainment fields
+    come back as zeros while every stored field keeps its stored value.
+    """
+    from jcm.checkpoint import _match_by_name, _named_leaves
+
+    nlev, ncols = 3, 2
+    template = _named_leaves({"clouds": CloudData.zeros((ncols,), nlev)})
+    new_names = {"clouds.conv_detrainment_qc", "clouds.conv_detrainment_qi"}
+    assert new_names <= {name for name, _ in template}
+    stored = {name: np.full(leaf.shape, 3.0, leaf.dtype)
+              for name, leaf in template if name not in new_names}
+    fresh = dict(_named_leaves({"clouds": CloudData.zeros((ncols,), nlev)}))
+
+    leaves, seeded, dropped = _match_by_name(
+        stored, template, path="old.msgpack", group="physics carry",
+        fill_missing=True, seeds=lambda: fresh,
+    )
+    assert set(seeded) == new_names and dropped == []
+    for (name, _), leaf in zip(template, leaves):
+        expected = 0.0 if name in new_names else 3.0
+        np.testing.assert_array_equal(np.asarray(leaf), expected, err_msg=name)

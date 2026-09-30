@@ -75,24 +75,52 @@ def _call(inputs):
     return cloud_microphysics_2m(*args, DT, CloudParams2M.default(), **col)
 
 
-def test_detrainment_enters_only_as_part_of_the_condensate_increment():
-    """Split detrainment gives the lumped result to the last bit.
-
-    Where ECHAM uses ``pxlte + pxtecl`` the scheme uses ``increment +
-    detrained``, and nowhere uses the detrainment alone (the processes that
-    will, ICE-1/3/4 of #941, are not in this scheme yet). So moving the
-    detrainment into the increment changes nothing.
-    """
-    column, detr = _column(), _detrainment()
-    split = _call({**column, **_increments(), **detr})
+def _split_and_lumped(detrainment):
+    """Run the column with ``detrainment`` passed apart, and inside the increments."""
+    column = _column()
+    split = _call({**column, **_increments(), **detrainment})
     lumped_increments = _increments()
-    lumped_increments["qc_increment"] = (
-        lumped_increments["qc_increment"] + detr["detrained_qc"])
-    lumped_increments["qi_increment"] = (
-        lumped_increments["qi_increment"] + detr["detrained_qi"])
-    lumped = _call({**column, **lumped_increments})
+    for phase in ("qc", "qi"):
+        lumped_increments[f"{phase}_increment"] = (
+            lumped_increments[f"{phase}_increment"]
+            + detrainment.get(f"detrained_{phase}", jnp.zeros(NLEV)))
+    return split, _call({**column, **lumped_increments})
+
+
+def test_warm_liquid_detrainment_is_part_of_the_condensate_increment():
+    """Liquid detrained above ``tmelt`` gives the lumped result to the last bit.
+
+    ECHAM's 2M gives the detrained condensate ``zxtec`` its own rules only
+    where they can act: it keeps it out of the ice sedimentation, gives it a
+    crystal number where ``ll_cv`` holds (below ``tmelt``) and re-splits it by
+    ``lo2``, which puts all of it in the liquid where ``lo2`` fails (always
+    above ``tmelt``). Liquid detrained above ``tmelt`` therefore enters
+    exactly as ``pxlte + pxtecl``, and moving it into the increment changes
+    nothing.
+    """
+    column = _column()
+    warm = column["temperature_m1"] > c.tmelt
+    cloudy_liquid = column["qc_m1"] > 0.0
+    assert bool(jnp.any(warm & cloudy_liquid))
+    detrained_qc = jnp.where(warm & cloudy_liquid, 3e-5, 0.0)
+    split, lumped = _split_and_lumped({"detrained_qc": detrained_qc})
     for a, b in zip(jax.tree.leaves(split), jax.tree.leaves(lumped)):
         np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+def test_cold_ice_detrainment_is_not_an_increment():
+    """Ice detrained below ``tmelt`` follows its own rules (ICE-1/3/4, #941).
+
+    As an increment it would sediment and keep the ice phase wherever the
+    ice-memory criterion does; as detrainment it does not fall this step,
+    brings its crystal number and is re-split by ``lo2``. The mixed-phase
+    and cirrus levels that receive it end differently.
+    """
+    detrained_qi = _detrainment()["detrained_qi"]
+    split, lumped = _split_and_lumped({"detrained_qi": detrained_qi})
+    receiving = np.asarray(detrained_qi) > 0.0
+    diff = np.abs(np.asarray(split[0].dqidt - lumped[0].dqidt))
+    assert float(np.max(diff[receiving])) > 0.0
 
 
 def test_no_increments_is_the_anchor_alone():

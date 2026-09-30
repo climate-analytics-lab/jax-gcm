@@ -5,10 +5,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jcm.physics.clouds.cloud_inputs import (
-    CONVECTIVE_DETRAINMENT_KEY,
-    cloud_scheme_inputs,
-)
+from jcm.physics.clouds.cloud_data import CloudData
+from jcm.physics.clouds.cloud_inputs import cloud_scheme_inputs
 from jcm.physics_interface import POST_PHYSICS_STATE_KEY, PhysicsState
 
 NLEV, NCOLS = 6, 4
@@ -55,6 +53,13 @@ def _detrainment(shape=(NLEV, NCOLS)):
     return {"qc": _field(21, 1e-9, 0.0, shape), "qi": _field(22, 1e-10, 0.0, shape)}
 
 
+def _clouds(detrainment, shape=(NLEV, NCOLS)):
+    """Return the step's ``clouds`` entry carrying the convective detrainment rates."""
+    return CloudData.zeros(shape[1:], shape[0]).copy(
+        conv_detrainment_qc=detrainment["qc"],
+        conv_detrainment_qi=detrainment["qi"])
+
+
 def _carry(valid, shape=(NLEV, NCOLS)):
     state = _state(shape)
     return {
@@ -75,7 +80,7 @@ def _diagnostics(carry=None, detrainment=True, run=True):
     if run:
         diagnostics["_tendency_run"] = _run()
     if detrainment:
-        diagnostics[CONVECTIVE_DETRAINMENT_KEY] = _detrainment()
+        diagnostics["clouds"] = _clouds(_detrainment())
     if carry is not None:
         diagnostics[POST_PHYSICS_STATE_KEY] = carry
     return diagnostics
@@ -207,6 +212,29 @@ class TestSecondStage:
         for a, b in zip(jax.tree.leaves(first.provisional),
                         jax.tree.leaves(second.provisional)):
             np.testing.assert_allclose(a, b, rtol=2e-6, atol=1e-12)
+
+    def test_zero_detrainment_fields_leave_the_run_in_the_increment(self):
+        """A convection scheme that detrains nothing leaves the fields at zero.
+
+        Betts-Miller and the idealised stacks never write
+        ``clouds.conv_detrainment_qc/qi``, which the cover term resets to zero
+        each step; with no ``clouds`` entry at all the detrainment is zero too.
+        Either way the whole running condensate tendency is the increment.
+        """
+        state = _state()
+        zero = {"qc": jnp.zeros((NLEV, NCOLS)), "qi": jnp.zeros((NLEV, NCOLS))}
+        with_zeros = _diagnostics(detrainment=False)
+        with_zeros["clouds"] = _clouds(zero)
+        without = _diagnostics(detrainment=False)
+        run = _run()
+        for diagnostics in (with_zeros, without):
+            inputs = cloud_scheme_inputs(state, diagnostics, TRACERS)
+            np.testing.assert_array_equal(inputs.detrained_qc, 0.0)
+            np.testing.assert_array_equal(inputs.detrained_qi, 0.0)
+            for name in ("qc", "qi"):
+                np.testing.assert_array_equal(
+                    inputs.increment.tracers[name],
+                    0.0 + (DT * run["tracers"][name] - 0.0))
 
     def test_detrainment_split_is_exact_against_the_running_tendency(self):
         """The increment plus the detrainment is what convection put into the run.

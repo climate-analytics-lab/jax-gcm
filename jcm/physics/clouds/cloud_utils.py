@@ -142,9 +142,9 @@ def ice_volume_mean_radius(
     in ``precip_formation_cold`` (``mo_cloud_micro_2m.f90:3160-3166``; the 1M
     Levkov aggregation in ``mo_cloud.f90:1031-1036`` uses the same relation).
     ECHAM's Wegener-Bergeron-Findeisen threshold uses a different conversion,
-    :func:`ice_volume_mean_radius_schumann`. jcm also passes this radius to
-    ``update_in_cloud_water`` as ``prid`` for the ICNC diagnosis, where ECHAM
-    passes its temperature-parameterised ``zrid`` (lines 945-956; #941).
+    :func:`ice_volume_mean_radius_schumann`, and the ICNC diagnosis in
+    ``update_in_cloud_water`` inverts the temperature-parameterised radius of
+    :func:`ice_volume_mean_radius_from_temperature` (ECHAM ``zrid``).
 
     Metres is load-bearing: callers invert this as
     ``N = rho q_i / ((4/3) pi r_vol^3 rho_ice)``, so returning the microns that
@@ -181,14 +181,14 @@ def ice_volume_mean_radius_schumann(
     ``r_vol = max(1e-6, conv_effr2mvr·1e-6·r_eff)`` with ``conv_effr2mvr = 0.9``
     (``mo_cloud_micro_2m.f90:4059-4085``, a simple fit to the Schumann et al.
     2011 r/r_eff data). This is the radius ECHAM hands to
-    ``threshold_vert_vel`` at every Wegener-Bergeron-Findeisen decision. jcm
-    uses it at the three it ports: the section-4 phase choice ``lo2``
-    (line 1288), the section-5 supersaturation correction
+    ``threshold_vert_vel`` at every Wegener-Bergeron-Findeisen decision, and
+    jcm uses it at all four: the section-1 criterion ``lo2_2d`` that gates the
+    crystal number of detrained ice (lines 872-885), the section-4 phase choice
+    ``lo2`` that also re-splits the detrained condensate (line 1288), the
+    section-5 supersaturation correction
     (``mixed_phase_deposition_and_corrections``, line 2374) and the WBF gate
-    (line 1582). ECHAM's fourth, the phase split of convective detrainment
-    ``lo2_2d`` (lines 872-885), has no counterpart: jcm's Tiedtke scheme
-    splits detrained condensate at ``tmelt`` (#941). The plate relation of
-    :func:`ice_volume_mean_radius` is ECHAM's for aggregation only.
+    (line 1582). The plate relation of :func:`ice_volume_mean_radius` is
+    ECHAM's for aggregation only.
 
     Parameters
     ----------
@@ -204,6 +204,102 @@ def ice_volume_mean_radius_schumann(
         params.ceffmax,
     )
     return effective_2_volmean_radius_param_Schuman_2011(r_eff_um, params)
+
+def ice_volume_mean_radius_from_temperature(
+    temperature: jnp.ndarray, params: CloudParams2M,
+) -> jnp.ndarray:
+    """Temperature-parameterised volume-mean ice crystal radius (ECHAM ``zrid``) in METRES.
+
+    ``r_eff = max(23.2·exp(0.015·min(T − tmelt, 0)), 1)`` micrometres, turned
+    into a volume-mean radius by ECHAM's
+    ``effective_2_volmean_radius_param_Schuman_2011``,
+    ``max(1e-6, conv_effr2mvr·1e-6·r_eff)`` (``mo_cloud_micro_2m.f90:945-956``).
+    ECHAM evaluates it at the step-start temperature ``ptm1`` and uses it for
+    two things: the crystal number of detrained ice ``znidetr`` (line 970,
+    :func:`detrained_ice_crystal_number`) and the radius ``prid`` that
+    ``update_in_cloud_water`` inverts to diagnose ICNC from ice mass
+    (passed at line 1511, used at 2616).
+
+    The Schumann helper takes micrometres and returns metres ("beware of
+    units", lines 4066-4067): every consumer of this radius expects metres.
+
+    Parameters
+    ----------
+    temperature : jnp.ndarray
+        Step-start temperature [K] (ECHAM ``ptm1``).
+
+    """
+    delta_t = jnp.minimum(temperature - params.tmelt, 0.0)
+    r_eff_um = jnp.maximum(23.2 * jnp.exp(0.015 * delta_t), 1.0)
+    return effective_2_volmean_radius_param_Schuman_2011(r_eff_um, params)
+
+def detrained_ice_crystal_number(
+    detrained_condensate: jnp.ndarray,
+    temperature: jnp.ndarray,
+    detrainment_is_ice: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    air_density: jnp.ndarray,
+    ice_radius: jnp.ndarray,
+    params: CloudParams2M,
+) -> jnp.ndarray:
+    """In-cloud crystal number of convectively detrained ice (ECHAM ``znidetr``) [1/m^3].
+
+    Transliterates ``mo_cloud_micro_2m.f90:958-982``: the detrained condensate
+    enters as crystals of the temperature-parameterised radius ``zrid``
+    (:func:`ice_volume_mean_radius_from_temperature`), through the plate
+    mass-size relation the cloud microphysics shares with radiation (Lohmann
+    et al. 2008, ERL, eq. 1):
+
+        znidetr = conv_effr2mvr·(0.5e-2)^pow_PK·1000/fact_PK · ρ·zxtec
+                  / (max(paclc, clc_min)·zrid^pow_PK)
+
+    with ``zrid`` in metres (lines 970-972, verbatim). Since
+    ``(0.5e-2/zrid[m])^pow_PK = D[cm]^-pow_PK`` with ``D = 2·zrid``, this is
+    the detrained mass concentration divided by the plate crystal mass
+    ``m[g] = fact_PK·D[cm]^pow_PK`` at that diameter, times
+    ``conv_effr2mvr``. The whole detrained condensate ``zxtec`` (both
+    phases) enters, gated by ECHAM's ``ll_cv``: condensate is detrained, and
+    the step-start temperature is below ``cthomi``, or below ``tmelt`` with
+    the section-1 Wegener-Bergeron-Findeisen criterion ``lo2_2d`` true
+    (lines 958-963). The number is zero where the cover is at or below
+    ``clc_min`` (line 974) and floored at ``cqtmin`` everywhere (line 978),
+    exactly as ECHAM does, so a cell with no detrainment gains ``cqtmin``
+    (1e-12 /m^3) crystals.
+
+    Parameters
+    ----------
+    detrained_condensate : jnp.ndarray
+        Detrained condensate this step [kg/kg] (ECHAM ``ztmst·zxtec``).
+    temperature : jnp.ndarray
+        Step-start temperature [K] (ECHAM ``ptm1``).
+    detrainment_is_ice : jnp.ndarray
+        Section-1 criterion ``lo2_2d`` (boolean): the updraft is below the
+        Korolev/Mazin threshold of the pre-detrainment ice.
+    cloud_fraction : jnp.ndarray
+        Cloud cover ``paclc`` [0..1].
+    air_density : jnp.ndarray
+        Air density [kg/m^3].
+    ice_radius : jnp.ndarray
+        ``zrid`` [m], at least 1e-6 m.
+
+    """
+    ll_cv = (detrained_condensate > 0.0) & (
+        (temperature < params.cthomi)
+        | ((temperature < params.tmelt) & detrainment_is_ice)
+    )
+    has_cover = cloud_fraction > params.clc_min
+    # ``ice_radius`` is floored at 1e-6 m by the Schumann helper, so the
+    # fractional power never sees a zero base and needs no gradient guard.
+    number = (
+        params.conv_effr2mvr * (0.5e-2) ** params.pow_PK * 1000.0
+        / params.fact_PK
+        * air_density * detrained_condensate
+        / (jnp.maximum(cloud_fraction, params.clc_min)
+           * ice_radius ** params.pow_PK)
+    )
+    number = jnp.where(has_cover, jnp.maximum(number, 0.0), 0.0)
+    number = jnp.where(ll_cv, number, 0.0)
+    return jnp.maximum(number, params.cqtmin)
 
 def turbulent_updraft_velocity(
     tke: jnp.ndarray, params: CloudParams2M,

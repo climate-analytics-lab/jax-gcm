@@ -271,8 +271,8 @@ def run_jcm_cloud(inp: dict, nn: int = 63) -> dict:
       _tendency_run qc, qi     <- pxlte + pxtecl, pxite + pxteci (jcm's
                                   convection returns its detrainment inside
                                   its condensate tendency)
-      _convective_detrainment  <- pxtecl, pxteci (published separately by
-                                  convection, as ECHAM passes them)
+      clouds.conv_detrainment_qc/qi <- pxtecl, pxteci (written separately
+                                  by convection, as ECHAM passes them)
       clouds.cloud_fraction    <- paclc
       air_density              <- papm1 / (rd*ptvm1)            (mo_cloud.f90:382)
       layer_thickness          <- dp / (g*air_density), dp from paphm1, so that
@@ -309,7 +309,9 @@ def run_jcm_cloud(inp: dict, nn: int = 63) -> dict:
         tracers={"qc": jnp.asarray(inp["pxlm1"]), "qi": jnp.asarray(inp["pxim1"])},
         u_wind=jnp.zeros_like(ptm1), v_wind=jnp.zeros_like(ptm1))
     clouds = CloudData.zeros((ncol,), nlev).copy(
-        cloud_fraction=jnp.asarray(inp["paclc"]), qc=qc_int, qi=qi_int)
+        cloud_fraction=jnp.asarray(inp["paclc"]), qc=qc_int, qi=qi_int,
+        conv_detrainment_qc=jnp.asarray(inp["pxtecl"]),
+        conv_detrainment_qi=jnp.asarray(inp["pxteci"]))
     diagnostics = {
         "_dt_seconds": dt,
         "pressure_full": jnp.asarray(inp["papm1"]),
@@ -324,8 +326,6 @@ def run_jcm_cloud(inp: dict, nn: int = 63) -> dict:
             "tracers": {"qc": jnp.asarray(inp["pxlte"] + inp["pxtecl"]),
                         "qi": jnp.asarray(inp["pxite"] + inp["pxteci"])},
         },
-        "_convective_detrainment": {"qc": jnp.asarray(inp["pxtecl"]),
-                                    "qi": jnp.asarray(inp["pxteci"])},
         "convection": _Convection(ktype=jnp.asarray(inp["ktype"]),
                                   cloud_top=jnp.asarray(inp["kctop"] - 1)),
     }

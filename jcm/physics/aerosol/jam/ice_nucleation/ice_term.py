@@ -96,9 +96,13 @@ class IceNucleation(PhysicsTerm):
             cooling = self._cooling_rate(diagnostics, t)
             inp_imm, inp_dep = lohmann_diehl_inp(pops, t, s_ice, cooling, dt, p)
 
-        # Immersion feeds the 2M mixed-phase het freezing; deposition feeds the
-        # cirrus nucleation hook (newly_formed_ice). Splitting them avoids
-        # double-counting where the regimes overlap.
+        # Immersion INP feeds the 2M mixed-phase heterogeneous-freezing
+        # closure, which freezes droplets up to max(ice_nuclei, DeMott floor);
+        # the max is a stopgap while this INP sits orders of magnitude below
+        # DeMott (#953). Deposition INP is read only by the nic_cirrus=2
+        # branch of the 2M update_in_cloud_water (``newly_formed_ice``), so it
+        # is inert at the default nic_cirrus=1 (#679, #552). Keeping the two
+        # regimes in separate fields avoids double-counting where they overlap.
         tendency = PhysicsTendency.zeros(t.shape)
         return tendency, {
             **diagnostics,

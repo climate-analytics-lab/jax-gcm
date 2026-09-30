@@ -295,9 +295,10 @@ see their predecessors through three channels:
 - **`thermo_run`**: a running (T, q, qc, qi), seeded to the step start and
   advanced by the terms that call `advance_thermo_run` (vertical diffusion,
   the prescribed surface flux, Tiedtke, the cloud schemes).
-- **the diagnostics dict itself**: published structs (`clouds`,
-  `convection`, …) and step-local keys such as `_convective_detrainment`,
-  and the cross-step carry (`_prev_step`, `_post_physics_state`).
+- **the diagnostics dict itself**: published structs (`clouds`, which also
+  carries the convective detrainment of the step, `convection`, …),
+  step-local keys such as `_surface_optics`, and the cross-step carry
+  (`_prev_step`, `_post_physics_state`).
 
 So the total tendency does not depend on the order of two terms that use
 none of these channels, but it does for the ECHAM stack, whose convection

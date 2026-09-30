@@ -28,7 +28,9 @@ step's ``x_ap``, so the faithful mapping of ECHAM's inputs is
   running sum of the tendencies of the terms upstream of the cloud scheme
   (``_tendency_run``);
 * detrainment := ``dt ×`` the convection scheme's detrained-condensate rate
-  (``_convective_detrainment``), per step;
+  (``clouds.conv_detrainment_qc`` / ``conv_detrainment_qi``, which
+  ``TiedtkeConvection`` writes each step and the cover term resets to zero
+  before it runs), per step;
 * provisional state := anchor + increment + detrainment, which is
   ``x_n + dt·P_upstream``.
 
@@ -48,16 +50,12 @@ import jax.numpy as jnp
 
 from jcm.physics_interface import POST_PHYSICS_STATE_KEY, PhysicsState
 
-#: Step-local diagnostics key under which a convection scheme publishes its
-#: detrained condensate as ``{"qc": rate, "qi": rate}`` [kg/kg/s] — the
-#: detrainment part of the qc/qi tendency it returns (ECHAM ``pxtecl``,
-#: ``pxteci``). Dropped before the cross-step carry (see
-#: ``ComposablePhysics._STEP_LOCAL_KEYS``); absent where the scheme detrains
-#: nothing, which reads as zero.
-CONVECTIVE_DETRAINMENT_KEY = "_convective_detrainment"
-
-#: The condensate tracers that receive convective detrainment.
-_DETRAINED = ("qc", "qi")
+#: The condensate tracers that receive convective detrainment, and the
+#: ``CloudData`` field holding each one's detrained rate [kg/kg/s]: ECHAM's
+#: ``pxtecl`` / ``pxteci``, the detrainment part of the qc/qi tendency the
+#: convection scheme returns. Zero without a convection term that writes
+#: them (Betts-Miller, the idealised stacks), or without a ``clouds`` entry.
+_DETRAINED = {"qc": "conv_detrainment_qc", "qi": "conv_detrainment_qi"}
 
 
 class CloudFields(NamedTuple):
@@ -122,8 +120,8 @@ def cloud_scheme_inputs(
         state: The state the cloud term receives (``x_n``).
         diagnostics: The term's diagnostics. Reads ``_dt_seconds``, and
             where present ``_tendency_run`` (the upstream running
-            tendency), :data:`CONVECTIVE_DETRAINMENT_KEY` and the carried
-            ``_post_physics_state``.
+            tendency), ``clouds.conv_detrainment_qc/qi`` (the convective
+            detrainment rates) and the carried ``_post_physics_state``.
         tracers: The cloud tracers wanted besides temperature and humidity.
             A name absent from ``state.tracers`` is zeros.
 
@@ -170,10 +168,11 @@ def cloud_scheme_inputs(
             anchor[name] = (x_n[name] if value is None
                             else jnp.where(use_carry, value, x_n[name]))
 
-    detrainment_rates = diagnostics.get(CONVECTIVE_DETRAINMENT_KEY) or {}
-    detrained = {
-        name: dt * detrainment_rates.get(name, zeros) for name in _DETRAINED
-    }
+    clouds = diagnostics.get("clouds")
+    detrained = {}
+    for name, field in _DETRAINED.items():
+        rate = getattr(clouds, field, None)
+        detrained[name] = dt * (zeros if rate is None else rate)
 
     increment = {}
     provisional = {}

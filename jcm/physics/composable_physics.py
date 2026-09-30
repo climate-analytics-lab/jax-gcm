@@ -40,7 +40,6 @@ from jcm.physics_interface import (
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 from jcm.physics.budget_gauge import gauge_aerosol_budget
-from jcm.physics.clouds.cloud_inputs import CONVECTIVE_DETRAINMENT_KEY
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics.radiation.band_config import RadiationBandConfig
 
@@ -811,9 +810,6 @@ class ComposablePhysics(nnx.Module, Physics):
     # (``jcm.physics.radiation.SURFACE_OPTICS_KEY``).
     _STEP_LOCAL_KEYS: ClassVar[frozenset[str]] = frozenset({
         "_surface_optics",
-        # Convection's detrained condensate for the cloud scheme of the same
-        # step (``jcm.physics.clouds.cloud_inputs``).
-        CONVECTIVE_DETRAINMENT_KEY,
     })
 
     @classmethod

@@ -1478,7 +1478,7 @@ class TestTerm:
 class TestCloudSchemeInputs:
 
     def test_detrainment_is_separate_and_changes_nothing_else(self):
-        """``_convective_detrainment`` leaves the increments and joins as ``pxtecl``.
+        """``clouds.conv_detrainment_qc`` leaves the increments and joins as ``pxtecl``.
 
         ECHAM reads the condensate only as ``pxlm1 + ztmst·(pxlte + pxtecl)``
         (F:666-680), so the result is the same whether the detrainment arrives
@@ -1493,7 +1493,8 @@ class TestCloudSchemeInputs:
                "tracers": {"qc": detr + zeros.at[k].set(1e-8), "qi": zeros}}
         state, diag, forcing, terrain = _term_inputs(tendency_run=run)
         tend_a, _ = Echam1MMicrophysics()(state, diag, forcing, terrain)
-        diag["_convective_detrainment"] = {"qc": detr, "qi": zeros}
+        diag["clouds"] = diag["clouds"].copy(conv_detrainment_qc=detr,
+                                             conv_detrainment_qi=zeros)
         inputs = cloud_scheme_inputs(state, diag)
         assert f(inputs.increment.tracers["qc"][k, 0]) == pytest.approx(
             1e-8 * 1200.0, rel=1e-6)
