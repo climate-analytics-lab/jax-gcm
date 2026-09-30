@@ -317,3 +317,54 @@ def _aquaplanet_like(state):
     coords = type("_Coords", (), {})()
     coords.horizontal = type("_H", (), {"nodal_shape": shape})()
     return TerrainData.aquaplanet(coords)
+
+
+def test_air_density_is_the_anchors_virtual_density(monkeypatch):
+    """The 2M column gets ECHAM's zrho = papm1/(rd·ptvm1) at the anchor.
+
+    ``mo_cloud_micro_2m.f90:578`` with ``ptvm1 = ptm1·(1 + vtmpc1·pqm1 −
+    (pxlm1 + pxim1))`` (``physc.f90:267-268``). The carried anchor here is
+    warmer and moister than the received state and holds condensate, so a
+    dry density, or one at the received state, fails. The layer depth that
+    goes with it keeps the layer mass ρ·dz of the moist-air diagnostics.
+    """
+    import jax
+
+    import jcm.constants as c
+    from jcm.forcing import ForcingData
+    from jcm.physics.clouds.lohmann_2m import scheme as scheme_module
+    from jcm.physics_interface import POST_PHYSICS_STATE_KEY
+
+    state, temperature, pressure, q = _cloudy_state()
+    physics = _composition(0.0)
+    ncols = 2
+    col = lambda v: jnp.broadcast_to(v[:, None], (TERM_NLEV, ncols))  # noqa: E731
+    qc_anchor = jnp.zeros(TERM_NLEV).at[CLOUD_LEVEL].set(2e-4)
+    anchor = {"temperature": col(temperature + 1.5),
+              "specific_humidity": col(q * 1.2),
+              "tracers": {"qc": col(qc_anchor), "qi": col(jnp.zeros(TERM_NLEV)),
+                          "qnc": col(jnp.zeros(TERM_NLEV)),
+                          "qni": col(jnp.zeros(TERM_NLEV))},
+              "valid": jnp.asarray(1.0)}
+
+    captured = []
+    real = scheme_module.cloud_microphysics_2m
+
+    def spy(*args):
+        jax.debug.callback(lambda rho, dz: captured.append(
+            (np.asarray(rho), np.asarray(dz))), args[8], args[9])
+        return real(*args)
+
+    monkeypatch.setattr(scheme_module, "cloud_microphysics_2m", spy)
+    forcing = ForcingData.zeros(state.normalized_surface_pressure.shape)
+    physics.compute_tendencies(state, forcing, _aquaplanet_like(state),
+                               prev_physics_data={POST_PHYSICS_STATE_KEY: anchor})
+    assert captured
+    tv = (temperature + 1.5) * (1.0 + c.vtmpc1 * q * 1.2 - qc_anchor)
+    expected = np.asarray(pressure / (c.rd * tv))
+    dry_received = np.asarray(pressure / (287.04 * temperature))
+    for rho, dz in captured:
+        np.testing.assert_allclose(rho, expected, rtol=1e-6)
+        assert np.max(np.abs(rho / dry_received - 1.0)) > 1e-3
+        # rho·dz is the stub's layer mass, dry density times 400 m.
+        np.testing.assert_allclose(rho * dz, dry_received * 400.0, rtol=1e-6)

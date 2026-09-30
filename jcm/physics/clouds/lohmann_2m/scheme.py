@@ -1305,8 +1305,6 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         params_2m = self.params.get_value()
 
         pressure_full = diagnostics["pressure_full"]
-        air_density = diagnostics["air_density"]
-        layer_thickness = diagnostics["layer_thickness"]
 
         # ECHAM's cloud_micro_interface inputs (physc.f90:1073-1081): the
         # anchor state at the previous time level, the increments since then
@@ -1320,6 +1318,20 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             state, diagnostics, tracers=("qc", "qi", "qnc", "qni"))
         anchor, increment = inputs.anchor, inputs.increment
         provisional = inputs.provisional
+
+        # Air density: ECHAM's zrho = papm1/(rd·ptvm1)
+        # (mo_cloud_micro_2m.f90:578), the anchor's virtual density, with
+        # ptvm1 = ptm1·(1 + vtmpc1·pqm1 − (pxlm1 + pxim1)) (physc.f90:267-268),
+        # as the 1M forms it. The layer depth goes with it, dz = Δp/(ρ·g) (the
+        # virtual-temperature depth, as ECHAM's zdz from the geopotential), so
+        # the layer mass the column forms as ρ·g·dz stays the moist-air
+        # diagnostics' Δp.
+        virtual_temperature = anchor.temperature * (
+            1.0 + c.vtmpc1 * anchor.specific_humidity
+            - (anchor.tracers["qc"] + anchor.tracers["qi"]))
+        air_density = pressure_full / (c.rd * virtual_temperature)
+        layer_mass = diagnostics["air_density"] * diagnostics["layer_thickness"]
+        layer_thickness = layer_mass / air_density
 
         clouds = diagnostics["clouds"]
         cloud_fraction = clouds.cloud_fraction

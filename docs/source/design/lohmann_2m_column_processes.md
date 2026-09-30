@@ -143,7 +143,10 @@ state, and the host sums them.
 `cloud_microphysics_2m` takes ECHAM's split directly:
 
 - the **anchor** `*_m1` = ECHAM's previous time level. Every quantity ECHAM
-  evaluates at t−1 reads it: saturation and the other section-1 fields,
+  evaluates at t−1 reads it: the air density (the term forms ECHAM's
+  `zrho = papm1/(rd·ptvm1)`, `mo_cloud_micro_2m.f90:578`, from the anchor and
+  passes it in with the layer depth `Δp/(ρ·g)` that keeps the layer mass),
+  saturation and the other section-1 fields,
   `zrid`, the temperature tests of `ll_cv` and `lo2`, the moist `cp`,
   melting and falling-ice sublimation;
 - the **increments** `*_increment` = `ztmst·ptte`, `ztmst·pqte`,
