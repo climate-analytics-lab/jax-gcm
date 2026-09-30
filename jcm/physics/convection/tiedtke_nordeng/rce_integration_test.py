@@ -526,7 +526,7 @@ class TestMoistureSupplyClosure(unittest.TestCase):
         self.assertGreater(mfu_anchored, 0.0)
         self.assertLess(mfu_anchored, 5.0)
 
-    def test_precip_scales_with_moisture_supply(self):
+    def test_deep_precip_is_set_by_the_rescale_not_the_supply(self):
         """Deep precipitation is set by the Nordeng rescale, not the supply.
 
         The moisture budget is only the FIRST GUESS; Nordeng's

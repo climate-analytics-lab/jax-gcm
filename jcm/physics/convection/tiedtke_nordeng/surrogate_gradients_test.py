@@ -15,8 +15,8 @@ ones:
   carries one only through its surrogate;
 * a column that ECHAM's first ascent test turns off returns exactly nothing,
   and its derivative with respect to the column state is the surrogate's
-  continuation of the convection it would have had, which the reference
-  derivative (all widths zero) does not see.
+  continuation applied to the ledger of the plume the scheme ran for it,
+  which the reference derivative (all widths zero) does not see.
 """
 
 import functools
@@ -260,7 +260,7 @@ def test_a_failed_first_ascent_leaves_no_surface_plume(monkeypatch):
     """A column the first ascent leaves non-convective stays so.
 
     ``cuasc`` resets ``pmfub`` and ``klab`` of a non-convective column before
-    the second ascent (mo_cuascent.f90:186-190, 212-215), so its surface
+    the second ascent (mo_cuascent.f90:190, 216-217), so its surface
     plume is not run again, whatever the closed flux would give. The first
     ascent is forced to fail here on a column whose plume passes; the final
     ascent is left alone.

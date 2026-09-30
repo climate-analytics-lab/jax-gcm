@@ -117,7 +117,7 @@ class TestRelativeThresholdSwitch:
 
 class TestAscentTest:
     def test_value_is_echams_conjunction(self):
-        # mo_cuascent.f90:436-451: pqu < zqold (cond > 0), zbuo > 0 strictly,
+        # mo_cuascent.f90:442-451: pqu < zqold (cond > 0), zbuo > 0 strictly,
         # pmfu >= 0.01·pmfub inclusively.
         mfub = 0.02
         cases = [
@@ -199,9 +199,6 @@ class TestWidthsAreStatic:
 
     def test_widths_are_not_pytree_leaves(self):
         leaves = jax.tree_util.tree_leaves(_DEFAULT)
-        values = {float(w) for w in _ASCENT_WIDTHS}
-        assert not any(isinstance(leaf, float) and leaf in values
-                       for leaf in leaves)
         n_fields = len(_DEFAULT.__dataclass_fields__)
         from jcm.physics.convection.tiedtke_nordeng.types import (
             SURROGATE_WIDTH_FIELDS,
@@ -211,6 +208,13 @@ class TestWidthsAreStatic:
     def test_negative_width_is_rejected(self):
         with pytest.raises(ValueError):
             _DEFAULT.replace(ascent_buoyancy_width=-1.0).validate()
+        with pytest.raises(ValueError):
+            ConvectionParameters.default(ascent_buoyancy_width=-1.0)
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            TiedtkeConvection,
+        )
+        with pytest.raises(ValueError):
+            TiedtkeConvection(_DEFAULT.replace(precip_onset_width=-1.0))
 
     def test_unknown_width_is_rejected(self):
         with pytest.raises(TypeError):

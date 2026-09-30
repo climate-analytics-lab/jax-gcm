@@ -82,18 +82,20 @@ carries, where the plume stops and where it rains are hard comparisons in
    ``zhelp = max(0, 1.1·E·g)`` (``ktype = FSEL(zhelp − zdqcv, 2, 1)``,
    lines 571-574), else shallow; a deep plume thinner than 200 hPa after the
    first ascent is demoted to shallow.
-4. The ascent test at each interface (``mo_cuascent.f90:436-466``): the plume
+4. The ascent test at each interface (``mo_cuascent.f90:442-465``): the plume
    continues only if it condensed there, its buoyancy ``zbuo`` (plus
    ``zlift`` on a mid-level plume's first step) is positive, it carries at
    least 1 % of the cloud-base flux and the interface lies at or below the
    cloud-top bound. The first interface that fails ends the ascent: no level
    above it is visited (the ``klab = 0`` latch, line 294), and a fraction
-   ``cmfctop`` of the flux overshoots into it. A plume that passes no
-   interface above cloud base leaves ``kctop = klevm1`` and the column
-   non-convective (line 541); a column that the first ascent leaves
-   non-convective runs no surface plume in the second.
+   ``cmfctop`` of the flux overshoots into it. A plume based at ``klevm1``
+   that passes no interface above it leaves ``kctop = klevm1`` and the column
+   non-convective (line 541) — a cloud base higher up counts as passed, its
+   test in ``cuasc`` repeating ``cubase``'s; a column that the first ascent
+   leaves non-convective runs no surface plume in the second.
 5. Precipitation starts where the interface lies ``zdnoprc`` or more above
-   cloud base (1.5e4 Pa over sea, 3e4 Pa wherever the column holds land).
+   cloud base (1.5e4 Pa over sea, 3e4 Pa over land: a land fraction of 0.5
+   or more, as ECHAM's default binary land-sea mask ``slm`` classifies it).
 
 ECHAM has no CAPE trigger, and neither does the port.
 ``jcm/data/test/echam_cumastr_reference`` holds what ECHAM6.3's compiled
@@ -104,7 +106,7 @@ moisture convergence (deep plumes) or a sub-cloud divergence and a humid
 sub-cloud layer (both ``zlo1`` conditions): in float64 with ECHAM's physical constants the port takes the same
 decision (convective or not, type, cloud base, cloud top) on every column,
 and its cloud-base mass flux, surface precipitation and per-level tendencies
-agree to 2e-12 of ECHAM's (``cumastr_reference_test.py``).
+agree to 2.1e-12 or better (``cumastr_reference_test.py``).
 
 Each decision's derivative is a named surrogate's (``switches.py``; see
 {doc}`../design/surrogate_gradients`): the value is ECHAM's, and the
@@ -121,7 +123,8 @@ overshoot and, at the first interface above a cloud base at ``klevm1``, the
 column's ``ldcum``; the chain of decisions that makes ``ldcum`` weights the
 whole ledger and the published mass fluxes, each link only where the links
 before it passed, so a column that is off carries the derivative of the
-switch that turned it off, applied to the convection it would have had.
+switch that turned it off, applied to the ledger of the plume the scheme ran
+for it (at ECHAM's first-guess flux for a plume the ``zlo1`` gate rejects).
 Tiedtke-Nordeng's saturation is ECHAM's
 ``ua`` table, Sonntag (1990) over ice at and below the melting point and over
 water above (``jcm/physics/convection/tiedtke_nordeng/cuadjtq.py`` on
@@ -278,9 +281,10 @@ arrays, and the surface interface carries no flux:
   there overshoots with the properties the ascent gave it and no
   precipitation; the rest detrains in that layer with the plume's condensate,
   and the overshoot's own condensate detrains in the layer above. A plume
-  that passes no interface above cloud base leaves ``kctop`` at ``klevm1``,
-  which makes the column non-convective (``ldcum`` false) — a ``cubase``
-  plume's seed interface counts, since the test there repeats ``cubase``'s.
+  based at ``klevm1`` that passes no interface above it leaves ``kctop`` at
+  ``klevm1``, which makes the column non-convective (``ldcum`` false) — a
+  ``cubase`` plume's seed interface counts, since the test there repeats
+  ``cubase``'s.
 - ``kctop0`` is ``cumastr``'s first-pass estimate: ``ictop0``, the highest
   interface at least two above cloud base where the cloud-base parcel's moist
   static energy exceeds the environment's reduced saturation value

@@ -174,7 +174,7 @@ Convection
 - Evaporatively-driven downdrafts
 - Convective precipitation (rain and snow)
 - Convective transport of cloud water and ice tracers
-- **Cuadjtq saturation adjustment** (ECHAM ``mo_cuadjust.f90::cuadjtq``, compared with the compiled routine): two damped Newton steps ``cond = (q - qs) / (1 + L/cp · dqs/dT)`` on ECHAM's ``ua`` saturation (Sonntag 1990, :py:mod:`jcm.physics.thermodynamics`), the first clipped by ``kcall`` (``0`` both signs for the half-level environment, ``1`` condensation only in the updraft and at cloud base, ``2`` evaporation only in the downdraft), the second unclipped where the first was non-zero, in :py:func:`jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq`. The updraft, cloud-base and CAPE parcels use its ``kcall=1`` wrapper :py:func:`~jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq_newton`, the downdraft wet bulb its ``kcall=2`` wrapper :py:func:`~jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq_newton_evap`; the ``1 + L/cp · dqs/dT`` denominator accounts for the warming that condensation causes, and every step conserves total water.
+- **Cuadjtq saturation adjustment** (ECHAM ``mo_cuadjust.f90::cuadjtq``, compared with the compiled routine): two damped Newton steps ``cond = (q - qs) / (1 + L/cp · dqs/dT)`` on ECHAM's ``ua`` saturation (Sonntag 1990, :py:mod:`jcm.physics.thermodynamics`), the first clipped by ``kcall`` (``0`` both signs for the half-level environment, ``1`` condensation only in the updraft and at cloud base, ``2`` evaporation only in the downdraft), the second unclipped where the first was non-zero, in :py:func:`jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq`. The updraft and cloud-base parcels use its ``kcall=1`` wrapper :py:func:`~jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq_newton`, the downdraft wet bulb its ``kcall=2`` wrapper :py:func:`~jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq_newton_evap`; the ``1 + L/cp · dqs/dT`` denominator accounts for the warming that condensation causes, and every step conserves total water.
 - **Mass-flux CFL cap**: at cloud base the updraft mass flux is capped to the layer-mass-per-timestep, ``mfu_cb ≤ rho_cb · dz_cb / dt``, to prevent the explicit transport step from violating CFL when the closure suggests an unphysically large mass flux. This is the JAX-side analogue of ECHAM's implicit upwind transport.
 
 **Activation Criteria**:
@@ -944,7 +944,7 @@ To customize physics parameters:
    from jcm.physics.radiation.radiation_types import RadiationParameters
 
    convection = ConvectionParameters.default(
-       tau=7200.0,        # Slower CAPE closure (2 hours)
+       tau=3600.0,        # Faster Nordeng closure (1 hour; the default is 2)
        entrpen=2.0e-4     # Stronger entrainment
    )
 

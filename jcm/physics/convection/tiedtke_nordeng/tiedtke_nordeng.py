@@ -223,7 +223,7 @@ def find_cloud_base(temperature: jnp.ndarray,
     variance (ECHAM ``pthvsig``); see :func:`cloud_base_lift`. Elevated
     convection is ``cubasmc``, ported in :func:`find_midlevel_cloud_base`.
     ``cubasmc`` fires only in a column that is not yet convective
-    (``.NOT.ldcum``, mo_cuascent.f90:631), and a surface plume that passes
+    (``.NOT.ldcum``, mo_cuascent.f90:636), and a surface plume that passes
     cuasc's first cloud-level test makes it convective, so no second plume
     is seeded above it; one that takes no hold leaves the column to
     ``cubasmc`` in the second ascent, which the scheme's driver reproduces.
@@ -354,7 +354,7 @@ def find_midlevel_cloud_base(temperature: jnp.ndarray,
     the first ascent's 400 hPa cloud-top bound (the seed's static energy,
     ``pcpen(kk+1)·ptu(kk+1) + pgeoh(kk+1)`` with
     ``ptu(kk+1) = (pcpen(kk)·pten(kk) + pgeo(kk) − pgeoh(kk+1))/pcpen(kk)``,
-    mo_cuascent.f90:640-648, converted back with the top interface's
+    mo_cuascent.f90:641-649, converted back with the top interface's
     ``pcpcu``), a ``cuadjtq`` adjustment at the top
     interface pressure, and the buoyancy test against the half-level
     environment with the ``zlift`` bonus that applies because the interface
@@ -415,7 +415,7 @@ def find_midlevel_cloud_base(temperature: jnp.ndarray,
     )
 
     # Survival of a seed in layer kk: the seed at interface kk+1 carries
-    # ``pcpen(kk+1)·ptu(kk+1) + pgeoh(kk+1)`` (mo_cuascent.f90:640-648); one
+    # ``pcpen(kk+1)·ptu(kk+1) + pgeoh(kk+1)`` (mo_cuascent.f90:641-649); one
     # DSE-conserving lift across the layer to interface kk, the damped
     # Newton adjustment there, then the buoyancy test WITH ``zlift``.
     from .half_levels import cubasmc_seed_static_energy
@@ -688,9 +688,9 @@ def _tiedtke_convection_toa_first(
         dt: Time step (s)
         config: Convection configuration
         land_fraction: Fraction of column underlying land (0=ocean, 1=land).
-            Selects ECHAM's per-surface ``zdnoprc`` precip-zone threshold
-            via ``config.cu_dnoprc_ocean`` / ``config.cu_dnoprc_land``.
-            Defaults to 0 (ocean).
+            At 0.5 or more the column takes ECHAM's land ``zdnoprc``
+            precipitation-onset depth (``config.cu_dnoprc_land``), else the
+            sea one (``config.cu_dnoprc_ocean``). Defaults to 0 (ocean).
         moisture_supply: Surface evaporation [kg/m²/s], upward positive —
             ECHAM's ``−pqhfla``. It sets the deep/shallow test's
             ``zhelp = 1.1·E``. Where no ``moisture_tend_profile`` is given it
@@ -795,7 +795,7 @@ def _tiedtke_convection_toa_first(
         thvsig, cp_moist=cp_moist, env=env,
     )
     from .updraft import cubase_parcel
-    from .switches import relative_threshold_switch, threshold_switch
+    from .switches import chain, relative_threshold_switch, threshold_switch
     dtype = temperature.dtype
 
     # --- The pre-convection moisture tendency ``pqte`` --------------------
@@ -844,19 +844,20 @@ def _tiedtke_convection_toa_first(
     tu_cb, qu_cb, lu_cb = cubase_parcel(env, cloud_base_sfc)
     zqumqe = qu_cb + lu_cb - env.qenh[cloud_base_sfc]
     zdqmin = jnp.maximum(0.01 * env.qenh[cloud_base_sfc], 1.0e-10)
-    zlo1 = (threshold_switch(zdqpbl, config.sub_cloud_supply_width)
-            * relative_threshold_switch(zqumqe, zdqmin,
-                                        config.cloud_base_excess_width))
+    zlo1 = chain(
+        threshold_switch(zdqpbl, config.sub_cloud_supply_width),
+        relative_threshold_switch(zqumqe, zdqmin,
+                                  config.cloud_base_excess_width))
     cubase_on = has_cloud_base_sfc & (zlo1 > 0.5)
 
     # A column that is not convective after cubase and the ``zlo1`` gate is
     # the one where cuasc's ``cubasmc`` may seed a mid-level plume
-    # (``.NOT.ldcum``, mo_cuascent.f90:631). A cubase column that fails the
+    # (``.NOT.ldcum``, mo_cuascent.f90:636). A cubase column that fails the
     # gate and has no mid-level alternative still runs the plume the gate
-    # rejects, at ECHAM's first-guess flux for it, and the whole result is
-    # weighted by the gate (``zlo1`` = 0 in the value): the output is
-    # ECHAM's exactly, and its derivative is the gate's surrogate slope times
-    # the convection the column would have.
+    # rejects, at ECHAM's first-guess flux for it (0.01 kg/m²/s), and the
+    # whole result is weighted by the gate (``zlo1`` = 0 in the value): the
+    # output is ECHAM's exactly, and its derivative is the gate's surrogate
+    # slope times that plume's ledger.
     use_midlev = (~cubase_on) & has_midlev_base
     cloud_base = jnp.where(use_midlev, midlev_base, cloud_base_sfc)
     has_cloud_base = has_cloud_base_sfc | use_midlev
@@ -879,8 +880,9 @@ def _tiedtke_convection_toa_first(
     # ECHAM has no CAPE trigger and no CAPE type split. The deep/shallow
     # choice is ECHAM's in the value and carries a logistic surrogate's
     # derivative of width ``deep_convergence_width``, so the per-type
-    # entrainment and closure, blended linearly by these weights, respond to
-    # the convergence that selects them.
+    # entrainment rates and entrainment bands, blended linearly by these
+    # weights, respond to the convergence that selects them; the closure is
+    # chosen by the integer type.
     w_deep = threshold_switch(zdqcv - zhelp, config.deep_convergence_width)
     w_mid = use_midlev.astype(dtype)
     type_weights = jnp.stack([
@@ -1172,22 +1174,29 @@ def _tiedtke_convection_toa_first(
         # ascent must pass an interface (mo_cuascent.f90:541) — a column the
         # first ascent leaves non-convective runs no surface plume in the
         # second, as cuasc resets ``pmfub`` and ``klab`` there (lines
-        # 186-190, 212-215); then so must the final ascent. The mid-level
+        # 190, 216-217); then so must the final ascent. The mid-level
         # plume the second ascent seeds afresh is decided by that ascent
-        # alone. As a weight the chain is 1.0 or 0.0. Each link is weighted
-        # only where the links before it passed, so that where the chain
-        # fails, its derivative is that of the first switch that failed,
-        # which is the decision that turned the column off.
-        def _then(passed, weight):
-            return jnp.where(passed > 0.5, weight, 1.0)
-
-        after_gate = first_ldcum_weight * _then(
-            first_ldcum_weight, updraft_state.ldcum_weight)
+        # alone. As a weight the chain is 1.0 or 0.0, and where it fails its
+        # derivative is that of the first link that failed (``switches.chain``).
         ldcum_weight = jnp.where(
             switch_mid,
             updraft_state.ldcum_weight,
-            jnp.where(use_midlev, after_gate, zlo1 * _then(zlo1, after_gate)))
+            jnp.where(use_midlev,
+                      chain(first_ldcum_weight, updraft_state.ldcum_weight),
+                      chain(zlo1, first_ldcum_weight,
+                            updraft_state.ldcum_weight)))
         ldcum = ldcum_weight > 0.5
+
+        def _weighted(x):
+            """``x`` weighted by ``ldcum``: ECHAM's value, the chain's slope.
+
+            Where the column is not convective the ledger belongs to a plume
+            ECHAM does not run; it contributes only through the weight's
+            derivative, and a non-finite value there must not reach the
+            output, whose value is zero.
+            """
+            safe = jnp.where(ldcum | jnp.isfinite(x), x, 0.0)
+            return safe * ldcum_weight
         # The downdraft is not re-run: ECHAM scales its fluxes and rain uptake
         # by the same factor (mo_cumastr.f90:944-972). It exists only under a
         # plume that took hold in the first ascent (cudlfs requires
@@ -1219,9 +1228,9 @@ def _tiedtke_convection_toa_first(
         # cuflx/cudtdq act only on convective columns (``ldcum``). The
         # ledger is weighted by ``ldcum_weight`` rather than masked: its value
         # is exactly zero where ECHAM's column is not convective, and its
-        # derivative there is that of the switches that turned it off
-        # applied to the convection the column would have had.
-        tendencies = jax.tree.map(lambda x: x * ldcum_weight, tendencies)
+        # derivative there is that of the switch that turned it off applied
+        # to the ledger of the plume the scheme ran for the column.
+        tendencies = jax.tree.map(_weighted, tendencies)
 
         # NOTE: ECHAM applies NO grid-mean saturation adjustment after
         # cudtdq (mo_cumastr.f90 — after the tendencies only cududv and the
@@ -1256,7 +1265,7 @@ def _tiedtke_convection_toa_first(
         # which drive the convective tracer transport, carry the same weight
         # as the ledger.
         new_state = new_state._replace(**{
-            f: getattr(new_state, f) * ldcum_weight
+            f: _weighted(getattr(new_state, f))
             for f in ("mfu", "mfd", "entrain_up", "entrain_down")})
 
         return tendencies, new_state
@@ -1466,9 +1475,12 @@ class TiedtkeConvection(PhysicsTerm):
     model timestep from ``diagnostics["_dt_seconds"]``. The environment
     (T, q) comes from the running ``thermo_run`` view (post-vdiff under
     the ECHAM physc term ordering; falls back to the raw state when
-    absent), and the zdqpbl closure supply reads the same-step
-    ``vertical_diffusion.qv_tendency`` profile plus the delivered surface
-    evaporation from ``diagnostics["surface"]``. Writes the
+    absent). ECHAM's pre-convection moisture tendency ``pqte`` is the
+    same-step ``vertical_diffusion.qv_tendency`` profile (which contains the
+    surface evaporation vdiff delivered) plus the dynamics tendency of the
+    previous step, reconstructed from the ``_prev_step`` carry; the surface
+    evaporation from ``diagnostics["surface"]`` sets the deep/shallow test's
+    ``zhelp``. Writes the
     :class:`ConvectionData` sub-struct under the public ``"convection"``
     key and advances ``clouds.qc`` / ``clouds.qi`` for downstream
     microphysics in the same split step.
@@ -1525,6 +1537,7 @@ class TiedtkeConvection(PhysicsTerm):
         resolved ascent, so no mid-level convection".
         """
         params = params or ConvectionParameters.default()
+        params.validate()
         self.params = nnx.Param(params)
         self._updraft_precip_cover = bool(updraft_precip_cover)
         if bool(params.cu_lmfmid):
@@ -1582,20 +1595,18 @@ class TiedtkeConvection(PhysicsTerm):
             temperature_env = thermo_run["temperature"]
             humidity_env = thermo_run["specific_humidity"]
 
-        # Boundary-layer moisture supply floor for the deep mass-flux closure:
-        # the SAME-STEP grid-box surface evaporation [kg/m²/s]. The vdiff term
-        # (which owns the surface exchange as the bottom row of its implicit
-        # solve) and the ``EchamSurface`` term that republishes its delivered
-        # fluxes both run *before* convection now, so this is this step's
-        # actually-delivered flux, not a one-step-lagged carry. Absent (e.g. a
-        # radiative-convective stack with no surface term) it stays zero and
-        # the scheme falls back to the CAPE closure.
+        # The SAME-STEP grid-box surface evaporation [kg/m²/s], ECHAM's
+        # ``−pqhfla``: the deep/shallow test's ``zhelp = 1.1·E``. The vdiff
+        # term (which owns the surface exchange as the bottom row of its
+        # implicit solve) and the ``EchamSurface`` term that republishes its
+        # delivered fluxes both run *before* convection, so this is this
+        # step's delivered flux. Absent (a stack with no surface term) it is
+        # zero.
         #
         # Read ``effective_evaporation`` — the moisture the column actually
         # received. Since the surface exchange became the bottom boundary row
         # of the vdiff implicit solve, this equals ``evaporation`` identically
-        # (reported == delivered, the ECHAM pev_vdiff identity), so the budget
-        # closure can never export more water than was supplied. Fall back to
+        # (reported == delivered, the ECHAM pev_vdiff identity). Fall back to
         # the raw flux for any surface state predating the field.
         surface_diag = diagnostics.get("surface")
         if surface_diag is not None and getattr(
@@ -1615,13 +1626,11 @@ class TiedtkeConvection(PhysicsTerm):
         # mixing + the surface-evaporation boundary row), read from the
         # same-step ``vertical_diffusion`` diagnostics. With the dynamics part
         # below it forms the ``pqte`` whose integrals are the closure supply
-        # ``zdqpbl`` and the type test's ``zdqcv``.
+        # ``zdqpbl`` and the type test's ``zdqcv``. A stack without vdiff
+        # passes none, and the scheme then delivers the surface evaporation
+        # to the lowest layer, where vdiff's surface row would have put it.
         vdiff_diag = diagnostics.get("vertical_diffusion")
-        qv_tend_vdiff = getattr(vdiff_diag, "qv_tendency", None)
-        if qv_tend_vdiff is not None:
-            moisture_tend_profile = qv_tend_vdiff
-        else:
-            moisture_tend_profile = jnp.zeros_like(state.specific_humidity)
+        moisture_tend_profile = getattr(vdiff_diag, "qv_tendency", None)
 
         # ECHAM ``pthvsig`` — σ(θ_v) at the second-lowest full level, from
         # vdiff's prognostic θ_v variance. This is what sets the cloud-base

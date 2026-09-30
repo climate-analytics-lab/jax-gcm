@@ -426,9 +426,9 @@ def calculate_updraft(
         mass_flux_base: Cloud base mass flux ``pmfub`` (kg/m²/s)
         config: Convection configuration
         land_fraction: Fraction of column underlying land surface (0=open
-            ocean, 1=land). Selects ECHAM's per-surface ``zdnoprc``
-            threshold via ``config.cu_dnoprc_ocean`` and
-            ``config.cu_dnoprc_land``.
+            ocean, 1=land). At 0.5 or more the column takes ECHAM's land
+            ``zdnoprc`` (``config.cu_dnoprc_land``), else the sea one
+            (``config.cu_dnoprc_ocean``).
         type_weights: (deep, shallow, mid) weights: one-hot in the value,
             with the derivative of the deep/shallow test's surrogate
             (``switches``); ``None`` means the one-hot of ``ktype``.
@@ -486,10 +486,12 @@ def calculate_updraft(
         klwmin = jnp.asarray(nlev - 1)
     kctop0 = jnp.asarray(ktop)
     # ECHAM's precipitation-onset depth ``zdnoprc = MERGE(zdlev, 1.5e4,
-    # ldland)`` (mo_cuascent.f90:452): the land value wherever the column
-    # holds any land, as ``physc`` sets ``loland = slf > 0``
-    # (physc.f90:379-385).
-    zdnoprc_col = jnp.where(land_fraction > 0.0, config.cu_dnoprc_land,
+    # ldland)`` (mo_cuascent.f90:454). ``physc`` sets ``loland`` from the
+    # binary land-sea mask under ECHAM6's default ``lfractional_mask =
+    # .FALSE.`` (physc.f90:383-386, mo_control.f90:86), which on jcm's
+    # fractional land is ``land_fraction >= 0.5``, the split every ECHAM term
+    # of jcm uses (``clouds.cloud_utils.continental_columns``).
+    zdnoprc_col = jnp.where(land_fraction >= 0.5, config.cu_dnoprc_land,
                             config.cu_dnoprc_ocean)
     if type_weights is None:
         type_weights = jnp.stack([
@@ -519,7 +521,7 @@ def calculate_updraft(
     # half-level ``pcpcu`` for a cubase plume, whose seed is the adjusted
     # parcel AT kcbot; for the cubasmc seed, ``pcpen(kk+1)`` of the level
     # below the seeding layer, ``pmfus(kk+1) = pmfub·(pcpen(kk+1)·ptu(kk+1)
-    # + pgeoh(kk+1))`` (mo_cuascent.f90:648; see
+    # + pgeoh(kk+1))`` (mo_cuascent.f90:649; see
     # :func:`~.half_levels.cubasmc_seed_static_energy`).
     cp_seed = jnp.where(is_midlevel, cp_moist[kseed_safe],
                         env.cpcu[kseed_safe])
@@ -819,7 +821,7 @@ def calculate_updraft(
             tu_new, qu_new, cond = saturation_adjustment(t_mix, q_mix, paph_k_)
             lu_new = l_mix + cond
 
-            # The ascent test (lines 436-466). The plume continues through
+            # The ascent test (lines 442-465). The plume continues through
             # this interface only if it CONDENSED here (``pqu < zqold``) and
             # is then buoyant — ECHAM's ``zbuo``, the virtual temperature of
             # the condensate-loaded plume less that of the half-level

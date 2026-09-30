@@ -40,9 +40,11 @@ class ConvectionParameters:
     these fields (:mod:`~jcm.physics.convection.tiedtke_nordeng.switches`,
     ``docs/source/design/surrogate_gradients.md``). A width of zero selects
     the reference derivative. ECHAM has no CAPE trigger, and neither does
-    this scheme: a column convects when ``cubase`` finds a buoyant cloud
-    base, the cloud-base moisture budget passes ``cumastr``'s ``zlo1`` test
-    and the first ascent passes an interface above cloud base.
+    this scheme: a surface plume convects when ``cubase`` finds a buoyant
+    cloud base, the cloud-base moisture budget passes ``cumastr``'s ``zlo1``
+    test and the ascents leave ``kctop`` above ``klevm1`` (a cloud base above
+    ``klevm1`` passes by itself, its test in ``cuasc`` repeating
+    ``cubase``'s; one at ``klevm1`` needs the first interface above it).
     """
 
     # Entrainment/detrainment parameters
@@ -148,7 +150,7 @@ class ConvectionParameters:
 
     # Surrogate widths (static). Each is the width of the logistic whose
     # derivative one of ECHAM's hard decisions carries; see ``switches.py``.
-    # The ascent test (mo_cuascent.f90:436-451), per factor:
+    # The ascent test (mo_cuascent.f90:442-451), per factor:
     ascent_condensate_width: float = struct.field(
         pytree_node=False, default=1.0e-8)   # condensed vapour [kg/kg]
     ascent_buoyancy_width: float = struct.field(
@@ -156,7 +158,7 @@ class ConvectionParameters:
     ascent_mass_flux_width: float = struct.field(
         pytree_node=False, default=2.0e-3)   # ``pmfu/pmfub - 0.01`` [-]
     # The precipitation onset ``zpbase - paphp1 >= zdnoprc``
-    # (mo_cuascent.f90:453-454) [Pa].
+    # (mo_cuascent.f90:454-455) [Pa].
     precip_onset_width: float = struct.field(
         pytree_node=False, default=2.0e3)
     # The deep/shallow test ``zdqcv > MAX(0, -1.1·pqhfla·g)``
@@ -197,7 +199,7 @@ class ConvectionParameters:
                 f"ConvectionParameters.default() got unknown field(s) "
                 f"{unknown}; the surrogate widths are "
                 f"{list(SURROGATE_WIDTH_FIELDS)}")
-        return cls(
+        params = cls(
             entrpen=jnp.array(entrpen),
             entrscv=jnp.array(entrscv),
             entrmid=jnp.array(entrmid),
@@ -225,6 +227,8 @@ class ConvectionParameters:
             cu_lmfmid=jnp.array(cu_lmfmid),
             **{k: float(v) for k, v in widths.items()},
         )
+        params.validate()
+        return params
 
     def validate(self):
         """Reject a negative surrogate width (a width is a scale, or zero)."""

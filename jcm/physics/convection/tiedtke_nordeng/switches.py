@@ -87,8 +87,10 @@ def ascent_test_pair(condensate_width, buoyancy_width, mass_flux_width):
     plus ``zlift`` where the interface below is still ``klab == 1``), the
     plume's mass flux there and the cloud-base flux [kg/m²/s].
 
-    ``exact`` is ECHAM's conjunction (mo_cuascent.f90:436-451)
-    ``pqu < zqold .AND. zbuo > 0 .AND. pmfu >= 0.01·pmfub`` as 1.0/0.0.
+    ``exact`` is ECHAM's conjunction (mo_cuascent.f90:442-451)
+    ``pqu < zqold .AND. zbuo > 0 .AND. pmfu >= 0.01·pmfub`` as 1.0/0.0; the
+    fourth condition, ``jk >= kctop0``, compares level indices and is applied
+    by the caller.
     ``surrogate`` replaces each comparison by a smooth gate and multiplies
     them: :func:`rescaled_sigmoid` of the condensate (exactly zero where
     nothing condenses, so a plume that stops condensing carries no
@@ -130,6 +132,22 @@ def ascent_test(cond, zbuo, mfu, mfub, condensate_width, buoyancy_width,
     dtype = jnp.result_type(zbuo)
     args = [jnp.asarray(a, dtype=dtype) for a in (cond, zbuo, mfu, mfub)]
     return with_surrogate_gradient(exact, surrogate)(*args)
+
+
+def chain(*weights):
+    """Return the 0/1 weight of a chain of decisions, each after the last.
+
+    The value is the product of the links. Each link is weighted only where
+    every link before it passed (``w1·where(w1, w2·where(w2, ..., 1), 1)``),
+    so where the chain fails its derivative is that of the first link that
+    failed, the decision that turned it off: a plain product would give a
+    zero derivative wherever two links fail, each slope multiplied by
+    another link's zero. See ``docs/source/design/surrogate_gradients.md``.
+    """
+    out = weights[-1]
+    for weight in reversed(weights[:-1]):
+        out = weight * jnp.where(weight > 0.5, out, 1.0)
+    return out
 
 
 def relative_threshold_pair(width):

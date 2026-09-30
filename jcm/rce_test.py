@@ -485,13 +485,16 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     higher, because it fails the ascent test at the first interface above
     cloud base (``mo_cuascent.f90`` l.449-451). ECHAM6.3's compiled
     ``mo_cover``/``mo_cloud``, fed this column's states, make the same fog,
-    and its compiled ``cumastr`` takes the port's decisions on every one of
-    the 7680 steps when the port runs with ECHAM's physical constants
-    (``echam_cumastr_reference``). With jcm's ``rv`` (461.0 against ECHAM's
-    461.51, 0.11 % in the saturation humidity) the port convects in 10.9 % of
-    the days 40-80 steps where ECHAM convects in 24.3 %, and never where
-    ECHAM does not: the buoyancy of that first interface sits within
-    hundredths of a kelvin of zero. The testbed has no shear or subsidence
+    and its compiled ``cumastr`` took the port's decision on every one of
+    this column's 7680 captured steps with the port run under ECHAM's
+    physical constants; the stored reference (``echam_cumastr_reference``)
+    holds 400 states of two earlier trajectories of the column and is the
+    standing check.
+    With jcm's ``rv`` (461.0 against ECHAM's 461.51, 0.11 % in the
+    saturation humidity) the port convects in 10.9 % of the days 40-80 steps
+    where ECHAM convects in 24.3 %, and never where ECHAM does not: the
+    buoyancy of that first interface sits within hundredths of a kelvin of
+    zero. The testbed has no shear or subsidence
     to ventilate its lowest layer (#967). The TOA shortwave albedo is
     0.53.
 

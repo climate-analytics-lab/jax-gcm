@@ -268,7 +268,7 @@ def cubasmc_seed_static_energy(cp_moist: jnp.ndarray,
     ``ptu(kk+1) = (pcpen(kk)·pten(kk) + pgeo(kk) − pgeoh(kk+1))/pcpen(kk)``,
     and forms the static-energy flux with the heat capacity of the level
     BELOW, ``pmfus(kk+1) = pmfub·(pcpen(kk+1)·ptu(kk+1) + pgeoh(kk+1))``
-    (mo_cuascent.f90:640-648). Entry ``kk`` is that energy for a seed in
+    (mo_cuascent.f90:641-649). Entry ``kk`` is that energy for a seed in
     layer ``kk``; the bottom layer, which has no level below and in which
     ``cubasmc`` never seeds, repeats its own full-level energy.
     """

@@ -665,11 +665,6 @@ class TestCloudBaseBuoyancyGate(unittest.TestCase):
         has_sink = (mfd[1:] < 0.0) | (layers >= int(state.kbase))
         self.assertGreaterEqual(float(np.min(source[~has_sink])), -1e-12)
 
-
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestAscentEndsAtTheFirstFailure(unittest.TestCase):
     """``cuasc`` visits no interface above the first failed ascent test.
 
@@ -731,17 +726,25 @@ class TestAscentEndsAtTheFirstFailure(unittest.TestCase):
             np.testing.assert_array_equal(np.asarray(state.mfu[:above]), 0.0)
             self.assertGreater(float(state.mfu[above]), 0.0)
 
-    def test_precipitation_onset_takes_the_land_depth_with_any_land(self):
-        """Use ECHAM's land ``zdnoprc`` for any land fraction.
+    def test_precipitation_onset_takes_the_land_depth_on_land_columns(self):
+        """Use ECHAM's land ``zdnoprc`` where the column is land.
 
-        ECHAM takes the land depth wherever ``loland``, which ``physc`` sets
-        for any land fraction (``slf > 0``).
+        ECHAM takes the land depth wherever ``loland``, which ``physc`` reads
+        from the binary land-sea mask by default: on jcm's fractional land,
+        a land fraction of 0.5 or more.
         """
         a = self._column("deep_rce_warm", 1)
         sea, _ = self._run(a, land_fraction=jnp.asarray(0.0))
         coast, _ = self._run(a, land_fraction=jnp.asarray(0.3))
+        half, _ = self._run(a, land_fraction=jnp.asarray(0.5))
         land, _ = self._run(a, land_fraction=jnp.asarray(1.0))
         np.testing.assert_array_equal(np.asarray(coast.precip_formation),
+                                      np.asarray(sea.precip_formation))
+        np.testing.assert_array_equal(np.asarray(half.precip_formation),
                                       np.asarray(land.precip_formation))
         self.assertFalse(np.array_equal(np.asarray(sea.precip_formation),
                                         np.asarray(land.precip_formation)))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -889,8 +889,8 @@ Reference-exact values with surrogate derivatives
   the scheme's parameters, and a width of 0 selects the reference derivative.
   ``jcm.testing.check_surrogate_gradient`` checks such a function: its value
   equals ``exact``'s, its jvp and vjp equal ``surrogate``'s, and its two AD
-  modes are adjoint. The ECHAM cover and 1M schemes use it (see the corrected
-  physics entries). See :doc:`design/surrogate_gradients`.
+  modes are adjoint. The ECHAM cover, the 1M scheme and the Tiedtke-Nordeng
+  convection use it (see the corrected physics entries). See :doc:`design/surrogate_gradients`.
 
 
 Corrected physics
@@ -1535,7 +1535,8 @@ Tiedtke-Nordeng takes ECHAM's decisions
   of letting a sigmoid-weighted fraction of the plume climb on; a plume that
   passes no interface above a cloud base at ``klevm1`` leaves the column
   non-convective; the precipitation onset is ECHAM's ``zdnoprc`` switch, at
-  the land depth wherever the column holds land. There is no CAPE trigger:
+  the land depth on land columns (land fraction 0.5 or more, ECHAM's default
+  binary land-sea mask). There is no CAPE trigger:
   a surface plume needs ``cumastr``'s ``zlo1`` gate, a sub-cloud layer that
   gains moisture and a cloud-base parcel wetter than its environment, and
   its first-guess flux is ``zdqpbl/(g·zqumqe)`` of the whole pre-convection
@@ -1554,7 +1555,7 @@ Tiedtke-Nordeng takes ECHAM's decisions
   that exercise the mid-level and deep plumes and the ``zlo1`` gate), is the reference
   (``jcm/data/test/echam_cumastr_reference``): with ECHAM's physical
   constants jcm takes its decision on every column and matches its cloud-base
-  flux, precipitation and tendencies to 2e-12. jcm keeps its own constants,
+  flux, precipitation and tendencies to 2.1e-12 or better. jcm keeps its own constants,
   which change 70 of the 758 decisions, 68 of them through ``rv`` (461.0
   against 461.51); on the whole-model RCE column's days 40-80 states the port
   then convects in 10.9 % of the steps where ECHAM convects in 24.3 %.

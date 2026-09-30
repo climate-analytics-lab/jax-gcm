@@ -1305,7 +1305,7 @@ tendency (dynamics included) with no evaporation floor, a downdraft whose
 level of free sinking lies above the final top is cancelled, and a failed
 first ascent leaves no surface plume for the second. On 758 columns the port
 takes ECHAM6.3's decision on every one, and matches its fluxes and tendencies
-to 2e-12, when it runs with ECHAM's physical constants
+to 2.1e-12 or better, when it runs with ECHAM's physical constants
 (``cumastr_reference_test.py``). jcm keeps its own constants: they change 70
 of those 758 decisions, 68 of them through ``rv`` (461.0 against ECHAM's
 461.51); see :doc:`science/convection`.
