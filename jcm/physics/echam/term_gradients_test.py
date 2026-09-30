@@ -112,6 +112,15 @@ class _OperatingPoint:
     #: Peak cloud liquid / ice mixing ratio [kg/kg] of the seeded deck.
     cloud_liquid: float
     cloud_ice: float
+    #: Large-scale moisture convergence [kg/m²/s] into the lowest eight
+    #: levels, handed to the replay as the previous step's dynamics (the
+    #: ``_prev_step`` carry from which Tiedtke reconstructs the dynamics part
+    #: of ECHAM's ``pqte``). ECHAM convects where the sub-cloud layer gains
+    #: moisture (``zdqpbl > 0``), and on the first step vertical diffusion
+    #: carries more moisture out of the lowest two layers than the surface
+    #: evaporates into them, so a convecting column needs the boundary-layer
+    #: convergence a convecting tropical column is under.
+    convergence: float = 0.0
 
 
 _POINTS = {
@@ -134,7 +143,7 @@ _POINTS = {
         sst=302.0, rh_boundary_layer=0.95, rh_free_troposphere=0.7,
         moist_depth_m=9000.0, inversion_k=0.0, wind=8.0,
         mixed_layer_top_m=900.0, orography_m=400.0, latitude_deg=5.0,
-        cloud_liquid=4.0e-4, cloud_ice=4.0e-5),
+        cloud_liquid=4.0e-4, cloud_ice=4.0e-5, convergence=3.0e-4),
 }
 
 # Inputs held fixed, because they are absent at both operating points rather
@@ -296,6 +305,12 @@ class _Check:
     skip_outputs: tuple[str, ...] = ()
     xfail_reference: str | None = None
     xfail_finiteness: str | None = None
+    #: The term is inactive at this point, as its reference scheme is there:
+    #: the reference check asserts that its tendency ledger is exactly zero
+    #: instead of looking for a derivative that has nothing to describe.
+    #: Finiteness is checked as everywhere else. The reason says why the
+    #: term is off.
+    off: str | None = None
 
 
 # Cells that are not the default. Keyed by (term, operating point); a term name
@@ -467,48 +482,26 @@ _CHECKS: dict = {
         skip_outputs=("specific_humidity",),
         live_inputs=("[0]/u_wind", "[0]/temperature")),
 
-    # On the stable column Tiedtke runs a one-layer shallow plume at the top
-    # of the capped boundary layer (7e-9 kg/m²/s of precipitation) that sits
-    # on its own existence boundary: along the seed-0 direction the plume
-    # dies between +1e-3 and +1e-2 of the tangent and the one-sided secants
-    # disagree between −1e-3 and 0 (a kink — the half-level environment's
-    # dry-static-energy envelope is a max over the near-equal energies of the
-    # well-mixed layer), so float32 finds no usable difference rung. In
-    # float64 the central difference is usable and agrees with AD, and jvp
-    # and vjp agree to 3.9e-13; float32 leaves them 4.4e-4 apart on this
-    # small projection (|value| ≈ 89), the same reduction-order gap as the
-    # convecting cell's. So the adjoint is the reference here too, at 1e-3.
+    # On the stable column ECHAM's convection is off, and so is Tiedtke:
+    # ``cubase`` finds a cloud base at the top of the capped boundary layer,
+    # but vertical diffusion carries more moisture out of the sub-cloud layers
+    # than the surface evaporates into them, so ``cumastr``'s ``zlo1`` gate
+    # (``zdqpbl > 0``, mo_cumastr.f90:565) rejects the column, by about 30
+    # widths of its surrogate. The column subsides; nothing resupplies it.
     ("tiedtke_convection", "stable"): _Check(
-        reference="adjoint", adjoint_rtol=1.0e-3, outputs="tendency",
-        skip_outputs=("tracers/qi",), live_inputs=_ENVIRONMENT),
+        off="the sub-cloud layer loses moisture (zdqpbl < 0): ECHAM's zlo1 "
+            "gate makes the column non-convective"),
 
-    # On the convecting column the column sits on the trigger: the minus secant is ~4e5 and the plus
-    # secant ~0 at every rung, i.e. the perturbation switches the plume off.
-    # That boundary is the documented discrete part of the scheme — ECHAM's
-    # ``cubasmc`` mid-level conditions ARE the activation, and the deep/shallow
-    # split is ECHAM's ``zdqcv`` switch (docs/source/science/convection.md) —
-    # so no central difference exists there and the adjoint reference is what
-    # the check can honestly assert. The plume on this column stays warm, so
-    # it detrains no ice and the qi tendency is a structural zero rather than
-    # a lost gradient.
-    #
-    # ``adjoint_rtol`` is relaxed to 3.0e-3 because the faithful #676/#669
-    # reformulation lengthened the convecting-plume float32 reduction: the
-    # cududv momentum tendency now sums SEPARATE updraft and downdraft
-    # deviation-flux divergences, each built from a prognostic plume wind
-    # mixed through the ascent/descent scans, plus the sub-cloud taper and the
-    # surface-layer closure; and the organized entrainment/detrainment add the
-    # ``zdrodz`` log-density term and the metre-based ``tan`` profile with
-    # their ``centrmax`` clips. In float64 the seed-0 jvp and vjp agree to
-    # 8.1e-13 (≤4e-14 over seeds 1-2), so the float32 gap is reduction order,
-    # not a jvp/vjp asymmetry — and there is no ``custom_jvp``, ``custom_vjp``
-    # or ``stop_gradient`` in the scheme for one to come from; the two float32
-    # modes straddle the float64 truth (-2527.3: jvp -2530.1, vjp -2528.9).
-    # The worst float32 spread over seeds 0-5 is 4.85e-4, all of it on seed 0
-    # (the smallest-magnitude projection, |Δ|≈1.2 on a value of 2530; the
-    # other five seeds are ≤2.6e-5). 3.0e-3 keeps ~6x headroom and still
-    # detects a 0.3 % asymmetry — far tighter than the 1.2e-1 the 1M
-    # convecting cell had to reject as unusable.
+    # The convecting column is a deep plume under boundary-layer convergence
+    # (``_OperatingPoint.convergence``). Its forward value is ECHAM's
+    # decisions, whose derivatives are those of the logistic surrogates of
+    # ``switches.py`` (docs/source/design/surrogate_gradients.md), so a
+    # central difference of the value disagrees with AD wherever a switch is
+    # near and the surrogate is active, by design; and the convective heating
+    # reaches the 5 K/h cap of ``TiedtkeConvection``, whose column minimum
+    # is piecewise. The adjoint identity and live environment inputs are
+    # what is checked. The plume stays warm enough to detrain no ice here,
+    # so the qi tendency is a structural zero.
     ("tiedtke_convection", "convecting"): _Check(
         reference="adjoint", adjoint_rtol=3.0e-3, outputs="tendency",
         skip_outputs=("tracers/qi",), live_inputs=_ENVIRONMENT),
@@ -659,6 +652,23 @@ def _replay(point_name: str, idealized: bool = False) -> _Replay:
     )
 
     diagnostics = dict(physics.initial_carry_state(coords))
+    if point.convergence:
+        # The previous step's physics removed the convergence from the lowest
+        # eight levels, and the dynamics resupplied it: Tiedtke's lagged
+        # ``qte_dynamics = (q_now − q_prev)/dt − q_tendency_prev`` is then
+        # the convergence per unit air mass there.
+        p_half = (jnp.asarray(vertical.a_boundaries)
+                  + jnp.asarray(vertical.b_boundaries)
+                  * c.p0 * state.normalized_surface_pressure[0])
+        mass = jnp.diff(p_half) / c.grav
+        lowest = jnp.arange(_NLEV) >= _NLEV - 8
+        q_tendency = jnp.where(
+            lowest, -point.convergence / jnp.sum(jnp.where(lowest, mass, 0.0)),
+            0.0)
+        diagnostics["_prev_step"] = {
+            "specific_humidity": state.specific_humidity,
+            "q_tendency": q_tendency[:, None],
+        }
     diagnostics["_dt_seconds"] = physics.dt_seconds
     diagnostics["_band_config"] = physics.band_config
     running = {
@@ -841,6 +851,17 @@ def test_term_gradients_against_a_reference(term_name, point_name):
     f, args = _term_function(
         _replay(point_name), term_name,
         outputs=check.outputs, skip_outputs=check.skip_outputs)
+    if check.off:
+        outputs = f(*args)
+        ledger = [k for k in outputs
+                  if k in ("u_wind", "v_wind", "temperature",
+                           "specific_humidity") or k.startswith("tracers/")]
+        assert ledger
+        for name in ledger:
+            np.testing.assert_array_equal(
+                np.asarray(outputs[name]), 0.0,
+                err_msg=f"{term_name}/{point_name}/{name}: {check.off}")
+        return
     check_gradients(
         f, args,
         rtol=check.rtol if check.reference == "difference" else None,
@@ -944,9 +965,9 @@ def test_convection_parameter_gradients(point_name):
 
     _assert_derivatives_are_finite(
         call, (params,), f"tiedtke_convection params/{point_name}")
-    # The scheme's smooth-trigger machinery is what makes these learnable at
-    # all; the sigmoids saturate far from a threshold, so liveness is asserted
-    # only on the column that is actually convecting.
+    # The parameters act through the plume, and through the surrogate
+    # derivatives of ECHAM's decisions, on a column that convects; liveness
+    # is asserted only there (the stable column does not convect).
     if point_name == "convecting":
         primal, vjp_fun = jax.vjp(call, params)
         gradients = vjp_fun(_cotangent(primal, 1))[0]
@@ -955,4 +976,4 @@ def test_convection_parameter_gradients(point_name):
             for leaf in jax.tree.leaves(gradients)
             if jnp.issubdtype(jnp.result_type(leaf), jnp.floating)), (
             "no convection parameter carries a gradient on a convecting "
-            "column — a trigger has been re-hardened")
+            "column")
