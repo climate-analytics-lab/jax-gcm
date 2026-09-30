@@ -62,7 +62,9 @@
   ``Δq_c``, ``Δq_i`` are ``dt`` times the running tendency of every physics
   term composed before the 1M term (radiation, vertical diffusion with its
   condensate, the surface, convection) on the step-start state as anchor, with
-  the convective detrainment passed separately as ECHAM's ``pxtecl``/``pxteci``. ``cvtfall``, ``csecfrl`` and ``clwprat`` are
+  the convective detrainment passed separately as ECHAM's ``pxtecl``/``pxteci``. The saturation vapour
+  pressure and its slope are ECHAM's Sonntag (1990) fit, from
+  ``echam_saturation``, the module the cover reads. ``cvtfall``, ``csecfrl`` and ``clwprat`` are
   ordinary tunable parameters whose defaults follow ECHAM's per-truncation
   values (T63: 2.5, 5e-6, 4.0). The **droplet number** is ECHAM's prescribed
   ``acdnc`` (``physc.f90`` §3.12; ICON-A ``mo_echam_phy_diag.f90::droplet_number``):
@@ -133,18 +135,26 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   whole enhancement wherever two levels compete. The ``lo2`` phase switch
   keeps its reference derivative (that of the branch in use). Widths of zero
   select the reference derivatives.
-- Cover, saturation vapour pressure — the cover's ``e_s`` comes from one
-  switch shared with the 1M scheme
-  (``jcm/physics/clouds/echam_saturation.py``, ``SATURATION_FORMULA``). Its
-  default is jcm's Tetens pair, not the Sonntag (1990) fit that ECHAM's
-  lookup tables hold (``mo_echam_convect_tables.f90``), which it differs from
-  by up to 2.4 % over water and 1.2 % over ice between 238 and 273 K and by
-  up to 16 % and 8 % below: convection and the 2M scheme use Tetens, and a
-  cloud scheme on another curve would judge detrained condensate against a
-  different saturation. The choice is made for all of jcm's ECHAM physics at
-  once. With ``"sonntag"`` selected the cover reproduces ECHAM's own
-  reference; with the default it reproduces ECHAM's routine run with the
-  Tetens pair.
+- Cover, saturation vapour pressure — ECHAM's: the Sonntag (1990) fit that
+  ECHAM's lookup tables hold (``mo_echam_convect_tables.f90``), evaluated
+  analytically rather than through the 0.025 K spline (they agree to 1e-10),
+  from ``jcm/physics/clouds/echam_saturation.py``. With it the cover
+  reproduces every column of ECHAM's own reference.
+- Radiation's cover, `science` — ECHAM's radiation uses the cover only where
+  the step-start grid-mean condensate it radiates is positive
+  (``mo_radiation.f90`` l.428-434, ``xq = MAX(xlm1, 0)``,
+  ``MERGE(cld_frc, 0, xq_liq > 0 .OR. xq_ice > 0)``), and hands the same
+  masked cover to COSP. jcm does the same in
+  ``cloud_data.radiation_cloud_fields``, which every radiation scheme reads,
+  and in the COSP term (masked by the condensate COSP is given). A cell the
+  mask clears has no condensate and so no optical depth; under maximum-random
+  overlap it separates the cloud banks above and below it, as in ECHAM's
+  sampler. The mask keeps its reference derivative (`differentiability`): the
+  cleared cell contributes nothing to any flux through its own optics, and
+  the one discrete effect, the bank separation, is already piecewise constant
+  in McICA's sampling. The AeroCom diagnostics read the post-microphysics
+  cover, which is ECHAM's written-back ``aclc`` (zero where both condensates
+  are below ``ccwmin``), and are not masked again.
 - Cover, time level — the cover reads the state the physics receives, which
   contains the step's dynamics; ECHAM's reads the ``t − Δt`` fields
   (``physc.f90`` l.543-548), one dynamics step earlier. Reading ECHAM's state
@@ -243,12 +253,6 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   crystals at the top of the size range the radiation's tables cover (#728).
 - Clear-sky evaporation of decorrelated condensate (the radiation-side contract in
   ``mcica.in_cloud_path``) is owned by the 2M scheme's clear-sky evaporation step.
-- **1M: saturation vapour pressure** comes from ``echam_saturation``, the
-  module the cover reads too, whose formula switch selects ECHAM's Sonntag
-  (1990) fit or jcm's Tetens pair for both at once. Against the Fortran every
-  column matches at float64 and float32 tolerance under either formula when
-  the Fortran uses the same one (the reference's ``sonntag`` and ``tetens``
-  variants), and at T31, T127 and T255.
 - **1M: the dynamics is not in the increments.** ECHAM's increments at
   ``cloud`` contain the dynamics of the step (advection and the adiabatic
   term); jcm's contain the upstream physics only, because the dynamics is
@@ -269,8 +273,10 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
 **Code pointers.**
 - ``jcm/physics/clouds/sundqvist.py`` — ``SundqvistCloudFraction``,
   ``calculate_cloud_fraction``.
-- ``jcm/physics/clouds/echam_saturation.py`` — ``SATURATION_FORMULA``,
+- ``jcm/physics/clouds/echam_saturation.py`` — ``es_water``, ``es_ice``,
   ``lo2_ice_phase``, ``qsat_from_es``.
+- ``jcm/physics/clouds/cloud_data.py`` — ``radiation_cloud_fields``,
+  ``condensate_masked_cover``.
 - ``jcm/physics/clouds/echam_cloud_defaults.py`` — ``echam_cloud_defaults``,
   ``inversion_levels``.
 - ``jcm/physics/resolution_defaults.py`` — ``resolution_defaults``.
@@ -286,8 +292,9 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
 **Validation evidence.** ``jcm/physics/clouds/echam_fortran_reference_test.py``
 (the cover and 1M against the ECHAM6.3 Fortran, column by column, with
 ``jcm/data/test/echam_cloud_reference/``),
-``sundqvist_test.py`` (designed points, both vapour-pressure formulas against
-the Fortran, the surrogates), ``echam_cloud_defaults_test.py``,
+``sundqvist_test.py`` (designed points, the Fortran columns at ECHAM's four
+truncations, the surrogates), ``cloud_data_test.py`` (radiation's condensate
+mask and its effect on McICA overlap), ``echam_cloud_defaults_test.py``,
 ``echam_saturation_test.py``, ``echam_1m_test.py``,
 ``lohmann_2m_test.py``, ``cloud_utils_test.py``, ``cloud_data_test.py``. Design
 reference: {doc}`../design/lohmann_2m_column_processes`.

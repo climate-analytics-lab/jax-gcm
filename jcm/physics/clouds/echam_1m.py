@@ -46,10 +46,9 @@ from jcm.physics.clouds.cloud_utils import (
     prescribed_droplet_number,
     sundqvist_condensation,
 )
-# Saturation vapour pressure and the lo2 phase rule of the ECHAM cloud
-# schemes: one module, shared with the cover, whose formula switch selects
-# ECHAM's Sonntag (1990) fit or jcm's Tetens pair for every ECHAM cloud scheme
-# at once. Every saturation value and slope in the sweep comes from it.
+# Saturation vapour pressure (ECHAM's Sonntag (1990) fit) and the lo2 phase
+# rule of the ECHAM cloud schemes: one module, shared with the cover. Every
+# saturation value and slope in the sweep comes from it.
 from jcm.physics.clouds import echam_saturation as _saturation
 from jcm.physics.clouds.echam_saturation import lo2_ice_phase
 from jcm.physics.surrogate_gradient import with_surrogate_gradient
@@ -360,8 +359,8 @@ class MicrophysicsTendencies(NamedTuple):
 def _es_and_derivative(temperature, ice):
     """``(e_s, de_s/dT)`` [Pa, Pa/K] over ice or over water at every temperature.
 
-    The formula is :mod:`echam_saturation`'s selection; the slope is the
-    analytic one ECHAM tabulates beside the value.
+    From :mod:`echam_saturation`; the slope is the analytic one ECHAM
+    tabulates beside the value.
     """
     if ice:
         es = _saturation.es_ice(temperature)

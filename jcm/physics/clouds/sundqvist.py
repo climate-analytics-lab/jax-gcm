@@ -5,9 +5,9 @@ humidity closure as ECHAM6.3-HAM2.3 r7492 codes it in ``mo_cover.f90``
 (l.101-261), called once per step before radiation (``physc.f90`` l.543):
 
 1. saturation specific humidity in ECHAM's form, over ice or over water per
-   ECHAM's ``lo2`` switch (l.215-224), with the vapour pressure of the
-   formula switch in :mod:`jcm.physics.clouds.echam_saturation` (by default
-   jcm's Tetens pair, where ECHAM's tables hold the Sonntag fit);
+   ECHAM's ``lo2`` switch (l.215-224), with ECHAM's vapour pressure, the
+   Sonntag (1990) fit its tables hold
+   (:mod:`jcm.physics.clouds.echam_saturation`);
 2. critical relative humidity ``rhc = crt + (crs - crt)·exp(1 - (p_s/p)^nex)``
    (l.233);
 3. over ice-free ocean without convection, a stratocumulus enhancement at the
@@ -16,8 +16,7 @@ humidity closure as ECHAM6.3-HAM2.3 r7492 codes it in ``mo_cover.f90``
 4. ``b0 = (q/(qs·zsat) - rhc)/(1 - rhc)`` clipped to ``[0, 1]`` and
    ``cover = 1 - sqrt(1 - b0)`` (l.248-251).
 
-Apart from the vapour pressure the values are ECHAM's: the cover is exactly 0
-where ``b0 <= 0`` and exactly 1
+The values are ECHAM's: the cover is exactly 0 where ``b0 <= 0`` and exactly 1
 where ``b0 >= 1``, at every level (ECHAM computes all levels, ``ktdia = 1``,
 ``physc.f90`` l.444). Where the reference derivative is useless (the clip's
 plateaux, the square root's infinite slope at saturation, the inversion
@@ -178,11 +177,8 @@ def cover_saturation_vapor_pressure(
 ) -> jnp.ndarray:
     """Return the saturation vapour pressure [Pa] the cover uses.
 
-    The one place the cover takes ``es`` from: the formula selected by
-    :data:`jcm.physics.clouds.echam_saturation.SATURATION_FORMULA`, the
-    setting the 1M scheme reads too. Its default is jcm's Tetens pair, not
-    the Sonntag (1990) fit ECHAM's tables hold; see that module for why the
-    choice is made for all of jcm's ECHAM physics together.
+    The one place the cover takes ``es`` from: ECHAM's Sonntag (1990) fit,
+    :func:`jcm.physics.clouds.echam_saturation.es_water` / ``es_ice``.
 
     Args:
         temperature: [K].

@@ -139,8 +139,8 @@ microphysics):
 
 | input | ECHAM6.3-HAM2.3 | jcm |
 |---|---|---|
-| cloud fraction | ``aclc`` from ``cover``, this step, before radiation | ``clouds.cloud_fraction`` from Sundqvist, this step, before radiation |
-| cloud water / ice | ``xlm1``/``xim1``, the step-start state | the step-start ``qc``/``qi`` tracers |
+| cloud fraction | ``aclc`` from ``cover``, this step, before radiation, zeroed where ``xlm1`` and ``xim1`` are both ≤ 0 (``mo_radiation.f90`` l.433-434) | ``clouds.cloud_fraction`` from the cover, this step, before radiation, zeroed where ``qc`` and ``qi`` are both ≤ 0 (``cloud_data.radiation_cloud_fields``) |
+| cloud water / ice | ``xlm1``/``xim1``, the step-start state, clipped at 0 | the step-start ``qc``/``qi`` tracers, clipped at 0 |
 | droplet number, 1M | ``acdnc`` prescribed profile, set at the first step from that step's pressure; × ``x_cdnc`` of the step's plumes | profile at this step's pressure; × this step's ``aerosol.cdnc_factor`` |
 | droplet number, 2M | ``acdnc`` = ``zcdnc`` at the end of the previous step's ``cloud_micro_2m`` | step-start ``qnc`` tracer (the previous step's microphysics output, after that step's transport) × air density |
 | crystal number, 2M | ``icnc_instantan`` = ``picnc`` at the end of the previous step's ``cloud_micro_2m`` | step-start ``qni`` tracer × air density |

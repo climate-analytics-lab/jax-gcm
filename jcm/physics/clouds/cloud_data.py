@@ -305,15 +305,39 @@ CLOUD_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
 
 
 def radiation_cloud_fields(state, diagnostics):
-    """Return ECHAM-ordered cloud fields for radiation.
+    """Return the cloud fields radiation sees, as ECHAM hands them over.
 
-    ECHAM ``physc`` calls ``cover`` before radiation, then passes the
-    diagnosed cloud fraction plus the pre-cloud-step ``xlm1`` / ``xim1``
-    condensate fields into radiation. Large-scale cloud microphysics runs
-    later. Mirror that here: fresh cloud fraction comes from
-    ``diagnostics["clouds"]``, while condensate comes from state tracers.
+    ECHAM ``physc`` calls ``cover`` before radiation and passes radiation
+    the diagnosed cover with the step-start grid-mean condensate
+    ``xlm1``/``xim1`` (``physc.f90`` l.566-573); the cloud microphysics runs
+    later. Inside ``radiation`` (``mo_radiation.f90`` l.428-434) the
+    condensate is clipped at zero, ``xq = MAX(qm, 0)``, and the cover is
+    kept only where there is condensate,
+    ``xc_frc = MERGE(cld_frc, 0, xq_liq > 0 .OR. xq_ice > 0)``. That masked
+    cover is what the radiative transfer, its total-cover diagnostic and
+    COSP (``cosp_f3d``, ``mo_psrad_interface.f90`` l.414) see; the cover
+    field itself is not changed. This returns the same: the step-start
+    ``qc``/``qi`` tracers clipped at zero, and the diagnosed
+    ``clouds.cloud_fraction`` zeroed where both are zero.
+
+    The mask is ECHAM's hard test, derivative included. A cell it clears has
+    no condensate, so it has no optical depth either way and contributes to
+    no flux through its own optics.
     """
     clouds = diagnostics["clouds"]
-    cloud_water = state.tracers.get("qc", jnp.zeros_like(state.temperature))
-    cloud_ice = state.tracers.get("qi", jnp.zeros_like(state.temperature))
-    return cloud_water, cloud_ice, clouds.cloud_fraction
+    zeros = jnp.zeros_like(state.temperature)
+    cloud_water = jnp.maximum(state.tracers.get("qc", zeros), 0.0)
+    cloud_ice = jnp.maximum(state.tracers.get("qi", zeros), 0.0)
+    return (cloud_water, cloud_ice,
+            condensate_masked_cover(clouds.cloud_fraction, cloud_water,
+                                    cloud_ice))
+
+
+def condensate_masked_cover(cloud_fraction, cloud_water, cloud_ice):
+    """ECHAM's ``MERGE(cld_frc, 0, xq_liq > 0 .OR. xq_ice > 0)``.
+
+    ``mo_radiation.f90`` l.433-434: the cover where either condensate is
+    positive, 0 elsewhere.
+    """
+    has_condensate = (cloud_water > 0.0) | (cloud_ice > 0.0)
+    return jnp.where(has_condensate, cloud_fraction, 0.0)

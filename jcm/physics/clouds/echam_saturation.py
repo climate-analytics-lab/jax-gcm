@@ -1,22 +1,17 @@
 """Saturation vapour pressure and phase rule of the ECHAM cloud schemes.
 
-**The formula switch.** :func:`es_water`, :func:`es_ice` and their log
-derivatives evaluate the formula named by :data:`SATURATION_FORMULA`, the one
-setting the cloud cover and the 1M scheme both read:
+:func:`es_water`, :func:`es_ice` and their log derivatives are ECHAM's
+formula, the Sonntag (1990) fit described below, which the cloud cover and
+the 1M scheme read.
 
-* ``"tetens"`` (the default): jcm's Tetens pair
-  ``es = 610.78·exp(a·Tc/(Tc + b))`` with ``(a, b) = (17.27, 237.3)`` over
-  water and ``(21.87, 265.5)`` over ice, which the cloud schemes used before
-  this switch existed.
-* ``"sonntag"``: the formula ECHAM6.3's cloud routines actually use.
-
-Which one is the default is decided for all of jcm's ECHAM physics at once:
-convection and the two-moment scheme take their vapour pressure from
-:mod:`jcm.physics.thermodynamics`, and a cloud scheme on a different curve
-from convection would judge detrained condensate against another
-saturation. Set it with :func:`set_saturation_formula` before building the
-model, as with :func:`jcm.constants.set_constants`: it is read when a
-function is traced.
+The module also carries jcm's former Tetens pair
+(:func:`tetens_es_water`, :func:`tetens_es_ice`), and
+:data:`SATURATION_FORMULA` can point :func:`es_water` / :func:`es_ice` at it.
+That is a test utility, not a model option: the ECHAM Fortran reference data
+include a ``tetens`` variant (ECHAM's routines run with this pair), and
+switching lets a test separate a formulation error from the vapour-pressure
+formula when localising a disagreement. Nothing in the model configuration
+sets it.
 
 **ECHAM's formula.** ECHAM6.3 (r7492) tabulates, in
 ``mo_echam_convect_tables.f90::init_convect_tables`` (l.262-309), the
@@ -74,7 +69,6 @@ __all__ = [
     "es_water",
     "lo2_ice_phase",
     "qsat_from_es",
-    "set_saturation_formula",
     "sonntag_dlnes_dT_ice",
     "sonntag_dlnes_dT_water",
     "sonntag_es_ice",
@@ -87,9 +81,9 @@ __all__ = [
 
 SATURATION_FORMULAS = ("tetens", "sonntag")
 
-#: The formula :func:`es_water` / :func:`es_ice` evaluate. See the module
-#: docstring; change it with :func:`set_saturation_formula`.
-SATURATION_FORMULA = "tetens"
+#: The formula :func:`es_water` / :func:`es_ice` evaluate: ECHAM's
+#: ``"sonntag"``. ``"tetens"`` exists for tests only (module docstring).
+SATURATION_FORMULA = "sonntag"
 
 #: ``cavl1..cavl5``, ``mo_echam_convect_tables.f90`` l.42-46.
 WATER_COEFFICIENTS = (-6096.9385, 21.2409642, -2.711193, 1.673952, 2.433502)
@@ -109,20 +103,6 @@ ECHAM_TABLE_T_MAX = 400.0
 
 #: ECHAM's cap on ``es·rd/rv/p`` (``mo_cover.f90`` l.221).
 _X_MAX = 0.5
-
-
-def set_saturation_formula(name: str) -> None:
-    """Choose the formula of :func:`es_water` / :func:`es_ice`.
-
-    Args:
-        name: ``"tetens"`` or ``"sonntag"``.
-
-    """
-    global SATURATION_FORMULA
-    if name not in SATURATION_FORMULAS:
-        raise ValueError(f"saturation formula must be one of "
-                         f"{SATURATION_FORMULAS}, got {name!r}")
-    SATURATION_FORMULA = name
 
 
 # --- Sonntag (1990), the fit ECHAM's tables hold ---------------------------
@@ -159,7 +139,7 @@ def sonntag_dlnes_dT_ice(temperature):
     return _dln_es_dT(temperature, ICE_COEFFICIENTS)
 
 
-# --- Tetens, jcm's pair -----------------------------------------------------
+# --- Tetens, jcm's former pair (test utility) --------------------------------
 
 def _tetens(temperature, coefficients):
     a, b = coefficients
@@ -193,34 +173,34 @@ def tetens_dlnes_dT_ice(temperature):
     return _tetens_dln(temperature, TETENS_ICE)
 
 
-# --- The selected formula ---------------------------------------------------
+# --- The formula the ECHAM cloud schemes use ---------------------------------
 
 def es_water(temperature):
-    """Saturation vapour pressure over water [Pa], selected formula."""
-    if SATURATION_FORMULA == "sonntag":
-        return sonntag_es_water(temperature)
-    return tetens_es_water(temperature)
+    """Saturation vapour pressure over water [Pa] (ECHAM's formula)."""
+    if SATURATION_FORMULA == "tetens":
+        return tetens_es_water(temperature)
+    return sonntag_es_water(temperature)
 
 
 def es_ice(temperature):
-    """Saturation vapour pressure over ice [Pa], selected formula."""
-    if SATURATION_FORMULA == "sonntag":
-        return sonntag_es_ice(temperature)
-    return tetens_es_ice(temperature)
+    """Saturation vapour pressure over ice [Pa] (ECHAM's formula)."""
+    if SATURATION_FORMULA == "tetens":
+        return tetens_es_ice(temperature)
+    return sonntag_es_ice(temperature)
 
 
 def dlnes_dT_water(temperature):
-    """``d ln(es_water)/dT`` [1/K] of the selected formula."""
-    if SATURATION_FORMULA == "sonntag":
-        return sonntag_dlnes_dT_water(temperature)
-    return tetens_dlnes_dT_water(temperature)
+    """``d ln(es_water)/dT`` [1/K] (ECHAM's formula)."""
+    if SATURATION_FORMULA == "tetens":
+        return tetens_dlnes_dT_water(temperature)
+    return sonntag_dlnes_dT_water(temperature)
 
 
 def dlnes_dT_ice(temperature):
-    """``d ln(es_ice)/dT`` [1/K] of the selected formula."""
-    if SATURATION_FORMULA == "sonntag":
-        return sonntag_dlnes_dT_ice(temperature)
-    return tetens_dlnes_dT_ice(temperature)
+    """``d ln(es_ice)/dT`` [1/K] (ECHAM's formula)."""
+    if SATURATION_FORMULA == "tetens":
+        return tetens_dlnes_dT_ice(temperature)
+    return sonntag_dlnes_dT_ice(temperature)
 
 
 # --- Phase and humidity -----------------------------------------------------
