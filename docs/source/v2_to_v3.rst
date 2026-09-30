@@ -455,9 +455,12 @@ detrainment reaches both cloud schemes through one channel:
   Read it through ``cloud_scheme_inputs`` rather than directly.
 - A convection scheme that detrains condensate writes this step's rate to
   ``clouds.conv_detrainment_qc`` / ``conv_detrainment_qi`` [kg kg⁻¹ s⁻¹], as
-  ``TiedtkeConvection`` does; the cloud schemes take it out of the running
-  condensate tendency and treat it as ECHAM's ``pxtecl``/``pxteci``. A scheme
-  that does not write them (Betts-Miller) reads as no detrainment.
+  ``TiedtkeConvection`` does, and returns the same detrained condensate as
+  part of its qc/qi tendency; the cloud schemes subtract ``dt × rate`` from
+  the running condensate tendency and treat it as ECHAM's
+  ``pxtecl``/``pxteci``, so a rate published without being in the returned
+  tendency would leave a negative condensate increment. A scheme that does
+  not write them (Betts-Miller) reads as no detrainment.
 
 Checkpoints written without the slot restore with it seeded and
 ``valid = 0``; see :ref:`v3-checkpoints`.
