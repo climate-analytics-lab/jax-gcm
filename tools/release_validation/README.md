@@ -271,7 +271,7 @@ the member's overrides — the list the PBS job runs, with the rundir on the
 volume.
 
 ```bash
-export SCRATCH=/scr/$USER    # launch records and fetched runs ($SCRATCH/jam_runs)
+export SCRATCH=/scr/$USER    # launch records + fetched runs: $SCRATCH/nautilus_runs
 export PATH=/data/dwatsonparris/micromamba/bin:$PATH             # kubectl
 
 # 1. Inspect, validate against the API server, submit. The commit must be on
@@ -291,7 +291,7 @@ python tools/release_validation/launch.py --site nautilus --members <member> \
 # 4. Copy a finished run off the volume, then score it as on Derecho
 python tools/release_validation/launch.py --site nautilus --fetch \
     --members <member> --tag <tag>
-R=$SCRATCH/jam_runs/mx_<member>_<tag>
+R=$SCRATCH/nautilus_runs/mx_<member>_<tag>
 python tools/release_validation/health.py $R --last-n 40 --log $R/run.log \
     --json $R/health.json
 ```
@@ -305,7 +305,10 @@ What the Kubernetes door adds, and why:
   means the one on GitHub. The default tag is the pinned commit's short SHA,
   so the run's name matches the `jcm=<sha>` its outputs record; the member
   definitions (`matrix.yaml`, `PRESETS`) are read from the launching
-  checkout, which is warned about when it is not the pin.
+  checkout, which is warned about when it is not the pin. The image is
+  pinned the same way: the site's `:latest` is resolved to its digest when
+  the Job is generated, so an eviction retry or a resume weeks later runs the
+  image the launch began on, and a republished image is a new launch.
 - **The pinned commit's own environment.** The image carries an older jcm
   release, so the pod installs the pinned commit with its own requirements and
   the `mam4` extra (`pip install -e '/work/jcm[mam4]'`, what CI installs),
@@ -314,9 +317,10 @@ What the Kubernetes door adds, and why:
   `hf://` URLs read at the mirror commit the Job exports
   (`JCM_MIRROR_REVISION`, recorded in `mirror_revision.json` exactly as on
   the PBS path). They are still prefetched here first, so a missing input
-  refuses before a GPU is claimed.
+  refuses before a GPU is claimed; an `hf://` warm-start state is checked at
+  the mirror commit, and one on the volume by the pod before it clones.
 - **One run directory, one launch, one start.** Each launch is recorded as
-  `$SCRATCH/jam_runs/<run>/launch.json` — the code pin, image, override list,
+  `$SCRATCH/nautilus_runs/<run>/launch.json` — the code pin, image, override list,
   length and Job name, with a digest — beside the manifest (`job.json`) and
   the mirror record. The generating node cannot see the volume, so the pod
   does what `check_fresh` does for a PBS rundir: it writes the same record
@@ -336,7 +340,8 @@ What the Kubernetes door adds, and why:
   `--init` and `--extra`, since a resumed run must continue as it began. With
   `--submit` it replaces the finished Job of that name (Jobs are immutable;
   the output stays on the volume and its log in `run.log`) and never touches
-  a running one. `--force-mirror-revision` works as on the PBS path.
+  a running one. `--force-mirror-revision` works as on the PBS path, and
+  only with `--resume`: a fresh Job never carries the opt-in.
 - A Job that fails deterministically (a refused rundir, a bad override)
   restarts until its retries are spent, holding its GPU in back-off:
   `kubectl delete job <name>` once the log shows why.
@@ -379,14 +384,24 @@ command line, so repeat them.
 
 ### Fetching, scoring and ingesting
 
-`--fetch` copies `/runs/<run>/` into `$SCRATCH/jam_runs/<run>/` through a
+`--fetch` copies `/runs/<run>/` into `$SCRATCH/nautilus_runs/<run>/` (not the
+PBS door's `jam_runs`, so a PBS and a Kubernetes run of one name never share a
+directory) through a
 throwaway CPU pod that mounts the volume read-only
 (`kubernetes-jcm-runs/scripts/fetch_run.py`), skipping checkpoints unless
 `--with-checkpoints` (the JAM archives run to ~1 GB each), and never over the
 local `launch.json` that `--resume` reads (a differing copy on the volume is
-reported). The copy is incremental and size-checked: re-running it after an
-interrupted stream copies only what is missing or short, and it exits
-non-zero while anything is.
+reported). The copy is incremental: a file already copied at the volume's
+size and modification time is skipped, so re-running it after an interrupted
+stream copies only what is missing, short or rewritten since, and it exits
+non-zero while anything is missing or short. One member that fails (never
+launched, a reader pod that will not start) is reported with the others.
+
+The `jcm-runs` volume is shared and finite (500 Gi, and a JAM year of 5-day
+chunks is tens of GB), so once a run is fetched and scored, remove it from
+the volume — unless an arm still warm-starts from its checkpoints: a
+short-lived pod that mounts `jcm-runs` read-write and runs
+`rm -rf /runs/<run>` on that one directory, then is deleted.
 
 Copying was chosen over scoring inside a pod because it needs less new code:
 one small copy helper, after which `health.py`, `aerosol_stats.py` and
@@ -404,10 +419,10 @@ run's `.hydra/` (the Job sets `hydra.run.dir` to the rundir), the chunk files'
 
 ```bash
 <monitor root>/venv/bin/python -m monitor.run ingest \
-    $SCRATCH/jam_runs/mx_<member>_<tag> \
+    $SCRATCH/nautilus_runs/mx_<member>_<tag> \
     --experiment rc-3.0.0 --arm <member> --member <member> --last-n 40
 # a retune arm: the monitor keys it by the arm's model-defining overrides
 <monitor root>/venv/bin/python -m monitor.run ingest \
-    $SCRATCH/jam_runs/mx_echam_jam_t63_l47_<tag>_cape150 \
+    $SCRATCH/nautilus_runs/mx_echam_jam_t63_l47_<tag>_cape150 \
     --experiment tiedtke-retune --arm cape150 --member echam-jam-t63-l47
 ```

@@ -203,7 +203,7 @@ done
 # evicted mid-year picks up from the last completed chunk rather than
 # starting over. That is what makes a multi-day run viable here.
 if [ -f "{checkpoint}" ]; then
-  echo "=== resuming from $(ls -la {checkpoint} | awk '{{print $5}}') byte checkpoint ==="
+  echo "=== resuming from $(ls -la {shlex.quote(checkpoint)} | awk '{{print $5}}') byte checkpoint ==="
 fi
 # run.log is append-only ACROSS pod restarts (that is what makes the
 # eviction-resume design debuggable), so every gate below must read only THIS

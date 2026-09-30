@@ -542,6 +542,85 @@ def resolve_pin(repo, ref: str | None = None, url: str = JCM_URL) -> str:
         "clone's copy of those refs).")
 
 
+#: Manifest media types a registry may answer a tag with (an index first:
+#: the digest a pod pulls by is the one the tag names, whatever it holds).
+_MANIFEST_TYPES = ("application/vnd.oci.image.index.v1+json",
+                   "application/vnd.docker.distribution.manifest.list.v2+json",
+                   "application/vnd.oci.image.manifest.v1+json",
+                   "application/vnd.docker.distribution.manifest.v2+json")
+
+
+def image_ref(image: str) -> str:
+    """Return ``image`` pinned to the digest its tag names now (``name@sha256:...``).
+
+    The site's image is a moving tag (``:latest``), and a run lasts days: an
+    eviction retry or a ``--resume`` would otherwise pull whatever was
+    published since, under the same launch definition. Pinned, every attempt
+    of a launch runs the image it was generated against, and a newer image
+    is a new definition. Resolved with the registry's anonymous token flow
+    (Docker registry API v2), as a pull would.
+    """
+    if "@" in image:
+        return image
+    name, _, tag = image.rpartition(":")
+    if not name or "/" in tag:            # no tag: the registry default
+        name, tag = image, "latest"
+    registry, _, repo = name.partition("/")
+    url = f"https://{registry}/v2/{repo}/manifests/{tag}"
+    headers = {"Accept": ", ".join(_MANIFEST_TYPES)}
+    import urllib.error
+    import urllib.request
+
+    def head():
+        req = urllib.request.Request(url, method="HEAD", headers=headers)
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.headers["Docker-Content-Digest"]
+
+    try:
+        try:
+            digest = head()
+        except urllib.error.HTTPError as e:
+            challenge = e.headers.get("WWW-Authenticate", "")
+            if e.code != 401 or not challenge.startswith("Bearer "):
+                raise
+            params = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
+            query = "&".join(f"{k}={params[k]}" for k in ("service", "scope")
+                             if k in params)
+            with urllib.request.urlopen(f"{params['realm']}?{query}",
+                                        timeout=60) as r:
+                token = json.load(r)["token"]
+            headers["Authorization"] = f"Bearer {token}"
+            digest = head()
+    except Exception as exc:                                  # noqa: BLE001
+        raise SystemExit(
+            f"cannot resolve {image} to a digest ({type(exc).__name__}: "
+            f"{exc}); a launch pins the image it runs, as it pins the code."
+        ) from exc
+    if not digest:
+        raise SystemExit(f"{url} returned no Docker-Content-Digest")
+    return f"{name}@{digest}"
+
+
+def hf_exists(url: str) -> bool:
+    """Whether an ``hf://`` file exists at this process's mirror commit.
+
+    Checked, not fetched: the pod downloads a warm-start state itself, and a
+    JAM state runs to GBs.
+    """
+    from huggingface_hub import HfApi
+
+    from jcm.data.remote import DEFAULT_REPO, requested_revision
+    return HfApi().file_exists(DEFAULT_REPO, url[len("hf://"):],
+                               repo_type="dataset",
+                               revision=requested_revision())
+
+
+def init_file(ovs: list[str]) -> str | None:
+    """Return the warm-start state a launch reads (its last ``init.file``)."""
+    files = [o.split("=", 1)[1] for o in ovs if o.startswith("init.file=")]
+    return files[-1] if "init=from_state" in ovs and files else None
+
+
 def job_name(prefix: str, run: str) -> str:
     """Return the Kubernetes Job name for ``run``; refuse rather than truncate.
 
@@ -613,13 +692,23 @@ def rundir_guard(rundir: str, checkpoint: str, defn: dict,
       Job's own retries pass, because it lists its uid in ``JOBS`` before its
       first chunk.
 
+    A warm start from a path on the volume is checked here too (jcm reads it
+    at every attempt's startup), since the generating node cannot see it.
+
     It runs before cloning, so each refused attempt costs seconds, but under
     ``restartPolicy: OnFailure`` the Job restarts until its retries are
     spent: delete it. The record is written to a temporary name and renamed,
     so a pod killed mid-write cannot leave a truncated record that would
     refuse the launch's own retry.
     """
-    return f"""if [ -z "${{JOB_UID:-}}" ]; then
+    state = init_file(defn.get("overrides", []))
+    ckpt = shlex.quote(checkpoint)
+    check_state = (f"""if [ ! -f {shlex.quote(state)} ]; then
+  echo "FATAL: the warm-start state {state} does not exist on the volume."
+  exit 1
+fi
+""" if state and not state.startswith("hf://") else "")
+    return check_state + f"""if [ -z "${{JOB_UID:-}}" ]; then
   echo "FATAL: JOB_UID is empty: the pod cannot tell its own Job's retries from"
   echo "       another Job's, so it cannot tell whether {checkpoint} is its own."
   exit 1
@@ -631,7 +720,7 @@ if [ -f {rundir}/{LAUNCH_RECORD} ]; then
     echo "       recorded, or launch this one under a new --tag or --suffix."
     exit 1
   fi
-elif [ -f {checkpoint} ]; then
+elif [ -f {ckpt} ]; then
   echo "FATAL: {checkpoint} exists but no {LAUNCH_RECORD} records which launch"
   echo "       wrote it; refusing to resume an integration of unknown origin."
   exit 1
@@ -641,7 +730,7 @@ else
 LAUNCH
   mv {rundir}/.{LAUNCH_RECORD}.tmp {rundir}/{LAUNCH_RECORD}
 fi
-if [ -f {checkpoint} ] && [ {int(resume)} -eq 0 ] \\
+if [ -f {ckpt} ] && [ {int(resume)} -eq 0 ] \\
     && ! grep -qxF "$JOB_UID" {rundir}/JOBS 2>/dev/null; then
   echo "FATAL: {checkpoint} exists, written by another Job: this launch is"
   echo "       fresh, and a member is a fresh year. --resume continues that"
@@ -757,10 +846,14 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
         raise SystemExit("--fetch copies runs; it does not launch them.")
     if a.with_checkpoints and not a.fetch:
         raise SystemExit("--with-checkpoints is an option of --fetch.")
-    sha = None
+    if a.force_mirror_revision and not a.resume:
+        raise SystemExit("--force-mirror-revision switches a resumed run to "
+                         "another mirror commit; it needs --resume.")
+    sha = image = None
     if not (a.resume or a.fetch):
         sha = resolve_pin(repo, pins.get("jcm"))
-        print(f"# jcm pinned at {sha}", file=sys.stderr)
+        image = image_ref(site["image"])
+        print(f"# jcm pinned at {sha}; image {image}", file=sys.stderr)
     # The tag names the code under test, as on the PBS path: the launched
     # checkout's HEAD by default, the pinned commit when one is given.
     if a.tag is not None:
@@ -787,7 +880,9 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
     regenerated = set()
     for member in wanted:
         run = run_name(member, run_tag, suffix)
-        local = Path(scratch) / "jam_runs" / run
+        # Its own tree, not the PBS rundirs' $SCRATCH/jam_runs: a PBS run and
+        # a Kubernetes run under one name must not share a directory.
+        local = Path(scratch) / f"{a.site}_runs" / run
         recorded = read_launch(local)
         if a.fetch:
             # The recorded Job name when there is one (a --job-prefix other
@@ -807,8 +902,7 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
         ovs = member_overrides(run, cfg["members"][member], d, rundir,
                                init=a.init, extra=a.extra, fetch_here=False)
         defn = launch_definition(member, run, job_name(a.job_prefix, run),
-                                 site["image"], {"jcm": sha}, int(d["days"]),
-                                 ovs)
+                                 image, {"jcm": sha}, int(d["days"]), ovs)
         if recorded is not None and recorded["digest"] != defn["digest"]:
             raise SystemExit(
                 f"{run} was already launched with a different definition "
@@ -829,9 +923,14 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
             # The local launch record is what --resume re-emits; the
             # volume's copy is the same bytes unless another launch owns the
             # rundir, which fetch_run reports rather than copying over it.
-            bad = fetch_run.fetch_run(
-                defn["run"], local, site=site, pod=f"{defn['job']}-fetch",
-                with_checkpoints=a.with_checkpoints, keep=(LAUNCH_RECORD,))
+            # One member's failure (a run never launched, a reader pod that
+            # would not start) is reported with the others, not fatal to them.
+            try:
+                bad = fetch_run.fetch_run(
+                    defn["run"], local, site=site, pod=f"{defn['job']}-fetch",
+                    with_checkpoints=a.with_checkpoints, keep=(LAUNCH_RECORD,))
+            except SystemExit as exc:
+                bad = [str(exc)]
             if bad:
                 problems[member] = bad
         if problems:
@@ -853,6 +952,14 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
     if not a.no_prefetch:
         missing = {member: bad for member, _, defn in plan
                    if (bad := prefetch(prefetchable(defn["overrides"])))}
+        # The warm start, which the input walk does not cover: an hf:// state
+        # is checked at the mirror commit; one on the volume, by the pod.
+        for member, _, defn in plan:
+            state = init_file(defn["overrides"])
+            if state and state.startswith("hf://") and not hf_exists(state):
+                missing.setdefault(member, []).append(
+                    f"{state} (no such file at mirror commit "
+                    f"{os.environ['JCM_MIRROR_REVISION']})")
         if missing:
             report = "\n".join(f"  {name}:\n    " + "\n    ".join(paths)
                                for name, paths in missing.items())
@@ -933,7 +1040,7 @@ def main(argv=None):
                      help=f"Job-name prefix (default {JOB_PREFIX})")
     k8s.add_argument("--fetch", action="store_true",
                      help="copy each member's run directory off the volume "
-                          "into $SCRATCH/jam_runs/<run>, for health.py")
+                          "into $SCRATCH/<site>_runs/<run>, for health.py")
     k8s.add_argument("--with-checkpoints", action="store_true",
                      help="with --fetch, also copy the checkpoints (a "
                           "year's archives run to GBs)")

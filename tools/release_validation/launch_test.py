@@ -341,6 +341,7 @@ def test_members_at_different_commits_are_launched_separately(
 # ``kubectl`` executable whose "volume" is a temporary directory.
 
 
+DIGEST = "sha256:" + "d" * 64
 DEFAULTS = yaml.safe_load(
     (pathlib.Path(launch.HERE) / "matrix.yaml").read_text())["defaults"]
 
@@ -372,6 +373,8 @@ def remote(monkeypatch):
     """Return the branches/tags a fake GitHub remote carries (edit to taste)."""
     refs = {}
     monkeypatch.setattr(launch, "remote_refs", lambda url: dict(refs))
+    monkeypatch.setattr(launch, "image_ref",
+                        lambda image: image.rsplit(":", 1)[0] + "@" + DIGEST)
     return refs
 
 
@@ -449,6 +452,9 @@ def test_nautilus_job_runs_the_pbs_overrides_at_the_pinned_commit(
     assert {"name": "runs", "persistentVolumeClaim": {
         "claimName": "jcm-runs"}} in pod["volumes"]
     assert pod["nodeSelector"] == {"nvidia.com/gpu.memory": "81920"}
+    # The image by digest, so every retry and resume runs the same one.
+    assert pod["containers"][0]["image"] == \
+        f"ghcr.io/climate-analytics-lab/jcm@{DIGEST}"
     script = _script(job)
     assert (f"git -C /work/jcm fetch --depth 1 origin {sha} "
             f"&& git -C /work/jcm checkout --detach {sha}") in script
@@ -481,7 +487,7 @@ def test_nautilus_exports_the_recorded_mirror_commit(
     env = _env(job)
     assert env["JCM_MIRROR_REVISION"] == mirror.MIRROR_REVISION
     assert "JCM_ALLOW_MIRROR_REVISION_CHANGE" not in env
-    record = scratch / "jam_runs" / "mx_speedy_t31_mc" / launch.MIRROR_RECORD
+    record = scratch / "nautilus_runs" / "mx_speedy_t31_mc" / launch.MIRROR_RECORD
     assert json.loads(record.read_text())["commit"] == mirror.MIRROR_REVISION
 
 
@@ -537,7 +543,7 @@ def test_pin_refuses_an_unpushed_commit(scratch, gitrepo, remote, capsys):
         _k8s(gitrepo, capsys, "--tag", "u")
     assert local_only[:12] in str(e.value) and "push it" in str(e.value)
     assert capsys.readouterr().out == ""
-    assert not (scratch / "jam_runs").exists()      # nothing recorded
+    assert not (scratch / "nautilus_runs").exists()      # nothing recorded
 
 
 def test_pin_takes_a_pushed_ancestor_and_a_remote_branch(
@@ -576,7 +582,7 @@ def test_suffix_and_tag_namespace_rundir_job_and_label(
         ovs = _jcm_main_overrides(job)
         assert f"run.output_prefix=/runs/{run}/{run}" in ovs
         assert f"run.checkpoint_path=/runs/{run}/checkpoint.msgpack" in ovs
-        assert (scratch / "jam_runs" / run / launch.LAUNCH_RECORD).exists()
+        assert (scratch / "nautilus_runs" / run / launch.LAUNCH_RECORD).exists()
 
 
 def test_arm_overrides_land_last(scratch, repo, gitrepo, remote, capsys):
@@ -711,7 +717,7 @@ def test_rundir_guard_ties_the_volume_to_one_launch_and_one_start(
     # uid from the label the Job controller puts on every pod it creates.
     remote["refs/heads/dev"] = _commit(gitrepo, "a")
     [job] = _k8s(gitrepo, capsys, "--tag", "g")
-    defn = json.loads((scratch / "jam_runs" / "mx_speedy_t31_g"
+    defn = json.loads((scratch / "nautilus_runs" / "mx_speedy_t31_g"
                        / launch.LAUNCH_RECORD).read_text())
     shipped = launch.rundir_guard("/runs/mx_speedy_t31_g",
                                   "/runs/mx_speedy_t31_g/checkpoint.msgpack",
@@ -740,7 +746,7 @@ def test_upper_case_tag_is_refused_on_kubernetes(scratch, gitrepo, remote,
     remote["refs/heads/dev"] = _commit(gitrepo, "a")
     with pytest.raises(SystemExit, match="lower case"):
         _k8s(gitrepo, capsys, "--tag", "T1")
-    assert not (scratch / "jam_runs").exists()
+    assert not (scratch / "nautilus_runs").exists()
 
 
 def test_submit_applies_every_job_after_vetting_all(
@@ -752,7 +758,7 @@ def test_submit_applies_every_job_after_vetting_all(
                for (args, i) in cluster["calls"] if args[0] == "apply"]
     assert applied == ["jcm-run-mx-speedy-t31-s", "jcm-run-mx-echam-1m-t63-s"]
     # The applied manifest is the one recorded next to the launch.
-    rec = json.loads((scratch / "jam_runs" / "mx_speedy_t31_s" / "job.json")
+    rec = json.loads((scratch / "nautilus_runs" / "mx_speedy_t31_s" / "job.json")
                      .read_text())
     first = next(json.loads(i) for (args, i) in cluster["calls"]
                  if args[0] == "apply")
@@ -878,7 +884,7 @@ def test_fetch_copies_the_run_but_not_its_checkpoints(scratch, volume,
                                                       gitrepo, capsys):
     launch.main(["--site", "nautilus", "--repo", str(gitrepo), "--fetch",
                  "--members", MEMBER, "--tag", "ft"])
-    local = scratch / "jam_runs" / "mx_speedy_t31_ft"
+    local = scratch / "nautilus_runs" / "mx_speedy_t31_ft"
     got = sorted(str(p.relative_to(local)) for p in local.rglob("*")
                  if p.is_file())
     assert got == sorted([".hydra/overrides.yaml", "launch.json", "run.log",
@@ -987,3 +993,159 @@ def test_fetch_deletes_a_reader_pod_that_never_ran(scratch, volume,
                             site=launch.sites.get("nautilus"), pod="p")
     calls = pathlib.Path(os.environ["FAKE_VOLUME"] + ".log").read_text().splitlines()
     assert calls[-1].startswith("delete pod p")
+
+
+def test_image_is_resolved_to_its_digest_with_the_registry_token_flow(
+        monkeypatch):
+    """The moving tag is pinned the way a pull resolves it (401, token, HEAD)."""
+    import io
+    import urllib.error
+    import urllib.request
+    seen = []
+
+    class Response(io.BytesIO):
+        def __init__(self, body=b"", headers=None):
+            super().__init__(body)
+            self.headers = headers or {}
+
+    def urlopen(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        auth = None if isinstance(req, str) else req.get_header("Authorization")
+        seen.append((url, auth))
+        if url.startswith("https://ghcr.io/token"):
+            return Response(json.dumps({"token": "tkn"}).encode())
+        if auth != "Bearer tkn":
+            raise urllib.error.HTTPError(url, 401, "no", {
+                "WWW-Authenticate": 'Bearer realm="https://ghcr.io/token",'
+                'service="ghcr.io",scope="repository:org/img:pull"'}, None)
+        return Response(headers={"Docker-Content-Digest": DIGEST})
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    assert launch.image_ref("ghcr.io/org/img:latest") == \
+        f"ghcr.io/org/img@{DIGEST}"
+    assert seen[1] == ("https://ghcr.io/token?service=ghcr.io&"
+                       "scope=repository:org/img:pull", None)
+    assert seen[2] == ("https://ghcr.io/v2/org/img/manifests/latest",
+                       "Bearer tkn")
+    assert launch.image_ref(f"ghcr.io/org/img@{DIGEST}") == \
+        f"ghcr.io/org/img@{DIGEST}"                    # already pinned
+
+    def down(req, timeout=None):
+        raise urllib.error.URLError("no route")
+
+    monkeypatch.setattr(urllib.request, "urlopen", down)
+    with pytest.raises(SystemExit, match="cannot resolve"):
+        launch.image_ref("ghcr.io/org/img:latest")
+
+
+def test_resume_keeps_the_recorded_image(scratch, gitrepo, remote, capsys,
+                                         monkeypatch):
+    remote["refs/heads/dev"] = _commit(gitrepo, "a")
+    [fresh] = _k8s(gitrepo, capsys, "--tag", "im")
+    monkeypatch.setattr(launch, "image_ref",
+                        lambda image: "ghcr.io/x@sha256:" + "e" * 64)
+    [resumed] = _k8s(gitrepo, capsys, "--tag", "im", "--resume")
+    images = [j["spec"]["template"]["spec"]["containers"][0]["image"]
+              for j in (fresh, resumed)]
+    assert images == [f"ghcr.io/climate-analytics-lab/jcm@{DIGEST}"] * 2
+    # ...while a fresh relaunch against a republished image is a new launch.
+    with pytest.raises(SystemExit, match="different definition"):
+        _k8s(gitrepo, capsys, "--tag", "im")
+
+
+def test_warm_start_state_is_checked_before_submitting(
+        scratch, gitrepo, remote, capsys, monkeypatch):
+    """A missing hf:// state refuses here; a volume path, in the pod's guard."""
+    remote["refs/heads/dev"] = _commit(gitrepo, "a")
+    asked = []
+    monkeypatch.setattr(launch, "hf_exists",
+                        lambda url: asked.append(url) or False)
+    state = "hf://bundles/t31_l8/init_states/typo.msgpack"
+    with pytest.raises(SystemExit, match="typo.msgpack"):
+        _k8s(gitrepo, capsys, "--tag", "ws", "--init", state)
+    assert asked == [state]
+    assert capsys.readouterr().out == ""
+    assert not (scratch / "nautilus_runs" / "mx_speedy_t31_ws").exists()
+    # A path on the volume passes here and is checked where it lives.
+    [job] = _k8s(gitrepo, capsys, "--tag", "wv", "--init", "/runs/d/s.ckpt")
+    script = _script(job)
+    assert "if [ ! -f /runs/d/s.ckpt ]; then" in script
+    assert script.index("/runs/d/s.ckpt ]") < script.index("git clone")
+
+
+def test_guard_refuses_a_missing_warm_start_state(tmp_path):
+    rundir = tmp_path / "run"
+    rundir.mkdir()
+    state = tmp_path / "donor.ckpt"
+    defn = {"digest": "a", "overrides": ["init=from_state",
+                                         f"init.file={state}"]}
+    guard = launch.rundir_guard(str(rundir), f"{rundir}/ckpt", defn, False)
+    missing = _bash(guard, JOB_UID="u")
+    assert missing.returncode == 1 and "does not exist" in missing.stdout
+    state.write_bytes(b"x")
+    assert _bash(guard, JOB_UID="u").returncode == 0
+
+
+def test_force_mirror_revision_needs_resume_on_kubernetes(
+        scratch, gitrepo, remote, capsys):
+    """A fresh Job never carries the opt-in to resume across mirror commits."""
+    remote["refs/heads/dev"] = _commit(gitrepo, "a")
+    with pytest.raises(SystemExit, match="needs --resume"):
+        _k8s(gitrepo, capsys, "--tag", "fr", "--force-mirror-revision")
+
+
+def test_kubernetes_records_live_apart_from_pbs_rundirs(
+        scratch, repo, gitrepo, remote, capsys):
+    """A PBS run and a Kubernetes run under one name never share a directory."""
+    remote["refs/heads/dev"] = _commit(gitrepo, "a")
+    _k8s(gitrepo, capsys, "--tag", "sep")
+    launch.main(["--repo", str(repo), "--members", MEMBER, "--tag", "sep"])
+    k8s = scratch / "nautilus_runs" / "mx_speedy_t31_sep"
+    pbs = scratch / "jam_runs" / "mx_speedy_t31_sep"
+    assert (k8s / launch.LAUNCH_RECORD).exists()
+    assert not (pbs / launch.LAUNCH_RECORD).exists()
+    assert (pbs / launch.MIRROR_RECORD).exists()
+
+
+def test_fetch_carries_on_past_a_member_that_fails(scratch, volume, gitrepo,
+                                                   capsys):
+    """A member never launched is reported with the rest, not fatal to them."""
+    with pytest.raises(SystemExit) as e:
+        launch.main(["--site", "nautilus", "--repo", str(gitrepo), "--fetch",
+                     "--members", "echam-1m-t63,speedy-t31", "--tag", "ft"])
+    assert "incomplete copies" in str(e.value)
+    assert "echam-1m-t63" in str(e.value) and "cannot list" in str(e.value)
+    assert "speedy-t31" not in str(e.value).split("incomplete copies")[1]
+    assert (scratch / "nautilus_runs" / "mx_speedy_t31_ft" / "run.log").exists()
+
+
+def test_fetch_refreshes_a_file_rewritten_at_the_same_size(scratch, volume):
+    """The rotating checkpoint is rewritten in place at a fixed size."""
+    import fetch_run
+    site = launch.sites.get("nautilus")
+    dest = scratch / "same"
+    fetch_run.fetch_run("mx_speedy_t31_ft", dest, site=site, pod="p",
+                        with_checkpoints=True)
+    ckpt = volume / "checkpoint.msgpack"
+    ckpt.write_bytes(b"D" * 5000)                    # a later state, same size
+    stamp = ckpt.stat().st_mtime + 100
+    os.utime(ckpt, (stamp, stamp))
+    assert fetch_run.fetch_run("mx_speedy_t31_ft", dest, site=site, pod="p",
+                               with_checkpoints=True) == []
+    assert (dest / "checkpoint.msgpack").read_bytes() == b"D" * 5000
+
+
+def test_fetch_notes_a_foreign_record_of_the_same_size(scratch, volume,
+                                                       capsys):
+    """Two records of one length (fixed-width digest) are compared by content."""
+    import fetch_run
+    dest = scratch / "foreign"
+    dest.mkdir(parents=True)
+    (volume / "launch.json").write_text('{"digest": "aaaa"}\n')
+    (dest / "launch.json").write_text('{"digest": "bbbb"}\n')
+    capsys.readouterr()
+    fetch_run.fetch_run("mx_speedy_t31_ft", dest,
+                        site=launch.sites.get("nautilus"), pod="p",
+                        keep=("launch.json",))
+    assert "not the launch recorded here" in capsys.readouterr().err
+    assert (dest / "launch.json").read_text() == '{"digest": "bbbb"}\n'

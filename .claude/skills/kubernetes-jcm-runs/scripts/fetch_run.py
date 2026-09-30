@@ -29,6 +29,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -93,19 +94,34 @@ def _start(site: dict, pod: str, run: str, wait_s: float = 300.0) -> None:
                      f"(`kubectl -n {site['namespace']} describe pod {pod}`)")
 
 
-def remote_files(site: dict, pod: str, run: str) -> dict[str, int]:
-    """``{relative path: size}`` of every file under ``/runs/<run>``."""
+def remote_files(site: dict, pod: str,
+                 run: str) -> dict[str, tuple[int, int]]:
+    """``{relative path: (size, mtime)}`` of every file under ``/runs/<run>``."""
     r = _kubectl(site, "exec", pod, "--", "sh", "-c",
-                 f"cd /runs/{run} && find . -type f -exec stat -c '%s %n' {{}} +",
+                 f"cd /runs/{run} && find . -type f -exec stat -c '%s %Y %n' {{}} +",
                  timeout=600)
     if r.returncode:
         raise SystemExit(f"cannot list /runs/{run} on {site['runs_pvc']}: "
                          f"{r.stderr.strip() or r.stdout.strip()}")
     out = {}
     for line in r.stdout.splitlines():
-        size, _, name = line.partition(" ")
-        out[name.removeprefix("./")] = int(size)
+        size, mtime, name = line.split(" ", 2)
+        out[name.removeprefix("./")] = (int(size), int(mtime))
     return out
+
+
+def _same(local: Path, size: int, mtime: int) -> bool:
+    """Whether ``local`` is the copy tar made of a file of this size and mtime.
+
+    Size alone is not enough: the rotating checkpoint is rewritten in place at
+    a fixed size, and a retried chunk file at the same size. ``tar`` restores
+    the modification time it recorded, so a file unchanged since the last
+    copy matches on both.
+    """
+    if not local.is_file():
+        return False
+    st = local.stat()
+    return st.st_size == size and int(st.st_mtime) == mtime
 
 
 def fetch_run(run: str, dest, *, site: dict, pod: str,
@@ -116,7 +132,7 @@ def fetch_run(run: str, dest, *, site: dict, pod: str,
     least at the size the volume listed — at least, because a run still
     being written grows between the listing and the copy. A name in ``keep``
     that already exists in ``dest`` is never overwritten (a caller's own
-    record); a size difference from the volume's copy is reported instead.
+    record); a difference from the volume's copy is reported instead.
     """
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -124,39 +140,45 @@ def fetch_run(run: str, dest, *, site: dict, pod: str,
         # Inside the try: a pod that never reaches Running must be deleted too.
         _start(site, pod, run)
         files = remote_files(site, pod, run)
-        wanted = {f: n for f, n in files.items()
+        kept = [f for f in keep if f in files and (dest / f).is_file()]
+        wanted = {f: sm for f, sm in files.items()
                   if (with_checkpoints or not CHECKPOINT.search(f))
-                  and not (f in keep and (dest / f).is_file())}
-        for f in keep:
-            if f in files and (dest / f).is_file() \
-                    and (dest / f).stat().st_size != files[f]:
-                print(f"# NOTE: /runs/{run}/{f} differs from {dest / f}; the "
-                      "local one is kept", file=sys.stderr)
-        todo = sorted(f for f, n in wanted.items()
-                      if not (dest / f).is_file()
-                      or (dest / f).stat().st_size != n)
-        gib = sum(wanted[f] for f in todo) / 2**30
+                  and f not in kept}
+        for f in kept:
+            theirs = _kubectl(site, "exec", pod, "--", "cat",
+                              f"/runs/{run}/{f}", timeout=120).stdout
+            if theirs != (dest / f).read_text():
+                print(f"# NOTE: /runs/{run}/{f} differs from {dest / f}: the "
+                      "run on the volume is not the launch recorded here; "
+                      "the local record is kept", file=sys.stderr)
+        todo = sorted(f for f, (n, t) in wanted.items()
+                      if not _same(dest / f, n, t))
+        gib = sum(wanted[f][0] for f in todo) / 2**30
         print(f"# {run}: {len(todo)} of {len(wanted)} files to copy "
               f"({gib:.2f} GiB; {len(files) - len(wanted)} kept or checkpoint "
               "files skipped)", file=sys.stderr)
         if todo:
-            src = subprocess.Popen(
-                ["kubectl", "-n", site["namespace"], "exec", pod, "--",
-                 "tar", "cf", "-", "-C", f"/runs/{run}", *todo],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            unpack = subprocess.run(["tar", "xf", "-", "-C", str(dest)],
-                                    stdin=src.stdout, capture_output=True)
-            src.stdout.close()
-            err = src.stderr.read().decode(errors="replace")
-            if src.wait() or unpack.returncode:
-                print(f"# the copy stream failed: {err.strip()} "
-                      f"{unpack.stderr.decode(errors='replace').strip()}",
-                      file=sys.stderr)
+            # stderr to a file, not a pipe: a pipe nobody reads until the
+            # stream ends fills after ~64 KiB of warnings and stalls kubectl.
+            with tempfile.TemporaryFile() as err:
+                src = subprocess.Popen(
+                    ["kubectl", "-n", site["namespace"], "exec", pod, "--",
+                     "tar", "cf", "-", "-C", f"/runs/{run}", *todo],
+                    stdout=subprocess.PIPE, stderr=err)
+                unpack = subprocess.run(["tar", "xf", "-", "-C", str(dest)],
+                                        stdin=src.stdout, capture_output=True)
+                src.stdout.close()
+                if src.wait() or unpack.returncode:
+                    err.seek(0)
+                    print("# the copy stream failed: "
+                          f"{err.read().decode(errors='replace').strip()} "
+                          f"{unpack.stderr.decode(errors='replace').strip()}",
+                          file=sys.stderr)
     finally:
         _kubectl(site, "delete", "pod", pod, "--ignore-not-found",
                  "--wait=false", timeout=120)
     return [f"{f} ({'missing' if not (dest / f).is_file() else 'short'})"
-            for f, n in sorted(wanted.items())
+            for f, (n, _) in sorted(wanted.items())
             if not (dest / f).is_file() or (dest / f).stat().st_size < n]
 
 
