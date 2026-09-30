@@ -24,17 +24,15 @@ block and is not contaminated by differences elsewhere in the column:
   step's detrained condensate (F 1227-1248; the fixture itself shows it).
 * ``update_in_cloud_water`` with ``prid = zrid`` (F 1511, 2610-2624): the ICNC
   diagnosis.
-* ``znidetr`` (F 958-983) -- needs the #941 core helper.
-* End to end (needs the #941 ``cloud_microphysics_2m(..., detrained_qc=,
-  detrained_qi=)`` signature): the number tendencies against the RAW tracer
+* ``znidetr`` (F 958-983).
+* End to end, through ``cloud_microphysics_2m(..., detrained_qc=,
+  detrained_qi=)``: the number tendencies against the RAW tracer
   (F 1781, 3625-3652) where ECHAM pins the end-of-step number, and the end
   state of clear cells that receive detrained condensate (the section-4
   split and the ``ptte`` fix, F 1300-1317).
 
-Tests that need the merged #941 core skip on a jcm without it, keyed on the
-``detrained_qc`` keyword of ``cloud_microphysics_2m``; once that keyword
-exists they run, and a missing helper is then a FAILURE (the adapter must be
-updated), never a silent skip.
+Nothing here skips: a renamed jcm helper or argument is a FAILURE of the
+adapter that calls it, which must then be updated.
 
 Physical constants
 ------------------
@@ -62,7 +60,6 @@ from __future__ import annotations
 
 import contextlib
 import functools
-import inspect
 from pathlib import Path
 
 import jax
@@ -172,18 +169,6 @@ def assert_close(field: str, family: str, jcm, ref, prec: str, what: str = ""):
                              + "\n".join(lines))
 
 
-def has_merged_core() -> bool:
-    """Return whether jcm's cloud_microphysics_2m takes the #941 detrainment arguments."""
-    from jcm.physics.clouds.lohmann_2m.scheme import cloud_microphysics_2m
-    return "detrained_qc" in inspect.signature(cloud_microphysics_2m).parameters
-
-
-needs_merged_core = pytest.mark.skipif(
-    not has_merged_core(),
-    reason="jcm's cloud_microphysics_2m has no detrained_qc/detrained_qi arguments yet: the "
-           "#941 core (znidetr, ICE-1/3/4/5) is not merged into this checkout")
-
-
 # jcm tunables that differ from ECHAM6.3-HAM2.3 at T63 (the maintainer's tuning, kept in
 # jcm). The comparisons use ECHAM's values so the formulation is tested, not the tuning;
 # ``test_cloud_params_relevant_to_941_match_echam`` pins the differences.
@@ -216,17 +201,8 @@ def _j(x, prec):
 # ===========================================================================
 def run_jcm_zrid(t_m1, prec):
     """ECHAM zrid [m] (F 945-956) from the step-start temperature ptm1."""
-    from jcm.physics.clouds import cloud_utils as cu
-    p = echam_params()
-    helper = getattr(cu, "ice_volume_mean_radius_from_temperature", None)
-    t = _j(t_m1, prec)
-    if helper is not None:                      # the #941 core helper
-        return np.asarray(helper(t, p))
-    if has_merged_core():
-        raise AssertionError("merged #941 core but no zrid helper: update run_jcm_zrid")
-    # dev: the effective radius parameterisation is one line; the conversion is jcm's helper.
-    reff = jnp.maximum(23.2 * jnp.exp(0.015 * jnp.minimum(t - p.tmelt, 0.0)), 1.0)
-    return np.asarray(cu.effective_2_volmean_radius_param_Schuman_2011(reff, p))
+    from jcm.physics.clouds.cloud_utils import ice_volume_mean_radius_from_temperature
+    return np.asarray(ice_volume_mean_radius_from_temperature(_j(t_m1, prec), echam_params()))
 
 
 def run_jcm_wbf_criterion(xip1, picnc, paclc, rho, esw, esi, eta, tkem1, prec):
@@ -278,16 +254,12 @@ def run_jcm_update_in_cloud_water(g, dt, prec):
 
 
 def run_jcm_znidetr(g, dt, prec):
-    """ECHAM znidetr [1/m3] (F 958-983) from jcm's #941 helper, on ECHAM's zxtec,
+    """ECHAM znidetr [1/m3] (F 958-983) from jcm's helper, on ECHAM's zxtec,
     ptm1, lo2_2d, paclc, rho and zrid.
     """
-    from jcm.physics.clouds import cloud_utils as cu
-    helper = getattr(cu, "detrained_ice_crystal_number", None)
-    if helper is None:
-        raise AssertionError("merged #941 core but no znidetr helper "
-                             "(cloud_utils.detrained_ice_crystal_number): update run_jcm_znidetr")
+    from jcm.physics.clouds.cloud_utils import detrained_ice_crystal_number
     inp = echam_in()
-    return np.asarray(helper(
+    return np.asarray(detrained_ice_crystal_number(
         _j(dt * g["xtec"], prec), _j(inp["ptm1"], prec), jnp.asarray(g["lo2_2d"] > 0.5),
         _j(inp["paclc"], prec), _j(g["rho"], prec), _j(g["rid"], prec), echam_params()))
 
@@ -494,9 +466,8 @@ def test_update_in_cloud_water_icnc_diagnosis_at_zrid(step, prec):
 
 
 # ===========================================================================
-# the #941 core (skipped until it is merged)
+# the #941 core
 # ===========================================================================
-@needs_merged_core
 @pytest.mark.parametrize("prec", PRECISIONS)
 @pytest.mark.parametrize("step", STEPS)
 def test_znidetr_matches_echam(step, prec):
@@ -508,14 +479,18 @@ def test_znidetr_matches_echam(step, prec):
         assert_close("znidetr", "number", run_jcm_znidetr(g, ztmst(step), prec), g["nidetr"], prec)
 
 
-@needs_merged_core
 @pytest.mark.parametrize("step", STEPS)
 def test_number_tendencies_against_raw_tracer(step):
     """ICE-5 end to end: where ECHAM pins the end-of-step number (the ccwmin repair
     zeroes it in condensate-free cells, F 3641-3652), jcm's raw + dt*tendency must
-    land on it for raw inputs that are negative or above icemax/rho. The warm liquid
-    cloud's CDNC is excluded: jcm clips raw CDNC at 1e11 m-3 on entry
-    (_cdnc_max_phys_per_m3), ECHAM carries 1e12 (no upper bound, F 600-601).
+    land on it for raw inputs that are negative or above icemax/rho.
+
+    jcm, like ECHAM, floors the working numbers at cqtmin only (F 600-605), caps ICNC
+    at icemax only after the detrained number joins it (F 1252), and never caps CDNC.
+    So the warm liquid cloud's raw 1e12 m-3 survives the step in both; its end number
+    is not pinned (the cloud keeps its water) and differs from ECHAM's only through the
+    autoconversion number sink (~2e3 m-3, which depends on the saturation formula), so
+    it is compared at 1e-9 relative.
     """
     prec = "float64"
     with echam_constants(), precision(prec):
@@ -533,9 +508,11 @@ def test_number_tendencies_against_raw_tracer(step):
             tol = 1e-12 * np.maximum(raw, 1.0) + 1e-6
             err = np.abs(jc[fld][pin, 0] - ref[fld][pin, 0])
             assert np.all(err <= tol[pin]), (fld, jc[fld][pin, 0], ref[fld][pin, 0])
+        warm = ~pinned_c & (sl["xtm1_cdnc"][:, 0] * g["rho"][:, j] > 1e11)
+        assert warm.sum() == 1
+        np.testing.assert_allclose(jc["qnc"][warm, 0], ref["qnc"][warm, 0], rtol=1e-9)
 
 
-@needs_merged_core
 @pytest.mark.parametrize("step", STEPS)
 def test_clear_cell_detrainment_end_state(step):
     """ICE-4 end to end in clear cells (cf = 0), where nothing but the detrained
@@ -568,7 +545,6 @@ def test_clear_cell_detrainment_end_state(step):
                 assert abs(jc[fld][k, 0] - ref[fld][k, j]) <= 1e-9 * sc, (fld, jc[fld][k, 0], ref[fld][k, j])
 
 
-@needs_merged_core
 @pytest.mark.parametrize("step", STEPS)
 def test_detrained_ice_end_to_end(step):
     """ICE-1 + ICE-3 wiring, end to end, in the cloudy cells that receive detrained
