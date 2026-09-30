@@ -1515,6 +1515,7 @@ from jcm.physics.physics_term import PhysicsTerm, TracerSpec  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
 from jcm.physics.diagnostics.moist_air_state import advance_thermo_run  # noqa: E402
+from jcm.physics.clouds.cloud_inputs import CONVECTIVE_DETRAINMENT_KEY  # noqa: E402
 
 
 # Hard limit on the convective T tendency: 5 K/hr. See the call site in
@@ -2040,8 +2041,19 @@ class TiedtkeConvection(PhysicsTerm):
             d_qi=tendency.tracers["qi"],
         )
 
+        # The detrained condensate for the cloud scheme of this step, by
+        # itself (ECHAM passes it to ``cloud`` separately as pxtecl/pxteci,
+        # physc.f90:1081). This scheme's qc/qi tendency IS its detrainment
+        # (``plude`` split by phase, flux_tendencies.py), so the published
+        # rates are the same arrays as the returned tendency and the cloud
+        # scheme's split of the running tendency into "upstream" and
+        # "detrained" is exact. Step-local: never carried, never output.
         return tendency, {
             **diagnostics,
             "convection": convection,
             "clouds": clouds,
+            CONVECTIVE_DETRAINMENT_KEY: {
+                "qc": tendency.tracers["qc"],
+                "qi": tendency.tracers["qi"],
+            },
         }

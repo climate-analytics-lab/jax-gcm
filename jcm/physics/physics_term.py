@@ -139,6 +139,20 @@ class PhysicsTerm(nnx.Module):
     # term's ``provides``.
     requires_dycore_fields: ClassVar[tuple[str, ...]] = ()
 
+    # Fields of the PREVIOUS step's post-physics state this term reads
+    # (``"temperature"``, ``"specific_humidity"`` or tracer names): the state
+    # after the physics tendency was applied and before the dynamics, as the
+    # dynamical core advanced from it. A tendency-driven cloud scheme anchors
+    # its increments there (ECHAM's ``ptm1``/``pqm1``/``pxlm1``/``pxim1``), so
+    # that ``x_n - x_ap`` is the dynamics increment; see
+    # ``jcm.physics.clouds.cloud_inputs``. ``ComposablePhysics`` unions the
+    # declarations at construction and carries the slot
+    # (``physics_interface.POST_PHYSICS_STATE_KEY``) only when the union is
+    # non-empty, so compositions that do not ask pay nothing. The term must
+    # read the slot softly: it is invalid on a first step and absent on hosts
+    # without a dynamical core.
+    requires_post_physics_fields: ClassVar[tuple[str, ...]] = ()
+
     # Declarative carry slots. Each entry maps a public ``physics_state``
     # key to a typed sub-struct class with a ``.zeros((ncols,), nlev)``
     # classmethod. The base ``initial_carry_state`` walks this dict and
