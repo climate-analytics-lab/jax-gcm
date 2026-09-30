@@ -319,20 +319,33 @@ def cloud_microphysics_2m(
     # Saturation anchors are evaluated at the STEP-START state, exactly as
     # ECHAM evaluates zqsi/zqsw/zeta/the subsaturations at (ptm1, pqm1);
     # the provisional state enters only through the increments above.
-    # ``es_water`` uses the LIQUID-WATER coefficients at ALL temperatures —
-    # the Bergeron/WBF machinery depends on the water/ice saturation
-    # *difference* below freezing, which degenerates to zero if es_water
-    # switches to the ice coefficients below 0 °C.
-    es_water = thermodynamics.saturation_vapor_pressure(
+    # ECHAM reads them from the 0.001 K tables (mo_cloud_micro_2m.f90
+    # l.648-702): the "water" set from ``tlucuaw`` — Sonntag over liquid
+    # water at ALL temperatures, which the Bergeron/WBF machinery needs,
+    # since it depends on the water/ice saturation *difference* below
+    # freezing — and the "ice" set from ``tlucua``, the ``ua`` table: Sonntag
+    # over ice at and below tmelt and over water above (``phase="auto"``).
+    # The vapour pressures are ``sat_spec_hum``'s capped ``zes`` times
+    # ``p·rv/rd`` (``zesw_2d``, ``zesi``, l.668 and 690), so they are held at
+    # ``0.5·p·rv/rd`` where that cap binds (the top few levels).
+    # The slopes are section 5's ``zdqsdt = 1000·(qs(it+1) − qs(it))`` of
+    # those capped ``qs`` (l.1393-1397): the fit's analytic slope, and zero
+    # where the cap binds, as the difference of two capped knots is.
+    es_cap = 0.5 * pressure * (c.rv / c.rd)
+    es_water_fit = thermodynamics.saturation_vapor_pressure(
         temperature_m1, phase="water")
-    es_ice = thermodynamics.saturation_vapor_pressure(
-        temperature_m1, phase="ice")
+    es_ice_fit = thermodynamics.saturation_vapor_pressure(
+        temperature_m1, phase="auto")
+    es_water = jnp.minimum(es_water_fit, es_cap)
+    es_ice = jnp.minimum(es_ice_fit, es_cap)
     qsat_water, dqsw_dt = (
         thermodynamics.saturation_specific_humidity_and_derivative(
             temperature_m1, pressure, phase="water"))
     qsat_ice, dqsi_dt = (
         thermodynamics.saturation_specific_humidity_and_derivative(
-            temperature_m1, pressure, phase="ice"))
+            temperature_m1, pressure, phase="auto"))
+    dqsw_dt = jnp.where(es_water_fit < es_cap, dqsw_dt, 0.0)
+    dqsi_dt = jnp.where(es_ice_fit < es_cap, dqsi_dt, 0.0)
 
     # Subsaturations for rain evaporation / snow sublimation: the NEGATIVE
     # relative deficits ``min(q/qs − 1, 0)`` (ECHAM zsusatw_evap/zicesub) —

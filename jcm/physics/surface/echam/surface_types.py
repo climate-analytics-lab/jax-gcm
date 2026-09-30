@@ -114,6 +114,9 @@ class AtmosphericForcing(NamedTuple):
     u_wind: jnp.ndarray           # Zonal wind [m/s] (ncol,)
     v_wind: jnp.ndarray           # Meridional wind [m/s] (ncol,)
     pressure: jnp.ndarray         # Pressure [Pa] (ncol,)
+    # Surface (lowest interface) pressure [Pa] (ncol,): the pressure ECHAM's
+    # precalc_ocean/_ice/_land divide the tile saturation by (paphm1).
+    surface_pressure: jnp.ndarray
     
     # Radiation fluxes
     sw_downward: jnp.ndarray      # Downward shortwave [W/m²] (ncol,)

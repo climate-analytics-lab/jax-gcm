@@ -3,7 +3,7 @@
 Only the API consumed via this package is re-exported (the composable
 physics term and its parameter struct); import scheme internals from
 their submodules (``.tiedtke_nordeng``, ``.updraft``, ``.downdraft``,
-``.adjustment``, ``.flux_tendencies``) directly so grep-for-callers
+``.cuadjtq``, ``.flux_tendencies``) directly so grep-for-callers
 stays meaningful.
 """
 

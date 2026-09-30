@@ -135,7 +135,7 @@ class TestWarmColumnMoistStaticEnergy(unittest.TestCase):
         T = jnp.where(mixed, 303.0 - 9.8e-3 * z,
                       303.0 - 9.8e-3 * 600.0 - 6.0e-3 * (z - 600.0))
         self.assertGreater(float(T.min()), c.tmelt + 5.0)
-        from jcm.physics.convection.saturation import saturation_mixing_ratio
+        from jcm.physics.convection.tiedtke_nordeng.cuadjtq import saturation_mixing_ratio
         q = jnp.where(mixed, 0.9, 0.75) * saturation_mixing_ratio(p, T)
         rho = p / (c.rd * T)
         dz = jnp.diff(p_half) / (rho * c.grav)

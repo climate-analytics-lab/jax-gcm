@@ -22,6 +22,11 @@ def compute_richardson_number(
     gravity: float | None = None,
 ) -> jnp.ndarray:
     """Compute bulk Richardson number for atmospheric stability.
+
+    The dry form, from ``∂T/∂z + g/cpd``. ECHAM's ``vdiff`` (l.776-799) forms
+    the interior buoyancy from the liquid-water and virtual potential
+    temperatures, total water and the ``ua`` saturation of the half level,
+    weighted by cloud cover; that moist form is not ported (#962).
     
     Args:
         u: Zonal wind [m/s] (ncol, nlev)

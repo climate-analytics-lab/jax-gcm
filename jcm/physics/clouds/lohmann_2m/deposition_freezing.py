@@ -85,9 +85,8 @@ def mixed_phase_deposition_and_corrections(
     5. Determine phase mask `lo2`:
        - True  (ice)    if T < cthomi, OR if T < tmelt AND updraft < threshold
        - False (liquid) otherwise
-    6. Look up saturation vapour pressures at the new temperature using the
-       ECHAM lookup-table approach (here replaced by analytic Teten's formula
-       consistent with the rest of the JAX scheme).
+    6. Saturation vapour pressures at the new temperature: ECHAM's ``ua`` /
+       ``uaw`` tables, Sonntag (1990), from :mod:`jcm.physics.thermodynamics`.
     7. Compute saturation specific humidities and thermodynamic correction factor
        `zqcon = 1 / (1 + Lc * dqs/dT)`.
     8. Apply deposition increment to `deposition_rate` (ice cases) and condensation
@@ -161,8 +160,9 @@ def mixed_phase_deposition_and_corrections(
     Notes
     -----
     The Fortran lookup table calls (`set_lookup_index`, `tlucua`, `tlucuaw`,
-    `tlucub`, `sat_spec_hum`) are replaced here by inline Teten's formula
-    computations consistent with the rest of the JAX scheme.
+    `tlucub`, `sat_spec_hum`) are replaced here by the Sonntag (1990) fit the
+    tables hold and its analytic slope, evaluated at the temperature rather
+    than at the nearest 0.001 K knot.
     `threshold_vert_vel` must be available in this module or imported.
 
     """
@@ -216,69 +216,58 @@ def mixed_phase_deposition_and_corrections(
     # -------------------------------------------------------------------------
     # 6. Saturation specific humidities and dqs/dT at temperature_tmp.
     #
-    #    ECHAM reads the mo_convect_tables lookups here: ``tlucua(it)`` is
-    #    eps·e_s from the Tetens pairs (ice c3ies=21.875/c4ies=7.66, water
-    #    c3les=17.269/c4les=35.86, prefactor c1es=610.78), indexed by
-    #    it = NINT(1000·T), and ``zdqsdt = 1000·(qs(it+1) − qs(it))`` — a
-    #    finite difference over 0.001 K, i.e. dqs/dT. We use the shared
-    #    ``jcm.physics.thermodynamics`` implementation of exactly those
-    #    Tetens pairs, with the analytic derivative (the 0.001 K difference
-    #    quotient to machine precision, without the subtraction noise).
-    #
-    #    Two earlier ports of this block were badly wrong and are the
-    #    history behind #667: first c.ak (the BOLTZMANN constant) as the
-    #    exponent coefficient with c.p0s1_bg (101325 Pa!) as the prefactor
-    #    suppressed zqcon by ~1e6 (review finding 1.2); the repaired
-    #    version then evaluated the difference quotient at T + 1.0 K but
-    #    kept the ×1000 lookup-step factor, leaving zdqsdt ~1000× too
-    #    large and zqcon = 1/(1 + L/cp·zdqsdt) at ~1/650 — the scheme's
-    #    own saturation adjustment was still effectively inert (#667.1).
-    #    It also mixed a Clausius–Clapeyron integral form for qs(T) with
-    #    Tetens for qs(T+1), which the analytic pair here makes moot.
+    #    ECHAM reads the 0.001 K tables here (mo_cloud_micro_2m.f90
+    #    l.2384-2402): ``tlucua``/``tlucuaw`` (Sonntag 1990, the ``ua`` and
+    #    ``uaw`` tables) at it = NINT(1000·T), the ``ua`` value where lo2
+    #    and the ``uaw`` value elsewhere (``MERGE(zlucua, zlucuaw, lo2)``),
+    #    ``qs`` via ``sat_spec_hum`` (MIN(ua/p, 0.5)/(1 − vtmpc1·…)), and
+    #    ``zdqsdt = 1000·(qs(it+1) − qs(it))`` — the difference quotient over
+    #    one 0.001 K knot. jcm evaluates the Sonntag fit at T and its analytic
+    #    derivative (the limit of that quotient, without the subtraction
+    #    noise), from ``jcm.physics.thermodynamics``. lo2 implies T < tmelt,
+    #    where ``ua`` holds the ice fit.
     # -------------------------------------------------------------------------
     qs_ice_tmp, dqs_ice_dt = thermodynamics.saturation_specific_humidity_and_derivative(
-        temperature_tmp, pressure, phase="ice")
+        temperature_tmp, pressure, phase="auto")
     qs_wat_tmp, dqs_wat_dt = thermodynamics.saturation_specific_humidity_and_derivative(
         temperature_tmp, pressure, phase="water")
 
     qsat_tmp = jnp.where(lo2, qs_ice_tmp, qs_wat_tmp)   # pqsp1tmp
     qsat_tmp_water = qs_wat_tmp                          # zqsp1tmpw
 
-    # zcor = 1/(1 − vtmpc1·qs): d(qs)/d(es) factor, used in the ll1=False
-    # branch of zlcdqsdt below (kept for the exact Fortran mapping).
-    zcor = 1.0 / jnp.maximum(1.0 - c.vtmpc1 * qsat_tmp, params.eps)
-
     # dqs/dT on the phase surface lo2 selected (ECHAM zdqsdt, units kg/kg/K).
     zdqsdt = jnp.where(lo2, dqs_ice_dt, dqs_wat_dt)
 
-    # Phase-appropriate e_s, needed only for the ll1 regime switch below.
-    zes = jnp.where(
+    # sat_spec_hum's ``zes = MIN(es·rd/rv/p, 0.5)`` on the lo2-selected table
+    # and its ``zcor = 1/(1 − vtmpc1·zes)``, both needed only in the ll1=False
+    # branch of zlcdqsdt below (kept for the exact Fortran mapping).
+    es_tmp = jnp.where(
         lo2,
-        thermodynamics.saturation_vapor_pressure(temperature_tmp, phase="ice"),
+        thermodynamics.saturation_vapor_pressure(temperature_tmp, phase="auto"),
         thermodynamics.saturation_vapor_pressure(temperature_tmp, phase="water"),
     )
+    zes = jnp.minimum(
+        es_tmp * (c.rd / c.rv) / jnp.maximum(pressure, params.eps), 0.5)
+    zcor = 1.0 / (1.0 - c.vtmpc1 * zes)
 
     # -------------------------------------------------------------------------
     # 8. Thermodynamic correction factor zqcon
     #    Fortran: zlcdqsdt = MERGE(lc*zdqsdt, q_s*zcor*zlucub, ll1)
-    #    where ll1 = (zes < 0.4) and zlucub ~ d(ln zes)/dT from the table.
-    #    In the analytic port: use lc*zdqsdt for both branches (ll1 captures
-    #    a numerical regime of the lookup table; for the analytic formula the
-    #    two expressions converge).
+    #    with ll1 = (zes < 0.4), zes = MIN(ua/p, 0.5) from sat_spec_hum, and
+    #    zlucub = tlucub(it) = (L/cpd)·d ln es/dT of the ``ua`` table (L and
+    #    the slope switch together at tmelt; mo_echam_convect_tables.f90
+    #    l.229-257). Below the cap both branches are the analytic L·dqs/dT.
     # -------------------------------------------------------------------------
-    # Fortran ``ll1 = (zes < 0.4)`` where sat_spec_hum's zes is eps·e_s/p —
-    # the lookup-validity regime switch, essentially always True at
-    # atmospheric conditions.
-    ll1 = (c.eps * zes / jnp.maximum(pressure, params.eps)) < 0.4
+    # ``ll1``: ECHAM's cap regime switch, always True at atmospheric
+    # conditions.
+    ll1 = zes < 0.4
 
     zlc = jnp.where(lo2, lsdcp, lvdcp)
 
-    # zlucub equivalent: (Lc/Rv) / T^2  (Clausius-Clapeyron derivative of ln e_s)
-    zlucub = jnp.where(
-        lo2,
-        c.alhs / (c.rv * jnp.maximum(temperature_tmp**2, params.eps)),  # ice
-        c.alhc / (c.rv * jnp.maximum(temperature_tmp**2, params.eps)),  # water
-    )
+    # zlucub = tlucub: (L/cpd)·d ln es/dT on the ``ua`` table's phase.
+    zlucub = (jnp.where(thermodynamics.ua_ice_phase(temperature_tmp),
+                        c.alhs, c.alhc) / c.cpd
+              * thermodynamics.dlnes_dT_ua(temperature_tmp))
 
     ztmp1_zlcd = zlc * zdqsdt
     ztmp2_zlcd = qsat_tmp * zcor * zlucub
@@ -369,7 +358,9 @@ def mixed_phase_deposition_and_corrections(
     # ICNC-limited depositional growth can consume it, and the latent-
     # heat spike when the state finally collapses NaN'd the coupled
     # T63L47 runs three times (days 30/90/110). Rides the deposition
-    # ledger, so water/enthalpy bookkeeping is exact by construction.
+    # ledger, so water/enthalpy bookkeeping is exact by construction. The
+    # excess is taken from the pre-increment humidity, so it also removes
+    # what the branch above already deposited (#963).
     scrit_koop = 2.349 - temperature_tmp / 259.0
     koop_excess = jnp.where(
         jnp.logical_and(lo2, temperature_tmp < params.cthomi),

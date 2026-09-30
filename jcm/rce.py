@@ -65,7 +65,6 @@ from jcm.forcing import ForcingData, SolarGeometry
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.physics.aerosol.aerosol_types import AerosolData
 from jcm.physics.clouds.cloud_data import CloudData
-from jcm.physics.clouds.sundqvist import saturation_specific_humidity
 from jcm.physics.composable_physics import ComposablePhysics
 from jcm.physics.convection.betts_miller import (
     BettsMillerConvection,
@@ -198,6 +197,29 @@ _RH_TAPER_TOP_PA = 2.0e3    # 20 hPa: RH forced to zero at and above this
 _STRATOSPHERE_Q_FLOOR = 1.0e-6
 
 
+def closure_saturation_specific_humidity(pfull, temperature, t_mix_min=238.15):
+    """Saturation specific humidity [kg/kg] the fixed-RH closure holds RH against.
+
+    A Tetens saturation vapour pressure, ``610.78·exp(a·Tc/(Tc + b))`` with
+    ``(a, b) = (17.27, 237.3)`` over water and ``(21.87, 265.5)`` over ice,
+    blended linearly between ``t_mix_min`` and ``tmelt``, and
+    ``qs = eps·es/(p − (1 − eps)·es)`` with ``es`` capped below the pressure.
+    The closure is a prescribed humidity profile of this idealised testbed,
+    not a physics scheme: it keeps the saturation the RCE cases were set up
+    and validated with, whatever convection and radiation terms run under it.
+    ECHAM physics takes Sonntag (1990) from :mod:`jcm.physics.thermodynamics`.
+    """
+    tc = temperature - c.tmelt
+    es_water = 610.78 * jnp.exp(17.27 * tc / (tc + 237.3))
+    es_ice = 610.78 * jnp.exp(21.87 * tc / (tc + 265.5))
+    weight = jnp.clip(
+        (temperature - t_mix_min) / (c.tmelt - t_mix_min), 0.0, 1.0)
+    es = weight * es_water + (1.0 - weight) * es_ice
+    es_safe = jnp.minimum(es, 0.99 * jnp.maximum(pfull, 1.0))
+    qs = c.eps * es_safe / jnp.maximum(pfull - es_safe * (1.0 - c.eps), 1.0)
+    return jnp.clip(qs, 0.0, 0.5)
+
+
 def _fixed_rh_specific_humidity(pfull, surface_pressure_pa, temperature, rh):
     """Fixed-RH specific humidity in **kg/kg**: uniform troposphere, dry stratosphere.
 
@@ -210,7 +232,7 @@ def _fixed_rh_specific_humidity(pfull, surface_pressure_pa, temperature, rh):
     surface) is what keeps the column moist enough for Betts-Miller to convect —
     the validated homebrew RCE setup. The result is kg/kg, the canonical
     ``PhysicsState.specific_humidity`` unit and the same unit
-    :func:`saturation_specific_humidity` returns.
+    :func:`closure_saturation_specific_humidity` returns.
 
     ``surface_pressure_pa`` is unused now that the taper is in absolute pressure
     (kept in the signature so callers need not special-case it).
@@ -220,7 +242,7 @@ def _fixed_rh_specific_humidity(pfull, surface_pressure_pa, temperature, rh):
         (pfull - _RH_TAPER_TOP_PA) / (_RH_TAPER_BASE_PA - _RH_TAPER_TOP_PA),
         0.0, 1.0,
     )
-    qsat = saturation_specific_humidity(pfull, temperature)  # kg/kg
+    qsat = closure_saturation_specific_humidity(pfull, temperature)  # kg/kg
     return jnp.maximum(rh_profile * qsat, _STRATOSPHERE_Q_FLOOR)
 
 

@@ -16,7 +16,7 @@ import jax.numpy as jnp
 import numpy as np
 
 import jcm.constants as c
-from jcm.physics.convection.saturation import (
+from jcm.physics.thermodynamics import (
     saturation_specific_humidity_and_derivative,
 )
 from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (

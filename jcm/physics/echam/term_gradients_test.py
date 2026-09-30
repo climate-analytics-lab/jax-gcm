@@ -313,7 +313,9 @@ class _Check:
     #: inventory of the struct rather than a check.
     outputs: str = "all"
     #: Output keys dropped even from the ledger, each because the term returns
-    #: that field as a structural zero rather than computing it.
+    #: that field as a structural zero rather than computing it. A
+    #: ``"key/field"`` entry drops one field of a struct-valued diagnostic
+    #: (see ``_drop_outputs``).
     skip_outputs: tuple[str, ...] = ()
     xfail_reference: str | None = None
     xfail_finiteness: str | None = None
@@ -401,24 +403,28 @@ _CHECKS: dict = {
     ("macv2_sp_aerosol", "stable"): _Check(
         xfail_reference=_MACV2_PER_BAND_RATIO_NOISE),
 
-    # ``sundqvist_cloud_fraction`` at both points takes the default difference
-    # reference. The stable column carried a strict xfail until #677: _qs_cover's
-    # ice-memory phase switch (es_ice vs es_water at t_ice = 238.15 K, a
-    # deliberate hard discontinuity — kept, see ``sundqvist.py`` _qs_cover) puts
-    # a jump in cloud_fraction where a level crosses that boundary, and along
-    # this test's fixed direction (seed 0) it defeated the central difference:
-    # the secant grew as jump/eps until the step no longer crossed t_ice, by
-    # which point it was float32 cancellation noise, so no rung was both past the
-    # jump and above the noise. #677 did not touch the switch, but its
-    # single-level tie-break and surface-interface height changed the
-    # stable-column cloud_fraction field enough that the seed-0 projection now
-    # resolves a converged reference in that gap (below the crossing step, above
-    # the noise) which AD matches. The reference is genuine but delicate: the
-    # switch is unchanged, so along other directions the jump can still defeat a
-    # difference (verified: the cell passes at some seeds and not others on both
-    # dev and this branch). If a future change re-crosses the boundary at seed 0
-    # this fails loudly rather than silently — the honest signal for a delicate
-    # reference — at which point it earns back an xfail naming the switch.
+    # ``sundqvist_cloud_fraction`` at the stable column crosses the cover's
+    # ice-memory switch under this direction: ``_qs_cover`` takes the ice fit
+    # where the cell's cloud ice exceeds csecfrl = 5e-6 kg/kg (ECHAM
+    # mo_cover.f90's ``lo2``, a deliberate hard switch, which its second
+    # condition T < cthomi shares). The column carries no cloud ice, so the
+    # zero qi leaf takes an absolute step, and the plus side crosses 5e-6 at
+    # the cold levels (30-35) between eps = 2e-6 and 4e-6: the cover's
+    # relative humidity jumps by 0.03-0.08 there and the plus secant grows as
+    # jump/eps. That is the scheme's own switch, so the adjoint identity and
+    # the liveness of the temperature and humidity the cover reads are what
+    # remain, and both hold at the default tolerance. The term is a
+    # diagnostic: its tendency ledger is structural zeros, and so are the two
+    # convective-detrainment fields of the ``clouds`` it returns, which it
+    # clears for the convection downstream to fill. The convecting column
+    # takes the default difference reference.
+    ("sundqvist_cloud_fraction", "stable"): _Check(
+        reference="adjoint",
+        live_inputs=("[0]/temperature", "[0]/specific_humidity"),
+        skip_outputs=("u_wind", "v_wind", "temperature", "specific_humidity",
+                      "tracers/qc", "tracers/qi",
+                      "clouds/conv_detrainment_qc",
+                      "clouds/conv_detrainment_qi")),
 
     # TTE-TKE, the 1M microphysics and Hines each cross an internal activation
     # boundary under this direction, and none of them has a central difference
@@ -806,6 +812,33 @@ def _term_terrain(replay: _Replay, term_name: str) -> TerrainData:
         replay.terrain, fmask=jnp.ones_like(replay.terrain.fmask))
 
 
+def _drop_outputs(out: dict, skip_outputs: tuple[str, ...]) -> dict:
+    """``out`` without the ``skip_outputs`` entries.
+
+    An entry that is a key of ``out`` drops that output (``"u_wind"``,
+    ``"tracers/qc"``). A ``"key/field"`` entry that is not drops one field of
+    the dataclass-valued output at ``key``, whose remaining fields are then
+    checked as a dict: ``"clouds/conv_detrainment_qc"`` is a structural zero of
+    the cover term, which clears it for the convection downstream, while the
+    rest of the ``clouds`` it returns is live. A field the struct does not have
+    is an error, so a renamed field cannot silently stop being skipped.
+    """
+    kept = {k: v for k, v in out.items() if k not in skip_outputs}
+    for entry in skip_outputs:
+        key, sep, field = entry.partition("/")
+        if entry in out or not sep or key not in kept:
+            continue
+        node = kept[key]
+        if dataclasses.is_dataclass(node):
+            node = {f.name: getattr(node, f.name)
+                    for f in dataclasses.fields(node)}
+        if not isinstance(node, dict) or field not in node:
+            raise KeyError(f"skip_outputs entry {entry!r}: output {key!r} "
+                           f"has no field {field!r}")
+        kept[key] = {k: v for k, v in node.items() if k != field}
+    return kept
+
+
 def _term_function(replay: _Replay, term_name: str,
                    outputs: str = "all", skip_outputs: tuple[str, ...] = ()):
     """``(state, diagnostics, forcing, terrain) -> (tendency, provided)``.
@@ -835,7 +868,7 @@ def _term_function(replay: _Replay, term_name: str,
         }
         if outputs == "all":
             out.update({k: updated[k] for k in provides if k in updated})
-        return {k: v for k, v in out.items() if k not in skip_outputs}
+        return _drop_outputs(out, skip_outputs)
 
     if term_name == "rrtmgp_radiation":
         # Compiled once rather than dispatched op by op: RRTMGP is thousands
@@ -900,6 +933,24 @@ def test_every_term_is_covered():
     """``_TERM_NAMES`` is the composition, so a new term cannot slip through."""
     physics = echam_physics(checkpoint_terms=False)
     assert tuple(term.name for term in physics.terms) == _TERM_NAMES
+
+
+def test_drop_outputs_drops_keys_and_struct_fields():
+    """``skip_outputs`` drops whole outputs and single fields of a struct output.
+
+    A field the struct does not have is rejected.
+    """
+    from jcm.physics.clouds.cloud_data import CloudData
+    clouds = CloudData.zeros((2,), 3)
+    out = {"u_wind": jnp.zeros(3), "tracers/qc": jnp.zeros(3), "clouds": clouds}
+    kept = _drop_outputs(out, ("u_wind", "tracers/qc",
+                                "clouds/conv_detrainment_qc"))
+    assert set(kept) == {"clouds"}
+    names = {f.name for f in dataclasses.fields(clouds)}
+    assert set(kept["clouds"]) == names - {"conv_detrainment_qc"}
+    assert kept["clouds"]["cloud_fraction"] is clouds.cloud_fraction
+    with pytest.raises(KeyError, match="no field 'not_a_field'"):
+        _drop_outputs(out, ("clouds/not_a_field",))
 
 
 @pytest.mark.parametrize("point_name", sorted(_POINTS))

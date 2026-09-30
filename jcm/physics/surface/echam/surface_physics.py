@@ -9,6 +9,8 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
+import jcm.constants as c
+
 from .surface_types import (
     SurfaceParameters, SurfaceState, AtmosphericForcing,
     SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics
@@ -492,6 +494,7 @@ class EchamSurface(PhysicsTerm):
             u_wind=atm_u,
             v_wind=atm_v,
             pressure=atm_p,
+            surface_pressure=state.normalized_surface_pressure * c.p0,
             sw_downward=radiation.surface_sw_down,
             lw_downward=radiation.surface_lw_down,
             rain_rate=jnp.zeros(ncols),

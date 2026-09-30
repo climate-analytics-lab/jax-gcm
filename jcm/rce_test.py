@@ -19,11 +19,11 @@ from dinosaur.sigma_coordinates import SigmaCoordinates
 
 import jcm.constants as c
 from jcm.forcing import SolarGeometry
-from jcm.physics.clouds.sundqvist import saturation_specific_humidity
 from jcm.rce import (
     _STRATOSPHERE_Q_FLOOR,
     AerosolFree,
     _pressure_centers,
+    closure_saturation_specific_humidity,
     fixed_rh_closure,
     rce_column,
     rce_initial_state,
@@ -53,7 +53,7 @@ class TestFixedRhClosure(unittest.TestCase):
 
         ps = float(self.ic.normalized_surface_pressure) * c.p0
         pfull = _pressure_centers(self.vertical, jnp.asarray(ps))
-        qsat = saturation_specific_humidity(pfull, self.ic.temperature)
+        qsat = closure_saturation_specific_humidity(pfull, self.ic.temperature)
         # Tropospheric levels (p ≥ 100 hPa) sit at the uniform environmental RH —
         # no surface-to-top taper that would dry the convecting layer.
         trop = np.asarray(pfull) >= 1.0e4
