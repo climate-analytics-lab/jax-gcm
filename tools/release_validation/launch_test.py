@@ -893,10 +893,12 @@ def test_fetch_copies_the_run_but_not_its_checkpoints(scratch, volume,
                           "mx_speedy_t31_ft_day5.nc",
                           "mx_speedy_t31_ft_day5.nc.provenance.json"])
     assert (local / "mx_speedy_t31_ft_day5.nc").read_bytes() == b"n" * 1000
-    # A later fetch never replaces the local launch record --resume reads.
+    # A later fetch never replaces the local launch record --resume reads,
+    # and refuses to copy another launch's run next to it.
     (local / "launch.json").write_text('{"digest": "local"}\n')
-    launch.main(["--site", "nautilus", "--repo", str(gitrepo), "--fetch",
-                 "--members", MEMBER, "--tag", "ft"])
+    with pytest.raises(SystemExit, match="different launch; nothing copied"):
+        launch.main(["--site", "nautilus", "--repo", str(gitrepo), "--fetch",
+                     "--members", MEMBER, "--tag", "ft"])
     assert (local / "launch.json").read_text() == '{"digest": "local"}\n'
 
 
@@ -964,13 +966,14 @@ def test_fetch_keeps_the_local_launch_record(scratch, volume, capsys):
     import fetch_run
     dest = scratch / "keep"
     dest.mkdir(parents=True)
-    (dest / "launch.json").write_text('{"digest": "mine"}\n')
-    capsys.readouterr()
+    (dest / "launch.json").write_bytes((volume / "launch.json").read_bytes())
+    stamp = (volume / "launch.json").stat().st_mtime + 500
+    os.utime(dest / "launch.json", (stamp, stamp))     # ours, same content
     assert fetch_run.fetch_run("mx_speedy_t31_ft", dest,
                                site=launch.sites.get("nautilus"), pod="p",
                                keep=("launch.json",)) == []
-    assert (dest / "launch.json").read_text() == '{"digest": "mine"}\n'
-    assert "differs" in capsys.readouterr().err
+    assert (dest / "launch.json").stat().st_mtime == stamp   # not rewritten
+    assert (dest / "run.log").exists()
 
 
 def test_fetch_of_a_run_still_being_written_is_not_short(scratch, volume,
@@ -1157,19 +1160,22 @@ def test_fetch_refreshes_a_file_rewritten_at_the_same_size(scratch, volume):
                    "file did not complete)"]
 
 
-def test_fetch_notes_a_foreign_record_of_the_same_size(scratch, volume,
-                                                       capsys):
-    """Two records of one length (fixed-width digest) are compared by content."""
+def test_fetch_refuses_a_foreign_record_of_the_same_size(scratch, volume):
+    """A different launch on the volume is not copied in under this record.
+
+    Compared by content: two records normally have one length (fixed-width
+    digest and SHA).
+    """
     import fetch_run
     dest = scratch / "foreign"
     dest.mkdir(parents=True)
     (volume / "launch.json").write_text('{"digest": "aaaa"}\n')
     (dest / "launch.json").write_text('{"digest": "bbbb"}\n')
-    capsys.readouterr()
-    fetch_run.fetch_run("mx_speedy_t31_ft", dest,
-                        site=launch.sites.get("nautilus"), pod="p",
-                        keep=("launch.json",))
-    assert "not the launch recorded here" in capsys.readouterr().err
+    bad = fetch_run.fetch_run("mx_speedy_t31_ft", dest,
+                              site=launch.sites.get("nautilus"), pod="p",
+                              keep=("launch.json",))
+    assert len(bad) == 1 and "different launch; nothing copied" in bad[0]
+    assert sorted(p.name for p in dest.iterdir()) == ["launch.json"]
     assert (dest / "launch.json").read_text() == '{"digest": "bbbb"}\n'
 
 

@@ -131,9 +131,9 @@ def fetch_run(run: str, dest, *, site: dict, pod: str,
     An empty list means ``dest`` now holds every (non-checkpoint) file at
     least at the size and modification time the volume listed — at least,
     because a run still being written grows between the listing and the copy
-    (see :func:`_incomplete`). A name in ``keep``
-    that already exists in ``dest`` is never overwritten (a caller's own
-    record); a difference from the volume's copy is reported instead.
+    (see :func:`_incomplete`). A name in ``keep`` that already exists in
+    ``dest`` is a caller's own record: it is never overwritten, and when the
+    volume's copy differs nothing is copied and the difference is returned.
     """
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -145,13 +145,17 @@ def fetch_run(run: str, dest, *, site: dict, pod: str,
         wanted = {f: sm for f, sm in files.items()
                   if (with_checkpoints or not CHECKPOINT.search(f))
                   and f not in kept}
-        for f in kept:
-            theirs = _kubectl(site, "exec", pod, "--", "cat",
-                              f"/runs/{run}/{f}", timeout=120).stdout
-            if theirs != (dest / f).read_text():
-                print(f"# NOTE: /runs/{run}/{f} differs from {dest / f}: the "
-                      "run on the volume is not the launch recorded here; "
-                      "the local record is kept", file=sys.stderr)
+        # A differing record means the volume holds another launch under this
+        # run name: copying its outputs next to this record would pass them
+        # off as the recorded launch's, so nothing is copied.
+        foreign = [f for f in kept
+                   if _kubectl(site, "exec", pod, "--", "cat",
+                               f"/runs/{run}/{f}", timeout=120).stdout
+                   != (dest / f).read_text()]
+        if foreign:
+            return [f"{f}: /runs/{run}/{f} differs from {dest / f}, so the "
+                    "run on the volume is a different launch; nothing copied"
+                    for f in foreign]
         todo = sorted(f for f, (n, t) in wanted.items()
                       if not _same(dest / f, n, t))
         gib = sum(wanted[f][0] for f in todo) / 2**30
