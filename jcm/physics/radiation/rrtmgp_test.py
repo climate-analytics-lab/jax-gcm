@@ -1865,3 +1865,24 @@ class TestRRTMGPCloudInhomogeneity:
             [0, 2, 4])
         np.testing.assert_array_equal(
             np.asarray(lagged_convection_type({}, 3)), [0, 0, 0])
+
+
+def test_zenith_angle_differentiates_with_the_sun_overhead():
+    """cos_zenith == 1 (overhead sun) has a finite, exact derivative (#663).
+
+    RRTMGP takes cos(zenith) back from the angle, so what matters is the
+    round trip: its value at 1 is 1 and, because cos_zenith = 1 is its own
+    maximum, reporting a zero derivative there is exact.
+    """
+    from jcm.physics.radiation.rrtmgp import _solar_zenith_angle
+
+    round_trip = lambda mu: jnp.sum(jnp.cos(_solar_zenith_angle(mu)))  # noqa: E731
+    mu = jnp.asarray([1.0, 0.999, 0.5, 0.0, -0.3], jnp.float32)
+    np.testing.assert_allclose(
+        np.asarray(_solar_zenith_angle(mu)),
+        np.arccos(np.clip(np.asarray(mu), 0.0, 1.0)), rtol=1e-6, atol=1e-7)
+    grad = np.asarray(jax.grad(round_trip)(mu))
+    assert np.all(np.isfinite(grad))
+    assert grad[0] == 0.0
+    # Inside (0, 1) the round trip is the identity, derivative 1.
+    np.testing.assert_allclose(grad[1:3], 1.0, rtol=1e-3)

@@ -481,6 +481,28 @@ def prepare_icon_data(
 # Main entry point (ICON-compatible signature)
 # ---------------------------------------------------------------------------
 
+
+def _solar_zenith_angle(cos_zenith: jnp.ndarray) -> jnp.ndarray:
+    """Return the solar zenith angle [rad] for ``cos_zenith``, clipped to [0, 1].
+
+    Night columns (cos_zenith < 0) map to pi/2, where the library's mu0 = 0
+    zeroes the direct beam.
+
+    arccos has an infinite derivative at 1, the sun exactly overhead, which a
+    float32 cos_zenith reaches within ~0.02 degrees of the subsolar point.
+    The library takes cos(zenith) straight back, and AD multiplies sin(0) = 0
+    by that infinity: a NaN derivative with respect to the solar geometry.
+    Double-where on the base (as the ``zxrp1_base`` guard in
+    ``clouds/echam_1m.py``): the value at mu0 = 1 is arccos(1) = 0 either
+    way, and the derivative reported there is 0, which is exact — mu0 = 1 is
+    the maximum of cos_zenith over hour angle, latitude and declination, so
+    cos_zenith's own derivative vanishes at it.
+    """
+    mu0 = jnp.clip(cos_zenith, 0.0, 1.0)
+    below_zenith = mu0 < 1.0
+    return jnp.where(
+        below_zenith, jnp.arccos(jnp.where(below_zenith, mu0, 0.0)), 0.0)
+
 def radiation_scheme_rrtmgp(
     temperature: jnp.ndarray,
     specific_humidity: jnp.ndarray,
@@ -655,7 +677,15 @@ def radiation_scheme_rrtmgp(
     )
     key_lw, key_sw = jax.random.split(col_key)
     overlap_str = cloud_overlap_name(int(parameters.cloud_overlap))
-    decorrelation_km = float(parameters.cloud_decorrelation_km)
+    # The decorrelation length stays an array: the sampler only uses it in
+    # ``exp(-dz / L)``, and a Python ``float()`` here would make every
+    # derivative with respect to the radiation parameters raise
+    # (ConcretizationTypeError) instead of returning one. Its own derivative
+    # here is zero — it reaches the fluxes only through the McICA draw's
+    # ``y < alpha`` comparison — so it traces rather than calibrates; the
+    # emulator's analytic expected cover does carry a derivative. The overlap
+    # rule is an integer code that selects a code path, read as a Python int.
+    decorrelation_km = parameters.cloud_decorrelation_km
 
     masks_lw = generate_subcolumns(
         cloud_fraction_rad, layer_thickness,
@@ -847,7 +877,7 @@ def radiation_scheme_rrtmgp(
 
     # Night columns are handled by the zenith clip (µ0 = 0 zeroes the direct
     # beam); the irradiance itself is strictly positive by construction.
-    zenith_angle = jnp.arccos(jnp.clip(cos_zenith, 0.0, 1.0))
+    zenith_angle = _solar_zenith_angle(cos_zenith)
     irrad_val = direct_irradiance
 
     # Per-column surface boundary condition (jax-rrtmgp >= 0.2.1 hook —
