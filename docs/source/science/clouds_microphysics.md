@@ -62,10 +62,10 @@
   ``Δq_c``, ``Δq_i`` are ``dt`` times the running tendency of every physics
   term composed before the 1M term (radiation, vertical diffusion with its
   condensate, the surface, convection) on the step-start state as anchor, with
-  the convective detrainment passed separately as ECHAM's ``pxtecl``/``pxteci``. The saturation vapour
-  pressure and its slope are ECHAM's Sonntag (1990) fit, from
-  ``echam_saturation``, the module the cover reads. ``cvtfall``, ``csecfrl`` and ``clwprat`` are
-  ordinary tunable parameters whose defaults follow ECHAM's per-truncation
+  the convective detrainment passed separately as ECHAM's ``pxtecl``/``pxteci``.
+  The saturation vapour pressure and its slope are ECHAM's Sonntag (1990) fit,
+  from ``echam_saturation``, the module the cover reads. ``cvtfall``,
+  ``csecfrl`` and ``clwprat`` are ordinary tunable parameters whose defaults follow ECHAM's per-truncation
   values (T63: 2.5, 5e-6, 4.0). The **droplet number** is ECHAM's prescribed
   ``acdnc`` (``physc.f90`` §3.12; ICON-A ``mo_echam_phy_diag.f90::droplet_number``):
   80 cm⁻³ over sea and 180 cm⁻³ over land that is not glacier from the surface
