@@ -384,18 +384,16 @@ def land_surface_physics_step(
     # Soil evaporation depends on soil moisture
     soil_beta = jnp.minimum(soil_moisture[:, 0] / 0.75, 1.0)  # Evaporation efficiency
     
-    # Simplified surface humidity, saturated over LIQUID water at all
-    # temperatures (shared ECHAM coefficients from
-    # jcm.physics.thermodynamics). Kept over-water deliberately: the
-    # latent-heat flux below pairs the resulting evaporation with the
-    # liquid-evaporation latent heat ``alhc`` unconditionally (this
-    # simplified land tile does not model frozen-soil / snow sublimation),
-    # so switching the saturation surface to ice below freezing would make
-    # the qsat/latent-heat pair inconsistent the other way around. If
-    # sublimation over frozen land is added later, both this phase choice
-    # and the ``alhc`` factor must switch together on T < tmelt.
-    e_sat = thermodynamics.saturation_vapor_pressure(surface_temp, phase="water")
-    q_sat_surface = c.eps * e_sat / atmospheric_state.pressure
+    # Simplified surface humidity from ECHAM's ``ua`` table at the surface
+    # temperature, as precalc_land reads it (mo_surface_land.f90 l.190):
+    # Sonntag (1990) over ice at and below tmelt, over water above, with
+    # ECHAM's ``qs`` form at the surface pressure (``ua/paphm1``, l.194-195).
+    # ECHAM pairs that saturation with ``alv`` for the
+    # snow-free evaporation too (JSBACH charges ``als − alv`` only to the
+    # snow share), which is what this simplified tile's ``alhc`` does.
+    e_sat = thermodynamics.es_ua(surface_temp)
+    q_sat_surface = thermodynamics.qsat_from_es(
+        e_sat, atmospheric_state.surface_pressure)
     q_surface = soil_beta * q_sat_surface  # Reduced by soil dryness
     
     # Temperature and humidity differences. Positive convention: flux UP

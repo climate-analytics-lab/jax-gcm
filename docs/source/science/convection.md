@@ -32,8 +32,13 @@
   the Nordeng ``zmfub1 = zcape·zmfub/(zheat·tau)`` rescale, which is where the
   CAPE-consumption timescale ``tau`` lives. Mid-level (``cubasmc``) plumes take
   neither: their base flux is the resolved ascent that triggered them. The saturation
-  adjustment ``cuadjtq`` is a faithful linearised-Newton port of ``mo_cuadjust.f90``
-  (``adjustment.py``) with the three ``kcall`` modes. The precipitation budget
+  adjustment ``cuadjtq`` (``cuadjtq.py``) is ``mo_cuadjust.f90::cuadjtq``: one
+  damped Newton step clipped by ``kcall`` (``0`` both signs for ``cuini``,
+  ``1`` condensation only for ``cubase``/``cuasc``, ``2`` evaporation only for
+  ``cudlfs``/``cuddraf``), then one unclipped refinement step where the first
+  was non-zero. It reproduces ECHAM's compiled routine to rounding where the
+  lookup tables are replaced by the Sonntag fit they hold, and to the tables'
+  interpolation error (2.4e-11 K) where they are not. The precipitation budget
   (rain/snow partition, snow melt, sub-cloud Kessler evaporation, proportional
   depletion) transcribes ECHAM ``cuflx`` (``flux_tendencies.py``,
   ``mo_cufluxdts.f90``). The fractional precipitation cover the sub-cloud
@@ -60,13 +65,19 @@
 
 **Tiedtke's** activation is a **smooth sigmoid trigger** on CAPE rather than a hard
 ``cape > threshold`` branch, so tau / entrainment / threshold parameters carry
-nonzero gradients near the trigger. Saturation thermodynamics are shared
-(``jcm/physics/convection/saturation.py``, Tetens).
+nonzero gradients near the trigger. Tiedtke-Nordeng's saturation is ECHAM's
+``ua`` table, Sonntag (1990) over ice at and below the melting point and over
+water above (``jcm/physics/convection/tiedtke_nordeng/cuadjtq.py`` on
+``jcm/physics/thermodynamics.py``; see {doc}`constants`), with the ``cuadjtq``
+latent heat switching at the same point (``mo_cuadjust.f90``,
+``mo_echam_convect_tables.f90::lookup_ubc``). Betts-Miller follows Isca and
+saturates over water with the Tetens form of
+``jcm/physics/convection/saturation.py``.
 
 **What ECHAM/CAM does.** ECHAM6-HAM2.3 uses the **Tiedtke (1989) bulk mass-flux
 scheme with Nordeng (1994) CAPE closure** (``mo_cumastr.f90`` master driver,
 ``mo_cuasc.f90`` / ``mo_cuascn.f90`` updraft ascent, ``mo_cudlfs`` / ``mo_cuddraf``
-downdrafts, ``mo_cuadjust.f90`` saturation and per-level adjustment,
+downdrafts, ``mo_cuadjust.f90`` saturation adjustment,
 ``mo_cufluxdts.f90`` fluxes). References: Tiedtke, M. (1989), *Mon. Wea. Rev.* 117,
 1779-1800; Nordeng, T.E. (1994), ECMWF Tech. Memo. 206. Betts-Miller's reference
 is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sci.*
@@ -79,11 +90,12 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   ``use_midlev`` that forces full trigger weight, as ECHAM's ``cubasmc``
   conditions ARE the activation), so gradients do not flow across mid-level
   onset.
-- `science` / `compute` (stopgap) — the **per-level moist-adjustment limits in
-  ``mo_cuadjust.f90`` are not yet ported**. The cloud-base mass-flux **CFL cap**
-  ``zmfmax = layer_mass/dt`` bounds the column-integrated flux but not per-level
-  latent-heat spikes inside the updraft loop. Until the per-level limits land, an
-  explicitly-labelled stopgap caps the convective T-tendency at 5 K/hr
+- `science` / `compute` (stopgap) — ECHAM bounds the mass flux, not the
+  heating: the cloud-base flux and the per-level entrainment are held to the
+  layer's air mass per step (``zmfmax = layer_mass/dt``, ``mo_cumastr.f90``
+  and ``mo_cuascent.f90::cuasc``, both ported). jcm adds a safety net ECHAM
+  does not have (#961): an explicitly-labelled stopgap caps the convective
+  T-tendency at 5 K/hr
   (``_DTDT_MAX``) and rescales the **whole** ledger homogeneously — T, q,
   qc/qi, precipitation, the mass fluxes with the tracer transport they drive,
   **and the momentum tendencies** ``dudt``/``dvdt``, which share the same mass
@@ -94,8 +106,8 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 **Status & known limitations.**
 - The 5 K/hr tendency cap is a **safety net, not physics**; it fires only where
   the parcel-vs-environment balance has gone pathological (healthy tropical deep
-  convection is ~1 K/hr). It remains until the ``mo_cuadjust`` per-level limits are
-  ported.
+  convection is ~1 K/hr). It has no ECHAM counterpart; whether it can go is
+  a measurement of where it fires and of stability without it (#961).
 - Cloud-base closure falls back to ECHAM's constant ``zmfub = 0.01`` first
   guess when the moisture-budget denominator collapses under a near-saturated
   cloud base or spectral supersaturation ringing; deep columns then take the
@@ -116,8 +128,8 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 **Code pointers.**
 - ``jcm/physics/convection/tiedtke_nordeng/`` — ``tiedtke_nordeng.py``
   (``TiedtkeConvection``, the CFL cap, the ``moisture_valid`` closure gate
-  [ECHAM zlo1], ``_DTDT_MAX``, the unported-mo_cuadjust note),
-  ``adjustment.py`` (``cuadjtq``), ``flux_tendencies.py``
+  [ECHAM zlo1], ``_DTDT_MAX``), ``cuadjtq.py`` (``cuadjtq``,
+  ``saturation_mixing_ratio``, ``cuadjtq_newton``, ``cuadjtq_newton_evap``), ``flux_tendencies.py``
   (``convective_precip_fluxes`` [ECHAM cuflx], ``mass_flux_closure_blend``),
   ``updraft.py``, ``downdraft.py``.
 - ``jcm/physics/convection/speedy_convection.py`` — ``diagnose_convection``.
@@ -128,7 +140,8 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 
 **Validation evidence.** ``jcm/physics/convection/tiedtke_nordeng/`` test suite
 (``tiedtke_nordeng_test.py``, ``half_level_ledger_test.py``,
-``adjustment_test.py``, ``updraft_test.py``,
+``cuadjtq_test.py`` (ECHAM's compiled ``cuadjtq``, all three ``kcall``
+modes), ``updraft_test.py``,
 ``downdraft_test.py``, ``deep_shallow_test.py``, ``midlevel_trigger_test.py``,
 ``rce_integration_test.py``, ``convection_units_test.py``,
 ``smooth_gradients_test.py``, ``cuasc_port_test.py``,
@@ -284,8 +297,9 @@ Operational notes:
   so such a column stays shallow unless it starts under convergence —
   ``jcm/rce.py::convergent_initial_physics_data`` supplies that for the JAM
   aerosol-pathway checks.
-- Near the model top (a few Pa) ``cuini``'s saturation adjustment works with a
-  saturation humidity capped at 0.5 and its interface values are not
+- In the top few levels (below ~150 Pa) ``cuini``'s saturation adjustment works with
+  ECHAM's capped ``x = MIN(es·rd/rv/p, 0.5)``, so its saturation humidity sits
+  at ``0.5/(1 − 0.5·vtmpc1) ≈ 0.72`` and its interface values are not
   physical, as in the reference; no plume reaches them.
 
 ## Heat capacity of the Tiedtke plume and ledger
@@ -302,7 +316,7 @@ and the ``cudtdq`` ledger — the DSE deviation fluxes ``cp·(T_plume − T)·M`
 the conversion of the whole heat ledger to a temperature tendency. The column
 enthalpy the ledger deposits is therefore ``Σ cp·dT·Δp/g``. Three sites keep
 dry ``cpd`` because the reference does: the ``cuadjtq`` Newton step and the
-wet-bulb adjustment (``adjustment.py``, ``saturation.py``), and the ``cuflx``
+wet-bulb adjustment (``cuadjtq.py``), and the ``cuflx``
 melting constant, which applies its own ``(1 + vtmpc2·q)`` factor with the
 provisional humidity. jcm's own trigger diagnostic ``calculate_cape_cin`` has no
 ECHAM counterpart and uses the textbook dry-``cpd`` parcel.

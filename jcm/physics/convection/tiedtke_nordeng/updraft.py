@@ -29,18 +29,21 @@ from .half_levels import (
     half_level_environment,
     reconstruct_pressure_half,
 )
-# The ECHAM cuadjtq-style damped Newton adjustment. It lives in
-# jcm.physics.convection.saturation so that ``calculate_cape_cin`` (in
+# ECHAM's condensing saturation adjustment (``cuadjtq``, kcall = 1). It lives
+# in the leaf module ``cuadjtq`` so that ``calculate_cape_cin`` (in
 # tiedtke_nordeng.py, which this module imports from) can call it too;
 # re-exported here under its historical name for callers and tests.
-from jcm.physics.convection.saturation import (
+from jcm.physics.convection.tiedtke_nordeng.cuadjtq import (
     cuadjtq_newton as saturation_adjustment,
 )
 from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 
 
 
-from jcm.physics.thermodynamics import saturation_specific_humidity_and_derivative
+from jcm.physics.thermodynamics import (
+    es_ua,
+    saturation_specific_humidity_and_derivative,
+)
 
 
 #: ECHAM ``cuentr``'s shallow-convection entrainment band: a shallow plume
@@ -186,7 +189,11 @@ def cubase_parcel(env: HalfLevelEnvironment, kbase: jnp.ndarray):
     carries the defined energy. At the base it is saturation adjusted
     with the damped condensation-only Newton step at the interface pressure
     (``cuadjtq`` kcall = 1, lines 296-314); the condensate stays in the
-    plume, so total water is conserved.
+    plume, so total water is conserved wherever the step condensed. Within
+    ~1 mK of ``tmelt``, where the adjustment can return the parcel with
+    more vapour and no condensate (see ``cuadjtq_newton``), ECHAM carries
+    that adjusted parcel on to the next interface; the telescoped lift here
+    does not, a difference of ~5e-4 K and ~2e-7 kg/kg.
 
     Returns:
         ``(tu, qu, lu)`` at interface ``kbase``.
@@ -276,7 +283,12 @@ def saturated_mse_hat(env: HalfLevelEnvironment) -> jnp.ndarray:
     zhsat = env.cpcu * env.tenh + env.geoh + zalvs * env.qsenh
     p = jnp.maximum(env.paph[:-1], 1.0)
     _, dqsdt = saturation_specific_humidity_and_derivative(env.tenh, p)
-    zgam = zalvs / env.cpcu * dqsdt
+    # ECHAM forms γ as ``zalvdcp·zdqsdt`` (L/pcpcu) where ``zes < 0.4`` and as
+    # ``zqsat·zcor·ub`` above (mo_cumastr.f90 l.609-618), with lookup_ubc's
+    # ``ub = (L/cpd)·d ln es/dT``: the same dqs/dT over cpd instead of pcpcu.
+    # ``zes >= 0.4`` only in the top few levels (below ~150 Pa).
+    zes = es_ua(env.tenh) * (c.rd / c.rv) / p
+    zgam = zalvs / jnp.where(zes >= 0.4, c.cpd, env.cpcu) * dqsdt
     zzz = env.cpcu * env.tenh * c.vtmpc1
     return zhsat - (
         (zzz + zgam * zzz) / (1.0 + zgam * zzz / zalvs)

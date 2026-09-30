@@ -221,6 +221,12 @@ class TestEchamReferenceTrajectory(_Float32ReferenceTest):
     30 % in specific humidity, 68 % in u and 83 % in v (winds spun up from
     rest) and 0.02 % in surface pressure; the condensate is identically zero in
     both (zero forcing, one day). The speedy reference is unchanged.
+
+    Regenerated 2026-09-30 for ECHAM's Sonntag (1990) saturation (#956) with
+    ``regenerate_regression_references.sh`` (jax/jaxlib 0.10.2). The shift
+    is inside the 3 % tolerance — 0.84 % in specific humidity, 0.14 % in v,
+    0.10 % in u, 4e-5 in temperature — and the fingerprint follows the
+    physics it pins. The speedy reference is unchanged.
     """
 
     @pytest.mark.slow

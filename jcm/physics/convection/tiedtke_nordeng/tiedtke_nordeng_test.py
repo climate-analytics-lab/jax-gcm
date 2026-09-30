@@ -699,7 +699,7 @@ def _deep_convecting_column(clouds=None):
     Returns ``(state, diagnostics, terrain, dt)``; ``clouds`` replaces the
     zero ``CloudData`` the diagnostics otherwise carry.
     """
-    from jcm.physics.convection.saturation import (
+    from jcm.physics.thermodynamics import (
         saturation_specific_humidity,
     )
     from jcm.constants import rd
