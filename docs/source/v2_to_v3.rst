@@ -426,6 +426,12 @@ Direct callers of the scheme functions:
   increments are zero, so the step's condensation is silently lost. Keyword
   callers fail loudly. Build the arguments with
   ``jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs``.
+- ``sundqvist.calculate_cloud_fraction`` is ECHAM's ``cover``: its arguments
+  are now ``(temperature, specific_humidity, cloud_ice, pressure,
+  surface_pressure, geopotential, config, inversion_range,
+  enhance_allowed)``, with ``inversion_range`` = ECHAM's ``(jbmin, jbmax)``
+  from ``echam_cloud_defaults.inversion_levels(coords)``. A call with the
+  old five or six positional arguments raises ``TypeError``.
 - ``sundqvist.condensation_evaporation`` is removed; it had no caller in the
   ECHAM stacks. The Sundqvist saturation functions are covered in the
   Sonntag section above.
