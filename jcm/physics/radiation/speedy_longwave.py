@@ -68,7 +68,10 @@ def get_downward_longwave_rad_fluxes(
     is_top = jnp.zeros((kx,), dtype=bool).at[0].set(True)
 
     # Temperature at level boundaries
-    st4a = st4a.at[:nl1,:,:,0].set(ta[:nl1]+physics_data.speedy_coords.wvi[:nl1,1,jnp.newaxis,jnp.newaxis]*(ta[1:nl1+1]-ta[:nl1]))
+    # Cast explicitly: ``wvi`` is float64 under jax_enable_x64 with float32
+    # physics (the pySES split), and an implicitly narrowing scatter is
+    # deprecated in JAX (#797).
+    st4a = st4a.at[:nl1,:,:,0].set((ta[:nl1]+physics_data.speedy_coords.wvi[:nl1,1,jnp.newaxis,jnp.newaxis]*(ta[1:nl1+1]-ta[:nl1])).astype(st4a.dtype))
 
     # Mean temperature in stratospheric layers.
     # Topmost layer: isothermal above, mean T = 0.75*T + 0.25*T_boundary_below.

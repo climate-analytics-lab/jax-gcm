@@ -299,7 +299,12 @@ def shortwave_rad_fluxes(operand):
     stratc = stratc.at[:,:,0].set(physics_data.shortwave_rad.stratz*psa)
     stratc = stratc.at[:,:,1].set(eps1*psa)
 
-    flux = physics_data.mod_radcon.flux.at[:,:,0].set(flux_1[0]).at[:,:,1].set(flux_2[kx-1])
+    # Cast explicitly: the fluxes follow SpeedyCoords' float64 tables under
+    # jax_enable_x64 with float32 physics, and an implicitly narrowing
+    # scatter is deprecated in JAX (#797).
+    flux = physics_data.mod_radcon.flux
+    flux = (flux.at[:,:,0].set(flux_1[0].astype(flux.dtype))
+            .at[:,:,1].set(flux_2[kx-1].astype(flux.dtype)))
     mod_radcon_out = physics_data.mod_radcon.copy(tau2=tau2, stratc=stratc, flux=flux)
     shortwave_rad_out = physics_data.shortwave_rad.copy(rsns=rsns, ftop=ftop, dfabs=dfabs, rsds=rsds)
     physics_data = physics_data.copy(shortwave_rad=shortwave_rad_out, mod_radcon=mod_radcon_out)

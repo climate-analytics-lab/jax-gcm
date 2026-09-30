@@ -501,15 +501,20 @@ def get_surface_fluxes(
     )
     physics_data = physics_data.copy(surface_flux=surface_flux_out)
 
-    # Tendencies on the lowest level (physics.f90:197-205).
+    # Tendencies on the lowest level (physics.f90:197-205). Each increment
+    # is cast to its field's dtype explicitly: ``grdsig``/``grdscp`` are
+    # float64 under jax_enable_x64 with float32 physics (the pySES split),
+    # and a scatter that narrows implicitly is deprecated in JAX (#797).
     rps = 1.0 / state.normalized_surface_pressure
     grdsig = physics_data.speedy_coords.grdsig[-1]
     grdscp = physics_data.speedy_coords.grdscp[-1]
+    lowest = lambda field, increment: jnp.zeros_like(field).at[-1].add(
+        increment.astype(field.dtype))
     physics_tendencies = PhysicsTendency(
-        jnp.zeros_like(state.u_wind).at[-1].add(merged.ustr * rps * grdsig),
-        jnp.zeros_like(state.v_wind).at[-1].add(merged.vstr * rps * grdsig),
-        jnp.zeros_like(state.temperature).at[-1].add(merged.shf * rps * grdscp),
-        jnp.zeros_like(state.specific_humidity).at[-1].add(merged.evap * rps * grdsig),
+        lowest(state.u_wind, merged.ustr * rps * grdsig),
+        lowest(state.v_wind, merged.vstr * rps * grdsig),
+        lowest(state.temperature, merged.shf * rps * grdscp),
+        lowest(state.specific_humidity, merged.evap * rps * grdsig),
     )
 
     return physics_tendencies, physics_data

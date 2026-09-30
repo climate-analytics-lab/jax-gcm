@@ -141,6 +141,11 @@ class PysesHydraConfigTest(unittest.TestCase):
 
     @pytest.mark.slow
     @pytest.mark.requires_extra("pyses")
+    # A float64 value scattered into a float32 field is the same mixed
+    # precision, narrowed implicitly; JAX deprecates that (a FutureWarning
+    # today, an error later), so it fails here rather than on a JAX upgrade.
+    @pytest.mark.filterwarnings(
+        "error:scatter inputs have incompatible types:FutureWarning")
     def test_speedy_physics_completes_a_fresh_first_chunk(self):
         """``physics=speedy`` must step on pySES, not only build (#797).
 

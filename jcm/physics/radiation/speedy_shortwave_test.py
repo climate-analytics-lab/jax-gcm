@@ -1,4 +1,6 @@
 import unittest
+
+import pytest
 import jax.numpy as jnp
 import numpy as np
 import jax
@@ -593,6 +595,8 @@ class TestShortWaveRadiation(unittest.TestCase):
 
         self.assertFalse(np.allclose(physics_data_computed.shortwave_rad.cloudc, initial_sw.cloudc))
 
+    @pytest.mark.filterwarnings(
+        "error:scatter inputs have incompatible types:FutureWarning")
     def test_float64_forcing_keeps_both_cond_branches_at_the_carry_dtype(self):
         """The pySES precision split must type-check on both cond branches.
 
