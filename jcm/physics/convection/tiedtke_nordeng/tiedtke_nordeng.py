@@ -2007,6 +2007,20 @@ class TiedtkeConvection(PhysicsTerm):
         # but do not modify ``tendency`` above or directly update prognostic
         # state; the final summed qc/qi tendency is capped and accounted once
         # at the physics interface.
+        #
+        # The same detrainment is also published on its own, as ECHAM's
+        # ``pxtecl``/``pxteci``: the cloud-tracer tendency this term returns
+        # is the detrained condensate and nothing else (``plude`` split by
+        # phase in ``flux_tendencies``; the in-plume condensate flux enters
+        # the VAPOUR budget, as in cudtdq), taken after ``cap_scale`` so it
+        # is exactly what was added to ``clouds.qc/qi`` here. Its phase split
+        # is at tmelt on the environment temperature this term received
+        # (ECHAM ``pten`` in cudtdq, mo_cufluxdts.f90:646-666). The 1M scheme
+        # consumes that split as-is through the ``clouds.qc/qi`` advance; the
+        # Lohmann 2M re-splits the total by its WBF criterion
+        # (mo_cloud_micro_2m.f90:1300-1316) and needs the ice part to undo
+        # the ice latent heat booked here (``zalv = als``) for condensate it
+        # reclassifies as liquid.
         clouds = diagnostics["clouds"].copy(
             qc=jnp.maximum(
                 diagnostics["clouds"].qc + tendency.tracers["qc"] * dt,
@@ -2016,6 +2030,8 @@ class TiedtkeConvection(PhysicsTerm):
                 diagnostics["clouds"].qi + tendency.tracers["qi"] * dt,
                 0.0,
             ),
+            conv_detrainment_qc=tendency.tracers["qc"],
+            conv_detrainment_qi=tendency.tracers["qi"],
         )
 
         # Advance the running thermodynamic state so the downstream cloud
