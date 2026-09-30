@@ -1,7 +1,7 @@
-# ECHAM6.3 convection, evaluated on 600 columns
+# ECHAM6.3 convection, evaluated on 738 columns
 
 `echam_cumastr.npz` holds what ECHAM6.3-HAM2.3 (r7492)
-`mo_cumastr.f90::cucall` returns for 600 single-column states: the convective
+`mo_cumastr.f90::cucall` returns for 738 single-column states: the convective
 decisions (`ldcum`, `ktype`, `kcbot`, `kctop`), the final cloud-base mass
 flux, the surface rain and snow, and the temperature and humidity tendencies
 per level. `jcm/physics/convection/tiedtke_nordeng/cumastr_reference_test.py`
@@ -23,12 +23,17 @@ radiative-convective column of `jcm/rce_test.py::TestRceWholeModelTiedtke`
 | `rce_warm` | `dev` at 8393799c (the previous 1M; a warmer, fog-free boundary layer) | 200 | the same, and shallow plumes up to 400 hPa |
 | `midlevel_rce_fogged`, `midlevel_rce_warm` | 50 captured columns of each, with a synthetic resolved ascent | 100 | the `cubasmc` mid-level trigger and seed |
 | `deep_rce_fogged`, `deep_rce_warm` | 50 captured columns of each, with a synthetic moisture convergence | 100 | the deep/shallow test, the deep plume, the Nordeng closure and the downdrafts |
+| `zlo1_rce_fogged`, `zlo1_rce_warm` | every captured column where `cubase` finds a cloud base and `zlo1` rejects it | 27 | the `zdqpbl > 0` gate |
+| `zlo1_excess_rce_fogged`, `zlo1_excess_rce_warm` | 40 captured columns of each, the two levels above the lowest made nearly as humid as it | 80 | the `zqumqe > zdqmin` gate |
+| `zlo1_midlevel_rce_fogged`, `zlo1_midlevel_rce_warm` | 15 captured columns of each, with a synthetic sub-cloud divergence under a resolved ascent | 30 | a surface plume `zlo1` rejects and a mid-level plume in the first ascent |
+| `downdraft_cancel_rce_fogged` | the one captured column whose downdraft `cuflx` cancels (level of free sinking above the final top) | 1 | `IF (kdtop < kctop) lddraf = .FALSE.` |
 
 The RCE columns are stratified by what jcm's scheme did at the time of
 capture against what ECHAM does (`sample_class`): 70 columns where both
 convect, 70 where only jcm's earlier scheme convected (the disagreement of
 jax-gcm#968) and 60 where neither does. `source_step` is the step of the
-80-day run. Columns were drawn with `numpy.random.default_rng(968)`.
+80-day run. Columns were drawn with `numpy.random.default_rng(968)` and, for
+the `zlo1_excess` and `zlo1_midlevel` groups, `numpy.random.default_rng(9681)`.
 
 The column has no dynamical core, so its captured `qte_dynamics` is round-off
 (~1e-12 kg/kg/s) and `omega` is zero. The synthetic groups change one captured
@@ -42,6 +47,11 @@ argument each, and the stored inputs carry the change:
   column's surface evaporation and `F` is log-uniform in 0.02-3. The
   convergence reaches the sub-cloud layers, so it enters both of `cumastr`'s
   integrals of `pqte`: the deep/shallow test and the sub-cloud supply.
+- `zlo1_excess` groups: the humidity of the second and third levels from the
+  bottom is set to `F` times the lowest level's, `F` uniform in 0.985-1.005.
+- `zlo1_midlevel` groups: `qte_dynamics = −D·E/Σ(Δp/g)` over the lowest four
+  levels and zero above, `D` uniform in 1.5-4, and `omega` as in the
+  mid-level groups.
 
 ## How ECHAM was run
 
@@ -86,13 +96,13 @@ the full-level geopotential `pgeo`, built as jcm's
 The cloud base, the final cloud-base mass flux and the `ldcum` flag are not
 among `cucall`'s arguments. They were read from a second build of the same
 routines with assignments to a diagnostics module added and nothing else
-changed; the two builds return bit-identical outputs on all 600 columns.
+changed; the two builds return bit-identical outputs on all 738 columns.
 
 ## Arrays
 
 | name | unit | meaning |
 |---|---|---|
-| `input_<argument>` | as jcm's | the arguments of `tiedtke_nordeng_convection`, top-first, `(600, 47)` or `(600,)`; `input_pressure_half` is `(600, 48)` |
+| `input_<argument>` | as jcm's | the arguments of `tiedtke_nordeng_convection`, top-first, `(738, 47)` or `(738,)`; `input_pressure_half` is `(738, 48)` |
 | `dt` | s | the time step, 900 |
 | `group`, `sample_class`, `source_step` | – | see above |
 | `eta_full` | – | the `eta` of ECHAM's `cevapcu` profile |

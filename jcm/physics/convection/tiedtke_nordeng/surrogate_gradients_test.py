@@ -8,7 +8,7 @@ ones:
 
 * the forward value does not depend on the surrogate widths — setting every
   width to zero, which selects the reference derivatives, changes no output
-  bit on the 600 ECHAM reference columns, among them the marginal ones where
+  bit on the 738 ECHAM reference columns, among them the marginal ones where
   the first ascent test decides whether the column convects;
 * the tunable parameters carry finite, live gradients on a convecting column,
   and the precipitation-onset depth, which enters only through a switch,

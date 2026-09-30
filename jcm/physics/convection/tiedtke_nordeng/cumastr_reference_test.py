@@ -1,12 +1,14 @@
 """The Tiedtke-Nordeng scheme against ECHAM6.3's compiled convection.
 
 ``jcm/data/test/echam_cumastr_reference/`` holds what ECHAM6.3's compiled
-``cucall``/``cumastr`` returns for 600 columns (provenance in the README
+``cucall``/``cumastr`` returns for 738 columns (provenance in the README
 there): 400 states of jcm's whole-model radiative-convective column, where
 ECHAM's shallow plume at the first interface above cloud base decides whether
-the column convects at all, 100 of them with a synthetic resolved ascent (the
+the column convects at all; 100 of them with a synthetic resolved ascent (the
 mid-level trigger) and 100 with a synthetic moisture convergence (deep
-convection, the Nordeng closure and downdrafts).
+convection, the Nordeng closure and downdrafts); and 138 that reach the
+``zlo1`` gate's two conditions, a surface plume rejected by it with a
+mid-level plume seeded instead, and a downdraft ``cuflx`` cancels.
 
 jcm runs in float64 with ECHAM's physical constants for the comparison, as
 ``cuadjtq_test.py`` does: ECHAM's ``grav``, ``rv``, ``alv`` and ``als``
@@ -16,14 +18,14 @@ jcm runs in float64 with ECHAM's physical constants for the comparison, as
   its type, its cloud base and its cloud top;
 * the cloud-base mass flux, the surface precipitation and the temperature and
   humidity tendency of every level agree to rounding. Measured, relative to
-  ECHAM's value (per level: to the column's largest tendency): 7.8e-13,
-  6.0e-13, 2.2e-12 and 1.3e-12. The bounds are 1e-10, a hundred times the
+  ECHAM's value (per level: to the column's largest tendency): 8.9e-13,
+  6.5e-13, 2.1e-12 and 1.3e-12. The bounds are 1e-10, fifty times the
   largest.
 
 jcm's own constants differ from ECHAM's in ``rv`` (461.0 against 461.51),
 which moves ``qsat`` and the virtual-temperature coefficient by 0.11 %, and in
 the latent heats (2.501e6 and 2.834e6 against 2.5008e6 and 2.8345e6 J/kg).
-The model keeps its unified constants; with them 53 of the 600 columns take a
+The model keeps its unified constants; with them 63 of the 738 columns take a
 different decision (``_JCM_CONSTANT_STEPS``). ECHAM's ``rv`` alone brings all
 but two back (``_JCM_CONSTANT_STEPS_AFTER_RV``) and the latent heats those
 two. Every one of these columns sits within hundredths of a kelvin of an
@@ -62,7 +64,7 @@ _JCM_CONSTANT_STEPS = (
     9, 11, 12, 13, 14, 15, 17, 18, 19, 28, 30, 34, 35, 37, 51, 52, 53, 60, 61,
     64, 66, 67, 68, 223, 311, 320, 322, 323, 324, 330, 331, 332, 334, 341,
     342, 343, 344, 345, 348, 349, 350, 353, 354, 355, 356, 357, 362, 504, 510,
-    524, 525, 558, 591)
+    524, 525, 558, 591, 614, 615, 624, 626, 661, 699, 703, 706, 712, 713)
 #: ... and those that still differ with ECHAM's ``rv`` alone.
 _JCM_CONSTANT_STEPS_AFTER_RV = (53, 354)
 
@@ -159,6 +161,12 @@ class TestReferenceData:
             assert np.any(kt[m] == 0) and np.any(kt[m] == 2), name
         assert np.any(kt[np.char.startswith(group, "midlevel")] == 3)
         assert np.any(kt[np.char.startswith(group, "deep")] == 1)
+        # zlo1 turns surface plumes off, and a mid-level plume takes over.
+        for name in ("zlo1_rce_fogged", "zlo1_rce_warm"):
+            assert np.all(kt[group == name] == 0), name
+        assert np.any(kt[np.char.startswith(group, "zlo1_midlevel")] == 3)
+        assert np.any(kt[np.char.startswith(group, "zlo1_excess")] == 0)
+        assert np.sum(group == "downdraft_cancel_rce_fogged") == 1
         # jcm's earlier scheme convected in these columns and ECHAM does not.
         prev = ref["sample_class"] == "previously_port_only"
         assert prev.sum() == 140 and np.all(kt[prev] == 0)

@@ -97,10 +97,11 @@ carries, where the plume stops and where it rains are hard comparisons in
 
 ECHAM has no CAPE trigger, and neither does the port.
 ``jcm/data/test/echam_cumastr_reference`` holds what ECHAM6.3's compiled
-``cucall`` returns for 600 columns — whole-model RCE column states, where the
+``cucall`` returns for 738 columns — whole-model RCE column states, where the
 first ascent test above a cloud base at ``klevm1`` decides whether the column
-convects, and the same states under a resolved ascent (mid-level plumes) or a
-moisture convergence (deep plumes): in float64 with ECHAM's physical constants the port takes the same
+convects, and the same states under a resolved ascent (mid-level plumes), a
+moisture convergence (deep plumes) or a sub-cloud divergence and a humid
+sub-cloud layer (both ``zlo1`` conditions): in float64 with ECHAM's physical constants the port takes the same
 decision (convective or not, type, cloud base, cloud top) on every column,
 and its cloud-base mass flux, surface precipitation and per-level tendencies
 agree to 2e-12 of ECHAM's (``cumastr_reference_test.py``).
@@ -154,8 +155,8 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   kelvin of zero in the whole-model RCE column, and on that column's own
   days 40-80 states the port convects in 10.9 % of the steps where ECHAM6.3
   convects in 24.3 %, never where ECHAM does not; with ECHAM's ``rv`` it takes
-  ECHAM's decision on every step. On the 600 reference columns jcm's
-  constants change 53 decisions, ECHAM's ``rv`` alone brings back all but
+  ECHAM's decision on every step. On the 738 reference columns jcm's
+  constants change 63 decisions, ECHAM's ``rv`` alone brings back all but
   two, and ECHAM's latent heats those two.
 - `science` / `compute` (stopgap) — ECHAM bounds the mass flux, not the
   heating: the cloud-base flux and the per-level entrainment are held to the
@@ -213,7 +214,7 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 modes), ``updraft_test.py``,
 ``downdraft_test.py``, ``deep_shallow_test.py``, ``midlevel_trigger_test.py``,
 ``rce_integration_test.py``, ``convection_units_test.py``,
-``cumastr_reference_test.py`` (ECHAM6.3's compiled convection on 600
+``cumastr_reference_test.py`` (ECHAM6.3's compiled convection on 738
 columns), ``switches_test.py`` and ``surrogate_gradients_test.py`` (the
 decisions' surrogate derivatives), ``cuasc_port_test.py``,
 ``ledger_entrainment_test.py``);
