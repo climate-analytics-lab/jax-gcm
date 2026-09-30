@@ -6,8 +6,6 @@ to verify structural correctness and reasonable agreement.
 Date: 2025-08-01
 """
 
-from importlib.metadata import version as _installed_version
-
 import pytest
 import jax
 import numpy as np
@@ -30,22 +28,6 @@ from jcm.physics.radiation.grey_two_stream.radiation_scheme_test import (
     calculate_air_density,
     calculate_layer_thickness,
 )
-
-
-def _release(version_string):
-    """Leading numeric components of a version string, as a tuple."""
-    parts = []
-    for part in version_string.split("."):
-        if not part.isdigit():
-            break
-        parts.append(int(part))
-    return tuple(parts)
-
-
-# Releases up to 0.4.0 reflect a lookup below a table's first point about
-# that point; later ones extend the table linearly.
-_JAX_RRTMGP_REFLECTS_BELOW_TABLE = (
-    _release(_installed_version("jax-rrtmgp")) <= (0, 4, 0))
 
 
 def _make_inputs(nlev=10):
@@ -1128,20 +1110,6 @@ class TestRRTMGPColdLayerEmission:
         # Inside the table the response has the physical sign.
         assert self._top_lw_heating(170.0) > self._top_lw_heating(190.0)
 
-    # jax-rrtmgp 0.4.0 and earlier reflect the table about its first point
-    # below 160 K, which gives the opposite sign. jcm's requirement still
-    # admits 0.4.0, so there the test is a strict expected failure:
-    # ``raises=AssertionError`` admits only that wrong sign, and an exception
-    # from the cold call fails the test. The condition reads the installed
-    # version, so a source install that carries the newer lookup but still
-    # reports 0.4.0 needs ``--runxfail``.
-    @pytest.mark.xfail(
-        condition=_JAX_RRTMGP_REFLECTS_BELOW_TABLE,
-        strict=True,
-        raises=AssertionError,
-        reason="jax-rrtmgp <= 0.4.0 reflects the temperature tables below "
-               "160 K instead of extending them",
-    )
     def test_below_table_cooling_weakens_as_the_layer_cools(self):
         # A 150 K layer must cool less than a 160 K one.
         assert self._top_lw_heating(150.0) > self._top_lw_heating(160.0)
