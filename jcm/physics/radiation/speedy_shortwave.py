@@ -7,6 +7,7 @@ from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physical_constants import epssw, solc, epsilon
 from jcm.physics_interface import PhysicsTendency, PhysicsState
+from jcm.utils import cast_like
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.physics.speedy.speedy_coords import (
     PBL_TOP_SIGMA, SpeedyCoords, interp_to_sigma, ozone_sigma_weight,
@@ -51,16 +52,27 @@ def get_shortwave_rad_fluxes(
     # unchanged between radiation steps, consistent with the heating actually applied.
     shape = state.temperature.shape
 
+    # Both branches are pinned to the operand's dtypes: the tendencies to the
+    # state's working dtype and the physics data to the incoming carry's.
+    # Under jax_enable_x64 with float32 physics (the pySES split) the forcing
+    # and SpeedyCoords' vertical tables stay float64 and promote the computed
+    # branch, and PhysicsTendency.zeros follows the x64 default, so lax.cond
+    # would otherwise reject the pair (#797).
+    working = state.temperature.dtype
+    pin_tendency = lambda t: jax.tree.map(lambda x: x.astype(working), t)
+
     def _compute(_):
         zero_tendencies = PhysicsTendency.zeros(shape=shape)
         _, new_physics_data, _, _, _, tendencies = shortwave_rad_fluxes(
             (state, physics_data, parameters, forcing, terrain, zero_tendencies))
+        tendencies = pin_tendency(tendencies)
         shortwave_rad = new_physics_data.shortwave_rad.copy(heating_rate=tendencies.temperature)
-        return tendencies, new_physics_data.copy(shortwave_rad=shortwave_rad)
+        return tendencies, cast_like(new_physics_data.copy(shortwave_rad=shortwave_rad),
+                                     physics_data)
 
     def _replay(_):
         tendencies = PhysicsTendency.zeros(shape=shape, temperature=physics_data.shortwave_rad.heating_rate)
-        return tendencies, physics_data
+        return pin_tendency(tendencies), physics_data
 
     return jax.lax.cond(physics_data.shortwave_rad.compute_shortwave, _compute, _replay, None)
 
@@ -398,7 +410,9 @@ def get_clouds(
 
     def _compute(_):
         _, new_physics_data, _, _, _, _ = clouds((state, physics_data, parameters, forcing, terrain, zero_tendencies))
-        return new_physics_data
+        # Pinned to the carried fields' dtypes, which the skip branch returns
+        # unchanged: see get_shortwave_rad_fluxes (#797).
+        return cast_like(new_physics_data, physics_data)
 
     return zero_tendencies, jax.lax.cond(physics_data.shortwave_rad.compute_shortwave, _compute, lambda _: physics_data, None)
 

@@ -87,6 +87,7 @@ from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData, land_wetness
 from jcm.physics.speedy.params import Parameters, SurfaceFluxParameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
+from jcm.utils import cast_like
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.physics.speedy.smoothing import smooth_gate, smooth_pos
 import jcm.constants as c
@@ -177,11 +178,18 @@ def _near_surface_humidity(t_near, psa, rh_bottom, q_bottom, sfp: SurfaceFluxPar
     point — its derivative never enters a reverse-mode pass, where a column
     driving ``get_qsat`` toward its singular denominator would contribute
     ``0 * inf`` to the gradient of the whole model.
+
+    The blend is pinned to ``q_bottom``'s dtype, which the other branch
+    returns unchanged. Under ``jax_enable_x64`` with a float32 state (the
+    pySES backend's split) ``SpeedyCoords``' vertical tables are float64, so
+    the extrapolated ``t_near`` is too, and without the pin ``lax.cond``
+    rejects the two branches' differing dtypes.
     """
     return jax.lax.cond(
         sfp.fhum0 > 0.0,
-        lambda _: (sfp.fhum0 * rel_hum_to_spec_hum(t_near, psa, 1.0, rh_bottom)[0]
-                   + (1.0 - sfp.fhum0) * q_bottom),
+        lambda _: cast_like(
+            sfp.fhum0 * rel_hum_to_spec_hum(t_near, psa, 1.0, rh_bottom)[0]
+            + (1.0 - sfp.fhum0) * q_bottom, q_bottom),
         lambda _: q_bottom,
         operand=None,
     )
