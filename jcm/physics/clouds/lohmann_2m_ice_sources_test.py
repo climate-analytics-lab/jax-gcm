@@ -194,6 +194,87 @@ class TestDetrainedIceCrystalNumber:
 
 
 # ---------------------------------------------------------------------------
+# ICE-5: number tendencies against the raw tracers
+# ---------------------------------------------------------------------------
+
+
+class TestNumberTendencyAgainstRawTracer:
+    """``pxtte = (n/ρ − pxtm1)/ztmst`` with the RAW ``pxtm1`` (F 1781, 3625).
+
+    The entry floor at 0 shapes the working numbers only, so the end-of-step
+    tracer ``raw + dt·tendency`` is the scheme's own number: a negative raw
+    tracer ends exactly where a zero one does. There is no upper bound on
+    entry (ECHAM has none, F 600-605): ICNC is capped at ``icemax`` once the
+    detrained number has joined it (F 1252), and CDNC is not capped at all.
+    """
+
+    N = 8
+
+    def _column(self, qni, qnc):
+        n = self.N
+        T = jnp.linspace(240.0, 275.0, n)
+        p = jnp.linspace(4e4, 8e4, n)
+        rho = p / (287.0 * T)
+        qc = jnp.array([0, 3e-4, 3e-4, 3e-4, 3e-4, 3e-4, 0, 0], jnp.float32)
+        qi = jnp.array([1e-5, 1e-5, 1e-5, 1e-5, 0, 0, 0, 1e-5], jnp.float32)
+        return dict(T=T, q=0.95 * _qsat(T, p, "water"), p=p, rho=rho,
+                    qc=qc, qi=qi, cf=jnp.where(qc + qi > 0, 0.7, 0.0),
+                    qni=jnp.asarray(qni, jnp.float32),
+                    qnc=jnp.asarray(qnc, jnp.float32),
+                    tke=jnp.full(n, 0.3))
+
+    @staticmethod
+    def _end(col, out, name):
+        tend = out[0].dqnidt if name == "qni" else out[0].dqncdt
+        return np.asarray(col[name] + DT * tend, dtype=np.float64)
+
+    def test_negative_raw_tracer_ends_where_zero_does(self):
+        qni_raw = [-5e3, 1e4, -1.0, 5e4, 2.0, -7.0, -3.0, 1e3]
+        qnc_raw = [1e7, -3e6, 5e7, -1.0, 3e7, 2.0, -4e5, 1e6]
+        raw = self._column(qni_raw, qnc_raw)
+        floored = self._column(np.maximum(qni_raw, 0.0),
+                               np.maximum(qnc_raw, 0.0))
+        out_raw, out_floored = _run(raw), _run(floored)
+        for name in ("qni", "qnc"):
+            end_raw = self._end(raw, out_raw, name)
+            end_floored = self._end(floored, out_floored, name)
+            # Float32 round-off of raw + dt·(n/ρ − raw)/dt, relative to the
+            # raw magnitude; the defect this pins leaves the whole floor
+            # residual (the negative raw value) in the tracer.
+            scale = (np.maximum(np.abs(np.asarray(raw[name])),
+                                np.abs(end_floored)) + 1.0)
+            assert np.all(np.abs(end_raw - end_floored) <= 1e-5 * scale), (
+                name, end_raw, end_floored)
+            assert np.all(end_raw >= -1e-5 * scale), (name, end_raw)
+        # Where the ccwmin repair empties the ice (returned to vapour), the
+        # number goes with it, whatever the raw tracer held.
+        end_ni = self._end(raw, out_raw, "qni")
+        end_qi = np.asarray(raw["qi"] + DT * out_raw[0].dqidt)
+        repaired = np.abs(end_qi) < 1e-12
+        assert repaired.sum() >= 2, "no repaired level — fixture is off"
+        np.testing.assert_allclose(end_ni[repaired], 0.0,
+                                   atol=1e-5 * float(np.max(np.abs(qni_raw))))
+
+    def test_no_entry_cap_icnc_capped_after_detrained_number(self):
+        rho = np.asarray(self._column(np.zeros(self.N), np.zeros(self.N))["rho"])
+        qni_raw = np.full(self.N, 1e3)
+        qnc_raw = np.full(self.N, 5e7)
+        qni_raw[1] = 3.0 * float(_P.icemax) / rho[1]   # ice + liquid level
+        qnc_raw[5] = 3.0e11 / rho[5]                   # liquid-only level
+        col = self._column(qni_raw, qnc_raw)
+        out = _run(col)
+        icnc_end = self._end(col, out, "qni") * rho
+        cdnc_end = self._end(col, out, "qnc") * rho
+        # ICNC: from 3·icemax, capped at icemax once the detrained number
+        # has joined (F 1252); the cold chain then only removes crystals.
+        assert icnc_end[1] <= float(_P.icemax) * 1.0001
+        # CDNC: ECHAM has no cap, so 3e11 /m³ survives the step (warm rain
+        # barely touches so many droplets); an entry cap would end it at
+        # or below 1e11.
+        assert cdnc_end[5] > 1.5e11
+
+
+# ---------------------------------------------------------------------------
 # ICE-6, DeMott density, the freezing substitute's number cap
 # ---------------------------------------------------------------------------
 

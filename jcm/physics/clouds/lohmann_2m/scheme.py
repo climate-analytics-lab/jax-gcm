@@ -198,31 +198,33 @@ def cloud_microphysics_2m(
     dqi_up = qi - qi_m1                           # ztmst·(pxite + detrainment)
 
     # ------------------------------------------------------------------
-    # Entry clamps on the number tracers (jcm addition, see below)
+    # Entry floor on the number tracers
     # ------------------------------------------------------------------
-    # ECHAM's per-level loop clamps icnc to ``[icemin, icemax]`` and
-    # forces cdnc to ``[cqtmin, cdnc_min_upper]``-or-above (lines 1252-3
-    # of mo_cloud_micro_2m.f90 and the activation block in
-    # update_in_cloud_water). Mirror that on the orchestrator's INPUT so
-    # the dynamical-core's spectral round-trip ringing — which can leave
-    # small negative artefacts that ``update_in_cloud_water`` amplifies
-    # via the ``delta_cdnc = activated_cdnc - droplet_number`` step —
-    # cannot drive a multi-day runaway. Upper bound chosen as
-    # ``cdnc_max_phys`` (1e11 / m^3, well above any realistic activation
-    # output) and ``icemax`` (1e7 / m^3) so realistic clouds are
-    # unaffected.
+    # ECHAM's section-1 numbers are ρ·(pxtm1 + ztmst·pxtte) floored at
+    # cqtmin (600-605), with no upper bound: ICNC is capped at icemax only
+    # once the detrained crystal number has joined it (1252), and CDNC is
+    # not capped at all. The floor here is 0 rather than cqtmin (1e-12 /m³,
+    # the same state to every consumer). It keeps the dynamical core's
+    # spectral ringing — small negative tracer values — out of
+    # ``update_in_cloud_water``, whose ``delta_cdnc = activated_cdnc -
+    # droplet_number`` step would amplify it. For ICNC it is also
+    # deliberately below ECHAM's ``icemin``: arrivals at or below ``icemin``
+    # are re-diagnosed from ice mass in ``update_in_cloud_water`` (the
+    # ``<=`` test fires either way), so an icemin floor would only inject a
+    # spurious icemin-per-step tracer source into ice-free cells.
     #
-    # The icnc LOWER bound is deliberately 0, not ECHAM's ``icemin``:
-    # arrivals at or below ``icemin`` are re-diagnosed from ice mass in
-    # ``update_in_cloud_water`` (the ``<=`` test fires either way), so the
-    # floor would only inject a spurious icemin-per-step tracer source into
-    # ice-free cells. Note this floor is NOT why mixed-phase r_eff_ice
-    # saturates at ``ceffmax`` — those cells arrive with ICNC well above
-    # icemin but INP-limited (~1e3 /m^3) — see #728.
-    _cdnc_max_phys_per_m3 = 1.0e11
+    # The floor shapes only the WORKING numbers. The number tendencies are
+    # taken against the RAW step-start tracers, as ECHAM passes
+    # pxtm1(:,jk,idt_cdnc/idt_icnc) unfloored to
+    # update_tendencies_and_important_vars (1781) and forms
+    # pxtte = (n/ρ − pxtm1)/ztmst (3625-3628): the end-of-step tracer is
+    # then exactly the scheme's number, so an out-of-range raw value is
+    # removed within the step instead of being carried and re-floored.
+    qnc_raw = qnc
+    qni_raw = qni
     inv_rho = 1.0 / jnp.maximum(air_density, eps_dt)
-    qnc = jnp.clip(qnc, 0.0, _cdnc_max_phys_per_m3 * inv_rho)
-    qni = jnp.clip(qni, 0.0, params.icemax * inv_rho)
+    qnc = jnp.maximum(qnc, 0.0)
+    qni = jnp.maximum(qni, 0.0)
 
     # Number-per-kg-of-air → per-m^3 at the scheme's API boundary.
     cdnc0 = qnc * air_density
@@ -860,11 +862,13 @@ def cloud_microphysics_2m(
         # end-of-step grid-mean state against ``ccwmin`` (#662 finding 6).
         ice_mmr_prev=qi,
         liq_mmr_prev=qc,
-        # ECHAM convention: pxtm1_cdnc / pxtm1_icnc are the previous-step
-        # tracer values in per-kg-of-air (the working cdnc/icnc are
-        # per-m³, so the tendency subtracts per-kg from per-m³·1/ρ).
-        tracer_tm1_cdnc=qnc,
-        tracer_tm1_icnc=qni,
+        # ECHAM convention: pxtm1_cdnc / pxtm1_icnc are the step-start
+        # tracer values in per-kg-of-air, RAW (1781; see the entry floor).
+        # The working cdnc/icnc are per-m³, so the tendency subtracts
+        # per-kg from per-m³·1/ρ, and the negative-mass repair removes the
+        # whole number where it zeroes the condensate (3632-3652).
+        tracer_tm1_cdnc=qnc_raw,
+        tracer_tm1_icnc=qni_raw,
         condensation_rate=condensation_rate,
         deposition_rate=deposition_rate,
         rain_evap_mmr=rain_evap,
@@ -1265,9 +1269,12 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             },
         )
 
-        # Stash current-step qnc/qni as tm1 for the next step's
-        # update_tendencies_and_important_vars; expose surface precip
-        # diagnostics from the lax.scan.
+        # ``qnc_prev``/``qni_prev`` keep this step's RAW step-start number
+        # tracers: the baseline the number tendencies are taken against
+        # (ECHAM pxtm1, mo_cloud_micro_2m.f90:1781), not the scheme's
+        # entry-floored working numbers. No term reads them; they record the
+        # state the scheme started from. The surface precipitation comes
+        # from the lax.scan carry.
         clouds_next = clouds.copy(
             # ECHAM writes the post-microphysics cloud fraction back to
             # ``paclc``: cells the scheme has just emptied of both condensates,
