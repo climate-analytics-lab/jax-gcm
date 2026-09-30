@@ -34,7 +34,8 @@ from jcm.date import (
 from jcm.forcing import ForcingData, default_forcing
 from jcm.predictions import ModelPredictions
 from jcm.physics_interface import (
-    PhysicsState, Physics, compute_physics_step_gridpoint, verify_state,
+    POST_PHYSICS_STATE_KEY, PhysicsState, Physics,
+    compute_physics_step_gridpoint, verify_state,
 )
 from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.terrain import TerrainData
@@ -1099,6 +1100,16 @@ class Model:
                         state, physics_tendency)
                     new_physics_state = self.physics.record_post_physics_state(
                         new_physics_state, post_physics)
+                    if axis is not None and POST_PHYSICS_STATE_KEY in new_physics_state:
+                        # Recorded outside the auto-sharded physics region:
+                        # give the slot the column sharding every other carry
+                        # leaf has, which the scan carry type requires.
+                        new_physics_state = {
+                            **new_physics_state,
+                            POST_PHYSICS_STATE_KEY: _reshard_columns(
+                                new_physics_state[POST_PHYSICS_STATE_KEY],
+                                physics_state_grid.temperature.shape[-1], axis),
+                        }
             with profiling.scope(profiling.DYNAMICS):
                 state_next = self.dycore.step(state, physics_tendency)
             return state_next, new_physics_state
