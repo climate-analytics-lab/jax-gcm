@@ -596,9 +596,25 @@ def _hines_extro_column(
 
     # --- Heating + diffusion (when enabled) ------------------------------
     visc_full = jnp.maximum(mol_visc, visc_min)
-    cutoff_turb = bv_freq / (f_width * jnp.maximum(sigma_t, 1e-30))
     cutoff_mol = jnp.cbrt(bv_freq * k_horiz / visc_full) / f_mol
-    cutoff_eff = jnp.minimum(cutoff_turb, cutoff_mol)
+    # The cutoff is ECHAM's MIN(m_sub_m_turb, m_sub_m_mol) (mo_midatm.f90::
+    # hines_heat). The turbulence cutoff bv / (f_width sigma_t) is the
+    # smaller one exactly where f_width sigma_t cutoff_mol > bv; everywhere
+    # else — in particular wherever sigma_t is 0, which ECHAM skips with
+    # ``losigma_t``: below the launch level on every column (never filled)
+    # and wherever the spectrum has died — MIN takes the molecular cutoff,
+    # so the quotient is only formed where it is selected (the double-where
+    # on the denominator, as the ``zxrp1_base`` guard in
+    # ``clouds/echam_1m.py`` does it). A floor under sigma_t is not enough:
+    # the floored quotient's derivative (``1/den**2``, far below float32's
+    # range) is infinite on those levels, and MIN's zero cotangent makes it a
+    # NaN derivative with respect to ``spectrum_width_factor`` on every
+    # column. The value is the same MIN.
+    turbulence_limited = f_width * sigma_t * cutoff_mol > bv_freq
+    cutoff_turb = bv_freq / (
+        f_width * jnp.where(turbulence_limited, sigma_t, 1.0))
+    cutoff_eff = jnp.where(
+        turbulence_limited, jnp.minimum(cutoff_turb, cutoff_mol), cutoff_mol)
 
     factor = f_amp * sigma_alpha + (
         bv_freq / jnp.maximum(cutoff_eff, 1e-30))[:, None]
@@ -614,10 +630,16 @@ def _hines_extro_column(
 
     heatng_raw = -f_heat * jnp.sum(dfdz, axis=-1)
     heating = jnp.where(spectrum_alive, heatng_raw, 0.0)
-    safe_heating = jnp.maximum(heatng_raw, 0.0)
+    # Double-where on the cube root's argument: on a masked level (no
+    # spectrum, or no heating) ``cbrt(maximum(heating, 0))`` is evaluated at
+    # 0, where its derivative is infinite, and the ``where``'s zero cotangent
+    # makes every ``diffco`` gradient NaN, so masked levels take the root of
+    # 1 instead. Unmasked levels see their own heating: the value is the same.
+    diffusing = spectrum_alive & (heatng_raw > 0.0)
+    heating_diffusing = jnp.where(diffusing, heatng_raw, 1.0)
     diffco = jnp.where(
-        spectrum_alive & (heatng_raw > 0.0),
-        f_diff * jnp.cbrt(safe_heating)
+        diffusing,
+        f_diff * jnp.cbrt(heating_diffusing)
         / jnp.maximum(cutoff_eff, 1e-30) ** (4.0 / 3.0),
         0.0,
     )

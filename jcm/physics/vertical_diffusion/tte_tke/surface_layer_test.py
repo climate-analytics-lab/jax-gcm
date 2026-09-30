@@ -333,3 +333,29 @@ class TestFrozenSurfacePhase:
         log_z = np.log(60.0 / 5.0e-4)   # z_ref / z0 (m and h) of _build_state
         neutral = 5.0 * c.karman_const ** 2 / log_z ** 2
         np.testing.assert_allclose(at_sat, neutral, rtol=2e-4)
+
+
+class TestBusingerDyerGradients:
+    """The Businger-Dyer option differentiates on both sides of neutral (#663)."""
+
+    def test_exchange_gradients_are_finite_on_stable_and_unstable_surfaces(self):
+        import jax
+
+        params = VDiffParameters.default(surface_layer_scheme="businger_dyer")
+        # Unstable, near neutral, strongly stable (Ri > 1/16, where the
+        # unstable branch's base would be negative) and strongly unstable
+        # (Ri < -0.2, where the stable branch's would divide by zero).
+        for t_air, t_sfc in ((290.0, 295.0), (300.0, 300.0),
+                             (300.0, 290.0), (250.0, 300.0)):
+            state = _build_state(T_air=t_air, T_sfc=t_sfc, q_air=0.010)
+
+            def total(t_surface, wind):
+                ch, ce, cm = compute_surface_exchange_coefficients(
+                    state, params, wind, t_surface, state.temperature[:, -1])
+                return jnp.sum(ch) + jnp.sum(ce) + jnp.sum(cm)
+
+            grads = jax.grad(total, argnums=(0, 1))(
+                state.surface_temperature, jnp.array([5.0]))
+            for g in grads:
+                assert np.all(np.isfinite(np.asarray(g))), (t_air, t_sfc)
+

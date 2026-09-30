@@ -69,7 +69,16 @@ class IceNucleation(PhysicsTerm):
         """Characteristic cooling rate [K/s] from the TKE updraft (ascent)."""
         vd = diagnostics.get("vertical_diffusion")
         if vd is not None:
-            w = jnp.sqrt(jnp.maximum(2.0 / 3.0 * vd.tke, 0.0))
+            # Double-where on the root's argument, as
+            # ``tke_budget.py::echam_tke_source_update`` guards the same
+            # root: at zero TKE (a laminar layer) ``maximum`` ties at 0 and
+            # hands half of ``sqrt'(0) = inf`` back, a NaN derivative with
+            # respect to TKE. The value is the same; the derivative at 0 is
+            # 0, the reference one, since ``_W_MIN`` floors w there.
+            w_sq = 2.0 / 3.0 * vd.tke
+            turbulent = w_sq > 0.0
+            w = jnp.where(
+                turbulent, jnp.sqrt(jnp.where(turbulent, w_sq, 1.0)), 0.0)
         else:
             w = jnp.full_like(temperature, _W_DEFAULT)
         # Dry-adiabatic cooling of the ascent, w·g/cp.

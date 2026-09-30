@@ -323,18 +323,31 @@ def compute_surface_exchange_coefficients(
         # Using 1/Φh rather than Φh is essential here: Φh is the
         # gradient-to-flux ratio, while CH is proportional to the
         # diffusivity, which is its inverse.
+        #
+        # Each branch sees Ri only on its own side of zero (the double-where
+        # on the base, as the ``zxrp1_base`` guard in ``clouds/echam_1m.py``
+        # does it). ``where`` differentiates the branch it discards: on a
+        # stable surface (Ri > 1/16) the unstable branch's base 1 − 16 Ri is
+        # negative and its fractional power NaN, and at Ri = −0.2 the stable
+        # branch divides by zero; the discarded branch's zero cotangent then
+        # meets a NaN or infinite derivative and makes the exchange
+        # coefficients' gradient NaN. The selected branch sees Ri itself, so
+        # the value is the same.
+        unstable = ri_surface < 0
+        ri_unstable = jnp.where(unstable, ri_surface, 0.0)
+        ri_stable = jnp.where(unstable, 0.0, ri_surface)
         stability_heat = jnp.where(
-            ri_surface < 0,
-            (1.0 - 16.0 * ri_surface)**(+0.5),  # Unstable: enhance
-            1.0 / (1.0 + 5.0 * ri_surface),     # Stable: suppress
+            unstable,
+            (1.0 - 16.0 * ri_unstable)**(+0.5),  # Unstable: enhance
+            1.0 / (1.0 + 5.0 * ri_stable),       # Stable: suppress
         )
         # Momentum stability multiplier 1/Φm: Businger-Dyer gives a weaker
         # unstable enhancement than heat ((1−16Ri)^(1/4) vs ^(1/2)); the stable
         # branch matches heat.
         stability_momentum = jnp.where(
-            ri_surface < 0,
-            (1.0 - 16.0 * ri_surface)**(+0.25),  # Unstable: enhance
-            1.0 / (1.0 + 5.0 * ri_surface),      # Stable: suppress
+            unstable,
+            (1.0 - 16.0 * ri_unstable)**(+0.25),  # Unstable: enhance
+            1.0 / (1.0 + 5.0 * ri_stable),        # Stable: suppress
         )
 
         # Exchange coefficient: C = κ²·|U|·(1/Φ) / [ln(z/z0)]²
