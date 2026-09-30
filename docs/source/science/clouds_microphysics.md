@@ -207,9 +207,12 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
 
 **Code pointers.**
 - ``jcm/physics/clouds/sundqvist.py`` — ``SundqvistCloudFraction``,
-  ``calculate_cloud_fraction``; ``echam_saturation.py`` (the vapour-pressure
-  switch, ``lo2``, ECHAM's ``q_s`` form); ``echam_cloud_defaults.py`` (the
-  ``sucloud`` table and inversion levels); ``jcm/physics/resolution_defaults.py``.
+  ``calculate_cloud_fraction``.
+- ``jcm/physics/clouds/echam_saturation.py`` — ``SATURATION_FORMULA``,
+  ``lo2_ice_phase``, ``qsat_from_es``.
+- ``jcm/physics/clouds/echam_cloud_defaults.py`` — ``echam_cloud_defaults``,
+  ``inversion_levels``.
+- ``jcm/physics/resolution_defaults.py`` — ``resolution_defaults``.
 - ``jcm/physics/clouds/echam_1m.py`` — ``Echam1MMicrophysics``.
 - ``jcm/physics/clouds/lohmann_2m/`` — ``scheme.py`` (``cloud_microphysics_2m``,
   ``Lohmann2MMicrophysics``, process-order docstring), ``deposition_freezing.py``
