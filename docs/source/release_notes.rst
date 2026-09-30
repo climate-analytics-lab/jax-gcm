@@ -900,7 +900,7 @@ ECHAM surface albedo and frozen-surface saturation
   0.22 → 0.50-0.64). See :doc:`science/surface`.
 - The surface saturation humidity of every ECHAM tile (and of the
   lowest-level air in the surface-layer Richardson number) is taken over ice
-  below the melting point and over water above, as ECHAM's ``tlucua`` table
+  at and below the melting point and over water above, as ECHAM's ``tlucua`` table
   does, instead of the Sundqvist mixed-phase blend; the latent heat in the
   surface-layer buoyancy switches with the air temperature. The reported
   latent heat flux is ``alhs·E`` over sea ice and carries the sublimation share
@@ -1193,6 +1193,57 @@ Lohmann 2M detrained ice carries ECHAM's crystal number
   observed range; a retune follows (#682). The release-matrix bands of the
   ``echam-2m`` and ``echam-jam`` members shift accordingly. See
   :doc:`science/clouds_microphysics`.
+
+ECHAM physics saturation is ECHAM's Sonntag (1990)
+""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- Every ECHAM scheme takes its saturation vapour pressure from
+  ``jcm.physics.thermodynamics``, which evaluates the Sonntag (1990) fit
+  ECHAM's lookup tables hold, with the table ECHAM reads at each site
+  (#956): ice at and below the melting point and water above (``ua``) for
+  Tiedtke-Nordeng convection, the TTE-TKE vertical diffusion, the surface
+  tiles and the 2M ice saturations; water at all temperatures (``uaw``) for
+  the 1M rain evaporation and the 2M water saturations; ECHAM's ``lo2``
+  choice between the two for the cloud cover and the 2M condensation. The
+  Tetens forms it replaces were up to 0.15 % off between 273 and 330 K,
+  1.2-2.4 % between 238 and 273 K and 8-16 % below. ``qs`` is ECHAM's
+  ``x/(1 − vtmpc1·x)`` with ``x = MIN(es·rd/rv/p, 0.5)``, so the ratio is
+  ``rd/rv`` (0.62265), consistent with ``vtmpc1``, rather than ``c.eps``.
+- Tiedtke-Nordeng's saturation adjustment is ECHAM's ``cuadjtq`` (#957): one
+  Newton step clipped by ``kcall``, then one unclipped refinement where the
+  first step moved. It matches ECHAM's compiled routine to rounding.
+- **Changes results** for every ECHAM configuration. Evaluated term by term
+  on one saved T63 state, the diagnosed cloud fraction of levels colder than
+  238 K, where the ice fit now sits 1.3-9 % above the old one, falls from
+  2.2 % to 0.8 % (1M preset) and from 3.1 % to 2.4 % (2M preset); the cloud
+  microphysics tendencies move by 10 % (1M) and 18 % (2M) RMS, 32-48 % below
+  238 K, the convection's by 15 % and the vertical diffusion's moisture
+  tendency by 0.6 %. Over days 5-10 of ``t63-echam-1m`` / ``t63-echam-2m``
+  runs restarted from 30-day spin-ups of each preset, the global net TOA
+  radiation goes from −10.26 to −9.71 / 8.62 to 8.79 W/m², the shortwave
+  cloud effect from −78.4 to −76.5 / −38.5 to −38.0 W/m², the longwave one
+  from 34.6 to 33.1 / 13.7 to 13.2 W/m², liquid water path from 129.9 to
+  127.1 / 41.0 to 40.4 g/m², ice water path from 16.6 to 16.1 / 3.51 to
+  3.53 g/m², total cloud cover from 71.6 to 71.0 / 66.0 to 65.9 %, and
+  precipitation from 2.52 to 2.53 / 2.66 to 2.65 mm/day; humidity at
+  200 hPa rises by 2 / 3 % (by 2.4 / 3.3 % in the tropics), and no
+  latitude band's upper-tropospheric temperature moves by more than
+  0.07 K. Rebuilds of this change that differ only at the 1e-4 level spread
+  by 0.3 / 0.06 W/m² in net TOA radiation over the same window, which is the
+  noise of these numbers. Ten days measure the immediate response, not a new climate; the
+  release-matrix bands of every ECHAM member shift (#943).
+- Unchanged, bit for bit: SPEEDY, Held-Suarez, Betts-Miller and the RCE
+  testbed, JAM's ARG activation, MAM4 humidity and ice nucleation, the public
+  relative-humidity diagnostic, the AeroCom diagnostics and the initial-state
+  injectors.
+- **Breaking:** ``jcm.physics.convection.tiedtke_nordeng.adjustment`` is
+  removed; ``cuadjtq``, ``cuadjtq_newton`` and ``cuadjtq_newton_evap`` live in
+  ``tiedtke_nordeng.cuadjtq``, the last two without ``n_refine``.
+  ``convection.saturation`` no longer carries the ``cuadjtq`` helpers,
+  ``thermodynamics`` its Tetens constants, and ``clouds.sundqvist`` its two
+  ``saturation_vapor_pressure_*`` functions;
+  ``surface.echam.AtmosphericForcing`` takes a required ``surface_pressure``.
+  See :doc:`v2_to_v3` and :doc:`science/constants`.
 
 
 Known limitations

@@ -1,4 +1,4 @@
-"""Tetens saturation for Betts-Miller and the JAM aerosol modules.
+"""Tetens saturation for Betts-Miller and two JAM aerosol modules.
 
 This module serves the schemes that follow their own references rather than
 ECHAM's saturation tables:

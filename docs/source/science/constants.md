@@ -151,11 +151,14 @@ through ``wv_sat_methods``.
 ECHAM's (``rv = 461.0`` against ECHAM's 461.51, ``rd = akap·cpd``), so
 ``rd/rv`` is 0.62265 where ECHAM's is 0.62196. The saturation formula is
 unaffected; the ``qs`` built from it follows the constants. The idealised schemes
-keep their own references: Betts-Miller and the JAM aerosol modules use the
-Tetens form of ``jcm/physics/convection/saturation.py``, SPEEDY its own
-``speedy_humidity.get_qsat``, the RCE testbed's fixed-RH closure its own
-Tetens blend, and the public ``relative_humidity`` diagnostic Bolton (1980)
-over water.
+keep their own references: Betts-Miller and JAM's MAM4 humidity and ice
+nucleation use the Tetens form of ``jcm/physics/convection/saturation.py``,
+JAM's ARG activation and placeholder microphysics their own WMO Magnus fit,
+SPEEDY its own ``speedy_humidity.get_qsat``, the RCE testbed's fixed-RH
+closure its own Tetens blend, and the public ``relative_humidity`` diagnostic
+Bolton (1980) over water. The ECHAM surface's 2 m humidity diagnostic
+(``surface/echam/turbulent_fluxes.py::compute_surface_humidity``), which no
+tendency reads, keeps its Clausius-Clapeyron form.
 
 **Code pointers.**
 - ``jcm/physics/thermodynamics.py`` — ``es_water``, ``es_ice``, ``es_ua``,

@@ -36,7 +36,9 @@
   damped Newton step clipped by ``kcall`` (``0`` both signs for ``cuini``,
   ``1`` condensation only for ``cubase``/``cuasc``, ``2`` evaporation only for
   ``cudlfs``/``cuddraf``), then one unclipped refinement step where the first
-  was non-zero; it reproduces ECHAM's compiled routine to rounding. The precipitation budget
+  was non-zero. It reproduces ECHAM's compiled routine to rounding where the
+  lookup tables are replaced by the Sonntag fit they hold, and to the tables'
+  interpolation error (2.4e-11 K) where they are not. The precipitation budget
   (rain/snow partition, snow melt, sub-cloud Kessler evaporation, proportional
   depletion) transcribes ECHAM ``cuflx`` (``flux_tendencies.py``,
   ``mo_cufluxdts.f90``). The fractional precipitation cover the sub-cloud
@@ -295,8 +297,9 @@ Operational notes:
   so such a column stays shallow unless it starts under convergence —
   ``jcm/rce.py::convergent_initial_physics_data`` supplies that for the JAM
   aerosol-pathway checks.
-- Near the model top (a few Pa) ``cuini``'s saturation adjustment works with a
-  saturation humidity capped at 0.5 and its interface values are not
+- Near the model top (a few Pa) ``cuini``'s saturation adjustment works with
+  ECHAM's capped ``x = MIN(es·rd/rv/p, 0.5)``, so its saturation humidity sits
+  at ``0.5/(1 − 0.5·vtmpc1) ≈ 0.72`` and its interface values are not
   physical, as in the reference; no plume reaches them.
 
 ## Heat capacity of the Tiedtke plume and ledger
