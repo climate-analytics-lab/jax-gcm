@@ -482,8 +482,12 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     against 0.45-0.47 mm/d of evaporation. Tiedtke triggers under it in 3-9 %
     of those steps, as a plume one layer deep based at 983 hPa. ECHAM6.3's
     compiled ``mo_cover``/``mo_cloud``, fed this column's states, make the
-    same fog: the testbed has no shear or subsidence to ventilate its lowest
-    layer (#967). The TOA shortwave albedo is 0.52-0.55.
+    same fog, and its compiled ``cumastr`` stays off over it as well: on in
+    2.8 % of the days 40-80 steps against the port's 4.7 %, and never where
+    the port is off, because the plume fails the ascent test at the first
+    interface above cloud base (``mo_cuascent.f90`` l.449-451). The testbed
+    has no shear or subsidence to ventilate its lowest layer (#967). The TOA
+    shortwave albedo is 0.52-0.55.
 
     The column is **aerosol-free** (``AerosolFree`` replaces MACv2-SP). The
     MACv2-SP plumes are a geographic climatology, and this column at 0°N/0°E
