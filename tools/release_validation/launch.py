@@ -454,6 +454,10 @@ _RECORDED_DISTS = ("jcm", "jax", "jaxlib", "jax-cuda12-plugin", "jax-rrtmgp",
                    "mam4-jax", "dinosaur", "flax")
 
 
+#: The dependency lock the first attempt of a launch writes into its rundir.
+LOCK_FILE = "requirements.lock"
+
+
 def pinned_setup(rundir: str) -> str:
     """Shell that installs the pinned commit's own dependency set in the pod.
 
@@ -464,16 +468,31 @@ def pinned_setup(rundir: str) -> str:
     which is what CI installs. The image's CUDA jax is held fixed by a
     constraint, so a pin needing another jax fails the install loudly instead
     of replacing the CUDA wheels with CPU ones; the GPU check that follows is
-    the backstop either way. The resolved versions go into the rundir's
-    PROVENANCE on every attempt, because an eviction retry can land on a
-    newer ``:latest`` image.
+    the backstop either way.
+
+    Most pins are floors (``jax-rrtmgp>=0.4.0``), so resolving them again on
+    an eviction retry or a ``--resume`` days later could pick up a release
+    made mid-run and change the model across a checkpoint. The first attempt
+    therefore writes what it resolved (every ``name==version`` of
+    ``pip freeze``) to ``<rundir>/requirements.lock``, and every later attempt
+    of that rundir — one launch, by :func:`rundir_guard` — installs under it
+    as a constraint. The versions each attempt ran with also go into the
+    rundir's PROVENANCE.
     """
     dists = ", ".join(repr(d) for d in _RECORDED_DISTS)
+    lock = f"{rundir}/{LOCK_FILE}"
     return f"""# The pinned commit's own dependency set (requirements.txt + the mam4 extra),
-# not the image's older release; the image's CUDA jax build is held by a
-# constraint so no pin can quietly replace it (the GPU check below backs that).
-pip freeze 2>/dev/null | grep -iE '^(jax|jaxlib|jax[-_]cuda12[-_]plugin|jax[-_]cuda12[-_]pjrt)==' > /tmp/cuda-jax.txt || true
-pip install --no-cache-dir --disable-pip-version-check -c /tmp/cuda-jax.txt -e '/work/jcm[mam4]' 2>&1 | tail -2
+# not the image's older release, resolved once per launch: the first attempt
+# holds the image's CUDA jax by a constraint and writes the lock, and every
+# later attempt installs exactly the locked versions (the GPU check backs both).
+if [ -f {lock} ]; then
+  pip install --no-cache-dir --disable-pip-version-check -c {lock} -e '/work/jcm[mam4]' 2>&1 | tail -2
+else
+  pip freeze 2>/dev/null | grep -iE '^(jax|jaxlib|jax[-_]cuda12[-_]plugin|jax[-_]cuda12[-_]pjrt)==' > /tmp/cuda-jax.txt || true
+  pip install --no-cache-dir --disable-pip-version-check -c /tmp/cuda-jax.txt -e '/work/jcm[mam4]' 2>&1 | tail -2
+  pip freeze --exclude-editable 2>/dev/null | grep -E '^[A-Za-z0-9_.-]+==' > {lock}.tmp
+  mv {lock}.tmp {lock}
+fi
 python - <<'PYDEPS' | tee -a {rundir}/PROVENANCE
 from importlib import metadata
 def version(d):

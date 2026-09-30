@@ -456,8 +456,10 @@ def test_nautilus_job_runs_the_pbs_overrides_at_the_pinned_commit(
     assert pod["containers"][0]["image"] == \
         f"ghcr.io/climate-analytics-lab/jcm@{DIGEST}"
     script = _script(job)
-    assert (f"git -C /work/jcm fetch --depth 1 origin {sha} "
-            f"&& git -C /work/jcm checkout --detach {sha}") in script
+    assert (f"rm -rf /work/jcm\ngit clone --filter=blob:none --no-checkout "
+            f"{launch.JCM_URL} /work/jcm\n"
+            f"git -C /work/jcm fetch --depth 1 origin {sha}\n"
+            f"git -C /work/jcm checkout --detach {sha}\n") in script
     assert ("pip install --no-cache-dir --disable-pip-version-check "
             "-c /tmp/cuda-jax.txt -e '/work/jcm[mam4]'") in script
     assert launch.pinned_setup(f"/runs/{run}") in script
@@ -1169,3 +1171,69 @@ def test_fetch_notes_a_foreign_record_of_the_same_size(scratch, volume,
                         keep=("launch.json",))
     assert "not the launch recorded here" in capsys.readouterr().err
     assert (dest / "launch.json").read_text() == '{"digest": "bbbb"}\n'
+
+
+def test_clone_restarts_cleanly_and_stops_on_a_failed_step(tmp_path):
+    """A container restarted in its Pod keeps /work; the clone must cope.
+
+    The checkout is removed first, and each git step is its own command, so
+    under the Job's ``set -e`` a failed step stops the attempt — in an
+    ``a && b`` list a failed ``a`` would not, and the attempt would carry on
+    with whatever a killed earlier attempt left in /work.
+    """
+    job = launch.mkrun.job_manifest(
+        site=launch.sites.get("nautilus"), job_name="j", label="l",
+        rundir="/runs/r", overrides=["run.checkpoint_path=/runs/r/c"],
+        days=1, resolved={"jcm": ("https://example/x", "a" * 40)},
+        setup="", python_env="", retries=0, gpus=1, cpu=1, memory="1Gi")
+    script = _script(job)
+    clone = script[script.index("rm -rf /work/jcm"):script.index("cd /work/jcm")]
+    work = tmp_path / "work"
+    (work / "jcm").mkdir(parents=True)
+    (work / "jcm" / "left-by-a-killed-attempt").write_text("x")
+    log = tmp_path / "git.log"
+    fake = f"""git() {{ echo "$*" >> {log}; case "$1" in clone) mkdir -p "$5";;
+  -C) [ "$3" != fetch ];; esac; }}
+"""
+    r = _bash(fake + clone.replace("/work/", f"{work}/") + "echo REACHED\n")
+    assert r.returncode != 0 and "REACHED" not in r.stdout   # fetch failed
+    calls = log.read_text().splitlines()
+    assert calls[0].startswith("clone ") and calls[1].startswith(f"-C {work}/jcm fetch")
+    assert len(calls) == 2                        # no checkout after it
+    assert not (work / "jcm" / "left-by-a-killed-attempt").exists()
+
+
+def test_dependencies_are_resolved_once_per_launch(tmp_path):
+    """The first attempt writes the lock; every later one installs under it.
+
+    The pins are floors, so resolving again on a retry or a resume could pick
+    up a release made mid-run and change the model across a checkpoint.
+    """
+    rundir = tmp_path / "run"
+    rundir.mkdir()
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    log = tmp_path / "pip.log"
+    (bindir / "pip").write_text(f"""#!/usr/bin/env bash
+echo "$*" >> {log}
+if [ "$1" = freeze ]; then
+  printf 'jax==0.10.1\njaxlib==0.10.1\n-e git+https://x@y#egg=jcm\njcm @ file:///app\nfoo==1.2\n'
+fi
+""")
+    (bindir / "pip").chmod(0o755)
+    setup = launch.pinned_setup(str(rundir))
+    install = setup[setup.index("if [ -f "):setup.index("python - <<'PYDEPS'")]
+    install = install.replace("/tmp/cuda-jax.txt", f"{tmp_path}/cuda-jax.txt")
+    env = {"PATH": f"{bindir}:{os.environ['PATH']}"}
+    assert _bash(install, **env).returncode == 0          # first attempt
+    lock = rundir / launch.LOCK_FILE
+    assert lock.read_text().split() == ["jax==0.10.1", "jaxlib==0.10.1",
+                                        "foo==1.2"]
+    first = log.read_text().splitlines()
+    assert any(f"-c {tmp_path}/cuda-jax.txt -e /work/jcm[mam4]" in c
+               for c in first)
+    log.write_text("")
+    assert _bash(install, **env).returncode == 0          # a later attempt
+    later = log.read_text().splitlines()
+    assert later == [f"install --no-cache-dir --disable-pip-version-check "
+                     f"-c {lock} -e /work/jcm[mam4]"]

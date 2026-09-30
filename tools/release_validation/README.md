@@ -313,6 +313,10 @@ What the Kubernetes door adds, and why:
   release, so the pod installs the pinned commit with its own requirements and
   the `mam4` extra (`pip install -e '/work/jcm[mam4]'`, what CI installs),
   holding the image's CUDA jax fixed by a constraint; the GPU check follows.
+  The pins are mostly floors, so the first attempt writes what it resolved to
+  `<rundir>/requirements.lock` and every later attempt of the launch installs
+  exactly that — a release made mid-run cannot change the model across a
+  checkpoint.
 - **Inputs resolve in the pod,** which has network: the JAM aux inputs stay
   `hf://` URLs read at the mirror commit the Job exports
   (`JCM_MIRROR_REVISION`, recorded in `mirror_revision.json` exactly as on

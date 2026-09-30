@@ -171,10 +171,18 @@ def job_manifest(*, site: dict, job_name: str, label: str, rundir: str,
     adds container env entries after the base ones.
     """
     checkpoint = checkpoint_of(overrides)
+    # One command per line, so ``set -e`` stops at whichever fails (in an
+    # ``a && b && c`` list a failure of ``a`` or ``b`` does not stop the
+    # script), and the checkout is removed first: a container restarted in
+    # the same Pod keeps /work (an emptyDir), so its clone would fail on the
+    # existing directory and the attempt would go on with whatever a killed
+    # earlier attempt left there — a checkout without a working tree
+    # included, which then fails every retry.
     clone = "\n".join(
-        f'git clone --filter=blob:none --no-checkout {url} /work/{d} '
-        f'&& git -C /work/{d} fetch --depth 1 origin {sha} '
-        f'&& git -C /work/{d} checkout --detach {sha}'
+        f"rm -rf /work/{d}\n"
+        f"git clone --filter=blob:none --no-checkout {url} /work/{d}\n"
+        f"git -C /work/{d} fetch --depth 1 origin {sha}\n"
+        f"git -C /work/{d} checkout --detach {sha}"
         for d, (url, sha) in resolved.items()
     )
     # Quoted, so an override carrying shell metacharacters (a Hydra list

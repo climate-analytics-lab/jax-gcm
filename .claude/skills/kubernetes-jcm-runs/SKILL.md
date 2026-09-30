@@ -146,10 +146,11 @@ python tools/release_validation/launch.py --site nautilus --fetch --members <m> 
 ```
 
 It pins `jcm` to a pushed SHA and the image to its digest, installs that
-commit's own requirements in the pod, records each launch so `--resume`
-re-emits it unchanged, and has the pod refuse a run directory that belongs
-to a different launch, or a fresh Job onto a run another Job started (the
-PBS path's `check_fresh`, done where the volume is visible). Workflow,
+commit's own requirements in the pod (locked on the first attempt), records
+each launch so `--resume` re-emits it unchanged, and has the pod refuse a run
+directory that belongs to a different launch, or a fresh Job onto a run
+another Job started (the PBS path's `check_fresh`, done where the volume is
+visible). Workflow,
 the arm recipe and the fetch/score/ingest commands:
 `tools/release_validation/README.md` ("Workflow on Nautilus").
 
