@@ -567,9 +567,9 @@ class TestPysesAfterPhysicsState(unittest.TestCase):
     def test_dribbled_couplings(self):
         """dribble_all has no post-physics state: the protocol default.
 
-        hybrid lumps the tracers (moisture included) and dribbles the winds
-        and temperature, so the former come from the lump and the latter
-        from the gridpoint add.
+        hybrid lumps the tracers (moisture included) and dribbles the dynamics
+        forcing in pieces that sum to the lump's increment, so every field,
+        winds and temperature included, comes from the lump.
         """
         from pyses.dynamical_cores.physics_dynamics_coupling import coupling_types
 
@@ -589,9 +589,24 @@ class TestPysesAfterPhysicsState(unittest.TestCase):
             self.dycore.timestep_config = tc
         np.testing.assert_array_equal(np.asarray(dribble.temperature),
                                       np.asarray(naive.temperature))
-        np.testing.assert_array_equal(np.asarray(hybrid.temperature),
-                                      np.asarray(naive.temperature))
-        np.testing.assert_array_equal(np.asarray(hybrid.specific_humidity),
-                                      np.asarray(lumped.specific_humidity))
+        for name in ("temperature", "u_wind", "v_wind", "specific_humidity"):
+            np.testing.assert_array_equal(np.asarray(getattr(hybrid, name)),
+                                          np.asarray(getattr(lumped, name)))
+        self.assertFalse(np.array_equal(np.asarray(hybrid.temperature),
+                                        np.asarray(naive.temperature)))
         np.testing.assert_array_equal(np.asarray(hybrid.tracers["qc"]),
                                       np.asarray(lumped.tracers["qc"]))
+
+    def test_hybrid_dribble_sums_to_the_lumped_physics_increment(self):
+        """The hybrid dribble of pySES adds ``physics_dt·forcing["dynamics"]`` in all.
+
+        ``_advance_coupling_step`` adds ``forcing["dynamics"]`` once per tracer
+        sub-step with that sub-step's dt, so the pieces sum to the lump's
+        ``physics_dt·forcing`` exactly when the sub-steps tile the physics
+        step, which is what makes the lumped winds and temperature the
+        post-physics state under hybrid coupling.
+        """
+        tc = self.dycore.timestep_config
+        self.assertAlmostEqual(
+            tc["tracer_subcycle"] * tc["tracer_advection"]["dt"], tc["physics_dt"],
+            places=9)

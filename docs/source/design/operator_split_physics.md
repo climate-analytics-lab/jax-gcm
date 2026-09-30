@@ -107,7 +107,7 @@ a default, so a backend that does not override it keeps working:
 | --- | --- |
 | protocol default | `to_physics_state(state) + dt·P`, exact for a backend that adds the tendency on the physics grid |
 | `DinosaurDycore` | the gridpoint conversion of `state + dt·T(P)`, formed by the same `_apply_physics_tendency` that `step` uses; `T` is the spectral projection, so for temperature and humidity the result differs from `x + dt·P` by what the truncation drops. The tracer filter of `to_physics_state` is not applied: this is what the dynamics advances from, not what physics is handed |
-| `PysesCamSEDycore` | with `lump_all` coupling, the forcing of `step` (FV→GLL scatter, DSS projection, `q→r` chain rule) added with pySES's own `sum_dynamics_series`/`sum_tracers_series`, gathered back to the pg2 columns. With `hybrid` the tracers come from that lump and the winds and temperature, which pySES dribbles over its substeps, from the gridpoint add; `dribble_all` has no post-physics state and takes the default |
+| `PysesCamSEDycore` | with `lump_all` coupling, the forcing of `step` (FV→GLL scatter, DSS projection, `q→r` chain rule) added with pySES's own `sum_dynamics_series`/`sum_tracers_series`, gathered back to the pg2 columns. With `hybrid` too, since pySES dribbles the same projected dynamics forcing over its tracer sub-steps in pieces that sum to `physics_dt × forcing`; `dribble_all` has no post-physics state and takes the default |
 
 No backend evaluates its dynamics for this. `Model` calls it only when the
 composed physics asks (below), so SPEEDY, Held-Suarez and the idealised
