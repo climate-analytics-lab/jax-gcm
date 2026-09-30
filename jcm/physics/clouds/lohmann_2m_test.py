@@ -1835,7 +1835,10 @@ class TestColumnWaterConservation2M:
         nucleation physics forbids that state: above S_crit(T) =
         2.349 - T/259 (Koop et al. 2000), solution droplets freeze in
         seconds. One microphysics step must bring S_ice at 190 K from
-        1.74 to at/below the threshold, with bounded latent heating.
+        1.74 to at/below the threshold, with bounded latent heating. With
+        ``nic_cirrus = 1`` the ECHAM deposition branch alone already brings
+        it to ~1.01, so this checks the outcome rather than the floor, which
+        over-deposits to ~0.89 (#963).
         """
         import numpy as np
         from jcm.physics import thermodynamics

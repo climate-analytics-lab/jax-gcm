@@ -261,17 +261,24 @@ def cloud_microphysics_2m(
     # The vapour pressures are ``sat_spec_hum``'s capped ``zes`` times
     # ``p·rv/rd`` (``zesw_2d``, ``zesi``, l.668 and 690), so they are held at
     # ``0.5·p·rv/rd`` where that cap binds (the top few levels).
+    # The slopes are section 5's ``zdqsdt = 1000·(qs(it+1) − qs(it))`` of
+    # those capped ``qs`` (l.1393-1397): the fit's analytic slope, and zero
+    # where the cap binds, as the difference of two capped knots is.
     es_cap = 0.5 * pressure * (c.rv / c.rd)
-    es_water = jnp.minimum(thermodynamics.saturation_vapor_pressure(
-        temperature_m1, phase="water"), es_cap)
-    es_ice = jnp.minimum(thermodynamics.saturation_vapor_pressure(
-        temperature_m1, phase="auto"), es_cap)
+    es_water_fit = thermodynamics.saturation_vapor_pressure(
+        temperature_m1, phase="water")
+    es_ice_fit = thermodynamics.saturation_vapor_pressure(
+        temperature_m1, phase="auto")
+    es_water = jnp.minimum(es_water_fit, es_cap)
+    es_ice = jnp.minimum(es_ice_fit, es_cap)
     qsat_water, dqsw_dt = (
         thermodynamics.saturation_specific_humidity_and_derivative(
             temperature_m1, pressure, phase="water"))
     qsat_ice, dqsi_dt = (
         thermodynamics.saturation_specific_humidity_and_derivative(
             temperature_m1, pressure, phase="auto"))
+    dqsw_dt = jnp.where(es_water_fit < es_cap, dqsw_dt, 0.0)
+    dqsi_dt = jnp.where(es_ice_fit < es_cap, dqsi_dt, 0.0)
 
     # Subsaturations for rain evaporation / snow sublimation: the NEGATIVE
     # relative deficits ``min(q/qs − 1, 0)`` (ECHAM zsusatw_evap/zicesub) —
