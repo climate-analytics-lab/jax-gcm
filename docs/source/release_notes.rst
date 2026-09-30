@@ -831,9 +831,10 @@ corrections, listed here because they change climate:
   and a branch name is refused). Two machines therefore no longer read
   different copies of a republished bundle depending on their caches. Runs,
   checkpoints, release-validation launches, benchmarks and fixture bands
-  record the commit. The pin is the 2026-09-24 upload carrying the
-  conservatively remapped t63/t106 ``emissions_{pd,pi}`` bundles, so a cache
-  holding the earlier emissions re-fetches once; prefetch before running
+  record the commit. The pin is the 2026-09-28 commit whose forcing bundles
+  carry the land-surface convention below (``lsm``, ``forest``, ``glac``) on
+  top of the conservatively remapped t63/t106 ``emissions_{pd,pi}``, so a
+  cache holding earlier bundles re-fetches once; prefetch before running
   offline.
 
 Importing jcm does not touch the GPU
@@ -908,9 +909,10 @@ ECHAM surface albedo and frozen-surface saturation
 - New optional static forcing fields ``forest`` and ``glac``
   (``ForcingData.forest_fraction`` / ``glacier_fraction``) carry the land
   cover the land albedo reads; the bundle builders write them from ERA5
-  ``cvh`` and the permanent-snow mask. Bundles published before this change
-  lack them and load with both ``None`` (no forest masking; ice sheets keep
-  their ERA5 background albedo of ≈0.8). ``snowc`` is the snow-covered
+  ``cvh`` and the permanent-snow mask, and every published forcing bundle
+  carries them from the pinned mirror commit on. A bundle without them loads
+  with both ``None`` (no forest masking; ice sheets keep their ERA5
+  background albedo of ≈0.8). ``snowc`` is the snow-covered
   fraction of the non-glacier land, so the snow-covered share of the land
   is ``glac + (1 − glac)·snowc`` (``jcm.forcing.land_snow_cover``, also
   read by the JAM dust snow gate). Forcing files now also carry ``lsm``, the
@@ -1120,6 +1122,34 @@ Convective scavenging follows ECHAM-HAM
   ``scav_weights`` by ``csr_conv``, and ``convective_tracer_tendency``
   takes ``csr_conv``, ``precip_efficiency``, ``plume_condensate`` and
   ``evap_fraction``.
+
+Lohmann 2M utility fields are ECHAM's
+"""""""""""""""""""""""""""""""""""""
+
+- Four fields of the two-moment cloud scheme now follow ECHAM6.3-HAM2.3
+  (#942). The snow Reynolds number of riming divides by the viscosity of air
+  ``pviscos`` (``mo_cloud_utils.f90``, line 132) instead of the thermal
+  conductivity of air, which was ~1400 times larger and held the collection
+  efficiency of droplets by snow at its 0.01 floor; it is now ~0.8. The ice
+  fall-speed factor is ``paaa = (p/30000)^-0.178·(T/233)^-0.394`` (line 129)
+  instead of ``(1.3/ρ)^0.4``, so cloud ice falls 30-35 % slower aloft. The
+  turbulent updraft of the phase and Wegener-Bergeron-Findeisen criteria is
+  ``100·fact_tke·√TKE``, zero at the lowest level
+  (``mo_cloud_micro_2m.f90``, lines 814-815), instead of ``√(2·TKE)``. The
+  threshold's ice radius is ``0.9·r_eff``
+  (``effective_2_volmean_radius_param_Schuman_2011``) instead of the plate
+  radius ECHAM uses only for aggregation, which was up to three times
+  smaller. **Changes results** for every 2M configuration, including JAM.
+  Over days 5-10 of ``t63-echam-2m`` runs restarted from a 30-day spin-up of
+  the preset, global liquid water path falls from 60.6 to 41.0 g/m² (the
+  supercooled part from 42.7 to 23.8), ice water path rises from 2.95 to
+  3.4 g/m², large-scale snowfall rises 2.6-fold, total cloud cover falls by
+  3.4 points, the shortwave cloud effect weakens by 7.5 W/m² and the
+  longwave one by 3.6 W/m², and net TOA radiation rises by 3.7 W/m². The
+  riming viscosity accounts for most of the liquid and snowfall change. Ten
+  days measure the immediate response, not a new climate; the release-matrix
+  bands of the ``echam-2m`` and ``echam-jam`` members shift accordingly. See
+  :doc:`science/clouds_microphysics`.
 
 
 Known limitations

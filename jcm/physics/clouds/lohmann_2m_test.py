@@ -2800,14 +2800,13 @@ class TestSchemeGradients2M:
     def test_gradients_are_finite_at_degenerate_operating_points(self):
         """Zero TKE, a clear column and zero droplet number stay finite.
 
-        ``scheme.py:302`` computes the updraft velocity as
-        ``sqrt(maximum(2*tke, 0.0))``, whose derivative at ``tke = 0`` would be
-        ``0.5 * inf``; the ECHAM term hands the scheme a literal zeros array
-        whenever no vertical-diffusion diagnostic is present, so that is the
-        default state. It is inert today only because the updraft velocity
-        reaches nothing differentiable — ``deposition_freezing.py:210`` uses it
-        solely inside a comparison — which is exactly why this fence is worth
-        having: it fails the day that changes.
+        ``cloud_utils.turbulent_updraft_velocity`` takes ``sqrt(TKE)``, whose
+        derivative at ``tke = 0`` is infinite, behind a double ``where``; the
+        ECHAM term hands the scheme a literal zeros array whenever no
+        vertical-diffusion diagnostic is present, so that is the default
+        state. The updraft reaches nothing differentiable today — it enters
+        the phase and WBF decisions only inside comparisons — which is exactly
+        why this fence is worth having: it fails the day that changes.
         """
         base = self._column()
         keys = ("temperature", "humidity", "qc", "qi", "qnc", "qni",
@@ -2835,3 +2834,184 @@ class TestSchemeGradients2M:
         ):
             for name, ok in finite_for(overrides).items():
                 assert ok, f"d/d{name} is not finite with {label}"
+
+
+class TestEchamUtilityWiring2M:
+    """The scheme computes ECHAM's utility fields and hands them to the processes.
+
+    ``cloud_utils_test.TestEchamUtilityFormulas2M`` pins each formula. These
+    tests run the whole column and watch the value each process routine
+    actually receives, so a scheme that computes one quantity and passes
+    another to a process fails here even when every formula is right. The
+    process-level riming test injects its viscosity directly, so this is the
+    only place the viscosity the scheme computes meets the collection
+    efficiency.
+
+    The fixture is a snowing mixed-phase deck at 250-266 K: liquid and a few
+    large crystals in every cloudy layer, vapour at ice saturation so there
+    is no deposition and hence no WBF glaciation to remove the liquid before
+    the snow meets it. The provisional temperature is 0.5 K above the
+    step-start one, so a field evaluated at the wrong time level shows.
+    """
+
+    NLEV = 12
+    CLOUDY = slice(3, 9)
+    DT_UPSTREAM = 0.5   # K, provisional minus step-start temperature
+
+    def _column(self):
+        from jcm.physics import thermodynamics
+        n = self.NLEV
+        temperature_m1 = jnp.linspace(245.0, 270.0, n)
+        pressure = jnp.linspace(4.0e4, 8.0e4, n)
+        air_density = pressure / (287.0 * temperature_m1)
+        q_ice_sat, _ = thermodynamics.saturation_specific_humidity_and_derivative(
+            temperature_m1, pressure, phase="ice")
+        qc = jnp.zeros(n).at[self.CLOUDY].set(3.0e-4)
+        qi = jnp.zeros(n).at[self.CLOUDY].set(1.0e-4)
+        cloud_fraction = jnp.where(qc > 0.0, 0.8, 0.0)
+        return dict(
+            temperature=temperature_m1 + self.DT_UPSTREAM,
+            temperature_m1=temperature_m1,
+            humidity=q_ice_sat, pressure=pressure,
+            qc=qc, qi=qi,
+            # Droplets well above cdnc_min, so riming is not number-gated;
+            # few crystals, so the ice radius sits on the ceffmax clip.
+            qnc=jnp.where(qc > 0.0, 2.0e8, 0.0),
+            qni=jnp.where(qi > 0.0, 1.0e4, 0.0),
+            cloud_fraction=cloud_fraction, air_density=air_density,
+            layer_thickness=jnp.full(n, 500.0),
+            tke=jnp.linspace(0.2, 1.5, n),
+        )
+
+    def _run(self, column):
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        n = self.NLEV
+        # The anchor is the step-start column; the upstream warming is the
+        # temperature increment, and every other field has none.
+        return cloud_microphysics_2m(
+            column["temperature_m1"], column["humidity"], column["pressure"],
+            column["qc"], column["qi"], column["qnc"], column["qni"],
+            column["cloud_fraction"], column["air_density"],
+            column["layer_thickness"], column["tke"],
+            jnp.full(n, 5.0e7), jnp.zeros(n), jnp.zeros(n),
+            1800.0, _P,
+            temperature_increment=(column["temperature"]
+                                   - column["temperature_m1"]),
+        )
+
+    @staticmethod
+    def _spy(monkeypatch, module, name, pick):
+        """Wrap ``module.name`` to record ``pick(args, kwargs, out)`` per call."""
+        records = []
+        original = getattr(module, name)
+
+        def wrapper(*args, **kwargs):
+            out = original(*args, **kwargs)
+            jax.debug.callback(
+                lambda *vals: records.append([np.asarray(v) for v in vals]),
+                *pick(args, kwargs, out))
+            return out
+
+        monkeypatch.setattr(module, name, wrapper)
+        return records
+
+    def _level_of(self, column, rho):
+        """Level index of a recorded air density (each level's is distinct)."""
+        k = int(np.argmin(np.abs(np.asarray(column["air_density"]) - rho)))
+        np.testing.assert_allclose(column["air_density"][k], rho, rtol=1e-6)
+        return k
+
+    def test_riming_sees_air_viscosity_and_a_real_efficiency(self, monkeypatch):
+        """Snow collects supercooled droplets at ECHAM's efficiency, off the floor.
+
+        With the viscosity of air (~1.6e-5 kg/m/s) the snow Reynolds number is
+        ~20, the ``5 < Re < 40`` fit applies and the collection efficiency of
+        10-20 um droplets is ~0.8 (ECHAM ``precip_formation_cold``,
+        mo_cloud_micro_2m.f90:3216-3250). A viscosity three orders of
+        magnitude too large pins the efficiency at its 0.01 floor.
+        """
+        from jcm.physics.clouds.lohmann_2m import precip as precip_mod
+        records = self._spy(
+            monkeypatch, precip_mod, "riming_collection_efficiency",
+            # (riming_mask, air_density, rho_rcp, qc, N, viscosity, params)
+            lambda a, k, out: (a[0], a[1], a[5], out))
+        column = self._column()
+        self._run(column)
+        mask = np.array([bool(r[0]) for r in records])
+        assert mask.sum() >= 3, f"riming ran in {mask.sum()} layers"
+        t_m1 = np.asarray(column["temperature_m1"], dtype=np.float64)
+        for rimes, rho, viscosity, efficiency in records:
+            k = self._level_of(column, float(rho))
+            # mo_cloud_utils.f90:132 at the step-start temperature.
+            np.testing.assert_allclose(
+                float(viscosity), (1.512 + 0.0052 * (t_m1[k] - 233.15)) * 1e-5,
+                rtol=1e-5)
+            if rimes:
+                assert 0.5 < float(efficiency) <= 1.0, (k, float(efficiency))
+
+    def test_ice_sedimentation_sees_echam_paaa(self, monkeypatch):
+        """The fall-speed factor handed to sedimentation is ECHAM's ``paaa``."""
+        from jcm.physics.clouds.lohmann_2m import scheme as scheme_mod
+        records = self._spy(
+            monkeypatch, scheme_mod, "sedimentation_ice",
+            # (cf, air_density_correction, dp, rho, ...)
+            lambda a, k, out: (a[1], a[3]))
+        column = self._column()
+        self._run(column)
+        p = np.asarray(column["pressure"], dtype=np.float64)
+        t_m1 = np.asarray(column["temperature_m1"], dtype=np.float64)
+        # mo_cloud_utils.f90:129 at (papm1, ptm1), evaluated in float64.
+        expected = (p / 30000.0) ** (-0.178) * (t_m1 / 233.0) ** (-0.394)
+        assert len(records) == self.NLEV
+        seen = set()
+        for factor, rho in records:
+            k = self._level_of(column, float(rho))
+            seen.add(k)
+            np.testing.assert_allclose(float(factor), expected[k], rtol=1e-5)
+        assert seen == set(range(self.NLEV))
+
+    def test_phase_criterion_sees_echam_turbulent_updraft(self, monkeypatch):
+        """``100·0.7·sqrt(TKE)`` cm/s, and 0 at the lowest level."""
+        from jcm.physics.clouds.lohmann_2m import scheme as scheme_mod
+        records = self._spy(
+            monkeypatch, scheme_mod, "mixed_phase_deposition_and_corrections",
+            # (pressure, ..., updraft_velocity is positional arg 17)
+            lambda a, k, out: (a[0], a[17]))
+        column = self._column()
+        self._run(column)
+        got = {round(float(r[0])): float(r[1]) for r in records}
+        tke = np.asarray(column["tke"], dtype=np.float64)
+        expected = 70.0 * np.sqrt(tke)
+        expected[-1] = 0.0          # levels are top-first
+        p = np.asarray(column["pressure"])
+        assert len(got) == self.NLEV
+        for k in range(self.NLEV):
+            np.testing.assert_allclose(
+                got[round(float(p[k]))], expected[k], rtol=1e-5, atol=1e-6)
+
+    def test_wbf_threshold_uses_schumann_radius(self, monkeypatch):
+        """Every WBF threshold gets 0.9·r_eff, not the plate ``zrih`` radius.
+
+        The fixture's crystals are large enough that r_eff sits on the
+        150 um clip, where ECHAM's radius for this threshold is 135 um
+        (``effective_2_volmean_radius_param_Schuman_2011``) and the
+        aggregation radius ``zrih`` would be 45.6 um. The threshold is
+        evaluated three times per level: the section-4 ``lo2`` and the WBF
+        gate in the scheme, and the section-5 ``lo2`` inside
+        ``mixed_phase_deposition_and_corrections``.
+        """
+        from jcm.physics.clouds.lohmann_2m import deposition_freezing as df_mod
+        from jcm.physics.clouds.lohmann_2m import scheme as scheme_mod
+        pick = lambda a, k, out: (k["ice_radius"],)  # noqa: E731
+        in_scheme = self._spy(monkeypatch, scheme_mod, "threshold_vert_vel", pick)
+        in_section5 = self._spy(monkeypatch, df_mod, "threshold_vert_vel", pick)
+        self._run(self._column())
+        for name, records in (("scheme", in_scheme), ("section 5", in_section5)):
+            radius = np.array([float(r[0]) for r in records])
+            expected_calls = 2 * self.NLEV if name == "scheme" else self.NLEV
+            assert len(radius) == expected_calls, (name, len(radius))
+            np.testing.assert_allclose(radius.max(), 1.35e-4, rtol=1e-5,
+                                       err_msg=name)
+            # Ice-free levels sit on the lower clip, 0.9 x 10 um.
+            np.testing.assert_allclose(radius.min(), 9.0e-6, rtol=1e-5,
+                                       err_msg=name)

@@ -103,7 +103,16 @@ def _monthly_clim(da: xr.DataArray, era: str) -> xr.DataArray:
 
 
 def _to_lonlat(da2d: xr.DataArray) -> tuple:
-    """(lat, lon[, time]) DataArray -> jcm-canonical (lon, lat[, time])."""
+    """(lat, lon[, time]) DataArray -> jcm-canonical (lon, lat[, time]).
+
+    Any other dim is refused: it can only be a source-grid dim a positional
+    regrid failed to consume, and writing it would publish a file many times
+    the bundle's size that no reader expects.
+    """
+    stray = set(da2d.dims) - {"lat", "lon", "time"}
+    if stray:
+        raise ValueError(f"{da2d.name}: dims {da2d.dims} carry {sorted(stray)} "
+                         "besides (lat, lon[, time])")
     dims = ("lon", "lat") + tuple(d for d in da2d.dims
                                   if d not in ("lat", "lon"))
     return dims, da2d.transpose(*dims).values

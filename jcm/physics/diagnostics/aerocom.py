@@ -866,9 +866,12 @@ class AerocomDiagnostics(PhysicsTerm):
         implementation. ``dew2`` converts the
         (well-mixed) lowest-level specific humidity to a dew point at
         surface pressure via the inverted Magnus formula. ``psl`` is the
-        standard WMO reduction with the 6.5 K/km lapse. ``wbase`` is the
-        SAME updraft the 2M activation uses (fact_tke sqrt(2 TKE),
-        lohmann_2m fact_tke = 0.7), sampled at the diagnosed cloud base.
+        standard WMO reduction with the 6.5 K/km lapse. ``wbase`` is
+        ``0.7·sqrt(2·TKE)`` sampled at the diagnosed cloud base; it is
+        neither the 2M scheme's phase-criterion updraft
+        (``cloud_utils.turbulent_updraft_velocity``, ``0.7·sqrt(TKE)``) nor
+        the JAM activation updraft (``sqrt(2·TKE/3)``,
+        ``jam/activation/arg_term.py``).
         Convective precipitation is split rain/snow by the lowest-level
         temperature (the melt criterion the COSP hook already uses).
         """

@@ -87,6 +87,44 @@ class TestGaussianBuilders(unittest.TestCase):
         np.testing.assert_allclose(float(out["lsm"].sel(lat=6.0, lon=3.0)),
                                    0.5)
 
+    def test_time_dim_leads_the_output(self):
+        # Monthly fields are (time, lat, lon); the (lat, lon) mask must not
+        # reorder them, or the positional bilinear regrid reads time as lon.
+        from jcm.data.mirror.bundles import land_surface_fields
+
+        f = _source()
+        grid = dict(dims=("latitude", "longitude"),
+                    coords={"latitude": LAT, "longitude": LON})
+        era5 = xr.Dataset({"lsm": xr.DataArray(f["lsm"], **grid)})
+        scale = np.array([1.0, 0.5])
+        for tdim, tcoord in (
+                ("time", np.array(["2000-01-01", "2000-02-01"],
+                                  dtype="datetime64[ns]")),
+                ("month", np.array([1, 2]))):
+            monthly = xr.DataArray(
+                scale[:, None, None] * f["snowc"][None],
+                dims=(tdim, "latitude", "longitude"),
+                coords={tdim: tcoord, "latitude": LAT, "longitude": LON})
+            out = land_surface_fields(
+                era5, xr.DataArray(f["glac"] > 0.5, **grid),
+                {"snowc": monthly}, lats=np.array([3.0]),
+                lons=np.array([3.0]))["snowc"]
+            self.assertEqual(set(out.dims), {tdim, "lat", "lon"}, tdim)
+            np.testing.assert_allclose(out.isel(lat=0, lon=0).values,
+                                       EXPECT["snowc"] * scale, rtol=1e-12,
+                                       err_msg=tdim)
+
+
+    def test_a_stray_source_dim_is_refused_at_write(self):
+        from jcm.data.mirror.bundles import _to_lonlat
+
+        da = xr.DataArray(np.zeros((2, 3, 4)), name="stl",
+                          dims=("lat", "lon", "latitude"))
+        with self.assertRaisesRegex(ValueError, "latitude"):
+            _to_lonlat(da)
+        dims, _ = _to_lonlat(da.isel(latitude=0).expand_dims(time=2))
+        self.assertEqual(dims, ("lon", "lat", "time"))
+
 
 class TestPysesColumnSampler(unittest.TestCase):
     def test_checkerboard_gives_exact_area_shares(self):

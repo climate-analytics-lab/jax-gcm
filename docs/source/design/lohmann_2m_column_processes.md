@@ -52,8 +52,14 @@ Formulation choices inside the sweep, for provenance:
 - The WBF threshold updraft `peta` is ECHAM's diffusional-growth ζ
   (`mo_cloud_micro_2m.f90` line 856), recomputed after freezing so the
   post-freezing crystal population sets the threshold.
-- Diagnostic cirrus ICNC (`nic_cirrus = 1`) uses the Schumann volume-mean
-  radius, in metres.
+- The WBF threshold updraft is compared with ECHAM's `zvervx` turbulent term
+  `100·fact_tke·√TKE` (zero at the lowest level), and the threshold uses
+  ECHAM's volume-mean radius `0.9·r_eff` at the three decisions jcm ports
+  (section-4 `lo2`, section-5 correction, WBF gate); ECHAM's fourth, the
+  detrainment split `lo2_2d`, has no counterpart (#941).
+- Diagnostic cirrus ICNC (`nic_cirrus = 1`) inverts the plate (`zrih`)
+  volume-mean radius of the existing ice, in metres; ECHAM passes a
+  temperature-parameterised radius there (#941).
 
 ## The state-splitting convention
 
@@ -91,7 +97,7 @@ telescopes exactly as ECHAM's INOUT accumulation.
 
 - **Large-scale vertical velocity is not plumbed** (`zvervx` is TKE-only; the
   `knvb`/`lonacc` inversion gate on `zauloc` is omitted; `het_mxphase_freezing`
-  likewise lacks `pvervel`). Tracked in #705.
+  likewise lacks `pvervel`). Listed in #941.
 - **`nic_cirrus = 2`** still expects the Kärcher–Lohmann `pnicex`/`zqinucl`
   source jcm does not compute (#552); its section-5 deposition branch returns
   zero, as in the reference with a missing external source.

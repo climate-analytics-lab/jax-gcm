@@ -257,19 +257,16 @@ are declared once in `jcm/data/mirror/sites.py` (auto-detected, or
 - **DKRZ Levante** holds the CMIP7 input4MIPs tree and the ECHAM-HAMMOZ and
   ECHAM6 pools under `/pool/data`, but not the RDA ERA5 archive. It therefore
   does not rebuild Tier A: `--stage pull` fetches the published Tier A products
-  (only the PI/PD climatology arrays of the emissions stores) and
-  `registry.json`, so a new grid regrids from exactly the data the published
-  grids were built from. The Lana DMS file and GMTED are downloaded once into
+  (only the PI/PD climatology arrays of the emissions stores), so a new grid
+  regrids from exactly the data the published grids were built from. The Lana DMS file and GMTED are downloaded once into
   `$JCM_MIRROR_ROOT/sources/`; the two WACCM CCMI REFC1 decade oxidant files
   are not on the public CESM inputdata server and are copied from Glade (the
   public `oxid_ozone_WACCM_CCMI_*_cycle` files are a different run, ccmi30
   1995–2004, and are not substitutes).
 
 `--grids` restricts every stage to a subset of the published grids, which is how
-a grid is added without rebuilding or re-uploading the others. The registry
-stage then merges the new hashes onto the pulled `registry.json` rather than
-rewriting it from the partial upload tree. The t127/t255 bundles were built on
-Levante with
+a grid is added without rebuilding or re-uploading the others. The t127/t255
+bundles were built on Levante with
 
 ```bash
 python -m jcm.data.mirror.build_mirror --grids t127,t255 \
@@ -288,7 +285,55 @@ out identical to the published Tier A), then
 `--grids t63,t106 --products emissions --stage bundles,amip`; `--products`
 limits those stages to the named bundle products so unchanged files are not
 republished. Any partial build — `--grids`, `--products`, or pulled Tier A —
-stages no Tier A and merges its registry onto the published one.
+stages no Tier A.
+
+### What gets published
+
+Only what this site's builds wrote. The upload tree is a long-lived working
+copy that builds on another site never reach, so any file a build did not just
+write may be older than the published one, and republishing it would revert
+that. Each stage's writes into the upload tree are recorded in
+`build/upload_ledger.json` (the files whose stat changed across the stage). A
+stage that fails records nothing — the file it died writing may be truncated —
+so rerun it over the same selection.
+
+`--stage registry` takes the published `registry.json` at the mirror's current
+tip and re-hashes only the ledger's files. It refuses any of them whose
+published copy differs and was committed after the local file's content was
+made — its mtime, since products under `build/` are staged into the upload
+tree with their own; an undated copy, or one within five minutes, counts as
+newer. Uploading would revert that copy: rebuild the file from the current
+sources, or remove it from the ledger to keep the published copy. A site's own
+earlier publish of the same bytes passes. A build whose Tier A was pulled is
+also refused when the tip's Tier A differs from the pinned revision it pulled,
+since its bundles were regridded from the replaced inputs. The mtime shows when
+a file was made, not what it was made from: a bundle regridded today from
+local inputs another site has since replaced passes. `--retire <globs>` on the
+same run drops published files (a renamed product's old path); nothing else
+ever leaves the mirror.
+
+`--stage upload` commits exactly the files the registry hashed, at the state
+it hashed them, starting from that tip commit. It uses batches within Hugging
+Face's per-commit limits (25k LFS files, 1 GB of small files), each committed
+on the previous one, then `registry.json` and the retirements last, so the
+registry moves only once every file has landed. If the mirror moves in
+between, the upload stops rather than overwriting it. Each landed batch is
+recorded, so a rerun resumes after it, and the final commit sets the ledger
+aside (`upload_ledger.<commit>.json`). Run one build invocation at a time per
+mirror root: the ledger is per root, not per process.
+
+The forcing bundles are rebuilt on Glade on a compute node (the builds and the
+upload's hashing exceed the 10 GB login-node memory limit), with `amip` and
+`era5-transient` as separate invocations because both read `--years` and their
+published ranges differ:
+
+```bash
+M="python -m jcm.data.mirror.build_mirror"
+$M --products forcing --stage bundles
+$M --products forcing --stage amip --years 1950,2022
+$M --stage era5-transient --years 1979,2024
+$M --stage manifest,registry,upload
+```
 
 - `sso.py` — streams the GMTED2010 DEM in latitude strips, accumulating
   Lott–Miller gradient-tensor statistics onto Gaussian bins or, for
@@ -315,15 +360,12 @@ stages no Tier A and merges its registry onto the published one.
   T255, and says so in its attributes), and the region mask regenerated on every
   grid from the `setclonlatbox` recipe in the HAMMOZ file history, which
   reproduces the native T63/T127 masks cell for cell.
-- `registry.py` — hashes the upload tree (merged onto the published registry
-  for a `--grids` build).
-- `build_mirror.py --stage upload` — pushes to the HF dataset with
-  retries (the xet backend has aborted 44k-file pushes with transient
-  timeouts; uploads resume, committed files are skipped). Deliberately
-  excluded from `--stage all` — publishing is explicit. It prints the
-  commit it created; runs keep reading the pinned one until `MIRROR_REVISION`
-  is bumped. `--stage pull` reads the pinned commit too, so when extending the
-  tip set `JCM_MIRROR_REVISION` to the tip's sha first. Needs
+- `registry.py` — hashes the files a build wrote onto the published registry.
+- `build_mirror.py --stage upload` — commits the ledger to the HF dataset
+  with retries (the xet backend has aborted large pushes with transient
+  timeouts). Deliberately excluded from `--stage all` — publishing is
+  explicit. It prints the commit it created; runs keep reading the pinned one
+  until `MIRROR_REVISION` is bumped. Needs
   `hf auth login` with write access; run `python -m` from the repo
   checkout's own directory.
 
