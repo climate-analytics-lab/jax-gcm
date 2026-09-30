@@ -28,8 +28,9 @@
  "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -ffp-contract=off -fimplicit-none",
  "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
  "harness": {
-  "commit": "832feced60121af6f5180f921f76fe28393af600",
-  "uncommitted_changes": true,
+  "path": "/scr/dwatsonparris/jam-ice-953/harness/fortran_harness/echam_hamfrz",
+  "commit": "01fe615c3bca036d070effc16820b3e0bbf80c90",
+  "uncommitted_changes": false,
   "repository": "private scratch harness (fortran_harness/echam_hamfrz), not pushed"
  },
  "checks": {

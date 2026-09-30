@@ -47,9 +47,10 @@
  "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -D__LP64__ -ffp-contract=off -fimplicit-none",
  "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
  "harness": {
+  "path": "/scr/dwatsonparris/jam-ice-953/harness/fortran_harness/echam_cloud2m",
   "repository": "private scratch copy of local branch harness/echam-cloud-2m 7dbfc93f (fortran_harness/echam_cloud2m) extended for #953: stub returns frz_in, driver magic 7943, het diagnostic points, py/columns_frz.py, py/build_reference_frz.py",
-  "commit": "016032d12768defa315c1841276575458cdcdc94",
-  "uncommitted_changes": true,
+  "commit": "01fe615c3bca036d070effc16820b3e0bbf80c90",
+  "uncommitted_changes": false,
   "stub_mo_submodel_interface_header": "Harness stub (own code). The two HAM hooks the 2M cloud scheme calls UNCONDITIONALLY (unlike the 1M, which guards them with lanysubmodel):  * cloud_subm_1 (mo_cloud_micro_2m.f90:726-734): aerosol activation and the aerosol inputs of the freezing parameterisations. The real routine (mo_submodel_interface.f90:1372-1560) needs HAM/CCN-climatology aerosol. This stub returns the AEROSOL-FREE configuration jcm's 2M corresponds to: pcdncact = cdncact_in (driver-set; the harness uses 0, so the cloud-base activation zqlnuc (lines 742-756) and the 5.5 activation in update_in_cloud_water add no droplets), pascs    = ascs_in (driver-set; 0 makes the nic_cirrus = 1 nucleation zninucl = MAX(MIN(., zascs - zicncq), 0) (lines 990-999) exactly 0: jcm does not implement zninucl), wet radii and dust/BC fractions = frz_in (driver-set; the #941 columns use 0, for which het_mxphase_freezing freezes nothing: every term is proportional to a fraction, and the diffusivities are MERGEd to 0 for zero radius, lines 2755-2771; the #953 freezing columns set them to drive het_mxphase_freezing, F 2675-2840), papnx/paprx/papsigx = 0 (read only for nic_cirrus = 2), ld_het = .FALSE. (read only for nic_cirrus /= 1). * cloud_subm_2 (lines 1808-1818): HAM wet chemistry / in-cloud scavenging. It changes only aerosol-tracer tendencies (never CDNC/ICNC, T, q, xl, xi); the harness has no aerosol tracers, so the stub is a no-op."
  },
  "checks": {
