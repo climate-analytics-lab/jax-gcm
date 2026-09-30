@@ -737,8 +737,9 @@ def radiation_scheme_rrtmgp(
     # in those weights and this is exactly ECHAM's ``ztau``/``zomg``/``zasy``.
     # Where they differ AND a layer holds both phases, the ssa/asymmetry are
     # weighted by the scaled rather than ECHAM's unscaled τ; the total optical
-    # depth is still exact. Weighting by the physical τ needs a per-phase
-    # optical-depth scale inside the library (jax-rrtmgp#37).
+    # depth is still exact. jax-rrtmgp 0.5.0 takes per-phase optical-depth
+    # scales (``cloud_tau_scale_liq``/``_ice``) that weight by the unscaled
+    # τ; passing them instead of scaling the paths is #958.
     zinhoml = liquid_inhomogeneity(convection_type, parameters)
     in_cloud_lwp_lib = zinhoml * lax.cond(
         needs_reversal, lambda a: a[::-1], identity,
@@ -891,9 +892,9 @@ def radiation_scheme_rrtmgp(
     # the column solve inconsistent with the surface scheme's absorbed
     # SW·(1−albedo_tile)). The library takes one BROADBAND SW albedo, so
     # blend the surface scheme's vis/nir pair with the ~0.46/0.54 split of
-    # the TOA solar spectrum about 0.7 µm. A true per-band albedo (and the
-    # direct/diffuse distinction ECHAM makes) needs a g-point→band albedo
-    # map in the library — deferred to the cloud/surface optics overhaul.
+    # the TOA solar spectrum about 0.7 µm. jax-rrtmgp 0.5.0 takes per-band
+    # direct and diffuse albedos (``sfc_alb_dir``/``sfc_alb_dif``); building
+    # them from the surface scheme's vis/nir pair and passing them is #959.
     sfc_alb_broadband = 0.46 * surface_albedo_vis + 0.54 * surface_albedo_nir
 
     # The library call is float32 end-to-end regardless of the host's x64

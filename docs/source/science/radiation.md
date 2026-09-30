@@ -106,12 +106,14 @@ RRTMGP and the NN emulator so a feature and its label describe the same cloud):
   physical (unscaled) condensate, so the diagnostic ice radius still follows the
   Moss/Foot IWC law. On the grey backend the τ-weighted ssa/asymmetry are
   likewise taken from the unscaled per-phase optical depths, exactly ECHAM's
-  ``zomg``/``zasy``. The RRTMGP backend can only pass per-phase condensate paths
-  to jax-rrtmgp, which weights the combined ssa/asymmetry by the τ those paths
-  produce: identical to ECHAM wherever the liquid and ice factors are equal
-  (every column except ``ktype = 4`` ones at the defaults), while in a
-  ``ktype = 4`` layer holding both phases the total τ is exact but the
-  ssa/asymmetry weighting uses the scaled τ (jax-rrtmgp#37). The four factors are
+  ``zomg``/``zasy``. The RRTMGP backend scales the per-phase condensate paths
+  it hands to jax-rrtmgp, which weights the combined ssa/asymmetry by the τ
+  those paths produce: identical to ECHAM wherever the liquid and ice factors
+  are equal (every column except ``ktype = 4`` ones at the defaults), while in
+  a ``ktype = 4`` layer holding both phases the total τ is exact but the
+  ssa/asymmetry weighting uses the scaled τ. jax-rrtmgp 0.5.0 accepts per-phase
+  optical-depth scales that weight by the unscaled τ; wiring them is #958. The
+  four factors are
   ``RadiationParameters.cloud_inhomogeneity_{liquid, liquid_convective,
   liquid_shallow, ice}``, differentiable leaves.
 **What ECHAM/CAM does.** ECHAM6-HAM2.3 runs the **PSrad/RRTMG** two-stream
@@ -141,8 +143,8 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   composition that runs radiation with no droplet-radius-publishing microphysics
   uses the fallback throughout.
 - `compute` — the SW spectrum is collapsed to a single broadband albedo
-  (``0.46·vis + 0.54·nir``) at the RRTMGP surface BC; a true per-band /
-  direct-diffuse albedo needs a g-point→band map in the library (deferred).
+  (``0.46·vis + 0.54·nir``) at the RRTMGP surface BC. jax-rrtmgp 0.5.0 accepts
+  per-band direct and diffuse albedos; passing them is #959.
   The same single value serves the direct beam and diffuse light, so the
   open-water direct and diffuse albedos are merged before they reach it (see
   {doc}`surface`, *Surface albedo*).
@@ -161,8 +163,8 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   counterpart: HAM activates with Lin-Leaitch or ARG) keeps ECHAM6's
   ``zinhomi = 0.8``. On RRTMGP, a mixed-phase layer in a ``ktype = 4``
   column weights its combined ssa/asymmetry by the scaled rather than the
-  physical per-phase τ until jax-rrtmgp takes a per-phase optical-depth scale
-  (jax-rrtmgp#37). The separate in-cloud-condensate cap
+  physical per-phase τ until the backend passes jax-rrtmgp's per-phase
+  optical-depth scales (#958). The separate in-cloud-condensate cap
   (``_MAX_IN_CLOUD_CONDENSATE``) is only a NaN guard against thin-cloud
   optical-depth blow-up; it binds in ~0.003 % of cloudy cells and is *not* an
   inhomogeneity term.
