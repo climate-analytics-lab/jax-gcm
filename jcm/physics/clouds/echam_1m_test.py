@@ -1068,7 +1068,10 @@ class TestSurrogates:
         check_surrogate_gradient(wrapped, exact, sur, (zxlb, zfrho))
         # Smooth on each side of the cutoff (C1 across it).
         check_gradients(sur, (jnp.array([1e-12, 3e-11, 9e-11]), zfrho[:3]), rtol=1e-5)
-        check_gradients(sur, (jnp.array([3e-10, 1e-6, 1e-4]), zfrho[:3]), rtol=1e-5)
+        # Points of one magnitude: the difference steps are fractions of the
+        # leaf's RMS, which a wide spread would let cross the cutoff.
+        check_gradients(sur, (jnp.array([3e-10, 6e-10, 9e-10]), zfrho[:3]), rtol=1e-5)
+        check_gradients(sur, (jnp.array([2e-5, 5e-5, 1e-4]), zfrho[:3]), rtol=1e-5)
         grid = jnp.concatenate([jnp.zeros(1), jnp.geomspace(1e-25, 1e-3, 300)])
         fr = jnp.full_like(grid, 2.3e-11)
         dist = np.abs(np.asarray(exact(grid, fr) - sur(grid, fr)))
