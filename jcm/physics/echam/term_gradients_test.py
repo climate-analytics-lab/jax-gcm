@@ -207,6 +207,14 @@ _CONDENSATE_CLIP_KINK = (
 _ENVIRONMENT = ("['thermo_run']/['temperature']",
                 "['thermo_run']/['specific_humidity']")
 
+# The 1M scheme follows ECHAM's ``cloud`` argument list instead: the step-start
+# state is its anchor (``ptm1``, ``pqm1``) and the running tendency of the
+# upstream terms, ``_tendency_run``, is its increment (``ztmst*ptte``), so both
+# are live.
+_ONE_MOMENT_ENVIRONMENT = ("['_tendency_run']/['temperature']",
+                           "['_tendency_run']/['specific_humidity']",
+                           "[0]/temperature", "[0]/specific_humidity")
+
 _PBL_HEIGHT_DEFECT = (
     "jcm/physics/vertical_diffusion/tte_tke/turbulence_coefficients.py:392 — "
     "compute_boundary_layer_height picks the PBL top with jnp.argmax over the "
@@ -441,17 +449,17 @@ _CHECKS: dict = {
     # returns the momentum tendencies as structural zeros, and publishes
     # ``wbf`` as a zero on purpose (the 1M scheme has no explicit
     # Wegener-Bergeron-Findeisen transfer, but the key stays so the AeroCom
-    # diagnostic set is scheme-independent — echam_1m.py:1418). There is
+    # diagnostic set is scheme-independent). There is
     # nothing for the liveness guard to find in any of the three.
     "echam_1m_microphysics": _Check(
-        reference="adjoint", adjoint_rtol=2.0e-3, live_inputs=_ENVIRONMENT,
+        reference="adjoint", adjoint_rtol=2.0e-3, live_inputs=_ONE_MOMENT_ENVIRONMENT,
         skip_outputs=("u_wind", "v_wind", "wbf")),
     # The convecting column keeps the default adjoint tolerance and fails it;
     # see ``_ONE_MOMENT_SATURATION_CANCELLATION`` for why that is recorded
     # rather than absorbed. Everything else about the cell is the term entry
     # above.
     ("echam_1m_microphysics", "convecting"): _Check(
-        reference="adjoint", live_inputs=_ENVIRONMENT,
+        reference="adjoint", live_inputs=_ONE_MOMENT_ENVIRONMENT,
         skip_outputs=("u_wind", "v_wind", "wbf"),
         xfail_reference=_ONE_MOMENT_SATURATION_CANCELLATION),
     # Hines returns a structurally zero moisture tendency — it moves momentum

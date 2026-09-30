@@ -1,1632 +1,1410 @@
-"""Unit tests for the ECHAM 1-moment cloud microphysics scheme."""
+"""Tests of the ECHAM6.3 1-moment cloud scheme (``echam_1m.py``).
 
-import jax.numpy as jnp
+The process tests drive one level of the sweep (``_sweep_level``) with chosen
+incoming fluxes and compare each intermediate with the formula of
+``mo_cloud.f90`` (ECHAM6.3-HAM2.3 r7492, lines cited as ``F:``) evaluated
+independently here in NumPy float64. Each test therefore fails if its process
+is removed and if its formula changes. The comparison with the Fortran routine
+itself is ``echam_fortran_reference_test.py``.
+"""
+
+import dataclasses
+import math
+
 import jax
+import jax.numpy as jnp
 import numpy as np
 import pytest
-from .echam_1m import (
+
+import jcm.constants as c
+from jcm.physics.clouds.echam_1m import (
+    LevelInputs,
     MicrophysicsParameters,
-    autoconversion, autoconversion_beheng, autoconversion_kk2000,
-    ice_autoconversion,
+    _es_and_derivative,
+    _sweep_level,
+    autoconversion,
+    autoconversion_beheng,
+    autoconversion_kk2000,
     cloud_microphysics_column_sweep,
+    contact_freezing_radius,
+    ice_autoconversion,
+    ice_fall_speed,
+    ice_phase_weight,
+    lo2_ice_phase,
+    lonacc_levels,
+    temperature_switch,
 )
-from jcm.constants import tmelt
-from jcm.testing import check_gradients
+
+DT = 1800.0
+ZXSEC = 1.0 - 1.0e-12
 
 
-class TestAutoconversion:
-    """Test autoconversion processes"""
-    
-    def test_autoconversion_no_water_no_rate(self):
-        """Beheng autoconversion gives essentially zero rate at near-zero qc."""
-        config = MicrophysicsParameters.default()
-        air_density = jnp.array(1.0)
-        cloud_fraction = jnp.array(0.5)
-        droplet_number = jnp.array(100e6)
-        dt = 1800.0
-
-        # qc = 0 → no autoconversion
-        rate_zero = autoconversion_beheng(
-            jnp.array(0.0), cloud_fraction, air_density, droplet_number, dt, config,
-        )
-        assert float(rate_zero) < 1e-15
-
-        # qc = tiny (1e-7 kg/kg) → effectively no autoconversion
-        rate_tiny = autoconversion_beheng(
-            jnp.array(1e-7), cloud_fraction, air_density, droplet_number, dt, config,
-        )
-        assert float(rate_tiny) < 1e-12
-
-        # qc = realistic post-convection (0.6 g/kg) → meaningful rate but
-        # bounded by mass conservation (cannot deplete more than qc/dt).
-        qc = jnp.array(0.6e-3)
-        rate_high = autoconversion_beheng(
-            qc, cloud_fraction, air_density, droplet_number, dt, config,
-        )
-        assert float(rate_high) > 0.0
-        assert float(rate_high) <= float(qc) / dt + 1e-12, (
-            "Beheng integral form must respect mass conservation: "
-            "autoconv rate cannot exceed qc/dt."
-        )
-
-    def test_autoconversion_dependencies(self):
-        """Beheng autoconversion: rate increases with qc, decreases with Nc.
-
-        Note: with the implicit-integration formulation, large qc gets
-        capped at the mass-conservation limit qc/dt, so the "rate
-        increases with qc" check uses a short timestep where the rate
-        hasn't saturated yet.
-        """
-        config = MicrophysicsParameters.default()
-        air_density = jnp.array(1.0)
-        cloud_fraction = jnp.array(1.0)
-        dt = 0.1  # short timestep so rate doesn't saturate at qc/dt
-
-        rate_low_qc = autoconversion_beheng(
-            jnp.array(0.4e-3), cloud_fraction, air_density,
-            jnp.array(100e6), dt, config,
-        )
-        rate_high_qc = autoconversion_beheng(
-            jnp.array(0.8e-3), cloud_fraction, air_density,
-            jnp.array(100e6), dt, config,
-        )
-        assert float(rate_high_qc) > float(rate_low_qc), (
-            "Higher qc → higher Beheng autoconversion rate"
-        )
-
-        # Droplet number dependence: more droplets (cleaner air) → slower
-        # autoconversion (Nc^-3.3 in the formula).
-        rate_few_droplets = autoconversion_beheng(
-            jnp.array(0.6e-3), cloud_fraction, air_density,
-            jnp.array(50e6), dt, config,
-        )
-        rate_many_droplets = autoconversion_beheng(
-            jnp.array(0.6e-3), cloud_fraction, air_density,
-            jnp.array(500e6), dt, config,
-        )
-        assert float(rate_few_droplets) > float(rate_many_droplets), (
-            "Fewer cloud droplets → faster autoconversion (Beheng Nc^-3.3)"
-        )
+@pytest.fixture(autouse=True)
+def _float64():
+    """Every test here runs in float64 unless it asks for float32 itself."""
+    with jax.enable_x64():
+        yield
 
 
-class TestKK2000Autoconversion:
-    """KK2000 explicit-rate autoconversion + dispatcher tests."""
+# ---------------------------------------------------------------------------
+# NumPy references (ECHAM formulas, float64)
+# ---------------------------------------------------------------------------
 
-    def test_below_threshold_negligible(self):
-        """Sub-threshold autoconversion is negligible, not exactly zero.
+def _es(t, ice):
+    """``(e_s, de_s/dT)`` from the sweep's one saturation formula, float64.
 
-        The ccraut gate is a sigmoid ramp now (maintainability review
-        B.2.5) so the threshold is calibratable; several widths below
-        it the residual rate must be a vanishing fraction of the
-        above-threshold rate, and at exactly zero cloud water the rate
-        (and its gradient path) must be exactly zero.
-        """
-        config = MicrophysicsParameters.default(
-            ccraut_kk_threshold=1e-3, autoconversion_scheme="kk2000",
-        )
-        # qc/cf = 2e-6 in-cloud, ~20 widths below the 1e-3 threshold.
-        rate_below = autoconversion_kk2000(
-            jnp.array(1e-6),
-            jnp.array(0.5), jnp.array(1.0),
-            jnp.array(100e6), 1800.0, config,
-        )
-        rate_above = autoconversion_kk2000(
-            jnp.array(1e-3),               # in-cloud 2e-3, above threshold
-            jnp.array(0.5), jnp.array(1.0),
-            jnp.array(100e6), 1800.0, config,
-        )
-        assert float(rate_below) < 1e-6 * float(rate_above)
-        # Exactly-zero cloud water stays exactly zero (double-where guard).
-        rate_zero = autoconversion_kk2000(
-            jnp.array(0.0), jnp.array(0.5), jnp.array(1.0),
-            jnp.array(100e6), 1800.0, config,
-        )
-        assert float(rate_zero) == 0.0
+    The process formulas below are independent transcriptions; the
+    saturation formula itself is the one choice they share with the sweep
+    (it is checked against the Fortran by the reference comparison).
+    """
+    e, de = _es_and_derivative(jnp.asarray(t, jnp.float64), ice)
+    return float(e), float(de)
 
-    def test_dependencies(self):
-        """KK2000: rate ∝ qc^2.47, ∝ Nc^-1.79 — same monotonicity as Beheng."""
-        config = MicrophysicsParameters.default(
-            ccraut_kk_threshold=1e-5, autoconversion_scheme="kk2000",
-        )
-        air_density = jnp.array(1.0)
-        cloud_fraction = jnp.array(1.0)
-        dt = 1800.0
 
-        rate_lo_qc = autoconversion_kk2000(
-            jnp.array(0.4e-3), cloud_fraction, air_density,
-            jnp.array(100e6), dt, config,
-        )
-        rate_hi_qc = autoconversion_kk2000(
-            jnp.array(0.8e-3), cloud_fraction, air_density,
-            jnp.array(100e6), dt, config,
-        )
-        assert float(rate_hi_qc) > float(rate_lo_qc)
+def np_dlnes(t, ice):
+    e, de = _es(t, ice)
+    return de / e
 
-        rate_few_drops = autoconversion_kk2000(
-            jnp.array(0.6e-3), cloud_fraction, air_density,
-            jnp.array(50e6), dt, config,
-        )
-        rate_many_drops = autoconversion_kk2000(
-            jnp.array(0.6e-3), cloud_fraction, air_density,
-            jnp.array(500e6), dt, config,
-        )
-        assert float(rate_few_drops) > float(rate_many_drops)
 
-    def test_dispatcher_picks_scheme(self):
-        """``autoconversion(...)`` dispatches by ``config.autoconversion_scheme``."""
-        qc = jnp.array(0.6e-3)
-        cloud_fraction = jnp.array(0.5)
-        air_density = jnp.array(1.0)
-        droplet_number = jnp.array(100e6)
-        dt = 1800.0
+def np_ua(t, water_only=False):
+    """ECHAM ``ua``/``dua`` (``uaw``/``duaw`` if ``water_only``)."""
+    ice = (t <= c.tmelt) and not water_only
+    e, de = _es(t, ice)
+    return e * c.rd / c.rv, de * c.rd / c.rv
 
-        cfg_beheng = MicrophysicsParameters.default(autoconversion_scheme="beheng")
-        cfg_kk2000 = MicrophysicsParameters.default(
-            ccraut_kk_threshold=1e-5, autoconversion_scheme="kk2000",
-        )
 
-        rate_via_dispatcher_beheng = autoconversion(
-            qc, cloud_fraction, air_density, droplet_number, dt, cfg_beheng,
-        )
-        rate_direct_beheng = autoconversion_beheng(
-            qc, cloud_fraction, air_density, droplet_number, dt, cfg_beheng,
-        )
-        assert jnp.allclose(rate_via_dispatcher_beheng, rate_direct_beheng)
+def np_qs(u, p):
+    z = min(u / p, 0.5)
+    return z / (1.0 - c.vtmpc1 * z)
 
-        rate_via_dispatcher_kk = autoconversion(
-            qc, cloud_fraction, air_density, droplet_number, dt, cfg_kk2000,
-        )
-        rate_direct_kk = autoconversion_kk2000(
-            qc, cloud_fraction, air_density, droplet_number, dt, cfg_kk2000,
-        )
-        assert jnp.allclose(rate_via_dispatcher_kk, rate_direct_kk)
 
-        # Sanity: the two schemes give different rates on the same column
-        assert not jnp.allclose(rate_via_dispatcher_beheng, rate_via_dispatcher_kk)
+def qs_water(t, p):
+    return np_qs(np_ua(t, water_only=True)[0], p)
 
-    def test_kk2000_active_at_defaults(self):
-        """Selecting kk2000 WITHOUT overriding any threshold must convert.
 
-        Regression for #674: when one ``ccraut`` field served as both the
-        Beheng prefactor (15.0) and the KK2000 qc threshold, kk2000 at
-        defaults evaluated sigmoid((qc - 15)/5e-5) = 0 for any physical qc
-        — autoconversion silently off. With the split
-        ``ccraut_kk_threshold`` (1e-5 kg/kg) default, physical stratiform
-        cloud water (1e-4..1e-3 kg/kg in-cloud) must produce a clearly
-        nonzero rate.
-        """
-        config = MicrophysicsParameters.default(autoconversion_scheme="kk2000")
-        for qc_grid in (1e-4, 5e-4, 1e-3):
-            rate = autoconversion_kk2000(
-                jnp.array(qc_grid), jnp.array(1.0), jnp.array(1.0),
-                jnp.array(100e6), 1800.0, config,
-            )
-            # The un-split parameter gave exactly 0.0 here; a meaningful
-            # KK2000 rate at these qc is >> 1e-12 kg/kg/s.
-            assert float(rate) > 1e-12, (
-                f"kk2000 autoconversion dead at qc={qc_grid}"
-            )
+def qs_ice(t, p):
+    return np_qs(_es(t, True)[0] * c.rd / c.rv, p)
 
-    def test_beheng_defaults_do_not_read_kk_threshold(self):
-        """The Beheng path at defaults is unaffected by the KK threshold."""
-        qc = jnp.array(0.6e-3)
-        cf = jnp.array(0.5)
-        rho = jnp.array(1.0)
-        nc = jnp.array(100e6)
-        cfg = MicrophysicsParameters.default()
-        cfg_weird_kk = MicrophysicsParameters.default(ccraut_kk_threshold=123.0)
-        r1 = autoconversion(qc, cf, rho, nc, 1800.0, cfg)
-        r2 = autoconversion(qc, cf, rho, nc, 1800.0, cfg_weird_kk)
-        assert float(r1) == float(r2)
-        assert float(r1) > 0.0
 
-    def test_scheme_int_alias(self):
-        """SCHEME_BEHENG / SCHEME_KK2000 ints round-trip with string aliases."""
-        cfg_str = MicrophysicsParameters.default(autoconversion_scheme="kk2000")
-        cfg_int = MicrophysicsParameters.default(
-            autoconversion_scheme=MicrophysicsParameters.SCHEME_KK2000,
-        )
-        assert int(cfg_str.autoconversion_scheme) == MicrophysicsParameters.SCHEME_KK2000
-        assert int(cfg_int.autoconversion_scheme) == int(cfg_str.autoconversion_scheme)
+def cp_moist(q):
+    return c.cpd + (c.cpv - c.cpd) * max(q, 0.0)
+
+
+def beheng(zxlb, rho, n, dt, ccraut=15.0):
+    """F:976-993."""
+    rate = (ccraut * 1.2e27) / rho * (n * 1e-6) ** -3.3 * (rho * 1e-3) ** 4.7
+    return zxlb * (1.0 - (1.0 + rate * dt * 3.7 * zxlb ** 3.7) ** (-1.0 / 3.7))
+
+
+def levkov(zxib, rho, dt, ccsaut=95.0, ceffmin=10.0, ceffmax=150.0):
+    """F:996-1001, 1029-1048."""
+    zrieff = min(max(83.8 * (zxib * rho * 1000.0) ** 0.216, ceffmin), ceffmax)
+    zrih = math.log10(math.sqrt(5113188.0 + 2809.0 * zrieff ** 3) - 2261.0)
+    zc1 = 17.5 * rho / 500.0 * (1.3 / rho) ** 0.33
+    zdt2 = -6.0 / zc1 * (zrih / 3.0 - 2.0)
+    return zxib * (1.0 - 1.0 / (1.0 + ccsaut / zdt2 * dt * zxib))
+
+
+def sweep_out_kernel(content, rho, cn0s=3.0e6, crhosno=100.0):
+    """Marshall-Palmer sweep-out rate of F:1065-1066."""
+    return (math.pi * cn0s * 3.078
+            * (content / (math.pi * crhosno * cn0s)) ** 0.8125
+            * math.sqrt(1.3 / rho))
+
+
+# ---------------------------------------------------------------------------
+# One level of the sweep
+# ---------------------------------------------------------------------------
+
+def run_level(carry=(0.0, 0.0, 0.0, 0.0), config=None, dt=DT, **kw):
+    """Run ``_sweep_level`` on one level; keyword arguments are LevelInputs."""
+    d = dict(tm1=280.0, qm1=None, dtemp=0.0, dq=0.0, xlp=0.0, xip=0.0,
+             paclc=0.0, p=70000.0, dp=5000.0, rho=None, dz=500.0,
+             cdnc=8.0e7, cdnc_aut=None, pcair=None, zauloc_off=False,
+             top=False, bottom=False)
+    d.update(kw)
+    if d["qm1"] is None:
+        d["qm1"] = 0.8 * qs_water(d["tm1"], d["p"])
+    if d["rho"] is None:
+        d["rho"] = d["p"] / (c.rd * d["tm1"])
+    if d["pcair"] is None:
+        d["pcair"] = cp_moist(d["qm1"])
+    if d["cdnc_aut"] is None:
+        d["cdnc_aut"] = d["cdnc"]
+    inputs = LevelInputs(**{k: jnp.asarray(v) for k, v in d.items()})
+    cfg = config or MicrophysicsParameters.default()
+    new_carry, out = _sweep_level(tuple(jnp.asarray(x, jnp.float64) for x in carry),
+                                  inputs, cfg, dt)
+    return ([float(x) for x in new_carry], out, d)
+
+
+def f(x):
+    return float(np.asarray(x))
+
+
+def zmass(d, dt=DT):
+    return d["dp"] / (dt * c.grav)
+
+
+def run_sweep(t, q, dtemp, dq, qc, qi, cf, p, dp, rho, dz, n, dt=DT, config=None,
+              **kw):
+    """Run the column sweep with the condensate as anchor and no condensate increment."""
+    zeros = jnp.zeros_like(qc)
+    return cloud_microphysics_column_sweep(t, q, qc, qi, dtemp, dq, zeros, zeros,
+                                           cf, p, dp, rho, dz, n, dt, config, **kw)
+
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+
+class TestParameters:
+
+    def test_defaults_are_echams_t63_values(self):
+        p = MicrophysicsParameters.default()
+        assert f(p.cvtfall) == 2.5
+        assert f(p.csecfrl) == 5.0e-6
+        assert f(p.clwprat) == 4.0
+        assert f(p.cthomi) == pytest.approx(c.tmelt - 35.0)
+        assert f(p.ccwmin) == 1e-7 and f(p.cqtmin) == 1e-12
+        assert f(p.ccraut) == 15.0 and f(p.ccsaut) == 95.0
+        assert f(p.ccracl) == 6.0 and f(p.ccsacl) == 0.1
+        assert f(p.cauloc) == 0.0
+        assert p.autoconversion_twomey is False
+
+    def test_resolution_leaves_are_differentiable_and_widths_static(self):
+        p = MicrophysicsParameters.default()
+        leaves = jax.tree_util.tree_leaves(p)
+        n_static = sum(1 for fld in dataclasses.fields(p)
+                       if not fld.metadata.get("pytree_node", True))
+        assert n_static == 7
+        assert p.defaults_truncation == 63
+        assert MicrophysicsParameters.default(
+            autoconversion_scheme="kk2000").autoconversion_scheme == 1
+        for name in ("cvtfall", "csecfrl", "clwprat", "cthomi"):
+            assert any(leaf is getattr(p, name) for leaf in leaves), name
+
+    def test_explicit_value_wins_over_resolution_default(self):
+        p = MicrophysicsParameters.default(cvtfall=3.3, csecfrl=1e-6)
+        assert f(p.cvtfall) == pytest.approx(3.3)
+        assert f(p.csecfrl) == pytest.approx(1e-6)
+        assert f(p.clwprat) == 4.0
+
+    def test_truncation_defaults_and_override_precedence(self):
+        pytest.importorskip("jcm.physics.clouds.echam_cloud_defaults")
+        from jcm.physics.physics_term import with_field_overrides
+        p127 = MicrophysicsParameters.default(truncation=127)
+        assert f(p127.cvtfall) == 3.0 and f(p127.csecfrl) == 1e-5
+        assert p127.defaults_truncation == 127
+        p106 = MicrophysicsParameters.default(truncation=106)
+        assert 2.5 < f(p106.cvtfall) < 3.0 and 5e-6 < f(p106.csecfrl) < 1e-5
+        over = with_field_overrides(p127, {"cvtfall": 2.0}, scheme="test")
+        assert f(over.cvtfall) == 2.0
+        assert f(over.csecfrl) == 1e-5
+        # Both the overridden and a defaulted leaf carry a live gradient.
+        g = jax.grad(lambda prm: _precip_of(prm))(over)
+        assert f(g.cvtfall) != 0.0 and np.isfinite(f(g.cvtfall))
+        assert np.isfinite(f(g.csecfrl))
+
+    def test_overridden_and_defaulted_leaves_are_live(self):
+        from jcm.physics.physics_term import with_field_overrides
+        over = with_field_overrides(MicrophysicsParameters.default(),
+                                    {"cvtfall": 2.2}, scheme="test")
+        g = jax.grad(_precip_of)(over)
+        assert f(g.cvtfall) != 0.0 and np.isfinite(f(g.cvtfall))
+        assert f(g.ccsaut) != 0.0 and np.isfinite(f(g.ccsaut))
+
+    def test_term_records_whether_parameters_are_defaults(self):
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        assert Echam1MMicrophysics().params_are_defaults
+        mine = MicrophysicsParameters.default(ccraut=12.0)
+        assert not Echam1MMicrophysics(mine).params_are_defaults
+        assert Echam1MMicrophysics(mine, params_are_defaults=True).params_are_defaults
+
+    def test_scheme_aliases(self):
+        assert MicrophysicsParameters.default(
+            autoconversion_scheme="kk2000").autoconversion_scheme == 1
+        assert MicrophysicsParameters.default(
+            autoconversion_scheme="beheng").autoconversion_scheme == 0
+        with pytest.raises(ValueError):
+            MicrophysicsParameters.default(autoconversion_scheme="nope")
 
     def test_legacy_kk2000_ccraut_override_raises(self):
-        """A legacy ``ccraut``-as-threshold KK2000 config must fail loudly.
-
-        Before the #674 split, KK2000 configs documented ``ccraut`` AS the qc
-        threshold. Such a config now silently ignores the override (the KK2000
-        branch reads ``ccraut_kk_threshold``), so construction must raise a
-        migration error naming the new field rather than run at the 1e-5
-        default.
-        """
         with pytest.raises(ValueError, match="ccraut_kk_threshold"):
-            MicrophysicsParameters.default(
-                autoconversion_scheme="kk2000", ccraut=1e-3,
-            )
+            MicrophysicsParameters.default(autoconversion_scheme="kk2000",
+                                           ccraut=1e-3)
+        MicrophysicsParameters.default(autoconversion_scheme="kk2000",
+                                       ccraut_kk_threshold=2e-5)
+        MicrophysicsParameters.default(ccraut=20.0)
 
-    def test_kk2000_new_field_override_is_accepted(self):
-        """Overriding the dedicated KK2000 field constructs cleanly."""
-        cfg = MicrophysicsParameters.default(
-            autoconversion_scheme="kk2000", ccraut_kk_threshold=1e-3,
-        )
-        assert float(cfg.ccraut_kk_threshold) == pytest.approx(1e-3)
+    def test_with_field_overrides_round_trip(self):
+        from jcm.physics.physics_term import with_field_overrides
+        base = MicrophysicsParameters.default()
+        out = with_field_overrides(base, {"ccsaut": 80.0, "phase_switch_width": 2.0},
+                                   scheme="test")
+        assert f(out.ccsaut) == 80.0 and out.phase_switch_width == 2.0
+        with pytest.raises(ValueError):
+            with_field_overrides(base, {"t_mix_min": 1.0}, scheme="test")
 
-    def test_beheng_ccraut_override_is_untouched_by_the_guard(self):
-        """A ccraut override under Beheng (the field's real owner) is fine."""
-        cfg = MicrophysicsParameters.default(
-            autoconversion_scheme="beheng", ccraut=1e-3,
-        )
-        assert float(cfg.ccraut) == pytest.approx(1e-3)
 
-    def test_ice_autoconversion(self):
-        """Levkov aggregation properties (ECHAM mo_cloud.f90:996-1052).
+def _precip_of(params):
+    """Surface precipitation of a mixed-phase column, for gradient checks."""
+    col = mixed_column()
+    _, st = run_sweep(*col, DT, params)
+    return jnp.sum(st.precip_rain + st.precip_snow)
 
-        The previous placeholder had a −15 °C Gaussian efficiency peak
-        and a hard 0.3 g/kg qi threshold — neither exists in the Levkov
-        chain, whose rate grows with the ice content (Moss radius) and
-        is temperature-independent at this stage (the T dependence sits
-        in the downstream aggregation-by-snow collection efficiency).
-        Pins: monotone in IWC, implicitly bounded (depletion ≤ qi even
-        at absurd dt), substantial at cirrus-anvil ice contents (the
-        placeholder's e-folding was ~30 days — effectively no sink).
+
+def mixed_column(nlev=12, cf_value=0.6):
+    """Build a contiguous deck, ice aloft and liquid below, with increments."""
+    p = np.linspace(25000.0, 95000.0, nlev)
+    t = np.linspace(228.0, 288.0, nlev)
+    q = np.array([0.97 * qs_water(ti, pi) if ti > c.tmelt else 0.97 * qs_ice(ti, pi)
+                  for ti, pi in zip(t, p)])
+    qc = np.where((t > 250.0), 1.5e-4, 0.0)
+    qi = np.where(t < 265.0, 4e-5, 0.0)
+    cf = np.where(qc + qi > 0.0, cf_value, 0.0)
+    dp = np.full(nlev, 6000.0)
+    rho = p / (c.rd * t)
+    dz = dp / (rho * c.grav)
+    dtemp = np.full(nlev, -0.4)
+    dq = np.full(nlev, 3e-5)
+    n = np.full(nlev, 8e7)
+    return tuple(jnp.asarray(a) for a in
+                 (t, q, dtemp, dq, qc, qi, cf, p, dp, rho, dz, n))
+
+
+# ---------------------------------------------------------------------------
+# Saturation
+# ---------------------------------------------------------------------------
+
+class TestSaturation:
+
+    def test_lo2_is_strict(self):
+        csec, cth = 5e-6, c.tmelt - 35.0
+
+        def lo2(t, xi):
+            return bool(lo2_ice_phase(jnp.asarray(t), jnp.asarray(xi), csec, cth))
+
+        assert lo2(cth - 0.01, 0.0) and not lo2(cth, 0.0)
+        assert lo2(260.0, 6e-6) and not lo2(260.0, 5e-6)
+        assert not lo2(c.tmelt, 1e-3) and lo2(c.tmelt - 0.01, 1e-3)
+
+    def test_mixed_table_switches_to_ice_at_and_below_tmelt(self):
+        from jcm.physics.clouds.echam_1m import _ua, _uaw, _ub
+        t = jnp.asarray([c.tmelt - 1.0, c.tmelt, c.tmelt + 1.0])
+        ua, dua = _ua(t)
+        uaw, duaw = _uaw(t)
+        ei = np.array([_es(float(x), True) for x in t])
+        ew = np.array([_es(float(x), False) for x in t])
+        np.testing.assert_allclose(np.asarray(ua), np.r_[ei[:2, 0], ew[2, 0]] * c.rd / c.rv,
+                                   rtol=1e-14)
+        np.testing.assert_allclose(np.asarray(uaw), ew[:, 0] * c.rd / c.rv, rtol=1e-14)
+        np.testing.assert_allclose(np.asarray(duaw), ew[:, 1] * c.rd / c.rv, rtol=1e-14)
+        ub = np.asarray(_ub(t))
+        np.testing.assert_allclose(ub[:2], c.alhs / c.cpd * ei[:2, 1] / ei[:2, 0], rtol=1e-14)
+        np.testing.assert_allclose(ub[2], c.alhc / c.cpd * ew[2, 1] / ew[2, 0], rtol=1e-14)
+        assert np.all(np.asarray(dua) > 0)
+
+
+# ---------------------------------------------------------------------------
+# Section 3.1: melting
+# ---------------------------------------------------------------------------
+
+class TestMelting:
+
+    def test_incoming_snow_melts_at_step_start_temperature(self):
+        zsfl = 2e-4
+        # Dry enough that the melt cooling cannot saturate the level.
+        carry, out, d = run_level(carry=(0.0, zsfl, 0.0, 0.0), tm1=274.0,
+                                  dtemp=-5.0, qm1=0.3 * qs_water(274.0, 70000.0))
+        lfdcp = (c.alhs - c.alhc) / d["pcair"]
+        zcons = 1.0 / (DT * c.grav) * (d["dp"] / lfdcp)
+        want = min(ZXSEC * zsfl, zcons * (274.0 - c.tmelt))
+        assert f(out.intermediates.zsmlt) == pytest.approx(want / zmass(d), rel=1e-12)
+        assert carry[0] == pytest.approx(want, rel=1e-12)
+        assert carry[1] == pytest.approx(zsfl - want, rel=1e-12)
+
+    def test_melt_is_capped_below_the_whole_flux(self):
+        zsfl = 1e-7
+        _, out, d = run_level(carry=(0.0, zsfl, 0.0, 0.0), tm1=285.0)
+        assert f(out.intermediates.zsmlt) * zmass(d) == pytest.approx(ZXSEC * zsfl,
+                                                                     rel=1e-12)
+
+    def test_no_melt_at_the_top_level(self):
+        _, out, _ = run_level(carry=(0.0, 1e-4, 0.0, 0.0), tm1=280.0, top=True,
+                              xip=1e-5)
+        assert f(out.intermediates.zsmlt) == 0.0
+        assert f(out.intermediates.zimlt) == 0.0
+
+    def test_all_cloud_ice_melts_above_tmelt(self):
+        _, warm, _ = run_level(tm1=273.5, dtemp=-3.0, xip=3e-5, paclc=0.5)
+        _, cold, _ = run_level(tm1=272.9, dtemp=+3.0, xip=3e-5, paclc=0.5)
+        assert f(warm.intermediates.zimlt) == 3e-5
+        assert f(cold.intermediates.zimlt) == 0.0
+
+    def test_ice_melt_moves_ice_to_liquid(self):
+        _, out, _ = run_level(tm1=274.0, xip=3e-5, paclc=0.5,
+                              qm1=0.5 * qs_water(274.0, 70000.0))
+        # zimlt leaves the ice and enters the liquid (F:1244-1247).
+        inter = out.intermediates
+        assert f(inter.zimlt) == 3e-5
+        assert f(out.zxite) * DT == pytest.approx(
+            -3e-5 + f(inter.zqsed) + f(inter.zdep) - f(inter.zspr) + f(inter.zfrl)
+            + f(inter.zdxicor) * DT, abs=1e-18)
+
+
+# ---------------------------------------------------------------------------
+# Sections 3.2 and 3.3: sublimation and evaporation of the incoming fluxes
+# ---------------------------------------------------------------------------
+
+class TestSnowSublimation:
+
+    def _expected(self, d, zsfl, zclcpre):
+        t, p, q, rho = d["tm1"], d["p"], d["qm1"], d["rho"]
+        zlsdcp = c.alhs / d["pcair"]
+        zqsi = np_qs(np_ua(t)[0], p)
+        zsusati = min(q / zqsi - 1.0, 0.0)
+        zb1 = zlsdcp ** 2 / (2.43e-2 * c.rv * t ** 2)
+        zb2 = 1.0 / (rho * zqsi * 0.211e-4)
+        zcoeff = 3.0e6 * 2.0 * math.pi * (zsusati / (rho * (zb1 + zb2)))
+        t1 = math.sqrt(math.sqrt(1.3 / rho))
+        t2 = math.sqrt((zsfl / zclcpre / 2.5) ** (1 / 1.16) / (math.pi * 100.0 * 3e6))
+        t3 = t2 ** 1.3125
+        zcfac4c = 0.78 * t2 + 232.19 * t1 * t3
+        zdpg = d["dp"] / c.grav
+        zzeps = max(-ZXSEC * zsfl / zclcpre, zcoeff * zcfac4c * zdpg)
+        zsub = -(zzeps / zdpg) * DT * zclcpre
+        zsub = min(zsub, max(ZXSEC * (zqsi - q), 0.0))
+        return min(max(zsub, 0.0), zsfl / zmass(d))
+
+    def test_lin_sublimation_formula(self):
+        zsfl, zclcpre = 3e-5, 0.5
+        carry, out, d = run_level(carry=(0.0, zsfl, zclcpre, 0.0), tm1=262.0,
+                                  qm1=0.5 * qs_ice(262.0, 70000.0))
+        want = self._expected(d, zsfl, zclcpre)
+        assert want > 0.0
+        assert f(out.intermediates.zsub) == pytest.approx(want, rel=1e-11)
+        # The sublimated snow leaves the flux in 7.3 and moistens the air.
+        assert f(out.snow_sub_flux) == pytest.approx(want * zmass(d), rel=1e-11)
+        assert carry[1] == pytest.approx(zsfl - want * zmass(d), rel=1e-9)
+
+    def test_needs_a_precipitating_level_above(self):
+        _, out, _ = run_level(carry=(0.0, 3e-5, 0.0, 0.0), tm1=262.0,
+                              qm1=0.5 * qs_ice(262.0, 70000.0))
+        assert f(out.intermediates.zsub) == 0.0
+
+    def test_capped_by_the_ice_saturation_deficit(self):
+        zsfl, zclcpre = 5e-3, 1.0
+        _, out, d = run_level(carry=(0.0, zsfl, zclcpre, 0.0), tm1=262.0,
+                              qm1=0.999 * qs_ice(262.0, 70000.0))
+        deficit = ZXSEC * (np_qs(np_ua(262.0)[0], 70000.0) - d["qm1"])
+        assert f(out.intermediates.zsub) == pytest.approx(deficit, rel=1e-11)
+
+
+class TestRainEvaporation:
+
+    def _expected(self, d, zrfl, zclcpre):
+        t, p, q, rho = d["tm1"], d["p"], d["qm1"], d["rho"]
+        uaw = np_ua(t, water_only=True)[0]
+        zesw = min(uaw / p, 0.5)
+        zqsw = zesw / (1.0 - c.vtmpc1 * zesw)
+        zsusatw = min(q / zqsw - 1.0, 0.0)
+        zast = c.alhc * (c.alhc / t / c.rv - 1.0) / t / 0.024
+        zbst = t / (2.21 / p * (uaw / c.rd))
+        zzepr = (870.0 * zsusatw * (zrfl / zclcpre) ** 0.61 * math.sqrt(1.3 / rho)
+                 / math.sqrt(1.3) / (zast + zbst))
+        zdpg = d["dp"] / c.grav
+        zzepr = max(-ZXSEC * zrfl / zclcpre, zzepr * zdpg)
+        zevp = -(zzepr / zdpg) * DT * zclcpre
+        zevp = min(zevp, max(ZXSEC * (zqsw - q), 0.0))
+        return min(max(zevp, 0.0), zrfl / zmass(d))
+
+    def test_rotstayn_formula_at_step_start_state(self):
+        zrfl, zclcpre = 6e-5, 0.4
+        carry, out, d = run_level(carry=(zrfl, 0.0, zclcpre, 0.0), tm1=286.0,
+                                  dtemp=+2.0, dq=-1e-4,
+                                  qm1=0.7 * qs_water(286.0, 70000.0))
+        want = self._expected(d, zrfl, zclcpre)
+        assert want > 0.0
+        assert f(out.intermediates.zevp) == pytest.approx(want, rel=1e-11)
+        assert carry[0] == pytest.approx(zrfl - want * zmass(d), rel=1e-9)
+
+    def test_capped_by_the_water_saturation_deficit(self):
+        # Rate and deficit both scale with the subsaturation; a large flux
+        # makes the rate exceed the deficit.
+        _, out, d = run_level(carry=(0.5, 0.0, 1.0, 0.0), tm1=286.0,
+                              qm1=0.999 * qs_water(286.0, 70000.0))
+        deficit = ZXSEC * (qs_water(286.0, 70000.0) - d["qm1"])
+        assert f(out.intermediates.zevp) == pytest.approx(deficit, rel=1e-10)
+
+    def test_evaporation_cooling_drives_condensation_in_cloud(self):
+        """Rain evaporation runs before section 5, and its cooling enters zdtdt.
+
+        No upstream increments and a cloudy level: ECHAM condenses
+        ``zqcdif = zlvdcp·zevp·zdqsat1·paclc`` from the evaporative cooling
+        alone (F:706-730).
         """
-        config = MicrophysicsParameters.default()
-        cloud_fraction = jnp.array(0.7)
-        dt = 1800.0
-        t = tmelt - 40.0
-        rho = jnp.array(0.5)
+        zrfl, zclcpre, cf, t, p = 6e-5, 0.4, 0.5, 286.0, 70000.0
+        _, out, d = run_level(carry=(zrfl, 0.0, zclcpre, 0.0), tm1=t, p=p,
+                              qm1=0.8 * qs_water(t, p), paclc=cf, xlp=1e-4)
+        zevp = f(out.intermediates.zevp)
+        zlvdcp = c.alhc / d["pcair"]
+        uaw, duaw = np_ua(t, water_only=True)
+        z = min(uaw / p, 0.5)
+        zcor = 1.0 / (1.0 - c.vtmpc1 * z)
+        zdqsdt = zcor ** 2 * duaw / p
+        zdqsat1 = zdqsdt / (1.0 + cf * zlvdcp * zdqsdt)
+        want = (0.0 - (-zlvdcp * zevp) * zdqsat1) * cf
+        assert zevp > 0.0 and want > 0.0
+        assert f(out.intermediates.zcnd) == pytest.approx(want, rel=1e-11)
 
-        rate_lo = ice_autoconversion(0.2e-3 * 0.7, t, cloud_fraction, dt, config, air_density=rho)
-        rate_hi = ice_autoconversion(1.0e-3 * 0.7, t, cloud_fraction, dt, config, air_density=rho)
-        assert float(rate_hi) > float(rate_lo) > 0.0
 
-        # Implicit integration: even with dt = 1 day the depletion cannot
-        # exceed the available ice.
-        rate_huge_dt = ice_autoconversion(
-            1.0e-3 * 0.7, t, cloud_fraction, 86400.0, config, air_density=rho)
-        assert float(rate_huge_dt) * 86400.0 <= 1.0e-3 * 0.7 + 1e-9
-
-        # Physically meaningful sink: ≥ 10 % of the in-cloud ice per
-        # 1800 s step at 1 g/kg in-cloud (the review measured ~57 %).
-        depletion_frac = float(rate_hi) * dt / (1.0e-3 * 0.7)
-        assert depletion_frac > 0.1
-
+# ---------------------------------------------------------------------------
+# Section 4: sedimentation, lo2, in-cloud values, clear cells
+# ---------------------------------------------------------------------------
 
 class TestSedimentation:
-    """Test sedimentation processes"""
-    
-class TestLocalRainAccretionBranch:
-    """The ``cauloc > 0`` local-rain / in-layer-snow paths (#675).
 
-    ECHAM's ``zrac2`` (local-rain accretion, mo_cloud.f90:1009) and ``zxsp2``
-    (in-layer snow riming/aggregation, :1050/:1074-1090) are dormant at the
-    shipped ``cauloc = 0`` default and so were never exercised — ``zrac2`` had
-    a missing ``· dt`` in its exponent (a ~1750× underestimate) and ``zxsp2``
-    was absent entirely. Enabling ``cauloc`` here fires both. ``dz = 5000`` m
-    makes ``zauloc = clip(cauloc·dz/5000, 0, 0.5) = 0.5`` at ``cauloc = 1``.
+    def _expected(self, d, xip, zxitop, cvtfall=2.5):
+        rho = d["rho"]
+        zxip1 = max(xip, 2.220446049250313e-16)
+        v = cvtfall * (rho * zxip1) ** 0.16
+        zal1 = math.exp(-v * c.grav * rho * (DT / d["dp"]))
+        zal2 = zxitop / (rho * v)
+        zxised = max(0.0, zxip1 * zal1 + zal2 * (1.0 - zal1))
+        zqsed = zxised - zxip1
+        zxibot = max(0.0, zxitop - zqsed * zmass(d))
+        return (zxitop - zxibot) / zmass(d), zxibot
+
+    @pytest.mark.parametrize("xip,zxitop", [(2e-5, 0.0), (2e-5, 1e-6),
+                                            (0.0, 2e-6), (1e-6, 5e-8)])
+    def test_analytic_sedimentation(self, xip, zxitop):
+        carry, out, d = run_level(carry=(0.0, 0.0, 0.0, zxitop), tm1=235.0,
+                                  xip=xip, paclc=0.5)
+        zqsed, zxibot = self._expected(d, xip, zxitop)
+        assert f(out.intermediates.zqsed) == pytest.approx(zqsed, rel=1e-10, abs=1e-24)
+        assert carry[3] == pytest.approx(zxibot, rel=1e-10, abs=1e-24)
+
+    def test_bottom_level_ice_flux_joins_the_snow(self):
+        zxitop = 2e-6
+        carry, out, d = run_level(carry=(0.0, 0.0, 0.0, zxitop), tm1=250.0,
+                                  xip=0.0, bottom=True)
+        _, zxibot = self._expected(d, 0.0, zxitop)
+        assert carry[3] == 0.0
+        assert carry[1] == pytest.approx(zxibot, rel=1e-10)
+
+
+class TestPhaseSwitch:
+
+    @pytest.mark.parametrize("tm1,dtemp,xip,ice", [
+        (230.0, 0.0, 0.0, True),      # below cthomi
+        (230.0, 20.0, 0.0, False),    # provisional T decides: 250 K, no ice
+        (255.0, 0.0, 3e-5, True),     # ice memory above csecfrl
+        (255.0, 0.0, 0.0, False),     # no ice: water saturation
+        (272.5, -1.5, 3e-5, True),    # provisional 271 K with ice
+        (275.0, -4.0, 3e-5, False),   # ptm1 > tmelt: the ice melted first
+        (270.0, 5.0, 3e-5, False),    # provisional above tmelt
+    ])
+    def test_lo2_on_provisional_temperature_and_sedimented_ice(self, tm1, dtemp,
+                                                               xip, ice):
+        _, out, _ = run_level(tm1=tm1, dtemp=dtemp, xip=xip, paclc=0.5, dp=40000.0)
+        assert f(out.intermediates.zlo2) == (1.0 if ice else 0.0)
+
+    def test_lo2_selects_latent_heat_and_saturation(self):
+        """In ice phase the growth is deposition with Ls and ice saturation."""
+        t, p, cf, dq = 255.0, 60000.0, 0.5, 1e-4
+        _, out, d = run_level(tm1=t, p=p, xip=3e-5, paclc=cf, dq=dq, dp=40000.0,
+                              qm1=0.9 * qs_ice(t, p))
+        zlsdcp = c.alhs / d["pcair"]
+        u, du = np_ua(t)
+        z = min(u / p, 0.5)
+        zcor = 1.0 / (1.0 - c.vtmpc1 * z)
+        zdqsdt = zcor ** 2 * du / p
+        zdqsat1 = zdqsdt / (1.0 + cf * zlsdcp * zdqsdt)
+        want = (dq - (cf * zlsdcp * dq) * zdqsat1) * cf
+        assert f(out.intermediates.zdep) == pytest.approx(want, rel=1e-11)
+        assert f(out.intermediates.zcnd) == 0.0
+
+
+class TestClearCell:
+
+    def test_clear_cell_returns_all_condensate(self):
+        xlp, xip = 3e-5, 2e-5
+        _, out, d = run_level(tm1=268.0, xlp=xlp, xip=xip, paclc=0.0)
+        inter = out.intermediates
+        assert f(inter.zxlevap) == xlp
+        assert f(inter.zxievap) == pytest.approx(xip + f(inter.zqsed), rel=1e-14)
+        assert f(out.zxlte) * DT == pytest.approx(-xlp, rel=1e-12)
+
+    def test_any_positive_cover_is_cloudy(self):
+        _, out, _ = run_level(tm1=285.0, xlp=3e-5, paclc=1e-20)
+        assert f(out.intermediates.zxlevap) == 0.0
+
+    def test_no_evaporation_of_partial_cloud_without_increments(self):
+        """#940 headline: cf 0.3, RH 0.9, no tendencies -> no condensate change.
+
+        ECHAM's section 5 condenses only what the step's increments bring;
+        a subsaturated partial cloud keeps its condensate (F:726-734).
+        """
+        t, p = 285.0, 70000.0
+        _, out, _ = run_level(tm1=t, p=p, qm1=0.9 * qs_water(t, p), paclc=0.3,
+                              xlp=1e-4)
+        assert f(out.intermediates.zcnd) == 0.0
+        assert f(out.intermediates.zdep) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Section 5: condensation
+# ---------------------------------------------------------------------------
+
+def _zdqsat(d, cf, dq, zdtdt, ice):
+    t, p = d["tm1"], d["p"]
+    zlc = (c.alhs if ice else c.alhc) / d["pcair"]
+    u, du = np_ua(t, water_only=not ice)
+    z = min(u / p, 0.5)
+    zcor = 1.0 / (1.0 - c.vtmpc1 * z)
+    zdqsdt = zcor ** 2 * du / p
+    zdqsat1 = zdqsdt / (1.0 + cf * zlc * zdqsdt)
+    return (zdtdt + cf * zlc * dq) * zdqsat1
+
+
+class TestCondensation:
+
+    def test_growth_from_increments(self):
+        t, p, cf, dq, dtemp = 285.0, 70000.0, 0.4, 2e-4, -0.5
+        _, out, d = run_level(tm1=t, p=p, qm1=0.9 * qs_water(t, p), paclc=cf,
+                              xlp=1e-4, dq=dq, dtemp=dtemp)
+        want = (dq - _zdqsat(d, cf, dq, dtemp, ice=False)) * cf
+        assert want > 0.0
+        assert f(out.intermediates.zcnd) == pytest.approx(want, rel=1e-11)
+        assert f(out.intermediates.zdep) == 0.0
+
+    def test_dissipation_splits_by_in_cloud_ice_fraction(self):
+        t, p, cf, dq = 262.0, 70000.0, 0.5, -1e-5
+        xlp, xip = 4e-5, 1e-5
+        _, out, d = run_level(tm1=t, p=p, qm1=0.9 * qs_water(t, p), paclc=cf,
+                              xlp=xlp, xip=xip, dq=dq, dp=60000.0)
+        inter = out.intermediates
+        zxib = (xip + f(inter.zqsed)) / cf
+        zxlb = xlp / cf
+        ice = f(inter.zlo2) == 1.0
+        zqcdif = max((dq - _zdqsat(d, cf, dq, 0.0, ice)) * cf, -(zxib + zxlb) * cf)
+        zifrac = zxib / (zxib + zxlb)
+        assert zqcdif < 0.0
+        assert f(inter.zcnd) == pytest.approx(zqcdif * (1 - zifrac), rel=1e-10)
+        assert f(inter.zdep) == pytest.approx(zqcdif * zifrac, rel=1e-10)
+
+    def test_dissipation_bounded_by_the_condensate(self):
+        t, p, cf = 285.0, 70000.0, 0.5
+        _, out, _ = run_level(tm1=t, p=p, qm1=0.5 * qs_water(t, p), paclc=cf,
+                              xlp=1e-6, dq=-5e-4)
+        assert f(out.intermediates.zcnd) == pytest.approx(-1e-6, rel=1e-12)
+
+    def test_growth_bounded_by_the_vapour(self):
+        # A strong cooling increment lowers the saturation humidity by more
+        # than the vapour present, so zqcdif = qsec*zqp1.
+        t, p, cf = 285.0, 70000.0, 1.0
+        q, dq = 1e-3, 1e-4
+        _, out, _ = run_level(tm1=t, p=p, qm1=q, paclc=cf, dq=dq, dtemp=-40.0,
+                              xlp=1e-4)
+        qp1 = q + dq
+        # zqcdif = min(., qsec*zqp1); 5.4 then finds the box subsaturated.
+        assert f(out.intermediates.zcnd) == pytest.approx((1 - 1e-12) * qp1, rel=1e-12)
+
+
+class TestWholeBoxSupersaturation:
+
+    def _zcor(self, t, p, q, pcair, ice=False):
+        u, du = np_ua(t, water_only=not ice)
+        zes = min(u / p, 0.5)
+        zcor = 1.0 / (1.0 - c.vtmpc1 * zes)
+        qsp = zes * zcor
+        zlc = (c.alhs if ice else c.alhc) / pcair
+        if zes >= 0.4:
+            ub = (c.alhs if (ice or t <= c.tmelt) else c.alhc) / c.cpd * np_dlnes(
+                t, t <= c.tmelt)
+            zlcdqsdt = qsp * zcor * ub
+        else:
+            zlcdqsdt = zlc * zcor ** 2 * du / p
+        return max((q - qsp - 0.01 * qsp) / (1.0 + zlcdqsdt), 0.0)
+
+    def test_clear_supersaturated_cell_condenses_the_excess_over_one_percent(self):
+        t, p = 285.0, 70000.0
+        q = 1.05 * qs_water(t, p)
+        _, out, d = run_level(tm1=t, p=p, qm1=q, paclc=0.0)
+        want = self._zcor(t, p, q, d["pcair"])
+        assert want > 0.0
+        assert f(out.intermediates.zcnd) == pytest.approx(want, rel=1e-11)
+
+    def test_low_pressure_branch_uses_ub(self):
+        t, p = 300.0, 1500.0
+        q = 0.9
+        _, out, d = run_level(tm1=t, p=p, qm1=q, paclc=0.0, rho=0.02, dp=100.0)
+        want = self._zcor(t, p, q, d["pcair"])
+        assert want > 0.0
+        assert f(out.intermediates.zcnd) == pytest.approx(want, rel=1e-10)
+
+    def test_clear_cell_with_new_condensate_is_cloudy_for_the_microphysics(self):
+        """F:800-810: zclcaux = 1, and the new condensate can rain out."""
+        t, p = 290.0, 90000.0
+        _, out, _ = run_level(tm1=t, p=p, qm1=1.2 * qs_water(t, p), paclc=0.0)
+        inter = out.intermediates
+        assert f(inter.zcnd) > 1e-4
+        assert f(inter.zclcaux) == 1.0
+        assert f(inter.zrpr) > 0.0
+        # The cover itself stays clear.
+        assert f(out.cloud_fraction) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Section 6: freezing
+# ---------------------------------------------------------------------------
+
+class TestFreezing:
+
+    def test_all_liquid_freezes_at_or_below_cthomi(self):
+        cth = c.tmelt - 35.0
+        for t in (cth - 5.0, cth):
+            _, out, _ = run_level(tm1=t, p=40000.0, xlp=5e-5, paclc=0.5,
+                                  qm1=0.5 * qs_ice(t, 40000.0))
+            assert f(out.intermediates.zfrl) == pytest.approx(5e-5, rel=1e-13)
+
+    def _bigg_contact(self, zxlb, t, rho, n, cf):
+        zfrho = rho / (1000.0 * n)
+        zfrl = 100.0 * (math.exp(0.66 * (c.tmelt - t)) - 1.0) * zfrho
+        zfrl = zxlb * (1.0 - 1.0 / (1.0 + zfrl * DT * zxlb))
+        zradl = (0.75 * zxlb * zfrho / math.pi) ** (1.0 / 3.0)
+        zf1 = max(0.0, 4.0 * math.pi * zradl * n * 2.0e5 * (c.tmelt - 3.0 - t) / rho)
+        zfrl = max(0.0, min(zfrl + DT * 1.4e-20 * zf1, zxlb))
+        return zfrl * cf
+
+    @pytest.mark.parametrize("t", [245.0, 258.0, 271.0])
+    def test_bigg_and_contact_freezing(self, t):
+        cf, xlp, n = 0.5, 2e-4, 5e7
+        _, out, d = run_level(tm1=t, p=60000.0, xlp=xlp, paclc=cf, cdnc=n,
+                              cdnc_aut=3e8, qm1=0.8 * qs_ice(t, 60000.0))
+        want = self._bigg_contact(xlp / cf, t, d["rho"], n, cf)
+        assert want > 0.0
+        assert f(out.intermediates.zfrl) == pytest.approx(want, rel=1e-11)
+
+    def test_no_freezing_above_tmelt(self):
+        _, out, _ = run_level(tm1=274.0, xlp=2e-4, paclc=0.5)
+        assert f(out.intermediates.zfrl) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Section 7: precipitation formation and fluxes
+# ---------------------------------------------------------------------------
+
+class TestWarmRain:
+
+    def test_beheng_autoconversion_uses_its_droplet_number(self):
+        t, p, cf, xlp = 288.0, 85000.0, 0.6, 3e-4
+        _, out, d = run_level(tm1=t, p=p, xlp=xlp, paclc=cf, cdnc=8e7, cdnc_aut=5e7,
+                              qm1=0.8 * qs_water(t, p))
+        want = cf * beheng(xlp / cf, d["rho"], 5e7, DT)
+        assert f(out.intermediates.zrpr) == pytest.approx(want, rel=1e-11)
+        assert f(out.autoconv_rate) == pytest.approx(want / DT, rel=1e-11)
+
+    def test_accretion_by_incoming_rain(self):
+        t, p, cf, xlp, zrfl, zclcpre = 288.0, 85000.0, 0.6, 3e-4, 2e-4, 0.3
+        # Saturated at the step start: the incoming rain does not evaporate.
+        _, out, d = run_level(carry=(zrfl, 0.0, zclcpre, 0.0), tm1=t, p=p, xlp=xlp,
+                              paclc=cf, qm1=qs_water(t, p))
+        zxlb = (xlp + f(out.intermediates.zcnd)) / cf
+        zraut = beheng(zxlb, d["rho"], 8e7, DT)
+        zxrp1 = (zrfl / zclcpre / (12.45 * math.sqrt(1.3 / d["rho"]))) ** (8 / 9)
+        zrac1 = (zxlb - zraut) * (1.0 - math.exp(-6.0 * zxrp1 * DT))
+        want = cf * zraut + min(cf, zclcpre) * zrac1
+        assert f(out.intermediates.zrpr) == pytest.approx(want, rel=1e-11)
+        assert f(out.accretion_rate) == pytest.approx(min(cf, zclcpre) * zrac1 / DT,
+                                                      rel=1e-11)
+
+    def test_local_rain_accretion_with_cauloc(self):
+        t, p, cf, xlp = 288.0, 85000.0, 0.6, 3e-4
+        cfg = MicrophysicsParameters.default(cauloc=10.0)
+        _, out, d = run_level(tm1=t, p=p, xlp=xlp, paclc=cf, dz=400.0, config=cfg,
+                              qm1=0.8 * qs_water(t, p))
+        zxlb = xlp / cf
+        zraut = beheng(zxlb, d["rho"], 8e7, DT)
+        zauloc = max(min(10.0 * 400.0 / 5000.0, 0.5), 0.0)
+        zrac2 = (zxlb - zraut) * (1.0 - math.exp(-6.0 * zauloc * d["rho"] * zraut * DT))
+        assert f(out.intermediates.zrpr) == pytest.approx(cf * (zraut + zrac2), rel=1e-11)
+        _, off, _ = run_level(tm1=t, p=p, xlp=xlp, paclc=cf, dz=400.0, config=cfg,
+                              qm1=0.8 * qs_water(t, p), zauloc_off=True)
+        assert f(off.intermediates.zrpr) == pytest.approx(cf * zraut, rel=1e-11)
+
+    def test_kk2000_option(self):
+        t, p, cf, xlp = 288.0, 85000.0, 0.6, 3e-4
+        cfg = MicrophysicsParameters.default(autoconversion_scheme="kk2000")
+        _, out, d = run_level(tm1=t, p=p, xlp=xlp, paclc=cf, config=cfg,
+                              qm1=0.8 * qs_water(t, p))
+        zxlb = xlp / cf
+        rate = 1350.0 * zxlb ** 2.47 * (8e7 * 1e-6 + 1e-12) ** -1.79
+        want = cf * min(rate * DT, zxlb)
+        assert f(out.intermediates.zrpr) == pytest.approx(want, rel=1e-11)
+
+
+class TestColdPrecipitation:
+
+    def test_aggregation_and_accretion_of_ice_by_snow(self):
+        t, p, cf, xip, zsfl, zclcpre = 245.0, 45000.0, 0.6, 5e-5, 3e-5, 0.5
+        _, out, d = run_level(carry=(0.0, zsfl, zclcpre, 0.0), tm1=t, p=p, xip=xip,
+                              paclc=cf, qm1=qs_ice(t, p), dp=8000.0)
+        inter = out.intermediates
+        rho = d["rho"]
+        zxib = (xip + f(inter.zqsed)) / cf
+        zsaut = levkov(zxib, rho, DT)
+        zxsp1 = (zsfl / zclcpre / 2.5) ** (1 / 1.16)
+        k1 = sweep_out_kernel(zxsp1, rho)
+        zcolleffi = math.exp(0.025 * (t - c.tmelt))
+        zsaci1 = (zxib - zsaut) * (1.0 - math.exp(-k1 * zcolleffi * DT))
+        want = cf * zsaut + min(cf, zclcpre) * zsaci1
+        assert f(inter.zsub) == 0.0 and f(inter.zdep) == 0.0
+        assert f(inter.zspr) == pytest.approx(want, rel=1e-10)
+
+    def test_riming_by_incoming_snow(self):
+        t, p, cf, xlp, zsfl, zclcpre = 273.65, 80000.0, 0.6, 2e-4, 5e-3, 0.5
+        carry, out, d = run_level(carry=(0.0, zsfl, zclcpre, 0.0), tm1=t, p=p,
+                                  xlp=xlp, paclc=cf, qm1=qs_water(t, p))
+        inter = out.intermediates
+        rho = d["rho"]
+        snow_in = zsfl - f(inter.zsmlt) * zmass(d)
+        rain_in = f(inter.zsmlt) * zmass(d)
+        # The melt cooling condenses in the cloud (section 5) before riming.
+        zxlb = (xlp + f(inter.zcnd)) / cf
+        zraut = beheng(zxlb, rho, 8e7, DT)
+        zxrp1 = (rain_in / zclcpre / (12.45 * math.sqrt(1.3 / rho))) ** (8 / 9)
+        zrac1 = (zxlb - zraut) * (1.0 - math.exp(-6.0 * zxrp1 * DT))
+        zxsp1 = (snow_in / zclcpre / 2.5) ** (1 / 1.16)
+        k1 = sweep_out_kernel(zxsp1, rho)
+        zsacl1 = (zxlb - zraut - zrac1) * (1.0 - math.exp(-k1 * 0.1 * DT))
+        assert f(inter.zsacl) == pytest.approx(min(cf, zclcpre) * zsacl1, rel=1e-10)
+        # Riming feeds the snow flux and heats with the fusion heat.
+        assert f(out.snow_source) == pytest.approx(
+            zmass(d) * (f(inter.zspr) + f(inter.zsacl)), rel=1e-12)
+
+
+class TestPrecipitatingFraction:
+
+    def test_reset_to_local_cover_when_local_production_dominates(self):
+        t, p, cf, xlp = 288.0, 85000.0, 0.3, 1e-3
+        carry, out, _ = run_level(carry=(1e-9, 0.0, 0.9, 0.0), tm1=t, p=p, xlp=xlp,
+                                  paclc=cf, qm1=qs_water(t, p))
+        assert f(out.intermediates.zclcpre) == pytest.approx(cf)
+        assert carry[2] == pytest.approx(cf)
+
+    def test_weighted_mean_when_incoming_dominates(self):
+        t, p, cf, xlp, zrfl, zclcpre = 288.0, 85000.0, 0.8, 2e-5, 1e-3, 0.3
+        carry, out, d = run_level(carry=(zrfl, 0.0, zclcpre, 0.0), tm1=t, p=p,
+                                  xlp=xlp, paclc=cf, qm1=qs_water(t, p))
+        zpredel = f(out.rain_source)
+        zpretot = zrfl
+        assert zpredel < zpretot
+        want = max(zclcpre, (cf * zpredel + zclcpre * zpretot) / (zpredel + zpretot))
+        assert carry[2] == pytest.approx(want, rel=1e-12)
+
+    def test_no_precipitation_no_fraction(self):
+        carry, _, _ = run_level(carry=(1e-14, 0.0, 0.7, 0.0), tm1=285.0)
+        assert carry[2] == 0.0
+
+    def test_bottom_level_melts_its_own_snow_at_the_updated_temperature(self):
+        """F:1119-1126: the ice flux and the level's snow melt at ztp1tmp."""
+        zxitop = 3e-5
+        carry, out, d = run_level(carry=(0.0, 0.0, 0.0, zxitop), tm1=272.0,
+                                  dtemp=3.0, bottom=True, qm1=0.5 * qs_water(272.0, 70000.0))
+        inter = out.intermediates
+        zlfdcp = (c.alhs - c.alhc) / d["pcair"]
+        # Clear, dry level: no condensation, ztp1tmp = tm1 + dtemp - latent terms.
+        ztp1tmp = (272.0 + 3.0 - c.alhc / d["pcair"] * f(inter.zxlevap)
+                   - c.alhs / d["pcair"] * f(inter.zxievap))
+        zxibot = TestSedimentation()._expected(d, 0.0, zxitop)[1]
+        zzdrs = zmass(d) * (f(inter.zspr) + f(inter.zsacl)) + zxibot
+        melt = min(ZXSEC * zzdrs, zmass(d) / zlfdcp * max(0.0, ztp1tmp - c.tmelt))
+        assert melt > 0.0
+        assert f(inter.zsmlt) == pytest.approx(melt / zmass(d), rel=1e-10)
+        assert carry[0] == pytest.approx(melt, rel=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# Section 8.4: condensate below ccwmin, cover write-back
+# ---------------------------------------------------------------------------
+
+class TestSmallCondensateCorrection:
+
+    def test_liquid_below_ccwmin_returns_to_vapour_and_cover_clears(self):
+        t, p, cf, xlp = 285.0, 70000.0, 0.5, 5e-8
+        _, out, d = run_level(tm1=t, p=p, xlp=xlp, paclc=cf, qm1=0.9 * qs_water(t, p))
+        inter = out.intermediates
+        # Before the correction the liquid is xlp minus the tiny autoconversion.
+        end = xlp - f(inter.zrpr)
+        assert 0.0 < end < 1e-7
+        assert f(inter.zdxlcor) == pytest.approx(-end / DT, rel=1e-12)
+        assert f(out.zxlte) * DT == pytest.approx(-xlp, rel=1e-12)
+        assert f(out.cloud_fraction) == 0.0
+        # Rain production moves liquid to rain at no heat; the correction
+        # evaporates the rest with Lv.
+        assert f(inter.zcnd) == 0.0
+        assert f(out.ztte) == pytest.approx(c.alhc / d["pcair"] * f(inter.zdxlcor),
+                                            rel=1e-10)
+
+    def test_negative_condensate_is_filled_from_vapour(self):
+        _, out, _ = run_level(tm1=285.0, xlp=-2e-8, paclc=0.5)
+        assert f(out.intermediates.zdxlcor) * DT == pytest.approx(2e-8, rel=1e-10)
+
+    def test_cover_kept_while_either_phase_holds_ccwmin(self):
+        _, out, _ = run_level(tm1=262.0, xlp=5e-8, xip=5e-5, paclc=0.4, dp=40000.0,
+                              qm1=qs_ice(262.0, 70000.0))
+        assert f(out.cloud_fraction) == pytest.approx(0.4)
+
+
+# ---------------------------------------------------------------------------
+# The whole column: budgets, broadcasting, top level
+# ---------------------------------------------------------------------------
+
+def random_columns(seed, nlev=20, ncols=16):
+    rng = np.random.default_rng(seed)
+    p = np.linspace(8000.0, 100000.0, nlev)[:, None] * np.ones((1, ncols))
+    t = (np.linspace(205.0, 298.0, nlev)[:, None]
+         + rng.normal(0.0, 3.0, (nlev, ncols)))
+    qsat = np.vectorize(lambda ti, pi: qs_water(ti, pi) if ti > c.tmelt
+                        else qs_ice(ti, pi))(t, p)
+    q = qsat * rng.uniform(0.6, 1.08, (nlev, ncols))
+    qc = np.where(t > 240.0, rng.uniform(0, 4e-4, (nlev, ncols)), 0.0)
+    qi = np.where(t < 270.0, rng.uniform(0, 8e-5, (nlev, ncols)), 0.0)
+    clear = rng.uniform(size=(nlev, ncols)) < 0.3
+    cf = np.where(clear, 0.0, rng.uniform(0.02, 1.0, (nlev, ncols)))
+    dp = np.full((nlev, ncols), 92000.0 / nlev)
+    rho = p / (c.rd * t)
+    dz = dp / (rho * c.grav)
+    dtemp = rng.normal(0.0, 0.8, (nlev, ncols))
+    dq = rng.normal(0.0, 5e-5, (nlev, ncols))
+    n = np.full((nlev, ncols), 8e7)
+    return (t, q, dtemp, dq, qc, qi, cf, p, dp, rho, dz, n)
+
+
+def budgets(cols, tend, st):
+    t, q, dtemp, dq, qc, qi, cf, p, dp, rho, dz, n = (np.asarray(a, np.float64)
+                                                      for a in cols)
+    dm = dp / c.grav
+    cp = c.cpd + (c.cpv - c.cpd) * np.maximum(q, 0.0)
+    dqt = np.asarray(tend.dqdt) + np.asarray(tend.dqcdt) + np.asarray(tend.dqidt)
+    rain, snow = np.asarray(st.precip_rain), np.asarray(st.precip_snow)
+    water = np.sum(dqt * dm, axis=0) + rain + snow
+    water_gross = np.sum(np.abs(dqt) * dm, axis=0) + rain + snow
+    lf = c.alhs - c.alhc
+    h = cp * np.asarray(tend.dtedt) + c.alhc * np.asarray(tend.dqdt) \
+        - lf * np.asarray(tend.dqidt)
+    energy = np.sum(h * dm, axis=0) - lf * snow
+    energy_gross = np.sum((np.abs(cp * np.asarray(tend.dtedt))
+                           + c.alhs * np.abs(np.asarray(tend.dqdt))) * dm, axis=0)
+    return water, water_gross, energy, energy_gross
+
+
+class TestColumnBudgets:
+    """Water and energy of the sweep close on every column.
+
+    Energy: ``Σ dm·(pcair·dT/dt + Lv·dq/dt − Lf·dqi/dt) = Lf·P_snow``, the
+    identity ECHAM's section 8.3 ledger satisfies with its moist ``pcair``.
     """
 
-    @staticmethod
-    def _run(cols, cauloc):
-        cfg = MicrophysicsParameters.default(cauloc=cauloc)
-        T, q, p, qc, qi, cf, rho, dz, nd = cols
-        return cloud_microphysics_column_sweep(
-            T, q, p, qc, qi, cf, rho, dz, nd, dt=1800.0, config=cfg)
+    @pytest.mark.parametrize("seed", [0, 1, 2])
+    def test_float64_round_off(self, seed):
+        cols = random_columns(seed)
+        tend, st = run_sweep(
+            *(jnp.asarray(a) for a in cols), DT)
+        water, wg, energy, eg = budgets(cols, tend, st)
+        assert np.all(wg > 0) and np.all(eg > 0)
+        np.testing.assert_array_less(np.abs(water), 1e-13 * wg + 1e-20)
+        np.testing.assert_array_less(np.abs(energy), 1e-12 * eg + 1e-12)
 
-    @staticmethod
-    def _warm(nlev=16):
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        T = jnp.linspace(275.0, 292.0, nlev)
-        p = jnp.linspace(3e4, 1e5, nlev)
-        q = 0.9 * jax.vmap(saturation_specific_humidity)(p, T)
-        return (T, q, p, jnp.full(nlev, 8e-4), jnp.zeros(nlev),
-                jnp.full(nlev, 0.5), p / (287.0 * T),
-                jnp.full(nlev, 5000.0), jnp.full(nlev, 9e7))
+    def test_float32_tolerance(self):
+        cols = random_columns(3)
+        with jax.enable_x64(False):
+            tend, st = run_sweep(
+                *(jnp.asarray(a, jnp.float32) for a in cols), DT)
+            assert tend.dtedt.dtype == jnp.float32
+        water, wg, energy, eg = budgets(cols, tend, st)
+        # float32 round-off through a 20-level scan: measured below 3e-6 of the
+        # gross exchange for water and energy.
+        np.testing.assert_array_less(np.abs(water), 2e-5 * wg)
+        np.testing.assert_array_less(np.abs(energy), 2e-5 * eg)
 
-    @staticmethod
-    def _cold(nlev=16):
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        T = jnp.linspace(240.0, 262.0, nlev)   # all below freezing (no melt)
-        p = jnp.linspace(3e4, 9e4, nlev)
-        q = 0.92 * jax.vmap(saturation_specific_humidity)(p, T)
-        return (T, q, p, jnp.full(nlev, 4e-4), jnp.full(nlev, 2e-4),
-                jnp.full(nlev, 0.5), p / (287.0 * T),
-                jnp.full(nlev, 5000.0), jnp.full(nlev, 9e7))
-
-    def test_zrac2_local_rain_accretion_carries_dt(self):
-        """Enabling ``cauloc`` measurably strengthens warm rain via ``zrac2``.
-
-        With ``zauloc = 0.5``, ``ρ ≈ 1``, ``zraut ~ 1e-5`` and ``dt = 1800`` the
-        implicit exponent is ``6·0.5·1·1e-5·1800 ≈ 0.05`` → a ~5 % in-cloud
-        liquid depletion. WITHOUT the ``· dt`` the exponent would be ``~3e-5``
-        (the old bug), i.e. a ~1750× weaker sink with no measurable effect on
-        surface rain. Asserting a > 0.5 % fractional rain increase separates
-        the fixed path from the buggy one (the bug gives ~1e-5 fractional).
-        """
-        cols = self._warm()
-        t0, s0 = self._run(cols, 0.0)
-        t1, s1 = self._run(cols, 1.0)
-        assert not bool(jnp.any(jnp.isnan(t1.dtedt)))
-        frac = float((s1.precip_rain - s0.precip_rain) / s0.precip_rain)
-        assert frac > 5e-3, (
-            f"zrac2 barely changed surface rain (frac {frac:.2e}) — the "
-            "· dt is likely missing from the accretion exponent"
-        )
-        # More cloud water is converted to precip when the branch is live.
-        assert float(jnp.sum(t1.dqcdt)) < float(jnp.sum(t0.dqcdt))
-
-    def test_zxsp2_in_layer_snow_branch_is_live(self):
-        """The in-layer riming/aggregation pass changes the cold column.
-
-        ``zxsp2 = zauloc·ρ·zsaut`` is nonzero only at ``cauloc > 0``. The
-        second pass rimes cloud water (→ snow) and aggregates cloud ice
-        (→ snow) against the snow the layer just made, so enabling it moves
-        more condensate into precipitation and shifts the rain/snow split
-        (the local-rain path competes with riming for the same cloud water).
-        """
-        cols = self._cold()
-        t0, s0 = self._run(cols, 0.0)
-        t1, s1 = self._run(cols, 1.0)
-        assert not bool(jnp.any(jnp.isnan(t1.dtedt)))
-        assert not bool(jnp.any(jnp.isnan(t1.dqidt)))
-        total0 = float(s0.precip_rain + s0.precip_snow)
-        total1 = float(s1.precip_rain + s1.precip_snow)
-        assert total1 > total0, "cauloc did not increase total precipitation"
-        # Both condensate phases are depleted more strongly with the branch on.
-        cond0 = float(jnp.sum(t0.dqcdt + t0.dqidt))
-        cond1 = float(jnp.sum(t1.dqcdt + t1.dqidt))
-        assert cond1 < cond0, "in-layer riming/aggregation pass is inert"
-
-    def test_default_config_is_unchanged_by_the_restructure(self):
-        """At the ``cauloc = 0`` default both branches vanish identically.
-
-        The cold-microphysics section was reordered to match the Fortran
-        depletion order (zraut, zrac1, zrac2, then riming/aggregation). At the
-        default that reorder is a no-op because ``zrac2 = zxsp2 = 0``, so the
-        shipped configuration's tendencies must be bit-for-bit what the
-        pass-1-only code produced.
-        """
-        cols = self._cold()
-        t0, s0 = self._run(cols, 0.0)
-        # zxsp2 and zrac2 are exactly zero, so a second cauloc=0 run agrees to
-        # the last bit (determinism) — the guard is that nothing spurious leaks
-        # from the new pass at the default.
-        t0b, s0b = self._run(cols, 0.0)
-        np.testing.assert_array_equal(np.asarray(t0.dtedt), np.asarray(t0b.dtedt))
-        np.testing.assert_array_equal(
-            np.asarray(s0.precip_snow), np.asarray(s0b.precip_snow))
+    def test_float32_follows_float64(self):
+        cols = random_columns(4)
+        t64, _ = run_sweep(*(jnp.asarray(a) for a in cols), DT)
+        with jax.enable_x64(False):
+            t32, _ = run_sweep(
+                *(jnp.asarray(a, jnp.float32) for a in cols), DT)
+        scale = np.max(np.abs(np.asarray(t64.dtedt)))
+        # Where a phase switch or the clear-cell criterion sits within float32
+        # round-off of its threshold the two precisions may take different
+        # branches; everywhere else they agree to float32 precision.
+        diff = np.abs(np.asarray(t32.dtedt, np.float64) - np.asarray(t64.dtedt))
+        assert np.quantile(diff, 0.98) < 1e-4 * scale
 
 
-class TestColumnSweepMicrophysics:
-    """Tests for the ICON ``mo_cloud.f90`` column-sweep port.
+class TestBroadcasting:
 
-    The column sweep propagates rain (``zrfl``) and snow (``zsfl``) as
-    downward fluxes top-to-bottom inside a single timestep. These tests
-    cover the column-budget invariants (surface flux = column source,
-    closed water budget) that depend on that in-step flux coupling.
+    def test_column_and_block_agree(self):
+        cols = [jnp.asarray(a) for a in random_columns(5, ncols=4)]
+        tb, sb = run_sweep(*cols, DT)
+        for j in range(4):
+            tc, sc = run_sweep(*(a[:, j] for a in cols), DT)
+            for got, want in zip(jax.tree.leaves((tb, sb)), jax.tree.leaves((tc, sc))):
+                got = np.asarray(got)
+                want = np.asarray(want)
+                # XLA vectorises the block differently: round-off of the
+                # field's own scale (fluxes that cancel to ~1e-20 carry it).
+                scale = float(np.max(np.abs(want))) if want.size else 0.0
+                np.testing.assert_allclose(got[..., j] if got.ndim else got, want,
+                                           rtol=1e-13, atol=1e-13 * scale)
+
+    def test_three_dimensional_grid(self):
+        cols = [jnp.asarray(a) for a in random_columns(6, ncols=6)]
+        grid = [a.reshape(a.shape[0], 2, 3) for a in cols]
+        tb, _ = run_sweep(*cols, DT)
+        tg, _ = run_sweep(*grid, DT)
+        np.testing.assert_array_equal(np.asarray(tg.dtedt).reshape(tb.dtedt.shape),
+                                      np.asarray(tb.dtedt))
+
+    def test_bottom_flux_is_the_surface_precipitation(self):
+        cols = [jnp.asarray(a) for a in random_columns(7)]
+        _, st = run_sweep(*cols, DT)
+        np.testing.assert_array_equal(np.asarray(st.rain_flux[-1]),
+                                      np.asarray(st.precip_rain))
+        np.testing.assert_array_equal(np.asarray(st.snow_flux[-1]),
+                                      np.asarray(st.precip_snow))
+
+
+# ---------------------------------------------------------------------------
+# Surrogate derivatives
+# ---------------------------------------------------------------------------
+
+from jcm.physics.clouds.echam_1m import (  # noqa: E402
+    contact_radius_pair, ice_phase_pair,
+    temperature_switch_pair,
+)
+from jcm.physics.surrogate_gradient import with_surrogate_gradient  # noqa: E402
+from jcm.testing import check_gradients, check_surrogate_gradient  # noqa: E402
+
+
+class TestSurrogates:
+    """Every surrogate of the sweep.
+
+    The value is exact, the derivative is the surrogate's, the surrogate is
+    smooth, and it is close to the reference.
     """
 
-    @staticmethod
-    def _column(nlev=20, qc_top=None, qi_top=None, T_profile=None):
-        """Build a column with optional cloud water/ice loading."""
-        T = jnp.linspace(220.0, 295.0, nlev) if T_profile is None else T_profile
-        p = jnp.linspace(20000.0, 100000.0, nlev)
-        q = jnp.full(nlev, 5e-3)
-        qc = jnp.zeros(nlev) if qc_top is None else qc_top
-        qi = jnp.zeros(nlev) if qi_top is None else qi_top
-        cf = jnp.where((qc + qi) > 0, 0.7, 0.0)
-        rho = p / (287.0 * T)
-        dz = jnp.full(nlev, 500.0)
-        ndrop = jnp.full(nlev, 1e8)
-        return T, q, p, qc, qi, cf, rho, dz, ndrop
+    def test_temperature_switch(self):
+        width = 1.0
+        exact, sur = temperature_switch_pair(width)
+        wrapped = with_surrogate_gradient(exact, sur)
+        d = jnp.linspace(-3.0, 3.0, 13) + 0.05
+        check_surrogate_gradient(wrapped, exact, sur, (d,))
+        check_gradients(sur, (d,), rtol=1e-6)
+        grid = jnp.linspace(-50.0, 50.0, 2001)
+        far = jnp.abs(grid) >= 5.0 * width
+        dist = np.abs(np.asarray(exact(grid) - sur(grid)))
+        assert np.max(dist[np.asarray(far)]) <= float(jax.nn.sigmoid(-5.0)) + 1e-15
+        assert np.max(dist) <= 0.5 + 1e-15
+        # Width zero: the reference step and its zero derivative.
+        assert f(jax.grad(lambda x: temperature_switch(x, 0.0))(0.3)) == 0.0
+        assert f(jax.grad(lambda x: temperature_switch(x, width))(0.3)) > 0.0
 
-    def test_no_clouds_no_precip(self):
-        """A column with zero qc/qi must produce zero surface precip."""
-        cfg = MicrophysicsParameters.default()
-        T, q, p, qc, qi, cf, rho, dz, ndrop = self._column()
-        _, state = cloud_microphysics_column_sweep(
-            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
-        )
-        assert float(state.precip_rain) == 0.0
-        assert float(state.precip_snow) == 0.0
+    def test_ice_phase(self):
+        exact, sur = ice_phase_pair(1.0, 0.1)
+        wrapped = with_surrogate_gradient(exact, sur)
+        t = jnp.array([230.0, 237.9, 255.0, 255.0, 272.5, 280.0])
+        xi = jnp.array([0.0, 1e-6, 4.9e-6, 6e-6, 1e-4, 1e-4])
+        csec = jnp.full(6, 5e-6)
+        cth = jnp.full(6, c.tmelt - 35.0)
+        check_surrogate_gradient(wrapped, exact, sur, (t, xi, csec, cth))
+        check_gradients(sur, (t, xi, csec, cth), rtol=1e-4)
+        # Away from every threshold (5 widths in T, 5 widths in ice) the
+        # surrogate is within 2·sigmoid(-5) of the switch.
+        tt, xx = np.meshgrid(np.linspace(200.0, 300.0, 401),
+                             np.concatenate([[0.0], np.geomspace(1e-9, 1e-3, 60)]))
+        tt, xx = jnp.asarray(tt), jnp.asarray(xx)
+        cs, ct = jnp.full_like(tt, 5e-6), jnp.full_like(tt, c.tmelt - 35.0)
+        far = ((jnp.abs(tt - (c.tmelt - 35.0)) >= 5.0) & (jnp.abs(tt - c.tmelt) >= 5.0)
+               & (jnp.abs(xx - 5e-6) >= 5 * 0.1 * 5e-6))
+        dist = np.abs(np.asarray(exact(tt, xx, cs, ct) - sur(tt, xx, cs, ct)))
+        assert np.max(dist[np.asarray(far)]) <= 2 * float(jax.nn.sigmoid(-5.0))
 
-    def test_warm_cloud_makes_surface_rain(self):
-        """A liquid cloud aloft in a warm, near-saturated column produces rain.
+    def test_contact_radius(self):
+        rc = 1e-7
+        exact, sur = contact_radius_pair(rc)
+        wrapped = with_surrogate_gradient(exact, sur)
+        v = jnp.array([0.0, 1e-24, 1e-21, 1e-18, 1e-15])
+        check_surrogate_gradient(wrapped, exact, sur, (v,))
+        # Smooth on each side of the cutoff volume 4π/3·rc³ (C1 across it).
+        check_gradients(sur, (jnp.array([1e-23, 3e-22, 1e-21]),), rtol=1e-5)
+        check_gradients(sur, (jnp.array([1e-19, 1e-18, 5e-18]),), rtol=1e-5)
+        grid = jnp.concatenate([jnp.zeros(1), jnp.geomspace(1e-30, 1e-12, 300)])
+        dist = np.abs(np.asarray(exact(grid) - sur(grid)))
+        assert np.max(dist) < rc
 
-        Background ``q`` is set to ~95% of saturation everywhere so that
-        Rotstayn rain evaporation cannot consume the full precipitation
-        flux before it reaches the surface.
+    def test_kk2000_gate(self):
+        cfg = MicrophysicsParameters.default(autoconversion_scheme="kk2000")
+        qc = jnp.array([2e-5, 9e-6, 1.1e-5, 1e-3])
+        rate = lambda thr: autoconversion_kk2000(  # noqa: E731
+            qc, jnp.ones_like(qc), jnp.ones_like(qc), jnp.full_like(qc, 1e8),
+            DT, cfg.replace(ccraut_kk_threshold=thr))
+        # The value is the hard gate; the threshold keeps a derivative.
+        np.testing.assert_array_equal(np.asarray(rate(1e-5)) > 0.0,
+                                      np.asarray(qc) > 1e-5)
+        assert f(jax.grad(lambda thr: jnp.sum(rate(thr)))(1e-5)) < 0.0
+
+    def test_wrappers_select_the_reference_derivative_at_width_zero(self):
+        t = jnp.asarray(255.0)
+        g_on = jax.grad(lambda x: ice_phase_weight(x, 6e-6, 5e-6, 238.15, 1.0, 0.1))(t)
+        g_off = jax.grad(lambda x: ice_phase_weight(x, 6e-6, 5e-6, 238.15, 0.0, 0.1))(t)
+        assert f(g_on) < 0.0 and f(g_off) == 0.0
+        # Fall speed: ECHAM's value with the EPSILON(1._wp) floor at no ice.
+        v0 = f(ice_fall_speed(0.6, 0.0, 2.5))
+        assert v0 == pytest.approx(2.5 * (0.6 * 2.220446049250313e-16) ** 0.16,
+                                   rel=1e-14)
+        assert f(ice_fall_speed(0.6, 2e-5, 2.5)) == pytest.approx(
+            2.5 * (0.6 * 2e-5) ** 0.16, rel=1e-14)
+        r = contact_freezing_radius(jnp.asarray(4.0 / 3.0 * math.pi * 1e-18), 1e-7)
+        assert f(r) == pytest.approx(1e-6, rel=1e-12)
+        assert np.isfinite(f(jax.grad(lambda v: contact_freezing_radius(v, 1e-7))(0.0)))
+
+    def test_sweep_value_does_not_depend_on_any_width(self):
+        cols = [jnp.asarray(a) for a in random_columns(8)]
+        ref, rs = run_sweep(*cols, DT)
+        zero = MicrophysicsParameters.default(
+            phase_switch_width=0.0, contact_radius_cutoff=0.0)
+        other = MicrophysicsParameters.default(
+            phase_switch_width=3.0, phase_switch_ice_width=0.5,
+            contact_radius_cutoff=1e-6)
+        for cfg in (zero, other):
+            got, gs = run_sweep(*cols, DT, cfg)
+            for a, b in zip(jax.tree.leaves((got, gs)), jax.tree.leaves((ref, rs))):
+                np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
+# ---------------------------------------------------------------------------
+# Gradients through the sweep
+# ---------------------------------------------------------------------------
+
+def _outputs(tend, st):
+    return (tend.dtedt, tend.dqdt, tend.dqcdt, tend.dqidt,
+            st.rain_flux, st.snow_flux, st.precip_rain, st.precip_snow)
+
+
+class TestSweepGradients:
+
+    def _args(self):
+        t, q, dtemp, dq, qc, qi, cf, p, dp, rho, dz, n = mixed_column()
+        return (t, q, dtemp, dq, qc, qi), (cf, p, dp, rho, dz, n)
+
+    def test_reference_derivative_matches_a_difference_off_every_switch(self):
+        """Widths zero: the derivative of the value itself, in float64.
+
+        The deck has condensate and cover in every level and sits away from
+        every threshold, so the value is differentiable there.
         """
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        cfg = MicrophysicsParameters.default()
-        nlev = 20
-        T = jnp.linspace(280.0, 295.0, nlev)
-        p = jnp.linspace(20000.0, 100000.0, nlev)
-        qsw = jax.vmap(saturation_specific_humidity)(p, T)
-        q = 0.95 * qsw
-        qc = jnp.zeros(nlev).at[5].set(2e-3)
-        qi = jnp.zeros(nlev)
-        cf = jnp.where(qc > 0, 0.7, 0.0)
-        rho = p / (287.0 * T)
-        dz = jnp.full(nlev, 500.0)
-        ndrop = jnp.full(nlev, 1e8)
-        _, state = cloud_microphysics_column_sweep(
-            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
-        )
-        # Rain at surface, no snow (column never goes below freezing).
-        assert float(state.precip_rain) > 1e-6
-        assert float(state.precip_snow) == 0.0
-
-    def test_accretion_rate_diagnosed_when_rain_falls_through_cloud(self):
-        """Rain falling through a cloudy deck must report accretion.
-
-        Regression for the Codex finding on #604: ``accretn`` was
-        published as zero because the per-level accretion rate never
-        left the sweep. A liquid deck spanning several near-saturated
-        levels forms rain aloft that falls through cloud below, so
-        both in-cloud (zrac2) and below-anvil (zrac1) accretion fire.
-        """
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        cfg = MicrophysicsParameters.default()
-        nlev = 20
-        T = jnp.linspace(280.0, 295.0, nlev)
-        p = jnp.linspace(20000.0, 100000.0, nlev)
-        qsw = jax.vmap(saturation_specific_humidity)(p, T)
-        q = 0.95 * qsw
-        qc = jnp.zeros(nlev).at[5:12].set(1e-3)
-        qi = jnp.zeros(nlev)
-        cf = jnp.where(qc > 0, 0.7, 0.0)
-        rho = p / (287.0 * T)
-        dz = jnp.full(nlev, 500.0)
-        ndrop = jnp.full(nlev, 1e8)
-        _, state = cloud_microphysics_column_sweep(
-            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
-        )
-        assert state.accretion_rate.shape == (nlev,)
-        assert float(jnp.max(state.accretion_rate)) > 0.0
-        # No accretion outside the deck.
-        assert float(jnp.max(state.accretion_rate[:5])) == 0.0
-
-    def test_subsaturated_column_evaporates_rain(self):
-        """A dry column under a cloud must evaporate falling rain.
-
-        Setup: a near-saturated cloud aloft (so the in-sweep saturation
-        adjustment doesn't immediately evaporate the cloud water before
-        autoconv fires) with strongly sub-saturated layers below the
-        cloud. Rotstayn rain evap should consume some of the falling
-        rain so the surface flux is strictly less than the
-        column-integrated rain source.
-        """
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        cfg = MicrophysicsParameters.default()
-        nlev = 20
-        T = jnp.linspace(280.0, 300.0, nlev)
-        p = jnp.linspace(20000.0, 100000.0, nlev)
-        qsw = jax.vmap(saturation_specific_humidity)(p, T)
-        # Near-saturated where the cloud lives (level 5); dry below.
-        cloud_level = 5
-        q = jnp.where(
-            jnp.arange(nlev) == cloud_level, 0.95 * qsw, 0.3 * qsw,
-        )
-        qc = jnp.zeros(nlev).at[cloud_level].set(2e-3)
-        qi = jnp.zeros(nlev)
-        cf = jnp.where(qc > 0, 0.7, 0.0)
-        rho = p / (287.0 * T)
-        dz = jnp.full(nlev, 500.0)
-        ndrop = jnp.full(nlev, 1e8)
-        _, state = cloud_microphysics_column_sweep(
-            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
-        )
-        rain_source_total = float(jnp.sum(state.rain_source))
-        # surface precip should be strictly LESS than the local rain
-        # source when rain evap is active in subsaturated air below cloud.
-        assert rain_source_total > 0.0, "autoconv didn't fire — adjust q profile"
-        assert float(state.precip_rain) < rain_source_total
-
-    def test_rain_evap_flux_closes_the_warm_flux_ledger(self):
-        """The exposed per-level rain evaporation closes the rain-flux ledger.
-
-        On an all-warm column (no snow, no melt) the sweep's flux update is
-        exactly ``rain_flux[k] = rain_flux[k-1] + rain_source[k] -
-        rain_evap_flux[k]``, so the new #499 diagnostic must satisfy that
-        identity level by level, with evaporation active (nonzero) in the
-        sub-saturated layers below the cloud and never exceeding the
-        available flux.
-        """
-        import numpy as np
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        cfg = MicrophysicsParameters.default()
-        nlev = 20
-        T = jnp.linspace(280.0, 300.0, nlev)
-        p = jnp.linspace(20000.0, 100000.0, nlev)
-        qsw = jax.vmap(saturation_specific_humidity)(p, T)
-        # Moist enough below cloud that evap never zeroes the flux (the
-        # ledger clamp stays slack), dry enough that evap is nonzero.
-        cloud_level = 5
-        q = jnp.where(
-            jnp.arange(nlev) == cloud_level, 0.95 * qsw, 0.6 * qsw,
-        )
-        qc = jnp.zeros(nlev).at[cloud_level].set(2e-3)
-        qi = jnp.zeros(nlev)
-        cf = jnp.where(qc > 0, 0.7, 0.0)
-        rho = p / (287.0 * T)
-        dz = jnp.full(nlev, 500.0)
-        ndrop = jnp.full(nlev, 1e8)
-        _, state = cloud_microphysics_column_sweep(
-            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
-        )
-        assert float(jnp.sum(state.snow_source)) == 0.0
-        assert float(jnp.max(state.rain_evap_flux)) > 0.0
-        assert float(jnp.min(state.rain_evap_flux)) >= 0.0
-        rain_in = jnp.concatenate([jnp.zeros(1), state.rain_flux[:-1]])
-        # atol covers f32 round-off relative to the ~1e-4 kg/m²/s flux
-        # scale (observed residual ~2.5e-13 where evap consumes ~all of
-        # the inflow).
-        np.testing.assert_allclose(
-            np.asarray(state.rain_flux),
-            np.asarray(rain_in + state.rain_source - state.rain_evap_flux),
-            rtol=1e-6, atol=1e-10,
-        )
-        assert float(state.rain_flux.min()) >= 0.0
-
-    def test_snow_above_warm_layer_melts_to_rain(self):
-        """Snow flux generated aloft melts as it falls into T>273K layers."""
-        cfg = MicrophysicsParameters.default()
-        nlev = 20
-        # Cold above (level 3, 240K), warm below (>273K from level 8 down).
-        T = jnp.concatenate([
-            jnp.linspace(220.0, 260.0, 8),
-            jnp.linspace(280.0, 295.0, nlev - 8),
-        ])
-        qi = jnp.zeros(nlev).at[3].set(5e-4).at[4].set(3e-4)
-        T_p, q, p, qc, qi_arr, cf, rho, dz, ndrop = self._column(
-            nlev=nlev, qi_top=qi, T_profile=T,
-        )
-        _, state = cloud_microphysics_column_sweep(
-            T_p, q, p, qc, qi_arr, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
-        )
-        # The aloft ice → snow flux is small; what matters is that the
-        # warm layers melt all of it before the surface, so surface snow
-        # is nearly all melted while surface rain is positive. With the
-        # corrected melt energetics (finding 2.11: melting now pays the
-        # latent heat of fusion, capped by the layer's heat content) a
-        # ~1 % residual of unmelted snow survives a single warm layer —
-        # physical, unlike the pre-fix free melting that zeroed it.
-        assert float(state.precip_snow) < 0.02 * float(state.precip_rain)
-        # Some ice was autoconverted to snow → melted → rain.
-        assert float(state.precip_rain) >= 0.0
-
-    def test_zero_dt_dependence_on_thicker_column(self):
-        """Sanity: thicker layers ≠ instability; precip should be finite."""
-        cfg = MicrophysicsParameters.default()
-        nlev = 20
-        T = jnp.linspace(280.0, 295.0, nlev)
-        qc = jnp.zeros(nlev).at[5].set(2e-3)
-        T_p, q, p, qc_arr, qi, cf, rho, dz, ndrop = self._column(
-            nlev=nlev, qc_top=qc, T_profile=T,
-        )
-        for dz_val in (200.0, 1000.0, 2000.0):
-            dz_v = jnp.full(nlev, dz_val)
-            _, state = cloud_microphysics_column_sweep(
-                T_p, q, p, qc_arr, qi, cf, rho, dz_v, ndrop, dt=1800.0, config=cfg,
-            )
-            assert jnp.isfinite(state.precip_rain)
-            assert float(state.precip_rain) >= 0.0
-
-    def test_jit_and_vmap(self):
-        """Column sweep must be jit-able and vmap-able (matches per-level)."""
-        cfg = MicrophysicsParameters.default()
-        nlev = 15
-        T_p, q, p, qc, qi, cf, rho, dz, ndrop = self._column(nlev=nlev)
-        qc = qc.at[5].set(1e-3)
-
-        f = jax.jit(cloud_microphysics_column_sweep, static_argnames=())
-        _, state_jit = f(T_p, q, p, qc, qi, cf, rho, dz, ndrop, 1800.0, cfg)
-        assert jnp.isfinite(state_jit.precip_rain)
-
-        # Stack 4 columns and vmap over column axis 0.
-        T_b = jnp.stack([T_p] * 4, axis=0)
-        q_b = jnp.stack([q] * 4, axis=0)
-        p_b = jnp.stack([p] * 4, axis=0)
-        qc_b = jnp.stack([qc] * 4, axis=0)
-        qi_b = jnp.stack([qi] * 4, axis=0)
-        cf_b = jnp.stack([cf] * 4, axis=0)
-        rho_b = jnp.stack([rho] * 4, axis=0)
-        dz_b = jnp.stack([dz] * 4, axis=0)
-        nd_b = jnp.stack([ndrop] * 4, axis=0)
-        _, state_b = jax.vmap(
-            cloud_microphysics_column_sweep,
-            in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, None, None),
-        )(T_b, q_b, p_b, qc_b, qi_b, cf_b, rho_b, dz_b, nd_b, 1800.0, cfg)
-        assert state_b.precip_rain.shape == (4,)
-        assert jnp.all(jnp.isfinite(state_b.precip_rain))
-
-    def test_surface_flux_matches_source_when_no_evap(self):
-        """In a saturated column, no rain evaporates: surface == ∑ source.
-
-        Rain evaporation requires sub-saturation (``q < qsw``); set
-        ``q = qsw`` everywhere so Rotstayn's ``zsusatw = min(0, …) = 0``
-        and the propagating ``zrfl`` at the surface equals the column
-        integrated local rain source exactly.
-        """
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        cfg = MicrophysicsParameters.default()
-        nlev = 15
-        T = jnp.linspace(280.0, 295.0, nlev)
-        p = jnp.linspace(20000.0, 100000.0, nlev)
-        q = jax.vmap(saturation_specific_humidity)(p, T)
-        qc = jnp.zeros(nlev).at[4].set(1.5e-3).at[7].set(8e-4)
-        qi = jnp.zeros(nlev)
-        cf = jnp.where(qc > 0, 0.7, 0.0)
-        rho = p / (287.0 * T)
-        dz = jnp.full(nlev, 500.0)
-        ndrop = jnp.full(nlev, 1e8)
-        _, state = cloud_microphysics_column_sweep(
-            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
-        )
-        assert jnp.allclose(
-            state.precip_rain, jnp.sum(state.rain_source), rtol=1e-5,
-        )
-
-    def test_column_water_budget_closes(self):
-        """Column-integrated d/dt(q+qc+qi) = -precip_surface within dt.
-
-        Locks the mass-conservation invariant of the merged column sweep:
-        the per-layer (dq + dqc + dqi) tendencies integrated over column
-        mass, plus the surface precip flux, must sum to zero — i.e. the
-        only sink for total water in the column is the falling precip
-        that exits at the surface. With the in-sweep saturation
-        adjustment moving mass between q ↔ qc/qi this is the right
-        invariant to track; the per-level scheme could not close it
-        because it discarded rain each step.
-        """
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        cfg = MicrophysicsParameters.default()
-        nlev = 20
-        T = jnp.linspace(220.0, 295.0, nlev)
-        p = jnp.linspace(20000.0, 100000.0, nlev)
-        qsw = jax.vmap(saturation_specific_humidity)(p, T)
-        q = 0.9 * qsw                     # near-saturated everywhere
-        qc = jnp.zeros(nlev).at[10].set(1.5e-3).at[12].set(1e-3)
-        qi = jnp.zeros(nlev).at[3].set(2e-4)
-        cf = jnp.where((qc + qi) > 0, 0.7, 0.0)
-        rho = p / (287.0 * T)
-        dz = jnp.full(nlev, 500.0)
-        ndrop = jnp.full(nlev, 1e8)
-        dt = 1800.0
-        tend, state = cloud_microphysics_column_sweep(
-            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=dt, config=cfg,
-        )
-        mref = rho * dz                                       # kg/m² per layer
-        # Column-integrated total water tendency (kg/m²/s)
-        total_water_tend = jnp.sum(
-            (tend.dqdt + tend.dqcdt + tend.dqidt) * mref,
-        )
-        surface_precip = state.precip_rain + state.precip_snow    # kg/m²/s
-        # Budget: ∫(dq+dqc+dqi) dm/dt = -surface_precip
-        residual = float(total_water_tend + surface_precip)
-        scale = float(jnp.maximum(jnp.abs(surface_precip), 1e-9))
-        assert abs(residual) / scale < 1e-3, (
-            f"column water budget residual {residual:.3e} kg/m²/s, "
-            f"surface precip {float(surface_precip):.3e} kg/m²/s"
-        )
-
-    def test_cloud_free_cells_force_evaporate_condensate(self):
-        """ECHAM ``zxlevap``/``zxievap`` (#668): cf=0 clears its condensate.
-
-        A cloud-free cell's condensate must return to vapour
-        unconditionally — even when the cell is supersaturated, the case
-        where the grid-mean Newton adjustment previously did the opposite
-        (the cell GAINED condensate, with no cf-weighted microphysical
-        sink ever able to touch it). The cleared water is then the
-        adjustment's to re-condense or not; either way it is vapour first,
-        the budget closes, and the latent heat is paid.
-        """
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        cfg = MicrophysicsParameters.default()
-        nlev = 6
-        T = jnp.linspace(250.0, 290.0, nlev)
-        p = jnp.linspace(40000.0, 100000.0, nlev)
-        qsw = jax.vmap(saturation_specific_humidity)(p, T)
-        # 2 % SUPERsaturated in the orphaned-condensate cells — the
-        # issue's probe case, where the old behaviour condensed further.
-        q = 1.02 * qsw
-        qc = jnp.zeros(nlev).at[3].set(3e-4)
-        qi = jnp.zeros(nlev).at[1].set(2e-4)
-        cf = jnp.zeros(nlev)                 # the whole column cloud-free
-        rho = p / (287.0 * T)
-        dz = jnp.full(nlev, 500.0)
-        ndrop = jnp.full(nlev, 1e8)
-        dt = 1800.0
-        tend, state = cloud_microphysics_column_sweep(
-            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=dt, config=cfg,
-        )
-        import jcm.constants as c
-        qc_new = qc + dt * tend.dqcdt
-        T_new = T + dt * tend.dtedt
-        q_new = q + dt * tend.dqdt
-        # A supersaturated cf=0 cell retains condensate, and that is
-        # FAITHFUL: clearing then re-capping is a thermodynamic identity
-        # (total water and enthalpy are unchanged, so the cell returns to
-        # the same equilibrium), and ECHAM's own 5.4 grid-box cap does the
-        # same. What #668 guarantees is that the outcome is the unique
-        # THERMODYNAMIC equilibrium of the cell's conserved quantities, not
-        # a function of how the water happened to be split on entry. Pin it
-        # with an enthalpy-consistent pair: state B is state A after
-        # condensing 3e-4 (same total water, same moist enthalpy) — both
-        # must land on the same (T, q, qc) to within Newton tolerance.
-        dq_shift = 3e-4
-        qB = q.at[3].add(-dq_shift)
-        qcB = qc.at[3].add(dq_shift)
-        TB = T.at[3].add(c.alhc * dq_shift / c.cpd)
-        tendB, _ = cloud_microphysics_column_sweep(
-            TB, qB, p, qcB, qi, cf, rho, dz, ndrop, dt=dt, config=cfg,
-        )
-        qcB_new = qcB + dt * tendB.dqcdt
-        TB_new = TB + dt * tendB.dtedt
-        assert abs(float(qcB_new[3]) - float(qc_new[3])) < 3e-5, (
-            f"cf=0 outcome depends on the vapour/condensate split of an "
-            f"enthalpy-identical state: {float(qc_new[3]):.3e} vs "
-            f"{float(qcB_new[3]):.3e}")
-        assert abs(float(TB_new[3]) - float(T_new[3])) < 0.15
-        # No accumulating supersaturation: vapour ends at/below the 1 %
-        # grid-box allowance.
-        from jcm.physics.clouds.sundqvist import (
-            saturation_specific_humidity as _qs)
-        qs_new = jax.vmap(_qs)(p, T_new)
-        assert float((q_new - 1.02 * qs_new).max()) < 5e-5, (
-            "supersaturation above the ECHAM allowance survived the step")
-        # And the column water budget still closes through the clearing.
-        mref = rho * dz
-        total_water_tend = jnp.sum(
-            (tend.dqdt + tend.dqcdt + tend.dqidt) * mref)
-        surface_precip = state.precip_rain + state.precip_snow
-        residual = float(total_water_tend + surface_precip)
-        assert abs(residual) < 1e-9, f"budget open by {residual:.3e}"
-
-    def test_cloud_free_subsaturated_cell_clears_fully(self):
-        """The other half of #668: a SUBsaturated cf=0 cell keeps nothing.
-
-        Pre-#668 the grid-mean adjustment evaporated orphaned condensate
-        only up to saturation and kept the remainder as cloud water forever
-        (no cf-weighted microphysical sink can touch a cf=0 cell). ECHAM
-        clears it unconditionally; after the evaporative cooling the cell
-        here is still subsaturated, so nothing re-condenses and the store
-        is genuinely gone.
-        """
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        cfg = MicrophysicsParameters.default()
-        nlev = 6
-        T = jnp.linspace(250.0, 290.0, nlev)
-        p = jnp.linspace(40000.0, 100000.0, nlev)
-        qsw = jax.vmap(saturation_specific_humidity)(p, T)
-        q = 0.8 * qsw
-        qc = jnp.zeros(nlev).at[3].set(3e-4)
-        cf = jnp.zeros(nlev)
-        rho = p / (287.0 * T)
-        dz = jnp.full(nlev, 500.0)
-        ndrop = jnp.full(nlev, 1e8)
-        dt = 1800.0
-        tend, state = cloud_microphysics_column_sweep(
-            T, q, p, qc, jnp.zeros(nlev), cf, rho, dz, ndrop, dt=dt,
-            config=cfg,
-        )
-        qc_new = qc + dt * tend.dqcdt
-        assert float(jnp.abs(qc_new).max()) < 1e-8, (
-            f"subsaturated cf=0 condensate survived: {float(qc_new[3]):.2e}")
-        # Latent heat was paid: the cell cooled by ~L*qc/cp.
-        dT3 = float(dt * tend.dtedt[3])
-        import jcm.constants as c
-        expected = -c.alhc * 3e-4 / c.cpd
-        assert abs(dT3 - expected) < 0.1 * abs(expected), (
-            f"evaporative cooling {dT3:.3f} K, expected ~{expected:.3f} K")
-
-    @staticmethod
-    def _mixed_phase_column(nlev=20):
-        """Ice cloud aloft + liquid cloud below in a near-saturated column.
-
-        Exercises both the rain and the snow/falling-ice flux paths; the
-        top layers carry no condensate so nothing can fall out of level 0.
-        """
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        T = jnp.linspace(230.0, 295.0, nlev)
-        p = jnp.linspace(20000.0, 100000.0, nlev)
-        qsw = jax.vmap(saturation_specific_humidity)(p, T)
-        q = 0.95 * qsw
-        qc = jnp.zeros(nlev).at[8].set(2e-3)
-        qi = jnp.zeros(nlev).at[4].set(5e-4)
-        cf = jnp.where((qc + qi) > 0, 0.7, 0.0)
-        rho = p / (287.0 * T)
-        dz = jnp.full(nlev, 500.0)
-        ndrop = jnp.full(nlev, 1e8)
-        return T, q, p, qc, qi, cf, rho, dz, ndrop
-
-    def test_flux_profiles_bottom_row_equals_surface_diagnostics(self):
-        """COSP hook invariants: rain_flux/snow_flux are per-level fluxes.
-
-        The profiles are the scan's through-layer fluxes, so the bottom
-        level must equal the surface ``precip_rain`` / ``precip_snow``
-        EXACTLY (same carry values), be non-negative everywhere, and be
-        zero at the model top (level 0 in the physics-internal TOA-first
-        frame — no condensate there, nothing can fall out of it).
-        """
-        cfg = MicrophysicsParameters.default()
-        column = self._mixed_phase_column()
-        _, state = cloud_microphysics_column_sweep(
-            *column, dt=1800.0, config=cfg,
-        )
-        assert float(state.precip_rain) > 0.0, "column must actually rain"
-        assert float(jnp.abs(state.rain_flux[-1] - state.precip_rain)) < 1e-12
-        assert float(jnp.abs(state.snow_flux[-1] - state.precip_snow)) < 1e-12
-        assert jnp.all(state.rain_flux >= 0.0)
-        assert jnp.all(state.snow_flux >= 0.0)
-        assert float(state.rain_flux[0]) == 0.0
-        assert float(state.snow_flux[0]) == 0.0
-        # The frozen profile includes the sedimenting cloud-ice flux, so
-        # it must be positive at the ice-cloud level itself (flux leaving
-        # level 4). How far below the source it survives depends on the
-        # sedimentation numerics (the expm1-stable influx form absorbs it
-        # within the next layer for this column), so only the source level
-        # is asserted.
-        assert float(state.snow_flux[4]) > 0.0
-
-    def test_flux_profiles_column_and_vmap_agree(self):
-        """A vmapped batch must reproduce the single-column flux profiles."""
-        cfg = MicrophysicsParameters.default()
-        column = self._mixed_phase_column()
-        _, state_1 = cloud_microphysics_column_sweep(
-            *column, dt=1800.0, config=cfg,
-        )
-        batched = tuple(jnp.stack([arr] * 3, axis=0) for arr in column)
-        _, state_b = jax.vmap(
-            cloud_microphysics_column_sweep,
-            in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, None, None),
-        )(*batched, 1800.0, cfg)
-        assert state_b.rain_flux.shape == (3, column[0].shape[0])
-        # rtol at float32 ulp scale plus an atol floor: the two layouts may
-        # commute the same arithmetic differently, and a last-bit difference
-        # on a ~1e-4 flux cascades through the near-cancelling exponential
-        # tail into percent-level RELATIVE differences on fluxes of 1e-11
-        # and below — physically zero precipitation (~1 mm/millennium), so
-        # the floor treats them as such.
-        for i in range(3):
-            assert jnp.allclose(state_b.rain_flux[i], state_1.rain_flux,
-                                rtol=2e-6, atol=1e-9)
-            assert jnp.allclose(state_b.snow_flux[i], state_1.snow_flux,
-                                rtol=2e-6, atol=1e-9)
-
-
-class TestColumnSweepParameterGradients:
-    """Regression tests for NaN parameter gradients through the sweep.
-
-    ``x**frac`` at a zero base (the Marshall-Palmer ``zxrp1`` / ``zxsp1``
-    concentrations and the Rotstayn rain-evap rate) has an infinite
-    derivative, and where-masking the output alone produced
-    ``d(precip)/d(params) = NaN`` even though finite differences gave a
-    perfectly good ~1e-6. These tests fail on the unguarded code and pin
-    the double-where fix.
-    """
-
-    @staticmethod
-    def _precipitating_column(nlev=20):
-        """Warm near-saturated column with a liquid cloud aloft.
-
-        Same construction as
-        ``TestColumnSweepMicrophysics.test_warm_cloud_makes_surface_rain``:
-        q at 95 % saturation so rain reaches the surface.
-        """
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        T = jnp.linspace(280.0, 295.0, nlev)
-        p = jnp.linspace(20000.0, 100000.0, nlev)
-        qsw = jax.vmap(saturation_specific_humidity)(p, T)
-        q = 0.95 * qsw
-        qc = jnp.zeros(nlev).at[5].set(2e-3)
-        qi = jnp.zeros(nlev)
-        cf = jnp.where(qc > 0, 0.7, 0.0)
-        rho = p / (287.0 * T)
-        dz = jnp.full(nlev, 500.0)
-        ndrop = jnp.full(nlev, 1e8)
-        return T, q, p, qc, qi, cf, rho, dz, ndrop
-
-    @staticmethod
-    def _mixed_column(nlev=20):
-        """Mixed-phase column (ice cloud aloft, liquid cloud below) so the
-        snow path — and with it ``cvtfall`` — is exercised.
-
-        The deck must be CONTIGUOUS (cf > 0 from the ice layers down through
-        the liquid layers): with a clear gap between them, the precipitating
-        cloud cover ``zclcpre`` collapses in the gap, ``snow_present`` is
-        False where the liquid sits, and the snow-riming path through
-        ``zxsp1`` (the one that carries ``cvtfall``) is never active. The
-        previous disjoint fixture only passed because the epsilon-floored
-        sedimentation VJP manufactured a spurious ``cvtfall`` sensitivity;
-        with the stable expm1 form the true gradient there is ~1e-24, i.e.
-        the path the test names was not exercised at all.
-        """
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        T = jnp.linspace(230.0, 295.0, nlev)
-        p = jnp.linspace(20000.0, 100000.0, nlev)
-        qsw = jax.vmap(saturation_specific_humidity)(p, T)
-        q = 0.95 * qsw
-        qc = jnp.zeros(nlev).at[6].set(1e-3).at[7].set(2e-3).at[8].set(2e-3)
-        qi = jnp.zeros(nlev).at[4].set(5e-4).at[5].set(3e-4)
-        cf = jnp.zeros(nlev).at[4:9].set(0.7)
-        rho = p / (287.0 * T)
-        dz = jnp.full(nlev, 500.0)
-        ndrop = jnp.full(nlev, 1e8)
-        return T, q, p, qc, qi, cf, rho, dz, ndrop
-
-    @staticmethod
-    def _total_precip(ccraut, cvtfall, column):
-        T, q, p, qc, qi, cf, rho, dz, ndrop = column
-        cfg = MicrophysicsParameters.default(ccraut=ccraut, cvtfall=cvtfall)
-        _, state = cloud_microphysics_column_sweep(
-            T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg,
-        )
-        return state.precip_rain + state.precip_snow
-
-    def test_param_gradients_finite_and_match_fd(self):
-        ccraut0, cvtfall0 = 15.0, 3.29
-        column = self._precipitating_column()
-        d_ccraut, d_cvtfall = jax.grad(self._total_precip, argnums=(0, 1))(
-            ccraut0, cvtfall0, column,
-        )
-        # The essential regression: finite (the unguarded powers gave NaN).
-        assert jnp.isfinite(d_ccraut), f"d(precip)/d(ccraut) = {d_ccraut}"
-        assert jnp.isfinite(d_cvtfall), f"d(precip)/d(cvtfall) = {d_cvtfall}"
-        # More autoconversion → more rain: strictly positive here.
-        assert float(d_ccraut) > 0.0
-
-        # Cross-check the autoconversion gradient against central finite
-        # differences (well-conditioned: FD/AD agree to ~0.03 % here).
-        h = ccraut0 * 1e-3
-        fd = (
-            float(self._total_precip(ccraut0 + h, cvtfall0, column))
-            - float(self._total_precip(ccraut0 - h, cvtfall0, column))
-        ) / (2.0 * h)
-        assert jnp.isclose(d_ccraut, fd, rtol=0.05), (
-            f"AD {float(d_ccraut)} vs FD {fd}"
-        )
-
-    def test_cvtfall_gradient_finite_with_snow_active(self):
-        # cvtfall enters through the falling-snow concentration zxsp1 (and
-        # the ice sedimentation fall speed); a contiguous mixed-phase deck
-        # makes its gradient genuinely nonzero (previously NaN via the
-        # unguarded x**(1/1.16)).
-        column = self._mixed_column()
-        d_cvtfall = jax.grad(self._total_precip, argnums=1)(
-            15.0, 3.29, column,
-        )
-        assert jnp.isfinite(d_cvtfall), f"d(precip)/d(cvtfall) = {d_cvtfall}"
-        assert float(d_cvtfall) != 0.0
-        # Cross-check against central finite differences so a spurious
-        # gradient (e.g. one manufactured by an ill-conditioned VJP, as the
-        # epsilon-floored sedimentation used to) cannot pass as "nonzero".
-        h = 1e-3
-        fd = (
-            float(self._total_precip(15.0, 3.29 + h, column))
-            - float(self._total_precip(15.0, 3.29 - h, column))
-        ) / (2.0 * h)
-        assert jnp.isclose(d_cvtfall, fd, rtol=0.05), (
-            f"AD {float(d_cvtfall)} vs FD {fd}"
-        )
-
-
-class TestEcham1MLeavesTheRadiusToRadiation:
-    """The 1M term publishes no effective radius.
-
-    ECHAM's radiation forms the droplet radius itself from the step's state
-    (``mo_cloud_optics.f90::cloud_optics``), and jcm's radiation term owns the
-    ``clouds.r_eff_*`` diagnostic (#929), so the microphysics must leave it as
-    it found it.
-    """
-
-    NLEV = 8
-    NCOLS = 3
-
-    def _run_term(self, qc_profile, cdnc_factor=None, carried=0.0):
-        from .echam_1m import Echam1MMicrophysics
-        from .cloud_data import CloudData
-        from jcm.physics.aerosol.aerosol_types import AerosolData
-        from jcm.physics_interface import PhysicsState
-
-        from .sundqvist import saturation_specific_humidity
-
-        nlev, ncols = self.NLEV, self.NCOLS
-        shape = (nlev, ncols)
-        # Warm, saturated column so the sweep's saturation adjustment neither
-        # evaporates the prescribed cloud nor freezes it.
-        p_col = jnp.linspace(4e4, 1e5, nlev)
-        t_col = jnp.linspace(280.0, 295.0, nlev)
-        q_col = jax.vmap(saturation_specific_humidity)(p_col, t_col)
-        pressure = p_col[:, None] * jnp.ones((1, ncols))
-        temperature = t_col[:, None] * jnp.ones((1, ncols))
-        specific_humidity = q_col[:, None] * jnp.ones((1, ncols))
-        air_density = pressure / (287.05 * temperature)
-        qc = jnp.asarray(qc_profile)
-        cloud_fraction = jnp.where(qc > 0.0, 0.6, 0.0)
-
-        clouds = CloudData.zeros((ncols,), nlev).copy(
-            cloud_fraction=cloud_fraction, qc=qc, qi=jnp.zeros(shape),
-            r_eff_liq=jnp.full(shape, carried),
-            r_eff_ice=jnp.full(shape, carried),
-        )
-        aerosol = AerosolData.zeros((ncols,), nlev)
-        if cdnc_factor is not None:
-            aerosol = aerosol.copy(cdnc_factor=jnp.asarray(cdnc_factor))
-
-        state = PhysicsState.zeros(
-            shape,
-            temperature=temperature,
-            specific_humidity=specific_humidity,
-            tracers={"qc": qc, "qi": jnp.zeros(shape)},
-        )
-        diagnostics = {
-            "_dt_seconds": 600.0,
-            "pressure_full": pressure,
-            "air_density": air_density,
-            "layer_thickness": jnp.full(shape, 500.0),
-            "clouds": clouds,
-            "aerosol": aerosol,
-        }
-        _, out = Echam1MMicrophysics()(state, diagnostics, None, None)
-        return out["clouds"]
-
-    def test_carried_radius_is_left_untouched(self):
-        qc = jnp.zeros((self.NLEV, self.NCOLS)).at[5].set(3e-4)
-        for carried in (0.0, 7.5):
-            clouds = self._run_term(qc, carried=carried)
-            np.testing.assert_array_equal(np.asarray(clouds.r_eff_liq), carried)
-            np.testing.assert_array_equal(np.asarray(clouds.r_eff_ice), carried)
-
-
-class TestEcham1MDropletNumberIsEchamsAcdnc:
-    """The 1M droplet number is ECHAM's prescribed ``acdnc`` (#936).
-
-    ECHAM passes one ``acdnc`` to the radiation and to ``cloud``; jcm's 1M
-    term and radiation must see the same number, through one call.
-    """
-
-    NLEV = 6
-    NCOLS = 2
-    # 800 hPa sits exactly on a level: the profile's regime boundary.
-    P_COL = np.array([20000.0, 50000.0, 79000.0, 80000.0, 81000.0, 95000.0])
-
-    def _inputs(self, qc_level=4, fmask=(0.0, 0.9), cdnc_factor=(1.0, 1.4)):
-        from types import SimpleNamespace
-
-        from .cloud_data import CloudData
-        from jcm.physics.aerosol.aerosol_types import AerosolData
-        from jcm.physics_interface import PhysicsState
-        from .sundqvist import saturation_specific_humidity
-
-        nlev, ncols = self.NLEV, self.NCOLS
-        shape = (nlev, ncols)
-        p_col = jnp.asarray(self.P_COL)
-        t_col = jnp.linspace(235.0, 293.0, nlev)
-        q_col = jax.vmap(saturation_specific_humidity)(p_col, t_col)
-        pressure = p_col[:, None] * jnp.ones((1, ncols))
-        temperature = t_col[:, None] * jnp.ones((1, ncols))
-        qc = jnp.zeros(shape).at[qc_level:].set(3.0e-4)
-        cf = jnp.where(qc > 0.0, 0.6, 0.0)
-        state = PhysicsState.zeros(
-            shape, temperature=temperature,
-            specific_humidity=q_col[:, None] * jnp.ones((1, ncols)),
-            tracers={"qc": qc, "qi": jnp.zeros(shape)})
-        diagnostics = {
-            "_dt_seconds": 600.0,
-            "pressure_full": pressure,
-            "air_density": pressure / (287.05 * temperature),
-            "layer_thickness": jnp.full(shape, 500.0),
-            "clouds": CloudData.zeros((ncols,), nlev).copy(
-                cloud_fraction=cf, qc=qc, qi=jnp.zeros(shape)),
-            "aerosol": AerosolData.zeros((ncols,), nlev).copy(
-                cdnc_factor=jnp.asarray(cdnc_factor)),
-        }
-        terrain = SimpleNamespace(fmask=jnp.asarray(fmask))
-        forcing = SimpleNamespace(glacier_fraction=None)
-        return state, diagnostics, forcing, terrain
-
-    def test_same_droplet_number_as_the_radiation(self):
-        """The 1M term's number is the one the radiation's radius is formed from."""
-        from .echam_1m import Echam1MMicrophysics
-        from jcm.physics.clouds.cloud_data import radiation_cloud_fields
-        from jcm.physics.radiation.cloud_optics import (
-            echam_cloud_effective_radii, radiation_effective_radii)
-        from jcm.physics.radiation.mcica import in_cloud_condensate
-
-        state, diagnostics, forcing, terrain = self._inputs()
-        _, out = Echam1MMicrophysics()(state, diagnostics, forcing, terrain)
-        n_micro = out["clouds"].droplet_number
-        cw, ci, cf = radiation_cloud_fields(state, diagnostics)
-        r_rad, _ = radiation_effective_radii(
-            state, diagnostics, forcing, terrain, cw, ci, cf, 1.0e-3)
-        r_from_micro, _ = echam_cloud_effective_radii(
-            in_cloud_condensate(cw, cf, eps=1.0e-3),
-            in_cloud_condensate(ci, cf, eps=1.0e-3),
-            state.temperature, diagnostics["pressure_full"], n_micro,
-            jnp.zeros_like(n_micro), jnp.asarray([False, True]), False)
-        np.testing.assert_array_equal(np.asarray(r_rad),
-                                      np.asarray(r_from_micro))
-        # And it is the Fortran profile, not a constant: sea / land column,
-        # Twomey factor 1.0 / 1.4 (physc.f90 section 3.12, cm-3).
-        n = np.asarray(n_micro) * 1.0e-6
-        np.testing.assert_allclose(n[-1], [80.0, 180.0 * 1.4], rtol=1e-6)
-        np.testing.assert_allclose(n[3], [80.0, 180.0 * 1.4], rtol=1e-6)
-        zprat = (80000.0 / self.P_COL[0]) ** 2
-        np.testing.assert_allclose(
-            n[0], [20.0 + 60.0 * np.exp(1.0 - zprat),
-                   1.4 * (20.0 + 160.0 * np.exp(1.0 - zprat))], rtol=1e-5)
-
-    def test_glacier_is_maritime(self):
-        from types import SimpleNamespace
-
-        from jcm.physics.clouds.cloud_utils import prescribed_droplet_number
-        p = jnp.asarray(self.P_COL)[:, None] * jnp.ones((1, 2))
-        n = prescribed_droplet_number(
-            p, SimpleNamespace(fmask=jnp.array([0.9, 0.9])),
-            SimpleNamespace(glacier_fraction=jnp.array([0.0, 0.3])), 1.0)
-        np.testing.assert_allclose(np.asarray(n[-1]) * 1e-6, [180.0, 80.0])
-
-    def test_gradients_finite_across_800_hpa(self):
-        """The 800 hPa regime switch leaves the term's reverse pass finite.
-
-        The number's pressure derivative is finite on both sides and zero
-        where the profile is constant.
-        """
-        from .echam_1m import Echam1MMicrophysics
-        from jcm.physics.clouds.cloud_utils import prescribed_cdnc_profile
-
-        state, diagnostics, forcing, terrain = self._inputs(qc_level=1)
-        term = Echam1MMicrophysics()
-
-        def total(pressure, temperature):
-            d = {**diagnostics, "pressure_full": pressure}
-            tend, out = term(state.copy(temperature=temperature), d,
-                             forcing, terrain)
-            return (jnp.sum(tend.temperature) + jnp.sum(tend.tracers["qc"])
-                    + jnp.sum(out["clouds"].droplet_number) * 1e-8)
-
-        gp, gt = jax.grad(total, argnums=(0, 1))(
-            diagnostics["pressure_full"], state.temperature)
-        assert bool(jnp.all(jnp.isfinite(gp))) and bool(jnp.all(jnp.isfinite(gt)))
-        # dN/dp of the profile itself: finite on both sides of 800 hPa and
-        # zero in the boundary-layer regime (the value is constant there).
-        dndp = jax.vmap(jax.grad(
-            lambda q: prescribed_cdnc_profile(q, False)))(
-                jnp.asarray(self.P_COL))
-        assert bool(jnp.all(jnp.isfinite(dndp)))
-        np.testing.assert_array_equal(np.asarray(dndp)[3:], 0.0)
-        # Just above 800 hPa: d/dp of 1e6*(20 + 60*exp(1 - (8e4/p)^2)).
-        want = 1e6 * 60.0 * 2.0 * 8.0e4 ** 2 / 79000.0 ** 3 * np.exp(
-            1.0 - (8.0e4 / 79000.0) ** 2)
-        np.testing.assert_allclose(float(dndp[2]), want, rtol=1e-4)
-
-
-class TestCloudFractionWriteBack1M:
-    """The 1M term clears the cover of cells it empties (#687).
-
-    ECHAM's 1M ``cloud`` routine writes the post-microphysics cover back
-    to ``paclc`` (mo_cloud.f90:1280): a cell whose end-of-step condensate
-    is below ``ccwmin`` in BOTH phases stops being cloudy. Without it,
-    ``clouds.cloud_fraction`` meant the RH-diagnosed pre-microphysics
-    cover under cloud_scheme='1m' but the post-microphysics cover under
-    '2m', so every shared consumer (radiation, COSP, AeroCom, the JAM
-    cloud-borne/aqueous/wetdep terms) switched semantics with the scheme.
-    """
-
-    @staticmethod
-    def _drive_term(qc0, qi0, cf0, q_scale=0.95):
-        from types import SimpleNamespace
-        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
-        from jcm.physics.clouds.cloud_data import CloudData
-        from jcm.physics_interface import PhysicsState
-
-        nlev, ncols = 8, 2
-        T = jnp.full((nlev, ncols), 285.0)
-        p = jnp.linspace(3e4, 1e5, nlev)[:, None] * jnp.ones((1, ncols))
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        qsw = saturation_specific_humidity(p, T)
-        q = q_scale * qsw            # subsaturated: condensate evaporates
-        rho = p / (287.0 * T)
-        zeros = jnp.zeros((nlev, ncols))
-
-        state = PhysicsState(
-            u_wind=zeros, v_wind=zeros, temperature=T,
-            specific_humidity=q, geopotential=zeros,
-            normalized_surface_pressure=jnp.ones(ncols),
-            tracers={"qc": qc0, "qi": qi0},
-        )
-        clouds = CloudData.zeros((ncols,), nlev).copy(
-            cloud_fraction=cf0, qc=qc0, qi=qi0)
-        diagnostics = {
-            "_dt_seconds": 1800.0,
-            "pressure_full": p,
-            "air_density": rho,
-            "layer_thickness": jnp.full((nlev, ncols), 500.0),
-            "clouds": clouds,
-            "aerosol": SimpleNamespace(cdnc_factor=jnp.ones(ncols)),
-        }
-        term = Echam1MMicrophysics()
-        _, diags_out = term(state, diagnostics, None, None)
-        return diags_out["clouds"].cloud_fraction
-
-    def test_emptied_cell_loses_cover_kept_cell_keeps_it(self):
-        import numpy as np
-        nlev, ncols = 8, 2
-        qc0 = jnp.zeros((nlev, ncols))
-        qi0 = jnp.zeros((nlev, ncols))
-        cf0 = jnp.zeros((nlev, ncols))
-        # Level 3: a wisp of liquid (5e-7) — the 5 % saturation deficit
-        # evaporates it below ccwmin within the step. Level 5: a solid
-        # deck (1e-3) the same deficit can only nibble at.
-        qc0 = qc0.at[3].set(5e-7).at[5].set(1e-3)
-        cf0 = cf0.at[3].set(0.4).at[5].set(0.7)
-
-        cf_out = np.asarray(self._drive_term(qc0, qi0, cf0))
-        assert np.all(cf_out[3] == 0.0), (
-            f"emptied cell keeps cover {cf_out[3]} — no paclc write-back"
-        )
-        assert np.all(cf_out[5] > 0.0), (
-            "a cell still holding condensate lost its cover"
-        )
-
-
-class TestMoistCpStepStartAnchor:
-    """The 1M ``L/cp`` factors use the STEP-START humidity (ECHAM ``qm1``).
-
-    ECHAM builds ``pcair = cpd + cpd·vtmpc2·max(qm1, 0)`` once per step in
-    physc (physc.f90:289), before vdiff/convection advance q, and ``cloud``
-    divides every latent term by it (mo_cloud.f90:412-414). The sweep acts on
-    the provisional post-upstream humidity, so the two must be decoupled. The
-    probe is a single cloud-free (cf=0) subsaturated cell holding cloud water:
-    ECHAM's clear-sky evaporation removes it all and the cell cools by exactly
-    ``alhc·qc / pcair`` — no autoconversion, no rain from above, and no
-    re-condensation — so the realised ``dT/qc`` IS the heat capacity used.
-    """
-
-    QC = 3e-4
-    K = 3
-
-    def _column(self, nlev=6):
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        T = jnp.linspace(250.0, 290.0, nlev)
-        p = jnp.linspace(40000.0, 100000.0, nlev)
-        q = 0.8 * jax.vmap(saturation_specific_humidity)(p, T)
-        qc = jnp.zeros(nlev).at[self.K].set(self.QC)
-        return (T, q, p, qc, jnp.zeros(nlev), jnp.zeros(nlev),
-                p / (287.0 * T), jnp.full(nlev, 500.0), jnp.full(nlev, 1e8))
-
-    def test_sweep_cools_with_the_step_start_heat_capacity(self):
-        import jcm.constants as c
-        from jcm.physics.clouds.cloud_utils import moist_isobaric_heat_capacity
-        cfg = MicrophysicsParameters.default()
-        dt = 1800.0
-        cols = self._column()
-        q_prov = cols[1]
-        # Step-start humidity 6 g/kg MOISTER than the provisional value: cp
-        # differs by vtmpc2·6e-3 ≈ 0.5 %, far above float32 resolution.
-        q_m1 = q_prov + 6e-3
-        tend, _ = cloud_microphysics_column_sweep(
-            *cols, dt=dt, config=cfg, specific_humidity_m1=q_m1)
-        dT = float(dt * tend.dtedt[self.K])
-        want = -c.alhc * self.QC / float(moist_isobaric_heat_capacity(q_m1[self.K]))
-        wrong = -c.alhc * self.QC / float(
-            moist_isobaric_heat_capacity(q_prov[self.K]))
-        np.testing.assert_allclose(dT, want, rtol=5e-5)
-        assert abs(dT - wrong) > 20 * abs(dT - want), (
-            f"dT={dT:.6f} K tracks the provisional-q cp ({wrong:.6f}), "
-            f"not the step-start cp ({want:.6f})")
-
-    def test_default_anchor_is_the_input_humidity(self):
-        """Standalone callers (no upstream increment) get ``q_m1 = q``."""
-        cfg = MicrophysicsParameters.default()
-        cols = self._column()
-        t_def, _ = cloud_microphysics_column_sweep(*cols, dt=1800.0, config=cfg)
-        t_exp, _ = cloud_microphysics_column_sweep(
-            *cols, dt=1800.0, config=cfg, specific_humidity_m1=cols[1])
-        np.testing.assert_array_equal(np.asarray(t_def.dtedt),
-                                      np.asarray(t_exp.dtedt))
-
-    def test_term_reads_cp_from_state_not_thermo_run(self):
-        """The term passes ``state.specific_humidity`` (step-start) as qm1.
-
-        ``thermo_run`` carries a provisional humidity (as if vdiff/convection
-        had moistened the column); the sweep must act on it but take ``cp``
-        from the step-start ``PhysicsState``. Swapping the moisture between
-        ``state`` and ``thermo_run`` would change the answer if the term used
-        the provisional q for cp.
-        """
-        from types import SimpleNamespace
-        import jcm.constants as c
-        from jcm.physics.clouds.cloud_data import CloudData
-        from jcm.physics.clouds.cloud_utils import moist_isobaric_heat_capacity
-        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
-        from jcm.physics_interface import PhysicsState
-
-        T, q, p, qc, qi, cf, rho, dz, _ = self._column()
-        ncols = 2
-        tile = lambda a: jnp.repeat(a[:, None], ncols, axis=1)  # noqa: E731
-        T, q, p, qc, qi, cf, rho, dz = map(tile, (T, q, p, qc, qi, cf, rho, dz))
-        q_step_start = q - 1e-3          # upstream terms then MOISTENED to q
-        zeros = jnp.zeros_like(T)
-        state = PhysicsState(
-            u_wind=zeros, v_wind=zeros, temperature=T,
-            specific_humidity=q_step_start, geopotential=zeros,
-            normalized_surface_pressure=jnp.ones(ncols),
-            tracers={"qc": qc, "qi": qi},
-        )
-        clouds = CloudData.zeros((ncols,), T.shape[0]).copy(
-            cloud_fraction=cf, qc=qc, qi=qi)
-        diagnostics = {
-            "_dt_seconds": 1800.0,
-            "pressure_full": p,
-            "air_density": rho,
-            "layer_thickness": dz,
-            "clouds": clouds,
-            "aerosol": SimpleNamespace(cdnc_factor=jnp.ones(ncols)),
-            "thermo_run": {"temperature": T, "specific_humidity": q},
-        }
-        tend, _ = Echam1MMicrophysics()(state, diagnostics, None, None)
-        dT = np.asarray(1800.0 * tend.temperature[self.K])
-        want = -c.alhc * self.QC / float(
-            moist_isobaric_heat_capacity(q_step_start[self.K, 0]))
-        np.testing.assert_allclose(dT, want, rtol=5e-5)
-
-
-class TestColumnSweepStateGradients:
-    """AD against a central difference in the *state* directions (issue #820).
-
-    ``TestColumnSweepParameterGradients`` above pins the tunable-parameter
-    derivatives; this class pins the derivative with respect to the column
-    state, which is what a data-assimilation or hybrid-ML gradient actually
-    travels along.
-
-    The result is that the sweep's derivative is right and the *operating
-    point* is what decides whether a difference can see it. Measured under
-    ``jax_enable_x64`` (outside the suite, which pins float32 for issue
-    #729), every one of the six state directions agrees with a converged
-    central difference to 1e-8 on the column built below, and jvp and vjp
-    agree to 6e-16. On a column with exactly zero condensate the same
-    comparison has no reference at all — see
-    ``test_clear_sky_column_has_no_two_sided_derivative``.
-    """
-
-    @staticmethod
-    def _cloudy_column(nlev=16):
-        """Build a column that is off every condensate and cover switch.
-
-        Three thresholds in the sweep are exact: ``cloud_fraction >
-        config.epsilon`` gates the in-cloud conversion, ``qc_in_cloud > 0``
-        gates KK2000 autoconversion and ``qi_in_cloud > 0`` gates ice
-        autoconversion. A fixture with ``qc = qi = 0`` and ``cf = 0`` in its
-        clear layers — which is how the parameter-gradient fixtures above are
-        built, because they only need the cloudy layers — puts every clear
-        layer exactly on all three at once, and there the scheme has no
-        two-sided derivative to compare against. That is a property of the
-        point, not of the scheme, so this fixture carries a thin but non-zero
-        condensate and cover in every layer: the state a running column is
-        actually in once the sweep has deposited anything at all.
-        """
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        T = jnp.linspace(248.0, 294.0, nlev)
-        p = jnp.linspace(2.2e4, 1.0e5, nlev)
-        q = 0.93 * jax.vmap(saturation_specific_humidity)(p, T)
-        qc = jnp.full(nlev, 3.1e-5).at[10].set(1.4e-3).at[11].set(9.0e-4)
-        qi = jnp.full(nlev, 7.2e-6).at[3].set(4.1e-5).at[4].set(2.6e-5)
-        cf = jnp.full(nlev, 0.13).at[3:5].set(0.55).at[10:12].set(0.72)
-        rho = p / (287.0 * T)
-        dz = jnp.full(nlev, 480.0)
-        nd = jnp.full(nlev, 9.4e7)
-        return T, q, p, qc, qi, cf, rho, dz, nd
-
-    @staticmethod
-    def _sweep_fn(column):
-        """Return f(T, q, qc, qi, cf, ndrop) -> (tendencies, state)."""
-        _, _, p, _, _, _, rho, dz, _ = column
-        cfg = MicrophysicsParameters.default()
-
-        def f(T, q, qc, qi, cf, ndrop):
-            return cloud_microphysics_column_sweep(
-                T, q, p, qc, qi, cf, rho, dz, ndrop, dt=1800.0, config=cfg)
-
-        return f
-
-    # The adjoint identity is exact in exact arithmetic and holds to 6e-16
-    # here under x64, so the float32 gap is round-off through the 16-level
-    # ``lax.scan`` — the same double sum contracted in opposite orders by the
-    # two AD modes — and nothing about the derivative. Measured at 1e-4 to
-    # 3e-3 across these seeds; 5e-3 leaves a small margin. It is a statement
-    # about float32, which is why it is stated rather than quietly defaulted.
-    ADJOINT_RTOL = 5e-3
-
-    @pytest.mark.parametrize("seed", [0, 7])
-    def test_state_gradients_match_a_central_difference(self, seed):
-        """One ``(nlev,)`` column, off every switch: AD matches the secant.
-
-        ``rtol=2e-2`` is a FLOAT32 secant tolerance, not a statement about the
-        derivative: measured under ``jax_enable_x64`` both seeds agree with a
-        converged central difference to well inside ``1e-2`` (the AD gradient is
-        exact). Since #706 divides the condensation heating by the
-        humidity-dependent moist ``cp``, the mapping carries slightly more
-        curvature, so at the eps the float32 ladder can resolve the secant's
-        own truncation error reaches ~1.2 % for seed 7's random projection —
-        float32 roundoff through the 16-level ``lax.scan``, confirmed by the
-        clean x64 pass, not a gradient defect.
-        """
-        column = self._cloudy_column()
-        T, q, _, qc, qi, cf, _, _, nd = column
-        check_gradients(
-            self._sweep_fn(column), (T, q, qc, qi, cf, nd),
-            rtol=2e-2, seed=seed, adjoint_rtol=self.ADJOINT_RTOL)
-
-    def test_block_of_columns_carries_live_gradients(self):
-        """A ``(nlev, ncols)`` block, vmapped as the ECHAM term calls it.
-
-        ``reference="adjoint"``: the three columns' projections are of one
-        magnitude and cancel to a fraction of it, so in float32 the secant is
-        left without significant digits well before the ladder reaches a
-        resolvable step — the same reason the TTE-TKE block check uses the
-        adjoint reference. The per-column difference is checked above.
-        """
-        column = self._cloudy_column()
-        T, q, p, qc, qi, cf, rho, dz, nd = column
-        cfg = MicrophysicsParameters.default()
-        stack = lambda a: jnp.stack(  # noqa: E731
-            [a * (1.0 + 0.07 * k) for k in range(3)], axis=1)
-
-        def f(T_b, q_b, qc_b, qi_b, cf_b, nd_b):
-            tend, st = jax.vmap(
-                lambda *a: cloud_microphysics_column_sweep(
-                    a[0], a[1], p, a[2], a[3], a[4], rho, dz, a[5],
-                    dt=1800.0, config=cfg),
-                in_axes=1, out_axes=0,
-            )(T_b, q_b, qc_b, qi_b, cf_b, nd_b)
-            # ``dqrdt``/``dqsdt`` and the melting/freezing diagnostics are
-            # structurally ``jnp.zeros`` in this scheme (rain and snow live
-            # in the falling flux, not in state), and the adjoint reference
-            # asserts every output it is given is live — so name the outputs
-            # that actually carry a derivative rather than hand it constants.
-            return (tend.dtedt, tend.dqdt, tend.dqcdt, tend.dqidt,
-                    st.rain_flux, st.snow_flux, st.rain_source,
-                    st.snow_source, st.rain_evap_flux, st.qc_in_cloud,
-                    st.qi_in_cloud, st.autoconv_rate, st.accretion_rate,
-                    st.precip_rain, st.precip_snow)
-
-        cf_block = jnp.stack(
-            [cf, jnp.clip(cf * 1.2, 0.0, 1.0), jnp.clip(cf * 0.8, 0.0, 1.0)],
-            axis=1)
-        check_gradients(
-            f, (stack(T), stack(q), stack(qc), stack(qi), cf_block, stack(nd)),
-            reference="adjoint", adjoint_rtol=self.ADJOINT_RTOL,
-            live_inputs=["[0]", "[1]", "[2]", "[3]", "[4]", "[5]"])
-
-    @staticmethod
-    def _ringing_tail_column(nlev=24):
-        """Build a phase-split deck whose tail decays through 1e-30 kg/kg.
-
-        Two things have to hold at once for the partition in
-        ``_saturation_adjustment_layer`` to be tested, and this is the shape a
-        running column actually has them in. A Gaussian deck does not stop at
-        the edge of the cloud: it decays continuously, so the layers outside it
-        carry 1e-20, 1e-25, 1e-30 kg/kg — physically nothing, numerically a
-        positive number, and the *denominator* of the phase split. And the deck
-        is split at the freezing level, so those same layers hold **exactly**
-        zero of the other phase — the *numerator*. The fixtures above miss it
-        in both directions: their clear layers hold exactly zero of both
-        phases, and ``_cloudy_column`` holds a uniform 7.2e-6 of each.
-
-        The widths are chosen so the ice deck's cold-side tail sweeps the whole
-        range, crossing 1e-19 around level 6 and reaching 1e-26 by level 3.
-        """
-        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
-        T = jnp.linspace(200.0, 300.0, nlev)
-        p = jnp.linspace(2.0e4, 1.0e5, nlev)
-        q = 0.94 * jax.vmap(saturation_specific_humidity)(p, T)
-        level = jnp.arange(nlev, dtype=jnp.float32)
-        deck = jnp.exp(-((level - 17.0) / 2.0) ** 2)
-        warm = T > tmelt
-        qc = jnp.where(warm, 3.0e-4 * deck, 0.0)
-        qi = jnp.where(warm, 0.0, 4.0e-5 * deck)
-        # Broad enough to keep every tail layer above ``cqtmin``: a cell the
-        # cloud scheme calls cloud-free has its condensate force-evaporated
-        # before the adjustment runs, which would empty the denominator this
-        # fixture exists to supply.
-        cf = jnp.clip(0.7 * jnp.exp(-((level - 17.0) / 8.0) ** 2), 1e-6, 1.0)
-        rho = p / (287.0 * T)
-        dz = jnp.full(nlev, 500.0)
-        nd = jnp.full(nlev, 9.0e7)
-        return T, q, p, qc, qi, cf, rho, dz, nd
-
-    def test_a_condensate_tail_does_not_poison_the_derivative(self):
-        """A 1e-30 kg/kg condensate tail keeps every partial finite.
-
-        The sharp probe is the **zero** direction: ``jvp`` with a zero tangent
-        contracts every local partial against 0, so it returns 0 for any
-        function whose partials are finite and ``nan`` for one that holds an
-        ``inf``, whatever the operating point's own values are. That is the
-        whole failure mode — ``qc / (qc + qi)`` at a total small enough that
-        float32 squares it to zero returns a perfectly good 0 forward and an
-        ``inf`` partial that the zero numerator turns into ``nan``. The
-        per-leaf directions after it are the practical statement: each input
-        on its own, in both modes.
-        """
-        column = self._ringing_tail_column()
-        T, q, _, qc, qi, cf, _, _, nd = column
-        f = self._sweep_fn(column)
-        args = (T, q, qc, qi, cf, nd)
-
-        primal, vjp_fun = jax.vjp(f, *args)
-        for leaf in jax.tree.leaves(primal):
-            assert np.all(np.isfinite(np.asarray(leaf))), "forward pass"
-
-        _, zero_direction = jax.jvp(f, args, tuple(jnp.zeros_like(a) for a in args))
-        for leaf in jax.tree.leaves(zero_direction):
-            assert np.all(np.isfinite(np.asarray(leaf))), (
-                "a zero perturbation produced a non-finite derivative, so some "
-                "local partial is infinite on this column")
-
-        for index in range(len(args)):
-            direction = tuple(
-                jnp.ones_like(a) if k == index else jnp.zeros_like(a)
-                for k, a in enumerate(args))
-            _, forward = jax.jvp(f, args, direction)
-            for leaf in jax.tree.leaves(forward):
-                assert np.all(np.isfinite(np.asarray(leaf))), (
-                    f"forward-mode derivative along argument {index}")
-
-        reverse = vjp_fun(jax.tree.map(jnp.ones_like, primal))
-        for leaf in jax.tree.leaves(reverse):
-            assert np.all(np.isfinite(np.asarray(leaf))), "reverse-mode gradient"
+        (t, q, dtemp, dq, qc, qi), (cf, p, dp, rho, dz, n) = self._args()
+        qc = qc + 2e-5
+        qi = qi + 3e-6
+        cf = jnp.maximum(cf, 0.2) * jnp.linspace(0.8, 1.1, cf.shape[0])
+        cfg = MicrophysicsParameters.default(
+            phase_switch_width=0.0, contact_radius_cutoff=0.0)
+
+        def fn(t_, q_, dtemp_, dq_, qc_, qi_):
+            return _outputs(*run_sweep(
+                t_, q_, dtemp_, dq_, qc_, qi_, cf, p, dp, rho, dz, n, DT, cfg))
+
+        check_gradients(fn, (t, q, dtemp, dq, qc, qi), rtol=1e-4)
 
     @pytest.mark.xfail(
         strict=True, raises=AssertionError,
-        reason="a clear layer sits exactly on three switches at once — "
-               "echam_1m.py:1241/1245 `cloud_fraction > config.epsilon`, "
-               ":444 `qc_in_cloud > 0.0` and :536 `qi_in_cloud > 0.0` — so "
-               "the in-cloud condensate jumps from 0 to O(dqc/dcf) as soon "
-               "as the pair is displaced, and the secant grows as jump/eps "
-               "at every rung instead of converging. Not a wrong gradient: "
-               "every state partial matches a difference to 1e-8 once the "
-               "column is off the switches. (#843)")
-    def test_clear_sky_column_has_no_two_sided_derivative(self):
-        """Record the zero-condensate operating point as a defect, not a tolerance.
+        reason="a clear layer with exactly zero condensate sits on ECHAM's "
+               "switches at once: the clear-cell criterion paclc > 0 (F:621) and "
+               "the kink max(0, zxlp1) of the clear-cell evaporation at zero "
+               "condensate (F:669-670), so no central difference converges. The "
+               "same column holding condensate in its clear layers, or with no "
+               "clear layer, matches a difference (test above). (#843)")
+    def test_clear_layers_without_condensate_have_no_two_sided_derivative(self):
+        """Record the zero-condensate clear layer as a defect, not a tolerance."""
+        (t, q, dtemp, dq, qc, qi), (cf, p, dp, rho, dz, n) = self._args()
+        cf = cf * jnp.linspace(0.8, 1.1, cf.shape[0])
+        cfg = MicrophysicsParameters.default(
+            phase_switch_width=0.0, contact_radius_cutoff=0.0)
 
-        Uses ``TestColumnSweepParameterGradients._precipitating_column``
-        unchanged, because that is how the repo's own fixtures are built and
-        the point of this test is that such a column is a *degenerate* place
-        to differentiate, not that the fixture is wrong for its own purpose.
+        def fn(t_, q_, dtemp_, dq_, qc_, qi_, cf_):
+            return _outputs(*run_sweep(
+                t_, q_, dtemp_, dq_, qc_, qi_, cf_, p, dp, rho, dz, n, DT, cfg))
+
+        check_gradients(fn, (t, q, dtemp, dq, qc, qi, cf), rtol=1e-4)
+
+    def test_surrogate_derivative_is_finite_and_adjoint(self):
+        """Check that jvp and vjp are adjoint and every input is live.
+
+        The covers are untied level to level: where the cover and the carried
+        precipitating fraction are exactly equal, ``min``/``max`` sit on a tie
+        and the two AD modes may take different one-sided derivatives (a
+        measure-zero point; with every cover exactly 0.6 the modes differ by
+        5 %, untied by 1e-19).
         """
-        column = TestColumnSweepParameterGradients._precipitating_column()
-        T, q, _, qc, qi, cf, _, _, nd = column
-        check_gradients(
-            self._sweep_fn(column), (T, q, qc, qi, cf, nd),
-            rtol=1e-2, adjoint_rtol=self.ADJOINT_RTOL)
+        (t, q, dtemp, dq, qc, qi), (cf, p, dp, rho, dz, n) = self._args()
+        cf = cf * jnp.linspace(0.8, 1.1, cf.shape[0])
+
+        # The surface snow of this deck is the 1e-12 remainder that ECHAM's
+        # melt cap (zxsec = 1 - 1e-12, F:434) leaves above the warm levels:
+        # round-off, whose AD projections are round-off too once normalised
+        # by its own RMS. It is left out of the projection.
+        def fn(t_, q_, dtemp_, dq_, qc_, qi_, cf_):
+            return _outputs(*run_sweep(
+                t_, q_, dtemp_, dq_, qc_, qi_, cf_, p, dp, rho, dz, n, DT))[:-1]
+
+        check_gradients(fn, (t, q, dtemp, dq, qc, qi, cf), reference="adjoint",
+                        live_inputs=["[0]", "[1]", "[2]", "[3]", "[4]", "[5]"])
+
+    def test_ice_free_layers_under_an_ice_flux(self):
+        """Cirrus above ice-free layers: gradients finite through the scan."""
+        nlev = 10
+        p = jnp.linspace(20000.0, 60000.0, nlev)
+        t = jnp.linspace(215.0, 250.0, nlev)
+        q = jnp.asarray([0.5 * qs_ice(float(a), float(b)) for a, b in zip(t, p)])
+        qi = jnp.zeros(nlev).at[:2].set(8e-5)
+        cf = jnp.zeros(nlev).at[:2].set(0.5)
+        dp = jnp.full(nlev, 4000.0)
+        rho = p / (c.rd * t)
+        dz = dp / (rho * c.grav)
+        zeros = jnp.zeros(nlev)
+        n = jnp.full(nlev, 5e7)
+
+        def surface_snow(qi_, t_):
+            _, st = run_sweep(
+                t_, q, zeros, zeros, zeros, qi_, cf, p, dp, rho, dz, n, DT)
+            return jnp.sum(st.snow_flux) + jnp.sum(st.intermediates.zqsed)
+
+        g_qi, g_t = jax.grad(surface_snow, argnums=(0, 1))(qi, t)
+        assert np.all(np.isfinite(np.asarray(g_qi)))
+        assert np.all(np.isfinite(np.asarray(g_t)))
+        assert np.any(np.asarray(g_qi)[2:] != 0.0)
+
+    def test_parameter_gradients_live(self):
+        base = MicrophysicsParameters.default()
+        g = jax.grad(_precip_of)(base)
+        for name in ("ccraut", "ccracl", "ccsaut", "cvtfall", "ccsacl"):
+            val = f(getattr(g, name))
+            assert np.isfinite(val) and val != 0.0, name
+        for leaf in jax.tree.leaves(g):
+            assert np.all(np.isfinite(np.asarray(leaf)))
+
+
+# ---------------------------------------------------------------------------
+# Rate helpers
+# ---------------------------------------------------------------------------
+
+class TestRateHelpers:
+
+    def test_beheng_grid_mean_rate(self):
+        cfg = MicrophysicsParameters.default()
+        qc, cf, rho, n = 3e-4, 0.6, 1.1, 8e7
+        got = f(autoconversion_beheng(jnp.asarray(qc), jnp.asarray(cf), jnp.asarray(rho),
+                                      jnp.asarray(n / rho), DT, cfg))
+        assert got == pytest.approx(cf * beheng(qc / cf, rho, n, DT) / DT, rel=1e-12)
+        assert f(autoconversion(jnp.asarray(qc), jnp.asarray(cf), jnp.asarray(rho),
+                                jnp.asarray(n / rho), DT, cfg)) == pytest.approx(got)
+
+    def test_levkov_grid_mean_rate(self):
+        cfg = MicrophysicsParameters.default()
+        qi, cf, rho = 5e-5, 0.5, 0.5
+        got = f(ice_autoconversion(jnp.asarray(qi), 240.0, jnp.asarray(cf), DT, cfg,
+                                   air_density=jnp.asarray(rho)))
+        assert got == pytest.approx(cf * levkov(qi / cf, rho, DT) / DT, rel=1e-12)
+        assert f(ice_autoconversion(jnp.asarray(0.0), 240.0, jnp.asarray(cf), DT, cfg,
+                                    air_density=jnp.asarray(rho))) == 0.0
+
+    def test_lonacc_levels(self):
+        omega = jnp.array([[0.1, 0.1], [0.1, -0.1], [0.1, 0.1], [0.1, 0.1]])
+        mask = lonacc_levels(jnp.array([1, 1]), omega, 1, 2, 4)
+        np.testing.assert_array_equal(np.asarray(mask),
+                                      [[False, False], [True, False],
+                                       [True, True], [False, False]])
+        none = lonacc_levels(jnp.array([3, 0]), omega, 1, 2, 4)
+        assert not np.any(np.asarray(none))
+
+
+# ---------------------------------------------------------------------------
+# The composable term
+# ---------------------------------------------------------------------------
+
+def _term_inputs(nlev=6, ncols=2, t_col=None, q_scale=1.0, qc_level=3, qc=3e-4, cf=0.6,
+                 cdnc_factor=(1.0, 1.4), fmask=(0.0, 0.9), tendency_run=None,
+                 dt=1200.0):
+    from types import SimpleNamespace
+    from jcm.physics.clouds.cloud_data import CloudData
+    from jcm.physics.aerosol.aerosol_types import AerosolData
+    from jcm.physics_interface import PhysicsState
+
+    shape = (nlev, ncols)
+    p_col = np.linspace(60000.0, 95000.0, nlev)
+    t_col = np.linspace(270.0, 290.0, nlev) if t_col is None else np.asarray(t_col)
+    q_col = q_scale * np.array([qs_water(a, b) for a, b in zip(t_col, p_col)])
+    pressure = jnp.asarray(p_col[:, None] * np.ones((1, ncols)))
+    temperature = jnp.asarray(t_col[:, None] * np.ones((1, ncols)))
+    humidity = jnp.asarray(q_col[:, None] * np.ones((1, ncols)))
+    qcf = jnp.zeros(shape).at[qc_level].set(qc)
+    cover = jnp.where(qcf > 0.0, cf, 0.0)
+    dp = jnp.full(shape, 5000.0)
+    rho = pressure / (c.rd * temperature)
+    state = PhysicsState.zeros(shape, temperature=temperature,
+                               specific_humidity=humidity,
+                               tracers={"qc": qcf, "qi": jnp.zeros(shape)})
+    diagnostics = {
+        "_dt_seconds": dt,
+        "pressure_full": pressure,
+        "pressure_thickness": dp,
+        "air_density": rho,
+        "layer_thickness": dp / (c.grav * rho),
+        "clouds": CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=cover, qc=qcf, qi=jnp.zeros(shape)),
+        "aerosol": AerosolData.zeros((ncols,), nlev).copy(
+            cdnc_factor=jnp.asarray(cdnc_factor)),
+    }
+    if tendency_run is not None:
+        diagnostics["_tendency_run"] = tendency_run
+    terrain = SimpleNamespace(fmask=jnp.asarray(fmask))
+    forcing = SimpleNamespace(glacier_fraction=None)
+    return state, diagnostics, forcing, terrain
+
+
+class TestTerm:
+
+    def test_radiative_cooling_condenses_in_the_same_step(self):
+        """An upstream cooling tendency condenses in the cloud by zqcdif.
+
+        A saturated cloudy level with a radiative cooling tendency in
+        ``_tendency_run`` and nothing else: ECHAM condenses
+        ``zqcdif = −zdqsat·paclc`` in the same step (F:706-734). The input
+        matters because the running ``thermo_run`` view holds only the terms
+        that advance it (vertical diffusion, the surface, convection), not
+        radiation, so the cooling would reach the cloud scheme only through
+        the next step's state.
+        """
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        from jcm.physics.clouds.cloud_utils import moist_isobaric_heat_capacity
+
+        nlev, ncols, k, cf, dt = 6, 2, 3, 0.6, 1200.0
+        cooling = -20.0 / 86400.0
+        zeros = jnp.zeros((nlev, ncols))
+        run = {"temperature": zeros.at[k].set(cooling), "specific_humidity": zeros,
+               "tracers": {"qc": zeros, "qi": zeros}}
+        state, diag, forcing, terrain = _term_inputs(tendency_run=run, cf=cf, dt=dt)
+        tend, _ = Echam1MMicrophysics()(state, diag, forcing, terrain)
+        t = float(state.temperature[k, 0])
+        p = float(diag["pressure_full"][k, 0])
+        pcair = float(moist_isobaric_heat_capacity(state.specific_humidity[k, 0]))
+        zlvdcp = c.alhc / pcair
+        uaw, duaw = np_ua(t, water_only=True)
+        z = min(uaw / p, 0.5)
+        zcor = 1.0 / (1.0 - c.vtmpc1 * z)
+        zdqsdt = zcor ** 2 * duaw / p
+        zqcdif = -(cooling * dt) * zdqsdt / (1.0 + cf * zlvdcp * zdqsdt) * cf
+        cond = -float(tend.specific_humidity[k, 0]) * dt
+        assert zqcdif > 0.0
+        assert cond == pytest.approx(zqcdif, rel=1e-9)
+        # Without the upstream tendency nothing condenses at this level (up to
+        # the round-off of ECHAM's 1e-20 in-cloud floor, F:911-912).
+        state, diag, forcing, terrain = _term_inputs(cf=cf, dt=dt)
+        tend0, _ = Echam1MMicrophysics()(state, diag, forcing, terrain)
+        assert abs(float(tend0.specific_humidity[k, 0])) * dt < 1e-17
+
+    def test_twomey_factor_reaches_the_radiation_number_not_the_autoconversion(self):
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        from jcm.physics.clouds.cloud_utils import prescribed_droplet_number
+
+        state, diag, forcing, terrain = _term_inputs(cdnc_factor=(1.4, 1.4))
+        state1, diag1, _, _ = _term_inputs(cdnc_factor=(1.0, 1.0))
+        _, out = Echam1MMicrophysics()(state, diag, forcing, terrain)
+        _, out1 = Echam1MMicrophysics()(state1, diag1, forcing, terrain)
+        np.testing.assert_allclose(
+            np.asarray(out["clouds"].droplet_number),
+            np.asarray(prescribed_droplet_number(diag["pressure_full"], terrain,
+                                                 forcing, jnp.asarray([1.4, 1.4]))))
+        np.testing.assert_array_equal(np.asarray(out["autoconv"]),
+                                      np.asarray(out1["autoconv"]))
+        on = Echam1MMicrophysics(MicrophysicsParameters.default(autoconversion_twomey=True))
+        _, out_on = on(state, diag, forcing, terrain)
+        assert np.all(np.asarray(out_on["autoconv"]) < np.asarray(out["autoconv"]))
+
+    def test_carried_radius_is_left_untouched(self):
+        """The radiation owns ``clouds.r_eff_*`` (#929); the 1M leaves them."""
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        state, diag, forcing, terrain = _term_inputs()
+        diag["clouds"] = diag["clouds"].copy(r_eff_liq=jnp.full((6, 2), 7.5),
+                                             r_eff_ice=jnp.full((6, 2), 7.5))
+        _, out = Echam1MMicrophysics()(state, diag, forcing, terrain)
+        np.testing.assert_array_equal(np.asarray(out["clouds"].r_eff_liq), 7.5)
+        np.testing.assert_array_equal(np.asarray(out["clouds"].r_eff_ice), 7.5)
+
+    def test_cover_write_back(self):
+        """F:1280: a cell left below ccwmin in both phases loses its cover."""
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        state, diag, forcing, terrain = _term_inputs(qc=5e-8, q_scale=0.9)
+        _, out = Echam1MMicrophysics()(state, diag, forcing, terrain)
+        assert np.all(np.asarray(out["clouds"].cloud_fraction) == 0.0)
+        state, diag, forcing, terrain = _term_inputs(qc=1e-3, q_scale=0.9)
+        _, out = Echam1MMicrophysics()(state, diag, forcing, terrain)
+        assert np.all(np.asarray(out["clouds"].cloud_fraction)[3] == pytest.approx(0.6))
+
+    def test_heat_capacity_is_the_anchor_humidity(self):
+        """Check ``pcair`` is built from ``pqm1`` (ECHAM physc.f90).
+
+        A clear cell holding liquid cools by exactly ``alv·qc/pcair(qm1)``.
+        """
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        from jcm.physics.clouds.cloud_utils import moist_isobaric_heat_capacity
+        nlev, ncols, k = 6, 2, 3
+        zeros = jnp.zeros((nlev, ncols))
+        # A moistening upstream increment must not change the heat capacity.
+        run = {"temperature": zeros, "specific_humidity": zeros.at[k].set(-2e-6),
+               "tracers": {"qc": zeros, "qi": zeros}}
+        state, diag, forcing, terrain = _term_inputs(q_scale=0.7, cf=0.0,
+                                                     tendency_run=run)
+        diag["clouds"] = diag["clouds"].copy(cloud_fraction=zeros)
+        tend, _ = Echam1MMicrophysics()(state, diag, forcing, terrain)
+        want = -c.alhc * 3e-4 / float(moist_isobaric_heat_capacity(
+            state.specific_humidity[k, 0])) / 1200.0
+        assert float(tend.temperature[k, 0]) == pytest.approx(want, rel=1e-12)
+
+    def test_tendency_run_condensate_is_part_of_the_provisional_condensate(self):
+        """Check the condensate increments of vdiff and convection reach the scheme."""
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        nlev, ncols, k = 6, 2, 3
+        zeros = jnp.zeros((nlev, ncols))
+        run = {"temperature": zeros, "specific_humidity": zeros,
+               "tracers": {"qc": zeros.at[k].set(1e-7), "qi": zeros}}
+        state, diag, forcing, terrain = _term_inputs(q_scale=0.7, tendency_run=run)
+        diag["clouds"] = diag["clouds"].copy(cloud_fraction=zeros)
+        tend, _ = Echam1MMicrophysics()(state, diag, forcing, terrain)
+        # Clear cell: anchor plus increment returns to vapour.
+        assert float(tend.tracers["qc"][k, 0]) * 1200.0 == pytest.approx(
+            -(3e-4 + 1e-7 * 1200.0), rel=1e-12)
 
 
 class TestShallowLiquidConvectionType:
-    """ECHAM ``mo_cloud.f90``'s radiation ``ktype = 4`` re-typing (#870).
-
-    A shallow column (ktype 2) becomes 4 when its liquid water path at and
-    below the convective cloud top exceeds ``clwprat`` x the path above it;
-    radiation then applies the shallow liquid inhomogeneity ``zinhoml2``.
-    """
+    """ECHAM ``mo_cloud.f90``'s radiation ``ktype = 4`` re-typing (F:1439-1455)."""
 
     NLEV = 6
 
     def _columns(self):
-        from .echam_1m import shallow_liquid_convection_type
+        from jcm.physics.clouds.echam_1m import shallow_liquid_convection_type
 
         nlev = self.NLEV
-        # Top-first: level 0 is the model top. Cloud top at level 3 in every
-        # column, so levels 0-2 are "above the top".
         p = jnp.linspace(2e4, 1e5, nlev)[:, None] * jnp.ones((1, 6))
         dp = jnp.full((nlev, 6), 1.0e4)
         qc = jnp.zeros((nlev, 6))
-        qc = qc.at[4, 0].set(1e-4)                          # 2: all below
-        qc = qc.at[1, 1].set(1e-4).at[4, 1].set(3e-4)       # 2: bot = 3 x top
-        qc = qc.at[1, 2].set(1e-4).at[4, 2].set(5e-4)       # 2: bot = 5 x top
-        qc = qc.at[4, 3].set(1e-4)                          # 1 (deep)
-        # col 4: ktype 0 with liquid; col 5: ktype 2 with no liquid at all
+        qc = qc.at[4, 0].set(1e-4)
+        qc = qc.at[1, 1].set(1e-4).at[4, 1].set(3e-4)
+        qc = qc.at[1, 2].set(1e-4).at[4, 2].set(5e-4)
+        qc = qc.at[4, 3].set(1e-4)
         qc = qc.at[4, 4].set(1e-4)
         ktype = jnp.array([2, 2, 2, 1, 0, 2], dtype=jnp.int32)
         top = jnp.full((6,), 3, dtype=jnp.int32)
@@ -1637,72 +1415,50 @@ class TestShallowLiquidConvectionType:
         out = fn(ktype, top, p, qc, dp, 4.0)
         np.testing.assert_array_equal(np.asarray(out), [4, 2, 4, 1, 0, 2])
         assert out.dtype == ktype.dtype
-        # ECHAM's T31 ``clwprat = 0``: any liquid at/below the top re-types.
         out0 = fn(ktype, top, p, qc, dp, 0.0)
         np.testing.assert_array_equal(np.asarray(out0), [4, 4, 4, 1, 0, 2])
 
     def test_negative_ringing_does_not_retype_a_dry_column(self):
-        """Advected ``qc`` can ring slightly negative above the top; with no
-        liquid at/below it the column is not "shallow liquid" (ECHAM's
-        non-negative ``pxlm1`` never meets this case).
-        """
         fn, ktype, top, p, _, dp = self._columns()
         qc = jnp.zeros_like(p).at[1].set(-1e-7)
-        out = fn(ktype, top, p, qc, dp, 4.0)
-        np.testing.assert_array_equal(np.asarray(out), np.asarray(ktype))
-        # Liquid below with negative ringing above: still re-typed.
+        np.testing.assert_array_equal(np.asarray(fn(ktype, top, p, qc, dp, 4.0)),
+                                      np.asarray(ktype))
         qc = qc.at[4].set(1e-4)
-        out = fn(ktype, top, p, qc, dp, 4.0)
-        np.testing.assert_array_equal(np.asarray(out), [4, 4, 4, 1, 0, 4])
+        np.testing.assert_array_equal(np.asarray(fn(ktype, top, p, qc, dp, 4.0)),
+                                      [4, 4, 4, 1, 0, 4])
 
     def test_independent_of_level_orientation(self):
         fn, ktype, top, p, qc, dp = self._columns()
         out = fn(ktype, top, p, qc, dp, 4.0)
-        flipped = fn(ktype, self.NLEV - 1 - top, p[::-1], qc[::-1], dp[::-1],
-                     4.0)
+        flipped = fn(ktype, self.NLEV - 1 - top, p[::-1], qc[::-1], dp[::-1], 4.0)
         np.testing.assert_array_equal(np.asarray(out), np.asarray(flipped))
 
-    def _term_diagnostics(self, with_convection):
-        from .cloud_data import CloudData
-        from jcm.physics.aerosol.aerosol_types import AerosolData
+    def test_term_amends_the_convection_carry_and_only_it(self):
+        from types import SimpleNamespace
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
         from jcm.physics.convection.tiedtke_nordeng.types import ConvectionData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.aerosol.aerosol_types import AerosolData
         from jcm.physics_interface import PhysicsState
 
         _, ktype, top, p, qc, dp = self._columns()
         nlev, ncols = qc.shape
         t = jnp.full((nlev, ncols), 285.0)
-        state = PhysicsState.zeros(
-            (nlev, ncols), temperature=t,
-            specific_humidity=jnp.full((nlev, ncols), 1e-3),
-            tracers={"qc": qc, "qi": jnp.zeros_like(qc)},
-        )
+        state = PhysicsState.zeros((nlev, ncols), temperature=t,
+                                   specific_humidity=jnp.full((nlev, ncols), 1e-3),
+                                   tracers={"qc": qc, "qi": jnp.zeros_like(qc)})
         diagnostics = {
-            "_dt_seconds": 600.0,
-            "pressure_full": p,
-            "pressure_thickness": dp,
-            "air_density": p / (287.05 * t),
-            "layer_thickness": jnp.full((nlev, ncols), 500.0),
+            "_dt_seconds": 600.0, "pressure_full": p, "pressure_thickness": dp,
+            "air_density": p / (c.rd * t), "layer_thickness": jnp.full((nlev, ncols), 500.0),
             "clouds": CloudData.zeros((ncols,), nlev).copy(
-                qc=qc, qi=jnp.zeros_like(qc),
-                cloud_fraction=jnp.where(qc > 0, 0.5, 0.0)),
+                qc=qc, qi=jnp.zeros_like(qc), cloud_fraction=jnp.where(qc > 0, 0.5, 0.0)),
             "aerosol": AerosolData.zeros((ncols,), nlev),
         }
-        if with_convection:
-            diagnostics["convection"] = ConvectionData.zeros(
-                (ncols,), nlev).replace(ktype=ktype, cloud_top=top)
-        return state, diagnostics
-
-    def test_term_amends_the_convection_carry(self):
-        from .echam_1m import Echam1MMicrophysics
-
-        state, diagnostics = self._term_diagnostics(with_convection=True)
-        _, out = Echam1MMicrophysics()(state, diagnostics, None, None)
-        np.testing.assert_array_equal(
-            np.asarray(out["convection"].ktype), [4, 2, 4, 1, 0, 2])
-
-    def test_term_without_convection_adds_nothing(self):
-        from .echam_1m import Echam1MMicrophysics
-
-        state, diagnostics = self._term_diagnostics(with_convection=False)
-        _, out = Echam1MMicrophysics()(state, diagnostics, None, None)
+        term = Echam1MMicrophysics()
+        _, out = term(state, diagnostics, SimpleNamespace(glacier_fraction=None), None)
         assert "convection" not in out
+        diagnostics["convection"] = ConvectionData.zeros((ncols,), nlev).replace(
+            ktype=ktype, cloud_top=top)
+        _, out = term(state, diagnostics, SimpleNamespace(glacier_fraction=None), None)
+        np.testing.assert_array_equal(np.asarray(out["convection"].ktype),
+                                      [4, 2, 4, 1, 0, 2])

@@ -227,12 +227,14 @@ class _Convection(SimpleNamespace):
 def run_jcm_cloud(inp: dict, nn: int = 63) -> dict:
     """ECHAM ``cloud`` (1M) -> jcm ``Echam1MMicrophysics``.
 
-    Mapping (ECHAM passes m1 state plus accumulated tendencies; jcm passes the
-    step-start state, the provisional ``thermo_run`` view and interim
-    condensate):
+    Mapping (ECHAM passes m1 state plus accumulated tendencies; jcm's term
+    takes the step-start state as the anchor and the running tendency of the
+    upstream terms, ``_tendency_run``, as the increments):
       state T, q, qc, qi       <- ptm1, pqm1, pxlm1, pxim1
-      thermo_run T, q          <- ptm1 + ptte*dt, pqm1 + pqte*dt
-      clouds.qc / clouds.qi    <- pxlm1 + (pxlte + pxtecl)*dt, pxim1 + (pxite + pxteci)*dt
+      _tendency_run T, q       <- ptte, pqte
+      _tendency_run qc, qi     <- pxlte + pxtecl, pxite + pxteci (jcm's
+                                  convection returns its detrainment inside
+                                  its condensate tendency)
       clouds.cloud_fraction    <- paclc
       air_density              <- papm1 / (rd*ptvm1)            (mo_cloud.f90:382)
       layer_thickness          <- dp / (g*air_density), dp from paphm1, so that
@@ -241,15 +243,22 @@ def run_jcm_cloud(inp: dict, nn: int = 63) -> dict:
                                   (ECHAM physc.f90 3.12 acdnc) for the land flag
       convection ktype/top     <- ktype, kctop - 1 (0-based)
       dt                       <- ptime_step_len
+      cvtfall, csecfrl, clwprat <- the values ECHAM ran with at truncation nn
+                                  (the reference's ``param`` arrays)
     Returns ECHAM's INOUT arrays after the call: tendencies = input +
     jcm's increment (+ detrainment for pxlte/pxite, which ECHAM adds in 8.3),
     prsfl/pssfl, paclc after the ccwmin write-back, and ktype.
-    jcm has no resolution-dependent 1M constants, so ``nn`` is unused.
     """
     from jcm.physics.clouds.cloud_data import CloudData
-    from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+    from jcm.physics.clouds.echam_1m import (
+        Echam1MMicrophysics, MicrophysicsParameters)
 
-    del nn
+    if nn == 63:
+        prm = {k: float(load("cloud")[f"param/sonntag/{k}"])
+               for k in ("cvtfall", "csecfrl", "clwprat")}
+    else:
+        prm = {k: float(load_resolution()[f"T{nn}/param/{k}"])
+               for k in ("cvtfall", "csecfrl", "clwprat")}
     dt = float(inp["ptime_step_len"])
     ptm1 = jnp.asarray(inp["ptm1"])
     nlev, ncol = ptm1.shape
@@ -271,17 +280,19 @@ def run_jcm_cloud(inp: dict, nn: int = 63) -> dict:
         "pressure_thickness": dp,
         "clouds": clouds,
         "aerosol": SimpleNamespace(cdnc_factor=jnp.ones(ncol)),
-        "thermo_run": {
-            "temperature": jnp.asarray(inp["ptm1"] + inp["ptte"] * dt),
-            "specific_humidity": jnp.asarray(inp["pqm1"] + inp["pqte"] * dt),
-            "qc": qc_int, "qi": qi_int,
+        "_tendency_run": {
+            "temperature": jnp.asarray(inp["ptte"]),
+            "specific_humidity": jnp.asarray(inp["pqte"]),
+            "tracers": {"qc": jnp.asarray(inp["pxlte"] + inp["pxtecl"]),
+                        "qi": jnp.asarray(inp["pxite"] + inp["pxteci"])},
         },
         "convection": _Convection(ktype=jnp.asarray(inp["ktype"]),
                                   cloud_top=jnp.asarray(inp["kctop"] - 1)),
     }
     terrain = SimpleNamespace(fmask=jnp.asarray(inp["land"].astype(float)))
     forcing = SimpleNamespace()
-    tend, out = Echam1MMicrophysics()(state, diagnostics, forcing, terrain)
+    term = Echam1MMicrophysics(MicrophysicsParameters.default(**prm))
+    tend, out = term(state, diagnostics, forcing, terrain)
     f = functools.partial(np.asarray, dtype=np.float64)
     return {
         "ptte": inp["ptte"] + f(tend.temperature),
