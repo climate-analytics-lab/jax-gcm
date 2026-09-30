@@ -599,7 +599,7 @@ class TestRadiationReadsLaggedConvectionType(unittest.TestCase):
         def solve(ktype):
             d = {**diag, "clouds": clouds,
                  "convection": diag["convection"].replace(ktype=ktype)}
-            _, out = rad._compute_full(state_cols, d, forcing, params)
+            _, out, _radii = rad._compute_full(state_cols, d, forcing, None, params)
             return (np.asarray(out.sw_heating_rate),        # (nlev, ncols)
                     np.asarray(out.toa_sw_up), np.asarray(out.cos_zenith))
 

@@ -1014,6 +1014,47 @@ Convective-type cloud inhomogeneity
   ``convection.cloud_top``/``cloud_base`` now carry the updraft's level
   indices (top-first physics axis) instead of zeros (#870).
 
+Cloud droplets: effective radii from the current state, one 1M droplet number
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- RRTMGP and the NN emulator form the droplet and crystal effective radii
+  inside the radiation call from the step's in-cloud condensate and
+  droplet/crystal number, as ECHAM's ``mo_cloud_optics.f90::cloud_optics``
+  does, clamped to the RRTMGP table range (2.5-21.5 µm droplets, 5-90 µm
+  crystals). The radii used to reach radiation one step late through the
+  ``clouds`` carry, with 0 meaning "not provided" and an 11 µm / Moss-Foot
+  fallback substituted per cell, so a cell that turned cloudy between steps
+  radiated with the fallback (#929). The 2M configurations (SPA and JAM) use
+  the prognostic ``qnc``/``qni`` with the Peng & Lohmann breadth factor and
+  the Lohmann (2008) plate crystal radius; the 1M configurations the Martin
+  et al. continental/maritime breadth factor and the Moss/Foot crystal radius.
+- The 1M droplet number, for the radiation and for the 1M autoconversion
+  alike, is ECHAM's prescribed ``acdnc`` (80 cm⁻³ over sea, 180 cm⁻³ over
+  land below 800 hPa, falling to 20 cm⁻³ aloft) times the MACv2-SP Twomey
+  factor, from one shared call (``cloud_utils.prescribed_droplet_number``).
+  The 1M autoconversion used a uniform 100 cm⁻³ × Twomey factor (#936). The
+  Twomey factor stays on the autoconversion, which MPI-ESM1.2 does not do
+  (#932).
+- **Changes results.** Over days 5-10 of a ``t63-echam-1m`` A/B the two
+  changes together raise the global-mean TOA net by **3.4 W/m²**
+  (radiation alone: 2.1): reflected SW −4.1 W/m², SW cloud radiative effect
+  +4.1, LW cloud radiative effect −0.6, OLR +0.7 W/m², liquid water path
+  **−9.0 g/m² (−16 %; −32 % over ocean)**, cloud cover −0.35 %, precipitation
+  unchanged. Fewer droplets make larger droplets for the radiation and a
+  faster Beheng autoconversion. On ``t63-echam-2m`` the radius change moves
+  TOA net by less than the 0.1 W/m² run-to-run spread (OLR +0.18 W/m², LW
+  cloud radiative effect −0.19 W/m²). ``clouds.r_eff_liq`` /
+  ``clouds.r_eff_ice`` are now written by the radiation term (the radii it
+  used; 0 where the phase is absent) rather than by the microphysics. The
+  COSP simulators and the AeroCom cloud diagnostics, which read the
+  post-microphysics condensate, form the radii of that condensate with the
+  same law (``cloud_optics.post_physics_effective_radii``) instead of
+  reading ``clouds.r_eff_*``.
+- **Breaking:** ``MicrophysicsParameters.base_cdnc`` and
+  ``resolve_effective_radii`` are removed, and ``radiation_scheme_rrtmgp`` /
+  ``radiation_scheme_emulated`` require ``r_eff_liq_um`` / ``r_eff_ice_um``
+  (form them with ``jcm.physics.radiation.cloud_optics.radiation_effective_radii``).
+
 RCE initial state seeds a mixed sub-cloud layer
 """""""""""""""""""""""""""""""""""""""""""""""
 

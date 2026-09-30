@@ -32,6 +32,25 @@
   ``mo_cloud.f90`` single-moment branch. The ice/snow fall-speed factor
   ``cvtfall = 2.5`` is ECHAM's value for jcm's default T63 grid
   (``mo_echam_cloud_params.f90``, ``nn == 63``), the same the 2M scheme uses.
+  The **droplet number** is ECHAM's prescribed ``acdnc``
+  (``physc.f90`` §3.12; ICON-A ``mo_echam_phy_diag.f90::droplet_number``):
+  80 cm⁻³ over sea and 180 cm⁻³ over land that is not glacier from the surface
+  to 800 hPa, ``20 + (zn2 − 20)·exp(1 − min(8, 80000/p)²)`` cm⁻³ above,
+  continuous at 800 hPa and 20 cm⁻³ in the upper troposphere. ECHAM passes that
+  one field to its radiation and to ``cloud`` (``pacdnc``), and jcm's 1M term
+  and radiation make one shared call,
+  ``cloud_utils.prescribed_droplet_number``, so they cannot see different
+  numbers. In ``mo_cloud.f90`` the droplet number enters the Beheng
+  autoconversion (line 977, ``pacdnc·1e-6`` to the power −3.3; the jcm KK2000
+  option reads the same number) and the Bigg and contact freezing of
+  supercooled cloud water (lines 859, 876), which this port lacks (#939). The
+  profile is multiplied by the MACv2-SP Twomey factor ``cdnc_factor`` for the
+  autoconversion as well as for the radiation. MPI-ESM1.2 applies the factor
+  to the radiation's droplet number only and leaves the cloud microphysics'
+  unperturbed (Mauritsen et al. 2019, *JAMES*, doi:10.1029/2018MS001400,
+  §2.2); the autoconversion path is jcm's aerosol-cloud formulation, kept for
+  v3.0 and recorded in #932. The published ``clouds.droplet_number`` is this
+  in-cloud number.
 - **Lohmann 2-moment microphysics**
   (``jcm/physics/clouds/lohmann_2m/scheme.py``: ``cloud_microphysics_2m`` and its
   ``Lohmann2MMicrophysics`` term) carries droplet and ice-crystal number as well
@@ -297,21 +316,15 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   inversion is non-dimensionalised by a static 1 µm scale, so no gradient
   path, through the state or a parameter, divides by a tiny cube
   (`differentiability`).
-- Both the 1M and 2M paths publish an LWC-dependent radiative liquid radius
-  from the shared ECHAM Martin/Bower law (``eff_liquid_droplet_radius``);
-  radiation reads it from the carried ``clouds`` state one step lagged, because
-  the ECHAM term order runs radiation before microphysics. The constant
-  ``effective_radius_liquid`` fallback therefore survives only where that carry
-  is still zero, resolved **cell by cell** — the cold-start first step, and
-  thereafter any cloudy cell that was clear the previous step (a level newly
-  turning cloudy falls back even mid-rollout in an otherwise-cloudy column) —
-  not the steady state the 1M ``physics=echam`` path used to run on. The
-  radiative **ice** radius is the 2M's published end-of-step ``r_eff_ice``:
-  the plate-crystal law of ``eff_ice_crystal_radius`` on the end-of-step ice
-  mass and crystal number at and above ``cthomi``, and ECHAM's
-  ``83.8·IWC^0.216`` below it, clipped to 10–150 µm (ECHAM ``preffi``, lines
-  3680–3698). Its mixed-phase value follows the crystal number the scheme
-  carries, which comes mainly from ``znidetr`` and the ``zrid`` diagnosis.
+- Neither microphysics scheme publishes the radiative effective radii: as in
+  ECHAM, the radiation forms them inside its own call from the step's
+  condensate and droplet/crystal number (``mo_cloud_optics.f90::cloud_optics``;
+  see {doc}`radiation`), from the laws in ``cloud_utils`` that the 2M scheme
+  also evaluates for its own ``preffl``/``preffi``. The 1M radiation and
+  microphysics see the same prescribed droplet number (above). The
+  radiative **ice** radius on the 2M path follows the crystal number the
+  scheme carries, which comes mainly from ``znidetr`` and the ``zrid``
+  diagnosis of the ice-number sources above.
 - Clear-sky evaporation of decorrelated condensate (the radiation-side contract in
   ``mcica.in_cloud_path``) is owned by the 2M scheme's clear-sky evaporation step.
 

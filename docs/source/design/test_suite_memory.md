@@ -75,12 +75,17 @@ RSS on this workstation:
 | without the trim | 12.53 GB | 10.89 GB | 47.5 min |
 | with the trim | 7.81 GB | 6.83 GB | 43.1 min |
 
-Without it, the CI fast job (2 workers on a 7 GB runner) was SIGTERM'd at
-86-93 % (exit 143); dev at the time peaked at 12.47 GB in the same local
-measurement, so the retained heap, not any one test, was what brought the
-job to the ceiling. The remaining high-water marks come from single
-heavy tests (the ECHAM forced-mode budget checks and the 2M gradient tests),
-not from accumulation.
+Without it, the CI fast job was SIGTERM'd at 86-93 % (exit 143). That job
+runs 2 workers on a 4 vCPU / 16 GB runner (`nproc` prints 4 and `free -m`
+15989 MiB in the job logs; `-n auto` counts the 2 physical cores that psutil
+reports, not the 4 logical ones), so the workers share 16 GB. Dev at the time
+peaked at 12.47 GB on one worker in the same local measurement, and the two
+workers' peaks in the table sum to 23.4 GB without the trim and 14.6 GB with
+it, either side of the runner's 16 GB (the peaks need not coincide, so the
+sum is an upper bound on what the two hold at once). The retained heap, not
+any one test, was what brought the job to the ceiling. The remaining
+high-water marks come from single heavy tests (the ECHAM forced-mode budget
+checks and the 2M gradient tests), not from accumulation.
 
 Memory mappings are a second ceiling, independent of RSS. Every compiled XLA
 CPU executable holds several mappings, and the kernel caps a process at

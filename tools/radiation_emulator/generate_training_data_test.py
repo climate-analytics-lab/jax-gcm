@@ -154,40 +154,44 @@ class ColumnSourceTest(unittest.TestCase):
 
 
 class EffectiveRadiusTest(unittest.TestCase):
-    """Stored radii are the RESOLVED ones the labels were generated with.
+    """Stored radii are the emulator features the labels were generated with.
 
-    Three ways this can go wrong silently: storing the raw microphysical
-    values (zero outside cloud, so the stored feature describes a different
-    cloud from the RRTMGP label), leaving them out of the vertical
+    Three ways this can go wrong silently: storing a radius other than the
+    one handed to RRTMGP (the stored feature then describes a different cloud
+    from the label), leaving the radius inputs out of the vertical
     re-orientation (a radius profile upside down against its own pressure),
     and not reaching RRTMGP at all (labels independent of the feature).
     """
 
-    # effective_radius_liquid(cdnc_factor=1, land_fraction=0.5) and
-    # effective_radius_ice(0 g/m3) — what "not provided" resolves to.
-    LIQUID_FALLBACK = 11.0
-    ICE_FALLBACK = 83.8
+    # nn_emulator.emulator_radius_features' fill for a layer without the
+    # phase, at the labeller's cdnc_factor = 1.
+    LIQUID_FILL = 11.0
+    ICE_FILL = 83.8
 
-    def test_sweep_radii_are_resolved_and_strictly_positive(self):
+    @staticmethod
+    def _present(batch):
+        from jcm.physics.radiation.mcica import in_cloud_condensate
+        cf = batch["cloud_fraction"]
+        return (np.asarray(in_cloud_condensate(batch["cloud_water"], cf)) > 0,
+                np.asarray(in_cloud_condensate(batch["cloud_ice"], cf)) > 0)
+
+    def test_sweep_radii_are_features_and_strictly_positive(self):
         batch = _sweep_batch(seed=5, n_columns=256)
         r_liq, r_ice = batch["r_eff_liq"], batch["r_eff_ice"]
         self.assertEqual(r_liq.shape, batch["cloud_fraction"].shape)
         self.assertTrue(np.all(r_liq > 0.0), r_liq.min())
         self.assertTrue(np.all(r_ice > 0.0), r_ice.min())
 
-        cloudy = batch["cloud_fraction"] > 0.0
-        self.assertTrue(cloudy.any())
-        # In cloud the sampled microphysical draw survives untouched.
-        self.assertGreater(r_liq[cloudy].min(), 1.99)
-        self.assertLess(r_liq[cloudy].max(), 20.01)
-        self.assertGreater(r_ice[cloudy].min(), 9.99)
-        self.assertLess(r_ice[cloudy].max(), 150.01)
-        # Outside cloud the sweep provides nothing, so the diagnostic
-        # fallbacks fill in — the same ones RRTMGP would have applied.
-        np.testing.assert_allclose(
-            r_liq[~cloudy], self.LIQUID_FALLBACK, rtol=1e-5)
-        np.testing.assert_allclose(
-            r_ice[~cloudy], self.ICE_FALLBACK, rtol=1e-5)
+        liquid, ice = self._present(batch)
+        self.assertTrue(liquid.any() and ice.any())
+        # Where the phase is present the sampled draw survives untouched.
+        self.assertGreater(r_liq[liquid].min(), 1.99)
+        self.assertLess(r_liq[liquid].max(), 20.01)
+        self.assertGreater(r_ice[ice].min(), 9.99)
+        self.assertLess(r_ice[ice].max(), 150.01)
+        # Elsewhere the feature is the trained fill.
+        np.testing.assert_allclose(r_liq[~liquid], self.LIQUID_FILL, rtol=1e-5)
+        np.testing.assert_allclose(r_ice[~ice], self.ICE_FILL, rtol=1e-5)
 
     def _fake_trajectory_fields(self):
         """Build a surface-first "JCM output" — the order the source must undo."""
@@ -209,8 +213,10 @@ class EffectiveRadiusTest(unittest.TestCase):
             "cloud_water": profile([2.0e-4] * nlev),
             "cloud_ice": profile([1.0e-5] * nlev),
             "cloud_fraction": profile([0.5] * nlev),
-            "r_eff_liq": profile([4.0, 6.0, 8.0, 10.0]),
-            "r_eff_ice": profile([20.0, 40.0, 60.0, 80.0]),
+            # Droplet / crystal number per kg, distinct per level so a
+            # misoriented profile cannot pass.
+            "qnc": profile([2.0e8, 1.5e8, 1.0e8, 5.0e7]),
+            "qni": profile([1.0e3, 1.0e4, 5.0e4, 1.0e5]),
             "ozone_vmr": profile([5e-8, 1e-7, 5e-7, 2e-6]),
             "aod_profile": profile([0.05] * nlev),
             "ssa_profile": profile([0.9] * nlev),
@@ -230,10 +236,11 @@ class EffectiveRadiusTest(unittest.TestCase):
             dtype="datetime64[s]")
         return fields
 
-    def test_trajectory_radii_are_flipped_with_pressure(self):
+    def test_trajectory_radii_are_the_state_law_flipped_with_pressure(self):
+        fields = self._fake_trajectory_fields()
         with mock.patch.object(
             generate_training_data, "_load_trajectory_fields",
-            return_value=self._fake_trajectory_fields(),
+            return_value=fields,
         ):
             batch = trajectory_columns(
                 6, 4, np.random.default_rng(0), 3, 3,
@@ -242,14 +249,35 @@ class EffectiveRadiusTest(unittest.TestCase):
             )
         self.assertTrue(np.all(np.diff(batch["pressure_levels"], axis=1) > 0),
                         "pressure must land TOA-first")
-        # Every level is cloudy and carries a microphysical radius, so the
-        # resolved values are the file's own — reversed exactly like pressure.
+        # Independent expectation: the radiation's 2-moment radius law on the
+        # file's SURFACE-FIRST column, then reversed like pressure. Every
+        # level holds both phases, so every feature is a radius, not the fill.
+        import jax.numpy as jnp
+
+        from jcm.physics.radiation.cloud_optics import (
+            echam_cloud_effective_radii)
+        from jcm.physics.radiation.mcica import in_cloud_condensate
+        col = {k: fields[k][0, :, 0, 0] for k in (
+            "temperature", "pressure_levels", "cloud_water", "cloud_ice",
+            "cloud_fraction", "qnc", "qni")}
+        rho = generate_training_data._air_density(
+            col["pressure_levels"], col["temperature"])
+        r_liq, r_ice = echam_cloud_effective_radii(
+            in_cloud_condensate(jnp.asarray(col["cloud_water"]),
+                                jnp.asarray(col["cloud_fraction"])),
+            in_cloud_condensate(jnp.asarray(col["cloud_ice"]),
+                                jnp.asarray(col["cloud_fraction"])),
+            jnp.asarray(col["temperature"]), jnp.asarray(col["pressure_levels"]),
+            jnp.asarray(col["qnc"] * rho), jnp.asarray(col["qni"] * rho),
+            False, prognostic_number=True)
         np.testing.assert_allclose(
-            batch["r_eff_liq"], np.broadcast_to([10.0, 8.0, 6.0, 4.0], (6, 4)),
-            rtol=1e-6)
+            batch["r_eff_liq"],
+            np.broadcast_to(np.asarray(r_liq)[::-1], (6, 4)), rtol=1e-5)
         np.testing.assert_allclose(
             batch["r_eff_ice"],
-            np.broadcast_to([80.0, 60.0, 40.0, 20.0], (6, 4)), rtol=1e-6)
+            np.broadcast_to(np.asarray(r_ice)[::-1], (6, 4)), rtol=1e-5)
+        # Fewer droplets per unit water aloft here -> larger droplets.
+        self.assertTrue(np.all(np.diff(batch["r_eff_liq"], axis=1) < 0))
 
     def test_labeller_drives_rrtmgp_with_the_stored_radii(self):
         # At a fixed water path smaller droplets mean more cloud optical
