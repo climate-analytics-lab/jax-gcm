@@ -83,6 +83,9 @@ class TestFreedHeapIsReturned:
             import pytest
             return self._cls if kind is pytest.Class else None
 
+        def iter_markers(self, name):
+            return iter(())
+
     class _Parent:
         def __init__(self, nodeid):
             self.nodeid = nodeid
@@ -109,3 +112,72 @@ class TestFreedHeapIsReturned:
         conftest = sys.modules["conftest"]
         monkeypatch.setattr(conftest, "_malloc_trim", None)
         conftest._release_freed_heap()
+
+
+class TestPysesTestsHoldX64:
+    """pySES-backend tests run in float64 for their class, and only they do.
+
+    xdist's ``--dist loadscope`` dispatches the largest scopes first, so a
+    pySES class can be built after an unrelated test restored the session
+    default, and an unrelated class can be built straight after a pySES
+    test. Both hooks are exercised directly, whatever order this run has.
+    """
+
+    class _Item:
+        nodeid = "m.py::T::test"
+
+        def __init__(self, extras=()):
+            import pytest
+            self._marks = ([pytest.mark.requires_extra(*extras).mark]
+                           if extras else [])
+
+        def iter_markers(self, name):
+            return iter([m for m in self._marks if m.name == name])
+
+        def getparent(self, kind):
+            return None
+
+    def test_setup_turns_x64_on_for_a_pyses_test_only(self, monkeypatch):
+        import jax
+
+        conftest = sys.modules["conftest"]
+        monkeypatch.setattr(conftest, "_X64_BASELINE", False)
+        try:
+            jax.config.update("jax_enable_x64", False)
+            conftest.pytest_runtest_setup(self._Item(("mam4",)))
+            assert not jax.config.read("jax_enable_x64")
+            conftest.pytest_runtest_setup(self._Item(("pyses",)))
+            assert jax.config.read("jax_enable_x64")
+            conftest.pytest_runtest_setup(self._Item(("pyses", "mam4")))
+            assert jax.config.read("jax_enable_x64")
+        finally:
+            jax.config.update("jax_enable_x64", False)
+
+    def test_teardown_restores_the_default_leaving_a_pyses_run(
+            self, monkeypatch):
+        import jax
+
+        conftest = sys.modules["conftest"]
+        monkeypatch.setattr(conftest, "_X64_BASELINE", False)
+        monkeypatch.setattr(conftest, "_malloc_trim", None)
+        monkeypatch.setattr(conftest, "_MAX_GROWTH_BYTES", 2**62)
+        monkeypatch.setattr(conftest, "_rss_at_last_clear", 0)
+        pyses, other = self._Item(("pyses",)), self._Item()
+        try:
+            jax.config.update("jax_enable_x64", True)
+            conftest.pytest_runtest_teardown(pyses, self._Item(("pyses",)))
+            assert jax.config.read("jax_enable_x64")     # still in the run
+            conftest.pytest_runtest_teardown(pyses, other)
+            assert not jax.config.read("jax_enable_x64")
+            jax.config.update("jax_enable_x64", True)
+            conftest.pytest_runtest_teardown(pyses, None)  # end of queue
+            assert not jax.config.read("jax_enable_x64")
+        finally:
+            jax.config.update("jax_enable_x64", False)
+
+    def test_pin_exempts_only_pyses_tests(self, request):
+        conftest = sys.modules["conftest"]
+        assert "_pin_jax_x64" in request.fixturenames
+        assert conftest._builds_pyses_backend(self._Item(("pyses",)))
+        assert not conftest._builds_pyses_backend(self._Item(("cosp",)))
+        assert not conftest._builds_pyses_backend(self._Item())

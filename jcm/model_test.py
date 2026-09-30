@@ -492,6 +492,28 @@ class TestCalendarDurations(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not fixed"):
             model.run(save_interval='1 month', total_time='2 months')
 
+    def test_inexact_intervals_name_the_values(self):
+        """A step grid that does not tile is refused, quoting the numbers.
+
+        The timestep is not always the caller's own (a delegating config
+        adopts the dycore's), so the error names it rather than leaving the
+        user to find it.
+        """
+        model = self._build_held_suarez_model()   # 180-minute step
+        with self.assertRaisesRegex(
+                ValueError,
+                r"save_interval \(14400 s\).*model timestep \(10800 s\)"):
+            model.run(save_interval='4 hours', total_time='4 hours')
+        with self.assertRaisesRegex(
+                ValueError,
+                r"total_time \(14400 s\).*save_interval \(10800 s\)"):
+            model.run(save_interval='3 hours', total_time='4 hours')
+        # The observers' per-step axis applies the same rule to total_time.
+        with self.assertRaisesRegex(
+                ValueError,
+                r"total_time \(14400 s\).*model timestep \(10800 s\)"):
+            model._observer_step_count(None, '4 hours')
+
     def test_xarray_resample_pattern(self):
         """Calendar-aligned aggregation is exposed via xarray's standard
         `resample` API on `to_xarray()` — no special model-level helper.

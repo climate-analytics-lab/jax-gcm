@@ -9,11 +9,14 @@ import unittest
 
 import numpy as np
 import jax.numpy as jnp
+import pytest
 
 from jcm.dycore.pyses.dycore import PysesCamSEDycore
 from jcm.dycore.pyses.pyses_dycore_test import T63_TERRAIN  # noqa: F401
 
 import jcm.constants as c
+
+pytestmark = pytest.mark.requires_extra("pyses")
 
 
 def _dycore(nx=3, **kwargs):

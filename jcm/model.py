@@ -1311,10 +1311,17 @@ class Model:
         dt_seconds = int(self.dt_si.m)
         save_seconds = parse_duration_seconds(save_interval)
         total_seconds = parse_duration_seconds(total_time)
+        # The values are named because the timestep is not always the
+        # caller's: a delegating config (``run.time_step: null``) adopts the
+        # dycore's own ``dt_seconds``.
         if save_seconds % dt_seconds:
-            raise ValueError("save_interval must be exactly divisible by the model timestep.")
+            raise ValueError(
+                f"save_interval ({save_seconds} s) must be exactly divisible "
+                f"by the model timestep ({dt_seconds} s).")
         if total_seconds % save_seconds:
-            raise ValueError("total_time must be exactly divisible by save_interval.")
+            raise ValueError(
+                f"total_time ({total_seconds} s) must be exactly divisible "
+                f"by save_interval ({save_seconds} s).")
         inner_steps = save_seconds // dt_seconds
         outer_steps = total_seconds // save_seconds
         # Op-split saves end-of-step states (snapshot mode) or post-step
@@ -1408,7 +1415,9 @@ class Model:
         total_seconds = parse_duration_seconds(total_time)
         dt_seconds = int(self.dt_si.m)
         if total_seconds % dt_seconds:
-            raise ValueError("total_time must be divisible by the model timestep.")
+            raise ValueError(
+                f"total_time ({total_seconds} s) must be divisible by the "
+                f"model timestep ({dt_seconds} s).")
         return total_seconds // dt_seconds
 
     def prepare_observers(self, start_time, save_interval=10.0,

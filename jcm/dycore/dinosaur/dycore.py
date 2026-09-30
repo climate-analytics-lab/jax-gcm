@@ -996,6 +996,11 @@ class DinosaurDycore(DynamicalCore):
         this shares the surface-first vertical convention and CF metadata with
         every other backend rather than handing back the physics-internal
         TOA-first frame.
+
+        Not called in production: :class:`jcm.predictions.ModelPredictions`
+        builds the dinosaur trajectory itself. It does not yet handle a real
+        run's nested ``physics`` dict or keep the exact ``datetime64`` time
+        axis the protocol documents (#951).
         """
         # Avoid the otherwise-circular import (utils does not currently depend
         # on dycore, but a top-level import here would still be fine; deferred
