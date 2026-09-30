@@ -1253,6 +1253,53 @@ ECHAM physics saturation is ECHAM's Sonntag (1990)
   See :doc:`v2_to_v3` and :doc:`science/constants`.
 
 
+Tiedtke-Nordeng takes ECHAM's decisions
+"""""""""""""""""""""""""""""""""""""""
+
+- The Tiedtke-Nordeng scheme decides whether a column convects, which plume
+  it carries, where the plume stops and where it rains exactly as ECHAM6.3's
+  ``cumastr``/``cuasc`` do (#968). The ascent ends at the first interface
+  whose test fails (the ``klab = 0`` latch, ``mo_cuascent.f90:294``) instead
+  of letting a sigmoid-weighted fraction of the plume climb on; a plume that
+  passes no interface above a cloud base at ``klevm1`` leaves the column
+  non-convective; the precipitation onset is ECHAM's ``zdnoprc`` switch, at
+  the land depth wherever the column holds land. There is no CAPE trigger:
+  a surface plume needs ``cumastr``'s ``zlo1`` gate, a sub-cloud layer that
+  gains moisture and a cloud-base parcel wetter than its environment, and
+  its first-guess flux is ``zdqpbl/(g·zqumqe)`` of the whole pre-convection
+  moisture tendency, dynamics included, with no floor at the surface
+  evaporation. Deep and shallow are ECHAM's moisture-convergence test. The
+  ``cubase`` and ``cubasmc`` seeds carry ECHAM's static energy (the
+  ``cubase`` parcel is about 0.13 K colder per g/kg of humidity drop between
+  the lowest two levels), a failed first ascent leaves no surface plume for
+  the second, and a downdraft whose level of free sinking lies above the
+  final plume's top is cancelled, as in ``cuflx``.
+- Each decision's derivative is that of a logistic surrogate
+  (``tiedtke_nordeng/switches.py``, :doc:`design/surrogate_gradients`); the
+  value does not depend on the widths.
+- ECHAM6.3's compiled convection, run on 600 columns (whole-model RCE states,
+  and the same states under a synthetic ascent or convergence that exercise
+  the mid-level and deep plumes), is the reference
+  (``jcm/data/test/echam_cumastr_reference``): with ECHAM's physical
+  constants jcm takes its decision on every column and matches its cloud-base
+  flux, precipitation and tendencies to 2e-12. jcm keeps its own constants,
+  which change 53 of the 600 decisions, 51 of them through ``rv`` (461.0
+  against 461.51); on the whole-model RCE column's days 40-80 states the port
+  then convects in 10.9 % of the steps where ECHAM convects in 24.3 %.
+- **Breaking:** ``ConvectionParameters`` loses ``trigger_cape``,
+  ``smooth_trigger_j`` and ``smooth_rh``; ``smooth_term_buoy``,
+  ``smooth_term_mf``, ``smooth_term_cond``, ``smooth_precip_pa`` and
+  ``cu_dqcv_width`` become the static surrogate widths
+  ``ascent_buoyancy_width`` (now in K), ``ascent_mass_flux_width``,
+  ``ascent_condensate_width``, ``precip_onset_width`` and
+  ``deep_convergence_width``, joined by ``sub_cloud_supply_width`` and
+  ``cloud_base_excess_width``; ``ConvectionParameters`` is a ``flax.struct``
+  dataclass; ``flux_tendencies.mass_flux_closure_blend`` is removed. See
+  :ref:`v3-tiedtke-parameters`.
+- **Changes results** for every ECHAM configuration. In the whole-model RCE
+  column, Tiedtke convects in 10.9 % of the days 40-80 steps and its
+  precipitation is 1.3e-3 of 0.30 mm/d.
+
 Known limitations
 ^^^^^^^^^^^^^^^^^
 
