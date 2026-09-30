@@ -1250,6 +1250,80 @@ class TestSweepGradients:
         for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b)):
             np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
 
+    def test_float32_derivative_where_the_precipitation_nearly_cancels(self):
+        """A float32 column whose lowest-level ``zpresum`` is ~1e-19 keeps a finite gradient.
+
+        Ice deposited aloft falls as snow that sublimates to a round-off
+        remainder (-2e-18 kg/m²/s), which nearly cancels the ``EPSILON``-floor
+        ice flux reaching the lowest level. ECHAM discards the precipitating
+        fraction there (``zpresum <= cqtmin``, F:1196); the division that forms
+        it is guarded by that same condition, since between the dtype's tiny
+        and ``cqtmin`` its reverse-mode rule ``-(0·x)·zpresum**-2`` overflows
+        to ``0·inf`` in float32.
+        """
+        with jax.enable_x64(False):
+            dtype = jnp.float32
+            nlev = 47
+            p = jnp.linspace(1000.0, 100000.0, nlev).astype(dtype)
+            t = jnp.linspace(200.0, 295.0, nlev).astype(dtype)
+            # e_s·rd/rv/p over water, formed in float32 as the case was found.
+            esw = _es_and_derivative(t, ice=False)[0]
+            q = (0.55 * jnp.minimum(esw * c.rd / c.rv / p, 0.01)).astype(dtype)
+            dp = jnp.full(nlev, 99000.0 / nlev, dtype)
+            rho = p / (c.rd * t)
+            dz = dp / (rho * c.grav)
+            z = jnp.zeros(nlev, dtype)
+            n = jnp.full(nlev, 8e7, dtype)
+
+            def loss(t_):
+                tend, st = run_sweep(t_, q, z, z, z, z, z, p, dp, rho, dz, n, DT)
+                return st.precip_rain + st.precip_snow + jnp.sum(tend.dtedt)
+
+            # The column reaches the case: some level's zpresum lies between
+            # the float32 tiny and 1e-18 (formed as the sweep forms it).
+            _, st = run_sweep(t, q, z, z, z, z, z, p, dp, rho, dz, n, DT)
+            loc = {k: np.asarray(v, np.float64) for k, v in st.echam_locals.items()}
+            zmass_ = np.asarray(dp, np.float64) / (DT * c.grav)
+            presum = loc["zrfl_melt"] + loc["zsfl_melt"] + zmass_ * (
+                loc["zrpr"] + loc["zspr"] + loc["zsacl"])
+            presum[-1] += loc["zxiflux_sed"][-1]
+            assert np.any((presum > np.finfo(np.float32).tiny) & (presum < 1e-18))
+            g = jax.grad(loss)(t)
+            assert np.all(np.isfinite(np.asarray(g)))
+
+    def test_float32_derivative_under_a_vanishing_precipitating_fraction(self):
+        """A tiny incoming ``zclcpre`` with no incoming rain or snow: finite in float32.
+
+        ``1/zclcpre`` reaches only products with the incoming fluxes (3.2,
+        3.3 and the section-7 contents); where both fluxes are zero its value
+        is discarded, and its division is guarded there, so a precipitating
+        fraction of 1e-25 (a weighted mean that underflowed above) does not
+        overflow the division's reverse-mode rule.
+        """
+        with jax.enable_x64(False):
+            dtype = jnp.float32
+            cfg = jax.tree.map(
+                lambda x: x.astype(dtype)
+                if jnp.issubdtype(jnp.result_type(x), jnp.floating) else x,
+                MicrophysicsParameters.default())
+            d = dict(tm1=285.0, qm1=0.003, dtemp=0.0, dq=0.0, xlp=0.0, xip=0.0,
+                     paclc=0.3, p=90000.0, dp=2000.0, rho=1.1, dz=180.0,
+                     cdnc=8e7, cdnc_aut=8e7, pcair=1010.0)
+            inp = LevelInputs(
+                **{k: jnp.asarray(v, dtype) for k, v in d.items()},
+                zauloc_off=jnp.asarray(False), top=jnp.asarray(False),
+                bottom=jnp.asarray(False))
+
+            def total(zclcpre_in):
+                zero = jnp.zeros((), dtype)
+                new_carry, out = _sweep_level((zero, zero, zclcpre_in, zero), inp,
+                                              cfg, jnp.asarray(DT, dtype))
+                return jnp.sum(jnp.stack(new_carry)) + out.ztte + out.zqvte
+
+            for zclcpre in (1e-25, 1e-10):
+                g = jax.grad(total)(jnp.asarray(zclcpre, dtype))
+                assert np.isfinite(float(g)), zclcpre
+
     def test_parameter_gradients_live(self):
         base = MicrophysicsParameters.default()
         g = jax.grad(_precip_of)(base)

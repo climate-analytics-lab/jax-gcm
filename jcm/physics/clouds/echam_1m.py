@@ -901,7 +901,14 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     # Only below a precipitating level (nclcpre, F:442), on the incoming
     # fluxes after melting, at the step-start (ptm1, pqm1).
     has_pre = zclcpre > 0.0
-    zclcpre_inv = jnp.where(has_pre, 1.0 / jnp.where(has_pre, zclcpre, 1.0), 0.0)
+    # 1/zclcpre reaches the level only through products with the incoming
+    # rain or snow flux (3.2, 3.3 and the contents of section 7), so its value
+    # is discarded where neither is positive. The division is guarded by that
+    # condition too: a tiny positive zclcpre (a weighted mean of 7.3 above can
+    # underflow to ~1e-25) would otherwise overflow the reverse-mode rule of
+    # the division to 0·inf in float32 where the value is not used.
+    inv_used = has_pre & ((zrfl > 0.0) | (zsfl > 0.0))
+    zclcpre_inv = jnp.where(inv_used, 1.0 / jnp.where(inv_used, zclcpre, 1.0), 0.0)
 
     # 3.2 Lin et al. (1983), over ice saturation from the mixed table (F:451-506).
     zesi = jnp.minimum(ua_m1 * zpapm1_inv, 0.5)
@@ -1177,14 +1184,19 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     # precipitation is taken to come from this level's cloud (F:1129, 1177).
     zclcpre = jnp.where(zpredel - zpretot >= 0.0, zclcaux, zclcpre)
     zpresum = zpretot + zpredel
-    tiny_sum = zpresum < tiny
+    # ECHAM sets zclcpre to 0 where zpresum <= cqtmin (F:1148, 1196). The
+    # division is guarded by that same condition, not only by the dtype's
+    # tiny: between the two the quotient is discarded, but its reverse-mode
+    # rule -(0·x)·zpresum**-2 overflows to 0·inf in float32.
+    discard = config.cqtmin - zpresum >= 0.0
+    no_division = discard | (zpresum < tiny)
     zclcpre1 = jnp.where(
-        tiny_sum, 0.0,
+        no_division, 0.0,
         (zclcaux * zpredel + zclcpre * zpretot)
-        / jnp.where(tiny_sum, 1.0, zpresum))
+        / jnp.where(no_division, 1.0, zpresum))
     zclcpre1 = jnp.maximum(zclcpre, zclcpre1)
     zclcpre1 = jnp.minimum(1.0, jnp.maximum(0.0, zclcpre1))
-    zclcpre = jnp.where(config.cqtmin - zpresum >= 0.0, 0.0, zclcpre1)
+    zclcpre = jnp.where(discard, 0.0, zclcpre1)
 
     rain_evap_flux = zmass * zevp
     snow_sub_flux = zmass * zsub
