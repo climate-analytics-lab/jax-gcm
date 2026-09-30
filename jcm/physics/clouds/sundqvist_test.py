@@ -8,7 +8,7 @@ from .sundqvist import (
     saturation_specific_humidity, calculate_cloud_fraction,
     condensation_evaporation, critical_relative_humidity, _qs_and_dqs_dt,
 )
-from jcm.constants import alhc, cpd
+import jcm.constants as c
 from jcm.testing import check_gradients
 
 
@@ -63,9 +63,9 @@ class TestCondensationLinearisation:
         dT_per_step = float(dT) * 1800.0
 
         # Naive (pre-fix) ΔT = L/cp · q_excess
-        naive_dT = float(alhc / cpd * (q - qs))
+        naive_dT = float(c.alhc / c.cpd * (q - qs))
         # Expected damping factor at this T
-        damping = float(1.0 + alhc / cpd * dqs_dt)
+        damping = float(1.0 + c.alhc / c.cpd * dqs_dt)
 
         # Post-fix ΔT must be no larger than naive/damping × 1.2 (allow
         # 20 % slack for the cloud-fraction weighting + two-pass cleanup).
@@ -156,8 +156,8 @@ class TestCondensationLinearisation:
         )
         delta_T = float(dT) * 1800.0
         delta_q = float(dq) * 1800.0
-        h_change = cpd * delta_T + alhc * delta_q
-        h_baseline = cpd * float(T) + alhc * float(q)
+        h_change = c.cpd * delta_T + c.alhc * delta_q
+        h_baseline = c.cpd * float(T) + c.alhc * float(q)
         rel = abs(h_change) / h_baseline
         assert rel < 1e-2, f"moist static energy drift {rel*100:.3f} %"
 
@@ -545,6 +545,19 @@ class TestSundqvistGradients:
                 tuple(jnp.asarray(a, jnp.float64)
                       for a in (temperature, humidity, pressure)),
                 rtol=1e-3)
+
+    def test_cloud_fraction_gradients_float32(self):
+        """The same column in float32, the model's working precision.
+
+        rtol 2e-3: the best float32 rung sits ~1.5e-3 from consistency
+        (secant round-off at this column's curvature), twice the float64
+        check's 1e-3.
+        """
+        temperature, humidity, pressure, _ = self._column()
+        config = CloudParameters.default()
+        check_gradients(
+            lambda t, q, p: calculate_cloud_fraction(t, q, p, 1.0e5, config),
+            (temperature, humidity, pressure), rtol=2e-3)
 
     def test_condensation_gradients_column_and_block_agree(self):
         """``condensation_evaporation`` is elementwise, so both shapes check.

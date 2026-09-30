@@ -239,6 +239,19 @@ _ONE_MOMENT_SATURATION_CANCELLATION = (
     "and keeps a real tolerance. (#843)"
 )
 
+_COVER_ICE_MEMORY_SWITCH = (
+    "jcm/physics/clouds/sundqvist.py::_qs_cover — the cover's saturation "
+    "switches from the water to the ice fit where the cell's cloud ice "
+    "exceeds csecfrl = 5e-6 kg/kg (ECHAM mo_cover.f90's lo2, a deliberate hard "
+    "switch). The stable column carries no cloud ice, so the zero qi leaf "
+    "takes an absolute step, and along the seed-0 direction the plus side "
+    "crosses 5e-6 at the cold levels between eps = 2e-6 and 4e-6: "
+    "cover_relative_humidity jumps by 0.03-0.08 there (levels 30-35) and the "
+    "plus secant grows as jump/eps while the minus secant stays at -4884. "
+    "Finiteness holds; there is no two-sided reference across a switch, "
+    "which the cover's second ice condition, T < cthomi = 238.15 K, shares."
+)
+
 _MACV2_PER_BAND_RATIO_NOISE = (
     "jcm/physics/aerosol/macv2_sp.py:129-136 — on the RRTMGP band structure "
     "(14 SW bands) the term publishes per-band ssa_sw_per_band / "
@@ -355,24 +368,11 @@ _CHECKS: dict = {
     ("macv2_sp_aerosol", "stable"): _Check(
         xfail_reference=_MACV2_PER_BAND_RATIO_NOISE),
 
-    # ``sundqvist_cloud_fraction`` at both points takes the default difference
-    # reference. The stable column carried a strict xfail until #677: _qs_cover's
-    # ice-memory phase switch (es_ice vs es_water at t_ice = 238.15 K, a
-    # deliberate hard discontinuity — kept, see ``sundqvist.py`` _qs_cover) puts
-    # a jump in cloud_fraction where a level crosses that boundary, and along
-    # this test's fixed direction (seed 0) it defeated the central difference:
-    # the secant grew as jump/eps until the step no longer crossed t_ice, by
-    # which point it was float32 cancellation noise, so no rung was both past the
-    # jump and above the noise. #677 did not touch the switch, but its
-    # single-level tie-break and surface-interface height changed the
-    # stable-column cloud_fraction field enough that the seed-0 projection now
-    # resolves a converged reference in that gap (below the crossing step, above
-    # the noise) which AD matches. The reference is genuine but delicate: the
-    # switch is unchanged, so along other directions the jump can still defeat a
-    # difference (verified: the cell passes at some seeds and not others on both
-    # dev and this branch). If a future change re-crosses the boundary at seed 0
-    # this fails loudly rather than silently — the honest signal for a delicate
-    # reference — at which point it earns back an xfail naming the switch.
+    # ``sundqvist_cloud_fraction`` at the stable column has no central
+    # difference along the seed-0 direction: see ``_COVER_ICE_MEMORY_SWITCH``.
+    # The tropical column takes the default difference reference.
+    ("sundqvist_cloud_fraction", "stable"): _Check(
+        xfail_reference=_COVER_ICE_MEMORY_SWITCH),
 
     # TTE-TKE, the 1M microphysics and Hines each cross an internal activation
     # boundary under this direction, and none of them has a central difference

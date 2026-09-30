@@ -2802,6 +2802,19 @@ class TestSchemeGradients2M:
             check_gradients(self._scheme_fn(column), args,
                             rtol=1e-4, seed=seed, adjoint_rtol=1e-3)
 
+    def test_column_gradients_float32(self):
+        """The same column in float32, the model's working precision.
+
+        rtol 3e-2: the float32 secant bottoms out at the smallest rung,
+        ~2 % from AD, which the float64 check above shows is round-off.
+        """
+        column = self._column()
+        args = tuple(column[k] for k in (
+            "temperature", "humidity", "qc", "qi", "qnc", "qni",
+            "cloud_fraction", "air_density"))
+        check_gradients(self._scheme_fn(column), args,
+                        rtol=3e-2, seed=0, adjoint_rtol=1e-3)
+
     def test_gradients_are_finite_at_degenerate_operating_points(self):
         """Zero TKE, a clear column and zero droplet number stay finite.
 
