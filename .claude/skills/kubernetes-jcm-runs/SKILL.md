@@ -129,6 +129,31 @@ when the health gate trips, so Kubernetes would mark a truncated year
 `Complete`. `mkrun.py` therefore checks the health verdict *and* the day
 count reached, and fails the Job if either falls short.
 
+### Release-validation members and retune arms
+
+Do not hand-build these from `mkrun.py`'s output. The release matrix
+(`tools/release_validation/matrix.yaml`) and one-member arms of it (the
+#682 retune) go through the release launcher, which builds the same Job
+through `mkrun.job_manifest()` — the importable engine behind `mkrun.py` —
+from the matrix's own override list:
+
+```bash
+python tools/release_validation/launch.py --site nautilus --submit    # 7 members
+python tools/release_validation/launch.py --site nautilus --members echam-jam-t63-l47 \
+    --days 60 --init <state> --suffix cape150 \
+    --extra +physics.convection.trigger_cape=150.0 --submit            # one arm
+python tools/release_validation/launch.py --site nautilus --fetch --members <m> --tag <t>
+```
+
+It pins `jcm` to a pushed SHA, installs that commit's own requirements in
+the pod, records each launch so `--resume` re-emits it unchanged, and has
+the pod refuse a run directory that belongs to a different launch. Workflow,
+the arm recipe and the fetch/score/ingest commands:
+`tools/release_validation/README.md` ("Workflow on Nautilus").
+
+A new door that keeps a run's output should call `mkrun.job_manifest()` too,
+not copy its YAML or rewrite its `jcm.main` line.
+
 ## Watching and collecting
 
 ```bash
@@ -145,13 +170,19 @@ python $S/fetch_reports.py --from-pvc # once a job's TTL has expired
 mount. `--from-pvc` falls back to a throwaway pod that mounts the reports
 volume, which is what you need after the 24 h TTL removes the Job.
 
+A production run's directory comes off the runs volume with
+`fetch_run.py <run> <dest>`: a read-only CPU reader pod and a `tar` stream
+through `kubectl exec`, incremental and size-checked, checkpoints skipped
+unless `--with-checkpoints`. The reader pod is always deleted.
+
 **A pod that vanished is not a pod that succeeded.** Check the Job's
 `COMPLETIONS`, and read the report — the harness refuses to quote a rate for
 a truncated or NaN'd run, so a report with no throughput line means the run
 failed even if Kubernetes says `Completed`.
 
-For anything sizeable, push to object storage from a pod rather than pulling
-multi-GB netCDF through `kubectl cp`, which is slow and has no resume.
+`kubectl cp` is slow and has no resume, so do not pull multi-GB netCDF with
+it; `fetch_run.py` (above) resumes per file, and for bulk well beyond a run's
+chunk files object storage pushed from a pod is still the faster route.
 
 ---
 
