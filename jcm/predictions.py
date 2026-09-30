@@ -150,29 +150,20 @@ class ModelPredictions:
         """Return *traced*, flagging a live/compiled parameter divergence.
 
         A mismatch means the caller edited a parameter in place after the
-        model was first compiled with a different value. jcm binds physics
+        physics was first compiled with a different value. jcm binds physics
         parameters when the physics is first traced (``Model`` is a static
-        jit argument), and whether a later edit reaches a later run depends
-        on which of JAX's compilation caches that run hits (#735), so the
-        results are unreliable either way. That is a scientific error the
-        user needs told about, not something for provenance to paper over
-        by quietly recording the compiled values and moving on.
+        jit argument), and a later edit is not reliably seen by a later run
+        (#735), so the results are unreliable either way. The record says so
+        rather than quietly holding the compiled values; the user is told
+        by the ``UserWarning`` :meth:`jcm.model.Model.run_from_state_with_carry`
+        raises before such a run starts, once per changed field.
         """
         live = provenance.describe_params(physics)
         if live == traced:
             return traced
-        logger.warning(
-            "provenance: the live parameters differ from those this model "
-            "was first compiled with. jcm binds physics parameters when the "
-            "physics is first traced (Model._run_from_state takes `self` as "
-            "a static argument), and an in-place parameter change afterwards "
-            "may or may not reach a later run, depending on JAX's "
-            "compilation caches. Results after such a change are therefore "
-            "unreliable, whatever this record says. Rebuild the Model to "
-            "change parameters.")
         flagged = dict(traced)
         flagged["live_parameters_differ_from_compiled"] = (
-            "parameters were edited in place after this model was first "
+            "parameters were edited in place after this physics was first "
             "compiled; the record holds the first-compiled values and the "
             "run's results are unreliable")
         return flagged

@@ -25,6 +25,9 @@ from dinosaur.scales import units
 from functools import partial
 import logging
 import math
+import os
+import sys
+import weakref
 
 from jcm import profiling, provenance
 from jcm.date import (
@@ -133,6 +136,77 @@ def _run_window_seconds(initial_time: jdt.Datetime, total_seconds: int):
     start = (int(initial_time.delta.days) * SECONDS_PER_DAY
              + int(initial_time.delta.seconds))
     return float(start), float(start + int(total_seconds))
+
+
+#: The parameter record of each physics object's first compilation, by the
+#: grid and precision it compiled for, shared by every Model built on that
+#: object. With per-term checkpointing (``checkpoint_terms``, the default for
+#: SPEEDY and ECHAM) ``jax.checkpoint`` caches each term's trace per term
+#: object and input shapes, so a second Model built on an already-compiled
+#: physics at the same grid and precision reuses those traces and computes
+#: with the first compilation's parameter constants: measured at T21L8 SPEEDY,
+#: a new Model on the same physics object after an in-place ``trvdi`` edit
+#: reproduced the first model's run bit-for-bit. The record of what ran, and
+#: the comparison that warns about an edit, therefore belong to the physics
+#: object there. Without per-term checkpointing, or at another grid or
+#: precision, a new Model retraces with the live values and keeps a record of
+#: its own. (A Model whose inputs still differ in structure — another forcing
+#: set — retraces too; for it the shared record errs towards reporting an
+#: edit as possibly unapplied, which is what the warning says.) Weak keys, so
+#: a record lives no longer than its physics object.
+_FIRST_COMPILED_PARAMS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _compile_signature(model) -> tuple:
+    """Return the grid and precision that decide whether cached traces fit."""
+    shape = getattr(model.coords, "nodal_shape", None)
+    return (tuple(shape) if shape is not None else None,
+            bool(jax.config.read("jax_enable_x64")))
+
+
+def _first_compiled_params(physics, signature, *, record: bool) -> dict | None:
+    """Return the parameter record of ``physics``' first compilation.
+
+    With ``record=True`` (at the end of a trace) a physics compiled for the
+    first time at ``signature`` is described and remembered; with
+    ``record=False`` this only looks. A physics that does not checkpoint its
+    terms, or cannot be a weak dictionary key, keeps no shared record.
+    """
+    by_signature = None
+    if getattr(physics, "checkpoint_terms", False):
+        try:
+            by_signature = (_FIRST_COMPILED_PARAMS.setdefault(physics, {})
+                            if record else _FIRST_COMPILED_PARAMS.get(physics, {}))
+        except TypeError:
+            pass
+    if by_signature is None:
+        return provenance.describe_params(physics) if record else None
+    known = by_signature.get(signature)
+    if known is not None or not record:
+        return known
+    known = provenance.describe_params(physics)
+    by_signature[signature] = known
+    return known
+
+
+def _outside_jcm_stacklevel() -> int:
+    """``stacklevel`` that attributes a warning to the caller's own code.
+
+    Counts from the function that calls ``warnings.warn`` up to the first
+    frame outside the jcm package (test modules count as the caller's code),
+    so the warning names the user's call site and Python's once-per-location
+    filter keeps separate call sites apart.
+    """
+    package = os.path.dirname(os.path.abspath(__file__)) + os.sep
+    # Frame 1 is the function calling ``warnings.warn`` (stacklevel 1), so
+    # its caller, frame 2, is stacklevel 2.
+    frame, level = sys._getframe(2), 2
+    while frame is not None:
+        name = frame.f_code.co_filename
+        if not name.startswith(package) or name.endswith("_test.py"):
+            break
+        frame, level = frame.f_back, level + 1
+    return level
 
 
 def _neutralize_mesh_typing(physics) -> None:
@@ -557,20 +631,25 @@ class Model:
             raise ValueError("time_step must be representable as whole seconds.")
 
         self.observers = tuple(observers)
-        # The physics parameter values captured at this model's FIRST trace
-        # (#732), and never overwritten afterwards. They cannot be read off
-        # the live module at the model-to-user handoff: ``self`` is a static
-        # argument to ``_run_from_state``, so the parameters are compiled
-        # into the executable as constants, and the physics is compiled once
-        # and reused from then on. Nor can a later trace refresh them — an
-        # outer retrace does not necessarily re-read the parameters, because
-        # the physics step hits its own compilation cache and its
-        # ``__call__`` is not re-entered at all (measured at T21L8: editing
-        # ``trvdi`` in place after a first run, then running again with a
-        # different ``total_time``, reproduced the unedited model's
-        # temperature field bit-for-bit). The first trace's values are
-        # therefore the ones the model actually computes with.
+        # The physics parameter values this model's physics was FIRST
+        # compiled with (#732), and never overwritten afterwards. They cannot
+        # be read off the live module at the model-to-user handoff: ``self``
+        # is a static argument to ``_run_from_state``, so the parameters are
+        # compiled into the executable as constants, and the physics is
+        # compiled once and reused from then on. Nor can a later trace
+        # refresh them — an outer retrace does not necessarily re-read the
+        # parameters, because the physics step hits its own compilation cache
+        # and its ``__call__`` is not re-entered at all (measured at T21L8:
+        # editing ``trvdi`` in place after a first run, then running again
+        # with a different ``total_time``, reproduced the unedited model's
+        # temperature field bit-for-bit). A Model built on the same physics
+        # object at the same grid reuses that cache, so the record is then
+        # the physics object's (``_FIRST_COMPILED_PARAMS``).
         self._traced_params: dict | None = None
+        # Parameter keys already reported as changed after compilation, so
+        # the warning names each field once per Model rather than once per
+        # run of a sweep loop.
+        self._reported_changed_params: set[str] = set()
         if len({obs.name for obs in self.observers}) != len(self.observers):
             raise ValueError("Observer names must be unique.")
         if self.observers:
@@ -1241,6 +1320,76 @@ class Model:
 
         return _integrate_fn
 
+    def _warn_on_changed_parameters(self) -> None:
+        """Warn when a physics parameter was changed after its physics compiled.
+
+        ``_run_from_state`` is jitted with ``self`` static, so the parameters
+        are constants in the executable compiled at the physics' first run.
+        An in-place edit afterwards is not reliably seen: measured at T21L8
+        SPEEDY, editing ``trvdi`` after a first run left the next run's
+        temperature bit-identical, with the same arguments, after a retrace,
+        and in a new Model built on the same physics object at the same grid
+        alike, because each physics term's trace is cached (see
+        ``_FIRST_COMPILED_PARAMS``).
+        A parameter sweep that edits one physics object would therefore run
+        the first value every time without any error (#735).
+
+        The change is inadvisable but not invalid, so it is reported, not
+        refused or rolled back: one ``UserWarning`` per changed field per
+        Model, raised before the run so a sweep hears it on its second
+        iteration, naming the fields and pointing at the working approach
+        (build the physics anew with the changed value, and a Model from
+        it). Making the edit take effect instead is not a small change:
+        keying the compile cache on parameter contents would only retrace,
+        which the measurement above shows reuses the stale term traces, so it
+        would need the parameters threaded through the jit as traced
+        arguments, which changes the compiled hot path. The comparison is the
+        one the provenance record already makes (first-compiled values
+        against the live module, a few milliseconds per run), so reporting
+        costs nothing measurable. It covers the physics parameters the record
+        holds (``nnx.Param`` and knob-shaped ``nnx.Variable`` fields); other
+        attributes a static ``self`` also bakes in (the dycore, terrain,
+        timestep) are not watched, and the same rule applies to them.
+        """
+        traced = self._traced_params
+        if traced is None:
+            # This Model has not compiled, but another may have compiled the
+            # same physics object, whose traces this one would reuse.
+            traced = _first_compiled_params(
+                self.physics, _compile_signature(self), record=False)
+        if not traced:
+            # Nothing compiled yet (the first run binds whatever is live
+            # then), or the trace-time capture failed and there is nothing
+            # to compare against.
+            return
+        try:
+            live = provenance.describe_params(self.physics)
+        except Exception:  # noqa: BLE001 — provenance never fails a run
+            return
+        missing = object()
+        changed = sorted(
+            key for key in set(live) | set(traced)
+            if live.get(key, missing) != traced.get(key, missing))
+        new = [key for key in changed
+               if key not in self._reported_changed_params]
+        if not new:
+            return
+        self._reported_changed_params.update(new)
+        import warnings
+
+        warnings.warn(
+            f"Physics parameters were changed in place after this physics was "
+            f"compiled: {', '.join(new)}. Physics parameters are compiled into "
+            "a run as constants the first time the physics runs "
+            "(Model._run_from_state takes the model as a static jit "
+            "argument), so this run, like any later run of a Model built on "
+            "the same physics object, is not guaranteed to see the change and "
+            "can keep computing with the first-compiled values; its "
+            "provenance record says so (live_parameters_differ_from_compiled). "
+            "To run with changed parameters, build the physics anew with them "
+            "(e.g. speedy_physics(parameters=...)) and a new Model from it.",
+            UserWarning, stacklevel=_outside_jcm_stacklevel())
+
     @partial(jax.jit, static_argnums=(0, 6, 7, 8, 10, 11))
     def _run_from_state(self,
                         initial_state,
@@ -1265,23 +1414,6 @@ class Model:
         can continue a run across API boundaries without re-seeding (e.g.
         :meth:`Model.resume`).
         """
-        # Capture the parameters HERE, at trace time, and only the FIRST
-        # time (#732). ``self`` is a static argument, so the parameter
-        # values are baked into this executable as constants; reading the
-        # live module at the model-to-user handoff would stamp a trajectory
-        # with values that did not produce it. The first trace is also the
-        # only trace that binds them — a later outer retrace re-enters this
-        # function but reuses the already-compiled physics — so the first
-        # record is the record of what every run of this model computes.
-        if self._traced_params is None:
-            try:
-                self._traced_params = provenance.describe_params(self.physics)
-            except Exception:  # noqa: BLE001 — provenance never fails a run
-                logger.warning(
-                    "provenance: trace-time parameter capture failed",
-                    exc_info=True)
-                self._traced_params = {}
-
         dt_seconds = int(self.dt_si.m)
         save_seconds = parse_duration_seconds(save_interval)
         total_seconds = parse_duration_seconds(total_time)
@@ -1326,6 +1458,25 @@ class Model:
             times=times,
             time_bounds=time_bounds,
         )
+        # Capture the parameters HERE, at trace time, and only the FIRST
+        # time the physics compiles (#732). ``self`` is a static argument, so
+        # the parameter values are baked into this executable as constants;
+        # reading the live module at the model-to-user handoff would stamp a
+        # trajectory with values that did not produce it. The first trace is
+        # also the only trace that binds them — a later outer retrace, or a
+        # new Model on the same physics object at the same grid, reuses the
+        # already-traced physics (see ``_FIRST_COMPILED_PARAMS``). Captured
+        # at the end of the traced body, so a trace that fails first (a bad
+        # ``total_time``) binds nothing and records nothing.
+        if self._traced_params is None:
+            try:
+                self._traced_params = _first_compiled_params(
+                    self.physics, _compile_signature(self), record=True)
+            except Exception:  # noqa: BLE001 — provenance never fails a run
+                logger.warning(
+                    "provenance: trace-time parameter capture failed",
+                    exc_info=True)
+                self._traced_params = {}
         return (final_dycore_state, final_physics_state, final_time, final_step,
                 predictions, observations, snapshots)
 
@@ -1565,6 +1716,7 @@ class Model:
             raise ValueError(
                 "run_from_state_with_carry requires initial_time and "
                 "initial_step; pass a complete RunState clock.")
+        self._warn_on_changed_parameters()
         parse_duration_seconds(save_interval)
         total_seconds = parse_duration_seconds(total_time)
         # Fail loudly on the CONCRETE run forcing before compiling — the

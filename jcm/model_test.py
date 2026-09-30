@@ -936,8 +936,8 @@ class TestParameterBindingAndCompilation(unittest.TestCase):
     every physics term and its parameters are constants inside the
     compiled executable, bound when the physics is first traced. Editing
     a live model's parameters afterwards is not reliably picked up by a
-    later run (#735, and the warning ``ModelPredictions`` raises when it
-    sees it). The supported way to vary a parameter is therefore to build
+    later run (#735), and the next run warns that it may not be. The
+    supported way to vary a parameter is therefore to build
     a Model per parameter set — inside one jitted function, so the
     rebuild is a trace-time cost paid once instead of a recompile per
     iteration. These tests pin that pattern, which is what a sensitivity
@@ -1015,6 +1015,181 @@ class TestParameterBindingAndCompilation(unittest.TestCase):
 
         preds = model.run(save_interval=1 / 48.0, total_time=1 / 24.0)
         self.assertAlmostEqual(preds.params[key], 2.0, places=6)
+
+    @staticmethod
+    def _edit_vdiff(model, **fields):
+        term = next(t for t in model.physics.terms
+                    if t.name == "speedy_vertical_diffusion")
+        term.params.set_value(term.params.get_value().replace(
+            **{k: jnp.array(v) for k, v in fields.items()}))
+
+    @staticmethod
+    def _run_recording(model, total_time):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            preds = model.run(save_interval=total_time, total_time=total_time)
+        messages = [str(w.message) for w in caught
+                    if "changed in place after this physics was compiled"
+                    in str(w.message)]
+        return preds, messages
+
+    def test_an_edit_after_compiling_warns_once_per_field(self):
+        """An in-place edit after compilation is reported (#735), once a field.
+
+        The edit is not reliably applied (the slow test below measures that),
+        so the next run warns before it starts, naming the field, and says so
+        once per field rather than on every iteration of a sweep. A new Model
+        built on the same, already-compiled physics object reuses its
+        compiled traces, so it warns too.
+        """
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        model = Model(coords=self.coords, physics=speedy_physics(),
+                      time_step=30.0)
+        # Before the first run nothing is compiled: an edit is simply the
+        # value the physics compiles with, and nothing warns.
+        self._edit_vdiff(model, trvdi=12.0)
+        _, messages = self._run_recording(model, 1 / 48.0)
+        self.assertEqual(messages, [])
+
+        self._edit_vdiff(model, trvdi=2.0)
+        preds, messages = self._run_recording(model, 1 / 48.0)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("speedy_vertical_diffusion.params.trvdi", messages[0])
+        self.assertIn("build the physics anew", messages[0])
+        self.assertIn("live_parameters_differ_from_compiled", preds.params)
+
+        self._edit_vdiff(model, trvdi=3.0)
+        _, messages = self._run_recording(model, 1 / 48.0)
+        self.assertEqual(messages, [])                # already reported
+
+        self._edit_vdiff(model, trshc=7.0)
+        _, messages = self._run_recording(model, 1 / 48.0)
+        self.assertEqual(len(messages), 1)
+        self.assertIn("speedy_vertical_diffusion.params.trshc", messages[0])
+        self.assertNotIn("trvdi", messages[0])
+
+        # A new Model on the same physics object is no way round it.
+        reused = Model(coords=self.coords, physics=model.physics,
+                       time_step=30.0)
+        preds, messages = self._run_recording(reused, 1 / 48.0)
+        self.assertEqual(len(messages), 1)
+        for field in ("trvdi", "trshc"):
+            self.assertIn(f"speedy_vertical_diffusion.params.{field}",
+                          messages[0])
+        self.assertIn("live_parameters_differ_from_compiled", preds.params)
+        self.assertEqual(
+            preds.params["speedy_vertical_diffusion.params.trvdi"], 12.0)
+
+    def test_no_false_alarm_where_a_new_model_retraces(self):
+        """Only a Model that can reuse stale traces is warned about them.
+
+        A physics without per-term checkpointing (Held-Suarez) keeps no
+        cached term traces, so a new Model on it after an edit retraces with
+        the live values: no warning, and its record is the live one. A first
+        run that fails before tracing (a ``total_time`` that is not a whole
+        number of steps) compiles nothing, so an edit before the retry is
+        simply the value it compiles with.
+        """
+        from jcm.model import Model
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.physics.held_suarez.utils import get_held_suarez_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+        physics = held_suarez_physics()
+        self.assertFalse(physics.checkpoint_terms)
+        first = Model(coords=coords, physics=physics, time_step=60.0)
+        first.run(save_interval=1 / 24.0, total_time=1 / 24.0)
+        term = physics.terms[0]
+        term.ka.set_value(term.ka.get_value() * 10.0)
+        reused = Model(coords=coords, physics=physics, time_step=60.0)
+        preds, messages = self._run_recording(reused, 1 / 24.0)
+        self.assertEqual(messages, [])
+        self.assertNotIn("live_parameters_differ_from_compiled", preds.params)
+        self.assertAlmostEqual(preds.params["held_suarez.ka"],
+                               float(term.ka.get_value()))
+
+        model = Model(coords=self.coords, physics=speedy_physics(),
+                      time_step=30.0)
+        with self.assertRaisesRegex(ValueError, "divisible"):
+            model.run(save_interval="1800 seconds", total_time="2700 seconds")
+        self._edit_vdiff(model, trvdi=2.0)
+        preds, messages = self._run_recording(model, 1 / 48.0)
+        self.assertEqual(messages, [])
+        self.assertAlmostEqual(
+            preds.params["speedy_vertical_diffusion.params.trvdi"], 2.0,
+            places=6)
+
+    @pytest.mark.slow
+    def test_an_edit_reaches_only_an_uncompiled_physics(self):
+        """What the warning above is about, measured (#735).
+
+        Over a quarter day ``trvdi = 2`` moves the temperature well away from
+        the default. An edit made before the physics first compiles is the
+        value it runs with; an edit after that reaches neither a later run of
+        the same Model nor a new Model built on the same physics object, both
+        of which reproduce the first-compiled physics exactly. A new Model at
+        another grid traces the terms afresh and runs the live value.
+        """
+        from jcm.model import Model
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        window = 0.25
+        temperature = lambda preds: np.asarray(preds.dynamics.temperature)
+
+        params = Parameters.default()
+        params = params.replace(vertical_diffusion=params.vertical_diffusion
+                                .replace(trvdi=jnp.array(2.0)))
+        as_edited = temperature(Model(
+            coords=self.coords, physics=speedy_physics(parameters=params),
+            time_step=30.0).run(save_interval=window, total_time=window))
+        as_default = temperature(Model(
+            coords=self.coords, physics=speedy_physics(),
+            time_step=30.0).run(save_interval=window, total_time=window))
+        self.assertGreater(float(np.max(np.abs(as_edited - as_default))), 1e-2)
+
+        model = Model(coords=self.coords, physics=speedy_physics(),
+                      time_step=30.0)
+        self._edit_vdiff(model, trvdi=2.0)            # before compiling
+        first, messages = self._run_recording(model, window)
+        self.assertEqual(messages, [])
+        np.testing.assert_array_equal(temperature(first), as_edited)
+
+        self._edit_vdiff(model, trvdi=24.0)           # after compiling
+        again, messages = self._run_recording(model, window)
+        self.assertEqual(len(messages), 1)
+        np.testing.assert_array_equal(temperature(again), as_edited)
+
+        reused = Model(coords=self.coords, physics=model.physics,
+                       time_step=30.0)
+        other, messages = self._run_recording(reused, window)
+        self.assertEqual(len(messages), 1)
+        np.testing.assert_array_equal(temperature(other), as_edited)
+        self.assertAlmostEqual(
+            other.params["speedy_vertical_diffusion.params.trvdi"], 2.0,
+            places=6)
+
+        # At another grid the term traces are new, so the live value runs:
+        # no warning, and the record says so.
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        t31 = get_speedy_coords(layers=8, spectral_truncation=31)
+        elsewhere = Model(coords=t31, physics=model.physics, time_step=30.0)
+        moved, messages = self._run_recording(elsewhere, window)
+        self.assertEqual(messages, [])
+        self.assertAlmostEqual(
+            moved.params["speedy_vertical_diffusion.params.trvdi"], 24.0,
+            places=6)
+        fresh_t31 = temperature(Model(
+            coords=t31, physics=speedy_physics(), time_step=30.0).run(
+                save_interval=window, total_time=window))
+        np.testing.assert_array_equal(temperature(moved), fresh_t31)
 
     def test_a_traced_run_leaves_no_carry_on_the_model(self):
         """Running an existing model under a jit must not poison it.
