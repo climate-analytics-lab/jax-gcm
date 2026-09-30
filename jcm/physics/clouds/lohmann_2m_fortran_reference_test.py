@@ -443,6 +443,23 @@ def test_sedimentation_ice_matches_echam(step, prec):
         assert_close("zxifluxn", "number_flux", r["sed_xifluxn"], g["sed_xifluxn"], prec)
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "jcm's sedimentation_ice clamps the flux a level ABSORBS from above at 0 when it updates "
+    "the falling-ice cover and the in-cloud sedimentation ledger; ECHAM passes the negative "
+    "zxiflx_from_level to gridbox_frac_falling_hydrometeor (F 2275-2277, cover 1.0 instead of "
+    "0.6 in sediment_then_detrain at 350 hPa) and keeps pmrateps negative (F 2264-2265, "
+    "-1.5e-4 instead of 0). Pre-existing, not part of #941; mass, number and fluxes agree."))
+@pytest.mark.parametrize("step", STEPS)
+def test_sedimentation_falling_ice_cover_matches_echam(step):
+    """The falling-ice cover zclcfi and the sedimentation ledger zmrateps (F 2264-2277)."""
+    prec = "float64"
+    with echam_constants(), precision(prec):
+        g = echam_diag(step)
+        r = run_jcm_sedimentation(g, ztmst(step), prec)
+        assert_close("zclcfi", "fraction", r["sed_clcfi"], g["sed_clcfi"], prec)
+        assert_close("zmrateps", "mass", r["sed_mrateps"], g["sed_mrateps"], prec)
+
+
 @pytest.mark.parametrize("prec", PRECISIONS)
 @pytest.mark.parametrize("step", STEPS)
 def test_update_in_cloud_water_icnc_diagnosis_at_zrid(step, prec):
