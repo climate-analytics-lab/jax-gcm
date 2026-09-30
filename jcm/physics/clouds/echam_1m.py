@@ -25,6 +25,7 @@ from typing import NamedTuple, Tuple, Optional
 import tree_math
 
 import jcm.constants as c
+from jcm.physics import thermodynamics
 from jcm.physics.clouds.cloud_utils import (
     eff_liquid_droplet_radius,
     latent_heat_over_cp,
@@ -639,6 +640,9 @@ def _saturation_adjustment_layer(
     # sweep a measured NO-OP: everything the clearing released re-condensed
     # immediately, in every regime (#668). ``cf=None`` (legacy callers)
     # preserves the unweighted behaviour.
+    # Sonntag (1990) saturation, blended linearly between water and ice from
+    # 238.15 K to tmelt; ECHAM picks the ``ua``/``uaw`` table per cell with
+    # ``lo2`` instead (mo_cloud.f90 l.697-705), part of the gap in #940.
     qs, dqs_dt = _qs_and_dqs_dt(p, T)
     q_excess = q - qs
     cond1 = q_excess / jnp.maximum(1.0 + L_cp * dqs_dt, 1e-3)
@@ -705,18 +709,16 @@ def _saturation_adjustment_layer(
 def _qsat_water(pressure: jnp.ndarray, temperature: jnp.ndarray):
     """Saturation specific humidity over water + the vapor pressure es.
 
-    Uses the same Tetens form as :func:`sundqvist.saturation_vapor_pressure_water`
-    so the rain-evaporation step is consistent with the condensation step.
-    The conversion from ``es`` to ``qs`` follows the standard mixing-ratio
-    formula ``qs = ε·es/(p - (1-ε)·es)`` (equivalent to ICON's
-    ``zqsw = uaw/(p - vtmpc1·uaw)`` after expanding ``uaw = ε·es``).
-    Returns ``(qsw, esw_pa)``.
+    ECHAM's rain evaporation reads the ``uaw`` table, Sonntag (1990) over
+    liquid water at all temperatures (``mo_cloud.f90`` l.394, 520-523:
+    ``zesw = MIN(uaw/p, 0.5)``, ``zqsw = zesw/(1 − vtmpc1·zesw)``), and
+    Rotstayn's vapour-diffusion term takes ``zesat = uaw/rd = es/rv``
+    (l.521). Returns ``(qsw, esw_pa)`` from
+    :func:`jcm.physics.thermodynamics.es_water` and
+    :func:`~jcm.physics.thermodynamics.qsat_from_es`.
     """
-    t_c = temperature - c.tmelt
-    es = 610.78 * jnp.exp(17.27 * t_c / (t_c + 237.3))
-    es_safe = jnp.minimum(es, 0.5 * pressure)
-    qsw = c.eps * es_safe / jnp.maximum(pressure - (1.0 - c.eps) * es_safe, 1.0)
-    return qsw, es_safe
+    es = thermodynamics.es_water(temperature)
+    return thermodynamics.qsat_from_es(es, pressure), es
 
 
 def cloud_microphysics_column_sweep(

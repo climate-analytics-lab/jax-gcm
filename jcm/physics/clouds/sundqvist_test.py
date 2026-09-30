@@ -2,12 +2,13 @@
 
 import jax.numpy as jnp
 import jax
+from jcm.physics import thermodynamics
 from .sundqvist import (
-    CloudParameters, saturation_vapor_pressure_water, saturation_vapor_pressure_ice,
+    CloudParameters,
     saturation_specific_humidity, calculate_cloud_fraction,
     condensation_evaporation, critical_relative_humidity, _qs_and_dqs_dt,
 )
-from jcm.constants import tmelt, eps, alhc, cpd
+from jcm.constants import alhc, cpd
 from jcm.testing import check_gradients
 
 
@@ -167,36 +168,21 @@ class TestCondensationLinearisation:
 class TestSaturationFunctions:
     """Test saturation vapor pressure and humidity calculations"""
     
-    def test_saturation_vapor_pressure_water(self):
-        """Test saturation vapor pressure over water"""
-        # At 0°C, should be ~611 Pa
-        es_0c = saturation_vapor_pressure_water(jnp.array(tmelt))
-        assert jnp.abs(es_0c - 610.78) < 1.0
-        
-        # At 20°C, should be ~2339 Pa
-        es_20c = saturation_vapor_pressure_water(jnp.array(tmelt + 20.0))
-        assert 2300 < es_20c < 2400
-        
-        # Should increase with temperature
-        temps = jnp.linspace(250, 310, 10)
-        es_vals = jax.vmap(saturation_vapor_pressure_water)(temps)
-        assert jnp.all(jnp.diff(es_vals) > 0)
-    
-    def test_saturation_vapor_pressure_ice(self):
-        """Test saturation vapor pressure over ice"""
-        # At 0°C, should be ~611 Pa
-        es_0c = saturation_vapor_pressure_ice(jnp.array(tmelt))
-        assert jnp.abs(es_0c - 610.78) < 1.0
-        
-        # At -20°C, should be ~103 Pa
-        es_m20c = saturation_vapor_pressure_ice(jnp.array(tmelt - 20.0))
-        assert 100 < es_m20c < 110
-        
-        # Should increase with temperature
-        temps = jnp.linspace(220, 273, 10)
-        es_vals = jax.vmap(saturation_vapor_pressure_ice)(temps)
-        assert jnp.all(jnp.diff(es_vals) > 0)
-    
+    def test_cover_qsat_is_echam_lo2_on_sonntag(self):
+        """The cover's qs: Sonntag over ice where lo2, over water elsewhere."""
+        from jcm.physics.clouds.sundqvist import _qs_cover
+        p = jnp.array([6.0e4, 6.0e4, 6.0e4, 6.0e4])
+        T = jnp.array([230.0, 260.0, 260.0, 280.0])
+        qi = jnp.array([0.0, 0.0, 1.0e-5, 1.0e-5])
+        es = jnp.array([
+            thermodynamics.es_ice(T[0]),       # T < cthomi
+            thermodynamics.es_water(T[1]),     # no ice: water
+            thermodynamics.es_ice(T[2]),       # ice above csecfrl
+            thermodynamics.es_water(T[3]),     # above tmelt
+        ])
+        assert jnp.allclose(_qs_cover(p, T, qi, t_ice=238.15),
+                            thermodynamics.qsat_from_es(es, p), rtol=1e-6)
+
     def test_saturation_specific_humidity(self):
         """Test saturation specific humidity calculation"""
         # Standard atmosphere at sea level
@@ -219,8 +205,10 @@ class TestSaturationFunctions:
         qs_mixed = saturation_specific_humidity(jnp.array(p_mid), jnp.array(t_mixed))
         
         # Should be between pure ice and pure water values
-        qs_ice = eps * saturation_vapor_pressure_ice(jnp.array(t_mixed)) / p_mid
-        qs_water = eps * saturation_vapor_pressure_water(jnp.array(t_mixed)) / p_mid
+        qs_ice = thermodynamics.qsat_from_es(
+            thermodynamics.es_ice(jnp.array(t_mixed)), p_mid)
+        qs_water = thermodynamics.qsat_from_es(
+            thermodynamics.es_water(jnp.array(t_mixed)), p_mid)
         assert qs_ice <= qs_mixed <= qs_water
 
 
@@ -542,12 +530,21 @@ class TestSundqvistGradients:
         return temperature, 0.82 * qs, pressure, qs
 
     def test_cloud_fraction_gradients_match_a_central_difference(self):
-        """Single column: ``calculate_cloud_fraction`` is vmapped by callers."""
-        temperature, humidity, pressure, _ = self._column()
-        config = CloudParameters.default()
-        check_gradients(
-            lambda t, q, p: calculate_cloud_fraction(t, q, p, 1.0e5, config),
-            (temperature, humidity, pressure), rtol=1e-3)
+        """Single column: ``calculate_cloud_fraction`` is vmapped by callers.
+
+        Checked in float64: the column's curvature leaves the best float32
+        rung within ~1.5e-3 of consistency, which is float32 rounding in the
+        secants, not a kink.
+        """
+        with jax.enable_x64(True):
+            temperature, humidity, pressure, _ = self._column()
+            config = CloudParameters.default()
+            check_gradients(
+                lambda t, q, p: calculate_cloud_fraction(t, q, p, 1.0e5,
+                                                         config),
+                tuple(jnp.asarray(a, jnp.float64)
+                      for a in (temperature, humidity, pressure)),
+                rtol=1e-3)
 
     def test_condensation_gradients_column_and_block_agree(self):
         """``condensation_evaporation`` is elementwise, so both shapes check.

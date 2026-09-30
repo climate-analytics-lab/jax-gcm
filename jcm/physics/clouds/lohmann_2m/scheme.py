@@ -252,20 +252,22 @@ def cloud_microphysics_2m(
     # Saturation anchors are evaluated at the STEP-START state, exactly as
     # ECHAM evaluates zqsi/zqsw/zeta/the subsaturations at (ptm1, pqm1);
     # the provisional state enters only through the increments above.
-    # ``es_water`` uses the LIQUID-WATER coefficients at ALL temperatures —
-    # the Bergeron/WBF machinery depends on the water/ice saturation
-    # *difference* below freezing, which degenerates to zero if es_water
-    # switches to the ice coefficients below 0 °C.
+    # ECHAM reads them from the 0.001 K tables (mo_cloud_micro_2m.f90
+    # l.642-705): the "water" set from ``tlucuaw`` — Sonntag over liquid
+    # water at ALL temperatures, which the Bergeron/WBF machinery needs,
+    # since it depends on the water/ice saturation *difference* below
+    # freezing — and the "ice" set from ``tlucua``, the ``ua`` table: Sonntag
+    # over ice at and below tmelt and over water above (``phase="auto"``).
     es_water = thermodynamics.saturation_vapor_pressure(
         temperature_m1, phase="water")
     es_ice = thermodynamics.saturation_vapor_pressure(
-        temperature_m1, phase="ice")
+        temperature_m1, phase="auto")
     qsat_water, dqsw_dt = (
         thermodynamics.saturation_specific_humidity_and_derivative(
             temperature_m1, pressure, phase="water"))
     qsat_ice, dqsi_dt = (
         thermodynamics.saturation_specific_humidity_and_derivative(
-            temperature_m1, pressure, phase="ice"))
+            temperature_m1, pressure, phase="auto"))
 
     # Subsaturations for rain evaporation / snow sublimation: the NEGATIVE
     # relative deficits ``min(q/qs − 1, 0)`` (ECHAM zsusatw_evap/zicesub) —

@@ -17,6 +17,7 @@ from typing import Tuple
 import tree_math
 
 import jcm.constants as c
+from jcm.physics import thermodynamics
 
 
 @tree_math.struct
@@ -135,40 +136,23 @@ def critical_relative_humidity(
     )
 
 
-def saturation_vapor_pressure_water(temperature: jnp.ndarray) -> jnp.ndarray:
-    """Calculate saturation vapor pressure over water using Tetens formula
-    
-    Args:
-        temperature: Temperature (K)
-        
-    Returns:
-        Saturation vapor pressure (Pa)
-
-    """
-    t_celsius = temperature - c.tmelt
-    return 610.78 * jnp.exp(17.27 * t_celsius / (t_celsius + 237.3))
-
-
-def saturation_vapor_pressure_ice(temperature: jnp.ndarray) -> jnp.ndarray:
-    """Calculate saturation vapor pressure over ice using Tetens formula
-    
-    Args:
-        temperature: Temperature (K)
-        
-    Returns:
-        Saturation vapor pressure (Pa)
-
-    """
-    t_celsius = temperature - c.tmelt
-    return 610.78 * jnp.exp(21.87 * t_celsius / (t_celsius + 265.5))
-
-
 def saturation_specific_humidity(
     pressure: jnp.ndarray,
     temperature: jnp.ndarray,
     t_mix_min: float = 238.15,
 ) -> jnp.ndarray:
-    """Calculate saturation specific humidity
+    """Mixed-phase saturation specific humidity [kg/kg] of the dev 1M scheme.
+
+    The saturation vapour pressure blends Sonntag (1990) over water and over
+    ice (:func:`jcm.physics.thermodynamics.es_water` / ``es_ice``) linearly in
+    temperature between ``t_mix_min`` and ``tmelt``, and ``qs`` is formed as
+    ECHAM forms it (:func:`jcm.physics.thermodynamics.qsat_from_es`). The blend
+    is the phase rule of the 1M saturation adjustment
+    (``echam_1m._saturation_adjustment_layer``), which pairs its latent heat
+    and its condensate partition with the same weight; ECHAM's ``mo_cloud``
+    instead chooses ice or water per cell with the binary ``lo2`` switch
+    (l.647-652, 697-705), as the cover already does here (:func:`_qs_cover`).
+    That difference is part of the 1M fidelity gap tracked in #940.
 
     Args:
         pressure: Pressure (Pa)
@@ -182,30 +166,11 @@ def saturation_specific_humidity(
         Saturation specific humidity (kg/kg)
 
     """
-    # Use appropriate saturation vapor pressure based on temperature
-    es_water = saturation_vapor_pressure_water(temperature)
-    es_ice = saturation_vapor_pressure_ice(temperature)
-
-    # Blend between ice and water saturation in mixed phase region
-    # Linear interpolation between t_mix_min and tmelt. This is CAM's
-    # default mixed-phase qsat form (wv_sat_methods.F90:479-513), with the
-    # width an ECHAM-derived default (tmelt − cthomi = 35 K) rather than
-    # CAM's 20 K — see #667 for the reference comparison.
-    # NOTE (review 2.27): ECHAM mo_cover uses a BINARY lo2 switch (ice qs
-    # only below cthomi or when ice > csecfrl is already present) rather
-    # than this blend; the cloud-fraction path applies that switch via
-    # _qs_cover below. The blended form remains for callers without a qi
-    # field (and for the condensation Newton pair, which switches qs
-    # and L together on the same weight).
     weight = jnp.clip(
         (temperature - t_mix_min) / (c.tmelt - t_mix_min), 0.0, 1.0)
-    es = weight * es_water + (1.0 - weight) * es_ice
-
-    # Convert to saturation specific humidity
-    # Cap es < pressure so denominator stays positive under extreme T
-    es_safe = jnp.minimum(es, 0.99 * jnp.maximum(pressure, 1.0))
-    qs = c.eps * es_safe / jnp.maximum(pressure - es_safe * (1.0 - c.eps), 1.0)
-    return jnp.clip(qs, 0.0, 0.5)
+    es = (weight * thermodynamics.es_water(temperature)
+          + (1.0 - weight) * thermodynamics.es_ice(temperature))
+    return thermodynamics.qsat_from_es(es, pressure)
 
 
 def _qs_cover(
@@ -214,24 +179,21 @@ def _qs_cover(
     cloud_ice: jnp.ndarray,
     t_ice: float = 238.15,
 ) -> jnp.ndarray:
-    # qs for the CLOUD-COVER decision: ECHAM binary lo2 phase switch,
+    # qs for the CLOUD-COVER decision, as mo_cover.f90 forms it (l.215-223):
+    # ECHAM's binary lo2 phase switch
     #   lo2 = (T < cthomi) OR (T < tmelt AND qi > csecfrl)
-    # (ice memory: ice saturation only where ice already exists or
-    # homogeneous freezing guarantees it; csecfrl = 5e-6 kg/kg at T63).
-    # ``t_ice`` is the homogeneous-freezing threshold (ECHAM cthomi),
-    # wired from ``CloudParameters.t_ice`` (#667 — the field was dead).
-    # The previous unconditional blend inflated RH by up to ~35 % near
-    # -35 C in ice-free air (over-diagnosing cloud) and under-diagnosed
-    # cirrus where ice exists (review finding 2.27).
-    es_water = saturation_vapor_pressure_water(temperature)
-    es_ice = saturation_vapor_pressure_ice(temperature)
+    # (prepare_ua_index_spline, mo_echam_convect_tables.f90 l.664-667) picks
+    # the ``ua`` table — Sonntag over ice, since lo2 implies T < tmelt — or
+    # the ``uaw`` table, Sonntag over water; ice memory: ice saturation only
+    # where ice already exists or homogeneous freezing guarantees it
+    # (csecfrl = 5e-6 kg/kg at T63). ``t_ice`` is the homogeneous-freezing
+    # threshold (ECHAM cthomi), wired from ``CloudParameters.t_ice`` (#667).
     lo2 = (temperature < t_ice) | (
         (temperature < c.tmelt) & (cloud_ice > 5.0e-6)
     )
-    es = jnp.where(lo2, es_ice, es_water)
-    es_safe = jnp.minimum(es, 0.99 * jnp.maximum(pressure, 1.0))
-    qs = c.eps * es_safe / jnp.maximum(pressure - es_safe * (1.0 - c.eps), 1.0)
-    return jnp.clip(qs, 0.0, 0.5)
+    es = jnp.where(lo2, thermodynamics.es_ice(temperature),
+                   thermodynamics.es_water(temperature))
+    return thermodynamics.qsat_from_es(es, pressure)
 
 
 def _full_level_heights(
@@ -520,38 +482,24 @@ def _qs_and_dqs_dt(
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Saturation specific humidity and its temperature derivative.
 
-    Closed-form derivative of :func:`saturation_specific_humidity` for
-    the mixed-phase Tetens-style formulation, so the Newton step is
-    bit-reproducible under JIT without finite-difference noise. Mirrors
-    what ECHAM's ``ua / dua`` lookup tables provide. ``t_mix_min`` must
-    be the same value the caller's latent-heat ramp uses (#667: this was
-    hardcoded while the L ramp read the live ``config.t_mix_min``, so a
-    CLI override moved the two ramps apart).
+    :func:`saturation_specific_humidity` (the dev 1M scheme's mixed-phase
+    blend of Sonntag over water and over ice) and its slope in the form
+    ECHAM's Newton steps use (:func:`jcm.physics.thermodynamics.
+    dqsat_dT_from_es`), with ``des/dT`` the same blend of the two phases'
+    analytic slopes. Closed form so the Newton step is reproducible under
+    JIT. ``t_mix_min`` must be the same value the caller's latent-heat ramp
+    uses (#667).
     """
-    es_water = saturation_vapor_pressure_water(temperature)
-    es_ice = saturation_vapor_pressure_ice(temperature)
     weight = jnp.clip(
         (temperature - t_mix_min) / (c.tmelt - t_mix_min), 0.0, 1.0)
+    es_water = thermodynamics.es_water(temperature)
+    es_ice = thermodynamics.es_ice(temperature)
     es = weight * es_water + (1.0 - weight) * es_ice
-
-    p_safe = jnp.maximum(pressure, 1.0)
-    es_safe = jnp.minimum(es, 0.99 * p_safe)
-    denom = jnp.maximum(p_safe - es_safe * (1.0 - c.eps), 1.0)
-    qs = c.eps * es_safe / denom
-
-    # Tetens d(es)/dT — same coefficients used in
-    # ``saturation_vapor_pressure_water`` / ``..._ice``.
-    a_water, c_water = 17.27, 237.3
-    a_ice, c_ice = 21.875, 265.5
-    tc = temperature - c.tmelt
-    des_dt_water = es_water * a_water * c_water / jnp.maximum(
-        (tc + c_water) ** 2, 1e-3,
-    )
-    des_dt_ice = es_ice * a_ice * c_ice / jnp.maximum(
-        (tc + c_ice) ** 2, 1e-3,
-    )
-    des_dt = weight * des_dt_water + (1.0 - weight) * des_dt_ice
-    dqs_dt = c.eps * p_safe * des_dt / denom ** 2
+    des_dt = (weight * es_water * thermodynamics.dlnes_dT_water(temperature)
+              + (1.0 - weight) * es_ice
+              * thermodynamics.dlnes_dT_ice(temperature))
+    qs = thermodynamics.qsat_from_es(es, pressure)
+    dqs_dt = thermodynamics.dqsat_dT_from_es(es, des_dt, pressure)
     return qs, dqs_dt
 
 
