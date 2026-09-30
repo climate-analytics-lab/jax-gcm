@@ -2253,10 +2253,9 @@ class TestColumnEnthalpyConservation2M:
         RH-based cover closure competing with ``SundqvistCloudFraction``.
 
         The fixture is the state that makes the difference stark: an
-        ice-supersaturated column at 5 hPa, above ``cloud_top_pressure_pa``,
-        where Sundqvist deliberately reports no cloud because "the RH-closure
-        otherwise fills the cold, near-zero-qsat stratosphere with spurious
-        cloud". Unclipped it comes back overcast.
+        ice-supersaturated column at 5 hPa handed to the scheme with a cover
+        of exactly 0, which the scheme must not turn into cloud of its own.
+        Unclipped it comes back overcast.
         """
         import numpy as np
         from jcm.physics import thermodynamics
@@ -2269,7 +2268,7 @@ class TestColumnEnthalpyConservation2M:
         qsi = 0.622 * esi / jnp.maximum(p - 0.378 * esi, 1e-12)
         q = 1.6 * qsi                               # strongly supersaturated
         zeros = jnp.zeros(nlev)
-        # cloud_fraction = 0 everywhere: Sundqvist reports no stratospheric cloud.
+        # cloud_fraction = 0 everywhere: the incoming cover is clear.
         cols = (T, q, p, zeros, zeros, zeros, zeros, zeros,
                 rho, jnp.full(nlev, 500.0), zeros, zeros)
 

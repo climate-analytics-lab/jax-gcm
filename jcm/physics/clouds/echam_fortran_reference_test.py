@@ -189,16 +189,19 @@ def run_jcm_cover(inp: dict, nn: int = 63) -> dict:
     """ECHAM ``cover`` -> jcm ``SundqvistCloudFraction``. Returns ``paclc``.
 
     Mapping: ptm1/pqm1/pxim1 -> state T/q/tracers["qi"] (step-start state,
-    as ECHAM's cover reads the m1 fields, physc.f90:543-549); papm1 ->
-    pressure_full; paphm1[-1] -> surface_pressure; land fraction
-    ``1 - pfrw - pfri`` -> terrain.fmask; sea-ice fraction of the water part
-    ``pfri / (pfrw + pfri)`` -> forcing.sice_am; ktype -> convection.ktype.
-    pgeo is not an input of jcm's cover (it rebuilds heights from T and p).
-    jcm has no resolution-dependent cover constants, so ``nn`` is unused.
+    as ECHAM's cover reads the m1 fields, physc.f90:543-549); pgeo -> state
+    geopotential (only level differences enter); papm1 -> pressure_full;
+    paphm1[-1] -> surface_pressure; land fraction ``1 - pfrw - pfri`` ->
+    terrain.fmask; sea-ice fraction of the water part ``pfri / (pfrw + pfri)``
+    -> forcing.sice_am; ktype -> convection.ktype. ``vct`` is the vertical
+    grid ``cache_coords`` derives ECHAM's jbmin/jbmax from, and ``nn`` selects
+    ECHAM's parameter row (``CloudParameters.default(truncation=nn)``).
     """
-    from jcm.physics.clouds.sundqvist import SundqvistCloudFraction
+    from jcm.physics.clouds.sundqvist import (
+        CloudParameters,
+        SundqvistCloudFraction,
+    )
 
-    del nn
     t = jnp.asarray(inp["ptm1"])
     nlev, ncol = t.shape
     frl = 1.0 - inp["pfrw"] - inp["pfri"]
@@ -206,6 +209,7 @@ def run_jcm_cover(inp: dict, nn: int = 63) -> dict:
     sice = np.where(water > 0.0, inp["pfri"] / np.where(water > 0.0, water, 1.0), 0.0)
     state = SimpleNamespace(
         temperature=t, specific_humidity=jnp.asarray(inp["pqm1"]),
+        geopotential=jnp.asarray(inp["pgeo"]),
         tracers={"qi": jnp.asarray(inp["pxim1"]), "qc": jnp.zeros_like(t)},
         u_wind=jnp.zeros_like(t), v_wind=jnp.zeros_like(t))
     diagnostics = {
@@ -215,7 +219,15 @@ def run_jcm_cover(inp: dict, nn: int = 63) -> dict:
     }
     terrain = SimpleNamespace(fmask=jnp.asarray(frl))
     forcing = SimpleNamespace(sice_am=jnp.asarray(sice))
-    _, out = SundqvistCloudFraction()(state, diagnostics, forcing, terrain)
+    vct = np.asarray(inp["vct"])
+    coords = SimpleNamespace(
+        horizontal=SimpleNamespace(longitude_wavenumbers=nn + 1,
+                                   nodal_shape=(ncol,)),
+        vertical=SimpleNamespace(a_boundaries=vct[:nlev + 1],
+                                 b_boundaries=vct[nlev + 1:]))
+    term = SundqvistCloudFraction(CloudParameters.default(truncation=nn))
+    term.cache_coords(coords)
+    _, out = term(state, diagnostics, forcing, terrain)
     return {"paclc": np.asarray(out["clouds"].cloud_fraction, np.float64)}
 
 

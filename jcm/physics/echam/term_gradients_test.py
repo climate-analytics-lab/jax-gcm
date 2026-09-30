@@ -400,24 +400,24 @@ _CHECKS: dict = {
     ("macv2_sp_aerosol", "stable"): _Check(
         xfail_reference=_MACV2_PER_BAND_RATIO_NOISE),
 
-    # ``sundqvist_cloud_fraction`` at both points takes the default difference
-    # reference. The stable column carried a strict xfail until #677: _qs_cover's
-    # ice-memory phase switch (es_ice vs es_water at t_ice = 238.15 K, a
-    # deliberate hard discontinuity — kept, see ``sundqvist.py`` _qs_cover) puts
-    # a jump in cloud_fraction where a level crosses that boundary, and along
-    # this test's fixed direction (seed 0) it defeated the central difference:
-    # the secant grew as jump/eps until the step no longer crossed t_ice, by
-    # which point it was float32 cancellation noise, so no rung was both past the
-    # jump and above the noise. #677 did not touch the switch, but its
-    # single-level tie-break and surface-interface height changed the
-    # stable-column cloud_fraction field enough that the seed-0 projection now
-    # resolves a converged reference in that gap (below the crossing step, above
-    # the noise) which AD matches. The reference is genuine but delicate: the
-    # switch is unchanged, so along other directions the jump can still defeat a
-    # difference (verified: the cell passes at some seeds and not others on both
-    # dev and this branch). If a future change re-crosses the boundary at seed 0
-    # this fails loudly rather than silently — the honest signal for a delicate
-    # reference — at which point it earns back an xfail naming the switch.
+    # ``sundqvist_cloud_fraction``'s value is ECHAM's cover, and its
+    # derivative is, by design, that of the smooth surrogates of the b0 clip
+    # and of the inversion stability test (``sundqvist._cover_surrogate``,
+    # ``_zsat_surrogate``; docs/source/design/surrogate_gradients.md). A
+    # central difference of the value therefore disagrees with AD wherever a
+    # level sits near a clip edge or a column near the stability threshold
+    # (8 % on the convecting column's projection), which is the surrogate
+    # working, not a lost gradient. The cell checks what a surrogate
+    # derivative must satisfy here: finite, not identically zero, adjoint,
+    # and live in the temperature and humidity. That the derivative is the
+    # surrogate's, that the surrogate is smooth, and how far it lies from the
+    # value are checked on the functions themselves in ``sundqvist_test.py``.
+    # Its tendency ledger is structurally zero (the cover emits none).
+    "sundqvist_cloud_fraction": _Check(
+        reference="adjoint",
+        skip_outputs=("u_wind", "v_wind", "temperature", "specific_humidity",
+                      "tracers/qc", "tracers/qi"),
+        live_inputs=("[0]/temperature", "[0]/specific_humidity")),
 
     # TTE-TKE, the 1M microphysics and Hines each cross an internal activation
     # boundary under this direction, and none of them has a central difference
@@ -454,6 +454,20 @@ _CHECKS: dict = {
     "echam_1m_microphysics": _Check(
         reference="adjoint", adjoint_rtol=2.0e-3, live_inputs=_ONE_MOMENT_ENVIRONMENT,
         skip_outputs=("u_wind", "v_wind", "wbf")),
+    # On the stable column ECHAM's cover is exactly 0 at every level but the
+    # enhanced inversion level, where it is exactly 1 (the 0.88 relative
+    # humidity there over csatsc = 0.7 is supersaturated): the deck's
+    # humidity sits below the critical value everywhere else. The 1M
+    # therefore evaporates all the seeded condensate, in the clear cells by
+    # the clear-cell rule and in the overcast one by the evaporation cap at
+    # the available condensate. Neither depends on the running temperature
+    # or humidity, and no precipitation process runs, so those input
+    # gradients and the process diagnostics' gradients are exactly zero.
+    # The cell checks the tendencies, which depend on the condensate, and
+    # asserts no live environment inputs; the convecting column keeps both.
+    ("echam_1m_microphysics", "stable"): _Check(
+        reference="adjoint", adjoint_rtol=2.0e-3, outputs="tendency",
+        skip_outputs=("u_wind", "v_wind")),
     # The convecting column keeps the default adjoint tolerance and fails it;
     # see ``_ONE_MOMENT_SATURATION_CANCELLATION`` for why that is recorded
     # rather than absorbed. Everything else about the cell is the term entry

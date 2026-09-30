@@ -47,6 +47,11 @@ from jcm.physics.gravity_waves.hines import HinesGwd, HinesParameters
 from jcm.physics.gravity_waves.sso import LottMillerSso, SSOParameters
 from jcm.physics.physics_term import with_field_overrides
 from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.resolution_defaults import (
+    default_parameters,
+    defaults_flag_kwargs,
+    spectral_truncation,
+)
 from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
 from jcm.physics.radiation.aerosol_free import (
     resolve_aerosol_free_interval,
@@ -151,6 +156,7 @@ def echam_physics(
     diagnose_omega: bool = False,
     cu_lmfmid: bool | None = None,
     prescribed_surface_fluxes: bool = False,
+    coords=None,
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
 
@@ -321,6 +327,14 @@ def echam_physics(
             instead) and with ``cu_lmfmid`` in a ``convection`` mapping;
             with a mapping of other fields it sets the base the mapping is
             applied to.
+        coords: The model's coordinate system. The schemes whose tunable
+            parameters have resolution-dependent defaults (the cloud cover's
+            ``CloudParameters``, the 1M ``MicrophysicsParameters``) take the
+            defaults for its spectral truncation
+            (:mod:`jcm.physics.resolution_defaults`); ``None`` takes the T63
+            defaults. An explicit ``Parameters`` object is used as given, and
+            a field-override mapping replaces its fields on top of the grid's
+            defaults.
         prescribed_surface_fluxes: Forced surface mode (jax-gcm#301):
             compose ``TteTkeVerticalDiffusion(couple_surface=False)``
             (interior-only mixing — the implicit solve's surface Robin BC
@@ -484,8 +498,15 @@ def echam_physics(
         convection_p = ConvectionParameters.default(cu_lmfmid=cu_lmfmid)
     else:
         convection_p = convection or ConvectionParameters.default()
-    clouds_p = clouds or CloudParameters.default()
-    microphysics_p = microphysics or MicrophysicsParameters.default()
+    # Resolution defaults are built here, at construction, for the run's
+    # truncation (T63 without a grid), so the parameter pytree the caller
+    # gets back is final. An explicit Parameters object is used as given.
+    truncation = 63 if coords is None else spectral_truncation(coords)
+    clouds_are_defaults = clouds is None
+    microphysics_are_defaults = microphysics is None
+    clouds_p = clouds or default_parameters(CloudParameters, truncation)
+    microphysics_p = microphysics or default_parameters(
+        MicrophysicsParameters, truncation)
     microphysics_2m_p = microphysics_2m or CloudParams2M.default()
     if isinstance(radiation_scheme, PhysicsTerm):
         # A radiation term instance carries its own parameters; the factory
@@ -571,7 +592,10 @@ def echam_physics(
     band_config = RadiationBandConfig.for_terms([rad_term])
 
     if cloud_scheme == "1m":
-        micro_term = Echam1MMicrophysics(params=microphysics_p)
+        micro_term = Echam1MMicrophysics(
+            params=microphysics_p,
+            **defaults_flag_kwargs(
+                Echam1MMicrophysics, microphysics_are_defaults))
     elif cloud_scheme == "2m":
         micro_term = Lohmann2MMicrophysics(params=microphysics_2m_p)
         # SPA activation knobs live on AerosolParameters — wire them into
@@ -769,7 +793,8 @@ def echam_physics(
             EchamBoundaryConditions(),
             *aerosol_terms,
             SimpleChemistry(),
-            SundqvistCloudFraction(params=clouds_p),
+            SundqvistCloudFraction(
+                params=clouds_p, params_are_defaults=clouds_are_defaults),
             rad_term,
             TteTkeVerticalDiffusion(
                 params=vertical_diffusion_p,

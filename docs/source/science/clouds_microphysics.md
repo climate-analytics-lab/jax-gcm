@@ -3,21 +3,32 @@
 **What we do.** A diagnostic cloud fraction plus a choice of **single-moment** or
 **two-moment** microphysics:
 
-- **Sundqvist diagnostic cloud fraction**
-  (``jcm/physics/clouds/sundqvist.py::SundqvistCloudFraction``) — RH-based cloud
-  fraction with a stratocumulus inversion enhancement (``mo_cover.f90``). The
-  enhancement boosts the apparent RH at a **single** boundary-layer-top level
-  over ice-free ocean with no active convection, chosen as ECHAM's ``zknvb``
-  scan does — the most inversion-like BL level, resolving to the *lowest*
-  (nearest-surface) one on a tie; the differentiable softmax surrogate keeps
-  that single-level behaviour rather than smearing the boost across the tied
-  levels. It is
-  a **pure diagnostic** — the term emits zero T/q/qc/qi tendencies; the
-  saturation adjustment lives downstream in each microphysics scheme (the 2M
-  path's ``mixed_phase_deposition_and_corrections``, and ``echam_1m.py``'s own
-  port of the same linearised-Newton step). The humidity the cover closure sees,
-  ``q/q_s`` with ``q_s`` over ice where the cell holds cloud ice below
-  ``t_ice`` (``mo_cover.f90``'s ``lo2`` switch), is published as
+- **Cloud cover** (``jcm/physics/clouds/sundqvist.py::SundqvistCloudFraction``)
+  — ECHAM6.3's ``mo_cover.f90::cover``, the Sundqvist (1989) / Lohmann and
+  Roeckner (1996) relative-humidity closure, used by the 1M, the 2M and the
+  JAM configurations alike. The value is ECHAM's at every level:
+  ``q_s`` in ECHAM's form over ice or water by ECHAM's ``lo2`` switch; the
+  critical relative humidity ``crt + (crs − crt)·exp(1 − (p_s/p)^nex)``;
+  over ice-free ocean without convection (previous step's ``ktype``, as in
+  ECHAM), ECHAM's inversion search from the lowest level up to its level
+  ``jbmin``, which takes the level with the largest ``min(0, dT/dz)`` (the
+  lowest one on a tie), applies no enhancement if that level lies below
+  ``jbmax``, and otherwise divides ``q_s`` by
+  ``zsat = min(1, csatsc + max(0, −dT/dz·cp/g))`` there and ``nadd`` levels
+  below; ``b0 = (q/(q_s·zsat) − rhc)/(1 − rhc)`` clipped to ``[0, 1]`` and
+  ``cover = 1 − sqrt(1 − b0)``. The cover is therefore exactly 0 in every cell
+  at or below the critical humidity and exactly 1 at saturation, which the
+  microphysics' clear-cell rules read. There is no stratospheric cutoff:
+  ECHAM computes every level (``ktdia = 1``). ``jbmin``/``jbmax`` follow
+  ECHAM's ``sucloud`` rule (the first levels from the top below 2000 m and
+  500 m, heights ``(p_s − p)/(1.25 g)`` at a 101320 Pa surface) on the model's
+  own levels, 40/45 at L47 and 88/93 at L95, and ``dT/dz`` uses the model
+  geopotential, as ECHAM's uses ``pgeo``. Every column of the ECHAM Fortran
+  reference (``jcm/data/test/echam_cloud_reference/``) is reproduced at the
+  reference tolerance, at T31, T63, T127 and T255. It is a **pure diagnostic**
+  — the term emits zero T/q/qc/qi tendencies; condensation lives in each
+  microphysics scheme, as in ECHAM's ``cloud``. The humidity the closure sees,
+  ``q/q_s`` with ``q_s`` over ice where ``lo2`` selects it, is published as
   ``cover_relative_humidity``. It is a scheme-internal closure variable — it
   jumps by up to ~25 % across the cloud-ice threshold between adjacent cold
   cells — so it is kept apart from the model's one public ``relative_humidity``,
@@ -105,6 +116,55 @@ inversion). CAM6 uses **MG2/PUMAS** two-moment microphysics (Gettelman & Morriso
 doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
 
 **Why we differ.**
+- Cover, `differentiability` — the cover's value is ECHAM's, but where its
+  derivative is useless the derivative is that of a named smooth surrogate
+  ({doc}`../design/surrogate_gradients`). The clip of ``b0`` has plateaux
+  with zero slope and the square root an unbounded slope at saturation; the
+  derivative is that of ``1 − sqrt(1 − b0_s)`` with the softplus clip
+  ``b0_s = w·softplus(b0/w) − w·softplus((b0 − 1)/w)``, width
+  ``smooth_b0 = 0.02``, whose slope is bounded by ``1/(2 sqrt(w ln 2))`` ≈ 4.2
+  and which lies within ``sqrt(w ln 2)`` ≈ 0.12 of the cover (at ``b0 = 1``).
+  The inversion search's stability test ``best > −cinv·g/cp`` is a threshold;
+  its derivative is that of the sigmoid ``σ((best + cinv·g/cp)/w)``, width
+  ``smooth_inv_thr = 2e-4`` K/m, which gives ``cinv`` and the chosen level's
+  lapse rate a gradient near the threshold. Which level the search chooses is
+  piecewise constant in the temperature and keeps its reference derivative,
+  zero: a smooth selection over levels would differ from the value by the
+  whole enhancement wherever two levels compete. The ``lo2`` phase switch
+  keeps its reference derivative (that of the branch in use). Widths of zero
+  select the reference derivatives.
+- Cover, saturation vapour pressure — the cover's ``e_s`` comes from one
+  switch shared with the 1M scheme
+  (``jcm/physics/clouds/echam_saturation.py``, ``SATURATION_FORMULA``). Its
+  default is jcm's Tetens pair, not the Sonntag (1990) fit that ECHAM's
+  lookup tables hold (``mo_echam_convect_tables.f90``), which it differs from
+  by up to 2.4 % over water and 1.2 % over ice between 238 and 273 K and by
+  up to 16 % and 8 % below: convection and the 2M scheme use Tetens, and a
+  cloud scheme on another curve would judge detrained condensate against a
+  different saturation. The choice is made for all of jcm's ECHAM physics at
+  once. With ``"sonntag"`` selected the cover reproduces ECHAM's own
+  reference; with the default it reproduces ECHAM's routine run with the
+  Tetens pair.
+- Cover, time level — the cover reads the state the physics receives, which
+  contains the step's dynamics; ECHAM's reads the ``t − Δt`` fields
+  (``physc.f90`` l.543-548), one dynamics step earlier. Reading ECHAM's state
+  would need the previous step's post-physics state in the carry.
+- Resolution-dependent defaults, `science` — ECHAM sets ``crs``, ``crt``,
+  ``nex``, ``nadd``, ``csatsc``, ``cinv``, ``cvtfall``, ``csecfrl`` and
+  ``clwprat`` per truncation (``mo_echam_cloud_params.f90::sucloud``) and
+  defines them for T31, T63, T127 and T255 only; it has no T106
+  configuration. jcm builds these defaults for the run's truncation at physics
+  construction (``echam_physics(coords=...)``; the Hydra runner passes the
+  grid): ECHAM's values at its four truncations, linear interpolation in the
+  truncation number between them for the real-valued ones, and the nearer
+  truncation's value for the integers ``nex`` and ``nadd``. T106 therefore
+  gets ``crs = 0.9878``, ``cvtfall = 2.836``, ``csecfrl = 8.36e-6`` and T63's
+  (= T127's) other values. The interpolated values are jcm's choice, made so
+  that the resolution trend ECHAM encodes is continued rather than switched,
+  and they are **untuned**. Outside T31–T255, and on a grid with no spectral
+  truncation, the nearest (or T63) values are used with a warning. An explicit
+  parameter object or a field override always wins
+  (``jcm/physics/resolution_defaults.py``).
 - `science` (deliberate, documented) — the 2M column sweep uses **MG/PUMAS
   sediment→melt ordering** (ice sedimentation before melt), *not* ECHAM's
   melt→sediment. The melt acts on the post-sedimentation ice through the threaded
@@ -209,7 +269,12 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
 
 **Code pointers.**
 - ``jcm/physics/clouds/sundqvist.py`` — ``SundqvistCloudFraction``,
-  ``calculate_cloud_fraction``, ``condensation_evaporation``.
+  ``calculate_cloud_fraction``.
+- ``jcm/physics/clouds/echam_saturation.py`` — ``SATURATION_FORMULA``,
+  ``lo2_ice_phase``, ``qsat_from_es``.
+- ``jcm/physics/clouds/echam_cloud_defaults.py`` — ``echam_cloud_defaults``,
+  ``inversion_levels``.
+- ``jcm/physics/resolution_defaults.py`` — ``resolution_defaults``.
 - ``jcm/physics/clouds/echam_1m.py`` — ``Echam1MMicrophysics``,
   ``cloud_microphysics_column_sweep``.
 - ``jcm/physics/clouds/lohmann_2m/`` — ``scheme.py`` (``cloud_microphysics_2m``,
@@ -219,8 +284,11 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   ``jcm/physics/clouds/lohmann_2m/types.py``;
   ``jcm/physics/clouds/lohmann_2m_params.py`` (``CloudParams2M``).
 
-**Validation evidence.** ``jcm/physics/clouds/sundqvist_test.py`` and
-``sundqvist_smooth_gradients_test.py``, ``echam_1m_test.py``,
-``echam_fortran_reference_test.py`` (with ``jcm/data/test/echam_cloud_reference/``),
+**Validation evidence.** ``jcm/physics/clouds/echam_fortran_reference_test.py``
+(the cover and 1M against the ECHAM6.3 Fortran, column by column, with
+``jcm/data/test/echam_cloud_reference/``),
+``sundqvist_test.py`` (designed points, both vapour-pressure formulas against
+the Fortran, the surrogates), ``echam_cloud_defaults_test.py``,
+``echam_saturation_test.py``, ``echam_1m_test.py``,
 ``lohmann_2m_test.py``, ``cloud_utils_test.py``, ``cloud_data_test.py``. Design
 reference: {doc}`../design/lohmann_2m_column_processes`.
