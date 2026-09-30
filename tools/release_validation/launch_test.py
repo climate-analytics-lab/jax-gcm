@@ -1160,6 +1160,41 @@ def test_fetch_refreshes_a_file_rewritten_at_the_same_size(scratch, volume):
                    "file did not complete)"]
 
 
+def test_fetch_replaces_a_truncated_local_record(scratch, volume, gitrepo):
+    """An interrupted first fetch leaves a cut launch.json; the next fetch heals it.
+
+    The truncated record is neither defended as this machine's record nor
+    read (a JSON error would block every later --fetch): it is short and
+    unparsable, so it is copied again like any other incomplete file.
+    """
+    import fetch_run
+    (volume / "launch.json").write_text('{"digest": "aaaa", "job": "j"}\n')
+    dest = scratch / "cut"
+    dest.mkdir(parents=True)
+    (dest / "launch.json").write_text('{"digest": "aa')        # tar cut mid-file
+    assert fetch_run.fetch_run("mx_speedy_t31_ft", dest,
+                               site=launch.sites.get("nautilus"), pod="p",
+                               keep=("launch.json",)) == []
+    assert (dest / "launch.json").read_text() == '{"digest": "aaaa", "job": "j"}\n'
+    # The launcher's own --fetch door reads that record before copying and
+    # must not fail on the cut one either.
+    local = scratch / "nautilus_runs" / "mx_speedy_t31_ft"
+    local.mkdir(parents=True)
+    (local / "launch.json").write_text('{"digest": "aa')
+    launch.main(["--site", "nautilus", "--repo", str(gitrepo), "--fetch",
+                 "--members", MEMBER, "--tag", "ft"])
+    assert json.loads((local / "launch.json").read_text())["digest"] == "aaaa"
+
+
+def test_resume_does_not_read_a_truncated_record_as_absent(scratch, gitrepo):
+    """--resume re-emits the record: a cut one is an error, never silently new."""
+    local = scratch / "nautilus_runs" / "mx_speedy_t31_ft"
+    local.mkdir(parents=True)
+    (local / "launch.json").write_text('{"digest": "aa')
+    with pytest.raises(ValueError):
+        launch.read_launch(local)
+
+
 def test_fetch_refuses_a_foreign_record_of_the_same_size(scratch, volume):
     """A different launch on the volume is not copied in under this record.
 

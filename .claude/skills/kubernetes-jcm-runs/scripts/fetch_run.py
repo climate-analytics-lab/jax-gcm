@@ -142,7 +142,11 @@ def fetch_run(run: str, dest, *, site: dict, pod: str,
         # Inside the try: a pod that never reaches Running must be deleted too.
         _start(site, pod, run)
         files = remote_files(site, pod, run)
-        kept = [f for f in keep if (dest / f).is_file()]
+        # A record left unparsable by an interrupted earlier fetch (tar was
+        # cut mid-file) is a truncated copy, not a caller's record: it is
+        # replaced like any other short file rather than defended or read.
+        kept = [f for f in keep
+                if (dest / f).is_file() and not _truncated_record(dest / f)]
         wanted = {f: sm for f, sm in files.items()
                   if (with_checkpoints or not CHECKPOINT.search(f))
                   and f not in kept}
@@ -190,6 +194,15 @@ def fetch_run(run: str, dest, *, site: dict, pod: str,
                  "--wait=false", timeout=120)
     return [f"{f} ({why})" for f, (n, t) in sorted(wanted.items())
             if (why := _incomplete(dest / f, n, t, f in todo))]
+
+
+def _truncated_record(local: Path) -> bool:
+    """Return True when ``local``, a JSON record a caller keeps, does not parse."""
+    try:
+        json.loads(local.read_text())
+    except ValueError:
+        return True
+    return False
 
 
 def _incomplete(local: Path, size: int, mtime: int, copied: bool) -> str | None:

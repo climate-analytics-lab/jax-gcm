@@ -694,10 +694,25 @@ def launch_definition(member: str, run: str, job: str, image: str,
     return {**body, "digest": digest.hexdigest()[:16]}
 
 
-def read_launch(local: Path) -> dict | None:
-    """Return the launch definition recorded in ``local`` (None: there is none)."""
+def read_launch(local: Path, *, lenient: bool = False) -> dict | None:
+    """Return the launch definition recorded in ``local`` (None: there is none).
+
+    ``lenient`` treats a record that does not parse as absent: a ``--fetch``
+    interrupted mid-copy leaves a truncated one, and the next ``--fetch``
+    replaces it (:func:`fetch_run.fetch_run`) instead of failing on it. A
+    ``--resume`` never reads such a record as absent: it re-emits it.
+    """
     record = Path(local) / LAUNCH_RECORD
-    return json.loads(record.read_text()) if record.exists() else None
+    if not record.exists():
+        return None
+    try:
+        return json.loads(record.read_text())
+    except ValueError:
+        if not lenient:
+            raise
+        print(f"# NOTE: {record} does not parse (an interrupted --fetch); "
+              "the volume's copy replaces it", file=sys.stderr)
+        return None
 
 
 def launch_record_text(defn: dict) -> str:
@@ -932,7 +947,7 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
         # Its own tree, not the PBS rundirs' $SCRATCH/jam_runs: a PBS run and
         # a Kubernetes run under one name must not share a directory.
         local = Path(scratch) / f"{a.site}_runs" / run
-        recorded = read_launch(local)
+        recorded = read_launch(local, lenient=a.fetch)
         if a.fetch:
             # The recorded Job name when there is one (a --job-prefix other
             # than the default); fetching a run launched elsewhere derives it.
