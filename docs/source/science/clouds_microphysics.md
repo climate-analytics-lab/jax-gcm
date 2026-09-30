@@ -289,8 +289,8 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     becomes a crystal, and those crystals seed the WBF transfer and
     deposition. In 10-day T63 JAM runs, going from the closure to ECHAM-HAM's
     rates raised the WBF transfer from 6.3 to 6.9 and the deposition from 252
-    to 271 g m⁻² d⁻¹, lowered the liquid water path from 45.6 to 42.8 g m⁻²
-    and the supercooled fraction at 238–243 K from 0.52 to 0.44, and changed
+    to 271 g m⁻² d⁻¹, lowered the liquid water path from 45.6 to 43.1 g m⁻²
+    and the supercooled fraction at 238–243 K from 0.52 to 0.45, and changed
     the ice water path by +0.2 g m⁻² (run-to-run noise: 0.75 g m⁻² in the liquid
     path).
   - ``ice_nuclei`` remains an optional input of the closure (an external INP
