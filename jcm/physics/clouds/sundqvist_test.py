@@ -610,6 +610,25 @@ class TestJaxTransformations:
         assert np.all(np.isfinite(np.asarray(g)))
         assert np.any(np.asarray(g) != 0.0)
 
+    @pytest.mark.parametrize("zero", ["smooth_b0", "smooth_inv_thr", "both"])
+    def test_zero_widths_give_a_finite_derivative(self, zero):
+        """A surrogate width of 0 selects the reference derivative, never a NaN."""
+        fields = ({"smooth_b0": 0.0, "smooth_inv_thr": 0.0} if zero == "both"
+                  else {zero: 0.0})
+        params = CloudParameters.default(**fields)
+        t, ph, pf, geo = _l47_column(inversion_level=42)
+        qi = np.zeros_like(t)
+        q = jnp.asarray(0.95 * _qs_numpy(t, qi, pf))
+
+        def total(temp, hum):
+            return calculate_cloud_fraction(
+                temp, hum, jnp.asarray(qi), jnp.asarray(pf),
+                jnp.asarray(ph[-1]), jnp.asarray(geo), params,
+                L47_RANGE)[0].sum()
+
+        for g in jax.grad(total, argnums=(0, 1))(jnp.asarray(t), q):
+            assert np.all(np.isfinite(np.asarray(g)))
+
     def test_parameter_gradients_are_live(self):
         """crt, crs, csatsc carry gradients through the surrogate."""
         t, ph, pf, geo = _l47_column(inversion_level=42)

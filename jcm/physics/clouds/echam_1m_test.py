@@ -1033,6 +1033,23 @@ class TestSurrogates:
         dist = np.abs(np.asarray(exact(tt, xx, cs, ct) - sur(tt, xx, cs, ct)))
         assert np.max(dist[np.asarray(far)]) <= 2 * float(jax.nn.sigmoid(-5.0))
 
+    def test_ice_phase_zero_ice_width_keeps_the_reference_ice_derivative(self):
+        """``ice_width = 0``: no derivative in the ice, the temperature logistics kept."""
+        cth = c.tmelt - 35.0
+        t = jnp.array([230.0, 255.0, 255.0, 255.0, 272.5])
+        xi = jnp.array([0.0, 4.9e-6, 5e-6, 6e-6, 1e-4])
+        csec = jnp.full(5, 5e-6)
+        w = ice_phase_weight(t, xi, csec, jnp.full(5, cth), 1.0, 0.0)
+        np.testing.assert_array_equal(
+            np.asarray(w), np.asarray(lo2_ice_phase(t, xi, csec, cth), float))
+        g_t, g_xi, g_cs = jax.vmap(jax.grad(
+            lambda a, b, s_: ice_phase_weight(a, b, s_, cth, 1.0, 0.0),
+            argnums=(0, 1, 2)))(t, xi, csec)
+        for g in (g_t, g_xi, g_cs):
+            assert np.all(np.isfinite(np.asarray(g)))
+        assert np.all(np.asarray(g_xi) == 0.0) and np.all(np.asarray(g_cs) == 0.0)
+        assert np.any(np.asarray(g_t) != 0.0)
+
     def test_ice_fall_speed(self):
         cutoff = 1e-7
         exact, sur = ice_fall_speed_pair(cutoff)
@@ -1260,6 +1277,36 @@ class TestSweepGradients:
                                             rho, dz, n, DT, cfg0)
         for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b)):
             np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
+
+    @pytest.mark.parametrize("fields", [
+        {"phase_switch_width": 0.0},
+        {"phase_switch_ice_width": 0.0},
+        {"ice_fall_speed_gradient_cutoff": 0.0},
+        {"contact_freezing_liquid_cutoff": 0.0},
+        {"autoconversion_scheme": "kk2000", "smooth_ccraut": 0.0},
+        {"phase_switch_width": 0.0, "phase_switch_ice_width": 0.0,
+         "ice_fall_speed_gradient_cutoff": 0.0,
+         "contact_freezing_liquid_cutoff": 0.0},
+    ])
+    @pytest.mark.parametrize("dtype", ["float32", "float64"])
+    def test_every_zero_width_gives_a_finite_derivative(self, fields, dtype):
+        """A width or cutoff of 0 selects the reference derivative, never a NaN."""
+        with jax.enable_x64(dtype == "float64"):
+            dt_ = jnp.float32 if dtype == "float32" else jnp.float64
+            cfg = MicrophysicsParameters.default(**fields)
+            (t, q, dtemp, dq, qc, qi), (cf, p, dp, rho, dz, n) = (
+                tuple(jnp.asarray(a, dt_) for a in part) for part in self._args())
+            cf = cf * jnp.linspace(0.8, 1.1, cf.shape[0]).astype(dt_)
+
+            def total(t_, q_, qi_):
+                tend, st = run_sweep(t_, q_, dtemp, dq, qc, qi_, cf, p, dp, rho,
+                                     dz, n, DT, cfg)
+                return (jnp.sum(tend.dtedt) + jnp.sum(tend.dqidt) * 1e3
+                        + st.precip_rain + st.precip_snow)
+
+            grads = jax.grad(total, argnums=(0, 1, 2))(t, q, qi)
+            for g in grads:
+                assert np.all(np.isfinite(np.asarray(g))), fields
 
     def test_float32_derivative_where_the_precipitation_nearly_cancels(self):
         """A float32 column whose lowest-level ``zpresum`` is ~1e-19 keeps a finite gradient.

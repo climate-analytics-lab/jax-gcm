@@ -149,7 +149,8 @@ class MicrophysicsParameters:
     # cthomi (F:821-828).
     phase_switch_width: float = struct.field(pytree_node=False, default=1.0)
     # Width of the logistic surrogate of lo2's ice-memory criterion
-    # (ice > csecfrl), as a fraction of csecfrl.
+    # (ice > csecfrl), as a fraction of csecfrl; 0 keeps that criterion's
+    # reference (zero) derivative.
     phase_switch_ice_width: float = struct.field(pytree_node=False, default=0.1)
     # Below this ice content [kg/m^3] the derivative of the ice fall speed
     # cvtfall*(rho*xi)**0.16 is that of a parabola through the origin, C1 at
@@ -448,7 +449,10 @@ def ice_phase_pair(width, ice_width):
     same logical formula with each comparison a logistic:
     ``s_cold + (1 - s_cold)·s_warm·s_ice``, ``s_cold`` in
     ``(cthomi - T)/width``, ``s_warm`` in ``(tmelt - T)/width``, ``s_ice`` in
-    ``(xi - csecfrl)/(ice_width·csecfrl)``.
+    ``(xi - csecfrl)/(ice_width·csecfrl)``. ``ice_width = 0`` keeps the
+    reference step ``xi > csecfrl`` in ``s_ice``, so the ice criterion has its
+    reference (zero) derivative while the temperature comparisons keep theirs
+    of width ``width``.
     """
     def exact(t, xi, csec, cth):
         ice = lo2_ice_phase(t, xi, csec, cth)
@@ -457,7 +461,11 @@ def ice_phase_pair(width, ice_width):
     def surrogate(t, xi, csec, cth):
         s_cold = jax.nn.sigmoid((cth - t) / width)
         s_warm = jax.nn.sigmoid((c.tmelt - t) / width)
-        s_ice = jax.nn.sigmoid((xi - csec) / (ice_width * csec))
+        if ice_width == 0:
+            # The ice criterion keeps its reference (zero) derivative.
+            s_ice = jnp.where(xi > csec, jnp.ones_like(t), jnp.zeros_like(t))
+        else:
+            s_ice = jax.nn.sigmoid((xi - csec) / (ice_width * csec))
         return s_cold + (1.0 - s_cold) * s_warm * s_ice
 
     return exact, surrogate
@@ -466,7 +474,8 @@ def ice_phase_pair(width, ice_width):
 def ice_phase_weight(temperature, cloud_ice, csecfrl, cthomi, width, ice_width):
     """ECHAM's ``lo2`` as 1 (ice) or 0 (liquid), with a surrogate derivative.
 
-    See :func:`ice_phase_pair`. ``width = 0`` keeps the reference derivative.
+    See :func:`ice_phase_pair`. ``width = 0`` keeps the reference derivative
+    of the whole switch; ``ice_width = 0`` that of its ice criterion alone.
     """
     exact, surrogate = ice_phase_pair(width, ice_width)
     if width == 0:
