@@ -1,9 +1,9 @@
 """ECHAM-HAM's aerosol inputs to mixed-phase freezing, for a JAM population (#953).
 
 Port of ``mo_ham_freezing.f90`` (ECHAM6.3-HAM2.3 r7492): ``get_aerofreez_nc``
-(lines 297-465) with its helpers ``aero_massvolratio`` (198-270) and
-``aero_nc_surfw`` (272-295), and the mixed-phase part of ``ham_IN_setup``
-(52-120). HAM describes the aerosol that can freeze cloud droplets by the
+(lines 300-465) with its helpers ``aero_massvolratio`` (188-263) and
+``aero_nc_surfw`` (278-289), and the mixed-phase part of ``ham_IN_setup``
+(53-120). HAM describes the aerosol that can freeze cloud droplets by the
 dust and black-carbon number in two populations:
 
 * **Soluble classes, immersion freezing.** The droplets activated on a
@@ -28,7 +28,7 @@ Which classes of a population play HAM's roles is declared by
   mixed, so they carry the aged dust and BC; they correspond to HAM's
   soluble accumulation and coarse modes (``iaccs``, ``icoas``). MAM4's Aitken
   mode carries neither dust nor BC, so HAM's exclusion of the soluble Aitken
-  BC (``DN #295``, line 426) changes nothing here.
+  BC (``DN #295``, line 427) changes nothing here.
 * the **primary-carbon** mode is the fresh, hydrophobic, insoluble carbon,
   HAM's insoluble Aitken mode (``iaiti``, BC and OC); it is the one
   insoluble class, so it is also the whole of ``naerinsol``.
@@ -102,7 +102,7 @@ def _ratio_pow(spec, short, species, masses, volume):
     """``aero_massvolratio`` then ``aero_nc_surfw``'s ``ratio**(2/3)``.
 
     ``volume`` weights each mass by ``1000/density`` (HAM's ``zdens_rcp``,
-    lines 226-231), so the empty-class threshold ``zdenom > zeps`` sees the
+    lines 225-231), so the empty-class threshold ``zdenom > zeps`` sees the
     same number as HAM's. Zero where the class is empty or the ratio is
     below ``zeps`` (lines 248-257); the power runs on a safe base there.
     """
@@ -166,7 +166,7 @@ def ham_freezing_aerosol(
     """
     zeros = jnp.zeros_like(air_density)
 
-    # Soluble classes: immersion (lines 395-405, 423-429).
+    # Soluble classes: immersion (lines 399-404, 427-431).
     n_du_sol, n_bc_sol = zeros, zeros
     for short in classes.soluble:
         for sp, acc in (("du", "du"), ("bc", "bc")):
@@ -179,8 +179,8 @@ def ham_freezing_aerosol(
             else:
                 n_bc_sol = n_bc_sol + term
 
-    # Insoluble classes: contact (lines 407-412, 419-421), over the number of
-    # all insoluble classes (lines 452-460).
+    # Insoluble classes: contact (lines 406-411, 423-425), over the number of
+    # all insoluble classes (lines 455-463).
     def insoluble(short, sp):
         if short is None:
             return zeros

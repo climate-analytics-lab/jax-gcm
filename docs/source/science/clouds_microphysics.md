@@ -244,7 +244,8 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     2675–2840; Lohmann & Diehl 2006, *J. Atmos. Sci.* 63, 968) freezes cloud
     water over the step by Brownian contact freezing on insoluble dust and by
     immersion freezing of droplets that hold dust or black carbon,
-    ``(32.3·f_du + 2.91·10⁻³·f_bc)·(ρ/ρ_w)·exp(tmelt − T)·(−min(dT/dt, 0))·V_drop``
+    ``(32.3·f_du + 2.91·10⁻³·f_bc)·exp(tmelt − T)·(−min(ztte, 0))·V_drop``
+    per second, with the droplet volume ``V_drop = ρ·q_l/(ρ_w·N_l)``
     (montmorillonite; the coefficients are the differentiable
     ``CloudParams2M.immersion_coefficient_dust/_bc``). The frozen number is
     capped at the droplets above ``cdnc_min``; mass, number and fusion heat
@@ -281,8 +282,17 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     constant fractions and would replace it once ``ω`` is plumbed (#705).
   - Heterogeneous freezing is a second-order ice source in both. Detrained ice
     carries its own crystal number, about 10⁵ crystals m⁻² s⁻¹ in T63 January
-    runs, against 10²–10³ from heterogeneous freezing, and the freezing moves
-    about 0.04 g m⁻² d⁻¹ of a mixed-phase ice budget of about 500.
+    runs, against 10²–10³ from heterogeneous freezing, and the freezing itself
+    moves 0.01–0.04 g m⁻² d⁻¹ of a mixed-phase ice budget of about 500. Its
+    indirect effect is larger under JAM: where ECHAM's immersion rate
+    completes, at the cold end of the mixed phase, every frozen droplet
+    becomes a crystal, and those crystals seed the WBF transfer and
+    deposition. In 10-day T63 JAM runs, going from the closure to ECHAM-HAM's
+    rates raised the WBF transfer from 6.3 to 6.9 and the deposition from 252
+    to 271 g m⁻² d⁻¹, lowered the liquid water path from 45.6 to 42.8 g m⁻²
+    and the supercooled fraction at 238–243 K from 0.52 to 0.44, and changed
+    the ice water path by +0.2 g m⁻² (run-to-run noise: 0.75 g m⁻² in the liquid
+    path).
   - ``ice_nuclei`` remains an optional input of the closure (an external INP
     number, the larger of it and DeMott is used); no in-tree term publishes
     it. ``ice_nuclei_deposition`` reaches ``update_in_cloud_water`` as
@@ -322,23 +332,24 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   - Liquid water path lies below the observed range (50–84 g m⁻² over the
     oceans; Lohmann et al. 2007, *ACP* 7, 3425, Table 2).
   - Under JAM the ice water path is about a quarter of the non-JAM one and the
-    mixed-phase condensate stays mostly liquid (10-day T63 January runs from a
-    JAM state 10 days past a cold start: IWP 7 against 27 g m⁻², supercooled
-    mass fraction at 253–258 K 0.83 against 0.29). Most of the gap is the ice
+    mixed-phase condensate stays mostly liquid (10-day T63 January runs, JAM
+    from a state 10 days past a cold start: IWP 7.2 against 27.8 g m⁻²,
+    supercooled mass fraction at 253–258 K 0.81 against 0.28). Most of the gap is the ice
     aggregation coefficient: the JAM presets use ECHAM-HAM's ``ccsaut = 900``,
     the retune ``mo_activ.f90`` applies at T63 L47 with prognostic CDNC, AR&G
     activation and ``cdnc_min_fixed = 40`` (lines 392–408), while the
     MACv2-SP presets keep ECHAM's generic 95 (``mo_echam_cloud_params.f90``,
     line 59). With 900 the mixed-phase ice aggregates to snow 2.7 times faster
-    per unit ice; the same JAM run with 95 has IWP 22 g m⁻² and a supercooled
-    fraction of 0.52. ECHAM-HAM's retune was made in a model with sources of
+    per unit ice; the same JAM run with 95 (measured before the switch to
+    ECHAM-HAM's freezing rates) has IWP 21.9 instead of 7.1 g m⁻² and a
+    supercooled fraction of 0.52 instead of 0.83. ECHAM-HAM's retune was made in a model with sources of
     ice number jcm does not have (Kärcher–Lohmann cirrus nucleation, #552;
     detrained droplet number and cloud-base activation, #955), so the value is
     ECHAM-HAM's but its effect here is not ECHAM-HAM's; it is left to the
     #682 retune. The rest of the gap is the young JAM state (10 points less
-    cloud cover). The aerosol–ice coupling is not the cause: switching JAM's
-    heterogeneous freezing to the aerosol-free closure changes the IWP by
-    0.05 g m⁻².
+    cloud cover). The aerosol–ice coupling is not the cause: replacing JAM's
+    INP by DeMott's in the closure changed the IWP by 0.05 g m⁻², and
+    ECHAM-HAM's rates change it by +0.2 g m⁻² (above).
 - **Cirrus ICNC diagnosis (default ``nic_cirrus = 1``).** Where a cloudy cell
   holds ice at or below ``icemin`` crystals, ``update_in_cloud_water``
   diagnoses the number from the ice mass at the radius ``zrid``,

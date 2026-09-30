@@ -171,6 +171,22 @@ class IceNucleationTermTest(unittest.TestCase):
                             cdncact=(0.3 * 1e8 + 0.5 * 1e5) * _RHO)
         np.testing.assert_allclose(np.asarray(fa.dust_soluble), np.asarray(expect.dust_soluble),
                                    rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(fa.bc_soluble), np.asarray(expect.bc_soluble),
+                                   rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(fa.bc_insoluble), np.asarray(expect.bc_insoluble),
+                                   rtol=1e-5)
+        # the insoluble-Aitken radius is the primary-carbon mode's wet radius
+        np.testing.assert_array_equal(np.asarray(fa.wet_radius_insoluble_aitken),
+                                      np.asarray(jnp.full(_SHAPE, 3e-8)))
+
+    def test_population_without_the_mam4_classes_must_name_its_own(self):
+        import dataclasses
+        spec = dataclasses.replace(MAM4_SPEC, modes=tuple(
+            dataclasses.replace(m, short=m.short + "x") for m in MAM4_SPEC.modes))
+        with self.assertRaisesRegex(ValueError, "pass classes="):
+            IceNucleation(spec=spec)
+        classes = HamFreezingClasses(soluble=("accx", "corx"), insoluble_aitken="pcmx")
+        self.assertIs(IceNucleation(spec=spec, classes=classes)._classes, classes)
 
     def test_cloud_borne_mass_is_part_of_the_class(self):
         """HAM has one phase per class; jcm's cloud-borne dust belongs to the composition."""

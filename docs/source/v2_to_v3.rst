@@ -270,7 +270,8 @@ Related, and visible without any code change:
 
 Nine modules captured constants at import time and so ignored
 ``set_constants``: JAM activation, dry-deposition resistances, sedimentation,
-ice nucleation, the WMO tropopause diagnostic, JAM aqueous chemistry, two
+JAM ice nucleation (whose successor, ECHAM-HAM's freezing inputs, reads no
+constants), the WMO tropopause diagnostic, JAM aqueous chemistry, two
 TTE-TKE modules and the emissions preparation tool. They now read the live
 singleton.
 

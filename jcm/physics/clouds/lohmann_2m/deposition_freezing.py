@@ -577,8 +577,9 @@ def het_mxphase_freezing(
       contact-nucleus number ``frac·(N_l + N_i)``. Black-carbon contact
       freezing is disabled in ECHAM (F 2784) and here.
     * **Immersion freezing** of droplets holding dust or black carbon
-      (F 2794-2805): ``(a_du·fracdusol + a_bc·fracbcsol)·(ρ/ρ_w)·exp(tmelt − T)
-      ·(−min(dT/dt, 0))·V_drop`` with ``a_du = 32.3`` (montmorillonite) and
+      (F 2794-2805): ``(a_du·fracdusol + a_bc·fracbcsol)·exp(tmelt − T)
+      ·(−min(ztte, 0))·V_drop`` with the droplet volume
+      ``V_drop = ρ·pxlb/(ρ_w·pcdnc)``, ``a_du = 32.3`` (montmorillonite) and
       ``a_bc = 2.91e-3`` (``CloudParams2M.immersion_coefficient_dust/_bc``),
       acting only while the air cools. The cooling rate is ECHAM's
       ``ztte = zomega/(cpd·ρ)``, the adiabatic cooling of the vertical motion
@@ -603,7 +604,8 @@ def het_mxphase_freezing(
     volume, ``√TKE``, the ``1/r`` of the diffusivities, ``exp(tmelt − T)``) is
     evaluated on a safe argument where its result is discarded, so neither AD
     mode differentiates it at a singular point (the double-``where`` of
-    ``JAX_gotchas.md``). Values are ECHAM's bit for bit up to operation order.
+    ``JAX_gotchas.md``). Values are ECHAM's to round-off; ``1 − exp(−x)`` is
+    evaluated as ``−expm1(−x)`` so float32 keeps the small rates.
 
     Returns:
         ``(picnc, pcdnc, pfrl, pxib, pxlb, pfrln)`` with ``pfrl`` grid-mean
@@ -652,7 +654,11 @@ def het_mxphase_freezing(
                               + d_du_ci * dust_coarse_fraction)
                  + zfrzcntbc * d_bc_ki * bc_insoluble_fraction)
               * (droplet_number + ice_crystal_number))
-    zfrzcnt = cloud_liquid * (1.0 - jnp.exp(
+    # ECHAM's pxlb*(1 - EXP(-x)) as -expm1(-x): the same in exact arithmetic
+    # and to round-off in float64, but float32 would lose every rate below
+    # its epsilon (1 - exp(-x) is exactly 0 for x < 6e-8), which is where
+    # small dust fractions put the immersion freezing.
+    zfrzcnt = cloud_liquid * (-jnp.expm1(
         -kernel / jnp.maximum(cloud_liquid, min_liquid_threshold) * timestep))
 
     # --- immersion freezing (F 2794-2805) ----------------------------------
@@ -668,7 +674,7 @@ def het_mxphase_freezing(
     t_gate = jnp.where(mask, t, tmelt)
     rate_imm = (-znaimm * air_density / c.rhow * jnp.exp(tmelt - t_gate)
                 * jnp.minimum(ztte, 0.0))
-    zfrzimm = cloud_liquid * (1.0 - jnp.exp(
+    zfrzimm = cloud_liquid * (-jnp.expm1(
         -rate_imm * safe_xlb / safe_cdnc * timestep))
 
     # --- frozen mass and number (F 2807-2821) ------------------------------

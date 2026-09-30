@@ -13,9 +13,11 @@ the rest of ``mo_cloud_micro_2m.f90`` (F below):
 - the number tendencies are taken against the raw step-start tracers
   (F 1781, 3625-3628);
 
-plus jcm's own closures: the JAM/DeMott INP maximum (a stopgap tracked in
-#953), DeMott (2010) per standard litre converted to ambient density, and
-the mixed-phase freezing substitute capped by the droplets available.
+plus jcm's own aerosol-free closures: the maximum of an external INP and
+DeMott (2010), DeMott per standard litre converted to ambient density, and
+the mixed-phase freezing substitute capped by the droplets available. (Under
+JAM section 6.2 is ECHAM-HAM's rates instead; see
+``lohmann_2m_freezing_reference_test.py``.)
 
 Kept apart from ``lohmann_2m_test.py`` (already ~3000 lines) so the #941
 contract reads as one unit; the column water/enthalpy budgets with
@@ -797,14 +799,18 @@ def _outputs_equal(out_a, out_b):
 
 
 class TestInpFloor:
-    """``n_inp = max(ice_nuclei, DeMott)`` — the #953 stopgap."""
+    """``n_inp = max(ice_nuclei, DeMott)`` of the aerosol-free closure.
+
+    ``ice_nuclei`` is the closure's optional external INP (no in-tree term
+    publishes it since JAM moved to ECHAM-HAM's rates); DeMott stays the floor.
+    """
 
     def test_tiny_online_inp_leaves_the_demott_floor(self):
         col = _supercooled_liquid_column()
         base = _run(col)
         tiny = _run(dict(col, inp=jnp.where(col["qc"] > 0, 1e-3, 0.0)))
         assert _outputs_equal(base, tiny), (
-            "a tiny online INP switched the DeMott floor off")
+            "a tiny external INP switched the DeMott floor off")
         # ...and the floor is doing something here: fewer coarse aerosol
         # (a smaller DeMott INP) makes fewer crystals.
         cleaner = _run(col, params=_P.replace(n_aer_coarse=0.01))
@@ -817,7 +823,7 @@ class TestInpFloor:
         base = _run(col)
         large = _run(dict(col, inp=jnp.where(col["qc"] > 0, 1e5, 0.0)))
         extra = float(jnp.sum((large[0].dqnidt - base[0].dqnidt) * col["rho"]))
-        assert extra > 0.0, "a large online INP did not raise the ICNC"
+        assert extra > 0.0, "a large external INP did not raise the ICNC"
 
     def test_floor_gradient_matches_a_central_difference(self):
         """d/d n_aer_coarse where the DeMott floor sets the new crystals."""

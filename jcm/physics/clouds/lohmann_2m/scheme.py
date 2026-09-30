@@ -451,8 +451,10 @@ def cloud_microphysics_2m(
         temperature_m1, params.n_aer_coarse, air_density)
     n_inp = jnp.maximum(ice_nuclei, demott_floor)
     # The HAM freezing inputs ride the level scan with the TKE the immersion
-    # cooling rate needs (ECHAM ptkem1, F 2800). A static Python switch: the
-    # aerosol-free composition traces exactly the closure it had before.
+    # cooling rate needs (F 2800). ECHAM reads the previous step's TKE
+    # (ptkem1); this is the TKE the scheme receives, the one its updraft
+    # zvervx also uses. A static Python switch: the aerosol-free composition
+    # traces exactly the closure it had before.
     if freezing_aerosol is None:
         freezing_levels = ()
     else:

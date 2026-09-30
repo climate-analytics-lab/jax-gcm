@@ -171,6 +171,98 @@ def test_aerosol_free_closure_unchanged():
                                    atol=1e-12 * float(np.max(np.abs(ref[k]))), err_msg=k)
 
 
+# ---------------------------------------------------------------------------
+# the JAM -> 2M hand-off, at the level of the physics terms
+# ---------------------------------------------------------------------------
+_NLEV, _NCOLS, _DT = 6, 2, 720.0
+
+
+def _term_inputs():
+    """Return a supercooled, dusty, turbulent column pair for the 2M physics term."""
+    from types import SimpleNamespace
+
+    from jcm.physics.aerosol.aerosol_types import AerosolData
+    from jcm.physics.clouds.cloud_data import CloudData
+    from jcm.physics.clouds.lohmann_2m.types import HeterogeneousFreezingAerosol
+    from jcm.physics.convection.saturation import saturation_specific_humidity
+    from jcm.physics_interface import PhysicsState
+
+    shape = (_NLEV, _NCOLS)
+    col = lambda v: jnp.asarray(v)[:, None] * jnp.ones((1, _NCOLS))  # noqa: E731
+    pressure = col(np.linspace(4.5e4, 7.0e4, _NLEV))
+    temperature = col(np.linspace(240.0, 262.0, _NLEV))
+    humidity = saturation_specific_humidity(temperature, pressure, phase="water")
+    rho = pressure / (287.05 * temperature)
+    qc = jnp.full(shape, 1e-4)
+    clouds = CloudData.zeros((_NCOLS,), _NLEV).copy(
+        cloud_fraction=jnp.full(shape, 0.5), qc=qc, qi=jnp.zeros(shape),
+        conv_detrainment_qc=jnp.zeros(shape), conv_detrainment_qi=jnp.zeros(shape))
+    state = PhysicsState.zeros(
+        shape, temperature=temperature, specific_humidity=humidity,
+        tracers={"qc": qc, "qi": jnp.zeros(shape), "qnc": 8e7 / rho, "qni": jnp.zeros(shape)})
+    diagnostics = {
+        "_dt_seconds": _DT, "pressure_full": pressure, "air_density": rho,
+        "layer_thickness": jnp.full(shape, 400.0), "clouds": clouds,
+        "aerosol": AerosolData.zeros((_NCOLS,), _NLEV),
+        "vertical_diffusion": SimpleNamespace(tke=jnp.full(shape, 0.1)),
+        "activated_cdnc": jnp.full(shape, 8e7),
+    }
+    fa = HeterogeneousFreezingAerosol(
+        dust_soluble=jnp.full(shape, 0.3), dust_insoluble_accumulation=jnp.zeros(shape),
+        dust_insoluble_coarse=jnp.zeros(shape), bc_soluble=jnp.full(shape, 0.1),
+        bc_insoluble=jnp.full(shape, 0.3), wet_radius_insoluble_aitken=jnp.full(shape, 3e-8),
+        wet_radius_insoluble_accumulation=jnp.zeros(shape),
+        wet_radius_insoluble_coarse=jnp.zeros(shape))
+    return state, diagnostics, fa
+
+
+def test_2m_term_freezes_with_the_published_freezing_aerosol():
+    """``Lohmann2MMicrophysics`` reads ``diagnostics["freezing_aerosol"]``: its tendencies
+    change with it, and equal the column function called with the same struct.
+    """
+    from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+    from jcm.physics.clouds.lohmann_2m.scheme import cloud_microphysics_2m
+    state, diagnostics, fa = _term_inputs()
+    term = Lohmann2MMicrophysics()
+    p = term.params.get_value()
+    without, _ = term(state, diagnostics, None, None)
+    with_fa, _ = term(state, {**diagnostics, "freezing_aerosol": fa}, None, None)
+    gap = jnp.max(jnp.abs(with_fa.tracers["qni"] - without.tracers["qni"]))
+    assert float(gap) > 1e3, float(gap)
+    clouds = diagnostics["clouds"]
+    for j in range(_NCOLS):
+        c = lambda x: x[:, j]  # noqa: E731
+        direct = cloud_microphysics_2m(
+            c(state.temperature), c(state.specific_humidity), c(diagnostics["pressure_full"]),
+            c(clouds.qc), c(clouds.qi), c(state.tracers["qnc"]), c(state.tracers["qni"]),
+            c(clouds.cloud_fraction), c(diagnostics["air_density"]),
+            c(diagnostics["layer_thickness"]), c(diagnostics["vertical_diffusion"].tke),
+            c(diagnostics["activated_cdnc"]), jnp.zeros(_NLEV), jnp.zeros(_NLEV), _DT, p,
+            temperature_m1=c(state.temperature), specific_humidity_m1=c(state.specific_humidity),
+            qc_m1=c(state.tracers["qc"]), qi_m1=c(state.tracers["qi"]),
+            detrained_qc=jnp.zeros(_NLEV), detrained_qi=jnp.zeros(_NLEV),
+            freezing_aerosol=jax.tree_util.tree_map(c, fa))[0]
+        for name, got, want in (("qni", with_fa.tracers["qni"], direct.dqnidt),
+                                ("qi", with_fa.tracers["qi"], direct.dqidt),
+                                ("T", with_fa.temperature, direct.dtedt)):
+            np.testing.assert_allclose(np.asarray(got[:, j]), np.asarray(want),
+                                       rtol=1e-5, atol=1e-14, err_msg=name)
+
+
+def test_jam_publishes_freezing_aerosol_before_the_cloud_scheme():
+    """In the ECHAM composition the JAM term that publishes the freezing inputs runs
+    ahead of the 2M term that reads them (same step, not the carry's previous value).
+    """
+    from jcm.physics.aerosol.jam.ice_nucleation.ice_term import IceNucleation
+    from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+    from jcm.physics.echam.echam_terms import echam_physics
+    terms = echam_physics(aerosol_module="jam", cloud_scheme="2m",
+                          jam_microphysics="placeholder").terms
+    kinds = [type(t) for t in terms]
+    assert kinds.index(IceNucleation) < kinds.index(Lohmann2MMicrophysics)
+    assert "freezing_aerosol" in terms[kinds.index(IceNucleation)].provides
+
+
 if __name__ == "__main__" and "--regenerate" in sys.argv:   # pragma: no cover
     import jcm
     out = _closure_tendencies()

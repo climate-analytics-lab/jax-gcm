@@ -75,9 +75,23 @@ class IceNucleation(PhysicsTerm):
         spec: ModalAerosolSpec | None = None,
         classes: HamFreezingClasses | None = None,
     ):
-        """Hold the population and its HAM freezing-class mapping."""
+        """Hold the population and its HAM freezing-class mapping.
+
+        ``classes`` defaults to the MAM4 mapping; a population with other
+        class names must say which of its classes play HAM's roles.
+        """
         self._spec = spec or MAM4_SPEC
         self._classes = classes or MAM4_FREEZING_CLASSES
+        known = set(self._spec.mode_shorts)
+        named = set(self._classes.soluble) | {
+            s for s in (self._classes.insoluble_aitken,
+                        self._classes.insoluble_accumulation,
+                        self._classes.insoluble_coarse) if s is not None}
+        if not named <= known:
+            raise ValueError(
+                f"HAM freezing classes {sorted(named - known)} are not classes of "
+                f"the population {sorted(known)}; pass classes= to name the "
+                "population's own classes.")
         self._classes.validate(self._spec)
 
     def __call__(self, state, diagnostics, forcing, terrain):
@@ -95,8 +109,15 @@ class IceNucleation(PhysicsTerm):
         named = set(classes.soluble) | {
             s for s in (classes.insoluble_aitken, classes.insoluble_accumulation,
                         classes.insoluble_coarse) if s is not None}
-        # Composition of a class: its interstitial plus cloud-borne mass (the
-        # step-start tracers, HAM's pxtm1), floored at zero.
+        # Composition of a class: its interstitial plus cloud-borne mass,
+        # floored at zero. HAM takes the composition, the activation and the
+        # insoluble number from one time level (pxtm1). Here the composition
+        # and the insoluble number are the step-start tracers, while the
+        # activated number and the wet radii are the core's post-step state
+        # that ARG activates from (``_jam_state``), so the activated classes
+        # sum to the ``activated_cdnc`` the 2M scheme receives. The core's
+        # aging and condensation within the step shift the ratios by that
+        # step's increment only.
         masses = {}
         for short in named:
             for sp in spec.mode(short).species:

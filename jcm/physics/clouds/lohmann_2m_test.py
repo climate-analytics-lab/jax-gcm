@@ -2442,8 +2442,8 @@ class TestColumnEnthalpyConservation2M:
     def test_het_freezing_moves_mass_and_fusion_heat(self):
         """Immersion INP must freeze droplet MASS, not just crystal number.
 
-        The aerosol → ice coupling of #494 sets ICNC from the online INP and
-        freezes one mean-mass droplet per new crystal. That transfer was
+        The aerosol-free closure sets ICNC from the INP number and freezes
+        one mean-mass droplet per new crystal. That transfer was
         applied to the local in-cloud arrays but never added to the freezing
         accumulator the assembly ledger reads, so raising INP created
         crystals with zero mass and destroyed droplets with zero mass — the
@@ -2461,7 +2461,7 @@ class TestColumnEnthalpyConservation2M:
         nlev = cols[0].shape[0]
         qc = cols[3]
 
-        cols[11] = jnp.zeros(nlev)                       # no online INP
+        cols[11] = jnp.zeros(nlev)                       # no external INP
         base, _, _ = self._run(tuple(cols))
         cols[11] = jnp.where(qc > 0, 1e6, 0.0)           # 1e6 /m³ immersion INP
         high, _, _ = self._run(tuple(cols))

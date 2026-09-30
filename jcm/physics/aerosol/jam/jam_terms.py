@@ -54,6 +54,9 @@ from jcm.physics.aerosol.jam.emissions.seasalt import (
     SeaSaltEmissions,
     SeaSaltParameters,
 )
+from jcm.physics.aerosol.jam.ice_nucleation.ham_freezing import (
+    HamFreezingClasses,
+)
 from jcm.physics.aerosol.jam.ice_nucleation.ice_term import IceNucleation
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.placeholder import (
@@ -153,6 +156,7 @@ def jam_aerosol_physics(
     sulfur_gas: SulfurGasParameters | None = None,
     aqueous: AqueousSulfurParameters | None = None,
     aqueous_scheme: str = "full",
+    freezing_classes: HamFreezingClasses | None = None,
     activation: ArgParameters | None = None,
     cloud_borne_exchange: CloudBorneExchangeParameters | None = None,
     sedimentation: SedParameters | None = None,
@@ -201,6 +205,9 @@ def jam_aerosol_physics(
             prescribed-oxidant + gas-phase + aqueous sulfur chemistry (#496).
         aqueous_scheme: ``"full"`` (default, HAM ``ham_wet_chemistry`` port) or
             ``"simple"`` (H2O2-limited stoichiometric oxidation).
+        freezing_classes: which classes of the population play HAM's roles in
+            the aerosol inputs to mixed-phase freezing (``HamFreezingClasses``);
+            ``None`` takes the MAM4 mapping, ``MAM4_FREEZING_CLASSES``.
         activation/cloud_borne_exchange/sedimentation/drydep/wetdep/
             tracer_diffusion/conv_transport: optional per-process
             ``Parameters`` overrides (each ``None`` resolves to its
@@ -346,7 +353,7 @@ def jam_aerosol_physics(
         # ham_IN_setup) -> ``freezing_aerosol``, which the 2M scheme turns into
         # contact + immersion freezing rates (#953). After ARG: HAM's
         # activated number per class is ARG's.
-        IceNucleation(spec=spec),
+        IceNucleation(spec=spec, classes=freezing_classes),
         StokesSedimentation(params=sedimentation, spec=spec),
         SlinnDryDeposition(params=drydep, spec=spec),
         # Cloud-borne cycling (#602): activation transfer + resuspension
