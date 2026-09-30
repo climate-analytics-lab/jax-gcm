@@ -239,19 +239,6 @@ _ONE_MOMENT_SATURATION_CANCELLATION = (
     "and keeps a real tolerance. (#843)"
 )
 
-_COVER_ICE_MEMORY_SWITCH = (
-    "jcm/physics/clouds/sundqvist.py::_qs_cover — the cover's saturation "
-    "switches from the water to the ice fit where the cell's cloud ice "
-    "exceeds csecfrl = 5e-6 kg/kg (ECHAM mo_cover.f90's lo2, a deliberate hard "
-    "switch). The stable column carries no cloud ice, so the zero qi leaf "
-    "takes an absolute step, and along the seed-0 direction the plus side "
-    "crosses 5e-6 at the cold levels between eps = 2e-6 and 4e-6: "
-    "cover_relative_humidity jumps by 0.03-0.08 there (levels 30-35) and the "
-    "plus secant grows as jump/eps while the minus secant stays at -4884. "
-    "Finiteness holds; there is no two-sided reference across a switch, "
-    "which the cover's second ice condition, T < cthomi = 238.15 K, shares."
-)
-
 _MACV2_PER_BAND_RATIO_NOISE = (
     "jcm/physics/aerosol/macv2_sp.py:129-136 — on the RRTMGP band structure "
     "(14 SW bands) the term publishes per-band ssa_sw_per_band / "
@@ -368,11 +355,24 @@ _CHECKS: dict = {
     ("macv2_sp_aerosol", "stable"): _Check(
         xfail_reference=_MACV2_PER_BAND_RATIO_NOISE),
 
-    # ``sundqvist_cloud_fraction`` at the stable column has no central
-    # difference along the seed-0 direction: see ``_COVER_ICE_MEMORY_SWITCH``.
-    # The tropical column takes the default difference reference.
+    # ``sundqvist_cloud_fraction`` at the stable column crosses the cover's
+    # ice-memory switch under this direction: ``_qs_cover`` takes the ice fit
+    # where the cell's cloud ice exceeds csecfrl = 5e-6 kg/kg (ECHAM
+    # mo_cover.f90's ``lo2``, a deliberate hard switch, which its second
+    # condition T < cthomi shares). The column carries no cloud ice, so the
+    # zero qi leaf takes an absolute step, and the plus side crosses 5e-6 at
+    # the cold levels (30-35) between eps = 2e-6 and 4e-6: the cover's
+    # relative humidity jumps by 0.03-0.08 there and the plus secant grows as
+    # jump/eps. That is the scheme's own switch, so the adjoint identity and
+    # the liveness of the temperature and humidity the cover reads are what
+    # remain, and both hold at the default tolerance. The term is a
+    # diagnostic: its tendency ledger is structural zeros. The tropical column
+    # takes the default difference reference.
     ("sundqvist_cloud_fraction", "stable"): _Check(
-        xfail_reference=_COVER_ICE_MEMORY_SWITCH),
+        reference="adjoint",
+        live_inputs=("[0]/temperature", "[0]/specific_humidity"),
+        skip_outputs=("u_wind", "v_wind", "temperature", "specific_humidity",
+                      "tracers/qc", "tracers/qi")),
 
     # TTE-TKE, the 1M microphysics and Hines each cross an internal activation
     # boundary under this direction, and none of them has a central difference

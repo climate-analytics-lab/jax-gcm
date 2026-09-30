@@ -1838,7 +1838,7 @@ class TestColumnWaterConservation2M:
         1.74 to at/below the threshold, with bounded latent heating.
         """
         import numpy as np
-        import jcm.constants as c
+        from jcm.physics import thermodynamics
         from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
         from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
 
@@ -1846,8 +1846,9 @@ class TestColumnWaterConservation2M:
         T = jnp.full(nlev, 190.2)
         p = jnp.linspace(3000.0, 4500.0, nlev)
         rho = p / (287.0 * T)
-        esi = 610.78 * np.exp(21.875 * (190.2 - 273.15) / (190.2 - 7.66))
-        qsi = c.eps * esi / np.asarray(p)
+        # The scheme's own ice saturation (ECHAM's ``ua`` table), so the
+        # start really is at S_ice = 1.74, above the 1.615 threshold.
+        qsi = np.asarray(thermodynamics.saturation_specific_humidity(T, p))
         q = jnp.asarray(1.74 * qsi)
         qi = jnp.full(nlev, 1.5e-4)
         tend, _, _, *_ = cloud_microphysics_2m(

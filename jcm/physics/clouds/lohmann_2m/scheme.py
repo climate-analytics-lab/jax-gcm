@@ -253,15 +253,19 @@ def cloud_microphysics_2m(
     # ECHAM evaluates zqsi/zqsw/zeta/the subsaturations at (ptm1, pqm1);
     # the provisional state enters only through the increments above.
     # ECHAM reads them from the 0.001 K tables (mo_cloud_micro_2m.f90
-    # l.642-705): the "water" set from ``tlucuaw`` — Sonntag over liquid
+    # l.648-702): the "water" set from ``tlucuaw`` — Sonntag over liquid
     # water at ALL temperatures, which the Bergeron/WBF machinery needs,
     # since it depends on the water/ice saturation *difference* below
     # freezing — and the "ice" set from ``tlucua``, the ``ua`` table: Sonntag
     # over ice at and below tmelt and over water above (``phase="auto"``).
-    es_water = thermodynamics.saturation_vapor_pressure(
-        temperature_m1, phase="water")
-    es_ice = thermodynamics.saturation_vapor_pressure(
-        temperature_m1, phase="auto")
+    # The vapour pressures are ``sat_spec_hum``'s capped ``zes`` times
+    # ``p·rv/rd`` (``zesw_2d``, ``zesi``, l.668 and 690), so they are held at
+    # ``0.5·p·rv/rd`` where that cap binds (the top few levels).
+    es_cap = 0.5 * pressure * (c.rv / c.rd)
+    es_water = jnp.minimum(thermodynamics.saturation_vapor_pressure(
+        temperature_m1, phase="water"), es_cap)
+    es_ice = jnp.minimum(thermodynamics.saturation_vapor_pressure(
+        temperature_m1, phase="auto"), es_cap)
     qsat_water, dqsw_dt = (
         thermodynamics.saturation_specific_humidity_and_derivative(
             temperature_m1, pressure, phase="water"))

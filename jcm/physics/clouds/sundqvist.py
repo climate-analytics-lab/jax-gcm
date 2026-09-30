@@ -487,8 +487,9 @@ def _qs_and_dqs_dt(
     ECHAM's steps use (:func:`~jcm.physics.thermodynamics.dqsat_dT_from_es`).
     The slope blends the two phases' analytic ``des/dT`` with the weight held
     fixed, so it omits the ``(es_w − es_i)·dweight/dT`` term of the blend's
-    own derivative (up to 9 % at 240 K); it is the per-phase slope a Newton
-    step on a fixed phase takes, and the blend itself is the #940 gap.
+    own derivative (9.2 % at 240 K, 9.8 % at 238.15 K); it is the per-phase
+    slope a Newton step on a fixed phase takes, and the blend itself is the
+    #940 gap.
     Closed form so the Newton step is reproducible under JIT. ``t_mix_min``
     must be the same value the caller's latent-heat ramp uses (#667).
     """
