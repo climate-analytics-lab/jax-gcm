@@ -4,8 +4,16 @@
 # ``physics.builder`` tells ``runners.build_physics`` to call
 # ``echam_physics(**these_kwargs)``, which encodes the JAM aerosol chain's
 # validated ordering (the chain is split around the cloud term, so a flat term
-# list can't express it). Only scalar flags below are forwarded; per-scheme
-# ``Parameters`` keep their ``.default()``.
+# list can't express it). The flags below are forwarded as they are; a
+# per-scheme ``Parameters`` field is set through the factory argument of that
+# scheme (there is no ``terms`` node), on top of what the factory would use:
+#
+#     python -m jcm.main physics=echam-jam \
+#         +physics.convection.entrpen=4e-4 +physics.convection.tau=3600
+#
+# (``convection``, ``clouds``, ``microphysics_2m``, ``radiation``,
+# ``vertical_diffusion``, ``surface``, ``hines``, ``sso``; see
+# ``echam_physics``.) Unset fields keep their defaults.
 #
 # End-to-end usage (supply emissions on the model grid; auto-routes by content):
 #
@@ -23,7 +31,7 @@ builder: echam_physics
 
 aerosol_module: jam
 cloud_scheme: 2m            # ARG activated_cdnc feeds the 2-moment scheme
-radiation_scheme: rrtmgp    # set radiation_scheme=grey for the cheap grey scheme
+radiation_scheme: rrtmgp    # the ECHAM radiation; "grey" (idealized, not ECHAM) is rejected
 jam_microphysics: mam4_jax  # the MAM4-JAX core (#490); "placeholder" for κ-Köhler
 jam_arg_variant: ghosh2025  # or arg2000
 jam_aqueous_scheme: full

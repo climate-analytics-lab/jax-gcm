@@ -27,8 +27,8 @@ import tree_math
 
 import jcm.constants as c
 from jcm.physics.clouds.cloud_utils import (
-    eff_liquid_droplet_radius,
     latent_heat_over_cp,
+    prescribed_droplet_number,
     moist_isobaric_heat_capacity,
 )
 
@@ -98,9 +98,6 @@ class MicrophysicsParameters:
                          # (jcm's default grid) is 2.5 (mo_echam_cloud_params.f90
                          # :211); the 2M scheme uses 2.5 too (#675).
 
-    # Cloud droplet number concentration
-    base_cdnc: float     # Baseline CDNC in clean air (1/m³), modulated by aerosol cdnc_factor
-
     # Mixed-phase split for the saturation-adjustment step. Below
     # ``t_mix_min`` condensate becomes 100% ice; above ``t_mix_max`` it
     # becomes 100% liquid. In between, the partition weighs liquid by
@@ -133,6 +130,15 @@ class MicrophysicsParameters:
                          # condensate below which a cell no longer counts as
                          # cloudy — drives the post-microphysics ``paclc``
                          # write-back (mo_cloud.f90:1280, #687)
+    clwprat: float       # ECHAM ``clwprat`` (mo_echam_cloud_params, 4.0 at
+                         # nn=63): a shallow-convective column (ktype 2) is
+                         # re-typed 4 for radiation when its liquid water path
+                         # at/below the convective cloud top exceeds clwprat x
+                         # the path above it (mo_cloud.f90:1449-1455), which
+                         # selects the shallow liquid inhomogeneity zinhoml2.
+                         # A discrete threshold: its gradient is identically
+                         # zero, so it is a configuration value, not a
+                         # calibration target
 
     # Autoconversion scheme selector (int flag — JAX won't trace strings).
     # 0 = Beheng (1994) implicit form (default; robust at large dt),
@@ -190,10 +196,10 @@ class MicrophysicsParameters:
                 ccracl=6.0, cauloc=0.0, clmin=0.0, clmax=0.5,
                  ceffmin=10.0, ceffmax=150.0, cn0s=3.0e6,
                  crhosno=100.0, ccsaut=95.0, ccsacl=0.1,
-                 cvtfall=2.5, base_cdnc=100.0e6,
+                 cvtfall=2.5,
                  t_mix_min=238.15, t_mix_max=273.15,
                  epsilon=1.0e-12, d_epsilon=1.0e-30,
-                 cqtmin=1.0e-12, ccwmin=1.0e-7,
+                 cqtmin=1.0e-12, ccwmin=1.0e-7, clwprat=4.0,
                  autoconversion_scheme=0) -> 'MicrophysicsParameters':
         """Return default microphysics parameters.
 
@@ -217,13 +223,13 @@ class MicrophysicsParameters:
             ccsaut=jnp.array(ccsaut),
             ccsacl=jnp.array(ccsacl),
             cvtfall=jnp.array(cvtfall),
-            base_cdnc=jnp.array(base_cdnc),
             t_mix_min=jnp.array(t_mix_min),
             t_mix_max=jnp.array(t_mix_max),
             epsilon=jnp.array(epsilon),
             d_epsilon=jnp.array(d_epsilon),
             cqtmin=jnp.array(cqtmin),
             ccwmin=jnp.array(ccwmin),
+            clwprat=jnp.array(clwprat),
             autoconversion_scheme=autoconversion_scheme,
         )
         # Run the field-level cross-validation on this door too (the runner
@@ -496,13 +502,14 @@ def ice_autoconversion(
     cloud_fraction: jnp.ndarray,
     dt: float,
     config: MicrophysicsParameters,
-    air_density: jnp.ndarray = jnp.array(1.0),
+    air_density: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Ice→snow autoconversion — ECHAM's Levkov aggregation (mo_cloud.f90:996-1052).
 
     The aggregation timescale comes from the Moss (1995) effective radius
     of the in-cloud ice (``zrieff = 83.8·(IWC g/m³)^0.216`` µm), converted
-    to a volume-mean size (Schumann form) and fed into Levkov's ``zdt2``;
+    to a volume-mean size with the plate relation ``zrih``
+    (mo_cloud.f90:1031-1036) and fed into Levkov's ``zdt2``;
     the rate coefficient ``ccsaut/zdt2`` is integrated IMPLICITLY
     (``x·(1 − 1/(1 + rate·dt·x))``) so per-step depletion is bounded with
     no artificial qi threshold and no 1/dt in the physical rate. The
@@ -525,6 +532,11 @@ def ice_autoconversion(
         Grid-mean autoconversion rate (kg/kg/s).
 
     """
+    # Built at call time, not as a default argument: a jax array in a
+    # ``def`` default is created at import and initialises the JAX backend
+    # on ``import`` (#859).
+    if air_density is None:
+        air_density = jnp.array(1.0)
     qi_in_cloud = jnp.where(
         cloud_fraction > config.epsilon,
         cloud_ice / jnp.maximum(cloud_fraction, config.epsilon),
@@ -866,6 +878,10 @@ def cloud_microphysics_column_sweep(
       tracked as a separate add when stability data justifies it.
     * **Rain freezing** below ``cthomi`` and the **Bergeron-Findeisen**
       ice-from-supercooled-water process (covered by the 2M scheme).
+    * **Bigg and contact freezing of supercooled cloud water** between
+      ``cthomi`` and ``tmelt`` (``mo_cloud.f90`` section 6.2, lines
+      830-885), the two ECHAM processes besides autoconversion that read
+      the droplet number (#939).
 
     """
     if config is None:
@@ -1372,25 +1388,81 @@ from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
 
 
+def shallow_liquid_convection_type(
+    ktype: jnp.ndarray,
+    cloud_top: jnp.ndarray,
+    pressure_full: jnp.ndarray,
+    cloud_water: jnp.ndarray,
+    pressure_thickness: jnp.ndarray,
+    clwprat,
+) -> jnp.ndarray:
+    """ECHAM's radiation convective type: ``ktype`` with shallow-liquid 4s.
+
+    ``mo_cloud.f90`` (1M ``cloud``, lines 1439-1455)::
+
+        zxlvitop = sum_{jk < kctop} xlm1 * dp/g       ! liquid ABOVE the top
+        zxlvibot = zxlvi - zxlvitop                   ! at and below the top
+        IF (ktype == 2 .AND. zxlvibot > clwprat*zxlvitop) ktype = 4
+
+    Broadcasting-native: level on axis 0, any trailing horizontal axes.
+    "Above the top" is decided by pressure (``p < p(cloud_top)``), so the
+    result does not depend on the level axis's orientation. ECHAM's ``pxlm1``
+    is non-negative; jcm's advected ``qc`` can carry small negative ringing, so
+    the path above the top is floored at zero and a column needs positive
+    liquid at/below the top to re-type — identical to ECHAM for any
+    non-negative ``qc`` (where ``0 > clwprat·0`` is already false), and it
+    keeps a liquid-free column from reading as "shallow liquid".
+
+    Args:
+        ktype: convection type per column (*horiz), int.
+        cloud_top: convective cloud-top level index per column (*horiz), on
+            the same level axis as ``pressure_full``.
+        pressure_full: full-level pressure [Pa] (nlev, *horiz).
+        cloud_water: grid-mean cloud liquid [kg/kg] (nlev, *horiz).
+        pressure_thickness: layer Δp [Pa] (nlev, *horiz).
+        clwprat: ECHAM ``clwprat`` threshold ratio.
+
+    Returns:
+        ``ktype`` with qualifying shallow columns set to 4, same dtype.
+
+    """
+    ktype = jnp.asarray(ktype)
+    top = jnp.clip(cloud_top, 0, pressure_full.shape[0] - 1).astype(jnp.int32)
+    p_top = jnp.take_along_axis(pressure_full, top[jnp.newaxis], axis=0)
+    liquid = cloud_water * pressure_thickness / c.grav
+    lwp_above_raw = jnp.sum(
+        jnp.where(pressure_full < p_top, liquid, 0.0), axis=0)
+    lwp_below = jnp.sum(liquid, axis=0) - lwp_above_raw
+    lwp_above = jnp.maximum(lwp_above_raw, 0.0)
+    shallow_liquid = (
+        (ktype == 2) & (lwp_below > 0.0) & (lwp_below > clwprat * lwp_above)
+    )
+    return jnp.where(shallow_liquid, jnp.asarray(4, ktype.dtype), ktype)
+
+
 class Echam1MMicrophysics(PhysicsTerm):
     """ECHAM 1-moment cloud microphysics as a composable PhysicsTerm.
 
     Consumes the post-condensation ``cloud_fraction``, ``qc``, ``qi``
     written to the public ``"clouds"`` key by
     :class:`~jcm.physics.clouds.sundqvist.SundqvistCloudFraction` so it
-    must be composed downstream of that term. Reads ``cdnc_factor`` from
-    the public ``"aerosol"`` key (set by
-    :class:`~jcm.physics.aerosol.Macv2SpAerosol`) to apply the Twomey
-    indirect effect on droplet number — when the aerosol term is absent,
-    falls back to the bare ``base_cdnc`` from the parameters.
+    must be composed downstream of that term. The droplet number is ECHAM's
+    prescribed ``acdnc`` profile scaled by ``cdnc_factor`` from the public
+    ``"aerosol"`` key (set by :class:`~jcm.physics.aerosol.Macv2SpAerosol`),
+    :func:`~jcm.physics.clouds.cloud_utils.prescribed_droplet_number`, the
+    call the radiation also makes.
 
     Reads ``pressure_full``, ``air_density``, ``layer_thickness`` from
     the moist-air diagnostics dict and the model timestep from
     ``diagnostics["_dt_seconds"]`` (injected by ``ComposablePhysics``).
-    Writes ``precip_rain``, ``precip_snow``, ``droplet_number`` and the
-    droplet effective radius ``r_eff_liq`` back into the public
-    ``"clouds"`` key (preserving the upstream ``cloud_fraction`` /
-    ``qc`` / ``qi`` fields).
+    Writes ``precip_rain``, ``precip_snow`` and ``droplet_number`` back
+    into the public ``"clouds"`` key (preserving the upstream ``cloud_fraction`` /
+    ``qc`` / ``qi`` fields). When a convection term has published
+    ``"convection"`` upstream, it also re-types that step's shallow columns
+    whose liquid sits below the convective cloud top as ``ktype = 4`` for the
+    next step's radiation (:func:`shallow_liquid_convection_type`, ECHAM
+    ``mo_cloud.f90``). ``"convection"`` is deliberately not in ``provides``:
+    the term only amends it, and cannot supply it where no convection runs.
     """
 
     name: ClassVar[str] = "echam_1m_microphysics"
@@ -1480,14 +1552,18 @@ class Echam1MMicrophysics(PhysicsTerm):
         qi_interim = clouds.qi
         cloud_fraction = clouds.cloud_fraction
 
-        # Twomey effect: aerosol term provides per-column cdnc_factor
-        # (validated as a required upstream key at composition time).
-        cdnc_factor = diagnostics["aerosol"].cdnc_factor
-        cdnc_m3 = (
-            jnp.ones_like(state.temperature)
-            * params.base_cdnc
-            * cdnc_factor[jnp.newaxis, :]
-        )
+        # Droplet number: ECHAM's prescribed ``acdnc`` profile (physc.f90
+        # section 3.12; land/sea, 80/180 cm-3 below 800 hPa, 20 cm-3 aloft)
+        # times the MACv2-SP Twomey factor, from the SAME call the radiation
+        # makes (``prescribed_droplet_number``): ECHAM's ``cloud`` receives
+        # the ``acdnc`` its radiation used as ``pacdnc``. The in-cloud number
+        # enters the Beheng/KK autoconversion (``mo_cloud.f90`` 977:
+        # ``ztmp2 = pacdnc*1e-6``); ECHAM's other two uses, Bigg and contact
+        # freezing of cloud water between cthomi and tmelt (859, 876), have
+        # no counterpart in this port (#939).
+        cdnc_m3 = prescribed_droplet_number(
+            pressure_full, terrain, forcing,
+            diagnostics["aerosol"].cdnc_factor)
         droplet_number_per_kg = cdnc_m3 / air_density
 
         # ECHAM ``mo_cloud.f90`` column-sweep: per-layer saturation
@@ -1580,21 +1656,6 @@ class Echam1MMicrophysics(PhysicsTerm):
             ).T / dm_col.T,
             precip_evaporation_rate=micro_state.rain_evap_flux.T / dm_col.T,
             droplet_number=cdnc_m3,
-            # Droplet effective radius (um) for radiation, from the same ECHAM
-            # law as the 2M scheme. The in-cloud liquid is the POST-microphysics
-            # value, not ``micro_state.qc_in_cloud`` (which the sweep derives
-            # from its INPUT state): radiation must see the size distribution of
-            # the ``qc`` it is given, as on the 2M path. No temperature mask —
-            # supercooled liquid is radiatively active liquid.
-            r_eff_liq=eff_liquid_droplet_radius(
-                jnp.where(
-                    cloud_fraction > params.epsilon,
-                    (qc_interim + micro_tend.dqcdt.T * dt)
-                    / jnp.maximum(cloud_fraction, params.epsilon),
-                    0.0,
-                ),
-                air_density, cdnc_m3, params.epsilon,
-            ),
         )
 
         # Advance the running condensate view so terms downstream (the
@@ -1610,5 +1671,30 @@ class Echam1MMicrophysics(PhysicsTerm):
             d_temperature=tendency.temperature,
             d_specific_humidity=tendency.specific_humidity,
             d_qc=tendency.tracers.get("qc"), d_qi=tendency.tracers.get("qi"))
+
+        # ECHAM ``mo_cloud.f90`` (after the column loop): re-type a shallow
+        # convective column (ktype 2) as 4 when its liquid water path at and
+        # below the convective cloud top exceeds ``clwprat`` x the path above
+        # it — "shallow convection with the liquid below the top". Nothing in
+        # the cloud scheme uses it; it is stored for NEXT step's radiation,
+        # which drops the liquid inhomogeneity to ``zinhoml2`` there
+        # (``mo_cloud_optics.f90``). ECHAM does this only in the 1M ``cloud``
+        # routine — its 2M ``cloud_micro_interface`` never re-types — so the
+        # Lohmann 2M term deliberately has no counterpart. The liquid is the
+        # step-start ``pxlm1`` (``state.tracers["qc"]``), as in ECHAM.
+        conv = diagnostics.get("convection")
+        if conv is not None and hasattr(conv, "cloud_top"):
+            diagnostics = {**diagnostics, "convection": conv.replace(
+                ktype=shallow_liquid_convection_type(
+                    conv.ktype, conv.cloud_top, pressure_full,
+                    state.tracers.get("qc", jnp.zeros_like(state.temperature)),
+                    # Every ECHAM stack has MoistAirColumnState's exact Δp;
+                    # the ρ·g·dz fallback (dz floored at 10 m) only serves
+                    # hand-built diagnostics without it.
+                    diagnostics.get("pressure_thickness",
+                                    air_density * layer_thickness * c.grav),
+                    params.clwprat,
+                ),
+            )}
 
         return tendency, {**diagnostics, "clouds": clouds}

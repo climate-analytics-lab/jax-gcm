@@ -45,15 +45,13 @@ TS=$(date +%y%m%d_%H%M%S)
 COMMON="physics=echam \
         grid=echam_t63_l47_hybrid \
         init=jw init.rh=0.0 \
-        terrain=from_file terrain.file=$REPO/jcm/data/bc/t63/terrain.nc \
-        forcing=from_file forcing.file=$REPO/jcm/data/bc/t63/forcing.nc \
-        run=longrun \
-        run.time_step=12 run.save_interval=5 run.chunk_days=30"
+        terrain=from_file terrain.file=hf://bundles/t63/terrain.nc \
+        forcing=from_file forcing.file=hf://bundles/t63/forcing_pd.nc \
+        run=longrun"
 
 PREFIX=myrun_$TS
 nohup env CUDA_VISIBLE_DEVICES=0 XLA_PYTHON_CLIENT_PREALLOCATE=false \
     $PY -m jcm.main $COMMON \
-        run.total_time=365 \
         run.output_prefix=$PREFIX \
         +run.checkpoint_path=${PREFIX}.ckpt \
     > $REPO/run_logs/${PREFIX}.log 2>&1 &
@@ -89,6 +87,12 @@ A T63L47 ECHAM run started from an isothermal cold start with no sponge
   `init=isothermal` on a real-orography grid is not a viable start.
 - `terrain=from_file` + `forcing=from_file` — real orography/land-sea mask and
   SSTs.
+- `run=longrun` — one **calendar year** (`run.total_time: 12 months` from
+  `run.start_time`) written as calendar-month means
+  (`<prefix>_monthly_YYYY-MM.nc`, `run.monthly_means`, #901) from daily means
+  in 5-day chunks; no per-chunk `_dayN.nc` unless `run.save_chunks=true`.
+  `forcing_pd.nc` + the `auto` emission/ozone/oxidant bundles are the
+  present-day (2005–2014) climatological AMIP forcing.
 - `run=longrun` — this already carries the **settled production sponge**
   (`levels=10, timescale_h=1.5, enspodi=2.0, damp_temperature=true,
   target_T_K=250`, rationale in `run/longrun.yaml`). Do **not** re-specify

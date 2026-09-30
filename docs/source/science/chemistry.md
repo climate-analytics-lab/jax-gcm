@@ -11,8 +11,8 @@ the aerosol code (``jcm/physics/aerosol/jam/chemistry/``), not under
 **What we do.** Radiation's ozone and methane are both supplied by
 ``EchamBoundaryConditions``, which seeds ``chemistry.ozone_vmr`` (the forcing
 climatology, or an **analytic fixed distribution** — a stratospheric-max profile
-parameterised by scale height, max VMR and tropopause height (the declared
-``ozone_stratosphere_coeff`` is inert, #799) — when no file is given) and
+parameterised by scale height, max VMR and tropopause height — when no file is
+given) and
 ``chemistry.methane_vmr`` every step.
 Both public fields are in **ppmv**, matching ``ForcingData.co2_vmr``,
 ``ForcingData.ch4_vmr``, ``ForcingData.n2o_vmr`` and

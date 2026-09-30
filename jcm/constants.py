@@ -88,9 +88,17 @@ class PhysicalConstants(NamedTuple):
 
     # --- Molar / aerosol-microphysics (independent constants) ---------------
     r_universal: float = 8.314462           # Universal gas constant (J/mol/K)
-    surface_tension_water: float = 0.0728   # Surface tension of water (N/m, ~20 °C)
-    vapor_diffusivity: float = 2.11e-5      # Water-vapour diffusivity in air (m²/s)
-    air_thermal_conductivity: float = 0.024  # Thermal conductivity of air (W/m/K)
+    # Droplet-growth properties of water and air, as CAM ``ndrop.F90`` uses
+    # them in ARG activation. The two transport coefficients are the values AT
+    # CAM's reference state (1013.25 hPa, 273 K); the ARG scheme scales them to
+    # the local T/p with the Pruppacher & Klett fits (``arg.py``), since the
+    # constant sea-level values bias activation high by up to ~20 % aloft (#679).
+    surface_tension_water: float = 0.076    # Water-air surface tension (N/m; CAM ``surften``)
+    vapor_diffusivity: float = 2.11e-5      # Water-vapour diffusivity in air at
+                                            # 1013.25 hPa, 273 K (m²/s; P&K 13.3)
+    air_thermal_conductivity: float = 5.69e-5 * 418.6  # Thermal conductivity of
+                                            # air at 273 K (W/m/K; P&K 13.18,
+                                            # 5.69e-5 cal/cm/s/K)
 
     # --- Derived quantities (recompute from the fields above) ---------------
     @property

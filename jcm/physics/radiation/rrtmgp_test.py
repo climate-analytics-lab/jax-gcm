@@ -17,7 +17,11 @@ from jcm.physics.radiation.grey_two_stream.radiation_scheme import radiation_sch
 from jcm.physics.radiation.rrtmgp import (
     radiation_scheme_rrtmgp,
 )
-from jcm.physics.radiation.radiation_types import RadiationParameters
+from jcm.physics.radiation.radiation_types import (
+    RadiationParameters,
+    lagged_convection_type,
+    liquid_inhomogeneity,
+)
 from jcm.physics.radiation.grey_two_stream.radiation_scheme_test import (
     create_test_atmosphere,
     create_default_aerosol_data,
@@ -71,7 +75,35 @@ def _make_inputs(nlev=10):
         aerosol_data=aerosol,
         ozone_vmr=None,
         co2_vmr=400e-6,
+        # The radii the RRTMGP term would form for this column (ECHAM 1M
+        # prescribed droplet number, maritime), so the scheme is exercised
+        # with the radius law it runs with in the model.
+        **_column_radii(atm, air_density),
     )
+
+
+def _column_radii(atm, air_density, cld_frac_min=1e-3):
+    """``r_eff_liq_um`` / ``r_eff_ice_um`` for a test column, ECHAM 1M inputs."""
+    from jcm.physics.clouds.cloud_utils import prescribed_cdnc_profile
+    from jcm.physics.radiation.cloud_optics import echam_cloud_effective_radii
+    from jcm.physics.radiation.mcica import in_cloud_condensate
+
+    cw = in_cloud_condensate(atm["cloud_water"], atm["cloud_fraction"],
+                             eps=cld_frac_min)
+    ci = in_cloud_condensate(atm["cloud_ice"], atm["cloud_fraction"],
+                             eps=cld_frac_min)
+    r_liq, r_ice = echam_cloud_effective_radii(
+        cw, ci, atm["temperature"], atm["pressure_levels"],
+        prescribed_cdnc_profile(atm["pressure_levels"], False),
+        jnp.zeros_like(atm["temperature"]), False, prognostic_number=False,
+    )
+    return dict(r_eff_liq_um=r_liq, r_eff_ice_um=r_ice)
+
+
+def _grey_inputs(inputs):
+    """Return ``inputs`` without the effective radii the grey scheme does not take."""
+    return {k: v for k, v in inputs.items()
+            if k not in ("r_eff_liq_um", "r_eff_ice_um")}
 
 
 def _solstice_solar(hour):
@@ -148,12 +180,11 @@ class TestRRTMGPTermCacheCoords:
 
 
 class TestRRTMGPEffectiveRadii:
-    """Effective-radius handling in the RRTMGP input prep (finding 2.36).
+    """The RRTMGP input prep hands the library exactly the radii it is given.
 
-    The ice fallback must be ECHAM's Moss/Foot power law on the in-cloud
-    IWC in g/m3 — thin cirrus gets small crystals — and microphysical
-    radii from the clouds carry (2M preffl/preffi) must override the
-    fallbacks where provided.
+    The radii are formed upstream from the current state
+    (``cloud_optics.radiation_effective_radii``); the prep only reorders and
+    converts them, with no substitution for a zero.
     """
 
     K_CIRRUS = 1  # TOA-first index of the cirrus layer
@@ -170,8 +201,6 @@ class TestRRTMGPEffectiveRadii:
         temperature = jnp.full(nlev, 250.0)
         air_density = pressure_levels / (c.rd * temperature)
         layer_thickness = jnp.full(nlev, dz)
-        # In-cloud mixing ratio giving exactly ``iwc_gm3`` of in-cloud ice
-        # (the rrtmgp caller hands prepare_radiation_state in-cloud values).
         cloud_ice = jnp.zeros(nlev).at[self.K_CIRRUS].set(
             iwc_gm3 * 1e-3 / air_density[self.K_CIRRUS]
         )
@@ -196,39 +225,8 @@ class TestRRTMGPEffectiveRadii:
         assert interior.shape == (nlev,)
         return interior[::-1] * 1e6
 
-    def test_thin_cirrus_gets_small_crystals(self):
-        """IWC = 1e-4 g/m3 must give r_eff_ice ~ 11.4 um through the prep.
-
-        The previous fabricated formula (T-ramp x clip(path-ratio*1e4))
-        yielded ~40-160 um here, saturating the LUT edge for thin cirrus.
-        """
-        from jcm.physics.radiation.rrtmgp import prepare_rrtmgp_data
-
-        nlev = 8
-        state, layer_thickness = self._make_state(nlev=nlev, iwc_gm3=1e-4)
-        out = prepare_rrtmgp_data(
-            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
-        )
-        r_ice = self._r_eff_um(out, "cloud_r_eff_ice", nlev)
-        expected = 83.8 * 1e-4 ** 0.216  # ~11.46 um (ECHAM Moss/Foot)
-        assert float(r_ice[self.K_CIRRUS]) < 15.0
-        assert np.isclose(float(r_ice[self.K_CIRRUS]), expected, rtol=1e-4)
-
-        # Denser cirrus: 0.01 g/m3 -> ~31 um
-        state, layer_thickness = self._make_state(nlev=nlev, iwc_gm3=1e-2)
-        out = prepare_rrtmgp_data(
-            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
-        )
-        r_ice = self._r_eff_um(out, "cloud_r_eff_ice", nlev)
-        assert np.isclose(
-            float(r_ice[self.K_CIRRUS]), 83.8 * 1e-2 ** 0.216, rtol=1e-4,
-        )
-
-    def test_provided_microphysical_radii_override_fallback(self):
-        """Clouds-carry radii (> 0) win; zeros keep the diagnostic fallback."""
-        from jcm.physics.radiation.cloud_optics import (
-            effective_radius_liquid,
-        )
+    def test_radii_pass_through_unchanged_including_zero(self):
+        """Given radii reach the library as given (um -> m), zeros included."""
         from jcm.physics.radiation.rrtmgp import prepare_rrtmgp_data
 
         nlev = 8
@@ -237,20 +235,20 @@ class TestRRTMGPEffectiveRadii:
         r_eff_liq_um = jnp.zeros(nlev).at[k + 2].set(9.5)
         r_eff_ice_um = jnp.zeros(nlev).at[k].set(25.0)
         out = prepare_rrtmgp_data(
-            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
+            state, layer_thickness, jnp.array(290.0),
             r_eff_liq_um=r_eff_liq_um, r_eff_ice_um=r_eff_ice_um,
         )
         r_liq = self._r_eff_um(out, "cloud_r_eff_liq", nlev)
         r_ice = self._r_eff_um(out, "cloud_r_eff_ice", nlev)
-        # Provided values pass through (um)
-        assert np.isclose(float(r_ice[k]), 25.0, rtol=1e-5)
-        assert np.isclose(float(r_liq[k + 2]), 9.5, rtol=1e-5)
-        # Unprovided levels fall back to the diagnostics
-        fallback_liq = float(effective_radius_liquid(jnp.array(1.0)))
-        assert np.isclose(float(r_liq[k]), fallback_liq, rtol=1e-5)
-        assert np.isclose(
-            float(r_ice[k + 1]), 83.8, rtol=1e-4,
-        )  # zero-IWC guard value
+        np.testing.assert_allclose(r_liq, r_eff_liq_um, rtol=1e-5, atol=0)
+        np.testing.assert_allclose(r_ice, r_eff_ice_um, rtol=1e-5, atol=0)
+
+    def test_scheme_requires_radii(self):
+        """No radius means no solve: there is no fallback to select."""
+        inputs = _make_inputs()
+        inputs.pop("r_eff_liq_um")
+        with pytest.raises(TypeError, match="radiation_effective_radii"):
+            radiation_scheme_rrtmgp(**inputs)
 
 
 class TestRRTMGPScheme:
@@ -549,13 +547,92 @@ class TestRRTMGPTermComputeAndCache(_RRTMGPTermFixture):
         )
 
 
+class TestRRTMGPTermEffectiveRadii(_RRTMGPTermFixture):
+    """The term radiates with radii of the CURRENT state (#929).
+
+    ECHAM forms the droplet and crystal radii inside its radiation call
+    (``mo_cloud_optics.f90::cloud_optics``); nothing about them may be read
+    back from the carried ``clouds`` diagnostic.
+    """
+
+    def _cloudy(self, prognostic=False):
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        diagnostics, state = self._seed_aerosol_and_cloud(diagnostics, state)
+        # Leave the top level clear, so "phase absent" is exercised too.
+        clouds = diagnostics["clouds"]
+        diagnostics = {**diagnostics, "clouds": clouds.copy(
+            cloud_fraction=clouds.cloud_fraction.at[0].set(0.0))}
+        if prognostic:
+            nlev, ncols = self.NLEV, self.NCOLS
+            state = state.copy(tracers={
+                **state.tracers,
+                "qnc": jnp.full((nlev, ncols), 3.0e8),
+                "qni": jnp.full((nlev, ncols), 2.0e4),
+            })
+        return term, state, diagnostics, forcing
+
+    def _expected(self, state, diagnostics, forcing, term):
+        from jcm.physics.radiation.cloud_optics import radiation_effective_radii
+        from jcm.physics.clouds.cloud_data import radiation_cloud_fields
+
+        cw, ci, cf = radiation_cloud_fields(state, diagnostics)
+        return radiation_effective_radii(
+            state, diagnostics, forcing, None, cw, ci, cf,
+            term.params.get_value().cld_frac_min)
+
+    @pytest.mark.parametrize("prognostic", [False, True], ids=["1m", "2m"])
+    def test_published_radii_are_the_current_state_law(self, prognostic):
+        term, state, diagnostics, forcing = self._cloudy(prognostic)
+        _, out = term(state, diagnostics, forcing, None)
+        want_liq, want_ice = self._expected(state, diagnostics, forcing, term)
+        got = out["clouds"]
+        np.testing.assert_allclose(np.asarray(got.r_eff_liq),
+                                   np.asarray(want_liq), rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(got.r_eff_ice),
+                                   np.asarray(want_ice), rtol=1e-6)
+        # The clear top level reports ECHAM's 0; cloudy levels a radius.
+        assert np.all(np.asarray(got.r_eff_liq)[0] == 0.0)
+        assert np.all(np.asarray(got.r_eff_liq)[1:] > 0.0)
+        assert np.all(np.asarray(got.r_eff_ice)[1:] > 0.0)
+
+    def test_prognostic_and_prescribed_number_differ(self):
+        """The 2M tracers, not ECHAM's 1M profile, set the 2M radius."""
+        term, state, diagnostics, forcing = self._cloudy(False)
+        _, out_1m = term(state, diagnostics, forcing, None)
+        term, state, diagnostics, forcing = self._cloudy(True)
+        _, out_2m = term(state, diagnostics, forcing, None)
+        assert not np.allclose(np.asarray(out_1m["clouds"].r_eff_liq)[1:],
+                               np.asarray(out_2m["clouds"].r_eff_liq)[1:])
+
+    def test_carried_radius_is_never_an_input(self):
+        """Any carried radius, zero or not, leaves the heating unchanged."""
+        term, state, diagnostics, forcing = self._cloudy()
+        tend_zero, _ = term(state, diagnostics, forcing, None)
+        clouds = diagnostics["clouds"]
+        carried = {**diagnostics, "clouds": clouds.copy(
+            r_eff_liq=jnp.full_like(clouds.r_eff_liq, 3.0),
+            r_eff_ice=jnp.full_like(clouds.r_eff_ice, 120.0))}
+        tend_carried, _ = term(state, carried, forcing, None)
+        np.testing.assert_array_equal(np.asarray(tend_zero.temperature),
+                                      np.asarray(tend_carried.temperature))
+
+    def test_cached_step_reports_the_radii_of_its_solve(self):
+        term, state, diagnostics, forcing = self._cloudy()
+        _, out1 = term(state, diagnostics, forcing, None)
+        wetter = state.copy(tracers={
+            **state.tracers, "qc": state.tracers["qc"] * 8.0})
+        _, out2 = term(wetter, out1, forcing, None)      # cached step
+        np.testing.assert_array_equal(np.asarray(out2["clouds"].r_eff_liq),
+                                      np.asarray(out1["clouds"].r_eff_liq))
+
+
 class TestGreyVsRRTMGP:
     """Compare grey and RRTMGP schemes for structural agreement."""
 
     def test_heating_tendency_shapes_match(self):
         """Both schemes should return the same shaped arrays."""
         inputs = _make_inputs(nlev=10)
-        tend_grey, _ = radiation_scheme(**inputs)
+        tend_grey, _ = radiation_scheme(**_grey_inputs(inputs))
         tend_rrtm, _ = radiation_scheme_rrtmgp(**inputs)
 
         assert tend_grey.temperature_tendency.shape == tend_rrtm.temperature_tendency.shape
@@ -569,7 +646,7 @@ class TestGreyVsRRTMGP:
         the two are in the same ballpark (atol=0.1 K/s, rtol=100%).
         """
         inputs = _make_inputs(nlev=10)
-        tend_grey, _ = radiation_scheme(**inputs)
+        tend_grey, _ = radiation_scheme(**_grey_inputs(inputs))
         tend_rrtm, _ = radiation_scheme_rrtmgp(**inputs)
 
         # Both should have the same sign pattern in most levels
@@ -613,7 +690,7 @@ class TestGreyVsRRTMGP:
             synodic_phase=jnp.asarray(ot.synodic_phase, dtype=jnp.float32),
         )
 
-        tend_grey, _ = radiation_scheme(**inputs)
+        tend_grey, _ = radiation_scheme(**_grey_inputs(inputs))
         tend_rrtm, _ = radiation_scheme_rrtmgp(**inputs)
 
         assert jnp.all(jnp.isfinite(tend_grey.temperature_tendency))
@@ -1073,6 +1150,42 @@ class TestRRTMGPVerticalOrientation:
             f"SW heating peak below mid-column (upper {upper}, lower "
             f"{lower}) — ozone profile entering gas optics upside down"
         )
+
+
+class TestRRTMGPColdLayerEmission:
+    """A layer's LW cooling must weaken as the layer cools.
+
+    Emission falls with temperature, so an optically thin layer that is
+    colder emits less and cools less. RRTMGP's gas-optics and Planck tables
+    span 160-355 K, and radiative cooling can take a thin model-top layer to
+    that edge. Below it jax-rrtmgp extends the absorption coefficients and
+    the Planck source linearly along the first table interval, floored at
+    zero, as RRTMGP's kernels and the RRTMG that ECHAM6 runs do
+    (``mo_gas_optics_rrtmgp_kernels.F90``;
+    ``mo_lrtm_driver.f90::planckFunction``, ``mo_rrtm_coeffs.f90``). The
+    response therefore keeps its physical sign across the edge, which is
+    what holds the layer there instead of letting it run away.
+    """
+
+    def _top_lw_heating(self, top_temperature):
+        nlev = 20
+        inputs = _make_inputs(nlev=nlev)
+        inputs["compute_cre"] = False
+        # The model-top layer is the one at the lowest pressure; select it
+        # by pressure rather than by an assumed index.
+        k_top = int(np.argmin(np.asarray(inputs["pressure_levels"])))
+        inputs["temperature"] = inputs["temperature"].at[k_top].set(
+            top_temperature)
+        _, diag = radiation_scheme_rrtmgp(**inputs)
+        return float(np.asarray(diag.lw_heating_rate)[k_top])
+
+    def test_in_table_cooling_weakens_as_the_layer_cools(self):
+        # Inside the table the response has the physical sign.
+        assert self._top_lw_heating(170.0) > self._top_lw_heating(190.0)
+
+    def test_below_table_cooling_weakens_as_the_layer_cools(self):
+        # A 150 K layer must cool less than a 160 K one.
+        assert self._top_lw_heating(150.0) > self._top_lw_heating(160.0)
 
 
 class TestRRTMGPAerosolFree(_RRTMGPTermFixture):
@@ -1603,8 +1716,9 @@ class TestRRTMGPMoistureConversion:
             cloud_fraction=jnp.zeros(nlev),
             cos_zenith=jnp.array(0.5),
         )
+        zeros = jnp.zeros(nlev)
         out = prepare_rrtmgp_data(
-            state, layer_thickness, jnp.array(1.0), jnp.array(290.0),
+            state, layer_thickness, jnp.array(290.0), zeros, zeros,
         )
         # Vapour = q_t - q_c; cloud-free here so q_c == 0.
         vapour = out["q_t"][0, 0, 1:-1] - out["q_c"][0, 0, 1:-1]
@@ -1619,29 +1733,33 @@ class TestRRTMGPMoistureConversion:
         assert np.allclose(np.asarray(library_vmr), true_vmr, rtol=1e-6)
 
 
+def _uniform_inhomogeneity(f):
+    """Radiation parameters with every inhomogeneity factor set to ``f``."""
+    return RadiationParameters.default(
+        cloud_inhomogeneity_liquid=f,
+        cloud_inhomogeneity_liquid_convective=f,
+        cloud_inhomogeneity_liquid_shallow=f,
+        cloud_inhomogeneity_ice=f,
+    )
+
+
 class TestRRTMGPCloudInhomogeneity:
-    """ECHAM's fixed cloud sub-grid inhomogeneity factor (#678)."""
+    """ECHAM's fixed cloud sub-grid inhomogeneity factors (#678, #870)."""
 
     def test_inhomogeneity_factor_reduces_reflected_sw(self):
-        """A smaller liquid inhomogeneity factor thins the cloud optically.
+        """A smaller inhomogeneity factor thins the cloud optically.
 
         The factor multiplies the in-cloud condensate path (equivalently the
         optical depth), so reducing it must lower the reflected TOA shortwave
-        and stay NaN-free -- the faithful ECHAM ``zinhoml`` behaviour, not the
-        old one-sided clip that was inert almost everywhere.
+        and stay NaN-free -- the faithful ECHAM ``zinhoml``/``zinhomi``
+        behaviour.
         """
         base = _make_inputs(nlev=10)
 
-        full = dict(base)
-        full["parameters"] = RadiationParameters.default(
-            cloud_inhomogeneity=1.0,
-        )
+        full = dict(base, parameters=_uniform_inhomogeneity(1.0))
         _, diag_full = radiation_scheme_rrtmgp(**full)
 
-        reduced = dict(base)
-        reduced["parameters"] = RadiationParameters.default(
-            cloud_inhomogeneity=0.5,
-        )
+        reduced = dict(base, parameters=_uniform_inhomogeneity(0.5))
         _, diag_reduced = radiation_scheme_rrtmgp(**reduced)
 
         assert jnp.isfinite(diag_full.toa_sw_up)
@@ -1649,7 +1767,101 @@ class TestRRTMGPCloudInhomogeneity:
         # Thinner clouds reflect less sunlight back to space.
         assert float(diag_reduced.toa_sw_up) < float(diag_full.toa_sw_up)
 
-    def test_default_factor_is_echam_t63_value(self):
-        """The default matches ECHAM's nn=63 ``zinhoml1 = zinhomi = 0.8``."""
+    def test_defaults_are_echam_t63_values(self):
+        """``setup_cloud_optics`` at nn=63: zinhoml1=zinhoml3=zinhomi=0.8,
+        zinhoml2=0.4.
+        """
         p = RadiationParameters.default()
-        assert float(p.cloud_inhomogeneity) == pytest.approx(0.8)
+        assert float(p.cloud_inhomogeneity_liquid) == pytest.approx(0.8)
+        assert float(p.cloud_inhomogeneity_liquid_convective) == pytest.approx(0.8)
+        assert float(p.cloud_inhomogeneity_liquid_shallow) == pytest.approx(0.4)
+        assert float(p.cloud_inhomogeneity_ice) == pytest.approx(0.8)
+
+    def test_liquid_factor_selected_by_convective_type(self):
+        """``mo_cloud_optics.f90``: ktype 0 -> zinhoml1, 4 -> zinhoml2, else
+        zinhoml3. Distinct values prove each branch is the right leaf.
+        """
+        p = RadiationParameters.default(
+            cloud_inhomogeneity_liquid=0.7,
+            cloud_inhomogeneity_liquid_convective=0.9,
+            cloud_inhomogeneity_liquid_shallow=0.4,
+        )
+        ktype = jnp.array([0, 1, 2, 3, 4], dtype=jnp.int32)
+        np.testing.assert_allclose(
+            np.asarray(liquid_inhomogeneity(ktype, p)),
+            [0.7, 0.9, 0.9, 0.9, 0.4], rtol=1e-6)
+        # At the defaults a shallow-liquid column gets 0.4, every other 0.8.
+        np.testing.assert_allclose(
+            np.asarray(liquid_inhomogeneity(ktype, RadiationParameters.default())),
+            [0.8, 0.8, 0.8, 0.8, 0.4], rtol=1e-6)
+
+    def test_shallow_liquid_column_weakens_sw_cre(self):
+        """A ktype-4 column halves the liquid optical depth: less reflected SW, a
+        weaker (less negative) SW cloud radiative effect, more OLR.
+        Deep/shallow/none columns share the 0.8 factor, so they give
+        identical fluxes.
+        """
+        base = _make_inputs(nlev=10)
+        assert float(jnp.sum(base["cloud_water"])) > 0.0  # liquid is present
+
+        diags = {k: radiation_scheme_rrtmgp(
+            **base, convection_type=jnp.int32(k))[1] for k in (0, 2, 4)}
+        up = {k: float(d.toa_sw_up) for k, d in diags.items()}
+        assert all(np.isfinite(v) for v in up.values())
+        assert up[4] < up[0]
+        assert up[2] == pytest.approx(up[0], rel=1e-6)
+        # SW CRE = clear - all-sky reflected: negative, weaker when thinner.
+        cre = {k: float(d.toa_sw_up_clear - d.toa_sw_up)
+               for k, d in diags.items()}
+        assert cre[0] < 0.0
+        assert cre[0] < cre[4] <= 0.0
+        assert float(diags[4].toa_lw_up) > float(diags[0].toa_lw_up)
+
+    def test_grey_backend_applies_the_same_selection(self):
+        """The grey backend reads the same per-column liquid factor. Its SW
+        cloud response is absorption-dominated (#855), so the robust check
+        is the LW: a thinner shallow-liquid cloud lets more OLR out, and the
+        0.8-factor types agree exactly.
+        """
+        base = _make_inputs(nlev=10)
+        diags = {k: radiation_scheme(**_grey_inputs(base), convection_type=jnp.int32(k))[1]
+                 for k in (0, 2, 4)}
+        olr = {k: float(d.toa_lw_up) for k, d in diags.items()}
+        assert all(np.isfinite(v) for v in olr.values())
+        assert olr[4] > olr[0]
+        assert olr[2] == pytest.approx(olr[0], rel=1e-6)
+        assert float(diags[4].toa_sw_up) != float(diags[0].toa_sw_up)
+
+    def test_factors_are_differentiable_leaves(self):
+        """Each liquid factor carries a live gradient exactly where selected."""
+        base = _make_inputs(nlev=10)
+
+        def reflected(f, field, ktype):
+            p = RadiationParameters.default(**{field: f})
+            return radiation_scheme_rrtmgp(
+                **dict(base, parameters=p), convection_type=ktype,
+            )[1].toa_sw_up
+
+        def grad(field, ktype):
+            return float(jax.grad(reflected)(
+                jnp.float32(0.6), field, jnp.int32(ktype)))
+
+        assert grad("cloud_inhomogeneity_liquid_shallow", 4) > 0.0
+        assert grad("cloud_inhomogeneity_liquid", 4) == 0.0
+        assert grad("cloud_inhomogeneity_liquid", 0) > 0.0
+        assert grad("cloud_inhomogeneity_liquid_shallow", 0) == 0.0
+        assert grad("cloud_inhomogeneity_liquid_convective", 2) > 0.0
+
+    def test_lagged_convection_type_reads_the_carry(self):
+        """Radiation reads the previous step's ``convection.ktype``; with no
+        convection carry it is 0 (ECHAM's cold-start ``rtype``).
+        """
+        from jcm.physics.convection.tiedtke_nordeng.types import ConvectionData
+
+        conv = ConvectionData.zeros((3,), 4).replace(
+            ktype=jnp.array([0, 2, 4], dtype=jnp.int32))
+        np.testing.assert_array_equal(
+            np.asarray(lagged_convection_type({"convection": conv}, 3)),
+            [0, 2, 4])
+        np.testing.assert_array_equal(
+            np.asarray(lagged_convection_type({}, 3)), [0, 0, 0])

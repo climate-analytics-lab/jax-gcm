@@ -52,22 +52,54 @@ class TestForcingProducts(unittest.TestCase):
             ir.forcing_products("/bb_{year}.nc", [2000, 2001], None),
             [["/bb_2000.nc", "/bb_2001.nc"]])
 
-    def test_coverage_clamps_expansion(self):
-        # emissions coverage ends 2022 while the requested range runs to 2024.
-        self.assertEqual(
-            ir.forcing_products("/emis/{year}.nc", [2023, 2024], [1850, 2022]),
-            [["/emis/2022.nc"]])
+    def test_coverage_gates_expansion_by_declared_persist(self):
+        # emissions coverage ends 2022 while the requested range runs to 2024:
+        # strict (the default) refuses, a declared hold reuses the edge year.
+        with self.assertRaisesRegex(ValueError,
+                                    "forcing.emissions_persist=hold"):
+            ir.forcing_products("/emis/{year}.nc", [2023, 2024],
+                                [1850, 2022], key="emissions_file")
+        with self.assertWarns(UserWarning):
+            self.assertEqual(
+                ir.forcing_products("/emis/{year}.nc", [2023, 2024],
+                                    [1850, 2022], persist="hold",
+                                    key="emissions_file"),
+                [["/emis/2022.nc"]])
         # The by-date bracket pads one year each side, clipped to coverage.
         self.assertEqual(
             ir.expand_yearly("/o3/{year}.nc", [2022, 2022], [1850, 2022]),
             ["/o3/2021.nc", "/o3/2022.nc"])
 
+    def test_per_product_persist(self):
+        # One policy per list product, like emissions_align.
+        with self.assertWarns(UserWarning):
+            out = ir.forcing_products(
+                ["/bb/{year}.nc", "/anthro/{year}.nc"], [2023, 2023],
+                [1850, 2022], persist=["hold", "hold"], key="emissions_file")
+        self.assertEqual(out, [["/bb/2022.nc"], ["/anthro/2022.nc"]])
+        with self.assertRaisesRegex(ValueError, "2 entries"):
+            ir.forcing_products(["/a.nc"], [2000, 2000], None,
+                                persist=["hold", "strict"],
+                                key="emissions_file")
+
+    def test_persist_key_for(self):
+        self.assertEqual(ir.persist_key_for("file"), "forcing.persist")
+        self.assertEqual(ir.persist_key_for("ozone_file"),
+                         "forcing.ozone_persist")
+        self.assertEqual(ir.persist_key_for("macv2_file"),
+                         "forcing.macv2_persist")
+
     def test_coverage_from_manifest(self):
         manifest = mm.load_manifest()
         cov = mm.coverage(manifest, "emissions_amip")
-        self.assertEqual(
-            ir.forcing_products("/emis/{year}.nc", [2023, 2024], cov),
-            [["/emis/2022.nc"]])
+        with self.assertRaisesRegex(ValueError, "1950-2022"):
+            ir.forcing_products("/emis/{year}.nc", [2023, 2024], cov,
+                                key="emissions_file")
+        with self.assertWarns(UserWarning):
+            self.assertEqual(
+                ir.forcing_products("/emis/{year}.nc", [2023, 2024], cov,
+                                    persist="hold", key="emissions_file"),
+                [["/emis/2022.nc"]])
 
 
 class TestMergeCompatibility(unittest.TestCase):
@@ -260,6 +292,60 @@ class TestResolvePackaged(unittest.TestCase):
             self.assertTrue(hit.endswith("g0/terrain.nc"))
             self.assertIsNone(ir.resolve_packaged(
                 self.man, "terrain_packaged", nlat=8, nlon=5, root=root))
+
+
+class TestManifestAlignmentForPaths(unittest.TestCase):
+    """``auto`` time alignment reads ONLY the manifest kind of a product (#884)."""
+
+    _SNAP = ("/home/u/.cache/huggingface/hub/datasets--climate-analytics-lab--"
+             "jax-gcm-data/snapshots/0123abcd/")
+
+    def test_hf_urls_map_to_their_product_kind(self):
+        f = ir.manifest_alignment_for_paths
+        self.assertEqual(f("hf://bundles/t63/forcing_pd.nc"), "climatology")
+        self.assertEqual(f("hf://bundles/t106_l95/ozone_pd.nc"), "climatology")
+        self.assertEqual(f("hf://bundles/t63/emissions_pd.nc"), "climatology")
+        # Transient series: the unexpanded pattern and its expanded years.
+        self.assertEqual(f("hf://bundles/t63/forcing_amip/{year}.nc"),
+                         "transient")
+        self.assertEqual(f(["hf://bundles/t63_l47/ozone_amip/1999.nc",
+                            "hf://bundles/t63_l47/ozone_amip/2000.nc"]),
+                         "transient")
+        self.assertEqual(f("hf://bundles/t63/terrain.nc"), "static")
+
+    def test_fetched_cache_path_names_its_product(self):
+        f = ir.manifest_alignment_for_paths
+        self.assertEqual(f(self._SNAP + "bundles/t63/forcing_pd.nc"),
+                         "climatology")
+        self.assertEqual(f(self._SNAP + "bundles/t63/forcing_era5/2001.nc"),
+                         "transient")
+
+    def test_packaged_files_are_products(self):
+        from pathlib import Path
+        root = Path(ir.__file__).resolve().parents[1]
+        f = ir.manifest_alignment_for_paths
+        self.assertEqual(f(str(root / "data/bc/t63/forcing.nc")), "climatology")
+        self.assertEqual(f(str(root / "data/bc/t30/clim/forcing.nc")),
+                         "climatology")
+        self.assertEqual(f(str(root / "data/bc/t63/ozone.nc")), "climatology")
+
+    def test_user_files_and_mixtures_are_unknown(self):
+        f = ir.manifest_alignment_for_paths
+        # A copy of a mirror file elsewhere is a user file.
+        self.assertIsNone(f("/scratch/me/bundles/t63/forcing_pd.nc"))
+        self.assertIsNone(f("/scratch/me/sst.nc"))
+        # A path under the mirror that matches no product template.
+        self.assertIsNone(f("hf://bundles/t63/emis/2000.nc"))
+        # A set mixing a climatology with a transient product has no one kind.
+        self.assertIsNone(f(["hf://bundles/t63/forcing_pd.nc",
+                             "hf://bundles/t63/forcing_amip/2000.nc"]))
+        # A set mixing a product with a user file is not a product.
+        self.assertIsNone(f(["hf://bundles/t63/forcing_pd.nc", "/me/x.nc"]))
+        self.assertIsNone(f([]))
+        self.assertIsNone(f(None))
+        # A cache path of a DIFFERENT repo is not this mirror.
+        self.assertIsNone(f("/c/datasets--someone--else/snapshots/r/"
+                            "bundles/t63/forcing_pd.nc"))
 
 
 if __name__ == "__main__":

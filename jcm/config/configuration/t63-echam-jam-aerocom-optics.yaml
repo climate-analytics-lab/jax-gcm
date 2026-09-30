@@ -38,5 +38,6 @@ defaults:
 init:
   rh: 0.0
 forcing:
+  align: wrap_year
   file: hf://bundles/t63/forcing_pd.nc
 sl_off_centering: 0.2

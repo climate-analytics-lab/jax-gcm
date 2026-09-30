@@ -29,6 +29,7 @@ import warnings
 
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 import jcm.constants as c
 import jcm as _jcm_pkg
@@ -142,10 +143,12 @@ NOT_AUDITED = frozenset({
     "CloudBorneCarryStore", "CloudBorneExchange", "CloudsatCosp",
     "ConvectiveTracerTransport",
     "DmsEmissions", "DustEmissions", "Echam1MMicrophysics",
-    "EchamBoundaryConditions", "EchamSurface", "GreyTwoStreamRadiation",
+    "EchamBoundaryConditions", "EchamSurface", "EchamSurfaceExchange",
+    "GreyTwoStreamRadiation",
     "HeldSuarez", "HinesGwd", "JamOpticsTerm", "Lohmann2MMicrophysics",
     "Macv2SpAerosol", "ModalMicrophysicsTerm", "NNEmulatorRadiation",
-    "PreSpeciatedEmissions", "PrescribedOxidants", "RRTMGPRadiation",
+    "PreSpeciatedEmissions", "PrescribedOxidants",
+    "PrescribedSurfaceFlux", "RRTMGPRadiation",
     "SeaSaltEmissions", "SimpleChemistry", "SimpleGwd",
     "SlinnDryDeposition", "SpeedyClouds", "SpeedyConvection",
     "SpeedyDownwardLongwaveRadiation", "SpeedyForcing", "SpeedyHumidity",
@@ -409,22 +412,34 @@ class LayoutAgnosticTermsTest(unittest.TestCase):
             "run them on both the nodal grid and a column-vectorised block "
             "(then this audit checks them), else to NOT_AUDITED.",
         )
-        # Roster rot (a name for a term that no longer exists) is only
-        # decidable when every optional extra is installed. CI runs
-        # `pip install -e .` with none, so terms behind `jcm[mam4]` /
-        # `jcm[cosp]` are simply absent there and would look deleted — this
-        # check failed CI on `Mam4JaxMicrophysics` while passing locally.
-        # Detect the gap by what actually failed to import, not by probing
-        # for package names: a term can be absent because its optional extra
-        # is missing, because an extra's own import raised, or because the
-        # module was stubbed. Only the import result covers all three.
+
+    # Needs every jcm module importable, which today only the MAM4 adapter
+    # (jcm.physics.aerosol.jam.microphysics.mam4_jax) is not without its
+    # extra. The default CI jobs install none, so they skip this and the
+    # extras-tests job, which installs them all, runs it.
+    @pytest.mark.requires_extra("mam4")
+    def test_every_shipped_term_is_audited_and_rosters_are_current(self):
+        """The rosters cover every shipped term, and name no deleted one.
+
+        The unmarked test above sees only the terms whose modules import
+        without extras. Here every module must import, so the classification
+        is checked against the complete set, and roster rot (a name for a
+        term that no longer exists) becomes decidable: a term whose module did
+        not import would look deleted. An unimportable module is therefore a
+        failure here, not a reason to skip.
+        """
         unimportable = _import_all_physics()
-        if unimportable:
-            self.skipTest(
-                "roster-rot check needs every module importable; these are "
-                f"not: {sorted(unimportable)[:4]}. The unclassified-terms "
-                "assertion above still ran and is the one that matters."
-            )
+        self.assertFalse(
+            unimportable,
+            f"jcm modules fail to import with the extras installed: "
+            f"{sorted(unimportable)}")
+        names = {cls.__name__ for cls in _all_terms()}
+        unclassified = sorted(
+            names - LAYOUT_AGNOSTIC - INERT_IN_HARNESS - NOT_AUDITED)
+        self.assertFalse(
+            unclassified,
+            "PhysicsTerm(s) behind an optional extra are in neither roster in "
+            f"layout_audit_test.py: {unclassified}.")
         stale = sorted(
             (LAYOUT_AGNOSTIC | INERT_IN_HARNESS | NOT_AUDITED) - names)
         self.assertFalse(stale, f"rosters name terms that no longer exist: {stale}")

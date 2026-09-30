@@ -46,6 +46,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx, struct
 
+from jcm.forcing import land_snow_cover
 from jcm.physics.aerosol.jam.emissions.distributors import distribute_surface_flux
 from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
     accumulate_emission_fluxes, emission_flux_keys)
@@ -646,7 +647,13 @@ class DustEmissions(PhysicsTerm):
             return self._inert(state, diagnostics, from_model_level, ncols)
         _require_companions(forcing, ncols)
         pot = jnp.clip(_column_field(forcing, "dust_source", ncols), 0.0, 1.0)
-        snow = jnp.clip(_column_field(forcing, "snowc_am", ncols), 0.0, 1.0)
+        # Snow-covered share of the land, glaciers included (the
+        # ``ForcingData`` snow convention; no glacier map reads as none).
+        glacier = getattr(forcing, "glacier_fraction", None)
+        snow = land_snow_cover(
+            _column_field(forcing, "snowc_am", ncols),
+            None if glacier is None
+            else _column_field(forcing, "glacier_fraction", ncols))
         wetness = _relative_soil_wetness(forcing, ncols)
 
         z0 = self._roughness(forcing, ncols, p)

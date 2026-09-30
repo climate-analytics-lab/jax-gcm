@@ -310,7 +310,7 @@ Two cheap checks before you commit:
   configurations and should never be smuggled through `Parameters`.
 - **Don't** add a leading underscore to a `provides` key unless the
   data is genuinely internal (caches, transient state). Public keys
-  flatten directly into `model.run().to_xarray()` output.
+  flatten directly into `predictions.to_xarray()` output.
 - **Don't** import from `jcm/physics/echam/` to make a SPEEDY-side
   term work. If you need shared infrastructure, put it under a
   scheme-neutral location like `jcm/physics/diagnostics/`.

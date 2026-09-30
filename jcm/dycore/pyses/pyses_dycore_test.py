@@ -5,7 +5,8 @@ non-lat/lon layout, tracer seeding, forward stepping) plus the developer
 prototype's self-checks (finite-top L47 grid, periodic interpolation, real
 geography, native nu_top sponge, bounded coupled steps).
 
-Skipped automatically when the optional ``pyses`` dependency is missing.
+Needs the optional ``pyses`` extra (``requires_extra``): skipped without it,
+and run by the ``extras-tests`` CI job, which installs it.
 Run on CPU: ``JAX_PLATFORMS=cpu pytest jcm/dycore/pyses -q``. The heavy
 dycore fixture (SE grid + USSA initial state, ~30 s) is built once per
 class; the coupled ECHAM smokes are ``@pytest.mark.slow``.
@@ -20,8 +21,6 @@ os.environ.setdefault("PYSES_USE_CPU", "1")
 import numpy as np
 import pytest
 
-pytest.importorskip("pyses")
-
 import jax.numpy as jnp
 
 from jcm.dycore import list_dycores
@@ -32,6 +31,8 @@ from jcm.dycore.pyses.interp import interp_grid_to_points
 from jcm.physics.echam.echam_coords import EchamCoords
 from jcm.physics.physics_term import TracerSpec
 from jcm.physics_interface import PhysicsState, PhysicsTendency
+
+pytestmark = pytest.mark.requires_extra("pyses")
 
 _T63_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "data", "bc", "t63")
 T63_TERRAIN = os.path.abspath(os.path.join(_T63_DIR, "terrain.nc"))
@@ -288,7 +289,7 @@ class TestPysesDycoreProtocol(unittest.TestCase):
                          (12, 1, self.ncol))
         self.assertEqual(forcing.alb0.shape, (1, self.ncol))
         date = DateData.set_date(model_time=jdt.to_datetime("2000-07-15"))
-        sliced = forcing.select(date, calendar="365_day")
+        sliced = forcing.select(date)
         sst = np.asarray(sliced.sea_surface_temperature)
         self.assertEqual(sst.shape, (1, self.ncol))
         self.assertGreater(sst.min(), 200.0)
@@ -316,8 +317,18 @@ class TestPysesDycoreProtocol(unittest.TestCase):
             "skipped_scalar": jnp.zeros((2,)),
         }
         preds = Predictions(dynamics=stacked, physics=physics, times=None)
-        ds = self.dycore.to_xarray(
-            preds, np.array([0.0, self.dycore.dt_seconds / 86400.0]))
+        # The labels a Model run hands every backend: exact datetime64[ms]
+        # from ``ModelPredictions.time_labels``, one timestep apart.
+        start = np.datetime64("2000-01-01T00:00:00", "ms")
+        times = start + np.array(
+            [0, int(self.dycore.dt_seconds) * 1000], dtype="timedelta64[ms]")
+        ds = self.dycore.to_xarray(preds, times)
+        np.testing.assert_array_equal(ds["time"].values, times)
+        # A bare elapsed-days axis carries no reference date, so it cannot be
+        # labelled exactly; the backend refuses it rather than guessing one.
+        with self.assertRaisesRegex(TypeError, "exact datetime64"):
+            self.dycore.to_xarray(
+                preds, np.array([0.0, self.dycore.dt_seconds / 86400.0]))
         self.assertIn("lat", ds.coords)
         self.assertIn("lon", ds.coords)
         self.assertEqual(ds["temperature"].dims, ("time", "level", "lon", "lat"))
@@ -366,7 +377,7 @@ class TestCoupledEchamSmoke(unittest.TestCase):
     def test_model_drives_coupled_run(self):
         from jcm.model import Model
         from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
 
         dycore = PysesCamSEDycore(
             nx=3, npt=4, dt_seconds=900.0, terrain_file=T63_TERRAIN,
@@ -379,8 +390,7 @@ class TestCoupledEchamSmoke(unittest.TestCase):
             # mid-level convection trigger cannot run here — turn it off
             # with the reference's own switch, as the config comment in
             # ``dycore/pyses_ne30l47.yaml`` documents.
-            physics=echam_physics(
-                radiation_scheme="grey",
+            physics=idealized_echam_physics(
                 convection=ConvectionParameters.default(cu_lmfmid=False),
             ),
         )
@@ -404,7 +414,7 @@ class TestCoupledEchamSmoke(unittest.TestCase):
         """
         from jcm.model import Model
         from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
 
         dycore = PysesCamSEDycore(
             nx=3, npt=4, dt_seconds=900.0, terrain_file=T63_TERRAIN,
@@ -417,8 +427,7 @@ class TestCoupledEchamSmoke(unittest.TestCase):
             # mid-level convection trigger cannot run here — turn it off
             # with the reference's own switch, as the config comment in
             # ``dycore/pyses_ne30l47.yaml`` documents.
-            physics=echam_physics(
-                radiation_scheme="grey",
+            physics=idealized_echam_physics(
                 convection=ConvectionParameters.default(cu_lmfmid=False),
             ),
         )
@@ -445,14 +454,14 @@ class TestCoupledEchamSmoke(unittest.TestCase):
         exercises it); full-f32 ECHAM physics needs a physics-side
         dtype-stability fix and is tracked as an open issue.
         """
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.physics_interface import compute_physics_step_gridpoint
 
         dycore = PysesCamSEDycore(
             nx=3, npt=4, dt_seconds=900.0, terrain_file=T63_TERRAIN,
             physics_dtype=jnp.float64,
         )
-        physics = echam_physics(radiation_scheme="grey")
+        physics = idealized_echam_physics()
         specs = {s.name: s for s in physics.required_tracers()}
         dycore.tracer_specs = specs
         physics.cache_coords(dycore.coords)
@@ -469,7 +478,7 @@ class TestCoupledEchamSmoke(unittest.TestCase):
             date = DateData.set_date(
                 model_time=jdt.to_datetime("2000-01-01")
                 + jdt.Timedelta(seconds=int(dycore.sim_time(state))))
-            forcing_now = forcing_all.select(date, calendar="365_day")
+            forcing_now = forcing_all.select(date)
             tend, carry = compute_physics_step_gridpoint(
                 ps, forcing_now, dycore.terrain, carry,
                 physics=physics, time_step=dycore.dt_seconds,

@@ -276,6 +276,9 @@ coverage report --fail-under=90                      # belt: enforce it again
 JAX_PLATFORMS=cpu pytest -n 4  -m "slow" --cov=jcm \
     --cov-config=.coveragerc-pr --cov-fail-under=80
 coverage report --rcfile=.coveragerc-pr --fail-under=80
+# the extras-tests job, in a SEPARATE venv with every optional extra:
+#   pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
+JCM_REQUIRE_EXTRAS=1 JAX_PLATFORMS=cpu pytest -rs -m requires_extra
 ```
 
 Both floors are checked twice because `--cov-fail-under` alone did not enforce
@@ -308,9 +311,19 @@ dependency parity**: CI installs `pip install -e .` with no extras, so code
 gated behind an optional extra (`jcm[cosp]`, ...) counts as UNCOVERED there
 even when its tests pass locally — uninstall the extra before measuring, or
 the gate you cleared locally fails in CI (PR #582 and #598 both hit
-coverage this way). Every Codex/bot inline comment gets an explicit
-threaded reply ("Confirmed and fixed in <sha>" / "Refuted: <evidence>")
-before handing back — see `jcm-local-ci` for the `gh api` one-liner.
+coverage this way). The tests those extras gate run in their own CI job,
+`extras-tests`, which installs every extra and has no coverage floor. A test
+gates on an extra **only** through `@pytest.mark.requires_extra("<extra>")`
+(`tools/ci/optional_extras.py`): that marker is how the job selects it. A
+test that gates any other way would be skipped by the default jobs and never
+picked up by the extras job, so it fails: every job fails a skip whose reason
+names an extra's package, and a fast-suite scan fails `importorskip` /
+`find_spec` of an extra and guarded imports of one. Import the extra inside
+the marked test, never at module scope, or collection fails without it.
+
+Every Codex/bot inline comment gets an explicit threaded reply ("Confirmed
+and fixed in <sha>" / "Refuted: <evidence>") before handing back — see
+`jcm-local-ci` for the `gh api` one-liner.
 
 Run these on a compute node, not a Derecho login node: the suite is
 memory-bound and a 10 GiB cgroup turns `-n 12` into an OOM that reads as
@@ -318,8 +331,26 @@ random failures (`docs/source/design/test_suite_memory.md`).
 
 Ruff is the only linter (config in `pyproject.toml`); no formatter, no type
 checker, no pre-commit hooks. Tests are `*_test.py` co-located with their
-module. CI: push runs fast tests at 90% coverage, PRs also run slow tests at
-80%.
+module. CI gates on ruff (~20 s) and then runs the fast tests at 90%
+coverage and, on pull requests, the slow tests at 80% **in parallel**. The
+slow suite runs as two path shards (`slow-tests-radiation`, `slow-tests-rest`;
+the split and a check that it partitions `-m slow` live in
+`tools/ci/slow_shards.py`), and `slow-coverage` enforces the 80% floor on
+their combined coverage; locally it is still the one `-m slow` command above.
+Alongside them, on every pull request and every push to `main`/`dev`,
+`extras-tests` runs `JCM_REQUIRE_EXTRAS=1 pytest -m requires_extra`, fast and
+slow tests together: under that variable the session refuses to start unless
+every extra `pyproject.toml` declares is installed, and a selected test that
+skips is a failure, so the job cannot go green without having run them all.
+On a PR a fast-suite test failure cancels the run so the slow suite (and
+`extras-tests`) stops with it rather than grinding on for another ~49 minutes
+— so a cancelled slow or extras result never means those tests passed. It
+does not identify the cause on its own: `cancel-in-progress` cancels it
+identically when a newer push supersedes the
+run, so read the `fast-tests` job to tell a real failure from a superseded
+run. `push` triggers
+the workflow on `main`/`dev` only; every other branch is gated by its pull
+request, so clear the local gates before opening one.
 
 ## Key Coding Conventions
 

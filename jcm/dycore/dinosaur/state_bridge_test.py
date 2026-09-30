@@ -296,13 +296,13 @@ class TestHybridSurfacePressureRoundTrip(unittest.TestCase):
     def test_hybrid_round_trip_preserves_surface_pressure(self):
         from jcm.model import Model
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.utils import get_coords
 
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
             coords=coords,
-            physics=echam_physics(radiation_scheme="grey", checkpoint_terms=False),
+            physics=idealized_echam_physics(checkpoint_terms=False),
             time_step=180.0,
         )
         primitive = model.dycore.primitive

@@ -22,6 +22,7 @@ import logging
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from jcm.physics.coords_util import column_lat_lon
 from jax import lax
@@ -41,32 +42,20 @@ from jcm.physics.radiation.mcica import (
     column_key,
     effective_cloud_fraction,
     generate_subcolumns,
-    in_cloud_path,
+    in_cloud_condensate,
 )
-from jcm.physics.radiation.radiation_types import cloud_overlap_name
-from jcm.physics.radiation.cloud_optics import resolve_effective_radii
+from jcm.physics.radiation.radiation_types import (
+    cloud_overlap_name,
+    lagged_convection_type,
+    liquid_inhomogeneity,
+)
+from jcm.physics.radiation.cloud_optics import radiation_effective_radii
 import jcm.constants as c
 
 import rrtmgp
 from rrtmgp.config import radiative_transfer
 from rrtmgp import stretched_grid_util
 from rrtmgp.rrtmgp import RRTMGP
-
-# NaN guard on the PHYSICAL in-cloud condensate (kg/kg) that sets the effective
-# radii. A thin but resolved cloud carrying large grid-mean condensate gives a
-# huge in-cloud water (grid_mean / cf), and the resulting optical depth NaNs the
-# two-stream solver. Applied in ``radiation_scheme_rrtmgp`` right after
-# ``in_cloud_path``.
-#
-# This is a one-sided clip -- the identity almost everywhere, flattening
-# everything above the threshold to the same value -- and is NOT the sub-grid
-# inhomogeneity treatment. The inhomogeneity factor (ECHAM ``zinhoml``/
-# ``zinhomi``) is a separate FIXED multiplicative reduction applied to the
-# per-gpoint optical-depth paths (see ``RadiationParameters.cloud_inhomogeneity``
-# and the ``in_cloud_*_lib`` scaling in ``radiation_scheme_rrtmgp``). Measured on
-# T63L47 output this clip binds in ~0.003% of cloudy cells, so it is inert in
-# practice; keep it strictly as a NaN guard (#678).
-_MAX_IN_CLOUD_CONDENSATE = 1.0e-2
 
 
 # ---------------------------------------------------------------------------
@@ -276,10 +265,9 @@ def _flux_profiles(
 def prepare_rrtmgp_data(
     icon_data,
     layer_thickness: jnp.ndarray,
-    cdnc_factor: jnp.ndarray,
     surface_temperature: jnp.ndarray,
-    r_eff_liq_um: Optional[jnp.ndarray] = None,
-    r_eff_ice_um: Optional[jnp.ndarray] = None,
+    r_eff_liq_um: jnp.ndarray,
+    r_eff_ice_um: jnp.ndarray,
 ) -> dict:
     """Convert ICON RadiationState to RRTMGP input dict.
 
@@ -289,24 +277,18 @@ def prepare_rrtmgp_data(
     Args:
         icon_data: RadiationState with TOA-first profiles.
         layer_thickness: geometric layer thickness (m), TOA-first.
-        cdnc_factor: aerosol CDNC scaling for the liquid r_eff fallback.
         surface_temperature: scalar surface temperature (K).
-        r_eff_liq_um: optional microphysical liquid effective radius (um),
-            TOA-first (nlev,). Entries <= 0 mean "not provided" and fall
-            back to the diagnostic ``effective_radius_liquid``.
-        r_eff_ice_um: optional microphysical ice effective radius (um),
-            TOA-first (nlev,). Entries <= 0 fall back to the Moss/Foot
-            in-cloud-IWC formula (``effective_radius_ice``).
+        r_eff_liq_um / r_eff_ice_um: droplet / crystal effective radius
+            (um), TOA-first (nlev,), used as given: the RRTMGP term forms
+            them from the current state
+            (:func:`~jcm.physics.radiation.cloud_optics.radiation_effective_radii`).
+            The library clips both to its lookup-table range internally
+            (radius for liquid, ``2 r`` as diameter for ice), so a clear
+            layer's 0 is a valid input: it has no condensate path to weight.
 
     """
     nlev = icon_data.temperature.shape[0]
     halo = 1
-
-    # dtype pinned for the same x64 reason as _to_3d_with_nan_halo.
-    if r_eff_liq_um is None:
-        r_eff_liq_um = jnp.zeros((nlev,), dtype=icon_data.temperature.dtype)
-    if r_eff_ice_um is None:
-        r_eff_ice_um = jnp.zeros((nlev,), dtype=icon_data.temperature.dtype)
 
     to3d_nan = lambda a: _to_3d_with_nan_halo(a, nlev, halo)  # noqa: E731
     to3d_fill = lambda a: _to_3d_with_filled_halo(a, nlev, halo)  # noqa: E731
@@ -358,23 +340,9 @@ def prepare_rrtmgp_data(
     )
     total_water = h2o_specific + total_condensate
 
-    # Cloud effective radii (microns -> metres). Microphysical values from
-    # the clouds carry (ECHAM preffl/preffi, written by the 2M scheme) take
-    # precedence where provided (> 0); otherwise fall back to the diagnostic
-    # parameterisations. The ice fallback is ECHAM's Moss/Foot power law on
-    # the IN-CLOUD ice water content in g/m3 — ``cip_1d`` is already the
-    # in-cloud ice water path per layer (kg/m2; the caller divides the
-    # grid-mean condensate by cloud fraction before building the state), so
-    # IWC = path / dz with a kg -> g conversion and NO further cf division.
-    # The jax-rrtmgp library clips both radii to its LUT bounds internally
-    # (radius for liquid, 2*r as diameter for ice), so no clamp is applied
-    # here.
-    r_eff_liq, r_eff_ice = resolve_effective_radii(
-        r_eff_liq_um, r_eff_ice_um, cdnc_factor,
-        cip_1d, layer_thickness,
-    )
-    cloud_r_eff_liq = r_eff_liq * 1e-6
-    cloud_r_eff_ice = r_eff_ice * 1e-6
+    # Cloud effective radii, microns -> metres (the library's unit).
+    cloud_r_eff_liq = r_eff_liq_um * 1e-6
+    cloud_r_eff_ice = r_eff_ice_um * 1e-6
 
     return {
         "rho_xxc": to3d_fill(rho),
@@ -532,8 +500,8 @@ def radiation_scheme_rrtmgp(
     longitude: float,
     parameters: RadiationParameters,
     aerosol_data,
-    column_index: jnp.ndarray = jnp.int32(0),
-    model_step: jnp.ndarray = jnp.int32(0),
+    column_index: jnp.ndarray = np.int32(0),  # numpy, not jnp: a jax default is built at import (#859)
+    model_step: jnp.ndarray = np.int32(0),  # numpy, not jnp: a jax default is built at import (#859)
     base_seed: int = 0,
     compute_cre: bool = True,
     ozone_vmr: Optional[jnp.ndarray] = None,
@@ -542,6 +510,7 @@ def radiation_scheme_rrtmgp(
     n2o_vmr: Optional[jnp.ndarray] = None,
     r_eff_liq_um: Optional[jnp.ndarray] = None,
     r_eff_ice_um: Optional[jnp.ndarray] = None,
+    convection_type: jnp.ndarray = np.int32(0),  # numpy, not jnp: a jax default is built at import (#859)
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """RRTMGP radiation scheme — canonical McICA partial-cloud treatment.
 
@@ -574,18 +543,26 @@ def radiation_scheme_rrtmgp(
             and populate ``toa_{sw,lw}_up_clear`` and the
             ``{sw,lw}_flux_{up,down}_clear`` profiles on the returned
             ``RadiationData``.
-        r_eff_liq_um / r_eff_ice_um: optional microphysical effective
-            radii (um, TOA-first (nlev,)) from the clouds carry (ECHAM
-            preffl/preffi written by the 2M scheme; lagged one step by the
-            carry). Levels <= 0 mean "not provided" and use the diagnostic
-            fallbacks in ``prepare_rrtmgp_data``.
+        r_eff_liq_um / r_eff_ice_um: droplet / crystal effective radii (um,
+            TOA-first (nlev,)), REQUIRED despite the keyword default (the
+            positional order predates them). The RRTMGP term forms them from
+            the current step's state with ECHAM's
+            ``mo_cloud_optics.f90::cloud_optics`` laws
+            (:func:`~jcm.physics.radiation.cloud_optics.radiation_effective_radii`);
+            they are used exactly as given, with no substitution.
+        convection_type: the column's (previous-step) ECHAM ``ktype``, which
+            selects the liquid inhomogeneity factor (see
+            :func:`~jcm.physics.radiation.radiation_types.liquid_inhomogeneity`).
+            0 (no convection) when not supplied.
 
     """
-    # CDNC factor from aerosol data
-    if aerosol_data.cdnc_factor.ndim == 0:
-        cdnc_factor = jnp.array(aerosol_data.cdnc_factor)
-    else:
-        cdnc_factor = aerosol_data.cdnc_factor
+    if r_eff_liq_um is None or r_eff_ice_um is None:
+        raise TypeError(
+            "radiation_scheme_rrtmgp needs r_eff_liq_um and r_eff_ice_um: "
+            "form them from the state with "
+            "jcm.physics.radiation.cloud_optics.radiation_effective_radii "
+            "(there is no fallback radius)."
+        )
 
     # Solar geometry via jax_solar. `solar` is a `jcm.forcing.SolarGeometry`
     # precomputed by the Model; the radiation scheme stays date-free.
@@ -611,30 +588,27 @@ def radiation_scheme_rrtmgp(
     # cloud-or-clear partitioning per g-point. ``in_cloud_path`` already
     # zeros the (essentially) clear cells (cf <= 2*eps; ECHAM mo_psrad).
     #
-    # This is the PHYSICAL in-cloud path: it sets the diagnostic effective radii
-    # (``resolve_effective_radii``; the ice radius follows the Moss/Foot IWC
-    # law) and the physical condensate ``q_c`` used in the vapour-VMR maths, so
-    # the sub-grid inhomogeneity factor must NOT be baked in here -- that would
-    # shrink the inferred ice crystal and partly undo the reduction (#678). The
-    # inhomogeneity factor is applied to the per-gpoint optical-depth paths
+    # This is the PHYSICAL in-cloud condensate: the effective radii the caller
+    # passes were formed from exactly this quantity (``in_cloud_condensate``
+    # is shared with ``radiation_effective_radii``), and it is the condensate
+    # ``q_c`` used in the vapour-VMR maths, so the sub-grid inhomogeneity
+    # factor must NOT be baked in here -- that would shrink the inferred
+    # crystal and partly undo the reduction (#678). The inhomogeneity factor
+    # is applied to the per-gpoint optical-depth paths
     # (``in_cloud_{lwp,ipath}_lib`` below), which is where it belongs (ECHAM
     # ``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``).
     #
-    # Only the NaN guard (``_MAX_IN_CLOUD_CONDENSATE``) is applied here: a *thin*
+    # Only the NaN guard (``_MAX_IN_CLOUD_CONDENSATE``) is applied: a *thin*
     # but resolved cloud (cf ~ 0.01-0.05) carrying large grid-mean condensate
     # yields a huge in-cloud water (grid_mean / cf) whose extreme optical depth
     # NaNs the two-stream solver. The cap = 10 g/kg is the high end of realistic
     # in-cloud water, so genuine clouds are untouched and only the pathological
     # inflation is clipped. It is a one-sided guard, NOT an inhomogeneity
     # scaling -- measured on T63L47 it binds in ~0.003% of cloudy cells (#678).
-    cloud_water_in_cloud = jnp.minimum(
-        in_cloud_path(cloud_water, cloud_fraction, eps=parameters.cld_frac_min),
-        _MAX_IN_CLOUD_CONDENSATE,
-    )
-    cloud_ice_in_cloud = jnp.minimum(
-        in_cloud_path(cloud_ice, cloud_fraction, eps=parameters.cld_frac_min),
-        _MAX_IN_CLOUD_CONDENSATE,
-    )
+    cloud_water_in_cloud = in_cloud_condensate(
+        cloud_water, cloud_fraction, eps=parameters.cld_frac_min)
+    cloud_ice_in_cloud = in_cloud_condensate(
+        cloud_ice, cloud_fraction, eps=parameters.cld_frac_min)
 
     # The clear-cell threshold ``in_cloud_path`` uses to zero the condensate
     # (cf <= 2*cld_frac_min) must also gate the McICA sampler and the cover
@@ -712,22 +686,30 @@ def radiation_scheme_rrtmgp(
         needs_reversal, flip_per_gpt, identity, masks_sw,
     )
     # Per-gpoint condensate paths carry the cloud optical depth (τ ∝ path at the
-    # fixed effective radius resolved from the PHYSICAL path). The ECHAM sub-grid
-    # inhomogeneity factor multiplies the optical depth (``mo_cloud_optics.f90``:
-    # ``ztau = ztol*zinhoml + ztoi*zinhomi``, ``l_variable_inhoml = .FALSE.``),
-    # so it is applied HERE -- to the τ-driving paths -- not to the physical path
-    # that set the effective radius above (#678).
+    # effective radius formed from the PHYSICAL in-cloud condensate). The ECHAM sub-grid
+    # inhomogeneity factors multiply the per-phase optical depth
+    # (``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``,
+    # ``l_variable_inhoml = .FALSE.``), so they are applied HERE -- to the
+    # τ-driving paths -- not to the physical path that set the effective radius
+    # above. The liquid factor follows the column's convective type (``zinhoml``
+    # 1/2/3); the ice factor is ``zinhomi``.
     #
-    # The SAME factor scales both phases (see ``RadiationParameters`` for why a
-    # single factor, not two): jax-rrtmgp weights the combined ssa (by τ) and
-    # asymmetry (by ssa) from these per-phase paths, so a common factor leaves
-    # those weightings unchanged and scales only the total optical depth --
-    # exactly ECHAM's ``ztau`` at the T63 default ``zinhoml = zinhomi = 0.8``.
-    in_cloud_lwp_lib = parameters.cloud_inhomogeneity * lax.cond(
+    # jax-rrtmgp's only per-phase inputs are these paths, and it weights the
+    # combined ssa (by τ) and asymmetry (by τ·ssa) with the τ they produce.
+    # Wherever the two factors are equal -- every column at the T63 defaults
+    # except shallow-convective ``ktype == 4`` ones -- the common factor cancels
+    # in those weights and this is exactly ECHAM's ``ztau``/``zomg``/``zasy``.
+    # Where they differ AND a layer holds both phases, the ssa/asymmetry are
+    # weighted by the scaled rather than ECHAM's unscaled τ; the total optical
+    # depth is still exact. jax-rrtmgp 0.5.0 takes per-phase optical-depth
+    # scales (``cloud_tau_scale_liq``/``_ice``) that weight by the unscaled
+    # τ; passing them instead of scaling the paths is #958.
+    zinhoml = liquid_inhomogeneity(convection_type, parameters)
+    in_cloud_lwp_lib = zinhoml * lax.cond(
         needs_reversal, lambda a: a[::-1], identity,
         icon_state.cloud_water_path,
     )
-    in_cloud_ipath_lib = parameters.cloud_inhomogeneity * lax.cond(
+    in_cloud_ipath_lib = parameters.cloud_inhomogeneity_ice * lax.cond(
         needs_reversal, lambda a: a[::-1], identity,
         icon_state.cloud_ice_path,
     )
@@ -748,7 +730,7 @@ def radiation_scheme_rrtmgp(
     )
 
     rrtmgp_input = prepare_rrtmgp_data(
-        icon_state, layer_thickness, cdnc_factor, surface_temperature,
+        icon_state, layer_thickness, surface_temperature,
         r_eff_liq_um=r_eff_liq_um, r_eff_ice_um=r_eff_ice_um,
     )
     # The broadcast q_liq / q_ice are shadowed by the per-gpoint
@@ -874,9 +856,9 @@ def radiation_scheme_rrtmgp(
     # the column solve inconsistent with the surface scheme's absorbed
     # SW·(1−albedo_tile)). The library takes one BROADBAND SW albedo, so
     # blend the surface scheme's vis/nir pair with the ~0.46/0.54 split of
-    # the TOA solar spectrum about 0.7 µm. A true per-band albedo (and the
-    # direct/diffuse distinction ECHAM makes) needs a g-point→band albedo
-    # map in the library — deferred to the cloud/surface optics overhaul.
+    # the TOA solar spectrum about 0.7 µm. jax-rrtmgp 0.5.0 takes per-band
+    # direct and diffuse albedos (``sfc_alb_dir``/``sfc_alb_dif``); building
+    # them from the surface scheme's vis/nir pair and passing them is #959.
     sfc_alb_broadband = 0.46 * surface_albedo_vis + 0.54 * surface_albedo_nir
 
     # The library call is float32 end-to-end regardless of the host's x64
@@ -996,6 +978,7 @@ from jcm.physics.radiation import (  # noqa: E402
     current_cos_zenith,
     radiation_should_compute,
     rescale_cached_radiation,
+    surface_optics_for_solve,
 )
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
@@ -1061,7 +1044,7 @@ def _maybe_chunked_vmap(fn, in_axes):
 
 
 # The *noa spacing helpers live in ``aerosol_free`` so echam_physics() can
-# validate the setting for grey/emulated configs too, without importing
+# validate the setting for emulated and custom-term configs too, without importing
 # this module and its RRTMGP tables.
 from jcm.physics.radiation.aerosol_free import (  # noqa: E402
     NOA_KEYS,
@@ -1099,6 +1082,14 @@ class RRTMGPRadiation(PhysicsTerm):
     emissivity from the public ``"radiation"`` key. Caches its own
     heating rates across radiation sub-steps via the previous step's
     ``RadiationData`` in ``diagnostics["radiation"]``.
+
+    The cloud effective radii are formed inside the term from the current
+    step's state (``radiation_effective_radii``: step-start condensate, the
+    2M number tracers or ECHAM's prescribed droplet profile, the land mask),
+    as ECHAM's radiation forms them inside ``cloud_optics``. The term
+    publishes them as the diagnostic ``clouds.r_eff_liq`` /
+    ``clouds.r_eff_ice`` (um, 0 where a phase is absent), which it never
+    reads back.
     """
 
     name: ClassVar[str] = "rrtmgp_radiation"
@@ -1157,7 +1148,7 @@ class RRTMGPRadiation(PhysicsTerm):
         # dominates the step, so this is opt-in only.
         #
         # Validated through the shared helper, which echam_physics() also
-        # calls so a grey or emulated config is held to the same contract
+        # calls so any other radiation scheme is held to the same contract
         # rather than silently ignoring the argument.
         interval = resolve_aerosol_free_interval(aerosol_free_interval)
         # A cadence locked to the solar day never samples some columns in
@@ -1240,8 +1231,16 @@ class RRTMGPRadiation(PhysicsTerm):
             forcing.solar, self._lons.get_value(), self._lats.get_value(),
         ).astype(radiation.cos_zenith.dtype)
 
+        clouds_in = diagnostics["clouds"]
+        # The published radii are a DIAGNOSTIC of the radius this term
+        # radiated with, never an input to it: a solve forms its radii from
+        # the current state (``radiation_effective_radii``), and a cached
+        # step reports the radii of the solve its heating came from.
+        radii_carried = (clouds_in.r_eff_liq, clouds_in.r_eff_ice)
+
         def _compute():
-            tend, rad = self._compute_full(state, diagnostics, forcing, params)
+            tend, rad, radii = self._compute_full(
+                state, diagnostics, forcing, terrain, params)
             # Pin the compute branch to the carry's leaf dtypes: under
             # jax_enable_x64 (e.g. driving this scheme from a float64
             # dycore with float32 physics state) some strong table
@@ -1251,7 +1250,10 @@ class RRTMGPRadiation(PhysicsTerm):
             rad = jax.tree.map(lambda n, o: n.astype(o.dtype), rad, radiation)
             tend = jax.tree.map(
                 lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, rad
+            radii = jax.tree.map(
+                lambda n, o: n.reshape(o.shape).astype(o.dtype),
+                radii, radii_carried)
+            return tend, rad, radii
 
         def _use_cached():
             rad = rescale_cached_radiation(radiation, mu0_now)
@@ -1260,9 +1262,9 @@ class RRTMGPRadiation(PhysicsTerm):
             # tendency arithmetic can promote through float64 scalars.
             tend = jax.tree.map(
                 lambda t: t.astype(state.temperature.dtype), tend)
-            return tend, rad
+            return tend, rad, radii_carried
 
-        tendency, new_radiation = jax.lax.cond(
+        tendency, new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
             radiation_should_compute(diagnostics, params),
             _compute, _use_cached,
         )
@@ -1274,20 +1276,26 @@ class RRTMGPRadiation(PhysicsTerm):
         new_radiation = new_radiation.copy(step=radiation.step + 1)
         # Mirror the all-sky and clear-sky TOA fluxes onto the
         # ``"clouds"`` sub-struct for cloud-radiative-effect diagnostics.
-        clouds = diagnostics["clouds"].copy(
+        clouds = clouds_in.copy(
             toa_sw_up_all=new_radiation.toa_sw_up,
             toa_sw_up_clear=new_radiation.toa_sw_up_clear,
             toa_lw_up_all=new_radiation.toa_lw_up,
             toa_lw_up_clear=new_radiation.toa_lw_up_clear,
+            r_eff_liq=r_eff_liq,
+            r_eff_ice=r_eff_ice,
         )
         return tendency, {
             **diagnostics, "radiation": new_radiation, "clouds": clouds,
         }
 
     def _compute_full(
-        self, state, diagnostics, forcing, params,
+        self, state, diagnostics, forcing, terrain, params,
     ):
-        """Run the full RRTMGP scheme, return (tendency, RadiationData)."""
+        """Run the full RRTMGP scheme.
+
+        Returns ``(tendency, RadiationData, (r_eff_liq_um, r_eff_ice_um))``,
+        the radii ``(nlev, ncols)`` being the ones the solve used.
+        """
         nlev, ncols = state.temperature.shape
 
         latitudes = self._lats.get_value()
@@ -1304,13 +1312,14 @@ class RRTMGPRadiation(PhysicsTerm):
         cloud_water, cloud_ice, cloud_fraction = radiation_cloud_fields(
             state, diagnostics,
         )
-        # Microphysical effective radii from the clouds carry (ECHAM
-        # preffl/preffi, written by the 2M microphysics; zero = not
-        # provided, e.g. 1M or cold start). Lagged one step by the carry,
-        # like the rest of the radiation's cloud inputs.
-        clouds_in = diagnostics["clouds"]
-        r_eff_liq_um = clouds_in.r_eff_liq.reshape(nlev, ncols)
-        r_eff_ice_um = clouds_in.r_eff_ice.reshape(nlev, ncols)
+        # Droplet and crystal effective radii from THIS step's state, formed
+        # the way ECHAM's radiation forms them inside its own call
+        # (mo_cloud_optics.f90::cloud_optics); see radiation_effective_radii
+        # for the inputs and their time levels.
+        r_eff_liq_um, r_eff_ice_um = radiation_effective_radii(
+            state, diagnostics, forcing, terrain,
+            cloud_water, cloud_ice, cloud_fraction, params.cld_frac_min,
+        )
 
         # Greenhouse-gas sourcing (all converted ppmv -> mole fraction here):
         #   O3, CH4  <- the chemistry diagnostic (O3 analytic/climatology; CH4
@@ -1326,10 +1335,8 @@ class RRTMGPRadiation(PhysicsTerm):
         surface_temperature_col = (
             diagnostics["surface"].surface_temperature.reshape(ncols)
         )
-        radiation_in = diagnostics["radiation"]
-        surface_albedo_vis_col = radiation_in.surface_albedo_vis.reshape(ncols)
-        surface_albedo_nir_col = radiation_in.surface_albedo_nir.reshape(ncols)
-        surface_emissivity_col = radiation_in.surface_emissivity.reshape(ncols)
+        (surface_albedo_vis_col, surface_albedo_nir_col,
+         surface_emissivity_col) = surface_optics_for_solve(diagnostics, ncols)
 
         aerosol_in = diagnostics["aerosol"]
         # Per-SW-band fields are ``(n_bnd_sw, nlev, ncols)`` from MACv2-SP;
@@ -1397,6 +1404,9 @@ class RRTMGPRadiation(PhysicsTerm):
             n2o_vmr=lev_to_col(jnp.broadcast_to(n2o_vmr, (nlev, ncols))),
             r_eff_liq_um=lev_to_col(r_eff_liq_um),
             r_eff_ice_um=lev_to_col(r_eff_ice_um),
+            # Previous step's convective type: selects the liquid
+            # inhomogeneity factor (ECHAM radiation reads the lagged rtype).
+            convection_type=lagged_convection_type(diagnostics, ncols),
         )
 
         # We tried a day/night split here (solve the dark ~half LW-only, skip
@@ -1413,6 +1423,7 @@ class RRTMGPRadiation(PhysicsTerm):
             0, None, None, None,  # col_index, model_step, base_seed, cre
             0, 0, 0, 0,          # ozone_vmr, co2_vmr, ch4_vmr, n2o_vmr
             0, 0,                # r_eff_liq_um, r_eff_ice_um
+            0,                   # convection_type
         )
         tendencies_vmapped, diagnostics_vmapped = _maybe_chunked_vmap(
             radiation_scheme_rrtmgp, _in_axes,
@@ -1428,6 +1439,7 @@ class RRTMGPRadiation(PhysicsTerm):
             model_step, base_seed, compute_cre,
             cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"], cols["n2o_vmr"],
             cols["r_eff_liq_um"], cols["r_eff_ice_um"],
+            cols["convection_type"],
         )
 
         _fresh_toa = dict(
@@ -1480,6 +1492,7 @@ class RRTMGPRadiation(PhysicsTerm):
                     cols["ozone_vmr"], cols["co2_vmr"], cols["ch4_vmr"],
                     cols["n2o_vmr"],
                     cols["r_eff_liq_um"], cols["r_eff_ice_um"],
+                    cols["convection_type"],
                 )
                 return (
                     _column_vector_rrtmgp(dnoa.toa_sw_up, ncols),
@@ -1507,14 +1520,24 @@ class RRTMGPRadiation(PhysicsTerm):
                 prev_frac = tuple(getattr(diagnostics["radiation"], f)
                                   for f in _FRAC_FIELDS)
 
+                # The two branches must return identical dtypes, and mixing
+                # the solve's flux dtype with the carried fraction's dtype
+                # (which differ under jax_enable_x64: the solve returns the
+                # fluxes in its own working precision, the fraction slot is
+                # whatever the carry holds) promotes in one branch only. So
+                # each *noa flux is pinned to the dtype of the fresh all-sky
+                # flux it stands in for, and each fraction to the dtype of
+                # its carried slot.
                 def _companion():
                     """Solve, and refresh the stored effect fraction."""
                     vals = _solve_aerosol_free()
                     fracs = [
                         update_effect_fraction(_fresh_toa[k], noa_v,
-                                               prev_frac[i])
+                                               prev_frac[i]
+                                               ).astype(prev_frac[i].dtype)
                         for i, (k, noa_v) in enumerate(zip(_KEYS, vals))
                     ]
+                    vals = tuple(v.astype(f.dtype) for v, f in zip(vals, fresh))
                     return vals, tuple(fracs)
 
                 def _held():
@@ -1526,7 +1549,9 @@ class RRTMGPRadiation(PhysicsTerm):
                     on a dark column would then report no aerosol effect for
                     the rest of the interval — including after sunrise.
                     """
-                    return hold_all(fresh, prev_frac), prev_frac
+                    held = hold_all(fresh, prev_frac)
+                    return (tuple(h.astype(f.dtype) for h, f in zip(held, fresh)),
+                            prev_frac)
 
                 noa_vals, new_frac = jax.lax.cond(
                     jnp.mod(rad_call, self._aerosol_free_interval) == 0,
@@ -1609,4 +1634,4 @@ class RRTMGPRadiation(PhysicsTerm):
             specific_humidity=jnp.zeros((nlev, ncols)),
             tracers={},
         )
-        return tendency, rad_out
+        return tendency, rad_out, (r_eff_liq_um, r_eff_ice_um)

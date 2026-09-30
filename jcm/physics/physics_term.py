@@ -242,6 +242,19 @@ class PhysicsTerm(nnx.Module):
         """
         return None
 
+    def preferred_advection(self) -> str | None:
+        """Return the dycore transport scheme this term was formulated for.
+
+        ``"eulerian"`` or ``"semi_lagrangian"``, or ``None`` (default) for no
+        preference. ``ComposablePhysics`` aggregates: any
+        ``"semi_lagrangian"`` wins (it may be a correctness requirement),
+        otherwise any ``"eulerian"``. The dycore still resolves an Eulerian
+        preference to semi-Lagrangian when the composition carries extra
+        tracers (#521). See
+        docs/source/design/dinosaur_transport_selection.md.
+        """
+        return None
+
     def adopt_runtime_configuration(self, previous: PhysicsTerm) -> None:
         """Take over post-compose configuration from the term being replaced.
 
@@ -306,6 +319,57 @@ class PhysicsTerm(nnx.Module):
         """
         raise NotImplementedError
 
+    def augment_probe_forcing(self, forcing: ForcingData) -> ForcingData:
+        """Complete the shape-probe ``ForcingData`` for this term.
+
+        ``ComposablePhysics.get_empty_data`` traces ``__call__`` abstractly
+        against a zero-filled ``ForcingData`` to discover the diagnostics
+        pytree. A term that reads an *optional* forcing field (default
+        ``None``) it genuinely REQUIRES for a given configuration — e.g. a
+        forced-surface-flux term reading ``prescribed_*`` — overrides this
+        to fill that field with a zero array of the right shape, so the
+        probe traces the real code path instead of a ``None``-guard.
+
+        This is the forcing analogue of the probe seeding tracers from
+        :meth:`required_tracers`: it makes the probe structurally match a
+        live step WITHOUT weakening the term's own run-time validation
+        (:meth:`validate_forcing`), which still fires on the real,
+        un-augmented forcing. Default: identity (most terms need nothing).
+        """
+        return forcing
+
+    def consumed_forcing_fields(self) -> tuple[str, ...]:
+        """Return the optional ``ForcingData`` fields this term reads as configured.
+
+        The capability marker for inputs that only SOME configurations
+        consume (default ``None`` on :class:`~jcm.forcing.ForcingData`), e.g.
+        the forced-mode surface-flux terms reading ``prescribed_*``. It lets
+        the composition answer "does anything here honour this input?" by
+        declared capability rather than by class name, so replacing or
+        removing terms keeps the answer correct
+        (:func:`jcm.physics.surface.prescribed_flux.
+        check_prescribed_flux_consumers` rejects a supplied input nothing
+        consumes instead of letting the run silently ignore it). Report
+        fields per the term's CURRENT configuration: a flag-selected mode that
+        does not read a field must not declare it. Default: none.
+        """
+        return ()
+
+    def validate_forcing(self, forcing: ForcingData, run_window=None) -> None:
+        """Raise if the run's forcing cannot serve this term over the run.
+
+        Called once by :meth:`~jcm.physics.composable_physics.
+        ComposablePhysics.validate_forcing` on the concrete run forcing
+        (not the abstract shape probe), so a term configured to read an
+        optional field it cannot run without — e.g. forced-mode surface
+        fluxes — fails loudly at run start rather than silently applying a
+        zero. ``run_window`` is ``(start_seconds, end_seconds)`` since
+        1970-01-01 when the model knows it concretely (``None``
+        inside a JAX transformation with a traced initial state), so a term
+        can also check that a date-aligned series covers the run rather than
+        clamping to its end sample. Default: no-op.
+        """
+
     def __add__(self, other):
         """Compose two terms (or a term and a ComposablePhysics).
 
@@ -331,3 +395,48 @@ class PhysicsTerm(nnx.Module):
             from jcm.physics.composable_physics import ComposablePhysics
             return ComposablePhysics(terms=[self])
         return NotImplemented
+
+
+def with_field_overrides(base, overrides: Mapping[str, Any] | None, *,
+                         scheme: str):
+    """Return ``base`` (a scheme ``Parameters`` object) with fields replaced.
+
+    The one conversion from a config mapping to a ``Parameters`` object, used
+    by both Hydra doors: ``runners._build_term`` (term-list presets, ``base``
+    is ``ParamsCls.default()``) and ``echam_physics`` (factory-built presets,
+    ``base`` is the object the factory would otherwise have used, so an
+    override of one field keeps the factory's own choices for the others).
+
+    Values are passed to the class constructor as given, so numeric fields
+    stay ordinary pytree leaves (differentiable, never static), and a class's
+    ``__post_init__`` normalizes its documented spellings (the string aliases
+    of enum-like fields). The constructor bypasses the cross-field checks in
+    ``default()``, so the opt-in ``validate`` hook is re-run on the result:
+    an override could otherwise re-create an illegal field combination (e.g.
+    echam_1m's legacy ccraut-as-KK2000-threshold, #674) that the defaults
+    alone never trip. Config-time, concrete values only; never under a trace.
+
+    Args:
+        base: The ``Parameters`` object whose unspecified fields are kept.
+        overrides: Field name to value; ``None`` or empty returns ``base``
+            rebuilt unchanged.
+        scheme: Name used in the error message (the config key or term name).
+
+    Raises:
+        ValueError: A key is not a field of ``base``'s class; the message
+            lists the valid fields, since a typo silently dropped would
+            invalidate the experiment that set it.
+
+    """
+    overrides = dict(overrides or {})
+    valid = {f.name for f in dataclasses.fields(base)}
+    unknown = sorted(set(overrides) - valid)
+    if unknown:
+        raise ValueError(
+            f"{scheme}: unknown {type(base).__name__} field(s) {unknown}. "
+            f"Valid fields: {sorted(valid)}.")
+    params = base.__class__(**{**base.__dict__, **overrides})
+    validate = getattr(params, "validate", None)
+    if callable(validate):
+        validate()
+    return params

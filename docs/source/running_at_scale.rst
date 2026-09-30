@@ -51,6 +51,26 @@ plus ``qnc``/``qni`` for the two-moment one — is loaded from the file when it
 carries it. Pass an explicit mapping to rename variables, or
 ``run.tracer_vars={}`` to load none.
 
+``run.mode=prescribed`` evaluates each state at its own time: the file's
+``time`` coordinate gives the offsets from the first state, so date-aligned
+forcing is selected (and its coverage checked) at the snapshot dates, not at
+synthetic model steps. Where the first state sits:
+
+* a file with a decoded date axis (``datetime64``/``cftime`` — any v3 output)
+  dates itself, so ``run.start_time`` may be left unset;
+* a ``run.start_time`` that is set anyway is used, with a warning naming both
+  times when it differs from the file's first time;
+* an elapsed-time axis (older outputs) carries no date, so ``run.start_time``
+  is required and its absence is an error.
+
+The state file must be a single netCDF whose ``time`` axis increases strictly and
+is either decoded dates (``datetime64``/``cftime``) or elapsed time (a
+``timedelta64`` axis, or a numeric one with ``units`` ``d``/``days`` or
+``s``/``seconds`` — ``d`` is what jcm writes for a numeric axis); a numeric
+axis with other or no units is rejected. ``run.chunk_days`` and
+``run.checkpoint_path`` belong to ``run.mode=full`` and are rejected in the
+state-file modes.
+
 Config groups
 -------------
 
@@ -152,6 +172,18 @@ Two consequences worth committing to memory:
      python -m jcm.main physics=echam \
          +physics.terms.tiedtke_convection.params.entrpen=4e-4
 
+  The factory-built presets (``physics=echam-jam``, ``echam-forced-flux``:
+  those that set ``builder: echam_physics``) have no ``terms`` node; there the
+  block is the factory's per-scheme argument (``convection``, ``clouds``,
+  ``microphysics_2m``, ``radiation``, ``vertical_diffusion``, ...)::
+
+     python -m jcm.main physics=echam-jam \
+         +physics.convection.entrpen=4e-4 +physics.convection.tau=3600
+
+  The field is applied on top of what that preset would otherwise use, and
+  both styles share one conversion: an unknown field is an error listing the
+  valid ones, and a numeric field stays a differentiable parameter.
+
   Physical-constant overrides are the same story — ``constants`` starts as an
   empty mapping, so each base field is *added*::
 
@@ -191,7 +223,10 @@ offline)::
        terrain=from_file terrain.file=hf://bundles/t63/terrain.nc \
        forcing.file=hf://bundles/t63/forcing_pd.nc
 
-See :doc:`design/data_mirror` for the full bundle catalogue. The Python door
+Every ``hf://`` read resolves at the dataset commit pinned in
+``jcm/data/remote.py``; ``JCM_MIRROR_REVISION=<commit sha>`` overrides it (a
+branch name is refused). Prefetch under the same value you run with. See
+:doc:`design/data_mirror` for the full bundle catalogue and the pin. The Python door
 onto the same bundles is :meth:`jcm.forcing.ForcingData.from_bundles` (in the
 getting-started guide).
 
@@ -293,8 +328,9 @@ Chunked, resumable runs and checkpoints
 ----------------------------------------
 
 Long integrations run in **chunks** with a health gate between them. Setting
-``run.chunk_days`` (``run=longrun`` uses 30) breaks the integration into pieces,
-writes each to ``{run.output_prefix}_day{N}.nc`` — a **relative** prefix by
+``run.chunk_days`` (``run=longrun`` uses 5) breaks the integration into pieces,
+writes each to ``{run.output_prefix}_day{N}.nc`` (unless ``run.save_chunks`` is
+false, see :ref:`monthly-means-cli`) — a **relative** prefix by
 default (``longrun``/``chunked_run``), so point it at a durable absolute path
 when the working directory is ephemeral (a container, a scratch job) — and runs
 :func:`jcm.diagnostics.check_health` after each one. With
@@ -318,6 +354,56 @@ Set ``run.archive_ckpt_every`` (sim-days; 0 = off) to also copy the rotating
 checkpoint to a dated, never-overwritten archive at the first chunk boundary
 past each interval multiple (the cadence need not divide ``run.chunk_days``),
 so a later experiment can restart from before a slowly-developing failure.
+
+.. _monthly-means-cli:
+
+Calendar-month means from the CLI
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``run.monthly_means=true`` streams every chunk's interval means through
+:class:`jcm.temporal_aggregation.MonthlyMeanAccumulator` and writes each
+Gregorian month to ``{run.output_prefix}_monthly_YYYY-MM.nc`` as soon as the
+first interval of the next month arrives (#901). The means are
+duration-weighted and accumulated in float64, and the files do not depend on
+``run.chunk_days`` or on where a run was killed and resumed. A partial first
+or last month carries its actual ``time_bounds`` plus ``time_coverage`` and
+``time_coverage_fraction``. It needs ``run.output_averages=true`` and save
+intervals that tile the months from ``run.start_time`` (daily or sub-daily
+saves from a midnight start); a schedule that would cross a month edge is
+refused before integrating. ``run.save_chunks=false`` keeps only the monthly
+files — a year of daily means for a JAM configuration is hundreds of GB — and
+is refused without ``run.monthly_means=true``, which would write nothing.
+
+With a checkpoint, the pending month is persisted as
+``{run.checkpoint_path}.monthly``: staged as ``.monthly.new`` just before
+each checkpoint and promoted once the checkpoint is committed (the previous
+state rotates to ``.monthly.prev``), copied beside every
+``archive_ckpt_every`` archive, and restored on resume. The state matching the
+checkpoint is never overwritten before its successor is committed, so
+repeated kills at any point still resume, and a checkpoint with no monthly
+state at its instant is refused rather than dropping or double-counting
+intervals. With
+``run.bail_on_unhealthy=false`` the stream follows the integration while the
+checkpoint (and so the persisted month) stays at the last healthy chunk; a
+resume re-integrates from there and rewrites any month file closed since.
+A restart from the final checkpoint integrates nothing: it writes the final
+month only if that file is missing (or unreadable, covers a different
+interval, or lacks its provenance sidecar), and otherwise leaves it and its
+sidecar untouched.
+
+``run=longrun`` (and ``run=pyses_year``) default to exactly this: a
+**calendar year** — ``run.total_time: 12 months``, resolved against
+``run.start_time`` into the exact end (366 days from the default 2000-01-01) —
+of daily means in 5-day chunks, written only as monthly files. Month/year
+lengths are accepted for ``run.total_time`` only; the fixed-duration APIs
+(``save_interval``, ``Model.run``) still reject them. A fixed length still
+works (``run.total_time=90``), as does ``run.save_chunks=true`` to also keep
+the daily files.
+
+The same recipes through :func:`jcm.configurations.load` hand
+``model.run`` that calendar year of daily saves, which an in-process run holds
+in memory in full; pass ``run.total_time`` / ``run.save_interval`` for an
+in-memory run, and reduce with ``ModelPredictions.monthly_means()``.
 
 The same primitives are available directly to bring-your-own-driver workflows
 via :py:mod:`jcm.checkpoint`:
@@ -360,7 +446,7 @@ and ``init=era5`` starts the run from the ERA5 state at the same date.
 Cloud access needs the ``jcm[era5]`` extra (``gcsfs`` + ``zarr``)::
 
    python -m jcm.main +configuration=t63-echam-rrtmgp \
-       init=era5 nudging=era5 run.start_date=2010-01-01 run.total_time=30
+       init=era5 nudging=era5 run.start_time=2010-01-01 run.total_time=30
 
 Prefetch on a login node first when compute nodes lack internet
 (``python -m jcm.data.era5 --grid echam_t63_l47_hybrid --start 2010-01-01 --end
@@ -442,7 +528,7 @@ scheduler does not extend a job past its walltime, so a long run is a *chain*
 of jobs sharing one checkpoint: each job resumes from
 ``run.checkpoint_path``, integrates until the walltime kills it, and the next
 job in the chain picks up at the last completed chunk. Once the run reaches
-``run.total_time`` a resubmitted job restores the checkpoint and exits
+``run.total_time`` (a calendar year under ``run=longrun``) a resubmitted job restores the checkpoint and exits
 immediately, so over-provisioning the chain is harmless:
 
 .. code-block:: bash
@@ -452,7 +538,6 @@ immediately, so over-provisioning the chain is harmless:
    #PBS -l walltime=12:00:00
    cd "$PBS_O_WORKDIR"
    python -m jcm.main +configuration=t63-echam-jam run=longrun \
-       run.total_time=365 \
        run.output_prefix="$SCRATCH/t63-echam-jam" \
        run.checkpoint_path="$SCRATCH/t63-echam-jam.ckpt"
 

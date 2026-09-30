@@ -13,9 +13,13 @@ from __future__ import annotations
 import numpy as np
 import xarray as xr
 
-RDA_MODA = "/glade/campaign/collections/rda/data/d633001/e5.moda.an.sfc"
-RDA_INVARIANT = ("/glade/campaign/collections/rda/data/d633000/"
-                 "e5.oper.invariant/197901")
+from jcm.data.mirror import sites
+
+# ``None`` on a site without the RDA archive (Levante): the ``era5`` stage is
+# then refused by ``check_sources`` and the Tier A product is pulled instead.
+_RDA = sites.current().rda
+RDA_MODA = f"{_RDA}/d633001/e5.moda.an.sfc" if _RDA else None
+RDA_INVARIANT = f"{_RDA}/d633000/e5.oper.invariant/197901" if _RDA else None
 
 # ERA5 GRIB table 128 codes for the fields the jcm forcing needs.
 FIELDS = {

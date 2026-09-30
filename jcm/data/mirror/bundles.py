@@ -26,6 +26,22 @@ Unit translations into the conventions the packaged t63 files establish
 * ``alb``   = per-cell minimum monthly ERA5 fal — the snow-free
   background albedo (snow brightening is applied dynamically from
   ``snowc``; an annual mean would double-count it)
+* ``forest`` = ERA5 high-vegetation cover ``cvh`` — the forest fraction
+  JSBACH's broadband land albedo masks the snow albedo with (static)
+* ``lsm``   = ERA5 land fraction, the land share of the cell (static; the
+  regrid weight for the conditional channels, see below)
+* ``glac``  = the permanent-snow (ice-sheet) mask above, as the glacier
+  share of the land — the glacier tiles whose albedo is the ECHAM glacier albedo (static).
+  Same mask that zeroes ``snowc``, so a cell's snow is either seasonal
+  (``snowc``) or glacier (``glac``), never both
+
+Land-surface channels are CONDITIONAL on part of the cell and are regridded
+with that part as the weight (:func:`land_surface_fields`,
+``jcm.data.regridding.CONDITIONAL_FIELDS``): ``glac``, ``stl``, ``soilw_am``
+and ``soilw_rel`` on the land; ``forest``, ``snowc`` and ``alb`` on the
+non-glacier land. So ``glac`` is the glacier share of the land and
+``snowc``/``forest``/``alb`` describe the non-glacier land, and a coastal or
+ice-sheet-margin cell is not diluted by its ocean or glacier neighbours.
 * ``soilw_am`` = SPEEDY availability fraction in [0, 1] per
   ``jcm.data.bc.compile``:
   ``min(1, (swvl1 + veg·3·max(0, swvl2 − swwil)) / (swcap + 3·(swcap − swwil)))``
@@ -47,11 +63,11 @@ from __future__ import annotations
 import numpy as np
 import xarray as xr
 
+from jcm.data.mirror import sites
 from jcm.data.regridding import (conservative_to_gaussian, fill_nearest,
-                                 interp_to)
+                                 interp_to, regrid_land_surface)
 
-AMIP_ROOT = ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
-             "CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10")
+AMIP_ROOT = sites.input4mips("CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10")
 TOS = (f"{AMIP_ROOT}/ocean/mon/tos/gn/v20250807/"
        "tos_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-10_gn_"
        "187001-202212.nc")
@@ -70,8 +86,9 @@ SSO_FIELDS = ("orog", "orostd", "orosig", "orogam", "orothe",
               "oropic", "oroval")
 
 # 12 month-start timestamps: interpolate_to_daily requires pd.infer_freq
-# "MS"/"M", and align_mode='auto' then resolves to WRAP_YEAR (climatology)
-# indexing, so the year itself is arbitrary.
+# "MS"/"M". The bundle is a manifest ``climatology`` product, so align: auto
+# resolves it to WRAP_YEAR from the manifest (#884) and the year itself is
+# arbitrary.
 CLIMO_TIME = np.array([np.datetime64(f"2014-{m:02d}-01")
                        for m in range(1, 13)])
 
@@ -86,7 +103,16 @@ def _monthly_clim(da: xr.DataArray, era: str) -> xr.DataArray:
 
 
 def _to_lonlat(da2d: xr.DataArray) -> tuple:
-    """(lat, lon[, time]) DataArray -> jcm-canonical (lon, lat[, time])."""
+    """(lat, lon[, time]) DataArray -> jcm-canonical (lon, lat[, time]).
+
+    Any other dim is refused: it can only be a source-grid dim a positional
+    regrid failed to consume, and writing it would publish a file many times
+    the bundle's size that no reader expects.
+    """
+    stray = set(da2d.dims) - {"lat", "lon", "time"}
+    if stray:
+        raise ValueError(f"{da2d.name}: dims {da2d.dims} carry {sorted(stray)} "
+                         "besides (lat, lon[, time])")
     dims = ("lon", "lat") + tuple(d for d in da2d.dims
                                   if d not in ("lat", "lon"))
     return dims, da2d.transpose(*dims).values
@@ -139,6 +165,32 @@ def translate_land(era5: xr.Dataset, permanent_snow: xr.DataArray) -> dict:
     return {"stl": era5.stl1, "soilw_am": soilw, "soilw_rel": soilw_rel,
             "snowc": snowc}
 
+
+
+def land_surface_fields(era5: xr.Dataset, permanent_snow: xr.DataArray,
+                        sources: dict, lats, lons) -> dict:
+    """Regrid the land-surface channels under the bundle convention (#672).
+
+    ``sources`` maps channel name to its 0.25-degree field (``stl``,
+    ``soilw_am``, ``soilw_rel``, ``snowc``, ``alb``, ``forest``, any subset).
+    Every channel, plus ``glac`` built from ``permanent_snow``, is
+    conditional on part of the cell and is regridded with that part as its
+    weight (:func:`jcm.data.regridding.regrid_land_surface`): ``glac`` and
+    the soil / land-temperature fields on the land, ``forest``, ``snowc``
+    and ``alb`` on the non-glacier land. The source land is ERA5's land
+    points (``lsm > 0.5``), the points its land fields are defined on.
+    ``lsm`` itself — the land share of each target cell, as in
+    ``terrain.nc`` — is written too, so a later regrid of the file (the
+    runtime upsampler, the pySES column sampler) can apply the same
+    weights. The single land-surface translation for every bundle builder.
+    """
+    land = (era5.lsm > 0.5).astype(np.float64)
+    glac = permanent_snow.astype(np.float64)
+    out = regrid_land_surface(
+        {**sources, "glac": glac}, lsm=land, glac=glac,
+        regrid=lambda da: interp_to(da, lats, lons))
+    out["lsm"] = interp_to(era5.lsm, lats, lons).clip(0.0, 1.0)
+    return out
 
 
 _EMIS_SPECIES = ("so2", "bc", "oc")
@@ -222,16 +274,20 @@ def build_forcing(era5_path: str, era: str, lats, lons,
 
     # For a climatology the ice-sheet mask comes from its own window (a
     # fixed multi-year period, as translate_land requires).
-    land = translate_land(era5, permanent_snow=era5.sd.min("time") >= 0.1)
+    permanent_snow = era5.sd.min("time") >= 0.1
+    land = translate_land(era5, permanent_snow=permanent_snow)
 
     fields = {
         "sst": interp_to(sst_da, lats, lons),
         "icec": interp_to(icec_da, lats, lons).clip(0.0, 1.0),
-        "stl": interp_to(land["stl"], lats, lons),
-        "soilw_am": interp_to(land["soilw_am"], lats, lons).clip(0.0, 1.0),
-        "soilw_rel": interp_to(land["soilw_rel"], lats, lons).clip(0.0, 1.0),
-        "snowc": interp_to(land["snowc"], lats, lons).clip(0.0, 1.0),
-        "alb": interp_to(era5.fal.min("time"), lats, lons),
+        **land_surface_fields(era5, permanent_snow, {
+            "stl": land["stl"],
+            "soilw_am": land["soilw_am"],
+            "soilw_rel": land["soilw_rel"],
+            "snowc": land["snowc"],
+            "alb": era5.fal.min("time"),
+            "forest": era5.cvh.clip(0.0, 1.0),
+        }, lats, lons),
     }
     ds = xr.Dataset(coords={"lat": lats, "lon": lons,
                             "time": CLIMO_TIME})

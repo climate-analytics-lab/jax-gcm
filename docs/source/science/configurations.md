@@ -105,13 +105,30 @@ mirror is reachable, except where noted.
 These compose and run but have no validation coverage; several have a known
 scientific gap, so treat results with care:
 
-- **Grey radiation + online (JAM) aerosol** — the direct effect *is* carried,
-  through the broadband 550 nm-band profile ``JamOpticsTerm`` writes for grey
-  (see {doc}`radiation`), but at band-centre accuracy and with none of the
-  per-band spectral detail RRTMGP uses, and no validation campaign has been run
-  on the combination. Reachable from either door: ``echam_physics(
-  aerosol_module="jam", radiation_scheme="grey", ...)`` or the CLI's
-  factory-backed ``physics=echam-jam physics.radiation_scheme=grey``.
+- **The ECHAM term stack with idealized grey radiation** — not an ECHAM
+  configuration: the grey two-stream is an idealized scheme with no ECHAM
+  reference (see {doc}`radiation`), so ``echam_physics()`` does not offer it
+  and the factory-built presets reject ``physics.radiation_scheme=grey``. It is
+  composed only explicitly, as a term —
+  ``echam_physics(radiation_scheme=GreyTwoStreamRadiation())`` — for idealized
+  studies and cheap tests, and nothing validates it. With JAM the aerosol direct
+  effect is still carried, through the broadband 550 nm-band profile
+  ``JamOpticsTerm`` writes, at band-centre accuracy.
+- **The ECHAM T127 and T255 grids** (``grid=echam_t{127,255}_l{47,95}_hybrid``;
+  384×192 and 768×384, node-for-node ECHAM's ``T127GR15`` / ``T255`` grids,
+  built with ``Grid.construct`` as T63 is) — *supported, not validated*. The
+  data mirror carries every climatological and static input for them (terrain,
+  present-day and pre-industrial SST/ice and land, emissions, DMS, the five dust
+  inputs — native HAMMOZ files — ozone and oxidants at L47/L95), so the ``auto``
+  and ``hf://bundles/t{127,255}/...`` inputs resolve exactly as at T63; the
+  yearly AMIP/ERA5 transient series are not published for them (#888). Nothing
+  is tuned for these grids: the physics runs with its T63-calibrated parameters
+  (including the dust ``nduscale_reg``, see {doc}`aerosol`), horizontal
+  diffusion takes ECHAM's tabulated T127/T255 e-folding times, and the time step
+  must be chosen by the user — the validated 12 min is not expected to hold; the
+  grid files suggest the advective-CFL scaling of the T106 step (≈10 min at
+  T127, ≈5 min at T255) as a starting point. No named configuration composes
+  them and they are not in the release matrix.
 - **Untabulated hybrid level counts with ``diffusion=auto``** — the ECHAM
   ``lmidatm`` hyperdiffusion profiles exist only for L47/L95; any other hybrid
   level count falls back to the uniform SPEEDY del² profile with a warning, which
@@ -140,8 +157,9 @@ guard is a ``ValueError`` / ``RuntimeError`` in the file named:
   initializes from its resting USSA-1976 state (``init=isothermal``) or a saved
   state, and nudging is dinosaur-only.
 - **A SL-less dinosaur install** — ``jcm/dycore/dinosaur/dycore.py``
-  (``_require_semi_lagrangian``): the Eulerian tracer path was removed, so
-  the backend requires the semi-Lagrangian dinosaur.
+  (``_require_semi_lagrangian``): semi-Lagrangian is the default transport
+  for every tracer-carrying configuration, so the backend requires the
+  semi-Lagrangian dinosaur.
 - **Physics that needs a dycore field the backend cannot provide** —
   ``jcm/model.py``: e.g. Tiedtke's ``cu_lmfmid`` mid-level trigger needs ``omega``,
   which pySES does not publish (hence ``cu_lmfmid: false`` in the ne30

@@ -104,9 +104,8 @@ single windows with many points, prefer the chunked driver pattern anyway.
 
 ## Caveats / follow-ups
 
-- Times are interpreted on the model's output time axis; with the
-  `"365_day"` calendar a real (Gregorian) campaign date drifts across long
-  runs — use `calendar="gregorian"` for real-campaign comparisons.
+- Times use the same real Gregorian clock as the primary output. Monthly
+  interval aggregation of primary output does not resample these observations.
 - Observers are fixed at `Model` construction (the jitted runner treats the
   Model as static; mutating `model.observers` later won't retrace).
 - Fields with extra trailing axes (per-band optics) are not sampleable.

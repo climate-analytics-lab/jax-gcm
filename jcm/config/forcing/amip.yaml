@@ -5,7 +5,7 @@
 # the ERA5 climatology, and CO2/CH4/N2O ride along as global-mean annual
 # series. Set the year range and start date together, e.g.:
 #
-#   forcing=amip forcing.years=[1979,1983] run.start_date=1979-01-01 \
+#   forcing=amip forcing.years=[1979,1983] run.start_time=1979-01-01 \
 #       grid=echam_t63_l47_hybrid
 #
 # The grid token in the paths below follows the horizontal resolution

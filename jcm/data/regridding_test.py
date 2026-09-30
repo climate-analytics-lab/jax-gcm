@@ -38,44 +38,41 @@ class ConservativeTest(unittest.TestCase):
         np.testing.assert_allclose(out, 3.5)
 
     def test_preserves_global_integral(self):
+        # Exact cell areas on both sides: regular 0.5° source bands in sin(lat),
+        # Gaussian target cells = quadrature weights.
         rng = np.random.default_rng(0)
         src_lats = np.linspace(-89.75, 89.75, 360)
         src_lons = np.arange(720) * 0.5
         field = rng.random((360, 720))
-        lats, lons = gaussian_latlon(24)
-        out = conservative_to_gaussian(field, src_lats, src_lons, lats, lons)
-        w_src = np.cos(np.deg2rad(src_lats))[:, None]
-        src_int = (field * w_src).sum()
-        # weight each target cell by the source area it received
-        glat, glon = np.meshgrid(src_lats, src_lons, indexing="ij")
-        rg = build_regridder(glon.ravel(), glat.ravel(),
-                             np.cos(np.deg2rad(glat)).ravel(),
-                             lons, lats, dst_in_degrees=True)
-        w_tgt = rg._covered_area.reshape(lons.size, lats.size).T
-        tgt_int = (out * w_tgt).sum()
-        self.assertAlmostEqual(tgt_int / src_int, 1.0, places=10)
+        edges = np.sin(np.deg2rad(np.linspace(-90.0, 90.0, 361)))
+        src_int = (field * np.diff(edges)[:, None]).sum() / 720
+        for nlat in (24, 384):           # coarsening, and T255 (a refinement)
+            lats, lons = gaussian_latlon(nlat)
+            out = conservative_to_gaussian(field, src_lats, src_lons, lats, lons)
+            w = np.polynomial.legendre.leggauss(nlat)[1]
+            tgt_int = (out * w[:, None]).sum() / lons.size
+            self.assertAlmostEqual(tgt_int / src_int, 1.0, places=10)
 
-    def test_rectilinear_axes_match_flattened_mesh(self):
-        # 1-D lon/lat axes with a 2-D area (#533) must build the identical
-        # operator as the pre-flattened mesh, for both (lon, lat) and
-        # (lat, lon) area layouts — and apply directly to native
-        # unflattened fields, e.g. a (time, lat, lon) input4MIPs series.
+    def test_rectilinear_axes_are_the_exact_overlap_operator(self):
+        # 1-D lon/lat axes with a 2-D area (#533) build the exact-overlap
+        # operator (conservative_overlap), for both (lon, lat) and (lat, lon)
+        # area layouts, and apply directly to native unflattened fields, e.g.
+        # a (time, lat, lon) input4MIPs series.
+        from jcm.data.regridding import conservative_overlap
         rng = np.random.default_rng(3)
         src_lats = np.linspace(-85.0, 85.0, 18)
         src_lons = np.arange(36) * 10.0
         mlon, mlat = np.meshgrid(src_lons, src_lats, indexing="ij")
         area = np.cos(np.deg2rad(mlat))                  # (nlon, nlat)
         lats, lons = gaussian_latlon(8)
-        ref = build_regridder(mlon.ravel(), mlat.ravel(), area.ravel(),
-                              lons, lats, dst_in_degrees=True)
         field = rng.random((3, 36, 18))                  # (time, lon, lat)
-        expect = ref(field.reshape(3, -1))
+        expect = np.swapaxes(conservative_overlap(
+            np.swapaxes(field, -1, -2), src_lats, src_lons, lats, lons),
+            -1, -2)                                      # (time, lon, lat)
         for rect_area, f in ((area, field),
                              (area.T, np.swapaxes(field, -1, -2))):
             rg = build_regridder(src_lons, src_lats, rect_area,
                                  lons, lats, dst_in_degrees=True)
-            np.testing.assert_allclose(rg._matrix.toarray(),
-                                       ref._matrix.toarray())
             # Both trailing layouts are recognized by shape.
             np.testing.assert_allclose(rg(field), expect)
             np.testing.assert_allclose(rg(np.swapaxes(field, -1, -2)), expect)
@@ -91,14 +88,19 @@ class ConservativeTest(unittest.TestCase):
             build_regridder(src_lons, src_lats, np.ones((7, 5)),
                             lons, lats, dst_in_degrees=True)
 
-    def test_matches_bruteforce_binning(self):
-        # independent reference: loop-based nearest-center area-weighted mean
+    def test_unstructured_source_matches_bruteforce_binning(self):
+        # A flattened (ncol-style) source is binned by nearest centre;
+        # independent reference: loop-based area-weighted mean.
         rng = np.random.default_rng(1)
         src_lats = np.linspace(-85.0, 85.0, 40)
         src_lons = np.arange(80) * 4.5
         field = rng.random((40, 80))
         lats, lons = gaussian_latlon(8)
-        out = conservative_to_gaussian(field, src_lats, src_lons, lats, lons)
+        glat, glon = np.meshgrid(src_lats, src_lons, indexing="ij")
+        rg = build_regridder(glon.ravel(), glat.ravel(),
+                             np.cos(np.deg2rad(glat)).ravel(),
+                             lons, lats, dst_in_degrees=True)
+        out = rg(field.ravel()).T
         ref_num = np.zeros((lats.size, lons.size))
         ref_den = np.zeros((lats.size, lons.size))
         for j, la in enumerate(src_lats):
@@ -111,6 +113,95 @@ class ConservativeTest(unittest.TestCase):
                 ref_den[i_lat, i_lon] += w
         ref = np.where(ref_den > 0, ref_num / np.maximum(ref_den, 1e-30), 0.0)
         np.testing.assert_allclose(out, ref, rtol=1e-12)
+
+
+class RefinementTest(unittest.TestCase):
+    """A target finer than the source must not come back with empty cells."""
+
+    def test_rectilinear_refinement_has_no_holes(self):
+        # 0.5° source onto T255's 0.47° cells: binning left whole latitude
+        # rows empty (zero flux); the overlap operator covers every cell.
+        src_lats = np.linspace(-89.75, 89.75, 360)
+        src_lons = np.arange(720) * 0.5
+        lats, lons = gaussian_latlon(384)
+        rg = build_regridder(src_lons, src_lats, np.ones((720, 360)),
+                             lons, lats, dst_in_degrees=True)
+        out = rg(np.full((360, 720), 2.0))
+        np.testing.assert_allclose(out, 2.0, rtol=1e-12)
+
+    def test_unstructured_refinement_takes_the_nearest_source(self):
+        src_lats = np.linspace(-80.0, 80.0, 9)
+        src_lons = np.arange(18) * 20.0
+        glat, glon = np.meshgrid(src_lats, src_lons, indexing="ij")
+        lats, lons = gaussian_latlon(32)
+        rg = build_regridder(glon.ravel(), glat.ravel(), np.ones(glat.size),
+                             lons, lats, dst_in_degrees=True)
+        values = 1.0 + np.arange(glat.size, dtype=float)
+        out = rg(values)
+        self.assertTrue(np.all(out >= 1.0))              # no empty (zero) cell
+        self.assertTrue(set(np.unique(out)) <= set(values))
+
+
+class RegionalAndPrecisionTest(unittest.TestCase):
+    """Inputs outside the global-float64 case must keep the exact operator."""
+
+    def _europe(self):
+        lats = np.arange(35.25, 70.0, 0.5)             # regional in both axes
+        lons = np.arange(-10.75, 30.0, 0.5)
+        return lats, lons
+
+    def test_regional_rectilinear_source_stays_inside_its_box(self):
+        lats, lons = self._europe()
+        dlat, dlon = gaussian_latlon(192)
+        rg = build_regridder(lons, lats, np.ones((lons.size, lats.size)),
+                             dlon, dlat, dst_in_degrees=True)
+        out = rg(np.full((lats.size, lons.size), 1.0)).T   # (lat, lon)
+        wrapped = np.where(dlon >= 180.0, dlon - 360.0, dlon)
+        inside = ((dlat[:, None] > 36.0) & (dlat[:, None] < 69.0)
+                  & (wrapped[None, :] > -10.0) & (wrapped[None, :] < 29.0))
+        far = ((dlat[:, None] < 30.0) | (dlat[:, None] > 75.0)
+               | (wrapped[None, :] < -15.0) | (wrapped[None, :] > 35.0))
+        np.testing.assert_allclose(out[inside], 1.0, rtol=1e-12)
+        np.testing.assert_array_equal(out[far], 0.0)
+
+    def test_regional_latitude_edges_keep_the_footprint(self):
+        from jcm.data.regridding import latitude_bounds
+        lats, _ = self._europe()
+        edges = latitude_bounds(lats)
+        self.assertAlmostEqual(edges[0], 35.0)
+        self.assertAlmostEqual(edges[-1], 70.0)
+        # A global regular grid still closes at the poles, and a pole-centred
+        # finite-volume row (CESM f09) becomes the half-width polar cap.
+        self.assertEqual(latitude_bounds(np.linspace(-89.75, 89.75, 360))[0],
+                         -90.0)
+        f09 = np.linspace(-90.0, 90.0, 192)
+        b = latitude_bounds(f09)
+        self.assertEqual((b[0], b[-1]), (-90.0, 90.0))
+        self.assertAlmostEqual(b[1], -90.0 + 0.5 * (f09[1] - f09[0]))
+
+    def test_float32_axes_keep_the_exact_operator(self):
+        from jcm.data.regridding import conservative_overlap
+        src_lats = np.linspace(-90.0, 90.0, 192)
+        src_lons = np.arange(288) * 1.25
+        dlat, dlon = gaussian_latlon(192)
+        field = np.random.default_rng(5).random((192, 288))
+        exact = conservative_overlap(field, src_lats, src_lons, dlat, dlon)
+        rg = build_regridder(src_lons.astype(np.float32),
+                             src_lats.astype(np.float32),
+                             np.ones((288, 192)), dlon, dlat,
+                             dst_in_degrees=True)
+        # float32 rounding of the cell positions moves edges by ~1e-5 deg;
+        # a fallback to binning would be off by O(0.1).
+        np.testing.assert_allclose(rg(field).T, exact, atol=1e-4)
+
+    def test_unstructured_regional_source_is_not_painted_outside(self):
+        lats, lons = self._europe()
+        glat, glon = np.meshgrid(lats, lons, indexing="ij")
+        dlat, dlon = gaussian_latlon(192)
+        rg = build_regridder(glon.ravel(), glat.ravel(), np.ones(glat.size),
+                             dlon, dlat, dst_in_degrees=True)
+        out = rg(np.ones(glat.size)).T
+        self.assertEqual(out[dlat < 20.0].max(), 0.0)
 
 
 class BilinearTest(unittest.TestCase):
@@ -134,6 +225,67 @@ class BilinearTest(unittest.TestCase):
         self.assertTrue(np.isfinite(out).all())
         self.assertEqual(out[0, 0, 1], 1.0)     # nearest valid is (0, 0)
         self.assertEqual(out[0, 1, 2], 6.0)     # untouched cells identical
+
+
+
+class ConservativeOverlapTest(unittest.TestCase):
+    """The exact-overlap remap the dust products are coarsened/refined with."""
+
+    def _field(self, lats, lons):
+        la, lo = np.meshgrid(np.deg2rad(lats), np.deg2rad(lons), indexing="ij")
+        return 1.0 + np.cos(la) ** 2 * np.cos(3 * lo) + 0.5 * np.sin(la)
+
+    def test_gaussian_bounds_reproduce_the_quadrature_weights(self):
+        from jcm.data.regridding import latitude_bounds
+        lats, _ = gaussian_latlon(48)
+        edges = np.sin(np.deg2rad(latitude_bounds(lats)))
+        np.testing.assert_allclose(
+            np.diff(edges), np.polynomial.legendre.leggauss(48)[1], atol=1e-12)
+        self.assertTrue(np.all((edges[:-1] < np.sin(np.deg2rad(lats)))
+                               & (np.sin(np.deg2rad(lats)) < edges[1:])))
+
+    def test_constant_is_preserved_coarsening_and_refining(self):
+        from jcm.data.regridding import conservative_overlap
+        fine, coarse = gaussian_latlon(192), gaussian_latlon(160)
+        for (sl, so), (dl, do) in ((fine, coarse), (coarse, fine)):
+            out = conservative_overlap(np.full((2, sl.size, so.size), 2.5),
+                                       sl, so, dl, do)
+            self.assertEqual(out.shape, (2, dl.size, do.size))
+            np.testing.assert_allclose(out, 2.5, rtol=1e-12)
+
+    def test_global_integral_is_conserved(self):
+        from jcm.data.regridding import conservative_overlap
+        weights = lambda n: np.polynomial.legendre.leggauss(n)[1]  # noqa: E731
+        for src_n, dst_n in ((192, 160), (96, 192), (384, 192)):
+            (sl, so), (dl, do) = gaussian_latlon(src_n), gaussian_latlon(dst_n)
+            f = self._field(sl, so)
+            out = conservative_overlap(f, sl, so, dl, do)
+            total_src = (weights(src_n)[:, None] * f).sum() / so.size
+            total_dst = (weights(dst_n)[:, None] * out).sum() / do.size
+            self.assertAlmostEqual(total_src, total_dst, places=12)
+
+    def test_identity_on_the_same_grid(self):
+        from jcm.data.regridding import conservative_overlap
+        lats, lons = gaussian_latlon(96)
+        f = self._field(lats, lons)
+        np.testing.assert_allclose(
+            conservative_overlap(f, lats, lons, lats, lons), f, atol=1e-12)
+
+    def test_descending_latitudes_are_refused(self):
+        from jcm.data.regridding import conservative_overlap
+        lats, lons = gaussian_latlon(32)
+        with self.assertRaisesRegex(ValueError, "ascending"):
+            conservative_overlap(np.ones((32, 64)), lats[::-1], lons, lats, lons)
+
+    def test_missing_source_is_renormalised_not_diluted(self):
+        from jcm.data.regridding import conservative_overlap
+        (sl, so), (dl, do) = gaussian_latlon(192), gaussian_latlon(96)
+        f = np.full((sl.size, so.size), np.nan)
+        f[100:120, 40:80] = 0.03              # a valid patch, NaN elsewhere
+        out = conservative_overlap(f, sl, so, dl, do)
+        finite = np.isfinite(out)
+        self.assertTrue(finite.any() and (~finite).any())
+        np.testing.assert_allclose(out[finite], 0.03, rtol=1e-12)
 
 
 if __name__ == "__main__":

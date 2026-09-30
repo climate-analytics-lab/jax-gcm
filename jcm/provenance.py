@@ -413,6 +413,23 @@ def start_run(cfg=None) -> None:
     _state["facts"] = {}
 
 
+def _mirror_revision_facts() -> dict:
+    """Return the data-mirror commit this process reads, and where it came from.
+
+    One commit per process (:func:`jcm.data.remote.mirror_revision`), recorded
+    for every run: the same code and config at another commit read different
+    inputs. An override that is not a commit sha has already failed any
+    mirror read; it is recorded as given rather than failing the output.
+    """
+    from jcm.data import remote
+    try:
+        revision = remote.mirror_revision()
+    except ValueError:
+        revision = "invalid: " + os.environ.get(remote.REVISION_ENV, "")
+    return {"data_mirror_revision": revision,
+            "data_mirror_revision_source": remote.revision_source()}
+
+
 def record_input(requested, resolved=None) -> None:
     """Record a boundary/input file the run resolved (deduped by path)."""
     resolved = str(resolved if resolved is not None else requested)
@@ -445,7 +462,7 @@ def collect(params: dict | None = None) -> dict:
     prov["code"] = probe_code()
     prov["environment"] = probe_environment()
     prov["inputs"] = dict(_state["inputs"])
-    prov["facts"] = dict(_state["facts"])
+    prov["facts"] = {**_mirror_revision_facts(), **_state["facts"]}
     if params:
         prov["params"] = params
     hash_material = {
@@ -458,6 +475,9 @@ def collect(params: dict | None = None) -> dict:
         "inputs": {k: v.get("sha256", (v.get("size"), v.get("mtime")))
                    for k, v in prov["inputs"].items()},
         "x64": prov["environment"]["jax_enable_x64"],
+        # The mirror commit decides the content of every hf:// input, and an
+        # input described only by size + mtime would not separate two.
+        "data_mirror_revision": prov["facts"]["data_mirror_revision"],
         # Without this every member of a parameter sweep shares one run
         # hash: the config, code and inputs are identical across them and
         # the parameters are the only thing that differs.

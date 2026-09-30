@@ -274,7 +274,7 @@ def _stratocumulus_zsat(
     pressure: jnp.ndarray,
     surface_pressure: float,
     config: CloudParameters,
-    enhance_allowed: jnp.ndarray = jnp.array(True),
+    enhance_allowed: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
     """Per-layer stratocumulus saturation factor ``zsat`` ∈ (0, 1].
 
@@ -306,6 +306,11 @@ def _stratocumulus_zsat(
         the cf formula.
 
     """
+    # Built at call time, not as a default argument: a jax array in a
+    # ``def`` default is created at import and initialises the JAX backend
+    # on ``import`` (#859).
+    if enhance_allowed is None:
+        enhance_allowed = jnp.array(True)
     nlev = temperature.shape[0]
 
     z_full = _full_level_heights(temperature, pressure, surface_pressure)
@@ -410,7 +415,7 @@ def calculate_cloud_fraction(
     pressure: jnp.ndarray,
     surface_pressure: float,
     config: CloudParameters,
-    enhance_allowed: jnp.ndarray = jnp.array(True),
+    enhance_allowed: jnp.ndarray | None = None,
     cloud_ice: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Diagnose cloud fraction following ECHAM ``mo_cover.f90``.
@@ -445,6 +450,11 @@ def calculate_cloud_fraction(
         ``(nlev,)``.
 
     """
+    # Built at call time, not as a default argument: a jax array in a
+    # ``def`` default is created at import and initialises the JAX backend
+    # on ``import`` (#859).
+    if enhance_allowed is None:
+        enhance_allowed = jnp.array(True)
     if cloud_ice is None:
         cloud_ice = jnp.zeros_like(temperature)
     qs = _qs_cover(pressure, temperature, cloud_ice, t_ice=config.t_ice)
@@ -712,8 +722,13 @@ class SundqvistCloudFraction(PhysicsTerm):
     ``state.tracers``. Writes ``cloud_fraction``, plus a pass-through of
     the input ``qc`` / ``qi``, into the public ``"clouds"`` key
     (:class:`CloudData` typed sub-struct, shared with the downstream
-    microphysics terms) and updates the public ``"relative_humidity"``
-    key with ``q / qsat``.
+    microphysics terms) and publishes ``"cover_relative_humidity"``: the
+    ``q / qsat`` the cover closure actually sees, with ``qsat`` over ice where
+    the cell carries cloud ice below ``t_ice`` (ECHAM ``mo_cover`` ``lo2``
+    switch). That is a scheme-internal closure variable — it jumps by tens of
+    percent across the ice threshold in adjacent cells — so it deliberately
+    does NOT overwrite the public water-saturation ``"relative_humidity"``
+    from :class:`~jcm.physics.diagnostics.moist_air_state.MoistAirColumnState`.
 
     **No q ↔ qc/qi condensation tendency is emitted.** Saturation
     adjustment (cuadjtq Newton step) lives in the downstream microphysics
@@ -738,10 +753,20 @@ class SundqvistCloudFraction(PhysicsTerm):
     requires: ClassVar[tuple[str, ...]] = (
         "pressure_full", "surface_pressure",
     )
-    provides: ClassVar[tuple[str, ...]] = ("clouds", "relative_humidity")
-    # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
-    # the microphysics terms that fill the rest of the CloudData struct.
-    output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS
+    provides: ClassVar[tuple[str, ...]] = ("clouds", "cover_relative_humidity")
+    # CF/units metadata for the ``clouds.*`` output fields (#740), shared with
+    # the microphysics terms that fill the rest of the CloudData struct, plus
+    # this term's own humidity. No CF ``standard_name``: ``relative_humidity``
+    # is the water-referenced quantity, which this one is not.
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        **CLOUD_OUTPUT_ATTRS,
+        "cover_relative_humidity": {
+            "units": "1",
+            "long_name": (
+                "relative humidity seen by the Sundqvist cloud cover "
+                "(ice saturation where cloud ice is present below t_ice)"),
+        },
+    }
     # Carry seeded as zeros; cloud fraction / qc / qi are rebuilt every
     # step from RH and the dynamics tracers, so the zero seed is
     # overwritten on the first compute call. Downstream microphysics
@@ -768,7 +793,7 @@ class SundqvistCloudFraction(PhysicsTerm):
         forcing: ForcingData,
         terrain: TerrainData,
     ) -> tuple[PhysicsTendency, dict]:
-        """Diagnose cloud fraction + relative humidity, no q tendency."""
+        """Diagnose cloud fraction + the cover's humidity, no q tendency."""
         nlev, ncols = state.temperature.shape
         params = self.params.get_value()
 
@@ -848,6 +873,16 @@ class SundqvistCloudFraction(PhysicsTerm):
         # Write cloud_fraction (the only thing this term computes) plus a
         # pass-through of the input qc / qi so downstream terms see a
         # populated CloudData with the latest state values.
+        #
+        # The convective-detrainment fields are reset to zero here because
+        # ``prev_clouds`` is the PREVIOUS step's carry: this term seeds the
+        # step's ``clouds`` upstream of convection, and those fields must
+        # hold only what convection detrains THIS step (TiedtkeConvection
+        # rewrites them). Without the reset, the gap before convection runs
+        # would expose last step's values, and a stack that composes no
+        # convection term — including a restart from a checkpoint written by
+        # one that did — would feed a stale detrainment to the microphysics
+        # on every step.
         prev_clouds = diagnostics.get(
             "clouds", CloudData.zeros((ncols,), nlev),
         )
@@ -855,10 +890,12 @@ class SundqvistCloudFraction(PhysicsTerm):
             cloud_fraction=cloud_fraction,
             qc=qc,
             qi=qi,
+            conv_detrainment_qc=zeros,
+            conv_detrainment_qi=zeros,
         )
 
         return tendency, {
             **diagnostics,
             "clouds": clouds,
-            "relative_humidity": rel_humidity,
+            "cover_relative_humidity": rel_humidity,
         }

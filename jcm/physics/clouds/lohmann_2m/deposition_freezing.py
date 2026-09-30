@@ -16,7 +16,7 @@ from jcm.physics import thermodynamics
 
 from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
-    ice_volume_mean_radius,
+    ice_volume_mean_radius_schumann,
     threshold_vert_vel,
 )
 from .types import microphysics_dt_constants
@@ -76,9 +76,10 @@ def mixed_phase_deposition_and_corrections(
        humidity (`specific_humidity_tmp`) from existing condensation/deposition rates.
     2. Update ice mass mixing ratio (`zxip1`) including detrainment, evaporation,
        Tompkins source (`pgenti`), and deposition.
-    3. Compute effective ice crystal radius from `zxip1` and `icnc` (via
-       `ice_volume_mean_radius`, which clips and converts to volume-mean via the
-       Schumann et al. (2011) parameterisation.
+    3. Compute the volume-mean ice crystal radius from `zxip1` and `icnc` via
+       `ice_volume_mean_radius_schumann`: the Lohmann (2008) effective radius,
+       clipped, times ``conv_effr2mvr = 0.9`` (ECHAM
+       `effective_2_volmean_radius_param_Schuman_2011`, line 2374).
     4. Compute Bergeron-Findeisen threshold vertical velocity (`zvervmax`) from
        saturation vapour pressures, ICNC, ice radius, and `peta`.
     5. Determine phase mask `lo2`:
@@ -181,11 +182,12 @@ def mixed_phase_deposition_and_corrections(
     zxip1 = jnp.maximum(zxip1, 0.0)
 
     # -------------------------------------------------------------------------
-    # 3. Effective ice crystal radius → volume-mean radius (Schumann 2011)
+    # 3. Effective ice crystal radius → volume-mean radius 0.9·r_eff
+    #    (ECHAM effective_2_volmean_radius_param_Schuman_2011, line 2374)
     #    Convert: grid-mean kg/kg → in-cloud g/m^3
     # -------------------------------------------------------------------------
     ice_gm3 = 1000.0 * zxip1 * air_density / jnp.maximum(cloud_fraction, params.clc_min)
-    zrice = ice_volume_mean_radius(ice_gm3, icnc, params)   # [m]
+    zrice = ice_volume_mean_radius_schumann(ice_gm3, icnc, params)   # [m]
 
     # -------------------------------------------------------------------------
     # 4. Bergeron-Findeisen threshold vertical velocity
@@ -835,31 +837,57 @@ def WBF_process(
     )
 
 
+# Standard conditions of DeMott et al. (2010): "Both aerosol and IN
+# concentrations were corrected to standard temperature and pressure
+# conditions (STP; 273.15 K, 1013.5 mb)" (Methods, Datasets). The pressure is
+# taken as printed; it differs from the conventional 1013.25 hPa by 0.02 %.
+_DEMOTT_STP_TEMPERATURE = 273.15   # [K]
+_DEMOTT_STP_PRESSURE = 101350.0    # [Pa]
+
+
 def demott2010_inp(
     temperature: jnp.ndarray,
     n_aer_coarse_cm3: float,
+    air_density: jnp.ndarray,
 ) -> jnp.ndarray:
     """Ice nucleating particle concentration via DeMott et al. (2010).
 
-    Returns INP concentration in 1/m³ for the mixed-phase temperature range
-    (−9 °C to −35 °C, i.e. 264 K to 238 K). Outside this range, returns 0.
+    Returns the AMBIENT INP concentration in 1/m³ for the mixed-phase
+    temperature range (−9 °C to −35 °C, i.e. 264 K to 238 K). Outside this
+    range, returns 0.
+
+    DeMott et al. (2010, eq. 1) give ``n_IN`` per STANDARD litre from the
+    number of aerosol particles larger than 0.5 μm per standard cm³, both at
+    the paper's STP (273.15 K, 1013.5 mb). ``n_aer_coarse_cm3`` is already a
+    standard-condition number, so only the result is converted, by the ratio
+    of the ambient air density to the dry-air density at that STP: the same
+    number of particles per unit mass of air occupies a larger volume aloft.
 
     Args:
         temperature: Temperature [K].
         n_aer_coarse_cm3: Total aerosol number > 0.5 μm diameter [cm⁻³ STP].
+        air_density: Ambient air density [kg/m³].
 
     Reference:
-        DeMott et al. (2010), PNAS, doi:10.1073/pnas.0910818107
+        DeMott et al. (2010), PNAS 107, 11217-11222,
+        doi:10.1073/pnas.0910818107
+
+    .. versionchanged:: 3.0.0
+       ``air_density`` is a required third positional argument, with no
+       default: a two-argument call fails rather than silently returning
+       the per-standard-volume number.
 
     """
-    a, b, c, d = 5.94e-5, 3.33, 0.0264, 0.0033
+    a, b, c_exp, d = 5.94e-5, 3.33, 0.0264, 0.0033
     delta_T = 273.16 - temperature
     delta_T_clipped = jnp.clip(delta_T, 0.0, 35.0)
     n_aer_safe = jnp.maximum(n_aer_coarse_cm3, 0.01)
 
-    # n_INP in std L⁻¹ → convert to m⁻³ (* 1e3)
-    n_inp_per_litre = a * delta_T_clipped ** b * n_aer_safe ** (c * delta_T_clipped + d)
-    n_inp_per_m3 = n_inp_per_litre * 1e3
+    # n_INP in std L⁻¹ → std m⁻³ (× 1e3) → ambient m⁻³ (× ρ/ρ_STP).
+    n_inp_per_std_litre = (
+        a * delta_T_clipped ** b * n_aer_safe ** (c_exp * delta_T_clipped + d))
+    rho_stp = _DEMOTT_STP_PRESSURE / (c.rd * _DEMOTT_STP_TEMPERATURE)
+    n_inp_per_m3 = n_inp_per_std_litre * 1e3 * air_density / rho_stp
 
     # Only active in the valid range (238 K to 264 K)
     active = (temperature <= 264.0) & (temperature >= 238.0)

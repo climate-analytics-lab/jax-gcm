@@ -13,6 +13,7 @@ from jcm.physics.clouds.echam_1m import MicrophysicsParameters
 from jcm.physics.clouds.sundqvist import CloudParameters
 from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters
 from jcm.physics.echam.echam_terms import echam_physics
+from jcm.physics.echam.testing import idealized_echam_physics
 
 
 def test_per_scheme_defaults():
@@ -89,7 +90,9 @@ def test_physics_terms_compute_tendencies():
     custom_clouds = CloudParameters.default().__class__(
         **{**CloudParameters.default().__dict__, "crt": 0.8}
     )
-    physics = echam_physics(clouds=custom_clouds)
+    # Parameter plumbing through a full compute; the radiation scheme is
+    # irrelevant to it, so the cheap idealized composition.
+    physics = idealized_echam_physics(clouds=custom_clouds)
 
     sigma_boundaries = np.linspace(0, 1, nlev + 1)
     coords = get_coords(sigma_boundaries, nodal_shape=(nlat, nlon))

@@ -11,11 +11,14 @@ JAX-GCM is designed to be a fully differentiable climate model that balances eas
    design/operator_split_physics
    design/water_positivity_conservation
    design/writing_a_physics_scheme
+   design/surface_exchange
+   design/forcing_time_semantics
    design/parallelization
    design/output_vertical_conventions
    design/checkpoint_compatibility
    design/pyses_cam_se_dycore
    design/dinosaur_sl_jam_configuration
+   design/dinosaur_transport_selection
    design/jam
    design/jam_carbon_aging
    design/jam_aerosol_removal
@@ -132,8 +135,9 @@ no ``omega``, so ECHAM's mid-level convection trigger has to be turned off or
 The spelling of that override follows the physics group's own shape: the
 term-list presets take ``+physics.terms.tiedtke_convection.params.cu_lmfmid=false``
 as above, while the factory-built ones (``physics=echam-jam*``, which set
-``builder: echam_physics``) take the scalar ``+physics.cu_lmfmid=false`` and
-reject a ``terms`` node outright.
+``builder: echam_physics``) take the scalar ``+physics.cu_lmfmid=false`` (or,
+equivalently, ``+physics.convection.cu_lmfmid=false``; setting both is an
+error) and reject a ``terms`` node outright.
 
 The ``dycore`` group owns what is backend-specific: on ``pyses_*`` the
 resolution comes from ``nx``/``npt``/``nlev`` in that group and the ``grid``
@@ -170,7 +174,7 @@ between the gridpoint state supplied by the dycore and a physics package:
                state: Current atmospheric state (temperature, winds, etc.)
                forcing: Boundary conditions for the *current step*. The
                    Model collapses every `TimeSeries` leaf and populates
-                   `forcing.solar` via ``forcing.select(date, calendar)``
+                   `forcing.solar` via ``forcing.select(date)``
                    before this call, so physics terms see only flat 2-D
                    spatial fields and a precomputed `SolarGeometry` —
                    no time axis, no `DateData`.
@@ -386,7 +390,7 @@ The default configuration provides a working model out of the box:
 
    # Just works - sensible defaults for everything
    model = Model(coords=get_speedy_coords())
-   predictions = model.run()
+   predictions = model.run(total_time="10 days")
 
 For Experts
 ^^^^^^^^^^^

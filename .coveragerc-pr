@@ -22,7 +22,7 @@ omit =
     jcm/physics/clouds/icon/cloud_microphysics_2m.py
     jcm/physics/clouds/icon/cloud_utils.py
     # Offline data-mirror builders (also omitted in the base rc): they
-    # stream multi-GB Glade sources CI cannot have.
+    # stream multi-GB Glade/Levante sources CI cannot have.
     jcm/data/mirror/sso.py
     jcm/data/mirror/era5_land.py
     jcm/data/mirror/ozone.py
@@ -83,7 +83,7 @@ omit =
     # routes through every step, but the branches outside the
     # SPEEDY/ECHAM default path — level-dependent diffusion at L47,
     # the semi-Lagrangian transport + nudging composition — only fire under
-    # GPU-gated slow tests (``test_echam_model_default_statistics``,
+    # GPU-gated slow tests (``test_release_matrix_default_statistics``,
     # the nudging-shrinks-winds suite) that the CPU CI skips. Fast
     # tests exercise both branches; PR coverage matches the existing
     # ``runners.py`` / ``utils.py`` omit pattern for code the slow

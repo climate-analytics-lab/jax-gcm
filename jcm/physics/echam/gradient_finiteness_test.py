@@ -15,7 +15,12 @@ infinite derivative), plus clear/ice-free cells (cloud fraction / condensate 0
 under a fractional power).
 
 The test differentiates ``mean(temperature)`` after two model steps with
-respect to the solar constant, for the 1M and 2M cloud microphysics schemes.
+respect to the solar constant, for the 1M and 2M cloud microphysics schemes,
+through the ECHAM composition ``echam_physics()`` — RRTMGP radiation. RRTMGP's
+reverse pass holds the per-g-point profiles of every column live at once
+(``RRTMGPRadiation``), which at T21L47 takes the process past 100 GB; the test
+sets ``JCM_RRTMGP_COL_CHUNKS`` so the backward rematerializes the columns in
+blocks, at the cost of one extra forward radiation evaluation.
 
 **What this does not cover, and where that lives.** One scalar input is a
 narrow direction: a poison on a path the solar constant never reaches stays
@@ -45,8 +50,10 @@ import dataclasses
 
 import jax
 import jax.numpy as jnp
+import jax_datetime as jdt
 import pytest
 
+from jcm.date import DateData
 from jcm.forcing import default_forcing
 from jcm.model import Model
 from jcm.physics.echam.echam_levels import get_echam_levels
@@ -58,10 +65,16 @@ from jcm.utils import get_coords
 _STEPS = 2
 _S0 = 1361.0
 # d(meanT)/d(solar_constant) after two steps from the balanced isothermal
-# aquaplanet start with the production-seeded physics carry. Radiation-dominated,
-# so identical across cloud configs (1M and 2M both give 5.2104e-6). Matches a
-# float64 central FD (5.2105e-6); validated in PR #559.
-_EXPECTED_GRAD = 5.21e-6
+# aquaplanet start with the production-seeded physics carry, RRTMGP radiation.
+# Radiation-dominated, so identical across cloud configs (1M and 2M both give
+# 1.1957e-5). A float32 central difference agrees within its own noise: 1.190e-5
+# at a +-50 W m-2 step, where the float32 resolution of the mean temperature
+# alone is ~1.5 %.
+_EXPECTED_GRAD = 1.196e-5
+# Column blocks for RRTMGP's reverse pass (see the module docstring): 2048 T21
+# columns in blocks of 128 bring the peak RSS to ~13 GB on CPU. Finer blocks do
+# not lower it further; the rest is the model's own backward.
+_RRTMGP_COL_CHUNKS = "16"
 
 _CONFIGS = [
     ("1m", "macv2sp"),
@@ -80,7 +93,7 @@ def _mean_temperature_after_two_steps(solar_constant, *, cloud_scheme, aerosol_m
     forcing = default_forcing(coords.horizontal)
     rad = dataclasses.replace(RadiationParameters.default(), solar_constant=solar_constant)
     physics = echam_physics(
-        radiation=rad, radiation_scheme="grey", checkpoint_terms=False,
+        radiation=rad, checkpoint_terms=False,
         cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,
     )
     model = Model(coords=coords, physics=physics, time_step=15.0)
@@ -100,20 +113,27 @@ def _mean_temperature_after_two_steps(solar_constant, *, cloud_scheme, aerosol_m
     step = model._get_op_split_step_fn(forcing)
     state = model._final_dycore_state
     physics_state = model._final_physics_state
-    for _ in range(_STEPS):
-        state, physics_state = step(state, physics_state)
+    clock = model.start_time
+    for model_step in range(_STEPS):
+        date = DateData(
+            clock, jnp.int32(model_step), int(model.dt_si.m))
+        state, physics_state = step(state, physics_state, date)
+        clock = clock + jdt.Timedelta(seconds=jnp.int32(model.dt_si.m))
     return jnp.mean(model.dycore.to_physics_state(state).temperature)
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("cloud_scheme,aerosol_module", _CONFIGS)
-def test_two_step_gradient_is_finite_and_correct(cloud_scheme, aerosol_module):
+def test_two_step_gradient_is_finite_and_correct(cloud_scheme, aerosol_module,
+                                                  monkeypatch):
     """Reverse-mode d(meanT)/d(solar_constant) is finite and correct.
 
     Finiteness is the #558 guard (a re-introduced degenerate-state poison NaNs
     the cotangent); the value check additionally catches a guard that silently
     changes the physics.
     """
+    # Read when RRTMGP's column map is traced, i.e. inside jax.grad below.
+    monkeypatch.setenv("JCM_RRTMGP_COL_CHUNKS", _RRTMGP_COL_CHUNKS)
     grad = jax.grad(
         lambda s: _mean_temperature_after_two_steps(
             s, cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,

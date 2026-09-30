@@ -20,6 +20,7 @@ from .turbulent_fluxes import (
 from .ocean import ocean_physics_step
 from .sea_ice import sea_ice_physics_step
 from .land import land_surface_physics_step
+from .albedo import CTFREEZ
 
 
 def initialize_surface_state(
@@ -28,7 +29,7 @@ def initialize_surface_state(
     ocean_temp: jnp.ndarray,
     ice_temp: jnp.ndarray,
     soil_temp: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default()
+    params: SurfaceParameters | None = None
 ) -> SurfaceState:
     """Initialize surface state from basic inputs.
     
@@ -44,6 +45,8 @@ def initialize_surface_state(
         Initialized surface state
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     # Use fixed value for nsfc_type since it needs to be concrete for array creation
     nsfc_type = 3  # Always 3: water, ice, land
     nice_layers = 2  # Default ice layers
@@ -129,8 +132,7 @@ def surface_physics_step(
     atmospheric_state: AtmosphericForcing,
     surface_state: SurfaceState,
     dt: float,
-    wind_speed_10m: jnp.ndarray,
-    params: SurfaceParameters = SurfaceParameters.default(),
+    params: SurfaceParameters | None = None,
 ) -> Tuple[SurfaceFluxes, SurfaceTendencies, SurfaceDiagnostics]:
     """Complete surface physics step for all surface types.
     
@@ -139,14 +141,13 @@ def surface_physics_step(
         surface_state: Surface state
         dt: Time step [s]
         params: Surface parameters
-        wind_speed_10m: diagnosed 10 m wind [m/s] (ncol,) for the reported
-            surface diagnostics (ECHAM ``nsurf_diag``; the vdiff carry always
-            holds one, so it is required rather than defaulted).
         
     Returns:
         Tuple of (surface_fluxes, tendencies, diagnostics)
 
     """
+    if params is None:  # not a def default: it would build jax arrays at import (#859)
+        params = SurfaceParameters.default()
     ncol, nsfc_type = surface_state.temperature.shape
     
     # Compute bulk Richardson number
@@ -248,7 +249,7 @@ def surface_physics_step(
     # Compute diagnostics
     diagnostics = compute_surface_diagnostics(
         atmospheric_state, surface_state, combined_fluxes, resistances,
-        wind_speed_10m, params,
+        params,
     )
     
     return combined_fluxes, combined_tendencies, diagnostics
@@ -446,11 +447,10 @@ class EchamSurface(PhysicsTerm):
         # fraction of an fmask=0.6 cell would otherwise use stl_am instead
         # of sst).
         ocean_temp = forcing.sea_surface_temperature.reshape(ncols)
-        ctfreez = 271.38  # K, ECHAM iniphy.f90:71 saline-water freezing
         land_temp = forcing.stl_am.reshape(ncols)
         ice_surface_temp = jnp.where(
             sea_ice_fraction > 0.0,
-            jnp.minimum(ocean_temp, ctfreez),
+            jnp.minimum(ocean_temp, CTFREEZ),
             ocean_temp,
         )
         ice_temp = jnp.repeat(ice_surface_temp[:, jnp.newaxis], 2, axis=1)
@@ -506,7 +506,7 @@ class EchamSurface(PhysicsTerm):
         # column actually receives are delivered by the vdiff implicit solve
         # and read back below.
         _fluxes, _tendencies, _surface_diag = surface_physics_step(
-            atm_forcing, surface_state, dt, jnp.ravel(vdiff.wind_10m), params,
+            atm_forcing, surface_state, dt, params,
         )
 
         # No turbulent-flux tendencies here: the vdiff term's implicit solve

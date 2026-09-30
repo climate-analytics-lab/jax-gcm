@@ -35,6 +35,7 @@ Results land in ``<outdir>/<label>/`` as ``report.md``, ``result.json``,
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import pathlib
 import re
@@ -154,8 +155,7 @@ def _load_mirror_manifest():
     """Load ``jcm.data.mirror_manifest`` WITHOUT importing the ``jcm`` package.
 
     Same rationale (and mechanism) as :func:`_hf_fetch`: reaching it through
-    ``jcm`` executes ``jcm/__init__.py``, which initialises a JAX backend and
-    preallocates ~75 % of the device before the free-GPU gate. The manifest
+    ``jcm`` executes ``jcm/__init__.py`` and the whole model stack. The manifest
     read-side is import-free (json + pathlib), so a file-path load is safe and
     shares the availability source of truth with the runner (#751). Its
     ``load_manifest`` reads the sibling JSON via ``__file__``, so the file-path
@@ -171,8 +171,8 @@ def _load_mirror_manifest():
 
 #: The prescribed-emission keys honouring ``auto`` (their auto product is
 #: flagged in the manifest). Matches ``forcing/default.yaml`` and the runner.
-#: This harness deliberately does NOT import ``jcm`` (that would initialise a
-#: JAX backend and preallocate the GPU before the free-card gate), so the key
+#: This harness deliberately does NOT import ``jcm`` before the free-card gate
+#: (see :func:`_hf_fetch`), so the key
 #: list and the dust gate below are a second copy of
 #: ``jcm.forcing_assembly``'s — keep them in step.
 _DUST_COMPANION_KEYS = ("dust_preferential_file", "dust_soil_types_file",
@@ -186,8 +186,7 @@ def _load_expand_yearly_files():
 
     Same rationale (and mechanism) as :func:`_load_mirror_manifest`: reaching it
     as ``from jcm.forcing import expand_yearly_files`` would execute ``jcm.forcing``
-    — which imports JAX/dinosaur/``jcm`` at module top and so initialises a JAX
-    backend, preallocating the GPU before the free-card gate. The expansion lives
+    — which imports JAX/dinosaur/``jcm`` at module top. The expansion lives
     in the import-free engine ``jcm/data/input_resolution.py`` (stdlib-only at
     module top) precisely so the runner (via ``jcm.forcing``'s re-export) and
     this pre-GPU prefetch share ONE implementation of the ``{year}`` →
@@ -316,6 +315,18 @@ _PER_PRODUCT_AVAILABLE = {
     "oxidants_file": "oxidants_available_years",
 }
 
+#: Each yearly product's declared out-of-range policy (#900), mirroring
+#: ``jcm.forcing_assembly._persist``: a ``{year}`` range outside the product's
+#: coverage raises under ``strict`` (the default) and reuses the edge-year file
+#: under ``hold`` — the same expansion the build will perform, so the prefetch
+#: neither fetches files the run will not open nor hides the build's error.
+_PER_PRODUCT_PERSIST = {
+    "file": "persist",
+    "ozone_file": "ozone_persist",
+    "emissions_file": "emissions_persist",
+    "oxidants_file": "oxidants_persist",
+}
+
 
 def _preset_data_files(overrides: list[str]) -> list[str]:
     """Prescribed-input paths (hf:// or local) a preset resolves to.
@@ -352,22 +363,34 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
         val = forcing.get(per) if per else None
         return val if val is not None else forcing.get("available_years", None)
 
-    def _add(v, available):
+    def _persist_for(key):
+        knob = _PER_PRODUCT_PERSIST.get(str(key))
+        val = forcing.get(knob) if knob else None
+        return "strict" if val is None else val
+
+    def _add(v, available, key="file", persist=None):
         # A ``{year}`` scalar expands to its yearly-file list; a plain path
         # passes through. Lists name several independent products — expand each
-        # element with the same coverage clamp (mirrors _forcing_products).
+        # element with the same coverage rule (mirrors _forcing_products),
+        # under its declared persist policy (one per product when a list).
         # ``analytic`` joins the sentinels: it selects the analytic ozone
         # profile (#774), not a file, and must not reach the prefetch.
+        if persist is None:
+            persist = _persist_for(key)
         if isinstance(v, str) and v not in ("auto", "null", "none", "???",
                                             "analytic"):
-            expanded = expand(v, years, available)
+            expanded = expand(v, years, available,
+                              persist=(persist if isinstance(persist, str)
+                                       else "strict"), key=str(key))
             if isinstance(expanded, (list, tuple)):
                 out.extend(str(x) for x in expanded)
             else:
                 out.append(expanded)
         elif isinstance(v, (list, tuple)):
-            for x in v:
-                _add(x, available)
+            for i, x in enumerate(v):
+                each = (persist[i] if isinstance(persist, (list, tuple))
+                        and i < len(persist) else persist)
+                _add(x, available, key, each)
 
     for group in ("forcing", "terrain", "dycore"):
         node = cfg.get(group, None)
@@ -383,7 +406,7 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
             # The ``{year}`` clamp only applies to forcing-group keys (terrain /
             # dycore files are never yearly patterns; ``forcing.years`` and the
             # ``*_available_years`` overrides live under ``forcing``).
-            _add(v, _available_for(k) if group == "forcing" else None)
+            _add(v, _available_for(k) if group == "forcing" else None, k)
     out += _auto_emission_files(cfg)
     out += _auto_ozone_files(cfg)
     return out
@@ -564,21 +587,44 @@ def _hf_fetch(path: str) -> str:
     """Prefetch one mirror file, WITHOUT importing the ``jcm`` package.
 
     ``jcm.data.remote.fetch`` is the function we want, but reaching it as
-    ``from jcm.data.remote import fetch`` executes ``jcm/__init__.py``,
-    which initialises a JAX backend -- and JAX preallocates ~75 % of the
-    device the instant it is touched. Doing that here, before the free-GPU
-    gate, makes the harness look like a 61 GiB tenant to its own gate; a
-    six-job sweep died that way. So load the module from its file with no
+    ``from jcm.data.remote import fetch`` executes ``jcm/__init__.py`` and
+    with it JAX, dinosaur and every physics package. ``import jcm`` keeps
+    the JAX backend uninitialised (#859, enforced by
+    ``jcm/import_side_effects_test.py``), but the pre-gate path should not
+    stake the gate on that invariant holding for every transitive
+    dependency: one backend touch here and JAX preallocates ~75 % of the
+    device, so the harness looks like a 61 GiB tenant to its own gate (a
+    six-job sweep died that way). So load the module from its file with no
     package context: ``remote.py`` has no intra-package imports, which is
     what makes this safe, and it stays the single source of truth for the
     dataset id rather than being copied in here.
     """
+    return _remote().fetch(path)
+
+
+@functools.lru_cache(maxsize=1)
+def _remote():
+    """Load ``jcm/data/remote.py`` once, by file path (see :func:`_hf_fetch`)."""
     import importlib.util
     src = REPO / "jcm" / "data" / "remote.py"
     spec = importlib.util.spec_from_file_location("_jcm_remote", src)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    return mod.fetch(path)
+    return mod
+
+
+def _mirror_revision() -> dict:
+    """Return this run's mirror commit and its source, and export the commit.
+
+    The model subprocess inherits ``os.environ``, so exporting makes it read
+    exactly the commit the prefetch did. The source is read before the
+    export, which would otherwise make every run look overridden.
+    """
+    remote = _remote()
+    mirror = {"commit": remote.mirror_revision(),
+              "source": remote.revision_source()}
+    os.environ[remote.REVISION_ENV] = mirror["commit"]
+    return mirror
 
 
 def run(args) -> dict:
@@ -608,6 +654,7 @@ def run(args) -> dict:
     # at a local path, changes which bundles the run actually needs. Composing
     # the preset alone would prefetch (or fail offline on) bundles the effective
     # config never uses.
+    mirror = _mirror_revision()
     files = _preset_data_files([*preset, *args.extra])
     missing = []
     for f in files:
@@ -672,6 +719,12 @@ def run(args) -> dict:
         # save_interval must be <= chunk_days or the chunk write dies with an
         # IndexError from to_xarray() on an empty time axis.
         f"run.save_interval={min(args.save_interval, chunk)}",
+        # A benchmark times fixed-length chunks of interval means; the
+        # calendar-month stream run/longrun.yaml now defaults to (#901) would
+        # refuse 5-day saves that cross month edges, and the per-chunk files
+        # are what --keep-output keeps.
+        "run.monthly_means=false",
+        "run.save_chunks=true",
         # With --allow-unhealthy the driver keeps integrating past a health
         # gate trip. Timing stays valid when it does: XLA runs the same
         # compiled program over the same shapes regardless of the values in
@@ -715,6 +768,9 @@ def run(args) -> dict:
 
     t0 = time.time()
     with log_path.open("w") as fh:
+        fh.write(f"data mirror revision: {mirror['commit']} "
+                 f"({mirror['source']})\n")
+        fh.flush()
         proc = subprocess.run(cmd, cwd=REPO, env=env, stdout=fh,
                               stderr=subprocess.STDOUT, check=False)
     wall_total = time.time() - t0
@@ -748,6 +804,7 @@ def run(args) -> dict:
         "overrides": overrides,
         "env": env_note,
         "provenance": _provenance(env, args.python),
+        "data_mirror_revision": mirror,
         **analyse_chunks(walls, chunk, tol=args.tol),
         "gpu": _summarize_gpu(gpu_path),
     }
@@ -816,6 +873,8 @@ def _report(r: dict) -> str:
         f"- requested {r['requested_days']} d, "
         f"completed {r['completed_days']} d",
         f"- exit code: {r['exit_code']}",
+        f"- data mirror revision: "
+        f"{r.get('data_mirror_revision', {}).get('commit', '?')}",
         "",
         "## Throughput",
         "",

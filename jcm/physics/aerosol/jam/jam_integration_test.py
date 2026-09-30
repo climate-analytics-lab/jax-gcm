@@ -17,7 +17,7 @@ import pytest
 class JamIntegrationTest(unittest.TestCase):
     def _run(self, **physics_kwargs):
         from jcm.model import Model
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
@@ -28,7 +28,7 @@ class JamIntegrationTest(unittest.TestCase):
             coords=coords,
             time_step=30,
             terrain=terrain,
-            physics=echam_physics(
+            physics=idealized_echam_physics(
                 aerosol_module="jam", cloud_scheme="2m", **physics_kwargs
             ),
         )

@@ -15,10 +15,9 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_map
-from numpy import timedelta64
 import pandas as pd
 
-from jcm import cf_metadata, provenance
+from jcm import cf_metadata, provenance, temporal_aggregation
 from jcm.dycore.base import Predictions
 from jcm.physics_interface import Physics
 from jcm.utils import DYNAMICS_UNITS_TABLE_CSV_PATH, data_to_xarray
@@ -32,6 +31,48 @@ _LIVE_CONTEXT_PARAMS_DESCRIPTION = (
     "ModelPredictions.with_context; they are not a trace-time record of the "
     "parameters that produced this trajectory"
 )
+
+
+def output_time_labels(values) -> np.ndarray:
+    """Return exact host labels for model output and coupled datasets.
+
+    Args:
+        values: A :class:`jax_datetime.Datetime` scalar/array or a NumPy
+            ``datetime64`` scalar/array. Numeric elapsed-time values are not
+            accepted; callers must construct dates from the authoritative
+            model clock first.
+
+    Returns:
+        A NumPy ``datetime64[ms]`` array. Millisecond storage represents exact
+        whole-second model times and the half-second midpoints of odd-length
+        intervals without the narrow year range of ``datetime64[ns]``.
+
+    """
+    host = jax.device_get(values)
+    if hasattr(host, "to_datetime64"):
+        array = np.asarray(host.to_datetime64())
+    else:
+        array = np.asarray(host)
+        if not np.issubdtype(array.dtype, np.datetime64):
+            raise TypeError(
+                "Prediction timestamps must be jax_datetime.Datetime or "
+                f"datetime64; got {array.dtype}."
+            )
+    if np.any(np.isnat(array)):
+        raise ValueError("Prediction timestamps may not contain NaT.")
+    labels = array.astype("datetime64[ms]")
+    if not np.array_equal(labels.astype(array.dtype), array):
+        raise ValueError(
+            "Prediction timestamps must be exactly representable at "
+            "millisecond precision."
+        )
+    return labels
+
+
+def _has_cell_method(existing: str, requested: str) -> bool:
+    """Avoid duplicating an already-present CF cell-method declaration."""
+    normalize = lambda value: " ".join(value.replace(":", " : ").split())
+    return normalize(requested) in normalize(existing)
 
 
 def _apply_term_output_attrs(ds, physics):
@@ -69,20 +110,20 @@ class ModelPredictions:
 
     def __init__(self, predictions: Predictions, coords, physics: Physics,  # noqa: D107
                  dycore=None, observations=None, observers=(),
-                 obs_t0_days=None, obs_dt_seconds=None,
+                 observer_start_time=None, obs_dt_seconds=None,
                  snapshots=None, snapshot_variables=(),
-                 snapshot_interval_days=None, params=None):
+                 snapshot_times=None, params=None):
         self._predictions = predictions
         self._coords = coords
         self._physics = physics
         self._dycore = dycore
         self._observations = observations
         self._observers = tuple(observers)
-        self._obs_t0_days = obs_t0_days
+        self._observer_start_time = observer_start_time
         self._obs_dt_seconds = obs_dt_seconds
         self._snapshots = snapshots
         self._snapshot_variables = tuple(snapshot_variables)
-        self._snapshot_interval_days = snapshot_interval_days
+        self._snapshot_times = snapshot_times
         # The parameters this trajectory was produced with (#732).
         #
         # ``params`` is the record captured at TRACE time by
@@ -157,7 +198,29 @@ class ModelPredictions:
 
     @property
     def times(self):
+        """The traced whole-second clock value of each output frame.
+
+        For interval means this is the midpoint floored to a whole second;
+        use :meth:`time_labels` for the exact label.
+        """
         return self._predictions.times
+
+    def time_labels(self) -> np.ndarray:
+        """Exact ``datetime64[ms]`` host labels of the output frames.
+
+        Instantaneous frames are labelled at their time. Interval means are
+        labelled at the midpoint of their exact bounds, computed in
+        milliseconds, so an odd-length interval's half-second midpoint is
+        exact (the traced clock can only hold whole seconds).
+        """
+        cell_method = getattr(self._predictions, "time_cell_method", None)
+        bounds = getattr(self._predictions, "time_bounds", None)
+        is_mean = (cell_method is not None
+                   and bool(np.asarray(jax.device_get(cell_method))))
+        if is_mean and bounds is not None:
+            bounds = output_time_labels(bounds)
+            return bounds[:, 0] + (bounds[:, 1] - bounds[:, 0]) // 2
+        return output_time_labels(self.times)
 
     @property
     def observations(self):
@@ -177,11 +240,11 @@ class ModelPredictions:
         dycore=_MISSING,
         observations=_MISSING,
         observers=_MISSING,
-        obs_t0_days=_MISSING,
+        observer_start_time=_MISSING,
         obs_dt_seconds=_MISSING,
         snapshots=_MISSING,
         snapshot_variables=_MISSING,
-        snapshot_interval_days=_MISSING,
+        snapshot_times=_MISSING,
     ) -> "ModelPredictions":
         """Return a copy with host-side model/output context re-attached.
 
@@ -199,7 +262,7 @@ class ModelPredictions:
 
         Snapshot arrays are not pytree children, so a transformed object
         cannot recover them. Pass ``snapshots``, ``snapshot_variables``, and
-        ``snapshot_interval_days`` when restoring a snapshot stream. Omitted
+        ``snapshot_times`` when restoring a snapshot stream. Omitted
         keyword metadata is preserved when it is still present on ``self``.
 
         Parameter values are always re-read from the supplied *live* physics
@@ -219,15 +282,12 @@ class ModelPredictions:
                 survived the pytree operation.
             observers: Observer definitions. The model-bound form obtains
                 these from the Model.
-            obs_t0_days: Observation-window start in days since 1970. When
-                omitted in the model-bound form, it is inferred from the last
-                trajectory timestamp, sample count, and model timestep where
-                those values are concrete.
+            observer_start_time: Exact start instant for the observer window.
             obs_dt_seconds: Observation cadence. The model-bound form uses the
                 model timestep.
             snapshots: Raw interval-instantaneous snapshot arrays.
             snapshot_variables: Names requested for the snapshot stream.
-            snapshot_interval_days: Snapshot cadence in days.
+            snapshot_times: Exact timestamp for every snapshot.
 
         Returns:
             A new ``ModelPredictions`` with the same pytree children and the
@@ -272,8 +332,9 @@ class ModelPredictions:
             self._observations if observations is _MISSING else observations
         )
         observers = self._observers if observers is _MISSING else observers
-        obs_t0_days = (
-            self._obs_t0_days if obs_t0_days is _MISSING else obs_t0_days
+        observer_start_time = (
+            self._observer_start_time
+            if observer_start_time is _MISSING else observer_start_time
         )
         obs_dt_seconds = (
             self._obs_dt_seconds
@@ -284,16 +345,11 @@ class ModelPredictions:
             self._snapshot_variables
             if snapshot_variables is _MISSING else snapshot_variables
         )
-        snapshot_interval_days = (
-            self._snapshot_interval_days
-            if snapshot_interval_days is _MISSING
-            else snapshot_interval_days
+        snapshot_times = (
+            self._snapshot_times
+            if snapshot_times is _MISSING
+            else snapshot_times
         )
-
-        if (obs_t0_days is None and observations
-                and obs_dt_seconds is not None):
-            obs_t0_days = self._infer_observation_t0(
-                observations, obs_dt_seconds)
 
         self._validate_context_shapes(
             coords, observations, observers, snapshots)
@@ -304,11 +360,11 @@ class ModelPredictions:
             dycore=dycore,
             observations=observations,
             observers=observers,
-            obs_t0_days=obs_t0_days,
+            observer_start_time=observer_start_time,
             obs_dt_seconds=obs_dt_seconds,
             snapshots=snapshots,
             snapshot_variables=snapshot_variables,
-            snapshot_interval_days=snapshot_interval_days,
+            snapshot_times=snapshot_times,
         )
         # ``__init__`` has just captured the live values. Label that record
         # after construction rather than passing it as ``params=``: the latter
@@ -318,32 +374,6 @@ class ModelPredictions:
         restored._params[_LIVE_CONTEXT_PARAMS_KEY] = (
             _LIVE_CONTEXT_PARAMS_DESCRIPTION)
         return restored
-
-    def _infer_observation_t0(self, observations, obs_dt_seconds):
-        """Infer a concrete observer-window start from retained array data."""
-        lengths = {
-            int(leaf.shape[0])
-            for leaf in jax.tree_util.tree_leaves(observations)
-            if hasattr(leaf, "shape") and leaf.ndim > 0
-        }
-        if not lengths:
-            return None
-        if len(lengths) != 1:
-            raise ValueError(
-                "Observation arrays have inconsistent leading sample counts: "
-                f"{sorted(lengths)}.")
-        times = getattr(self._predictions, "times", None)
-        if times is None or getattr(times, "ndim", 0) != 1 or not times.shape[0]:
-            return None
-        try:
-            final_time = float(jax.device_get(times[-1]))
-            dt_days = float(obs_dt_seconds) / 86400.0
-        except (TypeError, ValueError):
-            # Traced timestamps/cadences cannot be used as host metadata. The
-            # observation accessor already explains how to provide t0 when it
-            # remains unavailable.
-            return None
-        return final_time - lengths.pop() * dt_days
 
     def _validate_context_shapes(
         self, coords, observations, observers, snapshots,
@@ -388,7 +418,7 @@ class ModelPredictions:
         Empty dict semantics: returns ``None`` when the run requested no
         snapshots.
         """
-        if not self._snapshots or self._snapshot_interval_days is None:
+        if not self._snapshots or self._snapshot_times is None:
             return None
         import xarray as xr
 
@@ -396,20 +426,23 @@ class ModelPredictions:
         nlon, nlat = self._coords.horizontal.nodal_shape
         first = next(iter(snaps.values()))
         n = first.shape[0]
-        t = (np.arange(1, n + 1) * self._snapshot_interval_days)
+        t = output_time_labels(self._snapshot_times)
+        if t.shape != (n,):
+            raise ValueError(
+                f"snapshot_times must have shape ({n},); got {t.shape}.")
         data = {}
         for name, arr in snaps.items():
             arr = np.asarray(arr).reshape(n, nlon, nlat)
             data[name.replace(".", "_")] = (("snap_time", "lon", "lat"), arr)
         lon = self._coords.horizontal.nodal_axes[0] * 180.0 / np.pi
         lat = np.arcsin(self._coords.horizontal.nodal_axes[1]) * 180.0 / np.pi
-        return xr.Dataset(
+        ds = xr.Dataset(
             data,
             coords={"snap_time": t, "lon": lon, "lat": lat},
-            attrs={"snapshot_interval_days": self._snapshot_interval_days,
-                   "sampling": "instantaneous (post-step)",
+            attrs={"sampling": "instantaneous (post-step)",
                    **provenance.params_attrs(self._params)},
         )
+        return temporal_aggregation.set_cf_datetime_encoding(ds, "snap_time")
 
     def observation_datasets(self):
         """Per-timestep virtual-observation output as xarray Datasets.
@@ -427,21 +460,21 @@ class ModelPredictions:
         """
         if not self._observations:
             return {}
-        if self._obs_t0_days is None:
+        if self._observer_start_time is None:
             raise ValueError(
                 "This trajectory has observation samples but no window start "
                 "time, so the per-timestep time axis cannot be built. That "
                 "happens when a run inside a JAX transformation was given "
-                "prepared sampling tables (observer_xs) and no "
-                "observer_t0_days, leaving nothing concrete to date the "
-                "samples by. Pass observer_t0_days alongside observer_xs to "
+                "prepared sampling tables (observer_xs) and no exact "
+                "observer_start_time, leaving nothing concrete to date the "
+                "samples by. Pass observer_start_time alongside observer_xs to "
                 "record it; the raw samples are on `.observations` either "
                 "way.")
         samples_host = jax.device_get(self._observations)
         stamp = provenance.params_attrs(self._params)
         datasets = {}
         for obs, samples in zip(self._observers, samples_host):
-            ds = obs.to_dataset(samples, self._obs_t0_days,
+            ds = obs.to_dataset(samples, self._observer_start_time,
                                 self._obs_dt_seconds)
             ds.attrs.update(stamp)
             datasets[obs.name] = ds
@@ -460,10 +493,117 @@ class ModelPredictions:
         Returns:
             An xarray.Dataset ready for analysis and plotting.
 
+        Integer and boolean time-dependent diagnostics are categorical unless
+        a diagnostic defines a separate numerical statistic. They are omitted
+        from interval-mean trajectories and listed in the Dataset attribute
+        ``omitted_interval_mean_variables``; instantaneous output retains them.
+
         """
         ds = self._trajectory_dataset()
+        bounds = getattr(self._predictions, "time_bounds", None)
+        cell_method = getattr(self._predictions, "time_cell_method", None)
+        if bounds is not None:
+            bounds = output_time_labels(bounds)
+            if bounds.shape != (ds.sizes["time"], 2):
+                raise ValueError(
+                    "Prediction time_bounds must have shape (time, 2); got "
+                    f"{bounds.shape}."
+                )
+            ds["time_bounds"] = (("time", "bounds"), bounds)
+            ds["time_bounds"].attrs.update(
+                long_name="time interval bounds",
+                description=(
+                    "lower and upper bounds of each represented time interval"),
+            )
+            ds["time"].attrs["bounds"] = "time_bounds"
+        is_mean = (cell_method is not None
+                   and bool(np.asarray(jax.device_get(cell_method))))
+        if is_mean:
+            if bounds is None:
+                raise ValueError("Interval-mean predictions require time_bounds.")
+            # The traced whole-second clock cannot represent a half-second
+            # midpoint for odd-duration intervals.  Bounds are authoritative
+            # and datetime64[ms] preserves the exact midpoint on the host.
+            # Replacing the coordinate drops its attributes, so the CF time
+            # attributes the backend's ``finalize_output`` stamped are carried
+            # over: averaged and instantaneous files describe their time axis
+            # identically apart from ``bounds``.
+            time_attrs = dict(ds["time"].attrs)
+            ds["time"] = ("time", bounds[:, 0]
+                          + (bounds[:, 1] - bounds[:, 0]) // 2)
+            ds["time"].attrs.update(time_attrs)
+            ds["time"].attrs["bounds"] = "time_bounds"
+            cell_method = "time: mean"
+            # Categorical is decided on the RAW prediction dtypes as well as
+            # the Dataset's: a backend that regrids (pySES boxes columns onto
+            # lat/lon, in float64) has already turned an integer diagnostic
+            # such as Tiedtke's ``ktype`` into a float by now.
+            raw_categorical = self._raw_categorical_names()
+            categorical = sorted(
+                name for name, var in ds.data_vars.items()
+                if (name != "time_bounds" and "time" in var.dims
+                    and (name in raw_categorical
+                         or np.issubdtype(var.dtype, np.integer)
+                         or np.issubdtype(var.dtype, np.bool_)))
+            )
+            if categorical:
+                ds = ds.drop_vars(categorical)
+                ds.attrs["omitted_interval_mean_variables"] = ",".join(
+                    categorical)
+            for var in ds.data_vars.values():
+                if "time" in var.dims and var.name != "time_bounds":
+                    existing = var.attrs.get("cell_methods", "")
+                    operations = temporal_aggregation.time_cell_operations(existing)
+                    if operations - {"mean"}:
+                        raise ValueError(
+                            f"Variable {var.name!r} declares incompatible "
+                            f"time cell methods {sorted(operations)} but the "
+                            "trajectory contains interval means."
+                        )
+                    if not _has_cell_method(existing, cell_method):
+                        var.attrs["cell_methods"] = " ".join(
+                            item for item in (existing, cell_method) if item)
+        temporal_aggregation.set_cf_datetime_encoding(
+            ds, "time", "time_bounds")
         ds.attrs.update(provenance.params_attrs(self._params))
         return ds
+
+    def _raw_categorical_names(self) -> set[str]:
+        """Names of integer/boolean diagnostics in the raw predictions.
+
+        Physics leaves are named by their dotted pytree path, the name a
+        backend that flattens ``predictions.physics`` itself gives them
+        (``PysesCamSEDycore.to_xarray``). The dinosaur path keeps each
+        field's dtype in its Dataset, so the dtype check in :meth:`to_xarray`
+        already catches its categorical fields; both backends therefore omit
+        the same diagnostics.
+        """
+        from jax.tree_util import tree_flatten_with_path
+
+        physics = getattr(self._predictions, "physics", None)
+        if physics is None:
+            return set()
+        names = set()
+        leaves, _ = tree_flatten_with_path(physics)
+        for path, leaf in leaves:
+            dtype = getattr(leaf, "dtype", None)
+            if dtype is None or not (np.issubdtype(dtype, np.integer)
+                                     or np.issubdtype(dtype, np.bool_)):
+                continue
+            names.add(".".join(
+                str(getattr(p, "key", getattr(p, "name", p))) for p in path))
+        return names
+
+    def monthly_means(self):
+        """Return bounds-aware Gregorian monthly means as an xarray Dataset.
+
+        The trajectory must contain interval averages with exact bounds.
+        Instantaneous output and intervals spanning a month boundary are
+        rejected because they cannot be converted into true monthly means.
+        This host-only convenience method leaves the differentiable raw
+        prediction arrays untouched.
+        """
+        return temporal_aggregation.monthly_means(self.to_xarray())
 
     def _trajectory_dataset(self):
         """Build the trajectory Dataset, before provenance stamping."""
@@ -473,7 +613,7 @@ class ModelPredictions:
         # protocol; delegate whenever the grid has no modal axes.
         if self._dycore is not None and not hasattr(
                 self._coords.horizontal, "modal_axes"):
-            times = jax.device_get(self.times)
+            times = self.time_labels()
             ds = self._dycore.to_xarray(self._predictions, times)
             # The dycore's ``to_xarray`` has already run
             # ``cf_metadata.finalize_output`` (CSV attrs and the curated
@@ -502,7 +642,7 @@ class ModelPredictions:
         # Per-physics flattening of the diagnostic struct into a dict of named fields.
         physics_preds_dict = self._physics.data_struct_to_dict(physics_predictions, nodal_shape=nodal_shape)
 
-        times = jax.device_get(self.times)
+        times = self.time_labels()
         coords = jax.device_get(self._coords)
 
         additional_coords = {}
@@ -556,7 +696,7 @@ class ModelPredictions:
         pred_ds = data_to_xarray(
             dynamics_predictions.asdict() | physics_preds_dict,
             coords=coords, serialize_coords_to_attrs=False,
-            times=times - times[0],
+            times=np.arange(times.shape[0]),
             additional_coords=additional_coords,
         )
 
@@ -585,11 +725,8 @@ class ModelPredictions:
         # the non-modal delegation branch above.
         _apply_term_output_attrs(pred_ds, self._physics)
 
-        # Convert sim-day timestamps to datetimes. Done before the CF pass so
-        # ``time`` is already a datetime axis when its attributes are set.
-        pred_ds['time'] = (
-            times * (timedelta64(1, 'D') / timedelta64(1, 'ns'))
-        ).astype('datetime64[ns]')
+        # Exact model timestamps replace the temporary positional coordinate.
+        pred_ds["time"] = ("time", times)
 
         # Put the file into the output convention: BOTH vertical axes
         # surface-first, with the sigma/hybrid coordinates and CF attributes

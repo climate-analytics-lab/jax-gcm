@@ -1,6 +1,14 @@
 name: Linting via Ruff
 
-on: [push]
+# Unfiltered ruff over the whole tree, on both events. `pull_request` is not
+# redundant with `push`: a fork branch never pushes to this repo, so without
+# it a fork PR touching only the paths run_test.yaml ignores (`.claude/**`,
+# `docs/**`) is never linted at all — the fork blind spot that put five ruff
+# errors on dev in #753 (see #816). This workflow carries no paths filter, so
+# it is the only ruff run that covers those paths.
+on:
+  push:
+  pull_request:
 
 jobs:
   lint:

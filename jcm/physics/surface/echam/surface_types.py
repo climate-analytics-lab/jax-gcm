@@ -177,9 +177,6 @@ class SurfaceDiagnostics(NamedTuple):
     temperature_2m: jnp.ndarray        # 2m temperature [K] (ncol,)
     humidity_2m: jnp.ndarray           # 2m specific humidity [kg/kg] (ncol,)
     dewpoint_2m: jnp.ndarray           # 2m dew point [K] (ncol,)
-    wind_speed_10m: jnp.ndarray        # 10m wind speed [m/s] (ncol,)
-    u_wind_10m: jnp.ndarray            # 10m u-wind [m/s] (ncol,)
-    v_wind_10m: jnp.ndarray            # 10m v-wind [m/s] (ncol,)
     
     # Surface layer properties
     friction_velocity: jnp.ndarray     # Friction velocity [m/s] (ncol,)
@@ -194,7 +191,6 @@ class SurfaceDiagnostics(NamedTuple):
     # Tile-specific diagnostics
     temperature_2m_tile: jnp.ndarray   # 2m temperature per tile [K] (ncol, nsfc_type)
     humidity_2m_tile: jnp.ndarray      # 2m humidity per tile [kg/kg] (ncol, nsfc_type)
-    wind_speed_10m_tile: jnp.ndarray   # 10m wind per tile [m/s] (ncol, nsfc_type)
 
 
 class SurfaceResistances(NamedTuple):
@@ -228,8 +224,12 @@ class SurfaceData:
     # Surface fluxes
     sensible_heat_flux: jnp.ndarray  # Sensible heat flux [W/m²] (ncols,)
     latent_heat_flux: jnp.ndarray    # Latent heat flux [W/m²] (ncols,)
-    momentum_flux_u: jnp.ndarray     # U momentum flux [N/m²] (ncols,)
-    momentum_flux_v: jnp.ndarray     # V momentum flux [N/m²] (ncols,)
+    # Positive-down: the momentum flux INTO the surface, positive with
+    # the wind (republished from the vdiff-delivered
+    # VDiffSurfaceFluxes.stress_u/v — same sign as the #754
+    # surface-exchange contract).
+    momentum_flux_u: jnp.ndarray     # U momentum flux into surface [N/m²] (ncols,)
+    momentum_flux_v: jnp.ndarray     # V momentum flux into surface [N/m²] (ncols,)
 
     # Surface temperatures
     surface_temperature: jnp.ndarray # Surface temperature [K] (ncols,)

@@ -198,7 +198,7 @@ class TestRunnerWiring(unittest.TestCase):
     def test_config_presets_compose(self):
         from jcm.runners_test import _compose
         cfg = _compose(["nudging=era5", "init=era5",
-                        "run.start_date=2010-01-01"])
+                        "run.start_time=2010-01-01"])
         self.assertTrue(cfg.nudging.enabled)
         self.assertEqual(cfg.nudging.source, "era5")
         self.assertEqual(cfg.init.kind, "era5")
@@ -206,8 +206,15 @@ class TestRunnerWiring(unittest.TestCase):
 
 
 @pytest.mark.slow
+@pytest.mark.requires_extra("era5")
 class TestLiveWb2(unittest.TestCase):
-    """One tiny real pull from the public WB2 store (network required)."""
+    """One tiny real pull from the public WB2 store (network required).
+
+    Needs the ``era5`` extra (gcsfs) to reach the store, so it runs in the
+    ``extras-tests`` CI job. A missing or broken extra fails; an unreachable
+    store is a skip, except in that job, where every skip of a marked test is
+    a failure (it exists to run them), so a store outage turns it red.
+    """
 
     def test_nudging_target_from_cloud(self):
         from dinosaur.sigma_coordinates import SigmaCoordinates
@@ -218,6 +225,9 @@ class TestLiveWb2(unittest.TestCase):
         try:
             target = era5.nudging_target(coords, "2010-01-01", "2010-01-01",
                                          cache=False)
+        except ImportError:
+            # A missing or broken extra is a failure, not "no network".
+            raise
         except Exception as e:  # noqa: BLE001 — no network on this node
             self.skipTest(f"WB2 store unreachable: {e}")
         u = np.asarray(target.u_wind.values)

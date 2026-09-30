@@ -121,6 +121,12 @@ coords=coords)`` and pass the result to ``Model.run`` or ``Model.resume``.
 
    predictions = model.run(save_interval="1 day", total_time="1 year")
 
+.. note::
+
+   This describes v2. In v3, month/year duration aliases are rejected;
+   specify a real ``end_time`` instead. See :ref:`v3-datetime` for the
+   current Gregorian clock and forcing contract.
+
 Physical Constants
 ------------------
 
@@ -137,4 +143,3 @@ call :func:`jcm.constants.set_constants` before constructing the model:
 Read constants through module attribute access, for example
 ``constants.grav``. Avoid ``from jcm.constants import grav`` in code that needs
 to honour runtime overrides.
-

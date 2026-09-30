@@ -202,9 +202,9 @@ def build_features(ds, band_mode):
     cwp = f32("cloud_water") * f32("air_density") * f32("layer_thickness")
     cip = f32("cloud_ice") * f32("air_density") * f32("layer_thickness")
 
-    # Already RESOLVED by the generator (microphysical where the source had a
-    # value, diagnostic fallback elsewhere) and strictly positive, and the
-    # RRTMGP labels in the same file were produced from these very numbers.
+    # Already the emulator's radius features (``emulator_radius_features``,
+    # applied by the generator) and strictly positive, and the RRTMGP labels
+    # in the same file were produced from these very numbers.
     r_eff_liq = f32("r_eff_liq")
     r_eff_ice = f32("r_eff_ice")
 

@@ -240,6 +240,19 @@ class TermConfigTest(unittest.TestCase):
         self.assertIn("clouds", term.requires)
         self.assertIn("aerocom_clt", term.provides)
 
+    def test_radius_inputs_are_declared(self):
+        """``post_physics_effective_radii`` reads air_density and aerosol.
+
+        Both diagnostics that call it declare them, so ``_validate_ordering``
+        rejects a composition without them when it is built instead of a
+        KeyError at trace time (the reads sit in a helper the static
+        ``requires_audit_test`` cannot see).
+        """
+        from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
+        for cls in (AerocomDiagnostics, CloudsatCosp):
+            for key in ("air_density", "aerosol"):
+                self.assertIn(key, cls.requires, f"{cls.__name__}: {key}")
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -251,15 +264,15 @@ class EndToEndTest(unittest.TestCase):
     def test_runs_in_echam_physics_and_emits_diagnostics(self):
         from jcm.model import Model
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
-            coords=coords, terrain=TerrainData.aquaplanet(coords), time_step=900.0,
-            physics=echam_physics(
-                radiation_scheme="grey", cloud_scheme="2m",
+            coords=coords, terrain=TerrainData.aquaplanet(coords), time_step=15.0,
+            physics=idealized_echam_physics(
+                cloud_scheme="2m",
                 enable_aerocom=True,
                 aerocom_groups=("cloud", "column", "plev")),
         )
@@ -268,7 +281,7 @@ class EndToEndTest(unittest.TestCase):
         # The diagnostics term must be terminal — nothing may depend on it.
         self.assertEqual(names[-1], "aerocom_diagnostics")
 
-        ds = model.run(total_time=0.05, save_interval=0.05).to_xarray()
+        ds = model.run(total_time="1 hour", save_interval="1 hour").to_xarray()
         emitted = [k for k in ds.data_vars if "aerocom" in k]
         self.assertTrue(emitted,
                         f"no aerocom_* diagnostics in output: {list(ds.data_vars)[:5]}")
@@ -286,18 +299,17 @@ class EndToEndTest(unittest.TestCase):
         """Adding the term must not change the model trajectory."""
         from jcm.model import Model
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
         def run(enable):
             coords = get_coords(get_echam_levels(47), spectral_truncation=21)
             m = Model(coords=coords, terrain=TerrainData.aquaplanet(coords),
-                      time_step=900.0,
-                      physics=echam_physics(radiation_scheme="grey",
-                                            cloud_scheme="2m",
-                                            enable_aerocom=enable))
-            return m.run(total_time=0.05, save_interval=0.05).to_xarray()
+                      time_step=15.0,
+                      physics=idealized_echam_physics(
+                          cloud_scheme="2m", enable_aerocom=enable))
+            return m.run(total_time="1 hour", save_interval="1 hour").to_xarray()
 
         off, on = run(False), run(True)
         np.testing.assert_allclose(
@@ -402,7 +414,8 @@ class CodexRegressionTest(unittest.TestCase):
         """With no qnc tracer (1M scheme) the m^-3 CloudData field is used.
 
         The 1M ``droplet_number`` is a characteristic IN-CLOUD value
-        (``base_cdnc * cdnc_factor``), nonzero even in clear sky — so the
+        (the prescribed profile times ``cdnc_factor``), nonzero even in clear
+        sky — so the
         in-cloud output must equal it (NOT droplet_number / cf, which
         inflated cloud-top CDNC by 1/cf), the grid mean must be cf-weighted
         (NOT the raw field, which counted droplets in clear sky), and the
@@ -606,18 +619,18 @@ class AerosolGroupEndToEndTest(unittest.TestCase):
     def test_aerosol_group_runs_with_jam(self):
         from jcm.model import Model
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
-            coords=coords, terrain=TerrainData.aquaplanet(coords), time_step=900.0,
-            physics=echam_physics(
-                radiation_scheme="grey", cloud_scheme="2m", aerosol_module="jam",
+            coords=coords, terrain=TerrainData.aquaplanet(coords), time_step=15.0,
+            physics=idealized_echam_physics(
+                cloud_scheme="2m", aerosol_module="jam",
                 enable_aerocom=True, aerocom_groups=("aerosol",)),
         )
-        ds = model.run(total_time=0.05, save_interval=0.05).to_xarray()
+        ds = model.run(total_time="1 hour", save_interval="1 hour").to_xarray()
         for key in ("aerocom_N70", "aerocom_N100", "aerocom_PM1", "aerocom_PM10"):
             self.assertIn(key, ds.data_vars)
             self.assertTrue(np.isfinite(np.asarray(ds[key])).all(), key)
@@ -633,9 +646,9 @@ class PerBandOpticsSerializationTest(unittest.TestCase):
     Regression: ``*_sw_per_band`` / ``*_lw_per_band`` are
     ``(band, level, lon, lat)`` and the shape→dims lookup had no band
     coordinate, so the FIRST full-output echam-jam+RRTMGP run after
-    jax-gcm#584 crashed at output conversion (grey-radiation
-    compositions never build the per-band fields, which is how CI
-    missed it).
+    jax-gcm#584 crashed at output conversion (a composition with the
+    idealized grey radiation never builds the per-band fields, which is
+    how CI missed it).
     """
 
     @pytest.mark.slow
@@ -649,11 +662,11 @@ class PerBandOpticsSerializationTest(unittest.TestCase):
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
             coords=coords, terrain=TerrainData.aquaplanet(coords),
-            time_step=900.0,
+            time_step=15.0,
             physics=echam_physics(cloud_scheme="2m", aerosol_module="jam",
                                   radiation_scheme="rrtmgp"),
         )
-        ds = model.run(total_time=0.02, save_interval=0.02).to_xarray()
+        ds = model.run(total_time="15 minutes", save_interval="15 minutes").to_xarray()
         sw = "jam_optics.aod_sw_per_band"
         lw = "jam_optics.aod_lw_per_band"
         self.assertIn(sw, ds.data_vars)
@@ -686,11 +699,11 @@ class Macv2NamespaceOutputTest(unittest.TestCase):
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
         model = Model(
             coords=coords, terrain=TerrainData.aquaplanet(coords),
-            time_step=900.0,
+            time_step=15.0,
             physics=echam_physics(aerosol_module="macv2sp",
                                   radiation_scheme="rrtmgp"),
         )
-        ds = model.run(total_time=0.02, save_interval=0.02).to_xarray()
+        ds = model.run(total_time="15 minutes", save_interval="15 minutes").to_xarray()
         # Namespaced, CF-named MACv2-SP output present...
         self.assertIn("macsp.od550aer", ds.data_vars)
         self.assertIn("macsp.aod_anthropogenic", ds.data_vars)
@@ -750,6 +763,116 @@ class PostPhysicsTracerTest(unittest.TestCase):
         mass (deposition can exceed it in a single step for a trace tracer).
         """
         np.testing.assert_allclose(np.asarray(self._call(-1.0)), 0.0)
+
+
+class CloudGroupRadiiTest(unittest.TestCase):
+    """The cloud group's radii are those of the condensate it reads.
+
+    ``clouds.r_eff_*`` are the radii the radiation used: formed from the
+    step-start condensate before the microphysics ran, and held between
+    radiation solves. The cloud group reads the post-microphysics condensate
+    (``thermo_run``), so a layer the microphysics filled after the solve
+    carries condensate where the radiation's radius is 0; paired with that
+    radius, the 1 nm floor in ``_cloud_optical_depth`` turns it into an
+    optical depth ~1e4 times too large. The group therefore forms its own
+    radii with the same ECHAM law (``post_physics_effective_radii``).
+    """
+
+    NLEV, NLAT, NLON = 10, 64, 32
+
+    def _setup(self, radiation_radius_um, number_tendency=None):
+        from jcm.forcing import ForcingData
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.diagnostics.moist_air_state import MoistAirColumnState
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+        from jcm.utils import get_coords
+
+        nlev, ncols = self.NLEV, self.NLAT * self.NLON
+        coords = get_coords(np.linspace(0, 1, nlev + 1),
+                            nodal_shape=(self.NLAT, self.NLON))
+        terrain = TerrainData.aquaplanet(coords)
+        forcing = ForcingData.zeros((self.NLAT, self.NLON))
+        temperature = jnp.broadcast_to(
+            jnp.linspace(210.0, 290.0, nlev)[:, None], (nlev, ncols))
+        # ``number_tendency`` switches to the 2-moment law: qnc/qni tracers,
+        # with a running tendency on qnc [1/kg/s] that the post-physics
+        # droplet number must include.
+        tracers = ({} if number_tendency is None else
+                   {"qnc": jnp.full((nlev, ncols), 1.0e8),
+                    "qni": jnp.full((nlev, ncols), 1.0e6)})
+        state = PhysicsState.zeros(
+            (nlev, ncols), temperature=temperature, tracers=tracers,
+            geopotential=jnp.broadcast_to(
+                9.81 * jnp.linspace(18000.0, 100.0, nlev)[:, None],
+                (nlev, ncols)),
+            normalized_surface_pressure=jnp.ones((ncols,)))
+        prep = MoistAirColumnState()
+        prep.cache_coords(coords)
+        _, diagnostics = prep(state, {"_dt_seconds": 900.0}, forcing, terrain)
+
+        # A warm liquid deck in the even columns that exists only after the
+        # microphysics: step-start CloudData holds no condensate, the running
+        # view does, and the radiation's radius is whatever the caller says.
+        cf = np.zeros((nlev, ncols))
+        qc = np.zeros((nlev, ncols))
+        cols = np.arange(0, ncols, 2)
+        cf[7:9, cols] = 0.7
+        qc[7:9, cols] = 4e-5
+        clouds = CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=jnp.asarray(cf),
+            r_eff_liq=jnp.full((nlev, ncols), radiation_radius_um),
+            r_eff_ice=jnp.full((nlev, ncols), radiation_radius_um))
+        diagnostics = {
+            **diagnostics, "clouds": clouds,
+            "aerosol": AerosolData.zeros((ncols,), nlev),
+            "thermo_run": {**diagnostics["thermo_run"],
+                           "qc": jnp.asarray(qc),
+                           "qi": jnp.zeros((nlev, ncols))}}
+        if number_tendency is not None:
+            diagnostics["_tendency_run"] = {"tracers": {
+                "qnc": jnp.full((nlev, ncols), number_tendency),
+                "qni": jnp.zeros((nlev, ncols))}}
+        return state, diagnostics, forcing, terrain
+
+    def test_radii_follow_the_condensate_not_the_radiation(self):
+        term = AerocomDiagnostics(groups=("cloud",))
+        outs = [term(*self._setup(r))[1] for r in (0.0, 20.0)]
+        for key in ("aerocom_cdr", "aerocom_cod", "aerocom_lcc",
+                    "aerocom_clt"):
+            np.testing.assert_array_equal(
+                np.asarray(outs[0][key]), np.asarray(outs[1][key]),
+                err_msg=f"{key} depends on the radiation's radii")
+        cloudy = np.arange(0, self.NLAT * self.NLON, 2)
+        cdr = np.asarray(outs[0]["aerocom_cdr"])[cloudy]
+        self.assertTrue((cdr > 0.0).all())
+        # Grid-mean path 4e-5 kg/kg over two ~1e4 kg/m2 layers is ~0.8
+        # kg/m2; at a table radius (2.5-21.5 um) that is an optical depth of
+        # 50-500, where the 1 nm floor would give ~1e6.
+        cod = np.asarray(outs[0]["aerocom_cod"])[cloudy]
+        self.assertTrue(((cod > 10.0) & (cod < 1.0e3)).all(), cod[:4])
+        # The CMOR'd 3-D radius is the one behind these products.
+        cdr3d = np.asarray(outs[0]["aerocom_cdr3d"])
+        self.assertTrue((cdr3d[7:9, cloudy] > 0.0).all())
+        np.testing.assert_array_equal(
+            np.asarray(outs[0]["aerocom_cdr3d"]),
+            np.asarray(outs[1]["aerocom_cdr3d"]))
+
+    def test_two_moment_radii_use_the_post_physics_droplet_number(self):
+        """With qnc/qni, the droplet number is the saved one, not step-start.
+
+        A running qnc tendency that doubles the droplet number over the step
+        (1e8 /kg + 1e8/900 /kg/s x 900 s) must shrink the droplets.
+        """
+        term = AerocomDiagnostics(groups=("cloud",))
+        still = term(*self._setup(0.0, number_tendency=0.0))[1]
+        doubled = term(*self._setup(0.0, number_tendency=1.0e8 / 900.0))[1]
+        cloudy = np.arange(0, self.NLAT * self.NLON, 2)
+        r_still = np.asarray(still["aerocom_cdr3d"])[7:9][:, cloudy]
+        r_doubled = np.asarray(doubled["aerocom_cdr3d"])[7:9][:, cloudy]
+        self.assertTrue((r_still > 0.0).all())
+        self.assertTrue((r_doubled < r_still).all())
 
 
 class EmissionFluxResetTest(unittest.TestCase):
@@ -814,9 +937,10 @@ class ReviewRegressionTest(unittest.TestCase):
         term = AerocomDiagnostics()
 
         class _Clouds:
-            r_eff_liq = jnp.full((nz, nx), 10.0)   # um
-            r_eff_ice = jnp.full((nz, nx), 30.0)
             cloud_fraction = jnp.full((nz, nx), 0.5)
+
+        r_liq_m = jnp.full((nz, nx), 10.0e-6)
+        r_ice_m = jnp.full((nz, nx), 30.0e-6)
 
         p_half = jnp.linspace(1000.0, 101000.0, nz + 1)[:, None] * jnp.ones((1, nx))
         temperature = jnp.full((nz, nx), 260.0)
@@ -824,7 +948,8 @@ class ReviewRegressionTest(unittest.TestCase):
 
         def lcc_sum(qc):
             out = term._cloud_group(
-                _Clouds(), temperature, p_half, cdnc_ic, qc, qc)
+                _Clouds(), temperature, p_half, cdnc_ic, qc, qc,
+                r_liq_m, r_ice_m)
             return jnp.sum(out["aerocom_lcc"] + out["aerocom_cod"])
 
         # One probe inside each dtype's underflow-square window: 5e-31
@@ -886,3 +1011,98 @@ class ReviewRegressionTest(unittest.TestCase):
         from tools.aerocom_cmor import NAME_MAP
         for src in ("aerocom_u200", "aerocom_v200", "aerocom_u700", "aerocom_v700"):
             self.assertNotEqual(NAME_MAP[src][2], "Surface", src)
+
+
+class ModeWidthPairingTest(unittest.TestCase):
+    """Each mode's lognormal is integrated with that mode's own width.
+
+    The synthetic modal state gives every mode a different radius and number
+    and the MAM4 modes have different widths (accumulation 1.8, Aitken 1.6,
+    coarse 1.8, primary carbon 1.6), so integrating any mode with another
+    mode's width moves N70/N100 measurably away from the hand computation.
+    """
+
+    NLEV, NCOL = 3, 2
+
+    def _jam_state(self, spec):
+        from jcm.physics.aerosol.jam.jam_state import JamAerosolState
+        shape = (len(spec.modes), self.NLEV, self.NCOL)
+        # Radii straddle the 70/100 nm thresholds so the width matters.
+        radii = {"acc": 60e-9, "ait": 30e-9, "cor": 1.0e-6, "pcm": 40e-9}
+        numbers = {"acc": 3.0e8, "ait": 9.0e8, "cor": 1.0e5, "pcm": 2.0e8}
+        masses = {"acc": 2.0e-9, "ait": 1.0e-10, "cor": 5.0e-9, "pcm": 3.0e-10}
+        dens = {"acc": 1700.0, "ait": 1600.0, "cor": 2400.0, "pcm": 1200.0}
+
+        def per_mode(table):
+            vals = np.array([table[m.short] for m in spec.modes])
+            return jnp.asarray(vals[:, None, None] * np.ones(shape))
+
+        r = per_mode(radii)
+        return JamAerosolState(
+            r_dry=r, r_wet=r, rho=per_mode(dens), kappa=jnp.full(shape, 0.5),
+            mass=per_mode(masses), number=per_mode(numbers))
+
+    def _run(self, term, spec):
+        nz, nx = self.NLEV, self.NCOL
+        p_half = jnp.linspace(1000.0, 101000.0, nz + 1)[:, None] * jnp.ones((1, nx))
+
+        class _State:
+            tracers: dict = {}
+
+        return term._aerosol_group(_State(), {"_jam_state": self._jam_state(spec)},
+                                   p_half)
+
+    def test_default_widths_come_from_the_spec_modes(self):
+        from math import erfc, log, sqrt
+
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        state = self._jam_state(MAM4_SPEC)
+        out = self._run(AerocomDiagnostics(groups=("aerosol",)), MAM4_SPEC)
+        for label, d_thresh in (("N70", 70e-9), ("N100", 100e-9)):
+            expected = sum(
+                float(state.number[m, 0, 0]) * 0.5 * erfc(
+                    log(d_thresh / (2.0 * float(state.r_dry[m, 0, 0])))
+                    / (sqrt(2.0) * log(mode.geom_std_dev)))
+                for m, mode in enumerate(MAM4_SPEC.modes))
+            np.testing.assert_allclose(
+                np.asarray(out[f"aerocom_{label}"]), expected, rtol=1e-5,
+                err_msg=f"aerocom_{label} does not pair each mode with its width")
+
+    def test_permuted_spec_gives_the_same_diagnostics(self):
+        import dataclasses
+
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        # Swap the first two modes: with a positional width table this pairs
+        # each of them with the other's width, so the permutation is only
+        # invisible when widths follow the modes.
+        m = MAM4_SPEC.modes
+        permuted = dataclasses.replace(MAM4_SPEC, modes=(m[1], m[0], *m[2:]))
+        ref = self._run(AerocomDiagnostics(groups=("aerosol",)), MAM4_SPEC)
+        term = AerocomDiagnostics(groups=("aerosol",))
+        term._jam_spec = permuted
+        out = self._run(term, permuted)
+        for label in ("N70", "N100", "PM1", "PM10"):
+            np.testing.assert_allclose(
+                np.asarray(out[f"aerocom_{label}"]),
+                np.asarray(ref[f"aerocom_{label}"]), rtol=1e-6, err_msg=label)
+
+    def test_explicit_widths_are_used_in_spec_order(self):
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        spec_widths = tuple(m.geom_std_dev for m in MAM4_SPEC.modes)
+        ref = self._run(AerocomDiagnostics(groups=("aerosol",)), MAM4_SPEC)
+        same = self._run(AerocomDiagnostics(groups=("aerosol",),
+                                            mode_sigma_g=spec_widths), MAM4_SPEC)
+        wider = self._run(AerocomDiagnostics(groups=("aerosol",),
+                                             mode_sigma_g=(2.2,) * 4), MAM4_SPEC)
+        for label in ("N70", "N100", "PM1", "PM10"):
+            np.testing.assert_allclose(np.asarray(same[f"aerocom_{label}"]),
+                                       np.asarray(ref[f"aerocom_{label}"]),
+                                       rtol=1e-6, err_msg=label)
+        self.assertFalse(np.allclose(np.asarray(wider["aerocom_N100"]),
+                                     np.asarray(ref["aerocom_N100"])))
+
+    def test_width_count_must_match_the_modal_state(self):
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        term = AerocomDiagnostics(groups=("aerosol",), mode_sigma_g=(1.6, 1.8, 1.8))
+        with self.assertRaisesRegex(ValueError, "one width per mode"):
+            self._run(term, MAM4_SPEC)

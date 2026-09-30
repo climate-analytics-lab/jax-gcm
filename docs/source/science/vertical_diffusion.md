@@ -55,10 +55,70 @@ block in the ECHAM ordering.
 - ``jcm/physics/vertical_diffusion/tracer_diffusion.py`` —
   ``TracerVerticalDiffusion``, ``diffuse_tracers_implicit``.
 
+## Surface saturation and latent heat
+
+**What we do.** The saturation specific humidity of every surface tile, and of
+the air at the lowest level in the surface-layer Richardson number, is taken
+over water at or above the melting point and over ice below it
+(``jcm/physics/thermodynamics.py::saturation_specific_humidity``,
+``phase="auto"``): the sea-ice tile (at ``min(SST, 271.38 K)``) always
+saturates over ice, frozen land does below 273.15 K. The latent heat in the
+surface-layer buoyancy is the condensation heat when the lowest-level air is at
+or above the melting point and the sublimation heat below, and the
+liquid-water potential temperature subtracts ``(L/c_p)·(θ/T)·q_x`` with the same
+``L``. The latent heat of the delivered moisture flux is assembled per tile:
+``alhc·E`` over open water, ``alhs·E`` over sea ice, and over land
+``alhc·E + (alhs − alhc)·s·E_pot`` with ``s`` the snow-covered fraction (the
+prescribed ``snowc_am``, glaciers fully covered) and ``E_pot`` the flux at full
+wetness. The land wetness itself takes JSBACH's form ``s + (1 − s)·w``: the
+snow-covered part evaporates at the potential rate and the snow-free part at
+the soil availability ``w`` (``soilw_am``), so the land flux always covers the
+snow share the sublimation heat is charged to. Every tile flux is linear in
+the one implicit bottom value, so the per-tile latent heats fold into one
+exchange pair and the reported latent heat stays exactly consistent with the
+delivered moisture flux.
+
+**What ECHAM/CAM does.** ECHAM's ``precalc_ocean``/``precalc_ice``/
+``precalc_land`` read the tile saturation from the ``tlucua`` table
+(``mo_echam_convect_tables``), which switches from water to ice at the melting
+point with no mixed-phase blend, as does the lowest-level ``zqss`` in
+``vdiff.f90``; ``zfaxe = FSEL(T − tmelt, alv, als)`` sets the latent heat in the
+buoyancy and in ``zlteta1``. ``postproc_ice`` reports ``als·E`` and JSBACH
+(``mo_soil.f90``) reports ``alv·E_T + (als − alv)·snow_fract·E_pot``, with the
+snow fraction entering the land ``csat``/``cair`` as
+``snow_fract + (1 − snow_fract)·(…)`` (``qsat_fact``).
+
+**Why we differ.** The snow-covered fraction is the prescribed climatology
+until snow is prognostic (#672), and the snow-free land wetness is the
+prescribed soil availability rather than JSBACH's wet-skin / relative-humidity
+/ canopy-resistance composite (see {doc}`surface`).
+
+**Code pointers.**
+- ``jcm/physics/vertical_diffusion/tte_tke/surface_layer.py`` —
+  ``compute_surface_exchange_coefficients_echam_louis``.
+- ``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion.py`` —
+  ``vertical_diffusion_column`` (tile collapse and latent-heat pair),
+  ``TteTkeVerticalDiffusion`` (sublimation fractions).
+- ``jcm/physics/vertical_diffusion/tte_tke/matrix_solver.py`` —
+  ``diagnose_surface_fluxes``.
+
+**Validation evidence.**
+``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion_test.py`` —
+``TestSurfaceTilePhase``: ``LH/E`` equals ``alhs`` over sea ice, ``alhc`` over
+open water and ``alhc + (alhs − alhc)·s/w`` over snow-covered land, the term
+wets snowy land as ``s + (1 − s)·w``, and a column at the ice saturation of a
+260 K tile exchanges no moisture.
+
 ## Ten-metre wind diagnostic
 
-**What we do.** The term publishes a grid-mean 10 m wind speed,
-``VerticalDiffusionData.wind_10m``, alongside the exchange coefficients. It is
+**What we do.** The term publishes the 10 m wind as a grid-mean speed and
+vector, ``VerticalDiffusionData.wind_10m`` / ``wind_10m_u`` / ``wind_10m_v``,
+and per tile (``wind_10m_tile`` / ``wind_10m_u_tile`` / ``wind_10m_v_tile``,
+with the ``surface_fraction`` they are weighted by), alongside the exchange
+coefficients. It is the ECHAM family's one 10 m wind: the surface-exchange
+contract publishes it as ``wind_u``/``wind_v``, and the AeroCom ``uas``/``vas``
+apply its grid-mean reduction (``wind_10m_reduction``) to the post-physics
+lowest-level wind, the time level of the other AeroCom winds. It is
 the surface-layer profile evaluated at 10 m rather than an interpolation
 between levels: with ``bn = ln(z₁/z₀ₘ)`` the neutral profile factor and
 ``bm = bn·√(CMₙ|U| / CM|U|)`` its stability-corrected counterpart,
@@ -69,7 +129,9 @@ cbn  = ln(1 + (e^bn − 1)·zrat)
 red  = [cbn + (stable: −(bn − bm)·zrat | unstable: −ln(1 + (e^(bn−bm) − 1)·zrat))] / bm
 ```
 
-and ``|U(10 m)| = red·|U(z₁)|``, area-weighted over the surface tiles. The
+and each tile's 10 m wind is ``red·U(z₁)`` component-wise; the grid mean is
+their fraction-weighted sum, ``U(z₁)·Σ f·red``, so it keeps the lowest-level
+direction. The
 reduction is computed **inside** each surface-layer scheme's ``lax.cond``
 branch, from that scheme's own neutral drag: the two schemes differ in
 roughness (state-carried vs a hard-coded table), in the bound on ``z/z₀`` and
@@ -82,7 +144,11 @@ multiplies the true wind.
 **What ECHAM/CAM does.** ECHAM5 ``vdiff.f90`` / ICON
 ``mo_surface_diag::nsurf_diag`` compute the 10 m wind by exactly this
 construction, from the ``pbn``/``pbm`` profile factors ``mo_turbulence_diag``
-exports for the purpose; ``zepdu2 = 1 m²/s²`` is ECHAM's calm-wind floor on the
+exports for the purpose, from the step-start wind ``pum1`` that
+``vdiff.f90::update_surface`` passes to the surface (per tile ``zu10w = zred·pum1`` in
+``mo_surface_ocean.f90::postproc_ocean`` and its ice/land analogues, box-averaged
+by fraction in ``mo_surface.f90::surface_box_average`` into ``u10``/``v10``/
+``wind10``); ``zepdu2 = 1 m²/s²`` is ECHAM's calm-wind floor on the
 bulk Richardson number and the drag.
 
 **Why we differ.** We do not. The stable/unstable branch is selected by
@@ -91,8 +157,10 @@ both schemes here (their stability factors are <1 stable, ≥1 unstable, and bot
 equal 1 — with equal stable and unstable expressions — at ``Ri = 0``) and keeps
 the Richardson number inside the coefficient solve.
 
-**Status & known limitations.** The diagnostic is a grid-mean over the tiles;
-per-tile 10 m winds are computed internally but not published. The Businger-Dyer
+**Status & known limitations.** The wind is not taken relative to an ocean
+surface current: ECHAM's open-water 10 m speed and stress use ``u − ocu``, and
+jcm applies a zero current (``ForcingData.ocean_u``/``ocean_v`` are reserved
+for it but not yet read, #915; see {doc}`../design/surface_exchange`). The Businger-Dyer
 branch's neutral reference uses that scheme's own hard-coded von Kármán constant
 rather than the live ``jcm.constants`` value, so a ``set_constants`` override
 changes the drag and its neutral reference together.

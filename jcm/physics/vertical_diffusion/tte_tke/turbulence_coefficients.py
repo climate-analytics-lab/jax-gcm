@@ -228,8 +228,10 @@ def compute_exchange_coefficients(
 
 #: Businger-Dyer roughness tables [water, ice, land] — this scheme ignores
 #: ``state.roughness_length``, so its neutral drag must be built from these.
-_BD_Z0_HEAT = jnp.array([1e-4, 1e-4, 1e-2])
-_BD_Z0_MOMENTUM = jnp.array([1e-4, 1e-3, 1e-1])
+#: Tuples of Python floats, materialised with ``jnp.asarray`` where used: a
+#: module-level ``jnp.array`` initialises the JAX backend on import (#859).
+_BD_Z0_HEAT = (1e-4, 1e-4, 1e-2)
+_BD_Z0_MOMENTUM = (1e-4, 1e-3, 1e-1)
 
 
 def businger_dyer_neutral_drag(state, wind_speed):
@@ -242,7 +244,7 @@ def businger_dyer_neutral_drag(state, wind_speed):
     state's tile count, as the scheme's per-tile loop is.
     """
     z_ref = state.height_full[:, -1] - state.height_half[:, -1]
-    z0 = _BD_Z0_MOMENTUM[:state.roughness_length.shape[1]]
+    z0 = jnp.asarray(_BD_Z0_MOMENTUM[:state.roughness_length.shape[1]])
     bn = jnp.log(jnp.maximum(z_ref, 1.0)[:, None]
                  / jnp.maximum(z0, 1e-5)[None, :])
     # 0.4, not c.karman_const: it must match the von_karman this scheme
@@ -281,8 +283,8 @@ def compute_surface_exchange_coefficients(
     """
     ncol, nsfc_type = temperature_surface.shape
 
-    z0_heat = _BD_Z0_HEAT
-    z0_moisture = _BD_Z0_HEAT
+    z0_heat = jnp.asarray(_BD_Z0_HEAT)
+    z0_moisture = z0_heat
     # Momentum: one definition, shared with the 10 m reduction (below).
     _, cfn_m_all = businger_dyer_neutral_drag(state, wind_speed_surface)
     
@@ -543,8 +545,24 @@ def compute_turbulence_diagnostics(
     # 10 m wind (ECHAM ``nsurf_diag``), area-weighted over the tiles from the
     # same per-tile CM·|U|. Surface-flux parameterizations (sea salt, DMS) are
     # calibrated to u10, not to the lowest model level — ~33 m at L47.
-    wind_10m = wind_speed_surface * jnp.sum(
-        state.surface_fraction * wind_10m_tile, axis=1)
+    # ``wind_10m_tile`` is each tile's reduction factor ``zred``; ECHAM
+    # scales the lowest-level wind by it component-wise, per tile
+    # (mo_surface_ocean.f90::postproc_ocean ``zu10w = zred*pum1``, and the
+    # ice/land analogues), and box-averages the tiles by fraction
+    # (mo_surface.f90::surface_box_average -> ``u10``/``v10``/``wind10``). So
+    # the grid-mean vector is ``u_low * sum_t f_t zred_t``: the
+    # fraction-weighted sum of the per-tile vectors, and parallel to the
+    # lowest-level wind with magnitude ``wind_10m``. ``u_low`` is the
+    # step-start wind, as in ECHAM: vdiff.f90 passes ``pum1(:,klev)`` (t-dt),
+    # not the implicitly updated wind, to update_surface (vdiff.f90:951-964)
+    # and on to postproc_ocean/ice/land (mo_surface.f90:936-967).
+    reduction_10m = jnp.sum(state.surface_fraction * wind_10m_tile, axis=1)
+    wind_10m = wind_speed_surface * reduction_10m
+    wind_10m_u = state.u[:, -1] * reduction_10m
+    wind_10m_v = state.v[:, -1] * reduction_10m
+    speed_10m_tile = wind_10m_tile * wind_speed_surface[:, None]
+    u_10m_tile = wind_10m_tile * state.u[:, -1:]
+    v_10m_tile = wind_10m_tile * state.v[:, -1:]
     
     # Convective velocity scale (simplified)
     convective_velocity = jnp.maximum(friction_velocity, 0.1)
@@ -560,6 +578,12 @@ def compute_turbulence_diagnostics(
         friction_velocity=friction_velocity,
         convective_velocity=convective_velocity,
         wind_10m=wind_10m,
+        wind_10m_u=wind_10m_u,
+        wind_10m_v=wind_10m_v,
+        wind_10m_reduction=reduction_10m,
+        wind_10m_tile=speed_10m_tile,
+        wind_10m_u_tile=u_10m_tile,
+        wind_10m_v_tile=v_10m_tile,
         richardson_number=ri,
         mixing_length=mixing_length,
         kinetic_energy_dissipation=jnp.zeros(ncol)  # Will be computed by TKE budget

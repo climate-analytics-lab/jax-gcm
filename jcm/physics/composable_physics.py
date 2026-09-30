@@ -251,6 +251,20 @@ class ComposablePhysics(nnx.Module, Physics):
         ]
         return min(limits) if limits else None
 
+    def preferred_advection(self) -> str | None:
+        """Aggregate per-term transport preferences (see ``PhysicsTerm``).
+
+        Any term asking for ``"semi_lagrangian"`` wins — for a term that may
+        be a correctness requirement, whereas an ``"eulerian"`` preference
+        is a fidelity/cost one. Otherwise any ``"eulerian"`` preference,
+        else ``None`` (no preference).
+        """
+        prefs = {term.preferred_advection() for term in self.terms} - {None}
+        for scheme in ("semi_lagrangian", "eulerian"):
+            if scheme in prefs:
+                return scheme
+        return None
+
     def compute_tendencies(
         self,
         state: PhysicsState,
@@ -386,7 +400,7 @@ class ComposablePhysics(nnx.Module, Physics):
             "q_tendency": tendencies.specific_humidity,
         }
 
-        return tendencies, diagnostics
+        return tendencies, self._drop_step_local(diagnostics)
 
     def _compute_tendencies_columns(
         self, state, forcing, terrain, prev_physics_data=None,
@@ -518,7 +532,7 @@ class ComposablePhysics(nnx.Module, Physics):
             self._column_surface_sharding,
         )
         tendencies = _reshape_tendencies_to_3d(acc, nlev, nlat, nlon)
-        return tendencies, diagnostics
+        return tendencies, self._drop_step_local(diagnostics)
 
     def get_empty_data(self, coords) -> dict[str, jnp.ndarray]:
         """Return a zero-filled template of the per-step diagnostics dict.
@@ -571,6 +585,13 @@ class ComposablePhysics(nnx.Module, Physics):
             },
         )
         probe_forcing = ForcingData.zeros(nodal_shape)
+        # Let terms complete the probe forcing the same way it seeds tracers
+        # (above): a term that requires an optional forcing field for its
+        # configuration — e.g. a forced-surface-flux term reading
+        # ``prescribed_*`` — fills it here so the abstract trace follows the
+        # real code path instead of a ``None``-guard.
+        for term in self.terms:
+            probe_forcing = term.augment_probe_forcing(probe_forcing)
         probe_terrain = TerrainData.aquaplanet(coords)
 
         diagnostics = jax.eval_shape(
@@ -661,6 +682,23 @@ class ComposablePhysics(nnx.Module, Physics):
         "_tendency_run",
     })
 
+    # Per-step inputs one term hands to a later term of the SAME step. They
+    # are rebuilt every step before anything reads them, so they are removed
+    # before the diagnostics become the cross-step carry: never checkpointed,
+    # never output, and no stale or zero-seeded value can reach a reader
+    # after a restart. ``_surface_optics`` is the boundary-condition term's
+    # surface albedo / emissivity for the radiation
+    # (``jcm.physics.radiation.SURFACE_OPTICS_KEY``).
+    _STEP_LOCAL_KEYS: ClassVar[frozenset[str]] = frozenset({
+        "_surface_optics",
+    })
+
+    @classmethod
+    def _drop_step_local(cls, diagnostics: dict) -> dict:
+        """``diagnostics`` without the :attr:`_STEP_LOCAL_KEYS`."""
+        return {k: v for k, v in diagnostics.items()
+                if k not in cls._STEP_LOCAL_KEYS}
+
     # Dict-valued diagnostics that must NOT flatten into user output.
     # ``_sampler_state`` duplicates the whole state for the observer path
     # and is stripped at the model level for the ordinary output routes;
@@ -713,6 +751,64 @@ class ComposablePhysics(nnx.Module, Physics):
     #: explicit namespace (e.g. MACv2-SP's ``aerosol.*`` → ``macsp.*``, #640)
     #: without renaming the internal struct radiation/microphysics read.
     _output_key_map: Mapping[str, str] = {}
+
+    def publishes_surface_exchange(self) -> bool:
+        """Whether some term publishes the #754 surface-exchange contract.
+
+        True when a composed term declares the package-independent
+        ``"surface_exchange"`` diagnostics key (see
+        :mod:`jcm.physics.surface.surface_exchange`) in ``provides`` —
+        SPEEDY's surface-flux term and the ECHAM publisher do; Held-Suarez
+        deliberately opts out (it resolves no surface fluxes).
+        """
+        from jcm.physics.surface.surface_exchange import SURFACE_EXCHANGE_KEY
+        return any(
+            SURFACE_EXCHANGE_KEY in getattr(term, "provides", ())
+            for term in self.terms
+        )
+
+    def consumed_forcing_fields(self) -> tuple[str, ...]:
+        """Union of the composed terms' :meth:`PhysicsTerm.consumed_forcing_fields`."""
+        fields: list[str] = []
+        for term in self.terms:
+            hook = getattr(term, "consumed_forcing_fields", None)
+            for name in (hook() if hook is not None else ()):
+                if name not in fields:
+                    fields.append(name)
+        return tuple(fields)
+
+    def validate_forcing(self, forcing, run_window=None) -> None:
+        """Run every term's :meth:`PhysicsTerm.validate_forcing` once.
+
+        :class:`~jcm.model.Model` calls this on the concrete run forcing
+        before compiling, so a term that requires an optional field it
+        cannot run without (e.g. forced-mode surface fluxes) fails loudly
+        at run start rather than silently applying a zero. ``run_window``
+        (``(start_seconds, end_seconds)`` since 1970-01-01, or ``None``
+        when not concretely known) is passed through so a term can check a
+        date-aligned series covers the run.
+        """
+        for term in self.terms:
+            term.validate_forcing(forcing, run_window=run_window)
+
+    def require_surface_exchange(self) -> None:
+        """Fail loudly at composition time if no surface exchange is published.
+
+        A coupler (JAX-ESM, an ocean/land component) calls this once on the
+        composed package instead of discovering a missing
+        ``diagnostics["surface_exchange"]`` key mid-run — the
+        composition-time loudness #754 asks for.
+        """
+        if not self.publishes_surface_exchange():
+            names = [getattr(term, "name", type(term).__name__)
+                     for term in self.terms]
+            raise ValueError(
+                "No composed term publishes the 'surface_exchange' "
+                f"coupling struct (terms: {names}). SPEEDY and ECHAM "
+                "packages publish it; Held-Suarez opts out because it "
+                "resolves no surface fluxes. See "
+                "docs/source/design/surface_exchange.md."
+            )
 
     def units_table_paths(self) -> tuple:
         """Units/description CSVs of every term in this package, deduplicated.

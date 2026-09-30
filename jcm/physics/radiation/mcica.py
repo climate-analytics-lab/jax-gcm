@@ -73,6 +73,41 @@ def in_cloud_path(
     return jnp.where(cloud_fraction > 2.0 * eps, in_cloud, 0.0)
 
 
+# NaN guard on the PHYSICAL in-cloud condensate (kg/kg) that sets the effective
+# radii and the cloud optical depth. A thin but resolved cloud carrying large
+# grid-mean condensate gives a huge in-cloud water (grid_mean / cf), and the
+# resulting optical depth NaNs the two-stream solver. Applied by
+# :func:`in_cloud_condensate` right after ``in_cloud_path``.
+#
+# This is a one-sided clip -- the identity almost everywhere, flattening
+# everything above the threshold to the same value -- and is NOT the sub-grid
+# inhomogeneity treatment. The inhomogeneity factor (ECHAM ``zinhoml``/
+# ``zinhomi``) is a separate FIXED multiplicative reduction applied to the
+# per-gpoint optical-depth paths (see ``RadiationParameters.cloud_inhomogeneity_*``
+# and the ``in_cloud_*_lib`` scaling in ``radiation_scheme_rrtmgp``). Measured on
+# T63L47 output this clip binds in ~0.003% of cloudy cells, so it is inert in
+# practice; keep it strictly as a NaN guard (#678).
+_MAX_IN_CLOUD_CONDENSATE = 1.0e-2
+
+
+def in_cloud_condensate(
+    grid_mean: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    eps: float = 1.0e-3,
+) -> jnp.ndarray:
+    """In-cloud condensate the radiation sees: :func:`in_cloud_path` plus the NaN cap.
+
+    The one definition shared by the RRTMGP solve (its cloud paths) and the
+    effective radii (``cloud_optics.radiation_effective_radii``), so the
+    radius a layer radiates with is formed from exactly the condensate that
+    layer's optical depth is.
+    """
+    return jnp.minimum(
+        in_cloud_path(grid_mean, cloud_fraction, eps=eps),
+        _MAX_IN_CLOUD_CONDENSATE,
+    )
+
+
 def effective_cloud_fraction(
     cloud_fraction: jnp.ndarray,
     eps: float = 1.0e-3,

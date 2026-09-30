@@ -50,7 +50,8 @@ def run_default_speedy_model(save_interval=None):
 
     coords = get_speedy_coords()
     realistic_terrain = TerrainData.from_file(forcing_dir / 'terrain.nc', coords=coords)
-    realistic_forcing = ForcingData.from_file(forcing_dir / 'forcing.nc', coords=coords)
+    realistic_forcing = ForcingData.from_file(
+        forcing_dir / 'forcing.nc', coords=coords, align_mode="wrap_year")
 
     # in the default scenario output every timestep and don't average
     # in the test scenario, output as designated and average
@@ -84,7 +85,10 @@ def generate() -> None:
     import xarray as xr
 
     _, predictions = run_default_speedy_model(save_interval=None)
-    pred_ds = predictions.to_xarray()
+    # Reduce only the variables the stats file stores: the output Dataset also
+    # carries non-numeric (datetime-valued) variables that ``std`` cannot
+    # reduce.
+    pred_ds = predictions.to_xarray()[default_stat_vars]
 
     pred_ds_mean = (
         pred_ds.resample(time="1ME").mean().isel(time=-1).mean(dim={"lon", "lat"})

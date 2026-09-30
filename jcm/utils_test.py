@@ -22,7 +22,7 @@ from jcm.utils import (
     data_to_xarray,
     load_states_from_xarray,
 )
-from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
+from jcm.physics.speedy.physical_constants import compute_sigma_boundaries
 
 
 class TestGetCoords(unittest.TestCase):
@@ -30,7 +30,7 @@ class TestGetCoords(unittest.TestCase):
 
     def test_get_coords_with_spectral_truncation(self):
         """get_coords should create CoordinateSystem with spectral truncation."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=31)
 
         self.assertEqual(coords.horizontal.nodal_shape, (96, 48))
@@ -38,7 +38,7 @@ class TestGetCoords(unittest.TestCase):
 
     def test_get_coords_with_nodal_shape(self):
         """get_coords should infer truncation from nodal_shape."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, nodal_shape=(64, 32))
 
         # T21 has nodal shape (64, 32)
@@ -51,9 +51,29 @@ class TestGetCoords(unittest.TestCase):
         The 192x96 ECHAM grid is built with gaussian_nodes=48 so it matches
         the production boundary-condition files.
         """
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=63)
         self.assertEqual(coords.horizontal.nodal_shape, (192, 96))
+
+    def test_get_coords_echam_high_resolution_grids(self):
+        """T127/T255 take the same Grid.construct branch as T63.
+
+        dinosaur has no Grid.T127/T255 factory; built at ECHAM's node count
+        they are the 384x192 / 768x384 grids of ECHAM's T127GR15 / T255
+        boundary files, with the standard Gaussian latitudes.
+        """
+        from jcm.data.regridding import gaussian_latlon
+        sigma_boundaries = compute_sigma_boundaries(8)
+        for trunc, shape in ((127, (384, 192)), (255, (768, 384))):
+            coords = get_coords(sigma_boundaries, spectral_truncation=trunc)
+            self.assertEqual(coords.horizontal.nodal_shape, shape)
+            self.assertEqual(coords.horizontal.total_wavenumbers, trunc + 2)
+            lats = np.rad2deg(np.asarray(coords.horizontal.latitudes))
+            np.testing.assert_allclose(np.sort(lats),
+                                       gaussian_latlon(shape[1])[0], atol=1e-4)
+            self.assertEqual(
+                get_coords(sigma_boundaries, nodal_shape=shape)
+                .horizontal.nodal_shape, shape)
 
     def test_get_coords_builds_spmd_mesh(self):
         """A 1x1x1 spmd_mesh exercises the mesh-build path on one device.
@@ -64,7 +84,7 @@ class TestGetCoords(unittest.TestCase):
         """
         from jax.sharding import AxisType
 
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(
             sigma_boundaries, spectral_truncation=21, spmd_mesh=(1, 1, 1),
         )
@@ -79,7 +99,7 @@ class TestGetCoords(unittest.TestCase):
 
     def test_get_coords_invalid_spectral_truncation(self):
         """get_coords should raise error for invalid spectral truncation."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
 
         with self.assertRaises(ValueError) as context:
             get_coords(sigma_boundaries, spectral_truncation=50)  # Invalid
@@ -87,7 +107,7 @@ class TestGetCoords(unittest.TestCase):
 
     def test_get_coords_invalid_nodal_shape(self):
         """get_coords should raise error for invalid nodal shape."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
 
         with self.assertRaises(ValueError) as context:
             get_coords(sigma_boundaries, nodal_shape=(100, 50))  # Invalid
@@ -96,14 +116,14 @@ class TestGetCoords(unittest.TestCase):
     def test_get_coords_different_vertical_levels(self):
         """get_coords should work with different numbers of vertical levels."""
         for layers in [7, 8]:
-            sigma_boundaries = SIGMA_LAYER_BOUNDARIES[layers]
+            sigma_boundaries = compute_sigma_boundaries(layers)
             coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
             self.assertEqual(coords.vertical.layers, layers)
 
     def test_get_coords_nodal_shape_overrides_truncation(self):
         """nodal_shape should override spectral_truncation when both provided."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         # Provide T31 truncation but T21 nodal shape
         coords = get_coords(sigma_boundaries, spectral_truncation=31, nodal_shape=(64, 32))
 
@@ -112,7 +132,7 @@ class TestGetCoords(unittest.TestCase):
 
     def test_get_coords_with_sigma_coordinates_instance(self):
         """get_coords should accept a SigmaCoordinates instance directly."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         sigma_coords = SigmaCoordinates(sigma_boundaries)
         coords = get_coords(sigma_coords, spectral_truncation=21)
 
@@ -150,7 +170,7 @@ class TestSpectralTruncation(unittest.TestCase):
 
     def test_spectral_truncation_uniform_field(self):
         """Uniform field should be preserved after spectral truncation."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
         grid = coords.horizontal
 
@@ -162,7 +182,7 @@ class TestSpectralTruncation(unittest.TestCase):
 
     def test_spectral_truncation_removes_high_frequencies(self):
         """High-frequency noise should be reduced after truncation."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
         grid = coords.horizontal
 
@@ -180,7 +200,7 @@ class TestSpectralTruncation(unittest.TestCase):
 
     def test_spectral_truncation_preserves_shape(self):
         """Output should have same shape as input."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=31)
         grid = coords.horizontal
 
@@ -400,7 +420,7 @@ class TestDataToXarray(unittest.TestCase):
 
     def test_data_to_xarray_basic(self):
         """data_to_xarray should create xarray Dataset from data dict."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         nodal_shape = coords.horizontal.nodal_shape
@@ -421,7 +441,7 @@ class TestDataToXarray(unittest.TestCase):
 
     def test_data_to_xarray_with_tracers(self):
         """data_to_xarray should handle tracers dict."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         nodal_shape = coords.horizontal.nodal_shape
@@ -443,7 +463,7 @@ class TestDataToXarray(unittest.TestCase):
 
     def test_data_to_xarray_with_diagnostics(self):
         """data_to_xarray should handle diagnostics dict."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         nodal_shape = coords.horizontal.nodal_shape
@@ -465,7 +485,7 @@ class TestDataToXarray(unittest.TestCase):
 
     def test_data_to_xarray_tracer_collision_raises(self):
         """data_to_xarray should raise if tracer name collides with prognostic."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         nodal_shape = coords.horizontal.nodal_shape
@@ -486,7 +506,7 @@ class TestDataToXarray(unittest.TestCase):
 
     def test_data_to_xarray_diagnostic_collision_raises(self):
         """data_to_xarray should raise if diagnostic name collides with prognostic."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         nodal_shape = coords.horizontal.nodal_shape
@@ -507,7 +527,7 @@ class TestDataToXarray(unittest.TestCase):
 
     def test_data_to_xarray_unrecognized_shape_raises(self):
         """data_to_xarray should raise for unrecognized data shape."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         data = {
@@ -521,7 +541,7 @@ class TestDataToXarray(unittest.TestCase):
 
     def test_data_to_xarray_without_times(self):
         """data_to_xarray should work without times."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         nodal_shape = coords.horizontal.nodal_shape
@@ -538,7 +558,7 @@ class TestDataToXarray(unittest.TestCase):
 
     def test_data_to_xarray_with_attrs(self):
         """data_to_xarray should include custom attrs."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         nodal_shape = coords.horizontal.nodal_shape
@@ -556,7 +576,7 @@ class TestDataToXarray(unittest.TestCase):
 
     def test_data_to_xarray_serialize_coords_false(self):
         """data_to_xarray should not serialize coords when disabled."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         nodal_shape = coords.horizontal.nodal_shape
@@ -579,7 +599,7 @@ class TestDataToXarrayEdgeCases(unittest.TestCase):
 
     def test_data_to_xarray_with_sample_ids(self):
         """data_to_xarray should handle sample_ids parameter."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         nodal_shape = coords.horizontal.nodal_shape
@@ -601,7 +621,7 @@ class TestDataToXarrayEdgeCases(unittest.TestCase):
 
     def test_data_to_xarray_tracer_unrecognized_shape_raises(self):
         """data_to_xarray should raise for unrecognized tracer shape."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         nodal_shape = coords.horizontal.nodal_shape
@@ -622,7 +642,7 @@ class TestDataToXarrayEdgeCases(unittest.TestCase):
 
     def test_data_to_xarray_diagnostic_unrecognized_shape_raises(self):
         """data_to_xarray should raise for unrecognized diagnostic shape."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         nodal_shape = coords.horizontal.nodal_shape
@@ -643,7 +663,7 @@ class TestDataToXarrayEdgeCases(unittest.TestCase):
 
     def test_data_to_xarray_additional_coords_non_1d_raises(self):
         """data_to_xarray should raise for non-1d additional_coords."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         nodal_shape = coords.horizontal.nodal_shape
@@ -664,7 +684,7 @@ class TestDataToXarrayEdgeCases(unittest.TestCase):
 
     def test_data_to_xarray_additional_coords_level_collision_raises(self):
         """data_to_xarray should raise if additional_coords shape collides with level."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         nodal_shape = coords.horizontal.nodal_shape
@@ -685,7 +705,7 @@ class TestDataToXarrayEdgeCases(unittest.TestCase):
 
     def test_data_to_xarray_attrs_collision_raises(self):
         """data_to_xarray should raise if attrs key collides with serialized coords."""
-        sigma_boundaries = SIGMA_LAYER_BOUNDARIES[8]
+        sigma_boundaries = compute_sigma_boundaries(8)
         coords = get_coords(sigma_boundaries, spectral_truncation=21)
 
         nodal_shape = coords.horizontal.nodal_shape

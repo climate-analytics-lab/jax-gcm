@@ -30,6 +30,7 @@ class NearSurfaceGroupTest(unittest.TestCase):
         class _Vdiff:
             pass
         _Vdiff.tke = jnp.full((nx, nlev), tke)  # (ncol, nlev) layout
+        _Vdiff.wind_10m_reduction = jnp.linspace(0.7, 0.8, nx)
 
         class _Terrain:
             pass
@@ -46,6 +47,10 @@ class NearSurfaceGroupTest(unittest.TestCase):
             "clouds": _Clouds(), "surface": _Surface(),
             "convection": _Conv(), "vertical_diffusion": _Vdiff(),
             "height_full": z_full, "height_half": z_half,
+            # A same-step wind tendency, so post-physics != step start.
+            "_tendency_run": {"u_wind": jnp.full((nlev, nx), 1e-3),
+                              "v_wind": jnp.full((nlev, nx), -2e-3)},
+            "_dt_seconds": 600.0,
         }
 
         class _State:
@@ -63,12 +68,29 @@ class NearSurfaceGroupTest(unittest.TestCase):
             state, diagnostics, _Terrain(), state.temperature, p_full)
         return out, state, diagnostics
 
-    def test_neutral_log_law_wind_ratio_is_exact(self):
-        out, state, diag = self._diag(z0=0.1)
-        z_agl = float(diag["height_full"][-1, 0] - diag["height_half"][-1, 0])
-        want = 10.0 * np.log(10.0 / 0.1) / np.log(z_agl / 0.1)
-        np.testing.assert_allclose(np.asarray(out["aerocom_uas"]), want,
-                                   rtol=1e-6)
+    def test_uas_vas_reduce_the_post_physics_wind(self):
+        """uas/vas are the vdiff 10 m reduction applied to the SAVED
+        (post-physics) lowest-level wind, the time level of the
+        pressure-level winds, not the step-start wind.
+        """
+        out, _, diag = self._diag(z0=0.1)
+        red = np.asarray(diag["vertical_diffusion"].wind_10m_reduction)
+        u_post = 10.0 + 1e-3 * 600.0
+        v_post = -5.0 - 2e-3 * 600.0
+        np.testing.assert_allclose(np.asarray(out["aerocom_uas"]),
+                                   red * u_post, rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(out["aerocom_vas"]),
+                                   red * v_post, rtol=1e-6)
+
+    def test_uas_vas_zero_without_vdiff(self):
+        out, state, diag = self._diag()
+        del diag["vertical_diffusion"]
+        term = AerocomDiagnostics(groups=("nearsurface",))
+        p_full = jnp.linspace(20000.0, 99600.0, 6)[:, None] * jnp.ones((1, 3))
+        out2 = term._nearsurface_group(
+            state, diag, None, state.temperature, p_full)
+        np.testing.assert_array_equal(np.asarray(out2["aerocom_uas"]), 0.0)
+        np.testing.assert_array_equal(np.asarray(out2["aerocom_vas"]), 0.0)
 
     def test_tas_lies_between_skin_and_lowest_level(self):
         out, state, _ = self._diag(t_low=290.0)
@@ -324,7 +346,7 @@ class PlevOmegaTest(unittest.TestCase):
         from jcm.dycore.dinosaur.dycore import DinosaurDycore
         from jcm.model import Model
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.terrain import TerrainData
         from jcm.utils import get_coords
 
@@ -334,11 +356,10 @@ class PlevOmegaTest(unittest.TestCase):
             dt_seconds=900.0, compute_omega=True)
         model = Model(
             dycore=dycore, time_step=15.0,
-            physics=echam_physics(radiation_scheme="grey",
-                                  enable_aerocom=True,
-                                  aerocom_groups=("plev",)),
+            physics=idealized_echam_physics(enable_aerocom=True,
+                                            aerocom_groups=("plev",)),
         )
-        ds = model.run(total_time=0.05, save_interval=0.05).to_xarray()
+        ds = model.run(total_time="1 hour", save_interval="1 hour").to_xarray()
         for key in ("aerocom_wap", "aerocom_w500", "aerocom_w700"):
             arr = np.asarray(ds[key])
             self.assertTrue(np.isfinite(arr).all(), f"{key} not finite")
@@ -563,11 +584,12 @@ if __name__ == "__main__":
 class AerosolFreeRadiationTest(unittest.TestCase):
     """The #583 noa fluxes: a second solve with aerosol optics zeroed."""
 
-    def test_grey_scheme_is_rejected(self):
-        from jcm.physics.echam.echam_terms import echam_physics
-        with self.assertRaises(ValueError):
-            echam_physics(radiation_scheme="grey",
-                          aerosol_free_interval=1)
+    def test_non_rrtmgp_radiation_is_rejected(self):
+        # A radiation term with no aerosol optics to zero (here the idealized
+        # grey term) cannot produce *noa fluxes.
+        from jcm.physics.echam.testing import idealized_echam_physics
+        with self.assertRaisesRegex(ValueError, "radiation_scheme='rrtmgp'"):
+            idealized_echam_physics(aerosol_free_interval=1)
 
     def test_aerosol_free_interval_reaches_the_radiation_term(self):
         """The factory setting must actually configure the built term.

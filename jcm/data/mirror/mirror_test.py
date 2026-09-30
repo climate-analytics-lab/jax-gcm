@@ -9,6 +9,7 @@ downloader in ``jcm/data/remote_test.py``.
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -70,27 +71,435 @@ class RegistryTest(unittest.TestCase):
             reg = json.loads(Path(path).read_text())
             self.assertIn("sub/a.nc", reg["files"])
             self.assertEqual(reg["files"]["sub/a.nc"]["size"], 5)
-            # registry.json itself is excluded
+            # registry.json itself, and an interrupted write's temp copy,
+            # are excluded
+            (Path(d) / "registry.json.tmp").write_text("{}")
             reg2 = build_registry(d)
             self.assertNotIn("registry.json", reg2["files"])
+            self.assertNotIn("registry.json.tmp", reg2["files"])
+
+    def test_paths_keep_the_base_entry_of_every_other_file(self):
+        # A stale copy the build did not write must not override the
+        # published entry.
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("forcing_pd.nc", "emissions_pd.nc"):
+                (Path(d) / name).write_bytes(b"new")
+            base = {"files": {"emissions_pd.nc": {"sha256": "published",
+                                                  "size": 9}}}
+            reg = build_registry(d, base=base, paths={"forcing_pd.nc"})
+            self.assertEqual(reg["files"]["forcing_pd.nc"]["size"], 3)
+            self.assertEqual(reg["files"]["emissions_pd.nc"]["sha256"],
+                             "published")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class LedgerTest(unittest.TestCase):
+    """Registry and upload act only on what this site's builds wrote."""
+
+    F = "bundles/t63/forcing_pd.nc"
+
+    def setUp(self):
+        from pathlib import Path
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.t63 = self.root / "upload" / "bundles" / "t63"
+        self.t63.mkdir(parents=True)
+        (self.root / "build").mkdir()
+
+    def _patched(self, **extra):
+        from contextlib import ExitStack
+
+        from jcm.data.mirror import build_mirror as bm
+        stack = ExitStack()
+        for name, value in {"BUILD": self.root / "build",
+                            "UPLOAD": self.root / "upload", **extra}.items():
+            stack.enter_context(patch.object(bm, name, value))
+        return stack
+
+    def _write(self, rel, data, ledger=True):
+        from jcm.data.mirror import build_mirror as bm
+        path = self.root / "upload" / rel
+        path.write_bytes(data)
+        if ledger:
+            with self._patched():
+                bm._write_ledger(bm._ledger() | {rel})
+        return path
+
+    def _registry(self, tip_files, dates=None, **extra):
+        """Run stage_registry against a mocked mirror tip."""
+        import json
+
+        from jcm.data.mirror import build_mirror as bm
+        dates = dates or {}
+        with self._patched(_PRODUCTS=frozenset({"forcing"}), **extra), \
+                patch.object(bm, "_mirror_tip", lambda: "tip"), \
+                patch.object(bm, "_registry_at", lambda rev: json.loads(
+                    json.dumps({"files": tip_files}))), \
+                patch.object(bm, "_published_dates", lambda paths, rev: {
+                    p: dates[p] for p in paths if p in dates}):
+            bm.stage_registry()
+
+    def _sha(self, data):
+        import hashlib
+        return hashlib.sha256(data).hexdigest()
+
+    def test_a_stage_records_only_the_files_it_writes(self):
+        from jcm.data.mirror import build_mirror as bm
+        stale = self._write("bundles/t63/emissions_pd.nc", b"old", ledger=False)
+        with self._patched():
+            before = bm._upload_snapshot()
+            (self.t63 / "forcing_pd.nc").write_bytes(b"new")
+            after = bm._record_writes(before)
+            self.assertEqual(bm._ledger(), {self.F})
+            # A later stage adds to it; rewriting a file in place counts.
+            stale.write_bytes(b"rebuilt")
+            bm._record_writes(after)
+            self.assertEqual(bm._ledger(),
+                             {self.F, "bundles/t63/emissions_pd.nc"})
+
+    def test_registry_merges_the_ledger_onto_the_tip_and_retires(self):
+        import json
+
+        from jcm.data.mirror import build_mirror as bm
+        self._write(self.F, b"new")
+        self._write("bundles/t63/emissions_pd.nc", b"stale", ledger=False)
+        with self._patched():
+            bm._write_ledger(bm._ledger() | {"bundles/t63/vanished.nc"})
+        import datetime
+        long_ago = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
+        self._registry({"bundles/t63/emissions_pd.nc": {"sha256": "pub"},
+                        self.F: {"sha256": "old"},
+                        "bundles/t63/dust.nc": {"sha256": "gone"}},
+                       {self.F: long_ago}, _RETIRE=("bundles/*/dust.nc",))
+        reg = json.loads((self.root / "upload" / "registry.json"
+                          ).read_text())["files"]
+        side = json.loads((self.root / "build" / "registry_base.json"
+                           ).read_text())
+        self.assertEqual(reg[self.F]["sha256"], self._sha(b"new"))
+        self.assertEqual(reg["bundles/t63/emissions_pd.nc"]["sha256"], "pub")
+        self.assertNotIn("bundles/t63/dust.nc", reg)
+        self.assertEqual(side["parent_commit"], "tip")
+        self.assertEqual(side["retired"], ["bundles/t63/dust.nc"])
+        # A written file that has since gone is dropped, not published.
+        self.assertEqual(list(side["written"]), [self.F])
+        with self._patched():
+            self.assertEqual(bm._ledger(), {self.F})
+
+    def test_registry_refuses_only_a_newer_different_published_copy(self):
+        import datetime
+        path = self._write(self.F, b"mine")
+        mtime = datetime.datetime.fromtimestamp(path.stat().st_mtime,
+                                                datetime.timezone.utc)
+        later = {self.F: mtime + datetime.timedelta(hours=1)}
+        earlier = {self.F: mtime - datetime.timedelta(hours=1)}
+        # Another site published after our content was made: refused.
+        with self.assertRaises(SystemExit) as ctx:
+            self._registry({self.F: {"sha256": "theirs"}}, later)
+        self.assertIn("older than a different published copy",
+                      str(ctx.exception))
+        # Ours is newer (rebuilt after their publish): allowed.
+        self._registry({self.F: {"sha256": "theirs"}}, earlier)
+        # Our own earlier publish matches our hash: allowed.
+        self._registry({self.F: {"sha256": self._sha(b"mine")}}, later)
+        # Within the clock margin, or undated, counts as newer: refused.
+        close = {self.F: mtime - datetime.timedelta(seconds=10)}
+        for dates in (close, {}):
+            with self.assertRaises(SystemExit):
+                self._registry({self.F: {"sha256": "theirs"}}, dates)
+
+    def test_tier_a_is_restaged_when_rebuilt_and_completed_when_cut_short(self):
+        from jcm.data.mirror import build_mirror as bm
+        build, upload = self.root / "build", self.root / "upload"
+        store = build / "ceds_anthro.zarr"
+        (store / "so2").mkdir(parents=True)
+        for i in range(3):
+            (store / "so2" / str(i)).write_bytes(b"chunk%d" % i)
+        climo = build / "era5_land_climo_2005-2014_0p25.nc"
+        climo.write_bytes(b"old-build")
+        os.utime(climo, (1, 1))
+        # A copy killed part-way: one chunk truncated, one missing.
+        dst = upload / "products" / "ceds_anthro.zarr" / "so2"
+        dst.mkdir(parents=True)
+        import shutil
+        (dst / "0").write_bytes(b"chunk0")
+        shutil.copystat(store / "so2" / "0", dst / "0")    # already copied
+        (dst / "1").write_bytes(b"ch")
+        for name in bm._TIER_A:
+            bm._sync(build / name, upload / "products" / name)
+        for i in range(3):
+            self.assertEqual((dst / str(i)).read_bytes(), b"chunk%d" % i)
+        staged = upload / "products" / climo.name
+        self.assertEqual(staged.stat().st_mtime, 1)       # the content's age
+        climo.write_bytes(b"rebuilt")
+        with self._patched():
+            bm._sync(climo, staged)
+        self.assertEqual(staged.read_bytes(), b"rebuilt")
+
+    def test_registry_refuses_bundles_from_pulled_tier_a_the_tip_replaced(self):
+        from jcm.data import remote
+        from jcm.data.mirror import build_mirror as bm
+        self._write(self.F, b"new")
+        tier_a = "products/ceds_anthro.zarr/zarr.json"
+        pinned = {"files": {tier_a: {"sha256": "pinned"}}}
+        tip = {tier_a: {"sha256": "newer"}}
+        registry_at = {remote.mirror_revision(): pinned}
+        with self._patched(_PRODUCTS=frozenset({"forcing"})), \
+                patch.object(bm, "_pulled_tier_a", lambda: True), \
+                patch.object(bm, "_mirror_tip", lambda: "tip"), \
+                patch.object(bm, "_registry_at", lambda rev: registry_at.get(
+                    rev, {"files": dict(tip)})), \
+                self.assertRaises(SystemExit) as ctx:
+            bm.stage_registry()
+        self.assertIn("differs from the pinned revision", str(ctx.exception))
+
+    def test_registry_refuses_retiring_a_file_it_wrote(self):
+        self._write(self.F, b"new")
+        with self.assertRaises(SystemExit) as ctx:
+            self._registry({}, _RETIRE=("bundles/t63/forcing_*",))
+        self.assertIn("narrow the globs", str(ctx.exception))
+
+    def test_an_interrupted_registry_run_leaves_nothing_to_upload(self):
+        from jcm.data.mirror import build_mirror as bm
+        self._write(self.F, b"new")
+        self._registry({})
+        registry = (self.root / "upload" / "registry.json").read_text()
+        with self._patched(), \
+                patch.object(bm, "_mirror_tip", lambda: "tip"), \
+                patch.object(bm, "_registry_at",
+                             lambda rev: (_ for _ in ()).throw(OSError)), \
+                self.assertRaises(OSError):
+            bm.stage_registry()
+        self.assertFalse((self.root / "build" / "registry_base.json").exists())
+        self.assertEqual((self.root / "upload" / "registry.json").read_text(),
+                         registry)
+        with self.assertRaises(SystemExit) as ctx:
+            self._upload(lambda **kw: None)
+        self.assertIn("run --stage registry first", str(ctx.exception))
+
+    def _upload(self, create_commit, tip=lambda: "tip", **extra):
+        import contextlib
+        import io
+        from types import SimpleNamespace
+
+        import huggingface_hub
+
+        from jcm.data.mirror import build_mirror as bm
+        api = SimpleNamespace(create_commit=create_commit)
+        out = io.StringIO()
+        with self._patched(**extra), \
+                patch.object(huggingface_hub, "HfApi", lambda: api), \
+                patch.object(bm, "_mirror_tip", tip), \
+                patch("time.sleep", lambda s: None), \
+                contextlib.redirect_stdout(out):
+            bm.stage_upload()
+        return out.getvalue()
+
+    def _recorder(self, fail=(), tip="tip"):
+        """Mock create_commit: records calls, raises on call numbers in fail.
+
+        Also returns the mirror tip it implies: the last landed commit.
+        """
+        from types import SimpleNamespace
+        calls, state = [], {"tip": tip}
+
+        def create_commit(**kw):
+            calls.append(kw)
+            if len(calls) in fail:
+                raise TimeoutError("xet")
+            state["tip"] = f"c{len(calls)}".ljust(40, "0")
+            return SimpleNamespace(oid=state["tip"])
+        return create_commit, calls, lambda: state["tip"]
+
+    @staticmethod
+    def _ops(kw, kind):
+        import huggingface_hub
+        cls = getattr(huggingface_hub, kind)
+        return sorted(op.path_in_repo for op in kw["operations"]
+                      if isinstance(op, cls))
+
+    def test_upload_commits_exactly_what_the_registry_hashed(self):
+        from jcm.data.mirror import build_mirror as bm
+        self._write("bundles/t63/emissions_pd.nc", b"stale", ledger=False)
+        path = self._write(self.F, b"new")
+        self._registry({"bundles/t63/dust.nc": {"sha256": "x"}},
+                       _RETIRE=("bundles/*/dust.nc",))
+        create_commit, calls, _ = self._recorder()
+        # --retire belongs to the registry run; a different one is refused.
+        with self.assertRaises(SystemExit) as ctx:
+            self._upload(create_commit, _RETIRE=("other",))
+        self.assertIn("applied by --stage registry", str(ctx.exception))
+        # A file touched after the registry hashed it is refused.
+        stat = path.stat()
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10 ** 9))
+        with self.assertRaises(SystemExit) as ctx:
+            self._upload(create_commit)
+        self.assertIn("changed since --stage registry", str(ctx.exception))
+        self.assertEqual(calls, [])
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        out = self._upload(create_commit)
+        # The files, then the registry and retirements on top of them.
+        files, registry = calls
+        self.assertEqual(files["parent_commit"], "tip")
+        self.assertEqual(self._ops(files, "CommitOperationAdd"), [self.F])
+        self.assertEqual(registry["parent_commit"], "c1".ljust(40, "0"))
+        self.assertEqual(self._ops(registry, "CommitOperationAdd"),
+                         ["registry.json"])
+        self.assertEqual(self._ops(registry, "CommitOperationDelete"),
+                         ["bundles/t63/dust.nc"])
+        oid = "c2".ljust(40, "0")
+        self.assertIn(f'MIRROR_REVISION = "{oid}"', out)
+        with self._patched():
+            self.assertEqual(bm._ledger(), set())
+        self.assertTrue((self.root / "build" / f"upload_ledger.{oid[:12]}.json"
+                         ).exists())
+
+    def test_upload_batches_and_resumes_after_the_last_landed_batch(self):
+        names = [f"bundles/t63/forcing_amip/{y}.nc" for y in (1950, 1951, 1952)]
+        (self.t63 / "forcing_amip").mkdir()
+        for n in names:
+            self._write(n, n.encode())
+        self._registry({})
+        # One file per commit; the second batch fails until retries run out.
+        create_commit, calls, tip = self._recorder(fail=range(2, 7))
+        with self.assertRaises(RuntimeError):
+            self._upload(create_commit, tip=tip, _BATCH_FILES=1)
+        self.assertEqual(self._ops(calls[0], "CommitOperationAdd"), names[:1])
+        # The rerun starts after the landed batch, on its commit.
+        rerun, calls, tip = self._recorder(tip=tip())
+        self._upload(rerun, tip=tip, _BATCH_FILES=1)
+        self.assertEqual([self._ops(c, "CommitOperationAdd") for c in calls],
+                         [names[1:2], names[2:], ["registry.json"]])
+        self.assertEqual(calls[0]["parent_commit"], "c1".ljust(40, "0"))
+
+    def test_batches_respect_the_file_and_small_file_budgets(self):
+        from jcm.data.mirror import build_mirror as bm
+        for i in range(5):
+            self._write(f"bundles/t63/s{i}.nc", b"x" * 100, ledger=False)
+        with self._patched(_BATCH_FILES=2):
+            self.assertEqual([len(b) for b in bm._batches(
+                [f"bundles/t63/s{i}.nc" for i in range(5)])], [2, 2, 1])
+        with self._patched(_BATCH_SMALL_BYTES=250):
+            self.assertEqual([len(b) for b in bm._batches(
+                [f"bundles/t63/s{i}.nc" for i in range(5)])], [2, 2, 1])
+
+    def test_upload_stops_once_the_tip_has_moved_and_retries_otherwise(self):
+        from jcm.data.mirror import build_mirror as bm
+        self._write(self.F, b"new")
+        self._registry({})
+        failing, calls, _ = self._recorder(fail=range(1, 10))
+        with self.assertRaises(SystemExit) as ctx:
+            self._upload(failing, tip=lambda: "moved")
+        self.assertIn("mirror tip is now moved", str(ctx.exception))
+        self.assertEqual(len(calls), 1)
+        with self._patched():
+            self.assertEqual(bm._ledger(), {self.F})
+
+        # A failure that also breaks the tip query is retried, not fatal.
+        def no_network():
+            raise ConnectionError("down")
+
+        flaky, calls, _ = self._recorder(fail=(1, 2))
+        self._upload(flaky, tip=no_network)
+        self.assertEqual(len(calls), 4)       # 2 failures, files, registry
+
+    def test_main_records_each_stage_and_nothing_from_a_failed_one(self):
+        import contextlib
+        import io
+
+        from jcm.data.mirror import build_mirror as bm
+
+        def good():
+            (self.t63 / "forcing_pd.nc").write_bytes(b"new")
+
+        def bad():
+            (self.t63 / "forcing_amip.nc").write_bytes(b"trunc")
+            raise RuntimeError("walltime")
+
+        stages = {**bm.STAGES, "bundles": good, "amip": bad}
+        out = io.StringIO()
+        with self._patched(STAGES=stages), \
+                patch.object(bm, "check_sources", lambda *a, **k: None), \
+                patch("sys.argv", ["build_mirror", "--stage", "bundles,amip"]), \
+                contextlib.redirect_stdout(out), \
+                self.assertRaises(RuntimeError):
+            bm.main()
+        with self._patched():
+            self.assertEqual(bm._ledger(), {self.F})
+        self.assertIn("stage amip failed", out.getvalue())
+
+    def test_a_failed_rerun_unrecords_files_it_touched(self):
+        # A file recorded by an earlier run and truncated by a failing rerun
+        # must not stay publishable.
+        import contextlib
+        import io
+
+        from jcm.data.mirror import build_mirror as bm
+        self._write(self.F, b"good")
+
+        def bad():
+            (self.t63 / "forcing_pd.nc").write_bytes(b"tr")
+            raise RuntimeError("walltime")
+
+        with self._patched(STAGES={**bm.STAGES, "bundles": bad}), \
+                patch.object(bm, "check_sources", lambda *a, **k: None), \
+                patch("sys.argv", ["build_mirror", "--stage", "bundles"]), \
+                contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaises(RuntimeError):
+            bm.main()
+        with self._patched():
+            self.assertEqual(bm._ledger(), set())
+
+
+class MirrorRevisionStagesTest(unittest.TestCase):
+    def test_pull_is_pinned(self):
+        import contextlib
+        import io
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        import huggingface_hub
+
+        from jcm.data import remote
+        from jcm.data.mirror import build_mirror as bm
+
+        pulled = []
+
+        def snapshot(**kw):
+            pulled.append(kw["revision"])
+            root = Path(kw["local_dir"])
+            for name in ("era5_land_climo_2005-2014_0p25.nc",
+                         "ceds_anthro.zarr", "bb4cmip7.zarr"):
+                (root / "products" / name).mkdir(parents=True)
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(bm, "BUILD", Path(d)), \
+                mock.patch.object(huggingface_hub, "snapshot_download",
+                                  snapshot), \
+                contextlib.redirect_stdout(io.StringIO()):
+            bm.stage_pull()
+        self.assertEqual(pulled, [remote.mirror_revision()])
 
 
 class DustProductTest(unittest.TestCase):
-    """The dust bundle builder on a synthetic stand-in for the HAMMOZ files.
+    """The dust bundle builder on a synthetic stand-in for the HAMMOZ pool.
 
-    The real inputs are on Glade; what needs covering is the orientation flip,
-    the nearest-neighbour regrid and the two build-time guards.
+    The real inputs are in the ECHAM-HAMMOZ pool (``HammozPoolTest`` checks
+    them where it is mounted); what needs covering everywhere is the pool
+    layout lookup, the orientation flip, the conservative remap for a grid
+    HAMMOZ does not ship, the regenerated region mask and the build-time guards.
     """
 
     NLAT, NLON = 96, 192
+    T63 = "v0007/hammoz/T63"
 
-    def _sources(self, tmp, regions=None, soils=None):
+    def _sources(self, tmp, soils=None, regions=None):
+        """Write a fake T63-only pool under ``tmp``; return the model lat/lon."""
         import xarray as xr
 
+        from jcm.data.mirror.dust import region_mask
         from jcm.data.regridding import gaussian_latlon
         lats, lons = gaussian_latlon(self.NLAT)
         # The HAMMOZ files store latitude DESCENDING; the builder flips it.
@@ -100,13 +509,13 @@ class DustProductTest(unittest.TestCase):
         # pot_source varies with latitude so the flip is observable.
         pot = np.broadcast_to(np.abs(desc)[None, :, None], month).copy()
         if regions is None:
-            regions = np.tile(np.arange(1, 9).repeat(self.NLAT // 8)[:, None],
-                              (1, self.NLON))[None]
+            regions = region_mask(desc, lons)[None]
         if soils is None:
             soils = {f"type{i}": np.full(shape, 0.2 if i in (2, 3, 4, 6) else 0.0)
                      for i in (2, 3, 4, 6, 13, 14, 15, 16, 17)}
-        # Month starts on a Gregorian year, like the HAMMOZ files: written as
-        # datetime64 so the file carries real CF units for the builder to copy.
+        # Roughness is NaN away from dust sources, as in the HAMMOZ map.
+        rough = np.full(month, np.nan)
+        rough[:, 30:60, 20:80] = 0.02
         months = np.array([np.datetime64(f"2000-{m:02d}-01") for m in range(1, 13)])
         coords = {"lat": desc, "lon": lons}
         files = {
@@ -123,42 +532,86 @@ class DustProductTest(unittest.TestCase):
                 {"regions": (("time", "lat", "lon"), regions.astype(float))},
                 coords={**coords, "time": months[:1]}),
             "surface_rough_12m_T63.nc": xr.Dataset(
-                {"surfrough": (("time", "lat", "lon"), np.full(month, 0.02))},
+                {"surfrough": (("time", "lat", "lon"), rough)},
                 coords={**coords, "time": months}),
         }
+        os.makedirs(os.path.join(tmp, self.T63))
         for name, ds in files.items():
-            ds.to_netcdf(os.path.join(tmp, name))
+            ds.to_netcdf(os.path.join(tmp, self.T63, name))
         return lats, lons
+
+    def _build(self, tmp, name, nlat):
+        from jcm.data.mirror.dust import build_dust_product
+        out = os.path.join(tmp, f"{name}_{nlat}.nc")
+        with patch.dict("jcm.data.mirror.dust.NATIVE_SOURCES",
+                        {63: _t63_only()}, clear=True):
+            build_dust_product(name, nlat, out, source_dir=tmp)
+        return out
 
     def test_native_grid_is_copied_with_ascending_latitude(self):
         import xarray as xr
-
-        from jcm.data.mirror.dust import build_dust_product
         with tempfile.TemporaryDirectory() as tmp:
             lats, _ = self._sources(tmp)
-            out = os.path.join(tmp, "pot.nc")
-            build_dust_product("dust_potential_sources", self.NLAT, out,
-                               source_dir=tmp)
+            out = self._build(tmp, "dust_potential_sources", self.NLAT)
             with xr.open_dataset(out, decode_times=False) as ds:
                 np.testing.assert_allclose(ds.lat.values, lats)
                 np.testing.assert_allclose(
                     ds.pot_source.values[0, :, 0], np.abs(lats), atol=1e-9)
                 self.assertNotIn("regrid_approximation", ds.attrs)
+                self.assertIn(self.T63, ds.attrs["source"])
 
-    def test_regrid_is_nearest_and_keeps_the_mask_categorical(self):
+    def test_a_coarser_grid_is_remapped_conservatively(self):
+        # A grid HAMMOZ does not ship is coarsened from the finest native file
+        # with the exact-overlap remap: the area mean is conserved and nothing
+        # is flagged as an approximation.
         import xarray as xr
+        with tempfile.TemporaryDirectory() as tmp:
+            lats, _ = self._sources(tmp)
+            src = self._build(tmp, "dust_potential_sources", self.NLAT)
+            out = self._build(tmp, "dust_potential_sources", 48)
+            weights = lambda n: np.polynomial.legendre.leggauss(n)[1]  # noqa: E731
+            with xr.open_dataset(src) as a, xr.open_dataset(out) as b:
+                self.assertEqual(b.pot_source.shape, (12, 48, 96))
+                mean_a = (a.pot_source.values * weights(96)[:, None]).sum() / 192
+                mean_b = (b.pot_source.values * weights(48)[:, None]).sum() / 96
+                self.assertAlmostEqual(mean_a, mean_b, places=10)
+                self.assertIn("conservative", b.attrs["history"])
+                self.assertNotIn("regrid_approximation", b.attrs)
 
-        from jcm.data.mirror.dust import build_dust_product
+    def test_a_finer_grid_is_flagged_as_an_approximation(self):
+        import xarray as xr
         with tempfile.TemporaryDirectory() as tmp:
             self._sources(tmp)
-            out = os.path.join(tmp, "reg.nc")
-            build_dust_product("dust_regions", 32, out, source_dir=tmp)
-            with xr.open_dataset(out, decode_times=False) as ds:
+            out = self._build(tmp, "dust_surface_roughness", 160)
+            with xr.open_dataset(out) as ds:
+                self.assertIn("regrid_approximation", ds.attrs)
+                values = ds.surfrough.values
+                # NaN stays "no source", and the valid patch keeps its value
+                # rather than being diluted toward zero at its edges.
+                self.assertTrue(np.isnan(values).any())
+                np.testing.assert_allclose(values[np.isfinite(values)], 0.02)
+
+    def test_the_region_mask_is_regenerated_and_categorical(self):
+        import xarray as xr
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sources(tmp)
+            out = self._build(tmp, "dust_regions", 32)
+            with xr.open_dataset(out) as ds:
                 values = ds.regions.values
                 self.assertEqual(values.shape, (32, 64))
-                np.testing.assert_array_equal(values, np.round(values))
-                self.assertTrue(set(np.unique(values)) <= set(range(1, 9)))
-                self.assertIn("regrid_approximation", ds.attrs)
+                self.assertEqual(set(np.unique(values)), set(range(1, 9)))
+                self.assertIn(self.T63, ds.attrs["history"])
+
+    def test_a_native_mask_the_recipe_does_not_reproduce_is_refused(self):
+        from jcm.data.mirror.dust import region_mask
+        from jcm.data.regridding import gaussian_latlon
+        lats, lons = gaussian_latlon(self.NLAT)
+        regions = region_mask(lats[::-1], lons)
+        regions[10, 10] = 5.0 if regions[10, 10] != 5.0 else 6.0
+        with tempfile.TemporaryDirectory() as tmp:
+            self._sources(tmp, regions=regions[None])
+            with self.assertRaisesRegex(ValueError, "no longer reproduces"):
+                self._build(tmp, "dust_regions", self.NLAT)
 
     def test_a_built_product_round_trips_through_its_reader(self):
         # The build and the read are the two halves of one contract; nothing
@@ -170,7 +623,6 @@ class DustProductTest(unittest.TestCase):
         from jcm.forcing import (WRAP_YEAR, read_dust_preferential,
                                  read_dust_regions, read_dust_roughness,
                                  read_dust_soil_types, read_dust_source)
-        from jcm.data.mirror.dust import build_dust_product
         readers = {"dust_potential_sources": read_dust_source,
                    "dust_preferential_sources": read_dust_preferential,
                    "dust_soil_types": read_dust_soil_types,
@@ -179,8 +631,7 @@ class DustProductTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             lats, lons = self._sources(tmp)
             for name, reader in readers.items():
-                out = os.path.join(tmp, f"{name}.nc")
-                build_dust_product(name, self.NLAT, out, source_dir=tmp)
+                out = self._build(tmp, name, self.NLAT)
                 # Decoded (not decode_times=False): a monthly product must carry
                 # real CF time units, not bare numbers read as nanoseconds.
                 with xr.open_dataset(out) as ds:
@@ -197,25 +648,61 @@ class DustProductTest(unittest.TestCase):
                     self.assertEqual(int(leaf.align_mode), WRAP_YEAR, name)
 
     def test_a_broken_global_partition_is_refused(self):
-        from jcm.data.mirror.dust import build_dust_product
         soils = {f"type{i}": np.full((1, self.NLAT, self.NLON), 0.3)
                  for i in (2, 3, 4, 6, 13, 14, 15, 16, 17)}
         with tempfile.TemporaryDirectory() as tmp:
             self._sources(tmp, soils=soils)
             with self.assertRaisesRegex(ValueError, "would go negative"):
-                build_dust_product("dust_soil_types", self.NLAT,
-                                   os.path.join(tmp, "soil.nc"),
-                                   source_dir=tmp)
+                self._build(tmp, "dust_soil_types", self.NLAT)
 
-    def test_a_non_integer_region_mask_is_refused(self):
-        from jcm.data.mirror.dust import build_dust_product
-        regions = np.full((1, self.NLAT, self.NLON), 2.5)
-        with tempfile.TemporaryDirectory() as tmp:
-            self._sources(tmp, regions=regions)
-            with self.assertRaisesRegex(ValueError, "lost integrality"):
-                build_dust_product("dust_regions", self.NLAT,
-                                   os.path.join(tmp, "reg.nc"),
-                                   source_dir=tmp)
+
+def _t63_only():
+    from jcm.data.mirror.dust import NATIVE_SOURCES
+    return NATIVE_SOURCES[63]
+
+
+@unittest.skipUnless(os.path.isdir("/pool/data/ECHAM6-HAMMOZ"),
+                     "needs the ECHAM-HAMMOZ input pool (DKRZ Levante)")
+class HammozPoolTest(unittest.TestCase):
+    """The provenance claims in ``jcm.data.mirror.dust``, checked on the pool."""
+
+    ROOT = "/pool/data/ECHAM6-HAMMOZ"
+
+    def _field(self, rel, var):
+        import xarray as xr
+        with xr.open_dataset(os.path.join(self.ROOT, rel),
+                             decode_times=False) as ds:
+            return np.squeeze(ds[var].values), ds.lat.values, ds.lon.values
+
+    def test_the_region_recipe_reproduces_every_native_mask(self):
+        from jcm.data.mirror.dust import NATIVE_SOURCES, region_mask
+        for trunc, table in NATIVE_SOURCES.items():
+            if "dust_regions" not in table:
+                continue
+            ref, lats, lons = self._field(*table["dust_regions"]["regions"])
+            np.testing.assert_array_equal(region_mask(lats, lons), ref,
+                                          err_msg=f"T{trunc}")
+
+    def test_the_old_lineage_names_the_same_products(self):
+        # Where both lineages exist (T63, T127) the v01_001 files ARE the
+        # current products — the basis for taking T255 from v01_001.
+        from jcm.data.mirror.dust import NATIVE_SOURCES
+        for trunc in (63, 127):
+            t = f"T{trunc}"
+            new = NATIVE_SOURCES[trunc]
+            old = {"pot_source": (f"v01_001/hammoz/{t}/ndvi_lai_eff.12m.{t}.nc",
+                                  "laieff"),
+                   "source": (f"v01_001/hammoz/{t}/pot_sources.{t}.nc",
+                              "source"),
+                   "type2": (f"v01_001/hammoz/{t}/soil_type2.{t}.nc", "type")}
+            pairs = {"pot_source": new["dust_potential_sources"]["pot_source"],
+                     "source": new["dust_preferential_sources"]["source"],
+                     "type2": new["dust_soil_types"]["type2"]}
+            for key, cur in pairs.items():
+                a = self._field(*cur)[0]
+                b = self._field(*old[key])[0]
+                np.testing.assert_allclose(a, b, atol=1e-6,
+                                           err_msg=f"{t} {key}")
 
 
 class LandChannelCoverageTest(unittest.TestCase):
@@ -255,6 +742,27 @@ class LandChannelCoverageTest(unittest.TestCase):
             missing = sorted(translated - written)
             self.assertEqual(missing, [], f"{name}.py never names {missing}")
 
+    def test_every_writer_regrids_land_through_the_convention_helper(self):
+        """Every writer splices :func:`land_surface_fields` into its dict.
+
+        It is the one place the land-conditional channels (and ``glac``,
+        ``forest``, ``lsm``) are regridded with their masks (#672); a writer
+        that interpolated them itself would dilute them at coasts again.
+        """
+        import ast
+        import inspect
+        import importlib
+
+        for name in self._WRITERS:
+            module = importlib.import_module(f"jcm.data.mirror.{name}")
+            spliced = any(
+                key is None and isinstance(value, ast.Call)
+                and getattr(value.func, "id", None) == "land_surface_fields"
+                for node in ast.walk(ast.parse(inspect.getsource(module)))
+                if isinstance(node, ast.Dict)
+                for key, value in zip(node.keys, node.values))
+            self.assertTrue(spliced, f"{name}.py bypasses land_surface_fields")
+
 
 def _translate_land_keys():
     """Return the channel names ``translate_land`` produces on a minimal input."""
@@ -270,3 +778,155 @@ def _translate_land_keys():
     return translate_land(
         era5, permanent_snow=xr.DataArray(np.zeros(2, dtype=bool),
                                           dims=("cell",))).keys()
+
+
+class RegistryMergeTest(unittest.TestCase):
+    """A ``--grids`` build must not drop the rest of the mirror's registry."""
+
+    def test_partial_tree_merges_onto_the_published_registry(self):
+        import json
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "bundles/t127").mkdir(parents=True)
+            Path(d, "bundles/t127/terrain.nc").write_bytes(b"new")
+            base = {"files": {"bundles/t63/terrain.nc": {"sha256": "x", "size": 1},
+                              "bundles/t127/terrain.nc": {"sha256": "old",
+                                                          "size": 9}}}
+            reg = json.loads(Path(write_registry(d, base=base)).read_text())
+            self.assertIn("bundles/t63/terrain.nc", reg["files"])
+            self.assertEqual(reg["files"]["bundles/t127/terrain.nc"]["size"], 3)
+            self.assertNotEqual(
+                reg["files"]["bundles/t127/terrain.nc"]["sha256"], "old")
+
+
+class SitesTest(unittest.TestCase):
+    def test_explicit_site_and_overrides(self):
+        from jcm.data.mirror import sites
+        with patch.dict(os.environ, {"JCM_MIRROR_SITE": "levante",
+                                     "JCM_HAMMOZ_DIR": "/copy/of/pool"}):
+            site = sites.current()
+            self.assertEqual(site.name, "levante")
+            self.assertIsNone(site.rda)
+            self.assertEqual(site.hammoz, "/copy/of/pool")
+            self.assertTrue(sites.input4mips("CMIP7/x").startswith(
+                "/pool/data/INPUT4MIP/data/input4MIPs/"))
+        with patch.dict(os.environ, {"JCM_MIRROR_SITE": "glade"}):
+            self.assertIsNotNone(sites.current().rda)
+        # An inputdata override carries the WACCM oxidant root with it; the
+        # dedicated oxidant override wins over both.
+        with patch.dict(os.environ, {"JCM_MIRROR_SITE": "levante",
+                                     "JCM_CESM_INPUTDATA": "/my/inputdata"}):
+            site = sites.current()
+            self.assertEqual(site.cesm_inputdata, "/my/inputdata")
+            self.assertEqual(site.waccm_oxidants, "/my/inputdata/atm/cam/ozone")
+        with patch.dict(os.environ, {"JCM_MIRROR_SITE": "glade",
+                                     "JCM_CESM_INPUTDATA": "/my/inputdata",
+                                     "JCM_WACCM_OXIDANTS_DIR": "/cseg/ozone"}):
+            self.assertEqual(sites.current().waccm_oxidants, "/cseg/ozone")
+        with patch.dict(os.environ, {"JCM_MIRROR_SITE": "nowhere"}):
+            with self.assertRaisesRegex(ValueError, "known sites"):
+                sites.current()
+
+    def test_a_source_the_site_lacks_is_refused_up_front(self):
+        from jcm.data.mirror import build_mirror, sites
+        with patch.dict(os.environ, {"JCM_MIRROR_SITE": "levante"}):
+            levante = sites.current()
+        with patch.object(build_mirror, "SITE", levante):
+            self.assertEqual(build_mirror._unavailable(["era5", "ozone"]),
+                             {"era5": ["RDA ERA5 monthly means"]})
+            with self.assertRaises(SystemExit) as ctx:
+                build_mirror.check_sources(["era5"])
+            self.assertIn("--stage pull", str(ctx.exception))
+            build_mirror.check_sources(["manifest", "pull"])   # source-free
+        with patch.dict(os.environ, {"JCM_MIRROR_SITE": "glade"}):
+            glade = sites.current()
+        with patch.object(build_mirror, "SITE", glade):
+            # Glade lacks the HAMMOZ pool: the dust stage names it and says
+            # where it can be built.
+            with self.assertRaises(SystemExit) as ctx:
+                build_mirror.check_sources(["dust"])
+            self.assertIn("ECHAM-HAMMOZ pool", str(ctx.exception))
+            self.assertIn("JCM_HAMMOZ_DIR", str(ctx.exception))
+
+    def test_build_tree_inputs_are_checked_only_before_their_stage(self):
+        # A one-shot pull,...,bundles on a fresh root must not be refused up
+        # front for build/ outputs an earlier stage in the same run produces.
+        from jcm.data.mirror import build_mirror
+        with tempfile.TemporaryDirectory() as d:
+            from pathlib import Path
+            root = Path(d)
+            i4m = root / "i4m"
+            (i4m / "CMIP7/CMIP/PCMDI/PCMDI-AMIP-1-1-10").mkdir(parents=True)
+            site = build_mirror.SITE.__class__(**{
+                **build_mirror.SITE.__dict__, "input4mips": str(i4m)})
+            with patch.object(build_mirror, "SITE", site), \
+                    patch.object(build_mirror, "ROOT", root), \
+                    patch.object(build_mirror, "BUILD", root / "build"), \
+                    patch.object(build_mirror, "UPLOAD", root / "upload"):
+                build_mirror.check_sources(["bundles"])
+                with self.assertRaises(SystemExit) as ctx:
+                    build_mirror.check_sources(["bundles"], include_build=True)
+                self.assertIn("Tier A ERA5 land climatology", str(ctx.exception))
+
+    def test_a_partial_transient_build_is_refused(self):
+        from jcm.data.mirror import build_mirror as bm
+        argv = ["build_mirror", "--grids", "t63", "--stage", "amip"]
+        with patch("sys.argv", argv), self.assertRaises(SystemExit) as ctx:
+            bm.main()
+        self.assertIn("every transient grid", str(ctx.exception))
+
+class GridSelectionTest(unittest.TestCase):
+    def test_grids_filter_and_transient_scope(self):
+        from jcm.data.mirror import build_mirror as bm
+        with patch.object(bm, "_SELECTED", None):
+            self.assertEqual(set(bm._grids()), {"t63", "t106", "t127", "t255"})
+            self.assertEqual(set(bm._grids(transient=True)), {"t63", "t106"})
+            self.assertTrue(bm._column_selected())
+        with patch.object(bm, "_SELECTED", frozenset({"t127", "t255"})):
+            self.assertEqual(bm._grids(), {"t127": 192, "t255": 384})
+            self.assertEqual(bm._grids(transient=True), {})
+            self.assertFalse(bm._column_selected())
+        self.assertEqual(bm._truncation("t255"), 255)
+
+    def test_pulled_tier_a_marks_the_build_partial(self):
+        from jcm.data.mirror import build_mirror as bm
+        with tempfile.TemporaryDirectory() as d:
+            from pathlib import Path
+            build = Path(d) / "build"
+            (build / "pulled" / "products" / "ceds_anthro.zarr").mkdir(
+                parents=True)
+            (build / "ceds_anthro.zarr").symlink_to(
+                build / "pulled" / "products" / "ceds_anthro.zarr")
+            with patch.object(bm, "BUILD", build), \
+                    patch.object(bm, "_SELECTED", None), \
+                    patch.object(bm, "_PRODUCTS", None):
+                self.assertTrue(bm._pulled_emissions())
+                self.assertTrue(bm._partial_build())
+
+    def test_a_missing_ne30_topography_skips_only_ne30(self):
+        from jcm.data.mirror import build_mirror as bm, sites
+        with patch.dict(os.environ, {"JCM_MIRROR_SITE": "levante"}):
+            levante = sites.current()
+        with patch.object(bm, "SITE", levante), \
+                patch.object(bm, "NE30_TOPO", None):
+            with patch.object(bm, "_SELECTED", None):
+                self.assertNotIn("sso", bm._unavailable(["sso"]))
+                self.assertFalse(bm._column_buildable())
+            with patch.object(bm, "_SELECTED", frozenset({"ne30pg3"})):
+                self.assertEqual(bm._unavailable(["sso"]),
+                                 {"sso": ["CESM ne30 topography"]})
+
+    def test_products_filter_narrows_what_bundles_reads(self):
+        from jcm.data.mirror import build_mirror as bm
+        with patch.object(bm, "_PRODUCTS", frozenset({"emissions"})):
+            self.assertTrue(bm._want("emissions"))
+            self.assertFalse(bm._want("terrain"))
+            labels = {label for label, _ in bm._stage_sources()["bundles"]}
+            self.assertEqual(labels, {"Tier A CEDS store",
+                                      "Tier A BB4CMIP7 store"})
+        with patch.object(bm, "_PRODUCTS", None):
+            self.assertTrue(all(bm._want(p) for p in bm.BUNDLE_PRODUCTS))
+
+
+if __name__ == "__main__":
+    unittest.main()

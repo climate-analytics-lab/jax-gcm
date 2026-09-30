@@ -193,6 +193,37 @@ class TestComposablePhysics(unittest.TestCase):
             tend.u_wind, 0.1 * state.temperature, rtol=1e-5
         )
 
+    def test_preferred_advection_aggregation(self):
+        """No vote -> None; any Eulerian -> Eulerian; any SL wins outright.
+
+        SL wins because a term asking for it may need it for correctness
+        (nodal, monotone transport), whereas an Eulerian preference is a
+        fidelity/cost one (SPEEDY).
+        """
+        class Eulerian(LinearHeating):
+            name: ClassVar[str] = "eulerian_vote"
+
+            def preferred_advection(self):
+                return "eulerian"
+
+        class SemiLagrangian(LinearHeating):
+            name: ClassVar[str] = "sl_vote"
+
+            def preferred_advection(self):
+                return "semi_lagrangian"
+
+        self.assertIsNone(self._make_physics().preferred_advection())
+        self.assertEqual(
+            (self._make_physics() + Eulerian()).preferred_advection(), "eulerian")
+        self.assertEqual(
+            ComposablePhysics(terms=[Eulerian(), SemiLagrangian()]).preferred_advection(),
+            "semi_lagrangian")
+
+    def test_speedy_prefers_eulerian(self):
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        self.assertEqual(speedy_physics().preferred_advection(), "eulerian")
+
     def test_replace(self):
         physics = self._make_physics()
         new_rad = LinearHeating(alpha=5.0)
@@ -944,11 +975,11 @@ class TestInitialCarryState(unittest.TestCase):
         """
         from jcm.utils import get_coords
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
 
         coords = get_coords(get_echam_levels(47), spectral_truncation=31)
-        physics = echam_physics(
-            radiation_scheme="grey", checkpoint_terms=False,
+        physics = idealized_echam_physics(
+            checkpoint_terms=False,
         )
         physics.cache_coords(coords)
 
@@ -1098,7 +1129,8 @@ class TestModelSeedsTracers(unittest.TestCase):
         self.assertIn("specific_humidity", state.tracers)
         self.assertIn("qc", state.tracers)
         self.assertIn("qnc", state.tracers)
-        # Semi-Lagrangian transport (the only transport jcm has) splits the
+        # Semi-Lagrangian transport (what the physics-decided mode picks for
+        # this tracer-carrying composition) splits the
         # tracer representations, so equal shapes are NOT the invariant:
         # ``specific_humidity`` stays MODAL because it participates in the
         # implicit q<->Tv coupling, while every declared extra tracer is

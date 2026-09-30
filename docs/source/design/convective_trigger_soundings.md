@@ -37,17 +37,24 @@ ECHAM configuration.
 Real tropical sub-cloud layers are near-neutral, and so are the ones jcm's own
 vdiff produces in a coupled run: through a well-mixed layer the dry static
 energy is constant, `zbuo = zlift > 0`, and the parcel reaches the LCL. ECHAM
-leans on this twice over — its environment half levels are the DSE *upper
-envelope* of the adjacent full levels
-(`ptenh(jk) = (MAX(s(jk−1), s(jk)) − geoh(jk))/cpm`, then monotonized upward in
-`cuini`), which flattens any dry-neutral or dry-unstable layer before the
-parcel is ever compared against it.
+leans on this twice over — its environment half levels, which jcm's port
+builds the same way (`half_levels.py`), are the DSE *upper envelope* of the
+adjacent full levels
+(`ptenh(jk) = (MAX(s(jk−1), s(jk)) − geoh(jk))/cpm`, saturation adjusted with
+the humidity of the level above, then monotonized upward in `cuini`), which
+flattens any dry-neutral or dry-unstable layer before the parcel is ever
+compared against it. The saturation adjustment makes a moist interface the
+level above brought down its moist adiabat, so in a moist, conditionally
+unstable surface layer the interfaces the parcel is tested against are
+slightly cooler than the full levels: with ECHAM's maximum 1 K `zlift` a
+moist 6.5 K/km sounding can just reach a low LCL, while a modest excess
+(0.5 K) still needs the mixed layer.
 
 **So: any idealised, prescribed or hand-built column handed to Tiedtke needs a
 dry-adiabatic sub-cloud layer.** `jcm.rce.rce_initial_state` builds one by
 default (`mixed_layer_top_m`, 800 m); the convection tests' `_sounding`
 helpers take a `bl_top_m`; `updraft_test.py` pins both sides of the
-discriminator (`test_unmixed_boundary_layer_gets_no_convection` /
+discriminator (`test_stable_sub_cloud_layer_gets_no_convection` /
 `test_well_mixed_layer_convects_at_the_echam_minimum_lift`).
 
 ## Why this is not a place to add a guard

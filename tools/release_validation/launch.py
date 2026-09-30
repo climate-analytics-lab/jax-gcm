@@ -9,12 +9,11 @@ override sets) and becomes a PBS job running a full-output year on one
 A100. Per-grid inputs resolve automatically inside jcm (``terrain=auto``,
 ``forcing.ozone_file=auto``) and are PREFETCHED here, on the submitting
 (networked) node, so a member whose inputs are unavailable refuses at submit
-time instead of after hours of GPU; JAM members additionally need the aux
-inputs staged per
-``jcm/data/mirror/SOURCES.md`` (dms/oxidants + emissions on the model
-grid) via the ``JAM_INPUTS``/``JCM_EMISSIONS`` environment. The five
-Tegen dust bundles are mirror products and are fetched here, on the
-login node, so the compute nodes need no network.
+time instead of after hours of GPU; JAM members additionally get their aux
+inputs as concrete paths — the present-day climatological mirror bundles
+(``emissions_pd``, ``dms``, ``oxidants_pd`` and the five Tegen dust
+bundles), fetched here, on the login node, so the compute nodes need no
+network.
 Each run directory is namespaced by ``--tag`` (default: the launched
 repo's HEAD short SHA), because a release-validation member is a *fresh*
 year: a fixed rundir let a second matrix run silently resume the first
@@ -71,40 +70,38 @@ def dust_overrides(token: str) -> list[str]:
     return out
 
 
+#: JAM aux inputs besides dust: the present-day (2005-2014) climatology
+#: products ``auto`` resolves to (``emissions_pd``, ``dms``, ``oxidants_pd``).
+_JAM_PD_KEYS = ("emissions_file", "dms_file", "oxidants_file")
+
+
 def jam_aux(grid: str, levels: str) -> list[str]:
-    inputs = os.environ.get(
-        "JAM_INPUTS", "/glade/derecho/scratch/" + os.environ.get("USER", "")
-        + "/jam_inputs")
+    """Present-day climatological JAM inputs, fetched HERE as concrete paths.
+
+    The same ``*_pd`` mirror climatologies the presets resolve with ``auto``
+    (CEDS/BB4CMIP emissions and PD oxidants averaged over 2005-2014, the Lana
+    DMS climatology) plus the five dust bundles — so a release member runs
+    under the same climatological present-day AMIP forcing as ``forcing_pd``.
+    Fetched on the (networked) generating node and baked in as local cache
+    paths, so the compute job needs no network.
+    """
+    from jcm.data import mirror_manifest as mm
+    from jcm.data.remote import fetch
     token = grid.split("_")[1]        # echam_t63_l95_hybrid -> t63
-    # Emissions are horizontal-only (12-month 2-D fields), so every level
-    # set of a horizontal grid shares the L47-named prep_emissions output.
-    emis = os.environ.get(
-        "JCM_EMISSIONS",
-        f"{HOME}/jax-gcm/runs/emissions_echam_{token}_l47_hybrid_2014.nc")
-    # The oxidant source (cam/waccm) is the preparer's choice —
-    # prep_jam_aux_inputs recommends waccm at L95 — so match any source
-    # rather than hardcoding one.
-    ox = sorted(Path(inputs).glob(
-        f"oxidants_*_echam_{levels}_2014_{token}.nc"))
-    ov = [
-        f"forcing.emissions_file={emis}",
-        f"forcing.dms_file={inputs}/dms_lana2011_climo_{token}.nc",
-        *dust_overrides(token),
-    ]
-    if ox:
-        ov.append(f"forcing.oxidants_file={ox[-1]}")
-    else:
-        raise SystemExit(
-            f"no oxidants_*_echam_{levels}_2014_{token}.nc under {inputs} — "
-            "regenerate per jcm/data/mirror/SOURCES.md (scratch is "
-            "purge-eligible)")
-    for o in ov[:2]:
-        path = o.split("=", 1)[1]
-        if not Path(path).exists():
+    nlev = int(levels.lstrip("l"))    # l95 -> 95
+    manifest = mm.load_manifest()
+    out = []
+    for key in _JAM_PD_KEYS:
+        product = mm.product_for_key(manifest, key)
+        rel = mm.bundle_path(manifest, product, token, nlev)
+        try:
+            out.append(f"forcing.{key}={fetch(rel)}")
+        except Exception as exc:                              # noqa: BLE001
             raise SystemExit(
-                f"missing JAM input {path} — regenerate per "
-                "jcm/data/mirror/SOURCES.md (scratch is purge-eligible)")
-    return ov
+                f"could not fetch the present-day JAM input {rel} for "
+                f"{token}/{levels}: {exc}. Generate the jobs on a node with "
+                "network so the compute nodes need none.") from exc
+    return out + dust_overrides(token)
 
 
 def _preset_grid(preset_name: str) -> str | None:
@@ -215,6 +212,60 @@ def prefetch(ovs: list[str]) -> list[str]:
     return missing
 
 
+#: Written into each member's rundir at launch: the data-mirror commit the
+#: run reads, so a ``--resume`` continues on exactly the same inputs.
+MIRROR_RECORD = "mirror_revision.json"
+
+
+def mirror_commit(rundir: str, resume: bool, force: bool) -> tuple[str, bool]:
+    """Return ``(commit, opt_in, source)`` for one member (recorded later).
+
+    The commit is part of what a member is: the same code and config read
+    different inputs at another commit. A fresh launch records this process's
+    commit (the pin, or ``JCM_MIRROR_REVISION``). ``--resume`` reuses the
+    recorded one, so a jcm update that moved the pin cannot switch a running
+    member's inputs; an explicit different ``JCM_MIRROR_REVISION`` is refused
+    unless ``force``, which records the new commit and opts the job in to
+    resuming a checkpoint written at the old one (``run_chunked`` otherwise
+    refuses it).
+    """
+    import json
+
+    from jcm.data.remote import (
+        REVISION_ENV, requested_revision, revision_source)
+    commit, source = requested_revision(), revision_source()
+    record = Path(rundir) / MIRROR_RECORD
+    if resume and record.exists():
+        recorded = json.loads(record.read_text())["commit"]
+        if recorded == commit or (source == "pinned" and not force):
+            # Re-issuing a forced resume on the commit it already recorded
+            # (a forced launch that died before its first checkpoint)
+            # regenerates the opt-in.
+            return recorded, force and recorded == commit, source
+        if not force:
+            raise SystemExit(
+                f"{REVISION_ENV}={commit} differs from the mirror commit "
+                f"{recorded} recorded in {record}; resuming on it would change "
+                "the run's boundary inputs mid-integration. Unset it to "
+                "continue on the recorded commit, or pass "
+                "--force-mirror-revision to switch deliberately.")
+    return commit, force and resume, source
+
+
+def write_mirror_record(rundir: str, commit: str, source: str) -> None:
+    """Record ``commit`` in ``rundir`` (after the preflight has passed)."""
+    import json
+
+    record = Path(rundir) / MIRROR_RECORD
+    if record.exists() and json.loads(record.read_text())["commit"] == commit:
+        return      # a resume on the recorded commit keeps the launch record
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({
+        "requested": commit, "source": source, "commit": commit,
+        "written": datetime.datetime.now(datetime.timezone.utc).isoformat(
+            timespec="seconds")}, indent=1))
+
+
 def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
     # Presets may carry their own output plumbing (the pyses ones set
     # run.checkpoint_path); ours must win, so strip conflicting keys
@@ -231,6 +282,9 @@ def overrides(name: str, m: dict, d: dict, rundir: str) -> list[str]:
            f"run.total_time={d['days']}.0",
            f"run.save_interval={d['save_interval']}",
            f"run.chunk_days={d['chunk_days']}",
+           # The release matrix scores per-chunk files (health.py), so it
+           # opts out of run/longrun.yaml's calendar-month stream (#901).
+           "run.monthly_means=false", "run.save_chunks=true",
            "run.output_averages=true", "run.log_level=INFO",
            f"run.output={name}.nc",
            f"run.output_prefix={rundir}/{name}",
@@ -263,7 +317,8 @@ export JAX_PLATFORMS=cuda,cpu
 export MAM4_JAX_ENABLE_X64=0
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.93
 export JAX_COMPILATION_CACHE_DIR=${{SCRATCH}}/jcm-jax-cache
-mkdir -p {rundir}
+export JCM_MIRROR_REVISION={mirror_revision}
+{mirror_optin}mkdir -p {rundir}
 cd {repo}
 python -u -m jcm.main \\
     {ovs}
@@ -283,6 +338,10 @@ def main(argv=None):
     ap.add_argument("--resume", action="store_true",
                     help="continue an existing run rather than refusing to "
                          "start on top of its checkpoint")
+    ap.add_argument("--force-mirror-revision", action="store_true",
+                    help="with --resume, switch a run to the explicitly set "
+                         "JCM_MIRROR_REVISION although it was started at "
+                         "another mirror commit (its inputs change mid-run)")
     ap.add_argument("--submit", action="store_true")
     ap.add_argument("--no-prefetch", action="store_true",
                     help="skip the input preflight (offline job generation)")
@@ -309,6 +368,19 @@ def main(argv=None):
     plan = [(name, f"mx_{name.replace('-', '_')}_{run_tag}") for name in wanted]
     for _, tag in plan:
         check_fresh(f"{scratch}/jam_runs/{tag}", a.resume)
+    # Each member's mirror commit, resolved (and recorded) before the
+    # prefetch; the job exports it, as a PBS job does not inherit this shell.
+    mirror = {tag: mirror_commit(f"{scratch}/jam_runs/{tag}", a.resume,
+                                 a.force_mirror_revision)
+              for _, tag in plan}
+    # This process reads the mirror at one commit (jcm.data.remote), so a
+    # launch's members must share it; resume differing ones separately.
+    commits = {m[0] for m in mirror.values()}
+    if len(commits) > 1:
+        raise SystemExit(
+            f"these members read different mirror commits "
+            f"({', '.join(sorted(commits))}); launch them separately.")
+    os.environ["JCM_MIRROR_REVISION"] = commits.pop()
 
     # Preflight every member's inputs before writing any job: a matrix launch
     # that cannot resolve an input should fail whole, on the node that still
@@ -330,6 +402,10 @@ def main(argv=None):
                 "jcm/data/mirror/SOURCES.md, or pass --no-prefetch to "
                 "generate the jobs anyway.")
 
+    # Only now, with every input available, is the commit this launch's.
+    for _, tag in plan:
+        write_mirror_record(f"{scratch}/jam_runs/{tag}", *mirror[tag][::2])
+
     for name, tag in plan:
         m = cfg["members"][name]
         rundir = f"{scratch}/jam_runs/{tag}"
@@ -339,6 +415,9 @@ def main(argv=None):
             name=tag, account=a.account, hours=m.get("hours", d["hours"]),
             logdir=str(outdir), venv=venv, repo=repo,
             rundir=rundir, ovs=ovs, marker=f"{tag.upper()}_COMPLETE",
+            mirror_revision=mirror[tag][0],
+            mirror_optin=("export JCM_ALLOW_MIRROR_REVISION_CHANGE=1\n"
+                          if mirror[tag][1] else ""),
         )
         path = outdir / f"{tag}.pbs"
         path.write_text(job)

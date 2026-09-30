@@ -39,11 +39,17 @@ def interpolate_to_daily(ds_monthly: xr.Dataset) -> xr.Dataset:
     previous_year_padding = [ds_monthly[time_vars].isel(time=i) for i in range(12 - pad_n, 12)]
     next_year_padding = [ds_monthly[time_vars].isel(time=i) for i in range(pad_n)]
     extended_monthly_time_vars = xr.concat(previous_year_padding + [ds_monthly[time_vars]] + next_year_padding, dim='time')
-    extended_time = pd.date_range(start=f'1980-{13-pad_n:02}-01', end=f'1982-{pad_n:02}-01', freq='MS')
+    # Keep the source year. The labels are part of the forcing semantics and
+    # must not be silently rewritten to the historical implementation's 1981.
+    source_year = int(time[0].year)
+    extended_time = pd.date_range(
+        start=f'{source_year - 1}-{13-pad_n:02}-01',
+        end=f'{source_year + 1}-{pad_n:02}-01', freq='MS')
     extended_monthly_time_vars['time'] = extended_time
 
     daily_time_vars = extended_monthly_time_vars.resample(time='1D').interpolate('linear')
-    daily_time_vars = daily_time_vars.sel(time=slice('1981-01-01', '1981-12-31'))
+    daily_time_vars = daily_time_vars.sel(
+        time=slice(f'{source_year}-01-01', f'{source_year}-12-31'))
     return xr.merge([daily_time_vars, ds_monthly[non_time_vars]])
 
 def _upsample_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Dataset:
@@ -118,6 +124,26 @@ def upsample_forcings_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Datase
         ds_interp[v] = ds_interp[v].clip(min=0.)
     for v in ['icec', 'soilw_am', 'alb']:
         ds_interp[v] = ds_interp[v].clip(max=1.)
+    if "lsm" in ds.data_vars:
+        # A file carrying its land share follows the bundle convention for
+        # land-conditional fields (jcm.data.regridding.CONDITIONAL_FIELDS):
+        # regrid those with their land / non-glacier-land weights so ocean
+        # and glacier neighbours do not dilute them (#672). Files without
+        # ``lsm`` (the SPEEDY T30 climatology) keep the plain regrid.
+        from jcm.data.regridding import CONDITIONAL_FIELDS, regrid_land_surface
+
+        def regrid(da):
+            name = da.name or "_field"
+            return _upsample_ds(da.rename(name).to_dataset(), grid)[name]
+
+        conditional = {v: ds[v] for v in CONDITIONAL_FIELDS
+                       if v in ds.data_vars}
+        glac = ds["glac"] if "glac" in ds.data_vars else None
+        regridded = regrid_land_surface(conditional, ds["lsm"].clip(0.0, 1.0),
+                                        regrid, glac=glac)
+        for v, da in regridded.items():
+            ds_interp[v] = da.transpose(*ds_interp[v].dims)
+        ds_interp["lsm"] = ds_interp["lsm"].clip(0.0, 1.0)
     return ds_interp
 
 def upsample_terrain_ds(ds: xr.Dataset, grid: HorizontalGridTypes) -> xr.Dataset:
@@ -208,7 +234,7 @@ def interpolate(grid, output_dir=None):
 
 def main(argv=None) -> int:
     from jcm.utils import get_coords
-    from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
+    from jcm.physics.speedy.physical_constants import compute_sigma_boundaries
     """CLI entrypoint. Parse argv and call `interpolate`.
 
     Args:
@@ -233,7 +259,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv) # uses sys.argv[1:] if argv is None
 
     # it doesn't matter what the vertical coordinate system is, so we are just using a fixed one here, interpolation is horizontal
-    coords = get_coords(SIGMA_LAYER_BOUNDARIES[7],spectral_truncation=args.target_resolution)
+    coords = get_coords(compute_sigma_boundaries(7),spectral_truncation=args.target_resolution)
 
     try:
         interpolate(coords.horizontal)

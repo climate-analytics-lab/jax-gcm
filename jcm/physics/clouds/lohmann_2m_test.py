@@ -764,29 +764,38 @@ class TestMixedPhaseDepositionAndCorrections2M:
 
 
 class TestDeMott2010INP:
+    # The paper's standard density (273.15 K, 1013.5 mb): at it the ambient
+    # and standard-condition concentrations coincide, which is the frame
+    # these shape tests are written in. The density conversion itself is
+    # pinned in lohmann_2m_ice_sources_test.py.
+    @staticmethod
+    def _rho_stp():
+        import jcm.constants as c
+        return 101350.0 / (c.rd * 273.15)
+
     def test_zero_outside_valid_range(self):
         T = jnp.array([280.0, 265.0, 237.0, 200.0], dtype=jnp.float32)
-        n_inp = demott2010_inp(T, 0.5)
+        n_inp = demott2010_inp(T, 0.5, self._rho_stp())
         assert float(n_inp[0]) == 0.0  # too warm
         assert float(n_inp[2]) == 0.0  # too cold
         assert float(n_inp[3]) == 0.0  # way too cold
 
     def test_nonzero_in_valid_range(self):
         T = jnp.array([260.0, 250.0, 240.0], dtype=jnp.float32)
-        n_inp = demott2010_inp(T, 0.5)
+        n_inp = demott2010_inp(T, 0.5, self._rho_stp())
         assert jnp.all(n_inp > 0.0)
         # Colder → more INP
         assert float(n_inp[2]) > float(n_inp[1]) > float(n_inp[0])
 
     def test_more_aerosol_more_inp(self):
         T = jnp.array([250.0], dtype=jnp.float32)
-        n_low = demott2010_inp(T, 0.1)
-        n_high = demott2010_inp(T, 2.0)
+        n_low = demott2010_inp(T, 0.1, self._rho_stp())
+        n_high = demott2010_inp(T, 2.0, self._rho_stp())
         assert float(n_high[0]) > float(n_low[0])
 
     def test_output_in_per_m3(self):
         T = jnp.array([250.0], dtype=jnp.float32)
-        n_inp = demott2010_inp(T, 0.5)
+        n_inp = demott2010_inp(T, 0.5, self._rho_stp())
         # Should be order 1e3–1e6 per m³ for typical conditions
         assert float(n_inp[0]) > 1.0
         assert float(n_inp[0]) < 1e10
@@ -1096,9 +1105,10 @@ class TestUpdateInCloudWaterCirrusBranches_2M:
         Below the volume-mean radius at which the ice-mass inversion would
         exceed ``icemax`` (~1.8e-5 m for this fixture's IWC), the candidate
         would run to ~1e11-1e20 /m^3 — four to thirteen orders above realistic
-        cirrus. It is capped at ``icemax`` (the reference's cap on crystal
-        NUMBER, ECHAM ``MIN(candidate, zascs)``; jcm uses ``icemax`` as the
-        max-plausible-number ceiling since aerosol number is not plumbed here).
+        cirrus. It is capped at ``icemax``, the bound the scheme also puts on
+        the ICNC tracer and ECHAM puts on the section-1 number additions
+        (mo_cloud_micro_2m.f90:1252); ECHAM's own diagnosis (2616-2622) is
+        uncapped.
         """
         n = 3
         inputs = self._inputs_with_ice(n)
@@ -1602,13 +1612,18 @@ class TestIcon2MPipeline:
         assert nondim_flags["qc"] is True
 
     def test_model_runs_with_2m_and_stays_finite(self):
-        """Short SPEEDY-grid run with the 2M composable physics; no NaNs."""
-        from jcm.physics.echam.echam_terms import echam_physics
+        """Short SPEEDY-grid run with the 2M composable physics; no NaNs.
+
+        Composition machinery, so the cheap idealized stack carries it.
+        """
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.model import Model
         from jcm.physics.speedy.speedy_coords import get_speedy_coords
 
-        physics = echam_physics(cloud_scheme="2m", checkpoint_terms=False)
-        model = Model(coords=get_speedy_coords(), physics=physics, time_step=180)
+        physics = idealized_echam_physics(cloud_scheme="2m",
+                                          checkpoint_terms=False)
+        # Model.time_step is minutes; use the intended 180-second step.
+        model = Model(coords=get_speedy_coords(), physics=physics, time_step=3)
         preds = model.run(save_interval=(1 / 24.0), total_time=(2 / 24.0))
 
         assert jnp.all(jnp.isfinite(preds.dynamics.temperature))
@@ -1669,6 +1684,61 @@ class TestColumnWaterConservation2M:
         assert abs(residual) < max(1e-5 * gross, 1e-12), (
             f"2M water budget open by {residual:.3e} kg/m2/s "
             f"(gross movement {gross:.3e}, precip {P:.3e})"
+        )
+
+    def test_water_budget_closes_with_convective_detrainment(self):
+        """The same closure with detrained condensate in qc/qi (#941).
+
+        Convection hands the scheme liquid in warm layers and ice in cold
+        ones (``detrained_qc``/``detrained_qi``, already inside ``qc``/``qi``),
+        over step-start anchors that differ from the provisional state. The
+        scheme keeps the detrained ice out of this step's sedimentation,
+        gives it crystal number and re-splits it by ``lo2``; every one of
+        those moves mass between the scheme's own ledger entries only.
+        """
+        import numpy as np
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.clouds.sundqvist import saturation_specific_humidity
+
+        nlev = 20
+        T_m1 = jnp.linspace(225.0, 300.0, nlev)
+        p = jnp.linspace(2e4, 1e5, nlev)
+        rho = p / (287.0 * T_m1)
+        q_m1 = 0.95 * jax.vmap(saturation_specific_humidity)(p, T_m1)
+        qc_m1 = jnp.zeros(nlev).at[10:16].set(1e-3)
+        qi_m1 = jnp.zeros(nlev).at[3:8].set(2e-4)
+        idx = jnp.arange(nlev)
+        detr = jnp.where((idx >= 2) & (idx < 15), 3e-5, 0.0)
+        warm = T_m1 > 273.15
+        det_qc = jnp.where(warm, detr, 0.0)
+        det_qi = jnp.where(warm, 0.0, detr)
+        cf = jnp.where((qc_m1 + qi_m1 + detr) > 0, 0.7, 0.0)
+        qnc = jnp.where(qc_m1 > 0, 5e7, 0.0)
+        qni = jnp.where(qi_m1 > 0, 1e4, 0.0)
+
+        tend, rain_sfc, snow_sfc, *_ = cloud_microphysics_2m(
+            T_m1 + 0.4, q_m1 * 1.01, p, qc_m1 + det_qc, qi_m1 + det_qi,
+            qnc, qni, cf, rho, jnp.full(nlev, 500.0),
+            jnp.full(nlev, 0.3), jnp.full(nlev, 5e7),
+            jnp.zeros(nlev), jnp.zeros(nlev),
+            1800.0, CloudParams2M.default(),
+            temperature_m1=T_m1, specific_humidity_m1=q_m1,
+            qc_m1=qc_m1, qi_m1=qi_m1,
+            detrained_qc=det_qc, detrained_qi=det_qi,
+        )
+        mref = np.asarray(rho * 500.0)
+        dw = np.asarray(tend.dqdt + tend.dqcdt + tend.dqidt)
+        P = float(rain_sfc + snow_sfc)
+        gross = float(np.sum((np.abs(np.asarray(tend.dqdt))
+                              + np.abs(np.asarray(tend.dqcdt))
+                              + np.abs(np.asarray(tend.dqidt))) * mref))
+        gross += abs(P)
+        residual = float(np.sum(dw * mref) + P)
+        assert gross > 0.0
+        assert abs(residual) < max(1e-5 * gross, 1e-12), (
+            f"water open by {residual:.3e} kg/m2/s with detrainment "
+            f"(gross {gross:.3e})"
         )
 
     def test_precip_process_rates_close_the_warm_ledger(self):
@@ -2002,7 +2072,7 @@ class TestColumnEnthalpyConservation2M:
     DT = 1800.0
 
     @staticmethod
-    def _run(cols):
+    def _run(cols, **extra):
         from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
         from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
 
@@ -2013,6 +2083,7 @@ class TestColumnEnthalpyConservation2M:
             T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke,
             jnp.full(nlev, 5e7), inp, z,
             TestColumnEnthalpyConservation2M.DT, CloudParams2M.default(),
+            **extra,
         )
         return tend, float(rain_sfc), float(snow_sfc)
 
@@ -2032,12 +2103,18 @@ class TestColumnEnthalpyConservation2M:
         )
 
     @staticmethod
-    def _assert_enthalpy_closes(name, cols):
-        """Assert the identity above and return (residual, gross) [W/m²]."""
+    def _assert_enthalpy_closes(name, cols, **extra):
+        """Assert the identity above and return (residual, gross) [W/m²].
+
+        ``extra`` passes step-start anchors and detrainment through; the
+        humidity anchor must stay the fixture's ``q`` (the cp below uses it).
+        """
         import numpy as np
         import jcm.constants as c
 
-        tend, rain_sfc, snow_sfc = TestColumnEnthalpyConservation2M._run(cols)
+        assert "specific_humidity_m1" not in extra
+        tend, rain_sfc, snow_sfc = TestColumnEnthalpyConservation2M._run(
+            cols, **extra)
         _, q, _, _, _, _, _, _, rho, dz, _, _ = cols
         mass = np.asarray(rho * dz)                       # [kg/m²] per level
 
@@ -2157,6 +2234,46 @@ class TestColumnEnthalpyConservation2M:
         _, _, snow_sfc = self._run(cols)
         assert snow_sfc > 0.0, "fallout never reached the ground"
         self._assert_enthalpy_closes("cold ice to surface", cols)
+
+    @pytest.mark.parametrize("fixture, phase, tke", [
+        ("warm", "liquid", None),
+        ("mixed", "ice", 0.0),      # lo2 holds: the ice stays ice
+        ("mixed", "ice", 5.0),      # lo2 fails: ice re-split to liquid
+        ("mixed", "liquid", 0.0),   # liquid re-split to ice
+        ("mixed", "liquid", 5.0),
+        ("cold", "ice", None),
+    ])
+    def test_enthalpy_closes_with_convective_detrainment(
+            self, fixture, phase, tke):
+        """Detrained condensate in ``qc``/``qi`` keeps the identity exact (#941).
+
+        The fixture's condensate becomes the step-start state and
+        convection adds 4e-5 kg/kg of liquid or ice in the cloudy layers
+        (plus a clear layer above them). The re-split by ``lo2`` moves
+        mass between qc and qi with the fusion heat at the scheme's moist
+        cp, in either direction, so the identity holds whichever phase the
+        convection chose and whichever ``lo2`` decides.
+        """
+        if fixture == "warm":
+            cols = self._warm_liquid()
+        elif fixture == "mixed":
+            cols = self._wbf_mixed_phase(tke=tke)
+        else:
+            cols = self._cold_ice_to_surface()
+        T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke_col, inp = cols
+        nlev = T.shape[0]
+        cloudy = (qc + qi) > 0
+        first = int(jnp.argmax(cloudy))
+        layers = cloudy.at[max(first - 1, 0)].set(True)
+        det = jnp.where(layers, 4e-5, 0.0)
+        det_qc = det if phase == "liquid" else jnp.zeros(nlev)
+        det_qi = det if phase == "ice" else jnp.zeros(nlev)
+        cols = (T, q, p, qc + det_qc, qi + det_qi, qnc, qni,
+                jnp.where(layers, jnp.maximum(cf, 0.5), cf),
+                rho, dz, tke_col, inp)
+        self._assert_enthalpy_closes(
+            f"{fixture}/{phase}/tke={tke}", cols,
+            qc_m1=qc, qi_m1=qi, detrained_qc=det_qc, detrained_qi=det_qi)
 
     def test_enthalpy_closes_cloud_ice_above_freezing(self):
         """Cloud ice above 0 °C must melt exactly once.
@@ -2653,7 +2770,10 @@ class TestScavengingLedger2M:
         cirrus layer with NO cold-chain aggregation (cloud flag off below,
         few large crystals falling) must still report a positive in-cloud
         snow-formation ledger — the sedimenting ice is a scavenging
-        carrier in ECHAM-HAM's cloud_subm_2.
+        carrier in ECHAM-HAM's cloud_subm_2. The ledger is signed as in
+        ECHAM (mo_cloud_micro_2m.f90:2264-2265): the clear levels below,
+        which absorb part of the falling ice, carry negative entries, so the
+        sign is asserted over the source layer.
         """
         nlev = 16
         T = jnp.linspace(215.0, 260.0, nlev)   # all below freezing
@@ -2670,7 +2790,9 @@ class TestScavengingLedger2M:
         ledger = self._run(
             (T, q, p, qc, qi, qnc, qni, cf, rho, dz)
         )[self.LEDGER_INDEX]
-        assert float(jnp.sum(ledger.snow_formation)) > 0.0
+        assert float(jnp.min(ledger.snow_formation[3:6])) > 0.0
+        # Below the source, the absorbing levels are negative, not clipped.
+        assert float(jnp.min(ledger.snow_formation[6:])) < 0.0
 
     def test_term_publishes_ledger_to_cloud_data(self):
         """The composable term must write all seven ledger fields."""
@@ -2796,14 +2918,13 @@ class TestSchemeGradients2M:
     def test_gradients_are_finite_at_degenerate_operating_points(self):
         """Zero TKE, a clear column and zero droplet number stay finite.
 
-        ``scheme.py:302`` computes the updraft velocity as
-        ``sqrt(maximum(2*tke, 0.0))``, whose derivative at ``tke = 0`` would be
-        ``0.5 * inf``; the ECHAM term hands the scheme a literal zeros array
-        whenever no vertical-diffusion diagnostic is present, so that is the
-        default state. It is inert today only because the updraft velocity
-        reaches nothing differentiable — ``deposition_freezing.py:210`` uses it
-        solely inside a comparison — which is exactly why this fence is worth
-        having: it fails the day that changes.
+        ``cloud_utils.turbulent_updraft_velocity`` takes ``sqrt(TKE)``, whose
+        derivative at ``tke = 0`` is infinite, behind a double ``where``; the
+        ECHAM term hands the scheme a literal zeros array whenever no
+        vertical-diffusion diagnostic is present, so that is the default
+        state. The updraft reaches nothing differentiable today — it enters
+        the phase and WBF decisions only inside comparisons — which is exactly
+        why this fence is worth having: it fails the day that changes.
         """
         base = self._column()
         keys = ("temperature", "humidity", "qc", "qi", "qnc", "qni",
@@ -2831,3 +2952,187 @@ class TestSchemeGradients2M:
         ):
             for name, ok in finite_for(overrides).items():
                 assert ok, f"d/d{name} is not finite with {label}"
+
+
+class TestEchamUtilityWiring2M:
+    """The scheme computes ECHAM's utility fields and hands them to the processes.
+
+    ``cloud_utils_test.TestEchamUtilityFormulas2M`` pins each formula. These
+    tests run the whole column and watch the value each process routine
+    actually receives, so a scheme that computes one quantity and passes
+    another to a process fails here even when every formula is right. The
+    process-level riming test injects its viscosity directly, so this is the
+    only place the viscosity the scheme computes meets the collection
+    efficiency.
+
+    The fixture is a snowing mixed-phase deck at 250-266 K: liquid and a few
+    large crystals in every cloudy layer, vapour at ice saturation so there
+    is no deposition and hence no WBF glaciation to remove the liquid before
+    the snow meets it. The provisional temperature is 0.5 K above the
+    step-start one, so a field evaluated at the wrong time level shows.
+    """
+
+    NLEV = 12
+    CLOUDY = slice(3, 9)
+    DT_UPSTREAM = 0.5   # K, provisional minus step-start temperature
+
+    def _column(self):
+        from jcm.physics import thermodynamics
+        n = self.NLEV
+        temperature_m1 = jnp.linspace(245.0, 270.0, n)
+        pressure = jnp.linspace(4.0e4, 8.0e4, n)
+        air_density = pressure / (287.0 * temperature_m1)
+        q_ice_sat, _ = thermodynamics.saturation_specific_humidity_and_derivative(
+            temperature_m1, pressure, phase="ice")
+        qc = jnp.zeros(n).at[self.CLOUDY].set(3.0e-4)
+        qi = jnp.zeros(n).at[self.CLOUDY].set(1.0e-4)
+        cloud_fraction = jnp.where(qc > 0.0, 0.8, 0.0)
+        return dict(
+            temperature=temperature_m1 + self.DT_UPSTREAM,
+            temperature_m1=temperature_m1,
+            humidity=q_ice_sat, pressure=pressure,
+            qc=qc, qi=qi,
+            # Droplets well above cdnc_min, so riming is not number-gated;
+            # few crystals, so the ice radius sits on the ceffmax clip.
+            qnc=jnp.where(qc > 0.0, 2.0e8, 0.0),
+            qni=jnp.where(qi > 0.0, 1.0e4, 0.0),
+            cloud_fraction=cloud_fraction, air_density=air_density,
+            layer_thickness=jnp.full(n, 500.0),
+            tke=jnp.linspace(0.2, 1.5, n),
+        )
+
+    def _run(self, column):
+        from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
+        n = self.NLEV
+        return cloud_microphysics_2m(
+            column["temperature"], column["humidity"], column["pressure"],
+            column["qc"], column["qi"], column["qnc"], column["qni"],
+            column["cloud_fraction"], column["air_density"],
+            column["layer_thickness"], column["tke"],
+            jnp.full(n, 5.0e7), jnp.zeros(n), jnp.zeros(n),
+            1800.0, _P,
+            temperature_m1=column["temperature_m1"],
+        )
+
+    @staticmethod
+    def _spy(monkeypatch, module, name, pick):
+        """Wrap ``module.name`` to record ``pick(args, kwargs, out)`` per call."""
+        records = []
+        original = getattr(module, name)
+
+        def wrapper(*args, **kwargs):
+            out = original(*args, **kwargs)
+            jax.debug.callback(
+                lambda *vals: records.append([np.asarray(v) for v in vals]),
+                *pick(args, kwargs, out))
+            return out
+
+        monkeypatch.setattr(module, name, wrapper)
+        return records
+
+    def _level_of(self, column, rho):
+        """Level index of a recorded air density (each level's is distinct)."""
+        k = int(np.argmin(np.abs(np.asarray(column["air_density"]) - rho)))
+        np.testing.assert_allclose(column["air_density"][k], rho, rtol=1e-6)
+        return k
+
+    def test_riming_sees_air_viscosity_and_a_real_efficiency(self, monkeypatch):
+        """Snow collects supercooled droplets at ECHAM's efficiency, off the floor.
+
+        With the viscosity of air (~1.6e-5 kg/m/s) the snow Reynolds number is
+        ~20, the ``5 < Re < 40`` fit applies and the collection efficiency of
+        10-20 um droplets is ~0.8 (ECHAM ``precip_formation_cold``,
+        mo_cloud_micro_2m.f90:3216-3250). A viscosity three orders of
+        magnitude too large pins the efficiency at its 0.01 floor.
+        """
+        from jcm.physics.clouds.lohmann_2m import precip as precip_mod
+        records = self._spy(
+            monkeypatch, precip_mod, "riming_collection_efficiency",
+            # (riming_mask, air_density, rho_rcp, qc, N, viscosity, params)
+            lambda a, k, out: (a[0], a[1], a[5], out))
+        column = self._column()
+        self._run(column)
+        mask = np.array([bool(r[0]) for r in records])
+        assert mask.sum() >= 3, f"riming ran in {mask.sum()} layers"
+        t_m1 = np.asarray(column["temperature_m1"], dtype=np.float64)
+        for rimes, rho, viscosity, efficiency in records:
+            k = self._level_of(column, float(rho))
+            # mo_cloud_utils.f90:132 at the step-start temperature.
+            np.testing.assert_allclose(
+                float(viscosity), (1.512 + 0.0052 * (t_m1[k] - 233.15)) * 1e-5,
+                rtol=1e-5)
+            if rimes:
+                assert 0.5 < float(efficiency) <= 1.0, (k, float(efficiency))
+
+    def test_ice_sedimentation_sees_echam_paaa(self, monkeypatch):
+        """The fall-speed factor handed to sedimentation is ECHAM's ``paaa``."""
+        from jcm.physics.clouds.lohmann_2m import scheme as scheme_mod
+        records = self._spy(
+            monkeypatch, scheme_mod, "sedimentation_ice",
+            # (cf, air_density_correction, dp, rho, ...)
+            lambda a, k, out: (a[1], a[3]))
+        column = self._column()
+        self._run(column)
+        p = np.asarray(column["pressure"], dtype=np.float64)
+        t_m1 = np.asarray(column["temperature_m1"], dtype=np.float64)
+        # mo_cloud_utils.f90:129 at (papm1, ptm1), evaluated in float64.
+        expected = (p / 30000.0) ** (-0.178) * (t_m1 / 233.0) ** (-0.394)
+        assert len(records) == self.NLEV
+        seen = set()
+        for factor, rho in records:
+            k = self._level_of(column, float(rho))
+            seen.add(k)
+            np.testing.assert_allclose(float(factor), expected[k], rtol=1e-5)
+        assert seen == set(range(self.NLEV))
+
+    def test_phase_criterion_sees_echam_turbulent_updraft(self, monkeypatch):
+        """``100·0.7·sqrt(TKE)`` cm/s, and 0 at the lowest level."""
+        from jcm.physics.clouds.lohmann_2m import scheme as scheme_mod
+        records = self._spy(
+            monkeypatch, scheme_mod, "mixed_phase_deposition_and_corrections",
+            # (pressure, ..., updraft_velocity is positional arg 17)
+            lambda a, k, out: (a[0], a[17]))
+        column = self._column()
+        self._run(column)
+        got = {round(float(r[0])): float(r[1]) for r in records}
+        tke = np.asarray(column["tke"], dtype=np.float64)
+        expected = 70.0 * np.sqrt(tke)
+        expected[-1] = 0.0          # levels are top-first
+        p = np.asarray(column["pressure"])
+        assert len(got) == self.NLEV
+        for k in range(self.NLEV):
+            np.testing.assert_allclose(
+                got[round(float(p[k]))], expected[k], rtol=1e-5, atol=1e-6)
+
+    def test_wbf_threshold_uses_schumann_radius(self, monkeypatch):
+        """Every WBF threshold gets 0.9·r_eff, not the plate ``zrih`` radius.
+
+        The fixture's crystals are large enough that r_eff sits on the
+        150 um clip, where ECHAM's radius for this threshold is 135 um
+        (``effective_2_volmean_radius_param_Schuman_2011``) and the
+        aggregation radius ``zrih`` would be 45.6 um. The threshold is
+        evaluated four times per level: the section-1 detrainment criterion
+        ``lo2_2d`` (mo_cloud_micro_2m.f90:872-885, one vectorised call over
+        the column before the sweep), the section-4 ``lo2`` and the WBF gate
+        inside the sweep, and the section-5 ``lo2`` inside
+        ``mixed_phase_deposition_and_corrections``.
+        """
+        from jcm.physics.clouds.lohmann_2m import deposition_freezing as df_mod
+        from jcm.physics.clouds.lohmann_2m import scheme as scheme_mod
+        pick = lambda a, k, out: (k["ice_radius"],)  # noqa: E731
+        in_scheme = self._spy(monkeypatch, scheme_mod, "threshold_vert_vel", pick)
+        in_section5 = self._spy(monkeypatch, df_mod, "threshold_vert_vel", pick)
+        self._run(self._column())
+        for name, records in (("scheme", in_scheme), ("section 5", in_section5)):
+            # The section-1 call records the whole column at once; the
+            # per-level calls inside the sweep record one value each.
+            radius = np.concatenate([np.ravel(r[0]) for r in records])
+            expected_calls = 2 * self.NLEV + 1 if name == "scheme" else self.NLEV
+            expected_values = 3 * self.NLEV if name == "scheme" else self.NLEV
+            assert len(records) == expected_calls, (name, len(records))
+            assert len(radius) == expected_values, (name, len(radius))
+            np.testing.assert_allclose(radius.max(), 1.35e-4, rtol=1e-5,
+                                       err_msg=name)
+            # Ice-free levels sit on the lower clip, 0.9 x 10 um.
+            np.testing.assert_allclose(radius.min(), 9.0e-6, rtol=1e-5,
+                                       err_msg=name)

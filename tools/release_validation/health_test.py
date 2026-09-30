@@ -295,3 +295,39 @@ class TestBandPlacement:
         out = capsys.readouterr().out
         assert "PASS  cloud_cover = 0.45" in out
         assert status == 0
+
+
+class TestJsonReport:
+    """``--json`` carries the same numbers and verdicts the text report prints."""
+
+    def test_json_mirrors_the_printed_gates(self, tmp_path, monkeypatch,
+                                            capsys):
+        import json
+        (tmp_path / "run").mkdir()
+        run_dir = _write_run(tmp_path / "run", radiation_cover=0.71)
+        out_json = tmp_path / "health.json"
+        monkeypatch.setattr(sys, "argv",
+                            ["health.py", run_dir, "--json", str(out_json)])
+        status = H.main()
+        report = json.loads(out_json.read_text())
+        gates = {g["name"]: g for g in report["gates"]}
+        assert status == 0 and report["overall"] == "PASS"
+        assert gates["cloud_cover"]["value"] == pytest.approx(_MAXRANDOM)
+        assert (gates["cloud_cover"]["lo"], gates["cloud_cover"]["hi"]) == \
+            H.RANGES["cloud_cover"]
+        assert gates["precip_mm_day"]["value"] == pytest.approx(3.0)
+        assert gates["nan_scan"]["pass"] is True
+        assert report["info"]["cloud_cover_colmax"] == pytest.approx(_COLMAX)
+
+    def test_json_records_a_failure(self, tmp_path, monkeypatch, capsys):
+        import json
+        (tmp_path / "run").mkdir()
+        run_dir = _write_run(tmp_path / "run",
+                             profile=np.zeros(len(_PROFILE)))
+        out_json = tmp_path / "health.json"
+        monkeypatch.setattr(sys, "argv",
+                            ["health.py", run_dir, "--json", str(out_json)])
+        assert H.main() == 1
+        report = json.loads(out_json.read_text())
+        assert report["overall"] == "FAIL"
+        assert not {g["name"]: g for g in report["gates"]}["cloud_cover"]["pass"]

@@ -75,9 +75,7 @@ class TestCloudRadiativeEffectActive(unittest.TestCase):
             tracers={"qc": broadcast(qc_col), "qi": jnp.zeros(shape)},
         )
 
-        model._final_dycore_state = model._prepare_initial_dycore_state(
-            physics_state=initial,
-        )
+        model.bootstrap_state(initial)
         # One 30-min step: radiation runs on the seeded state, and the
         # unsupported blob hasn't yet rained/evaporated away (measured: it
         # decays on a ~30-60 min timescale with no dynamical resupply, which

@@ -89,7 +89,7 @@ def test_era5_state_reexport_is_accepted_by_run(monkeypatch):
     assert isinstance(state, PhysicsState)
 
     # model.run accepts the returned gridpoint state and integrates it.
-    dt_days = 180.0 / 86400.0
+    dt_days = float(model.dt_si.m) / 86400.0
     model.run(initial_state=state, save_interval=dt_days, total_time=dt_days)
     final = model.dycore.to_physics_state(model.dycore_state)
     assert np.all(np.isfinite(np.asarray(final.temperature)))
@@ -123,7 +123,10 @@ def test_checkpoint_state_returns_state_and_resets_clock(tmp_path):
     stamped_carry = jax.tree_util.tree_map(
         lambda x: jnp.full_like(x, 0.0456), donor.physics_carry
     )
-    donor.restore_state(stamped_state, stamped_carry)
+    import jax_datetime as jdt
+    donor.restore_state(stamped_state, stamped_carry,
+                        time=donor.start_time + jdt.Timedelta(days=5),
+                        step=int(5 * 86400 / donor.dt_si.m))
     ckpt = tmp_path / "donor.ckpt"
     save_checkpoint(donor, ckpt, elapsed_days=5.0)
 
@@ -152,7 +155,7 @@ def test_checkpoint_state_returns_state_and_resets_clock(tmp_path):
         return original(initial_state, forcing, **kwargs)
 
     warm.run_from_state_with_carry = spy
-    dt_days = 180.0 / 86400.0
+    dt_days = float(warm.dt_si.m) / 86400.0
     warm.run(
         initial_state=state, initial_physics_state=physics_carry,
         save_interval=dt_days, total_time=dt_days,

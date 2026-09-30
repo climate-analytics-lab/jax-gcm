@@ -112,8 +112,8 @@ top-first. So the inference is checked against the file's own pressures
 surface entry must be within a factor of two of the surface pressure the state
 itself carries. Either check failing raises rather than handing physics a
 column whose temperature belongs to one level and whose pressure belongs to
-another. Files with no `pressure_full` — a trimmed restart such as
-`spinup_state.nc` — fall back to the `level` inference alone.
+another. Files with no `pressure_full` — a trimmed restart holding only the
+prognostic fields — fall back to the `level` inference alone.
 
 The factor of two is deliberately loose: the lowest full level sits within a
 percent or so of the surface, while an inverted column misses by the ratio of

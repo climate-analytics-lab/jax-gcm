@@ -9,12 +9,13 @@ for every supported grid, built by `jcm/data/mirror/` (see
 prefetched on the login node at generation time, and the local cache
 paths are baked into the job script — compute nodes need no internet.
 
-Per Gaussian grid `<g>` (t63, t106):
+Per Gaussian grid `<g>` (t63, t106, t127, t255 — yearly transients t63/t106 only):
 
     bundles/<g>/terrain.nc                 GMTED2010 SSO + fractional ERA5 land mask
     bundles/<g>/forcing_{pd,pi}.nc         PCMDI-AMIP SST/ice + ERA5 land climatology
     bundles/<g>/emissions_{pd,pi}.nc       CEDS+BB4CMIP7, 4 super-sectors x 3 species
-    bundles/<g>/dms.nc, dust.nc            Lana 2011; 0.23x0.31 deg erodibility
+    bundles/<g>/dms.nc                     Lana 2011 seawater DMS
+    bundles/<g>/dust_*.nc                  five Tegen/HAMMOZ inputs (native T63/T127/T255)
     bundles/<g>_<l>/ozone_{pd,pi}.nc       FZJ CMIP7, pre-interpolated per level count
     bundles/<g>_<l>/oxidants_{pd,pi}.nc    WACCM CCMI full-lid, per level count
 

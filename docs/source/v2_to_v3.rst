@@ -13,10 +13,10 @@ coming from v1, read :doc:`v1_to_v2` first.
    :local:
    :depth: 1
 
-Read this first: the three changes that silently alter results
---------------------------------------------------------------
+Read this first: the four changes that silently alter results
+-------------------------------------------------------------
 
-Most items below fail loudly. These three do not, so check them before
+Most items below fail loudly. These four do not, so check them before
 comparing any v3 number against a v2 one.
 
 1. **Specific humidity is kg/kg everywhere** (:ref:`v3-q-units`). A v2-written
@@ -31,6 +31,9 @@ comparing any v3 number against a v2 one.
    **semi-Lagrangian tracer transport now has a mass fixer on by default**
    (:ref:`v3-mass-fixer`). Both change the climate of an unchanged
    configuration.
+4. **A bare** ``echam_physics()`` **composes RRTMGP**, not the grey two-stream
+   (:ref:`v3-echam-radiation`). A v2 script that relied on the factory default
+   now runs the real ECHAM radiation — slower, and a different climate.
 
 Installation and dependencies
 -----------------------------
@@ -328,15 +331,25 @@ through ``hydra.searchpath: [pkg://jcm.config]`` must also change
 ``+experiment@<node>=<name>`` to ``+configuration@<node>=<name>``; JAX-ESM
 composes ``+experiment@atmosphere=<name>`` and has to move in the same cycle.
 
-``+advection=`` is gone
-^^^^^^^^^^^^^^^^^^^^^^^
+``+advection=`` is gone; ``dycore.advection`` replaces it
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-Semi-Lagrangian tracer transport is the only transport on the Dinosaur
-backend; the Eulerian spectral path was removed because it rang negative on
-sharp emission sources and NaN'd the aerosol microphysics.
-``+advection=semi_lagrangian`` and ``+advection=eulerian`` are both rejected,
-and the backend refuses to build on a dinosaur without the SL classes, naming
-what to install.
+Semi-Lagrangian is the Dinosaur backend's default transport, and the one the
+automatic (physics-decided) choice always uses for tracer-carrying physics:
+Eulerian spectral transport rang negative on sharp emission sources and NaN'd
+the aerosol microphysics. An explicit Eulerian request with tracers is not an
+error — it runs, but logs a warning. The top-level ``+advection=...`` config
+group no longer exists, and the backend refuses to build on a dinosaur
+without the SL classes, naming what to install.
+
+The scheme is now ``DinosaurDycore(advection=...)`` / ``dycore.advection``,
+default ``None`` / ``null`` = *the physics decides*. SPEEDY declares the
+Eulerian spectral core it was formulated on (it carries no extra tracers,
+and semi-Lagrangian costs ~4x its CPU step for nothing), so **SPEEDY runs
+Eulerian exactly as in 2.x** with no code change. ECHAM, JAM, Held–Suarez and
+any SPEEDY composition that adds tracers run semi-Lagrangian; an explicit
+``eulerian`` with tracer-carrying physics runs but warns. See
+:doc:`design/dinosaur_transport_selection`.
 
 ``diffusion.tracer_positivity`` is **not** gone. It survives as a
 mass-conserving hole-filler at the dynamics-to-physics boundary, rather than
@@ -362,13 +375,18 @@ A shape consequence worth knowing if you index a dycore-native state:
 ``specific_humidity`` stays **modal** for the implicit q↔Tᵥ coupling while
 every extra tracer is **nodal**, so the two no longer share a shape.
 
-``physics=echam`` composes RRTMGP
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+.. _v3-echam-radiation:
 
-``physics=echam`` used to compose the grey two-stream scheme, which is an
-unsupported pairing (the supported ones are grey-for-SPEEDY and
-RRTMGP-for-ECHAM). It now composes RRTMGP — and because that made the separate
-``echam-rrtmgp`` group redundant, **that group was deleted**:
+ECHAM composes RRTMGP from both doors; ``"grey"`` is rejected
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The grey two-stream radiation is an idealized scheme — in the same class as
+Betts-Miller convection — with no ECHAM reference and no validation in an ECHAM
+composition. v2 composed it into the ECHAM stack from both doors
+(``physics=echam`` and a bare ``echam_physics()``). In v3 both compose RRTMGP.
+
+On the CLI, ``physics=echam`` is the RRTMGP term list, so the separate
+``echam-rrtmgp`` group was redundant and **was deleted**:
 
 .. code-block:: console
 
@@ -376,14 +394,29 @@ RRTMGP-for-ECHAM). It now composes RRTMGP — and because that made the separate
    $ python -m jcm.main physics=echam          # v3 — the same term list
 
 (The ``+configuration=t63-echam-rrtmgp`` *configuration* preset is a different
-group and still exists.) **There is deliberately no CLI route to a grey-ECHAM
-composition.** The Python factory still defaults to grey for the cheap A/B, so
-the two doors disagree on purpose:
+group and still exists.) The factory-built presets (``echam-jam*``,
+``echam-forced-flux``) reject ``physics.radiation_scheme=grey``.
+
+In Python, ``echam_physics()`` defaults to ``radiation_scheme="rrtmgp"``; the
+accepted strings are ``"rrtmgp"`` and ``"emulated"`` (the neural-network
+emulator of RRTMGP, the fast option), and ``"grey"`` raises ``ValueError``.
+A study that wants the idealized scheme in the ECHAM stack composes it
+explicitly, as a term:
 
 .. code-block:: python
 
-   echam_physics()                          # grey (unchanged, cheap for tests)
-   echam_physics(radiation_scheme="rrtmgp")  # what physics=echam now gives you
+   from jcm.physics.echam.echam_terms import echam_physics
+   from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
+
+   echam_physics()                                           # RRTMGP
+   echam_physics(radiation_scheme="grey")                    # v3: ValueError
+   echam_physics(radiation_scheme=GreyTwoStreamRadiation())  # explicit, idealized
+
+Radiation parameters go to the term's constructor
+(``GreyTwoStreamRadiation(params=RadiationParameters.default(...))``); passing
+``radiation=`` alongside a term instance is rejected, since the instance carries
+its own. Tests that only need a cheap composition use
+``jcm.physics.echam.testing.idealized_echam_physics``, which does exactly this.
 
 JAM no longer composes MACv2-SP
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -442,6 +475,122 @@ plus ``aod_sw_per_band`` / ``aod_lw_per_band``). Note that
 ``jam_optics.aod_550`` is a band-centre approximation, distinct from the
 Mie-based ``od550aer`` of the ``aerocom_optics`` pass.
 
+.. _v3-align:
+
+Forcing files must declare climatology or dated
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+v2's ``align: auto`` looked at a file's time axis and treated anything
+spanning at most ~one year as a climatology, replaying it every model year. A
+year of monthly samples from one real year looks exactly like a monthly
+climatology, so a one-year transient archive was silently recycled. v3 does
+not guess (#884): ``auto`` resolves only data-mirror and packaged products,
+from the kind the mirror manifest records, and **raises for any other file**.
+
+What now errors, and the one-line fix:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - v2 usage
+     - v3 fix
+   * - ``forcing.file=/my/sst_clim.nc`` (align left ``auto``)
+     - add ``forcing.align=wrap_year`` (or ``by_date`` / ``by_date_interp``
+       for dated samples)
+   * - a user ``forcing.ozone_file`` / ``emissions_file`` / ``oxidants_file``
+     - add ``forcing.ozone_align=...`` / ``forcing.emissions_align=...``
+       (scalar, or one mode per list product) / ``forcing.oxidants_align=...``
+   * - ``forcing.prescribed_surface_flux.file`` with a time axis
+     - add ``forcing.prescribed_surface_flux.align=...``
+   * - ``forcing.prescribed_surface_flux`` with an interactive physics preset
+     - compose a forced-mode consumer (``physics=speedy-forced-flux`` /
+       ``echam-forced-flux``); without one the block is rejected, never
+       silently ignored
+   * - ``ForcingData.from_dataset(ds)`` with a time axis
+     - pass ``align_mode="wrap_year"`` (an in-memory dataset has no manifest
+       identity, so ``auto`` always raises)
+   * - ``ForcingData.from_file(path)`` / ``OzoneClimatology.from_file(path)``
+       / ``read_anthropogenic_emissions(ds)`` / ``read_prescribed_aerosol_emissions(ds)``
+       on a user file
+     - pass ``align_mode=...``
+
+``hf://`` mirror paths, their fetched Hugging Face cache files, and the files
+packaged under ``jcm/data/bc`` (the SPEEDY T30 and T63 climatologies) keep
+resolving under ``auto``; every shipped configuration and the ``amip`` /
+``era5`` presets are unchanged. The declared mode is also checked: a
+prescribed-flux file declared ``wrap_year`` must hold exactly twelve monthly
+samples January to December, a declared ozone climatology must have twelve
+months, and a date-aligned input must cover the run window
+(:ref:`v3-persist`).
+
+.. _v3-persist:
+
+Dated inputs must cover the run, or declare a hold
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+v2 looked up a dated (``by_date`` / ``by_date_interp``) input by clamping to
+its first or last sample outside its time axis, so a transient run past the
+end of its SST, ozone, emission or oxidant archive quietly reused the final
+record, and a ``{year}`` range past a product's ``available_years`` quietly
+reused the edge-year file. v3 applies the #884 rule to that too: what an input
+does outside its archive is **declared**, per input, never inferred.
+
+Each dated input has a ``persist`` knob next to its ``align`` knob:
+``forcing.persist`` (the surface file and the GHG series in it),
+``forcing.ozone_persist``, ``forcing.emissions_persist`` (a scalar, or one
+value per ``emissions_file`` product), ``forcing.oxidants_persist``,
+``forcing.macv2_persist`` and ``forcing.prescribed_surface_flux.persist``. The
+Python readers take the same ``persist=`` argument. There are two values:
+
+* ``strict`` (the default): the input must cover the run window, or the run
+  fails before it is compiled, and ``forcing.years`` outside the product's
+  available years fails at build time before anything is fetched. Every entry
+  point checks this: ``Model.run`` / ``resume`` / ``run_from_state``,
+  ``PrescribedStateModel.run``, and the CLI and ``jcm.configurations.load``
+  with the configured ``run.start_time`` + ``total_time`` window.
+* ``hold``: holding the edge samples (and the edge-year file) past the archive
+  is the intended experiment. jcm warns once, naming the input, its last
+  covered date and the run end, and records the policy in the output
+  provenance (``jcm_prov_dated_input_persistence``).
+
+``wrap_year`` climatologies cover every date and are unaffected. The covered
+span of an archive is its CF ``time_bnds`` when the reader has them, otherwise
+one end-sample interval of slack at each end, so a Jan-1…Dec-1 or mid-month
+monthly archive covers its calendar year
+(:doc:`design/forcing_time_semantics`).
+
+What now errors, and the fix:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - v2 usage
+     - v3 fix
+   * - a transient run past its archive's end (e.g. ``forcing=amip
+       forcing.years=[2020,2024]``, or emissions ``{year}`` files ending 2022
+       in a 2030 run)
+     - cover the run with data, or declare the hold:
+       ``forcing.persist=hold`` / ``forcing.ozone_persist=hold`` /
+       ``forcing.emissions_persist=hold`` / ``forcing.oxidants_persist=hold``
+   * - a dated file whose dates do not match ``run.start_time`` (e.g.
+       ``forcing.years=[1979,1983]`` left on the default 2000 start)
+     - set ``run.start_time`` to the period the file covers
+   * - ``ForcingData.from_file`` / ``OzoneClimatology.from_file`` /
+       ``read_anthropogenic_emissions`` / ``read_oxidant_vmr`` on a dated file
+       used past its end from Python
+     - pass ``persist="hold"`` (or ``ForcingData.from_bundles(...,
+       persist="hold")``)
+   * - ``forcing=macv2_sp`` in a year after the file's last real year (SPv2.1:
+       2023; v2 forward-filled the trailing fill years)
+     - ``forcing.macv2_persist=hold``
+
+``forcing=era5`` declares ``ozone_persist: hold``: its surface files run to 2024
+but the ozone bundles end in 2022, and holding 2022 ozone for 2023–24 is the
+preset's stated choice. Its transient emissions, if you add them, stay
+``strict``.
+
 Other config-surface changes
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -472,6 +621,101 @@ Other config-surface changes
   prognostic aerosol module with every emission input explicitly nulled;
   MACv2-SP on default all-ones weights; and transient by-date forcing composed
   with present-day JAM emission bundles.
+
+.. _v3-datetime:
+
+One real datetime clock
+-----------------------
+
+Model time now follows Gregorian dates, including February 29, at whole-second
+precision. Timezone-aware inputs are normalized to UTC; naive inputs use the
+same timeline. Days contain 86,400 seconds; leap-second timestamps are not
+supported. Replace
+``start_date`` with ``start_time`` and remove the ``calendar`` argument.
+Use exactly one of a fixed ``total_time`` or an absolute ``end_time``:
+
+.. code-block:: python
+
+   model = Model(..., start_time="2000-01-01")
+   daily = model.run(forcing=forcing, end_time="2001-01-01",
+                     save_interval="1D", output_averages=True)
+   monthly = daily.monthly_means()
+
+Numeric run durations remain days. Strings such as ``"6h"`` and ``"1D"``
+are fixed durations; ``"1 month"`` and ``"1 year"`` are rejected because
+months and years have different lengths. In Hydra, select an endpoint with
+``run.total_time=null run.end_time=2001-01-01``.
+
+Run and save durations must divide exactly into model steps, and the run must
+contain complete save intervals. An interval mean is labelled at the midpoint
+of its exact bounds, which may fall on a half second for an odd-length
+interval (e.g. a 1 s step with ``save_interval="3 seconds"``).
+
+Seasonal physics now evaluates January 1 at phase zero in every year. The v2
+default instead inherited an epoch-dependent offset (seven days on
+2000-01-01), so one-day ECHAM and longer climate fingerprints change even
+though the physics equations do not. The ECHAM regression shift was isolated
+by running the v3 integrator with the legacy phase before updating that
+reference; see `issue #876 <https://github.com/climate-analytics-lab/jax-gcm/issues/876>`_.
+
+Interval means include ``time_bounds`` and midpoint labels. Monthly means
+weight each contributing interval by its duration; snapshots cannot be
+converted into interval means after the run. Observers keep their own
+sampling: this helper aggregates only the primary output stream. See
+`issue #876 <https://github.com/climate-analytics-lab/jax-gcm/issues/876>`_
+for the forcing and partial-month contracts.
+
+Whether an input repeats every year or is dated is always declared
+(:ref:`v3-align`); the clock decides what each declared mode selects. A
+``wrap_year`` climatology is replayed on the real calendar: twelve records are
+January to December, each held from the 1st of its month (#805); a 365/366
+record table is a nominal-date daily climatology, where a 365-record table
+holds February 28 on February 29 and March 1 still selects March 1; any other
+length (e.g. MACv2-SP's weekly annual cycle) keeps equal fractions of the
+actual year. A climatology's own stamps are read only for their month and day,
+so idealised-calendar climatologies still load. Dated ``by_date`` /
+``by_date_interp`` input is placed on the exact clock: no-leap dated inputs
+retain their nominal date components, and ``by_date_interp`` interpolates
+across the actual bracketing dates, including a missing leap day. Unsupported
+transient 360-day and Julian axes are rejected at ingestion; preprocess those
+explicitly with xarray. Every dated input must cover the run window, or
+declare that holding its end samples is intended (:ref:`v3-persist`).
+
+Coupled output must use the shared public conversion instead of multiplying
+floating epoch days into nanoseconds:
+
+.. code-block:: python
+
+   from jcm.predictions import output_time_labels
+
+   # exact_times is a jax_datetime.Datetime axis shared by the components.
+   labels = output_time_labels(exact_times)
+   ocean = ocean.assign_coords(time=labels)
+
+The result is exact ``datetime64[ms]``; integer-second model labels are
+preserved, and interval midpoints are exact to the millisecond: an
+odd-length interval's midpoint falls on a half second and is represented
+exactly (``ModelPredictions.time_labels`` and ``to_xarray`` compute it from
+the exact bounds). Floating days-since-epoch input is rejected. The trajectory serializer uses
+the same conversion, preventing tiny timestamp differences from expanding
+an xarray merge into two interleaved axes (#862).
+
+A saved run now includes its exact datetime and integer step count. External
+couplers must preserve the complete ``RunState`` or pass ``time`` and ``step``
+explicitly to ``restore_state``. Dycore ``sim_time`` alone is insufficient.
+``run_from_state_with_carry`` now requires ``initial_time`` and
+``initial_step`` and returns ``(RunState, ModelPredictions)``; continue with
+all four fields of ``RunState`` (``dynamics``, ``physics``, ``time``, ``step``).
+See :doc:`advanced_features` for a complete external-stepper example.
+``run.mode=prescribed`` places each state at its own time. A dated state
+file (every v3 output) supplies the first state's time itself, so
+``run.start_time`` may be omitted; if it is set and differs, the config wins
+with a warning naming both times. An older output whose ``time`` axis is
+elapsed time carries no date and requires ``run.start_time``.
+Checkpoints predating the exact clock can only be imported as initial
+conditions (``as_initial_condition=True``), starting at the new model's
+``start_time``. Unstamped files additionally require the unit assertion
+explained below.
 
 .. _v3-checkpoints:
 
@@ -516,14 +760,14 @@ convention yourself, per leaf:
    from jcm.checkpoint import load_checkpoint
 
    # a pre-#824 ECHAM donor: its stored mass mixing ratios are 1000x small
-   load_checkpoint(model, path, unstamped_scale={
+   load_checkpoint(model, path, as_initial_condition=True, unstamped_scale={
        "tracers.specific_humidity": 1000.0,
        "tracers.qc": 1000.0,
        "tracers.qi": 1000.0,
    })
 
    # or, having checked the file is already in the current convention:
-   load_checkpoint(model, path, unstamped_scale={})
+   load_checkpoint(model, path, as_initial_condition=True, unstamped_scale={})
 
 and, for a *fresh start from* a saved state, from the CLI through the ``init``
 group:
@@ -657,6 +901,48 @@ deliberate behaviour change, not a side effect. Opt out with:
 Per-species ``budget_mass_<sp>`` / ``budget_ptend_<sp>`` / ``budget_dyn_<sp>``
 diagnostics and one greppable log line per species per chunk make the residual
 visible.
+
+ECHAM surface albedo follows ECHAM 6.3
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The ECHAM land albedo was a constant 0.15 (visible) / 0.25 (near-IR)
+everywhere, ice sheets included, and ignored the background albedo and snow
+cover the forcing carries. It is now ECHAM 6.3's per-tile albedo (background
+plus prescribed snow cover, forest masking and glaciers over land;
+temperature-dependent sea ice; zenith-dependent open water; see
+:doc:`science/surface`). Over a 5-day January ``t63-echam-1m`` run the global
+planetary albedo rises **0.274 → 0.300-0.302** and TOA absorbed solar falls
+**251.2 → 241.6-242.1 W/m²**; ice-sheet surface albedo goes **0.22 → 0.85** and
+snow-covered Northern-Hemisphere land **0.22 → 0.50-0.64** (the range spans
+bundles with and without the new forest map). Any tuning of the TOA balance
+or shortwave cloud radiative effect done before this change absorbed that
+bias and should be redone.
+
+Code that built ``SurfaceOpticsParameters(land_albedo_vis=...)`` must move
+the value to the new structure, e.g.
+``SurfaceOpticsParameters(albedo=EchamSurfaceAlbedoParameters(snow_albedo_max=0.75))``;
+the emissivities are unchanged.
+
+Cloud droplets follow ECHAM
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+RRTMGP and the emulator form the droplet and crystal radii inside the
+radiation call from the step's condensate and droplet/crystal number, as
+ECHAM's ``cloud_optics`` does, instead of reading the microphysics' radius
+one step late with an 11 µm fallback wherever it was missing; and the 1M
+radiation and 1M autoconversion both see ECHAM's prescribed droplet profile
+(fewer droplets than the uniform 100 cm⁻³ the 1M scheme used). Over days
+5-10 of a ``t63-echam-1m`` A/B the global-mean TOA net rises by
+**3.4 W/m²** (2.1 from the radius alone), almost all of it a weaker
+shortwave cloud radiative effect (**+4.1 W/m²**), and the liquid water path
+falls by **16 %** (32 % over ocean) as the autoconversion speeds up;
+precipitation does not change. On ``t63-echam-2m`` the TOA net moves by less
+than the run-to-run spread (0.1 W/m²). Ten days measure the immediate
+effect, not a climate. Any tuning of the 1M cloud water or shortwave cloud
+radiative effect done before this change should be redone. Code that passed
+``MicrophysicsParameters.default(base_cdnc=...)`` must drop the argument;
+direct callers of ``radiation_scheme_rrtmgp`` pass the radii from
+``jcm.physics.radiation.cloud_optics.radiation_effective_radii``.
 
 SPEEDY shortwave heating is applied every step
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -809,6 +1095,10 @@ free.
    * - Betts-Miller / RCE
      - Python-only (``jcm.rce.rce_physics``); unit tests, no Hydra group
      - No packaged configuration
+   * - Grey two-stream radiation (idealized)
+     - Python-only, composed explicitly as a term (``jcm.rce``, cheap tests);
+       unit tests, no Hydra group
+     - No packaged configuration
 
 Betts-Miller is the default convection of the single-column RCE layer
 (``jcm.rce``), which is a Python entry point rather than a Hydra group: no
@@ -817,6 +1107,11 @@ Betts-Miller is the default convection of the single-column RCE layer
 ``tools/release_validation/scm_check.py`` is **not** an RCE check despite
 borrowing ``jcm.rce``'s column setup — it drives ECHAM+JAM with Tiedtke
 convection on one prescribed column.
+
+The grey two-stream radiation is likewise an idealized scheme with no Hydra
+group: it is not an ECHAM radiation option (``echam_physics`` rejects
+``radiation_scheme="grey"``, :ref:`v3-echam-radiation`) and is composed only
+explicitly, as a ``GreyTwoStreamRadiation`` term.
 
 "Release-validated" means a member of ``tools/release_validation/matrix.yaml``:
 a full A100 year with 5-day means, scored by ``health.py`` against TOA net,
@@ -932,41 +1227,37 @@ VMRs) while the ledger covers only ``specific_humidity`` and
 ``qc``/``qi``/``qr``/``qs``. JAM aerosol and gas tracers are deliberately
 **not** capped; their removal is bounded where it is produced.
 
-Native HAMMOZ dust inputs exist only at T63
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+No ne30 dust product; dust tuning is a T63 quantity
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-*Documented limitation (proposed) — #810, with the calibration half in #808.*
+*Documented limitation (proposed) — the calibration half follows #808.*
 
-The five HAMMOZ soil and source fields exist on disk only at T63. T106 is
-published as a **nearest-neighbour refinement** of T63 — the honest choice,
-since conservative regridding cannot refine a grid and the region mask is
-categorical, but not the native field HAMMOZ would use. So T106 gains
-resolution in the dynamics and none in the dust source, and the ``ndust = 3``
-tuning polynomial it feeds is itself fitted only up to T63.
+The five HAMMOZ soil and source fields are published natively at T63, T127 and
+T255 (the resolutions the ECHAM-HAMMOZ input pool ships), and T106 is
+conservatively coarsened from the T255 files, so every Gaussian grid carries a
+dust source at least as fine as its dynamics. The ``ndust = 3`` tuning
+polynomial those maps feed is fitted only up to T63, and T127/T255 are
+supported-but-untuned grids.
 
 There is **no ne30 dust product at all**, so ``auto`` resolves to nothing on
 the pySES backend: a shipped ``+configuration=ma-ne30-l{47,95}`` run has the
 dust term composed but inert, leaving online Gong sea salt as its only aerosol
 source. A file supplied by hand is sampled onto the physics columns —
-continuous fields bilinearly, the categorical region mask nearest-neighbour —
-so an ne30 dust field is two removes from a native one. See
-:doc:`science/boundary_conditions` and :doc:`science/aerosol`.
+continuous fields bilinearly, the categorical region mask nearest-neighbour.
+See :doc:`science/boundary_conditions` and :doc:`science/aerosol`.
 
 Validation gaps in the release matrix
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 *Documented limitation (proposed) — #638.*
 
-Three things the matrix does not currently establish, each worth knowing before
+Two things the matrix does not currently establish, each worth knowing before
 quoting a validated configuration:
 
 * the **T106 members' multi-GPU mesh configurations have never been run for a
   full year**;
 * ``echam-jam`` at **L95** needs L95 oxidant and ozone inputs staged, which is
-  a data dependency rather than a code one;
-* the single-column JAM check (``scm_check.py``) composes **grey** radiation,
-  while the stated pairing policy for the matrix is RRTMGP for ECHAM. Either
-  the check or the policy should move.
+  a data dependency rather than a code one.
 
 A ``FAIL`` from ``health.py`` is also a recorded verdict rather than
 automatically a blocker: several members fail a gate by design until the

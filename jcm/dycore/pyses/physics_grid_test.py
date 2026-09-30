@@ -1,6 +1,7 @@
 """Tests for the pg2 finite-volume physics grid (GLL ↔ column bridge).
 
-Skipped automatically when the optional ``pyses`` dependency is missing.
+Needs the optional ``pyses`` extra (``requires_extra``): skipped without it,
+and run by the ``extras-tests`` CI job, which installs it.
 Run on CPU: ``JAX_PLATFORMS=cpu pytest jcm/dycore/pyses -q``.
 """
 
@@ -15,11 +16,11 @@ os.environ.setdefault("PYSES_USE_CPU", "1")
 import numpy as np
 import pytest
 
-pytest.importorskip("pyses")
-
 import jax.numpy as jnp
 
 from jcm.dycore.pyses.physics_grid import FVPhysicsGrid
+
+pytestmark = pytest.mark.requires_extra("pyses")
 
 
 class TestFVPhysicsGrid(unittest.TestCase):

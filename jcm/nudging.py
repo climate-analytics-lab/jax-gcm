@@ -10,7 +10,7 @@ The reference target rides on :class:`ForcingData` like every other
 per-step input: the user assembles a :class:`NudgingTarget` (static or
 :class:`TimeSeries`-backed) and attaches it via
 ``forcing.copy(nudging_target=target)``. The Model slices it per step
-inside ``forcing.select(date, calendar)`` so :class:`NudgingTerm` only
+inside ``forcing.select(date)`` so :class:`NudgingTerm` only
 ever sees an already-current target — physics never touches the date.
 
 Per-variable, per-level relaxation timescales are configurable so the
@@ -55,7 +55,7 @@ class NudgingTarget:
     must not be rescaled. Fields are on the ``(nlev, *horizontal_shape)`` layout via
     ``coords.horizontal.nodal_shape``. Each leaf can be a bare
     ``jnp.ndarray`` (static target) or a :class:`jcm.forcing.TimeSeries`
-    leaf with a leading time axis that ``select(date, calendar)`` slices
+    leaf with a leading time axis that ``select(date)`` slices
     per step.
 
     Use :meth:`from_dataset` to build one from an xarray Dataset of
@@ -75,7 +75,8 @@ class NudgingTarget:
     def from_dataset(cls, ds, *,
                      u_var: str = "u", v_var: str = "v",
                      T_var: str = "T", q_var: str = "q",
-                     time_var: Optional[str] = "time") -> "NudgingTarget":
+                     time_var: Optional[str] = "time",
+                     persist: str = "strict") -> "NudgingTarget":
         """Build a :class:`NudgingTarget` from an xarray Dataset.
 
         Args:
@@ -91,6 +92,11 @@ class NudgingTarget:
                 relaxation leaves humidity alone.
             time_var: Time coord name. ``None`` for static (climatology)
                 reference data.
+            persist: ``"strict"`` (default) | ``"hold"`` — the declared
+                out-of-range policy of a time-varying target: a run outside
+                its time axis fails at start under ``"strict"``
+                (:func:`jcm.forcing.check_forcing_coverage`, #900), and
+                ``"hold"`` declares holding the end samples intended.
 
         Returns:
             A :class:`NudgingTarget` ready to attach to a
@@ -98,7 +104,7 @@ class NudgingTarget:
 
         """
         import numpy as np
-        from jcm.forcing import _time_axis_seconds_from_ds
+        from jcm.forcing import _time_axis_from_ds
 
         is_time_varying = time_var is not None and time_var in ds.coords
 
@@ -117,10 +123,11 @@ class NudgingTarget:
         q = to_jax(q_var) if q_var in ds else None
 
         if is_time_varying:
-            time_seconds = _time_axis_seconds_from_ds(ds.rename({time_var: "time"}))
+            times = _time_axis_from_ds(ds.rename({time_var: "time"}))
 
             def ts(a):
-                return make_time_series(a, time_seconds, align_mode=BY_DATE)
+                return make_time_series(a, times, align_mode=BY_DATE,
+                                        persist=persist)
 
             return cls(u_wind=ts(u), v_wind=ts(v), temperature=ts(T),
                        specific_humidity=None if q is None else ts(q))
@@ -394,7 +401,7 @@ class NudgingTerm(PhysicsTerm):
         """Compute the per-step relaxation tendency.
 
         Reads ``forcing.nudging_target`` (already sliced by the Model via
-        ``forcing.select(date, calendar)``). If no target is wired,
+        ``forcing.select(date)``). If no target is wired,
         emits zero — keeping the term inert until forcing is set up.
         """
         target = getattr(forcing, "nudging_target", None)

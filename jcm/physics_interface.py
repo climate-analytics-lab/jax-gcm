@@ -243,6 +243,18 @@ class Physics:
         """
         return None
 
+    def preferred_advection(self) -> str | None:
+        """Transport scheme this physics asks the dycore for, or ``None``.
+
+        Consulted by :class:`~jcm.model.Model` for a dycore constructed with
+        ``advection=None`` (see
+        :meth:`jcm.dycore.dinosaur.dycore.DinosaurDycore.resolve_advection`).
+        ``"eulerian"`` is honoured only when the physics carries no extra
+        tracers; ``None`` means no preference (semi-Lagrangian).
+        ``ComposablePhysics`` aggregates per-term preferences.
+        """
+        return None
+
     def required_dycore_fields(self):
         """Names of dycore-supplied fields this physics needs each step.
 
@@ -331,6 +343,18 @@ class Physics:
             items = {}
             for key, val in obj.__dict__.items():
                 new_key = f"{parent_key}{sep}{key}" if parent_key else key
+                if val is None:
+                    # Declared-but-unfilled optional field (e.g. the
+                    # SurfaceExchange tile fields, #754): absence is
+                    # explicit, so the variable is simply omitted from
+                    # the output rather than published as a fake zero.
+                    continue
+                if isinstance(val, str):
+                    # Static string metadata (e.g. SurfaceExchange's
+                    # ``wind_reference``) is not an array variable; the
+                    # publishing term carries it into the netCDF as
+                    # variable attributes through its ``output_attrs``.
+                    continue
                 if isinstance(val, jax.Array):
                     items[new_key] = val
                 elif hasattr(val, "__dict__") and val.__dict__:

@@ -20,6 +20,42 @@ from jcm.physics.radiation.radiation_types import (
 from jcm.physics_interface import PhysicsTendency
 
 
+#: Diagnostics key under which the boundary-condition term publishes the
+#: surface optical properties of the CURRENT step (``albedo_vis``,
+#: ``albedo_nir``, ``emissivity``, each ``(ncols,)``). A radiation term reads
+#: them only when it solves, and publishes the values it solved with in
+#: ``RadiationData.surface_albedo_*`` / ``surface_emissivity``. Between solves
+#: those carry fields keep the last solve's values, so the published albedo,
+#: the reflected flux and the heating rate always describe one solve — as in
+#: ECHAM, whose radiation reads the surface albedo only at a radiation step
+#: (``trigrad``) and replays the transmissivities in between (``radheat``).
+#:
+#: Step-local: ``ComposablePhysics`` removes it before the diagnostics become
+#: the cross-step carry (``_STEP_LOCAL_KEYS``), so it is never checkpointed
+#: and a radiation term only ever sees the value published earlier in the
+#: same step.
+SURFACE_OPTICS_KEY = "_surface_optics"
+
+
+def surface_optics_for_solve(diagnostics: dict, ncols: int):
+    """``(albedo_vis, albedo_nir, emissivity)`` a radiation solve should use.
+
+    The current step's :data:`SURFACE_OPTICS_KEY` when a boundary-condition
+    term published it, else the values already on the ``radiation`` carry
+    (hosts that set the surface optics there directly, e.g. single-column
+    tests).
+    """
+    optics = diagnostics.get(SURFACE_OPTICS_KEY)
+    if optics is None:
+        radiation = diagnostics["radiation"]
+        return (radiation.surface_albedo_vis.reshape(ncols),
+                radiation.surface_albedo_nir.reshape(ncols),
+                radiation.surface_emissivity.reshape(ncols))
+    return (optics["albedo_vis"].reshape(ncols),
+            optics["albedo_nir"].reshape(ncols),
+            optics["emissivity"].reshape(ncols))
+
+
 def radiation_should_compute(
     diagnostics: dict, parameters: RadiationParameters,
 ) -> jnp.ndarray:
@@ -151,7 +187,9 @@ def rescale_cached_radiation(
 
 
 __all__ = [
+    "SURFACE_OPTICS_KEY",
     "cached_radiation_tendency",
+    "surface_optics_for_solve",
     "current_cos_zenith",
     "radiation_should_compute",
     "rescale_cached_radiation",

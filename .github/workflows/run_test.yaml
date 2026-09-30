@@ -1,32 +1,71 @@
 name: Run Unit Tests via Pytest
 
-# Documentation-only changes cannot change a test result, so they do not run
-# the suite. This matters here because a single push to a PR branch costs TWO
-# ~35-minute jobs (push -> fast tests, pull_request -> slow tests), and over
-# half the commits on a docs-heavy branch touch no testable code at all.
+# Both suites live in ONE workflow run so that a doomed run can be stopped
+# early. `needs:` can only order jobs *within a single run*, and the previous
+# layout ran the fast suite from the `push` event and the slow suite from the
+# `pull_request` event — two independent runs that nothing could sequence, so a
+# ruff error still burned the whole cost of both suites — measured on this
+# workflow's first green run, 67 min for the fast suite and 49 for the slow —
+# across two jobs already known to be pointless.
 #
-# This paths-ignore stays safe because run_docs.yaml covers everything it
-# skips: it runs the one stdlib-only suite docs/ carries
+# The shape is a cheap gate plus a kill switch, NOT a full chain. Ruff (~20 s)
+# gates both suites, which then run in PARALLEL: making the slow suite `needs:
+# fast-tests` would serialise them and roughly double the wall clock of every
+# green PR, which is too expensive for a saving that only materialises on red
+# runs. Instead `fast-tests` cancels the whole run when it fails, killing the
+# in-flight slow job. That reclaims the slow suite's *remaining* time rather
+# than all of it, but the failures worth catching early — import errors,
+# collection errors, a broken fixture — land in the first minute or two.
+#
+# `push` is limited to the integration branches because the fast suite now runs
+# from the `pull_request` event instead; both suites have to sit in the same
+# run for any of the above to work. So a branch with no open PR is not tested
+# by CI at all — run the `jcm-local-ci` gates before opening the PR, as that
+# skill says. The fast suite also now tests the *merge* commit rather than the
+# branch tip, which is the thing that actually lands.
+#
+# This also closes the fork-PR gap. A fork branch never pushes to this repo, so
+# under the old layout a fork PR ran *only* the slow suite and could show green
+# having never seen ruff or the fast suite — that is how #753 merged five ruff
+# errors and four failing gradient checks onto `dev` (#816). Driving both from
+# the `pull_request` event gates forks like anything else.
+#
+# Documentation-only changes cannot change a test result, so they do not run
+# the suite. This paths-ignore stays safe because run_docs.yaml covers
+# everything it skips: it runs the one stdlib-only suite docs/ carries
 # (docs/science_pointers_test.py, the model-description rot guard) AND a
 # strict full-tree `sphinx-build -W --keep-going` on every docs/** change
-# (#829). ruff also lints EVERYTHING on every push via run_linter.yaml —
-# including the Python under .claude/skills — so a syntax error in a skill
-# script is still caught in ~30 s.
+# (#829). ruff also lints EVERYTHING via run_linter.yaml — including the
+# Python under .claude/skills, which the paths-ignore below excludes — so a
+# syntax error in a skill script is still caught in ~30 s. That workflow runs
+# on `pull_request` as well as `push` precisely so the excluded paths are
+# still linted on a FORK PR, which never pushes to this repo; the `lint` job
+# here inherits the paths-ignore and so cannot cover them.
+#
+# The `lint` job is therefore a second, deliberately redundant ruff run whose
+# only purpose is to be the gate the test jobs can hang off — `needs:` cannot
+# reach a job in another workflow.
 #
 # Note the two events filter differently. `push` matches the files in the
 # pushed commits; `pull_request` matches the whole PR diff. So a docs commit
-# on a PR that also contains code skips the push job but still runs the PR
-# job — that is correct (the PR as a whole does touch code), and `[skip ci]`
-# in the commit message is the escape hatch for the rest.
+# on a PR that also contains code still runs the PR pipeline — that is correct
+# (the PR as a whole does touch code), and `[skip ci]` in the commit message is
+# the escape hatch for the rest.
 #
 # Safe because no branch has protection rules: with a required status check,
 # a filtered-out job never reports and the PR blocks forever on a pending
-# check. Revisit this if branch protection is ever enabled.
+# check. Revisit this if branch protection is ever enabled — and note the job
+# names: `lint`, `fast-tests`, the slow suite's `slow-tests-radiation`,
+# `slow-tests-rest` and `slow-coverage` (see the slow jobs below), and
+# `extras-tests`.
 # The two lists are duplicated deliberately: GitHub Actions does not resolve
 # YAML anchors/aliases in workflow files, so `&x`/`*x` would silently not do
 # what it looks like. Keep them in sync by hand.
 on:
   push:
+    branches:
+      - main
+      - dev
     paths-ignore:
       - '**.md'
       - 'docs/**'
@@ -50,98 +89,354 @@ concurrency:
   cancel-in-progress: true
 
 # Explicit so the rot-guard step's issue-state check works regardless of
-# the repo's default token setting; nothing here writes.
+# the repo's default token setting; only `fast-tests` writes, and it raises
+# its own job-level permissions to do so.
 permissions:
   contents: read
   issues: read
 
 jobs:
-  build:
+  # The gate. Deliberately independent of the install so it reports in well
+  # under a minute — a lint error should cost seconds, not a runner-hour.
+  lint:
     runs-on: ubuntu-latest
-    # ~2x the slowest recent green run (52 min). The default is 6 h, so a
-    # hung compile or a deadlocked test would otherwise burn a whole runner
-    # day before anyone noticed.
-    timeout-minutes: 110
-    strategy:
-      matrix:
-        python-version: ["3.11"]
-
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v3
-
-      # Job-local JAX/XLA compilation cache (nothing is uploaded or persisted
-      # — the dir dies with the runner). In today's single-process pytest run
-      # JAX's in-memory dedup already reuses identical modules, so this is
-      # mostly insurance: it keeps that reuse if the suite is ever split
-      # across processes (pytest-xdist) or a step restarts, at zero cost.
-      # Set via $GITHUB_ENV because the `runner` context is not available in
-      # job-level `env` (the workflow fails validation there).
-      # NOTE deliberately NOT actions/cache'd across runs: entries are
-      # native code and the cache key does not include CPU features, while
-      # this runner pool is CPU-heterogeneous — a cross-machine hit could
-      # be an illegal-instruction crash, not just a miss.
-      - name: Enable job-local JAX compilation cache
-        run: echo "JAX_COMPILATION_CACHE_DIR=$RUNNER_TEMP/jax-cache" >> "$GITHUB_ENV"
-
-      - name: Set up Python ${{ matrix.python-version }}
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: ${{ matrix.python-version }}
-          # Cache the wheel downloads. jax/jaxlib and the scientific stack are
-          # a large, almost-never-changing install repeated on every job, and
-          # a PR branch push runs two jobs. Keyed on requirements.txt, so a
-          # dependency change invalidates it automatically. Unlike the path
-          # filter this costs no coverage at all — it speeds up the runs that
-          # DO need to happen.
-          cache: 'pip'
-          cache-dependency-path: requirements.txt
+          python-version: '3.11'
+      - name: Install Ruff
+        run: pip install ruff==0.15.17  # keep in sync with run_linter.yaml
+      - name: Run Ruff
+        run: ruff check .
 
-      - name: Install dependencies
+  fast-tests:
+    needs: lint
+    runs-on: ubuntu-latest
+    # The default is 6 h, so a hung compile or a deadlocked test would
+    # otherwise burn a whole runner day before anyone noticed. 110 was ~2x the
+    # then-slowest green run (52 min); this job has since been measured at 67
+    # min, so the headroom is nearer 1.6x — raise it if the suite grows again.
+    timeout-minutes: 110
+    permissions:
+      contents: read
+      actions: write  # for the cancel step below
+    steps:
+      - uses: actions/checkout@v3
+      # Local composite action, so it resolves only after checkout.
+      - uses: ./.github/actions/setup-jcm
+
+      # Parallelised because the suite is XLA-COMPILE bound, not CPU bound in
+      # the usual sense: 87 of ~3100 tests account for 53% of the wall clock
+      # while operating on arrays of a few dozen elements, and 2556 tests
+      # under a second together account for 6 minutes of 65. That cost is
+      # tracing and compilation, which is independent per test and largely
+      # single-threaded, so it parallelises nearly linearly.
+      #
+      # `--dist loadscope` keeps a whole class on one worker. Tests in a class
+      # share fixtures and shapes and therefore reuse each other's compiled
+      # executables (docs/source/design/test_suite_memory.md); splitting a
+      # class across workers would make each recompile, which is the very cost
+      # being parallelised away.
+      #
+      # `-n auto` resolves to 2 workers on this runner class (the log says
+      # `created: 2/2 workers`), and that is the whole ceiling: 67 min serial
+      # -> 35 min measured, i.e. 1.91x on 2 workers, near-perfect linear
+      # scaling. Nothing here is inefficient — the suite is simply limited by
+      # core count, so a larger runner class would keep buying time roughly
+      # linearly if that trade is ever worth the money.
+      #
+      # The cache budget is tightened because each worker retains its OWN
+      # executables, and a heavy module peaks near 5 GB under the default 1 GB
+      # growth budget (docs/source/design/test_suite_memory.md) — two of those
+      # do not fit the standard runner. That failure is silent: a worker
+      # killed by the ceiling surfaces as `worker gwN crashed` and an
+      # arbitrary set of failures (#704), never as an honest OOM. The tighter
+      # budget makes each worker drop caches sooner, trading a little
+      # recompilation for headroom. Revisit BOTH knobs together if the runner
+      # class changes: `-n auto` scales workers with CPU count, and memory
+      # does not follow it.
+      #
+      # `--durations` so the next person asking "why is this slow?" reads it
+      # off the log instead of reconstructing it from line timestamps.
+      # `-s` is gone: under xdist, uncaptured output from N workers interleaves
+      # into noise, and captured output is still shown for failures.
+      - name: Test with pytest (fast suite)
+        id: fast-suite
+        env:
+          JCM_TEST_CACHE_GROWTH_MB: 256
         run: |
-          python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          pip install -e .
+          pytest -v -n auto --dist loadscope --durations=25 \
+            -m "not slow" --cov=jcm --cov-fail-under=90
 
-      # run fast tests when triggered by a push 
-      - name: Test with pytest (no slow tests on push)
-        if: github.event_name == 'push'
-        run: |
-          pytest -v -s -m "not slow" --cov=jcm --cov-fail-under=90
-
-      # Same belt as the PR job's floor below, against the base .coveragerc.
-      - name: Enforce fast-test coverage floor (push)
-        if: github.event_name == 'push'
+      # Same belt as the slow job's floor below, against the base .coveragerc.
+      - name: Enforce fast-test coverage floor
         run: |
           coverage report --fail-under=90
 
-      # run slow tests when triggered by a push to an open PR
-      # Uses .coveragerc-pr which omits utility / orchestration modules
-      # already well-covered by the push-mode fast-test suite, so the
-      # 80% threshold reflects main-path integration coverage.
-      # The PR-side pytest is `-m slow`, which never collects the stdlib
+      # Every fast-suite test failure is also a failure of the slow suite, ~35
+      # minutes later, so stop paying for it the moment we know. There is no
+      # REST endpoint to cancel a single job, so cancelling the run is the only
+      # way to reach a sibling that is already in progress — which takes
+      # `extras-tests` down too: its result cannot make a PR with a failing
+      # fast suite green, so its remaining time is spent for nothing.
+      #
+      # Two deliberate narrowings, because this step trades a signal for time:
+      #
+      # `pull_request` ONLY. On a push to main/dev there is no slow job to
+      # cancel (it is skipped), so the cancel would buy little (the extras
+      # job's remaining time) and cost the
+      # failure notification — GitHub emails on workflow failure but not on
+      # cancellation, and with `cancel-in-progress` on, a cancelled run on dev
+      # is indistinguishable from one superseded by the next push. A red dev
+      # would land silently, which is the failure class this workflow exists
+      # to catch.
+      #
+      # Keyed on the pytest step, not on `failure()`. `failure()` is true for
+      # a failed checkout or a transient `pip install` too, and cancelling a
+      # slow job that would have passed because PyPI blipped loses both
+      # results instead of none. Only a genuine test failure implies the slow
+      # suite is doomed.
+      #
+      # Accepted cost: the cancel takes THIS job down with the run, so
+      # `fast-tests` reports as cancelled rather than failed. The failed step
+      # is still red in the log, and `gh pr checks` buckets cancelled as a
+      # failure, so the PR is unambiguously not green.
+      #
+      # Best-effort: a `pull_request` from a FORK gets a read-only
+      # GITHUB_TOKEN whatever `permissions:` says, so there the cancel is
+      # refused and the slow suite runs to completion — the failure is still
+      # reported either way, this only decides whether the time is wasted.
+      - name: Cancel the run so the slow suite stops too
+        if: >-
+          always()
+          && github.event_name == 'pull_request'
+          && steps.fast-suite.outcome == 'failure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run cancel "${{ github.run_id }}" \
+            || echo "::notice::Could not cancel the run (expected on fork PRs); the slow suite will run to completion."
+
+  # The tests the optional extras gate. Every other job installs `pip install
+  # -e .` with no extras, so coverage is measured at dependency parity, and
+  # every test that needs `pyses`, `mam4-jax`, `jax-cosp` or `gcsfs` skips
+  # there. This job installs all of them and runs exactly those tests, fast and
+  # slow together. The extras exercise code far outside their own packages (a
+  # Tiedtke change broke the MAM4 and pySES paths in #945), so it runs
+  # wherever the fast suite does: every pull request and every push to
+  # main/dev, with no path filter beyond the workflow's documentation-only
+  # paths-ignore.
+  #
+  # tools/ci/optional_extras.py keeps it from rotting silently:
+  # - selection is `-m requires_extra`, the one sanctioned way a test gates on
+  #   an extra, so a marked test is picked up by construction; the fast suite
+  #   fails any test that gates some other way (a static scan, and a skip whose
+  #   reason names an extra's package), since the default jobs would skip it
+  #   and this job would never select it;
+  # - JCM_REQUIRE_EXTRAS=1 makes the session refuse to start unless every
+  #   extra `pyproject.toml` declares is importable, and fails any selected
+  #   test that skips — here a skip is a test that did not run;
+  # - the install list is `optional_extras.py pip-extras`, which `check` holds
+  #   equal to pyproject's extras, so a new extra is installed here unasked.
+  #
+  # No coverage gate: the floors belong to the dependency-parity jobs.
+  #
+  # Single process, like the slow shards and for the same reason: the pySES
+  # delegating-config chunk (`hydra_config_test`) peaks at ~12.7 GB compiling
+  # the production CAM-SE step, which leaves no room for a second worker on
+  # the 16 GB runner.
+  #
+  # Cancellation is the same as the slow jobs': it hangs off `lint`, runs in
+  # parallel with the suites, and a fast-suite failure cancels the run with it,
+  # so a cancelled result never means these tests passed. Its own failure does
+  # not cancel anything — it says nothing about the tests the others run.
+  extras-tests:
+    needs: lint
+    runs-on: ubuntu-latest
+    # First green run (PR #952): 11 min, of which 10 min of tests and under a
+    # minute of setup. 30 leaves the headroom of the other jobs' timeouts.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/actions/setup-jcm
+        with:
+          # Its own pip-cache key: the extras' wheels must not land in the
+          # cache the dependency-parity jobs restore.
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+
+      # On top of the dependency-parity install, so the two environments
+      # differ by exactly the extras. pyses requires torch, whose default
+      # PyPI wheel brings the CUDA stack (~4.4 GB installed) to a CPU-only
+      # runner; the CPU build satisfies the same requirement.
+      - name: Install every optional extra
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
+
+      - name: Report runner resources
+        run: nproc && free -m
+
+      - name: Check the extras gating
+        run: python tools/ci/optional_extras.py check
+
+      - name: Test with pytest (extras-gated tests)
+        env:
+          JCM_REQUIRE_EXTRAS: '1'
+        run: |
+          pytest -v -rs --durations=25 -m requires_extra
+
+  # Slow tests only make sense on a PR. They start alongside the fast suite
+  # rather than after it (see the header) and are cut short by its cancel step
+  # if it goes red. A cancelled result here therefore never means "slow suite
+  # passed" — but it does not pin the cause either, because
+  # `cancel-in-progress` cancels these jobs just the same when a newer push
+  # supersedes the run, as does cancelling by hand. Read the `fast-tests` job
+  # to tell the three apart.
+  #
+  # The slow suite runs as TWO parallel shards plus a coverage job. Single-
+  # process it had grown past this job's 110-minute timeout (~115 min of tests
+  # once the ECHAM gradient harnesses moved to RRTMGP, #918), and xdist is not
+  # an option here: RRTMGP's reverse pass is the heaviest thing in the suite
+  # (~12-14 GB peak in one process), so two workers would not fit the runner.
+  # The split is by path and lives in ONE place, tools/ci/slow_shards.py:
+  # `radiation` (the ECHAM gradient harnesses and jcm/physics/radiation, ~52
+  # min of tests) and `rest` (everything else, ~63 min), where `rest` is the
+  # complement of `radiation` — so a new slow test file lands in `rest` by
+  # construction — and `slow_shards.py check` fails the `radiation` job unless
+  # the two collections partition `-m slow` exactly.
+  #
+  # Coverage is judged on the COMBINED data: each shard uploads its
+  # `.coverage` file and `slow-coverage` combines them and enforces the 80 %
+  # floor against .coveragerc-pr. A shard alone covers only part of the
+  # integration path, so neither enforces a floor itself.
+  slow-tests-radiation:
+    needs: lint
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # ~52 min of tests measured in CI plus ~4 min setup and shard check.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v3
+      - uses: ./.github/actions/setup-jcm
+
+      # Recorded so memory questions about this job can be answered from the
+      # log (RRTMGP's reverse pass peaks at ~12-14 GB in one process).
+      - name: Report runner resources
+        run: nproc && free -m
+
+      - name: Check the slow-suite shards partition the suite
+        run: python tools/ci/slow_shards.py check
+
+      - name: Test with pytest (slow suite, radiation shard)
+        run: |
+          pytest -v -s -m "slow" $(python tools/ci/slow_shards.py args radiation) \
+            --cov=jcm --cov-config=.coveragerc-pr
+          mv .coverage .coverage.radiation
+          python -c "import coverage; print(coverage.__version__)" > coverage-version.txt
+
+      # include-hidden-files: upload-artifact@v4 skips dotfiles by default,
+      # and the coverage data file is one.
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: slow-coverage-radiation
+          path: |
+            .coverage.radiation
+            coverage-version.txt
+          include-hidden-files: true
+          retention-days: 3
+
+  slow-tests-rest:
+    needs: lint
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # ~63 min of tests measured in CI plus ~3 min setup.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v3
+
+      # This job's pytest is `-m slow`, which never collects the stdlib
       # model-description rot guard; a code-only PR renaming a documented
       # symbol must still fail it, so it runs explicitly here (~seconds).
-      - name: Science-register rot guard (PR)
-        if: github.event_name == 'pull_request'
+      #
+      # BEFORE the install, not after: the guard imports stdlib and docs/
+      # only, and the fast suite's early failures (import errors, collection
+      # errors) land inside the couple of minutes `setup-jcm` spends fetching
+      # jax and the scientific stack. Run after the install, a cancel would
+      # kill this job mid-`pip` and the rot-guard result would silently not
+      # exist. run_docs.yaml invokes it the same way, with no install.
+      - name: Science-register rot guard
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python docs/science_pointers_test.py
 
-      - name: Test with pytest (include slow tests on PR)
-        if: github.event_name == 'pull_request'
-        run: |
-          pytest -v -s -m "slow" --cov=jcm --cov-config=.coveragerc-pr --cov-fail-under=80
+      - uses: ./.github/actions/setup-jcm
 
-      # Belt to the --cov-fail-under braces above. The floor is enforced twice
-      # on purpose: `--cov-fail-under` lives in a plugin whose enforcement
-      # semantics have already changed under us once (pytest-cov 6.0.0 made the
-      # check honour the reporting precision, silently turning this 80 floor
-      # into a 79.5 floor until `.coveragerc-pr` set `precision = 2` — #786),
-      # whereas this step is a plain non-zero exit from coverage itself.
-      # It reads the same `.coverage` file pytest-cov has just combined across
-      # the xdist workers, so it re-reports the identical total rather than
-      # re-measuring anything, and it costs about a second.
-      - name: Enforce slow-test coverage floor (PR)
-        if: github.event_name == 'pull_request'
+      - name: Report runner resources
+        run: nproc && free -m
+
+      - name: Test with pytest (slow suite, rest shard)
+        run: |
+          pytest -v -s -m "slow" $(python tools/ci/slow_shards.py args rest) \
+            --cov=jcm --cov-config=.coveragerc-pr
+          mv .coverage .coverage.rest
+          python -c "import coverage; print(coverage.__version__)" > coverage-version.txt
+
+      - name: Upload coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: slow-coverage-rest
+          path: |
+            .coverage.rest
+            coverage-version.txt
+          include-hidden-files: true
+          retention-days: 3
+
+  # The 80 % floor on the combined slow-suite coverage, against .coveragerc-pr
+  # (which omits utility / orchestration modules already well covered by the
+  # fast suite, so the floor reflects main-path integration coverage).
+  slow-coverage:
+    needs: [slow-tests-radiation, slow-tests-rest]
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # The sources are needed: coverage reports against the files it measured.
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Download coverage data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: slow-coverage-*
+          path: coverage-data
+      # The same coverage version the shards measured with, so the data files
+      # are read by the code that wrote them.
+      - name: Install coverage
+        run: pip install "coverage==$(cat coverage-data/slow-coverage-radiation/coverage-version.txt)"
+      - name: Combine the shards
+        run: |
+          coverage combine --rcfile=.coveragerc-pr \
+            coverage-data/slow-coverage-radiation/.coverage.radiation \
+            coverage-data/slow-coverage-rest/.coverage.rest
+
+      # The floor is enforced twice, by two different routes. The first is
+      # coverage's own `report --fail-under`, judged at the rcfile's reporting
+      # precision (`precision = 2`, the #786 fix: at precision 0 an 80 floor
+      # was a 79.5 floor). The second re-reads the unrounded total from the
+      # JSON report and compares it in plain Python, so a change to either
+      # coverage's rounding or its fail-under semantics cannot silently disarm
+      # the gate. (pytest-cov's `--cov-fail-under` cannot be one of the two
+      # any more: no single pytest process sees the combined data.)
+      - name: Enforce slow-test coverage floor
         run: |
           coverage report --rcfile=.coveragerc-pr --fail-under=80
+          coverage json --rcfile=.coveragerc-pr -o slow-coverage.json
+          python -c "import json, sys; t = json.load(open('slow-coverage.json'))['totals']['percent_covered']; print(f'combined slow coverage {t:.4f} %'); sys.exit(0 if t >= 80 else 1)"

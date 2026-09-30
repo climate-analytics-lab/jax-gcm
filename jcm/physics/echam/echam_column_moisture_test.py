@@ -80,7 +80,8 @@ def _build_model_and_step(physics_factory, n_steps: int):
     """
     coords = get_coords(get_echam_levels(47), spectral_truncation=63)
     terrain = TerrainData.from_file(_T63_BC_DIR / "terrain.nc", coords=coords)
-    forcing = ForcingData.from_file(_T63_BC_DIR / "forcing.nc", coords=coords)
+    forcing = ForcingData.from_file(
+        _T63_BC_DIR / "forcing.nc", coords=coords, align_mode="wrap_year")
     physics = physics_factory()
     model = Model(coords=coords, terrain=terrain, physics=physics, time_step=12)
     # Bootstrap from the balanced-isothermal start so the step loop below can
@@ -108,14 +109,14 @@ def _build_model_and_step(physics_factory, n_steps: int):
 
 def _full_physics():
     from jcm.physics.dissipation import UpperSponge
-    return echam_physics(radiation_scheme="grey") + UpperSponge(
+    return echam_physics() + UpperSponge(
         n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
     )
 
 
 def _no_surface_physics():
     from jcm.physics.dissipation import UpperSponge
-    return echam_physics(radiation_scheme="grey").remove("surface") + UpperSponge(
+    return echam_physics().remove("surface") + UpperSponge(
         n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
     )
 

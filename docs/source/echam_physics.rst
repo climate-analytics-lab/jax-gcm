@@ -51,13 +51,17 @@ Each parameterization is described in detail below.
 Radiation
 ^^^^^^^^^
 
-JAX-GCM offers three radiation backends, selected via the ``radiation_scheme`` argument to :func:`echam_physics`:
+The ECHAM stack offers two radiation backends, selected via the ``radiation_scheme`` argument to :func:`echam_physics`:
 
-- ``"rrtmgp"`` (recommended): the same RRTMGP correlated-k gas-optics package used by ICON, wrapped via the ``jax-rrtmgp`` library
-- ``"grey"`` (default): a fast, low-fidelity two-stream scheme intended for development and ML emulator training
-- ``"emulated"``: a neural-network surrogate of RRTMGP
+- ``"rrtmgp"`` (default): the same RRTMGP correlated-k gas-optics package used by ICON, wrapped via the ``jax-rrtmgp`` library
+- ``"emulated"``: a neural-network surrogate of RRTMGP, the fast option
 
-**RRTMGP** (recommended for production)
+The grey two-stream scheme (``jcm.physics.radiation.grey_two_stream``) is an
+idealized scheme, not ECHAM physics, and ``radiation_scheme="grey"`` is
+rejected; see :doc:`science/radiation` for what it is and how to compose it
+explicitly.
+
+**RRTMGP** (default)
 
 The RRTMGP path provides physically correct heating rates suitable for multi-day to multi-year integrations.
 
@@ -111,15 +115,9 @@ Per-call cost at T63L47 g128/g112 is dominated by gas-optics interpolation table
      - ≈ 101 ms
      - ~155×
 
-The microphysics choice has effectively no impact on RRTMGP per-call cost — the work is entirely radiation. With the default 2-hour ``radiation_interval`` cache (RRTMGP fires on 1 step in 10 at dt = 12 min) a 30-day T63L47 + sponge integration takes ~78 min wall vs ~6.5 min for grey radiation — i.e. **~12× the grey total**, not the ~4× a smaller-config measurement might suggest. That works out to ~1.5 sim-yr per wall-day on one A100 at climate-quality resolution.
+The microphysics choice has effectively no impact on RRTMGP per-call cost — the work is entirely radiation. With the default 2-hour ``radiation_interval`` cache (RRTMGP fires on 1 step in 10 at dt = 12 min) a 30-day T63L47 + sponge integration takes ~78 min wall vs ~6.5 min with the idealized grey radiation in its place — i.e. **~12× the grey total**, not the ~4× a smaller-config measurement might suggest. That works out to ~1.5 sim-yr per wall-day on one A100 at climate-quality resolution.
 
-**Grey two-stream** (development / ML training)
-
-The grey scheme is a simplified two-stream scheme with hand-tuned band coefficients. It is fast (single GPU pass, no chunking) but NOT physically calibrated — comparison against the RRTMGP harness shows mid-tropospheric LW cooling is roughly 150× too weak and OLR is ~70 % too high on a tropical column. Grey is appropriate for short development runs, neural-network emulator training (the network learns the mapping anyway), and any test where radiation is a passive element of the run; for multi-day climate-style integrations use RRTMGP.
-
-*Configuration*: 2 SW bands (visible 0.2-0.69 µm, near-IR 0.69-2.5 µm), 3 LW bands (window 10-350 cm⁻¹, CO2 350-500 cm⁻¹, H2O 500-2500 cm⁻¹).
-
-**Common features (all backends)**
+**Common features**
 
 - Gas absorption for H2O, CO2, O3, CH4, N2O
 - Mie scattering for liquid cloud droplets; ice crystal optics (Yang et al. 2013, Baum et al. 2014)
@@ -189,6 +187,13 @@ classified it:
    its own surface flux (no excess convergence).
 3. **Mid-level convection** (``ktype=3``): a ``cubasmc``-initiated plume with
    no surface connection (see the mid-level trigger above).
+
+With the 1M cloud scheme a fourth value appears in the published
+``convection.ktype``: the cloud step re-types a shallow column as ``ktype=4``
+when its liquid water path at and below the convective cloud top
+(``convection.cloud_top``) exceeds ``clwprat`` times the path above it, exactly
+as ECHAM's ``mo_cloud.f90`` does, so that the next step's radiation applies the
+shallow-convection liquid inhomogeneity factor.
 
 The convergence integral uses ECHAM's ``pqte``: the same-step vdiff moisture
 tendency plus the dynamics (advection + hyperdiffusion) tendency of the
@@ -409,12 +414,11 @@ Key processes:
    - Rain and snow use the simpler instantaneous form
 
 7. **Evaporation** of rain in subsaturated layers (Rotstayn 1997; the 1M port has no snow sublimation)
-8. **Droplet effective radius** for radiation, from the ECHAM law
-   ``r_eff = 1e6 · κ(N) · (3 ρ q_l,in-cloud / (4 π ρ_w N))^(1/3)`` with the Peng &
-   Lohmann (2003) breadth factor — the same
-   :py:func:`~jcm.physics.clouds.cloud_utils.eff_liquid_droplet_radius` helper the
-   2-moment scheme uses. Published as ``clouds.r_eff_liq``; cloud-free cells stay
-   at exactly 0 so radiation falls back to its diagnostic formula there.
+
+The scheme publishes no effective radius: as in ECHAM, the radiation forms the
+droplet and crystal radii itself from the step's state
+(:py:func:`~jcm.physics.radiation.cloud_optics.radiation_effective_radii`; see
+the radiation page of the model description).
 
 The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICON ``mo_cloud.f90:267-1080`` structure, with Rotstayn 1997 rain evaporation) is the only 1-moment path: :py:class:`~jcm.physics.clouds.echam_1m.Echam1MMicrophysics` vmaps it over columns, and its in-sweep saturation adjustment closes the rain-evap → re-condensation feedback loop.
 
@@ -448,9 +452,11 @@ The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICO
    * - ``cvtfall``
      - Ice/snow terminal-velocity factor (ECHAM ``mo_echam_cloud_params`` value at T63; the 2M scheme uses the same)
      - 2.5
-   * - ``base_cdnc``
-     - Baseline CDNC in clean air (1/m³)
-     - 100e6
+
+The droplet number the autoconversion sees is not a parameter: it is ECHAM's
+prescribed ``acdnc`` profile times the MACv2-SP Twomey factor
+(:py:func:`~jcm.physics.clouds.cloud_utils.prescribed_droplet_number`), the same
+number the radiation forms the droplet radius from.
 
 **2-moment** — :py:func:`jcm.physics.clouds.lohmann_2m.cloud_microphysics_2m`
 
@@ -580,6 +586,7 @@ Surface Physics
   - ``"businger_dyer"`` (option): a simpler bulk-Richardson Businger-Dyer form in ``turbulence_coefficients.compute_surface_exchange_coefficients``. Both schemes now return momentum as well as heat/moisture.
 
   A standalone surface-side bulk-Richardson scheme (``turbulent_fluxes.compute_exchange_coefficients`` / ``compute_stability_functions``) remains in the tree as a tested reference but is **no longer in the default flux path** — ``surface_physics_step`` consumes the upstream exchange coefficients rather than recomputing its own.
+- **10 m wind**: ECHAM has one 10 m wind, the stability-corrected ``nsurf_diag`` reduction the vertical-diffusion term diagnoses per tile from the same surface-layer scheme (``vertical_diffusion.wind_10m`` / ``wind_10m_u`` / ``wind_10m_v`` and their per-tile counterparts). The surface-exchange contract publishes it as ``wind_u``/``wind_v`` (``wind_reference="10m"``) and the AeroCom ``uas``/``vas`` apply the same reduction to the post-physics lowest-level wind; the surface term's diagnostics carry no separate 10 m wind. See :doc:`design/surface_exchange`.
 - **Implicit damping**: An implicit-Euler factor ``1 / (1 + K·dt/dz_sfc)`` is applied to the sensible-heat, latent-heat, and momentum tendencies at the lowest model level to keep the explicit step stable when ``K·dt/dz_sfc > 2`` (easily violated over rough terrain at ECHAM-tuned exchange coefficients). This stands in for the implicit surface BC of the vdiff tridiagonal solve that ECHAM/ICON use natively but that JCM's explicit pipeline can't currently express. ``K`` here is the same per-tile ``CH·|U|`` / ``CE·|U|`` / ``CM·|U|`` (m/s) that sets the flux, so ``K·dt/dz_sfc`` is properly dimensionless. (The momentum factor previously borrowed the interior diffusivity ``Km`` at the lowest level — units m²/s — which made the momentum damping dimensionally inconsistent and over-suppressed the surface stress by ~10×.)
 
 **Configurable parameters** (:py:class:`jcm.physics.surface.SurfaceParameters`):
@@ -640,14 +647,23 @@ The ECHAM physics package consumes two NetCDF files at run time. T63 versions si
      - 12-month climatology
      - Sea-ice tile fraction (clipped to ``[0, 1 − fmask]`` at apply time).
    * - ``alb`` (forcing.nc) → ``forcing.alb0``
-     - Static (annual mean)
-     - Bare-land surface albedo for the radiation backends.
+     - Static
+     - Snow-free background albedo of the non-glacier land (JSBACH ``update_land_surface_fast``, see :doc:`science/surface`).
    * - ``soilw_am`` (forcing.nc)
      - 12-month climatology
      - Soil-moisture initial state for the land-tile column.
    * - ``snowc`` (forcing.nc) → ``forcing.snowc_am``
      - 12-month climatology
-     - Snow cover (clipped to plausible range at load time).
+     - Prescribed snow-cover fraction of the non-glacier land (total cover ``glac + (1 − glac)·snowc``): brightens the land albedo towards the temperature-dependent snow albedo and sets the sublimating share of the land latent heat flux.
+   * - ``forest`` (forcing.nc) → ``forcing.forest_fraction``
+     - Static (optional)
+     - Forest share of the non-glacier land, masking the snow albedo under a canopy. ``None`` (no forest) if absent.
+   * - ``lsm`` (forcing.nc)
+     - Static (optional)
+     - Land share of the cell: the weight any regrid of the file gives the land-conditional channels (``jcm.data.regridding.CONDITIONAL_FIELDS``).
+   * - ``glac`` (forcing.nc) → ``forcing.glacier_fraction``
+     - Static (optional)
+     - Glacier share of the land: the ECHAM glacier albedo and a fully snow-covered (sublimating) surface. ``None`` (no glacier) if absent.
 
 Generating BC files from ECHAM input
 """"""""""""""""""""""""""""""""""""
@@ -660,6 +676,8 @@ Generating BC files from ECHAM input
         --sic     T63_amipsic_1979-2008_mean.nc \
         --land-init ic_land_soil_T63GR15_1976.nc \
         --out-dir jcm/data/bc/t63/
+
+``--snow-cover FILE`` takes the 12-month ``snowc`` cover fraction of a jcm forcing file on the same grid instead of the single ECHAM snow snapshot; the packaged T63 file is built with the data-mirror ``forcing_pd.nc`` this way, since the land albedo reads the snow cover every month.
 
 When ``--land-init`` is provided (the JSBACH initial-conditions file from a standard ECHAM dataset), the ``stl`` field uses the real monthly land-surface temperature climatology and the soil-moisture / snow fields use ``init_moist`` / ``snow`` rather than the AMIP-SST extrapolation. Without ``--land-init``, ``stl`` falls back to AMIP SST extrapolated over land — fine for short development runs, but the ~+30 K bias over the Tibetan and Antarctic plateaus has historically driven multi-day stability failures, so the JSBACH-backed file should be used for any climate-style integration.
 
@@ -780,7 +798,7 @@ Aerosol Scheme (MACv2-SP)
 
 .. admonition:: Note vs. ICON-A
 
-   ICON-A typically uses the Kinne et al. (2013) aerosol climatology or the MACv2-SP scheme. The JAX-GCM implementation uses MACv2-SP with the addition of Angstrom spectral scaling (matching the Fortran implementation) and aerosol-cloud coupling through the CDNC modification of both cloud optics and microphysics autoconversion.
+   ICON-A typically uses the Kinne et al. (2013) aerosol climatology or the MACv2-SP scheme. The JAX-GCM implementation uses MACv2-SP with the addition of Angstrom spectral scaling (matching the Fortran implementation) and aerosol-cloud coupling through the CDNC modification of both cloud optics and microphysics autoconversion. MPI-ESM1.2 applies the MACv2-SP factor to the radiation's droplet number only and leaves the cloud microphysics' unperturbed (Mauritsen et al. 2019); the extra autoconversion path is jcm's recorded departure (#932).
 
 
 Chemistry
@@ -835,7 +853,7 @@ Forcing and Boundary Conditions
 - **Sea Ice Concentration**: Prescribed from climatology
 - **Snow Cover**: Prescribed from climatology
 - **Soil Moisture**: Prescribed from climatology
-- **Surface Albedo**: Annual-mean bare-land albedo
+- **Surface Albedo**: ECHAM 6.3 tile albedos — land from the background ``alb`` with prescribed snow cover, forest masking and glaciers; temperature-dependent sea ice; zenith-dependent open water (:doc:`science/surface`)
 - **Aerosol Temporal Weights**: Per-plume year and seasonal cycle weights for MACv2-SP
 
 The forcing data system supports both realistic (from netCDF files with 365 daily time steps) and idealized (aquaplanet with cos2 SST profile) configurations.
@@ -898,7 +916,7 @@ orchestrator:
    # Create composable ECHAM physics with all standard terms
    physics = echam_physics()
 
-   # Use neural network radiation emulator instead of grey radiation
+   # Use the neural-network emulator of RRTMGP, the fast radiation option
    physics = echam_physics(radiation_scheme="emulated")
 
    # Remove non-orographic Hines gravity-wave drag
@@ -914,9 +932,12 @@ orchestrator:
    )
    physics = echam_physics().replace("convection", convection)
 
-When replacing a wavelength-dependent radiation backend, the enclosing
-``ComposablePhysics.band_config`` must also be configured for that backend.
-The RRTMGP Hydra configurations perform this setup automatically.
+A different radiation term is composed by passing the instance to the
+factory, ``echam_physics(radiation_scheme=<term>)``: the factory derives the
+composition's ``band_config`` and the JAM optics cadence from that term.
+``replace("radiation", ...)`` does not re-derive them — it keeps the displaced
+term's band structure and cadence (#926) — so it is not the route for the
+radiation slot.
 
 Each ECHAM term is a ``PhysicsTerm`` subclass (``flax.nnx.Module``) with lazy
 imports — the underlying ECHAM physics functions are imported at call time,
@@ -938,8 +959,6 @@ respective process directories:
 
    * - Process
      - Module path
-   * - Radiation (grey 2-stream)
-     - ``jcm.physics.radiation.grey_two_stream``
    * - Radiation (RRTMGP)
      - ``jcm.physics.radiation.rrtmgp``
    * - Convection

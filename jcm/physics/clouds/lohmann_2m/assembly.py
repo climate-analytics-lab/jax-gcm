@@ -443,23 +443,25 @@ def update_in_cloud_water(
     # compute candidate ICNC depending on nic_cirrus
     if params.nic_cirrus == 1:
         # N = rho*q_i / ((4/3)*pi*prid^3*rho_ice): crystal number diagnosed by
-        # inverting the ice-mass/volume-mean-radius (``prid``, METRES) relation.
+        # inverting the ice-mass/volume-mean-radius relation
+        # (mo_cloud_micro_2m.f90:2616-2622). ``prid`` is ECHAM's
+        # temperature-parameterised radius ``zrid`` in METRES (945-956,
+        # passed at 1511), which the orchestrator passes here.
         #
-        # Physical bound (#846). The diagnosed number is capped at ``icemax``
-        # (the maximum-plausible ICNC the scheme already enforces on the ice
-        # tracer, scheme.py). This is the reference-faithful direction:
-        # ECHAM-HAM's own nic_cirrus==1 branch caps the nucleated number by the
-        # available soluble-aerosol count ``zascs``
-        # (mo_cloud_micro_2m.f90:991-999, ``MIN(candidate, zascs)``) — a cap on
-        # NUMBER, not a floor on size. jcm does not plumb the aerosol number
-        # into this scheme, so ``icemax`` (1e7 /m^3) stands in as the
-        # max-plausible-number ceiling. A bare 100 nm radius floor was rejected:
-        # it leaves the forward candidate at ~1e11-1e12 /m^3 (four orders above
-        # realistic cirrus and above ``icemax``), so it is not the physical
-        # bound; the equivalent radius-floor dual would also inject a
-        # ``qi**(1/3)`` gradient singularity at ``qi -> 0`` (the candidate is
-        # computed on every cell before the ``ll2_ic`` select), whereas the
-        # number cap keeps the candidate linear in ``qi``.
+        # Number cap (#846). ECHAM's diagnosis is uncapped; the candidate here
+        # is capped at ``icemax`` (1e7 /m^3), the bound the scheme also puts on
+        # the ICNC tracer, consistent with ECHAM's own ``icemax`` cap on the
+        # section-1 number additions (1252). (The soluble-aerosol cap ``zascs``
+        # of ECHAM's nic_cirrus==1 branch, 991-999, bounds the cirrus
+        # nucleation ``zninucl``, which this scheme does not compute; it plays
+        # no part in this diagnosis.) The number cap also keeps the candidate
+        # linear in ``qi``, with no ``qi**(1/3)`` gradient singularity at
+        # ``qi -> 0`` (the candidate is computed on every cell before the
+        # ``ll2_ic`` select).
+        #
+        # Radius floor. ``cirrus_min_ice_radius`` (1e-7 m) floors ``prid``
+        # below; with ``zrid >= 1e-6 m`` it never binds, and it stays as a
+        # parameter of this routine's interface.
         #
         # Non-dimensionalisation (#846). Written as ``C/r**3`` the reverse/
         # forward derivative forms ``1/r**6``, which overflows float32 below

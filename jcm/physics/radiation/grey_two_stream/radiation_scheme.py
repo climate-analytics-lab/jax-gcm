@@ -6,6 +6,7 @@ coordinating shortwave and longwave radiation computations.
 """
 
 import jax.numpy as jnp
+import numpy as np
 
 from jcm.physics.chemistry.simple_chemistry import ppmv_to_mole_fraction
 from jcm.physics.coords_util import column_lat_lon
@@ -17,6 +18,8 @@ from ..radiation_types import (
     RadiationTendencies,
     OpticalProperties,
     RadiationData,
+    lagged_convection_type,
+    liquid_inhomogeneity,
 )
 
 from jax_solar import radiation_flux, get_solar_sin_altitude, OrbitalTime
@@ -260,7 +263,8 @@ def radiation_scheme(
     parameters: RadiationParameters,
     aerosol_data,  # AerosolData from physics_data
     ozone_vmr: Optional[jnp.ndarray] = None,
-    co2_vmr: float = 400e-6
+    co2_vmr: float = 400e-6,
+    convection_type: jnp.ndarray = np.int32(0),  # numpy, not jnp: a jax default is built at import (#859)
 ) -> Tuple[RadiationTendencies, RadiationData]:
     """Radiation scheme wrapper that extracts aerosol data and includes aerosol effects.
 
@@ -287,6 +291,10 @@ def radiation_scheme(
         aerosol_data: AerosolData containing optical properties
         ozone_vmr: Ozone volume mixing ratio [nlev]
         co2_vmr: CO2 volume mixing ratio
+        convection_type: the column's (previous-step) ECHAM ``ktype``, which
+            selects the liquid inhomogeneity factor (see
+            :func:`~jcm.physics.radiation.radiation_types.liquid_inhomogeneity`).
+            0 (no convection) when not supplied.
 
     Returns:
         Tuple of (radiation tendencies, radiation diagnostics)
@@ -420,8 +428,11 @@ def radiation_scheme(
     # Physical (unscaled) in-cloud paths. The ECHAM sub-grid inhomogeneity
     # reduction (``mo_cloud_optics.f90`` ``zinhoml``/``zinhomi``,
     # l_variable_inhoml = .FALSE.) is passed into ``cloud_optics`` and applied
-    # to the optical depth there -- NOT to the path, so the diagnostic ice
-    # radius stays derived from the physical IWC (#678). This within-cloud
+    # per phase to the optical depth there -- NOT to the path, so the
+    # diagnostic ice radius stays derived from the physical IWC, and the
+    # ssa/asymmetry stay weighted by the unscaled optical depths exactly as in
+    # ECHAM even where the liquid (convective-type dependent) and ice factors
+    # differ. This within-cloud
     # horizontal-variability correction is distinct from the beam-split
     # clear/cloudy partitioning above.
     in_cloud_lwp = in_cloud_path(
@@ -438,8 +449,8 @@ def radiation_scheme(
         cloud_ice_path=in_cloud_ipath,
         layer_thickness=layer_thickness,
         cdnc_factor=cdnc_factor,
-        inhomogeneity_liquid=parameters.cloud_inhomogeneity,
-        inhomogeneity_ice=parameters.cloud_inhomogeneity,
+        inhomogeneity_liquid=liquid_inhomogeneity(convection_type, parameters),
+        inhomogeneity_ice=parameters.cloud_inhomogeneity_ice,
     )
     zero_optics_sw = OpticalProperties(
         optical_depth=jnp.zeros_like(cloud_sw_optics_cloudy.optical_depth),
@@ -683,6 +694,7 @@ from jcm.physics.radiation import (  # noqa: E402
     current_cos_zenith,
     radiation_should_compute,
     rescale_cached_radiation,
+    surface_optics_for_solve,
 )
 from jcm.physics.radiation.radiation_types import RadiationParameters  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
@@ -820,13 +832,11 @@ class GreyTwoStreamRadiation(PhysicsTerm):
         co2_vmr = ppmv_to_mole_fraction(forcing.co2_vmr)
 
         # Surface temperature still lives in the legacy "surface" key
-        # (until the EchamSurface migration); the radiation surface
-        # albedo / emissivity is on the "radiation" sub-struct.
+        # (until the EchamSurface migration); the surface albedo /
+        # emissivity are the current step's published surface optics.
         surface_temperature = diagnostics["surface"].surface_temperature.reshape(ncols)
-        radiation = diagnostics["radiation"]
-        surface_albedo_vis = radiation.surface_albedo_vis.reshape(ncols)
-        surface_albedo_nir = radiation.surface_albedo_nir.reshape(ncols)
-        surface_emissivity = radiation.surface_emissivity.reshape(ncols)
+        (surface_albedo_vis, surface_albedo_nir,
+         surface_emissivity) = surface_optics_for_solve(diagnostics, ncols)
 
         # Reshape aerosol fields so column is the leading (mapped) axis.
         # Per-band fields are ``(n_bnd, nlev, ncols)`` — transpose so the
@@ -877,6 +887,8 @@ class GreyTwoStreamRadiation(PhysicsTerm):
                 None, 0, 0,
                 # parameters None, aerosol per-col, ozone on axis 1, co2 None
                 None, 0, 1, None,
+                # previous-step convective type per column
+                0,
             ),
             out_axes=(0, 0),
             axis_size=ncols,
@@ -889,6 +901,8 @@ class GreyTwoStreamRadiation(PhysicsTerm):
             surface_albedo_nir, surface_emissivity,
             solar, latitudes, longitudes,
             params, aerosol_for_vmap, ozone_vmr, co2_vmr,
+            # Lagged convective type -> liquid inhomogeneity (as RRTMGP).
+            lagged_convection_type(diagnostics, ncols),
         )
 
         # Grey scheme keeps a per-band axis on the flux profiles; sum it

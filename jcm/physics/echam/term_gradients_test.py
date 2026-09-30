@@ -75,6 +75,7 @@ from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
 )
 from jcm.physics.echam.echam_levels import get_echam_levels
 from jcm.physics.echam.echam_terms import echam_physics
+from jcm.physics.echam.testing import idealized_echam_physics
 from jcm.physics_interface import PhysicsState
 from jcm.terrain import TerrainData
 from jcm.testing import (_cotangent, _leaf_names, _tangent,
@@ -165,20 +166,21 @@ _TERM_NAMES = (
     "macv2_sp_aerosol",
     "simple_chemistry",
     "sundqvist_cloud_fraction",
-    "grey_two_stream_radiation",
+    "rrtmgp_radiation",
     "tte_tke_vertical_diffusion",
     "echam_surface",
     "tiedtke_convection",
     "echam_1m_microphysics",
+    "echam_surface_exchange",
     "hines_gwd",
     "lott_miller_sso",
 )
 
 _CONDENSATE_CLIP_KINK = (
-    "jcm/physics/radiation/grey_two_stream/radiation_scheme.py:266-267 — "
+    "jcm/physics/radiation/grey_two_stream/radiation_scheme.py:314-315 — "
     "cloud_water = jnp.maximum(cloud_water, 0.0), and the same for cloud_ice, "
     "applied to the condensate this scheme reads straight from the state "
-    "tracers (cloud_data.py:311, radiation_cloud_fields, ECHAM's cover-then-"
+    "tracers (cloud_data.py:317, radiation_cloud_fields, ECHAM's cover-then-"
     "radiation order). The seeded deck leaves that tracer at exactly 0 in most "
     "layers, so the clip sits ON the operating point: the plus and minus "
     "displacements are clipped in disjoint sets of layers, the two one-sided "
@@ -237,6 +239,26 @@ _ONE_MOMENT_SATURATION_CANCELLATION = (
     "and keeps a real tolerance. (#843)"
 )
 
+_MACV2_PER_BAND_RATIO_NOISE = (
+    "jcm/physics/aerosol/macv2_sp.py:129-136 — on the RRTMGP band structure "
+    "(14 SW bands) the term publishes per-band ssa_sw_per_band / "
+    "asy_sw_per_band as ratios of plume-weighted sums, ssa_sum_b / "
+    "aod_sw_per_band and asy_sum_b / ssa_sum_b, and at the stable column's "
+    "weak plume the float32 rounding of those ratios is a noise floor under "
+    "the whole step ladder. Along the "
+    "checked direction D- - D+ grows like 1/eps (0.014 at eps = 5e-4, 0.03 at "
+    "1.25e-4, 0.12 at 6.25e-5) — a fixed rounding offset in the primal, not "
+    "curvature — and per output leaf it sits in ssa_sw_per_band, "
+    "asy_sw_per_band and the column angstrom, while aod_profile and "
+    "aod_sw_per_band agree one-sided to 0.1 % at the top rung. Bisecting the "
+    "direction one "
+    "input leaf at a time, every one of the 150 leaves has a converged central "
+    "difference that AD matches; only their sum does not. The broadband "
+    "(single 550 nm band) configuration, which has no weak bands, passes. Not "
+    "a lost gradient: the finiteness case passes and the convecting column's "
+    "reference converges."
+)
+
 _CHEMISTRY_RELAXATION_KINK = (
     "jcm/physics/chemistry/simple_chemistry.py:313-314 — the term splits its net "
     "ozone relaxation rate into ozone_production = jnp.maximum(ozone_tendency, "
@@ -291,8 +313,11 @@ class _Check:
 # Cells that are not the default. Keyed by (term, operating point); a term name
 # alone applies to both points.
 _CHECKS: dict = {
-    # Finiteness holds at both points; only the two-sided reference is missing,
-    # and for a reason that is the operating point rather than the scheme.
+    # The idealized grey radiation is not in the ECHAM composition; its term is
+    # checked on its own by the ``test_grey_radiation_term_*`` tests below.
+    # Finiteness holds at both points; only the two-sided reference is
+    # missing, and for a reason that is the operating point rather than the
+    # scheme.
     "grey_two_stream_radiation": _Check(xfail_reference=_CONDENSATE_CLIP_KINK),
 
     # The chemistry relaxes ozone toward a target it also seeds the current
@@ -300,6 +325,72 @@ _CHECKS: dict = {
     # production/loss split sits exactly on its corner at both points; finiteness
     # holds, the two-sided reference does not. See ``_CHEMISTRY_RELAXATION_KINK``.
     "simple_chemistry": _Check(xfail_reference=_CHEMISTRY_RELAXATION_KINK),
+
+    # RRTMGP has no central difference at either point, so the adjoint
+    # identity is its reference. The gas optics are not the obstruction: they
+    # interpolate their tables linearly in temperature, log-pressure and the
+    # binary-species fraction, and along ``state/temperature`` and
+    # ``state/specific_humidity`` alone, with the library promoted to float64,
+    # the central difference agrees with AD to 1.5 % or better at every rung
+    # from 1.25e-4 down to 6e-8 at both points. Two things are, and they
+    # stack.
+    #
+    # 1. Inputs that sit exactly at zero. Where a condensate tracer is 0 the
+    #    term has a kink: a negative step is clipped by
+    #    ``prepare_radiation_state`` (grey_two_stream/radiation_scheme.py:
+    #    221-222, the grey term's ``_CONDENSATE_CLIP_KINK`` on this scheme's
+    #    path) and changes nothing, a positive step radiates, and AD returns
+    #    the cloud-free side's derivative, 0. ``qi`` is 0 at every level of
+    #    the stable column, and ``qc`` is 0 at 9 of the 17 convecting levels
+    #    the radiation treats as cloudy (cloud fraction above 2e-3). Along
+    #    ``qi`` alone on the stable column in float64, AD is exactly 0 and the
+    #    secant into cloud is +919 at the last rung and still rising: the
+    #    Moss/Foot radius (83.8 IWC^0.216) gets smaller as the step does, so
+    #    the extinction per unit ice keeps growing until the radius reaches
+    #    the table floor, at an ice content far below these steps on an
+    #    all-zero leaf. With the ice radius pinned at that floor the same
+    #    secant converges to +852. Along the full seed-0
+    #    direction the stable column's float64 secants end at D- = +724 and
+    #    D+ = -188 against an AD value of -196, and on the convecting column
+    #    the condensate keeps them about 9 % apart down to the last rung.
+    #    MACv2-SP's longwave aerosol triple (``aod/ssa/asy_lw_per_band``) is
+    #    identically 0 at both points too, and on the stable column, with the
+    #    condensate held fixed, it alone keeps the float64 secants from
+    #    agreeing above a step of 1e-7. With the condensate tracers and every
+    #    identically-zero input held fixed, the float64 central difference
+    #    agrees with AD to 1.5 % or better at every rung from 3e-5 down to
+    #    6e-8 at both points. The clip is the physics (negative condensate
+    #    must not radiate); the kink is tracked in #843.
+    # 2. float32. The library runs in float32 by construction (see
+    #    ``radiation_scheme_rrtmgp``), and the heating of the top few-Pa
+    #    layers is a difference of two large fluxes. Along T and q alone at a
+    #    step of 1e-6, the float32 heating at the 1 and 4 Pa levels moves by
+    #    6e-8 to 3e-7 K/s where float64 moves by about 1e-9. From a step of
+    #    6.25e-5 to 1e-6 (62x smaller) the float64 change falls 27x to 72x
+    #    and the float32 one 1x to 15x, so it is rounding, not response. With
+    #    the inputs of (1) held fixed, the float32 ladder still finds no
+    #    usable rung at either point.
+    #
+    # Holding the zero-valued inputs fixed would remove (1) but not (2), and
+    # would stop checking the condensate's gradient where it is non-zero, so
+    # the reference is the adjoint identity. It holds to at most 4.9e-5 over
+    # seeds 0-5 at both points (float32 reduction order through the
+    # per-g-point solves; 1e-3 keeps ~20x headroom), and the two inputs
+    # radiation reads from the state must be live. The term returns heating
+    # only: its momentum and moisture tendencies are structural zeros, and its
+    # diagnostics carry fields that are legitimately zero here (the ``*_noa``
+    # slots with no aerosol-free companion), hence the tendency-only output.
+    "rrtmgp_radiation": _Check(
+        reference="adjoint", adjoint_rtol=1.0e-3, outputs="tendency",
+        skip_outputs=("u_wind", "v_wind", "specific_humidity",
+                      "tracers/qc", "tracers/qi"),
+        live_inputs=("[0]/temperature", "[0]/specific_humidity")),
+
+    # MACv2-SP's per-band ratio fields on RRTMGP's 14 SW bands are float32
+    # noise at the stable column's weak plume; see
+    # ``_MACV2_PER_BAND_RATIO_NOISE``.
+    ("macv2_sp_aerosol", "stable"): _Check(
+        xfail_reference=_MACV2_PER_BAND_RATIO_NOISE),
 
     # ``sundqvist_cloud_fraction`` at both points takes the default difference
     # reference. The stable column carried a strict xfail until #677: _qs_cover's
@@ -371,9 +462,22 @@ _CHECKS: dict = {
         skip_outputs=("specific_humidity",),
         live_inputs=("[0]/u_wind", "[0]/temperature")),
 
-    # Tiedtke differentiates cleanly on the stable column (no plume, and the
-    # 5 K/hr cap no longer poisons the inactive levels). On the convecting one
-    # the column sits on the trigger: the minus secant is ~4e5 and the plus
+    # On the stable column Tiedtke runs a one-layer shallow plume at the top
+    # of the capped boundary layer (7e-9 kg/m²/s of precipitation) that sits
+    # on its own existence boundary: along the seed-0 direction the plume
+    # dies between +1e-3 and +1e-2 of the tangent and the one-sided secants
+    # disagree between −1e-3 and 0 (a kink — the half-level environment's
+    # dry-static-energy envelope is a max over the near-equal energies of the
+    # well-mixed layer), so float32 finds no usable difference rung. In
+    # float64 the central difference is usable and agrees with AD, and jvp
+    # and vjp agree to 3.9e-13; float32 leaves them 4.4e-4 apart on this
+    # small projection (|value| ≈ 89), the same reduction-order gap as the
+    # convecting cell's. So the adjoint is the reference here too, at 1e-3.
+    ("tiedtke_convection", "stable"): _Check(
+        reference="adjoint", adjoint_rtol=1.0e-3, outputs="tendency",
+        skip_outputs=("tracers/qi",), live_inputs=_ENVIRONMENT),
+
+    # On the convecting column the column sits on the trigger: the minus secant is ~4e5 and the plus
     # secant ~0 at every rung, i.e. the perturbation switches the plume off.
     # That boundary is the documented discrete part of the scheme — ECHAM's
     # ``cubasmc`` mid-level conditions ARE the activation, and the deep/shallow
@@ -506,10 +610,10 @@ class _Replay:
     snapshots: dict
 
 
-_REPLAY_CACHE: dict[str, _Replay] = {}
+_REPLAY_CACHE: dict[tuple[str, bool], _Replay] = {}
 
 
-def _replay(point_name: str) -> _Replay:
+def _replay(point_name: str, idealized: bool = False) -> _Replay:
     """Run the package once, snapshotting the diagnostics each term is given.
 
     Reproduces ``ComposablePhysics._compute_tendencies_columns`` on a one-column
@@ -519,14 +623,19 @@ def _replay(point_name: str) -> _Replay:
     ``_dycore_fields`` is absent and Tiedtke's ``cubasmc`` mid-level trigger
     reads its documented zero-omega fallback (no resolved ascent, trigger
     dormant).
+
+    ``idealized=True`` replays the idealized composition (grey radiation in
+    the radiation slot) instead of ECHAM's, for the grey term's own check.
     """
-    if point_name in _REPLAY_CACHE:
-        return _REPLAY_CACHE[point_name]
+    key = (point_name, idealized)
+    if key in _REPLAY_CACHE:
+        return _REPLAY_CACHE[key]
 
     point = _POINTS[point_name]
     vertical = get_echam_levels(_NLEV)
     coords = ColumnCoordinates.at_location(vertical, point.latitude_deg, 0.0)
-    physics = echam_physics(radiation_scheme="grey", checkpoint_terms=False)
+    factory = idealized_echam_physics if idealized else echam_physics
+    physics = factory(checkpoint_terms=False)
     physics.cache_coords(coords)
 
     state = _column_state(
@@ -569,10 +678,10 @@ def _replay(point_name: str) -> _Replay:
                 for name in running["tracers"]},
         }
 
-    _REPLAY_CACHE[point_name] = _Replay(
+    _REPLAY_CACHE[key] = _Replay(
         physics=physics, state=state, forcing=forcing, terrain=terrain,
         snapshots=snapshots)
-    return _REPLAY_CACHE[point_name]
+    return _REPLAY_CACHE[key]
 
 
 def _term_function(replay: _Replay, term_name: str,
@@ -606,6 +715,12 @@ def _term_function(replay: _Replay, term_name: str,
             out.update({k: updated[k] for k in provides if k in updated})
         return {k: v for k, v in out.items() if k not in skip_outputs}
 
+    if term_name == "rrtmgp_radiation":
+        # Compiled once rather than dispatched op by op: RRTMGP is thousands
+        # of primitives, and eagerly each one gets its own CPU executable,
+        # which takes the process past the kernel's memory-map limit
+        # (vm.max_map_count) partway through the step ladder and aborts it.
+        call = jax.jit(call)
     return call, (replay.state, free, replay.forcing, replay.terrain)
 
 
@@ -660,8 +775,38 @@ def _cases(attribute):
 
 def test_every_term_is_covered():
     """``_TERM_NAMES`` is the composition, so a new term cannot slip through."""
-    physics = echam_physics(radiation_scheme="grey", checkpoint_terms=False)
+    physics = echam_physics(checkpoint_terms=False)
     assert tuple(term.name for term in physics.terms) == _TERM_NAMES
+
+
+@pytest.mark.parametrize("point_name", sorted(_POINTS))
+def test_grey_radiation_term_derivatives_are_finite(point_name):
+    """The idealized grey radiation term, checked as a scheme of its own.
+
+    It is not part of the ECHAM composition, so it is replayed inside the
+    idealized one (same column, same upstream terms) and given the same
+    finiteness check as every ECHAM term.
+    """
+    f, args = _term_function(
+        _replay(point_name, idealized=True), "grey_two_stream_radiation")
+    _assert_derivatives_are_finite(
+        f, args, f"grey_two_stream_radiation/{point_name}")
+
+
+@pytest.mark.parametrize("point_name", sorted(_POINTS))
+@pytest.mark.xfail(strict=True, reason=_CONDENSATE_CLIP_KINK,
+                   raises=AssertionError)
+def test_grey_radiation_term_against_a_reference(point_name):
+    """The grey term's reference check (strict xfail: the condensate clip)."""
+    check = _check_for("grey_two_stream_radiation", point_name)
+    f, args = _term_function(
+        _replay(point_name, idealized=True), "grey_two_stream_radiation",
+        outputs=check.outputs, skip_outputs=check.skip_outputs)
+    check_gradients(f, args, rtol=check.rtol, atol=1e-8,
+                    reference=check.reference,
+                    adjoint_rtol=check.adjoint_rtol,
+                    live_inputs=check.live_inputs,
+                    fixed_inputs=_FIXED_INPUTS)
 
 
 @pytest.mark.parametrize("term_name,point_name", _cases("xfail_finiteness"))
@@ -738,13 +883,22 @@ def test_package_tendency_is_finite_per_state_field(point_name):
             state_, replay.forcing, replay.terrain, carry)
         return tendency
 
+    # One compiled jvp, reused for every direction (all have the state's
+    # shapes). Run eagerly, each direction dispatched the package op by op,
+    # and the per-primitive executables alone took an xdist worker past the
+    # kernel's memory-map limit (65,499 of vm.max_map_count's 65,530), where
+    # the CPU JIT fails with "Failed to materialize symbols".
+    jvp_tendencies = jax.jit(
+        lambda state_, direction_: jax.jvp(
+            tendencies, (state_,), (direction_,))[1])
+
     leaves, treedef = jax.tree_util.tree_flatten(state)
     names = _leaf_names(state)
     for index, name in enumerate(names):
         direction = jax.tree_util.tree_unflatten(treedef, [
             jnp.ones_like(leaf) if position == index else jnp.zeros_like(leaf)
             for position, leaf in enumerate(leaves)])
-        _, forward = jax.jvp(tendencies, (state,), (direction,))
+        forward = jvp_tendencies(state, direction)
         for leaf in jax.tree.leaves(forward):
             assert np.all(np.isfinite(np.asarray(leaf))), (
                 f"{point_name}: the package tendency has a non-finite "

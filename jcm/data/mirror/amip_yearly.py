@@ -27,9 +27,10 @@ from __future__ import annotations
 import numpy as np
 import xarray as xr
 
+from jcm.data.mirror import sites
 from jcm.data.mirror.bundles import (AMIP_ROOT, _ANTHRO_SECTORS,
                                      _EMIS_SPECIES, _to_lonlat,
-                                     translate_land)
+                                     land_surface_fields, translate_land)
 from jcm.data.regridding import (conservative_to_gaussian, fill_nearest,
                                  interp_to)
 
@@ -40,16 +41,14 @@ SICONCBCS = (f"{AMIP_ROOT}/seaIce/mon/siconcbcs/gn/v20250807/"
              "siconcbcs_input4MIPs_SSTsAndSeaIce_CMIP_PCMDI-AMIP-1-1-10_gn_"
              "187001-202212.nc")
 
-_GHG_ROOT = ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
-             "CMIP7/CMIP/CR/CR-CMIP-1-0-0/atmos/yr")
+_GHG_ROOT = sites.input4mips("CMIP7/CMIP/CR/CR-CMIP-1-0-0/atmos/yr")
 _GHG_FILE = (_GHG_ROOT + "/{gas}/gm/v20250228/{gas}_input4MIPs_"
              "GHGConcentrations_CMIP_CR-CMIP-1-0-0_gm_1750-2022.nc")
 #: unit -> ppmv conversion for the CR global-mean files.
 _TO_PPMV = {"ppm": 1.0, "ppb": 1e-3, "ppt": 1e-6}
 
-_FZJ_ROOT = ("/glade/campaign/cesm/cesmdata/input4MIPs_raw/input4MIPs/"
-             "CMIP7/CMIP/FZJ/FZJ-CMIP-ozone-1-0/atmos/mon/vmro3/gn/"
-             "v20250904")
+_FZJ_ROOT = sites.input4mips(
+    "CMIP7/CMIP/FZJ/FZJ-CMIP-ozone-1-0/atmos/mon/vmro3/gn/v20250904")
 #: (first_year, last_year) -> transient vmro3 chunk file.
 _FZJ_CHUNKS = {
     (1829, 1849): "182901-184912", (1850, 1899): "185001-189912",
@@ -113,7 +112,8 @@ def build_forcing_year(era5_path: str, year: int, lats, lons,
     # re-stamped on this year's time axis (months align 1:1). The input
     # is the climatology, so its own window doubles as the fixed
     # ice-sheet-mask window.
-    land = translate_land(era5, permanent_snow=era5.sd.min("time") >= 0.1)
+    permanent_snow = era5.sd.min("time") >= 0.1
+    land = translate_land(era5, permanent_snow=permanent_snow)
 
     def _on_year_axis(da):
         return da.assign_coords(time=times)
@@ -121,17 +121,19 @@ def build_forcing_year(era5_path: str, year: int, lats, lons,
     fields = {
         "sst": interp_to(sst_da, lats, lons),
         "icec": interp_to(icec_da, lats, lons).clip(0.0, 1.0),
-        "stl": _on_year_axis(interp_to(land["stl"], lats, lons)),
-        "soilw_am": _on_year_axis(
-            interp_to(land["soilw_am"], lats, lons).clip(0.0, 1.0)),
-        # The dust saturation cut-off reads this one, not soilw_am: an AMIP
-        # year without it would silently run with the cut-off inert (#787).
-        "soilw_rel": _on_year_axis(
-            interp_to(land["soilw_rel"], lats, lons).clip(0.0, 1.0)),
-        "snowc": _on_year_axis(
-            interp_to(land["snowc"], lats, lons).clip(0.0, 1.0)),
-        "alb": interp_to(era5.fal.min("time"), lats, lons),
+        # soilw_rel: the dust saturation cut-off reads it, not soilw_am; an
+        # AMIP year without it would silently run the cut-off inert (#787).
+        **land_surface_fields(era5, permanent_snow, {
+            "stl": land["stl"],
+            "soilw_am": land["soilw_am"],
+            "soilw_rel": land["soilw_rel"],
+            "snowc": land["snowc"],
+            "alb": era5.fal.min("time"),
+            "forest": era5.cvh.clip(0.0, 1.0),
+        }, lats, lons),
     }
+    for name in ("stl", "soilw_am", "soilw_rel", "snowc"):
+        fields[name] = _on_year_axis(fields[name])
     ds = xr.Dataset(coords={"lat": lats, "lon": lons, "time": times})
     for name, da in fields.items():
         ds[name] = _to_lonlat(da)

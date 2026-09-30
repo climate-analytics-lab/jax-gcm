@@ -124,7 +124,8 @@ surface looks like) and ``ForcingData`` (what it does over time):
 
    # SST, sea ice, soil moisture and friends. Time-varying fields become
    # TimeSeries leaves and the Model picks the right slice each step.
-   forcing = ForcingData.from_file(data_dir / "forcing.nc", coords=coords)
+   forcing = ForcingData.from_file(
+       data_dir / "forcing.nc", coords=coords, align_mode="wrap_year")
 
    model = Model(coords=coords, time_step=30.0, terrain=terrain)
 
@@ -136,11 +137,9 @@ surface looks like) and ``ForcingData`` (what it does over time):
 
    predictions.to_xarray().to_netcdf("output.nc")
 
-One thing that catches people out: ``from_file`` decides between climatology
-and date-aligned mode from the netCDF time axis — a one-year file wraps, a
-multi-year file aligns by date. And SPEEDY assumes a 365-day no-leap calendar;
-pass ``Model(..., calendar='gregorian')`` if you need the clock to track real
-Gregorian dates.
+``from_file`` treats input timestamps as real dates by default. Select
+``align_mode="wrap_year"`` explicitly for a repeating monthly or daily
+climatology. All physics packages use the same Gregorian model clock.
 
 .. _configurations-from-python:
 
@@ -169,6 +168,13 @@ builds one for you:
 
    # Override any key with Hydra dotted syntax:
    exp = configurations.load("t63-echam-jam", **{"run.total_time": 30})
+
+The recipes' own run length is a **calendar year of daily means**
+(``run.total_time: 12 months``). The CLI streams those into one file per
+calendar month (``run.monthly_means``, see :ref:`monthly-means-cli`); an
+in-process ``model.run(**exp.run_kwargs)`` keeps every daily mean in memory,
+so override ``run.total_time`` (and ``run.save_interval``) for in-memory runs
+and reduce with ``predictions.monthly_means()``.
 
 ``exp.model`` is a built :class:`~jcm.model.Model`, ``exp.forcing`` the built
 :class:`~jcm.forcing.ForcingData`, and ``exp.config`` a plain resolved dict.
@@ -211,10 +217,9 @@ composes the whole canonical forcing set for a composition in one call:
    coords = get_coords(vertical_coords=get_echam_levels(47),
                        spectral_truncation=63)          # ECHAM T63L47 hybrid
 
-   # JAM reads the 2-moment scheme's process ledger, and RRTMGP consumes the
-   # aerosol optics the grey scheme would ignore — so these three go together.
-   physics = echam_physics(aerosol_module="jam", cloud_scheme="2m",
-                           radiation_scheme="rrtmgp")
+   # JAM reads the 2-moment scheme's process ledger, so the two go together;
+   # RRTMGP (the default radiation) consumes JAM's per-band aerosol optics.
+   physics = echam_physics(aerosol_module="jam", cloud_scheme="2m")
    terrain = TerrainData.from_coords(coords)   # flat ocean; terrain_file= for orography
    model = Model(coords=coords, terrain=terrain, physics=physics)
 
@@ -224,7 +229,7 @@ composes the whole canonical forcing set for a composition in one call:
 
    predictions = model.run(
        initial_state=jw_state(model, rh=0.0),
-       forcing=forcing, total_time="1 year", save_interval="1 day",
+       forcing=forcing, total_time="365 days", save_interval="1 day",
    )
 
 Use ``from_bundles`` when you are composing your **own** model, as above. It
@@ -317,6 +322,15 @@ configuration; it then owns the time step.
        diffusion=DiffusionFilter.default(),
    )
    model = Model(dycore=dycore)          # adopts the dycore's 30-minute step
+
+*Transport scheme.* ``DinosaurDycore(advection=None)`` (the default; Hydra
+``dycore.advection=null``) lets the physics choose: SPEEDY runs the Eulerian
+spectral core it was formulated on, which on CPU is ~4x faster than
+semi-Lagrangian for SPEEDY; ECHAM, JAM, Held–Suarez and any composition that
+carries extra tracers run semi-Lagrangian. Pass ``advection="semi_lagrangian"``
+or ``"eulerian"`` to force one — Eulerian with tracer-carrying physics runs
+but warns, since it rings negative on sharp tracer fields. See
+:doc:`design/dinosaur_transport_selection`.
 
 **Initial conditions.** For the common starting states there are ready-made
 builders in :mod:`jcm.initial_states` — the same ones the CLI's ``init`` group

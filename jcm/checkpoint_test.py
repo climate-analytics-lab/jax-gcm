@@ -21,6 +21,7 @@ forcing. The composition-coverage tests build one SPEEDY and one ECHAM model
 (bootstrap only, no integration) to exercise a moist tracer set.
 """
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +30,7 @@ import flax.serialization
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import tree_math
 
 from jcm.checkpoint import (
@@ -221,12 +223,12 @@ class TestCheckpointSchemaStamp(unittest.TestCase):
     def test_stamp_and_migration_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(self.model, path, elapsed_days=1.5)
+            save_checkpoint(self.model, path, elapsed_days=0.0)
             payload = _read_payload(path)
 
         self.assertEqual(int(payload["schema_version"]), SCHEMA_VERSION)
         self.assertIsInstance(payload["jcm_version"], str)
-        self.assertAlmostEqual(float(payload["elapsed_days"]), 1.5)
+        self.assertAlmostEqual(float(payload["elapsed_days"]), 0.0)
         # Arrays are keyed by their pytree NAME, which is what makes a
         # field-set change migratable rather than fatal.
         self.assertIn("vorticity", payload["dycore"])
@@ -237,6 +239,20 @@ class TestCheckpointSchemaStamp(unittest.TestCase):
         # ``specific_humidity`` is a kg/kg mass mixing ratio even though no
         # term declares it — the flag a unit migration keys on.
         self.assertTrue(payload["dycore_tracers"]["specific_humidity"])
+
+    def test_mirror_revision_round_trips_through_metadata(self):
+        from unittest import mock
+
+        from jcm.data import remote
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(os.environ, {remote.REVISION_ENV: "a" * 40}):
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(self.model, path, elapsed_days=0.0)
+            fresh = _build_model()
+            fresh.bootstrap_state()
+            meta = {}
+            load_checkpoint(fresh, path, metadata=meta)
+        self.assertEqual(meta["data_mirror_revision"], "a" * 40)
 
     def test_newer_schema_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -268,11 +284,11 @@ class TestPhysicsCarryFieldMigration(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(donor, path, elapsed_days=3.0)
+            save_checkpoint(donor, path, elapsed_days=0.0)
             with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
                 elapsed = load_checkpoint(upgraded, path)
 
-        self.assertAlmostEqual(elapsed, 3.0)
+        self.assertAlmostEqual(elapsed, 0.0)
         restored = upgraded.physics_carry["extra_carry"].counter
         self.assertEqual(restored.shape, expected.shape)
         np.testing.assert_array_equal(np.asarray(restored), np.asarray(expected))
@@ -306,11 +322,12 @@ class TestPhysicsCarryFieldMigration(unittest.TestCase):
         evolved = dict(carry)
         evolved["extra_carry"] = _ExtraCarryData(
             counter=jnp.full_like(carry["extra_carry"].counter, 7.0))
-        upgraded.restore_state(state, evolved)
+        upgraded.restore_state(state, evolved, time=upgraded.run_state.time,
+                               step=upgraded.run_state.step)
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(donor, path, elapsed_days=1.0)
+            save_checkpoint(donor, path, elapsed_days=0.0)
             load_checkpoint(upgraded, path)
 
         restored = np.asarray(upgraded.physics_carry["extra_carry"].counter)
@@ -325,11 +342,11 @@ class TestPhysicsCarryFieldMigration(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(donor, path, elapsed_days=4.0)
+            save_checkpoint(donor, path, elapsed_days=0.0)
             with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
                 elapsed = load_checkpoint(target, path)
 
-        self.assertAlmostEqual(elapsed, 4.0)
+        self.assertAlmostEqual(elapsed, 0.0)
         self.assertNotIn("extra_carry", target.physics_carry)
         self.assertTrue(
             any("extra_carry.counter" in line and "dropped" in line
@@ -347,7 +364,7 @@ class TestPhysicsCarryFieldMigration(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(donor, path, elapsed_days=1.0)
+            save_checkpoint(donor, path, elapsed_days=0.0)
             with self.assertRaises(ValueError) as ctx:
                 load_checkpoint(upgraded, path)
         message = str(ctx.exception)
@@ -364,7 +381,7 @@ class TestPhysicsCarryFieldMigration(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(donor, path, elapsed_days=1.0)
+            save_checkpoint(donor, path, elapsed_days=0.0)
             payload = _read_payload(path)
             self.assertIn(
                 "reservoir",
@@ -492,9 +509,9 @@ class TestUnstampedCheckpoints(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 load_checkpoint(target, path)
         message = str(ctx.exception)
-        self.assertIn("no schema_version stamp", message)
+        self.assertIn("no exact Gregorian clock", message)
         self.assertIn("unstamped_scale", message)
-        self.assertIn("#824", message)
+        self.assertIn("as_initial_condition", message)
 
     def test_unstamped_loads_on_an_explicit_no_op_assertion(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -502,8 +519,15 @@ class TestUnstampedCheckpoints(unittest.TestCase):
             _write_unstamped(self.model, path, elapsed_days=7.0)
             target = _build_model()
             target.bootstrap_state()
-            elapsed = load_checkpoint(target, path, unstamped_scale={})
+            elapsed = load_checkpoint(target, path, unstamped_scale={},
+                                      as_initial_condition=True)
+        # Documented return contract: the donor's recorded elapsed days,
+        # while the imported state's clock restarts at start_time.
         self.assertAlmostEqual(elapsed, 7.0)
+        run_state = target.run_state
+        restarted = run_state.time - target.start_time
+        self.assertEqual((int(restarted.days), int(restarted.seconds)), (0, 0))
+        self.assertEqual(int(run_state.step), 0)
         self.assertEqual(
             _max_abs_diff(self.model.dycore_state, target.dycore_state), 0.0)
 
@@ -517,16 +541,18 @@ class TestUnstampedCheckpoints(unittest.TestCase):
             "specific_humidity": jnp.full_like(
                 state.tracers["specific_humidity"], 2.0),
         })
-        donor.restore_state(moist, donor.physics_carry)
+        donor.restore_state(moist, donor.physics_carry, time=donor.run_state.time,
+                            step=donor.run_state.step)
 
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "legacy.msgpack"
-            _write_unstamped(donor, path, elapsed_days=1.0)
+            _write_unstamped(donor, path, elapsed_days=0.0)
             target = _build_model()
             target.bootstrap_state()
             with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
                 load_checkpoint(target, path,
-                                unstamped_scale={self.q_name: 1000.0})
+                                unstamped_scale={self.q_name: 1000.0},
+                                as_initial_condition=True)
 
         restored = np.asarray(target.dycore_state.tracers["specific_humidity"])
         np.testing.assert_allclose(restored, 2000.0, rtol=1e-6)
@@ -548,7 +574,8 @@ class TestUnstampedCheckpoints(unittest.TestCase):
             target.bootstrap_state()
             with self.assertRaises(ValueError) as ctx:
                 load_checkpoint(target, path,
-                                unstamped_scale={"tracers.nope": 1000.0})
+                                unstamped_scale={"tracers.nope": 1000.0},
+                                as_initial_condition=True)
         self.assertIn("tracers.nope", str(ctx.exception))
 
     def test_unstamped_scale_is_refused_for_a_stamped_file(self):
@@ -559,7 +586,8 @@ class TestUnstampedCheckpoints(unittest.TestCase):
             target.bootstrap_state()
             with self.assertRaises(ValueError) as ctx:
                 load_checkpoint(target, path,
-                                unstamped_scale={self.q_name: 1000.0})
+                                unstamped_scale={self.q_name: 1000.0},
+                                as_initial_condition=True)
         self.assertIn("stamped schema", str(ctx.exception))
 
     def test_unstamped_structural_mismatch_cannot_be_migrated(self):
@@ -572,7 +600,8 @@ class TestUnstampedCheckpoints(unittest.TestCase):
             target = _build_model()
             target.bootstrap_state()
             with self.assertRaises(ValueError) as ctx:
-                load_checkpoint(target, path, unstamped_scale={})
+                load_checkpoint(target, path, unstamped_scale={},
+                                      as_initial_condition=True)
         self.assertIn("carries no field names", str(ctx.exception))
 
 
@@ -617,10 +646,10 @@ class TestCompositionCoverage(unittest.TestCase):
         target.bootstrap_state()
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ckpt.msgpack"
-            save_checkpoint(donor, path, elapsed_days=2.0)
+            save_checkpoint(donor, path, elapsed_days=0.0)
             payload = _read_payload(path)
             elapsed = load_checkpoint(target, path)
-        self.assertAlmostEqual(elapsed, 2.0)
+        self.assertAlmostEqual(elapsed, 0.0)
         self.assertEqual(
             _max_abs_diff(donor.dycore_state, target.dycore_state), 0.0)
         self.assertEqual(
@@ -655,19 +684,20 @@ class TestCompositionCoverage(unittest.TestCase):
             _write_unstamped(donor, path, elapsed_days=0.0)
             with self.assertRaises(ValueError) as ctx:
                 load_checkpoint(target, path,
-                                unstamped_scale={integer_leaf: 1000.0})
+                                unstamped_scale={integer_leaf: 1000.0},
+                                as_initial_condition=True)
         self.assertIn("floating-point", str(ctx.exception))
 
     def test_echam_round_trip_and_condensate_metadata(self):
         from jcm.physics.echam.echam_levels import get_echam_levels
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.utils import get_coords
 
         def build():
             coords = get_coords(get_echam_levels(47), spectral_truncation=21)
             return Model(coords=coords,
                          terrain=TerrainData.aquaplanet(coords),
-                         physics=echam_physics(radiation_scheme="grey"))
+                         physics=idealized_echam_physics())
 
         payload, _, _ = self._round_trip(build)
         tracers = payload["dycore_tracers"]
@@ -684,5 +714,148 @@ class TestCompositionCoverage(unittest.TestCase):
         )
 
 
+
+class TestSurfaceOpticsAcrossRestart(unittest.TestCase):
+    """The radiation's surface optics survive a restart bit for bit (#672).
+
+    The boundary-condition term hands the radiation this step's surface
+    albedo / emissivity under a step-local key that ``ComposablePhysics``
+    drops before the carry (so it is never checkpointed); the radiation
+    publishes the values it solved with in ``radiation.surface_*`` and holds
+    them between solves. A restart in the middle of a radiation interval
+    must therefore replay the held, solve-time albedo exactly, and a file
+    carrying the step-local key (written by an intermediate build) must load
+    to the same result.
+    """
+
+    DT_MIN = 30          # model step [min]
+    EVERY = 4            # radiation solves every 4 steps (2 h)
+
+    def _build(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.testing import idealized_echam_physics
+        from jcm.physics.radiation.radiation_types import RadiationParameters
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        return Model(
+            coords=coords, terrain=TerrainData.aquaplanet(coords),
+            time_step=self.DT_MIN,
+            physics=idealized_echam_physics(
+                radiation=RadiationParameters.default(
+                    radiation_interval=self.EVERY * self.DT_MIN * 60.0)))
+
+    @staticmethod
+    def _radiation(model):
+        rad = model.physics_carry["radiation"]
+        return {name: np.asarray(getattr(rad, name)) for name in (
+            "surface_albedo_vis", "surface_albedo_nir", "surface_emissivity",
+            "sw_flux_up", "sw_flux_down", "surface_sw_up", "surface_sw_down",
+            "toa_sw_up", "sw_heating_rate")}
+
+    @pytest.mark.slow
+    def test_mid_interval_restart_is_bit_identical(self):
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.radiation import SURFACE_OPTICS_KEY
+
+        self.assertIn(SURFACE_OPTICS_KEY, ComposablePhysics._STEP_LOCAL_KEYS)
+        step_days = self.DT_MIN / 1440.0
+        total = 2 * self.EVERY            # two radiation intervals
+        split = self.EVERY + 2            # mid-interval: a cached step next
+
+        baseline = self._build()
+        baseline.run(save_interval=step_days, total_time=total * step_days)
+        want = self._radiation(baseline)
+        # Anti-vacuity: the sun is up somewhere and the ocean albedo varies.
+        self.assertGreater(float(want["surface_sw_down"].max()), 100.0)
+        self.assertGreater(float(np.ptp(want["surface_albedo_vis"])), 1e-3)
+
+        first = self._build()
+        first.run(save_interval=step_days, total_time=split * step_days)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(first, path, elapsed_days=split * step_days)
+            payload = _read_payload(path)
+            # Step-local: never part of the checkpointed carry.
+            self.assertFalse(
+                [k for k in payload["physics"] if SURFACE_OPTICS_KEY in k])
+
+            resumed = self._build()
+            resumed.bootstrap_state()
+            load_checkpoint(resumed, path)
+            resumed.resume(save_interval=step_days,
+                           total_time=(total - split) * step_days)
+
+            # A file that does carry the step-local key (written by a build
+            # that checkpointed it) loads with the key dropped: zeros there
+            # can never reach a solve.
+            stale = dict(payload)
+            stale["physics"] = dict(payload["physics"])
+            ncols_shape = want["surface_albedo_vis"].shape
+            for field in ("albedo_vis", "albedo_nir", "emissivity"):
+                stale["physics"][f"{SURFACE_OPTICS_KEY}.{field}"] = (
+                    np.zeros(ncols_shape, np.float32))
+            stale_path = Path(tmp) / "stale.msgpack"
+            _write_payload(stale_path, stale)
+            from_stale = self._build()
+            from_stale.bootstrap_state()
+            load_checkpoint(from_stale, stale_path)
+            from_stale.resume(save_interval=step_days,
+                              total_time=(total - split) * step_days)
+
+        for label, model in (("resumed", resumed), ("stale-key", from_stale)):
+            got = self._radiation(model)
+            for name, value in want.items():
+                np.testing.assert_array_equal(
+                    got[name], value, err_msg=f"{label}: radiation.{name}")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExactCheckpointClock(unittest.TestCase):
+    """Resumes preserve exact dates; legacy fields are initialization only."""
+
+    def test_clock_round_trip_and_reject_inconsistent_elapsed_metadata(self):
+        import jax_datetime as jdt
+
+        donor = _build_model()
+        state, carry = donor.bootstrap_state()
+        # An exact sub-day offset must survive without an epoch float.
+        donor.restore_state(state, carry,
+                            time=donor.start_time + jdt.Timedelta(seconds=10800),
+                            step=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "clock.msgpack"
+            with self.assertRaisesRegex(ValueError, "elapsed_days"):
+                save_checkpoint(donor, path, elapsed_days=1.0)
+            save_checkpoint(donor, path, elapsed_days=0.125)
+            target = _build_model()
+            target.bootstrap_state()
+            load_checkpoint(target, path)
+            self.assertEqual(int(target.run_state.step), 1)
+            self.assertEqual(int((target.run_state.time - donor.run_state.time).seconds), 0)
+            self.assertEqual(int((target.run_state.time - donor.run_state.time).days), 0)
+            payload = _read_payload(path)
+            payload["clock"]["step"] = np.int32(2)
+            _write_payload(path, payload)
+            with self.assertRaisesRegex(ValueError, "disagree"):
+                load_checkpoint(target, path)
+
+    def test_schema_one_requires_new_experiment(self):
+        donor = _build_model()
+        donor.bootstrap_state()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "old.msgpack"
+            save_checkpoint(donor, path, elapsed_days=0.0)
+            payload = _read_payload(path)
+            payload["schema_version"] = 1
+            del payload["clock"]
+            _write_payload(path, payload)
+            target = _build_model()
+            target.bootstrap_state()
+            with self.assertRaisesRegex(ValueError, "as_initial_condition"):
+                load_checkpoint(target, path)
+            load_checkpoint(target, path, as_initial_condition=True)
+            self.assertEqual(int(target.run_state.step), 0)

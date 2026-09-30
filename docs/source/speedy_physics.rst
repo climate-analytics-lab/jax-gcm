@@ -572,10 +572,10 @@ Assumptions and Limitations
 
 **Forcing Data**:
 
-- One-year climatology files are reused on every simulated year. Multi-year
-  files are aligned by date.
-- SPEEDY uses a no-leap (365-day) year by default. Pass
-  ``Model(calendar='gregorian')`` if you need real Gregorian timestamps.
+- Explicitly declared monthly/daily climatologies repeat each year. Dated
+  files retain their absolute timestamps, regardless of record length.
+- SPEEDY receives seasonal phase from the real Gregorian model clock. Its
+  empirical solar coefficients remain unchanged; see :doc:`science/radiation`.
 - SST and other boundary conditions are prescribed (not predicted).
 
 **Domain**:

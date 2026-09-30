@@ -180,6 +180,13 @@ class VDiffState(NamedTuple):
     # Ocean surface velocities (for momentum exchange)
     ocean_u: jnp.ndarray          # Ocean u-velocity [m/s] (ncol,)
     ocean_v: jnp.ndarray          # Ocean v-velocity [m/s] (ncol,)
+
+    # Fraction of each tile's POTENTIAL evaporation that sublimates [-]
+    # (ncol, nsfc_type): 1 over sea ice (ECHAM ``ahfli = als·evap``), the
+    # snow-cover fraction over land (JSBACH ``alv·E + (als−alv)·snow_fract·
+    # E_pot``), 0 over open water. Sets only the latent heat attached to the
+    # surface moisture flux; the moisture flux itself does not depend on it.
+    surface_sublimation_fraction: jnp.ndarray = None
     
 
 
@@ -217,9 +224,14 @@ class VDiffSurfaceFluxes(NamedTuple):
 
     evaporation: jnp.ndarray     # E [kg/m²/s] (ncol,), positive up (into column)
     sensible_heat: jnp.ndarray   # SH [W/m²] (ncol,), positive up (into column)
-    latent_heat: jnp.ndarray     # LH = alhc·E [W/m²] (ncol,)
-    stress_u: jnp.ndarray        # τ_u on the atmosphere [N/m²] (ncol,)
-    stress_v: jnp.ndarray        # τ_v on the atmosphere [N/m²] (ncol,)
+    latent_heat: jnp.ndarray     # LH = Σ_t f_t·L_t·E_t [W/m²] (ncol,)
+    # Downward momentum flux INTO the surface (positive with the wind);
+    # the delivered column momentum change is its negative (verified
+    # against the column-integrated tendency; see
+    # matrix_solver.diagnose_surface_fluxes). Matches the #754
+    # surface-exchange contract sign as-is.
+    stress_u: jnp.ndarray        # τ_u into the surface [N/m²] (ncol,)
+    stress_v: jnp.ndarray        # τ_v into the surface [N/m²] (ncol,)
 
     @classmethod
     def zeros(cls, ncol):
@@ -250,6 +262,14 @@ class VDiffDiagnostics(NamedTuple):
     # Grid-mean 10 m wind speed, the reference height every surface-flux
     # parameterization (sea salt, DMS) is calibrated to.
     wind_10m: jnp.ndarray                 # |U(10 m)| [m/s] (ncol,)
+    # Its eastward/northward components (ECHAM ``u10``/``v10``) and the
+    # per-tile 10 m wind the grid means are the fraction-weighted sums of.
+    wind_10m_u: jnp.ndarray               # u(10 m) [m/s] (ncol,)
+    wind_10m_v: jnp.ndarray               # v(10 m) [m/s] (ncol,)
+    wind_10m_reduction: jnp.ndarray       # sum_t f_t zred_t [-] (ncol,)
+    wind_10m_tile: jnp.ndarray            # |U(10 m)| per tile [m/s] (ncol, nsfc_type)
+    wind_10m_u_tile: jnp.ndarray          # u(10 m) per tile [m/s] (ncol, nsfc_type)
+    wind_10m_v_tile: jnp.ndarray          # v(10 m) per tile [m/s] (ncol, nsfc_type)
 
     # Richardson number
     richardson_number: jnp.ndarray        # Bulk Richardson number [-] (ncol, nlev)
@@ -358,6 +378,22 @@ class VerticalDiffusionData:
     # Diagnosed 10 m wind speed (ECHAM ``vphysc%velo10m``): the reference
     # height the surface-flux emission schemes are calibrated to.
     wind_10m: jnp.ndarray            # |U(10 m)| [m/s] (ncols,)
+    # The same 10 m wind as a vector (ECHAM ``u10``/``v10``) and per tile
+    # (0 = water, 1 = sea ice, 2 = land), with the tile fractions it was
+    # weighted by: ``sum(surface_fraction * wind_10m_u_tile, -1) ==
+    # wind_10m_u`` (and likewise for v and the speed). From the step-start
+    # lowest-level wind, as ECHAM's u10 (``update_surface`` gets ``pum1``);
+    # the surface-exchange contract publishes these.
+    wind_10m_u: jnp.ndarray          # u(10 m) [m/s] (ncols,)
+    wind_10m_v: jnp.ndarray          # v(10 m) [m/s] (ncols,)
+    # The grid-mean reduction factor itself, sum_t f_t zred_t, so a
+    # consumer can apply the same surface-layer profile to a lowest-level
+    # wind at another time (the AeroCom uas/vas use the post-physics wind).
+    wind_10m_reduction: jnp.ndarray  # [-] (ncols,)
+    wind_10m_tile: jnp.ndarray       # |U(10 m)| per tile [m/s] (ncols, nsfc_type)
+    wind_10m_u_tile: jnp.ndarray     # u(10 m) per tile [m/s] (ncols, nsfc_type)
+    wind_10m_v_tile: jnp.ndarray     # v(10 m) per tile [m/s] (ncols, nsfc_type)
+    surface_fraction: jnp.ndarray    # tile fractions [-] (ncols, nsfc_type)
 
     # Grid-mean surface fluxes DELIVERED by the implicit surface-coupled
     # column solve this step (diagnosed from the implicit solution, so they
@@ -367,8 +403,10 @@ class VerticalDiffusionData:
     surface_evaporation: jnp.ndarray     # E [kg/m²/s] (ncols,), positive up
     surface_sensible_heat: jnp.ndarray   # SH [W/m²] (ncols,), positive up
     surface_latent_heat: jnp.ndarray     # LH [W/m²] (ncols,)
-    surface_stress_u: jnp.ndarray        # τ_u on the atmosphere [N/m²] (ncols,)
-    surface_stress_v: jnp.ndarray        # τ_v on the atmosphere [N/m²] (ncols,)
+    # Positive-down: the momentum flux INTO the surface (see
+    # VDiffSurfaceFluxes.stress_u above).
+    surface_stress_u: jnp.ndarray        # τ_u into the surface [N/m²] (ncols,)
+    surface_stress_v: jnp.ndarray        # τ_v into the surface [N/m²] (ncols,)
 
     @classmethod
     def zeros(cls, nodal_shape, nlev):
@@ -387,6 +425,13 @@ class VerticalDiffusionData:
             surface_friction_velocity=jnp.zeros(nodal_shape),
             monin_obukhov_length=jnp.zeros(nodal_shape),
             wind_10m=jnp.zeros(nodal_shape),
+            wind_10m_u=jnp.zeros(nodal_shape),
+            wind_10m_v=jnp.zeros(nodal_shape),
+            wind_10m_reduction=jnp.zeros(nodal_shape),
+            wind_10m_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
+            wind_10m_u_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
+            wind_10m_v_tile=jnp.zeros(nodal_shape + (nsfc_type,)),
+            surface_fraction=jnp.zeros(nodal_shape + (nsfc_type,)),
             surface_evaporation=jnp.zeros(nodal_shape),
             surface_sensible_heat=jnp.zeros(nodal_shape),
             surface_latent_heat=jnp.zeros(nodal_shape),
@@ -409,6 +454,13 @@ class VerticalDiffusionData:
             'surface_friction_velocity': self.surface_friction_velocity,
             'monin_obukhov_length': self.monin_obukhov_length,
             'wind_10m': self.wind_10m,
+            'wind_10m_u': self.wind_10m_u,
+            'wind_10m_v': self.wind_10m_v,
+            'wind_10m_reduction': self.wind_10m_reduction,
+            'wind_10m_tile': self.wind_10m_tile,
+            'wind_10m_u_tile': self.wind_10m_u_tile,
+            'wind_10m_v_tile': self.wind_10m_v_tile,
+            'surface_fraction': self.surface_fraction,
             'surface_evaporation': self.surface_evaporation,
             'surface_sensible_heat': self.surface_sensible_heat,
             'surface_latent_heat': self.surface_latent_heat,

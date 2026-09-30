@@ -8,8 +8,9 @@ float64 and meets float32 ``vmr_fields`` inside the library's gas-optics
 pySES JAM smoke run. This test reproduces that exact coupling (x64 on, f32
 inputs) on a tiny column.
 
-It lives in the pyses test package so ``conftest.py`` schedules it after all
-dtype-sensitive tests — flipping x64 here must not contaminate them.
+It needs no extra, so the default CI jobs run it. The flag it turns on does
+not reach other tests: the root ``conftest.py`` restores the session default
+around every test not marked ``requires_extra("pyses")``.
 """
 
 import unittest

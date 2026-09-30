@@ -11,7 +11,13 @@ The single-column model applies the summed physics tendencies, so the
 budget is checked on the TENDENCIES of one step (the SCM's prescribed
 tracer base makes state differences unusable for tracers):
 
-    Σ (dq/dt + dqc/dt + dqi/dt)·Δp/g  +  P_conv + P_rain + P_snow − E ≈ 0
+    Σ (dq/dt + dqc/dt + dqi/dt)·Δp/g  +  P_conv + P_rain + P_snow − E − S ≈ 0
+
+``S`` is the water Tiedtke's precipitation-flux floor creates where the
+downdraft takes up more rain than the plume generates — ECHAM behaviour,
+published as ``convection.precip_floor_source`` (#912). It is part of the
+convective ledger, so the closure keeps it rather than hiding it in a looser
+bound.
 """
 
 import unittest
@@ -26,29 +32,19 @@ import jcm.constants as c
 @pytest.mark.slow
 class TestComposedColumnWaterClosure(unittest.TestCase):
     def test_full_echam_step_water_budget(self):
-        from dinosaur.sigma_coordinates import SigmaCoordinates
-
-        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.physics.echam.testing import idealized_echam_physics
         from jcm.physics.radiation.radiation_types import RadiationParameters
         from jcm.rce import rce_column, rce_initial_state, run_rce
 
-        # UNIFORM sigma grid, deliberately: the Tiedtke cudtdq ledger closes
-        # against its own dual-grid (centre-to-centre) layer masses, not the
-        # model's interface masses — the documented staggering deviation
-        # tracked in #530 (see flux_tendencies.py "NOTE on staggering"). On a
-        # stretched hybrid grid that deviation projects onto this budget as a
-        # spurious residual (measured 25 % of E on the full L47 grid in a
-        # weakly-precipitating regime, closing to 1e-12 under the scheme's own
-        # mass), swamping the genuine leaks this test exists to catch (water
-        # created at the precip rate, clips destroying mass, an unscaled cap
-        # ledger). On an equidistant grid the two mass measures coincide, so
-        # the closure below measures the composed ledger and nothing else.
-        # This test previously ran on the truncated L40 hybrid table, whose
-        # removal (#680) surfaced the projection.
-        nlev = 40
-        vertical = SigmaCoordinates.equidistant(nlev)
-        physics = echam_physics(
-            radiation_scheme="grey",
+        # The production L47 hybrid grid, whose layer thicknesses stretch
+        # fastest near the surface and the model top: every scheme's ledger
+        # — the Tiedtke cudtdq finite-volume ledger included — is
+        # conservative in the model's own interface masses, so the stretched
+        # grid is where a ledger kept in any other mass would show up here.
+        nlev = 47
+        vertical = get_echam_levels(nlev)
+        physics = idealized_echam_physics(
             radiation=RadiationParameters.default(solar_constant=420.0),
         )
         scm = rce_column(
@@ -72,7 +68,9 @@ class TestComposedColumnWaterClosure(unittest.TestCase):
         # before a per-term ledger showed every term closing to round-off
         # and the composed residual collapsing 55x under the correct mass.
         ps = float(np.asarray(ic.normalized_surface_pressure) * c.p0)
-        mass = np.diff(np.asarray(scm.vertical.boundaries) * ps) / c.grav
+        p_half = (np.asarray(vertical.a_boundaries)
+                  + np.asarray(vertical.b_boundaries) * ps)
+        mass = np.diff(p_half) / c.grav
 
         t = preds.tendencies
         nsteps = np.asarray(t.specific_humidity).shape[0]
@@ -87,6 +85,9 @@ class TestComposedColumnWaterClosure(unittest.TestCase):
             + np.asarray(ph["convection"].precip_conv).reshape(nsteps, -1)[:, 0]
         )
         E = np.asarray(ph["surface"].evaporation).reshape(nsteps, -1)[:, 0]
+        S = np.asarray(
+            ph["convection"].precip_floor_source,
+        ).reshape(nsteps, -1)[:, 0]
 
         # Since the surface exchange became the bottom boundary row of the
         # vdiff implicit solve, the published evaporation IS the delivered
@@ -98,7 +99,7 @@ class TestComposedColumnWaterClosure(unittest.TestCase):
         np.testing.assert_allclose(E_eff, E)
 
         col = (dq + dqc + dqi) @ mass  # (nsteps,)
-        residual = col + P - E
+        residual = col + P - E - S
         scale = np.maximum.reduce([np.abs(E), np.abs(P), np.abs(col), np.full_like(E, 1e-9)])
         rel = np.abs(residual) / scale
 

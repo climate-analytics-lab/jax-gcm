@@ -256,9 +256,19 @@ class CloudBorneExchange(PhysicsTerm):
             jnp.maximum(clouds.incloud_liquid, 0.0)
             + jnp.maximum(clouds.incloud_ice, 0.0)
         )
-        formed_gm = cf_proc * dt * jnp.maximum(
-            clouds.incloud_rain_formation + clouds.incloud_riming
-            + clouds.incloud_snow_formation, 0.0,
+        # The liquid (rain formation + riming) and ice (snow formation)
+        # parts are floored separately, as HAM keeps the phases apart
+        # (mo_hammoz_wetdep.f90:428-435 clips the ice efficiency from
+        # pmrateps alone and takes the liquid one from pmratepr + pmsnowacl;
+        # ``incloud_scavenged_fractions`` does the same). The snow-formation
+        # ledger is signed: its sedimentation seed is negative in a level
+        # that absorbs more falling ice than it sheds (mo_cloud_micro_2m.f90
+        # 2258-2265), and a joint floor would let that offset rain and
+        # riming in the same cell.
+        formed_gm = cf_proc * dt * (
+            jnp.maximum(
+                clouds.incloud_rain_formation + clouds.incloud_riming, 0.0)
+            + jnp.maximum(clouds.incloud_snow_formation, 0.0)
         )
         f_wat, f_ice, pice = incloud_scavenged_fractions(clouds, dt)
         f_form = (1.0 - pice) * f_wat + pice * f_ice

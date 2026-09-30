@@ -52,6 +52,7 @@ import numpy as np
 import jcm.constants as c
 from jcm.forcing import ForcingData
 from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.radiation.cloud_optics import post_physics_effective_radii
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
 
@@ -67,9 +68,9 @@ OVERLAP_MAXIMUM = "maximum"
 OVERLAP_RANDOM = "random"
 OVERLAP_MAXIMUM_RANDOM = "maximum-random"
 
-# Effective-radius floor when forming optical depth, so a cloud-free layer
-# (r_eff = 0) cannot divide by zero. Only reached where condensate is also
-# zero, so the guarded value never affects a physical result.
+# Effective-radius floor for the division that forms an optical depth, so the
+# unselected branch of ``_cloud_optical_depth``'s ``where`` (a layer with
+# r_eff = 0, which contributes no optical depth) cannot divide by zero.
 _MIN_REFF_M = 1e-9
 
 # Physical floor for condensate guards. A guard of ``> 0.0`` is not enough
@@ -168,13 +169,20 @@ def _cloud_optical_depth(
     result is the grid-mean optical depth; the protocol's Q/A is explicit
     that 2-D cloud fields are stored as grid-box means and NOT divided by
     cloud cover.
+
+    A layer whose radius is 0 holds no cloud of that phase: its condensate
+    is absent or sits in a cover too small to form an in-cloud value
+    (``post_physics_effective_radii``), which the radiation does not radiate
+    either, so it contributes no optical depth.
     """
     dm = _layer_mass(pressure_half)
     lwp_layer, iwp_layer = qc * dm, qi * dm
     r_liq = jnp.maximum(r_eff_liq_m, _MIN_REFF_M)
     r_ice = jnp.maximum(r_eff_ice_m, _MIN_REFF_M)
-    tau_liq = 1.5 * lwp_layer / (_RHO_WATER * r_liq)
-    tau_ice = 1.5 * iwp_layer / (_RHO_ICE * r_ice)
+    tau_liq = jnp.where(r_eff_liq_m > 0.0,
+                        1.5 * lwp_layer / (_RHO_WATER * r_liq), 0.0)
+    tau_ice = jnp.where(r_eff_ice_m > 0.0,
+                        1.5 * iwp_layer / (_RHO_ICE * r_ice), 0.0)
     return tau_liq, tau_ice
 
 
@@ -386,8 +394,9 @@ class AerocomDiagnostics(PhysicsTerm):
         ``PM1``/``PM10`` from the modal state. Requires the JAM aerosol
         module; silently inactive without it.
     ``nearsurface``
-        2 m temperature/dew point, 10 m winds (neutral log-profile
-        interpolation, see :meth:`_nearsurface_group`), sea-level
+        2 m temperature/dew point (neutral log-profile interpolation),
+        10 m winds from the vertical-diffusion surface-layer reduction (see
+        :meth:`_nearsurface_group`), sea-level
         pressure, the convective/stratiform x rain/snow precipitation
         split (``prcr``/``prcs``/``prsn``) and the activation cloud-base
         updraft ``wbase``.
@@ -408,7 +417,14 @@ class AerocomDiagnostics(PhysicsTerm):
 
     name: ClassVar[str] = "aerocom_diagnostics"
     category: ClassVar[str] = "diagnostics"
-    requires: ClassVar[tuple[str, ...]] = ("clouds", "pressure_full", "pressure_half")
+    # ``air_density`` and, on the 1-moment law, ``aerosol`` (its Twomey
+    # factor scales the prescribed droplet number) are read by
+    # ``post_physics_effective_radii`` for the cloud group's radii. Every
+    # ``echam_physics`` composition carries both (``MoistAirColumnState``,
+    # and MACv2-SP or JAM); declaring them makes a composition without them
+    # fail when it is built rather than when it is traced.
+    requires: ClassVar[tuple[str, ...]] = (
+        "clouds", "pressure_full", "pressure_half", "air_density", "aerosol")
     # Every key this term can publish. The emitted set must be static (the
     # diagnostics dict is part of the scan carry), so each selected group
     # writes all of its keys, zero-filled where the active configuration
@@ -418,7 +434,7 @@ class AerocomDiagnostics(PhysicsTerm):
         "aerocom_clt", "aerocom_ttop", "aerocom_cdr", "aerocom_icr",
         "aerocom_cdnc", "aerocom_lcc", "aerocom_icc", "aerocom_cod",
         "aerocom_codliq", "aerocom_codice", "aerocom_lwp", "aerocom_iwp",
-        "aerocom_cllvi", "aerocom_clivi",
+        "aerocom_cllvi", "aerocom_clivi", "aerocom_cdr3d", "aerocom_icr3d",
         # column
         "aerocom_prw", "aerocom_cdnum", "aerocom_icnum", "aerocom_albedo",
         "aerocom_cdnc3d",
@@ -449,9 +465,11 @@ class AerocomDiagnostics(PhysicsTerm):
         ``overlap`` should match the radiation scheme's overlap
         assumption, as the protocol requests. ``plev_pa`` lists the
         pressure surfaces for the ``plev`` group (default 200 and 700
-        hPa, the levels AeroCom asks for). ``mode_sigma_g`` gives the
-        geometric standard deviation per aerosol mode for the number
-        diagnostics; ``None`` uses the MAM4 defaults.
+        hPa, the levels AeroCom asks for). ``mode_sigma_g`` overrides the
+        geometric standard deviation used for each aerosol mode by the
+        number and PM diagnostics, one entry per mode in the order of the
+        spec's modes; ``None`` takes each mode's ``geom_std_dev`` from the
+        aerosol spec itself.
         """
         unknown = set(groups) - set(self.ALL_GROUPS)
         if unknown:
@@ -463,15 +481,16 @@ class AerocomDiagnostics(PhysicsTerm):
         self.groups = tuple(groups)
         self.overlap = str(overlap)
         self.plev_pa = tuple(float(p) for p in plev_pa)
-        # MAM4 modal widths (Aitken, accumulation, coarse, primary-carbon).
+        # ``None`` is resolved against the spec's modes in _aerosol_group,
+        # where the spec is known, so a width can never be paired with the
+        # wrong mode by a parallel table falling out of order.
         self.mode_sigma_g = (tuple(float(s) for s in mode_sigma_g)
-                             if mode_sigma_g is not None
-                             else (1.6, 1.8, 1.8, 1.6))
+                             if mode_sigma_g is not None else None)
         # sigma_g = 1 is a monodisperse delta: ln(sigma) = 0 divides both
         # lognormal integrals by zero, and sigma < 1 is not a width at all.
         # The per-mode COUNT is checked against the live modal state in
         # _aerosol_group, where it is known.
-        bad = [s for s in self.mode_sigma_g if s <= 1.0]
+        bad = [s for s in (self.mode_sigma_g or ()) if s <= 1.0]
         if bad:
             raise ValueError(
                 f"mode_sigma_g entries must be > 1 (geometric std dev); got {bad}")
@@ -516,8 +535,17 @@ class AerocomDiagnostics(PhysicsTerm):
         # GRID-MEAN under both schemes, so the CMOR'd cdnc3d means one thing.
         out["aerocom_cdnc3d"] = cdnc_gm
         if "cloud" in self.groups:
+            # The radii of the condensate this group reads, not the
+            # radiation's (formed from the step-start condensate, before the
+            # microphysics): see ``post_physics_effective_radii``.
+            prognostic = "qnc" in state.tracers and "qni" in state.tracers
+            r_liq_um, r_ice_um = post_physics_effective_radii(
+                state, diagnostics, forcing, terrain, qc, qi,
+                clouds.cloud_fraction, temperature,
+                number_tracers=(qnc, qni) if prognostic else None)
             out.update(self._cloud_group(clouds, temperature, p_half,
-                                         cdnc_ic, qc, qi))
+                                         cdnc_ic, qc, qi,
+                                         r_liq_um * 1e-6, r_ice_um * 1e-6))
         if "column" in self.groups:
             out.update(self._column_group(state, diagnostics, p_half, qnc, qni))
         if "plev" in self.groups:
@@ -550,7 +578,9 @@ class AerocomDiagnostics(PhysicsTerm):
           carry init;
         * 1-moment (``echam_1m``) writes ``CloudData.droplet_number`` in
           **m^-3** as a characteristic **in-cloud** value
-          (``base_cdnc * cdnc_factor``), nonzero even in clear sky.
+          (ECHAM's prescribed profile times ``cdnc_factor``,
+          ``cloud_utils.prescribed_droplet_number``), nonzero even in clear
+          sky.
 
         Both a grid-mean and an in-cloud volumetric field are returned so
         each consumer takes the semantics it needs: the CMOR'd ``cdnc3d``
@@ -583,7 +613,7 @@ class AerocomDiagnostics(PhysicsTerm):
         return cdnc_gm, cdnc_ic, qnc, qni
 
     def _cloud_group(self, clouds, temperature, p_half, cdnc_ic,
-                     qc, qi) -> dict:
+                     qc, qi, r_liq_m, r_ice_m) -> dict:
         """Cloud-top sampling, optical depths and condensate paths.
 
         ``cdnc_ic`` is the IN-CLOUD droplet number [m^-3], already resolved
@@ -591,10 +621,9 @@ class AerocomDiagnostics(PhysicsTerm):
         in-cloud cdnc3d as input to the sampler (the grid-mean output then
         follows from the area weighting inside it). Do not divide by cloud
         fraction here: for the 1M scheme the field is in-cloud already.
+        ``r_liq_m`` / ``r_ice_m`` are the effective radii [m] of ``qc`` /
+        ``qi``, 0 where a phase is absent.
         """
-        # jcm carries effective radii in microns; the protocol wants metres.
-        r_liq_m = clouds.r_eff_liq * 1e-6
-        r_ice_m = clouds.r_eff_ice * 1e-6
         tau_liq, tau_ice = _cloud_optical_depth(
             qc, qi, r_liq_m, r_ice_m, p_half)
         cod3d = tau_liq + tau_ice
@@ -632,6 +661,11 @@ class AerocomDiagnostics(PhysicsTerm):
             # CMIP/AeroCom aliases for the same paths.
             "aerocom_cllvi": lwp,
             "aerocom_clivi": iwp,
+            # The 3-D radii [m] of the condensate above, for the CMOR'd
+            # cdr3d/icr3d: the same radii as every product in this group,
+            # not the radiation's ``clouds.r_eff_*``.
+            "aerocom_cdr3d": r_liq_m,
+            "aerocom_icr3d": r_ice_m,
         }
 
     def _column_group(self, state, diagnostics, p_half, qnc, qni) -> dict:
@@ -813,20 +847,31 @@ class AerocomDiagnostics(PhysicsTerm):
                            temperature, p_full) -> dict:
         """2 m / 10 m diagnostics, sea-level pressure, precipitation split.
 
-        The 2 m temperature and 10 m winds interpolate between the surface
-        and the lowest model level with the NEUTRAL logarithmic profile,
-        using the tile-averaged momentum roughness the surface term
+        ``uas``/``vas`` apply the vertical-diffusion term's stability-
+        dependent 10 m reduction (the grid-mean ``sum_t f_t zred_t`` of
+        ECHAM ``nsurf_diag``, ``vertical_diffusion.wind_10m_reduction``) to
+        the POST-physics lowest-level wind, so they are at the same time
+        level as the pressure-level winds of this AeroCom set. The
+        surface-exchange contract's ``wind_u``/``wind_v`` apply the same
+        reduction to the step-start wind the surface fluxes used, as ECHAM's
+        own ``u10``/``v10`` do (``update_surface`` gets ``pum1``). The
+        2 m temperature interpolates between
+        the surface and the lowest model level with the NEUTRAL logarithmic
+        profile, using the tile-averaged momentum roughness the surface term
         publishes (heat roughness = 0.1 z0m, the model's own ratio).
-        Stability corrections are deliberately omitted in this first
-        version: they modify the 2 m values by O(1 K) in strongly
-        stable/unstable layers, which matters for NWP verification but not
-        for the AeroCom context fields — documented so nobody mistakes
-        this for a Monin-Obukhov implementation. ``dew2`` converts the
+        Stability corrections are deliberately omitted there: they modify
+        the 2 m values by O(1 K) in strongly stable/unstable layers, which
+        matters for NWP verification but not for the AeroCom context fields
+        — documented so nobody mistakes this for a Monin-Obukhov
+        implementation. ``dew2`` converts the
         (well-mixed) lowest-level specific humidity to a dew point at
         surface pressure via the inverted Magnus formula. ``psl`` is the
-        standard WMO reduction with the 6.5 K/km lapse. ``wbase`` is the
-        SAME updraft the 2M activation uses (fact_tke sqrt(2 TKE),
-        lohmann_2m fact_tke = 0.7), sampled at the diagnosed cloud base.
+        standard WMO reduction with the 6.5 K/km lapse. ``wbase`` is
+        ``0.7·sqrt(2·TKE)`` sampled at the diagnosed cloud base; it is
+        neither the 2M scheme's phase-criterion updraft
+        (``cloud_utils.turbulent_updraft_velocity``, ``0.7·sqrt(TKE)``) nor
+        the JAM activation updraft (``sqrt(2·TKE/3)``,
+        ``jam/activation/arg_term.py``).
         Convective precipitation is split rain/snow by the lowest-level
         temperature (the melt criterion the COSP hook already uses).
         """
@@ -838,32 +883,39 @@ class AerocomDiagnostics(PhysicsTerm):
 
         t_low = temperature[-1]
         q_low = _post_physics(state, diagnostics, "specific_humidity")[-1]
-        u_low = _post_physics(state, diagnostics, "u_wind")[-1]
-        v_low = _post_physics(state, diagnostics, "v_wind")[-1]
         # The ACTUAL surface pressure, not the lowest level-centre pressure:
         # at L47 the two differ by ~400 Pa even over ocean, which would bias
         # psl and the dew point directly (Codex review on PR #604).
         p_sfc = state.normalized_surface_pressure.reshape(ncols_shape) * c.p0
+
+        vdiff = diagnostics.get("vertical_diffusion")
+        reduction = getattr(vdiff, "wind_10m_reduction", None)
+        if reduction is None:
+            # No vdiff term composed: there is no 10 m profile to apply.
+            out["aerocom_uas"] = jnp.zeros(ncols_shape, dtype=temperature.dtype)
+            out["aerocom_vas"] = jnp.zeros(ncols_shape, dtype=temperature.dtype)
+        else:
+            reduction = reduction.reshape(ncols_shape)
+            out["aerocom_uas"] = (
+                reduction * _post_physics(state, diagnostics, "u_wind")[-1])
+            out["aerocom_vas"] = (
+                reduction * _post_physics(state, diagnostics, "v_wind")[-1])
 
         sfc = diagnostics.get("surface")
         t_skin = getattr(sfc, "surface_temperature", None)
         z0m = getattr(sfc, "roughness_length", None)
         if t_skin is None or z0m is None or z_full is None or z_half is None:
             zero = jnp.zeros(ncols_shape, dtype=temperature.dtype)
-            for k in ("tas", "uas", "vas", "dew2", "wbase"):
+            for k in ("tas", "dew2", "wbase"):
                 out[f"aerocom_{k}"] = zero
         else:
             z_agl = jnp.maximum(z_full[-1] - z_half[-1], 10.0)
             z0m = jnp.clip(z0m.reshape(ncols_shape), 1e-5, 2.0)
             z0h = 0.1 * z0m
-            # Neutral log-profile ratios; winds vanish at z0m, scalars
-            # reach the skin value at z0h.
-            r10 = jnp.log(10.0 / z0m) / jnp.log(z_agl / z0m)
+            # Neutral log-profile ratio; scalars reach the skin value at z0h.
             r2 = jnp.log(2.0 / z0h) / jnp.log(z_agl / z0h)
             t_skin = t_skin.reshape(ncols_shape)
             out["aerocom_tas"] = t_skin + (t_low - t_skin) * jnp.clip(r2, 0.0, 1.0)
-            out["aerocom_uas"] = u_low * jnp.clip(r10, 0.0, 1.0)
-            out["aerocom_vas"] = v_low * jnp.clip(r10, 0.0, 1.0)
             # Magnus inversion: e = q p / (eps + (1-eps) q); Td from
             # ln(e/611.2) = 17.62 Td / (Td + 243.12) (Td in Celsius).
             eps_rd = 0.622
@@ -875,7 +927,6 @@ class AerocomDiagnostics(PhysicsTerm):
                 td_c + 273.15, out["aerocom_tas"])
 
             # Cloud-base updraft from the vdiff TKE (see docstring).
-            vdiff = diagnostics.get("vertical_diffusion")
             tke = getattr(vdiff, "tke", None)
             if tke is None:
                 out["aerocom_wbase"] = jnp.zeros(ncols_shape,
@@ -1030,14 +1081,19 @@ class AerocomDiagnostics(PhysicsTerm):
                      else jam.number)
         mass_pp = (jnp.stack(mass_post) if all(x is not None for x in mass_post)
                    else jam.mass)
-        # One width per live mode, positionally. The previous cycling idiom
-        # ((sigma * n)[:n]) silently handed mode 5 mode 1's width if the
-        # modal scheme ever grew; fail loudly instead.
-        if len(self.mode_sigma_g) != n_modes:
+        # One width per live mode, in the spec's mode order (the order of
+        # jam.number / jam.r_dry). By default each mode's own geom_std_dev;
+        # an explicit override is positional in that same order. A count
+        # that disagrees with the modal state fails loudly rather than
+        # pairing some mode with another's width.
+        sigmas = (self.mode_sigma_g if self.mode_sigma_g is not None
+                  else tuple(float(mode.geom_std_dev) for mode in spec.modes))
+        if len(sigmas) != n_modes:
             raise ValueError(
-                f"mode_sigma_g has {len(self.mode_sigma_g)} entries but the "
-                f"modal state carries {n_modes} modes; pass one width per mode")
-        sigmas = self.mode_sigma_g
+                f"{len(sigmas)} mode widths ("
+                f"{'mode_sigma_g' if self.mode_sigma_g is not None else 'aerosol spec'}"
+                f") but the modal state carries {n_modes} modes; "
+                "pass one width per mode")
         rho_air = diagnostics.get("air_density")
         for label, d_thresh in _N_THRESHOLDS.items():
             total = None

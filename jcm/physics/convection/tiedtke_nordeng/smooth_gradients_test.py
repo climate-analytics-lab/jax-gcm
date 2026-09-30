@@ -32,13 +32,14 @@ def _moist_tropical_column(nlev=20, t_sfc=300.0):
     return t, q, p, jnp.abs(dz), rho
 
 
-def _precip(params, t_sfc=300.0, supply=2e-5, convergence=0.5):
+def _precip(params, t_sfc=300.0, supply=2e-5, convergence=1.5):
     t, q, p, dz, rho = _moist_tropical_column(t_sfc=t_sfc)
-    # Resolved moisture convergence of ``convergence``*supply beyond the
-    # surface flux: since #699 the deep/shallow split is ECHAM's zdqcv
-    # test, so a column that should exercise the DEEP path (entrpen, the
-    # Nordeng closure) has to be fed convergence the way the atmosphere
-    # would feed it — a CAPE value no longer selects deep by itself.
+    # Resolved moisture convergence of ``convergence``*supply: since #699
+    # the deep/shallow split is ECHAM's zdqcv test (deep iff the column
+    # convergence exceeds 1.1x the surface flux), so a column that should
+    # exercise the DEEP path (entrpen, the Nordeng closure) has to be fed
+    # convergence beyond that the way the atmosphere would feed it — a CAPE
+    # value no longer selects deep by itself.
     nlev = t.shape[0]
     sl = slice(nlev // 2, nlev - 4)
     conv = jnp.zeros(nlev).at[sl].set(
@@ -130,7 +131,7 @@ class TestSmoothTriggerGradients:
         widths past the threshold — the synthetic sounding here carries
         CAPE ~ 1.5e4 J/kg, so the gradient at the default 100 J/kg is a
         legitimate exact zero. The calibration property is sensitivity
-        near the crossing: evaluate d(precip)/d(trigger_cape) at a
+        near the crossing: evaluate the plume's sensitivity to trigger_cape at a
         threshold placed just below the column's CAPE, where the fuzzy
         trigger is on its ramp.
         """
@@ -140,12 +141,28 @@ class TestSmoothTriggerGradients:
         t, q, p, dz, _ = _moist_tropical_column()
         cfg = ConvectionParameters.default()
         cb, _has = find_cloud_base(t, q, p, cfg)
-        cape, _ = calculate_cape_cin(t, q, p, dz, cb, cfg)
+        # The scheme's trigger CAPE starts its moist ascent at the first full
+        # level above the cloud-base INTERFACE ``cb`` (that of layer cb − 1).
+        cape, _ = calculate_cape_cin(t, q, p, dz, cb - 1, cfg)
         # supply=0: with a moisture supply the OR-branch floor weight
         # saturates the trigger for any buoyant column (by design — the
         # #529 continuous-convection path), so the main threshold only
-        # binds on the CAPE-only path.
-        loss, _ = _grad_wrt('trigger_cape', supply=0.0)
+        # binds on the CAPE-only path. Without supply or convergence the
+        # column is shallow, and its plume stops within ECHAM's 150 hPa
+        # no-precipitation depth above cloud base, so the observable is the
+        # column's updraft mass flux rather than its (zero) precipitation.
+        t, q, p, dz, rho = _moist_tropical_column()
+        zeros = jnp.zeros_like(t)
+
+        def loss(x):
+            state = tiedtke_nordeng_convection(
+                t, q, p, dz, rho, zeros, zeros, zeros, zeros, dt=900.0,
+                config=ConvectionParameters.default(trigger_cape=x),
+                moisture_supply=jnp.asarray(0.0),
+                land_fraction=jnp.asarray(0.0), qte_dynamics=zeros,
+            )[1]
+            return jnp.sum(state.mfu)
+
         x_near = jnp.asarray(float(cape) - 30.0)
         g = jax.grad(loss)(x_near)
         assert np.isfinite(float(g)) and float(g) != 0.0, g

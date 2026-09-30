@@ -4,25 +4,14 @@ import unittest
 
 
 class SemiLagrangianRequiredTest(unittest.TestCase):
-    """The dinosaur backend is semi-Lagrangian only — no Eulerian fallback.
+    """The SL core is a hard requirement of the dinosaur backend.
 
-    The Eulerian spectral transport was removed, not merely deselected: it
-    rang negative on sharp emission sources and NaN'd the aerosol
-    microphysics (#521), and while it remained the silent default whole
-    investigations were run on it by accident.
+    It is the default transport and what the physics-decided mode always uses
+    for tracer-carrying physics — Eulerian spectral transport rings negative on
+    sharp emission sources and NaN'd the aerosol microphysics (#521), so an
+    explicit Eulerian request with tracers only warns — and a dinosaur without
+    it is not a usable install even for the tracer-free Eulerian path.
     """
-
-    def test_no_advection_knob_is_exposed(self):
-        import inspect
-
-        from jcm.dycore.dinosaur.dycore import DinosaurDycore
-
-        params = inspect.signature(DinosaurDycore.__init__).parameters
-        self.assertNotIn(
-            "advection", params,
-            "an advection selector is back; there is no supported Eulerian "
-            "configuration, so it must not be selectable",
-        )
 
     def test_missing_sl_core_fails_with_an_actionable_message(self):
         from unittest import mock
@@ -69,6 +58,131 @@ def _small_dycore(**kwargs):
         dt_seconds=2400.0,
         **kwargs,
     )
+
+
+@unittest.skipUnless(_sl_available(), "needs the semi-Lagrangian dinosaur")
+class AdvectionSelectionTest(unittest.TestCase):
+    """``advection`` selection: explicit, physics-decided, and the #521 warning.
+
+    Eulerian spectral transport is meant for tracer-free physics (SPEEDY
+    declares it — it carries no extra tracers and SL costs ~4x its CPU step
+    for nothing). Spectral transport of a sharp tracer rings negative and
+    NaN'd the aerosol microphysics (#521), so the physics-decided mode never
+    picks it for tracers, and an explicit request with tracers warns.
+    """
+
+    def _dust(self):
+        from jcm.physics.physics_term import TracerSpec
+
+        return {"dust": TracerSpec(name="dust")}
+
+    def test_unknown_scheme_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "advection must be one of"):
+            _small_dycore(advection="spectral")
+
+    def test_explicit_eulerian_builds_the_spectral_core(self):
+        from dinosaur import primitive_equations
+
+        dycore = _small_dycore(advection="eulerian")
+        self.assertEqual(dycore.advection, "eulerian")
+        self.assertIsInstance(dycore.primitive, primitive_equations.PrimitiveEquations)
+        self.assertNotIsInstance(
+            dycore.primitive, primitive_equations.SemiLagrangianPrimitiveEquations)
+        self.assertEqual(dycore._nodal_tracers, ())
+
+    def test_explicit_eulerian_with_tracers_warns(self):
+        with self.assertLogs("jcm.dycore.dinosaur.dycore", "WARNING") as logs:
+            dycore = _small_dycore(advection="eulerian", tracer_specs=self._dust())
+        self.assertIn("#521", logs.output[0])
+        self.assertEqual(dycore.advection, "eulerian")
+
+    def test_unresolved_default_is_semi_lagrangian(self):
+        dycore = _small_dycore()
+        self.assertIsNone(dycore.advection_requested)
+        self.assertEqual(dycore.advection, "semi_lagrangian")
+
+    def test_auto_mode_adopts_a_tracer_free_eulerian_preference(self):
+        dycore = _small_dycore()
+        self.assertEqual(dycore.resolve_advection("eulerian"), "eulerian")
+        self.assertEqual(dycore._nodal_tracers, ())
+
+    def test_auto_mode_keeps_tracers_semi_lagrangian(self):
+        dycore = _small_dycore(tracer_specs=self._dust())
+        self.assertEqual(dycore.resolve_advection("eulerian"), "semi_lagrangian")
+        self.assertEqual(tuple(dycore.primitive.nodal_tracers), ("dust",))
+
+    def test_auto_mode_leaves_eulerian_when_tracers_arrive(self):
+        dycore = _small_dycore()
+        dycore.resolve_advection("eulerian")
+        dycore.tracer_specs = self._dust()
+        self.assertEqual(dycore.advection, "semi_lagrangian")
+        self.assertEqual(tuple(dycore.primitive.nodal_tracers), ("dust",))
+
+    def test_explicit_choice_beats_the_physics_preference(self):
+        dycore = _small_dycore(advection="semi_lagrangian")
+        self.assertEqual(dycore.resolve_advection("eulerian"), "semi_lagrangian")
+
+    def test_bad_physics_preference_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "preferred_advection"):
+            _small_dycore().resolve_advection("spectral")
+
+    def test_model_resolves_speedy_to_eulerian(self):
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        model = Model(coords=_small_dycore().coords, physics=speedy_physics())
+        self.assertEqual(model.dycore.advection, "eulerian")
+        # Explicit dycore in auto mode resolves the same way.
+        model = Model(_small_dycore(), physics=speedy_physics())
+        self.assertEqual(model.dycore.advection, "eulerian")
+
+    def test_model_puts_speedy_plus_tracers_on_semi_lagrangian(self):
+        from typing import ClassVar
+
+        from jcm.model import Model
+        from jcm.physics.physics_term import PhysicsTerm, TracerSpec
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        from jcm.physics_interface import PhysicsTendency
+
+        class DustTerm(PhysicsTerm):
+            name: ClassVar[str] = "dust_term"
+            category: ClassVar[str] = "test"
+
+            @classmethod
+            def required_tracers(cls):
+                return (TracerSpec("dust"),)
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+        physics = speedy_physics() + DustTerm()
+        self.assertEqual(physics.preferred_advection(), "eulerian")
+        model = Model(_small_dycore(), physics=physics)
+        self.assertEqual(model.dycore.advection, "semi_lagrangian")
+        self.assertIn("dust", model.dycore.primitive.nodal_tracers)
+
+    def test_model_leaves_held_suarez_semi_lagrangian(self):
+        from jcm.model import Model
+        from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
+
+        model = Model(_small_dycore(), physics=held_suarez_physics())
+        self.assertEqual(model.dycore.advection, "semi_lagrangian")
+
+    def test_eulerian_speedy_steps_finite(self):
+        import jax
+        import numpy as np
+
+        from jcm.forcing import ForcingData
+        from jcm.model import Model
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        dycore = _small_dycore(advection="eulerian")
+        model = Model(dycore, physics=speedy_physics())
+        preds = model.run(
+            forcing=ForcingData.zeros(dycore.coords.horizontal.nodal_shape),
+            save_interval=0.25, total_time=0.5)
+        for leaf in jax.tree_util.tree_leaves(preds.dynamics):
+            self.assertTrue(np.all(np.isfinite(np.asarray(leaf))))
 
 
 @unittest.skipUnless(_sl_available(), "needs the semi-Lagrangian dinosaur")

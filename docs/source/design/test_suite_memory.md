@@ -21,8 +21,8 @@ looks like a test failure:
 
 * under `pytest -n`, the symptom is `worker gwN crashed` and an arbitrary,
   run-dependent subset of "failures" (issue #704);
-* in the single-process CI slow job, it is exit 143/137 with every completed
-  test passing (issue #745);
+* in a single-process CI slow job (each of the two slow shards is one), it is
+  exit 143/137 with every completed test passing (issue #745);
 * in a long single-process run on Derecho, it is a segfault inside
   `backend_compile_and_load` (issue #729).
 
@@ -58,6 +58,48 @@ all of the memory back for no measurable time anywhere.
 
 The clear applies to every suite, not just the `slow` one: the fast xdist
 suite hits the same ceiling, and a worker that dies takes its tests with it.
+
+Dropping the caches frees memory to the allocator, not to the OS. glibc keeps
+freed heap mapped, so without further help a worker's RSS only ratchets up:
+the per-test arrays and traces of a finished class, and the executables a
+clear drops, stay resident, and the next class's differently-sized
+allocations extend the heap instead of reusing them. The same hook therefore
+calls glibc's `malloc_trim(0)` at every class/module boundary (a no-op where
+there is no glibc), which returns the free pages to the OS. Measured with the
+CI fast-suite command on a 2-worker run (`-n 2 --dist loadscope -m "not
+slow"`, `JCM_TEST_CACHE_GROWTH_MB=256`) of the v3 datetime branch, peak worker
+RSS on this workstation:
+
+| | worker 0 | worker 1 | wall time |
+| --- | --- | --- | --- |
+| without the trim | 12.53 GB | 10.89 GB | 47.5 min |
+| with the trim | 7.81 GB | 6.83 GB | 43.1 min |
+
+Without it, the CI fast job was SIGTERM'd at 86-93 % (exit 143). That job
+runs 2 workers on a 4 vCPU / 16 GB runner (`nproc` prints 4 and `free -m`
+15989 MiB in the job logs; `-n auto` counts the 2 physical cores that psutil
+reports, not the 4 logical ones), so the workers share 16 GB. Dev at the time
+peaked at 12.47 GB on one worker in the same local measurement, and the two
+workers' peaks in the table sum to 23.4 GB without the trim and 14.6 GB with
+it, either side of the runner's 16 GB (the peaks need not coincide, so the
+sum is an upper bound on what the two hold at once). The retained heap, not
+any one test, was what brought the job to the ceiling. The remaining
+high-water marks come from single heavy tests (the ECHAM forced-mode budget
+checks and the 2M gradient tests), not from accumulation.
+
+Memory mappings are a second ceiling, independent of RSS. Every compiled XLA
+CPU executable holds several mappings, and the kernel caps a process at
+`vm.max_map_count` of them (65,530 on kernels that keep the old default). The
+op-by-op derivative checks in `jcm/physics/echam/term_gradients_test.py`
+compile one executable per primitive, so a slow-suite worker reached the cap
+while its RSS was still modest; the CPU JIT then fails with "Failed to
+materialize symbols" and the worker aborts. The hook therefore also counts
+`/proc/self/maps` at every test boundary and, past `JCM_TEST_MAX_MAPS`
+(default 40,000), treats that test as a boundary even inside a class: it
+trims the heap as above and clears the caches at once, whatever the RSS
+growth. A clear releases the mappings: six Tiedtke derivative checks took a
+process from 4,171 to 22,436 mappings, and the clear brought it back to
+5,459.
 
 ## Derecho login nodes: a 10 GiB cgroup, not a slow CPU
 
@@ -99,6 +141,50 @@ Two related login-node observations that are *not* the problem:
   10 GiB cap is a guaranteed OOM, and the resulting red run carries no
   information.
 
+## GPU memory: preallocation, and why importing jcm is device-free
+
+On a GPU host, XLA claims 75 % of the card the moment a JAX backend is first
+initialised (`XLA_PYTHON_CLIENT_PREALLOCATE`, default on) — 61,222 MiB of an
+80 GB A100 — and keeps it for the life of the process. The root
+`conftest.py` therefore *forces* `XLA_PYTHON_CLIENT_PREALLOCATE=false` for the
+session, overriding an inherited `true`. The reason is not only courtesy on a
+shared box: the release-matrix regression integrates each member in a worker
+subprocess, a worker can only use what the parent pytest process left on the
+card, and the first test in the session that builds any jax array would
+otherwise hand three-quarters of it to the parent. `generate_stats.generate()`
+refuses to orchestrate without the same setting, for the same reason.
+Preallocation changes when memory is claimed, never what a test computes.
+
+Backend initialisation is lazy: `import jax` does not do it; the first query
+that needs a device does (`jnp.array`, `jnp.asarray`, any `jnp` op,
+`jax.devices()`). jcm keeps its *import* free of such queries (#859), so
+`import jcm` — or importing any jcm module — leaves the backend uninitialised
+and the GPU untouched, and the device is first touched when a model or physics
+term builds arrays. `jcm/import_side_effects_test.py` enforces this: in a fresh
+subprocess it imports `jcm`, then every jcm module one by one, and asserts
+after each that `jax._src.xla_bridge.backends_are_initialized()` is still
+false — the one choke point every device-array creation passes through, so it
+catches a jax array however it is spelled. A GPU-gated companion checks with
+`nvidia-smi` that the importing process holds no CUDA context, with a positive
+control so it skips rather than passes where `nvidia-smi` cannot see the
+process. The conftest guard still acts before collection because *tests*
+touch the device, and the setting only counts if it predates the first one.
+
+Keeping it that way, when writing a module:
+
+* no jax array at module level, in a class body, or as a `def` default — all
+  of them are evaluated at import. Store constant tables as tuples of Python
+  floats (or numpy) and materialise them with `jnp.asarray(...)` where used;
+  use `None` defaults resolved in the body, or numpy scalars
+  (`np.int32(0)`) where a fixed dtype is the point. Materialising at use also
+  makes the table's dtype follow the `jax_enable_x64` flag at the time the
+  physics runs, not whichever flag was set when the module was first imported.
+* derived Python constants that need arithmetic use `math`/numpy, not `jnp`
+  followed by `float(...)`.
+* `jax.config.update(...)` at import changes every later user's process; the
+  one dependency that does it (`mam4_jax`, below) is imported lazily and
+  wrapped.
+
 ## Process-global JAX config: `jax_enable_x64`
 
 Two dependencies turn float64 on for the whole process:
@@ -117,17 +203,40 @@ earlier test nor a leak from this one can propagate.
 
 Two deliberate exceptions:
 
-* Tests under `jcm/dycore/pyses/` are exempt. Their `setUpClass` fixtures
-  build float64 backends that later tests in the same class reuse, so the
-  flag must stay on for the life of the class; `jcm/dycore/pyses/conftest.py`
-  schedules the whole package last instead. That reordering is defeated by
-  `pytest-randomly`, so pass `-p no:randomly` if you have it installed.
+* Tests marked `requires_extra("pyses")` are exempt. Their `setUpClass`
+  fixtures build float64 backends that later tests in the same class reuse,
+  so the flag must stay on for the life of the class. pySES turns it on only
+  when it is first imported, and a class fixture is built before any
+  function-scoped fixture runs, so the root `conftest.py` does this with two
+  hooks rather than the pin: `pytest_runtest_setup` (`tryfirst`) turns the
+  flag on before such a test's fixtures are built, and
+  `pytest_runtest_teardown` restores the session default when the next test
+  is not one of them (or there is none), before the next class's fixtures are
+  built. Neither depends on test order, which matters because xdist's
+  `--dist loadscope` dispatches the largest scopes first, interleaving the
+  pySES classes with unrelated ones on a worker.
 * `jcm/physics/aerosol/jam/microphysics/mam4_jax.py` restores the flag
-  around its own `import mam4_jax`, so importing the adapter — including at
-  collection time, via `pytest.importorskip` — cannot change anyone's dtype.
+  around its own `import mam4_jax`, so importing the adapter, wherever it
+  happens, cannot change anyone's dtype.
   Constructing the adapter still sets the precision it needs; set
   `MAM4_JAX_ENABLE_X64=0` to force a float32 core.
 
-CI never sees the mam4 side of this: it installs `pip install -e .` with no
-extras, so those tests skip there. The pin is what makes a local run with the
-`jcm[mam4]` extra installed agree with CI.
+The default CI jobs never see the mam4 side of this: they install
+`pip install -e .` with no extras, so those tests skip there. The pin is what
+makes a local run with the `jcm[mam4]` extra installed agree with them. The
+`extras-tests` job does see it: it installs every extra and runs the tests
+they gate, mam4 and pySES classes in one process.
+
+## The extras job's memory
+
+`extras-tests` (`JCM_REQUIRE_EXTRAS=1 pytest -m requires_extra`) runs in a
+single process, like the slow shards. Its peak is one test:
+`hydra_config_test.py::test_delegating_config_completes_a_fresh_first_chunk`
+drives one chunk of the production `dycore=pyses_ne30l47 run=pyses_year`
+configuration on a test-size grid, and compiling that CAM-SE step takes the
+process to 12.7 GB, alone as well as in the full selection (measured on a
+workstation, 2026-09-29). The next heaviest, the pySES coupled-ECHAM smokes,
+leave the process at 5-6.5 GB. A second xdist worker running one of those
+beside that compile would take the 16 GB runner past its ceiling, so the job
+does not use xdist. Serially the selection takes about 10 minutes of test
+time on the CI runner (13 on the workstation).

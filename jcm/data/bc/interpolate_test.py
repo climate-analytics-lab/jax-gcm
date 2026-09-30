@@ -19,12 +19,12 @@ from jcm.data.bc.interpolate import (
     upsample_forcings_ds,
     upsample_terrain_ds,
 )
-from jcm.physics.speedy.physical_constants import SIGMA_LAYER_BOUNDARIES
+from jcm.physics.speedy.physical_constants import compute_sigma_boundaries
 from jcm.utils import get_coords
 
 
 def _t21_grid():
-    return get_coords(SIGMA_LAYER_BOUNDARIES[7], spectral_truncation=21).horizontal
+    return get_coords(compute_sigma_boundaries(7), spectral_truncation=21).horizontal
 
 
 def _monthly_source(n_lon: int = 8, n_lat: int = 4) -> xr.Dataset:

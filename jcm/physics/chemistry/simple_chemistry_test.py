@@ -86,6 +86,35 @@ class TestOzoneDistribution(TestCase):
         # Lower levels should have less ozone than upper levels
         self.assertLess(ozone_vmr[0, 0], ozone_vmr[-1, 0])
 
+    def test_every_ozone_parameter_is_live(self):
+        """Each ozone field of ``ChemistryParameters`` moves the profile.
+
+        A declared tunable the profile never reads has an exactly-zero
+        gradient, which silently misleads calibration (#799). The profile
+        spans both branches (below and above the ozone maximum) so each shape
+        parameter is exercised where it acts.
+        """
+        config = ChemistryParameters.default()
+        ozone_fields = ["ozone_scale_height", "ozone_max_vmr",
+                        "ozone_tropopause_height"]
+        declared = [f for f in vars(config) if f.startswith("ozone_")]
+        self.assertEqual(sorted(declared), sorted(ozone_fields))
+
+        nlev, ncols = 30, 2
+        pressure = jnp.geomspace(100000.0, 50.0, nlev)[:, None] * jnp.ones((1, ncols))
+        surface_pressure = jnp.full(ncols, 100000.0)
+        temperature = jnp.full((nlev, ncols), 240.0)
+
+        def total_ozone(cfg):
+            return jnp.sum(fixed_ozone_distribution(
+                pressure, surface_pressure, temperature, cfg))
+
+        grads = jax.grad(total_ozone)(config)
+        for field in ozone_fields:
+            with self.subTest(field=field):
+                self.assertTrue(jnp.isfinite(getattr(grads, field)))
+                self.assertNotEqual(float(getattr(grads, field)), 0.0)
+
 
 class TestMethaneChemistry(TestCase):
     """Test methane chemistry calculations"""
