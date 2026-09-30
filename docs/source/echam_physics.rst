@@ -482,8 +482,9 @@ the radiation page of the model description).
      - 5e-6 at T63
    * - ``autoconversion_twomey``
      - Apply the MACv2-SP Twomey factor to the autoconversion's droplet number
-       (a jcm option)
-     - False
+       (jcm's aerosol-cloud interaction; MPI-ESM1.2 scales the radiation's
+       number only)
+     - True
 
 The droplet number is not a parameter: it is ECHAM's prescribed ``acdnc``
 profile. The radiation's droplet number

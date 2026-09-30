@@ -130,11 +130,13 @@ class MicrophysicsParameters:
     # 1 = Khairoutdinov & Kogan (2000), a jcm option.
     autoconversion_scheme: int = struct.field(pytree_node=False, default=0)
     # Whether the MACv2-SP Twomey factor scales the droplet number of the
-    # autoconversion. ECHAM with simple plumes (MPI-ESM1.2) scales the
-    # radiation's droplet number only (Mauritsen et al. 2019, section 2.2), so
-    # the default is off; the droplet number of the freezing (section 6.2) is
-    # always the unscaled ``acdnc`` (#932).
-    autoconversion_twomey: bool = struct.field(pytree_node=False, default=False)
+    # autoconversion. On by default: jcm's aerosol-cloud interaction acts on
+    # the precipitation formation as well as on the radiation, a documented
+    # departure from ECHAM with simple plumes (MPI-ESM1.2 scales the
+    # radiation's droplet number only, Mauritsen et al. 2019, section 2.2),
+    # decided by the maintainer (#932, 2026-09-30). The droplet number of the
+    # freezing (section 6.2) is ECHAM's unscaled ``acdnc`` either way.
+    autoconversion_twomey: bool = struct.field(pytree_node=False, default=True)
 
     # The truncation whose resolution defaults the parameters were built from
     # (metadata for the host's grid check; not read by the scheme).
@@ -1586,8 +1588,10 @@ class Echam1MMicrophysics(PhysicsTerm):
         # freezing of section 6.2 and the autoconversion of section 7.1 read.
         # The MACv2-SP Twomey factor scales the radiation's droplet number
         # (``prescribed_droplet_number``, the call the radiation makes, which
-        # is also what ``clouds.droplet_number`` publishes); it reaches the
-        # autoconversion only with ``autoconversion_twomey`` (#932).
+        # is also what ``clouds.droplet_number`` publishes) and, with
+        # ``autoconversion_twomey`` (the default), the autoconversion's too:
+        # jcm's aerosol-cloud interaction acts on precipitation formation,
+        # which ECHAM with simple plumes does not do (#932).
         acdnc = prescribed_droplet_number(pressure_full, terrain, forcing, 1.0)
         cdnc_radiation = prescribed_droplet_number(
             pressure_full, terrain, forcing, diagnostics["aerosol"].cdnc_factor)

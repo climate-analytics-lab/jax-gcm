@@ -75,11 +75,14 @@
   autoconversion and the Bigg and contact freezing. The radiation's droplet
   number (``cloud_utils.prescribed_droplet_number``, published as
   ``clouds.droplet_number``) is that profile times the MACv2-SP Twomey factor
-  ``cdnc_factor``; the 1M microphysics uses the unscaled profile, as MPI-ESM1.2
-  does (Mauritsen et al. 2019, *JAMES*, doi:10.1029/2018MS001400, §2.2). The
-  jcm options ``autoconversion_twomey`` (the factor on the autoconversion's
-  droplet number, the aerosol-cloud formulation recorded in #932) and
-  ``autoconversion_scheme="kk2000"`` (Khairoutdinov & Kogan 2000) are off by
+  ``cdnc_factor``. `science` (deliberate, documented) — the same factor scales
+  the autoconversion's droplet number (``autoconversion_twomey``, on by
+  default), so the aerosol-cloud interaction acts on precipitation formation
+  and not only on the radiation. MPI-ESM1.2 scales the radiation's droplet
+  number only (Mauritsen et al. 2019, *JAMES*, doi:10.1029/2018MS001400,
+  §2.2); the departure is the maintainer's choice, recorded in #932. The
+  freezing of section 6.2 reads ECHAM's unscaled profile. The jcm option
+  ``autoconversion_scheme="kk2000"`` (Khairoutdinov & Kogan 2000) is off by
   default.
 - **Lohmann 2-moment microphysics**
   (``jcm/physics/clouds/lohmann_2m/scheme.py`` — ``cloud_microphysics_2m`` and its

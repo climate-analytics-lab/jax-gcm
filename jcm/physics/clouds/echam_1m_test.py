@@ -170,7 +170,7 @@ class TestParameters:
         assert f(p.ccraut) == 15.0 and f(p.ccsaut) == 95.0
         assert f(p.ccracl) == 6.0 and f(p.ccsacl) == 0.1
         assert f(p.cauloc) == 0.0
-        assert p.autoconversion_twomey is False
+        assert p.autoconversion_twomey is True
 
     def test_resolution_leaves_are_differentiable_and_widths_static(self):
         p = MicrophysicsParameters.default()
@@ -1379,7 +1379,14 @@ class TestTerm:
         tend0, _ = Echam1MMicrophysics()(state, diag, forcing, terrain)
         assert abs(float(tend0.specific_humidity[k, 0])) * dt < 1e-17
 
-    def test_twomey_factor_reaches_the_radiation_number_not_the_autoconversion(self):
+    def test_twomey_factor_reaches_the_radiation_number_and_the_autoconversion(self):
+        """The aerosol-cloud interaction acts on precipitation formation too.
+
+        The factor scales the published (radiation) droplet number, and by
+        default the autoconversion's, a documented departure from MPI-ESM1.2
+        (#932). With the option off the autoconversion reads the unscaled
+        ``acdnc`` and is blind to the factor.
+        """
         from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
         from jcm.physics.clouds.cloud_utils import prescribed_droplet_number
 
@@ -1391,11 +1398,15 @@ class TestTerm:
             np.asarray(out["clouds"].droplet_number),
             np.asarray(prescribed_droplet_number(diag["pressure_full"], terrain,
                                                  forcing, jnp.asarray([1.4, 1.4]))))
-        np.testing.assert_array_equal(np.asarray(out["autoconv"]),
+        # More droplets, less autoconversion, by default.
+        assert np.all(np.asarray(out["autoconv"]) < np.asarray(out1["autoconv"]))
+        off = Echam1MMicrophysics(MicrophysicsParameters.default(autoconversion_twomey=False))
+        _, out_off = off(state, diag, forcing, terrain)
+        _, out_off1 = off(state1, diag1, forcing, terrain)
+        np.testing.assert_array_equal(np.asarray(out_off["autoconv"]),
+                                      np.asarray(out_off1["autoconv"]))
+        np.testing.assert_array_equal(np.asarray(out_off["autoconv"]),
                                       np.asarray(out1["autoconv"]))
-        on = Echam1MMicrophysics(MicrophysicsParameters.default(autoconversion_twomey=True))
-        _, out_on = on(state, diag, forcing, terrain)
-        assert np.all(np.asarray(out_on["autoconv"]) < np.asarray(out["autoconv"]))
 
     def test_published_precipitation_is_non_negative(self):
         """The surface and COSP read non-negative precipitation."""
