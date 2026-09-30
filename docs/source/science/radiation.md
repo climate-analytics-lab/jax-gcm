@@ -130,8 +130,22 @@ implementation is ``cloud_optics.echam_cloud_effective_radii``, fed by
 - **Published diagnostic** — ``clouds.r_eff_liq`` / ``clouds.r_eff_ice`` are
   the radii the radiation used, written by the radiation term (held from the
   last solve on a cached sub-step). No term reads them back into the
-  radiation; COSP and the AeroCom ``cdr3d``/``icr3d`` output read them, as
-  ECHAM's COSP reads ``cloud_optics``' radii.
+  radiation.
+- **Radii of the satellite simulators and AeroCom** — ECHAM's COSP pairs
+  the radii and cover of the last radiation call (``cosp_reffl``/
+  ``cosp_reffi``/``cosp_f3d``, set in ``mo_psrad_interface.f90``) with the
+  step-start condensate (``xlm1``/``xim1``), which match on radiation
+  steps. jcm's COSP simulators and AeroCom cloud diagnostics
+  read the post-microphysics condensate and cover instead, so they can
+  describe the state saved at the end of the step. Paired with the
+  radiation's radii, a layer the microphysics filled after the solve would
+  carry condensate with a radius of 0. They therefore form the radii of the
+  condensate they read with the same law
+  (``cloud_optics.post_physics_effective_radii``: the post-physics
+  temperature and number tracers, and a cover floor of ~10⁻¹² rather than
+  the radiation's thin-cloud optical-depth guard). AeroCom publishes them as
+  ``aerocom_cdr3d``/``aerocom_icr3d``, which the CMOR writer maps to
+  ``cdr3d``/``icr3d``.
 
 Time level of each input, ECHAM (``physc``: ``cover``, then radiation, then
 the cloud scheme) against jcm (Sundqvist cover, then radiation, then the

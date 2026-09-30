@@ -80,9 +80,12 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     # carries qnc instead; AerocomDiagnostics publishes the resolved
     # volumetric profile, so map that.
     "aerocom_cdnc3d": ("cdnc3d", "m-3", "ModelLevel", 1.0, 0.0),
-    # jcm carries effective radii in microns; AeroCom asks for metres.
-    "clouds.r_eff_liq": ("cdr3d", "m", "ModelLevel", 1e-6, 0.0),
-    "clouds.r_eff_ice": ("icr3d", "m", "ModelLevel", 1e-6, 0.0),
+    # The radii of the saved condensate (clw/cli above), in metres, which
+    # AerocomDiagnostics forms with the radiation's law. ``clouds.r_eff_*``
+    # are the radiation's radii of the step-start condensate, held between
+    # radiation solves, so they are not mapped.
+    "aerocom_cdr3d": ("cdr3d", "m", "ModelLevel", 1.0, 0.0),
+    "aerocom_icr3d": ("icr3d", "m", "ModelLevel", 1.0, 0.0),
     # --- precipitation ---
     "clouds.precip_rain": ("prlr", "kg m-2 s-1", "Surface", 1.0, 0.0),
     "clouds.precip_snow": ("prls", "kg m-2 s-1", "Surface", 1.0, 0.0),

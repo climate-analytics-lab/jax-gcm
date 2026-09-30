@@ -747,6 +747,65 @@ class TestRadiationEffectiveRadii:
         np.testing.assert_array_equal(np.asarray(r_liq_2m_pol),
                                       np.asarray(r_liq_2m))
 
+    def test_post_physics_radii_use_the_later_state(self):
+        """The diagnostics' radii see the post-physics inputs and thin cover.
+
+        ``post_physics_effective_radii`` is the same law with the
+        post-physics temperature and number tracers in place of the
+        step-start ones, and a cover floor of ~1e-12 in place of the
+        radiation's ``2 * cld_frac_min`` optical-depth guard: a cover of
+        1.5e-3 is clear to the radiation but cloud to AeroCom and COSP.
+        """
+        from jcm.physics.radiation.cloud_optics import (
+            post_physics_effective_radii, radiation_effective_radii)
+        shape = (3, 2)
+        tracers = {"qnc": jnp.full(shape, 1.0e8), "qni": jnp.full(shape, 1e6)}
+        state, diagnostics, forcing, terrain, cf = self._inputs(
+            tracers=tracers)
+        qc, qi = state.tracers["qc"], state.tracers["qi"]
+        same = post_physics_effective_radii(
+            state, diagnostics, forcing, terrain, qc, qi, cf,
+            state.temperature, number_tracers=(tracers["qnc"], tracers["qni"]))
+        ref = radiation_effective_radii(
+            state, diagnostics, forcing, terrain, qc, qi, cf, 1.0e-3)
+        for a, b in zip(same, ref):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+        # Twice the droplets: the post-physics number tracer is what counts.
+        more, _ = post_physics_effective_radii(
+            state, diagnostics, forcing, terrain, qc, qi, cf,
+            state.temperature,
+            number_tracers=(2.0 * tracers["qnc"], tracers["qni"]))
+        assert bool(jnp.all(more < same[0]))
+        # A later temperature enters the water content and the number
+        # density alike, through the one p/(rd T).
+        import jcm.constants as c
+        from jcm.physics.radiation.cloud_optics import (
+            echam_cloud_effective_radii)
+        from jcm.physics.radiation.mcica import in_cloud_condensate
+        t_later = state.temperature + 10.0
+        warmer = post_physics_effective_radii(
+            state, diagnostics, forcing, terrain, qc, qi, cf, t_later,
+            number_tracers=(tracers["qnc"], tracers["qni"]))
+        rho_later = diagnostics["pressure_full"] / (c.rd * t_later)
+        want = echam_cloud_effective_radii(
+            in_cloud_condensate(qc, cf, eps=1.0e-12),
+            in_cloud_condensate(qi, cf, eps=1.0e-12),
+            t_later, diagnostics["pressure_full"],
+            tracers["qnc"] * rho_later, tracers["qni"] * rho_later,
+            False, True)
+        for a, b in zip(warmer, want):
+            np.testing.assert_allclose(np.asarray(a), np.asarray(b),
+                                       rtol=1e-6)
+        assert not np.allclose(np.asarray(warmer[0]), np.asarray(same[0]))
+        thin = jnp.full(shape, 1.5e-3)
+        r_rad, _ = radiation_effective_radii(
+            state, diagnostics, forcing, terrain, qc, qi, thin, 1.0e-3)
+        r_diag, _ = post_physics_effective_radii(
+            state, diagnostics, forcing, terrain, qc, qi, thin,
+            state.temperature, number_tracers=(tracers["qnc"], tracers["qni"]))
+        assert float(jnp.max(r_rad)) == 0.0
+        assert bool(jnp.all(r_diag > 0.0))
+
     @pytest.mark.parametrize("prognostic", [False, True], ids=["1m", "2m"])
     def test_gradients_are_live_in_both_modes(self, prognostic):
         """Both AD modes match a difference, and every physical input is live.

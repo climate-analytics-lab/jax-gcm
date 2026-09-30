@@ -1043,7 +1043,11 @@ Cloud droplets: effective radii from the current state, one 1M droplet number
   TOA net by less than the 0.1 W/m² run-to-run spread (OLR +0.18 W/m², LW
   cloud radiative effect −0.19 W/m²). ``clouds.r_eff_liq`` /
   ``clouds.r_eff_ice`` are now written by the radiation term (the radii it
-  used; 0 where the phase is absent) rather than by the microphysics.
+  used; 0 where the phase is absent) rather than by the microphysics. The
+  COSP simulators and the AeroCom cloud diagnostics, which read the
+  post-microphysics condensate, form the radii of that condensate with the
+  same law (``cloud_optics.post_physics_effective_radii``) instead of
+  reading ``clouds.r_eff_*``.
 - **Breaking:** ``MicrophysicsParameters.base_cdnc`` and
   ``resolve_effective_radii`` are removed, and ``radiation_scheme_rrtmgp`` /
   ``radiation_scheme_emulated`` require ``r_eff_liq_um`` / ``r_eff_ice_um``

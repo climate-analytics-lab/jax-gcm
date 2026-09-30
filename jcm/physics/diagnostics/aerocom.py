@@ -52,6 +52,7 @@ import numpy as np
 import jcm.constants as c
 from jcm.forcing import ForcingData
 from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.radiation.cloud_optics import post_physics_effective_radii
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
 
@@ -67,9 +68,9 @@ OVERLAP_MAXIMUM = "maximum"
 OVERLAP_RANDOM = "random"
 OVERLAP_MAXIMUM_RANDOM = "maximum-random"
 
-# Effective-radius floor when forming optical depth, so a cloud-free layer
-# (r_eff = 0) cannot divide by zero. Only reached where condensate is also
-# zero, so the guarded value never affects a physical result.
+# Effective-radius floor for the division that forms an optical depth, so the
+# unselected branch of ``_cloud_optical_depth``'s ``where`` (a layer with
+# r_eff = 0, which contributes no optical depth) cannot divide by zero.
 _MIN_REFF_M = 1e-9
 
 # Physical floor for condensate guards. A guard of ``> 0.0`` is not enough
@@ -168,13 +169,20 @@ def _cloud_optical_depth(
     result is the grid-mean optical depth; the protocol's Q/A is explicit
     that 2-D cloud fields are stored as grid-box means and NOT divided by
     cloud cover.
+
+    A layer whose radius is 0 holds no cloud of that phase: its condensate
+    is absent or sits in a cover too small to form an in-cloud value
+    (``post_physics_effective_radii``), which the radiation does not radiate
+    either, so it contributes no optical depth.
     """
     dm = _layer_mass(pressure_half)
     lwp_layer, iwp_layer = qc * dm, qi * dm
     r_liq = jnp.maximum(r_eff_liq_m, _MIN_REFF_M)
     r_ice = jnp.maximum(r_eff_ice_m, _MIN_REFF_M)
-    tau_liq = 1.5 * lwp_layer / (_RHO_WATER * r_liq)
-    tau_ice = 1.5 * iwp_layer / (_RHO_ICE * r_ice)
+    tau_liq = jnp.where(r_eff_liq_m > 0.0,
+                        1.5 * lwp_layer / (_RHO_WATER * r_liq), 0.0)
+    tau_ice = jnp.where(r_eff_ice_m > 0.0,
+                        1.5 * iwp_layer / (_RHO_ICE * r_ice), 0.0)
     return tau_liq, tau_ice
 
 
@@ -409,7 +417,14 @@ class AerocomDiagnostics(PhysicsTerm):
 
     name: ClassVar[str] = "aerocom_diagnostics"
     category: ClassVar[str] = "diagnostics"
-    requires: ClassVar[tuple[str, ...]] = ("clouds", "pressure_full", "pressure_half")
+    # ``air_density`` and, on the 1-moment law, ``aerosol`` (its Twomey
+    # factor scales the prescribed droplet number) are read by
+    # ``post_physics_effective_radii`` for the cloud group's radii. Every
+    # ``echam_physics`` composition carries both (``MoistAirColumnState``,
+    # and MACv2-SP or JAM); declaring them makes a composition without them
+    # fail when it is built rather than when it is traced.
+    requires: ClassVar[tuple[str, ...]] = (
+        "clouds", "pressure_full", "pressure_half", "air_density", "aerosol")
     # Every key this term can publish. The emitted set must be static (the
     # diagnostics dict is part of the scan carry), so each selected group
     # writes all of its keys, zero-filled where the active configuration
@@ -419,7 +434,7 @@ class AerocomDiagnostics(PhysicsTerm):
         "aerocom_clt", "aerocom_ttop", "aerocom_cdr", "aerocom_icr",
         "aerocom_cdnc", "aerocom_lcc", "aerocom_icc", "aerocom_cod",
         "aerocom_codliq", "aerocom_codice", "aerocom_lwp", "aerocom_iwp",
-        "aerocom_cllvi", "aerocom_clivi",
+        "aerocom_cllvi", "aerocom_clivi", "aerocom_cdr3d", "aerocom_icr3d",
         # column
         "aerocom_prw", "aerocom_cdnum", "aerocom_icnum", "aerocom_albedo",
         "aerocom_cdnc3d",
@@ -520,8 +535,17 @@ class AerocomDiagnostics(PhysicsTerm):
         # GRID-MEAN under both schemes, so the CMOR'd cdnc3d means one thing.
         out["aerocom_cdnc3d"] = cdnc_gm
         if "cloud" in self.groups:
+            # The radii of the condensate this group reads, not the
+            # radiation's (formed from the step-start condensate, before the
+            # microphysics): see ``post_physics_effective_radii``.
+            prognostic = "qnc" in state.tracers and "qni" in state.tracers
+            r_liq_um, r_ice_um = post_physics_effective_radii(
+                state, diagnostics, forcing, terrain, qc, qi,
+                clouds.cloud_fraction, temperature,
+                number_tracers=(qnc, qni) if prognostic else None)
             out.update(self._cloud_group(clouds, temperature, p_half,
-                                         cdnc_ic, qc, qi))
+                                         cdnc_ic, qc, qi,
+                                         r_liq_um * 1e-6, r_ice_um * 1e-6))
         if "column" in self.groups:
             out.update(self._column_group(state, diagnostics, p_half, qnc, qni))
         if "plev" in self.groups:
@@ -589,7 +613,7 @@ class AerocomDiagnostics(PhysicsTerm):
         return cdnc_gm, cdnc_ic, qnc, qni
 
     def _cloud_group(self, clouds, temperature, p_half, cdnc_ic,
-                     qc, qi) -> dict:
+                     qc, qi, r_liq_m, r_ice_m) -> dict:
         """Cloud-top sampling, optical depths and condensate paths.
 
         ``cdnc_ic`` is the IN-CLOUD droplet number [m^-3], already resolved
@@ -597,10 +621,9 @@ class AerocomDiagnostics(PhysicsTerm):
         in-cloud cdnc3d as input to the sampler (the grid-mean output then
         follows from the area weighting inside it). Do not divide by cloud
         fraction here: for the 1M scheme the field is in-cloud already.
+        ``r_liq_m`` / ``r_ice_m`` are the effective radii [m] of ``qc`` /
+        ``qi``, 0 where a phase is absent.
         """
-        # jcm carries effective radii in microns; the protocol wants metres.
-        r_liq_m = clouds.r_eff_liq * 1e-6
-        r_ice_m = clouds.r_eff_ice * 1e-6
         tau_liq, tau_ice = _cloud_optical_depth(
             qc, qi, r_liq_m, r_ice_m, p_half)
         cod3d = tau_liq + tau_ice
@@ -638,6 +661,11 @@ class AerocomDiagnostics(PhysicsTerm):
             # CMIP/AeroCom aliases for the same paths.
             "aerocom_cllvi": lwp,
             "aerocom_clivi": iwp,
+            # The 3-D radii [m] of the condensate above, for the CMOR'd
+            # cdr3d/icr3d: the same radii as every product in this group,
+            # not the radiation's ``clouds.r_eff_*``.
+            "aerocom_cdr3d": r_liq_m,
+            "aerocom_icr3d": r_ice_m,
         }
 
     def _column_group(self, state, diagnostics, p_half, qnc, qni) -> dict:

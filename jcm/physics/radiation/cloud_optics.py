@@ -912,6 +912,9 @@ def radiation_effective_radii(
     cloud_ice: jnp.ndarray,
     cloud_fraction: jnp.ndarray,
     cld_frac_min,
+    *,
+    temperature=None,
+    number_tracers=None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray]:
     """Effective radii (um, shaped like the state) the ECHAM radiation uses this step.
 
@@ -941,18 +944,34 @@ def radiation_effective_radii(
     Nothing here reads a radius from the ``clouds`` carry: the published
     ``clouds.r_eff_liq`` / ``clouds.r_eff_ice`` are a diagnostic of this
     function's output, written by the radiation term.
+
+    ``temperature`` and ``number_tracers`` (a ``(qnc, qni)`` pair) replace
+    the step-start ``state.temperature`` and number tracers, for a caller
+    that forms the radii of a later state with the same law
+    (:func:`post_physics_effective_radii`). Which law applies is still
+    decided by the composition's tracers, so an override cannot switch a
+    1-moment composition to the prognostic-number law.
     """
-    temperature = state.temperature
     pressure = diagnostics["pressure_full"]
-    air_density = diagnostics["air_density"]
+    if temperature is None:
+        temperature = state.temperature
+        air_density = diagnostics["air_density"]
+    else:
+        # The density of the overriding temperature, so the number tracers
+        # convert with the same p/(rd T) that ``echam_cloud_effective_radii``
+        # uses for the water content (``diagnostics["air_density"]`` is that
+        # law at the step-start temperature).
+        air_density = pressure / (c.rd * temperature)
     cw_in = in_cloud_condensate(cloud_water, cloud_fraction, eps=cld_frac_min)
     ci_in = in_cloud_condensate(cloud_ice, cloud_fraction, eps=cld_frac_min)
     prognostic = "qnc" in state.tracers and "qni" in state.tracers
     continental = per_column(continental_columns(terrain, forcing),
                              temperature.shape[1:])
     if prognostic:
-        droplet_number = jnp.maximum(state.tracers["qnc"], 0.0) * air_density
-        ice_number = jnp.maximum(state.tracers["qni"], 0.0) * air_density
+        qnc, qni = ((state.tracers["qnc"], state.tracers["qni"])
+                    if number_tracers is None else number_tracers)
+        droplet_number = jnp.maximum(qnc, 0.0) * air_density
+        ice_number = jnp.maximum(qni, 0.0) * air_density
     else:
         # The one call the 1M microphysics makes too, so the two cannot see
         # different droplet numbers (ECHAM passes both the same ``acdnc``).
@@ -963,3 +982,66 @@ def radiation_effective_radii(
         cw_in, ci_in, temperature, pressure,
         droplet_number, ice_number, continental, prognostic,
     )
+
+
+# The cloud-fraction scale below which :func:`post_physics_effective_radii`
+# treats a cell as clear (``in_cloud_path`` zeros a cover at or below twice
+# it): the order of the 1-moment microphysics' ``epsilon``, the cover below
+# which it forms no in-cloud value. It is not the radiation's
+# ``cld_frac_min``, which zeros the in-cloud condensate of thin cloud as an
+# optical-depth guard for the two-stream solver. A diagnostic that counts
+# such a cell as cloud (AeroCom's cloud-top scan from a cover of 1e-3, COSP's
+# sub-columns from any cover) needs its radius there.
+POST_PHYSICS_CLOUD_FRACTION_FLOOR = 1.0e-12
+
+
+def post_physics_effective_radii(
+    state, diagnostics: dict, forcing, terrain,
+    cloud_water: jnp.ndarray,
+    cloud_ice: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
+    temperature: jnp.ndarray,
+    number_tracers=None,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """Effective radii (um) of the condensate a post-physics diagnostic reads.
+
+    The satellite simulators (``cosp_cloudsat``) and the AeroCom cloud
+    diagnostics describe the atmosphere as saved at the end of the step: the
+    post-microphysics condensate and cover, and the post-physics temperature
+    and number tracers. The radii the radiation used
+    (``clouds.r_eff_liq`` / ``r_eff_ice``, formed from the step-start
+    condensate before the microphysics ran, and held between radiation
+    solves) describe a different state: a layer the microphysics fills
+    after the solve carries condensate there with a radius of 0. ECHAM's COSP
+    reads the step-start condensate (``xlm1``/``xim1``) with the radii and
+    cover of the last radiation call (``cosp_reffl``/``cosp_reffi``/
+    ``cosp_f3d``, set in ``mo_psrad_interface.f90``), so the two match on
+    radiation steps. jcm's diagnostics read the post-physics condensate
+    instead, so they form the radius from that condensate with the same
+    ECHAM law (:func:`radiation_effective_radii`,
+    :func:`echam_cloud_effective_radii`), and the two match on every step.
+
+    Args:
+        state: the step-start state the diagnostic term receives; its
+            tracers decide which law applies.
+        diagnostics: the term's diagnostics (column geometry and, for
+            1-moment, the MACv2-SP Twomey factor).
+        forcing: forcing data (glacier cover for the continental mask).
+        terrain: terrain data (land mask).
+        cloud_water / cloud_ice: grid-mean post-physics condensate [kg/kg].
+        cloud_fraction: the post-microphysics cover.
+        temperature: the temperature [K] the caller pairs with that
+            condensate (the running ``thermo_run`` view or the full
+            post-physics temperature).
+        number_tracers: post-physics ``(qnc, qni)`` [1/kg] when the
+            composition carries the 2-moment number tracers; ignored
+            otherwise.
+
+    Returns:
+        ``(r_eff_liq_um, r_eff_ice_um)``, 0 where a phase is absent.
+
+    """
+    return radiation_effective_radii(
+        state, diagnostics, forcing, terrain, cloud_water, cloud_ice,
+        cloud_fraction, POST_PHYSICS_CLOUD_FRACTION_FLOOR,
+        temperature=temperature, number_tracers=number_tracers)
