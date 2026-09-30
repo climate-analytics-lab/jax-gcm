@@ -353,7 +353,8 @@ def vertical_diffusion_column(
 
         # Per-tile saturation humidity at the surface pressure — the same
         # thermodynamics the ECHAM-Louis surface layer uses for its qts
-        # (ECHAM ``tlucua``: over ice below tmelt, over water above).
+        # (ECHAM's ``ua`` table: Sonntag over ice at and below tmelt, over
+        # water above).
         p_sfc = state.pressure_half[:, -1]
         qsat_tiles = saturation_specific_humidity(
             state.surface_temperature, p_sfc[:, None],

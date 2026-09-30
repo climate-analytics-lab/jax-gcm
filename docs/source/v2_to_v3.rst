@@ -300,6 +300,45 @@ Override before the model is built. A constant read inside a jitted term is
 fixed at trace time, and constants internal to ``mam4-jax`` are outside jcm's
 control.
 
+``jcm.physics.thermodynamics`` is ECHAM's Sonntag (1990) saturation
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The module's public functions keep their names and signatures and change
+their values. ``saturation_vapor_pressure``, ``saturation_specific_humidity``
+and ``saturation_specific_humidity_and_derivative`` evaluate the Sonntag
+(1990) fit that ECHAM's lookup tables hold instead of the Tetens form. The
+old values sat, relative to the new, up to 0.15 % off above 273 K, 1.3 % (ice)
+and 2.4 % (water) off between 238 and 273 K, and 8.4 % and 16 % off between
+200 and 238 K. Three further differences a caller will notice:
+
+- ``phase="auto"`` is ECHAM's ``ua`` table, ice **at and below** ``tmelt``
+  (previously water at ``tmelt``).
+- ``qs`` is ECHAM's ``x/(1 − vtmpc1·x)`` with ``x = MIN(es·rd/rv/p, 0.5)``:
+  the ratio is ``rd/rv`` (0.62265) rather than ``c.eps`` (0.622), and the cap
+  applies to ``x`` rather than to ``qs``. The derivative keeps ECHAM's slope
+  under the cap instead of returning zero there.
+- The Tetens constants ``C1ES``, ``C3LES``, ``C4LES``, ``C3IES`` and
+  ``C4IES`` are gone from the module.
+
+New functions: ``es_water``, ``es_ice``, ``es_ua``, ``ua_ice_phase``,
+``dlnes_dT_water``, ``dlnes_dT_ice``, ``dlnes_dT_ua``, ``qsat_from_es`` and
+``dqsat_dT_from_es``. The Tetens form lives on only for the schemes that
+follow their own references, in ``jcm.physics.convection.saturation``
+(Betts-Miller and the JAM aerosol modules), which no longer carries the
+``cuadjtq`` helpers:
+
+.. code-block:: python
+
+   # v2
+   from jcm.physics.convection.saturation import cuadjtq_newton, saturation_mixing_ratio
+   # v3
+   from jcm.physics.convection.tiedtke_nordeng.cuadjtq import (
+       cuadjtq_newton, saturation_mixing_ratio)
+
+``jcm.physics.clouds.sundqvist.saturation_vapor_pressure_water`` and
+``saturation_vapor_pressure_ice`` are removed; use ``thermodynamics.es_water``
+and ``thermodynamics.es_ice``. See :doc:`science/constants`.
+
 Widened, not broken: ``vertical_interp_log_p``
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

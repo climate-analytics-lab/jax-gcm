@@ -60,8 +60,14 @@
 
 **Tiedtke's** activation is a **smooth sigmoid trigger** on CAPE rather than a hard
 ``cape > threshold`` branch, so tau / entrainment / threshold parameters carry
-nonzero gradients near the trigger. Saturation thermodynamics are shared
-(``jcm/physics/convection/saturation.py``, Tetens).
+nonzero gradients near the trigger. Tiedtke-Nordeng's saturation is ECHAM's
+``ua`` table, Sonntag (1990) over ice at and below the melting point and over
+water above (``jcm/physics/convection/tiedtke_nordeng/cuadjtq.py`` on
+``jcm/physics/thermodynamics.py``; see {doc}`constants`), with the ``cuadjtq``
+latent heat switching at the same point (``mo_cuadjust.f90``,
+``mo_echam_convect_tables.f90::lookup_ubc``). Betts-Miller follows Isca and
+saturates over water with the Tetens form of
+``jcm/physics/convection/saturation.py``.
 
 **What ECHAM/CAM does.** ECHAM6-HAM2.3 uses the **Tiedtke (1989) bulk mass-flux
 scheme with Nordeng (1994) CAPE closure** (``mo_cumastr.f90`` master driver,
@@ -117,7 +123,8 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
 - ``jcm/physics/convection/tiedtke_nordeng/`` — ``tiedtke_nordeng.py``
   (``TiedtkeConvection``, the CFL cap, the ``moisture_valid`` closure gate
   [ECHAM zlo1], ``_DTDT_MAX``, the unported-mo_cuadjust note),
-  ``adjustment.py`` (``cuadjtq``), ``flux_tendencies.py``
+  ``adjustment.py`` (``cuadjtq``), ``cuadjtq.py``
+  (``saturation_mixing_ratio``, ``cuadjtq_newton``, ``cuadjtq_newton_evap``), ``flux_tendencies.py``
   (``convective_precip_fluxes`` [ECHAM cuflx], ``mass_flux_closure_blend``),
   ``updraft.py``, ``downdraft.py``.
 - ``jcm/physics/convection/speedy_convection.py`` — ``diagnose_convection``.
@@ -302,7 +309,7 @@ and the ``cudtdq`` ledger — the DSE deviation fluxes ``cp·(T_plume − T)·M`
 the conversion of the whole heat ledger to a temperature tendency. The column
 enthalpy the ledger deposits is therefore ``Σ cp·dT·Δp/g``. Three sites keep
 dry ``cpd`` because the reference does: the ``cuadjtq`` Newton step and the
-wet-bulb adjustment (``adjustment.py``, ``saturation.py``), and the ``cuflx``
+wet-bulb adjustment (``adjustment.py``, ``cuadjtq.py``), and the ``cuflx``
 melting constant, which applies its own ``(1 + vtmpc2·q)`` factor with the
 provisional humidity. jcm's own trigger diagnostic ``calculate_cape_cin`` has no
 ECHAM counterpart and uses the textbook dry-``cpd`` parcel.

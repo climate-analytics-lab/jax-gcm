@@ -24,6 +24,7 @@ def _atmospheric_forcing(ncol, nsfc_type, u_wind, v_wind):
         u_wind=u_wind,
         v_wind=v_wind,
         pressure=jnp.linspace(101325.0, 98000.0, ncol),
+        surface_pressure=jnp.linspace(101325.0, 98000.0, ncol),
         sw_downward=jnp.linspace(300.0, 250.0, ncol),
         lw_downward=jnp.linspace(350.0, 320.0, ncol),
         rain_rate=jnp.full(ncol, 1.0e-6),

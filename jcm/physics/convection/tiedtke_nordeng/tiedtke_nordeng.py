@@ -26,12 +26,11 @@ from jax import lax
 from typing import Tuple
 
 import jcm.constants as c
-# Shared Tetens saturation thermodynamics (water+ice "auto" phase, as used
-# throughout the ECHAM/Tiedtke path). Re-exported for backward compatibility.
-from jcm.physics.convection.saturation import (  # noqa: F401
+# ECHAM's ``ua``-table saturation (Sonntag 1990) and the cuadjtq Newton
+# adjustment; ``saturation_mixing_ratio`` is re-exported for flux_tendencies.
+from jcm.physics.convection.tiedtke_nordeng.cuadjtq import (  # noqa: F401
     cuadjtq_newton,
     saturation_mixing_ratio,
-    saturation_vapor_pressure,
 )
 from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
 

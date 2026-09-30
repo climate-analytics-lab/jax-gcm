@@ -1,8 +1,8 @@
-"""Tests for the shared Tetens saturation thermodynamics.
+"""Tests for the Tetens saturation of Betts-Miller and the JAM modules.
 
-These cover the formulas that ``tiedtke_nordeng`` and ``betts_miller`` both
-depend on: the saturation vapour pressure, specific humidity / mixing ratio, and
-the analytic ``dqs/dT`` used by the Newton adjustment steps.
+ECHAM physics does not use this module (it takes Sonntag 1990 from
+``jcm.physics.thermodynamics``); these tests pin the Tetens formula the
+out-of-scope schemes keep, value for value.
 """
 
 import unittest
@@ -10,14 +10,9 @@ import unittest
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 
 import jcm.constants as c
 from jcm.physics.convection import saturation as sat
-from jcm.physics.convection.saturation import (
-    cuadjtq_newton, saturation_mixing_ratio,
-)
-from jcm.testing import check_gradients
 
 
 class TestSaturationVaporPressure(unittest.TestCase):
@@ -95,14 +90,6 @@ class TestSaturationSpecificHumidity(unittest.TestCase):
         # ceiling (float32 rounding allows a sub-epsilon overshoot).
         self.assertLessEqual(float(qs), 1e-3 + 1e-9)
 
-    def test_mixing_ratio_is_clipped_alias(self):
-        # saturation_mixing_ratio swaps the arg order and clips to [0, 0.5].
-        T, p = jnp.array(295.0), jnp.array(9.0e4)
-        r = sat.saturation_mixing_ratio(p, T, phase="auto")
-        qs = sat.saturation_specific_humidity(T, p, phase="auto",
-                                              clip=(0.0, 0.5))
-        self.assertAlmostEqual(float(r), float(qs), places=10)
-
     def test_broadcasts_over_shapes(self):
         # Column temperature (kx,) against a (kx, ncols) pressure broadcasts.
         T = jnp.linspace(240.0, 300.0, 6)[:, None]
@@ -112,27 +99,27 @@ class TestSaturationSpecificHumidity(unittest.TestCase):
         self.assertTrue(bool(jnp.all(jnp.isfinite(qs))))
 
 
-class TestSaturationDerivative(unittest.TestCase):
-    """The analytic ``dqs/dT`` used by the Newton adjustment steps."""
+class TestTetensValuesPinned(unittest.TestCase):
+    """The formula, value for value, so Betts-Miller and JAM stay bit-identical."""
 
-    def test_qs_matches_plain_call(self):
-        T, p = jnp.array(285.0), jnp.array(8.5e4)
-        qs, _ = sat.saturation_specific_humidity_and_derivative(
-            T, p, phase="auto")
-        qs_plain = sat.saturation_specific_humidity(T, p, phase="auto")
-        self.assertAlmostEqual(float(qs), float(qs_plain), places=8)
+    def test_hand_computed_tetens(self):
+        with jax.enable_x64(True):
+            for T0, phase, c3, c4 in ((300.0, "water", 17.269, 35.86),
+                                      (250.0, "ice", 21.875, 7.66),
+                                      (250.0, "auto", 21.875, 7.66),
+                                      (c.tmelt, "auto", 17.269, 35.86)):
+                es = sat.saturation_vapor_pressure(jnp.asarray(T0), phase=phase)
+                want = 610.78 * np.exp(c3 * (T0 - c.tmelt) / (T0 - c4))
+                np.testing.assert_allclose(float(es), want, rtol=1e-14)
 
-    def test_derivative_matches_autodiff(self):
-        # The closed-form dqs/dT should match JAX's autodiff of qs(T) (away from
-        # the es<0.99p cap, where the two branches diverge by construction).
-        for T0 in (250.0, 285.0, 305.0):
-            T, p = jnp.array(T0), jnp.array(9.0e4)
-            _, dqs_dT = sat.saturation_specific_humidity_and_derivative(
-                T, p, phase="auto")
-            ad = jax.grad(
-                lambda t: sat.saturation_specific_humidity(t, p, phase="auto"))(T)
-            self.assertTrue(np.isclose(float(dqs_dT), float(ad), rtol=1e-3),
-                            msg=f"T={T0}: {float(dqs_dT)} vs {float(ad)}")
+    def test_specific_humidity_uses_eps(self):
+        with jax.enable_x64(True):
+            T, p = jnp.asarray(290.0), jnp.asarray(8.5e4)
+            es = float(sat.saturation_vapor_pressure(T, phase="water"))
+            want = 0.622 * es / (8.5e4 - 0.378 * es)
+            np.testing.assert_allclose(
+                float(sat.saturation_specific_humidity(T, p, phase="water")),
+                want, rtol=1e-13)
 
 
 class TestSaturationConstantsOverride(unittest.TestCase):
@@ -157,39 +144,3 @@ class TestSaturationConstantsOverride(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class TestCuadjtqNewtonGradients:
-    """AD against a central difference for the saturation adjustment (#820).
-
-    ``cuadjtq_newton`` is a fixed-length Newton solve — no convergence
-    branch, no ``lax.while_loop`` — which makes it one of the better
-    finite-difference candidates in the package, and it had no test of its
-    own in this module. Both the supersaturated branch (condensation) and the
-    subsaturated one (re-evaporation, bounded by the available liquid) are
-    checked, and both are green; the function is elementwise, so a parcel
-    vector is the natural shape.
-    """
-
-    @staticmethod
-    def _parcels():
-        """Return (temperature, pressure) for four warm parcels."""
-        return (jnp.array([283.0, 288.0, 292.0, 297.0]),
-                jnp.array([9.5e4, 9.0e4, 8.0e4, 7.0e4]))
-
-    @pytest.mark.parametrize("saturation_ratio", [1.25, 0.6])
-    @pytest.mark.parametrize("seed", [0, 4])
-    def test_gradients_match_a_central_difference(self, saturation_ratio,
-                                                  seed):
-        """Supersaturated and subsaturated parcels alike.
-
-        The ratios are 1.25 and 0.6 rather than anything near 1.0: at exactly
-        saturation the first pass's ``max(condensate, 0)`` sits on its hinge,
-        which is a one-sided point rather than a defect in the solve.
-        """
-        temperature, pressure = self._parcels()
-        total_water = saturation_ratio * saturation_mixing_ratio(
-            pressure, temperature)
-        check_gradients(cuadjtq_newton,
-                        (temperature, total_water, pressure),
-                        rtol=1e-3, seed=seed)

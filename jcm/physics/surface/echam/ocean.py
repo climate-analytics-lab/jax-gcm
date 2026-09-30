@@ -13,6 +13,7 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
+from jcm.physics import thermodynamics
 from .surface_types import (
     SurfaceParameters, AtmosphericForcing,
     SurfaceFluxes, SurfaceTendencies
@@ -130,11 +131,14 @@ def compute_ocean_surface_fluxes(
     air_density = (atmospheric_state.pressure /
                   (c.rd * atmospheric_state.temperature))
 
-    # Ocean surface saturation humidity
-    # Saturation vapor pressure over ocean
-    T_celsius = ocean_temp - c.tmelt
-    e_sat = 611.0 * jnp.exp(17.27 * T_celsius / (T_celsius + 237.3))  # Pa
-    q_sat_ocean = c.eps * e_sat / atmospheric_state.pressure
+    # Ocean surface saturation humidity: ECHAM's precalc_ocean reads the
+    # ``ua`` table at the SST (mo_surface_ocean.f90 l.334-339), Sonntag (1990)
+    # over ice at and below tmelt and over water above, and forms
+    # ``zqsw = zes/(1 − vtmpc1·zes)`` with ``zes = ua/paphm1``, at the
+    # surface pressure.
+    e_sat = thermodynamics.es_ua(ocean_temp)  # Pa
+    q_sat_ocean = thermodynamics.qsat_from_es(
+        e_sat, atmospheric_state.surface_pressure)
 
     # Temperature and humidity differences
     delta_temp = ocean_temp - atmospheric_state.temperature

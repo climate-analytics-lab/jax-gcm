@@ -130,6 +130,19 @@ humidity — ECHAM's ``zlvdcp = alv/pcair`` / ``zlsdcp = als/pcair``
 condensation event by ``vtmpc2·q`` (~1.5 % in the moist tropics); the column
 enthalpy budget closes against this same moist ``cp``.
 
+Saturation is Sonntag (1990), the formula ECHAM's lookup tables hold, from
+``jcm/physics/thermodynamics.py`` (see {doc}`constants`); the cover and the 1M
+read it through ``echam_saturation``. The cover's ``q_s`` and the 1M's
+condensation take the ice fit where ``lo2`` holds and the water fit elsewhere
+(``mo_cover.f90`` l.215-224; ``mo_cloud.f90`` l.697-699, and
+``lookup_ua_eor_uaw_spline`` for the whole-box check, l.763-765). The 1M's
+snow sublimation reads ECHAM's ``ua`` table (ice at and below ``tmelt``, water
+above; l.451) and its rain evaporation the ``uaw`` table (water at every
+temperature; l.520-522), both at the step-start temperature (l.392-394). The
+2M scheme reads ECHAM's ``uaw`` for its water saturations and the ``ua``
+table for its ice saturations, and picks between them with its own ``lo2`` in
+the condensation (``mo_cloud_micro_2m.f90``).
+
 The 2M scheme's utility fields are ECHAM's, shared through ``cloud_utils``:
 
 - **Viscosity of air** in the snow Reynolds number of riming,

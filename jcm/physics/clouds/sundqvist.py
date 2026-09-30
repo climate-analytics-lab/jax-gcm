@@ -25,10 +25,10 @@ test), the derivative is that of a named smooth surrogate, through
 ``docs/source/design/surrogate_gradients.md`` and the cloud-cover section of
 ``docs/source/science/clouds_microphysics.md``.
 
-The module also holds Tetens helpers that other code imports
-(:func:`saturation_vapor_pressure_water`, :func:`saturation_specific_humidity`,
-:func:`_qs_and_dqs_dt`). The blended :func:`saturation_specific_humidity` is
-not ECHAM's phase rule and the cover does not use it.
+The module also holds :func:`saturation_specific_humidity`, a linear
+mixed-phase blend of the Sonntag (1990) fits that tests build humidity
+profiles from. It is not ECHAM's phase rule, and neither the cover nor the 1M
+scheme uses it.
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ import jax.numpy as jnp
 from flax import struct
 
 import jcm.constants as c
+from jcm.physics import thermodynamics
 from jcm.physics.clouds import echam_saturation as es
 from jcm.physics.clouds.echam_cloud_defaults import (
     CTHOMI_BELOW_TMELT,
@@ -465,40 +466,23 @@ def calculate_cloud_fraction(
 
 
 # ---------------------------------------------------------------------------
-# Tetens helpers for other callers (the cover does not use them)
+# Mixed-phase saturation for other callers (the cover does not use it)
 # ---------------------------------------------------------------------------
-
-def saturation_vapor_pressure_water(temperature: jnp.ndarray) -> jnp.ndarray:
-    """Return jcm's Tetens saturation vapour pressure over water [Pa].
-
-    :func:`jcm.physics.clouds.echam_saturation.tetens_es_water`; not ECHAM's
-    formula.
-    """
-    return es.tetens_es_water(temperature)
-
-
-def saturation_vapor_pressure_ice(temperature: jnp.ndarray) -> jnp.ndarray:
-    """Return jcm's Tetens saturation vapour pressure over ice [Pa].
-
-    :func:`jcm.physics.clouds.echam_saturation.tetens_es_ice`; not ECHAM's
-    formula.
-    """
-    return es.tetens_es_ice(temperature)
-
 
 def saturation_specific_humidity(
     pressure: jnp.ndarray,
     temperature: jnp.ndarray,
     t_mix_min: float = 238.15,
 ) -> jnp.ndarray:
-    """Tetens saturation specific humidity with a linear mixed-phase blend.
+    """Saturation specific humidity [kg/kg] on a linear mixed-phase blend.
 
-    ``es`` blends the water and ice Tetens values linearly between
-    ``t_mix_min`` and ``tmelt`` (CAM's mixed-phase form,
-    ``wv_sat_methods.F90``, with a 35 K width). This is neither ECHAM's
-    formula nor its phase rule; the cover uses
-    :func:`cover_saturation_specific_humidity`. Kept for the callers that
-    build test humidities and the RCE initial state from it.
+    The vapour pressure blends Sonntag (1990) over water and over ice
+    (:func:`jcm.physics.thermodynamics.es_water` / ``es_ice``) linearly in
+    temperature between ``t_mix_min`` and ``tmelt``, and ``qs`` is formed as
+    ECHAM forms it (:func:`jcm.physics.thermodynamics.qsat_from_es`). The
+    blend is not ECHAM's phase rule: the cover
+    (:func:`cover_saturation_specific_humidity`) and the 1M scheme choose ice
+    or water per cell with ``lo2``. Tests build humidity profiles from it.
 
     Args:
         pressure: pressure [Pa].
@@ -509,48 +493,11 @@ def saturation_specific_humidity(
         Saturation specific humidity [kg/kg].
 
     """
-    es_water = saturation_vapor_pressure_water(temperature)
-    es_ice = saturation_vapor_pressure_ice(temperature)
     weight = jnp.clip(
         (temperature - t_mix_min) / (c.tmelt - t_mix_min), 0.0, 1.0)
-    vapour = weight * es_water + (1.0 - weight) * es_ice
-    # Cap es < pressure so the denominator stays positive at extreme T.
-    es_safe = jnp.minimum(vapour, 0.99 * jnp.maximum(pressure, 1.0))
-    qs = c.eps * es_safe / jnp.maximum(pressure - es_safe * (1.0 - c.eps), 1.0)
-    return jnp.clip(qs, 0.0, 0.5)
-
-
-def _qs_and_dqs_dt(
-    pressure: jnp.ndarray,
-    temperature: jnp.ndarray,
-    t_mix_min: float = 238.15,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """:func:`saturation_specific_humidity` and its temperature derivative.
-
-    The derivative is the closed form of the same Tetens coefficients the
-    value uses, blended with the same weight (the weight's own slope is
-    left out, as it is in the ECHAM-style Newton step that calls this).
-    """
-    es_water = saturation_vapor_pressure_water(temperature)
-    es_ice = saturation_vapor_pressure_ice(temperature)
-    weight = jnp.clip(
-        (temperature - t_mix_min) / (c.tmelt - t_mix_min), 0.0, 1.0)
-    vapour = weight * es_water + (1.0 - weight) * es_ice
-
-    p_safe = jnp.maximum(pressure, 1.0)
-    es_safe = jnp.minimum(vapour, 0.99 * p_safe)
-    denom = jnp.maximum(p_safe - es_safe * (1.0 - c.eps), 1.0)
-    qs = c.eps * es_safe / denom
-
-    tc = temperature - c.tmelt
-    (a_water, b_water), (a_ice, b_ice) = es.TETENS_WATER, es.TETENS_ICE
-    des_dt_water = es_water * a_water * b_water / jnp.maximum(
-        (tc + b_water) ** 2, 1e-3)
-    des_dt_ice = es_ice * a_ice * b_ice / jnp.maximum(
-        (tc + b_ice) ** 2, 1e-3)
-    des_dt = weight * des_dt_water + (1.0 - weight) * des_dt_ice
-    dqs_dt = c.eps * p_safe * des_dt / denom ** 2
-    return qs, dqs_dt
+    vapour = (weight * thermodynamics.es_water(temperature)
+              + (1.0 - weight) * thermodynamics.es_ice(temperature))
+    return thermodynamics.qsat_from_es(vapour, pressure)
 
 
 # ---------------------------------------------------------------------------

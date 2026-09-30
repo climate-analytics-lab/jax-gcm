@@ -88,3 +88,89 @@ behavioural checks: with gravity overridden, the tropopause geopotential
 height, the ARG maximum supersaturation, the Stokes settling velocity, the
 quasi-laminar deposition resistance and the ice-nucleation cooling rate all
 move, and each restores the original constants afterwards.
+
+## Saturation vapour pressure of the ECHAM physics
+
+**What we do.** Every ECHAM scheme in jcm takes its saturation vapour
+pressure, saturation specific humidity and their temperature derivatives from
+one module, ``jcm/physics/thermodynamics.py``, which evaluates the five-term
+fit of Sonntag (1990, *Z. Meteorol.* 70, 340-344),
+``ln es = a1/T + a2 + a3·0.01·T + a4·1e-5·T² + a5·ln T``, with separate
+coefficients over liquid water and over ice. The phase is chosen per scheme as
+ECHAM chooses it:
+
+- ``es_ua`` — ECHAM's ``ua`` table: ice at and below the melting point, water
+  above. Tiedtke-Nordeng convection throughout (``cuini``, ``cubase``,
+  ``cuasc``, ``cudlfs``/``cuddraf`` and the ``cuadjtq`` adjustment, whose
+  latent heat switches at the same point), the TTE-TKE vertical diffusion,
+  the ocean, land and sea-ice surface saturation, and every "ice" saturation
+  of the 2M scheme.
+- ``es_water`` — ECHAM's ``uaw`` table: water at all temperatures. The 1M
+  rain evaporation and the 2M scheme's water saturation (rain evaporation,
+  Bergeron-Findeisen, the water branch of its condensation).
+- ``es_ice`` or ``es_water`` per cell by the ``lo2`` switch — the cloud
+  cover's saturation (ice where ``T < cthomi`` or where ``T < tmelt`` with
+  cloud ice above ``csecfrl``) and the 2M condensation (ice where
+  ``T < cthomi`` or where ``T < tmelt`` and the updraft is below the
+  Korolev-Mazin threshold).
+
+The saturation specific humidity is ECHAM's ``x = MIN(es·rd/rv/p, 0.5)``,
+``qs = x/(1 − vtmpc1·x)``, and its slope the one ECHAM's Newton adjustments
+use, ``dqs/dT = zcor²·d(es·rd/rv)/dT / p`` (``qsat_from_es``,
+``dqsat_dT_from_es``).
+
+**What ECHAM/CAM does.** ECHAM6.3-HAM2.3 tabulates the same Sonntag fit in
+``mo_echam_convect_tables.f90::init_convect_tables`` — the ``ua`` table with
+the ice fit where ``T ≤ tmelt``, the ``uaw`` table with the water fit — and
+reads it through cubic Hermite splines on 0.025 K knots
+(``lookup_ua_spline``, ``lookup_uaw_spline``, ``lookup_ua_eor_uaw_spline``
+with the ``lo2`` phase test in ``prepare_ua_index_spline``); the 2M scheme
+reads the 0.001 K tables ``tlucua``/``tlucuaw`` at the nearest knot
+(``mo_cloud_micro_2m.f90``). The Tetens constants ``c1es``, ``c3les``,
+``c4les``, ``c3ies``, ``c4ies`` in ``mo_physical_constants.f90`` serve only
+the 2 m dew-point inversion of the land tile's post-processing
+(``mo_surface_land.f90::postproc_land``). CAM uses Goff-Gratch (1946)
+through ``wv_sat_methods``.
+
+**Why we differ.**
+- `compute` / `differentiability` — jcm evaluates the fit instead of
+  interpolating a table: no table memory or gather, and a derivative that is
+  the fit's own. Against ECHAM's compiled tables the fit differs by the
+  splines' interpolation error, at most 4e-12 in ``es`` and 1.8e-9 in
+  ``d ln es/dT`` between 150 and 330 K
+  (``jcm/data/test/echam_saturation_tables/``), so the two are the same
+  formulation.
+- `differentiability` — the ``ua`` table switches phase at 273.15 K while the
+  two fits meet at the triple point, 273.16 K, so ``es`` steps by −9.7e-5 of
+  its value (0.059 Pa, what a 1.3 mK warming changes) and ``d ln es/dT`` by
+  +13 % across the switch. Automatic differentiation returns each side's
+  analytic slope, which is the slope ECHAM's derivative tables hold; the step
+  is too small to be worth a surrogate gradient, so there is none.
+
+**Status & known limitations.** jcm's constants are its own unified set, not
+ECHAM's (``rv = 461.0`` against ECHAM's 461.51, ``rd = akap·cpd``), so
+``rd/rv`` is 0.62265 where ECHAM's is 0.62196. The saturation formula is
+unaffected; the ``qs`` built from it follows the constants. The 1M scheme's
+saturation adjustment blends the two fits linearly between 238.15 K and
+``tmelt`` instead of switching with ``lo2`` (#940). The idealised schemes
+keep their own references: Betts-Miller and the JAM aerosol modules use the
+Tetens form of ``jcm/physics/convection/saturation.py``, SPEEDY its own
+``speedy_humidity.get_qsat``, the RCE testbed's fixed-RH closure its own
+Tetens blend, and the public ``relative_humidity`` diagnostic Bolton (1980)
+over water.
+
+**Code pointers.**
+- ``jcm/physics/thermodynamics.py`` — ``es_water``, ``es_ice``, ``es_ua``,
+  ``ua_ice_phase``, the ``dlnes_dT_*`` slopes, ``qsat_from_es``,
+  ``dqsat_dT_from_es`` and the phase-selected
+  ``saturation_specific_humidity(_and_derivative)``.
+- ``jcm/physics/convection/tiedtke_nordeng/cuadjtq.py`` —
+  ``saturation_mixing_ratio``, ``cuadjtq_newton``, ``cuadjtq_newton_evap``
+  (the convection's saturation and its adjustment).
+- ``jcm/physics/clouds/sundqvist.py::_qs_cover`` — the cover's ``lo2``
+  saturation.
+
+**Validation evidence.** ``jcm/physics/thermodynamics_test.py`` compares the
+functions with ECHAM's own compiled tables in float64 (rtol 1e-11 in ``es``,
+4e-9 in the slope) and float32 (2e-5, 2e-6), pins the phase rule, the jump at
+the melting point, ECHAM's ``qs`` form and its slope.

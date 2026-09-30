@@ -20,13 +20,13 @@ import numpy as np
 import pytest
 
 import jcm.constants as c
+from jcm.physics import thermodynamics
 from jcm.physics.clouds import echam_saturation as es
 from jcm.physics.clouds.sundqvist import (
     CloudParameters,
     SundqvistCloudFraction,
     _cover_exact,
     _cover_surrogate,
-    _qs_and_dqs_dt,
     _zsat_exact,
     _zsat_surrogate,
     _inversion_lapse,
@@ -35,8 +35,6 @@ from jcm.physics.clouds.sundqvist import (
     cover_saturation_specific_humidity,
     critical_relative_humidity,
     saturation_specific_humidity,
-    saturation_vapor_pressure_ice,
-    saturation_vapor_pressure_water,
     stratocumulus_saturation_factor,
 )
 from jcm.physics.echam.echam_levels import get_echam_levels
@@ -633,35 +631,29 @@ class TestJaxTransformations:
 
 
 # ---------------------------------------------------------------------------
-# The Tetens helpers kept for other callers
+# The mixed-phase helper kept for other callers
 # ---------------------------------------------------------------------------
 
-class TestTetensHelpers:
+class TestMixedPhaseHelper:
 
-    def test_values(self):
-        assert float(saturation_vapor_pressure_water(c.tmelt)) == pytest.approx(
-            610.78)
-        assert 2300 < float(saturation_vapor_pressure_water(c.tmelt + 20)) < 2400
-        assert 100 < float(saturation_vapor_pressure_ice(c.tmelt - 20)) < 110
+    def test_blends_the_sonntag_fits(self):
+        """The water fit at and above ``tmelt``, ice at and below 238.15 K.
+
+        Linear in temperature between, with ``qs`` in ECHAM's form, both
+        from ``thermodynamics``.
+        """
+        p = jnp.array(60000.0)
+        mixed = (255.0 - 238.15) / (c.tmelt - 238.15)
+        for temp, weight in ((c.tmelt + 5.0, 1.0), (c.tmelt, 1.0),
+                             (255.0, mixed), (238.15, 0.0), (230.0, 0.0)):
+            t = jnp.array(temp)
+            vapour = (weight * thermodynamics.es_water(t)
+                      + (1.0 - weight) * thermodynamics.es_ice(t))
+            np.testing.assert_allclose(
+                float(saturation_specific_humidity(p, t)),
+                float(thermodynamics.qsat_from_es(vapour, p)), rtol=1e-6)
         qs = saturation_specific_humidity(jnp.array(101325.0), jnp.array(288.15))
         assert 0.008 < float(qs) < 0.012
-
-    def test_derivative_is_the_values(self):
-        """``_qs_and_dqs_dt``'s slope uses the value's own coefficients."""
-        for temp in (230.0, 250.0, 290.0):
-            p = jnp.array(50000.0)
-            _, dqs = _qs_and_dqs_dt(p, jnp.array(temp))
-            # hold the blend weight fixed, as the closed form does
-            h = 1e-3
-            w = np.clip((temp - 238.15) / (c.tmelt - 238.15), 0, 1)
-            def es_blend(tt):
-                return (w * saturation_vapor_pressure_water(tt)
-                        + (1 - w) * saturation_vapor_pressure_ice(tt))
-            def qs_of(tt):
-                e = es_blend(tt)
-                return c.eps * e / (p - (1 - c.eps) * e)
-            fd = (qs_of(temp + h) - qs_of(temp - h)) / (2 * h)
-            assert float(dqs) == pytest.approx(float(fd), rel=1e-5)
 
 
 def test_cover_qs_is_echams_form():
