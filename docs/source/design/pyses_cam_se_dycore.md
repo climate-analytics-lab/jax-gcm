@@ -92,7 +92,10 @@ forcing interpolation, output regrid weights).
   nominal-σ / hybrid (a, b) coordinates and CF attributes, so analysis selects
   by value, never by blind index. The interface axis is named `level_i`, the
   same as the dinosaur backend's — see
-  [output_vertical_conventions](output_vertical_conventions.md).
+  [output_vertical_conventions](output_vertical_conventions.md). Physics
+  diagnostics are named by the physics that produced them, through
+  `jcm.predictions.physics_output_fields` — the same flattening the dinosaur
+  output uses — so a variable has one name on either backend.
 
 ## Usage
 
@@ -117,7 +120,7 @@ model = Model(
 )
 forcing = build_forcing("jcm/data/bc/t63/forcing.nc", dycore)
 predictions = model.run(forcing=forcing, save_interval=1.0, total_time=5.0)
-ds = dycore.to_xarray(...)              # lat/lon regridded output
+ds = predictions.to_xarray()            # lat/lon regridded output
 ```
 
 ## Open issues for the ne30 GPU production run
