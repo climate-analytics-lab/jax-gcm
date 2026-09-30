@@ -482,26 +482,54 @@ def prepare_icon_data(
 # ---------------------------------------------------------------------------
 
 
+@jax.custom_jvp
+def _zenith_from_mu0(mu0: jnp.ndarray) -> jnp.ndarray:
+    """Return arccos(mu0) on [0, 1], with the overhead sun moved off zenith 0.
+
+    See ``_solar_zenith_angle``. At mu0 = 1 the value is an angle whose cosine
+    is still exactly 1 in mu0's dtype (half the square root of machine
+    epsilon), so ``cos`` of it reproduces mu0 bit for bit; below 1 it is
+    ``arccos`` itself.
+    """
+    below = mu0 < 1.0
+    overhead = 0.5 * jnp.sqrt(jnp.finfo(jnp.result_type(mu0)).eps)
+    return jnp.where(below, jnp.arccos(jnp.where(below, mu0, 0.0)), overhead)
+
+
+@_zenith_from_mu0.defjvp
+def _zenith_from_mu0_jvp(primals, tangents):
+    # d(arccos mu)/dmu = -1/sin(arccos mu): arccos's own derivative wherever
+    # mu0 < 1, and at the overhead value (sin > 0) the one that makes
+    # d cos(zenith)/d mu0 exactly 1.
+    (mu0,), (dmu0,) = primals, tangents
+    zenith = _zenith_from_mu0(mu0)
+    return zenith, -dmu0 / jnp.sin(zenith)
+
+
 def _solar_zenith_angle(cos_zenith: jnp.ndarray) -> jnp.ndarray:
     """Return the solar zenith angle [rad] for ``cos_zenith``, clipped to [0, 1].
 
     Night columns (cos_zenith < 0) map to pi/2, where the library's mu0 = 0
     zeroes the direct beam.
 
-    arccos has an infinite derivative at 1, the sun exactly overhead, which a
-    float32 cos_zenith reaches within ~0.02 degrees of the subsolar point.
-    The library takes cos(zenith) straight back, and AD multiplies sin(0) = 0
-    by that infinity: a NaN derivative with respect to the solar geometry.
-    Double-where on the base (as the ``zxrp1_base`` guard in
-    ``clouds/echam_1m.py``): the value at mu0 = 1 is arccos(1) = 0 either
-    way, and the derivative reported there is 0, which is exact — mu0 = 1 is
-    the maximum of cos_zenith over hour angle, latitude and declination, so
-    cos_zenith's own derivative vanishes at it.
+    The library only ever uses cos(zenith), so what matters is the round
+    trip mu0 -> zenith -> cos. Plain ``arccos`` breaks it at mu0 = 1, the sun
+    overhead, which a float32 cos_zenith reaches anywhere within ~0.02
+    degrees of the subsolar point: its derivative is infinite there and AD
+    multiplies sin(0) = 0 by it, a NaN derivative with respect to the solar
+    geometry. Zeroing that derivative instead would silently drop a real
+    one, because inside the rounding band cos_zenith is below its maximum and
+    still moves with the geometry. ``_zenith_from_mu0`` keeps the round trip
+    the identity in value and in derivative: at mu0 = 1 it returns an angle
+    whose cosine is exactly 1 in the working dtype, with the analytic
+    derivative -1/sin(zenith). The upper clip is a ``where`` rather than a
+    ``minimum``: at exactly 1 a ``minimum`` ties and would halve the
+    derivative.
     """
-    mu0 = jnp.clip(cos_zenith, 0.0, 1.0)
-    below_zenith = mu0 < 1.0
-    return jnp.where(
-        below_zenith, jnp.arccos(jnp.where(below_zenith, mu0, 0.0)), 0.0)
+    mu0 = jnp.maximum(cos_zenith, 0.0)
+    mu0 = jnp.where(mu0 > 1.0, 1.0, mu0)
+    return _zenith_from_mu0(mu0)
+
 
 def radiation_scheme_rrtmgp(
     temperature: jnp.ndarray,
