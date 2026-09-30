@@ -1160,8 +1160,9 @@ the liquid water path **+6.8 / +5.9 g/m²** higher, and precipitation
 unchanged. Identical-physics runs spread by about 0.2 W/m². Ten days measure
 the immediate response, not a climate. Any tuning of the 1M cloud water, the
 cloud radiative effects or the mixed-phase partition done before this change
-should be redone, and the T106, T127 and T255 configurations now take their
-truncation's cloud parameters.
+should be redone, and every configuration whose truncation is not T63 (the
+shipped T106 and T119 members, whose values are interpolated between T63 and
+T127, and T127 or T255 grids) now takes its truncation's cloud parameters.
 
 SPEEDY shortwave heating is applied every step
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
