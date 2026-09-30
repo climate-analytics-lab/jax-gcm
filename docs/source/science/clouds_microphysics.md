@@ -43,7 +43,7 @@
   precipitating fraction and the sedimenting ice carried between levels within
   the step. Melting of the incoming snow and of cloud ice above ``tmelt``,
   sublimation of the incoming snow (Lin et al. 1983) and evaporation of the
-  incoming rain (Rotstayn 1997), all at the anchor (step-start) state; ice
+  incoming rain (Rotstayn 1997), all at the anchor state (below); ice
   sedimentation; the ``lo2`` phase switch (ice below ``cthomi``, or below
   ``tmelt`` where the cloud ice exceeds ``csecfrl``), which selects the latent
   heat and ice or water saturation; the return of all condensate of a clear
