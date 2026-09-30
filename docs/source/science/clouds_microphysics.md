@@ -311,7 +311,12 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   sampler. The mask keeps its reference derivative (`differentiability`): the
   cleared cell contributes nothing to any flux through its own optics, and
   the one discrete effect, the bank separation, is already piecewise constant
-  in McICA's sampling. The AeroCom diagnostics read the post-microphysics
+  in McICA's sampling. The price is that in a cell with cover but no
+  condensate the radiation's derivative with respect to that cell's own
+  condensate is exactly zero, although a trace of condensate would switch its
+  optics on at the full cover; a surrogate on the mask cannot change that,
+  because the in-cloud path's clear-cell guard and McICA's sampled sub-column
+  masks select on the masked cover (#973). The AeroCom diagnostics read the post-microphysics
   cover, which is ECHAM's written-back ``aclc`` (zero where both condensates
   are below ``ccwmin``), and are not masked again.
 - Cover and radiation condensate, time level — the cover reads the state the

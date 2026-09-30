@@ -380,7 +380,9 @@ def radiation_cloud_fields(state, diagnostics):
     although a trace of condensate switches its optics on. A surrogate on
     the mask would not change that, because the in-cloud path's clear-cell
     guard (``mcica.in_cloud_path``) and McICA's sampled sub-column masks
-    select on the masked value.
+    select on the masked value. Reaching the one-sided derivative would need
+    the radiation's derivative pass to see the unmasked cover, with a matching
+    treatment of that guard and of the sampling; that is tracked in #973.
     """
     clouds = diagnostics["clouds"]
     zeros = jnp.zeros_like(state.temperature)
