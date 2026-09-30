@@ -254,3 +254,44 @@ class TestAcrossTheOnset:
         assert np.all(np.isfinite(dheat)) and np.all(np.isfinite(dheat_r))
         assert dheat[1] != 0.0 and dheat_r[1] == 0.0
         assert dheat[0] != dheat_r[0]
+
+
+def test_a_failed_first_ascent_leaves_no_surface_plume(monkeypatch):
+    """A column the first ascent leaves non-convective stays so.
+
+    ``cuasc`` resets ``pmfub`` and ``klab`` of a non-convective column before
+    the second ascent (mo_cuascent.f90:186-190, 212-215), so its surface
+    plume is not run again, whatever the closed flux would give. The first
+    ascent is forced to fail here on a column whose plume passes; the final
+    ascent is left alone.
+    """
+    from jcm.physics.convection.tiedtke_nordeng import updraft
+
+    ref = _reference()
+    nlev = ref["input_temperature"].shape[1]
+    row = int(np.where((ref["group"] == "rce_warm")
+                       & (ref["echam_ktype"] == 2)
+                       & (ref["echam_kcbot"] == nlev - 1))[0][0])
+    args = [jnp.asarray(ref[f"input_{k}"][row]) for k in _INPUTS]
+    config = ConvectionParameters.default()
+    tend, state = _column_call(config)(*args)
+    assert int(state.ktype) == 2 and float(tend.precip_conv) >= 0.0
+    assert float(jnp.max(jnp.abs(tend.dtedt))) > 0.0
+
+    original = updraft.calculate_updraft
+    calls = []
+
+    def first_fails(*a, **kw):
+        out = original(*a, **kw)
+        calls.append(1)
+        if len(calls) == 1:
+            out = out._replace(kctop=jnp.asarray(nlev - 2, jnp.int32),
+                               ldcum_weight=jnp.zeros_like(out.ldcum_weight))
+        return out
+
+    monkeypatch.setattr(updraft, "calculate_updraft", first_fails)
+    tend, state = _column_call(config)(*args)
+    assert len(calls) == 2
+    assert int(state.ktype) == 0
+    assert float(jnp.max(jnp.abs(tend.dtedt))) == 0.0
+    assert float(tend.precip_conv) == 0.0
