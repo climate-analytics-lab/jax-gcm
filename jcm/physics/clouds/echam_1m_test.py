@@ -177,7 +177,7 @@ class TestParameters:
         leaves = jax.tree_util.tree_leaves(p)
         n_static = sum(1 for fld in dataclasses.fields(p)
                        if not fld.metadata.get("pytree_node", True))
-        assert n_static == 7
+        assert n_static == 8
         assert p.defaults_truncation == 63
         assert MicrophysicsParameters.default(
             autoconversion_scheme="kk2000").autoconversion_scheme == 1
@@ -982,7 +982,7 @@ class TestBroadcasting:
 # ---------------------------------------------------------------------------
 
 from jcm.physics.clouds.echam_1m import (  # noqa: E402
-    contact_radius_pair, ice_phase_pair,
+    contact_radius_pair, ice_fall_speed_pair, ice_phase_pair,
     temperature_switch_pair,
 )
 from jcm.physics.surrogate_gradient import with_surrogate_gradient  # noqa: E402
@@ -1032,6 +1032,33 @@ class TestSurrogates:
         dist = np.abs(np.asarray(exact(tt, xx, cs, ct) - sur(tt, xx, cs, ct)))
         assert np.max(dist[np.asarray(far)]) <= 2 * float(jax.nn.sigmoid(-5.0))
 
+    def test_ice_fall_speed(self):
+        cutoff = 1e-7
+        exact, sur = ice_fall_speed_pair(cutoff)
+        wrapped = with_surrogate_gradient(exact, sur)
+        y = jnp.array([0.0, 1e-30, 3e-9, 5e-8, 2e-7, 1e-5, 1e-3])
+        floor = jnp.full_like(y, 0.6 * 2.220446049250313e-16)
+        check_surrogate_gradient(wrapped, exact, sur, (y, floor))
+        check_gradients(sur, (y + 1e-9, floor), rtol=1e-5)
+        # Distance: zero above the cutoff, below cutoff**0.16 under it, and
+        # largest just below the cutoff.
+        grid = jnp.concatenate([jnp.zeros(1), jnp.geomspace(1e-20, 1e-2, 400)])
+        fl = jnp.full_like(grid, 0.6 * 2.220446049250313e-16)
+        dist = np.abs(np.asarray(exact(grid, fl) - sur(grid, fl)))
+        above = np.asarray(grid) >= cutoff
+        assert np.all(dist[above] == 0.0)
+        assert np.max(dist) < cutoff ** 0.16
+        # The slope is bounded by (2 - a)·cutoff**(a - 1) everywhere.
+        slope = jax.vmap(jax.grad(lambda x: wrapped(x, 1e-16)))(grid)
+        assert np.all(np.isfinite(np.asarray(slope)))
+        assert np.max(np.asarray(slope)) <= (2 - 0.16) * cutoff ** (-0.84) * (1 + 1e-12)
+        # No ice and a trace of ice have nearly the same slope.
+        g0 = f(jax.grad(lambda x: wrapped(x, 1e-16))(0.0))
+        g1 = f(jax.grad(lambda x: wrapped(x, 1e-16))(1e-30))
+        assert g0 == pytest.approx(g1, rel=1e-12) and g0 > 0.0
+        # The floor is a guard, not a parameter: no derivative.
+        assert f(jax.grad(lambda fl_: wrapped(1e-6, fl_))(1e-16)) == 0.0
+
     def test_contact_radius(self):
         rc = 1e-7
         exact, sur = contact_radius_pair(rc)
@@ -1062,11 +1089,14 @@ class TestSurrogates:
         g_off = jax.grad(lambda x: ice_phase_weight(x, 6e-6, 5e-6, 238.15, 0.0, 0.1))(t)
         assert f(g_on) < 0.0 and f(g_off) == 0.0
         # Fall speed: ECHAM's value with the EPSILON(1._wp) floor at no ice.
-        v0 = f(ice_fall_speed(0.6, 0.0, 2.5))
+        v0 = f(ice_fall_speed(0.6, 0.0, 2.5, 1e-7))
         assert v0 == pytest.approx(2.5 * (0.6 * 2.220446049250313e-16) ** 0.16,
                                    rel=1e-14)
-        assert f(ice_fall_speed(0.6, 2e-5, 2.5)) == pytest.approx(
+        assert f(ice_fall_speed(0.6, 2e-5, 2.5, 1e-7)) == pytest.approx(
             2.5 * (0.6 * 2e-5) ** 0.16, rel=1e-14)
+        slope = jax.grad(lambda xi: ice_fall_speed(0.6, xi, 2.5, 1e-7))
+        slope_ref = jax.grad(lambda xi: ice_fall_speed(0.6, xi, 2.5, 0.0))
+        assert f(slope(0.0)) > 0.0 and f(slope_ref(0.0)) == 0.0
         r = contact_freezing_radius(jnp.asarray(4.0 / 3.0 * math.pi * 1e-18), 1e-7)
         assert f(r) == pytest.approx(1e-6, rel=1e-12)
         assert np.isfinite(f(jax.grad(lambda v: contact_freezing_radius(v, 1e-7))(0.0)))
@@ -1075,10 +1105,11 @@ class TestSurrogates:
         cols = [jnp.asarray(a) for a in random_columns(8)]
         ref, rs = run_sweep(*cols, DT)
         zero = MicrophysicsParameters.default(
-            phase_switch_width=0.0, contact_radius_cutoff=0.0)
+            phase_switch_width=0.0, ice_fall_speed_gradient_cutoff=0.0,
+            contact_radius_cutoff=0.0)
         other = MicrophysicsParameters.default(
             phase_switch_width=3.0, phase_switch_ice_width=0.5,
-            contact_radius_cutoff=1e-6)
+            ice_fall_speed_gradient_cutoff=1e-9, contact_radius_cutoff=1e-6)
         for cfg in (zero, other):
             got, gs = run_sweep(*cols, DT, cfg)
             for a, b in zip(jax.tree.leaves((got, gs)), jax.tree.leaves((ref, rs))):
@@ -1111,7 +1142,8 @@ class TestSweepGradients:
         qi = qi + 3e-6
         cf = jnp.maximum(cf, 0.2) * jnp.linspace(0.8, 1.1, cf.shape[0])
         cfg = MicrophysicsParameters.default(
-            phase_switch_width=0.0, contact_radius_cutoff=0.0)
+            phase_switch_width=0.0, ice_fall_speed_gradient_cutoff=0.0,
+            contact_radius_cutoff=0.0)
 
         def fn(t_, q_, dtemp_, dq_, qc_, qi_):
             return _outputs(*run_sweep(
@@ -1132,7 +1164,8 @@ class TestSweepGradients:
         (t, q, dtemp, dq, qc, qi), (cf, p, dp, rho, dz, n) = self._args()
         cf = cf * jnp.linspace(0.8, 1.1, cf.shape[0])
         cfg = MicrophysicsParameters.default(
-            phase_switch_width=0.0, contact_radius_cutoff=0.0)
+            phase_switch_width=0.0, ice_fall_speed_gradient_cutoff=0.0,
+            contact_radius_cutoff=0.0)
 
         def fn(t_, q_, dtemp_, dq_, qc_, qi_, cf_):
             return _outputs(*run_sweep(
@@ -1186,6 +1219,14 @@ class TestSweepGradients:
         assert np.all(np.isfinite(np.asarray(g_qi)))
         assert np.all(np.isfinite(np.asarray(g_t)))
         assert np.any(np.asarray(g_qi)[2:] != 0.0)
+        # The fall-speed cutoff leaves the value bit for bit unchanged.
+        cfg0 = MicrophysicsParameters.default(ice_fall_speed_gradient_cutoff=0.0)
+        a = run_sweep(t, q, zeros, zeros, zeros, qi, cf, p, dp,
+                                            rho, dz, n, DT)
+        b = run_sweep(t, q, zeros, zeros, zeros, qi, cf, p, dp,
+                                            rho, dz, n, DT, cfg0)
+        for x, y in zip(jax.tree.leaves(a), jax.tree.leaves(b)):
+            np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
 
     def test_parameter_gradients_live(self):
         base = MicrophysicsParameters.default()

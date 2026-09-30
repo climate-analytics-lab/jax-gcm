@@ -154,6 +154,13 @@ class MicrophysicsParameters:
     # Width of the logistic surrogate of lo2's ice-memory criterion
     # (ice > csecfrl), as a fraction of csecfrl.
     phase_switch_ice_width: float = struct.field(pytree_node=False, default=0.1)
+    # Below this ice content [kg/m^3] the derivative of the ice fall speed
+    # cvtfall*(rho*xi)**0.16 is that of a parabola through the origin, C1 at
+    # the cutoff, instead of the unbounded slope of the power law; the largest
+    # slope is then (2 - 0.16)*cutoff**(-0.84), about 1.4e6. Thin cirrus holds
+    # about 1e-6 to 1e-4 kg/m^3, so 1e-7 lies below real cloud.
+    ice_fall_speed_gradient_cutoff: float = struct.field(pytree_node=False,
+                                                         default=1.0e-7)
     # Below this mean droplet radius [m] the derivative of the contact-freezing
     # radius (zradl, F:866-869) is that of the same C1 parabola.
     contact_radius_cutoff: float = struct.field(pytree_node=False, default=1.0e-7)
@@ -488,14 +495,43 @@ def _c1_power(y, exponent, cutoff):
     return jnp.where(y < cutoff, low, high)
 
 
-def ice_fall_speed(air_density, cloud_ice, cvtfall):
+def ice_fall_speed_pair(cutoff):
+    """``(exact, surrogate)`` of the power law of the ice fall speed.
+
+    Both take ``(ice_density, floor)``, the ice content ``ρ·xi`` [kg/m^3] and
+    ECHAM's floor on it. ``exact = max(ice_density, floor)**0.16``, the
+    ``(ρ·zxip1)**0.16`` of F:583-592 with ``zxip1 = max(xi, EPSILON(1._wp))``
+    when the caller passes ``floor = ρ·EPSILON(1._wp)``. ``surrogate`` is
+    :func:`_c1_power` of ``ice_density`` with the static ``cutoff``; it does
+    not read ``floor``, so the derivative with respect to the floor, a
+    numerical guard, is zero, and a cell with no ice gets the parabola's slope
+    at the origin like a cell with a trace of ice.
+    """
+    def exact(ice_density, floor):
+        return jnp.maximum(ice_density, floor) ** 0.16
+
+    def surrogate(ice_density, floor):
+        del floor
+        return _c1_power(ice_density, 0.16, cutoff)
+
+    return exact, surrogate
+
+
+def ice_fall_speed(air_density, cloud_ice, cvtfall, cutoff):
     """ECHAM's ice fall speed ``cvtfall·(ρ·max(xi, EPSILON))**0.16`` [m/s].
 
-    F:581-592, with ECHAM's double-precision ``EPSILON(1._wp)`` floor on the
-    ice, which also gives an ice-free level a small fall speed.
+    F:581-592, with ECHAM's double-precision ``EPSILON(1._wp)`` floor. The
+    slope of the power law is unbounded towards zero ice; below the static
+    ``cutoff`` [kg/m^3] the derivative is that of the C1 parabola of
+    :func:`ice_fall_speed_pair`. ``cutoff = 0`` keeps the reference
+    derivative.
     """
-    return cvtfall * (jnp.asarray(air_density)
-                      * jnp.maximum(cloud_ice, _ECHAM_EPSILON)) ** 0.16
+    exact, surrogate = ice_fall_speed_pair(cutoff)
+    power = exact if cutoff == 0.0 else with_surrogate_gradient(exact, surrogate)
+    ice_density = jnp.asarray(air_density) * jnp.asarray(cloud_ice)
+    floor = jnp.broadcast_to(jnp.asarray(air_density) * _ECHAM_EPSILON,
+                             jnp.shape(ice_density)).astype(ice_density.dtype)
+    return cvtfall * power(ice_density, floor)
 
 
 def contact_radius_pair(radius_cutoff):
@@ -900,7 +936,8 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     # its derivative stays bounded where v is small.
     zxip1_raw = xip - zimlt
     zxip1 = jnp.maximum(zxip1_raw, _ECHAM_EPSILON)
-    zxifall = ice_fall_speed(rho, zxip1_raw, config.cvtfall)
+    zxifall = ice_fall_speed(rho, zxip1_raw, config.cvtfall,
+                             config.ice_fall_speed_gradient_cutoff)
     sed_x = zxifall * c.grav * rho * (dt / dp)
     zal1 = jnp.exp(-sed_x)
     sed_x_safe = jnp.maximum(sed_x, 1.0e-8)
