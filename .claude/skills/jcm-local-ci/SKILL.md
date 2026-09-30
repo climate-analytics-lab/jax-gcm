@@ -22,6 +22,33 @@ sequentially. Watch the job log for `FAST_EXIT=0`, `SLOW_EXIT=0` and the
 closing `GATES PASSED`: the job exits non-zero if either gate failed, so a
 job that ends green means both passed.
 
+Every submission gets its own log, named for the tree it tests:
+`<worktree>/jcm_ci.<tag>.<UTC timestamp>.log`, where `<tag>` is HEAD's short
+sha, with `+dirty.<hash>` appended when the worktree differs from HEAD —
+tracked edits or untracked, non-ignored files, which pytest would collect too;
+the hash is of that difference, so two different dirty trees on one commit get
+different tags. The PBS job is named `jcm_ci_<tag>_<timestamp>` to match
+(punctuation replaced by `_`, to keep the name to characters every PBS
+accepts). The script prints the exact log path and the watch command when it
+submits:
+
+```bash
+tree: 1a2b3c4d.20260930T051200Z
+log:  /path/to/worktree/jcm_ci.1a2b3c4d.20260930T051200Z.log
+watch: grep -E 'FAST_EXIT|SLOW_EXIT|GATES' /path/to/worktree/jcm_ci.1a2b3c4d.20260930T051200Z.log
+```
+
+The job tests the worktree as it is when the job *starts*, which an edit or a
+commit made while it queued can change, so it recomputes the tag then: the log
+opens with `submitted=<tag> tested=<tag>` (and a `WARNING` line when they
+differ), and every result line carries both,
+`GATES PASSED tree=<tag>.<timestamp> tested=<tag>`.
+
+Use the printed path, not a glob over `jcm_ci.*.log`: an earlier run's log in
+the same worktree is a verdict on an earlier tree, and a green line in it says
+nothing about the one just submitted. Check that the `tested=` tag on the line
+you read is the sha you pushed.
+
 The gates go to a compute node because a login node caps you at 10 GiB
 (see `docs/source/design/test_suite_memory.md`) — well under what an
 `-n 12` fast suite needs, so a local run there reports OOM-killed workers
