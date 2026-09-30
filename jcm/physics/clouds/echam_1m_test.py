@@ -1473,27 +1473,129 @@ class TestCloudSchemeInputs:
         (F:666-680), so the result is the same whether the detrainment arrives
         separately or inside the running tendency.
         """
-        from jcm.physics.clouds.echam_1m import (
-            Echam1MMicrophysics, cloud_scheme_inputs_stage1)
+        from jcm.physics.clouds.cloud_inputs import cloud_scheme_inputs
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
         nlev, ncols, k = 6, 2, 3
         zeros = jnp.zeros((nlev, ncols))
         detr = zeros.at[k].set(4e-8)
         run = {"temperature": zeros.at[k].set(-1e-5), "specific_humidity": zeros,
                "tracers": {"qc": detr + zeros.at[k].set(1e-8), "qi": zeros}}
         state, diag, forcing, terrain = _term_inputs(tendency_run=run)
-        anchor, inc, dqc, dqi = cloud_scheme_inputs_stage1(state, diag)
-        # Not published separately: the detrainment stays in the increment.
-        assert f(inc["qc"][k, 0]) == pytest.approx(5e-8 * 1200.0, rel=1e-12)
-        assert f(dqc[k, 0]) == 0.0
         tend_a, _ = Echam1MMicrophysics()(state, diag, forcing, terrain)
         diag["_convective_detrainment"] = {"qc": detr, "qi": zeros}
-        anchor, inc, dqc, dqi = cloud_scheme_inputs_stage1(state, diag)
-        assert f(inc["qc"][k, 0]) == pytest.approx(1e-8 * 1200.0, rel=1e-6)
-        assert f(dqc[k, 0]) == pytest.approx(4e-8 * 1200.0, rel=1e-12)
+        inputs = cloud_scheme_inputs(state, diag)
+        assert f(inputs.increment.tracers["qc"][k, 0]) == pytest.approx(
+            1e-8 * 1200.0, rel=1e-6)
+        assert f(inputs.detrained_qc[k, 0]) == pytest.approx(4e-8 * 1200.0, rel=1e-12)
         tend_b, _ = Echam1MMicrophysics()(state, diag, forcing, terrain)
         for a, b in zip(jax.tree.leaves(tend_a), jax.tree.leaves(tend_b)):
             np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12,
                                        atol=1e-20)
+
+    def test_air_density_is_echams_at_the_anchor(self):
+        """``papm1/(rd·ptvm1)``, ``ptvm1 = T(1 + vtmpc1·q − (xl + xi))`` (physc.f90:267).
+
+        The moist-air diagnostic ``air_density`` (dry temperature) is not read.
+        """
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        state, diag, forcing, terrain = _term_inputs(qc=3e-4, cf=0.6, q_scale=0.99)
+        tend, _ = Echam1MMicrophysics()(state, diag, forcing, terrain)
+        diag["air_density"] = diag["air_density"] * 3.0
+        tend_b, _ = Echam1MMicrophysics()(state, diag, forcing, terrain)
+        for a, b in zip(jax.tree.leaves(tend), jax.tree.leaves(tend_b)):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+    def test_upstream_radiative_cooling_condenses_in_the_same_step(self):
+        """Mirror of the 2M's composition test: an upstream term's cooling.
+
+        ECHAM adds radheat to ptte before cloud (physc.f90:776-794), so a
+        half-covered, box-subsaturated layer condenses
+        ``zqcdif = −zdqsat·paclc`` in the step the cooling happens (F:706-734).
+        """
+        from typing import ClassVar
+        from types import SimpleNamespace
+        from jcm.forcing import ForcingData
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.physics_term import PhysicsTerm
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
+
+        nlev, k, dt = 8, 5, 1200.0
+        pressure = jnp.linspace(5.0e4, 1.0e5, nlev)
+        temperature = jnp.linspace(262.0, 292.0, nlev)
+        cover = jnp.zeros(nlev).at[k].set(0.5)
+        qsat = jnp.asarray([qs_water(float(a), float(b))
+                            for a, b in zip(temperature, pressure)])
+        q = jnp.full(nlev, 0.5).at[k].set(0.9) * qsat
+
+        class _Column(PhysicsTerm):
+            name: ClassVar[str] = "column"
+            category: ClassVar[str] = "diagnostics"
+            requires: ClassVar[tuple[str, ...]] = ()
+            provides: ClassVar[tuple[str, ...]] = (
+                "pressure_full", "pressure_thickness", "air_density",
+                "layer_thickness", "clouds", "aerosol")
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                p = jnp.broadcast_to(pressure[:, None], state.temperature.shape)
+                ncols = state.temperature.shape[1]
+                return PhysicsTendency.zeros(state.temperature.shape), {
+                    **diagnostics, "pressure_full": p,
+                    "pressure_thickness": jnp.full_like(p, 6000.0),
+                    "air_density": p / (c.rd * state.temperature),
+                    "layer_thickness": jnp.full_like(p, 400.0),
+                    "clouds": CloudData.zeros((ncols,), nlev).copy(
+                        cloud_fraction=jnp.broadcast_to(cover[:, None],
+                                                        state.temperature.shape)),
+                    "aerosol": AerosolData.zeros((ncols,), nlev)}
+
+        def composition(rate):
+            class _Cooling(PhysicsTerm):
+                name: ClassVar[str] = "cooling"
+                category: ClassVar[str] = "radiation"
+                requires: ClassVar[tuple[str, ...]] = ()
+                provides: ClassVar[tuple[str, ...]] = ()
+
+                def __call__(self, state, diagnostics, forcing, terrain):
+                    r = jnp.zeros(nlev).at[k].set(rate)
+                    tend = PhysicsTendency.zeros(state.temperature.shape)
+                    return tend.copy(temperature=jnp.broadcast_to(
+                        r[:, None], state.temperature.shape)), diagnostics
+
+            return ComposablePhysics([_Column(), _Cooling(), Echam1MMicrophysics()],
+                                     vectorize_columns=True, dt_seconds=dt)
+
+        shape = (nlev, 2, 1)
+        grid = lambda col: jnp.broadcast_to(col[:, None, None], shape)  # noqa: E731
+        qc = jnp.zeros(nlev).at[k].set(5e-5)
+        state = PhysicsState(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=grid(temperature), specific_humidity=grid(q),
+            geopotential=jnp.zeros(shape),
+            normalized_surface_pressure=jnp.ones(shape[1:]),
+            tracers={"qc": grid(qc), "qi": jnp.zeros(shape)})
+        from jcm.terrain import TerrainData
+        coords = SimpleNamespace(horizontal=SimpleNamespace(nodal_shape=shape[1:]))
+        terrain = TerrainData.aquaplanet(coords)
+
+        def vapour_tendency(rate):
+            tend, _ = composition(rate).compute_tendencies(
+                state, ForcingData.zeros(shape[1:]), terrain)
+            return float(np.asarray(tend.specific_humidity[k, 0, 0]))
+
+        rate = -3.0e-4
+        condensed = -dt * (vapour_tendency(rate) - vapour_tendency(0.0))
+        t, p = float(temperature[k]), float(pressure[k])
+        uaw, duaw = np_ua(t, water_only=True)
+        z = min(uaw / p, 0.5)
+        zcor = 1.0 / (1.0 - c.vtmpc1 * z)
+        zdqsdt = zcor ** 2 * duaw / p
+        zlvdcp = c.alhc / cp_moist(float(q[k]))
+        zqcdif = -(dt * rate) * zdqsdt / (1.0 + 0.5 * zlvdcp * zdqsdt) * 0.5
+        assert zqcdif > 0.0
+        np.testing.assert_allclose(condensed, zqcdif, rtol=1e-6)
 
 
 class TestShallowLiquidConvectionType:

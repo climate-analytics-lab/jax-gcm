@@ -2493,7 +2493,7 @@ class TestPostPhysicsAnchor(unittest.TestCase):
         self.assertEqual(set(slot["tracers"]), {"qc", "qi"})
 
     def test_composition_without_a_reader_carries_no_slot(self):
-        """SPEEDY, Held-Suarez and the 1M ECHAM stack do not pay for the slot."""
+        """SPEEDY and Held-Suarez do not pay for the slot; the ECHAM stacks do."""
         from jcm.model import Model
         from jcm.physics.echam.echam_terms import echam_physics
         from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
@@ -2501,11 +2501,13 @@ class TestPostPhysicsAnchor(unittest.TestCase):
         from jcm.physics.speedy.speedy_terms import speedy_physics
 
         coords = get_speedy_coords(layers=8, spectral_truncation=21)
-        for physics in (speedy_physics(), held_suarez_physics(), echam_physics()):
+        for physics in (speedy_physics(), held_suarez_physics()):
             self.assertEqual(physics.post_physics_fields(), ())
             model = Model(coords=coords, physics=physics)
             self.assertNotIn("_post_physics_state", model.initial_physics_carry())
             self.assertEqual(model._post_physics_fields, ())
+        self.assertEqual(echam_physics().post_physics_fields(),
+                         ("temperature", "specific_humidity", "qc", "qi"))
         two_moment = echam_physics(cloud_scheme="2m")
         self.assertEqual(
             two_moment.post_physics_fields(),
@@ -2647,6 +2649,78 @@ class TestPostPhysicsAnchor(unittest.TestCase):
         blind = -self.DT * (
             np.asarray(blind_forced.physics["_prev_step"]["q_tendency"][1][k])
             - np.asarray(blind_still.physics["_prev_step"]["q_tendency"][1][k]))
+        self.assertLess(float(np.max(np.abs(blind))), 0.02 * zqcdif)
+
+    def _one_moment_physics(self, reads_anchor=True):
+        from typing import ClassVar
+
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.physics_term import PhysicsTerm
+
+        stub = self._column_stub()
+
+        class _OneMomentColumn(type(stub)):
+            name: ClassVar[str] = "column_stub_1m"
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                tend, diags = super().__call__(state, diagnostics, forcing, terrain)
+                ncols = state.temperature.shape[1]
+                return tend, {**diags, "aerosol": AerosolData.zeros(
+                    (ncols,), state.temperature.shape[0])}
+
+        term = Echam1MMicrophysics()
+        if not reads_anchor:
+            class _NoAnchor(Echam1MMicrophysics):
+                requires_post_physics_fields = ()
+            term = _NoAnchor()
+        del PhysicsTerm
+        return ComposablePhysics([_OneMomentColumn(), term],
+                                 vectorize_columns=True, dt_seconds=self.DT)
+
+    def test_one_moment_partly_cloudy_layer_condenses_the_dynamics_forcing(self):
+        """The 1M: ascent cooling in a half-covered, box-subsaturated layer.
+
+        ECHAM: zqcdif = (ztmst·pqte − zdqsat)·paclc with ztmst·ptte holding the
+        dynamics (mo_cloud.f90:706-734), and zdqsat from ECHAM's saturation at
+        the anchor. A 1M that does not read the anchor sees none of it.
+        """
+        from jcm.physics.clouds import echam_saturation as es
+        from jcm.physics.clouds.cloud_utils import latent_heat_over_cp
+
+        k = self.CLOUD_LEVEL
+        cooling = jnp.zeros(self.NLEV).at[k].set(-5.0e-4)
+        initial = self._cloudy_initial_state()
+        initial = initial.copy(tracers={"qc": initial.tracers["qc"],
+                                        "qi": initial.tracers["qi"]})
+
+        def condensed(physics_factory):
+            forced = self._run(physics_factory(), cooling, steps=2, initial=initial)[1]
+            still = self._run(physics_factory(), 0.0, steps=2, initial=initial)[1]
+            return forced, -self.DT * (
+                np.asarray(forced.physics["_prev_step"]["q_tendency"][1][k])
+                - np.asarray(still.physics["_prev_step"]["q_tendency"][1][k]))
+
+        forced, got = condensed(self._one_moment_physics)
+        anchor = forced.physics["_post_physics_state"]
+        t_anchor = jnp.asarray(float(anchor["temperature"][0][k, 0]))
+        q_anchor = float(anchor["specific_humidity"][0][k, 0])
+        p_k = float(jnp.linspace(5.0e4, 1.0e5, self.NLEV)[k])
+        es_w = float(es.es_water(t_anchor))
+        des_w = es_w * float(es.dlnes_dT_water(t_anchor))
+        import jcm.constants as c
+        z = min(es_w * c.rd / c.rv / p_k, 0.5)
+        zcor = 1.0 / (1.0 - c.vtmpc1 * z)
+        zdqsdt = zcor ** 2 * des_w * c.rd / c.rv / p_k
+        lvdcp, _ = latent_heat_over_cp(jnp.asarray(q_anchor))
+        cf = 0.5
+        zdqsat = self.DT * float(cooling[k]) * zdqsdt / (1.0 + cf * float(lvdcp) * zdqsdt)
+        zqcdif = -zdqsat * cf
+        self.assertGreater(zqcdif, 0.0)
+        np.testing.assert_allclose(got, zqcdif, rtol=1e-3)
+
+        _, blind = condensed(lambda: self._one_moment_physics(False))
         self.assertLess(float(np.max(np.abs(blind))), 0.02 * zqcdif)
 
     def test_averaged_output_mode_carries_the_slot(self):
