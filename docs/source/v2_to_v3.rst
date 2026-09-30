@@ -13,10 +13,10 @@ coming from v1, read :doc:`v1_to_v2` first.
    :local:
    :depth: 1
 
-Read this first: the four changes that silently alter results
+Read this first: the five changes that silently alter results
 -------------------------------------------------------------
 
-Most items below fail loudly. These four do not, so check them before
+Most items below fail loudly. These five do not, so check them before
 comparing any v3 number against a v2 one.
 
 1. **Specific humidity is kg/kg everywhere** (:ref:`v3-q-units`). A v2-written
@@ -34,6 +34,13 @@ comparing any v3 number against a v2 one.
 4. **A bare** ``echam_physics()`` **composes RRTMGP**, not the grey two-stream
    (:ref:`v3-echam-radiation`). A v2 script that relied on the factory default
    now runs the real ECHAM radiation — slower, and a different climate.
+5. **The default cloud overlap is maximum-random, and the ECHAM 1M cloud
+   scheme and cloud cover are ECHAM6.3's** (:ref:`v3-cloud-overlap`,
+   :ref:`v3-echam-1m`). Nothing fails, and every ECHAM configuration's
+   results change by more than the run-to-run spread: most in the ``echam``
+   (1M) presets' net TOA radiation, cloud cover and liquid water path, less
+   in the 2M and JAM presets. Cloud and radiation numbers from before this
+   change, and any tuning of them, are not comparable.
 
 Installation and dependencies
 -----------------------------
@@ -758,6 +765,8 @@ but the ozone bundles end in 2022, and holding 2022 ozone for 2023–24 is the
 preset's stated choice. Its transient emissions, if you add them, stay
 ``strict``.
 
+.. _v3-cloud-overlap:
+
 Cloud overlap defaults to maximum-random
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -1138,6 +1147,8 @@ radiative effect done before this change should be redone. Code that passed
 ``MicrophysicsParameters.default(base_cdnc=...)`` must drop the argument;
 direct callers of ``radiation_scheme_rrtmgp`` pass the radii from
 ``jcm.physics.radiation.cloud_optics.radiation_effective_radii``.
+
+.. _v3-echam-1m:
 
 The ECHAM 1M cloud scheme and cloud cover are ECHAM6.3's
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
