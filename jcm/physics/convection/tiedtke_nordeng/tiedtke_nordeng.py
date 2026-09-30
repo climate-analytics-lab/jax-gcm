@@ -1164,19 +1164,26 @@ def _tiedtke_convection_toa_first(
         updraft_state = ascent(
             base_final, kctop0_final, type_final, mfub_final, weights_final)
         actual_ktop = updraft_state.kctop
-        # ``ldcum`` at the ledger: the plume of the final ascent passed an
-        # interface (mo_cuascent.f90:541) and, unless it is the mid-level
-        # plume the second ascent seeds afresh, so did the first ascent's
-        # (a column the first ascent leaves non-convective runs no surface
-        # plume in the second: cuasc resets ``pmfub`` and ``klab`` there,
-        # lines 186-190, 212-215), and the cloud-base moisture budget passed
-        # ``zlo1``. As a weight it is 1.0 or 0.0; each factor carries the
-        # derivative of the switch that decides it.
+        # ``ldcum`` at the ledger is a chain of decisions. A cubase column
+        # must pass the cloud-base moisture budget (``zlo1``); then its first
+        # ascent must pass an interface (mo_cuascent.f90:541) — a column the
+        # first ascent leaves non-convective runs no surface plume in the
+        # second, as cuasc resets ``pmfub`` and ``klab`` there (lines
+        # 186-190, 212-215); then so must the final ascent. The mid-level
+        # plume the second ascent seeds afresh is decided by that ascent
+        # alone. As a weight the chain is 1.0 or 0.0. Each link is weighted
+        # only where the links before it passed, so that where the chain
+        # fails, its derivative is that of the first switch that failed,
+        # which is the decision that turned the column off.
+        def _then(passed, weight):
+            return jnp.where(passed > 0.5, weight, 1.0)
+
+        after_gate = first_ldcum_weight * _then(
+            first_ldcum_weight, updraft_state.ldcum_weight)
         ldcum_weight = jnp.where(
             switch_mid,
             updraft_state.ldcum_weight,
-            jnp.where(use_midlev, 1.0, zlo1)
-            * first_ldcum_weight * updraft_state.ldcum_weight)
+            jnp.where(use_midlev, after_gate, zlo1 * _then(zlo1, after_gate)))
         ldcum = ldcum_weight > 0.5
         # The downdraft is not re-run: ECHAM scales its fluxes and rain uptake
         # by the same factor (mo_cumastr.f90:944-972). It exists only under a
