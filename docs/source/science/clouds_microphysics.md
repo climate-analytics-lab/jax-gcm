@@ -51,8 +51,9 @@
   ``micro_mg`` / PUMAS ``qsmall`` / ``mincld`` / ``dcs`` constants enter. The
   scheme is not a complete port of ECHAM-HAM. Several section-1 number
   sources are absent, the mixed-phase heterogeneous freezing is a jcm
-  closure, and a small set of jcm-only bounds remains (for example the
-  droplet-number entry cap and the Koop homogeneous-freezing floor). The
+  closure, and a small set of jcm-only bounds remains (the Koop
+  homogeneous-freezing floor, the ``icemax`` cap on the ICNC diagnosis and
+  the falling-ice cover threshold). The
   absent processes and the deliberate deviations are listed below. See
   {doc}`../design/lohmann_2m_column_processes`.
 
@@ -122,8 +123,10 @@ section 4 inside it (``mo_cloud_micro_2m.f90``). jcm applies them:
   ``lo2_2d`` true (``ll_cv``). There it is
   ``conv_effr2mvr·(0.5·10⁻²)^pow_PK·1000/fact_PK · ρ·Δq_det / (max(cf, clc_min)·zrid^pow_PK)``,
   floored at ``cqtmin``, with ``Δq_det`` the whole condensate detrained this
-  step in both phases (lines 970–972). The prefactor is ECHAM's as written.
-  It is not the exact inverse of the plate mass–radius law, and jcm keeps it.
+  step in both phases (lines 970–972). The prefactor is ECHAM's as written:
+  ``conv_effr2mvr`` times the inverse of the plate mass–radius law at the
+  plate dimension ``2·zrid``, since ``(0.5·10⁻²/zrid)^pow_PK`` is that
+  dimension in centimetres to the power ``−pow_PK``.
 - **Sedimentation acts on the ice present before detrainment** (lines
   1227–1248): ``pxim1 + ztmst·pxite``, the step-start ice plus the upstream
   increments without the detrained part. Detrained ice joins the cell after
@@ -143,9 +146,10 @@ section 4 inside it (``mo_cloud_micro_2m.f90``). jcm applies them:
   the clear-sky evaporation and the section-5 closure together with the other
   increments (``zxidt``/``zxldt``, lines 1316–1317).
 - **Number tendencies are taken against the raw tracer** (the call at lines
-  1780–1781; lines 3625–3628). For its own arithmetic the scheme clips the
-  incoming number tracers to ``[0, icemax/ρ]`` for ice and
-  ``[0, 10¹¹ m⁻³/ρ]`` for droplets. The returned tendency is
+  1780–1781; lines 3625–3628). For its own arithmetic the scheme floors the
+  incoming number tracers at ``cqtmin`` (lines 600–605) and applies no upper
+  bound at entry: ICNC is capped at ``icemax`` only after ``znidetr`` joins
+  it (line 1252), and CDNC is not capped. The returned tendency is
   ``(N_end/ρ − q_N)/Δt`` against the unclipped tracer ``q_N``. The tracer
   therefore ends the step at the scheme's number, or at zero where the
   negative-mass repair removed the condensate (lines 3641–3652), and an
@@ -208,8 +212,8 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   mean mass freeze until the crystal number reaches the INP number ``n_inp``.
   The droplets available cap the number frozen, the liquid available caps the
   mass, and number, mass and fusion heat move together. The droplet number is
-  floored at ``cqtmin``, where ECHAM's ``het_mxphase_freezing`` stops at
-  ``cdnc_min`` (line 2819).
+  floored at ``cqtmin``; ECHAM's ``het_mxphase_freezing`` instead caps the
+  number frozen at the droplets above ``cdnc_min`` (lines 2818–2820).
   - Without JAM, ``n_inp`` is the **DeMott et al. (2010)** parameterisation
     (``jcm/physics/clouds/lohmann_2m/deposition_freezing.py::demott2010_inp``)
     on a prescribed number of particles larger than 0.5 µm, ``n_aer_coarse``
@@ -261,7 +265,7 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     (#705), and for the two transcription errors above to be fixed.
   - the large-scale term ``−100·ω/(g·ρ)`` of the updraft ``zvervx`` (line
     816; #705).
-- **Known biases of the 2M ice.** Three biases remain, measured in 10-day T63
+- **Known biases of the 2M ice.** Four biases remain, measured in 10-day T63
   January runs from a spun-up state. No parameter has been tuned to them. A
   retune follows together with the convection retune (#682).
   - Glaciation is too warm. The supercooled share of the condensate mass
@@ -269,13 +273,19 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     CALIOP's quantity is a cloud-top phase frequency, not a mass fraction, and
     that figure comes from a secondary summary (Hu et al. 2010; Tan et al.
     2016).
-  - Cold ice cloud holds too many crystals. About a fifth to two fifths of
-    ice-containing cells exceed 10⁶ crystals m⁻³, above the 90th percentile
+  - Cold ice cloud holds too many crystals. In the daily-mean output, two
+    fifths of the mixed-phase and three fifths of the cold ice-containing
+    cells exceed 10⁶ crystals m⁻³, above the 90th percentile
     of the in-situ cirrus climatology of Krämer et al. (2020, *ACP* 20,
     12569). The cause is the small radius ``zrid`` gives at cirrus
     temperatures, which makes ``znidetr`` large.
   - Liquid water path lies below the observed range (50–84 g m⁻² over the
     oceans; Lohmann et al. 2007, *ACP* 7, 3425, Table 2).
+  - Under JAM the mixed-phase condensate stays mostly liquid: in the same
+    validation, from a cold-started JAM state 20 days old, the supercooled
+    mass fraction at 253–258 K is 0.84, against 0.27 without JAM. The cause
+    has not been established; the droplet number from ARG activation and the
+    short spin-up are the candidates.
 - **Cirrus ICNC diagnosis (default ``nic_cirrus = 1``).** Where a cloudy cell
   holds ice at or below ``icemin`` crystals, ``update_in_cloud_water``
   diagnoses the number from the ice mass at the radius ``zrid``,

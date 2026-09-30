@@ -83,10 +83,13 @@ Each was reviewed and kept.
   step-start temperature stays below it) therefore gains its fusion heat,
   where ECHAM lets it leak. The column moist-enthalpy identity closes to
   round-off with detrainment present.
-- **No `icemin` floor after the section-4 additions** (ECHAM line 1253), as
-  there is none before the loop (lines 1127-1131). A cell at or below
-  `icemin` is re-diagnosed from its ice mass in `update_in_cloud_water`, and
-  the floor would inject `icemin` crystals per step into cells with no ice.
+- **No `icemin` floor on the crystal number** at the two places ECHAM applies
+  one: before the loop in cold cloudy cells (lines 1127-1131) and after the
+  section-4 additions (line 1253). A cell at or below `icemin` is re-diagnosed
+  from its ice mass in `update_in_cloud_water`, and the floor would inject
+  `icemin` crystals per step into cells with no ice. ECHAM's entry floor at
+  `cqtmin` (lines 600-605) is kept: the strict inequality of the WBF criteria
+  needs a positive crystal number to hold at zero updraft.
 - **The ICNC diagnosis is capped at `icemax`.** ECHAM's diagnosis (lines
   2610-2624) is uncapped. jcm applies the bound ECHAM puts on the section-1
   additions (line 1252). The `zascs` cap in ECHAM belongs to the cirrus
@@ -97,6 +100,13 @@ Each was reviewed and kept.
 
 Formulation choices inside the sweep, for provenance:
 
+- The falling-ice cover and the in-cloud sedimentation ledger receive the
+  signed from-level flux (lines 2255-2267): a level that gains more ice from
+  above than it loses lowers the falling-ice cover and reports a negative
+  in-cloud snow-formation rate. The total falling flux stays non-negative in
+  exact arithmetic and is guarded against round-off only. The JAM consumers
+  floor the ledger per phase, as HAM's wet deposition does
+  (`mo_hammoz_wetdep.f90` lines 426-435).
 - Grid-scale condensation/evaporation is the section-5 `zqcdif` closure with
   ECHAM's Newton saturation damper (`zqcon`; 0.36–0.93 through the
   troposphere), so no external saturation adjustment is composed alongside
@@ -145,10 +155,17 @@ The pure upstream increments are `(x − x_m1)` for T and q, and
 condensate. They play the role of `ztmst·pqte` and `ztmst·ptte` in the
 condensation closure, and of `ztmst·pxlte` and `ztmst·pxite` in the
 clear-sky-evaporation split; the ice increment also feeds sedimentation.
-Today `thermo_run` is advanced by vertical diffusion, the prescribed-flux
-term and Tiedtke convection. ECHAM's `ptte`/`pqte` also carry the dynamics,
-radiative heating and gravity-wave drag, which jcm's increments lack
-(#940).
+Today the T and q increments carry this step's vertical-diffusion,
+prescribed-flux and Tiedtke tendencies, because those terms advance
+`thermo_run`. The condensate increments are zero in the ECHAM ordering: the
+cover term snapshots `clouds.qc/qi` from `thermo_run` before vertical
+diffusion runs, vertical diffusion advances only `thermo_run`, and the
+convection term's addition is the detrainment the scheme receives
+separately. The sedimentation input is therefore the step-start ice, and
+the vertical-diffusion condensate increment reaches the state without
+passing through the scheme. ECHAM's `ptte`/`pqte`/`pxlte`/`pxite` also
+carry the dynamics, radiative heating and gravity-wave drag. The #940
+rewiring supplies all of these.
 
 The ledger reconstruction is identical either way:
 `pxlm1 + Δt·(upstream+own) ≡ qc_provisional + Δt·own`, so the negative-mass
@@ -192,15 +209,18 @@ touching each other.
 
 ## The number-tendency rule
 
-The scheme clips the incoming number tracers to `[0, icemax/ρ]` (ice) and
-`[0, 10¹¹ m⁻³/ρ]` (droplets) for its own arithmetic, so dycore ringing
-cannot drive the activation or diagnosis steps. The returned number
+The scheme floors the incoming number tracers at `cqtmin` for its own
+arithmetic (ECHAM lines 600-605), so dycore ringing cannot drive the
+activation or diagnosis steps, and applies no upper bound at entry: the
+crystal number is capped at `icemax` only after the detrained number joins
+it (line 1252), and the droplet number is not capped. The returned number
 tendencies are taken against the raw tracers, as ECHAM passes the raw
 `pxtm1` to its ledger (lines 1780-1781) and writes
 `pxtte = (N/ρ − pxtm1)/ztmst` (lines 3625-3628). The end-of-step tracer is
 then the scheme's crystal or droplet number per kilogram, or zero where the
 negative-mass repair removed the condensate (lines 3641-3652), and an
-out-of-range tracer value does not persist from step to step.
+out-of-range tracer value does not persist from step to step. The
+previous-step stash `clouds.qnc_prev`/`qni_prev` holds the raw tracers too.
 
 ## Deliberate omissions (tracked)
 
@@ -229,7 +249,14 @@ out-of-range tracer value does not persist from step to step.
 against the surface fluxes for warm-liquid, WBF, cold-fallout, and
 melt-in-place fixtures, and with detrained condensate of both phases
 re-split by `lo2`. They are the contract the #940 input rewiring must
-keep. `TestSaturationGate2M` pins that no supersaturation survives a step;
+keep. `lohmann_2m_ice_sources_test.py` pins each section-1 and section-4
+rule (`zrid`, `znidetr`, the sedimentation input, the re-split with its
+fusion heat, the raw-tracer tendencies, the JAM/DeMott maximum), and
+`lohmann_2m_fortran_reference_test.py` compares them block by block and end
+to end, on designed columns, with the unmodified ECHAM routine run by a
+standalone harness (fixtures under
+`jcm/data/test/echam_cloud_reference/cloud2m_*`).
+`TestSaturationGate2M` pins that no supersaturation survives a step;
 `TestColdChainSameStepCoupling2M` pins that a deck glaciating via WBF
 exports a frozen flux the same step. Budget tests pin the
 ledger's self-consistency — a defect that mis-states the in-cloud state on

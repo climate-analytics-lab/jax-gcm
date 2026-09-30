@@ -1137,15 +1137,17 @@ Lohmann 2M detrained ice carries ECHAM's crystal number
   ``clouds.conv_detrainment_qi`` [kg kg⁻¹ s⁻¹], the condensate the Tiedtke
   scheme detrains each step, in its own phase split.
 
-.. The figures in the next bullet are the #941 audit's, measured on the
-   pre-#940 cloud inputs; replace them with the PR's validation run.
-
+- ``demott2010_inp`` takes the ambient air density as a third positional
+  argument.
 - **Changes results** for every 2M configuration, including JAM. Over days
   5-10 of ``t63-echam-2m`` runs restarted from a 30-day spin-up, global ice
-  water path rises from 3.4 to 26.8 g/m² (observed about 27), the longwave
+  water path rises from 3.4 to 27.2 g/m² (observed about 27), the longwave
   cloud effect from 14.1 to 24.4 W/m², the shortwave one strengthens from
-  -38.7 to -44.7 W/m², liquid water path falls from 41.0 to 31.1 g/m², and
-  net TOA radiation rises by 3.9 W/m². Glaciation remains too warm, cold ice
+  -38.8 to -44.8 W/m², liquid water path falls from 41.2 to 30.4 g/m², and
+  net TOA radiation rises by 3.8 W/m². Under JAM (``ma-t63-l47``, ten days
+  from a cold-started state) ice water path rises from 1.2 to 6.8 g/m², the
+  longwave cloud effect from 14.0 to 17.2 W/m², and the mixed-phase
+  condensate stays mostly liquid. Glaciation remains too warm, cold ice
   cloud holds too many crystals, and liquid water path lies below the
   observed range; a retune follows (#682). The release-matrix bands of the
   ``echam-2m`` and ``echam-jam`` members shift accordingly. See
