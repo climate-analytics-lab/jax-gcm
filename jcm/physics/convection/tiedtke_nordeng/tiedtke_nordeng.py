@@ -1179,8 +1179,16 @@ def _tiedtke_convection_toa_first(
         # The downdraft is not re-run: ECHAM scales its fluxes and rain uptake
         # by the same factor (mo_cumastr.f90:944-972). It exists only under a
         # plume that took hold in the first ascent (cudlfs requires
-        # ``ldcum``), so a column that turned to a mid-level plume has none.
-        dd_scale = jnp.where(ldcum_first, rescale, 0.0)
+        # ``ldcum``), so a column that turned to a mid-level plume has none,
+        # and ``cuflx`` cancels it where its level of free sinking, found in
+        # the first ascent's cloud, lies above the final plume's top
+        # (``IF (kdtop < kctop) lddraf = .FALSE.``, mo_cufluxdts.f90:189).
+        # ECHAM then zeroes the downdraft only from ``kctop − 1`` down and
+        # leaves the absolute (not deviation) fluxes of any downdraft level
+        # above that in its ledger; jcm removes the whole downdraft, which is
+        # the same wherever the LFS is at most one interface above the top.
+        dd_active = ldcum_first & (downdraft_state.lfs >= actual_ktop)
+        dd_scale = jnp.where(dd_active, rescale, 0.0)
         downdraft_state = downdraft_state._replace(
             mfd=downdraft_state.mfd * dd_scale,
             pdmfdp=downdraft_state.pdmfdp * dd_scale,

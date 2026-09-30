@@ -184,6 +184,7 @@ def convective_precip_fluxes(
     updraft_velocity: jnp.ndarray = 2.0,
     use_updraft_cover: bool = False,
     updraft_layer_mass: jnp.ndarray | None = None,
+    surface_pressure: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
            jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """ECHAM ``cuflx`` precipitation budget (mo_cufluxdts.f90:265-491).
@@ -234,6 +235,10 @@ def convective_precip_fluxes(
             ``Δp`` (``Δp/g`` [kg/m²]), the taper weight for the cover's
             sub-cloud ``p_s − p_half`` reconstruction. Required when
             ``use_updraft_cover``; the ledger passes ``dp_lev / g``.
+        surface_pressure: The column's surface (bottom interface) pressure
+            [Pa], the denominator of the ``cevapcu`` profile's ``eta``. The
+            ledger passes it; without it the lowest full-level pressure
+            stands in.
 
     Returns:
         ``(rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux,
@@ -293,8 +298,13 @@ def convective_precip_fluxes(
     from .tiedtke_nordeng import saturation_mixing_ratio
     qs_env = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
 
-    # ECHAM cevapcu(jk) profile (iniphy.f90:87-89) with eta ≈ p/p_surface.
-    eta = pressure / jnp.maximum(pressure[-1], 1.0)
+    # ECHAM cevapcu(jk) profile (iniphy.f90:87-89). ECHAM's ``ceta`` is the
+    # grid's full-level hybrid coordinate, ``a/101325 + b`` at the layer
+    # midpoint (mo_hyb.f90:212-220); the column's own ``p/p_s`` is that value
+    # exactly on a sigma grid and at the reference surface pressure on a
+    # hybrid one.
+    p_surface = pressure[-1] if surface_pressure is None else surface_pressure
+    eta = pressure / jnp.maximum(p_surface, 1.0)
     cevapcu = (
         1.93e-6 * 261.0
         * jnp.sqrt(1.0e3 / (38.3 * 0.293) * jnp.sqrt(jnp.clip(eta, 1e-4, 1.0)))
@@ -570,6 +580,7 @@ def calculate_tendencies(
         updraft_velocity=config.cu_updraft_velocity,
         use_updraft_cover=use_updraft_cover,
         updraft_layer_mass=mass,
+        surface_pressure=env.paph[-1],
     )
     plude = updraft_state.plude
 
