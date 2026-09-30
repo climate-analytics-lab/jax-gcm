@@ -413,6 +413,19 @@ Direct callers of the scheme functions:
   plus ``pressure_thickness``, with the detrainment and the other optional
   inputs keyword-only. Build them with
   ``jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs``.
+- ``lohmann_2m.cloud_microphysics_2m`` takes the anchor first. Its leading
+  arguments are now ``temperature_m1``, ``specific_humidity_m1``,
+  ``pressure``, ``qc_m1``, ``qi_m1``, ``qnc_m1`` and ``qni_m1`` (ECHAM's
+  ``ptm1``, ``pqm1``, ``pxlm1``, ``pxim1`` and the number tracers), and the
+  increments over the step (``temperature_increment``,
+  ``humidity_increment``, ``qc_increment``, ``qi_increment``,
+  ``qnc_increment``, ``qni_increment``) follow ``params`` as optional
+  arguments that default to zero, with ``detrained_qc``/``detrained_qi``
+  after them. **An old positional call that passed the provisional state
+  still runs**: that state is now read as the anchor and the omitted
+  increments are zero, so the step's condensation is silently lost. Keyword
+  callers fail loudly. Build the arguments with
+  ``jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs``.
 - ``sundqvist.condensation_evaporation`` is removed; it had no caller in the
   ECHAM stacks. The Sundqvist saturation functions are covered in the
   Sonntag section above.
