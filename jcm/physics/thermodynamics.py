@@ -5,10 +5,12 @@ saturation specific humidity and their temperature derivatives from:
 Tiedtke-Nordeng convection (including its ``cuadjtq`` saturation adjustment),
 the Sundqvist cloud cover, the 1M and 2M cloud schemes, the TTE-TKE vertical
 diffusion and the ECHAM surface tiles. No ECHAM scheme carries coefficients of
-its own.
+its own; the one other saturation form in the ECHAM surface,
+``surface/echam/turbulent_fluxes.py::compute_surface_humidity``, feeds only
+tile diagnostics that no tendency reads.
 
 **The formula.** ECHAM6.3 (r7492) takes saturation from lookup tables built in
-``mo_echam_convect_tables.f90::init_convect_tables`` (l.262-309). They tabulate
+``mo_echam_convect_tables.f90::init_convect_tables`` (l.223-309). They tabulate
 the five-term fit of Sonntag (1990, *Z. Meteorol.* 70, 340-344)
 
     ln es(T) = a1/T + a2 + a3·0.01·T + a4·1e-5·T² + a5·ln T        [es in Pa]
@@ -147,7 +149,7 @@ def ua_ice_phase(temperature):
     ``init_convect_tables`` builds the ice branch where ``T − tmelt <= 0``
     (l.226) and ``prepare_ua_index_spline`` shifts the index with
     ``FSEL(tmelt − T, 1, 0)`` (l.657) so that ``T == tmelt`` reads ice;
-    ``lookup_ubc`` switches its latent heat with the same ``FSEL`` (l.328-332).
+    ``lookup_ubc`` switches its latent heat with the same ``FSEL`` (l.329-333).
     Schemes that pair a latent heat with a ``ua`` saturation switch it here.
     """
     return temperature <= c.tmelt
@@ -185,11 +187,14 @@ def qsat_from_es(es, pressure):
 def dqsat_dT_from_es(es, des_dT, pressure):
     """``dqs/dT`` [kg/kg/K] of :func:`qsat_from_es`, as ECHAM forms it.
 
-    ``zdqsdt = (1/p)·zcor²·dua`` with ``dua = des/dT·rd/rv`` and
-    ``zcor = 1/(1 − vtmpc1·x)`` from the capped ``x`` (``mo_cuadjust.f90``
-    l.107-112, ``mo_cloud.f90`` l.700-704); where ``x >= 0.4`` ECHAM uses
-    ``qs·zcor·d ln es/dT`` (the ``ub`` branch, l.113), which keeps the capped
-    ``x`` in the slope. Both are the analytic derivative below the cap.
+    ``cuadjtq``'s slope (``mo_cuadjust.f90`` l.107-113): ``zdqsdt =
+    (1/p)·zcor²·dua`` with ``dua = des/dT·rd/rv`` and ``zcor = 1/(1 −
+    vtmpc1·x)`` from the capped ``x`` where ``x < 0.4``, and
+    ``qs·zcor·d ln es/dT`` (the ``ub`` branch) above, which keeps the capped
+    ``x`` in the slope. Below the cap both are the analytic derivative, and
+    equal the ``(1/p)·zcor²·dua`` that ``mo_cloud`` and ``precalc_land`` use
+    everywhere; at the cap (a few Pa at the model top) those keep the
+    uncapped ``dua/p``.
 
     Args:
         es: Saturation vapour pressure [Pa].

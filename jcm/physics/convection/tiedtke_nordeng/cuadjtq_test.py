@@ -122,14 +122,17 @@ class TestAgainstEchamCuadjtq:
         self._assert_close(q_out, want_q, cases, f"kcall={kcall} q",
                            dict(atol=0.0, rtol=q_rtol))
         if wrapped_out is not None:
-            # The wrappers are cuadjtq itself, bit for bit.
+            # The wrappers are cuadjtq itself, bit for bit; the updraft's
+            # condensate is the removed vapour where vapour was removed.
             np.testing.assert_array_equal(np.asarray(wrapped_out[0]),
                                           np.asarray(t_out))
             np.testing.assert_array_equal(np.asarray(wrapped_out[1]),
                                           np.asarray(q_out))
             if kcall == 1:
-                np.testing.assert_array_equal(np.asarray(wrapped_out[2]),
-                                              np.asarray(cond))
+                np.testing.assert_array_equal(
+                    np.asarray(wrapped_out[2]),
+                    np.where(np.asarray(q_out) < np.asarray(q),
+                             np.asarray(cond), 0.0))
 
     @staticmethod
     def _assert_close(got, want, cases, label, kw):
@@ -286,6 +289,29 @@ class TestCuadjtqNewton:
             np.testing.assert_allclose(
                 np.asarray(T_adj - T),
                 np.asarray(lcp_ua(T_adj) * liq), rtol=1e-12)
+
+    def test_no_condensate_where_the_refinement_returns_vapour(self):
+        """ECHAM adds to ``plu`` only ``IF (pqu < zqold)``.
+
+        Just below tmelt at ~1e-5 supersaturation the first step condenses
+        ~2e-8 kg/kg and warms the parcel above the melting point; the
+        refinement then reads the water table, ~1e-4 higher, and returns
+        ~2e-7 kg/kg more vapour than the parcel started with. ECHAM keeps
+        that temperature and vapour and leaves the condensate unchanged.
+        """
+        with jax.enable_x64(True):
+            T = jnp.array([c.tmelt - 1e-5, c.tmelt - 1e-4, 285.0])
+            p = jnp.full(3, 8.0e4)
+            q = jnp.array([1.00001, 1.00005, 1.3]) * saturation_mixing_ratio(
+                p, T)
+            _, _, cond1 = cuadjtq(T, q, p, kcall=1, refine=False)
+            T_adj, vap, liq = cuadjtq_newton(T, q, p)
+            _, vap_ref, removed = cuadjtq(T, q, p, kcall=1)
+        assert np.all(np.asarray(cond1) > 0.0)
+        np.testing.assert_array_equal(np.asarray(vap), np.asarray(vap_ref))
+        np.testing.assert_array_equal(np.asarray(vap[:2] > q[:2]), True)
+        np.testing.assert_array_equal(np.asarray(liq[:2]), 0.0)
+        assert float(liq[2]) == float(removed[2]) > 0.0
 
     def test_wet_bulb_conserves_moist_static_energy(self):
         with jax.enable_x64(True):

@@ -7,7 +7,7 @@ ECHAM's convection reads saturation from the ``ua`` lookup table everywhere
 (1990) over ice at and below the melting point and over water above
 (:func:`jcm.physics.thermodynamics.es_ua`). ``cuadjtq`` takes ``L/cp`` from
 ``lookup_ubc`` with the same switch (``als/cpd`` at and below ``tmelt``,
-``alv/cpd`` above; ``mo_echam_convect_tables.f90`` l.328-332).
+``alv/cpd`` above; ``mo_echam_convect_tables.f90`` l.329-333).
 
 :func:`cuadjtq` is the port of ``mo_cuadjust.f90::cuadjtq`` (l.83-213) and the
 one saturation adjustment of the scheme: ``cuini`` (``kcall = 0``), ``cubase``
@@ -48,7 +48,7 @@ def lcp_ua(temperature):
 
     DRY ``cpd`` is the reference: ``cuadjtq`` reads ``L/cp`` from ``uc``,
     built with ``zalvdcp = alv/cpd``, ``zalsdcp = als/cpd``
-    (``mo_echam_convect_tables.f90`` l.214-215, 322-323), not the moist
+    (``mo_echam_convect_tables.f90`` l.214-215, 323-324), not the moist
     ``zcpq`` of the ``cumastr`` static-energy ledger. The switch is the ``ua``
     table's, so the latent heat always pairs with the saturation surface.
     """
@@ -109,10 +109,12 @@ def cuadjtq(
             which ECHAM never does; it exists for tests of that step.
 
     Returns:
-        ``(T_adj, q_adj, condensate)`` with ``condensate = q − q_adj`` (the
-        form ECHAM's callers take, e.g. ``plu + zqold − pqu`` in ``cuasc``):
-        ``≥ 0`` after a condensing first step, ``≤ 0`` after an evaporating
-        one.
+        ``(T_adj, q_adj, condensate)`` with ``condensate = q − q_adj``, the
+        vapour the two steps removed (ECHAM's callers form it as
+        ``zqold − pqu``). It has the sign of the first step, except within
+        ~1e-4 K of ``tmelt``, where a first step that crosses the melting
+        point is refined on the other phase's table (``es`` steps by ~1e-4
+        there) and the unclipped refinement can outweigh it.
 
     """
     if kcall not in (0, 1, 2):
@@ -142,11 +144,16 @@ def cuadjtq_newton(
     """Condense an updraft parcel to saturation: :func:`cuadjtq`, ``kcall = 1``.
 
     A parcel lifted with vapour ``total_water`` and no condensate is brought
-    to saturation as ``cubase`` (``mo_cuinitialize.f90`` l.302-314) and
+    to saturation as ``cubase`` (``mo_cuinitialize.f90`` l.302-322) and
     ``cuasc`` (``mo_cuascent.f90`` l.431-446) do: ``cuadjtq`` with
-    ``kcall = 1``, and the condensate is the vapour it removed
-    (``plu + zqold − pqu``). A subsaturated parcel is returned unchanged.
-    Total water is conserved by construction.
+    ``kcall = 1``, and the condensate gains the vapour it removed,
+    ``plu + zqold − pqu``, only ``IF (pqu < zqold)`` — the test that also
+    marks the level as condensing (``klab = 2``). A subsaturated parcel is
+    returned unchanged. Total water is conserved wherever vapour was removed;
+    within ~1e-4 K of ``tmelt``, where the refinement can return more vapour
+    than the parcel had (see :func:`cuadjtq`), ECHAM keeps the adjusted
+    temperature and vapour and leaves the condensate alone, and so does
+    this.
 
     Args:
         temperature: Temperature [K].
@@ -154,11 +161,13 @@ def cuadjtq_newton(
         pressure: Pressure [Pa].
 
     Returns:
-        ``(T_adj, vapour, liquid)`` with ``liquid = total_water − vapour``.
+        ``(T_adj, vapour, liquid)``: ``liquid = total_water − vapour`` where
+        that is positive, else 0.
 
     """
-    t_adj, vapour, liquid = cuadjtq(temperature, total_water, pressure,
-                                    kcall=1)
+    t_adj, vapour, removed = cuadjtq(temperature, total_water, pressure,
+                                     kcall=1)
+    liquid = jnp.where(vapour < total_water, removed, 0.0)
     return t_adj, vapour, liquid
 
 

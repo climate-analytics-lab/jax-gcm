@@ -181,6 +181,35 @@ class TestOceanSurfaceFluxes:
         assert jnp.all(jnp.isfinite(fluxes.momentum_v))
         assert jnp.all(jnp.isfinite(roughness))
 
+    def test_saturation_is_the_ua_table_at_the_surface_pressure(self):
+        """``precalc_ocean``: ``ua`` at the SST over ``paphm1``.
+
+        The evaporation is ``ρ·C_q·(qs − q)`` with ECHAM's ``qs`` of the
+        ``ua`` table (ice at and below tmelt, so a 271 K sea reads the ice
+        fit) at the SURFACE pressure, not the lowest level's.
+        """
+        import jax
+        import jcm.constants as c
+        from jcm.physics import thermodynamics
+
+        with jax.enable_x64(True):
+            sst = jnp.array([285.0, 271.0, c.tmelt])
+            state = self.atmospheric_state._replace(
+                pressure=jnp.array([99000.0, 94000.0, 84000.0]),
+                surface_pressure=jnp.array([101325.0, 95000.0, 85000.0]))
+            fluxes, _ = compute_ocean_surface_fluxes(
+                state, sst, self.ocean_u, self.ocean_v,
+                self.exchange_coeff_heat, self.exchange_coeff_moisture,
+                self.exchange_coeff_momentum, self.solar_zenith_angle)
+            es = jnp.where(sst <= c.tmelt, thermodynamics.es_ice(sst),
+                           thermodynamics.es_water(sst))
+            x = es * c.rd / c.rv / state.surface_pressure
+            qs = x / (1.0 - c.vtmpc1 * x)
+            rho = state.pressure / (c.rd * state.temperature)
+            want = rho * self.exchange_coeff_moisture * (qs - state.humidity)
+            assert jnp.allclose(fluxes.evaporation_mean, want, rtol=1e-12,
+                                atol=0.0)
+
     def test_ocean_flux_directions(self):
         """Test that flux directions make physical sense."""
         fluxes, _ = compute_ocean_surface_fluxes(
