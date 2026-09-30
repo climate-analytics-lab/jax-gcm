@@ -240,6 +240,45 @@ def half_level_environment(
     )
 
 
+def cubase_seed_static_energy(env: HalfLevelEnvironment) -> jnp.ndarray:
+    """Return the dry static energy ECHAM's ``cubase`` parcel carries [J/kg].
+
+    ``cuini`` starts the updraft at the lowest interface with the half-level
+    environment there, ``ptu(klev) = ptenh(klev)`` and ``pqu(klev) =
+    pqenh(klev)`` (mo_cuinitialize.f90:200-204), and ``cubase`` lifts it
+    conserving ``pcpcu·ptu + pgeoh`` (l.294-295): the seed's static energy
+    is ``pcpcu(klev)·ptenh(klev) + pgeoh(klev)``, with the half-level heat
+    capacity ``pcpcu(klev)``, the mean of the lowest two levels' ``pcpen``.
+    That differs from the bottom full level's ``pcpen·pten + pgeo``, from
+    which ``ptenh(klev)`` was built with ``pcpen(klev)``, by
+    ``(pcpcu − pcpen)(klev)·ptenh(klev) = −cpd·vtmpc2·Δq/2·ptenh(klev)``,
+    with ``Δq`` the humidity drop from the lowest level to the one above:
+    the lifted parcel is colder than one carrying the bottom level's energy
+    by ``vtmpc2·Δq/2·T``, about 0.13 K per g/kg of that drop.
+    """
+    return env.cpcu[-1] * env.tenh[-1] + env.geoh[-1]
+
+
+def cubasmc_seed_static_energy(cp_moist: jnp.ndarray,
+                               env: HalfLevelEnvironment) -> jnp.ndarray:
+    """Return the dry static energy of ECHAM's ``cubasmc`` seed per layer [J/kg].
+
+    ``cubasmc`` seeds a mid-level plume at the bottom interface ``kk + 1`` of
+    layer ``kk`` with the layer's environment brought down to it,
+    ``ptu(kk+1) = (pcpen(kk)·pten(kk) + pgeo(kk) − pgeoh(kk+1))/pcpen(kk)``,
+    and forms the static-energy flux with the heat capacity of the level
+    BELOW, ``pmfus(kk+1) = pmfub·(pcpen(kk+1)·ptu(kk+1) + pgeoh(kk+1))``
+    (mo_cuascent.f90:640-648). Entry ``kk`` is that energy for a seed in
+    layer ``kk``; the bottom layer, which has no level below and in which
+    ``cubasmc`` never seeds, repeats its own full-level energy.
+    """
+    cp_below = jnp.concatenate([cp_moist[1:], cp_moist[-1:]], axis=0)
+    geoh_below = jnp.concatenate([env.geoh[1:], env.geoh[-1:]], axis=0)
+    t_seed = (env.dse - geoh_below) / cp_moist
+    energy = cp_below * t_seed + geoh_below
+    return jnp.concatenate([energy[:-1], env.dse[-1:]], axis=0)
+
+
 def _cummax(a: jnp.ndarray) -> jnp.ndarray:
     """Cumulative maximum along axis 0 (``lax.cummax`` for any rank)."""
     from jax import lax
