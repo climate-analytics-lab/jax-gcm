@@ -169,13 +169,28 @@ def cloud_microphysics_2m(
     differences ``(x - x_m1)`` — less the detrained condensate for ``qc``
     and ``qi`` — play the role of ECHAM's accumulated tendencies
     ``ztmst·ptte``/``ztmst·pqte``/``ztmst·pxlte``/``ztmst·pxite`` in the
-    condensation closure and the clear-sky-evaporation split. In the
-    composed ECHAM stack the term wrapper forms them from the running
-    thermodynamic view, so they carry this step's vertical-diffusion and
-    convection increments; the dynamics and radiation increments that
-    ECHAM also accumulates in those tendencies do not reach the scheme
-    (#940). When omitted, the ``*_m1`` arguments default to the
-    provisional state less the detrained condensate (zero upstream
+    condensation closure, the clear-sky-evaporation split and (for ice)
+    the sedimentation input.
+
+    What those increments hold in the composed ECHAM stack
+    (``echam_physics``) differs by variable. ``temperature`` and
+    ``specific_humidity`` come from the running thermodynamic view
+    ``thermo_run``, so ``dT``/``dq`` carry this step's vertical-diffusion
+    and convection increments. ``qc``/``qi`` come from ``clouds.qc/qi``,
+    which ``SundqvistCloudFraction`` snapshots from ``thermo_run`` AHEAD of
+    vertical diffusion (the factory composes the cover term before
+    ``TteTkeVerticalDiffusion``); vertical diffusion advances only
+    ``thermo_run``, never ``clouds``, and after it only the convection term
+    adds to ``clouds.qc/qi`` — its detrainment. The pure condensate
+    increments are therefore zero in that stack (up to the convection
+    term's clip of ``clouds.qc/qi`` at zero, which leaves them positive
+    where the step-start tracer is negative): vertical diffusion's
+    condensate increment never reaches the scheme, and the sedimentation
+    input is the step-start ice ``qi_m1``. The dynamics and radiation
+    increments ECHAM also accumulates in its tendencies reach none of the
+    four. #940 rewires the stack to supply the condensate, dynamics and
+    radiation increments. When omitted, the ``*_m1`` arguments default to
+    the provisional state less the detrained condensate (zero upstream
     increments), which reduces section 5 to a pure saturation adjustment.
 
     Convective detrainment arrives separately as ``detrained_qc`` /
@@ -287,7 +302,10 @@ def cloud_microphysics_2m(
     # cloud-water reservoir.
     # minimum_CDNC expects the in-cloud water content in kg/m³ (only
     # consumed when ldyn_cdnc_min=True), of the liquid present BEFORE this
-    # step's detrainment, as ECHAM evaluates it on pxlm1 + ztmst·pxlte (597).
+    # step's detrainment: ECHAM evaluates zcdnc_min on pxlm1 + ztmst·pxlte
+    # (609-610) and floors CDNC with it at 1124-1125, there only in cells
+    # with paclc >= epsec and ptm1 > cthomi; this scheme floors the working
+    # CDNC with it at entry in every cell.
     inv_cf_min = 1.0 / jnp.maximum(cloud_fraction, params.epsec)
     qc_in_cloud_kgm3 = jnp.where(
         cloud_fraction > params.epsec,
@@ -1277,19 +1295,30 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         air_density = diagnostics["air_density"]
         layer_thickness = diagnostics["layer_thickness"]
 
-        # Post-(vdiff+convection) thermodynamic state (sequential
-        # vdiff->convection->cloud coupling, ECHAM physc order): the upstream
-        # vdiff and convection terms have already advanced ``thermo_run`` with
-        # their tendencies and convection forwarded its detrained condensate
-        # into ``clouds.qc/qi``. The provisional state is what the returned
-        # tendencies are relative to (the host's additive sum with the
-        # upstream tendencies telescopes back to the correct final state),
-        # while the STEP-START state supplies ECHAM's (ptm1, pqm1, pxlm1,
-        # pxim1) anchors: saturation evaluates there, and the differences,
-        # less the detrained condensate, play the role of the accumulated
-        # tendencies in the condensation closure and the clear-sky-
-        # evaporation split (see ``cloud_microphysics_2m``). Falls back to
-        # the step-start state if no upstream term seeded ``thermo_run``.
+        # Provisional state (sequential vdiff->convection->cloud coupling,
+        # ECHAM physc order). T and q are the running view ``thermo_run``,
+        # which the upstream vdiff and convection terms have advanced with
+        # their tendencies. qc and qi are ``clouds.qc/qi``: the cover term
+        # snapshots them from ``thermo_run`` before vertical diffusion runs
+        # (echam_physics composes SundqvistCloudFraction ahead of
+        # TteTkeVerticalDiffusion, and vdiff advances only ``thermo_run``),
+        # and the convection term then adds its detrainment. So the T and q
+        # increments carry vdiff + convection, while the condensate
+        # increments less the detrainment are zero up to the convection
+        # term's clip at zero: vdiff's condensate increment does not reach
+        # the scheme, and the ice it sediments is the step-start ``qi_m1``.
+        # #940 rewires this to supply the condensate (and the dynamics and
+        # radiation) increments; the scheme already treats whatever arrives
+        # as ECHAM's accumulated tendencies.
+        #
+        # The provisional state is what the returned tendencies are relative
+        # to (the host's additive sum with the upstream tendencies telescopes
+        # back to the correct final state), while the STEP-START state
+        # supplies ECHAM's (ptm1, pqm1, pxlm1, pxim1) anchors: saturation
+        # evaluates there, and the differences, less the detrained
+        # condensate, play the role of the accumulated tendencies (see
+        # ``cloud_microphysics_2m``). Falls back to the step-start state if
+        # no upstream term seeded ``thermo_run``.
         thermo_run = diagnostics.get("thermo_run")
         if thermo_run is None:
             temperature_in = state.temperature
