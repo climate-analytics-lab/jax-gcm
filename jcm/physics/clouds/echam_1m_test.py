@@ -1060,17 +1060,32 @@ class TestSurrogates:
         assert f(jax.grad(lambda fl_: wrapped(1e-6, fl_))(1e-16)) == 0.0
 
     def test_contact_radius(self):
-        rc = 1e-7
-        exact, sur = contact_radius_pair(rc)
+        qc_cut = 1e-10
+        exact, sur = contact_radius_pair(qc_cut)
         wrapped = with_surrogate_gradient(exact, sur)
-        v = jnp.array([0.0, 1e-24, 1e-21, 1e-18, 1e-15])
-        check_surrogate_gradient(wrapped, exact, sur, (v,))
-        # Smooth on each side of the cutoff volume 4π/3·rc³ (C1 across it).
-        check_gradients(sur, (jnp.array([1e-23, 3e-22, 1e-21]),), rtol=1e-5)
-        check_gradients(sur, (jnp.array([1e-19, 1e-18, 5e-18]),), rtol=1e-5)
-        grid = jnp.concatenate([jnp.zeros(1), jnp.geomspace(1e-30, 1e-12, 300)])
-        dist = np.abs(np.asarray(exact(grid) - sur(grid)))
-        assert np.max(dist) < rc
+        zxlb = jnp.array([0.0, 5e-21, 3e-11, 2e-10, 1e-4])
+        zfrho = jnp.full(5, 2.3e-11)
+        check_surrogate_gradient(wrapped, exact, sur, (zxlb, zfrho))
+        # Smooth on each side of the cutoff (C1 across it).
+        check_gradients(sur, (jnp.array([1e-12, 3e-11, 9e-11]), zfrho[:3]), rtol=1e-5)
+        check_gradients(sur, (jnp.array([3e-10, 1e-6, 1e-4]), zfrho[:3]), rtol=1e-5)
+        grid = jnp.concatenate([jnp.zeros(1), jnp.geomspace(1e-25, 1e-3, 300)])
+        fr = jnp.full_like(grid, 2.3e-11)
+        dist = np.abs(np.asarray(exact(grid, fr) - sur(grid, fr)))
+        prefactor = (0.75 * 2.3e-11 / math.pi) ** (1 / 3)
+        assert np.max(dist) < prefactor * qc_cut ** (1 / 3) * (1 + 1e-9)
+        assert np.max(dist[np.asarray(grid) >= qc_cut]) < 1e-12 * prefactor
+
+    def test_contact_radius_derivative_is_finite_under_jit_in_float32(self):
+        """A trace of liquid (5e-21 kg/kg) keeps a finite float32 derivative.
+
+        On a droplet-volume variable (~1e-31 m^3) XLA's reassociation of the
+        parabola put 1/cutoff**2 = 1e42 beyond float32 and returned NaN.
+        """
+        with jax.enable_x64(False):
+            g = jax.jit(jax.grad(lambda q: contact_freezing_radius(
+                q, jnp.float32(2.3e-11), 1e-10)))(jnp.float32(5.3e-21))
+            assert np.isfinite(float(g)) and float(g) > 0.0
 
     def test_kk2000_gate(self):
         cfg = MicrophysicsParameters.default(autoconversion_scheme="kk2000")
@@ -1097,19 +1112,22 @@ class TestSurrogates:
         slope = jax.grad(lambda xi: ice_fall_speed(0.6, xi, 2.5, 1e-7))
         slope_ref = jax.grad(lambda xi: ice_fall_speed(0.6, xi, 2.5, 0.0))
         assert f(slope(0.0)) > 0.0 and f(slope_ref(0.0)) == 0.0
-        r = contact_freezing_radius(jnp.asarray(4.0 / 3.0 * math.pi * 1e-18), 1e-7)
+        zfrho = 1.0 / (1000.0 * 1e8)
+        zxlb = 4.0 / 3.0 * math.pi * 1e-18 / zfrho       # a 1 um droplet
+        r = contact_freezing_radius(jnp.asarray(zxlb), zfrho, 1e-10)
         assert f(r) == pytest.approx(1e-6, rel=1e-12)
-        assert np.isfinite(f(jax.grad(lambda v: contact_freezing_radius(v, 1e-7))(0.0)))
+        assert np.isfinite(f(jax.grad(
+            lambda q: contact_freezing_radius(q, zfrho, 1e-10))(0.0)))
 
     def test_sweep_value_does_not_depend_on_any_width(self):
         cols = [jnp.asarray(a) for a in random_columns(8)]
         ref, rs = run_sweep(*cols, DT)
         zero = MicrophysicsParameters.default(
             phase_switch_width=0.0, ice_fall_speed_gradient_cutoff=0.0,
-            contact_radius_cutoff=0.0)
+            contact_freezing_liquid_cutoff=0.0)
         other = MicrophysicsParameters.default(
             phase_switch_width=3.0, phase_switch_ice_width=0.5,
-            ice_fall_speed_gradient_cutoff=1e-9, contact_radius_cutoff=1e-6)
+            ice_fall_speed_gradient_cutoff=1e-9, contact_freezing_liquid_cutoff=1e-9)
         for cfg in (zero, other):
             got, gs = run_sweep(*cols, DT, cfg)
             for a, b in zip(jax.tree.leaves((got, gs)), jax.tree.leaves((ref, rs))):
@@ -1143,7 +1161,7 @@ class TestSweepGradients:
         cf = jnp.maximum(cf, 0.2) * jnp.linspace(0.8, 1.1, cf.shape[0])
         cfg = MicrophysicsParameters.default(
             phase_switch_width=0.0, ice_fall_speed_gradient_cutoff=0.0,
-            contact_radius_cutoff=0.0)
+            contact_freezing_liquid_cutoff=0.0)
 
         def fn(t_, q_, dtemp_, dq_, qc_, qi_):
             return _outputs(*run_sweep(
@@ -1165,7 +1183,7 @@ class TestSweepGradients:
         cf = cf * jnp.linspace(0.8, 1.1, cf.shape[0])
         cfg = MicrophysicsParameters.default(
             phase_switch_width=0.0, ice_fall_speed_gradient_cutoff=0.0,
-            contact_radius_cutoff=0.0)
+            contact_freezing_liquid_cutoff=0.0)
 
         def fn(t_, q_, dtemp_, dq_, qc_, qi_, cf_):
             return _outputs(*run_sweep(

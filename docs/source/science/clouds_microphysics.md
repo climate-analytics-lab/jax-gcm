@@ -186,7 +186,8 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   parabola through the origin that matches the power law's value and slope at
   the cutoff; thin cirrus holds 1e-6 to 1e-4 kg/m³, so the cutoff lies below
   real cloud, and the largest slope is 1.4e6), and the mean droplet radius of
-  contact freezing (the same parabola below ``contact_radius_cutoff`` = 0.1 µm).
+  contact freezing (the same parabola in the in-cloud liquid below
+  ``contact_freezing_liquid_cutoff`` = 1e-10 kg/kg, about a 0.08 µm droplet).
   The KK2000 option's threshold is a hard gate with a logistic surrogate of
   width ``smooth_ccraut``. All widths are static fields; zero selects the
   reference derivative. Switches whose value jumps but which keep their

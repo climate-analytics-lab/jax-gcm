@@ -157,9 +157,11 @@ class MicrophysicsParameters:
     # about 1e-6 to 1e-4 kg/m^3, so 1e-7 lies below real cloud.
     ice_fall_speed_gradient_cutoff: float = struct.field(pytree_node=False,
                                                          default=1.0e-7)
-    # Below this mean droplet radius [m] the derivative of the contact-freezing
-    # radius (zradl, F:866-869) is that of the same C1 parabola.
-    contact_radius_cutoff: float = struct.field(pytree_node=False, default=1.0e-7)
+    # Below this in-cloud liquid [kg/kg] the derivative of the contact-freezing
+    # radius (zradl, F:866-869) is that of the same C1 parabola; 1e-10 kg/kg is
+    # a droplet radius of about 0.08 um at the prescribed droplet numbers.
+    contact_freezing_liquid_cutoff: float = struct.field(pytree_node=False,
+                                                         default=1.0e-10)
     # Logistic width [kg/kg] of the surrogate of the KK2000 threshold gate.
     smooth_ccraut: float = struct.field(pytree_node=False, default=5.0e-5)
 
@@ -529,35 +531,43 @@ def ice_fall_speed(air_density, cloud_ice, cvtfall, cutoff):
     return cvtfall * power(ice_density, floor)
 
 
-def contact_radius_pair(radius_cutoff):
+def contact_radius_pair(liquid_cutoff):
     """``(exact, surrogate)`` of the contact-freezing droplet radius [m].
 
-    Both take the in-cloud liquid volume per droplet ``V = zxlb·zfrho``
-    (F:866-869): ``exact = (3V/4π)**(1/3)`` and ``surrogate`` the C1 parabola
-    of :func:`_c1_power` below ``radius_cutoff**3``.
+    Both take the in-cloud liquid ``zxlb`` [kg/kg] and ``zfrho = ρ/(ρw·N)``.
+    ``exact = (0.75·zxlb·zfrho/π)**(1/3)`` (F:866-869); ``surrogate`` is
+    ``(0.75·zfrho/π)**(1/3)`` times :func:`_c1_power` of ``zxlb`` below
+    ``liquid_cutoff``. The surrogate acts on the liquid, not on the droplet
+    volume (~1e-31 m^3): a cutoff on the volume would put ``1/cutoff**2``
+    beyond float32 range, and XLA's reassociation of ``(y/c)·(y/c)`` then
+    turns the parabola into ``inf·0``.
     """
-    def exact(v):
-        base = 0.75 * v / jnp.pi
+    def exact(zxlb, zfrho):
+        base = 0.75 * zxlb * zfrho / jnp.pi
         positive = base > 0.0
         return jnp.where(positive,
                          jnp.where(positive, base, 1.0) ** (1.0 / 3.0), 0.0)
 
-    def surrogate(v):
-        return _c1_power(0.75 * v / jnp.pi, 1.0 / 3.0, radius_cutoff ** 3)
+    def surrogate(zxlb, zfrho):
+        prefactor = (0.75 * zfrho / jnp.pi) ** (1.0 / 3.0)
+        return prefactor * _c1_power(zxlb, 1.0 / 3.0, liquid_cutoff)
 
     return exact, surrogate
 
 
-def contact_freezing_radius(droplet_volume, radius_cutoff):
+def contact_freezing_radius(zxlb, zfrho, liquid_cutoff):
     """Mean droplet radius of contact freezing [m], bounded surrogate slope.
 
-    See :func:`contact_radius_pair`; ``radius_cutoff = 0`` keeps the reference
-    derivative.
+    See :func:`contact_radius_pair`; ``liquid_cutoff = 0`` keeps the
+    reference derivative.
     """
-    exact, surrogate = contact_radius_pair(radius_cutoff)
-    if radius_cutoff == 0:
-        return exact(droplet_volume)
-    return with_surrogate_gradient(exact, surrogate)(droplet_volume)
+    exact, surrogate = contact_radius_pair(liquid_cutoff)
+    if liquid_cutoff == 0:
+        return exact(zxlb, zfrho)
+    shape = jnp.broadcast_shapes(jnp.shape(zxlb), jnp.shape(zfrho))
+    dtype = jnp.result_type(zxlb)
+    args = [jnp.broadcast_to(jnp.asarray(a, dtype=dtype), shape) for a in (zxlb, zfrho)]
+    return with_surrogate_gradient(exact, surrogate)(*args)
 
 
 # ---------------------------------------------------------------------------
@@ -1061,7 +1071,7 @@ def _sweep_level(carry, inputs: LevelInputs, config: MicrophysicsParameters, dt)
     zfrho = rho / (c.rhow * cdnc)
     zfrl_b = 100.0 * (jnp.exp(0.66 * (c.tmelt - t_frz)) - 1.0) * zfrho
     zfrl_b = zxlb_frz * (1.0 - 1.0 / (1.0 + zfrl_b * dt * zxlb_frz))
-    zradl = contact_freezing_radius(zxlb_frz * zfrho, config.contact_radius_cutoff)
+    zradl = contact_freezing_radius(zxlb_frz, zfrho, config.contact_freezing_liquid_cutoff)
     zval = 4.0 * jnp.pi * zradl * cdnc * 2.0e5 * (c.tmelt - 3.0 - t_frz)
     zf1 = jnp.maximum(0.0, zval / rho)
     zfrl_62 = zfrl_b + dt * 1.4e-20 * zf1

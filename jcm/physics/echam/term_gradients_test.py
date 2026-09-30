@@ -209,11 +209,11 @@ _ENVIRONMENT = ("['thermo_run']/['temperature']",
 
 # The 1M scheme follows ECHAM's ``cloud`` argument list instead: the step-start
 # state is its anchor (``ptm1``, ``pqm1``) and the running tendency of the
-# upstream terms, ``_tendency_run``, is its increment (``ztmst*ptte``), so both
-# are live.
-_ONE_MOMENT_ENVIRONMENT = ("['_tendency_run']/['temperature']",
-                           "['_tendency_run']/['specific_humidity']",
-                           "[0]/temperature", "[0]/specific_humidity")
+# upstream terms, ``_tendency_run``, is its increment (``ztmst*ptte``). This
+# check holds plumbing keys fixed, so only the anchor can be live here; the
+# increment path is differentiated by the package test below and by
+# ``echam_1m_test.py``.
+_ONE_MOMENT_ENVIRONMENT = ("[0]/temperature", "[0]/specific_humidity")
 
 _PBL_HEIGHT_DEFECT = (
     "jcm/physics/vertical_diffusion/tte_tke/turbulence_coefficients.py:392 — "
