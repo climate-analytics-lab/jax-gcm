@@ -873,6 +873,16 @@ class SundqvistCloudFraction(PhysicsTerm):
         # Write cloud_fraction (the only thing this term computes) plus a
         # pass-through of the input qc / qi so downstream terms see a
         # populated CloudData with the latest state values.
+        #
+        # The convective-detrainment fields are reset to zero here because
+        # ``prev_clouds`` is the PREVIOUS step's carry: this term seeds the
+        # step's ``clouds`` upstream of convection, and those fields must
+        # hold only what convection detrains THIS step (TiedtkeConvection
+        # rewrites them). Without the reset, the gap before convection runs
+        # would expose last step's values, and a stack that composes no
+        # convection term — including a restart from a checkpoint written by
+        # one that did — would feed a stale detrainment to the microphysics
+        # on every step.
         prev_clouds = diagnostics.get(
             "clouds", CloudData.zeros((ncols,), nlev),
         )
@@ -880,6 +890,8 @@ class SundqvistCloudFraction(PhysicsTerm):
             cloud_fraction=cloud_fraction,
             qc=qc,
             qi=qi,
+            conv_detrainment_qc=zeros,
+            conv_detrainment_qi=zeros,
         )
 
         return tendency, {
