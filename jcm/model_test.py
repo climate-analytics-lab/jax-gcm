@@ -1126,6 +1126,32 @@ class TestParameterBindingAndCompilation(unittest.TestCase):
             preds.params["speedy_vertical_diffusion.params.trvdi"], 2.0,
             places=6)
 
+    def test_the_shared_record_is_keyed_by_the_physics_dtype(self):
+        """A float32-physics and a float64-physics Model do not share traces.
+
+        With x64 on, pySES runs its physics in float32 (``physics_dtype``)
+        while a dinosaur Model on the same grid runs float64 and retraces
+        the terms for those inputs, so the first-compiled record must not
+        pass from one to the other. The key is the physics' working dtype,
+        not the process-wide x64 flag.
+        """
+        from types import SimpleNamespace
+
+        from jcm.model import _compile_signature
+
+        coords = SimpleNamespace(nodal_shape=(8, 64, 32))
+        f32 = SimpleNamespace(coords=coords,
+                              dycore=SimpleNamespace(physics_dtype=jnp.float32))
+        native = SimpleNamespace(coords=coords, dycore=SimpleNamespace())
+        prior = bool(jax.config.read("jax_enable_x64"))
+        jax.config.update("jax_enable_x64", True)
+        try:
+            self.assertNotEqual(_compile_signature(f32),
+                                _compile_signature(native))
+        finally:
+            jax.config.update("jax_enable_x64", prior)
+        self.assertEqual(_compile_signature(f32), _compile_signature(native))
+
     @pytest.mark.slow
     def test_an_edit_reaches_only_an_uncompiled_physics(self):
         """What the warning above is about, measured (#735).

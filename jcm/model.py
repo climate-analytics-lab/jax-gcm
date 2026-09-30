@@ -139,7 +139,7 @@ def _run_window_seconds(initial_time: jdt.Datetime, total_seconds: int):
 
 
 #: The parameter record of each physics object's first compilation, by the
-#: grid and precision it compiled for, shared by every Model built on that
+#: grid and physics dtype it compiled for, shared by every Model built on that
 #: object. With per-term checkpointing (``checkpoint_terms``, the default for
 #: SPEEDY and ECHAM) ``jax.checkpoint`` caches each term's trace per term
 #: object and input shapes, so a second Model built on an already-compiled
@@ -158,10 +158,17 @@ _FIRST_COMPILED_PARAMS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary(
 
 
 def _compile_signature(model) -> tuple:
-    """Return the grid and precision that decide whether cached traces fit."""
+    """Return the grid and precision that decide whether cached traces fit.
+
+    The precision is the dtype the physics actually runs in, not the
+    process-wide x64 flag: a backend may run float32 physics with x64 on
+    (pySES's ``physics_dtype``), and a float64 Model on the same grid would
+    retrace the terms for its own input dtypes.
+    """
     shape = getattr(model.coords, "nodal_shape", None)
-    return (tuple(shape) if shape is not None else None,
-            bool(jax.config.read("jax_enable_x64")))
+    working = getattr(model.dycore, "physics_dtype", None)
+    working = jnp.dtype(working if working is not None else jnp.result_type(float))
+    return (tuple(shape) if shape is not None else None, working.name)
 
 
 def _first_compiled_params(physics, signature, *, record: bool) -> dict | None:
