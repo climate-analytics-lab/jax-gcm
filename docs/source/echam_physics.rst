@@ -415,7 +415,7 @@ ECHAM's order:
 
 1. **Melting** of the incoming snow and of cloud ice above ``tmelt``;
    **sublimation** of the incoming snow (Lin et al. 1983) and **evaporation** of
-   the incoming rain (Rotstayn 1997), at the step-start state.
+   the incoming rain (Rotstayn 1997), at the anchor state (below).
 2. **Ice sedimentation** (the analytic exponential integral, with ECHAM's
    ``EPSILON(1._wp)`` floor on the ice), the ``lo2`` phase switch, and the return
    of all condensate of a cloud-free cell to vapour.
