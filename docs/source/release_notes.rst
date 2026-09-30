@@ -1110,6 +1110,47 @@ Lohmann 2M utility fields are ECHAM's
   bands of the ``echam-2m`` and ``echam-jam`` members shift accordingly. See
   :doc:`science/clouds_microphysics`.
 
+Lohmann 2M detrained ice carries ECHAM's crystal number
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- Convectively detrained condensate in the two-moment cloud scheme follows
+  ECHAM6.3-HAM2.3's section-1 and section-4 rules (#941). Detrained ice
+  carries the crystal number ``znidetr`` at the temperature-parameterised
+  radius ``zrid`` (``mo_cloud_micro_2m.f90``, lines 945-983) and joins the
+  cell after that step's ice sedimentation (lines 1227-1252), instead of
+  arriving without crystals and sedimenting at the old number in the same
+  step. The whole detrained condensate is split into ice and liquid by the
+  Wegener-Bergeron-Findeisen criterion ``lo2``, with the fusion-heat
+  correction (lines 1276-1317), instead of the Tiedtke split at the melting
+  point. The ICNC diagnosis inverts the ice mass at ``zrid`` instead of the
+  radius of the existing ice (line 1511). The number-tracer tendencies are
+  taken against the unclipped tracers (lines 1780-1781, 3625-3628), so an
+  out-of-range crystal or droplet number no longer persists from step to
+  step.
+- The DeMott (2010) INP number is converted from standard to ambient air
+  density, and mixed-phase freezing creates no more crystals than there are
+  droplets. Under JAM the mixed-phase INP number is
+  ``max(ice_nuclei, DeMott)`` instead of JAM's value wherever it is
+  positive. This is a stopgap while JAM's immersion INP sits about four
+  orders of magnitude below DeMott (#953).
+- **New output:** ``clouds.conv_detrainment_qc`` and
+  ``clouds.conv_detrainment_qi`` [kg kg⁻¹ s⁻¹], the condensate the Tiedtke
+  scheme detrains each step, in its own phase split.
+
+.. The figures in the next bullet are the #941 audit's, measured on the
+   pre-#940 cloud inputs; replace them with the PR's validation run.
+
+- **Changes results** for every 2M configuration, including JAM. Over days
+  5-10 of ``t63-echam-2m`` runs restarted from a 30-day spin-up, global ice
+  water path rises from 3.4 to 26.8 g/m² (observed about 27), the longwave
+  cloud effect from 14.1 to 24.4 W/m², the shortwave one strengthens from
+  -38.7 to -44.7 W/m², liquid water path falls from 41.0 to 31.1 g/m², and
+  net TOA radiation rises by 3.9 W/m². Glaciation remains too warm, cold ice
+  cloud holds too many crystals, and liquid water path lies below the
+  observed range; a retune follows (#682). The release-matrix bands of the
+  ``echam-2m`` and ``echam-jam`` members shift accordingly. See
+  :doc:`science/clouds_microphysics`.
+
 
 Known limitations
 ^^^^^^^^^^^^^^^^^
