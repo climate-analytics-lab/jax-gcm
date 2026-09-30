@@ -1298,13 +1298,16 @@ The ECHAM 1M cloud scheme is ECHAM6.3's ``cloud``
   :doc:`science/clouds_microphysics`.
 - **Compared with the compiled Fortran.**
   ``jcm/physics/clouds/echam_fortran_reference_test.py`` runs jcm against
-  numbers from the unmodified ECHAM6.3 routine, compiled in a local harness
-  (the ECHAM source is not in this repository), under ECHAM's constants: every
-  output and the 73 locals the harness records, on 42 designed and sampled
-  columns, at T63 in float64 (41 columns in float32; one tests exact melting
-  point thresholds) under ECHAM's Sonntag saturation and under jcm's Tetens
-  as a variant kept for localising disagreements, and at T31, T127 and T255
-  in float64. Everything passes except three float32 locals recorded in
+  numbers from ECHAM6.3's own routine, with its code unmodified and its
+  saturation lookup tables replaced by the analytic formula they tabulate (the
+  two agree to 3e-11 of each column's scale), compiled in a local harness (the
+  ECHAM source is not in this repository), under ECHAM's constants. Every
+  output passes on 42 designed and sampled columns, at T63 in float64 (41
+  columns in float32; one tests exact melting point thresholds) under ECHAM's
+  Sonntag saturation and under jcm's Tetens as a variant kept for localising
+  disagreements, and at T31, T127 and T255 in float64. The 73 locals the
+  harness records are compared under Sonntag at T63, in float64 and float32.
+  Everything passes except three float32 locals recorded in
   ``jcm/data/test/echam_cloud_reference/known_gaps.json`` as strict expected
   failures: two Bigg/contact columns whose 4e-10 kg m⁻² s⁻¹ trace snow flux
   carries 0.4 % float32 error, and one 1.7e-16 melt remainder that flips a

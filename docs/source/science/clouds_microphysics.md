@@ -56,8 +56,10 @@
   Levkov et al. (1992) aggregation, accretion of ice and riming by snow; the
   precipitating-fraction update with its reset to the local cover; and the
   return of condensate below ``ccwmin`` to vapour with the cover write-back.
-  Every output and every intermediate the Fortran harness exposes is compared
-  with the unmodified Fortran routine on 42 designed and sampled columns
+  Every output, and every intermediate the Fortran harness exposes (under the
+  Sonntag variant at T63), is compared with the Fortran routine, whose code is
+  unmodified and whose saturation tables the harness evaluates analytically
+  (they agree to 3e-11), on 42 designed and sampled columns
   (``echam_fortran_reference_test.py``). The anchor and the increments ``Δq``,
   ``ΔT``, ``Δq_c``, ``Δq_i`` are the 2M's (``cloud_scheme_inputs``, below): the
   previous step's post-physics state, and the dynamics since then plus ``dt``

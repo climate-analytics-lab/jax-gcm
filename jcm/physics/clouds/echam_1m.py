@@ -29,8 +29,9 @@ accumulated diagnostics; the ``ktype`` re-typing of section 10 is
 r7492 ``src/mo_cloud.f90``.
 
 The test module ``echam_fortran_reference_test.py`` compares this function,
-output by output and intermediate by intermediate, with the unmodified
-Fortran routine run on the same columns.
+output by output and, under the Sonntag variant at T63, intermediate by
+intermediate, with the Fortran routine run on the same columns: its code is
+unmodified and its saturation tables are evaluated analytically.
 """
 
 import math
