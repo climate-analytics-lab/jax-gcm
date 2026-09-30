@@ -242,10 +242,10 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     (``cdncact_cv``), which the Tiedtke scheme does not provide. Detrained
     liquid therefore joins the existing droplet population, and droplets are
     activated only in ``update_in_cloud_water``, where the droplet number has
-    fallen to ``cdnc_min`` (lines 2594–2608). Tracked in #941.
+    fallen to ``cdnc_min`` (lines 2594–2608). Tracked in #955.
   - cirrus nucleation ``zninucl`` at ``nic_cirrus = 1`` (lines 986–999). Its
     cap is the soluble-aerosol number ``zascs``, which the scheme does not
-    receive, and the ice budget stands without it.
+    receive, and the ice budget stands without it (#955).
   - Kärcher–Lohmann cirrus, ``nic_cirrus = 2`` (lines 1001–1117; #552).
   - aerosol-driven mixed-phase freezing, ``het_mxphase_freezing`` (lines
     2675–2840). jcm's transliteration
