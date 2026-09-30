@@ -34,7 +34,8 @@ from jcm.date import (
 from jcm.forcing import ForcingData, default_forcing
 from jcm.predictions import ModelPredictions
 from jcm.physics_interface import (
-    PhysicsState, Physics, compute_physics_step_gridpoint, verify_state,
+    POST_PHYSICS_STATE_KEY, PhysicsState, Physics,
+    compute_physics_step_gridpoint, verify_state,
 )
 from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.terrain import TerrainData
@@ -652,6 +653,12 @@ class Model:
             if hasattr(self.dycore, flag):
                 setattr(self.dycore, flag, True)
         self._dycore_field_names = tuple(self.dycore.physics_field_names())
+        # Whether the composed physics carries the previous step's
+        # post-physics state (a tendency-driven cloud scheme's anchor, see
+        # ``jcm.physics.clouds.cloud_inputs``). Settled here from the
+        # composition: packages that do not ask skip the extra conversion.
+        self._post_physics_fields = tuple(
+            getattr(self.physics, "post_physics_fields", lambda: ())())
         missing = [f for f in required if f not in self._dycore_field_names]
         if missing:
             raise ValueError(
@@ -1080,6 +1087,29 @@ class Model:
                 physics_tendency, new_physics_state = auto_axes(
                     call, axes=axis, out_sharding=specs,
                 )(*args)
+            if self._post_physics_fields:
+                # The state the dynamics is about to start from, as the dycore
+                # forms it from this tendency, carried to the next step's
+                # physics: the difference from the next step's gridpoint state
+                # is then the dynamics alone, which the cloud schemes need as
+                # an increment (ECHAM's ``ptte``/``pqte`` hold it at
+                # ``cloud``). It stays differentiable: one step back through
+                # the carry, like ``_prev_step``.
+                with profiling.scope(profiling.BRIDGE_TO_PHYSICS):
+                    post_physics = self.dycore.after_physics_state(
+                        state, physics_tendency)
+                    new_physics_state = self.physics.record_post_physics_state(
+                        new_physics_state, post_physics)
+                    if axis is not None and POST_PHYSICS_STATE_KEY in new_physics_state:
+                        # Recorded outside the auto-sharded physics region:
+                        # give the slot the column sharding every other carry
+                        # leaf has, which the scan carry type requires.
+                        new_physics_state = {
+                            **new_physics_state,
+                            POST_PHYSICS_STATE_KEY: _reshard_columns(
+                                new_physics_state[POST_PHYSICS_STATE_KEY],
+                                physics_state_grid.temperature.shape[-1], axis),
+                        }
             with profiling.scope(profiling.DYNAMICS):
                 state_next = self.dycore.step(state, physics_tendency)
             return state_next, new_physics_state

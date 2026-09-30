@@ -671,6 +671,64 @@ class DinosaurDycore(DynamicalCore):
             state, self._primitive, tracer_specs=self.tracer_specs,
             nodal_tracers=self._nodal_tracers,
         )
+        physics_state = self._clean_tracers(physics_state)
+        # Then pin the cleaned gridpoint state to dinosaur's "physics" sharding
+        # before it crosses into the (dycore-agnostic) physics packages. That
+        # spec (``P(None, ('x', 'z'), 'y')``) replicates the vertical axis so
+        # every column lives wholly on one device, and carries the device split
+        # on longitude/latitude instead — the layout column physics wants, since
+        # each column is independent. The dycore itself runs on
+        # ``dycore_partition_spec`` (``P('z', 'x', 'y')``); the modal→nodal
+        # transform here is where the two layouts meet. Under the recommended
+        # longitude-only mesh ``(N, 1, 1)`` the two specs coincide, so this is
+        # a free relabelling rather than a reshard. No-op without an
+        # ``spmd_mesh``. See docs/source/design/parallelization.md.
+        return self.coords.with_physics_sharding(physics_state)
+
+    def after_physics_state(self, state: State,
+                            physics_tendency: PhysicsTendency | None) -> PhysicsState:
+        """Gridpoint state the dynamics starts from: ``state + dt·T(P)``.
+
+        ``T`` is this core's own projection of the gridpoint tendency
+        (:func:`physics_tendency_to_dynamics_tendency`: temperature, humidity
+        and the modal tracers go through the spectral transform, which drops
+        what the truncation cannot hold; the semi-Lagrangian tracers stay
+        nodal). The sum is formed exactly as :meth:`step` forms it
+        (:meth:`_apply_physics_tendency`) and converted back to gridpoint
+        WITHOUT the tracer filter of :meth:`to_physics_state`: the filter
+        cleans what physics receives, whereas this is the state the dynamics
+        actually advances from. With no tracer filter configured,
+        ``after_physics_state(state, P) − (to_physics_state(state) + dt·P)``
+        is therefore exactly the projection residual ``dt·(T(P) − P)``, and a
+        consumer that differences against the next step's state counts none of
+        it as dynamics.
+        """
+        state_after_physics = self._apply_physics_tendency(state, physics_tendency)
+        physics_state = dynamics_state_to_physics_state(
+            state_after_physics, self._primitive, tracer_specs=self.tracer_specs,
+            nodal_tracers=self._nodal_tracers,
+        )
+        return self.coords.with_physics_sharding(physics_state)
+
+    def _apply_physics_tendency(self, state: State,
+                                physics_tendency: PhysicsTendency | None) -> State:
+        """Forward-Euler add the projected physics tendency (Lie split a)."""
+        if physics_tendency is None:
+            return state
+        # The tendency comes back from physics in the "physics" sharding;
+        # pin it explicitly so the gridpoint→modal transform inside
+        # ``physics_tendency_to_dynamics_tendency`` reshards from a known
+        # layout rather than whatever GSPMD happened to infer. No-op
+        # without an ``spmd_mesh``.
+        physics_tendency = self.coords.with_physics_sharding(physics_tendency)
+        dyn_tendency = physics_tendency_to_dynamics_tendency(
+            physics_tendency, self._primitive, tracer_specs=self.tracer_specs,
+            nodal_tracers=self._nodal_tracers,
+        )
+        return state + self._dt * dyn_tendency
+
+    def _clean_tracers(self, physics_state: PhysicsState) -> PhysicsState:
+        """Apply the optional ``tracer_filter`` to the gridpoint tracers."""
         # Clean the gridpoint tracers as we hand them to the physics. A spectral
         # projection of a sharp, near-zero tracer source rings into negatives
         # (unphysical for aerosol microphysics / activation / optics); the
@@ -688,18 +746,7 @@ class DinosaurDycore(DynamicalCore):
             physics_state = physics_state.copy(
                 tracers=self.tracer_filter(physics_state.tracers, dp),
             )
-        # Then pin the cleaned gridpoint state to dinosaur's "physics" sharding
-        # before it crosses into the (dycore-agnostic) physics packages. That
-        # spec (``P(None, ('x', 'z'), 'y')``) replicates the vertical axis so
-        # every column lives wholly on one device, and carries the device split
-        # on longitude/latitude instead — the layout column physics wants, since
-        # each column is independent. The dycore itself runs on
-        # ``dycore_partition_spec`` (``P('z', 'x', 'y')``); the modal→nodal
-        # transform here is where the two layouts meet. Under the recommended
-        # longitude-only mesh ``(N, 1, 1)`` the two specs coincide, so this is
-        # a free relabelling rather than a reshard. No-op without an
-        # ``spmd_mesh``. See docs/source/design/parallelization.md.
-        return self.coords.with_physics_sharding(physics_state)
+        return physics_state
 
     def physics_field_names(self) -> tuple[str, ...]:
         """Declare the enabled per-step dycore-side diagnostic fields."""
@@ -839,20 +886,7 @@ class DinosaurDycore(DynamicalCore):
         Order: forward-Euler add of the physics dynamics-tendency →
         semi-Lagrangian Crank-Nicolson RK2 dynamics step → spectral filters.
         """
-        if physics_tendency is not None:
-            # The tendency comes back from physics in the "physics" sharding;
-            # pin it explicitly so the gridpoint→modal transform inside
-            # ``physics_tendency_to_dynamics_tendency`` reshards from a known
-            # layout rather than whatever GSPMD happened to infer. No-op
-            # without an ``spmd_mesh``.
-            physics_tendency = self.coords.with_physics_sharding(physics_tendency)
-            dyn_tendency = physics_tendency_to_dynamics_tendency(
-                physics_tendency, self._primitive, tracer_specs=self.tracer_specs,
-                nodal_tracers=self._nodal_tracers,
-            )
-            state_after_physics = state + self._dt * dyn_tendency
-        else:
-            state_after_physics = state
+        state_after_physics = self._apply_physics_tendency(state, physics_tendency)
         state_after_dyn = self._dynamics_step_fn(state_after_physics)
         state_next = state_after_dyn
         for f in self._filters:

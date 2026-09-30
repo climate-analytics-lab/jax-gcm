@@ -57,22 +57,32 @@ Formulation choices inside the sweep, for provenance:
 
 ## The state-splitting convention
 
-ECHAM is leapfrog: the scheme receives the t−1 state (`ptm1`, `pqm1`,
-`pxlm1`, `pxim1`) plus accumulated tendencies (`ptte`, `pqte`, …) and *adds*
-its own contributions to the tendencies. jcm is additive operator-split: each
-term returns its own tendency against a provisional post-upstream state.
+ECHAM's scheme receives the previous time level (`ptm1`, `pqm1`, `pxlm1`,
+`pxim1`, the number tracers' `pxtm1`) plus the tendencies accumulated since
+(`ptte`, `pqte`, `pxlte`, `pxite`, `pxtte`) and the convective detrainment
+apart (`pxtecl`, `pxteci`), and *adds* its own contributions to the
+tendencies. jcm's terms each return their own tendency against a provisional
+state, and the host sums them.
 
-The mapping used (and documented on `cloud_microphysics_2m`):
+`cloud_microphysics_2m` takes ECHAM's split directly:
 
-- primary inputs = the **post-upstream provisional** state (`thermo_run` T/q,
-  `clouds.qc/qi` with convective detrainment folded in) — what the returned
-  tendencies are relative to;
-- optional `*_m1` inputs = the **step-start** state — ECHAM's t−1 anchors.
-  Saturation and all section-1 fields evaluate there, and the differences
-  `(x − x_m1)` play the role of `ztmst·pqte` in the condensation closure and
-  of `ztmst·pxlte` in the clear-sky-evaporation split.
+- the **anchor** `*_m1` = ECHAM's previous time level. Saturation and all
+  section-1 fields evaluate there;
+- the **increments** `*_increment` = `ztmst·ptte`, `ztmst·pqte`, … —
+  everything since the anchor except the convective detrainment;
+- `detrained_qc`, `detrained_qi` = `ztmst·pxtecl`, `ztmst·pxteci`, mass per
+  step. Where ECHAM uses `pxlte + pxtecl` (the condensation closure, the
+  clear-sky-evaporation split) the scheme uses `increment + detrained`.
 
-The ledger reconstruction is identical either way:
+The column forms the provisional state as `anchor + increment` (plus the
+detrainment for the condensate) — what the returned tendencies are relative
+to. The term fills these from
+`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs`: the anchor is the
+previous step's post-physics state carried by the model, and the increments
+are the dynamics since then plus every upstream term's tendency (see
+[operator-split physics](operator_split_physics.md#coupling-within-physics)).
+
+The section-8 ledger reconstructs ECHAM's end state as
 `pxlm1 + Δt·(upstream+own) ≡ qc_provisional + Δt·own`, so the negative-mass
 guard bounds the true end-of-step state and the host's tendency sum
 telescopes exactly as ECHAM's INOUT accumulation.

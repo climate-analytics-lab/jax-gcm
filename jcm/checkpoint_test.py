@@ -859,3 +859,64 @@ class TestExactCheckpointClock(unittest.TestCase):
                 load_checkpoint(target, path)
             load_checkpoint(target, path, as_initial_condition=True)
             self.assertEqual(int(target.run_state.step), 0)
+
+
+class _AnchorReader(PhysicsTerm):
+    """Asks for the carried post-physics state and does nothing else.
+
+    Stands in for a tendency-driven cloud scheme (the Lohmann 2M declares the
+    same), so the slot's checkpoint behaviour is tested on Held-Suarez.
+    """
+
+    name = "anchor_reader"
+    category = "test_anchor_reader"
+    requires_post_physics_fields = ("temperature", "specific_humidity")
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        """No tendency; the carry slot is the point."""
+        return PhysicsTendency.zeros(state.temperature.shape), diagnostics
+
+
+class TestPostPhysicsSlotAcrossRestart(unittest.TestCase):
+    """The carried post-physics state restores by name, like every carry slot."""
+
+    def test_checkpoint_without_the_slot_restores_it_invalid(self):
+        """A file written before the slot existed: template seed, valid = 0."""
+        donor = _build_model()
+        donor.run(save_interval=0.25, total_time=0.25)
+        upgraded = _build_model(physics=held_suarez_physics() + _AnchorReader())
+        upgraded.bootstrap_state()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(donor, path, elapsed_days=0.25)
+            self.assertNotIn("_post_physics_state", donor.physics_carry)
+            with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                load_checkpoint(upgraded, path)
+
+        slot = upgraded.physics_carry["_post_physics_state"]
+        self.assertEqual(float(slot["valid"]), 0.0)
+        np.testing.assert_array_equal(np.asarray(slot["temperature"]), 0.0)
+        self.assertTrue(
+            any("_post_physics_state" in line and "seeded" in line
+                for line in logs.output), logs.output)
+        # The run continues: the first step falls back, the next ones are valid.
+        upgraded.resume(save_interval=0.25, total_time=0.25)
+        slot = upgraded.physics_carry["_post_physics_state"]
+        self.assertEqual(float(slot["valid"]), 1.0)
+        self.assertTrue(np.isfinite(np.asarray(slot["temperature"])).all())
+        self.assertGreater(float(np.min(np.asarray(slot["temperature"]))), 100.0)
+
+    def test_slot_round_trips_valid(self):
+        first = _build_model(physics=held_suarez_physics() + _AnchorReader())
+        first.run(save_interval=0.25, total_time=0.25)
+        saved = first.physics_carry["_post_physics_state"]
+        self.assertEqual(float(saved["valid"]), 1.0)
+        second = _build_model(physics=held_suarez_physics() + _AnchorReader())
+        second.bootstrap_state()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(first, path, elapsed_days=0.25)
+            load_checkpoint(second, path)
+        self.assertEqual(
+            _max_abs_diff(saved, second.physics_carry["_post_physics_state"]), 0.0)

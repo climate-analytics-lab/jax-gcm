@@ -2350,3 +2350,312 @@ class TestReleaseMatrixReusedStateDigest(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError,
                                         "stats windows launched"):
                 self._generate(tmp, contents, digest)
+
+
+# ---------------------------------------------------------------------------
+# The carried post-physics state (the cloud schemes' anchor)
+# ---------------------------------------------------------------------------
+
+
+def _prescribed_dynamics_setup(d_temperature, d_humidity=0.0, nlev=6,
+                               dt_seconds=900.0):
+    """Build a dycore whose only 'dynamics' is a prescribed gridpoint tendency.
+
+    ``step`` applies the physics tendency and then adds ``dt·D`` to
+    temperature and humidity, so between two physics calls the state changes
+    by exactly the prescribed dynamics. Two horizontal dimensions (3 x 2) so
+    the column-vectorised physics path runs.
+    """
+    from jcm.dycore._fake_cubed_sphere.dycore import (
+        FakeCubedSphereDycore, _FakeCoords, _FakeHorizontalGrid,
+        _FakeVerticalGrid,
+    )
+    from jcm.terrain import TerrainData
+
+    shape = (3, 2)
+    d_t = jnp.broadcast_to(jnp.asarray(d_temperature).reshape(-1, 1, 1),
+                           (nlev,) + shape)
+    d_q = jnp.broadcast_to(jnp.asarray(d_humidity).reshape(-1, 1, 1),
+                           (nlev,) + shape)
+
+    class _PrescribedDynamicsDycore(FakeCubedSphereDycore):
+        def __init__(self):
+            super().__init__(nelem=1, gll=1, nlev=nlev, dt_seconds=dt_seconds)
+            self.coords = _FakeCoords(
+                horizontal=_FakeHorizontalGrid(
+                    nodal_shape=shape,
+                    latitudes=jnp.full(shape, 0.3),
+                    longitudes=jnp.full(shape, 1.0)),
+                vertical=_FakeVerticalGrid(
+                    centers=jnp.linspace(0.3, 0.95, nlev)),
+            )
+            self.terrain = TerrainData.aquaplanet(self.coords)
+
+        def initial_state(self, physics_state, **kwargs):
+            state = super().initial_state(physics_state, **kwargs)
+            if physics_state is not None and physics_state.tracers:
+                state = state.replace(tracers={**state.tracers,
+                                               **physics_state.tracers})
+            return state
+
+        def step(self, state, physics_tendency):
+            state = super().step(state, physics_tendency)
+            return state.replace(
+                temperature=state.temperature + self.dt_seconds * d_t,
+                specific_humidity=(state.specific_humidity
+                                   + self.dt_seconds * d_q))
+
+    return _PrescribedDynamicsDycore()
+
+
+class TestPostPhysicsAnchor(unittest.TestCase):
+    """The model carries x_ap, so a cloud scheme sees the dynamics as an increment."""
+
+    DT = 900.0
+    NLEV = 6
+
+    def _run(self, physics, d_temperature, d_humidity=0.0, steps=3,
+             initial=None, **run_kwargs):
+        from jcm.forcing import ForcingData
+        from jcm.model import Model
+
+        dycore = _prescribed_dynamics_setup(d_temperature, d_humidity,
+                                            self.NLEV, self.DT)
+        model = Model(dycore=dycore, physics=physics)
+        state = dycore.initial_state(initial, tracer_specs={
+            s.name: s for s in physics.required_tracers()})
+        step_days = self.DT / 86400.0
+        preds = model.run(initial_state=state,
+                          forcing=ForcingData.zeros(dycore.coords.horizontal.nodal_shape),
+                          save_interval=step_days, total_time=steps * step_days,
+                          **run_kwargs)
+        return model, preds
+
+    def test_dynamics_increment_equals_the_prescribed_dynamics(self):
+        from typing import ClassVar
+
+        from jcm.physics.clouds.cloud_inputs import cloud_scheme_inputs
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.physics_term import PhysicsTerm, TracerSpec
+        from jcm.physics_interface import PhysicsTendency
+
+        class _Probe(PhysicsTerm):
+            name: ClassVar[str] = "probe"
+            category: ClassVar[str] = "probe"
+            requires: ClassVar[tuple[str, ...]] = ()
+            provides: ClassVar[tuple[str, ...]] = ("probe",)
+            requires_post_physics_fields: ClassVar[tuple[str, ...]] = (
+                "temperature", "specific_humidity", "qc", "qi")
+
+            @classmethod
+            def required_tracers(cls):
+                return (TracerSpec("qc", units="kg/kg"),
+                        TracerSpec("qi", units="kg/kg"))
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                inputs = cloud_scheme_inputs(state, diagnostics)
+                return PhysicsTendency.zeros(state.temperature.shape), {
+                    **diagnostics,
+                    "probe": {
+                        "d_temperature": inputs.increment.temperature,
+                        "d_humidity": inputs.increment.specific_humidity,
+                        "valid": inputs.dynamics_valid,
+                    },
+                }
+
+        d_t = -jnp.linspace(1e-5, 6e-5, self.NLEV)        # K/s, prescribed ascent cooling
+        d_q = jnp.linspace(1e-9, 3e-9, self.NLEV)         # kg/kg/s
+        physics = ComposablePhysics([_Probe()], vectorize_columns=True,
+                                    dt_seconds=self.DT)
+        from jcm.physics_interface import PhysicsState
+        shape = (self.NLEV, 3, 2)
+        initial = PhysicsState(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=jnp.full(shape, 270.0),
+            specific_humidity=jnp.full(shape, 2e-3),
+            geopotential=jnp.zeros(shape),
+            normalized_surface_pressure=jnp.ones(shape[1:]))
+        model, preds = self._run(physics, d_t, d_q, steps=3, initial=initial)
+        probe = preds.physics["probe"]
+        valid = np.asarray(probe["valid"])
+        # Step 1 has no anchor; every later step has the carried x_ap.
+        np.testing.assert_array_equal(valid, [0.0, 1.0, 1.0])
+        np.testing.assert_array_equal(np.asarray(probe["d_temperature"][0]), 0.0)
+        expected_t = np.broadcast_to(self.DT * np.asarray(d_t)[:, None], (self.NLEV, 6))
+        expected_q = np.broadcast_to(self.DT * np.asarray(d_q)[:, None], (self.NLEV, 6))
+        for k in (1, 2):
+            np.testing.assert_allclose(np.asarray(probe["d_temperature"][k]),
+                                       expected_t, rtol=2e-3, atol=1e-5)
+            np.testing.assert_allclose(np.asarray(probe["d_humidity"][k]),
+                                       expected_q, rtol=1e-3, atol=1e-11)
+        slot = model.physics_carry["_post_physics_state"]
+        self.assertEqual(float(slot["valid"]), 1.0)
+        self.assertEqual(set(slot["tracers"]), {"qc", "qi"})
+
+    def test_composition_without_a_reader_carries_no_slot(self):
+        """SPEEDY, Held-Suarez and the 1M ECHAM stack do not pay for the slot."""
+        from jcm.model import Model
+        from jcm.physics.echam.echam_terms import echam_physics
+        from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        for physics in (speedy_physics(), held_suarez_physics(), echam_physics()):
+            self.assertEqual(physics.post_physics_fields(), ())
+            model = Model(coords=coords, physics=physics)
+            self.assertNotIn("_post_physics_state", model.initial_physics_carry())
+            self.assertEqual(model._post_physics_fields, ())
+        two_moment = echam_physics(cloud_scheme="2m")
+        self.assertEqual(
+            two_moment.post_physics_fields(),
+            ("temperature", "specific_humidity", "qc", "qi", "qnc", "qni"))
+
+    # -- the 2M condenses the dynamics' forcing in a partly cloudy layer --------
+
+    CLOUD_LEVEL = 3
+
+    def _column_stub(self):
+        """Pressure, density, layer depth, a FIXED cover and activation.
+
+        The cover does not respond to the state, so the only difference
+        between a run with and without the prescribed dynamics, at the second
+        physics call, is the dynamics increment the 2M receives.
+        """
+        from typing import ClassVar
+
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.physics_term import PhysicsTerm
+        from jcm.physics_interface import PhysicsTendency
+
+        nlev, k = self.NLEV, self.CLOUD_LEVEL
+        pressure = jnp.linspace(5.0e4, 1.0e5, nlev)
+        cover = jnp.zeros(nlev).at[k].set(0.5)
+
+        class _ColumnStub(PhysicsTerm):
+            name: ClassVar[str] = "column_stub"
+            category: ClassVar[str] = "diagnostics"
+            requires: ClassVar[tuple[str, ...]] = ()
+            provides: ClassVar[tuple[str, ...]] = (
+                "pressure_full", "air_density", "layer_thickness", "clouds",
+                "aerosol", "activated_cdnc")
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                ncols = state.temperature.shape[1]
+                p = jnp.broadcast_to(pressure[:, None], state.temperature.shape)
+                rho = p / (287.04 * state.temperature)
+                clouds = CloudData.zeros((ncols,), nlev).copy(
+                    cloud_fraction=jnp.broadcast_to(cover[:, None],
+                                                    state.temperature.shape))
+                return PhysicsTendency.zeros(state.temperature.shape), {
+                    **diagnostics,
+                    "pressure_full": p,
+                    "air_density": rho,
+                    "layer_thickness": jnp.full_like(p, 400.0),
+                    "clouds": clouds,
+                    "aerosol": {},
+                    "activated_cdnc": jnp.full_like(p, 5.0e7),
+                }
+
+        return _ColumnStub()
+
+    def _cloudy_initial_state(self):
+        from jcm.physics import thermodynamics
+        from jcm.physics_interface import PhysicsState
+
+        nlev, k = self.NLEV, self.CLOUD_LEVEL
+        shape = (nlev, 3, 2)
+        temperature = jnp.linspace(262.0, 292.0, nlev)
+        pressure = jnp.linspace(5.0e4, 1.0e5, nlev)
+        qsat = thermodynamics.saturation_specific_humidity_and_derivative(
+            temperature, pressure, phase="water")[0]
+        # Grid-mean RH 0.9 in the half-covered layer: the cloudy part is
+        # saturated, the box is not, so the whole-box supersaturation
+        # correction cannot fire and only zqcdif can condense.
+        rh = jnp.full(nlev, 0.5).at[k].set(0.9)
+        qc = jnp.zeros(nlev).at[k].set(5.0e-5)
+        rho = pressure / (287.04 * temperature)
+
+        def grid(column):
+            return jnp.broadcast_to(column[:, None, None], shape)
+
+        return PhysicsState(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=grid(temperature),
+            specific_humidity=grid(rh * qsat),
+            geopotential=jnp.zeros(shape),
+            normalized_surface_pressure=jnp.ones(shape[1:]),
+            tracers={"qc": grid(qc), "qi": jnp.zeros(shape),
+                     "qnc": grid(jnp.where(qc > 0, 5.0e7 / rho, 0.0)),
+                     "qni": jnp.zeros(shape)})
+
+    def _two_moment_physics(self, reads_anchor=True):
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+        from jcm.physics.composable_physics import ComposablePhysics
+
+        term = Lohmann2MMicrophysics()
+        if not reads_anchor:
+            class _NoAnchor(Lohmann2MMicrophysics):
+                requires_post_physics_fields = ()
+            term = _NoAnchor()
+        return ComposablePhysics([self._column_stub(), term],
+                                 vectorize_columns=True, dt_seconds=self.DT)
+
+    def test_partly_cloudy_layer_condenses_the_dynamics_forcing(self):
+        """Ascent cooling in a half-covered, box-subsaturated layer condenses zqcdif.
+
+        ECHAM: zqcdif = (ztmst·pqte − zdqsat)·paclc with ztmst·ptte holding
+        the dynamics (mo_cloud_micro_2m.f90 section 5). With the carried
+        anchor the 2M sees the prescribed cooling as its temperature
+        increment; the vapour it removes in excess of the undisturbed run is
+        that zqcdif. A 2M that does not read the anchor sees none of it.
+        """
+        from jcm.physics import thermodynamics
+        from jcm.physics.clouds.cloud_utils import latent_heat_over_cp
+
+        k = self.CLOUD_LEVEL
+        cooling = jnp.zeros(self.NLEV).at[k].set(-5.0e-4)       # K/s: -0.45 K/step
+        initial = self._cloudy_initial_state()
+
+        def q_tendency(physics, d_t):
+            model, preds = self._run(physics, d_t, steps=2, initial=initial)
+            return preds
+
+        forced = q_tendency(self._two_moment_physics(), cooling)
+        still = q_tendency(self._two_moment_physics(), 0.0)
+        condensed = -self.DT * (
+            np.asarray(forced.physics["_prev_step"]["q_tendency"][1][k])
+            - np.asarray(still.physics["_prev_step"]["q_tendency"][1][k]))
+
+        anchor = forced.physics["_post_physics_state"]
+        t_anchor = float(anchor["temperature"][0][k, 0])
+        q_anchor = float(anchor["specific_humidity"][0][k, 0])
+        pressure_k = float(jnp.linspace(5.0e4, 1.0e5, self.NLEV)[k])
+        _, dqsdt = thermodynamics.saturation_specific_humidity_and_derivative(
+            jnp.asarray(t_anchor), jnp.asarray(pressure_k), phase="water")
+        lvdcp, _ = latent_heat_over_cp(jnp.asarray(q_anchor))
+        cf = 0.5
+        d_t = self.DT * float(cooling[k])
+        zdqsat = d_t * float(dqsdt) / (1.0 + cf * float(lvdcp) * float(dqsdt))
+        zqcdif = (0.0 - zdqsat) * cf
+        self.assertGreater(zqcdif, 0.0)
+        # Measured: 7.2432e-5 against 7.2430e-5 (float32).
+        np.testing.assert_allclose(condensed, zqcdif, rtol=1e-3)
+
+        blind_forced = q_tendency(self._two_moment_physics(False), cooling)
+        blind_still = q_tendency(self._two_moment_physics(False), 0.0)
+        blind = -self.DT * (
+            np.asarray(blind_forced.physics["_prev_step"]["q_tendency"][1][k])
+            - np.asarray(blind_still.physics["_prev_step"]["q_tendency"][1][k]))
+        self.assertLess(float(np.max(np.abs(blind))), 0.02 * zqcdif)
+
+    def test_averaged_output_mode_carries_the_slot(self):
+        """The averaging accumulator's template has the slot too (same structure)."""
+        cooling = jnp.zeros(self.NLEV).at[self.CLOUD_LEVEL].set(-5.0e-4)
+        model, preds = self._run(self._two_moment_physics(), cooling, steps=4,
+                                 initial=self._cloudy_initial_state(),
+                                 output_averages=True)
+        self.assertEqual(float(model.physics_carry["_post_physics_state"]["valid"]),
+                         1.0)
+        for leaf in jax.tree.leaves(preds.dynamics):
+            self.assertTrue(np.isfinite(np.asarray(leaf)).all())

@@ -38,13 +38,14 @@ The ECHAM physics package includes the following components, executed in sequenc
 Process Coupling
 ^^^^^^^^^^^^^^^^
 
-JAX-GCM's outer ``ComposablePhysics`` coupling is **process-parallel**:
-every term receives the same prognostic input state and the returned tendencies
-are summed. Terms execute in a validated order and may consume diagnostics
-produced by earlier terms, but they do not see earlier tendency contributions
-applied to the prognostic state until the next model step. Tightly coupled
-calculations that require internal sequential updates are implemented inside a
-single process term.
+Every ``ComposablePhysics`` term receives the same prognostic input state and
+the returned tendencies are summed. Terms execute in ECHAM's ``physc`` order and
+see what earlier terms did through the running tendency sum
+(``_tendency_run``), the running thermodynamic state (``thermo_run``) and the
+cross-step carry, so the coupling is partly sequential and the order is
+load-bearing. The cloud microphysics receives ECHAM's inputs this way: the
+previous step's post-physics state as its anchor, and the dynamics and every
+upstream term as increments. See :doc:`design/operator_split_physics`.
 
 Each parameterization is described in detail below.
 

@@ -53,6 +53,31 @@ if TYPE_CHECKING:
 DycoreState = Any
 
 
+def add_physics_tendency(physics_state: "PhysicsState",
+                         physics_tendency: "PhysicsTendency",
+                         dt_seconds) -> "PhysicsState":
+    """``physics_state + dt_seconds · physics_tendency`` on the gridpoint fields.
+
+    Winds, temperature, humidity and every tracer of ``physics_state`` advance;
+    a tracer the tendency does not carry is unchanged. Geopotential and surface
+    pressure are left as they are (physics does not tend them).
+    """
+    tracers = {
+        name: value + dt_seconds * physics_tendency.tracers[name]
+        if name in physics_tendency.tracers else value
+        for name, value in physics_state.tracers.items()
+    }
+    return physics_state.copy(
+        u_wind=physics_state.u_wind + dt_seconds * physics_tendency.u_wind,
+        v_wind=physics_state.v_wind + dt_seconds * physics_tendency.v_wind,
+        temperature=(physics_state.temperature
+                     + dt_seconds * physics_tendency.temperature),
+        specific_humidity=(physics_state.specific_humidity
+                           + dt_seconds * physics_tendency.specific_humidity),
+        tracers=tracers,
+    )
+
+
 @tree_math.struct
 class Predictions:
     """Internal container for one frame of model prediction output (a JAX pytree).
@@ -101,6 +126,10 @@ class DynamicalCore(abc.ABC):
         physics-dynamics seam is purely operator-split (Lie a): the gridpoint
         ``physics_tendency`` is forward-Euler-added to the state and the dycore
         then takes one ``dt`` of dynamics.
+      * Reporting the state between those two stages
+        (:meth:`after_physics_state`) when it applies the tendency in a
+        representation other than the physics grid; the default covers a
+        backend that adds on the physics grid.
       * Building its own terrain (orography is smoothed against the dycore's own
         basis — spectral truncation for dinosaur, SE projection for pyses, ...).
       * Converting a trajectory to xarray for output (the cubed-sphere → lat/lon
@@ -238,6 +267,53 @@ class DynamicalCore(abc.ABC):
             The dycore-native state at ``t + dt``.
 
         """
+
+    def after_physics_state(
+        self,
+        state: DycoreState,
+        physics_tendency: "PhysicsTendency | None",
+    ) -> "PhysicsState":
+        """Gridpoint state after the physics tendency, before the dynamics.
+
+        :meth:`step` first applies ``physics_tendency`` to ``state`` and then
+        runs the dynamics. This returns the intermediate: the state the
+        dynamics starts from, converted to the gridpoint layout of
+        :meth:`to_physics_state`. ``Model`` calls it once per step, after the
+        physics and before :meth:`step`, when the composed physics carries the
+        previous step's post-physics state
+        (:data:`jcm.physics_interface.POST_PHYSICS_STATE_KEY`); a
+        tendency-driven cloud scheme anchors there, so that the difference
+        from the next step's :meth:`to_physics_state` is the dynamics of the
+        step (see :mod:`jcm.physics.clouds.cloud_inputs`).
+
+        A backend whose :meth:`step` applies the tendency in a different
+        representation (a spectral projection, a scatter to element nodes)
+        must override this with its own application, so the returned state is
+        the one its dynamics really advances from: the part of the tendency
+        the representation cannot hold is then not counted as dynamics.
+
+        The default is the gridpoint forward-Euler add
+        ``to_physics_state(state) + dt_seconds · physics_tendency``, exact for
+        a backend that adds the tendency on the physics grid itself. It must
+        not run the dynamics. The returned state is not clamped: non-negativity
+        is ``verify_state``'s job at the physics boundary.
+
+        Args:
+            state: The dycore-native state the physics ran on (the ``state``
+                argument of the coming :meth:`step`).
+            physics_tendency: The gridpoint tendency :meth:`step` will apply;
+                ``None`` for an unforced step.
+
+        Returns:
+            A :class:`~jcm.physics_interface.PhysicsState` shaped like
+            :meth:`to_physics_state`'s.
+
+        """
+        physics_state = self.to_physics_state(state)
+        if physics_tendency is None:
+            return physics_state
+        return add_physics_tendency(physics_state, physics_tendency,
+                                    self.dt_seconds)
 
     # ------------------------------------------------------------------
     # Sim-time accounting (so Model can index trajectory frames)

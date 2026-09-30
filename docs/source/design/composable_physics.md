@@ -282,29 +282,42 @@ the gradient. Callers that *do* want to differentiate w.r.t. the
 vertical-level placement (rare, but supported for learnable level
 schemes) can broaden the path filter.
 
-## Process-parallel coupling
+## Coupling between terms
 
-Within a `ComposablePhysics` step, terms run **process-parallel**:
-every term reads the same input prognostic `state`, and tendencies
-are summed. Terms may read each other's *diagnostic* outputs
-(through the dict), but they do not see each other's tendency
-contribution applied to the prognostic state until the next dynamics
-step.
+Within a `ComposablePhysics` step every term reads the same input
+prognostic `state`, and the tendencies are summed and applied once by the
+host. The state is not updated between terms. Terms run in list order and
+see their predecessors through three channels:
 
-This is order-independent at the prognostic-state level —
-`A + B + C` and `B + A + C` produce the same total tendency from the
-same state. It differs from ECHAM6's sequential coupling, where each
-scheme reads the state with prior schemes' tendencies already added
-(via the `tte += ...` pattern on shared accumulators in
-`mo_scan_buffer.f90`). Sequential coupling is more accurate for
-tightly-coupled process pairs but gives up the order-independence
-that makes `replace()` / `remove()` semantically clean.
+- **`_tendency_run`**: the host publishes the sum of the tendencies of the
+  terms already run (winds, temperature, humidity, every tracer) before
+  each term, on both the grid and the column host.
+- **`thermo_run`**: a running (T, q, qc, qi), seeded to the step start and
+  advanced by the terms that call `advance_thermo_run` (vertical diffusion,
+  the prescribed surface flux, Tiedtke, the cloud schemes).
+- **the diagnostics dict itself**: published structs (`clouds`,
+  `convection`, …) and step-local keys such as `_convective_detrainment`,
+  and the cross-step carry (`_prev_step`, `_post_physics_state`).
 
-For terms that genuinely need sequential coupling (e.g. a tightly
-coupled CLUBB+MG2 pair as in E3SM), the recommended pattern is a
-*process group* term that runs the inner sub-cycle internally and
-presents a single tendency externally — keeping the outer container
-process-parallel.
+So the total tendency does not depend on the order of two terms that use
+none of these channels, but it does for the ECHAM stack, whose convection
+reads vertical diffusion's `thermo_run` and whose cloud scheme reads the
+running tendency, the detrainment and the carried post-physics state: the
+`physc` order `echam_physics()` ships is load-bearing. What each hand-off
+holds, who advances it and what the cloud schemes receive is set out in
+[operator-split physics](operator_split_physics.md#coupling-within-physics).
+
+A term that needs the previous step's post-physics state declares the
+fields in `requires_post_physics_fields`; the container carries the slot
+only when some term does, and `Model` fills it from
+`DynamicalCore.after_physics_state` after every physics call. The slot is
+invalid (its `valid` flag is 0) on a first step, after restoring a
+checkpoint that predates it and on hosts without a dynamical core; a
+reader must treat it as absent then.
+
+For terms that need a tighter coupling than this (e.g. a CLUBB+MG2 pair as
+in E3SM), the pattern is a *process group* term that runs the inner
+sub-cycle internally and presents a single tendency externally.
 
 ## Plugin contract
 

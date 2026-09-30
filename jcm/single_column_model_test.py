@@ -590,3 +590,37 @@ class TestSelectColumn(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "finite"):
                     select_column(states, ds, lat_req, lon_req)
 
+
+
+class TestCloudAnchorWithoutDycore(unittest.TestCase):
+    """A host with no dynamical core never validates the carried anchor.
+
+    The single-column model runs the 2M through the same ComposablePhysics
+    path, so the ``_post_physics_state`` slot rides its carry; nothing writes
+    it, its ``valid`` flag stays 0, and the cloud scheme takes the received
+    state as its anchor (zero dynamics increment) with finite results.
+    """
+
+    def test_two_moment_column_runs_on_the_fallback_anchor(self):
+        import jax
+
+        from jcm.physics.clouds.lohmann_2m.scheme_test import (
+            TERM_NLEV, _cloudy_state, _composition,
+        )
+
+        scm = SingleColumnModel(
+            physics=_composition(-3.0e-4),
+            vertical=SigmaCoordinates.equidistant(TERM_NLEV),
+            dt_seconds=1800.0)
+        # The (nlev, 2, 1) test block, first column: 1-D profiles, scalar ps.
+        column = tree_map(lambda x: x[:, 0, 0] if x.ndim == 3 else x[0, 0],
+                          _cloudy_state()[0])
+        steps = tree_map(lambda x: jnp.broadcast_to(x, (3,) + x.shape), column)
+        preds = scm.run(steps)
+        slot = preds.physics_data["_post_physics_state"]
+        np.testing.assert_array_equal(np.asarray(slot["valid"]), 0.0)
+        for leaf in jax.tree.leaves(preds.tendencies):
+            self.assertTrue(np.isfinite(np.asarray(leaf)).all())
+        # The cooling tendency condenses in every step (no dynamics needed).
+        self.assertTrue(
+            (np.asarray(preds.tendencies.specific_humidity)[:, 5] < 0).all())

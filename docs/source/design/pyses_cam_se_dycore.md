@@ -22,6 +22,15 @@ pyses advance_coupling_step(..., physics_forcing={"dynamics", "tracers"})
     remap, consistent tracer advection
 ```
 
+`after_physics_state` forms the state between the forcing add and the
+dynamics without running the dynamics: the same forcing, added with pySES's
+own `sum_dynamics_series` / `sum_tracers_series`, gathered to the pg2 columns.
+Under `hybrid` coupling only the tracers (moisture included) pass through
+such a state, so winds and temperature take the gridpoint add; under
+`dribble_all` nothing does and the protocol default applies. The
+tendency-driven cloud schemes use it as their anchor (see
+[operator-split physics](operator_split_physics.md#coupling-within-physics)).
+
 The step path is pure JAX (pyses's `advance_coupling_step` is itself jitted);
 host-side numpy appears only at construction time (grid build, terrain /
 forcing interpolation, output regrid weights).

@@ -70,7 +70,12 @@ Builds the per-`dt` step closure `(state, physics_state, date) ->
 2. Project the backend-native state with `dycore.to_physics_state`.
 3. Call `compute_physics_step_gridpoint` for
    `(physics_tendency, new_physics_state)`.
-4. Pass the native state and gridpoint tendency to `dycore.step`.
+4. If the physics carries the post-physics state
+   (`Physics.post_physics_fields()` is non-empty), ask
+   `dycore.after_physics_state(state, physics_tendency)` for it and store it
+   in the carry with `Physics.record_post_physics_state` (see
+   `DynamicalCore.after_physics_state` below).
+5. Pass the native state and gridpoint tendency to `dycore.step`.
 
 The step is a pure function of `(state, physics_state, date)`. The
 `physics_state` carry is a JAX pytree and is the only cross-step physics
@@ -90,6 +95,33 @@ primitive-equation tendency, applies the forward-Euler physics update,
 runs the two-time-level semi-Lagrangian semi-implicit Crank–Nicolson RK2
 step, then applies the surface-pressure conservation and spectral
 diffusion filters.
+
+### `DynamicalCore.after_physics_state` (`jcm/dycore/base.py`)
+
+Returns the gridpoint state after the physics tendency has been applied and
+before the dynamics runs: the state `dycore.step` hands to its dynamics,
+converted to the layout of `to_physics_state`. It is an optional method with
+a default, so a backend that does not override it keeps working:
+
+| Backend | Returns |
+| --- | --- |
+| protocol default | `to_physics_state(state) + dt·P`, exact for a backend that adds the tendency on the physics grid |
+| `DinosaurDycore` | the gridpoint conversion of `state + dt·T(P)`, formed by the same `_apply_physics_tendency` that `step` uses; `T` is the spectral projection, so for temperature and humidity the result differs from `x + dt·P` by what the truncation drops. The tracer filter of `to_physics_state` is not applied: this is what the dynamics advances from, not what physics is handed |
+| `PysesCamSEDycore` | with `lump_all` coupling, the forcing of `step` (FV→GLL scatter, DSS projection, `q→r` chain rule) added with pySES's own `sum_dynamics_series`/`sum_tracers_series`, gathered back to the pg2 columns. With `hybrid` the tracers come from that lump and the winds and temperature, which pySES dribbles over its substeps, from the gridpoint add; `dribble_all` has no post-physics state and takes the default |
+
+No backend evaluates its dynamics for this. `Model` calls it only when the
+composed physics asks (below), so SPEEDY, Held-Suarez and the idealised
+stacks do no extra work. Under `jit` the Dinosaur add is the same
+computation `step` performs on the same inputs.
+
+The consumer is a tendency-driven cloud scheme. The scheme leaves the cloudy
+part of a cell saturated at the post-physics state; the next step's
+`to_physics_state` minus the carried post-physics state is then the dynamics
+of the step alone, which is what ECHAM's `ptte`/`pqte` hold at `cloud`
+(see [coupling within physics](#coupling-within-physics)). Reconstructing the
+same state as `x_{n-1} + dt·P` would count the projected-out part of the
+physics tendency as dynamics: at T63L47 that residual is 2.0–2.1 g/kg/day rms
+in humidity, against 0.9–1.1 g/kg/day of true dynamics.
 
 ### `compute_physics_step_gridpoint` (`jcm/physics_interface.py`)
 
@@ -207,17 +239,62 @@ destroying the quantity. See
 
 ### Coupling within physics
 
-`ComposablePhysics` is **process-parallel**: every term sees the same
-input `state`, tendencies are summed. Order-independent
-(`A + B + C == B + A + C`), which keeps `replace()` / `remove()` /
-`__add__()` composition operators well-defined.
+The split between the dynamics and the physics is sequential (Lie a, above).
+Inside one physics call `ComposablePhysics` runs its terms in list order on a
+single input state: every term receives the step-start state `x_n`, its
+tendency joins a running sum, and the host applies the total once. The input
+state is not updated between terms. A term that must see what its
+predecessors did reads it from one of the hand-offs below, so within the
+ECHAM stack the coupling is partly sequential and the term order is
+load-bearing: `echam_physics()` ships ECHAM's `physc` order (radiation →
+vertical diffusion → surface → convection → cloud microphysics), and
+reordering coupled terms is a known-unstable configuration.
 
-This differs from ECHAM6's sequential coupling (each scheme sees the
-state with prior schemes' tendencies already applied via
-`tte += ...`). Sequential coupling is more accurate for tightly-coupled
-process pairs but introduces order-dependence. Process-parallel is
-adequate at JCM's climate-rate `dt`; sequential coupling is available
-as a follow-up for terms that need it (cf. E3SM's CLUBB+MG2 loop).
+| Hand-off | Holds | Advanced by | Read by |
+| --- | --- | --- | --- |
+| `_tendency_run` | the sum of the tendencies of the terms already run (winds, T, q, every tracer) | the host, before each term, on both hosts | the cloud schemes (their increments), the JAM removal split, AeroCom |
+| `thermo_run` | a running (T, q, qc, qi), seeded to `x_n` | the terms that call `advance_thermo_run`: vertical diffusion, the prescribed surface flux, Tiedtke, and the cloud scheme after its own tendency. Radiation does not | Tiedtke (its provisional state), Sundqvist (its condensate), COSP, AeroCom |
+| `clouds` | the cover and a condensate view | Sundqvist (cover; condensate from `thermo_run`), Tiedtke (adds its detrainment), the cloud scheme | radiation, aerosol, COSP |
+| `_convective_detrainment` | this step's detrained qc/qi rate; step-local, never carried | Tiedtke | the cloud schemes |
+| `_prev_step` (carry) | the previous step's q and applied q tendency | the host, after the physics | Tiedtke's deep/shallow test |
+| `_post_physics_state` (carry) | the previous step's post-physics state and a validity flag | `Model`, after the physics, from `after_physics_state`; present only when a term declares `requires_post_physics_fields` | the cloud schemes (their anchor) |
+
+**What the cloud schemes receive.** ECHAM's `cloud` and
+`cloud_micro_interface` take the previous time level (`ptm1`, `pqm1`,
+`pxlm1`, `pxim1`; `physc.f90:1073-1074`) and the tendencies accumulated since
+it (`ptte`, `pqte`, `pxlte`, `pxite`): the explicit dynamics
+(`dyn.f90:244-467`, tracer transport `mo_tpcore.f90:581-583`), vertical
+diffusion, radiative heating, gravity-wave drag and convection, with the
+convective detrainment passed separately (`pxtecl`, `pxteci`,
+`physc.f90:1081`). Condensation is the humidity increment the saturation
+humidity does not absorb, `zqcdif = (ztmst·pqte − zdqsat)·paclc`
+(`mo_cloud.f90:706-730`). `jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs`
+forms the same inputs from the hand-offs, and the Lohmann 2M calls it:
+
+- anchor := the previous step's post-physics state `x_ap` from the carry;
+- increment := `(x_n − x_ap) + dt·P_upstream − detrainment`, where
+  `x_n − x_ap` is the dynamics of the last step and `P_upstream` is
+  `_tendency_run` at the cloud scheme;
+- detrainment := `dt ×` `_convective_detrainment`, by itself;
+- provisional state := anchor + increment + detrainment, which is
+  `x_n + dt·P_upstream`, bit for bit the state the scheme's tendencies are
+  relative to.
+
+On a first step, after a restart from a checkpoint that predates the slot,
+and on hosts without a dynamical core (single column, RCE), the carry holds
+no valid anchor: the validity flag is 0 and the anchor is `x_n` with a zero
+dynamics increment. Convection is unaffected: Tiedtke keeps reading
+`thermo_run`, which does not contain radiation.
+
+Terms that run after the cloud scheme in the previous step (surface exchange,
+gravity-wave and orographic drag, the upper sponge) are part of `x_ap`, so
+their heating enters the anchor rather than an increment. In ECHAM the
+gravity-wave and orographic drag run before `cloud`
+(`physc.f90:835-884`); their tropospheric heating in jcm is at most
+0.03 K/day at T63.
+
+This is not ECHAM's parallel (leapfrog) split, where every process of a step
+sees the same time level; nothing here needs it.
 
 ### Dinosaur filters
 
@@ -336,14 +413,14 @@ Two structural differences from JCM:
    (under the shipped `coupling: hybrid`, CAM-SE `se_ftype 2`, tracers
    are lumped while u/v/T are dribbled across the dynamics substeps).
 
-2. **Within-physics coupling.** ECHAM is **sequential** (each scheme
-   reads the state with prior schemes' tendencies already applied via
-   the `tte += ...` pattern on the shared accumulators in
-   `mo_scan_buffer.f90`). JCM's `ComposablePhysics` is
-   **process-parallel** (every term reads the same input state,
-   tendencies are summed). The latter preserves the composability
-   story (the order-independence of `A + B + C`) at the cost of a
-   small accuracy penalty for tightly-coupled term pairs.
+2. **Within-physics coupling.** ECHAM accumulates every scheme's
+   tendency on shared buffers (`tte += ...`, `mo_scan_buffer.f90`), and a
+   scheme sees its predecessors through them. JCM's `ComposablePhysics`
+   hands every term the same input state and sums the tendencies; the
+   predecessors reach a term through the hand-offs of
+   [coupling within physics](#coupling-within-physics) (`_tendency_run`,
+   `thermo_run`, the carry), which make the ECHAM stack partly sequential
+   and its term order load-bearing.
 
 The cross-step physics state in ECHAM lives in module-level globals
 (`mo_radiation_forcing`, …) — semantically the same as JCM's
