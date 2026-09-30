@@ -205,12 +205,14 @@ radius.
   physical (unscaled) condensate, so the inhomogeneity does not shrink the
   crystal radius the IWC laws give. On the grey backend the τ-weighted ssa/asymmetry are
   likewise taken from the unscaled per-phase optical depths, exactly ECHAM's
-  ``zomg``/``zasy``. The RRTMGP backend can only pass per-phase condensate paths
-  to jax-rrtmgp, which weights the combined ssa/asymmetry by the τ those paths
-  produce: identical to ECHAM wherever the liquid and ice factors are equal
-  (every column except ``ktype = 4`` ones at the defaults), while in a
-  ``ktype = 4`` layer holding both phases the total τ is exact but the
-  ssa/asymmetry weighting uses the scaled τ (jax-rrtmgp#37). The four factors are
+  ``zomg``/``zasy``. The RRTMGP backend scales the per-phase condensate paths
+  it hands to jax-rrtmgp, which weights the combined ssa/asymmetry by the τ
+  those paths produce: identical to ECHAM wherever the liquid and ice factors
+  are equal (every column except ``ktype = 4`` ones at the defaults), while in
+  a ``ktype = 4`` layer holding both phases the total τ is exact but the
+  ssa/asymmetry weighting uses the scaled τ. jax-rrtmgp 0.5.0 accepts per-phase
+  optical-depth scales that weight by the unscaled τ; wiring them is #958. The
+  four factors are
   ``RadiationParameters.cloud_inhomogeneity_{liquid, liquid_convective,
   liquid_shallow, ice}``, differentiable leaves.
 
@@ -249,8 +251,8 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   from before transport, while the condensate it pairs them with is
   transported. jcm pairs transported number with transported condensate.
 - `compute` — the SW spectrum is collapsed to a single broadband albedo
-  (``0.46·vis + 0.54·nir``) at the RRTMGP surface BC; a true per-band /
-  direct-diffuse albedo needs a g-point→band map in the library (deferred).
+  (``0.46·vis + 0.54·nir``) at the RRTMGP surface BC. jax-rrtmgp 0.5.0 accepts
+  per-band direct and diffuse albedos; passing them is #959.
   The same single value serves the direct beam and diffuse light, so the
   open-water direct and diffuse albedos are merged before they reach it (see
   {doc}`surface`, *Surface albedo*).
@@ -308,8 +310,8 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   counterpart: HAM activates with Lin-Leaitch or ARG) keeps ECHAM6's
   ``zinhomi = 0.8``. On RRTMGP, a mixed-phase layer in a ``ktype = 4``
   column weights its combined ssa/asymmetry by the scaled rather than the
-  physical per-phase τ until jax-rrtmgp takes a per-phase optical-depth scale
-  (jax-rrtmgp#37). The separate in-cloud-condensate cap
+  physical per-phase τ until the backend passes jax-rrtmgp's per-phase
+  optical-depth scales (#958). The separate in-cloud-condensate cap
   (``_MAX_IN_CLOUD_CONDENSATE``) is only a NaN guard against thin-cloud
   optical-depth blow-up; it binds in ~0.003 % of cloudy cells and is *not* an
   inhomogeneity term.
@@ -323,6 +325,30 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   retrain). The convective-type dependence does not widen that gap: the emulated
   configuration is 2M, where no column is re-typed and RRTMGP also applies the
   uniform 0.8 liquid factor.
+- **Out-of-range RRTMGP inputs.** Water vapour: jax-rrtmgp clips the
+  humidity it receives at zero and treats an absent absorber as absent (the
+  zero relative abundance is guarded), so a dry or slightly negative layer
+  gives finite fluxes. ECHAM instead bounds the input below at machine epsilon
+  (``mo_radiation.f90``: ``xq_vap = MAX(qm_vap, EPSILON(1.0_wp))``). The two
+  give the same radiation: a model-top humidity anywhere from 1e-12 kg/kg
+  down to zero, or negative, gives the same heating rate, so jcm adds no bound
+  of its own. Temperature and pressure: RRTMGP's gas-optics and Planck
+  tables cover 160–355 K and 1096 hPa–1.005 Pa, and a model layer can lie
+  outside both. A 1 Pa top layer is below the pressure range, and radiative
+  cooling can take a thin top layer to the 160 K edge. jax-rrtmgp extends the
+  absorption coefficients and the Planck source linearly along the end
+  interval of each axis and floors them at zero. That is the index-and-fraction
+  rule of RRTMGP's own kernels (``mo_gas_optics_rrtmgp_kernels.F90``), whose
+  frontend rejects out-of-range input before it reaches them
+  (``mo_gas_optics_rrtmgp.F90``), and of the RRTMG that ECHAM6 runs
+  (``mo_lrtm_driver.f90::planckFunction``, ``mo_rrtm_coeffs.f90``). The Planck
+  fractions, which partition a band's source among its g-points, are held at
+  their end values instead, so they stay non-negative and each band's
+  fractions still sum to one. A layer colder than 160 K therefore emits less
+  than one at 160 K, and its longwave cooling weakens as it cools, on both
+  sides of the table edge (``rrtmgp_test.py::TestRRTMGPColdLayerEmission``).
+  In the single-column RRTMGP RCE of the full ECHAM stack the 1 Pa layer
+  settles at 160.2 K.
 - **The NN emulator's radius features keep a trained fill in phase-free
   layers.** The emulator is fed the radius RRTMGP radiates the layer with
   wherever the phase is present, but where it is absent the feature is
