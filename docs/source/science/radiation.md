@@ -309,8 +309,12 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
 - **Cloud inhomogeneity carries ECHAM's T63 values, not its per-resolution
   table.** ECHAM raises the ice factor at higher truncation (``zinhomi = 0.85``
   at T127+) and uses ``zinhoml3 = 0.4`` at T31; jcm takes the T63 values at
-  every resolution and exposes them as parameters, the same T63 convention as
-  the other ECHAM cloud constants. The 2M + SPA composition (no ECHAM-HAM
+  every resolution and exposes them as parameters. The cover's and the
+  microphysics' constants, by contrast, take ECHAM's per-truncation defaults
+  ({doc}`../design/resolution_defaults`, which also gives why these two are
+  held: ``RadiationParameters`` cannot record the truncation its defaults were
+  built for, and ECHAM-HAM's JAM value of ``zinhomi`` is defined at T63
+  only). The 2M + SPA composition (no ECHAM-HAM
   counterpart: HAM activates with Lin-Leaitch or ARG) keeps ECHAM6's
   ``zinhomi = 0.8``. On RRTMGP, a mixed-phase layer in a ``ktype = 4``
   column weights its combined ssa/asymmetry by the scaled rather than the
