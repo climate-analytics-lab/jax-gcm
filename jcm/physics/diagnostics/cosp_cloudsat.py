@@ -96,6 +96,7 @@ from flax import nnx
 
 import jcm.constants as c
 from jcm.forcing import ForcingData
+from jcm.physics.clouds.cloud_data import condensate_masked_cover
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
@@ -322,7 +323,12 @@ class CloudsatCosp(PhysicsTerm):
             # jcosp wants each layer's bottom interface; height_half holds
             # the nlev+1 interfaces top-first.
             zhalf=diagnostics["height_half"][1:],
-            cloud_frac=clouds.cloud_fraction,
+            # ECHAM hands COSP the cover its radiation used (``cosp_f3d =
+            # cld_frc``, mo_psrad_interface.f90 l.414): the cover masked to
+            # cells with condensate (mo_radiation.f90 l.433-434). Masked
+            # here by the condensate COSP itself is given.
+            cloud_frac=condensate_masked_cover(
+                clouds.cloud_fraction, qc_pm, qi_pm),
             conv_frac=jnp.zeros_like(clouds.cloud_fraction),
             mr_lsliq=qc_pm,
             mr_lsice=qi_pm,
