@@ -137,6 +137,7 @@ class TestAtmosphericForcing:
             u_wind=jnp.ones(ncol) * 5.0,
             v_wind=jnp.ones(ncol) * 3.0,
             pressure=jnp.ones(ncol) * 101325.0,
+            surface_pressure=jnp.ones(ncol) * 101325.0,
             sw_downward=jnp.ones(ncol) * 300.0,
             lw_downward=jnp.ones(ncol) * 350.0,
             rain_rate=jnp.ones(ncol) * 1e-6,

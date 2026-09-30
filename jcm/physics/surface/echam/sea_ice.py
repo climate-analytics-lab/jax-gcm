@@ -166,9 +166,11 @@ def sea_ice_physics_step(
     # surface temperature, as precalc_ice reads it (mo_surface_ice.f90
     # l.592-597): Sonntag (1990) over ice at and below tmelt
     # — where a sea-ice surface always is — paired with the sublimation
-    # latent heat ``alhs`` below; ECHAM's ``qs`` form.
+    # latent heat ``alhs`` below; ECHAM's ``qs`` form at the surface pressure
+    # (``ua/paphm1``).
     e_sat = thermodynamics.es_ua(surface_temp)
-    q_sat_surface = thermodynamics.qsat_from_es(e_sat, atmospheric_state.pressure)
+    q_sat_surface = thermodynamics.qsat_from_es(
+        e_sat, atmospheric_state.surface_pressure)
 
     # Temperature and humidity differences. Positive convention: flux UP
     # from surface into the atmosphere when the surface is warmer / wetter

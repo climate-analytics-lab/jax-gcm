@@ -134,9 +134,11 @@ def compute_ocean_surface_fluxes(
     # Ocean surface saturation humidity: ECHAM's precalc_ocean reads the
     # ``ua`` table at the SST (mo_surface_ocean.f90 l.334-339), Sonntag (1990)
     # over ice at and below tmelt and over water above, and forms
-    # ``zqsw = zes/(1 − vtmpc1·zes)`` with ``zes = ua/p``.
+    # ``zqsw = zes/(1 − vtmpc1·zes)`` with ``zes = ua/paphm1``, at the
+    # surface pressure.
     e_sat = thermodynamics.es_ua(ocean_temp)  # Pa
-    q_sat_ocean = thermodynamics.qsat_from_es(e_sat, atmospheric_state.pressure)
+    q_sat_ocean = thermodynamics.qsat_from_es(
+        e_sat, atmospheric_state.surface_pressure)
 
     # Temperature and humidity differences
     delta_temp = ocean_temp - atmospheric_state.temperature
