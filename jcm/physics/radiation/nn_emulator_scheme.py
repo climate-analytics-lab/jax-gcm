@@ -263,7 +263,10 @@ def radiation_scheme_emulated(
             expected_total_cover(
                 cloud_fraction, layer_thickness,
                 cloud_overlap_name(int(parameters.cloud_overlap)),
-                float(parameters.cloud_decorrelation_km),
+                # An array, not ``float()``: the expected cover is a smooth
+                # function of the decorrelation length, and a Python float
+                # would make its derivative raise instead of exist.
+                parameters.cloud_decorrelation_km,
             ),
             jnp.shape(sw_flux_up[0]),
         ),

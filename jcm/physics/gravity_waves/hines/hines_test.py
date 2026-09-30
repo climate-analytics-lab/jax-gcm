@@ -148,6 +148,29 @@ class TestHinesJaxTransforms:
         np.testing.assert_allclose(np.asarray(out[2]), -np.asarray(out[0]),
                                    rtol=1e-3, atol=1e-9)
 
+    def test_diffusion_coefficient_gradients_are_finite(self):
+        """``diffco`` differentiates, parameters included, at every wind (#663).
+
+        Below the launch level ``sigma_t`` is exactly zero and above it the
+        heating can be zero or negative: both mask a branch whose root or
+        quotient must not be formed there.
+        """
+        for scale in (0.0, 1.0, 10.0):
+            col = _make_column(nlev=30, u_scale=scale, v_scale=scale)
+
+            def loss(temperature, config):
+                _, state = hines_gwd(
+                    col["pressure_half"], col["pressure_full"],
+                    col["height_half"], col["density"], col["layer_mass"],
+                    temperature, col["u_wind"], col["v_wind"], config)
+                return jnp.sum(state.diffco ** 2)
+
+            d_t, d_config = jax.grad(loss, argnums=(0, 1))(
+                col["temperature"], HinesParameters.default())
+            assert jnp.all(jnp.isfinite(d_t)), scale
+            for leaf in jax.tree.leaves(d_config):
+                assert jnp.all(jnp.isfinite(leaf)), scale
+
     def test_grad_finite(self):
         """jax.grad runs and produces finite gradients wrt input wind."""
         col = _make_column()

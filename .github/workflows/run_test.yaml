@@ -304,8 +304,8 @@ jobs:
   # an option here: RRTMGP's reverse pass is the heaviest thing in the suite
   # (~12-14 GB peak in one process), so two workers would not fit the runner.
   # The split is by path and lives in ONE place, tools/ci/slow_shards.py:
-  # `radiation` (the ECHAM gradient harnesses and jcm/physics/radiation, ~52
-  # min of tests) and `rest` (everything else, ~63 min), where `rest` is the
+  # `radiation` (the ECHAM gradient harnesses and jcm/physics/radiation, ~68
+  # min of tests) and `rest` (everything else, ~62 min), where `rest` is the
   # complement of `radiation` — so a new slow test file lands in `rest` by
   # construction — and `slow_shards.py check` fails the `radiation` job unless
   # the two collections partition `-m slow` exactly.
@@ -318,7 +318,9 @@ jobs:
     needs: lint
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # ~52 min of tests measured in CI plus ~4 min setup and shard check.
+    # ~68 min of tests measured in CI (PR #970, which added the parameter-
+    # gradient section of term_gradients_test.py, ~16 min) plus ~4 min setup
+    # and shard check.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v3
@@ -355,7 +357,7 @@ jobs:
     needs: lint
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # ~63 min of tests measured in CI plus ~3 min setup.
+    # ~62 min of tests measured in CI plus ~3 min setup.
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v3

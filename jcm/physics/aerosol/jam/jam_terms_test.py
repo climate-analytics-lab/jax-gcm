@@ -2,6 +2,8 @@
 
 import unittest
 
+import pytest
+
 
 class JamFactoryTest(unittest.TestCase):
     def test_term_order_and_categories(self):
@@ -146,6 +148,90 @@ class EchamPhysicsWiringTest(unittest.TestCase):
         )
         arg = next(t for t in phys.terms if t.category == "aerosol_activation")
         self.assertEqual(arg._variant, "ghosh2025")
+
+
+# ---------------------------------------------------------------------------
+# 64-bit mode (#770)
+# ---------------------------------------------------------------------------
+
+def _trace_float32_physics_under_x64(**physics_kwargs):
+    """Trace one ECHAM+JAM physics step, float32 physics with x64 on.
+
+    pySES runs float32 physics under ``jax_enable_x64``, and ``mam4_jax``
+    turns the flag on process-wide when it is imported. The parameters are
+    then float64 while the state is float32, and a float64 value scattered
+    into a float32 operand (``.at[...].set``) is a JAX ``FutureWarning`` today
+    and an error in later releases, so every ``FutureWarning`` is raised as an
+    error here. Dtype promotion is decided when the step is traced, so
+    tracing it with ``jax.eval_shape`` reaches every such site without
+    running the physics. The flag is set and restored explicitly, in a
+    ``finally``, rather than through ``jax.enable_x64``: the adapter
+    ``mam4_jax`` builds sets the process-wide flag itself, which a context
+    manager would not undo.
+    """
+    import warnings
+
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    from jcm.forcing import ForcingData
+    from jcm.physics_interface import PhysicsState
+    from jcm.terrain import TerrainData
+    from jcm.utils import get_coords
+
+    previous = bool(jax.config.read("jax_enable_x64"))
+    try:
+        jax.config.update("jax_enable_x64", True)
+        from jcm.model import Model
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        coords = get_coords(np.linspace(0, 1, 9), spectral_truncation=21)
+        model = Model(coords=coords, time_step=30,
+                      terrain=TerrainData.aquaplanet(coords),
+                      physics=echam_physics(aerosol_module="jam",
+                                            cloud_scheme="2m",
+                                            **physics_kwargs))
+        physics = model.physics
+        nodal = coords.horizontal.nodal_shape
+        shape_3d = (coords.nodal_shape[0],) + nodal
+        state = PhysicsState.zeros(shape_3d).copy(
+            temperature=jnp.full(shape_3d, 288.0),
+            normalized_surface_pressure=jnp.ones(nodal),
+            tracers={spec.name: jnp.zeros(shape_3d)
+                     for spec in physics.required_tracers()},
+        )
+        forcing = ForcingData.zeros(nodal)
+        for term in physics.terms:
+            forcing = term.augment_probe_forcing(forcing)
+
+        def cast(tree):
+            return jax.tree.map(
+                lambda x: x.astype(jnp.float32)
+                if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
+                else x, tree)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)
+            jax.eval_shape(physics.compute_tendencies, cast(state),
+                           cast(forcing), cast(model.terrain))
+    finally:
+        jax.config.update("jax_enable_x64", previous)
+
+
+def test_jam_package_traces_under_x64_without_mixed_dtype_scatters():
+    """The ECHAM+JAM package, placeholder aerosol core, in 64-bit mode."""
+    _trace_float32_physics_under_x64()
+
+
+@pytest.mark.requires_extra("mam4")
+def test_mam4_jam_package_traces_under_x64_without_mixed_dtype_scatters():
+    """The same with the MAM4-JAX aerosol core, whose import sets x64 itself."""
+    import jax
+
+    before = bool(jax.config.read("jax_enable_x64"))
+    _trace_float32_physics_under_x64(jam_microphysics="mam4_jax")
+    assert bool(jax.config.read("jax_enable_x64")) == before
 
 
 if __name__ == "__main__":
