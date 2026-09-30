@@ -872,6 +872,11 @@ def demott2010_inp(
         DeMott et al. (2010), PNAS 107, 11217-11222,
         doi:10.1073/pnas.0910818107
 
+    .. versionchanged:: 3.0.0
+       ``air_density`` is a required third positional argument, with no
+       default: a two-argument call fails rather than silently returning
+       the per-standard-volume number.
+
     """
     a, b, c_exp, d = 5.94e-5, 3.33, 0.0264, 0.0033
     delta_T = 273.16 - temperature
