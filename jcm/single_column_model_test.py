@@ -580,6 +580,161 @@ class TestSelectColumn(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"not a latitude"):
             select_column(states, ds, 120.0, 30.0)
 
+    @staticmethod
+    def _file(lat, lon):
+        """Build a state file on the given axes; each column holds its index."""
+        import xarray as xr
+
+        lat, lon = np.asarray(lat), np.asarray(lon)
+        col = (np.arange(lon.size)[:, None] * 1000.0
+               + np.arange(lat.size)[None, :])
+        states = {"surface": np.broadcast_to(col[None], (2,) + col.shape)}
+        return states, xr.Dataset(coords={"lat": lat, "lon": lon})
+
+    @staticmethod
+    def _gaussian_axes(truncation):
+        from jcm.utils import get_coords
+
+        coords = get_coords(np.linspace(0.0, 1.0, 9),
+                            spectral_truncation=truncation)
+        lon = np.degrees(np.asarray(coords.horizontal.nodal_axes[0]))
+        lat = np.degrees(np.arcsin(np.asarray(coords.horizontal.nodal_axes[1])))
+        return lat, lon
+
+    def test_a_global_file_accepts_every_request_as_before(self):
+        """A global file keeps the whole globe, poles and seam included.
+
+        A Gaussian axis's outermost centre stops short of the pole by more
+        than half a spacing (88.57 at T63, 85.76 at T21), so a plain
+        half-cell bound would refuse ``lat_deg=90`` there; the pole is still
+        inside that row's cell and must resolve to it, as it did before the
+        coverage check existed. Float32 axes (``cdo``/``ncks`` output) must
+        not count their round-off as falling off the grid.
+        """
+        from jcm.single_column_model import select_column
+
+        for truncation in (21, 63):
+            lat, lon = self._gaussian_axes(truncation)
+            for dtype in (np.float64, np.float32):
+                states, ds = self._file(lat.astype(dtype), lon.astype(dtype))
+                for lat_req, lon_req in ((90.0, 0.0), (-90.0, 180.0),
+                                         (0.0, 359.99), (45.0, -120.0),
+                                         (float(lat[0]), float(lon[-1]))):
+                    with self.subTest(truncation=truncation, dtype=dtype,
+                                      lat=lat_req, lon=lon_req):
+                        _, (i_lon, i_lat, _, _) = select_column(
+                            states, ds, lat_req, lon_req)
+                        # The nearest-neighbour pick is unchanged.
+                        self.assertEqual(
+                            i_lat, int(np.argmin(np.abs(lat - lat_req))))
+                        self.assertEqual(i_lon, int(np.argmin(np.abs(
+                            (lon - lon_req + 180.0) % 360.0 - 180.0))))
+
+    def test_a_regional_file_refuses_a_pole_beyond_its_last_row(self):
+        """``lat = 20..80`` has its last cell end at 85; 90 is not in it."""
+        from jcm.single_column_model import select_column
+
+        lat = np.arange(20.0, 81.0, 10.0)
+        for label, axis in (("ascending", lat), ("descending", lat[::-1])):
+            states, ds = self._file(axis, np.arange(0.0, 360.0, 10.0))
+            with self.subTest(order=label):
+                with self.assertRaises(ValueError) as ctx:
+                    select_column(states, ds, 90.0, 0.0)
+                message = str(ctx.exception)
+                self.assertIn("lat_deg=90.0", message)
+                self.assertIn("latitudes 15 to 85", message)
+                self.assertIn("every longitude", message)
+                # 90N is 10 degrees of latitude from the 80N row.
+                self.assertIn("1112 km", message)
+                # Inside the half cell beyond the last row is still covered.
+                _, (_, i_lat, actual_lat, _) = select_column(
+                    states, ds, 84.9, 0.0)
+                self.assertEqual(actual_lat, 80.0)
+                with self.assertRaises(ValueError):
+                    select_column(states, ds, 85.5, 0.0)
+
+    def test_a_single_column_file_accepts_only_its_own_column(self):
+        """A length-1 axis has no spacing, so no half cell to widen it by."""
+        from jcm.single_column_model import select_column
+
+        states, ds = self._file([71.0], [190.0])
+        with self.assertRaises(ValueError) as ctx:
+            select_column(states, ds, -20.0, 0.0)
+        message = str(ctx.exception)
+        self.assertIn("(lat_deg=-20.0, lon_deg=0.0)", message)
+        self.assertIn("latitude 71 and longitude 190", message)
+        self.assertIn("(lat=71, lon=190)", message)
+        self.assertIn("km away", message)
+        # Its own coordinates resolve, also written the other way round the
+        # circle.
+        for lat_req, lon_req in ((71.0, 190.0), (71.0, -170.0)):
+            with self.subTest(lat=lat_req, lon=lon_req):
+                column, (i_lon, i_lat, _, _) = select_column(
+                    states, ds, lat_req, lon_req)
+                self.assertEqual((i_lon, i_lat), (0, 0))
+        with self.assertRaises(ValueError):
+            select_column(states, ds, 71.0, 190.5)
+
+        # A float32 axis (cdo/ncks output) stores the column a few 1e-6
+        # degrees from the value that names it; that is still its column.
+        states, ds = self._file(np.array([71.3226], dtype=np.float32),
+                                np.array([189.8437], dtype=np.float32))
+        self.assertNotEqual(float(ds["lat"].values[0]), 71.3226)
+        select_column(states, ds, 71.3226, 189.8437)
+        with self.assertRaises(ValueError):
+            select_column(states, ds, 71.3236, 189.8437)
+
+    def test_an_uneven_global_axis_has_no_spurious_hole(self):
+        """Tied widest gaps are the spacing, not a missing sector.
+
+        ``0, 75, ..., 300`` has four 75-degree gaps and a 60-degree wrap:
+        every longitude lies between two points of the file, so none may be
+        refused, however the widest gap is chosen among the tied ones.
+        """
+        from jcm.single_column_model import select_column
+
+        states, ds, lat, _ = self._synthetic()     # lon = 0, 75, ..., 300
+        for lon_req in np.arange(0.0, 360.0, 2.5):
+            with self.subTest(lon=lon_req):
+                select_column(states, ds, float(lat[0]), float(lon_req))
+
+    def test_a_request_off_a_zonal_or_sector_extraction_is_refused(self):
+        """Partial files: a latitude band, and a longitude sector on the seam."""
+        from jcm.single_column_model import select_column
+
+        # A zonal band: every longitude, tropics only.
+        lat, lon = self._gaussian_axes(21)
+        band = lat[np.abs(lat) < 30.0]
+        states, ds = self._file(band, lon)
+        _, (_, _, actual_lat, _) = select_column(states, ds, 10.0, 355.0)
+        self.assertLess(abs(actual_lat - 10.0), 3.0)
+        with self.assertRaisesRegex(ValueError, "every longitude"):
+            select_column(states, ds, 60.0, 0.0)
+
+        # A sector across the 0/360 seam, stored as -10..10.
+        states, ds = self._file(lat, np.arange(-10.0, 10.1, 2.5))
+        for lon_req in (0.0, 359.0, -11.0, 11.0, 371.0):
+            with self.subTest(lon=lon_req):
+                select_column(states, ds, 0.0, lon_req)
+        for lon_req in (180.0, 12.0, 347.0):
+            with self.subTest(lon=lon_req):
+                with self.assertRaisesRegex(
+                        ValueError, "longitudes 348.75 east to 11.25"):
+                    select_column(states, ds, 0.0, lon_req)
+
+        # A sector whose half-cell edge falls exactly on the seam: the edge
+        # itself is covered, from either side of the 0/360 convention, and
+        # the first step beyond it is not.
+        states, ds = self._file(lat, np.arange(5.0, 86.0, 10.0))   # 5..85
+        for lon_req in (0.0, 360.0, -0.0, 90.0):
+            with self.subTest(edge=lon_req):
+                select_column(states, ds, 0.0, lon_req)
+        for lon_req in (359.9, -0.1, 90.1):
+            with self.subTest(beyond=lon_req):
+                with self.assertRaisesRegex(ValueError,
+                                            "longitudes 0 east to 90"):
+                    select_column(states, ds, 0.0, lon_req)
+
     def test_a_non_finite_coordinate_is_refused(self):
         """NaN wins no comparison, so it would resolve to column 0 unseen."""
         from jcm.single_column_model import select_column

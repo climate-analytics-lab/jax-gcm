@@ -56,6 +56,19 @@ def _disable_gpu_preallocation():
 _disable_gpu_preallocation()
 
 
+def _disable_run_compilation_cache():
+    """Set ``JCM_CACHE_DIR=off``; see ``_no_run_enabled_compilation_cache``.
+
+    Applied at import and in ``pytest_configure``, not only by that fixture,
+    because a ``setUpClass`` that drives a run (``TestMonthlyMeansStream``)
+    runs before any function-scoped fixture.
+    """
+    os.environ["JCM_CACHE_DIR"] = "off"
+
+
+_disable_run_compilation_cache()
+
+
 def _register_optional_extras(config):
     """Register the ``requires_extra`` plugin in ``tools/ci/optional_extras.py``.
 
@@ -88,6 +101,7 @@ def pytest_configure(config):
     the baseline meant to detect it.
     """
     _disable_gpu_preallocation()
+    _disable_run_compilation_cache()
     _register_optional_extras(config)
 
     global _X64_BASELINE
@@ -357,3 +371,30 @@ def _one_mirror_revision_per_test():
     yield
     remote._FROZEN = None
 
+
+@pytest.fixture(autouse=True)
+def _no_run_enabled_compilation_cache(monkeypatch):
+    """Keep a test's ``runners.run()`` off the shared on-disk XLA cache (#880).
+
+    ``run()`` calls ``maybe_enable_compilation_cache``, which points JAX's
+    persistent compilation cache at ``$SCRATCH/jcm-jax-cache`` or
+    ``~/.cache/jcm/jax`` — a directory every test session, worktree and
+    production run of the same user shares. JAX initialises that cache once
+    per process and keeps it for the life of the process, so without this the
+    first test in a worker that drives a run switches every later test in
+    the worker to loading executables other sessions compiled and writing its
+    own for them: worker-placement-dependent behaviour, and cross-session
+    shared state that no test asked for. ``JCM_CACHE_DIR=off`` is the
+    documented switch ``maybe_enable_compilation_cache`` honours. It is set
+    for the whole session (``_disable_run_compilation_cache``, which also
+    covers class fixtures) and again around every test, so a test that
+    exercises the switch itself controls its own value and cannot leave it
+    changed.
+
+    A cache the operator asks for explicitly for the whole session, through
+    JAX's own ``JAX_COMPILATION_CACHE_DIR`` (``local_ci.sh`` does, to share
+    compiles between xdist workers), is read by JAX at start-up, not through
+    ``run()``, and is unaffected.
+    """
+    monkeypatch.setenv("JCM_CACHE_DIR", "off")
+    yield

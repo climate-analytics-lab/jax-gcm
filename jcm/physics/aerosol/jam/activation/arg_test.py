@@ -329,5 +329,37 @@ class ArgTermTest(unittest.TestCase):
             ArgActivation(variant="nope")
 
 
+class ArgUpdraftAtZeroTkeTest(unittest.TestCase):
+    """The TKE updraft differentiates on a laminar column (#663)."""
+
+    def test_derivatives_at_zero_tke_are_finite(self):
+        import types
+
+        from jcm.physics.aerosol.jam.activation.arg_term import ArgParameters
+
+        term = ArgActivation()
+
+        def updraft(tke, tke_factor):
+            params = ArgParameters(
+                updraft_default=jnp.asarray(0.3), tke_factor=tke_factor,
+                w_min=jnp.asarray(0.1))
+            diagnostics = {"vertical_diffusion": types.SimpleNamespace(tke=tke)}
+            return jnp.sum(term._updraft(diagnostics, tke.shape, params))
+
+        tke = jnp.zeros((4,))
+        factor = jnp.asarray(2.0 / 3.0)
+        # w_min floors the updraft there, so the value is 4 * w_min and the
+        # reference derivative is exactly zero in both arguments.
+        self.assertAlmostEqual(float(updraft(tke, factor)), 0.4, places=6)
+        d_tke, d_factor = jax.grad(updraft, argnums=(0, 1))(tke, factor)
+        np.testing.assert_array_equal(np.asarray(d_tke), 0.0)
+        self.assertEqual(float(d_factor), 0.0)
+        # And the live side is untouched: w = sqrt(tke_factor * TKE).
+        d_live = jax.grad(updraft, argnums=1)(jnp.full((4,), 0.5), factor)
+        self.assertAlmostEqual(float(d_live),
+                               4 * 0.5 / (2 * np.sqrt(0.5 * 2.0 / 3.0)),
+                               places=5)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -102,8 +102,15 @@ term.params.set_value(term.params.get_value().replace(trvdi=jnp.array(2.0)))
 model.run(...)          # may run the OLD trvdi; no error either way
 ```
 
-Build a new `Model` to change a parameter, and put the loop that does so inside
-one `jax.jit` so the rebuild is traced once rather than compiled per iteration.
+The per-term trace cache belongs to the physics object, so a new `Model` built
+on the same, already-compiled physics at the same grid reuses it too. The next run after such an
+edit warns (a `UserWarning` naming each changed parameter, once per field per
+model), so the edit is at least not silent; an edit made before the physics
+first runs is simply the value it compiles with.
+
+Build the physics anew (and a new `Model` from it) to change a parameter, and
+put the loop that does so inside one `jax.jit` so the rebuild is traced once
+rather than compiled per iteration.
 The corollary for anything on the `run` path: never require a concrete value
 from inside the jitted computation (no `int()`/`float()` on a returned array).
 That is fine at top level and raises `ConcretizationTypeError` the moment a

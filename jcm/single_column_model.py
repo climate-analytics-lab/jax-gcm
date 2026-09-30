@@ -146,6 +146,104 @@ def _squeeze_tendency(tend: PhysicsTendency) -> PhysicsTendency:
     return type(tend)(**args)
 
 
+#: Coordinate agreement treated as exact, in degrees (~11 m). A state file
+#: with float32 ``lat``/``lon`` (common from ``cdo``/``ncks``; jcm itself
+#: writes float64) stores a coordinate a few 1e-6 degrees from the value it
+#: names, which must not count as a request falling off the grid.
+_COORDINATE_TOLERANCE_DEG = 1.0e-4
+
+
+def _latitude_coverage(lat) -> tuple[float, float]:
+    """``(south, north)`` bounds of the latitudes an axis's cells cover.
+
+    Each end of the axis extends by half the spacing to its inner
+    neighbour: a request within half a cell of the outermost row is in that
+    row's cell. The exception is an end that already reaches its pole, i.e.
+    whose distance to the pole is less than one spacing, so that no further
+    row of that spacing fits in between. Its cell then runs to the pole,
+    whatever the grid: a Gaussian axis stops ~0.77 spacings short of the pole
+    at every truncation (T63's outermost centre, 88.57, is 1.43 degrees from
+    the pole: beyond its half spacing of 0.92, inside its spacing of 1.85), a
+    regular cell-centred axis half a spacing short, and a pole-centred one
+    not at all, while an extraction from any of them stops at least one full
+    spacing short. That keeps every global file
+    accepting the whole of [-90, 90] and a regional one (``lat = 20..80``)
+    refusing a pole ten degrees beyond its last row. A single-row axis has
+    no spacing and covers only its own latitude.
+    """
+    import numpy as np
+
+    rows = np.unique(np.asarray(lat, dtype=np.float64))
+    if rows.size == 1:
+        return float(rows[0]), float(rows[0])
+    tol = _COORDINATE_TOLERANCE_DEG
+    south_step = rows[1] - rows[0]
+    north_step = rows[-1] - rows[-2]
+    south = (-90.0 if rows[0] + 90.0 < south_step - tol
+             else max(-90.0, rows[0] - south_step / 2.0))
+    north = (90.0 if 90.0 - rows[-1] < north_step - tol
+             else min(90.0, rows[-1] + north_step / 2.0))
+    return float(south), float(north)
+
+
+def _longitude_coverage(lon) -> tuple[float, float] | None:
+    """Return the arc of longitudes an axis's cells cover, ``None`` for all.
+
+    Returned as ``(west, east)`` degrees in [0, 360), the arc running east
+    from ``west`` to ``east``. Longitude is periodic only when the file's
+    cells close the circle: every point's cell extends half the spacing to
+    its neighbour, so coverage can open only at a gap between consecutive
+    longitudes on the circle that is wider than every other — the one an
+    extraction leaves — and there only beyond its two end points' outward
+    half cells, each half the spacing on that end's inner side. A global
+    axis (JCM writes 0-360) has no such gap; a regional or zonal-sector
+    extraction does. A single-column axis has no spacing and covers only its
+    own longitude.
+    """
+    import numpy as np
+
+    points = np.unique(np.mod(np.asarray(lon, dtype=np.float64), 360.0))
+    if points.size == 1:
+        return float(points[0]), float(points[0])
+    tol = _COORDINATE_TOLERANCE_DEG
+    gaps = np.diff(np.append(points, points[0] + 360.0))
+    hole = int(np.argmax(gaps))
+    n = points.size
+    west_extension = gaps[(hole + 1) % n] / 2.0
+    east_extension = gaps[hole - 1] / 2.0
+    # A widest gap no wider than some other gap is just the grid's spacing
+    # (a uniform global axis ties every gap), not a missing sector.
+    others = np.delete(gaps, hole)
+    if (gaps[hole] <= others.max() + tol
+            or gaps[hole] - west_extension - east_extension <= tol):
+        return None
+    west = (points[(hole + 1) % n] - west_extension) % 360.0
+    east = (points[hole] + east_extension) % 360.0
+    return float(west), float(east)
+
+
+def _on_arc(value, west, east) -> bool:
+    """Whether longitude ``value`` lies on the eastward arc ``west`` → ``east``."""
+    tol = _COORDINATE_TOLERANCE_DEG
+    length = (east - west) % 360.0
+    offset = (value - west) % 360.0
+    return offset <= length + tol or offset >= 360.0 - tol
+
+
+def _great_circle_km(lat1, lon1, lat2, lon2) -> float:
+    """Great-circle distance between two points, in km."""
+    import math
+
+    import jcm.constants as c
+
+    phi1, phi2 = math.radians(lat1), math.radians(lat2)
+    dphi = phi2 - phi1
+    dlam = math.radians(lon2 - lon1)
+    a = (math.sin(dphi / 2.0) ** 2
+         + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2.0) ** 2)
+    return 2.0 * c.rearth * math.asin(min(1.0, math.sqrt(a))) / 1000.0
+
+
 def select_column(states, ds, lat_deg: float, lon_deg: float):
     """Return the column of ``states`` nearest to ``(lat_deg, lon_deg)``.
 
@@ -160,13 +258,25 @@ def select_column(states, ds, lat_deg: float, lon_deg: float):
     0/360 seam. Latitude is not periodic, so an out-of-range value cannot be
     folded into meaning and is refused instead.
 
-    Both of those assume the file's axes span the globe, which is what JCM
-    writes. Given a regional or single-column state file they do not, and
-    the nearest column can be arbitrarily far from the one requested with
-    nothing said about it — ``_run_scm`` reports the cell it resolved to at
-    INFO, below the default ``run.log_level``. Detecting that reliably means
-    deciding when a grid covers a pole (a Gaussian axis stops short of
-    +/-90 while its cell does not), which is issue #818, not this function.
+    The request must also lie on the grid the file covers, or the nearest
+    column can be arbitrarily far from it: a regional or single-column
+    state file holds only part of the globe. The rule is the file's axis
+    span extended by half a grid cell at each end — so a request is refused
+    exactly when no cell of the file contains it — with longitude periodic
+    only when the file's longitudes close the circle, and a latitude end
+    that already reaches its pole covering it (see
+    :func:`_latitude_coverage`; a global file therefore accepts every
+    request, as before). A length-1 axis has no spacing to take half of, so
+    a single-column file accepts only its own coordinates. Agreement to
+    1e-4 degrees counts as exact, which absorbs float32 storage of the
+    axes.
+
+    Raises:
+        ValueError: For a non-finite coordinate, a latitude outside
+            [-90, 90], or a request outside the file's coverage; the last
+            names the request, the coverage and the distance to the nearest
+            column.
+
     """
     import numpy as np
 
@@ -187,6 +297,34 @@ def select_column(states, ds, lat_deg: float, lon_deg: float):
     i_lat = int(np.argmin(np.abs(lat - lat_deg)))
     # Signed separation folded into [-180, 180): the shorter way round.
     i_lon = int(np.argmin(np.abs((lon - lon_deg + 180.0) % 360.0 - 180.0)))
+
+    tol = _COORDINATE_TOLERANCE_DEG
+    south, north = _latitude_coverage(lat)
+    lon_arc = _longitude_coverage(lon)
+    off_lat = not south - tol <= float(lat_deg) <= north + tol
+    off_lon = lon_arc is not None and not _on_arc(float(lon_deg), *lon_arc)
+    if off_lat or off_lon:
+        lat_text = (f"latitude {south:g}" if south == north
+                    else f"latitudes {south:g} to {north:g}")
+        if lon_arc is None:
+            lon_text = "every longitude"
+        elif lon_arc[0] == lon_arc[1]:
+            lon_text = f"longitude {lon_arc[0]:g}"
+        else:
+            lon_text = f"longitudes {lon_arc[0]:g} east to {lon_arc[1]:g}"
+        nearest_lat, nearest_lon = float(lat[i_lat]), float(lon[i_lon])
+        distance = _great_circle_km(float(lat_deg), float(lon_deg),
+                                    nearest_lat, nearest_lon)
+        raise ValueError(
+            f"The requested column (lat_deg={lat_deg}, lon_deg={lon_deg}) is "
+            f"outside the state file's grid, which covers {lat_text} and "
+            f"{lon_text} ({lat.size} x {lon.size} lat/lon points: each "
+            "axis's span extended by half a grid cell, and a latitude end "
+            "within one row spacing of its pole extended to the pole). Its "
+            "nearest column, "
+            f"at (lat={nearest_lat:g}, lon={nearest_lon:g}), is "
+            f"{distance:.0f} km away. Request a point the file covers, or "
+            "use a state file whose grid contains this one.")
 
     def slice_field(arr):
         # JCM xarray output is laid out (time, level, lon, lat) for column

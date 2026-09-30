@@ -62,7 +62,8 @@ class _TrivialDycore(DynamicalCore):
     def with_sim_time(self, state, sim_time):
         return {**state, "sim_time": jnp.asarray(sim_time, dtype=jnp.float64)}
 
-    def to_xarray(self, predictions, times, *, additional_coords=None):
+    def to_xarray(self, predictions, times, *, additional_coords=None,
+                  physics=None):
         return xr.Dataset({"sim_time": ("time", np.asarray(times))})
 
     def build_terrain(self, *, source_file=None, **kwargs):

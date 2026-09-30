@@ -9,6 +9,8 @@ API
    jcm.model.Model
    jcm.model.Model.date_from_sim_time
    jcm.predictions.ModelPredictions
+   jcm.predictions.physics_output_fields
+   jcm.predictions.gridded_trajectory_dataset
    jcm.dycore
    jcm.dycore.base.DynamicalCore
    jcm.dycore.dinosaur.DinosaurDycore

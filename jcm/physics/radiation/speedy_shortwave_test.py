@@ -1,4 +1,6 @@
 import unittest
+
+import pytest
 import jax.numpy as jnp
 import numpy as np
 import jax
@@ -592,6 +594,77 @@ class TestShortWaveRadiation(unittest.TestCase):
         _, physics_data_computed = get_clouds(state, physics_data_compute_input, parameters, forcing_now, terrain_new)
 
         self.assertFalse(np.allclose(physics_data_computed.shortwave_rad.cloudc, initial_sw.cloudc))
+
+    @pytest.mark.filterwarnings(
+        "error:scatter inputs have incompatible types:FutureWarning")
+    def test_float64_forcing_keeps_both_cond_branches_at_the_carry_dtype(self):
+        """The pySES precision split must type-check on both cond branches.
+
+        The pySES backend turns ``jax_enable_x64`` on process-wide and runs
+        its physics in float32 (``dycore.physics_dtype``), but not every
+        input follows: the forcing it builds stays float64 (as a coupled
+        driver's does), and so do ``SpeedyCoords``' vertical tables.
+        ``get_clouds`` and ``get_shortwave_rad_fluxes`` each choose between a
+        branch that recomputes from those inputs and one that passes the
+        carried float32 fields through, so the recomputed branch comes out
+        float64 unless it is pinned to the operand's dtypes, and
+        ``lax.cond`` then rejects the pair before anything runs (#797).
+        Both the compute and the replay step are exercised.
+
+        The flag is set with ``jax.config.update`` and restored in a
+        ``finally``, so a failure cannot leak float64 into later tests.
+        """
+        def cast(tree, dtype):
+            return jax.tree.map(
+                lambda leaf: jnp.asarray(leaf, dtype)
+                if jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.floating)
+                else leaf, tree)
+
+        prior = bool(jax.config.read("jax_enable_x64"))
+        jax.config.update("jax_enable_x64", True)
+        try:
+            state, physics_data, forcing_now, terrain_new = (
+                self._build_realistic_state_and_data())
+            from jcm.physics.speedy.speedy_coords import (
+                SpeedyCoords, get_speedy_coords)
+            coords64 = SpeedyCoords.from_coordinate_system(
+                get_speedy_coords(layers=kx, nodal_shape=(ix, il)))
+            self.assertEqual(coords64.wvi.dtype, jnp.float64)
+            state = cast(state, jnp.float32)
+            physics_data = cast(physics_data, jnp.float32).copy(
+                speedy_coords=coords64)
+            terrain_new = cast(terrain_new, jnp.float32)
+            params = cast(parameters, jnp.float32)
+            forcing_now = cast(forcing_now, jnp.float64)
+            self.assertEqual(forcing_now.sea_surface_temperature.dtype,
+                             jnp.float64)
+
+            def assert_carry_dtypes(result, reference):
+                for (path, got), want in zip(
+                        jax.tree_util.tree_flatten_with_path(result)[0],
+                        jax.tree_util.tree_leaves(reference)):
+                    self.assertEqual(got.dtype, jnp.asarray(want).dtype,
+                                     jax.tree_util.keystr(path))
+
+            _, clouds_data = get_clouds(
+                state, physics_data, params, forcing_now, terrain_new)
+            assert_carry_dtypes(clouds_data, physics_data)
+
+            tend, computed = get_shortwave_rad_fluxes(
+                state, clouds_data, params, forcing_now, terrain_new)
+            assert_carry_dtypes(computed, physics_data)
+            self.assertEqual(tend.temperature.dtype, jnp.float32)
+            self.assertFalse(np.allclose(tend.temperature, 0.0))
+
+            replay_in = computed.copy(shortwave_rad=computed.shortwave_rad.copy(
+                compute_shortwave=False))
+            tend_replay, _ = get_shortwave_rad_fluxes(
+                state, replay_in, params, forcing_now, terrain_new)
+            self.assertEqual(tend_replay.u_wind.dtype, jnp.float32)
+            np.testing.assert_array_equal(tend_replay.temperature,
+                                          tend.temperature)
+        finally:
+            jax.config.update("jax_enable_x64", prior)
 
     def test_get_zonal_average_fields_gradient_check(self):
         from jcm.utils import convert_back, convert_to_float

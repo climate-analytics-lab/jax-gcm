@@ -1,6 +1,8 @@
-"""Tests for the dinosaur dycore backend's transport contract."""
+"""Tests for the dinosaur dycore backend: transport and trajectory output."""
 
 import unittest
+
+import numpy as np
 
 
 class SemiLagrangianRequiredTest(unittest.TestCase):
@@ -449,3 +451,146 @@ class AfterPhysicsStateTest(unittest.TestCase):
         after = dycore.after_physics_state(state, None)
         np.testing.assert_array_equal(np.asarray(after.temperature),
                                       np.asarray(grid.temperature))
+
+
+class TrajectoryToXarrayTest(unittest.TestCase):
+    """``DinosaurDycore.to_xarray`` converts a real run's predictions.
+
+    The protocol makes each backend own its trajectory conversion, and
+    ``ModelPredictions.to_xarray`` (what the chunked CLI writes) delegates
+    here, so a direct ``model.dycore.to_xarray(predictions, labels)`` has to
+    accept what a run returns — physics diagnostics nested in dicts such as
+    ``_prev_step`` and ``water_positivity_correction`` — name them as the
+    written files do, and keep the exact ``datetime64`` labels it is given as
+    the time axis (#951).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from jcm.model import Model
+        from jcm.physics.held_suarez.held_suarez_physics import (
+            held_suarez_physics,
+        )
+        from jcm.physics.held_suarez.utils import get_held_suarez_coords
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.physics.speedy.speedy_terms import speedy_physics
+        from jcm.terrain import TerrainData
+
+        # The reproduction from the issue, verbatim.
+        c = get_held_suarez_coords()
+        cls.held_suarez = Model(coords=c, terrain=TerrainData.from_coords(c),
+                                time_step=180, physics=held_suarez_physics())
+        cls.held_suarez_run = cls.held_suarez.run(
+            save_interval="3 hours", total_time="6 hours")
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        cls.speedy = Model(coords=coords,
+                           terrain=TerrainData.from_coords(coords),
+                           physics=speedy_physics(), time_step=30.0,
+                           start_time="2001-07-01")
+        cls.speedy_run = cls.speedy.run(save_interval="1 hour",
+                                        total_time="2 hours")
+        cls.speedy_means = cls.speedy.run(save_interval="1 hour",
+                                          total_time="2 hours",
+                                          output_averages=True)
+
+    def _direct(self, model, predictions):
+        return model.dycore.to_xarray(predictions._predictions,
+                                      predictions.time_labels())
+
+    def test_the_issue_reproduction_converts(self):
+        # Raised ``AttributeError: 'dict' object has no attribute 'shape'``.
+        predictions = self.held_suarez_run
+        self.assertIn("_prev_step", predictions.physics)
+        self.assertIn("water_positivity_correction", predictions.physics)
+        ds = self._direct(self.held_suarez, predictions)
+        self.assertIn("water_positivity_correction.total_water_tendency", ds)
+        self.assertFalse([name for name in ds.data_vars
+                          if name.startswith("_prev_step")])
+
+    def test_variables_match_what_the_written_file_holds(self):
+        """The CLI writes ``ModelPredictions.to_xarray()``; so must this.
+
+        The only variable the wrapper adds is ``time_bounds``; for interval
+        means it also drops the categorical diagnostics it lists in
+        ``omitted_interval_mean_variables``, which a trajectory conversion
+        (before cell methods exist) keeps.
+        """
+        cases = (("held_suarez", self.held_suarez, self.held_suarez_run),
+                 ("speedy", self.speedy, self.speedy_run),
+                 ("speedy means", self.speedy, self.speedy_means))
+        for name, model, predictions in cases:
+            with self.subTest(case=name):
+                direct = self._direct(model, predictions)
+                written = predictions.to_xarray()
+                omitted = written.attrs.get(
+                    "omitted_interval_mean_variables", "")
+                expected = (set(written.data_vars) - {"time_bounds"}
+                            | set(filter(None, omitted.split(","))))
+                self.assertEqual(set(direct.data_vars), expected)
+                for var in ("temperature", "u_wind"):
+                    self.assertEqual(direct[var].dims, written[var].dims)
+                    self.assertEqual(direct[var].attrs.get("units"),
+                                     written[var].attrs.get("units"))
+                    np.testing.assert_array_equal(direct[var].values,
+                                                  written[var].values)
+        # A SPEEDY run's typed sub-structs are named by field, not position.
+        self.assertIn("condensation.precls", self._direct(
+            self.speedy, self.speedy_run))
+        self.assertIn("iptop", " ".join(
+            self.speedy_means.to_xarray().attrs[
+                "omitted_interval_mean_variables"].split(",")))
+
+    def test_a_trajectory_fetched_to_the_host_writes_the_same_file(self):
+        """Host arrays write the same variables as device arrays.
+
+        ``jax.device_get`` turns every leaf into a numpy array; the file a
+        trajectory writes must not depend on where its arrays live.
+        """
+        import jax
+
+        for model, predictions in ((self.held_suarez, self.held_suarez_run),
+                                   (self.speedy, self.speedy_run)):
+            on_host = jax.device_get(predictions).with_context(model)
+            self.assertEqual(set(on_host.to_xarray().data_vars),
+                             set(predictions.to_xarray().data_vars))
+
+    def test_time_axis_is_the_exact_labels_given(self):
+        for model, predictions in ((self.held_suarez, self.held_suarez_run),
+                                   (self.speedy, self.speedy_run),
+                                   (self.speedy, self.speedy_means)):
+            labels = predictions.time_labels()
+            self.assertTrue(np.issubdtype(labels.dtype, np.datetime64))
+            ds = self._direct(model, predictions)
+            np.testing.assert_array_equal(ds["time"].values, labels)
+        # Dated, not elapsed: the SPEEDY run starts on 2001-07-01.
+        np.testing.assert_array_equal(
+            self._direct(self.speedy, self.speedy_run)["time"].values,
+            np.array(["2001-07-01T01:00", "2001-07-01T02:00"],
+                     dtype="datetime64[ms]"))
+        # An elapsed-time axis carries no date, so it is refused rather than
+        # silently relabelled.
+        with self.assertRaisesRegex(TypeError, "datetime64"):
+            self.held_suarez.dycore.to_xarray(
+                self.held_suarez_run._predictions, np.array([0.125, 0.25]))
+
+    def test_explicit_physics_wins_and_none_bound_is_refused(self):
+        from jcm.dycore.dinosaur.dycore import DinosaurDycore
+
+        predictions = self.held_suarez_run
+        # Passing the physics explicitly is the same conversion.
+        ds = self.held_suarez.dycore.to_xarray(
+            predictions._predictions, predictions.time_labels(),
+            physics=self.held_suarez.physics)
+        self.assertEqual(set(ds.data_vars),
+                         set(self._direct(self.held_suarez,
+                                          predictions).data_vars))
+        # A dycore no Model composed has nothing to name the diagnostics
+        # with; that is an error, not a guess at their names.
+        standalone = DinosaurDycore(coords=self.held_suarez.coords,
+                                    terrain=self.held_suarez.terrain,
+                                    dt_seconds=180.0)
+        self.assertIsNone(standalone.output_physics)
+        with self.assertRaisesRegex(TypeError, "no physics package"):
+            standalone.to_xarray(predictions._predictions,
+                                 predictions.time_labels())

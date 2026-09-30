@@ -67,7 +67,7 @@ def test_trajectory_serialization_calls_public_output_labeller(monkeypatch):
                         recording_labeller)
 
     class FakeDycore:
-        def to_xarray(self, predictions, times):
+        def to_xarray(self, predictions, times, physics=None):
             return xr.Dataset(
                 {"temperature": ("time", np.array([280.0, 281.0]))},
                 coords={"time": times})

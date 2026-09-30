@@ -184,12 +184,16 @@ def soil_temperature_step(
     cp_soil = cp_soil_dry + soil_moisture * (cp_water - cp_soil_dry)
     heat_capacity = rho_soil * cp_soil * soil_depths[None, :]
     
-    # Initialize tendency
+    # Initialize tendency. Every scattered value is pinned to its dtype: the
+    # soil parameters are float64 under x64 even when the physics runs in
+    # float32 (pySES), and a float64 value scattered into a float32 operand
+    # is a JAX FutureWarning today and an error in later releases (#770).
     temp_tendency = jnp.zeros_like(soil_temp)
-    
+    dtype = temp_tendency.dtype
+
     # Top layer: affected by surface heat flux
     temp_tendency = temp_tendency.at[:, 0].set(
-        surface_heat_flux / heat_capacity[:, 0]
+        (surface_heat_flux / heat_capacity[:, 0]).astype(dtype)
     )
     
     # Simple heat diffusion between layers
@@ -198,10 +202,10 @@ def soil_temperature_step(
     layer_spacing = 0.5 * (soil_depths[1:] + soil_depths[:-1])
     heat_exchange = thermal_diffusivity * (soil_temp[:, :-1] - soil_temp[:, 1:]) / layer_spacing
     temp_tendency = temp_tendency.at[:, 1:].add(
-        heat_exchange / heat_capacity[:, 1:]
+        (heat_exchange / heat_capacity[:, 1:]).astype(dtype)
     )
     temp_tendency = temp_tendency.at[:, :-1].add(
-        -heat_exchange / heat_capacity[:, :-1]
+        (-heat_exchange / heat_capacity[:, :-1]).astype(dtype)
     )
     
     return temp_tendency

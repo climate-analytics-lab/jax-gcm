@@ -15,6 +15,7 @@ from typing import Any, Dict, Tuple, TypeAlias
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 import tree_math
 from jax import tree_util
 
@@ -56,6 +57,12 @@ logger = logging.getLogger(__name__)
 # vorticity / divergence for the dinosaur backend) is free to do so — the
 # conversion to u/v happens inside the dycore's ``to_physics_state`` and
 # is not visible to physics packages.
+
+
+#: The array types a diagnostics flattening publishes: device arrays, and the
+#: host arrays the same predictions hold after ``jax.device_get`` (a pytree
+#: fetched to the host must serialize to the same variables).
+OUTPUT_ARRAY_TYPES = (jax.Array, np.ndarray)
 
 
 @tree_math.struct
@@ -391,7 +398,7 @@ class Physics:
                     # publishing term carries it into the netCDF as
                     # variable attributes through its ``output_attrs``.
                     continue
-                if isinstance(val, jax.Array):
+                if isinstance(val, OUTPUT_ARRAY_TYPES):
                     items[new_key] = val
                 elif hasattr(val, "__dict__") and val.__dict__:
                     items.update(_to_dict_recursive(val, parent_key=new_key))

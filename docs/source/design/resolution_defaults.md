@@ -98,7 +98,7 @@ present:
   chose is convection and gravity-wave values per truncation first and the
   Tiedtke retune after (#682).
 * the ice cloud-optics inhomogeneity `zinhomi` and the deep-convective liquid
-  `zinhoml3` (`mo_cloud_optics.f90` l.115-134). `RadiationParameters` is a
+  `zinhoml3` (`mo_cloud_optics.f90` l.115-134; #974). `RadiationParameters` is a
   `tree_math.struct`, which has no static field to record the truncation its
   defaults were built for (step 2 above), and ECHAM-HAM's own override of
   `zinhomi` for the JAM pairing (0.7, `lcdnc_progn` with `ncd_activ = 2`) is

@@ -254,5 +254,23 @@ import pytest  # noqa: E402
 IceNucleationModelTest = pytest.mark.slow(IceNucleationModelTest)
 
 
+class CoolingRateAtZeroTkeTest(unittest.TestCase):
+    """The ascent cooling rate differentiates on a laminar column (#663)."""
+
+    def test_derivative_at_zero_tke_is_finite(self):
+        import types
+
+        term = IceNucleation()
+
+        def rate(tke):
+            diagnostics = {"vertical_diffusion": types.SimpleNamespace(tke=tke)}
+            return jnp.sum(term._cooling_rate(diagnostics,
+                                              jnp.full(tke.shape, 250.0)))
+
+        d_tke = jax.grad(rate)(jnp.zeros((4,)))
+        # _W_MIN floors w at zero TKE, so the reference derivative is zero.
+        np.testing.assert_array_equal(np.asarray(d_tke), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()
