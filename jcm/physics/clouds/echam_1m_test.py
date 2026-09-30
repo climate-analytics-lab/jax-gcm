@@ -1430,6 +1430,38 @@ class TestTerm:
             -(3e-4 + 1e-7 * 1200.0), rel=1e-12)
 
 
+class TestCloudSchemeInputs:
+
+    def test_detrainment_is_separate_and_changes_nothing_else(self):
+        """``_convective_detrainment`` leaves the increments and joins as ``pxtecl``.
+
+        ECHAM reads the condensate only as ``pxlm1 + ztmst·(pxlte + pxtecl)``
+        (F:666-680), so the result is the same whether the detrainment arrives
+        separately or inside the running tendency.
+        """
+        from jcm.physics.clouds.echam_1m import (
+            Echam1MMicrophysics, cloud_scheme_inputs_stage1)
+        nlev, ncols, k = 6, 2, 3
+        zeros = jnp.zeros((nlev, ncols))
+        detr = zeros.at[k].set(4e-8)
+        run = {"temperature": zeros.at[k].set(-1e-5), "specific_humidity": zeros,
+               "tracers": {"qc": detr + zeros.at[k].set(1e-8), "qi": zeros}}
+        state, diag, forcing, terrain = _term_inputs(tendency_run=run)
+        anchor, inc, dqc, dqi = cloud_scheme_inputs_stage1(state, diag)
+        # Not published separately: the detrainment stays in the increment.
+        assert f(inc["qc"][k, 0]) == pytest.approx(5e-8 * 1200.0, rel=1e-12)
+        assert f(dqc[k, 0]) == 0.0
+        tend_a, _ = Echam1MMicrophysics()(state, diag, forcing, terrain)
+        diag["_convective_detrainment"] = {"qc": detr, "qi": zeros}
+        anchor, inc, dqc, dqi = cloud_scheme_inputs_stage1(state, diag)
+        assert f(inc["qc"][k, 0]) == pytest.approx(1e-8 * 1200.0, rel=1e-6)
+        assert f(dqc[k, 0]) == pytest.approx(4e-8 * 1200.0, rel=1e-12)
+        tend_b, _ = Echam1MMicrophysics()(state, diag, forcing, terrain)
+        for a, b in zip(jax.tree.leaves(tend_a), jax.tree.leaves(tend_b)):
+            np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-12,
+                                       atol=1e-20)
+
+
 class TestShallowLiquidConvectionType:
     """ECHAM ``mo_cloud.f90``'s radiation ``ktype = 4`` re-typing (F:1439-1455)."""
 

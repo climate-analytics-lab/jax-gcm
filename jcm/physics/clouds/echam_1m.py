@@ -46,16 +46,12 @@ from jcm.physics.clouds.cloud_utils import (
     prescribed_droplet_number,
     sundqvist_condensation,
 )
-# The saturation vapour pressure of the sweep: the one place it is chosen.
-# ECHAM6.3 tabulates Sonntag (1990) (mo_echam_convect_tables.f90:42-52,
-# 262-309); jcm's cloud schemes use the Tetens form below, and whether ECHAM
-# physics adopts Sonntag is the maintainer's decision. Every saturation value
-# and derivative in the sweep comes from these two functions (the derivative
-# by ``jax.jvp``), so the choice is this import.
-from jcm.physics.clouds.sundqvist import (
-    saturation_vapor_pressure_ice as _es_ice_formula,
-    saturation_vapor_pressure_water as _es_water_formula,
-)
+# Saturation vapour pressure and the lo2 phase rule of the ECHAM cloud
+# schemes: one module, shared with the cover, whose formula switch selects
+# ECHAM's Sonntag (1990) fit or jcm's Tetens pair for every ECHAM cloud scheme
+# at once. Every saturation value and slope in the sweep comes from it.
+from jcm.physics.clouds import echam_saturation as _saturation
+from jcm.physics.clouds.echam_saturation import lo2_ice_phase
 from jcm.physics.surrogate_gradient import with_surrogate_gradient
 
 # Defaults shared by the ``default`` factory's signature AND its legacy-config
@@ -359,9 +355,16 @@ class MicrophysicsTendencies(NamedTuple):
 # ---------------------------------------------------------------------------
 
 def _es_and_derivative(temperature, ice):
-    """``(e_s, de_s/dT)`` [Pa, Pa/K] over ice or over water at every temperature."""
-    formula = _es_ice_formula if ice else _es_water_formula
-    return jax.jvp(formula, (temperature,), (jnp.ones_like(temperature),))
+    """``(e_s, de_s/dT)`` [Pa, Pa/K] over ice or over water at every temperature.
+
+    The formula is :mod:`echam_saturation`'s selection; the slope is the
+    analytic one ECHAM tabulates beside the value.
+    """
+    if ice:
+        es = _saturation.es_ice(temperature)
+        return es, es * _saturation.dlnes_dT_ice(temperature)
+    es = _saturation.es_water(temperature)
+    return es, es * _saturation.dlnes_dT_water(temperature)
 
 
 def _ua(temperature):
@@ -393,15 +396,6 @@ def _ub(temperature):
     es_w, des_w = _es_and_derivative(temperature, ice=False)
     return jnp.where(ice, c.alhs / c.cpd * (des_i / es_i),
                      c.alhc / c.cpd * (des_w / es_w))
-
-
-def lo2_ice_phase(temperature, cloud_ice, csecfrl, cthomi):
-    """ECHAM's ``lo2``: ice below ``cthomi``, or below ``tmelt`` with ice above ``csecfrl``.
-
-    Strict inequalities, as ECHAM's ``FSEL`` chain makes them (F:647-650,
-    ``mo_echam_convect_tables.f90:664-667``).
-    """
-    return (temperature < cthomi) | ((temperature < c.tmelt) & (cloud_ice > csecfrl))
 
 
 # ---------------------------------------------------------------------------
@@ -1416,6 +1410,45 @@ def shallow_liquid_convection_type(
     return jnp.where(shallow_liquid, jnp.asarray(4, ktype.dtype), ktype)
 
 
+def cloud_scheme_inputs_stage1(state: PhysicsState, diagnostics: dict):
+    """Anchor, increments and detrainment of ECHAM's cloud routine, from the host.
+
+    The anchor (``ptm1``, ``pqm1``, ``pxlm1``, ``pxim1``) is the state the
+    physics receives. The increments (``ztmst·ptte``, ``ztmst·pqte``,
+    ``ztmst·pxlte``, ``ztmst·pxite``) are ``dt`` times the running tendency of
+    the terms upstream (``_tendency_run``), with the convective detrainment
+    removed from the condensate; the detrainment (``ztmst·pxtecl``,
+    ``ztmst·pxteci``) comes from ``_convective_detrainment`` where convection
+    publishes it, else it is zero and stays inside the increments, which gives
+    the same provisional condensate. These are the semantics of the shared
+    ``cloud_inputs.cloud_scheme_inputs`` without a carried post-physics state.
+
+    Returns:
+        ``(anchor, increment, detrained_qc, detrained_qi)``; ``anchor`` and
+        ``increment`` are dicts with ``temperature``, ``specific_humidity``,
+        ``qc`` and ``qi``.
+
+    """
+    dt = diagnostics["_dt_seconds"]
+    zeros = jnp.zeros_like(state.temperature)
+    anchor = {"temperature": state.temperature,
+              "specific_humidity": state.specific_humidity,
+              "qc": state.tracers.get("qc", zeros),
+              "qi": state.tracers.get("qi", zeros)}
+    run = diagnostics.get("_tendency_run") or {}
+    tracers = run.get("tracers", {})
+    detrainment = diagnostics.get("_convective_detrainment") or {}
+    detrained_qc = dt * detrainment.get("qc", zeros)
+    detrained_qi = dt * detrainment.get("qi", zeros)
+    increment = {
+        "temperature": dt * run.get("temperature", zeros),
+        "specific_humidity": dt * run.get("specific_humidity", zeros),
+        "qc": dt * tracers.get("qc", zeros) - detrained_qc,
+        "qi": dt * tracers.get("qi", zeros) - detrained_qi,
+    }
+    return anchor, increment, detrained_qc, detrained_qi
+
+
 class Echam1MMicrophysics(PhysicsTerm):
     """ECHAM6.3's 1-moment cloud scheme as a composable PhysicsTerm.
 
@@ -1425,13 +1458,14 @@ class Echam1MMicrophysics(PhysicsTerm):
     droplet number is ECHAM's prescribed ``acdnc``
     (:func:`~jcm.physics.clouds.cloud_utils.prescribed_droplet_number`).
 
-    Anchor and increments. The anchor is the step-start state of the
-    physics. The increments are ``dt`` times the running sum of the
-    tendencies of every physics term composed before this one
-    (``_tendency_run``): in the ECHAM stack radiation, vertical diffusion
-    (with its condensate), the surface and convection (with its detrained
-    condensate), which are the physics terms ECHAM's ``ptte``/``pqte``/
-    ``pxlte``/``pxite`` hold at ``cloud``. They do NOT hold the dynamics of
+    Anchor and increments (:func:`cloud_scheme_inputs_stage1`). The anchor is
+    the state the physics receives. The increments are ``dt`` times the
+    running sum of the tendencies of every physics term composed before this
+    one (``_tendency_run``): in the ECHAM stack radiation, vertical diffusion
+    (with its condensate), the surface and convection, which are the physics
+    terms ECHAM's ``ptte``/``pqte``/``pxlte``/``pxite`` hold at ``cloud``;
+    the convective detrainment is passed separately, as ECHAM's
+    ``pxtecl``/``pxteci``. They do NOT hold the dynamics of
     the step, which ECHAM's increments do (advection and the adiabatic term,
     ``dyn.f90``, transport): in jcm the dynamics is already in the step-start
     state. What follows: in a partly cloudy box large-scale ascent forms no
@@ -1465,6 +1499,11 @@ class Echam1MMicrophysics(PhysicsTerm):
     # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
     # the cover term; this term fills the precip/process-rate fields.
     output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS
+    # The fields of the previous step's post-physics state this term takes
+    # as ECHAM's anchor when the host carries one (the dynamics of the step
+    # then joins the increments).
+    requires_post_physics_fields: ClassVar[tuple[str, ...]] = (
+        "temperature", "specific_humidity", "qc", "qi")
 
     def __init__(self, params: MicrophysicsParameters | None = None, *,
                  params_are_defaults: bool = False):
@@ -1480,6 +1519,17 @@ class Echam1MMicrophysics(PhysicsTerm):
         )
         self.params_are_defaults = params is None or params_are_defaults
 
+    def cache_coords(self, coords) -> None:
+        """Warn if default parameters were built for another grid.
+
+        The parameters were fixed at construction and are not re-resolved;
+        parameters the caller supplied are not checked.
+        """
+        if self.params_are_defaults:
+            from jcm.physics.resolution_defaults import check_defaults_grid
+            check_defaults_grid(type(self).__name__,
+                                self.params.get_value().defaults_truncation, coords)
+
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
         """``qc`` / ``qi`` are read each step; declared so dynamics carries them."""
@@ -1487,22 +1537,6 @@ class Echam1MMicrophysics(PhysicsTerm):
             TracerSpec("qc", units="kg/kg"),
             TracerSpec("qi", units="kg/kg"),
         )
-
-    @staticmethod
-    def _anchor_state(state: PhysicsState) -> dict:
-        """Return the anchor of ECHAM's increments (``ptm1``, ``pqm1``, ``pxlm1``, ``pxim1``).
-
-        It is the step-start state of the physics. This is the one place the
-        anchor is chosen: were the host to supply the previous step's
-        post-physics state, the anchor would become that state and
-        ``state − anchor`` (the dynamics of the step) would join the
-        increments.
-        """
-        zeros = jnp.zeros_like(state.temperature)
-        return {"temperature": state.temperature,
-                "specific_humidity": state.specific_humidity,
-                "qc": state.tracers.get("qc", zeros),
-                "qi": state.tracers.get("qi", zeros)}
 
     def __call__(
         self,
@@ -1524,28 +1558,10 @@ class Echam1MMicrophysics(PhysicsTerm):
         pressure_thickness = diagnostics.get(
             "pressure_thickness", air_density * layer_thickness * c.grav)
 
-        # ECHAM's cloud routine receives an anchor state and the increments
-        # accumulated since it (``ztmst·ptte`` etc.). The anchor comes from one
-        # place, ``_anchor_state``; the increments are the running sum of the
-        # tendencies of every physics term upstream of this one, which the host
-        # publishes as ``_tendency_run``: radiation, vertical diffusion
-        # (including its condensate), the surface and convection (including its
-        # detrained condensate). Without ``_tendency_run`` (a standalone call)
-        # the increments are zero.
-        anchor = self._anchor_state(state)
-        run = diagnostics.get("_tendency_run")
-        zeros = jnp.zeros_like(state.temperature)
-        if run is None:
-            increments = {"temperature": zeros, "specific_humidity": zeros,
-                          "qc": zeros, "qi": zeros}
-        else:
-            tracers = run.get("tracers", {})
-            increments = {
-                "temperature": dt * run["temperature"],
-                "specific_humidity": dt * run["specific_humidity"],
-                "qc": dt * tracers.get("qc", zeros),
-                "qi": dt * tracers.get("qi", zeros),
-            }
+        # ECHAM's cloud routine receives an anchor state, the increments
+        # accumulated since it and the convective detrainment, from one place.
+        anchor, increments, detrained_qc, detrained_qi = (
+            cloud_scheme_inputs_stage1(state, diagnostics))
 
         # Droplet number. ECHAM passes its prescribed ``acdnc`` (physc.f90
         # section 3.12) to the cloud routine as ``pacdnc``, which both the
@@ -1568,6 +1584,7 @@ class Echam1MMicrophysics(PhysicsTerm):
             clouds.cloud_fraction,
             pressure_full, pressure_thickness, air_density, layer_thickness,
             acdnc, dt, params,
+            detrained_liquid=detrained_qc, detrained_ice=detrained_qi,
             autoconversion_droplet_number=cdnc_autoconversion,
         )
 

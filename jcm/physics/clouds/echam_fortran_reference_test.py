@@ -23,7 +23,9 @@ reproduce it to 4e-12 in e_s and 2e-9 in de_s/dT; the table variant's outputs
 differ from it by < 3e-11 of each column's scale, far inside the tolerance).
 The ``tetens`` variant (NOT ECHAM: jcm's Tetens e_s inside the otherwise
 unmodified routines) is compared too, so a formulation that is right except
-for the saturation formula can be recognised as such.
+for the saturation formula can be recognised as such. Each variant runs jcm
+with the matching choice of ``echam_saturation.SATURATION_FORMULA``
+(``saturation_formula``), restored afterwards.
 
 Physical constants
 ------------------
@@ -171,6 +173,25 @@ def echam_constants():
 
 
 @contextlib.contextmanager
+def saturation_formula(variant: str):
+    """Select the vapour-pressure formula of the variant for the duration.
+
+    ``sonntag`` (and the resolution data, which are the sonntag variant) runs
+    jcm's ECHAM cloud schemes with the Sonntag (1990) fit, ``tetens`` with
+    jcm's Tetens pair, so each variant tests the formulation under its own
+    saturation curve. The previous selection is restored afterwards.
+    """
+    from jcm.physics.clouds import echam_saturation
+    saved = echam_saturation.SATURATION_FORMULA
+    echam_saturation.set_saturation_formula(
+        "tetens" if variant == "tetens" else "sonntag")
+    try:
+        yield
+    finally:
+        echam_saturation.set_saturation_formula(saved)
+
+
+@contextlib.contextmanager
 def precision(name: str):
     with jax.enable_x64(name == "float64"):
         yield
@@ -247,6 +268,8 @@ def run_jcm_cloud(inp: dict, nn: int = 63) -> dict:
       _tendency_run qc, qi     <- pxlte + pxtecl, pxite + pxteci (jcm's
                                   convection returns its detrainment inside
                                   its condensate tendency)
+      _convective_detrainment  <- pxtecl, pxteci (published separately by
+                                  convection, as ECHAM passes them)
       clouds.cloud_fraction    <- paclc
       air_density              <- papm1 / (rd*ptvm1)            (mo_cloud.f90:382)
       layer_thickness          <- dp / (g*air_density), dp from paphm1, so that
@@ -298,6 +321,8 @@ def run_jcm_cloud(inp: dict, nn: int = 63) -> dict:
             "tracers": {"qc": jnp.asarray(inp["pxlte"] + inp["pxtecl"]),
                         "qi": jnp.asarray(inp["pxite"] + inp["pxteci"])},
         },
+        "_convective_detrainment": {"qc": jnp.asarray(inp["pxtecl"]),
+                                    "qi": jnp.asarray(inp["pxteci"])},
         "convection": _Convection(ktype=jnp.asarray(inp["ktype"]),
                                   cloud_top=jnp.asarray(inp["kctop"] - 1)),
     }
@@ -345,7 +370,7 @@ def comparison(kind: str, variant: str, prec: str, nn: int = 63) -> dict:
     inp = echam_inputs(kind, variant, None if nn == 63 else nn)
     ref = echam_outputs(kind, variant, None if nn == 63 else nn)
     run = run_jcm_cover if kind == "cover" else run_jcm_cloud
-    with echam_constants(), precision(prec):
+    with echam_constants(), precision(prec), saturation_formula(variant):
         got = run(inp, nn=nn)
     ri, gi = increments(kind, inp, ref), increments(kind, inp, got)
     rtol = RTOL_F64 if prec == "float64" else RTOL_F32
@@ -554,7 +579,7 @@ def show(kind: str, column: str, variant: str = "sonntag", prec: str = "float64"
     inp = echam_inputs(kind, variant)
     ref = echam_outputs(kind, variant)
     run = run_jcm_cover if kind == "cover" else run_jcm_cloud
-    with echam_constants(), precision(prec):
+    with echam_constants(), precision(prec), saturation_formula(variant):
         got = run(inp)
     j = column_names(kind).index(column)
     ri, gi = increments(kind, inp, ref), increments(kind, inp, got)
