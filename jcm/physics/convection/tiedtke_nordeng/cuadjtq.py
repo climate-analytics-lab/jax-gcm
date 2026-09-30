@@ -112,7 +112,7 @@ def cuadjtq(
         ``(T_adj, q_adj, condensate)`` with ``condensate = q − q_adj``, the
         vapour the two steps removed (ECHAM's callers form it as
         ``zqold − pqu``). It has the sign of the first step, except within
-        ~1e-4 K of ``tmelt``, where a first step that crosses the melting
+        ~1 mK of ``tmelt``, where a first step that crosses the melting
         point is refined on the other phase's table (``es`` steps by ~1e-4
         there) and the unclipped refinement can outweigh it.
 
@@ -150,7 +150,7 @@ def cuadjtq_newton(
     ``plu + zqold − pqu``, only ``IF (pqu < zqold)`` — the test that also
     marks the level as condensing (``klab = 2``). A subsaturated parcel is
     returned unchanged. Total water is conserved wherever vapour was removed;
-    within ~1e-4 K of ``tmelt``, where the refinement can return more vapour
+    within ~1 mK of ``tmelt``, where the refinement can return more vapour
     than the parcel had (see :func:`cuadjtq`), ECHAM keeps the adjusted
     temperature and vapour and leaves the condensate alone, and so does
     this.

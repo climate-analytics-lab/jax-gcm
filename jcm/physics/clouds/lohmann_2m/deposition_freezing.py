@@ -85,9 +85,8 @@ def mixed_phase_deposition_and_corrections(
     5. Determine phase mask `lo2`:
        - True  (ice)    if T < cthomi, OR if T < tmelt AND updraft < threshold
        - False (liquid) otherwise
-    6. Look up saturation vapour pressures at the new temperature using the
-       ECHAM lookup-table approach (here replaced by analytic Teten's formula
-       consistent with the rest of the JAX scheme).
+    6. Saturation vapour pressures at the new temperature: ECHAM's ``ua`` /
+       ``uaw`` tables, Sonntag (1990), from :mod:`jcm.physics.thermodynamics`.
     7. Compute saturation specific humidities and thermodynamic correction factor
        `zqcon = 1 / (1 + Lc * dqs/dT)`.
     8. Apply deposition increment to `deposition_rate` (ice cases) and condensation
@@ -161,8 +160,9 @@ def mixed_phase_deposition_and_corrections(
     Notes
     -----
     The Fortran lookup table calls (`set_lookup_index`, `tlucua`, `tlucuaw`,
-    `tlucub`, `sat_spec_hum`) are replaced here by inline Teten's formula
-    computations consistent with the rest of the JAX scheme.
+    `tlucub`, `sat_spec_hum`) are replaced here by the Sonntag (1990) fit the
+    tables hold and its analytic slope, evaluated at the temperature rather
+    than at the nearest 0.001 K knot.
     `threshold_vert_vel` must be available in this module or imported.
 
     """
@@ -358,7 +358,9 @@ def mixed_phase_deposition_and_corrections(
     # ICNC-limited depositional growth can consume it, and the latent-
     # heat spike when the state finally collapses NaN'd the coupled
     # T63L47 runs three times (days 30/90/110). Rides the deposition
-    # ledger, so water/enthalpy bookkeeping is exact by construction.
+    # ledger, so water/enthalpy bookkeeping is exact by construction. The
+    # excess is taken from the pre-increment humidity, so it also removes
+    # what the branch above already deposited (#963).
     scrit_koop = 2.349 - temperature_tmp / 259.0
     koop_excess = jnp.where(
         jnp.logical_and(lo2, temperature_tmp < params.cthomi),
