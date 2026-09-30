@@ -956,10 +956,16 @@ def _main_k8s(a, cfg: dict, repo: str, scratch: str) -> None:
         # is checked at the mirror commit; one on the volume, by the pod.
         for member, _, defn in plan:
             state = init_file(defn["overrides"])
-            if state and state.startswith("hf://") and not hf_exists(state):
-                missing.setdefault(member, []).append(
-                    f"{state} (no such file at mirror commit "
-                    f"{os.environ['JCM_MIRROR_REVISION']})")
+            if not (state and state.startswith("hf://")):
+                continue
+            try:
+                why = None if hf_exists(state) else (
+                    "no such file at mirror commit "
+                    f"{os.environ['JCM_MIRROR_REVISION']}")
+            except Exception as exc:                          # noqa: BLE001
+                why = f"{type(exc).__name__}: {exc}"
+            if why:
+                missing.setdefault(member, []).append(f"{state} ({why})")
         if missing:
             report = "\n".join(f"  {name}:\n    " + "\n    ".join(paths)
                                for name, paths in missing.items())

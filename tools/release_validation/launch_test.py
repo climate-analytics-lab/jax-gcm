@@ -1065,6 +1065,13 @@ def test_warm_start_state_is_checked_before_submitting(
         _k8s(gitrepo, capsys, "--tag", "ws", "--init", state)
     assert asked == [state]
     assert capsys.readouterr().out == ""
+
+    def offline(url):
+        raise ConnectionError("hub unreachable")
+
+    monkeypatch.setattr(launch, "hf_exists", offline)
+    with pytest.raises(SystemExit, match="hub unreachable"):
+        _k8s(gitrepo, capsys, "--tag", "ws", "--init", state)
     assert not (scratch / "nautilus_runs" / "mx_speedy_t31_ws").exists()
     # A path on the volume passes here and is checked where it lives.
     [job] = _k8s(gitrepo, capsys, "--tag", "wv", "--init", "/runs/d/s.ckpt")
