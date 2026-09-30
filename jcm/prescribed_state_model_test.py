@@ -267,6 +267,32 @@ class TestPrescribedStateModelCarryWarning(unittest.TestCase):
                 _, messages = self._construct(physics, coords)
                 self.assertEqual(messages, [])
 
+    def test_a_raw_physics_carry_of_any_pytree_is_handled(self):
+        """``initial_carry_state`` may return any pytree, or ``None``.
+
+        A raw ``Physics`` whose carry is an array has cross-step state with
+        no slot names, which still gets the warning; one whose carry is
+        ``None`` or empty has none and stays silent.
+        """
+        from jcm.physics_interface import Physics
+
+        coords = get_held_suarez_coords(layers=8, spectral_truncation=21)
+
+        class _Raw(Physics):
+            def __init__(self, carry):
+                self._carry = carry
+
+            def initial_carry_state(self, coords):
+                return self._carry
+
+        for carry, expected in ((None, 0), ({}, 0), ((), 0),
+                                (jnp.zeros((8, 2048)), 1)):
+            with self.subTest(carry=type(carry).__name__):
+                _, messages = self._construct(_Raw(carry), coords)
+                self.assertEqual(len(messages), expected)
+                if expected:
+                    self.assertIn("unnamed", messages[0])
+
     def test_tte_tke_and_cloud_borne_slots_are_named(self):
         from jcm.physics.aerosol.jam.cloud_borne_store import (
             CARRY_KEY, CloudBorneCarryStore)

@@ -23,6 +23,7 @@ depends on the previous one), use ``SingleColumnModel`` instead.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 import math
 
@@ -252,12 +253,21 @@ class PrescribedStateModel:
         estimate.
         """
         initial_carry_state = getattr(self.physics, "initial_carry_state", None)
-        # Only the slot names are needed; ``eval_shape`` gets them without
-        # allocating the seed (tens of MB for a JAM composition at T63).
-        slots = (sorted(jax.eval_shape(lambda: initial_carry_state(coords)))
-                 if initial_carry_state else [])
-        if not slots:
+        if initial_carry_state is None:
             return
+        # Only the carry's structure is needed; ``eval_shape`` gets it
+        # without allocating the seed (tens of MB for a JAM composition at
+        # T63). ``Physics.initial_carry_state`` may return any pytree
+        # ``compute_tendencies`` accepts (``ComposablePhysics`` returns a dict
+        # of named slots; a raw physics may return an array, a struct or
+        # ``None``), so only a mapping has slot names to report.
+        carry = jax.eval_shape(lambda: initial_carry_state(coords))
+        if not jax.tree_util.tree_leaves(carry):
+            return
+        if isinstance(carry, Mapping):
+            slots = sorted(str(key) for key in carry)
+        else:
+            slots = ["an unnamed carry pytree"]
         prognostic = [slot for slot in getattr(
             self.physics, "prognostic_carry_slots", tuple)() if slot in slots]
         detail = (f" {', '.join(prognostic)} holds prognostic state (its only "
