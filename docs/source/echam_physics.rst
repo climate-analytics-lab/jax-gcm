@@ -348,14 +348,14 @@ Cloud Cover
 
 **Type**: ECHAM6.3's diagnostic cloud cover, ``mo_cover.f90::cover`` (Sundqvist et al. 1989; Lohmann and Roeckner 1996)
 
-**Description**: Diagnoses cloud cover from relative humidity: zero at or below a critical relative humidity, full at saturation, ``1 - sqrt(1 - b0)`` in between, with ECHAM's stratocumulus enhancement at a low-level inversion over ice-free ocean. The values are ECHAM's, checked column by column against the ECHAM Fortran; the derivatives of the clip and of the inversion test are those of smooth surrogates. See :doc:`science/clouds_microphysics` for the formulation, the vapour-pressure switch and the time level.
+**Description**: Diagnoses cloud cover from relative humidity: zero at or below a critical relative humidity, full at saturation, ``1 - sqrt(1 - b0)`` in between, with ECHAM's stratocumulus enhancement at a low-level inversion over ice-free ocean. The values are ECHAM's, checked column by column against the ECHAM Fortran; the derivatives of the clip and of the inversion test are those of smooth surrogates. See :doc:`science/clouds_microphysics` for the formulation, the vapour pressure and the time level.
 
 **Key Features**:
 
 - Critical relative humidity ``crt + (crs - crt)·exp(1 - (p_s/p)^nex)``
 - Saturation over ice or water by ECHAM's ``lo2`` rule (ice below ``t_ice``, or below 0 °C where cloud ice exceeds ``csecfrl``)
 - ECHAM's inversion search between its levels ``jbmin`` and the surface, computed from the model's own vertical grid
-- No stratospheric cutoff, as in ECHAM
+- No stratospheric cutoff, as in ECHAM; radiation and COSP use the cover only where there is condensate (``mo_radiation.f90``)
 - Resolution-dependent defaults for ``crt``, ``crs``, ``nex``, ``nadd``, ``csatsc``, ``cinv`` and ``csecfrl`` (ECHAM's table, interpolated between its truncations; built by ``echam_physics(coords=...)``)
 
 **Configurable Parameters** (:py:class:`~jcm.physics.clouds.sundqvist.CloudParameters`; T63 defaults shown):

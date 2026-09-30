@@ -21,9 +21,11 @@ The primary reference is the ``sonntag`` variant: ECHAM with its saturation
 tables replaced by the Sonntag (1990) formula they tabulate (the tables
 reproduce it to 4e-12 in e_s and 2e-9 in de_s/dT; the table variant's outputs
 differ from it by < 3e-11 of each column's scale, far inside the tolerance).
-The ``tetens`` variant (NOT ECHAM: jcm's Tetens e_s inside the otherwise
-unmodified routines) is compared too, so a formulation that is right except
-for the saturation formula can be recognised as such.
+The ``tetens`` variant (NOT ECHAM: jcm's former Tetens e_s inside the
+otherwise unmodified routines) is compared too, with jcm's cloud schemes
+pointed at the same Tetens pair for the duration (``saturation_formula``), so
+a disagreement can be localised to the formulation or to the saturation
+formula.
 
 Physical constants
 ------------------
@@ -168,6 +170,25 @@ def echam_constants():
         yield
     finally:
         c.set_constants(saved)
+
+
+@contextlib.contextmanager
+def saturation_formula(variant: str):
+    """Run jcm with the vapour pressure of the reference variant.
+
+    jcm's ECHAM cloud schemes use ECHAM's formula (Sonntag), the ``sonntag``
+    and resolution references. For the ``tetens`` variant, a localisation
+    aid, ``echam_saturation.SATURATION_FORMULA`` is pointed at the same
+    Tetens pair for the duration.
+    """
+    from jcm.physics.clouds import echam_saturation
+    saved = echam_saturation.SATURATION_FORMULA
+    echam_saturation.SATURATION_FORMULA = (
+        "tetens" if variant == "tetens" else "sonntag")
+    try:
+        yield
+    finally:
+        echam_saturation.SATURATION_FORMULA = saved
 
 
 @contextlib.contextmanager
@@ -334,7 +355,7 @@ def comparison(kind: str, variant: str, prec: str, nn: int = 63) -> dict:
     inp = echam_inputs(kind, variant, None if nn == 63 else nn)
     ref = echam_outputs(kind, variant, None if nn == 63 else nn)
     run = run_jcm_cover if kind == "cover" else run_jcm_cloud
-    with echam_constants(), precision(prec):
+    with echam_constants(), saturation_formula(variant), precision(prec):
         got = run(inp, nn=nn)
     ri, gi = increments(kind, inp, ref), increments(kind, inp, got)
     rtol = RTOL_F64 if prec == "float64" else RTOL_F32
@@ -543,7 +564,7 @@ def show(kind: str, column: str, variant: str = "sonntag", prec: str = "float64"
     inp = echam_inputs(kind, variant)
     ref = echam_outputs(kind, variant)
     run = run_jcm_cover if kind == "cover" else run_jcm_cloud
-    with echam_constants(), precision(prec):
+    with echam_constants(), saturation_formula(variant), precision(prec):
         got = run(inp)
     j = column_names(kind).index(column)
     ri, gi = increments(kind, inp, ref), increments(kind, inp, got)

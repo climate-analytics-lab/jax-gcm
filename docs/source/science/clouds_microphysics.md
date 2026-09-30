@@ -116,18 +116,26 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   whole enhancement wherever two levels compete. The ``lo2`` phase switch
   keeps its reference derivative (that of the branch in use). Widths of zero
   select the reference derivatives.
-- Cover, saturation vapour pressure — the cover's ``e_s`` comes from one
-  switch shared with the 1M scheme
-  (``jcm/physics/clouds/echam_saturation.py``, ``SATURATION_FORMULA``). Its
-  default is jcm's Tetens pair, not the Sonntag (1990) fit that ECHAM's
-  lookup tables hold (``mo_echam_convect_tables.f90``), which it differs from
-  by up to 2.4 % over water and 1.2 % over ice between 238 and 273 K and by
-  up to 16 % and 8 % below: convection and the 2M scheme use Tetens, and a
-  cloud scheme on another curve would judge detrained condensate against a
-  different saturation. The choice is made for all of jcm's ECHAM physics at
-  once. With ``"sonntag"`` selected the cover reproduces ECHAM's own
-  reference; with the default it reproduces ECHAM's routine run with the
-  Tetens pair.
+- Cover, saturation vapour pressure — ECHAM's: the Sonntag (1990) fit that
+  ECHAM's lookup tables hold (``mo_echam_convect_tables.f90``), evaluated
+  analytically rather than through the 0.025 K spline (they agree to 1e-10),
+  from ``jcm/physics/clouds/echam_saturation.py``. With it the cover
+  reproduces every column of ECHAM's own reference.
+- Radiation's cover, `science` — ECHAM's radiation uses the cover only where
+  the step-start grid-mean condensate it radiates is positive
+  (``mo_radiation.f90`` l.428-434, ``xq = MAX(xlm1, 0)``,
+  ``MERGE(cld_frc, 0, xq_liq > 0 .OR. xq_ice > 0)``), and hands the same
+  masked cover to COSP. jcm does the same in
+  ``cloud_data.radiation_cloud_fields``, which every radiation scheme reads,
+  and in the COSP term (masked by the condensate COSP is given). A cell the
+  mask clears has no condensate and so no optical depth; under maximum-random
+  overlap it separates the cloud banks above and below it, as in ECHAM's
+  sampler. The mask keeps its reference derivative (`differentiability`): the
+  cleared cell contributes nothing to any flux through its own optics, and
+  the one discrete effect, the bank separation, is already piecewise constant
+  in McICA's sampling. The AeroCom diagnostics read the post-microphysics
+  cover, which is ECHAM's written-back ``aclc`` (zero where both condensates
+  are below ``ccwmin``), and are not masked again.
 - Cover, time level — the cover reads the state the physics receives, which
   contains the step's dynamics; ECHAM's reads the ``t − Δt`` fields
   (``physc.f90`` l.543-548), one dynamics step earlier. Reading ECHAM's state
@@ -208,8 +216,10 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
 **Code pointers.**
 - ``jcm/physics/clouds/sundqvist.py`` — ``SundqvistCloudFraction``,
   ``calculate_cloud_fraction``.
-- ``jcm/physics/clouds/echam_saturation.py`` — ``SATURATION_FORMULA``,
+- ``jcm/physics/clouds/echam_saturation.py`` — ``es_water``, ``es_ice``,
   ``lo2_ice_phase``, ``qsat_from_es``.
+- ``jcm/physics/clouds/cloud_data.py`` — ``radiation_cloud_fields``,
+  ``condensate_masked_cover``.
 - ``jcm/physics/clouds/echam_cloud_defaults.py`` — ``echam_cloud_defaults``,
   ``inversion_levels``.
 - ``jcm/physics/resolution_defaults.py`` — ``resolution_defaults``.
@@ -223,8 +233,9 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
 
 **Validation evidence.** ``jcm/physics/clouds/echam_fortran_reference_test.py``
 (the cover and 1M against the ECHAM6.3 Fortran, column by column),
-``sundqvist_test.py`` (designed points, both vapour-pressure formulas against
-the Fortran, the surrogates), ``echam_cloud_defaults_test.py``,
+``sundqvist_test.py`` (designed points, the Fortran columns at ECHAM's four
+truncations, the surrogates), ``cloud_data_test.py`` (radiation's condensate
+mask and its effect on McICA overlap), ``echam_cloud_defaults_test.py``,
 ``echam_saturation_test.py``, ``echam_1m_test.py``,
 ``lohmann_2m_test.py``, ``cloud_utils_test.py``, ``cloud_data_test.py``. Design
 reference: {doc}`../design/lohmann_2m_column_processes`.

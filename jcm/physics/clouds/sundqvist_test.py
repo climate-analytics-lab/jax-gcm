@@ -167,7 +167,7 @@ def _x64():
 
 @pytest.fixture(params=es.SATURATION_FORMULAS)
 def formula(request, monkeypatch):
-    """Run a value test under each vapour-pressure formula of the switch."""
+    """Run a value test under ECHAM's formula and the Tetens test utility."""
     monkeypatch.setattr(es, "SATURATION_FORMULA", request.param)
     return request.param
 
@@ -684,15 +684,14 @@ def test_cover_qs_is_echams_form():
     ("tetens", 63), ("sonntag", 31), ("sonntag", 63), ("sonntag", 127),
     ("sonntag", 255)])
 def test_formulation_matches_echam(monkeypatch, formula_variant, nn, prec):
-    """Every Fortran cover column, under each formula of the switch.
+    """Every Fortran cover column, under ECHAM's formula and the test Tetens.
 
-    ``tetens``: jcm's default formula against the reference's ``tetens``
-    variant (ECHAM's routine with the same Tetens pair inside). ``sonntag``:
-    the fit ECHAM's tables hold against the primary ``sonntag`` reference,
-    at ECHAM's four truncations with each truncation's parameter row. Both at
-    the reference module's own tolerances: everything but the vapour
-    pressure is ECHAM's, and with ECHAM's vapour pressure the cover is
-    ECHAM's.
+    ``sonntag`` (the cover's formula) against the primary reference at ECHAM's
+    four truncations, each with its parameter row (the same comparison
+    ``echam_fortran_reference_test`` makes); ``tetens`` (the test utility)
+    against the reference's ``tetens`` variant, ECHAM's routine with that
+    pair inside, which confirms the formulation independently of the vapour
+    pressure. Both at the reference module's own tolerances.
     """
     from jcm.physics.clouds import echam_fortran_reference_test as ref
 

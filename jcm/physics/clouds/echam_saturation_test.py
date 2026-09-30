@@ -106,25 +106,12 @@ def test_qsat_form_and_cap():
     assert got[2] == pytest.approx(capped)
 
 
-def test_the_switch_selects_the_formula(monkeypatch):
-    """One setting chooses the formula; its default is jcm's Tetens pair."""
-    assert es.SATURATION_FORMULA == "tetens"
-    t = jnp.array([230.0, 260.0, 290.0])
-    for name, water, ice in (("tetens", es.tetens_es_water, es.tetens_es_ice),
-                             ("sonntag", es.sonntag_es_water,
-                              es.sonntag_es_ice)):
-        monkeypatch.setattr(es, "SATURATION_FORMULA", name)
-        np.testing.assert_array_equal(es.es_water(t), water(t))
-        np.testing.assert_array_equal(es.es_ice(t), ice(t))
-        np.testing.assert_array_equal(
-            es.dlnes_dT_water(t), getattr(es, f"{name}_dlnes_dT_water")(t))
-        np.testing.assert_array_equal(
-            es.dlnes_dT_ice(t), getattr(es, f"{name}_dlnes_dT_ice")(t))
-
-
-def test_set_saturation_formula_validates(monkeypatch):
-    monkeypatch.setattr(es, "SATURATION_FORMULA", "tetens")
-    es.set_saturation_formula("sonntag")
+def test_the_formula_is_echams_and_tetens_is_a_test_utility(monkeypatch):
+    """``es_water``/``es_ice`` are Sonntag; ``"tetens"`` reroutes them in tests."""
     assert es.SATURATION_FORMULA == "sonntag"
-    with pytest.raises(ValueError, match="tetens"):
-        es.set_saturation_formula("goff-gratch")
+    t = jnp.array([230.0, 260.0, 290.0])
+    for name in es.SATURATION_FORMULAS:
+        monkeypatch.setattr(es, "SATURATION_FORMULA", name)
+        for fn in ("es_water", "es_ice", "dlnes_dT_water", "dlnes_dT_ice"):
+            np.testing.assert_array_equal(
+                getattr(es, fn)(t), getattr(es, f"{name}_{fn}")(t))
