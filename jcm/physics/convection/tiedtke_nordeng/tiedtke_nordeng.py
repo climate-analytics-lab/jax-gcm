@@ -688,11 +688,15 @@ def _tiedtke_convection_toa_first(
             Selects ECHAM's per-surface ``zdnoprc`` precip-zone threshold
             via ``config.cu_dnoprc_ocean`` / ``config.cu_dnoprc_land``.
             Defaults to 0 (ocean).
-        moisture_supply: Boundary-layer moisture supply rate [kg/m²/s] — the
-            surface evaporation feeding the subcloud layer. Anchors the deep
-            cloud-base mass flux to ECHAM's moisture-budget closure
-            (``zmfub`` ≈ E/(q_u−q_e), mo_cumastr.f90). Defaults to 0, which
-            falls back to the pure-CAPE closure (cold start / no surface term).
+        moisture_supply: Surface evaporation [kg/m²/s], upward positive —
+            ECHAM's ``−pqhfla``. It sets the deep/shallow test's
+            ``zhelp = 1.1·E``. Where no ``moisture_tend_profile`` is given it
+            is also the physics part of ``pqte``, delivered to the lowest
+            layer. Defaults to 0.
+        moisture_tend_profile: The same-step vertical-diffusion moisture
+            tendency [kg/kg/s] [nlev], which contains the surface
+            evaporation vdiff delivered: the physics part of ECHAM's
+            ``pqte``. ``None`` puts ``moisture_supply`` in the lowest layer.
         thvsig: σ(θ_v) [K] from vdiff (ECHAM ``pthvsig``), setting the
             cloud-base ``zlift``. ``None`` falls back to ``config.cu_thvsig``.
         omega: Pressure vertical velocity [Pa/s] [nlev], negative upward
@@ -703,10 +707,11 @@ def _tiedtke_convection_toa_first(
             dycore step [kg/kg/s] [nlev] — advection plus hyperdiffusion,
             reconstructed one step lagged by the wrapper (see there).
             Together with ``moisture_tend_profile`` (the same-step vdiff
-            part) it forms ECHAM's ``pqte``, whose column integral
-            ``zdqcv`` drives the deep/shallow split. ``None`` (no host
-            information) means the split sees no large-scale convergence
-            and classifies by the surface budget alone.
+            part) it forms ECHAM's ``pqte``, whose column integral ``zdqcv``
+            drives the deep/shallow split and whose sub-cloud integral
+            ``zdqpbl`` gates the column and sets its first-guess cloud-base
+            flux. ``None`` (no host information) means no large-scale
+            convergence is known.
         humidity_m1: STEP-START specific humidity [kg/kg] [nlev] (ECHAM
             ``pqm1``), from which the scheme's moist heat capacity
             ``cp = cpd·(1 + vtmpc2·max(q, 0))`` is built — ECHAM's ``zcpq``
@@ -801,11 +806,10 @@ def _tiedtke_convection_toa_first(
     # diffusion's surface boundary row delivers it.
     surface_evap = jnp.maximum(moisture_supply, 0.0)
     if moisture_tend_profile is None:
-        pqte_physics = jnp.zeros_like(temperature).at[-1].set(
+        pqte = jnp.zeros_like(temperature).at[-1].set(
             surface_evap / layer_air_mass[-1])
     else:
-        pqte_physics = moisture_tend_profile
-    pqte = pqte_physics
+        pqte = moisture_tend_profile
     if qte_dynamics is not None:
         pqte = pqte + qte_dynamics
 
@@ -817,15 +821,13 @@ def _tiedtke_convection_toa_first(
     #                                          cloud-base interface,
     #   zhelp  = MAX(0, −1.1·pqhfla·g)         1.1 times the surface
     #                                          evaporation.
-    # ``zdqpbl`` integrates the physics part of ``pqte`` only: the dynamics
-    # part is a one-step-lagged reconstruction, and a lagged advective supply
-    # in the closure compounds through the convergence feedback it feeds (see
-    # ``TiedtkeConvection``); the type test, which only classifies, takes the
-    # whole tendency.
+    # The surface evaporation enters the supply only through ``pqte``, as the
+    # moisture vertical diffusion delivered to the sub-cloud layers, and the
+    # type test only through ``zhelp``.
     levels_all = jnp.arange(nlev)
     zdqcv = jnp.sum(pqte * layer_air_mass)
     zdqpbl = jnp.sum(jnp.where(levels_all >= cloud_base_sfc,
-                               pqte_physics * layer_air_mass, 0.0))
+                               pqte * layer_air_mass, 0.0))
     zhelp = 1.1 * surface_evap
 
     # ``ldcum`` of a cubase column is cumastr's ``zlo1`` gate on the
@@ -1598,27 +1600,12 @@ class TiedtkeConvection(PhysicsTerm):
         else:
             moisture_supply = jnp.zeros(ncols)
 
-        # Same-step pqte analog for the zdqpbl closure supply: the moisture
-        # tendency the vdiff solve applied THIS step (interior mixing + the
-        # surface-evaporation boundary row), read from the same-step
-        # ``vertical_diffusion`` diagnostics. ECHAM's ``pqte`` at ``cucall``
-        # time contains advection + vdiff; the vdiff part is the dominant PBL
-        # moisture source and — crucially — is same-step, so convection
-        # consumes exactly what vdiff supplied within the step and the
-        # supply cannot compound across steps. The previous one-step-LAGGED
-        # total-Δq snapshot form did compound (convergence→convection→
-        # convergence ramped for days with heating pinned at the stability
-        # cap, then NaN — the onset7 T63L47 analysis), so it was removed.
-        #
-        # Follow-up (documented deviation): the large-scale ADVECTIVE part of
-        # ECHAM's pqte is still missing — the dycore applies advection after
-        # physics, so a same-step advective moisture tendency would need new
-        # host plumbing (exposing the dynamics tendency to the physics step).
-        # A lagged advection increment is NOT an acceptable substitute: the
-        # compounding feedback runs precisely through the lagged dynamics
-        # term. vdiff-only is a strict subset of ECHAM's supply (conservative
-        # closure; the max(E, zdqpbl) floor below keeps the #529 continuous-
-        # convection anchor).
+        # The physics part of ECHAM's ``pqte`` at ``cucall`` time: the
+        # moisture tendency the vdiff solve applied THIS step (interior
+        # mixing + the surface-evaporation boundary row), read from the
+        # same-step ``vertical_diffusion`` diagnostics. With the dynamics part
+        # below it forms the ``pqte`` whose integrals are the closure supply
+        # ``zdqpbl`` and the type test's ``zdqcv``.
         vdiff_diag = diagnostics.get("vertical_diffusion")
         qv_tend_vdiff = getattr(vdiff_diag, "qv_tendency", None)
         if qv_tend_vdiff is not None:
@@ -1659,12 +1646,10 @@ class TiedtkeConvection(PhysicsTerm):
         # so dynamics = (q_now - q_prev)/dt - q_tend_physics_prev. It is one
         # step lagged — the SAME provenance as ECHAM's leapfrog ``pqte``
         # dynamics contribution, so this is the reference's information
-        # structure, not an approximation of it. Used ONLY in the
-        # deep/shallow classification integral ``zdqcv`` (a switch), never
-        # in a closure AMPLITUDE: a lagged amplitude is the
-        # convergence->convection->convergence compounding loop that blew
-        # up the onset7 runs, and the zdqpbl closure supply deliberately
-        # stays same-step vdiff-only. Absent carry (step 1, column tests):
+        # structure, not an approximation of it. It enters both of
+        # cumastr's integrals of ``pqte``: the deep/shallow test ``zdqcv``
+        # and the sub-cloud supply ``zdqpbl`` of the ``zlo1`` gate and the
+        # first-guess cloud-base flux. Absent carry (step 1, column tests):
         # zeros, i.e. no known convergence.
         prev = diagnostics.get("_prev_step")
         if prev is not None:

@@ -341,12 +341,12 @@ class TestCloudBaseInitialisation(unittest.TestCase):
 
         The dry parcel is ECHAM ``cubase``'s DSE walk up the half levels,
         ``pcpcu·T + pgeoh`` conserved with the environment's MOIST heat
-        capacity (mo_cuinitialize.f90:294) from the bottom full level's dry
-        static energy ``pcpen·T + pgeo`` to the cloud-base interface — built
-        here by hand from the column's hydrostatic half-level geopotential.
-        The condensation warming itself is ``cuadjtq``'s, whose ``L/cp``
-        table is DRY (``alv/cpd``, mo_echam_convect_tables.f90:214), hence
-        ``cpd`` below.
+        capacity (mo_cuinitialize.f90:294) from the lowest interface's
+        environment, ``pcpcu(klev)·ptenh(klev) + pgeoh(klev)``, to the
+        cloud-base interface — built here by hand from the column's
+        half-level environment. The condensation warming itself is
+        ``cuadjtq``'s, whose ``L/cp`` table is DRY (``alv/cpd``,
+        mo_echam_convect_tables.f90:214), hence ``cpd`` below.
         """
         from jcm.physics.convection.tiedtke_nordeng.updraft import (
             column_environment,
@@ -355,8 +355,8 @@ class TestCloudBaseInitialisation(unittest.TestCase):
         state, pressure, temperature, q_surf = self._run(kbase, surf_rh=1.0)
         _, _, humidity = self._column(surf_rh=1.0)
         env = column_environment(temperature, humidity, pressure)
-        cp = c.cpd * (1.0 + c.vtmpc2 * np.asarray(humidity))
-        s0 = cp[-1] * float(temperature[-1]) + float(env.geo[-1])
+        s0 = (float(env.cpcu[-1]) * float(env.tenh[-1])
+              + float(env.geoh[-1]))
         t_dry = (s0 - float(env.geoh[kbase])) / float(env.cpcu[kbase])
         dT = float(state.tu[kbase]) - t_dry
         expected = c.alhc * float(state.lu[kbase]) / c.cpd

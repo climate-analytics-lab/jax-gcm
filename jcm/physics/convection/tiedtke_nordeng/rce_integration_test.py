@@ -78,13 +78,16 @@ class TestRCEConvection(unittest.TestCase):
     """Full-scheme RCE-style integration tests."""
 
     def test_tropical_sounding_fires_convection(self):
-        """On a sounding with CAPE > 1000 J/kg the scheme should produce:
+        """A buoyant sounding fed by surface evaporation convects:
         - non-zero tendencies
         - positive precipitation
         - non-zero updraft mass flux
+
+        ECHAM convects where ``cubase`` finds a buoyant cloud base AND the
+        sub-cloud layer gains moisture (``zdqpbl > 0``, mo_cumastr.f90:565),
+        so the column is given the evaporation and convergence of a deep
+        tropical column, as the model would supply them.
         """
-        # Use a very warm, moist sounding to guarantee CAPE > 1000 J/kg
-        # (deep convection threshold in the scheme).
         T, q, p, dz, rho = _tropical_sounding(
             surface_T=305.0, surface_rh=0.9, lapse_K_per_km=7.0
         )
@@ -98,6 +101,7 @@ class TestRCEConvection(unittest.TestCase):
 
         tendencies, state = tiedtke_nordeng_convection(
             T, q, p, dz, rho, u, v, qc, qi, dt, cfg,
+            **deep_convection_drivers({'pressure': p}),
         )
         # Should have nonzero temperature tendency somewhere
         self.assertGreater(
@@ -258,6 +262,7 @@ class TestRCEConvection(unittest.TestCase):
             jnp.zeros(nlev), jnp.zeros(nlev),
             jnp.zeros(nlev), jnp.zeros(nlev),
             1800.0, cfg,
+            **deep_convection_drivers({'pressure': p}),
         )
         # Some level should have dqdt < 0 (drying) from condensation
         self.assertLess(
@@ -465,16 +470,17 @@ class TestRCEConvection(unittest.TestCase):
 
 
 class TestMoistureSupplyClosure(unittest.TestCase):
-    """The cloud-base mass-flux closure anchored to the surface moisture supply.
+    """The cloud-base mass flux anchored to the sub-cloud moisture budget.
 
-    These distil the single-column RCE finding that drove the closure fix: the
-    bare-CAPE closure (``moisture_supply=0``) sets the cloud-base mass flux to
-    the CFL cap ``layer_mass/dt`` whenever CAPE is large, so the convective
-    burst *grows as the timestep shrinks* and empties CAPE in one step — the
-    on/off cloud-base flicker. ECHAM instead anchors the flux to the
-    boundary-layer moisture supply (``zmfub`` ≈ E/(q_u−q_e), mo_cumastr.f90),
-    a smooth, timestep-independent rate. Passing the surface evaporation as
-    ``moisture_supply`` switches the scheme onto that closure.
+    ECHAM's first-guess cloud-base flux is ``zmfub = zdqpbl/(g·MAX(zqumqe,
+    zdqmin))`` (mo_cumastr.f90:560-569): the moisture the sub-cloud layer
+    gains per step, exported by the cloud-base parcel's water excess. The
+    same budget decides whether a ``cubase`` column convects at all: the
+    ``zlo1`` gate requires ``zdqpbl > 0`` and ``zqumqe > zdqmin``, and a
+    column that fails it is not convective (``ldcum = .FALSE.``). A caller
+    that gives only the surface evaporation ``moisture_supply`` has it
+    delivered to the lowest layer, which is where vertical diffusion's
+    surface row puts it.
     """
 
     def _run(self, moisture_supply, dt=1800.0, surface_T=305.0,
@@ -486,10 +492,10 @@ class TestMoistureSupplyClosure(unittest.TestCase):
         z = jnp.zeros(nlev)
         extra = {}
         if deep:
-            # Resolved convergence > 1.1*supply so ECHAM's zdqcv test
-            # (#699) classifies deep on the dynamics signal alone; the
-            # closure-path comparisons this class makes are otherwise
-            # about the SUPPLY argument, which stays the sole variable.
+            # Resolved convergence > 0.1*supply so ECHAM's zdqcv test
+            # (#699) classifies deep; the closure-path comparisons this class
+            # makes are otherwise about the SUPPLY argument, which stays the
+            # sole variable.
             sl = slice(nlev // 2, nlev - 4)
             conv = jnp.zeros(nlev).at[sl].set(
                 1.3 * float(moisture_supply) / jnp.sum(rho[sl] * dz[sl]))
@@ -502,89 +508,44 @@ class TestMoistureSupplyClosure(unittest.TestCase):
         return tend, state
 
     def test_moisture_anchored_flux_is_timestep_invariant(self):
-        """The flicker mechanism: anchored flux is dt-independent, CAPE-cap isn't.
+        """The anchored flux is ``zdqpbl/Δq``, which has no ``dt`` in it.
 
-        With a moisture supply the peak convective heating is the same at
-        dt=1800 s and dt=600 s (the flux is E/(q_u−q_e), independent of dt). The
-        bare-CAPE closure instead rides the ``layer_mass/dt`` CFL cap, so its
-        peak heating grows markedly as dt shrinks — the per-step amplification
-        that becomes the temporal flicker in an integration.
+        The peak convective heating is the same at dt = 1800 s and 600 s to
+        within the ``zmfmax = layer_mass/dt`` limiter, which can still touch
+        the 600 s step on this explosive sounding (by design); a closure that
+        rode that limiter would give a ratio of 3.
         """
         anch_long = float(jnp.max(jnp.abs(self._run(1.0e-4, dt=1800.0)[0].dtedt)))
         anch_short = float(jnp.max(jnp.abs(self._run(1.0e-4, dt=600.0)[0].dtedt)))
-        cape_long = float(jnp.max(jnp.abs(self._run(0.0, dt=1800.0)[0].dtedt)))
-        cape_short = float(jnp.max(jnp.abs(self._run(0.0, dt=600.0)[0].dtedt)))
-
-        # Anchored: ~dt-invariant. With the unconditional ECHAM Nordeng
-        # rescale the amplitude is the physical zcape/(zheat*cmftau) with
-        # no dt in it; the layer_mass/dt CFL cap can still touch the
-        # dt=600 s branch on this explosive sounding (by design) — the
-        # pathological pre-Nordeng regime was >= 2.
+        self.assertGreater(anch_long, 0.0)
         self.assertLess(anch_short / anch_long, 1.5)
-        # The CAPE fallback is now Nordeng's zcape/(zheat·cmftau) — a
-        # physical timescale closure with no dt in it — so it is ALSO
-        # ~dt-invariant. The previous control assertion here pinned the
-        # PATHOLOGY (the naive CAPE/(g·τ) fallback rode the layer-mass/dt
-        # CFL cap, so its burst grew as dt shrank — the flicker mechanism);
-        # with the fallback replaced, both branches are cured and the
-        # assertion flips to pin that. Residual dt-dependence up to ~1.4
-        # remains on THIS deliberately explosive sounding because the
-        # ECHAM zmfmax = layer_mass/dt CFL cap still binds at dt = 600 s
-        # under the corrected (larger) ice saturation (#547) — the cap is
-        # by design; the pathological ratios were ≳2.
-        self.assertLess(cape_short / cape_long, 1.5)
 
-    def test_moisture_anchored_flux_is_smaller_and_bounded(self):
-        """The evaporation-limited flux is far gentler than the CAPE-cap burst.
-
-        On the same explosive sounding the moisture-anchored cloud-base mass
-        flux is a small fraction of the bare-CAPE-cap flux — it removes CAPE
-        gradually (keeping convection on) rather than dumping it in one step.
-        """
-        # Re-justified for the unconditional ECHAM rescale (restored after
-        # coupled runs locked into a desiccated fixed point): the moisture
-        # budget is only the FIRST GUESS; Nordeng sets the amplitude for
-        # every deep column. The anti-flicker/anti-explosion invariant this
-        # test now pins is that NEITHER branch blows up the layer_mass/dt CFL
-        # cap and BOTH keep convection active. Since #676 the E=0 branch uses
-        # ECHAM's constant fallback ``zmfub = 0.01`` (mo_cumastr.f90:567)
-        # rather than the dimensionally-invalid ``cape/(g·tau)`` velocity, so
-        # its cloud-base first guess is legitimately a different magnitude
-        # from the moisture-anchored E/(q_u−q_e); the two are no longer
-        # expected to sit within a tight ratio, only to both stay bounded.
+    def test_moisture_anchored_flux_is_bounded(self):
+        """The evaporation-limited flux keeps convection on and bounded."""
         mfu_anchored = float(jnp.max(self._run(1.0e-4)[1].mfu))
-        mfu_cape = float(jnp.max(self._run(0.0)[1].mfu))
-        self.assertGreater(mfu_anchored, 0.0)  # convection still active
-        self.assertGreater(mfu_cape, 0.0)      # fallback still convects
-        self.assertLess(mfu_anchored, 5.0)     # no CFL explosion
-        self.assertLess(mfu_cape, 5.0)
+        self.assertGreater(mfu_anchored, 0.0)
+        self.assertLess(mfu_anchored, 5.0)
 
     def test_precip_scales_with_moisture_supply(self):
-        """Moisture-budget content: precip exports the supplied moisture.
+        """Deep precipitation is set by the Nordeng rescale, not the supply.
 
-        Because M_b = E/(q_u−q_e), the convective mass flux — and hence the
-        precipitation it produces — is linear in the supply E. Doubling the
-        surface evaporation roughly doubles the convective precip.
+        The moisture budget is only the FIRST GUESS; Nordeng's
+        ``zmfub1 = zcape·zmfub/(zheat·cmftau)`` sets every deep column's
+        amplitude, and on this explosive sounding it saturates the closure
+        clip at any supply, so doubling the supply leaves the convective
+        precipitation almost unchanged, as in ECHAM.
         """
-        # Re-justified for the unconditional ECHAM rescale: the deep
-        # amplitude is CAPE-controlled and saturates the closure clip on
-        # this explosive sounding at any supply — convective precip is
-        # supply-INSENSITIVE here, exactly as in ECHAM (supply linearity
-        # was a property of the replaced deviation, which capped deep
-        # convection at the current evaporation and locked coupled runs
-        # into a desiccated fixed point).
         pr_1x = float(self._run(2.0e-5, deep=True)[0].precip_conv)
         pr_2x = float(self._run(4.0e-5, deep=True)[0].precip_conv)
         self.assertGreater(pr_1x, 0.0)
         self.assertLess(abs(pr_2x / pr_1x - 1.0), 0.1)
 
-    def test_zero_supply_falls_back_to_cape_closure(self):
-        """No moisture supply ⇒ unchanged (bare-CAPE) behaviour.
+    def test_no_sub_cloud_supply_no_convection(self):
+        """A buoyant column whose sub-cloud layer gains no moisture is dry.
 
-        Radiative-convective-only stacks (and any caller that does not provide a
-        surface evaporation) must see the original CAPE closure. The default
-        ``moisture_supply=0`` reproduces the no-argument call exactly and still
-        fires convection on an unstable sounding.
+        ``zlo1`` fails where ``zdqpbl <= 0`` (mo_cumastr.f90:565): however
+        buoyant the parcel, ECHAM makes the column non-convective. The
+        default ``moisture_supply = 0`` reproduces the explicit zero.
         """
         T, q, p, dz, rho = _tropical_sounding(
             surface_T=305.0, surface_rh=0.9, lapse_K_per_km=7.0,
@@ -592,34 +553,22 @@ class TestMoistureSupplyClosure(unittest.TestCase):
         nlev = T.shape[0]
         z = jnp.zeros(nlev)
         cfg = ConvectionParameters.default()
-        default_tend, _ = tiedtke_nordeng_convection(
-            T, q, p, dz, rho, z, z, z, z, 1800.0, cfg,
-        )
-        explicit_tend, _ = tiedtke_nordeng_convection(
-            T, q, p, dz, rho, z, z, z, z, 1800.0, cfg,
-            moisture_supply=jnp.asarray(0.0),
-        )
-        self.assertTrue(
-            jnp.allclose(default_tend.dtedt, explicit_tend.dtedt)
-        )
-        self.assertGreater(float(jnp.max(jnp.abs(default_tend.dtedt))), 1e-6)
+        for kwargs in ({}, {"moisture_supply": jnp.asarray(0.0)}):
+            tend, state = tiedtke_nordeng_convection(
+                T, q, p, dz, rho, z, z, z, z, 1800.0, cfg, **kwargs)
+            self.assertEqual(int(state.ktype), 0)
+            self.assertEqual(float(jnp.max(jnp.abs(tend.dtedt))), 0.0)
+            self.assertEqual(float(tend.precip_conv), 0.0)
+        # ... and the same column with a supply convects.
+        self.assertGreater(int(self._run(1.0e-5)[1].ktype), 0)
 
     def test_stable_column_with_moisture_supply_stays_inactive(self):
-        """A statically stable column must NOT convect on evaporation alone.
+        """A statically stable column does not convect on evaporation alone.
 
-        ``find_cloud_base`` returns the LCL, which exists in many stable
-        columns, so triggering convection on the moisture supply alone
-        (activate whenever E>0) fired deep convection in stable, non-buoyant
-        columns (CAPE==0). On a T63L47 real-orography spin-up that
-        over-activation dumped latent heat into stable tropical columns and ran
-        the temperature away to NaN within ~4 days. The buoyancy floor
-        (``cape > _MIN_CAPE_FOR_MOISTURE_TRIGGER``) restores ECHAM's ``ldcum``
-        requirement: no buoyancy ⇒ no convection, no matter how large the
-        moisture supply.
+        A surface parcel on this sounding reaches its LCL but is not buoyant
+        there, so ``cubase`` finds no cloud base, and no moisture supply
+        makes the column convective (ECHAM's ``ldcum`` needs the cloud base).
         """
-        # Stable sounding (small lapse): a surface parcel reaches its LCL (a
-        # cloud base exists, so the old ``moisture_supply > 0`` trigger would
-        # have fired) but is never buoyant, so CAPE is below the floor.
         T, q, p, dz, rho = _tropical_sounding(
             surface_T=285.0, surface_rh=0.7, lapse_K_per_km=3.5,
         )
@@ -640,52 +589,6 @@ class TestMoistureSupplyClosure(unittest.TestCase):
                 float(jnp.max(jnp.abs(tend.dtedt))), 0.0, places=8,
             )
             self.assertAlmostEqual(float(tend.precip_conv), 0.0, places=8)
-
-    def test_near_saturated_cloud_base_falls_back_to_cape_closure(self):
-        """Near-saturated cloud base ⇒ moisture closure bypassed (ECHAM zlo1).
-
-        The moisture-budget flux is ``E/(q_u−q_e)``; as the cloud-base
-        environment approaches saturation the denominator collapses and
-        ``E/q_excess`` spikes to the CFL cap ``layer_mass/dt`` — a catastrophic
-        single-step latent-heat burst that seeded the T63L47 hot-cell runaway.
-        ECHAM only applies the budget closure when the saturation deficit
-        exceeds ``zdqmin`` (mo_cumastr.f90:268-271); below it the scheme falls
-        back. So on a near-saturated (but still conditionally unstable) column
-        the cloud-base mass flux with E>0 equals the bounded CAPE-closure flux
-        (E=0), NOT the CFL-cap burst.
-        """
-        T, q, p, dz, rho = _tropical_sounding(
-            surface_T=302.0, surface_rh=0.997, lapse_K_per_km=7.0,
-        )
-        nlev = T.shape[0]
-        z = jnp.zeros(nlev)
-        cfg = ConvectionParameters.default()
-        # Both calls deep via the same convergence (#699): the equality
-        # below holds through the Nordeng rescale, which sets the deep
-        # amplitude independently of the first-guess flux. A shallow
-        # column has no rescale, so first-guess differences (the
-        # trigger-weight floor path with E > 0) would survive — a
-        # different property than the CFL-burst guard this test pins.
-        sl = slice(nlev // 2, nlev - 4)
-        conv = jnp.zeros(nlev).at[sl].set(
-            3.0e-4 / jnp.sum(rho[sl] * dz[sl]))
-        _, st_supply = tiedtke_nordeng_convection(
-            T, q, p, dz, rho, z, z, z, z, 1800.0, cfg,
-            moisture_supply=jnp.asarray(2.0e-4),
-            qte_dynamics=conv,
-        )
-        _, st_cape = tiedtke_nordeng_convection(
-            T, q, p, dz, rho, z, z, z, z, 1800.0, cfg,
-            moisture_supply=jnp.asarray(0.0),
-            qte_dynamics=conv,
-        )
-        mfu_supply = float(jnp.max(st_supply.mfu))
-        mfu_cape = float(jnp.max(st_cape.mfu))
-        # Convection still fires (unstable column) ...
-        self.assertGreater(mfu_cape, 1.0e-4)
-        # ... but the near-saturated cloud base falls back to the bounded CAPE
-        # closure rather than the CFL-cap burst — identical mass flux to E=0.
-        self.assertAlmostEqual(mfu_supply, mfu_cape, places=6)
 
 
 if __name__ == "__main__":
