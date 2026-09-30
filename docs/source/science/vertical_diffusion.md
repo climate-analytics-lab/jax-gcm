@@ -42,7 +42,11 @@ all constituents likewise.
 first step — it reads the previous step's ``kh`` carry, which is seeded to
 zero on step 0 (zero exchange coefficient, zero tendency)
 and reads the previous step's ``kh`` carry, because vdiff runs after the aerosol
-block in the ECHAM ordering.
+block in the ECHAM ordering. The interior Richardson number is the dry one,
+``N² = (g/T̄)·(∂T/∂z + g/cpd)`` (``compute_richardson_number``); ECHAM's
+``vdiff`` forms it from moist, cloud-weighted buoyancy with the ``ua``
+saturation of each half level, which the surface layer here already does
+(#962).
 
 **Code pointers.**
 - ``jcm/physics/vertical_diffusion/tte_tke/`` — ``vertical_diffusion.py``
