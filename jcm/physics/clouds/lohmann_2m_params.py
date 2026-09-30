@@ -143,6 +143,17 @@ class CloudParams2M:
     # (2010) INP heterogeneous nucleation parameterization [cm^-3 at STP].
     n_aer_coarse: jnp.ndarray
 
+    # Lohmann & Diehl (2006) immersion-freezing coefficients of the aerosol
+    # heterogeneous freezing ``het_mxphase_freezing`` (ECHAM
+    # mo_cloud_micro_2m.f90:2794-2797): montmorillonite dust (ECHAM's choice
+    # over the commented kaolinite 6.15e-2) and black carbon, multiplying the
+    # dust and BC fractions of the activated droplets. Differentiable leaves
+    # so the aerosol-ice coupling can be calibrated by gradient; ECHAM
+    # hard-codes them. Read only where a composition supplies the HAM
+    # freezing inputs (JAM); the aerosol-free path uses DeMott (2010).
+    immersion_coefficient_dust: jnp.ndarray
+    immersion_coefficient_bc: jnp.ndarray
+
     # Static code-path selectors (trace-time Python branches; NOT leaves).
     # nic_cirrus=1: diagnostic ICNC from ice mass and mean crystal radius
     # (ECHAM licnc-diagnostic configuration) — the working default.
@@ -207,6 +218,8 @@ class CloudParams2M:
         cdnc_min_fixed: float = 40.0,  # [cm^-3] ECHAM warm-microphysics floor; KK2000 autoconv (rate ∝ Nc^-1.79) runs away below this in clean air
         activation_smoothing: float = 1.0e6,  # [1/m^3] smooth-max half-width for the nucleation increment
         n_aer_coarse: float = 0.5,
+        immersion_coefficient_dust: float = 32.3,
+        immersion_coefficient_bc: float = 2.91e-3,
         nic_cirrus: int = 1,
         ldyn_cdnc_min: bool = False,
     ) -> 'CloudParams2M':
@@ -284,6 +297,8 @@ class CloudParams2M:
             cap=jnp.array(cap_val),
             cons4=jnp.array(cons4_val),
             n_aer_coarse=jnp.array(n_aer_coarse),
+            immersion_coefficient_dust=jnp.array(immersion_coefficient_dust),
+            immersion_coefficient_bc=jnp.array(immersion_coefficient_bc),
             nic_cirrus=int(nic_cirrus),
             ldyn_cdnc_min=bool(ldyn_cdnc_min),
         )
