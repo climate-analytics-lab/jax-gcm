@@ -112,14 +112,21 @@ class CloudData:
     # Cloud properties
     droplet_number: jnp.ndarray  # Droplet number concentration [1/m³] (nlev, ncols)
 
+    # Droplet / crystal effective radii [um] (nlev, ncols) the radiation used
+    # (ECHAM ``re_droplets2d``/``re_crystals2d``): a DIAGNOSTIC written by the
+    # radiation term (RRTMGP or the emulator) from the state it radiated,
+    # 0 where the phase had no in-cloud condensate; on a cached radiation step
+    # it holds the radii of the solve the heating came from. No term reads it
+    # as an input to the radiation (see ``cloud_optics.radiation_effective_radii``),
+    # and the post-physics diagnostics (COSP, AeroCom) do not read it either:
+    # they describe the post-microphysics condensate, so they form its radii
+    # with the same law (``cloud_optics.post_physics_effective_radii``).
+    r_eff_liq: jnp.ndarray
+    r_eff_ice: jnp.ndarray
     # Previous-timestep (t-dt) 2M number concentrations carried across
     # steps so the 2M ``update_tendencies_and_important_vars`` step has
     # the tm1 state it needs. Stored per kg of air (matching the
     # qnc/qni tracer convention).
-    # Microphysical effective radii [um] (nlev, ncols); 0 = not provided
-    # (1M / cold start) — radiation falls back to its diagnostic formulas.
-    r_eff_liq: jnp.ndarray
-    r_eff_ice: jnp.ndarray
     qnc_prev: jnp.ndarray            # Previous-step cloud droplet number [1/kg] (nlev, ncols)
     qni_prev: jnp.ndarray            # Previous-step ice crystal number    [1/kg] (nlev, ncols)
 
@@ -274,9 +281,11 @@ CLOUD_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
             "number_concentration_of_cloud_liquid_water_particles_in_air",
         "units": "m-3", "long_name": "cloud droplet number concentration"},
     "clouds.r_eff_liq": {
-        "units": "um", "long_name": "cloud droplet effective radius"},
+        "units": "um",
+        "long_name": "cloud droplet effective radius used by the radiation"},
     "clouds.r_eff_ice": {
-        "units": "um", "long_name": "cloud ice effective radius"},
+        "units": "um",
+        "long_name": "cloud ice effective radius used by the radiation"},
     "clouds.qnc_prev": {
         "units": "kg-1",
         "long_name": "previous-step cloud droplet number per kg air"},

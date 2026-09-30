@@ -11,22 +11,23 @@ Source roots come from :mod:`jcm.data.mirror.sites` (auto-detected, or
 of the published grids — how a new grid is added without rebuilding (or
 re-uploading) the existing ones. A site without the RDA ERA5 archive or the raw
 input4MIPs emissions streams (Levante) first runs ``--stage pull``, which
-fetches the published Tier A products and ``registry.json`` from the mirror so
-the per-grid bundles regrid from exactly the data the other grids were built
-from::
+fetches the published Tier A products from the mirror so the per-grid bundles
+regrid from exactly the data the other grids were built from::
 
     python -m jcm.data.mirror.build_mirror --grids t127,t255 \
         --stage pull,sso,ozone,aux,dust,bundles,manifest,registry
 
-Stages: ``pull`` (Tier A + registry from the published mirror), ``sso``,
+Stages: ``pull`` (Tier A from the published mirror), ``sso``,
 ``era5``, ``ozone``, ``emissions`` (fat-node PBS job
 recommended — see ``--help``), ``aux`` (dms/oxidants via
 ``tools/prep_jam_aux_inputs.py``), ``dust`` (the five Tegen/HAMMOZ
 dust inputs), ``bundles``, ``amip`` (yearly
 transient forcing/emissions/ozone, ``--years first,last`` — issue #610),
 ``era5-transient`` (yearly all-ERA5 forcing incl. transient land —
-issue #629), ``registry``, ``upload``
-(push to the HF dataset; needs ``hf auth login`` with write access).
+issue #629), ``registry`` (the published registry at the tip, with the files
+this site's stages wrote re-hashed), ``upload`` (commit those files to the HF
+dataset; needs ``hf auth login`` with write access). ``--retire`` on a
+``registry`` run names published files to remove; the upload deletes them.
 Outputs land in ``$JCM_MIRROR_ROOT`` (default: the site's scratch ``hf_mirror``):
 Tier A under ``build/``, the HF-shaped tree under ``upload/``.
 
@@ -38,6 +39,7 @@ worktree as cwd): an editable-installed jcm elsewhere shadows
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import os
 import shutil
@@ -336,6 +338,148 @@ def _partial_build() -> bool:
             or _pulled_tier_a())
 
 
+#: Globs of published files to remove (``--retire``): dropped from the
+#: registry and deleted on upload. The only way an entry leaves the mirror.
+_RETIRE: tuple[str, ...] = ()
+
+#: Stages whose upload-tree writes :func:`main` does not record: ``registry``
+#: records its own before it hashes, and ``upload`` only reads.
+_UNRECORDED_STAGES = ("registry", "upload")
+
+
+#: Tier A products under ``build/`` that a full build stages into ``products/``.
+_TIER_A = ("ceds_anthro.zarr", "bb4cmip7.zarr",
+           "era5_land_climo_2005-2014_0p25.nc")
+
+#: Seconds a published copy may predate a local file and still count as newer:
+#: HF commit dates are whole seconds and the two clocks differ.
+_CLOCK_MARGIN_S = 300
+
+
+def _sync(src: Path, dst: Path) -> None:
+    """Copy file or tree ``src`` to ``dst`` wherever size or mtime differ.
+
+    ``copy2`` keeps each file's own mtime, the age of its content. Unlike a
+    copy-if-absent, a rebuilt ``src`` is restaged and a copy cut short by a
+    killed run is completed on the rerun.
+    """
+    pairs = ([(src, dst)] if src.is_file() else
+             [(f, dst / f.relative_to(src)) for f in src.rglob("*")
+              if f.is_file()])
+    for s, d in pairs:
+        ss = s.stat()
+        if d.exists():
+            ds = d.stat()
+            if (ds.st_size, ds.st_mtime_ns) == (ss.st_size, ss.st_mtime_ns):
+                continue
+        d.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(s, d)
+
+
+#: The registry and its in-flight temp copy: outputs of hashing, never inputs.
+_REGISTRY_FILES = ("registry.json", "registry.json.tmp")
+
+
+def _forget_writes(before: dict) -> list[str]:
+    """Drop from the ledger every file changed since ``before``.
+
+    For a failed stage: a file it touched may be truncated, including one an
+    earlier run already recorded, so none of them may be published until a
+    rerun rewrites and re-records them.
+    """
+    after = _upload_snapshot()
+    touched = {p for p, st in after.items() if before.get(p) != st}
+    touched |= set(before) - set(after)
+    ledger = _ledger()
+    if ledger & touched:
+        _write_ledger(ledger - touched)
+    return sorted(touched)
+
+
+def _ledger_path() -> Path:
+    """Upload-tree files written since the last upload (a JSON list)."""
+    return BUILD / "upload_ledger.json"
+
+
+def _ledger() -> set[str]:
+    path = _ledger_path()
+    return set(json.loads(path.read_text())) if path.exists() else set()
+
+
+def _write_ledger(paths) -> None:
+    # tmp + replace, so a crash mid-write never truncates the ledger.
+    tmp = _ledger_path().with_suffix(".tmp")
+    tmp.write_text(json.dumps(sorted(paths), indent=1) + "\n")
+    os.replace(tmp, _ledger_path())
+
+
+def _upload_snapshot() -> dict[str, tuple]:
+    """``{relative path: (mtime_ns, size, inode)}`` of every upload-tree file."""
+    snap = {}
+    if not UPLOAD.exists():
+        return snap
+    for dirpath, _, files in os.walk(UPLOAD):
+        for name in files:
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, UPLOAD)
+            if rel in _REGISTRY_FILES:
+                continue
+            st = os.stat(full)
+            snap[rel] = (st.st_mtime_ns, st.st_size, st.st_ino)
+    return snap
+
+
+def _record_writes(before: dict) -> dict:
+    """Add the upload-tree files created or changed since ``before`` to the ledger.
+
+    The registry and the upload act on the ledger alone. The upload tree is a
+    long-lived working copy that builds on other sites never reach, so a file
+    this site did not just write may be older than the published one, and
+    republishing it would revert that. Returns the new snapshot, the next
+    stage's ``before``.
+    """
+    after = _upload_snapshot()
+    written = {p for p, st in after.items() if before.get(p) != st}
+    if written:
+        _write_ledger(_ledger() | written)
+    return after
+
+
+def _registry_at(revision: str) -> dict:
+    from huggingface_hub import HfApi
+
+    from jcm.data.remote import DEFAULT_REPO
+
+    path = HfApi().hf_hub_download(
+        DEFAULT_REPO, "registry.json", repo_type="dataset", revision=revision,
+        local_dir=str(BUILD / "published" / revision))
+    return json.loads(Path(path).read_text())
+
+
+def _mirror_tip() -> str:
+    from huggingface_hub import HfApi
+
+    from jcm.data.remote import DEFAULT_REPO
+
+    return HfApi().repo_info(DEFAULT_REPO, repo_type="dataset").sha
+
+
+def _published_dates(paths, revision: str) -> dict:
+    """``{path: datetime}`` of the last commit touching each path at ``revision``."""
+    from huggingface_hub import HfApi
+
+    from jcm.data.remote import DEFAULT_REPO
+
+    paths, api, dates = sorted(paths), HfApi(), {}
+    for i in range(0, len(paths), 200):
+        for f in api.get_paths_info(DEFAULT_REPO, paths[i:i + 200],
+                                    expand=True, revision=revision,
+                                    repo_type="dataset"):
+            if getattr(f, "last_commit", None) is not None:
+                dates[f.path] = f.last_commit.date
+    return dates
+
+
 def _truncation(grid: str) -> int:
     """``"t127"`` -> 127 — the relation ``jcm.forcing_assembly`` uses."""
     return int(grid[1:])
@@ -504,19 +648,19 @@ def stage_bundles() -> None:
             d.mkdir(parents=True, exist_ok=True)
             for era, tag in (("pi", "pi1850"), ("pd", "pd2005-2014")):
                 if _want("ozone"):
-                    shutil.copy(BUILD / "ozone" /
+                    shutil.copy2(BUILD / "ozone" /
                                 f"ozone_fzj_cmip7_{tag}_{grid}_l{nlev}.nc",
                                 d / f"ozone_{era}.nc")
             for era, year in (("pi", 1850), ("pd", 2005)):
                 if _want("oxidants"):
-                    shutil.copy(
+                    shutil.copy2(
                         BUILD / "aux" / f"oxidants_waccm_echam_l{nlev}_"
                         f"{year}_t{trunc[grid]}.nc",
                         d / f"oxidants_{era}.nc")
         g = UPLOAD / "bundles" / grid
         if _want("dms"):
-            shutil.copy(BUILD / "aux" /
-                        f"dms_lana2011_climo_t{trunc[grid]}.nc", g / "dms.nc")
+            shutil.copy2(BUILD / "aux" /
+                         f"dms_lana2011_climo_t{trunc[grid]}.nc", g / "dms.nc")
 
     if not _column_buildable() or not _want("terrain"):
         print("bundles: done", flush=True)
@@ -526,8 +670,8 @@ def stage_bundles() -> None:
     # terrain.nc, matching the Gaussian bundles: the file is the fully
     # assembled terrain (LANDFRAC lsm + orog_gll), and the old sso.nc
     # name invited grabbing a raw SSO product instead (#596)
-    shutil.copy(BUILD / "sso" / "sso_gmted2010_ne30pg3.nc",
-                d / "terrain.nc")
+    shutil.copy2(BUILD / "sso" / "sso_gmted2010_ne30pg3.nc",
+                 d / "terrain.nc")
     # a rerun over a pre-#596 upload tree must not re-register the trap
     # file under its old name
     (d / "sso.nc").unlink(missing_ok=True)
@@ -882,30 +1026,12 @@ def verify_remote_coverage(manifest: dict = None, repo_id: str = None) -> dict:
     return drift
 
 
-def stage_registry() -> None:
-    """Stage Tier A into the upload tree and write ``registry.json``.
-
-    A full build (every grid and product, Tier A built here) stages Tier A
-    and writes the registry from its own tree, so a file it no longer produces
-    drops out. A partial build (``_partial_build``: ``--grids``,
-    ``--products`` or pulled Tier A) stages no Tier A — it is what the new
-    bundles were regridded *from*, already published, and restaging a locally
-    rebuilt copy would republish GB of unchanged data — and merges its hashes
-    onto the pulled published registry, since a registry built from a partial
-    tree alone would drop every other file's entry. SSO statistics (the
-    terrain product's Tier A) are staged for the selected grids when terrain is
-    among the products built.
-    """
-    from jcm.data.mirror.registry import write_registry
-
-    partial = _partial_build()
-    if not partial:
-        for name in ("ceds_anthro.zarr", "bb4cmip7.zarr",
-                     "era5_land_climo_2005-2014_0p25.nc"):
-            src, dst = BUILD / name, UPLOAD / "products" / name
-            if src.exists() and not dst.exists():
-                shutil.copytree(src, dst) if src.is_dir() else shutil.copy(
-                    src, dst)
+def _stage_tier_a() -> None:
+    """Stage Tier A (full builds) and the selected SSO statistics for upload."""
+    if not _partial_build():
+        for name in _TIER_A:
+            if (BUILD / name).exists():
+                _sync(BUILD / name, UPLOAD / "products" / name)
     if _want("terrain"):
         sso_dst = UPLOAD / "products" / "sso"
         sso_dst.mkdir(parents=True, exist_ok=True)
@@ -916,15 +1042,95 @@ def stage_registry() -> None:
             dst = sso_dst / f.name
             # staging may have hardlinked build -> upload already
             if not (dst.exists() and dst.samefile(f)):
-                shutil.copy(f, dst)
-    base = None
-    if partial:
-        if not _REMOTE_REGISTRY.exists():
-            sys.exit("registry: a partial build (--grids / --products / pulled "
-                     "Tier A) must merge onto the published registry.json — "
-                     "run --stage pull first.")
-        base = json.loads(_REMOTE_REGISTRY.read_text())
-    print(write_registry(str(UPLOAD), base=base), flush=True)
+                shutil.copy2(f, dst)
+
+
+def stage_registry() -> None:
+    """Stage Tier A into the upload tree and write ``registry.json``.
+
+    The registry is the published one at the mirror's tip, with the ledger's
+    files (:func:`_record_writes`) re-hashed and the ``--retire`` globs
+    removed, so a build only ever replaces what it wrote. A full build (every
+    grid and product, Tier A built here) also stages Tier A; a partial build
+    (``_partial_build``: ``--grids``, ``--products`` or pulled Tier A) does
+    not — Tier A is what the new bundles were regridded *from*, already
+    published, and restaging a locally rebuilt copy would republish GB of
+    unchanged data. SSO statistics (the terrain product's Tier A) are staged
+    for the selected grids when terrain is among the products built.
+    """
+    from jcm.data.mirror.registry import build_registry
+
+    # A registry run that dies part-way must not leave the previous run's
+    # base for the upload to pair with a half-written registry.
+    (BUILD / "registry_base.json").unlink(missing_ok=True)
+    before = _upload_snapshot()
+    try:
+        _stage_tier_a()
+    except BaseException:
+        _forget_writes(before)      # a copy cut short is not publishable
+        raise
+    _record_writes(before)
+    written = _ledger()
+    gone = sorted(p for p in written if not (UPLOAD / p).is_file())
+    if gone:
+        # Removed after it was written: nothing to publish. Removing the
+        # published copy is a --retire decision, never implicit.
+        print(f"registry: {len(gone)} written file(s) no longer exist, "
+              f"dropped from the ledger: {', '.join(gone[:5])}", flush=True)
+        written -= set(gone)
+        _write_ledger(written)
+    clash = sorted(p for p in written
+                   if any(fnmatch.fnmatch(p, g) for g in _RETIRE))
+    if clash:
+        sys.exit(f"registry: --retire matches file(s) this site wrote "
+                 f"({', '.join(clash[:5])}); narrow the globs")
+    tip = _mirror_tip()
+    base = _registry_at(tip)
+    if written and _pulled_tier_a():
+        # Pulled Tier A is the pinned revision's; bundles regridded from it
+        # would reintroduce inputs the tip has since replaced.
+        from jcm.data.remote import mirror_revision
+
+        pinned = _registry_at(mirror_revision())["files"]
+        moved = sorted(p for p in {*pinned, *base["files"]}
+                       if p.startswith(tuple(f"products/{n}" for n in _TIER_A))
+                       and pinned.get(p) != base["files"].get(p))
+        if moved:
+            sys.exit(f"registry: the mirror tip's Tier A differs from the "
+                     f"pinned revision this build pulled ({moved[0]}, ...); "
+                     "set JCM_MIRROR_REVISION to the tip, re-pull and rebuild")
+    stats = {p: list(st) for p, st in _upload_snapshot().items()
+             if p in written}
+    reg = build_registry(str(UPLOAD), base=base, paths=written)
+    # A published copy that differs from ours and was committed after our
+    # file's content (its mtime; build/ products are staged with copy2) would
+    # be reverted: rebuild on it or keep it. Our own earlier publish matches
+    # our hash and passes.
+    differ = [p for p in written if p in base["files"]
+              and base["files"][p]["sha256"] != reg["files"][p]["sha256"]]
+    # Undated counts as newer; the margin absorbs whole-second commit dates
+    # and clock skew, erring towards refusing.
+    dates = _published_dates(differ, tip) if differ else {}
+    newer = sorted(p for p in differ if p not in dates
+                   or dates[p].timestamp() > (UPLOAD / p).stat().st_mtime
+                   - _CLOCK_MARGIN_S)
+    if newer:
+        sys.exit(f"registry: {len(newer)} file(s) this site wrote are older "
+                 f"than a different published copy ({', '.join(newer[:5])}); "
+                 "rebuild them from the current sources, or remove them from "
+                 f"{_ledger_path()} to keep the published copy")
+    retired = sorted(p for p in reg["files"]
+                     if any(fnmatch.fnmatch(p, g) for g in _RETIRE))
+    for p in retired:
+        del reg["files"][p]
+    tmp = UPLOAD / "registry.json.tmp"
+    tmp.write_text(json.dumps(reg, indent=1, sort_keys=True))
+    os.replace(tmp, UPLOAD / "registry.json")
+    (BUILD / "registry_base.json").write_text(json.dumps(
+        {"parent_commit": tip, "retire": list(_RETIRE), "retired": retired,
+         "written": stats}, indent=1) + "\n")
+    print(f"registry: {len(written)} written file(s) over tip {tip[:8]}, "
+          f"{len(retired)} retired", flush=True)
 
 
 def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
@@ -1085,8 +1291,7 @@ def _pulled_emissions() -> bool:
 
 def _pulled_tier_a() -> bool:
     """Whether any build-tree Tier A product came from --stage pull."""
-    return _pulled(("ceds_anthro.zarr", "bb4cmip7.zarr",
-                    "era5_land_climo_2005-2014_0p25.nc"))
+    return _pulled(_TIER_A)
 
 
 #: Tier A products the per-grid bundles regrid from. ``stage_pull`` fetches
@@ -1101,30 +1306,22 @@ _TIER_A_PULL = (
     *(f"products/{store}/{coord}/**"
       for store in ("ceds_anthro.zarr", "bb4cmip7.zarr")
       for coord in ("lat", "lon", "month", "time")),
-    "registry.json",
 )
 
-#: The published ``registry.json`` as pulled, merged into by ``stage_registry``
-#: when the upload tree holds only some grids (a ``--grids`` build).
-_REMOTE_REGISTRY = BUILD / "remote_registry.json"
-
-
 def stage_pull() -> None:
-    """Fetch the published Tier A products and ``registry.json`` into ``build/``.
+    """Fetch the published Tier A products into ``build/``.
 
     For a site that cannot rebuild Tier A (no RDA ERA5, no raw input4MIPs
     emission streams) and for any ``--grids`` build that adds a grid: the new
     bundles then regrid from exactly the Tier A data the published grids were
-    built from, and the registry is merged rather than rewritten.
+    built from.
     """
     from huggingface_hub import snapshot_download
 
     from jcm.data.remote import DEFAULT_REPO, mirror_revision
 
-    # Pinned like every other mirror read. The registry pulled here is merged
-    # into and re-uploaded, so when extending the tip set JCM_MIRROR_REVISION
-    # to the tip's sha first; pulling an older commit would drop the entries
-    # added since.
+    # Pinned like every other mirror read, so a build regrids from the Tier A
+    # the pinned bundles were built from.
     revision = mirror_revision()
     print(f"pull: mirror revision {revision}", flush=True)
     stage = BUILD / "pulled"
@@ -1136,17 +1333,37 @@ def stage_pull() -> None:
         dst = BUILD / name
         if not dst.exists():
             dst.symlink_to(stage / "products" / name)
-    shutil.copy(stage / "registry.json", _REMOTE_REGISTRY)
     print("pull: done", flush=True)
 
 
-def stage_upload() -> None:
-    """Push the upload tree to the HF dataset (needs a write token).
+#: Per-commit budget, well inside HF's ``create_commit`` limits (25k LFS files,
+#: 1 GB of regular files, which HF stores for files under ~10 MB).
+_BATCH_FILES = 2000
+_BATCH_SMALL_BYTES = 500 * 2 ** 20
+_SMALL_FILE = 10 * 2 ** 20
 
-    Retries transient backend failures: the xet upload pipeline has
-    aborted mid-transfer with TimeoutError("error decoding response
-    body") on a 44k-file push — uploads are resumable, so committed
-    files are skipped on the next attempt.
+
+def _batches(paths) -> list[list[str]]:
+    """Split ``paths`` into commits within the file and small-file budgets."""
+    batches, cur, small = [], [], 0
+    for p in paths:
+        size = (UPLOAD / p).stat().st_size
+        add = size if size < _SMALL_FILE else 0
+        if cur and (len(cur) >= _BATCH_FILES
+                    or small + add > _BATCH_SMALL_BYTES):
+            batches.append(cur)
+            cur, small = [], 0
+        cur.append(p)
+        small += add
+    return [*batches, cur] if cur else batches
+
+
+def _commit(ops, parent: str, message: str):
+    """``create_commit`` on ``parent``, retrying while the tip stays there.
+
+    Once the tip has moved — another push, or an attempt that landed
+    unacknowledged — it stops and says so rather than retrying against a
+    parent the server will refuse.
     """
     import time
 
@@ -1154,27 +1371,89 @@ def stage_upload() -> None:
 
     from jcm.data.remote import DEFAULT_REPO
 
-    api = HfApi()
     last = None
     for attempt in range(1, 6):
-        print(f"upload attempt {attempt}", flush=True)
         try:
-            commit = api.upload_folder(
-                repo_id=DEFAULT_REPO, repo_type="dataset",
-                folder_path=str(UPLOAD),
-                commit_message="Mirror update via build_mirror --stage upload")
-            # Runs read the pinned commit, so the upload changes nothing they
-            # see until the pin is bumped; print the line that does it.
-            print(f"upload: done, mirror revision {commit.oid}\n"
-                  f"  to make runs read it, set in jcm/data/remote.py:\n"
-                  f"    MIRROR_REVISION = \"{commit.oid}\"", flush=True)
-            return
+            return HfApi().create_commit(
+                repo_id=DEFAULT_REPO, repo_type="dataset", operations=ops,
+                parent_commit=parent, commit_message=message)
         except Exception as e:                      # noqa: BLE001
             last = e
             print(f"upload attempt {attempt} failed: "
                   f"{type(e).__name__}: {e}", flush=True)
+            try:
+                tip = _mirror_tip()
+            except Exception:                       # noqa: BLE001
+                tip = parent                        # unknown: keep retrying
+            if tip != parent:
+                sys.exit(f"upload: the mirror tip is now {tip}, not {parent}. "
+                         "Either an earlier attempt landed (check that "
+                         "commit) or another push moved the tip; rerun "
+                         "--stage registry,upload.")
             time.sleep(60)
     raise RuntimeError("upload failed after 5 attempts") from last
+
+
+def stage_upload() -> None:
+    """Commit the ledger's files, ``registry.json`` and the retirements to HF.
+
+    Only what this site's builds wrote is pushed (:func:`_record_writes`), in
+    batches that fit HF's per-commit limits, each committed on the previous
+    one starting from the tip the registry was merged onto; ``registry.json``
+    and the retirements come last, so the registry moves only once every file
+    has landed. If the mirror moves in between, the upload stops rather than
+    overwrite it (:func:`_commit`). Each landed batch is recorded in
+    ``registry_base.json``, so a rerun resumes after it. The ledger is set
+    aside once the registry commit lands. Needs a write token.
+    """
+    from huggingface_hub import CommitOperationAdd, CommitOperationDelete
+
+    side = BUILD / "registry_base.json"
+    if not side.exists() or not (UPLOAD / "registry.json").exists():
+        sys.exit("upload: run --stage registry first")
+    base = json.loads(side.read_text())
+    if _RETIRE and list(_RETIRE) != base["retire"]:
+        sys.exit("upload: --retire is applied by --stage registry; rerun it "
+                 "with these globs")
+    # Exactly the files, at exactly the state, the registry hashed.
+    written = sorted(_ledger())
+    snap = _upload_snapshot()
+    if (written != sorted(base["written"])
+            or any(list(snap.get(p, ())) != st
+                   for p, st in base["written"].items())):
+        sys.exit("upload: the upload tree changed since --stage registry; "
+                 "rerun it")
+    done = set(base.get("uploaded", []))
+    batches = _batches([p for p in written if p not in done])
+    print(f"upload: {len(written)} file(s) ({len(done)} already landed) in "
+          f"{len(batches)} batch(es) + registry.json, "
+          f"{len(base['retired'])} retired, onto {base['parent_commit'][:8]}",
+          flush=True)
+    message = "Mirror update via build_mirror --stage upload"
+    for i, batch in enumerate(batches, 1):
+        commit = _commit(
+            [CommitOperationAdd(path_in_repo=p,
+                                path_or_fileobj=str(UPLOAD / p))
+             for p in batch],
+            base["parent_commit"], f"{message} ({i}/{len(batches)})")
+        base["parent_commit"] = commit.oid
+        base["uploaded"] = sorted(done.union(*batches[:i]))
+        side.write_text(json.dumps(base, indent=1) + "\n")
+        print(f"upload: batch {i}/{len(batches)} landed as {commit.oid[:8]}",
+              flush=True)
+    commit = _commit(
+        [CommitOperationAdd(path_in_repo="registry.json",
+                            path_or_fileobj=str(UPLOAD / "registry.json")),
+         *(CommitOperationDelete(path_in_repo=p) for p in base["retired"])],
+        base["parent_commit"], f"{message} (registry)")
+    if _ledger_path().exists():
+        _ledger_path().rename(BUILD / f"upload_ledger.{commit.oid[:12]}.json")
+    side.unlink()
+    # Runs read the pinned commit, so the upload changes nothing they
+    # see until the pin is bumped; print the line that does it.
+    print(f"upload: done, mirror revision {commit.oid}\n"
+          f"  to make runs read it, set in jcm/data/remote.py:\n"
+          f"    MIRROR_REVISION = \"{commit.oid}\"", flush=True)
 
 
 STAGES = {"pull": stage_pull, "sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
@@ -1206,13 +1485,19 @@ def main() -> None:
     ap.add_argument("--years", default="1950,2022",
                     help="inclusive year range for --stage amip, "
                          "e.g. 1950,2022")
+    ap.add_argument("--retire", default=None,
+                    help="comma-separated globs of published files the "
+                         "--stage registry run removes (e.g. a renamed "
+                         "product's old path), deleted by the upload that "
+                         "follows; nothing else leaves the mirror")
     ap.add_argument("--verify-remote", action="store_true",
                     help="after staging, cross-check the manifest against the "
                          "live mirror (list_repo_files): transient coverage "
                          "per variant + existence of every staged static "
                          "artifact; exit non-zero on any drift")
     args = ap.parse_args()
-    global _AMIP_YEARS, _SELECTED, _PRODUCTS
+    global _AMIP_YEARS, _SELECTED, _PRODUCTS, _RETIRE
+    _RETIRE = tuple(args.retire.split(",")) if args.retire else ()
     first, last = (int(y) for y in args.years.split(","))
     _AMIP_YEARS = (first, last)
     if args.grids:
@@ -1253,10 +1538,24 @@ def main() -> None:
     BUILD.mkdir(parents=True, exist_ok=True)
     UPLOAD.mkdir(parents=True, exist_ok=True)
     check_sources(names)
+    snap = None
     for name in names:
         print(f"=== stage: {name} ===", flush=True)
         check_sources([name], include_build=True)
-        STAGES[name]()
+        if name in _UNRECORDED_STAGES:
+            STAGES[name]()
+            snap = None
+            continue
+        before = snap if snap is not None else _upload_snapshot()
+        try:
+            STAGES[name]()
+        except BaseException:
+            touched = _forget_writes(before)
+            print(f"stage {name} failed: the {len(touched)} file(s) it "
+                  "touched are not publishable until a rerun over the same "
+                  "selection rewrites them", flush=True)
+            raise
+        snap = _record_writes(before)
     if args.verify_remote:
         print("=== verify-remote ===", flush=True)
         drift = verify_remote_coverage()

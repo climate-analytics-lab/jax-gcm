@@ -1,7 +1,9 @@
 """Utility routines and constants for the 2-m cloud microphysics scheme (based on mo_cloud_utils from ECHAM6/ICON)."""
 
-import jax.numpy as jnp
+import math
 from math import pi
+
+import jax.numpy as jnp
 
 import jcm.constants as c
 from .lohmann_2m_params import CloudParams2M
@@ -79,11 +81,17 @@ def eff_ice_crystal_radius(
 def ice_volume_mean_radius(
     ice_in_cloud_gm3: jnp.ndarray, icnc: jnp.ndarray, params: CloudParams2M,
 ) -> jnp.ndarray:
-    """Volume-mean ice crystal radius (Fortran ``prid``/``zrice``/``zris``) in METRES.
+    """Plate volume-mean ice crystal radius (Fortran ``zris``) in METRES.
 
     Chains the Lohmann (2008) effective radius, the ``[ceffmin, ceffmax]`` clip,
-    and the Schumann (2011) effective -> volume-mean conversion
-    ``zrih = -2261 + sqrt(5113188 + 2809 r_eff^3)``, ``r_vol = 1e-6 zrih^(1/3)``.
+    and the plate relation ``zrih = -2261 + sqrt(5113188 + 2809 r_eff^3)``,
+    ``r_vol = 1e-6 zrih^(1/3)`` that ECHAM uses for the aggregation timescale
+    in ``precip_formation_cold`` (``mo_cloud_micro_2m.f90:3160-3166``; the 1M
+    Levkov aggregation in ``mo_cloud.f90:1031-1036`` uses the same relation).
+    ECHAM's Wegener-Bergeron-Findeisen threshold uses a different conversion,
+    :func:`ice_volume_mean_radius_schumann`. jcm also passes this radius to
+    ``update_in_cloud_water`` as ``prid`` for the ICNC diagnosis, where ECHAM
+    passes its temperature-parameterised ``zrid`` (lines 945-956; #941).
 
     Metres is load-bearing: callers invert this as
     ``N = rho q_i / ((4/3) pi r_vol^3 rho_ice)``, so returning the microns that
@@ -109,6 +117,103 @@ def ice_volume_mean_radius(
     # above keeps r_eff >= ceffmin, so zrih >= ~550 and the floor never binds
     # in the forward pass.
     return 1.0e-6 * jnp.maximum(zrih, params.eps) ** (1.0 / 3.0)
+
+def ice_volume_mean_radius_schumann(
+    ice_in_cloud_gm3: jnp.ndarray, icnc: jnp.ndarray, params: CloudParams2M,
+) -> jnp.ndarray:
+    """Volume-mean ice crystal radius for the WBF threshold (ECHAM ``zrice``) in METRES.
+
+    Chains the Lohmann (2008) effective radius, the ``[ceffmin, ceffmax]`` clip
+    and ECHAM's ``effective_2_volmean_radius_param_Schuman_2011``,
+    ``r_vol = max(1e-6, conv_effr2mvr·1e-6·r_eff)`` with ``conv_effr2mvr = 0.9``
+    (``mo_cloud_micro_2m.f90:4059-4085``, a simple fit to the Schumann et al.
+    2011 r/r_eff data). This is the radius ECHAM hands to
+    ``threshold_vert_vel`` at every Wegener-Bergeron-Findeisen decision. jcm
+    uses it at the three it ports: the section-4 phase choice ``lo2``
+    (line 1288), the section-5 supersaturation correction
+    (``mixed_phase_deposition_and_corrections``, line 2374) and the WBF gate
+    (line 1582). ECHAM's fourth, the phase split of convective detrainment
+    ``lo2_2d`` (lines 872-885), has no counterpart: jcm's Tiedtke scheme
+    splits detrained condensate at ``tmelt`` (#941). The plate relation of
+    :func:`ice_volume_mean_radius` is ECHAM's for aggregation only.
+
+    Parameters
+    ----------
+    ice_in_cloud_gm3 : jnp.ndarray
+        IN-CLOUD ice mass concentration [g/m^3].
+    icnc : jnp.ndarray
+        Ice crystal number concentration [1/m^3].
+
+    """
+    r_eff_um = jnp.clip(
+        eff_ice_crystal_radius(ice_in_cloud_gm3, icnc, params),
+        params.ceffmin,
+        params.ceffmax,
+    )
+    return effective_2_volmean_radius_param_Schuman_2011(r_eff_um, params)
+
+def turbulent_updraft_velocity(
+    tke: jnp.ndarray, params: CloudParams2M,
+) -> jnp.ndarray:
+    """Turbulent part of ECHAM's cloud-scheme updraft ``zvervx`` [cm/s].
+
+    ``100·fact_tke·sqrt(TKE)`` with ``fact_tke = 0.7``, set to zero at the
+    lowest model level (``mo_cloud_micro_2m.f90:814-815``). ECHAM's
+    ``zvervx`` (line 816) adds the large-scale term ``−100·ω/(g·ρ)``; that
+    one is the caller's to add (it needs the pressure velocity).
+
+    Parameters
+    ----------
+    tke : jnp.ndarray
+        Turbulent kinetic energy [m²/s²], vertical on axis 0 (top first, so
+        the last index is the lowest level) and any horizontal axes after it.
+
+    """
+    nlev = tke.shape[0]
+    is_lowest_level = (jnp.arange(nlev) == nlev - 1).reshape(
+        (nlev,) + (1,) * (tke.ndim - 1))
+    # Double-where on the root: at TKE = 0 (laminar layers, a cold start)
+    # sqrt has an infinite derivative.
+    positive_tke = tke > 0.0
+    turbulent = 100.0 * params.fact_tke * jnp.where(
+        positive_tke, jnp.sqrt(jnp.where(positive_tke, tke, 1.0)), 0.0)
+    return jnp.where(is_lowest_level, 0.0, turbulent)
+
+def air_dynamic_viscosity(temperature: jnp.ndarray) -> jnp.ndarray:
+    """Dynamic viscosity of air [kg m^-1 s^-1] (ECHAM ``pviscos``).
+
+    ``pviscos = (1.512 + 0.0052·(T − 233.15))·1e-5``, a linear fit in
+    temperature (``mo_cloud_utils.f90::get_util_var``, line 132), evaluated at
+    the step-start temperature ``ptm1``. The 2M scheme uses it only in the snow
+    Reynolds number of riming (``precip_formation_cold``,
+    ``mo_cloud_micro_2m.f90:3216``). Not to be confused with the thermal
+    conductivity of air ``zkair = 4.1867e-3·(5.69 + 0.017·(T − tmelt))``
+    (line 715), which enters the diffusional-growth factors instead.
+    """
+    return (1.512 + 0.0052 * (temperature - 233.15)) * 1.0e-5
+
+def ice_fall_speed_air_density_factor(
+    pressure: jnp.ndarray, temperature: jnp.ndarray,
+) -> jnp.ndarray:
+    """Air-density correction of the cloud-ice fall speed (ECHAM ``paaa``), dimensionless.
+
+    ``paaa = (p/30000)^(-0.178)·(T/233)^(-0.394)``
+    (``mo_cloud_utils.f90::get_util_var``, line 129), the Heymsfield & Iaquinta
+    (2000, *J. Atmos. Sci.* 57, 916-938) pressure and temperature correction of
+    the crystal fall speed, equal to 1 at 300 hPa and 233 K. Evaluated at the
+    full-level pressure and step-start temperature. The 2M scheme uses it
+    only in the ice sedimentation fall speed ``zxifallmc = fall·α·m^β·paaa``
+    (``mo_cloud_micro_2m.f90:2224``), which moves ice mass and number alike.
+
+    Parameters
+    ----------
+    pressure : jnp.ndarray
+        Full-level pressure ``papm1`` [Pa].
+    temperature : jnp.ndarray
+        Temperature ``ptm1`` [K].
+
+    """
+    return (pressure / 30000.0) ** (-0.178) * (temperature / 233.0) ** (-0.394)
 
 def minimum_CDNC(pxwat, params: CloudParams2M):
     """Set the minimum cloud droplet number concentration, either statically or dynamically.
@@ -239,17 +344,154 @@ def breadth_factor(pcdnc: jnp.ndarray) -> jnp.ndarray:
     """
     return 4.5e-10 * pcdnc + 1.18
 
+#: Martin et al. (1994) droplet-spectrum breadth parameters ECHAM's radiation
+#: uses when droplet number is prescribed (``mo_cloud_optics.f90``:
+#: ``zkap_cont = 1.143``, ``zkap_mrtm = 1.077``; ``k^(-1/3)`` for the measured
+#: continental / maritime ``k = 0.67 / 0.80``).
+BREADTH_CONTINENTAL = 1.143
+BREADTH_MARITIME = 1.077
+
+
+def prescribed_cdnc_profile(
+    pressure: jnp.ndarray, continental: jnp.ndarray | bool,
+) -> jnp.ndarray:
+    """ECHAM's prescribed cloud droplet number concentration [1/m^3].
+
+    The 1-moment ECHAM cloud scheme has no prognostic droplet number; the
+    number its radiation and cloud microphysics see is a fixed profile,
+    ``acdnc`` (``physc.f90`` section 3.12, identical in ICON-A
+    ``mo_echam_phy_diag.f90::droplet_number``)::
+
+        zprat = MIN(8, 80000/p)**2
+        zn1, zn2 = 20, 180 [cm-3] continental;  20, 80 [cm-3] maritime
+        zcdnc = 1e6*(zn1 + (zn2 - zn1)*EXP(1 - zprat))   for p < 80000 Pa
+        zcdnc = 1e6*zn2                                  for p >= 80000 Pa
+
+    so the surface-layer value (80 / 180 cm-3) holds up to 800 hPa and decays
+    to 20 cm-3 aloft. The profile is continuous at 800 hPa (``zprat = 1``
+    there). ECHAM6 evaluates it once at the initial step from that step's
+    pressure; ICON-A re-evaluates it every step. Here it is evaluated from
+    the pressure it is given, i.e. every radiation call (ICON-A's form); the
+    two differ only through surface-pressure changes.
+
+    Parameters
+    ----------
+    pressure : jnp.ndarray
+        Full-level pressure [Pa], any shape.
+    continental : jnp.ndarray or bool
+        True for continental columns (ECHAM: land that is not glacier, or a
+        lake), broadcast against ``pressure``.
+
+    Returns
+    -------
+    jnp.ndarray
+        Droplet number concentration [1/m^3], shaped like ``pressure``.
+
+    """
+    zn1 = 20.0
+    zn2 = jnp.where(continental, 180.0, 80.0)
+    zprat = jnp.minimum(8.0, 80000.0 / pressure) ** 2
+    aloft = 1.0e6 * (zn1 + (zn2 - zn1) * jnp.exp(1.0 - zprat))
+    return jnp.where(pressure < 80000.0, aloft, 1.0e6 * zn2)
+
+
+def continental_columns(terrain, forcing) -> jnp.ndarray:
+    """ECHAM's continental mask for cloud droplets: land that is not glacier.
+
+    ``physc.f90`` section 3.12 gives the prescribed droplet number its
+    continental profile for ``loland .AND. .NOT. loglac`` (or a lake), and
+    ``mo_cloud_optics.f90`` takes the continental breadth constant
+    ``WHERE (laland .AND. .NOT. laglac)``. ECHAM6's default
+    (``lfractional_mask = .FALSE.``) reads ``loland`` from the binary
+    land-sea mask; jcm's land fraction ``fmask`` is fractional, so land is
+    ``fmask >= 0.5`` (the same split ``SundqvistCloudFraction`` uses).
+    ``loglac`` is any glacier cover on land (``glac > 0``), from
+    ``forcing.glacier_fraction`` where the forcing carries it. jcm carries no
+    lake map, so no ocean-classified cell is treated as a lake.
+
+    Returns a per-column boolean, shaped like ``terrain.fmask``. A term driven
+    without terrain (``terrain=None``: unit tests and bare column drivers)
+    has no land to classify, so every column is maritime.
+    """
+    if terrain is None:
+        return jnp.asarray(False)
+    land = terrain.fmask >= 0.5
+    glacier = getattr(forcing, "glacier_fraction", None)
+    if glacier is None:
+        return land
+    return jnp.logical_and(
+        land, ~(jnp.reshape(jnp.asarray(glacier), land.shape) > 0.0))
+
+
+def per_column(x, horizontal_shape) -> jnp.ndarray:
+    """Lay a per-column field out in ``horizontal_shape``.
+
+    Per-column fields arrive in their producer's horizontal layout (the
+    terrain or aerosol grid, a flattened column vector, or a scalar); a
+    column-physics term needs them in the state's own layout so they
+    broadcast against ``(nlev, *horizontal_shape)`` fields.
+    """
+    x = jnp.asarray(x)
+    if x.size == math.prod(horizontal_shape):
+        return x.reshape(horizontal_shape)
+    return jnp.broadcast_to(x, horizontal_shape)
+
+
+def prescribed_droplet_number(
+    pressure: jnp.ndarray, terrain, forcing, cdnc_factor,
+) -> jnp.ndarray:
+    """Droplet number [1/m^3] of the 1-moment ECHAM configuration.
+
+    ECHAM's ``acdnc`` (:func:`prescribed_cdnc_profile` on the
+    :func:`continental_columns` mask) times the MACv2-SP Twomey factor
+    ``cdnc_factor``. ECHAM passes one ``acdnc`` to both its radiation
+    (``mo_cloud_optics.f90``) and its 1M cloud scheme (``mo_cloud.f90``,
+    ``pacdnc``), so this is the one call both jcm consumers make:
+    ``Echam1MMicrophysics`` and the radiation's
+    ``cloud_optics.radiation_effective_radii``.
+
+    The Twomey factor reaches both. In MPI-ESM1.2 it scales the radiation's
+    droplet number only and leaves the cloud microphysics' unperturbed
+    (Mauritsen et al. 2019, JAMES, section 2.2); the extra path through the
+    1M autoconversion is jcm's existing aerosol-cloud formulation, recorded
+    in #932 and kept as it is for v3.0.
+
+    Args:
+        pressure: full-level pressure [Pa], ``(nlev, *horiz)``.
+        terrain / forcing: for the continental mask; ``terrain=None`` is
+            all-maritime.
+        cdnc_factor: per-column Twomey factor, any layout with one value per
+            column (or a scalar).
+
+    """
+    horiz = jnp.shape(pressure)[1:]
+    continental = per_column(continental_columns(terrain, forcing), horiz)
+    return (prescribed_cdnc_profile(pressure, continental)
+            * per_column(cdnc_factor, horiz))
+
+
 def eff_liquid_droplet_radius(
     liquid_in_cloud: jnp.ndarray,
     air_density: jnp.ndarray,
     cdnc: jnp.ndarray,
     eps: float | jnp.ndarray,
     liquid_cloud_flag: jnp.ndarray | bool = True,
+    breadth: jnp.ndarray | float | None = None,
 ) -> jnp.ndarray:
-    """Effective cloud droplet radius (ECHAM ``preffl``), shared by the 1M and 2M schemes.
+    """Effective cloud droplet radius (ECHAM ``preffl`` / ``re_droplets``).
 
     ``r_eff = 1e6 * kappa * (3 * rho * q_l,in-cloud / (4 pi rho_w N))^(1/3)``
-    with the Peng & Lohmann (2003) breadth factor ``kappa(N)``.
+
+    This is the Martin et al. (1994) law in the form both ECHAM routines use:
+    the 2-moment microphysics' diagnostic ``preffl``
+    (``mo_cloud_micro_2m.f90``) and the radiation's
+    ``mo_cloud_optics.f90::cloud_optics``
+    (``zfact*zkap*(zlwc/zcdnc)**(1/3)`` with
+    ``zfact = 1e6*(3e-9/(4 pi rhoh2o))**(1/3)``, ``zlwc`` in g/m3 and ``zcdnc``
+    in cm-3, which is the same expression in other units). It is the single
+    implementation of the law: the Lohmann 2M scheme calls it for its own
+    ``preffl``, and the radiation (``cloud_optics.echam_cloud_effective_radii``)
+    calls it for the radius it radiates with.
 
     Parameters
     ----------
@@ -263,16 +505,21 @@ def eff_liquid_droplet_radius(
         Floor on the CDNC denominator.
     liquid_cloud_flag : jnp.ndarray or bool
         Additional liquid-cloud mask (Fortran: ld_liqcl); ``True`` applies none.
+    breadth : jnp.ndarray, float or None
+        Spectral breadth factor ``kappa``. ``None`` (the default) uses the
+        Peng & Lohmann (2003) ``breadth_factor(cdnc)`` of the 2-moment scheme;
+        the prescribed-number radiation passes the Martin et al. continental /
+        maritime constant (``BREADTH_CONTINENTAL`` / ``BREADTH_MARITIME``).
 
     Returns
     -------
     jnp.ndarray
-        Effective droplet radius [micron], EXACTLY 0 where there is no liquid —
-        radiation (``cloud_optics.resolve_effective_radii``) selects on
-        ``r_eff > 0``, so the zero is what routes a cell to the fallback radius.
+        Effective droplet radius [micron]; exactly 0 where there is no liquid
+        (ECHAM's ``re_droplets2d = 0`` for a cloud-free layer).
 
     """
-    breadth = breadth_factor(cdnc)
+    if breadth is None:
+        breadth = breadth_factor(cdnc)
     # Double-where guard on the cube root, whose derivative is infinite when the
     # base is 0. The mask must be "there is liquid to speak of", NOT
     # ``liquid_cloud_flag`` alone: in the 2M scheme that flag is
@@ -281,9 +528,8 @@ def eff_liquid_droplet_radius(
     # *differentiated* branch. The forward is unchanged either way (the radius is
     # masked to 0 there), but the reverse pass multiplies that infinite local
     # derivative by the incoming cotangent, and a zero cotangent gives
-    # 0 * inf = NaN. That NaN reaches the gradient only once radiation consumes
-    # these radii from the cloud carry, i.e. from the second step of a rollout
-    # onwards.
+    # 0 * inf = NaN. The radiation differentiates through this radius in every
+    # cell of every column, clear ones included, so the guard is load-bearing.
     has_liquid = jnp.logical_and(liquid_cloud_flag, liquid_in_cloud > 0.0)
     radius_base = (
         (3.0 / (4.0 * pi * c.rhow)) * liquid_in_cloud * air_density

@@ -14,6 +14,7 @@ except ImportError:
     HAVE_JCOSP = False
 
 from jcm.forcing import ForcingData
+from jcm.physics.aerosol.aerosol_types import AerosolData
 from jcm.physics.clouds.cloud_data import CloudData
 from jcm.physics.convection.tiedtke_nordeng.types import ConvectionData
 from jcm.physics.diagnostics.moist_air_state import MoistAirColumnState
@@ -78,7 +79,10 @@ def _setup():
         diagnostics = {**diagnostics,
                        "thermo_run": {**tr, "qc": jnp.asarray(qc),
                                       "qi": jnp.asarray(qi)}}
-    diagnostics = {**diagnostics, "clouds": clouds, "convection": convection}
+    # The ECHAM compositions always carry an aerosol struct; its Twomey
+    # factor scales the 1-moment droplet number the radii are formed from.
+    diagnostics = {**diagnostics, "clouds": clouds, "convection": convection,
+                   "aerosol": AerosolData.zeros((NCOLS,), NLEV)}
     return state, diagnostics, forcing, terrain
 
 
@@ -157,18 +161,7 @@ class CalipsoModisTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        state, diagnostics, forcing, terrain = _setup()
-        # The shared fixture leaves the effective radii at zero, which the
-        # LIDAR reads as "no particles" (unlike the radar, for which zero
-        # selects the PSD defaults). Give the cloudy layers realistic radii
-        # so the lidar has something to detect.
-        clouds = diagnostics["clouds"]
-        reff_liq = jnp.where(clouds.qc > 0.0, 10.0, 0.0)   # microns
-        reff_ice = jnp.where(clouds.qi > 0.0, 30.0, 0.0)
-        diagnostics = {**diagnostics,
-                       "clouds": clouds.copy(r_eff_liq=reff_liq,
-                                             r_eff_ice=reff_ice)}
-        cls.setup = (state, diagnostics, forcing, terrain)
+        cls.setup = _setup()
 
     def _run(self, **kw):
         from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
@@ -224,19 +217,35 @@ class CalipsoModisTest(unittest.TestCase):
         diag = self._run(enable_calipso=True)
         self.assertGreater(float(np.asarray(diag["cltcalipso"]).max()), 0.0)
 
-    def test_zero_effective_radius_gives_no_lidar_cloud(self):
-        """Documents the radar/lidar convention difference.
+    def test_radii_follow_the_condensate_not_the_radiation(self):
+        """The simulators form radii from the condensate they read.
 
-        ``lidar_optics`` treats radius <= 0 as "class absent", whereas the
-        radar treats reff == 0 as "use PSD defaults". A configuration that
-        never sets the effective radii therefore reports zero lidar cover —
-        surprising enough to pin down so it is not mistaken for a bug.
+        ``clouds.r_eff_*`` are the radiation's radii: formed from the
+        step-start condensate before the microphysics ran, so 0 in a layer
+        the microphysics filled after the solve. ``lidar_optics`` reads a
+        radius <= 0 as "class absent" and the MODIS optical depth floors it
+        at 1 nm, so either would misreport that layer. The fixture's
+        ``clouds.r_eff_*`` are 0 everywhere while ``thermo_run`` holds the
+        cloud; the lidar must still see it, and nothing may depend on the
+        radiation's radii.
         """
         from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp
-        state, diagnostics, forcing, terrain = _setup()  # radii left at zero
-        term = CloudsatCosp(ncolumns=20, seed=1, enable_calipso=True)
-        _, diag = term(state, diagnostics, forcing, terrain)
-        self.assertEqual(float(np.asarray(diag["cltcalipso"]).max()), 0.0)
+        state, diagnostics, forcing, terrain = self.setup
+        clouds = diagnostics["clouds"]
+        self.assertEqual(float(jnp.abs(clouds.r_eff_liq).max()), 0.0)
+        term = CloudsatCosp(ncolumns=20, seed=1, enable_calipso=True,
+                            enable_modis=True)
+        zero = term(state, diagnostics, forcing, terrain)[1]
+        self.assertGreater(float(np.asarray(zero["cltcalipso"]).max()), 0.0)
+        other = {**diagnostics, "clouds": clouds.copy(
+            r_eff_liq=jnp.full_like(clouds.r_eff_liq, 20.0),
+            r_eff_ice=jnp.full_like(clouds.r_eff_ice, 60.0))}
+        moved = term(state, other, forcing, terrain)[1]
+        for key in ("cltcalipso", "cltmodis", "tauwmodis", "reffclwmodis",
+                    "cosp_warm_rain"):
+            np.testing.assert_array_equal(
+                np.asarray(zero[key]), np.asarray(moved[key]),
+                err_msg=f"{key} depends on the radiation's radii")
 
     def test_modis_outputs_are_finite_and_physical(self):
         diag = self._run(enable_modis=True)
@@ -277,14 +286,7 @@ class JointHistogramTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        state, diagnostics, forcing, terrain = _setup()
-        clouds = diagnostics["clouds"]
-        reff_liq = jnp.where(clouds.qc > 0.0, 10.0, 0.0)
-        reff_ice = jnp.where(clouds.qi > 0.0, 30.0, 0.0)
-        diagnostics = {**diagnostics,
-                       "clouds": clouds.copy(r_eff_liq=reff_liq,
-                                             r_eff_ice=reff_ice)}
-        cls.setup = (state, diagnostics, forcing, terrain)
+        cls.setup = _setup()
 
     def _run(self, **kw):
         from jcm.physics.diagnostics.cosp_cloudsat import CloudsatCosp

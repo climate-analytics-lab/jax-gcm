@@ -831,9 +831,10 @@ corrections, listed here because they change climate:
   and a branch name is refused). Two machines therefore no longer read
   different copies of a republished bundle depending on their caches. Runs,
   checkpoints, release-validation launches, benchmarks and fixture bands
-  record the commit. The pin is the 2026-09-24 upload carrying the
-  conservatively remapped t63/t106 ``emissions_{pd,pi}`` bundles, so a cache
-  holding the earlier emissions re-fetches once; prefetch before running
+  record the commit. The pin is the 2026-09-28 commit whose forcing bundles
+  carry the land-surface convention below (``lsm``, ``forest``, ``glac``) on
+  top of the conservatively remapped t63/t106 ``emissions_{pd,pi}``, so a
+  cache holding earlier bundles re-fetches once; prefetch before running
   offline.
 
 Importing jcm does not touch the GPU
@@ -908,9 +909,10 @@ ECHAM surface albedo and frozen-surface saturation
 - New optional static forcing fields ``forest`` and ``glac``
   (``ForcingData.forest_fraction`` / ``glacier_fraction``) carry the land
   cover the land albedo reads; the bundle builders write them from ERA5
-  ``cvh`` and the permanent-snow mask. Bundles published before this change
-  lack them and load with both ``None`` (no forest masking; ice sheets keep
-  their ERA5 background albedo of ≈0.8). ``snowc`` is the snow-covered
+  ``cvh`` and the permanent-snow mask, and every published forcing bundle
+  carries them from the pinned mirror commit on. A bundle without them loads
+  with both ``None`` (no forest masking; ice sheets keep their ERA5
+  background albedo of ≈0.8). ``snowc`` is the snow-covered
   fraction of the non-glacier land, so the snow-covered share of the land
   is ``glac + (1 − glac)·snowc`` (``jcm.forcing.land_snow_cover``, also
   read by the JAM dust snow gate). Forcing files now also carry ``lsm``, the
@@ -1012,6 +1014,47 @@ Convective-type cloud inhomogeneity
   ``convection.cloud_top``/``cloud_base`` now carry the updraft's level
   indices (top-first physics axis) instead of zeros (#870).
 
+Cloud droplets: effective radii from the current state, one 1M droplet number
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- RRTMGP and the NN emulator form the droplet and crystal effective radii
+  inside the radiation call from the step's in-cloud condensate and
+  droplet/crystal number, as ECHAM's ``mo_cloud_optics.f90::cloud_optics``
+  does, clamped to the RRTMGP table range (2.5-21.5 µm droplets, 5-90 µm
+  crystals). The radii used to reach radiation one step late through the
+  ``clouds`` carry, with 0 meaning "not provided" and an 11 µm / Moss-Foot
+  fallback substituted per cell, so a cell that turned cloudy between steps
+  radiated with the fallback (#929). The 2M configurations (SPA and JAM) use
+  the prognostic ``qnc``/``qni`` with the Peng & Lohmann breadth factor and
+  the Lohmann (2008) plate crystal radius; the 1M configurations the Martin
+  et al. continental/maritime breadth factor and the Moss/Foot crystal radius.
+- The 1M droplet number, for the radiation and for the 1M autoconversion
+  alike, is ECHAM's prescribed ``acdnc`` (80 cm⁻³ over sea, 180 cm⁻³ over
+  land below 800 hPa, falling to 20 cm⁻³ aloft) times the MACv2-SP Twomey
+  factor, from one shared call (``cloud_utils.prescribed_droplet_number``).
+  The 1M autoconversion used a uniform 100 cm⁻³ × Twomey factor (#936). The
+  Twomey factor stays on the autoconversion, which MPI-ESM1.2 does not do
+  (#932).
+- **Changes results.** Over days 5-10 of a ``t63-echam-1m`` A/B the two
+  changes together raise the global-mean TOA net by **3.4 W/m²**
+  (radiation alone: 2.1): reflected SW −4.1 W/m², SW cloud radiative effect
+  +4.1, LW cloud radiative effect −0.6, OLR +0.7 W/m², liquid water path
+  **−9.0 g/m² (−16 %; −32 % over ocean)**, cloud cover −0.35 %, precipitation
+  unchanged. Fewer droplets make larger droplets for the radiation and a
+  faster Beheng autoconversion. On ``t63-echam-2m`` the radius change moves
+  TOA net by less than the 0.1 W/m² run-to-run spread (OLR +0.18 W/m², LW
+  cloud radiative effect −0.19 W/m²). ``clouds.r_eff_liq`` /
+  ``clouds.r_eff_ice`` are now written by the radiation term (the radii it
+  used; 0 where the phase is absent) rather than by the microphysics. The
+  COSP simulators and the AeroCom cloud diagnostics, which read the
+  post-microphysics condensate, form the radii of that condensate with the
+  same law (``cloud_optics.post_physics_effective_radii``) instead of
+  reading ``clouds.r_eff_*``.
+- **Breaking:** ``MicrophysicsParameters.base_cdnc`` and
+  ``resolve_effective_radii`` are removed, and ``radiation_scheme_rrtmgp`` /
+  ``radiation_scheme_emulated`` require ``r_eff_liq_um`` / ``r_eff_ice_um``
+  (form them with ``jcm.physics.radiation.cloud_optics.radiation_effective_radii``).
+
 RCE initial state seeds a mixed sub-cloud layer
 """""""""""""""""""""""""""""""""""""""""""""""
 
@@ -1079,6 +1122,34 @@ Convective scavenging follows ECHAM-HAM
   ``scav_weights`` by ``csr_conv``, and ``convective_tracer_tendency``
   takes ``csr_conv``, ``precip_efficiency``, ``plume_condensate`` and
   ``evap_fraction``.
+
+Lohmann 2M utility fields are ECHAM's
+"""""""""""""""""""""""""""""""""""""
+
+- Four fields of the two-moment cloud scheme now follow ECHAM6.3-HAM2.3
+  (#942). The snow Reynolds number of riming divides by the viscosity of air
+  ``pviscos`` (``mo_cloud_utils.f90``, line 132) instead of the thermal
+  conductivity of air, which was ~1400 times larger and held the collection
+  efficiency of droplets by snow at its 0.01 floor; it is now ~0.8. The ice
+  fall-speed factor is ``paaa = (p/30000)^-0.178·(T/233)^-0.394`` (line 129)
+  instead of ``(1.3/ρ)^0.4``, so cloud ice falls 30-35 % slower aloft. The
+  turbulent updraft of the phase and Wegener-Bergeron-Findeisen criteria is
+  ``100·fact_tke·√TKE``, zero at the lowest level
+  (``mo_cloud_micro_2m.f90``, lines 814-815), instead of ``√(2·TKE)``. The
+  threshold's ice radius is ``0.9·r_eff``
+  (``effective_2_volmean_radius_param_Schuman_2011``) instead of the plate
+  radius ECHAM uses only for aggregation, which was up to three times
+  smaller. **Changes results** for every 2M configuration, including JAM.
+  Over days 5-10 of ``t63-echam-2m`` runs restarted from a 30-day spin-up of
+  the preset, global liquid water path falls from 60.6 to 41.0 g/m² (the
+  supercooled part from 42.7 to 23.8), ice water path rises from 2.95 to
+  3.4 g/m², large-scale snowfall rises 2.6-fold, total cloud cover falls by
+  3.4 points, the shortwave cloud effect weakens by 7.5 W/m² and the
+  longwave one by 3.6 W/m², and net TOA radiation rises by 3.7 W/m². The
+  riming viscosity accounts for most of the liquid and snowfall change. Ten
+  days measure the immediate response, not a new climate; the release-matrix
+  bands of the ``echam-2m`` and ``echam-jam`` members shift accordingly. See
+  :doc:`science/clouds_microphysics`.
 
 
 Known limitations

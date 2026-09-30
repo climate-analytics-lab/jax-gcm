@@ -414,12 +414,11 @@ Key processes:
    - Rain and snow use the simpler instantaneous form
 
 7. **Evaporation** of rain in subsaturated layers (Rotstayn 1997; the 1M port has no snow sublimation)
-8. **Droplet effective radius** for radiation, from the ECHAM law
-   ``r_eff = 1e6 · κ(N) · (3 ρ q_l,in-cloud / (4 π ρ_w N))^(1/3)`` with the Peng &
-   Lohmann (2003) breadth factor — the same
-   :py:func:`~jcm.physics.clouds.cloud_utils.eff_liquid_droplet_radius` helper the
-   2-moment scheme uses. Published as ``clouds.r_eff_liq``; cloud-free cells stay
-   at exactly 0 so radiation falls back to its diagnostic formula there.
+
+The scheme publishes no effective radius: as in ECHAM, the radiation forms the
+droplet and crystal radii itself from the step's state
+(:py:func:`~jcm.physics.radiation.cloud_optics.radiation_effective_radii`; see
+the radiation page of the model description).
 
 The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICON ``mo_cloud.f90:267-1080`` structure, with Rotstayn 1997 rain evaporation) is the only 1-moment path: :py:class:`~jcm.physics.clouds.echam_1m.Echam1MMicrophysics` vmaps it over columns, and its in-sweep saturation adjustment closes the rain-evap → re-condensation feedback loop.
 
@@ -453,9 +452,11 @@ The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICO
    * - ``cvtfall``
      - Ice/snow terminal-velocity factor (ECHAM ``mo_echam_cloud_params`` value at T63; the 2M scheme uses the same)
      - 2.5
-   * - ``base_cdnc``
-     - Baseline CDNC in clean air (1/m³)
-     - 100e6
+
+The droplet number the autoconversion sees is not a parameter: it is ECHAM's
+prescribed ``acdnc`` profile times the MACv2-SP Twomey factor
+(:py:func:`~jcm.physics.clouds.cloud_utils.prescribed_droplet_number`), the same
+number the radiation forms the droplet radius from.
 
 **2-moment** — :py:func:`jcm.physics.clouds.lohmann_2m.cloud_microphysics_2m`
 
@@ -797,7 +798,7 @@ Aerosol Scheme (MACv2-SP)
 
 .. admonition:: Note vs. ICON-A
 
-   ICON-A typically uses the Kinne et al. (2013) aerosol climatology or the MACv2-SP scheme. The JAX-GCM implementation uses MACv2-SP with the addition of Angstrom spectral scaling (matching the Fortran implementation) and aerosol-cloud coupling through the CDNC modification of both cloud optics and microphysics autoconversion.
+   ICON-A typically uses the Kinne et al. (2013) aerosol climatology or the MACv2-SP scheme. The JAX-GCM implementation uses MACv2-SP with the addition of Angstrom spectral scaling (matching the Fortran implementation) and aerosol-cloud coupling through the CDNC modification of both cloud optics and microphysics autoconversion. MPI-ESM1.2 applies the MACv2-SP factor to the radiation's droplet number only and leaves the cloud microphysics' unperturbed (Mauritsen et al. 2019); the extra autoconversion path is jcm's recorded departure (#932).
 
 
 Chemistry

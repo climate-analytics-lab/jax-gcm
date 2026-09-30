@@ -32,6 +32,25 @@
   ``mo_cloud.f90`` single-moment branch. The ice/snow fall-speed factor
   ``cvtfall = 2.5`` is ECHAM's value for jcm's default T63 grid
   (``mo_echam_cloud_params.f90``, ``nn == 63``), the same the 2M scheme uses.
+  The **droplet number** is ECHAM's prescribed ``acdnc``
+  (``physc.f90`` §3.12; ICON-A ``mo_echam_phy_diag.f90::droplet_number``):
+  80 cm⁻³ over sea and 180 cm⁻³ over land that is not glacier from the surface
+  to 800 hPa, ``20 + (zn2 − 20)·exp(1 − min(8, 80000/p)²)`` cm⁻³ above,
+  continuous at 800 hPa and 20 cm⁻³ in the upper troposphere. ECHAM passes that
+  one field to its radiation and to ``cloud`` (``pacdnc``), and jcm's 1M term
+  and radiation make one shared call,
+  ``cloud_utils.prescribed_droplet_number``, so they cannot see different
+  numbers. In ``mo_cloud.f90`` the droplet number enters the Beheng
+  autoconversion (line 977, ``pacdnc·1e-6`` to the power −3.3; the jcm KK2000
+  option reads the same number) and the Bigg and contact freezing of
+  supercooled cloud water (lines 859, 876), which this port lacks (#939). The
+  profile is multiplied by the MACv2-SP Twomey factor ``cdnc_factor`` for the
+  autoconversion as well as for the radiation. MPI-ESM1.2 applies the factor
+  to the radiation's droplet number only and leaves the cloud microphysics'
+  unperturbed (Mauritsen et al. 2019, *JAMES*, doi:10.1029/2018MS001400,
+  §2.2); the autoconversion path is jcm's aerosol-cloud formulation, kept for
+  v3.0 and recorded in #932. The published ``clouds.droplet_number`` is this
+  in-cloud number.
 - **Lohmann 2-moment microphysics**
   (``jcm/physics/clouds/lohmann_2m/scheme.py`` — ``cloud_microphysics_2m`` and its
   ``Lohmann2MMicrophysics`` term) — the full two-moment process chain (droplet and
@@ -55,6 +74,42 @@ humidity — ECHAM's ``zlvdcp = alv/pcair`` / ``zlsdcp = als/pcair``
 ``cloud_utils.latent_heat_over_cp``. Dry ``cpd`` would over-heat every
 condensation event by ``vtmpc2·q`` (~1.5 % in the moist tropics); the column
 enthalpy budget closes against this same moist ``cp``.
+
+The 2M scheme's utility fields are ECHAM's, shared through ``cloud_utils``:
+
+- **Viscosity of air** in the snow Reynolds number of riming,
+  ``pviscos = (1.512 + 0.0052·(T − 233.15))·10⁻⁵`` kg m⁻¹ s⁻¹ at the step-start
+  temperature (``mo_cloud_utils.f90::get_util_var``, line 132;
+  ``air_dynamic_viscosity``). It puts the Reynolds number of the 447 µm planar
+  flake at about 15–30 through the troposphere, and the collection efficiency
+  of 10–20 µm droplets at about 0.8 (``precip.riming_collection_efficiency``,
+  ``mo_cloud_micro_2m.f90::precip_formation_cold``, lines 3198–3250; Lohmann
+  2004). The thermal conductivity of air ``zkair`` (line 715) is a different
+  quantity; it enters only the diffusional-growth factors.
+- **Ice fall-speed air-density factor**
+  ``paaa = (p/30000)^−0.178·(T/233)^−0.394`` (``get_util_var``, line 129;
+  Heymsfield & Iaquinta 2000; ``ice_fall_speed_air_density_factor``), 1 at
+  300 hPa and 233 K, scaling the sedimentation speed of ice mass and number
+  alike (``sedimentation_ice``, ``mo_cloud_micro_2m.f90`` line 2224).
+- **Turbulent updraft** of the phase choice ``lo2`` and the
+  Wegener–Bergeron–Findeisen gate, ``100·fact_tke·√TKE`` cm s⁻¹ with
+  ``fact_tke = 0.7``, zero at the lowest level (``mo_cloud_micro_2m.f90``
+  lines 814–815; ``turbulent_updraft_velocity``). ECHAM's ``zvervx`` adds the
+  large-scale ``−100·ω/(g·ρ)`` (line 816), which is not plumbed to the scheme
+  (#941).
+- **Volume-mean ice radius of the WBF threshold** ``0.9·r_eff``
+  (``conv_effr2mvr``; ``effective_2_volmean_radius_param_Schuman_2011``, lines
+  4059–4085; ``ice_volume_mean_radius_schumann``), with ``r_eff`` the
+  Lohmann (2008) effective radius clipped to 10–150 µm. ECHAM uses it at every
+  threshold-velocity decision; jcm ports three of them — section 4 (line
+  1288), the section-5 supersaturation correction (line 2374) and the WBF gate
+  (line 1582). The fourth, ECHAM's phase split of convective detrainment
+  (``lo2_2d``, lines 872–885), has no counterpart: the Tiedtke scheme splits
+  detrained condensate at ``tmelt`` (#941). Aggregation uses the plate radius
+  ``zrih = −2261 + √(5113188 + 2809·r_eff³)`` µm³ (``ice_volume_mean_radius``,
+  lines 3160–3166), as ECHAM does. The ICNC diagnosis (``prid`` in
+  ``update_in_cloud_water``) also uses ``zrih`` of the existing ice, where
+  ECHAM passes a temperature-parameterised radius (lines 945–956; #941).
 
 Cloud parameters are ``flax.struct.dataclass`` leaves (differentiable), threaded
 through the scheme via ``nnx.Param``; only genuine code-path switches
@@ -114,18 +169,15 @@ doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count.
   divides by a tiny cube (`differentiability`; the bare ``C/r³`` form's
   ``1/r⁶`` gradient overflowed float32 below r ≈ 3e-7 m, and using the
   parameter itself as the scale put the same overflow on its own gradient).
-- Both the 1M and 2M paths publish an LWC-dependent radiative liquid radius
-  from the shared ECHAM Martin/Bower law (``eff_liquid_droplet_radius``);
-  radiation reads it from the carried ``clouds`` state one step lagged, because
-  the ECHAM term order runs radiation before microphysics. The constant
-  ``effective_radius_liquid`` fallback therefore survives only where that carry
-  is still zero, resolved **cell by cell** — the cold-start first step, and
-  thereafter any cloudy cell that was clear the previous step (a level newly
-  turning cloudy falls back even mid-rollout in an otherwise-cloudy column) —
-  not the steady state the 1M ``physics=echam`` path used to run on. The
-  radiative **ice** radius remains limited: mixed-phase ICNC is
-  INP-limited (~1e3 m⁻³), pinning most warm-branch ``r_eff_ice`` at the 150 µm
-  clip (#728).
+- Neither microphysics scheme publishes the radiative effective radii: as in
+  ECHAM, the radiation forms them inside its own call from the step's
+  condensate and droplet/crystal number (``mo_cloud_optics.f90::cloud_optics``;
+  see {doc}`radiation`), from the laws in ``cloud_utils`` that the 2M scheme
+  also evaluates for its own ``preffl``/``preffi``. The 1M radiation and
+  microphysics see the same prescribed droplet number (above). The
+  radiative **ice** radius on the 2M path is limited by the crystal number:
+  mixed-phase ICNC is INP-limited (~1e3 m⁻³), which puts most warm-branch
+  crystals at the top of the size range the radiation's tables cover (#728).
 - Clear-sky evaporation of decorrelated condensate (the radiation-side contract in
   ``mcica.in_cloud_path``) is owned by the 2M scheme's clear-sky evaporation step.
 
