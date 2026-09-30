@@ -470,7 +470,12 @@ interstitial phase where precip evaporates, and it deliberately excludes the
 sedimenting cloud-ice flux from the in-cloud carrier flux. Ice nucleation
 (``ice_nucleation/``) writes an ``ice_nuclei`` field for the 2M cloud scheme, with
 two schemes: ``niemand`` (default; Niemand et al. 2012) and ``lohmann_diehl``
-(Lohmann & Diehl 2006 + Meyers 1992 deposition).
+(Lohmann & Diehl 2006 + Meyers 1992 deposition). The 2M scheme freezes
+mixed-phase droplets up to ``max(ice_nuclei, DeMott)``. The maximum is a
+stopgap: the immersion INP of the default ``niemand`` scheme sits about four
+orders of magnitude below the DeMott (2010) value, for a reason outside the
+cloud scheme (#953). See
+{doc}`clouds_microphysics`.
 
 **What ECHAM/CAM does.** Deposition mirrors ``mo_hammoz_drydep`` /
 Ganzeveld (Slinn & Slinn 1980); sedimentation ``mo_ham_sedimentation``; wet
