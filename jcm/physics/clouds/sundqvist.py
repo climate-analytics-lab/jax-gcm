@@ -483,12 +483,14 @@ def _qs_and_dqs_dt(
     """Saturation specific humidity and its temperature derivative.
 
     :func:`saturation_specific_humidity` (the dev 1M scheme's mixed-phase
-    blend of Sonntag over water and over ice) and its slope in the form
-    ECHAM's Newton steps use (:func:`jcm.physics.thermodynamics.
-    dqsat_dT_from_es`), with ``des/dT`` the same blend of the two phases'
-    analytic slopes. Closed form so the Newton step is reproducible under
-    JIT. ``t_mix_min`` must be the same value the caller's latent-heat ramp
-    uses (#667).
+    blend of Sonntag over water and over ice) and a Newton slope in the form
+    ECHAM's steps use (:func:`~jcm.physics.thermodynamics.dqsat_dT_from_es`).
+    The slope blends the two phases' analytic ``des/dT`` with the weight held
+    fixed, so it omits the ``(es_w − es_i)·dweight/dT`` term of the blend's
+    own derivative (up to 9 % at 240 K); it is the per-phase slope a Newton
+    step on a fixed phase takes, and the blend itself is the #940 gap.
+    Closed form so the Newton step is reproducible under JIT. ``t_mix_min``
+    must be the same value the caller's latent-heat ramp uses (#667).
     """
     weight = jnp.clip(
         (temperature - t_mix_min) / (c.tmelt - t_mix_min), 0.0, 1.0)

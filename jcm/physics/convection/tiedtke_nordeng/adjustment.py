@@ -33,7 +33,7 @@ from typing import Tuple
 
 # Analytic (qs, dqs/dT) of ECHAM's ``ua`` table for the cuadjtq Newton step
 # (Sonntag 1990, jcm.physics.thermodynamics) and its latent-heat switch.
-from jcm.physics.convection.tiedtke_nordeng.cuadjtq import _lcp
+from jcm.physics.convection.tiedtke_nordeng.cuadjtq import lcp_ua
 from jcm.physics.thermodynamics import (
     saturation_specific_humidity_and_derivative as _qsat_and_dqsat_dt,
 )
@@ -74,8 +74,8 @@ def cuadjtq(
         # Phase-consistent latent heat: ECHAM cuadjtq pairs the ``ua`` table
         # (ice at and below tmelt) with ``lookup_ubc``'s ``L/cpd`` on the same
         # switch — dry ``cpd``, not the cumastr ledger's moist ``zcpq``
-        # (see ``cuadjtq._lcp``).
-        L_cp = _lcp(T)
+        # (see ``cuadjtq.lcp_ua``).
+        L_cp = lcp_ua(T)
         qs, dqs_dT = _qsat_and_dqsat_dt(T, pressure)
         cond = (q - qs) / (1.0 + L_cp * dqs_dT)
         # Apply the kcall sign clip exactly as ECHAM does.

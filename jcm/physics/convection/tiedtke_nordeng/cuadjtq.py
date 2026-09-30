@@ -37,7 +37,7 @@ def saturation_mixing_ratio(pressure: jnp.ndarray,
         temperature, pressure, phase="auto")
 
 
-def _lcp(temperature):
+def lcp_ua(temperature):
     """``L/cp`` of ``lookup_ubc``: ``als/cpd`` at and below ``tmelt``, else ``alv/cpd``.
 
     DRY ``cpd`` is the reference: ``cuadjtq`` reads ``L/cp`` from ``uc``,
@@ -58,12 +58,12 @@ def cuadjtq_newton(
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Newton-Raphson saturation adjustment (``cuadjtq``, kcall=1 flavour).
 
-    Matches ECHAM ``mo_cuadjust.f90`` ``cuadjtq`` for the
-    "condensation-only" mode used inside updrafts. The first iteration
-    clips the Newton step to be non-negative (only condensation, never
-    evaporation of pre-existing liquid). Subsequent refinement iterations
-    allow both directions so Newton overshoot in one direction can be
-    corrected.
+    ECHAM ``mo_cuadjust.f90`` ``cuadjtq`` in the "condensation-only" mode
+    used inside updrafts. The first iteration clips the Newton step to be
+    non-negative (only condensation, never evaporation of pre-existing
+    liquid). The refinement iterations allow both directions, bounded by the
+    liquid, so Newton overshoot can be corrected; ECHAM takes one unclipped
+    refinement where this takes ``n_refine`` (#957).
 
     The Newton step:
 
@@ -97,7 +97,7 @@ def cuadjtq_newton(
     """
     def _first_pass(T, q_vap, liq):
         """Condensation-only Newton step (kcall=1)."""
-        L_cp = _lcp(T)
+        L_cp = lcp_ua(T)
         qs, dqs_dT = thermodynamics.saturation_specific_humidity_and_derivative(
             T, pressure)
         cond = (q_vap - qs) / (1.0 + L_cp * dqs_dT)
@@ -109,7 +109,7 @@ def cuadjtq_newton(
         overshoot, but only while there's liquid available to re-evaporate.
         """
         T, q_vap, liq = carry
-        L_cp = _lcp(T)
+        L_cp = lcp_ua(T)
         qs, dqs_dT = thermodynamics.saturation_specific_humidity_and_derivative(
             T, pressure)
         cond = (q_vap - qs) / (1.0 + L_cp * dqs_dT)
@@ -142,7 +142,8 @@ def cuadjtq_newton_evap(
         Δq = (q − qs(T)) / (1 + (L/cp)·dqs/dT),
 
     but clipped ``MIN(Δq, 0)`` in every pass — only evaporation, never
-    condensation, so already-saturated air is returned unchanged. The fixed
+    condensation, so already-saturated air is returned unchanged (ECHAM's
+    refinement pass is unclipped, #957). The fixed
     point is the isobaric wet bulb: ``cp·ΔT + L·Δq = 0`` by construction,
     so moist static energy is conserved exactly; the state-dependent damper
     is what makes the evaporated amount the wet-bulb deficit rather than a
@@ -160,7 +161,7 @@ def cuadjtq_newton_evap(
     """
     def _pass(carry, _):
         T, q = carry
-        L_cp = _lcp(T)
+        L_cp = lcp_ua(T)
         qs, dqs_dT = thermodynamics.saturation_specific_humidity_and_derivative(
             T, pressure)
         cond = (q - qs) / (1.0 + L_cp * dqs_dT)

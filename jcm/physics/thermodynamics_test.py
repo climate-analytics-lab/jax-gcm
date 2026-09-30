@@ -290,6 +290,22 @@ class TestDerivative(unittest.TestCase):
             hi = float(thermo.dqsat_dT_from_es(es, des, p04 * (1 - 1e-9)))
             np.testing.assert_allclose(lo, hi, rtol=1e-7)
 
+    def test_gradients_finite_at_zero_pressure(self):
+        """Zero pressure (the model-top interface) is capped and differentiable."""
+        T, p = jnp.array([200.0, 300.0]), jnp.array([0.0, 0.0])
+        for phase in ("water", "ice", "auto"):
+            for i in (0, 1):
+                g = jax.grad(
+                    lambda t, pp: jnp.sum(
+                        thermo.saturation_specific_humidity_and_derivative(
+                            t, pp, phase=phase)[i]),
+                    argnums=(0, 1))(T, p)
+                for x in g:
+                    self.assertTrue(bool(jnp.all(jnp.isfinite(x))))
+        self.assertAlmostEqual(
+            float(thermo.saturation_specific_humidity(T[1], p[1])),
+            0.5 / (1.0 - 0.5 * c.vtmpc1), places=6)
+
     def test_qs_matches_plain_call(self):
         T, p = jnp.array(265.0), jnp.array(7.0e4)
         qs, _ = thermo.saturation_specific_humidity_and_derivative(T, p)

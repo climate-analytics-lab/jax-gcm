@@ -42,9 +42,9 @@ triple point), not at ``tmelt = 273.15 K``. Switching there, as ECHAM does,
 steps ``es`` by −9.7e-5 of its value (0.059 Pa, the change a 1.3 mK warming
 makes) and ``d ln es/dT`` by +13 %. Automatic differentiation returns each
 side's analytic slope, which is the slope ECHAM's derivative tables hold at
-that point; the step itself is too small to carry information a smooth
-surrogate could add, so there is none (``docs/source/design/
-surrogate_gradients.md``: a bounded two-sided derivative needs no surrogate).
+that point. Both one-sided derivatives exist and are bounded, and the step is
+too small to carry information a smooth surrogate gradient could add, so the
+switch is differentiated as it stands.
 
 **Saturation specific humidity** is formed as ECHAM forms it
 (``mo_cuadjust.f90`` l.107-111, ``mo_cover.f90`` l.221-223,
@@ -88,12 +88,14 @@ ECHAM_TABLE_T_MAX = 400.0
 # 0.5 is far above any physical value, so it is inactive in the atmosphere.
 _X_MAX = 0.5
 
+# Floor under the pressure the qs forms divide by [Pa]. Callers hand in the
+# model-top interface, where p = 0; there ECHAM's form is already at its cap,
+# but a bare 1/p would make the derivative through the cap 0·inf = NaN. The
+# floor is far below the top full level (~1 Pa), so no value changes.
+_P_MIN = 1.0e-3
+
 
 # --- Sonntag (1990), the fit ECHAM's tables hold ---------------------------
-#
-# These four functions are written exactly as the cloud schemes'
-# ``echam_saturation`` module writes them, so the two evaluate to the same
-# bits.
 
 def _ln_es(temperature, coefficients):
     a1, a2, a3, a4, a5 = coefficients
@@ -175,7 +177,8 @@ def qsat_from_es(es, pressure):
     (``mo_cover.f90`` l.221-223). With ``vtmpc1 = rv/rd − 1`` the denominator
     is at least ``1 − 0.5·vtmpc1 > 0``, so no further guard is needed.
     """
-    x = jnp.minimum(es * (c.rd / c.rv) / pressure, _X_MAX)
+    x = jnp.minimum(es * (c.rd / c.rv) / jnp.maximum(pressure, _P_MIN),
+                    _X_MAX)
     return x / (1.0 - c.vtmpc1 * x)
 
 
@@ -194,7 +197,7 @@ def dqsat_dT_from_es(es, des_dT, pressure):
         pressure: Pressure [Pa].
 
     """
-    k = (c.rd / c.rv) / pressure
+    k = (c.rd / c.rv) / jnp.maximum(pressure, _P_MIN)
     uncapped = es * k < _X_MAX
     x = jnp.where(uncapped, es * k, _X_MAX)
     zcor = 1.0 / (1.0 - c.vtmpc1 * x)

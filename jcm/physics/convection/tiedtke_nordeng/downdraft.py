@@ -60,10 +60,11 @@ def wetbulb_temperature(
     """Calculate wet-bulb temperature and humidity.
 
     ECHAM ``cuadjtq(kcall=2)`` — the evaporation-only damped Newton
-    adjustment (see :func:`~jcm.physics.convection.tiedtke_nordeng.cuadjtq.
-    cuadjtq_newton_evap`). Conserves moist static energy exactly
-    (``cp·ΔT + L·Δq = 0``), and already-saturated air comes back unchanged
-    because the evaporation-only clip zeroes the step.
+    adjustment (see
+    :func:`~jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq_newton_evap`).
+    Conserves moist static energy exactly (``cp·ΔT + L·Δq = 0``), and
+    already-saturated air comes back unchanged because the evaporation-only
+    clip zeroes the step.
 
     Args:
         temperature: Environmental temperature (K)

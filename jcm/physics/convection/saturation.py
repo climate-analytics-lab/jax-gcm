@@ -6,9 +6,10 @@ ECHAM's saturation tables:
 * Betts-Miller (:mod:`jcm.physics.convection.betts_miller`) follows Isca's
   ``betts_miller.f90`` and saturates over liquid water everywhere
   (``phase="water"``).
-* JAM's MAM4 microphysics RH (:mod:`jcm.physics.aerosol.jam.microphysics.
-  mam4_jax`) and its ice-nucleation ice supersaturation
-  (:mod:`jcm.physics.aerosol.jam.ice_nucleation.ice_term`).
+* JAM's MAM4 microphysics RH
+  (:mod:`~jcm.physics.aerosol.jam.microphysics.mam4_jax`) and its
+  ice-nucleation ice supersaturation
+  (:mod:`~jcm.physics.aerosol.jam.ice_nucleation.ice_term`).
 
 ECHAM physics (Tiedtke-Nordeng convection, the cloud cover, the 1M and 2M
 cloud schemes, the vertical diffusion, the surface tiles) does **not** use this
