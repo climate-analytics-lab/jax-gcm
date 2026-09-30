@@ -164,8 +164,7 @@ class _Float32ReferenceTest(unittest.TestCase):
     ``import mam4_jax`` (the JAM/aerosol tests do); these comparisons would then
     run in float64 — diverging past the RMS tolerance or crashing the
     mixed-precision SL dynamics. Pin x64 False for the test and restore the
-    prior value so the guard cannot itself contaminate later tests. Mirrors
-    jcm/dycore/pyses/conftest.py, which reorders the pyses x64-flippers last.
+    prior value so the guard cannot itself contaminate later tests.
     """
 
     def setUp(self):

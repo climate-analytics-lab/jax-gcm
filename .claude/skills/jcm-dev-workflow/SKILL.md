@@ -60,8 +60,13 @@ round-tripping through the device.
 coverage and the slow tests at **80%** (pull requests only) run in parallel
 behind it — the slow suite as two path shards (`slow-tests-radiation`,
 `slow-tests-rest`, defined in `tools/ci/slow_shards.py`) whose coverage the
-`slow-coverage` job combines before enforcing the floor; on a PR, if the fast suite goes red the run is cancelled, taking
-the slow suite with it, and `fast-tests` itself reports as cancelled rather
+`slow-coverage` job combines before enforcing the floor. A separate
+`extras-tests` job installs every optional extra and runs the tests they gate
+(`JCM_REQUIRE_EXTRAS=1 pytest -m requires_extra`, no coverage floor), on
+every PR and push to `main`/`dev`; gate a test on an extra only with
+`@pytest.mark.requires_extra(...)`, since every job fails any other gate. On
+a PR, if the fast suite goes red the run is cancelled, taking
+the slow suite and `extras-tests` with it, and `fast-tests` itself reports as cancelled rather
 than failed (the failing step is still red inside it). A cancelled slow result
 therefore never means *passing* — and never means *the fast suite failed*
 either, since `cancel-in-progress` cancels it the same way when your next push

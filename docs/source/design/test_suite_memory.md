@@ -203,17 +203,40 @@ earlier test nor a leak from this one can propagate.
 
 Two deliberate exceptions:
 
-* Tests under `jcm/dycore/pyses/` are exempt. Their `setUpClass` fixtures
-  build float64 backends that later tests in the same class reuse, so the
-  flag must stay on for the life of the class; `jcm/dycore/pyses/conftest.py`
-  schedules the whole package last instead. That reordering is defeated by
-  `pytest-randomly`, so pass `-p no:randomly` if you have it installed.
+* Tests marked `requires_extra("pyses")` are exempt. Their `setUpClass`
+  fixtures build float64 backends that later tests in the same class reuse,
+  so the flag must stay on for the life of the class. pySES turns it on only
+  when it is first imported, and a class fixture is built before any
+  function-scoped fixture runs, so the root `conftest.py` does this with two
+  hooks rather than the pin: `pytest_runtest_setup` (`tryfirst`) turns the
+  flag on before such a test's fixtures are built, and
+  `pytest_runtest_teardown` restores the session default when the next test
+  is not one of them (or there is none), before the next class's fixtures are
+  built. Neither depends on test order, which matters because xdist's
+  `--dist loadscope` dispatches the largest scopes first, interleaving the
+  pySES classes with unrelated ones on a worker.
 * `jcm/physics/aerosol/jam/microphysics/mam4_jax.py` restores the flag
-  around its own `import mam4_jax`, so importing the adapter — including at
-  collection time, via `pytest.importorskip` — cannot change anyone's dtype.
+  around its own `import mam4_jax`, so importing the adapter, wherever it
+  happens, cannot change anyone's dtype.
   Constructing the adapter still sets the precision it needs; set
   `MAM4_JAX_ENABLE_X64=0` to force a float32 core.
 
-CI never sees the mam4 side of this: it installs `pip install -e .` with no
-extras, so those tests skip there. The pin is what makes a local run with the
-`jcm[mam4]` extra installed agree with CI.
+The default CI jobs never see the mam4 side of this: they install
+`pip install -e .` with no extras, so those tests skip there. The pin is what
+makes a local run with the `jcm[mam4]` extra installed agree with them. The
+`extras-tests` job does see it: it installs every extra and runs the tests
+they gate, mam4 and pySES classes in one process.
+
+## The extras job's memory
+
+`extras-tests` (`JCM_REQUIRE_EXTRAS=1 pytest -m requires_extra`) runs in a
+single process, like the slow shards. Its peak is one test:
+`hydra_config_test.py::test_delegating_config_completes_a_fresh_first_chunk`
+drives one chunk of the production `dycore=pyses_ne30l47 run=pyses_year`
+configuration on a test-size grid, and compiling that CAM-SE step takes the
+process to 12.7 GB, alone as well as in the full selection (measured on a
+workstation, 2026-09-29). The next heaviest, the pySES coupled-ECHAM smokes,
+leave the process at 5-6.5 GB. A second xdist worker running one of those
+beside that compile would take the 16 GB runner past its ceiling, so the job
+does not use xdist. Serially the selection takes about 10 minutes of test
+time on the CI runner (13 on the workstation).

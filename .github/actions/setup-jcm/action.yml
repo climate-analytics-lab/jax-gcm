@@ -1,16 +1,24 @@
 name: Set up the JCM test environment
 description: >
-  Python, cached wheel downloads and an editable install, shared by the fast
-  and slow test jobs. A composite action rather than duplicated steps because
-  GitHub Actions does not resolve YAML anchors in workflow files, and the two
-  suites must install *identically* — a drift between them would move the
-  coverage denominator without anyone noticing.
+  Python, cached wheel downloads and an editable install, shared by every
+  test job. A composite action rather than duplicated steps because GitHub
+  Actions does not resolve YAML anchors in workflow files, and the fast and
+  slow suites must install *identically* — a drift between them would move
+  the coverage denominator without anyone noticing. The extras job adds its
+  extras on top of this install.
 
 inputs:
   python-version:
     description: Python version to install.
     required: false
     default: '3.11'
+  cache-dependency-path:
+    description: >
+      Files whose hash keys the pip download cache. A job that installs more
+      than requirements.txt passes its own list, so its larger download set is
+      cached under its own key instead of being restored into every other job.
+    required: false
+    default: requirements.txt
 
 runs:
   using: composite
@@ -35,15 +43,17 @@ runs:
       with:
         python-version: ${{ inputs.python-version }}
         # Cache the wheel downloads. jax/jaxlib and the scientific stack are
-        # a large, almost-never-changing install repeated on every job, and
-        # a PR runs it twice (fast, then slow). Keyed on requirements.txt, so
-        # a dependency change invalidates it automatically.
+        # a large, almost-never-changing install repeated on every job of a
+        # PR. Keyed on requirements.txt (plus whatever a job adds through
+        # `cache-dependency-path`), so a dependency change invalidates it
+        # automatically.
         cache: 'pip'
-        cache-dependency-path: requirements.txt
+        cache-dependency-path: ${{ inputs.cache-dependency-path }}
 
     # No extras: CI dependency parity. Code behind an optional extra
     # (`jcm[cosp]`, ...) must count as uncovered here, which is what the
-    # local gates are told to reproduce.
+    # local gates are told to reproduce. The `extras-tests` job installs every
+    # extra on top of this and runs the tests they gate.
     - name: Install dependencies
       shell: bash
       run: |

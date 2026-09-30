@@ -1,17 +1,15 @@
-"""Tests for the CloudSat COSP diagnostic hook (requires jax-cosp)."""
+"""Tests for the CloudSat COSP diagnostic hook.
+
+Needs the optional ``cosp`` extra (jax-cosp, ``requires_extra("cosp")``):
+skipped without it, and run by the ``extras-tests`` CI job, which installs it.
+"""
 
 import unittest
 
 import jax
 import jax.numpy as jnp
 import numpy as np
-
-try:
-    import jcosp  # noqa: F401
-
-    HAVE_JCOSP = True
-except ImportError:
-    HAVE_JCOSP = False
+import pytest
 
 from jcm.forcing import ForcingData
 from jcm.physics.aerosol.aerosol_types import AerosolData
@@ -21,6 +19,8 @@ from jcm.physics.diagnostics.moist_air_state import MoistAirColumnState
 from jcm.physics_interface import PhysicsState
 from jcm.terrain import TerrainData
 from jcm.utils import get_coords
+
+pytestmark = pytest.mark.requires_extra("cosp")
 
 # T21 is the smallest supported grid; the term runs column-vectorized.
 NLEV, NLAT, NLON = 10, 64, 32
@@ -86,7 +86,6 @@ def _setup():
     return state, diagnostics, forcing, terrain
 
 
-@unittest.skipUnless(HAVE_JCOSP, "jax-cosp not installed")
 class CloudsatCospTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -133,7 +132,6 @@ class CloudsatCospTest(unittest.TestCase):
         self.assertTrue(bool(jnp.isfinite(out).all()))
 
 
-@unittest.skipUnless(HAVE_JCOSP, "jax-cosp not installed")
 class FactoryWiringTest(unittest.TestCase):
     def test_enable_cosp_adds_term_after_microphysics(self):
         from jcm.physics.echam.echam_terms import echam_physics
@@ -155,7 +153,6 @@ if __name__ == "__main__":
     unittest.main()
 
 
-@unittest.skipUnless(HAVE_JCOSP, "jax-cosp not installed")
 class CalipsoModisTest(unittest.TestCase):
     """CALIPSO and MODIS run on the radar's SCOPS realization."""
 
@@ -280,7 +277,6 @@ class CalipsoModisTest(unittest.TestCase):
             self.assertNotIn(key, diag)
 
 
-@unittest.skipUnless(HAVE_JCOSP, "jax-cosp not installed")
 class JointHistogramTest(unittest.TestCase):
     """The COSP joint histograms (jax-gcm#597) ride the same realization."""
 
@@ -372,7 +368,6 @@ class JointHistogramTest(unittest.TestCase):
             self.assertNotIn(key, diag)
 
 
-@unittest.skipUnless(HAVE_JCOSP, "jax-cosp not installed")
 class HistogramCmorTest(unittest.TestCase):
     """The CMOR writer reassembles the flattened histogram channels."""
 

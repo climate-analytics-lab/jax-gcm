@@ -17,8 +17,8 @@ def _cfg(overrides):
 
 
 class PysesHydraConfigTest(unittest.TestCase):
+    @pytest.mark.requires_extra("pyses")
     def test_canonical_config_builds_pyses_model(self):
-        pytest.importorskip("pyses")
         import jax.numpy as jnp
 
         from jcm.dycore.pyses import PysesCamSEDycore
@@ -46,10 +46,11 @@ class PysesHydraConfigTest(unittest.TestCase):
     def test_delegated_timestep_survives_a_fresh_chunk_on_dinosaur(self):
         """The fast-lane half of the delegated-timestep guard.
 
-        The pySES version below is the end-to-end one, but it is slow AND
-        importorskip'd, so CI never runs it. This drives the same per-chunk
-        path — integrate, health-check, budget report, netCDF, checkpoint —
-        with ``run.time_step=null`` on a tiny dinosaur model, which
+        The pySES version below is the end-to-end one, but it is slow and
+        needs the ``pyses`` extra, so only the ``extras-tests`` CI job runs
+        it. This drives the same per-chunk path — integrate, health-check,
+        budget report, netCDF, checkpoint — with ``run.time_step=null`` on a
+        tiny dinosaur model, which
         ``run_chunked`` accepts because a pre-built model makes the run config's
         timestep unused. Anything in that path that reads it as a number fails
         here, in the fast lane.
@@ -84,6 +85,7 @@ class PysesHydraConfigTest(unittest.TestCase):
             self.assertTrue(list(Path(tmpdir).glob("deleg_day*.nc")))
 
     @pytest.mark.slow
+    @pytest.mark.requires_extra("pyses")
     def test_delegating_config_completes_a_fresh_first_chunk(self):
         """A config whose timestep the dycore owns must survive chunk 1.
 
@@ -93,9 +95,15 @@ class PysesHydraConfigTest(unittest.TestCase):
         happened twice in one campaign (a health-check argument here, and the
         scoreable-gate decision of #780), each time in code that ran fine on
         every config that names its own timestep. Drive a real fresh chunk end
-        to end: integrate, health-check, budget report, netCDF, checkpoint.
+        to end: integrate, health-check, budget report, the calendar-month
+        stream, checkpoint.
+
+        ``run=pyses_year`` writes calendar-month means only
+        (``save_chunks: false``): a chunk leaves the checkpoint and, beside
+        it, the pending month it resumes from, and the end of the run flushes
+        that (here partial) month to its monthly file. There is no per-chunk
+        netCDF; the dinosaur sibling above covers that path.
         """
-        pytest.importorskip("pyses")
         import tempfile
         from pathlib import Path
 
@@ -106,21 +114,30 @@ class PysesHydraConfigTest(unittest.TestCase):
                 "dycore=pyses_ne30l47", "physics=held_suarez", "run=pyses_year",
                 "dycore.nx=3", "dycore.n_sponge=8",
                 # One short chunk: the first fresh chunk is the whole point.
-                "run.total_time=0.05", "run.chunk_days=0.05",
-                "run.save_interval=0.05",
+                # Its length must be a whole number of the dycore's 900 s
+                # steps (Model.run rejects any other save interval), so six
+                # steps: 0.0625 d = 5400 s.
+                "run.total_time=0.0625", "run.chunk_days=0.0625",
+                "run.save_interval=0.0625",
                 f"run.output_prefix={tmpdir}/deleg",
                 f"run.checkpoint_path={tmpdir}/deleg.ckpt",
             ])
             self.assertIsNone(cfg.run.time_step)   # the point of the config
             reports = run(cfg)
 
-            # Everything the crash happened BETWEEN: the integration finished,
-            # so the chunk must have reached disk and the checkpoint written.
+            # Everything the crash happened BETWEEN: the integration finished
+            # and passed its health check, so the checkpoint, the pending
+            # month that pairs with it, and the month flushed at the end of
+            # the run must all be on disk.
             self.assertIsInstance(reports, list)
             self.assertGreaterEqual(len(reports), 1)
             self.assertTrue(reports[0]["ok"], reports[0].get("reasons"))
-            self.assertTrue(list(Path(tmpdir).glob("deleg_day*.nc")))
             self.assertTrue(Path(f"{tmpdir}/deleg.ckpt").exists())
+            self.assertTrue(Path(f"{tmpdir}/deleg.ckpt.monthly").exists())
+            self.assertEqual(
+                [p.name for p in Path(tmpdir).glob("deleg_monthly_*.nc")],
+                ["deleg_monthly_2000-01.nc"])
+            self.assertFalse(list(Path(tmpdir).glob("deleg_day*.nc")))
 
     def test_dinosaur_default_unchanged(self):
         from jcm.dycore.dinosaur.dycore import DinosaurDycore
@@ -130,19 +147,19 @@ class PysesHydraConfigTest(unittest.TestCase):
         model = build_model(cfg)
         self.assertIsInstance(model.dycore, DinosaurDycore)
 
+    @pytest.mark.requires_extra("pyses")
     def test_dinosaur_init_kinds_rejected_on_pyses(self):
-        pytest.importorskip("pyses")
         from jcm.runners import build_model
 
         cfg = _cfg(["dycore=pyses_ne30l47", "init=jw", "dycore.nx=3"])
         with self.assertRaisesRegex(ValueError, "dinosaur-specific"):
             build_model(cfg)
 
+    @pytest.mark.requires_extra("pyses")
     def test_jam_forcing_files_flow_and_fail_loudly_on_pyses(self):
         # The column path carries the JAM aerosol inputs through
         # attach_jam_forcing; a bad path must still fail loudly rather
         # than run silently aerosol-dark.
-        pytest.importorskip("pyses")
         from jcm.runners import build_forcing, build_model
 
         cfg = _cfg(["dycore=pyses_ne30l47", "physics=speedy", "dycore.nx=3",
@@ -151,6 +168,7 @@ class PysesHydraConfigTest(unittest.TestCase):
         with self.assertRaises((FileNotFoundError, OSError, ValueError)):
             build_forcing(cfg, model.coords, dycore=model.dycore)
 
+    @pytest.mark.requires_extra("pyses", "mam4")
     def test_ma_ne30_configurations_construct_on_pyses(self):
         """The ma-ne30 configuration presets compose and build on pySES.
 
@@ -162,10 +180,6 @@ class PysesHydraConfigTest(unittest.TestCase):
         omega requirement and the Model builds. Uses a test-size grid; the
         canonical files document ne30.
         """
-        pytest.importorskip("pyses")
-        # The submodule, not the package: a stale flat-layout mam4-jax wheel
-        # satisfies a bare "mam4_jax" import and then fails inside build_model.
-        pytest.importorskip("mam4_jax.core")  # echam-jam's default JAM core
         from jcm.runners import build_model
 
         for name in ("ma-ne30-l47", "ma-ne30-l95"):
