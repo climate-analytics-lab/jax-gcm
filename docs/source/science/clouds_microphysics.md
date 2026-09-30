@@ -58,11 +58,13 @@
   return of condensate below ``ccwmin`` to vapour with the cover write-back.
   Every output and every intermediate the Fortran harness exposes is compared
   with the unmodified Fortran routine on 42 designed and sampled columns
-  (``echam_fortran_reference_test.py``). The increments ``Δq``, ``ΔT``,
-  ``Δq_c``, ``Δq_i`` are ``dt`` times the running tendency of every physics
-  term composed before the 1M term (radiation, vertical diffusion with its
-  condensate, the surface, convection) on the step-start state as anchor, with
-  the convective detrainment passed separately as ECHAM's ``pxtecl``/``pxteci``.
+  (``echam_fortran_reference_test.py``). The anchor and the increments ``Δq``,
+  ``ΔT``, ``Δq_c``, ``Δq_i`` are the 2M's (``cloud_scheme_inputs``, below): the
+  previous step's post-physics state, and the dynamics since then plus ``dt``
+  times the running tendency of every physics term composed before the 1M term
+  (radiation, vertical diffusion with its condensate, the surface,
+  convection), with the convective detrainment passed separately as ECHAM's
+  ``pxtecl``/``pxteci``.
   The saturation vapour pressure and its slope are ECHAM's Sonntag (1990) fit
   of ``thermodynamics``, read through ``echam_saturation`` as the cover reads it. ``cvtfall``,
   ``csecfrl`` and ``clwprat`` are ordinary tunable parameters whose defaults follow ECHAM's per-truncation
@@ -237,7 +239,8 @@ section 4 inside it (``mo_cloud_micro_2m.f90``). jcm applies them:
   incoming number tracers at ``cqtmin`` (lines 600–605) and applies no upper
   bound at entry: ICNC is capped at ``icemax`` only after ``znidetr`` joins
   it (line 1252), and CDNC is not capped. The returned tendency is
-  ``(N_end/ρ − q_N)/Δt`` against the unclipped tracer ``q_N``. The tracer
+  ``(N_end/ρ − q_N)/Δt`` against the unclipped provisional tracer ``q_N``
+  (anchor plus increment), which the host adds it to. The tracer
   therefore ends the step at the scheme's number, or at zero where the
   negative-mass repair removed the condensate (lines 3641–3652), and an
   out-of-range value does not persist from step to step.
@@ -310,8 +313,9 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   are below ``ccwmin``), and are not masked again.
 - Cover, time level — the cover reads the state the physics receives, which
   contains the step's dynamics; ECHAM's reads the ``t − Δt`` fields
-  (``physc.f90`` l.543-548), one dynamics step earlier. Reading ECHAM's state
-  would need the previous step's post-physics state in the carry.
+  (``physc.f90`` l.543-548), one dynamics step earlier. ECHAM's state is the
+  carried post-physics state the cloud schemes take as their anchor; the cover
+  does not read it.
 - Resolution-dependent defaults, `science` — ECHAM sets ``crs``, ``crt``,
   ``nex``, ``nadd``, ``csatsc``, ``cinv``, ``cvtfall``, ``csecfrl`` and
   ``clwprat`` per truncation (``mo_echam_cloud_params.f90::sucloud``) and
@@ -477,14 +481,6 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   diagnosis of the ice-number sources above.
 - Clear-sky evaporation of decorrelated condensate (the radiation-side contract in
   ``mcica.in_cloud_path``) is owned by the 2M scheme's clear-sky evaporation step.
-- **1M: the dynamics is not in the increments.** ECHAM's increments at
-  ``cloud`` contain the dynamics of the step (advection and the adiabatic
-  term); jcm's contain the upstream physics only, because the dynamics is
-  already in the step-start state. In a partly cloudy box, large-scale ascent
-  therefore forms no condensate through ``zqcdif`` until the whole box exceeds
-  saturation and the 1 % supersaturation check condenses the excess. The missed
-  in-cloud forcing is about +6 g/kg/day in extratropical ascent (T63 samples).
-  Supplying it needs the previous step's post-physics state as the anchor.
 - **1M: gravity-wave and orographic drag heating** reach the cloud scheme one
   step late: those terms run after it (≤ 0.03 K/day in the troposphere).
 - **1M: the ``lonacc`` zeroing of the local-rain factor** at the cover's

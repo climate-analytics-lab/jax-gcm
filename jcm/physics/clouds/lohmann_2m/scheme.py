@@ -276,12 +276,14 @@ def cloud_microphysics_2m(
     # source into ice-free cells.
     #
     # The floor shapes only the WORKING numbers. The number tendencies are
-    # taken against the RAW step-start tracers, as ECHAM passes
-    # pxtm1(:,jk,idt_cdnc/idt_icnc) unfloored to
-    # update_tendencies_and_important_vars (1781) and forms
-    # pxtte = (n/ρ − pxtm1)/ztmst (3625-3628): the end-of-step tracer is
-    # then exactly the scheme's number, so an out-of-range raw value is
-    # removed within the step instead of being carried and re-floored.
+    # taken against the RAW provisional tracers (anchor + increment,
+    # unfloored), the state the host adds them to. ECHAM passes the unfloored
+    # pxtm1(:,jk,idt_cdnc/idt_icnc) to update_tendencies_and_important_vars
+    # (1781) and replaces its tendency with pxtte = (n/ρ − pxtm1)/ztmst
+    # (3625-3628); for jcm's additive host the same end state is reached from
+    # the provisional tracer. The end-of-step tracer is then exactly the
+    # scheme's number, so an out-of-range raw value is removed within the
+    # step instead of being carried and re-floored.
     qnc_raw = qnc
     qni_raw = qni
     inv_rho = 1.0 / jnp.maximum(air_density, eps_dt)
@@ -1012,11 +1014,12 @@ def cloud_microphysics_2m(
         # state against ``ccwmin`` (#662 finding 6).
         ice_mmr_prev=qi - detrainment_move,
         liq_mmr_prev=qc + detrainment_move,
-        # ECHAM convention: pxtm1_cdnc / pxtm1_icnc are the step-start
-        # tracer values in per-kg-of-air, RAW (1781; see the entry floor).
-        # The working cdnc/icnc are per-m³, so the tendency subtracts
-        # per-kg from per-m³·1/ρ, and the negative-mass repair removes the
-        # whole number where it zeroes the condensate (3632-3652).
+        # The baseline of the number tendencies: the RAW provisional tracers
+        # per kg of air (anchor + increment; ECHAM's pxtm1 for its
+        # replacing tendency, 1781; see the entry floor). The working
+        # cdnc/icnc are per-m³, so the tendency subtracts per-kg from
+        # per-m³·1/ρ, and the negative-mass repair removes the whole number
+        # where it zeroes the condensate (3632-3652).
         tracer_tm1_cdnc=qnc_raw,
         tracer_tm1_icnc=qni_raw,
         condensation_rate=condensation_rate,
@@ -1205,7 +1208,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     upstream), TKE from ``"vertical_diffusion"``, and the SPA-style
     activated CDNC floor from the public ``"aerosol"`` Nccn. Writes the
     surface rain / snow precip flux into ``"clouds"`` along with the
-    qnc / qni state-carry needed for the next step's update.
+    number tracers the step started from (``qnc_prev``/``qni_prev``).
 
     Must be composed downstream of ``SundqvistCloudFraction`` and
     (because it reads TKE) downstream of ``TteTkeVerticalDiffusion``.
@@ -1423,11 +1426,10 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             },
         )
 
-        # ``qnc_prev``/``qni_prev`` keep the RAW number tracers of the state
-        # this term receives (ECHAM pxtm1, mo_cloud_micro_2m.f90:1781), not
-        # the scheme's entry-floored working numbers. No term reads them;
-        # they record the state the scheme started from. The surface
-        # precipitation comes from the lax.scan carry.
+        # ``qnc_prev``/``qni_prev`` record the raw number tracers of the
+        # state this term receives, not the scheme's entry-floored working
+        # numbers. No term reads them. The surface precipitation comes from
+        # the lax.scan carry.
         clouds_next = clouds.copy(
             # ECHAM writes the post-microphysics cloud fraction back to
             # ``paclc``: cells the scheme has just emptied of both condensates,

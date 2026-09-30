@@ -437,9 +437,10 @@ ECHAM's order:
    local cover where the level's own production dominates), and the return of
    condensate below ``ccwmin`` to vapour with the cover write-back.
 
-The increments are ``dt`` times the running tendency of the physics terms
-composed before the scheme; the dynamics of the step is not among them (see the
-model description, clouds and microphysics).
+The anchor is the previous step's post-physics state and the increments are
+the dynamics since then plus ``dt`` times the running tendency of the physics
+terms composed before the scheme, with the convective detrainment passed
+separately, as for the 2M (see :doc:`design/operator_split_physics`).
 
 The scheme publishes no effective radius: as in ECHAM, the radiation forms the
 droplet and crystal radii itself from the step's state

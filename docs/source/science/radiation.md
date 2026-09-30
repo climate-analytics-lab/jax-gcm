@@ -50,8 +50,9 @@ Geleyn-Hollingsworth product (``mo_radiation.f90`` l.436-442). The rank
 comparisons are piecewise constant in the cover, as the ``r < cf`` test of
 every rule is, so the sampled masks carry no cover gradient and need no
 surrogate. ECHAM's sampler also offers random overlap (and maximum, which jcm
-does not); exponential is a jcm option with no ECHAM counterpart. The **grey** backend instead combines one clear and one cloudy
-beam weighted by the overlap-derived total cover (``column_total_cover``); the
+does not); exponential is a jcm option with no ECHAM counterpart. The **grey**
+backend instead combines one clear and one cloudy beam weighted by the
+overlap-derived total cover (``column_total_cover``); the
 **NN emulator's** fluxes carry whatever overlap its RRTMGP training labels
 embedded — the network sees only layer cloud fractions and paths, so the
 runtime ``cloud_overlap`` / ``cloud_decorrelation_km`` knobs change its

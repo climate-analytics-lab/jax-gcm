@@ -275,9 +275,9 @@ forms the same inputs from the hand-offs, and both cloud schemes call it:
   `x_n − x_ap` is the dynamics of the last step and `P_upstream` is
   `_tendency_run` at the cloud scheme;
 - detrainment := `dt ×` `clouds.conv_detrainment_qc` / `_qi`, by itself;
-- provisional state := anchor + increment + detrainment, which is
-  `x_n + dt·P_upstream`, bit for bit the state the scheme's tendencies are
-  relative to.
+- provisional state := anchor + increment + detrainment, which equals
+  `x_n + dt·P_upstream` up to rounding and is, bit for bit, the state the
+  scheme's tendencies are relative to.
 
 On a first step, after a restart from a checkpoint that predates the slot,
 and on hosts without a dynamical core (single column, RCE), the carry holds

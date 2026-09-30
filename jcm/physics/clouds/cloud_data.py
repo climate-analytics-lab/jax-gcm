@@ -37,8 +37,9 @@ class CloudData:
     # Convective detrainment of cloud condensate [kg/kg/s], grid-mean,
     # (nlev, ncols): ECHAM's ``pxtecl`` (liquid) / ``pxteci`` (ice). They
     # are the part of this step's ``clouds.qc`` / ``clouds.qi`` increment
-    # that the convection term ADDED, exactly as applied (after its
-    # tendency cap), written by ``TiedtkeConvection`` every step and zero
+    # that the convection term ADDED, as it applies it (after its tendency
+    # cap, before the clip of ``clouds.qc/qi`` at zero; the same rate is in
+    # the running tendency), written by ``TiedtkeConvection`` every step and zero
     # otherwise: ``SundqvistCloudFraction`` resets them when it seeds the
     # step's ``clouds`` from the carry, so a step without convection — or
     # a restart into a stack without it — can never re-apply a previous

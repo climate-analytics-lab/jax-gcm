@@ -90,6 +90,10 @@ def _split_and_lumped(detrainment):
 def test_warm_liquid_detrainment_is_part_of_the_condensate_increment():
     """Liquid detrained above ``tmelt`` gives the lumped result to the last bit.
 
+    At the default ``ldyn_cdnc_min = False``: the dynamic droplet floor reads
+    the liquid before this step's detrainment, which the two runs split
+    differently.
+
     ECHAM's 2M gives the detrained condensate ``zxtec`` its own rules only
     where they can act: it keeps it out of the ice sedimentation, gives it a
     crystal number where ``ll_cv`` holds (below ``tmelt``) and re-splits it by

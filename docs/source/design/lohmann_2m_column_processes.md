@@ -144,8 +144,8 @@ state, and the host sums them.
 
 - the **anchor** `*_m1` = ECHAM's previous time level. Every quantity ECHAM
   evaluates at t−1 reads it: saturation and the other section-1 fields,
-  `zrid`, the temperature tests of `lo2_2d`, `ll_cv` and `lo2`, the moist
-  `cp`, melting and falling-ice sublimation;
+  `zrid`, the temperature tests of `ll_cv` and `lo2`, the moist `cp`,
+  melting and falling-ice sublimation;
 - the **increments** `*_increment` = `ztmst·ptte`, `ztmst·pqte`,
   `ztmst·pxlte`, `ztmst·pxite`, `ztmst·pxtte` — everything since the anchor
   except the convective detrainment. They play the role of ECHAM's
@@ -212,13 +212,15 @@ arithmetic (ECHAM lines 600-605), so dycore ringing cannot drive the
 activation or diagnosis steps, and applies no upper bound at entry: the
 crystal number is capped at `icemax` only after the detrained number joins
 it (line 1252), and the droplet number is not capped. The returned number
-tendencies are taken against the raw tracers, as ECHAM passes the raw
-`pxtm1` to its ledger (lines 1780-1781) and writes
-`pxtte = (N/ρ − pxtm1)/ztmst` (lines 3625-3628). The end-of-step tracer is
-then the scheme's crystal or droplet number per kilogram, or zero where the
-negative-mass repair removed the condensate (lines 3641-3652), and an
-out-of-range tracer value does not persist from step to step. The
-previous-step stash `clouds.qnc_prev`/`qni_prev` holds the raw tracers too.
+tendencies are taken against the raw provisional tracers (anchor plus
+increment, unfloored), which the host adds them to; ECHAM passes the raw
+`pxtm1` to its ledger (lines 1780-1781) and replaces its tendency with
+`pxtte = (N/ρ − pxtm1)/ztmst` (lines 3625-3628), the same end state. The
+end-of-step tracer is then the scheme's crystal or droplet number per
+kilogram, or zero where the negative-mass repair removed the condensate
+(lines 3641-3652), and an out-of-range tracer value does not persist from
+step to step. `clouds.qnc_prev`/`qni_prev` record the raw number tracers of
+the state the term receives.
 
 ## Deliberate omissions (tracked)
 
