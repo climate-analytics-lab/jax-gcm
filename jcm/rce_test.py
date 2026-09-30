@@ -476,18 +476,23 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     where it no longer condenses or is not buoyant.
 
     Under ECHAM's 1M cloud scheme the column fogs its lowest level (996 hPa)
-    from about day 10: over days 40-80 that level is overcast in 99.7-100 %
-    of the steps and holds ~0.46 g/kg of cloud water, and the 1M's stratiform
-    rain is all but 1e-4 of the column's 0.29-0.31 mm/d of precipitation,
-    against 0.45-0.47 mm/d of evaporation. Tiedtke triggers under it in 3-9 %
-    of those steps, as a plume one layer deep based at 983 hPa. ECHAM6.3's
-    compiled ``mo_cover``/``mo_cloud``, fed this column's states, make the
-    same fog, and its compiled ``cumastr`` stays off over it as well: on in
-    2.8 % of the days 40-80 steps against the port's 4.7 %, and never where
-    the port is off, because the plume fails the ascent test at the first
-    interface above cloud base (``mo_cuascent.f90`` l.449-451). The testbed
-    has no shear or subsidence to ventilate its lowest layer (#967). The TOA
-    shortwave albedo is 0.52-0.55.
+    from about day 10: over days 40-80 that level is overcast in every step
+    and holds 0.46 g/kg of cloud water, and the 1M's stratiform rain is all
+    but 0.4 % of the column's 0.30 mm/d of precipitation, against 0.49 mm/d
+    of evaporation. Tiedtke triggers under it in 10.9 % of those steps, none
+    after day 65, as a plume based at 983 hPa that mostly stops one layer
+    higher, because it fails the ascent test at the first interface above
+    cloud base (``mo_cuascent.f90`` l.449-451). ECHAM6.3's compiled
+    ``mo_cover``/``mo_cloud``, fed this column's states, make the same fog,
+    and its compiled ``cumastr`` takes the port's decisions on every one of
+    the 7680 steps when the port runs with ECHAM's physical constants
+    (``echam_cumastr_reference``). With jcm's ``rv`` (461.0 against ECHAM's
+    461.51, 0.11 % in the saturation humidity) the port convects in 10.9 % of
+    the days 40-80 steps where ECHAM convects in 24.3 %, and never where
+    ECHAM does not: the buoyancy of that first interface sits within
+    hundredths of a kelvin of zero. The testbed has no shear or subsidence
+    to ventilate its lowest layer (#967). The TOA shortwave albedo is
+    0.53.
 
     The column is **aerosol-free** (``AerosolFree`` replaces MACv2-SP). The
     MACv2-SP plumes are a geographic climatology, and this column at 0°N/0°E
@@ -506,9 +511,8 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     expected failure until the testbed is re-derived (#967).
 
     What it does NOT pin, and why: a steady column water. Over days 40-80 the
-    column water still rises by 0.16-0.17 mm/d (35 % of E) across
-    trajectories that differ only in round-off; the grey atmosphere's net
-    radiative cooling is only 3-8 W/m² (#883).
+    column water still rises by 0.19 mm/d (39 % of E); the grey atmosphere's
+    net radiative cooling is only 3-8 W/m² (#883).
 
     The 80-day integration runs once per class (``setUpClass``); the two
     tests read its series.
@@ -584,13 +588,12 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         self.assertLess(float(q[-1, -1]) * 1e3, 30.0)
 
         # Convection is not extinguished over the averaging window. Under the
-        # fogged lowest level (class docstring) Tiedtke triggers in 3-9 % of
+        # fogged lowest level (class docstring) Tiedtke triggers in 10.9 % of
         # the steps of days 40-80, most of them before day 50 and none after
-        # day 69 in two of three round-off trajectories, and its time-mean
-        # precipitation is 0.6-2.0e-5 mm/d of a 0.29-0.31 mm/d total. The pins
-        # are strict positivity: the hard-trigger extinction they guard
-        # against drives the equilibrium convective precipitation to exactly
-        # zero.
+        # day 65, and its time-mean precipitation is 1.3e-3 mm/d of a
+        # 0.30 mm/d total. The pins are strict positivity: the extinction
+        # they guard against drives the equilibrium convective precipitation
+        # to exactly zero.
         precip, total = self.precip_conv, self.total_precip
         self.assertTrue(np.all(np.isfinite(precip)))
         self.assertTrue(np.all(np.isfinite(total)))
@@ -602,16 +605,15 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         # It sits in the mixed-phase cloud deck at 375-413 hPa (250-256 K),
         # whose cover flickers (temporal standard deviation 0.43-0.46): its
         # radiative heating scatters by 6-7 K/day, partly offset by the rest
-        # of the physics. Measured 5.4-5.9 K/day across trajectories that
-        # differ only in round-off.
+        # of the physics. Measured 5.4 K/day.
         max_temporal_std = float(np.max(tot[window].std(axis=0)))
         self.assertLess(max_temporal_std, 8.0)  # K/day
 
         # Column water budget over the window: Δ(column water)/Δt =
         # E − P + (the Tiedtke floor source, #912) on the host's own layer
-        # mass. Measured residual <= 6e-6 mm/d against E of 0.45-0.47 mm/d;
-        # the floor source is zero over this window, where Tiedtke is nearly
-        # silent.
+        # mass. Measured residual 1.3e-6 mm/d against E of 0.49 mm/d; the
+        # floor source is zero over this window, where Tiedtke's plume has no
+        # downdraft.
         evap, water = self.evap, self.column_water
         dwater_dt = (water[-1] - water[-40 * spd - 1]) / (40 * spd * 900.0)
         residual = float(evap[window].mean() - total[window].mean()
@@ -622,7 +624,7 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         strict=True, raises=AssertionError,
         reason="under ECHAM's 1M cloud scheme this column fogs its lowest "
                "level from day 11 and Tiedtke falls silent, so precipitation "
-               "is 0.65 of evaporation over days 40-80 (P 0.300, E 0.460 "
+               "is 0.61 of evaporation over days 40-80 (P 0.296, E 0.488 "
                "mm/d) against the 0.8 bound. ECHAM6.3's compiled "
                "mo_cover/mo_cloud, fed this column's captured states, "
                "reproduce jcm's cover and 1M to the Fortran reference test's "
@@ -634,8 +636,7 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     def test_precipitation_substantially_balances_evaporation(self):
         # The RCE balance this testbed exists to pin: over the window the
         # column rains most of what it evaporates. The fogged column rains
-        # 0.645-0.652 of it (P 0.29-0.31, E 0.45-0.47 mm/d) across
-        # trajectories that differ only in round-off (the xfail reason).
+        # 0.61 of it (P 0.296, E 0.488 mm/d; the xfail reason).
         window = self.window
         self.assertGreater(float(self.total_precip[window].mean()),
                            0.8 * float(self.evap[window].mean()))
