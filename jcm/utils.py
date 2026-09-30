@@ -214,6 +214,33 @@ def _check_type_convert_back(x, x0):
 def convert_back(x, x0):
     return tree_map(_check_type_convert_back, x, x0)
 
+
+def cast_like(tree, reference):
+    """Cast every leaf of ``tree`` to the dtype of the matching ``reference`` leaf.
+
+    ``lax.cond`` requires both branches to return identical dtypes. With
+    ``jax_enable_x64`` on and the physics running in float32 (the pySES
+    backend's split), some inputs stay float64 — the forcing, and tables
+    built from Python floats such as ``SpeedyCoords``' vertical coordinates —
+    so a branch that recomputes a field from them comes out float64 while
+    the branch that passes its float32 operand through does not. Pinning
+    the computed branch to the operand's dtypes is a no-op in an
+    all-float32 or all-float64 run, and keeps the carry's dtype fixed
+    otherwise.
+
+    Args:
+        tree: The pytree to cast (typically a cond branch's result).
+        reference: A pytree of the same structure whose leaf dtypes are
+            authoritative (typically the operand the other branch returns).
+
+    Returns:
+        ``tree`` with each leaf cast to its reference leaf's dtype.
+
+    """
+    return tree_map(
+        lambda leaf, ref: jnp.asarray(leaf).astype(jnp.result_type(ref)),
+        tree, reference)
+
 def _infer_dims_shape_and_coords(
     coords: CoordinateSystem,
     times: typing.Array | None,

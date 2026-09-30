@@ -99,9 +99,11 @@ jcm configures no logging; ``Model(log_level=...)`` removed
   ``job_logging`` regardless.
 - An application that silences logging now gets silence — jcm will not
   override it, which it previously did by design (#735). Findings that must
-  survive a quiet application are recorded in the run's provenance instead;
-  the parameters-changed-after-compilation warning, the case #735 was about,
-  is also the ``live_parameters_differ_from_compiled`` provenance key.
+  survive a quiet application are recorded in the run's provenance instead,
+  or raised as Python warnings rather than log records: the
+  parameters-changed-after-compilation case #735 was about is a
+  ``UserWarning`` and the ``live_parameters_differ_from_compiled`` provenance
+  key.
 - **A default CLI run prints less.** ``run.log_level`` (default ``WARNING``)
   now actually takes effect: previously it was applied only by
   ``Model.__init__``, so it did nothing at all in ``run.mode=prescribed`` and
@@ -122,6 +124,47 @@ jcm configures no logging; ``Model(log_level=...)`` removed
   seam** — a request within half a cell of 360 used to fall back to the
   axis's last centre and now correctly wraps to its first, so such a run
   selects a different column than it did before.
+- **Breaking:** a single-column request the state file does not cover is
+  refused (#818). A regional or single-column file used to run its nearest
+  column however far away (``lat_deg=90`` ran the 80°N row of a
+  ``lat = 20..80`` file; a single-column file ran its one column for any
+  request); ``select_column`` now raises, naming the request, the file's
+  coverage and the distance to the nearest column. Coverage is the axis span
+  extended by half a grid cell at each end, with longitude periodic only when
+  the file's longitudes close the circle, a latitude end within one row
+  spacing of its pole reaching the pole, and a length-1 axis covering only its
+  own coordinate. Global files — what jcm writes — are unaffected. See
+  :ref:`v3-scm-coverage`.
+
+One trajectory conversion for every backend
+"""""""""""""""""""""""""""""""""""""""""""
+
+- ``DinosaurDycore.to_xarray`` converts a real run (#951): it failed on the
+  nested physics diagnostics every run returns (``_prev_step``,
+  ``water_positivity_correction``) and rewrote the exact ``datetime64``
+  labels into an elapsed axis. It is now where the dinosaur trajectory
+  conversion lives, ``ModelPredictions.to_xarray()`` delegates to the
+  attached dycore for every backend, and the labels are kept as given; a
+  numeric axis raises ``TypeError``.
+- The physics names its own diagnostics, once, for every model trajectory
+  output (``ModelPredictions.to_xarray()``, the chunked CLI's files and each
+  backend's ``DynamicalCore.to_xarray``):
+  ``jcm.predictions.physics_output_fields`` (the physics'
+  ``data_struct_to_dict``) is used by the dinosaur and pySES conversions
+  alike, and a trajectory fetched to the host with ``jax.device_get`` now
+  writes the same variables (host arrays were dropped). The
+  ``run.mode=prescribed`` output keeps its own minimal ``diag.*`` layout. **Breaking for protocol implementers:**
+  ``DynamicalCore.to_xarray`` takes a keyword-only ``physics``, and a dycore
+  carries the ``output_physics`` a ``Model`` binds to it at construction, so
+  a direct ``model.dycore.to_xarray(...)`` names the variables the model's
+  output does; a call with diagnostics and no physics to name them raises.
+- **pySES output names physics diagnostics as the dinosaur output does.**
+  It used to take each leaf's pytree path, which named SPEEDY's typed
+  structs by position (``_condensation.0``, ``_shortwave_rad.10``) and wrote
+  the ``_prev_step`` carry plumbing; it now writes ``condensation.dqlsc`` and
+  the rest of the dinosaur names, drops what the dinosaur output drops
+  (``_prev_step``, per-term withheld fields), applies per-term output renames,
+  and splits multi-channel fields per channel. See :ref:`v3-dycore-to-xarray`.
 
 Specific humidity has one kg/kg contract
 """"""""""""""""""""""""""""""""""""""""
@@ -506,6 +549,17 @@ Dynamical cores and grids
   frontogenesis physics-fields provider. Selected from Hydra with
   ``dycore=pyses_ne30l{47,95}`` or the ``+configuration=ma-ne30-l{47,95}``
   presets. See :doc:`design/pyses_cam_se_dycore`.
+- ``physics=speedy`` runs on the pySES backend (#797). Under pySES's
+  float64-dynamics / float32-physics split the forcing and SPEEDY's cached
+  vertical tables stay float64, so the ``lax.cond`` branches that recompute
+  from them (the shortwave cloud and flux caches, the near-surface humidity
+  blend) came out float64 against a float32 pass-through branch and the
+  first physics step raised a ``TypeError``. The recomputed branches are
+  pinned to their operand's dtypes (``jcm.utils.cast_like``), and the scatters
+  that write those float64 values into float32 fields (lowest-level surface
+  tendencies, longwave boundary temperatures, shortwave fluxes, large-scale
+  condensation) cast explicitly, which JAX deprecates doing implicitly. Both
+  are no-ops in an all-float32 or all-float64 run.
 - **Semi-Lagrangian is the Dinosaur backend's default tracer transport.**
   Every extra tracer rides nodally with a Bermejo-Staniforth quasi-monotone
   limiter, so aerosol non-negativity is structural in transport rather than
@@ -661,6 +715,15 @@ Public state and transformed-output contracts
   boundaries. The explicit ``with_context(coords, physics, ...)`` form supports
   custom drivers; re-derived live parameters are labelled so they cannot be
   mistaken for trace-time provenance (#756).
+- ``ModelPredictions.is_interval_mean()`` is the public reading of whether a
+  trajectory's frames are interval means (#907). A coupler scanning
+  ``run_from_state_with_carry`` over chunks gets the per-trajectory flag
+  stacked with every other leaf; the accessor returns it when the chunks
+  agree and raises ``ValueError`` when a stack mixes means with
+  instantaneous samples. ``time_labels()`` and ``to_xarray()`` read the flag
+  through it, so a stacked trajectory labels directly (keeping its chunk
+  axis) and serializes once the chunk axis is merged into time — no private
+  field has to be rewritten. See :doc:`advanced_features`.
 
 Public model clock conversion
 """""""""""""""""""""""""""""
@@ -728,11 +791,26 @@ Provenance records the parameters
   afterwards does not reach the computation. Reading the module at the
   handoff would therefore stamp a trajectory with values that never ran.
   Where the live values disagree with the compiled ones, the record
-  reports the compiled ones and both a log warning and a
-  ``live_parameters_differ_from_compiled`` key say so: that disagreement
-  means an in-place parameter change did nothing to the run. Rebuild the
-  ``Model`` to change parameters; making the mutation take effect (or
-  fail loudly) is tracked in #735.
+  reports the compiled ones and a ``live_parameters_differ_from_compiled``
+  key says so (as does the warning below): that disagreement means an
+  in-place parameter change may not have reached the run. Build the physics
+  anew to change parameters.
+- **An in-place parameter change after the physics has run now fails
+  loudly** (#735). The change still does not reliably reach a later run —
+  of that model, or of a new ``Model`` built on the same physics object at
+  the same grid, since each checkpointed term's trace is cached — so the
+  next such run raises a ``UserWarning`` before it starts, naming each
+  changed field once per model; a sensitivity loop that edits one physics
+  object therefore hears about it on its second iteration instead of
+  returning a flat response. Where a new Model can reuse those traces, the
+  first-compiled parameter record is the physics object's, so the record
+  holds the values the traces were built with, flagged; a physics without
+  per-term checkpointing (Held-Suarez), or a new grid, retraces with the
+  live values and neither warns nor flags. An edit made before the physics
+  first runs is simply the value it compiles with. Making edits take effect would need the
+  parameters passed through the jit as traced arguments, a change to the
+  compiled hot path; the supported loop builds the physics and the ``Model``
+  inside one ``jax.jit`` (:doc:`advanced_features`).
 - The record travels on the predictions object, so it reaches every
   output stream that object produces (trajectory, snapshots and the
   per-observer datasets), including a bare
@@ -1348,6 +1426,12 @@ Accepted limitations (proposed)
 - **The release-validation matrix has two gaps**: the T106 members' multi-GPU
   mesh configurations have never been run for a full year, and ``echam-jam``
   at L95 needs L95 oxidant and ozone inputs staged (#638).
+- **PrescribedStateModel re-diagnoses carried state from a cold start.** Each
+  time is evaluated independently, so TTE-TKE turbulence takes its spin-up
+  value and JAM's carry-stored cloud-borne aerosol is an empty reservoir at
+  every re-diagnosed time; construction warns once, naming the slots. Read a
+  saved run's own ``jam_cloud_borne.*`` output instead; threading the carry
+  is left for after v3.0 (#623, :ref:`v3-limitation-prescribed-carry`).
 
 Regression fixtures follow the supported matrix
 """""""""""""""""""""""""""""""""""""""""""""""
