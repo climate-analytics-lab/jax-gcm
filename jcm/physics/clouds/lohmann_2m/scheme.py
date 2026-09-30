@@ -31,7 +31,7 @@ from ..lohmann_2m_params import CloudParams2M
 from ..cloud_utils import (
     air_dynamic_viscosity,
     ice_fall_speed_air_density_factor,
-    ice_volume_mean_radius,
+    ice_volume_mean_radius_from_temperature,
     ice_volume_mean_radius_schumann,
     latent_heat_over_cp,
     minimum_CDNC,
@@ -318,6 +318,11 @@ def cloud_microphysics_2m(
     # not plumbed to this scheme (#941); it is the term to add here.
     updraft_velocity = turbulent_updraft_velocity(tke, params)
 
+    # Temperature-parameterised volume-mean crystal radius zrid [m] at the
+    # step-start temperature (945-956): the radius the section-5.5 ICNC
+    # diagnosis inverts (prid, 1511).
+    zrid = ice_volume_mean_radius_from_temperature(temperature_m1, params)
+
     # Dynamic viscosity of air for the snow Reynolds number in riming,
     # ECHAM pviscos (mo_cloud_utils.f90::get_util_var, line 132).
     dynamic_viscosity = air_dynamic_viscosity(temperature_m1)
@@ -353,7 +358,7 @@ def cloud_microphysics_2m(
         (rain_flux, snow_flux, ice_flux, ice_flux_n,
          falling_ice_frac, precip_cover) = carry
         (cf_k, t_m1_k, q_m1_k, dT_up_k, dq_up_k, dqc_up_k, dqi_up_k,
-         qc_m1_k, qi_m1_k, qc_run_k, qi_run_k,
+         qc_m1_k, qi_m1_k, qc_run_k, qi_run_k, zrid_k,
          p_k, rho_k, inv_rho_k, dp_k, dpg_k, dz_k, adc_k, zqrho_k,
          cdnc0_k, icnc0_k,
          esw_k, esi_k, qsw_k, qsi_k, dqsw_k, dqsi_k,
@@ -468,10 +473,6 @@ def cloud_microphysics_2m(
         # and the WBF gate below use, so the three decisions cannot drift.
         ice_gm3 = 1000.0 * zxip1 * rho_k / cf_safe
         zrice = ice_volume_mean_radius_schumann(ice_gm3, icnc_melt, params)
-        # Radius update_in_cloud_water inverts to diagnose ICNC (``prid``).
-        # jcm uses the plate radius of the existing ice here; ECHAM passes
-        # its temperature-parameterised zrid (lines 945-956), #941.
-        prid_radius = ice_volume_mean_radius(ice_gm3, icnc_melt, params)
         zvervmax = threshold_vert_vel(
             sat_vap_pres_water=esw_k, sat_vap_pres_ice=esi_k,
             icnc=icnc_melt, ice_radius=zrice, eta=eta_k, params=params)
@@ -554,7 +555,7 @@ def cloud_microphysics_2m(
             inp_dep_k,          # pnicex: read only by the nic_cirrus=2 branch
             zqp1tmp, zqsp1tmp,
             rho_k,
-            prid_radius,        # prid: volume-mean ice radius [m]
+            zrid_k,             # prid: ECHAM zrid [m] (1511)
             t_m1_k,             # ptm1 (activation gates on step-start T)
             ll_cc,
             icnc_melt,
@@ -803,7 +804,7 @@ def cloud_microphysics_2m(
     scan_inputs = (
         cloud_fraction, temperature_m1, specific_humidity_m1,
         dT_up, dq_up, dqc_up, dqi_up,
-        qc_m1, qi_m1, qc, qi,
+        qc_m1, qi_m1, qc, qi, zrid,
         pressure, air_density, inv_rho, pressure_thickness, dp_over_g,
         layer_thickness, air_density_correction, zqrho,
         cdnc0, icnc0,

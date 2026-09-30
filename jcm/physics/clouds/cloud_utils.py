@@ -87,9 +87,9 @@ def ice_volume_mean_radius(
     in ``precip_formation_cold`` (``mo_cloud_micro_2m.f90:3160-3166``; the 1M
     Levkov aggregation in ``mo_cloud.f90:1031-1036`` uses the same relation).
     ECHAM's Wegener-Bergeron-Findeisen threshold uses a different conversion,
-    :func:`ice_volume_mean_radius_schumann`. jcm also passes this radius to
-    ``update_in_cloud_water`` as ``prid`` for the ICNC diagnosis, where ECHAM
-    passes its temperature-parameterised ``zrid`` (lines 945-956; #941).
+    :func:`ice_volume_mean_radius_schumann`, and the ICNC diagnosis in
+    ``update_in_cloud_water`` inverts the temperature-parameterised radius of
+    :func:`ice_volume_mean_radius_from_temperature` (ECHAM ``zrid``).
 
     Metres is load-bearing: callers invert this as
     ``N = rho q_i / ((4/3) pi r_vol^3 rho_ice)``, so returning the microns that

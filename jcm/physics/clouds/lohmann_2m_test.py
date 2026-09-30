@@ -1105,9 +1105,10 @@ class TestUpdateInCloudWaterCirrusBranches_2M:
         Below the volume-mean radius at which the ice-mass inversion would
         exceed ``icemax`` (~1.8e-5 m for this fixture's IWC), the candidate
         would run to ~1e11-1e20 /m^3 — four to thirteen orders above realistic
-        cirrus. It is capped at ``icemax`` (the reference's cap on crystal
-        NUMBER, ECHAM ``MIN(candidate, zascs)``; jcm uses ``icemax`` as the
-        max-plausible-number ceiling since aerosol number is not plumbed here).
+        cirrus. It is capped at ``icemax``, the bound the scheme also puts on
+        the ICNC tracer and ECHAM puts on the section-1 number additions
+        (mo_cloud_micro_2m.f90:1252); ECHAM's own diagnosis (2616-2622) is
+        uncapped.
         """
         n = 3
         inputs = self._inputs_with_ice(n)

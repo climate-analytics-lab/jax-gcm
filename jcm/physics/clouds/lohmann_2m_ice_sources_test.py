@@ -19,6 +19,7 @@ from .cloud_utils import (
     ice_volume_mean_radius_from_temperature,
 )
 from .lohmann_2m import cloud_microphysics_2m, demott2010_inp
+from .lohmann_2m import scheme as scheme_mod
 from .lohmann_2m_params import CloudParams2M
 
 _P = CloudParams2M.default()
@@ -191,6 +192,64 @@ class TestDetrainedIceCrystalNumber:
         assert self._call(cf=float(_P.clc_min))[0] == cqtmin
         assert self._call(cf=0.0)[0] == cqtmin
         assert self._call(detr=0.0)[0] == cqtmin
+
+
+# ---------------------------------------------------------------------------
+# ICE-2: zrid is the radius of the ICNC diagnosis
+# ---------------------------------------------------------------------------
+
+
+class TestIcncDiagnosisRadius:
+    """``update_in_cloud_water`` inverts ice mass at ``zrid`` (F 1511, 2616)."""
+
+    def test_echam_reference_value(self):
+        """ECHAM diagnoses 2.98e5 /m³ at 200 K from 1.44e-6 kg/kg, ρ = 0.271."""
+        from .lohmann_2m import update_in_cloud_water
+        one = lambda v: jnp.array([v], dtype=jnp.float32)  # noqa: E731
+        T = one(200.0)
+        _, icnc, *_ = update_in_cloud_water(
+            pressure=one(1.6e4), activated_cdnc=one(0.0),
+            condensation_rate=one(0.0), deposition_rate=one(0.0),
+            tompkins_genti=one(0.0), tompkins_gentl=one(0.0),
+            newly_formed_ice=one(0.0), specific_humidity_tmp=one(1e-6),
+            sat_spec_humidity_tmp=one(1e-6), air_density=one(0.271),
+            ice_radius_mean=ice_volume_mean_radius_from_temperature(T, _P),
+            temp_prev=T, cloud_flag=jnp.array([True]),
+            ice_crystal_number=one(0.0), nucleation_rate=one(0.0),
+            droplet_number=one(0.0), cloud_fraction=one(1.0),
+            cloud_ice_in_cloud=one(1.44e-6), cloud_liquid_in_cloud=one(0.0),
+            dt=jnp.float32(DT), params=_P)
+        np.testing.assert_allclose(float(icnc[0]), 2.98e5, rtol=5e-3)
+
+    def test_number_less_ice_is_diagnosed_at_zrid(self, monkeypatch):
+        n = 6
+        T = jnp.linspace(215.0, 250.0, n)
+        p = jnp.linspace(2e4, 4.5e4, n)
+        rho = p / (287.0 * T)
+        qi = jnp.full(n, 5e-6)
+        col = dict(T=T, q=_qsat(T, p, "ice"), p=p, rho=rho,
+                   cf=jnp.full(n, 1.0), qc=jnp.zeros(n), qi=qi,
+                   qni=jnp.zeros(n))                 # ice mass, no crystals
+        records = _spy(
+            monkeypatch, scheme_mod, "update_in_cloud_water",
+            # (rho, prid, icnc in, in-cloud ice out, icnc out)
+            lambda a, k, out: (a[9], a[10], a[13], out[5], out[1]))
+        _run(col)
+        zrid = np.asarray(ice_volume_mean_radius_from_temperature(T, _P),
+                          dtype=np.float64)
+        diagnosed = 0
+        for rho_k, prid, icnc_in, qib, icnc_out in records:
+            k = _level_of(rho, float(rho_k))
+            np.testing.assert_allclose(float(prid), zrid[k], rtol=1e-6)
+            if float(icnc_in) <= float(_P.icemin) and float(qib) > 1e-12:
+                formula = (0.75 * float(rho_k) * float(qib)
+                           / (np.pi * float(_P.rhoice) * zrid[k] ** 3))
+                expected = max(min(formula, float(_P.icemax)),
+                               float(_P.icemin))
+                np.testing.assert_allclose(float(icnc_out), expected,
+                                           rtol=1e-4)
+                diagnosed += 1
+        assert diagnosed >= n // 2, f"only {diagnosed} levels diagnosed"
 
 
 # ---------------------------------------------------------------------------
