@@ -3158,12 +3158,12 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         return term.params.get_value()
 
     def test_scheme_fields_reach_both_factory_presets(self):
-        # The Tiedtke retune knobs (#682: entrainment, the CAPE trigger and
-        # the closure timescale), a cloud-fraction field and a radiation
+        # The Tiedtke retune knobs (#682: the deep and shallow entrainment
+        # and the closure timescale), a cloud-fraction field and a radiation
         # field, on each factory-built preset.
         overrides = [
             "+physics.convection.entrpen=4e-4",
-            "+physics.convection.trigger_cape=150.0",
+            "+physics.convection.entrscv=2e-3",
             "+physics.convection.tau=3600.0",
             "+physics.clouds.crs=0.95",
             "+physics.radiation.cloud_inhomogeneity_liquid=0.7",
@@ -3173,7 +3173,7 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
                 physics = build_physics(_compose([*preset, *overrides]))
                 conv = self._params(physics, "convection")
                 self.assertAlmostEqual(float(conv.entrpen), 4e-4)
-                self.assertAlmostEqual(float(conv.trigger_cape), 150.0)
+                self.assertAlmostEqual(float(conv.entrscv), 2e-3)
                 self.assertAlmostEqual(float(conv.tau), 3600.0)
                 self.assertAlmostEqual(
                     float(self._params(physics, "cloud_fraction").crs), 0.95)
