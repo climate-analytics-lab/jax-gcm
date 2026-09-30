@@ -1141,6 +1141,19 @@ def test_fetch_refreshes_a_file_rewritten_at_the_same_size(scratch, volume):
                                with_checkpoints=True) == []
     assert (dest / "checkpoint.msgpack").read_bytes() == b"D" * 5000
 
+    # ...and when that refresh's stream fails, the stale same-size copy is
+    # reported, not accepted on its size.
+    ckpt.write_bytes(b"E" * 5000)
+    os.utime(ckpt, (stamp + 100, stamp + 100))
+    os.environ["FAKE_TAR_FAIL"] = "1"
+    try:
+        bad = fetch_run.fetch_run("mx_speedy_t31_ft", dest, site=site,
+                                  pod="p", with_checkpoints=True)
+    finally:
+        del os.environ["FAKE_TAR_FAIL"]
+    assert bad == ["checkpoint.msgpack (stale: the copy of the rewritten "
+                   "file did not complete)"]
+
 
 def test_fetch_notes_a_foreign_record_of_the_same_size(scratch, volume,
                                                        capsys):

@@ -129,8 +129,9 @@ def fetch_run(run: str, dest, *, site: dict, pod: str,
     """Copy ``/runs/<run>/`` into ``dest``; return what is still missing or short.
 
     An empty list means ``dest`` now holds every (non-checkpoint) file at
-    least at the size the volume listed — at least, because a run still
-    being written grows between the listing and the copy. A name in ``keep``
+    least at the size and modification time the volume listed — at least,
+    because a run still being written grows between the listing and the copy
+    (see :func:`_incomplete`). A name in ``keep``
     that already exists in ``dest`` is never overwritten (a caller's own
     record); a difference from the volume's copy is reported instead.
     """
@@ -177,9 +178,29 @@ def fetch_run(run: str, dest, *, site: dict, pod: str,
     finally:
         _kubectl(site, "delete", "pod", pod, "--ignore-not-found",
                  "--wait=false", timeout=120)
-    return [f"{f} ({'missing' if not (dest / f).is_file() else 'short'})"
-            for f, (n, _) in sorted(wanted.items())
-            if not (dest / f).is_file() or (dest / f).stat().st_size < n]
+    return [f"{f} ({why})" for f, (n, t) in sorted(wanted.items())
+            if (why := _incomplete(dest / f, n, t, f in todo))]
+
+
+def _incomplete(local: Path, size: int, mtime: int, copied: bool) -> str | None:
+    """Why ``local`` is not a complete copy of the listed file (None: it is).
+
+    A file this fetch set out to copy must now carry at least the listed
+    mtime, not only the listed size: a same-size rewrite (the rotating
+    checkpoint, a retried chunk) whose stream failed leaves the stale local
+    copy at exactly that size. tar sets a file's mtime once it is written
+    whole, so a truncated one is short and a complete one has the volume's
+    mtime — or a later one, with a larger size, when the run was still
+    growing it.
+    """
+    if not local.is_file():
+        return "missing"
+    st = local.stat()
+    if st.st_size < size:
+        return "short"
+    if copied and int(st.st_mtime) < mtime:
+        return "stale: the copy of the rewritten file did not complete"
+    return None
 
 
 def main() -> int:
