@@ -1139,17 +1139,19 @@ ECHAM physics saturation is ECHAM's Sonntag (1990)
   tendency by 0.6 %. Over days 5-10 of ``t63-echam-1m`` / ``t63-echam-2m``
   runs restarted from 30-day spin-ups of each preset, the global net TOA
   radiation goes from −10.26 to −9.71 / 8.62 to 8.79 W/m², the shortwave
-  cloud effect from −78.4 to −76.5 / −38.5 to −38.0 W/m², the longwave one
-  from 34.6 to 33.1 / 13.7 to 13.2 W/m², liquid water path from 129.9 to
-  127.1 / 41.0 to 40.4 g/m², ice water path from 16.6 to 16.1 / 3.51 to
-  3.53 g/m², total cloud cover from 71.6 to 71.0 / 66.0 to 65.9 %, and
-  precipitation from 2.52 to 2.53 / 2.66 to 2.65 mm/day; humidity at
+  cloud effect from −78.4 to −76.5 / −38.5 to −38.1 W/m², the longwave one
+  from 34.6 to 33.1 / 13.7 to 13.3 W/m², liquid water path from 129.9 to
+  127.1 / 41.0 to 40.5 g/m², ice water path from 16.6 to 16.1 / 3.51 to
+  3.57 g/m², total cloud cover from 71.6 to 71.0 / 66.0 to 65.9 %, and
+  precipitation from 2.52 to 2.53 mm/day (1M; the 2M's stays at 2.66);
+  humidity at
   200 hPa rises by 2 / 3 % (by 2.4 / 3.3 % in the tropics), and no
   band-mean upper-tropospheric temperature (90-60-30° bands) moves by more
-  than 0.07 K. Rebuilds of this change that differ only at the 1e-4 level spread
-  by 0.3 / 0.06 W/m² in net TOA radiation over the same window, which is the
-  noise of these numbers. Ten days measure the immediate response, not a new climate; the
-  release-matrix bands of every ECHAM member shift (#943).
+  than 0.07 K. Rebuilds of this change that differ only at the 1e-4 level
+  spread by 0.3 / 0.06 W/m² in net TOA radiation over the same window,
+  which is the noise of these numbers. Ten days measure the immediate
+  response, not a new climate; the release-matrix bands of every ECHAM
+  member shift (#943).
 - Unchanged, bit for bit: SPEEDY, Held-Suarez, Betts-Miller and the RCE
   testbed, JAM's ARG activation, MAM4 humidity and ice nucleation, the public
   relative-humidity diagnostic, the AeroCom diagnostics and the initial-state
