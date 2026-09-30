@@ -581,6 +581,107 @@ class TestDetrainmentPhaseSplit:
         assert_column_budgets_close("mixed liquid→ice", as_liquid, out_l)
 
 
+class TestSupersaturationCorrectionSeesDetrainedIce:
+    """Section 5.4 receives the lo2 ice part of the detrainment (F 1490, 2361).
+
+    ECHAM passes ``zxite = MERGE(zxtec, 0, lo2)`` (F 1309) as the tendency
+    argument of ``mixed_phase_deposition_and_corrections``, which adds
+    ``ztmst·pxite`` to the post-sedimentation ice for its own phase test
+    (F 2361-2362).
+    """
+
+    @staticmethod
+    def _records_by_level(records, rho):
+        return {_level_of(rho, float(r[0])): r for r in records}
+
+    def test_argument_is_the_ice_part_per_second(self, monkeypatch):
+        n = 6
+        T = jnp.array([230.0, 280.0, 258.0, 258.0, 250.0, 270.0])
+        p = jnp.linspace(3e4, 8e4, n)
+        rho = p / (287.0 * T)
+        # Below cthomi (ice), warm (liquid), mixed and turbulent without
+        # crystals (liquid), mixed and quiescent (ice), then none.
+        det_qc = jnp.array([1e-5, 1e-5, 0.0, 2e-5, 0.0, 0.0])
+        det_qi = jnp.array([5e-6, 0.0, 2e-5, 0.0, 0.0, 0.0])
+        tke = jnp.array([0.3, 0.3, 5.0, 0.0, 0.3, 0.3])
+        col = dict(T=T, q=0.95 * _qsat(T, p, "water"), p=p, rho=rho,
+                   cf=jnp.full(n, 0.6), tke=tke,
+                   qc=det_qc, qc_m1=jnp.zeros(n), det_qc=det_qc,
+                   qi=det_qi, qi_m1=jnp.zeros(n), det_qi=det_qi)
+        records = _spy(monkeypatch, scheme_mod,
+                       "mixed_phase_deposition_and_corrections",
+                       lambda a, k, out: (a[12], a[16]))
+        _run(col)
+        got = self._records_by_level(records, rho)
+        assert sorted(got) == list(range(n))
+        is_ice = np.array([True, False, False, True, False, False])
+        expected = np.where(is_ice, np.asarray(det_qc + det_qi) / DT, 0.0)
+        np.testing.assert_allclose([float(got[k][1]) for k in range(n)],
+                                   expected, rtol=1e-6, atol=0.0)
+
+    def test_detrained_ice_decides_the_phase_of_the_correction(
+            self, monkeypatch):
+        """A cell where the routine's own lo2 rests on the detrained ice.
+
+        The step-start temperature is just below cthomi, so the section-4
+        lo2 is ice and the detrained ice goes to ice; the provisional
+        temperature is above cthomi, so the routine's lo2 falls to the
+        updraft test, whose threshold grows with the ice it is given. The
+        updraft sits between the thresholds with and without the detrained
+        ice: with it (ECHAM's input) the cell's ice supersaturation
+        deposits; without it the routine takes the liquid branch, which
+        leaves ice-supersaturated vapour alone.
+        """
+        n, k, D = 6, 2, 1e-6
+        T_m1 = jnp.full(n, 237.9)
+        dT = 1.0
+        p = jnp.linspace(2.5e4, 4e4, n)
+        rho = p / (287.0 * T_m1)
+        qs, dqs = thermodynamics.saturation_specific_humidity_and_derivative(
+            T_m1, p, phase="ice")
+        det = jnp.zeros(n).at[k].set(D)
+        col = dict(T=T_m1 + dT, T_m1=T_m1, q=1.15 * qs + dqs * dT,
+                   q_m1=1.15 * qs, p=p, rho=rho, cf=jnp.full(n, 0.9),
+                   tke=jnp.full(n, 0.3),
+                   qc=jnp.zeros(n), qc_m1=jnp.zeros(n), det_qc=jnp.zeros(n),
+                   qi=det, qi_m1=jnp.zeros(n), det_qi=det)
+        assert float(T_m1[k]) < float(_P.cthomi) < float(col["T"][k])
+        records = _spy(monkeypatch, scheme_mod,
+                       "mixed_phase_deposition_and_corrections",
+                       # (rho, pxite, updraft, threshold, deposition)
+                       lambda a, k_, out: (a[12], a[16], a[17], out[5],
+                                           out[1]))
+        out_with = _run(col)
+        _, pxite, verv, vmax_with, dep_with = self._records_by_level(
+            records, rho)[k]
+        np.testing.assert_allclose(float(pxite), D / DT, rtol=1e-6)
+
+        records.clear()
+        spied = scheme_mod.mixed_phase_deposition_and_corrections
+
+        def without_detrained_ice(*args, **kwargs):
+            args = list(args)
+            args[16] = jnp.zeros_like(args[16])
+            return spied(*args, **kwargs)
+
+        monkeypatch.setattr(scheme_mod,
+                            "mixed_phase_deposition_and_corrections",
+                            without_detrained_ice)
+        out_without = _run(col)
+        _, _, _, vmax_without, dep_without = self._records_by_level(
+            records, rho)[k]
+
+        # The fixture: the updraft lies between the two thresholds.
+        assert float(vmax_without) < 0.01 * float(verv) < float(vmax_with)
+        # With the detrained ice the supersaturation deposits (tens of
+        # micrograms per kg); without it almost nothing does.
+        assert float(dep_with) > 1e-5
+        assert float(dep_without) < 1e-2 * float(dep_with)
+        gained = DT * float(out_with[0].dqidt[k] - out_without[0].dqidt[k])
+        assert gained > 0.5 * float(dep_with)
+        assert_column_budgets_close("5.4 with detrained ice", col, out_with)
+
+
 # ---------------------------------------------------------------------------
 # ICE-5: number tendencies against the raw tracers
 # ---------------------------------------------------------------------------
