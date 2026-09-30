@@ -332,6 +332,14 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   truncation, the nearest (or T63) values are used with a warning. An explicit
   parameter object or a field override always wins
   (``jcm/physics/resolution_defaults.py``).
+- ``csecfrl`` and ``cthomi``, two copies — ECHAM has one ``csecfrl``
+  (``mo_echam_cloud_params.f90`` l.76, set per truncation) and one
+  ``cthomi`` (l.54), which its cover and its ``cloud`` both read. jcm holds
+  each twice: ``CloudParameters.csecfrl``/``t_ice`` for the cover and
+  ``MicrophysicsParameters.csecfrl``/``cthomi`` for the 1M (the 2M carries
+  its own ``cthomi``). The defaults agree. An override or a calibration of
+  one copy leaves the other scheme's value unchanged, and ``echam_physics()``
+  warns when the copies it builds differ.
 - `science` (deliberate, documented): the 2M column sweep uses **MG/PUMAS
   sediment→melt ordering** (ice sedimentation before melt), *not* ECHAM's
   melt→sediment. The melt acts on the post-sedimentation ice through the threaded
@@ -476,8 +484,10 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   ECHAM, the radiation forms them inside its own call from the step's
   condensate and droplet/crystal number (``mo_cloud_optics.f90::cloud_optics``;
   see {doc}`radiation`), from the laws in ``cloud_utils`` that the 2M scheme
-  also evaluates for its own ``preffl``/``preffi``. The 1M radiation and
-  microphysics see the same prescribed droplet number (above). The
+  also evaluates for its own ``preffl``/``preffi``. The 1M radiation and the
+  1M autoconversion read the prescribed droplet number times the Twomey
+  factor, and the 1M's Bigg and contact freezing the unscaled ``acdnc``
+  (above). The
   radiative **ice** radius on the 2M path follows the crystal number the
   scheme carries, which comes mainly from ``znidetr`` and the ``zrid``
   diagnosis of the ice-number sources above.

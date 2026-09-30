@@ -65,6 +65,14 @@ class CloudParameters:
     table, :func:`~jcm.physics.clouds.echam_cloud_defaults.echam_cloud_defaults`):
     build them with :meth:`default` ``(truncation=...)`` or :meth:`for_grid`.
 
+    ``csecfrl`` and ``t_ice`` are ECHAM's ``csecfrl`` and ``cthomi``
+    (``mo_echam_cloud_params.f90`` l.76, l.54), one value each, which
+    ECHAM's cover and cloud scheme share. jcm holds a second copy in the
+    cloud scheme's parameters (``MicrophysicsParameters.csecfrl``/``cthomi``;
+    the 2M's ``CloudParams2M.cthomi``); the defaults agree, and an override of
+    one copy leaves the other unchanged. ``echam_physics`` warns when the
+    copies it builds differ.
+
     Static fields (``pytree_node=False``):
 
     * ``nadd`` selects which extra level below the inversion is enhanced, a

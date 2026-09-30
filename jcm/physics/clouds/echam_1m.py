@@ -84,6 +84,13 @@ class MicrophysicsParameters:
     configure only the derivative (surrogate widths and cutoffs, see
     ``docs/source/design/surrogate_gradients.md``) or select a jcm option; the
     value of the scheme never depends on a width.
+
+    ``csecfrl`` and ``cthomi`` are ECHAM's single ``csecfrl`` and ``cthomi``
+    (``mo_echam_cloud_params.f90`` l.76, l.54), which ECHAM's cover and cloud
+    scheme share; jcm's cover holds its own copy
+    (``CloudParameters.csecfrl``/``t_ice``). The defaults agree, an override
+    of one copy leaves the other unchanged, and ``echam_physics`` warns when
+    the copies it builds differ.
     """
 
     # --- Warm-phase precipitation (mo_echam_cloud_params.f90) ---
@@ -1664,8 +1671,12 @@ class Echam1MMicrophysics(PhysicsTerm):
         clouds = clouds.copy(
             # ECHAM's section 8.4 write-back: a cell whose end-of-step
             # condensate is below ``ccwmin`` in both phases has no cloud
-            # (F:1280). Radiation, COSP, AeroCom and the JAM cloud terms read
-            # this cover.
+            # (F:1280). The terms after the cloud scheme (COSP, AeroCom, the
+            # JAM cloud terms) read this cover, and it is the saved
+            # ``clouds.cloud_fraction``. Radiation does not: it runs before
+            # the cloud scheme and reads the cover term's value, which the
+            # next step recomputes, as ECHAM's cover recomputes aclc before
+            # radiation (physc.f90:543, 566).
             cloud_fraction=micro_state.cloud_fraction,
             # The published fluxes are floored at zero. ECHAM's flux update
             # (F:1211-1212) leaves a round-off remainder, of either sign, where

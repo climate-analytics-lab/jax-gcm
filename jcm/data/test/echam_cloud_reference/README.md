@@ -228,7 +228,7 @@ It also records the -O0 vs -O2 difference, which is zero.
 | 10 | `two_inversions` | 1.3 tie-break | two identical inversions inside the window: the scan from the surface keeps the lowest (strict improvement only, mo_cover.f90:202). |
 | 11 | `rh_thresholds` | 2 closure | levels at RH = rhc - 1e-3, rhc + 1e-3, rhc + 0.1, exactly 1 (cover 1), and 1.2 (super-saturated, cover 1), water phase, no inversion. |
 | 12 | `ice_phase_cover` | 1 lo2 qsat | cold cells at RH_w 0.95: T = 250 K with ice 1e-5 (> csecfrl, ice qsat), T = 250 K ice-free (water qsat), T = 230 K ice-free (< cthomi, ice qsat), T = 250 K with ice exactly csecfrl (water qsat). |
-| 13 | `strat_humid` | no stratospheric cutoff in mo_cover | saturated levels above 10 hPa: ECHAM's cover has no pressure cutoff, so they get cover (jcm cuts at 1000 Pa). |
+| 13 | `strat_humid` | no stratospheric cutoff in mo_cover | saturated levels above 10 hPa: ECHAM's cover has no pressure cutoff, so they get cover; jcm's has none either. |
 | 14 | `real_tropical_deep` | realistic | tropical ocean, deep convection (ktype 1, max CAPE, LWP < 1 kg/m2); lat 4.66, lon 0.00, 2005-04-02, frl 0.02, sice 0.00, from B_fix2.nc (ERA5 init 2005-04-01, instantaneous) |
 | 15 | `real_sc_east_pacific` | realistic | subtropical marine inversion, eastern Pacific (180-290E); lat -34.51, lon 268.12, 2005-04-02, frl 0.00, sice 0.00, from B_fix2.nc (ERA5 init 2005-04-01, instantaneous) |
 | 16 | `real_sc_atlantic` | realistic | subtropical marine inversion, eastern Atlantic (330-20E); lat -12.12, lon 350.62, 2005-04-02, frl 0.00, sice 0.00, from B_fix2.nc (ERA5 init 2005-04-01, instantaneous) |

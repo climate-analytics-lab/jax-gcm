@@ -595,15 +595,18 @@ def prescribed_droplet_number(
     :func:`continental_columns` mask) times the MACv2-SP Twomey factor
     ``cdnc_factor``. ECHAM passes one ``acdnc`` to both its radiation
     (``mo_cloud_optics.f90``) and its 1M cloud scheme (``mo_cloud.f90``,
-    ``pacdnc``), so this is the one call both jcm consumers make:
-    ``Echam1MMicrophysics`` and the radiation's
-    ``cloud_optics.radiation_effective_radii``.
+    ``pacdnc``). The radiation's ``cloud_optics.radiation_effective_radii``
+    calls this with the MACv2-SP factor. ``Echam1MMicrophysics`` calls it
+    twice: with a factor of 1 for ECHAM's ``pacdnc``, which its Bigg and
+    contact freezing (section 6.2) read, and with the MACv2-SP factor for
+    the autoconversion (``autoconversion_twomey``, on by default) and the
+    published ``clouds.droplet_number``.
 
-    The Twomey factor reaches both. In MPI-ESM1.2 it scales the radiation's
-    droplet number only and leaves the cloud microphysics' unperturbed
-    (Mauritsen et al. 2019, JAMES, section 2.2); the extra path through the
-    1M autoconversion is jcm's existing aerosol-cloud formulation, recorded
-    in #932 and kept as it is for v3.0.
+    In MPI-ESM1.2 the Twomey factor scales the radiation's droplet number
+    only and leaves the cloud microphysics' unperturbed (Mauritsen et al.
+    2019, JAMES, section 2.2). Its reaching the 1M autoconversion is jcm's
+    aerosol-cloud formulation, the maintainer's decision recorded in #932;
+    the freezing keeps ECHAM's unscaled number.
 
     Args:
         pressure: full-level pressure [Pa], ``(nlev, *horiz)``.
