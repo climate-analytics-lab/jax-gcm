@@ -26,8 +26,8 @@ Every submission gets its own log, named for the tree it tests:
 `<worktree>/jcm_ci.<tag>.<UTC timestamp>.log`, where `<tag>` is HEAD's short
 sha, with `+dirty.<hash>` appended when the worktree differs from HEAD —
 tracked edits or untracked, non-ignored files, which pytest would collect too;
-the hash is of that difference, so two different dirty trees on one commit get
-different tags. The PBS job is named `jcm_ci_<tag>_<timestamp>` to match
+the hash is of that difference (the tracked diff and every untracked file's
+contents), so two different dirty trees on one commit get different tags. The PBS job is named `jcm_ci_<tag>_<timestamp>` to match
 (punctuation replaced by `_`, to keep the name to characters every PBS
 accepts). The script prints the exact log path and the watch command when it
 submits:

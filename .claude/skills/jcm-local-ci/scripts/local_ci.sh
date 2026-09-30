@@ -80,16 +80,18 @@ fi
 # run's green line passes for the current tree's (#788). The tag is HEAD's
 # short sha, plus "+dirty.<hash>" when the worktree differs from HEAD
 # (tracked edits or untracked, non-ignored files, which pytest would collect
-# too); the hash is of that difference, so two different dirty trees on one
-# commit get different tags. The timestamp keeps two runs of one tree apart.
+# too); the hash is of that difference — the tracked diff and every untracked
+# file's contents — so two different dirty trees on one commit get different
+# tags. The timestamp keeps two runs of one tree apart.
 # The job recomputes the tag when it starts, because it tests the worktree as
 # it is then, not as it was at submission.
 tree_tag() {
     local sha
     sha=$(git -C "$1" rev-parse --short HEAD 2>/dev/null) || { echo nogit; return; }
     if [ -n "$(git -C "$1" status --porcelain)" ]; then
-        sha="$sha+dirty.$( { git -C "$1" diff HEAD; git -C "$1" status --porcelain; } \
-            | sha1sum | cut -c1-7)"
+        sha="$sha+dirty.$( { git -C "$1" diff HEAD; git -C "$1" status --porcelain
+            git -C "$1" ls-files -z --others --exclude-standard \
+                | (cd "$1" && xargs -0 -r sha1sum); } | sha1sum | cut -c1-7)"
     fi
     echo "$sha"
 }
