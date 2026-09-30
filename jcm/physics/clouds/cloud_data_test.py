@@ -76,6 +76,35 @@ def test_radiation_cover_is_masked_where_there_is_no_condensate():
                                   np.asarray(cf))
 
 
+def test_radiation_condensate_derivative_is_one_sided_at_zero():
+    """d(in-cloud condensate)/dq is 1/cf at zero condensate in a cloudy cell.
+
+    Levels (cover 0.5): pure ice, pure liquid, both, neither. The clip's
+    derivative at zero is the one-sided 1 (a symmetric ``max`` gives 1/2),
+    so d(in-cloud liquid)/dqc is 1/cf in the pure-ice cell and d(in-cloud
+    ice)/dqi in the pure-liquid cell. The covered cell with no condensate
+    keeps the mask's reference derivative, zero.
+    """
+    import jax
+    from jcm.physics.radiation.mcica import in_cloud_condensate
+    qc0 = jnp.array([[0.0], [1e-4], [1e-4], [0.0]])
+    qi0 = jnp.array([[1e-5], [0.0], [1e-5], [0.0]])
+    cf = jnp.full((4, 1), 0.5)
+    clouds = CloudData.zeros((1,), 4).copy(cloud_fraction=cf)
+
+    def in_cloud(qc, qi, which):
+        cw, ci, cov = radiation_cloud_fields(_state_with(qc, qi), {"clouds": clouds})
+        return jnp.sum(in_cloud_condensate(cw if which == "liq" else ci, cov, eps=1e-3))
+
+    d_qc = np.asarray(jax.grad(lambda q: in_cloud(q, qi0, "liq"))(qc0))[:, 0]
+    d_qi = np.asarray(jax.grad(lambda q: in_cloud(qc0, q, "ice"))(qi0))[:, 0]
+    np.testing.assert_allclose(d_qc, [2.0, 2.0, 2.0, 0.0])
+    np.testing.assert_allclose(d_qi, [2.0, 2.0, 2.0, 0.0])
+    # Negative condensate is clipped: no derivative.
+    g = jax.grad(lambda q: in_cloud(q, qi0, "liq"))(jnp.full((4, 1), -1e-8))
+    assert np.all(np.asarray(g) == 0.0)
+
+
 def _echam_total_cover(cf):
     """``mo_radiation.f90`` l.436-442, ECHAM's maximum-random ``cld_cvr``."""
     import numpy as np
