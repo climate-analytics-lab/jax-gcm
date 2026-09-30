@@ -443,20 +443,31 @@ def test_sedimentation_ice_matches_echam(step, prec):
         assert_close("zxifluxn", "number_flux", r["sed_xifluxn"], g["sed_xifluxn"], prec)
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "jcm's sedimentation_ice clamps the flux a level ABSORBS from above at 0 when it updates "
-    "the falling-ice cover and the in-cloud sedimentation ledger; ECHAM passes the negative "
-    "zxiflx_from_level to gridbox_frac_falling_hydrometeor (F 2275-2277, cover 1.0 instead of "
-    "0.6 in sediment_then_detrain at 350 hPa) and keeps pmrateps negative (F 2264-2265, "
-    "-1.5e-4 instead of 0). Pre-existing, not part of #941; mass, number and fluxes agree."))
 @pytest.mark.parametrize("step", STEPS)
 def test_sedimentation_falling_ice_cover_matches_echam(step):
-    """The falling-ice cover zclcfi and the sedimentation ledger zmrateps (F 2264-2277)."""
+    """The falling-ice cover zclcfi and the sedimentation ledger zmrateps (F 2264-2277).
+
+    Includes the absorbing level of sediment_then_detrain at 350 hPa, where the
+    flux from the level is negative: ECHAM passes it signed to
+    gridbox_frac_falling_hydrometeor (cover 1.0) and keeps pmrateps negative.
+
+    One deviation remains, in jcm's gridbox_frac_falling_hydrometeor itself:
+    it reports no cover where the total falling flux is below 1e-9 kg/m2/s
+    (ECHAM: cqtmin = 1e-12), a guard against the 1/flux**2 reverse-mode
+    amplifier of the cover weighting (cloud_utils). The cover is compared
+    where the falling-ice flux leaving the level reaches that threshold, and
+    below it jcm must report exactly no cover (icnc_diagnosis_zrid level 28:
+    1.9e-10 / 5.4e-11 kg/m2/s, cover 1.0 in ECHAM).
+    """
     prec = "float64"
+    jcm_min_cover_flux = 1.0e-9     # cloud_utils.gridbox_frac_falling_hydrometeor
     with echam_constants(), precision(prec):
         g = echam_diag(step)
         r = run_jcm_sedimentation(g, ztmst(step), prec)
-        assert_close("zclcfi", "fraction", r["sed_clcfi"], g["sed_clcfi"], prec)
+        resolved = g["sed_xiflux"] > jcm_min_cover_flux
+        assert_close("zclcfi", "fraction", np.where(resolved, r["sed_clcfi"], 0.0),
+                     np.where(resolved, g["sed_clcfi"], 0.0), prec)
+        assert np.all(r["sed_clcfi"][~resolved] == 0.0)
         assert_close("zmrateps", "mass", r["sed_mrateps"], g["sed_mrateps"], prec)
 
 

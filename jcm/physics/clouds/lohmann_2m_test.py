@@ -2770,7 +2770,10 @@ class TestScavengingLedger2M:
         cirrus layer with NO cold-chain aggregation (cloud flag off below,
         few large crystals falling) must still report a positive in-cloud
         snow-formation ledger — the sedimenting ice is a scavenging
-        carrier in ECHAM-HAM's cloud_subm_2.
+        carrier in ECHAM-HAM's cloud_subm_2. The ledger is signed as in
+        ECHAM (mo_cloud_micro_2m.f90:2264-2265): the clear levels below,
+        which absorb part of the falling ice, carry negative entries, so the
+        sign is asserted over the source layer.
         """
         nlev = 16
         T = jnp.linspace(215.0, 260.0, nlev)   # all below freezing
@@ -2787,7 +2790,9 @@ class TestScavengingLedger2M:
         ledger = self._run(
             (T, q, p, qc, qi, qnc, qni, cf, rho, dz)
         )[self.LEDGER_INDEX]
-        assert float(jnp.sum(ledger.snow_formation)) > 0.0
+        assert float(jnp.min(ledger.snow_formation[3:6])) > 0.0
+        # Below the source, the absorbing levels are negative, not clipped.
+        assert float(jnp.min(ledger.snow_formation[6:])) < 0.0
 
     def test_term_publishes_ledger_to_cloud_data(self):
         """The composable term must write all seven ledger fields."""

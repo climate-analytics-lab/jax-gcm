@@ -266,7 +266,9 @@ def sedimentation_ice(
     ice_sedimentation_rate_in_cloud : array
         Diagnostic in-cloud sedimented ice amount (`pmrateps`) [kg/kg].
         This is `zxi_delta / max(cloud_fraction, clc_min)` where clouds exist, otherwise the grid-mean `zxi_delta`.
-        In ICON/ECHAM it is used for in-cloud scavenging diagnostics.
+        In ICON/ECHAM it is used for in-cloud scavenging diagnostics. It is
+        negative where the layer absorbs more falling ice than it sheds, as
+        in ECHAM (mo_cloud_micro_2m.f90:2264-2265).
 
     """
     # Fortran uses ztmst and zcons2 ( = ztmst * rgrav ) from common timestep constants.
@@ -336,25 +338,33 @@ def sedimentation_ice(
     zxiflx_from_level = zcons2 * zxi_delta * pressure_thickness
 
     # --- In-cloud sedimentation diagnostic (pmrateps in Fortran)
-    # Only meaningful as a positive rate; clamp to zero for the absorption case.
+    # Signed, as ECHAM has it (mo_cloud_micro_2m.f90:2264-2265): negative
+    # where the layer absorbs more of the falling ice than it sheds. It
+    # seeds the in-cloud snow-formation ledger (``zmrateps``) where the cold
+    # chain does not overwrite it; the JAM consumers of that ledger floor it
+    # at zero themselves.
     pmrateps_in_cloud = zxi_delta / jnp.maximum(cloud_fraction, params.clc_min)
     ice_sedimentation_rate_in_cloud = jnp.where(has_cloud, pmrateps_in_cloud, zxi_delta)
-    ice_sedimentation_rate_in_cloud = jnp.maximum(ice_sedimentation_rate_in_cloud, 0.0)
 
     # --- Update fraction covered by falling ice
-    # Only update if there is a positive flux contribution from this level.
+    # ECHAM passes the signed flux from this level (2275-2277): an
+    # absorbing level (negative contribution) weights the incoming cover up
+    # against the smaller total flux, and the result is clipped to [0, 1]
+    # inside the helper.
     falling_ice_fraction = gridbox_frac_falling_hydrometeor(
         precip_flux_from_above=ice_flux,
         precip_frac_from_above=falling_ice_fraction,
-        precip_flux_from_level=jnp.maximum(zxiflx_from_level, 0.0),  # only positive contribution
+        precip_flux_from_level=zxiflx_from_level,
         precip_frac_from_level=cloud_fraction,
         params=params,
     )
 
     # --- Update mass flux
-    # The outgoing flux = incoming + sedimented_out - absorbed_from_above.
-    # Cannot go below zero: if zxiflx_from_level < 0 (net absorption), limit removal
-    # to what is available in the incoming flux.
+    # The outgoing flux = incoming + sedimented out of this level (negative
+    # where the level absorbs). ECHAM adds without a floor (2279). In exact
+    # arithmetic it cannot go negative: the relaxation keeps a fraction of
+    # at least 1 − (1 − e^{-a})/a of the incoming flux falling through, so
+    # the floor is a guard against round-off only.
     ice_flux = jnp.maximum(ice_flux + zxiflx_from_level, 0.0)
 
     # --- Update number flux
