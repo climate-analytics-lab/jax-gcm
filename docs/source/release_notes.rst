@@ -1447,11 +1447,14 @@ Default cloud overlap is maximum-random, sampled by ECHAM's rule
   ``CLOUD_OVERLAP_MAXIMUM_RANDOM``), ECHAM6.3's default (``i_overlap = 1``,
   ``mo_radiation_parameters.f90`` l.71), instead of exponential overlap with
   a 2 km decorrelation length, which ECHAM's sampler does not offer. The
-  McICA sampler draws it as ECHAM's ``mo_cld_sampling.f90::sample_cld_state``
-  does (l.66-83): from the lowest level up, a sub-column keeps its rank only
-  where it is cloudy in the level below, so adjacent cloudy layers overlap
-  maximally and layers separated by clear air overlap randomly, including
-  across a layer with cover but no condensate (entry above). Its expected
+  McICA sampler draws it with the rank rule of ECHAM's
+  ``mo_cld_sampling.f90::sample_cld_state`` (l.66-83): a sub-column keeps its
+  rank only where it is cloudy in the adjacent level, so adjacent cloudy
+  layers overlap maximally and layers separated by clear air overlap
+  randomly, including across a layer with cover but no condensate (entry
+  above). ECHAM runs the chain top-down on its surface-first column and jcm
+  bottom-up on its top-first one; the two give every sub-column cloud
+  pattern the same probability. Its expected
   total cover is ECHAM's ``cld_cvr`` (``mo_radiation.f90`` l.436-442), which
   is what the emulator's ``radiation.total_cloud_cover`` reports; RRTMGP
   reports the cover of its drawn sub-columns.

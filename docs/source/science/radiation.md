@@ -41,12 +41,16 @@ adjacent cloudy layers, random across a clear layer), and
 generalised-exponential with a decorrelation length
 (``RadiationParameters.cloud_overlap``, ``cloud_decorrelation_km``). The
 default is **maximum-random**, ECHAM6.3's default (``i_overlap = 1``,
-``mo_radiation_parameters.f90`` l.71), sampled as ECHAM's
-``mo_cld_sampling.f90::sample_cld_state`` samples it (l.66-83): from the
-lowest level up, a sub-column keeps its rank where it is cloudy in the level
-below and otherwise draws a new rank in that level's clear part, so its
-expected total cover is ECHAM's ``cld_cvr``, the adjacent-layer
-Geleyn-Hollingsworth product (``mo_radiation.f90`` l.436-442). The rank
+``mo_radiation_parameters.f90`` l.71), with the rank rule of ECHAM's
+``mo_cld_sampling.f90::sample_cld_state`` (l.66-83). ECHAM runs that chain
+from the top down on the surface-first column its ``psrad_interface`` hands
+the radiation (``mo_psrad_interface.f90`` l.221-227): a sub-column keeps the
+rank of the level above where it is cloudy there and otherwise draws a new
+rank in that level's clear part. jcm runs the same rule from the bottom up on
+its top-first column; the two directions give every sub-column cloud pattern
+the same probability, so the expected total cover is ECHAM's ``cld_cvr``,
+the adjacent-layer Geleyn-Hollingsworth product (``mo_radiation.f90``
+l.436-442). The rank
 comparisons are piecewise constant in the cover, as the ``r < cf`` test of
 every rule is, so the sampled masks carry no cover gradient and need no
 surrogate. ECHAM's sampler also offers random overlap (and maximum, which jcm

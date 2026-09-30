@@ -137,7 +137,7 @@ def test_maximum_random_is_echams_sampler_on_a_bank_with_an_interior_minimum():
     ``mo_cld_sampling.f90`` l.66-83: in a bank 0.5 / 0.2 / 0.5 a sub-column
     clear in the thin middle layer redraws its rank in the clear part, so the
     two outer layers overlap partly at random. The total cover is ECHAM's
-    ``cld_cvr``, 1 − 0.5·0.8/0.8·0.5/0.8 = 0.6875, not the 0.5 of one rank
+    ``cld_cvr``, 1 − 0.5·(0.5/0.5)·(0.5/0.8) = 0.6875, not the 0.5 of one rank
     shared through the bank.
     """
     cf = [0.5, 0.2, 0.5]
@@ -565,3 +565,47 @@ class TestMcicaGradients:
                 f"d/d{name} is no longer identically zero: {gradient}. The "
                 f"sampler has become differentiable; that is a change to "
                 f"what McICA samples, not a test to relax.")
+
+
+def _echam_sampler_patterns(cf_top_first, n, seed):
+    """Pattern counts of ECHAM's ``sample_cld_state`` maximum-random loop, literally.
+
+    ``mo_cld_sampling.f90`` l.66-83 on the surface-first column
+    ``psrad_interface`` builds (``mo_psrad_interface.f90`` l.221-227): ranks
+    uniform, then ``DO jk = klev-1, 1, -1``, keep ``rank(jk+1)`` (the level
+    above) where ``rank(jk+1) > 1 - cf(jk+1)``, else ``rank(jk)·(1 - cf(jk+1))``;
+    a level is cloudy where ``rank > 1 - cf``. Returned top-first.
+    """
+    cf = np.asarray(cf_top_first, np.float64)[::-1]      # surface-first, jk = 1 at the surface
+    rank = np.random.default_rng(seed).uniform(size=(n, cf.size))
+    for jk in range(cf.size - 2, -1, -1):
+        above = rank[:, jk + 1]
+        rank[:, jk] = np.where(above > 1.0 - cf[jk + 1], above,
+                               rank[:, jk] * (1.0 - cf[jk + 1]))
+    cloudy = (rank > 1.0 - cf)[:, ::-1]
+    return np.unique(cloudy, axis=0, return_counts=True)
+
+
+@pytest.mark.parametrize("cf", [
+    [0.3, 0.7, 0.0, 0.5, 0.2],
+    [0.5, 0.2, 0.5, 0.9],
+    [0.8, 0.1, 0.6, 0.3, 0.6],
+])
+def test_maximum_random_patterns_match_echams_top_down_loop(cf):
+    """The bottom-up chain and ECHAM's top-down loop give every pattern one probability.
+
+    Not only the total cover: every sub-column cloud pattern occurs as often
+    under jcm's sampler as under a literal transcription of ECHAM's loop run
+    in ECHAM's surface-first frame.
+    """
+    n = 200_000
+    masks = np.asarray(generate_subcolumns(
+        jnp.asarray(cf, jnp.float32), _layer_thickness(nlev=len(cf)),
+        n_subcols=n, overlap="maximum_random", key=jax.random.PRNGKey(11)))
+    ours = {tuple(p): c / n for p, c in zip(*np.unique(masks, axis=0, return_counts=True))}
+    patterns, counts = _echam_sampler_patterns(cf, n, seed=12)
+    echam = {tuple(p): c / n for p, c in zip(patterns, counts)}
+    for p in set(ours) | set(echam):
+        a, b = ours.get(p, 0.0), echam.get(p, 0.0)
+        sigma = np.sqrt(max(a * (1 - a), b * (1 - b), 1.0 / n) * 2.0 / n)
+        assert abs(a - b) < 5.0 * sigma, (p, a, b)

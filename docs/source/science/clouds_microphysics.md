@@ -300,9 +300,12 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   the step-start grid-mean condensate it radiates is positive
   (``mo_radiation.f90`` l.428-434, ``xq = MAX(xlm1, 0)``,
   ``MERGE(cld_frc, 0, xq_liq > 0 .OR. xq_ice > 0)``), and hands the same
-  masked cover to COSP. jcm does the same in
-  ``cloud_data.radiation_cloud_fields``, which every radiation scheme reads,
-  and in the COSP term (masked by the condensate COSP is given). A cell the
+  masked cover to COSP. jcm's radiation does the same in
+  ``cloud_data.radiation_cloud_fields``, which every radiation scheme reads.
+  jcm's COSP term applies the same mask to a different state: the
+  post-microphysics cover with the post-physics condensate and temperature it
+  simulates, where ECHAM's COSP reads the radiation's masked step-start
+  fields (``mo_psrad_interface.f90`` l.414; ``physc.f90`` l.1348-1356). A cell the
   mask clears has no condensate and so no optical depth; under maximum-random
   overlap it separates the cloud banks above and below it, as in ECHAM's
   sampler. The mask keeps its reference derivative (`differentiability`): the
@@ -313,9 +316,10 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   are below ``ccwmin``), and are not masked again.
 - Cover, time level — the cover reads the state the physics receives, which
   contains the step's dynamics; ECHAM's reads the ``t − Δt`` fields
-  (``physc.f90`` l.543-548), one dynamics step earlier. ECHAM's state is the
-  carried post-physics state the cloud schemes take as their anchor; the cover
-  does not read it.
+  (``physc.f90`` l.543-548), one dynamics step earlier. The carry holds that
+  state's temperature, humidity and condensate (the cloud schemes' anchor)
+  but not its pressures or geopotential; the cover reads the received state
+  by the maintainer's decision.
 - Resolution-dependent defaults, `science` — ECHAM sets ``crs``, ``crt``,
   ``nex``, ``nadd``, ``csatsc``, ``cinv``, ``cvtfall``, ``csecfrl`` and
   ``clwprat`` per truncation (``mo_echam_cloud_params.f90::sucloud``) and

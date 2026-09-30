@@ -532,7 +532,7 @@ class TestCoverSurrogate:
         assert gap[far].max() < 1e-3
 
     def test_slope_is_bounded(self):
-        """Surrogate slope peaks near ``1/(2 sqrt(w ln 2))``; finite everywhere."""
+        """Surrogate slope below ``1/(2 sqrt(w ln 2))`` (peak 2.26 at w = 0.02); finite."""
         x = jnp.linspace(-1.0, 5.0, 6001)
         slope = np.asarray(jax.vmap(jax.grad(
             lambda v: cover_from_b0(v, self.WIDTH)))(x))

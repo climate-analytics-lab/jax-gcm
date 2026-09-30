@@ -390,7 +390,7 @@ Cloud Cover
      - Homogeneous-freezing temperature ``cthomi`` (K)
      - 238.15
    * - ``nadd`` (static)
-     - Extra levels below the inversion that are enhanced
+     - Offset of the second enhanced level below the inversion level (ECHAM enhances levels ``jb`` and ``jb + nadd`` only)
      - 0
    * - ``smooth_b0``, ``smooth_inv_thr`` (static)
      - Widths of the derivative surrogates (0 selects the reference derivative)
