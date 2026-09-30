@@ -149,8 +149,10 @@ class PhysicsTerm(nnx.Module):
     # declarations at construction and carries the slot
     # (``physics_interface.POST_PHYSICS_STATE_KEY``) only when the union is
     # non-empty, so compositions that do not ask pay nothing. The term must
-    # read the slot softly: it is invalid on a first step and absent on hosts
-    # without a dynamical core.
+    # read the slot through its ``valid`` flag: it is invalid on a first step,
+    # after a restore from a checkpoint without it, and always on hosts
+    # without a dynamical core (the single-column model carries it with
+    # ``valid = 0``); it is absent only where no composed term declares it.
     requires_post_physics_fields: ClassVar[tuple[str, ...]] = ()
 
     # Declarative carry slots. Each entry maps a public ``physics_state``

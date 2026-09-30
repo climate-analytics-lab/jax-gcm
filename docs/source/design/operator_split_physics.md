@@ -114,14 +114,21 @@ composed physics asks (below), so SPEEDY, Held-Suarez and the idealised
 stacks do no extra work. Under `jit` the Dinosaur add is the same
 computation `step` performs on the same inputs.
 
-The consumer is a tendency-driven cloud scheme. The scheme leaves the cloudy
-part of a cell saturated at the post-physics state; the next step's
-`to_physics_state` minus the carried post-physics state is then the dynamics
-of the step alone, which is what ECHAM's `ptte`/`pqte` hold at `cloud`
+The consumer is a tendency-driven cloud scheme. The carried post-physics
+state is the state the dynamics advanced from, so the next step's
+`to_physics_state` minus it is the dynamics of the step alone, which is what
+ECHAM's `ptte`/`pqte` hold at `cloud`
 (see [coupling within physics](#coupling-within-physics)). Reconstructing the
 same state as `x_{n-1} + dt·P` would count the projected-out part of the
 physics tendency as dynamics: at T63L47 that residual is 2.0–2.1 g/kg/day rms
-in humidity, against 0.9–1.1 g/kg/day of true dynamics.
+in humidity, against 0.9–1.1 g/kg/day of true dynamics. The same projection
+means that on Dinosaur the anchor is not exactly the state the cloud scheme
+left saturated: the part of the scheme's own latent heating and drying that
+the truncation discards (about 22 % of each physics increment of T and q,
+#954) is not treated as an increment, so the anchor's cloudy part carries
+that residual super- or subsaturation, which only the section-5.4 whole-box
+check reaches (in overcast boxes). It is exact for a backend that adds on
+the physics grid and for Dinosaur's semi-Lagrangian gridpoint tracers.
 
 ### `compute_physics_step_gridpoint` (`jcm/physics_interface.py`)
 

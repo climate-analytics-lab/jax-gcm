@@ -17,8 +17,9 @@ anchor, and what the increments move it away by condenses.
 jcm splits the physics sequentially from the dynamics: physics runs on the
 post-dynamics state ``x_n``, the dycore adds the projected physics tendency
 (giving the post-physics state ``x_ap``) and then runs the dynamics to
-``x_{n+1}``. The cloud scheme left its cloudy part saturated at the previous
-step's ``x_ap``, so the faithful mapping of ECHAM's inputs is
+``x_{n+1}``. The anchor is the state the dynamics advanced from, so that the
+next received state minus the anchor is the dynamics of the last step alone
+(the maintainer-approved mapping, option D1b of the wiring study):
 
 * anchor := the previous step's ``x_ap``, carried by the model
   (``_post_physics_state``, written from
@@ -33,6 +34,19 @@ step's ``x_ap``, so the faithful mapping of ECHAM's inputs is
   before it runs), per step;
 * provisional state := anchor + increment + detrainment, which is
   ``x_n + dt·P_upstream``.
+
+Where the dycore adds the physics tendency on the physics grid, and for the
+tracers a Dinosaur core carries semi-Lagrangian on the grid, the anchor is the
+state the cloud scheme left its cloudy part saturated at. For Dinosaur's modal
+temperature and humidity it is not: ``x_ap`` is the gridpoint image of
+``x + dt·T(P)``, and the spectral projection ``T`` discards part of every
+physics increment of T and q (about 22 %, #954), the cloud scheme's own latent
+heating and drying included. That discarded part is deliberately not an
+increment, so the scheme does not re-condense what the truncation removed;
+the anchor's cloudy part then carries the projection's residual super- or
+subsaturation, which section 5's ``zqcdif`` does not see (the section-5.4
+whole-box check reaches it in overcast boxes; elsewhere it enters the
+grid-mean humidity and the next cover).
 
 Where no carried anchor is valid — the first step of a run, a checkpoint
 written before the slot existed, a host with no dynamical core (single

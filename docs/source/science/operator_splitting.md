@@ -51,10 +51,12 @@ forcing to the dynamics despite multiple dynamics sub-evaluations per physics
   ``_tendency_run`` channels, which is why the shipped orderings are
   load-bearing rather than arbitrary. The cloud scheme's anchor is the carried
   post-physics state rather than ECHAM's ``x(t−Δt)`` because jcm's split is
-  sequential: the cloud scheme left its cloudy part saturated at the
-  post-physics state, and differencing against it counts neither the
-  dynamics twice nor the part of the physics tendency the dycore's projection
-  dropped.
+  sequential: the carried state is the one the dynamics advanced from, so
+  differencing against it counts the dynamics once and does not count as an
+  increment the part of the physics tendency the dycore's projection dropped
+  (on Dinosaur about 22 % of each physics increment of T and q, #954). For
+  those modal fields the anchor is therefore not exactly the state the cloud
+  scheme left saturated.
 - `compute` / `differentiability` — one physics call per ``dt`` (rather than one
   per RK substage) keeps the autodiff tape small under ``jax.checkpoint``, and
   the ``physics_state`` carry is threaded as an explicit JAX pytree rather than

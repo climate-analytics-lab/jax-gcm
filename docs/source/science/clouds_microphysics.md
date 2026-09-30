@@ -314,9 +314,12 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   in McICA's sampling. The AeroCom diagnostics read the post-microphysics
   cover, which is ECHAM's written-back ``aclc`` (zero where both condensates
   are below ``ccwmin``), and are not masked again.
-- Cover, time level — the cover reads the state the physics receives, which
-  contains the step's dynamics; ECHAM's reads the ``t − Δt`` fields
-  (``physc.f90`` l.543-548), one dynamics step earlier. The carry holds that
+- Cover and radiation condensate, time level — the cover reads the state the
+  physics receives, which contains the step's dynamics, and so does the
+  radiation's condensate (``cloud_data.radiation_cloud_fields``); ECHAM's
+  cover reads the ``t − Δt`` fields (``physc.f90`` l.543-548) and its
+  radiation the ``xlm1``/``xim1`` of that time level (l.566-573), one
+  dynamics step earlier. The cloud schemes map ``xlm1`` to their anchor. The carry holds that
   state's temperature, humidity and condensate (the cloud schemes' anchor)
   but not its pressures or geopotential; the cover reads the received state
   by the maintainer's decision.

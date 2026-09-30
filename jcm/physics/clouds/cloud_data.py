@@ -356,9 +356,12 @@ def radiation_cloud_fields(state, diagnostics):
     """Return the cloud fields radiation sees, as ECHAM hands them over.
 
     ECHAM ``physc`` calls ``cover`` before radiation and passes radiation
-    the diagnosed cover with the step-start grid-mean condensate
-    ``xlm1``/``xim1`` (``physc.f90`` l.566-573); the cloud microphysics runs
-    later. Inside ``radiation`` (``mo_radiation.f90`` l.428-434) the
+    the diagnosed cover with the grid-mean condensate ``xlm1``/``xim1`` of
+    the previous time level (``physc.f90`` l.566-573); the cloud
+    microphysics runs later. jcm passes the ``qc``/``qi`` of the state the
+    physics receives, which contains the last step's dynamics: the time level
+    of the cover's inputs, one dynamics step after ECHAM's (the cloud schemes'
+    anchor, the carried post-physics state, is where jcm maps ``xlm1``). Inside ``radiation`` (``mo_radiation.f90`` l.428-434) the
     condensate is clipped at zero, ``xq = MAX(qm, 0)``, and the cover is
     kept only where there is condensate,
     ``xc_frc = MERGE(cld_frc, 0, xq_liq > 0 .OR. xq_ice > 0)``. That masked
