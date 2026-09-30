@@ -25,6 +25,10 @@ from flax import struct
 
 from jcm import constants as c
 
+#: ECHAM's T63 snow/ice fall-speed prefactor (``mo_echam_cloud_params.f90``
+#: l.190, 211), the value a build without a grid gets.
+_T63_CVTFALL = 2.5
+
 
 @struct.dataclass
 class CloudParams2M:
@@ -154,6 +158,11 @@ class CloudParams2M:
     nic_cirrus: int = struct.field(pytree_node=False, default=1)
     ldyn_cdnc_min: bool = struct.field(pytree_node=False, default=False)
 
+    # The truncation whose resolution defaults the parameters were built from
+    # (metadata for the host's grid check; not read by the scheme). ``None`` is
+    # a grid without a spectral truncation.
+    defaults_truncation: int | None = struct.field(pytree_node=False, default=63)
+
     @classmethod
     def default(
         cls,
@@ -171,7 +180,7 @@ class CloudParams2M:
         ceffmin: float = 10.0,
         ccwmin: float = 1e-7,
         cqtmin: float = 1e-12,
-        cvtfall: float = 2.5,
+        cvtfall: float | None = None,
         epsec: float = 1e-12,
         # cri: assumed volume-mean radius of ice crystals produced when
         # melting; only enters through the derived crystal mass ``mi``.
@@ -209,8 +218,27 @@ class CloudParams2M:
         n_aer_coarse: float = 0.5,
         nic_cirrus: int = 1,
         ldyn_cdnc_min: bool = False,
+        truncation: int | None = 63,
     ) -> 'CloudParams2M':
-        """Return default cloud parameters for the 2-moment scheme."""
+        """Return default cloud parameters for the 2-moment scheme.
+
+        ``cvtfall`` is the one parameter here that ECHAM sets per spectral
+        truncation: the 2M reads ``sucloud``'s value
+        (``mo_cloud_micro_2m.f90`` l.97, 536; ``mo_echam_cloud_params.f90``
+        l.198-237), the same ``cvtfall`` the 1M reads. ``truncation`` selects
+        it like the 1M's (63, the default and what a build without a grid gets,
+        is ECHAM's T63 value 2.5; other truncations interpolate between
+        ECHAM's rows, ``None`` is a non-spectral grid, which takes the T63 row
+        with a warning). An explicit ``cvtfall`` wins. The remaining
+        defaults are not resolution dependent in ECHAM's 2M.
+        """
+        if cvtfall is None:
+            if truncation == 63:
+                cvtfall = _T63_CVTFALL
+            else:
+                from jcm.physics.clouds.echam_cloud_defaults import (
+                    echam_cloud_defaults)
+                cvtfall = echam_cloud_defaults(truncation)["cvtfall"]
         # Derived helpers — Python/numpy math so default() stays safe to
         # call under any tracing context.
         xsec = 1.0 - epsec
@@ -286,4 +314,5 @@ class CloudParams2M:
             n_aer_coarse=jnp.array(n_aer_coarse),
             nic_cirrus=int(nic_cirrus),
             ldyn_cdnc_min=bool(ldyn_cdnc_min),
+            defaults_truncation=truncation,
         )

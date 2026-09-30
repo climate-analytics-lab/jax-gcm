@@ -1492,8 +1492,8 @@ ECHAM cloud parameters default to their truncation's values
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
 - The cloud cover's ``crs``, ``crt``, ``nex``, ``csatsc``, ``cinv``,
-  ``csecfrl`` and ``nadd`` and the 1M's ``cvtfall``, ``csecfrl`` and
-  ``clwprat`` take ECHAM6.3's per-truncation values
+  ``csecfrl`` and ``nadd``, the 1M's ``cvtfall``, ``csecfrl`` and
+  ``clwprat`` and the 2M's ``cvtfall`` take ECHAM6.3's per-truncation values
   (``mo_echam_cloud_params.f90::sucloud`` l.198-237) for the run's grid,
   chosen when the physics is built: by ``echam_physics(coords=...)``, and by
   both Hydra doors, which give the physics the grid (the factory presets

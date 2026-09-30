@@ -360,10 +360,10 @@ re-exported is gone; ECHAM convection's is ``thermodynamics.es_ua``.
 ECHAM cloud parameters are built for the grid
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The cloud cover's ``CloudParameters`` and the 1M's ``MicrophysicsParameters``
-default to ECHAM6.3's values for the run's spectral truncation
-(``mo_echam_cloud_params.f90::sucloud``), interpolated between ECHAM's
-truncations, instead of T63's at every grid. Pass the grid when you build the
+The cloud cover's ``CloudParameters``, the 1M's ``MicrophysicsParameters`` and
+the 2M's ``CloudParams2M`` (its ``cvtfall`` only) default to ECHAM6.3's values
+for the run's spectral truncation (``mo_echam_cloud_params.f90::sucloud``),
+interpolated between ECHAM's truncations, instead of T63's at every grid. Pass the grid when you build the
 physics; without it you get the T63 defaults, and a term running on another
 truncation warns once, naming both grids. The Hydra runner passes the grid
 itself.
@@ -371,6 +371,7 @@ itself.
 .. code-block:: python
 
    from jcm.physics.clouds.echam_1m import MicrophysicsParameters
+   from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
    from jcm.physics.clouds.sundqvist import CloudParameters
    from jcm.physics.echam.echam_terms import echam_physics
 
@@ -378,6 +379,7 @@ itself.
    CloudParameters.for_grid(coords, crs=0.99)        # grid defaults, crs overridden
    CloudParameters.default(truncation=127)           # keyword-only
    MicrophysicsParameters.default(truncation=127)    # cvtfall, csecfrl, clwprat
+   CloudParams2M.default(truncation=127)             # cvtfall (the 2M's own)
 
 An explicit ``Parameters`` object is used as given, so code that built its own
 keeps its values; a field override (``echam_physics(clouds={"crs": 0.99})``,

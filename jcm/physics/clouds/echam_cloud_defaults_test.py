@@ -246,3 +246,106 @@ class TestGridCheck:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             term.cache_coords(grid)
+
+
+# ---------------------------------------------------------------------------
+# The 2M's cvtfall: ECHAM's 2M reads sucloud's per-truncation value
+# ---------------------------------------------------------------------------
+
+def _two_moment_term(physics):
+    from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+    return next(t for t in physics.terms
+                if isinstance(t, Lohmann2MMicrophysics))
+
+
+class TestTwoMomentCvtfall:
+    """``mo_cloud_micro_2m.f90`` l.97, 536 read ``cvtfall`` from ``sucloud``."""
+
+    @pytest.mark.parametrize("truncation", sorted(FORTRAN))
+    def test_echam_truncations_return_the_fortran_value(self, truncation):
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        p = CloudParams2M.default(truncation=truncation)
+        assert float(p.cvtfall) == pytest.approx(FORTRAN[truncation][6],
+                                                 rel=1e-6)
+        assert p.defaults_truncation == truncation
+
+    def test_t106_is_interpolated_like_the_1m(self):
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        assert float(CloudParams2M.default(truncation=106).cvtfall) == \
+            pytest.approx(2.8359375, rel=1e-6)
+
+    def test_t63_is_bit_identical_to_the_value_before_the_table(self):
+        """Every leaf at T63 is what ``default()`` has always returned."""
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        explicit = CloudParams2M.default(cvtfall=2.5)
+        for built in (CloudParams2M.default(),
+                      CloudParams2M.default(truncation=63)):
+            for a, b in zip(jax.tree_util.tree_leaves(built),
+                            jax.tree_util.tree_leaves(explicit)):
+                assert np.array_equal(np.asarray(a), np.asarray(b))
+            assert np.asarray(built.cvtfall).dtype == \
+                np.asarray(explicit.cvtfall).dtype
+
+    def test_non_spectral_grid_takes_the_t63_row_with_a_warning(self):
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        with pytest.warns(UserWarning, match="no spectral truncation"):
+            p = CloudParams2M.default(truncation=None)
+        assert float(p.cvtfall) == 2.5 and p.defaults_truncation is None
+
+    def test_explicit_cvtfall_wins(self):
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        assert float(CloudParams2M.default(truncation=127,
+                                           cvtfall=2.0).cvtfall) == 2.0
+
+    def test_factory_builds_the_grid_default(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        term = _two_moment_term(echam_physics(cloud_scheme="2m",
+                                              coords=_grid(127)))
+        p = term.params.get_value()
+        assert float(p.cvtfall) == pytest.approx(3.0)
+        assert p.defaults_truncation == 127
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            term.cache_coords(_grid(127))
+
+    def test_factory_without_a_grid_is_t63_and_warns_on_another_grid(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        term = _two_moment_term(echam_physics(cloud_scheme="2m"))
+        assert float(term.params.get_value().cvtfall) == 2.5
+        with pytest.warns(UserWarning, match=r"T63.*T127"):
+            term.cache_coords(_grid(127))
+
+    def test_field_override_wins_and_keeps_the_grid_check(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+        term = _two_moment_term(echam_physics(
+            cloud_scheme="2m", coords=_grid(127),
+            microphysics_2m={"ccraut": 9.0}))
+        p = term.params.get_value()
+        assert float(p.ccraut) == pytest.approx(9.0)
+        assert float(p.cvtfall) == pytest.approx(3.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            term.cache_coords(_grid(127))
+
+    def test_explicit_object_is_used_as_given_and_not_checked(self):
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+        from jcm.physics.echam.echam_terms import echam_physics
+        mine = CloudParams2M.default(truncation=63, ccraut=9.0)
+        term = _two_moment_term(echam_physics(
+            cloud_scheme="2m", coords=_grid(127), microphysics_2m=mine))
+        assert float(term.params.get_value().cvtfall) == 2.5
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            term.cache_coords(_grid(127))
+
+    def test_runner_term_list_door(self):
+        from jcm.runners import _build_term
+        entry = {"_target_": "jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics",
+                 "params": {"ccraut": 9.0}}
+        term = _build_term("lohmann_2m_microphysics", entry, 127)
+        p = term.params.get_value()
+        assert float(p.ccraut) == pytest.approx(9.0)
+        assert float(p.cvtfall) == pytest.approx(3.0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            term.cache_coords(_grid(127))

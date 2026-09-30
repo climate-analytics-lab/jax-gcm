@@ -332,7 +332,8 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   by the maintainer's decision.
 - Resolution-dependent defaults, `science` — ECHAM sets ``crs``, ``crt``,
   ``nex``, ``nadd``, ``csatsc``, ``cinv``, ``cvtfall``, ``csecfrl`` and
-  ``clwprat`` per truncation (``mo_echam_cloud_params.f90::sucloud``) and
+  ``clwprat`` per truncation (``mo_echam_cloud_params.f90::sucloud``; the 2M
+  reads the same ``cvtfall``, ``mo_cloud_micro_2m.f90`` l.97, 536) and
   defines them for T31, T63, T127 and T255 only; it has no T106
   configuration. jcm builds these defaults for the run's truncation at physics
   construction (``echam_physics(coords=...)``; the Hydra runner passes the

@@ -540,7 +540,9 @@ def echam_physics(
     clouds_p = clouds or default_parameters(CloudParameters, truncation)
     microphysics_p = microphysics or default_parameters(
         MicrophysicsParameters, truncation)
-    microphysics_2m_p = microphysics_2m or CloudParams2M.default()
+    microphysics_2m_are_defaults = microphysics_2m is None
+    microphysics_2m_p = microphysics_2m or default_parameters(
+        CloudParams2M, truncation)
     if isinstance(radiation_scheme, PhysicsTerm):
         # A radiation term instance carries its own parameters; the factory
         # reads them back (below) rather than composing a second, possibly
@@ -635,7 +637,10 @@ def echam_physics(
             **defaults_flag_kwargs(
                 Echam1MMicrophysics, microphysics_are_defaults))
     elif cloud_scheme == "2m":
-        micro_term = Lohmann2MMicrophysics(params=microphysics_2m_p)
+        micro_term = Lohmann2MMicrophysics(
+            params=microphysics_2m_p,
+            **defaults_flag_kwargs(
+                Lohmann2MMicrophysics, microphysics_2m_are_defaults))
         # SPA activation knobs live on AerosolParameters — wire them into
         # the 2M term so it stays self-contained at compose time. Pass the
         # values through untouched (no float() cast) so the gradient path

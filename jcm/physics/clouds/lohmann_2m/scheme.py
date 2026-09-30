@@ -1245,8 +1245,16 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     # the cover term; this term fills the precip / 2M / process-rate fields.
     output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS
 
-    def __init__(self, params: 'CloudParams2M | None' = None):
-        """Hold the scheme-native :class:`CloudParams2M`."""
+    def __init__(self, params: 'CloudParams2M | None' = None, *,
+                 params_are_defaults: bool = False):
+        """Hold the scheme-native :class:`CloudParams2M`.
+
+        ``params_are_defaults`` marks parameters that are the resolution
+        defaults of a grid rather than the caller's own choice (the factory
+        and the Hydra runner set it), so ``cache_coords`` can check them
+        against the grid; parameters left ``None`` are defaults too.
+        """
+        self.params_are_defaults = params is None or params_are_defaults
         if params is None:
             params = CloudParams2M.default()
         self.params = nnx.Param(params)
@@ -1257,6 +1265,17 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         self._spa_prefactor = nnx.Param(jnp.array(1.0))
         self._spa_exponent = nnx.Param(jnp.array(0.5))
         self._spa_cap_smoothing = nnx.Param(jnp.array(0.0))
+
+    def cache_coords(self, coords) -> None:
+        """Warn if default parameters were built for another grid.
+
+        The parameters were fixed at construction and are not re-resolved;
+        parameters the caller supplied are not checked.
+        """
+        if self.params_are_defaults:
+            from jcm.physics.resolution_defaults import check_defaults_grid
+            check_defaults_grid(type(self).__name__,
+                                self.params.get_value().defaults_truncation, coords)
 
     def configure_spa(self, prefactor: float, exponent: float,
                       cap_smoothing: float = 0.0) -> None:

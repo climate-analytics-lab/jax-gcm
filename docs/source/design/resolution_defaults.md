@@ -86,12 +86,24 @@ computed from the model's own levels in `cache_coords`.
    `check_defaults_grid` from its `cache_coords` when it is set.
 
 The factory and the runner then need no change. Today the cloud cover
-(`CloudParameters`) and the 1M cloud scheme (`MicrophysicsParameters`: `cvtfall`,
-`csecfrl`, `clwprat`) use it. ECHAM6.3 also sets these by truncation, which jcm
-holds fixed at present: convection (`cmfctop`, `cprcon`,
-`mo_echam_conv_constants.f90` l.121-137, and `cmftau = min(3 h, 7200 s·63/nn)`),
-the ice cloud-optics inhomogeneity `zinhomi` and the deep-convective liquid
-`zinhoml3` (`mo_cloud_optics.f90` l.115-134), and the subgrid-orography wake
-coefficient `gkwake` (`mo_ssodrag.f90` l.93-122). Horizontal diffusion already
-follows ECHAM's truncation table through its own interpolation in
-`jcm/diffusion.py`.
+(`CloudParameters`), the 1M cloud scheme (`MicrophysicsParameters`: `cvtfall`,
+`csecfrl`, `clwprat`) and the 2M cloud scheme (`CloudParams2M`: `cvtfall`, the
+one value ECHAM's 2M reads from `sucloud`, `mo_cloud_micro_2m.f90` l.97, 536)
+use it. ECHAM6.3 also sets these by truncation, which jcm holds fixed at
+present:
+
+* convection (`cmfctop`, `cprcon`, `mo_echam_conv_constants.f90` l.121-137,
+  and `cmftau = min(3 h, 7200 s·63/nn)`) and the subgrid-orography wake
+  coefficient `gkwake` (`mo_ssodrag.f90` l.93-122). The order the maintainer
+  chose is convection and gravity-wave values per truncation first and the
+  Tiedtke retune after (#682).
+* the ice cloud-optics inhomogeneity `zinhomi` and the deep-convective liquid
+  `zinhoml3` (`mo_cloud_optics.f90` l.115-134). `RadiationParameters` is a
+  `tree_math.struct`, which has no static field to record the truncation its
+  defaults were built for (step 2 above), and ECHAM-HAM's own override of
+  `zinhomi` for the JAM pairing (0.7, `lcdnc_progn` with `ncd_activ = 2`) is
+  defined at T63 only, so the JAM composition has no row to interpolate to at
+  another truncation.
+
+Horizontal diffusion already follows ECHAM's truncation table through its own
+interpolation in `jcm/diffusion.py`.
