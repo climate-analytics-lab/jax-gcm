@@ -228,3 +228,21 @@ class TestGridCheck:
         term = SundqvistCloudFraction()
         with pytest.warns(UserWarning, match="non-spectral"):
             term.cache_coords(_grid(None, nodal_shape=(21600,)))
+
+    def test_physics_built_with_the_non_spectral_grid_passes_its_own_check(self):
+        """The pySES runner builds the physics with the dycore's grid.
+
+        That grid has no spectral truncation, so the defaults are ECHAM's T63
+        row (with the one warning that says so at construction) and record
+        that they were built for a non-spectral grid; the check at
+        ``cache_coords`` then finds nothing to report, where physics built
+        without the grid is flagged.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+        grid = _grid(None, nodal_shape=(1, 21600))
+        with pytest.warns(UserWarning, match="no spectral truncation"):
+            term = _cover_term(echam_physics(coords=grid))
+        assert term.params.get_value().crs == ECHAM_CLOUD_DEFAULTS[63]["crs"]
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            term.cache_coords(grid)

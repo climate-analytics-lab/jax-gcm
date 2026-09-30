@@ -1490,9 +1490,10 @@ ECHAM cloud parameters default to their truncation's values
   ``clwprat`` take ECHAM6.3's per-truncation values
   (``mo_echam_cloud_params.f90::sucloud`` l.198-237) for the run's grid,
   chosen when the physics is built: by ``echam_physics(coords=...)``, and by
-  both Hydra doors, which build the grid first (the factory presets receive
-  ``coords``; the term-list presets build each term's parameters with
-  ``jcm.physics.resolution_defaults.default_parameters``). Without a grid the
+  both Hydra doors, which give the physics the grid (the factory presets
+  receive ``coords``; the term-list presets build each term's parameters with
+  ``jcm.physics.resolution_defaults.default_parameters``; the pySES door
+  builds the physics the model runs with its dycore's grid). Without a grid the
   defaults are ECHAM's T63 values. They remain differentiable parameters: an
   explicit ``Parameters`` object is used as given, and a field override
   replaces its field on top of the grid's defaults.

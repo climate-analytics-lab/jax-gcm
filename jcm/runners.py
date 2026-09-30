@@ -299,9 +299,11 @@ def build_physics(cfg: DictConfig, coords=None):
     path (:func:`~jcm.physics.physics_term.with_field_overrides`).
 
     ``coords`` is the model grid when it is known before the physics (the
-    dinosaur path builds it first). Schemes with resolution-dependent
-    defaults then take the defaults for its truncation; without it they take
-    the T63 defaults (:mod:`jcm.physics.resolution_defaults`).
+    dinosaur path builds it first, the pySES path passes its dycore's grid to
+    the build of the physics the model runs). Schemes with
+    resolution-dependent defaults then take the defaults for its truncation
+    (the T63 row, with a warning, for a grid that has none); without it they
+    take the T63 defaults (:mod:`jcm.physics.resolution_defaults`).
     """
     from omegaconf import OmegaConf
 
@@ -1030,8 +1032,15 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
     from jcm.dycore.pyses import PysesCamSEDycore
 
     dc = cfg.dycore
-    physics = build_physics(cfg)
-    tracer_specs = {spec.name: spec for spec in physics.required_tracers()}
+    # The dycore is built from the tracers the physics declares, and the
+    # physics takes its resolution-dependent defaults from the dycore's grid
+    # (:mod:`jcm.physics.resolution_defaults`), which only exists once the
+    # dycore does. The first build therefore only reads the tracer
+    # declarations, which do not depend on the grid; the physics the model
+    # runs is built again below with the dycore's grid, as on the dinosaur
+    # door, so the grid check at ``cache_coords`` agrees with the defaults.
+    tracer_specs = {spec.name: spec
+                    for spec in build_physics(cfg).required_tracers()}
 
     dycore = PysesCamSEDycore(
         nx=int(dc.nx), npt=int(dc.npt), nlev=int(dc.nlev),
@@ -1047,6 +1056,7 @@ def _build_pyses_model(cfg: DictConfig) -> Model:
         tracer_specs=tracer_specs,
         physics_dtype=jnp.float32,
     )
+    physics = build_physics(cfg, dycore.coords)
 
     sponge = dc.get("lid_sponge", None)
     if sponge is not None and int(sponge.get("levels", 0)) > 0:

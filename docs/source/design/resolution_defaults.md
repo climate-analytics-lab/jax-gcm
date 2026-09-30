@@ -41,7 +41,12 @@ from it, and nothing may change it behind the optimiser's back.
 * The Hydra runner builds the coordinates before the physics and passes them
   to both configuration doors: the factory presets (`physics.builder`) get
   `coords`, and the term-list presets build each term's `Parameters` base with
-  `default_parameters(ParamsCls, truncation)`.
+  `default_parameters(ParamsCls, truncation)`. With the pySES dycore the
+  coordinates are the dycore's, which exists only after the physics has named
+  its tracers: the runner reads the tracer declarations from a first build and
+  builds the physics the model runs with `dycore.coords`. That grid has no
+  spectral truncation, so its defaults are the T63 row, with the warning that
+  says so.
 * `default_parameters` calls `default(truncation=...)` on a class that accepts
   it and plain `default()` otherwise, so a scheme gains resolution defaults by
   adding the keyword and nothing else.
