@@ -1573,7 +1573,9 @@ The cloud schemes take ECHAM's anchor, increments and detrainment
   effect, OLR and large-scale precipitation and JAM's longwave cloud effect
   and total precipitation are within the spread of identical-physics runs
   (0.13 and 0.16 W/m², 0.005 and 0.006 mm/day); the other changes are
-  outside it.
+  outside it. The JAM numbers were measured before the JAM mixed-phase
+  freezing entry below, which also changes JAM; the combination was not
+  re-measured.
 
 Default cloud overlap is maximum-random, sampled by ECHAM's rule
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
