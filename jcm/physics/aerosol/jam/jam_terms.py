@@ -4,7 +4,7 @@ Returns the HAMMOZ-style process chain (emissions → microphysics core →
 activation → sedimentation → dry deposition → cloud-borne exchange →
 aqueous chemistry → wet deposition) as a list of
 ``PhysicsTerm``s, ready to splice into ``echam_physics``. The microphysics
-core is the swap point: pass ``"placeholder"`` (default κ-Köhler equilibrium)
+core is the swap point: pass ``"modal"`` (default, the in-tree MAM4 chain), ``"placeholder"`` (equilibrium water uptake, zero tendency)
 or any ``ModalMicrophysicsTerm`` instance (e.g. a future MAM4-JAX wrapper,
 #490). Every harness term is handed the core's population so they all agree
 on mode/species layout.
@@ -198,9 +198,10 @@ def _build_core(core_cls, spec, options, name):
 # renaming, new-particle formation, coagulation, ageing —
 # ``docs/source/design/jam_modal_microphysics.md``) are built in;
 # ``mam4_jax``/``m7_jax`` are loaded lazily so their optional dependencies
-# are only imported when selected. ``modal`` is opt-in until AER-09's budgets
-# and AER-12's A/B against ``mam4_jax`` have run (D-A4): the factory default
-# stays ``placeholder`` and the Hydra JAM config stays on ``mam4_jax``.
+# are only imported when selected. ``modal`` is the factory default since its
+# ledger (AER-09) and its A/B against ``mam4_jax`` (AER-12) came in green
+# (D-A4); the shipped Hydra JAM configs keep ``mam4_jax`` for this release, and
+# ``placeholder`` stays for inert tests.
 _MICROPHYSICS = {
     "placeholder": lambda spec, options: _build_core(
         PlaceholderMicrophysics, spec, options, "placeholder"),
@@ -300,7 +301,7 @@ def _activation_term(scheme, params, spec, arg_variant, nactivpdf):
 
 def jam_aerosol_physics(
     *,
-    microphysics: ModalMicrophysicsTerm | str = "placeholder",
+    microphysics: ModalMicrophysicsTerm | str = "modal",
     microphysics_options: Mapping[str, Any] | None = None,
     cloud_borne: bool | None = None,
     arg_variant: str = "arg2000",
@@ -343,9 +344,11 @@ def jam_aerosol_physics(
     """Build the ordered JAM harness term list.
 
     Args:
-        microphysics: the swappable core — ``"placeholder"``,
+        microphysics: the swappable core — ``"modal"`` (default, the
+            in-tree MAM4 chain), ``"placeholder"``/``"m7_placeholder"``,
             ``"mam4_jax"`` (fixed substeps), ``"mam4_jax_astem"``
-            (CAM's adaptive semi-implicit solve), or a term instance.
+            (CAM's adaptive semi-implicit solve), or a
+            ``ModalMicrophysicsTerm`` instance.
         optics_backend: which ``_mode_optics`` implementation ``optics=True``
             attaches (``docs/source/design/jam_optics_mode_seam.md``):
             ``"jcm"`` (default) is the on-the-fly Gauss-Hermite quadrature

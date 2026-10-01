@@ -54,13 +54,13 @@
 # loads bulk sources and CAM6 SOAG together from the period-matched HF bundle.
 # Set forcing.emissions_file=null explicitly for a zero-prescribed-source run.
 #
-# Defaults use the real MAM4-JAX core, which is an optional GPL extra:
+# This shipped config pins the MAM4-JAX core, an optional GPL extra:
 #     pip install jcm[mam4]
-# Without it, override the core: ``physics.jam_microphysics=placeholder``
-# (κ-Köhler equilibrium, no microphysics) or ``physics.jam_microphysics=modal``
-# (the in-tree MAM4 process chain, Apache-licensed; opt-in until its budgets
-# and the A/B against mam4_jax have run — D-A4 in
-# docs/source/design/jam_modal_microphysics.md).
+# Without it, override the core: ``physics.jam_microphysics=modal`` (the
+# in-tree MAM4 process chain, Apache-licensed, validated against MAM4-JAX
+# process by process and the ``echam_physics()`` factory's default — D-A4 in
+# docs/source/design/jam_modal_microphysics.md) or ``=placeholder``
+# (equilibrium water uptake only, zero microphysics tendency).
 
 builder: echam_physics
 
@@ -75,8 +75,9 @@ radiation_scheme: rrtmgp    # the ECHAM radiation; "grey" (idealized, not ECHAM)
 # ``physics.jam_microphysics=mam4_jax_astem`` for a forward-only SOA study
 # that needs CAM's conservative corrector.
 jam_microphysics: mam4_jax
-# "placeholder" (κ-Köhler, no microphysics) or "modal" (the in-tree MAM4 core,
-# docs/source/design/jam_modal_microphysics.md) select the other cores.
+# "modal" (the in-tree MAM4 core, the echam_physics() factory default;
+# docs/source/design/jam_modal_microphysics.md) or "placeholder" (κ-Köhler,
+# no microphysics) select the other cores.
 jam_arg_variant: ghosh2025  # or arg2000
 jam_aqueous_scheme: full
 # In-cloud impaction scavenging of interstitial aerosol by cloud droplets and

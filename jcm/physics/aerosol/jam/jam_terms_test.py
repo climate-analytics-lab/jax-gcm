@@ -296,11 +296,18 @@ class EchamPhysicsWiringTest(unittest.TestCase):
         cores = [t for t in phys.terms if t.category == "aerosol_microphysics"]
         self.assertEqual(len(cores), 1)
         self.assertIsInstance(cores[0], JamModalMicrophysics)
-        # Default unchanged (D-A4): the plain JAM build is still the placeholder.
+        # D-A4: the plain JAM build IS the modal core; the placeholder stays
+        # selectable for inert baselines.
         default = echam_physics(aerosol_module="jam", cloud_scheme="2m")
-        self.assertNotIsInstance(
+        self.assertIsInstance(
             next(t for t in default.terms if t.category == "aerosol_microphysics"),
             JamModalMicrophysics)
+        from jcm.physics.aerosol.jam.microphysics import PlaceholderMicrophysics
+        inert = echam_physics(aerosol_module="jam", cloud_scheme="2m",
+                              jam_microphysics="placeholder")
+        self.assertIsInstance(
+            next(t for t in inert.terms if t.category == "aerosol_microphysics"),
+            PlaceholderMicrophysics)
 
     def test_jam_module_rejects_1m(self):
         # JAM's scavenging/resuspension terms read the process-time ledger
@@ -405,12 +412,12 @@ def _trace_float32_physics_under_x64(**physics_kwargs):
 
 def test_jam_package_traces_under_x64_without_mixed_dtype_scatters():
     """The ECHAM+JAM package, placeholder aerosol core, in 64-bit mode."""
-    _trace_float32_physics_under_x64()
+    _trace_float32_physics_under_x64(jam_microphysics="placeholder")
 
 
 def test_modal_jam_package_traces_under_x64_without_mixed_dtype_scatters():
-    """The same with the in-tree modal core (AER-08)."""
-    _trace_float32_physics_under_x64(jam_microphysics="modal")
+    """The same with the in-tree modal core, the factory default (D-A4)."""
+    _trace_float32_physics_under_x64()
 
 
 @pytest.mark.requires_extra("mam4")

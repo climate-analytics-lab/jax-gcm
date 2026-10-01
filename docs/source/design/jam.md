@@ -26,13 +26,14 @@ swappable microphysics core, expressed in JCM's composable architecture:
   a future part2pop/AMBRS interop adapter is a thin mapping rather than a
   rewrite.
 - **Microphysics core** (`microphysics/`): the single swap point. The default
-  `PlaceholderMicrophysics` computes κ-Köhler equilibrium radii/density with
-  **zero tendency** on the real MAM4 4-mode population (`mam4_data.py`,
-  constants from E3SM `rad_constituents.F90` / `modal_aero_data.F90`,
-  cross-checked against MAM4-JAX). Replacing it with the in-tree
-  `JamModalMicrophysics` (`modal.py`; design record in
-  `jam_modal_microphysics.md`) or the real MAM4-JAX core swaps only the
-  per-step microphysics, not the contract (#490).
+  is the in-tree `JamModalMicrophysics` (`modal.py`; MAM4's five processes,
+  design record in `jam_modal_microphysics.md`) on the real MAM4 4-mode
+  population (`mam4_data.py`, constants from E3SM `rad_constituents.F90` /
+  `modal_aero_data.F90`, cross-checked against MAM4-JAX).
+  `PlaceholderMicrophysics` (equilibrium water uptake, **zero tendency**)
+  remains for inert baselines, and the real MAM4-JAX core (#490, GPL extra)
+  is what the shipped `echam-jam*` configs pin; swapping cores changes only
+  the per-step microphysics, not the contract.
 - **Tracers** (`tracer_layout.py`): aerosol mass and number are ordinary
   `state.tracers` entries (`m_`/`mc_`/`n_`/`nc_` for interstitial/cloud-borne
   mass/number, keyed by aerosol class), so the dynamical core transports them
@@ -92,7 +93,7 @@ from jcm.physics.echam.echam_terms import echam_physics
 physics = echam_physics(
     aerosol_module="jam",      # default "macv2sp"
     cloud_scheme="2m",         # ARG activated_cdnc feeds the 2M scheme
-    jam_microphysics="placeholder",  # or "modal" (in-tree), "mam4_jax" (GPL extra)
+    jam_microphysics="modal",        # default; or "placeholder", "mam4_jax" (GPL extra)
     jam_arg_variant="arg2000", # or "ghosh2025"
 )
 ```

@@ -225,7 +225,7 @@ def echam_physics(
     radiation_compute_cre: bool = True,
     cloud_scheme: str = "1m",
     aerosol_module: str = "macv2sp",
-    jam_microphysics: str = "placeholder",
+    jam_microphysics: str = "modal",
     jam_microphysics_options: Mapping[str, Any] | None = None,
     jam_cloud_borne: bool = True,
     jam_optics: bool = True,
@@ -464,11 +464,15 @@ def echam_physics(
             the SPA floor. The online aerosol *direct radiative* effect that
             would let JAM fully replace MACv2-SP optics is tracked in #495.
         jam_microphysics: JAM core when ``aerosol_module="jam"`` —
+            ``"modal"`` (the default: the in-tree MAM4 process chain, Apache
+            licensed, validated against MAM4-JAX process by process —
+            ``docs/source/design/jam_modal_microphysics.md``),
             ``"placeholder"`` (κ-Köhler equilibrium on the MAM4 population,
-            default) today; ``"modal"`` is the in-tree MAM4 process chain
-            (opt-in until validated — D-A4 in
-            ``docs/source/design/jam_modal_microphysics.md``); ``"mam4_jax"``
-            is #490 (optional ``jcm[mam4]`` extra). ``"m7_placeholder"`` is the same κ-Köhler core on the M7
+            zero microphysics tendency; for tests and inert baselines),
+            ``"mam4_jax"`` (#490, the GPL MAM4-JAX adapter; optional
+            ``jcm[mam4]`` extra; what the shipped ``echam-jam*`` configs
+            select) or ``"mam4_jax_astem"`` (its forward-only ASTEM
+            variant). ``"m7_placeholder"`` is the same κ-Köhler core on the M7
             population instead (the ``echam-jam-m7`` preset's earlier
             chain-test vehicle, #1017). ``"m7_jax"`` is the real ECHAM-HAM M7
             core over the optional ``jcm[m7]`` extra (#1017); its switches

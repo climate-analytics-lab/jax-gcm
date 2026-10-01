@@ -672,10 +672,14 @@ _REPLAY_CACHE: dict[tuple[str, str], _Replay] = {}
 _FACTORIES = {
     "echam": lambda: echam_physics(checkpoint_terms=False),
     "idealized": lambda: idealized_echam_physics(checkpoint_terms=False),
+    # The aerosol-cloud package with the inert placeholder core, so every
+    # OTHER JAM term is checked on a population the microphysics did not
+    # move; the factory's default core is ``modal`` (D-A4), checked below.
     "echam_jam_2m": lambda: echam_physics(
-        aerosol_module="jam", cloud_scheme="2m", checkpoint_terms=False),
+        aerosol_module="jam", cloud_scheme="2m", jam_microphysics="placeholder",
+        checkpoint_terms=False),
     # The same package with the in-tree modal microphysics core in the
-    # microphysics seat (AER-08; opt-in, D-A4). Only that term differs, so
+    # microphysics seat (the factory default). Only that term differs, so
     # only its parameters are checked here.
     "echam_jam_2m_modal": lambda: echam_physics(
         aerosol_module="jam", cloud_scheme="2m", jam_microphysics="modal",

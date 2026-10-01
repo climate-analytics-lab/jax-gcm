@@ -27,15 +27,16 @@ activation → aerosol inputs to ice formation → sedimentation → dry deposit
 cloud-borne exchange → aqueous sulfur chemistry → wet scavenging. Diagnostics
 thread in this call order, so custom compositions should preserve it.
 
-The microphysics core is a swap point with three cores: ``"placeholder"`` (the
-bare-factory default, keeping the Apache-2.0 core importable with no GPL
-dependency) is an **equilibrium water-uptake** core with zero tendency that still
-exposes the real MAM4 mode/species geometry so the full harness runs
-end-to-end; ``"modal"`` is the **in-tree, Apache-licensed MAM4 process chain**
+The microphysics core is a swap point with three cores: ``"modal"`` (the
+factory default) is the **in-tree, Apache-licensed MAM4 process chain**
 (gas-aerosol exchange, renaming, new-particle formation, coagulation,
-carbonaceous ageing — the section below), opt-in until validated;
-``"mam4_jax"`` is the real MAM4-JAX box model (GPL-3.0, optional ``jcm[mam4]``
-extra, imported lazily) doing ``calcsize → wateruptake → amicphys``. Every
+carbonaceous ageing — the section below), validated against MAM4-JAX process
+by process; ``"placeholder"`` is an **equilibrium water-uptake** core with zero
+tendency that still exposes the real MAM4 mode/species geometry, kept for
+inert baselines; ``"mam4_jax"`` is the real MAM4-JAX box model (GPL-3.0,
+optional ``jcm[mam4]`` extra, imported lazily) doing ``calcsize → wateruptake
+→ amicphys``, which the shipped ``echam-jam*`` configurations pin for this
+release. Every
 process term reads modal properties from the core's diagnostic and shares one
 population spec, and all process parameters are differentiable
 ``@tree_math.struct`` leaves.
@@ -70,14 +71,15 @@ See {doc}`../design/jam_carbon_aging`.
   oxidation is jcm-side).
 
 **Status & known limitations.** Every shipped ``echam-jam*`` configuration pins
-``jam_microphysics: mam4_jax`` (requiring ``jcm[mam4]``, MAM4-JAX 0.5.1), the
-fixed-substep core through which ``jax.grad`` runs; ``mam4_jax_astem`` selects
-CAM's adaptive ASTEM corrector, which conserves the organic budget in warm
-evaporating cells but is forward-only (#1064).
+``jam_microphysics: mam4_jax`` (requiring ``jcm[mam4]``, MAM4-JAX 0.5.1) for
+this release, the fixed-substep core through which ``jax.grad`` runs;
+``mam4_jax_astem`` selects CAM's adaptive ASTEM corrector, which conserves the
+organic budget in warm evaporating cells but is forward-only (#1064).
 The substep core's warm-cell evaporation limitation is described in
-{doc}`../design/jam_soa_dust`. The
-zero-tendency κ-Köhler placeholder is the bare-factory default and the
-documented fallback when the GPL extra is unavailable. The core's cloudy ``amicphys``
+{doc}`../design/jam_soa_dust`. The ``echam_physics()`` factory default is the
+in-tree ``modal`` core ({doc}`../design/jam_modal_microphysics`), and the
+zero-tendency κ-Köhler placeholder is the documented inert baseline and the
+fallback when the GPL extra is unavailable. The core's cloudy ``amicphys``
 sub-area is not ported upstream, so cloud-borne activation is the harness's job
 (``ArgActivation`` / ``CloudBorneExchange``) and the core runs clear-sky. Aerosol
 burdens and lifetimes of the shipped configuration, from a 365-day T63 L47 year
@@ -172,9 +174,10 @@ inside coagulation from the coagulated one.
   float64 literal is exactly 1.0 in float32); all tunables are
   ``flax.struct`` leaves on the core.
 
-**Status & known limitations.** Opt-in: ``jam_microphysics="modal"`` /
-``physics.jam_microphysics=modal``; the factory default stays the placeholder
-and the shipped JAM configurations stay on ``mam4_jax``. Against the MAM4-JAX
+**Status & known limitations.** The ``echam_physics()`` factory default
+(``jam_microphysics="modal"``); the shipped JAM configurations pin
+``mam4_jax`` for this release and select it with
+``physics.jam_microphysics=modal``. Against the MAM4-JAX
 core on the same state (``microphysics/ab_mam4_jax_test.py``, the
 ``extras-tests`` job), every process agrees, dry and at mixed humidity:
 exchange gases to 0.4 %, renaming to ~1 %, new-particle formation to 1.5 %,

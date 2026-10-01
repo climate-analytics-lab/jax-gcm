@@ -990,9 +990,10 @@ Interactive aerosol (JAM)
   reverse-differentiable with every tunable a gradient-visible leaf, and a
   per-process conservation ledger. Checked process by process against the
   MAM4-JAX core on the same state (``ab_mam4_jax_test.py``): within a few
-  per cent everywhere, dry and humid. Opt-in for now: the factory default
-  stays the placeholder and the shipped JAM configurations stay on
-  ``mam4_jax`` (``docs/source/design/jam_modal_microphysics.md``, D-A4).
+  per cent everywhere, dry and humid. It is the ``echam_physics()`` factory's
+  default JAM core (``aerosol_module="jam"`` no longer builds the inert
+  placeholder); the shipped ``echam-jam*`` configurations pin ``mam4_jax``
+  for this release (``docs/source/design/jam_modal_microphysics.md``, D-A4).
 - **JAM's equilibrium water uptake is MAM's** (``koehler.py``, shared by
   every core and read by activation, sedimentation, deposition and optics):
   the Köhler solve with the Kelvin term at the volume-mean particle,

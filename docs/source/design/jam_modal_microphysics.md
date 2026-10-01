@@ -324,81 +324,27 @@ Pinned by `CloudBorneTest` (fractions against the per-cell
 transcription with combined inputs, both-phase conservation, the store
 booking through the driver, and the probe without a store).
 
-### D-A4 — default switch: REGISTER ``modal``, OPT-IN (decided 2026-10-01)
+### D-A4 — default switch: REGISTER ``modal``, OPT-IN (decided 2026-10-01); FACTORY DEFAULT (revised 2026-10-02)
 
-Three positions were put: register ``"modal"`` and change no default;
-make it the default of the Hydra JAM config (`physics/echam-jam.yaml`,
-today on the GPL ``mam4_jax``); make it the default everywhere. **The
-first is adopted.** `echam_physics()` keeps ``"placeholder"`` and
-`echam-jam.yaml` keeps ``mam4_jax``; the in-tree core is selected with
-``jam_microphysics="modal"`` or ``physics.jam_microphysics=modal``. The
-trigger to revisit is concrete: AER-09's conservation ledger green and
-AER-12's A/B against ``mam4_jax`` within tolerance (which needs D-A3).
-Until then every existing JAM test and run keeps its behaviour, and the
-new core is exercised by its own wiring tests and a slow integration run.
+Three positions were put on 2026-10-01: register ``"modal"`` and change
+no default; make it the default of the Hydra JAM config
+(`physics/echam-jam.yaml`, on the GPL ``mam4_jax``); make it the default
+everywhere. The first was adopted with a concrete trigger to revisit:
+AER-09's ledger green and AER-12's A/B against ``mam4_jax`` within
+tolerance. Both came in (and D-A6 removed the one systematic
+difference), so on 2026-10-02 the default was revised for the release
+that makes ECHAM the default physics:
 
-### AER-11: the second float32 class — reverse-mode overflow, not dead branches
-
-AER-02..07 found and fixed the *dead-branch* class: ``x / max(y, tiny)``
-with ``tiny²`` underflowing, cured by the double-``where``. The AER-11
-sweep found a class the double-``where`` does not touch: a **live**
-quotient of two small numbers under a large cotangent. JAX's reverse
-rule for ``x / y`` forms ``cot · y⁻²`` *before* multiplying by ``x``;
-for coagulation's harmonic mean of two ~1e-15 m³ s⁻¹ limits under the
-number equation's ``dN/dβ = −Δt N² ≈ 1e19``, that intermediate is
-~1e47, past float32, and a perfectly finite derivative — forward mode
-and the central difference both agree on it — comes back ``inf`` and
-then ``NaN``. Measured as ``d n_acc / d m_bc_acc`` on a populated
-column, i.e. at the model's ordinary operating point, not a corner.
-
-The cure is :mod:`numerics`: ``divide(x, y)`` is ``x / y`` with a
-``custom_jvp`` of ``(dx − z·dy)/y`` where ``z = x/y`` is the computed
-value — reverse mode then forms ``cot/y`` and ``−z·cot/y`` and never
-``y⁻²``; exact in value and derivative, only the evaluation order
-differs. Applied where a small denominator can meet a large cotangent:
-the coagulation kernel's harmonic mean (through ``numerics.harmonic_mean``),
-NPF's vapour-clipping ratio, coagulation's primary-carbon share (whose
-floor is 1e-37), condensation's floored quotients (``_safe_divide``,
-floors 1e-15), the κ-Köhler density and hygroscopicity quotients and
-the moment inversion in ``moments`` — the last three found by the
-repo-wide test on the ECHAM column, whose top levels carry masses of
-1e-33 kg/kg: a volume that small has a square no float32 holds, and
-the end-of-step ``_jam_state`` sends a ~1e17 cotangent back through the
-exchange sub-step scan. The plain ``/`` stays where the denominator is
-O(1).
-
-Two more findings from the same sweep:
-
-- **NPF's clipping ratio was live at 1e-32 kg/kg.** With the vapour fully
-  consumed by exchange and formation still wanting ~1e-32 kg/kg, the
-  clip branch is selected and its reverse rule forms ``wanted⁻²`` — the
-  true sensitivity is zero (nothing available) but the rule's
-  intermediate is ``inf``. Formation wanting less than 1e-30 kg/kg per
-  step (a hundred-thousandth of one H₂SO₄ molecule per kg of air) now
-  books nothing — number and mass alike, so nothing is overdrawn — and
-  the ratio goes through ``divide``.
-- **Negative tracers reach the κ-Köhler state.** Spectral transport
-  rings around sharp sources, so negative masses are real input; a
-  negative sulfate mass gave the Aitken mode a negative wet density and
-  the kernel's ``sqrt(3kT/ρ)`` a NaN that the forward ``where`` masked
-  and reverse mode did not. The core now reads its population floored
-  at zero — the convention every JAM consumer already follows — and
-  books ``after − floored_before``, which leaves a negative excursion
-  exactly where transport put it rather than pumping it. The placeholder
-  core's ``_jam_state`` on negative tracers is the harness's existing
-  behaviour and is not changed here.
-
-The sweep itself (`modal_gradients_test`): jvp and vjp through each
-process alone and the full core at ten operating points; parameter
-derivatives at each; AD against a float64 central difference through
-the whole fold with respect to O(1) multipliers on the tracer groups and
-to every parameter struct (``pbl_minimum_depth`` and ``pbl_enabled``
-held fixed, being step switches); and a liveness table — every float
-leaf of every parameter struct moves the outputs at the populated
-point, except those named dead with a reason. The core is also the
-``echam_jam_2m_modal`` composition of the repo-wide
-``term_gradients_test``, whose parameter cases replay it on the ECHAM
-column at both soundings.
+- **`echam_physics(aerosol_module="jam")` and `jam_aerosol_physics()`
+  default to ``"modal"``.** A JAM build without the GPL extra now runs
+  real microphysics instead of the inert placeholder.
+- **`physics/echam-jam.yaml` keeps ``mam4_jax``** for this release — the
+  core the shipped configurations were validated with — and ``modal`` is
+  selected with ``physics.jam_microphysics=modal``.
+- **``"placeholder"`` stays selectable** for inert baselines and tests;
+  the repo-wide gradient test's ``echam_jam_2m`` composition pins it
+  explicitly so every other JAM term is still checked on a population the
+  microphysics did not move, with ``echam_jam_2m_modal`` beside it.
 
 ### D-A6 — water uptake: ADOPT MAM's (decided 2026-10-02, option a)
 
