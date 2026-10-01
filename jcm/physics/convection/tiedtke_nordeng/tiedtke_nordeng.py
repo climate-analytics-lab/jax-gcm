@@ -1204,10 +1204,18 @@ def _tiedtke_convection_toa_first(
         # and ``cuflx`` cancels it where its level of free sinking, found in
         # the first ascent's cloud, lies above the final plume's top
         # (``IF (kdtop < kctop) lddraf = .FALSE.``, mo_cufluxdts.f90:189).
-        # ECHAM then zeroes the downdraft only from ``kctop − 1`` down and
-        # leaves the absolute (not deviation) fluxes of any downdraft level
-        # above that in its ledger; jcm removes the whole downdraft, which is
-        # the same wherever the LFS is at most one interface above the top.
+        # jcm removes the whole cancelled downdraft, a deliberate deviation.
+        # ECHAM zeroes it only from ``kctop − 1`` down and keeps the levels
+        # above as cuddraf left them: ABSOLUTE heat and moisture fluxes
+        # (``pmfds = pmfd·(pcpcu·ptd + pgeoh)``, mo_cudescent.f90:164, 312),
+        # converted to deviations only where the downdraft is kept
+        # (mo_cufluxdts.f90:199-212), and cudtdq applies them from ``ktopm2``
+        # down. An absolute static-energy flux of ~1e3 W/m² ending at
+        # ``kctop − 1`` is a heating dipole estimated at order 10 K/hr, so
+        # jcm does not reproduce it. The two agree wherever the LFS is at
+        # most one interface above the top; it is two or more in 4 of 1.1
+        # million column-steps over half a day of t63-echam-1m. ECHAM zeroes
+        # the tracer fluxes of those levels too (mo_cufluxdts.f90:215-227).
         dd_active = ldcum_first & (downdraft_state.lfs >= actual_ktop)
         dd_scale = jnp.where(dd_active, rescale, 0.0)
         downdraft_state = downdraft_state._replace(

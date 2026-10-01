@@ -162,6 +162,15 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   model runs it, convects in 15.1 % of the steps and ECHAM6.3 in 15.0 %, the
   two differing in 16 of the 3840 steps; in float64 with ECHAM's constants
   the port takes ECHAM's decision on every step.
+- `science` — a downdraft ``cuflx`` cancels is removed whole. ECHAM zeroes
+  it only from ``kctop − 1`` down and keeps the levels above as ``cuddraf``
+  left them, absolute (not deviation) heat and moisture fluxes, which
+  ``cudtdq`` then applies (``mo_cufluxdts.f90:189-212``, ``mo_cudescent.f90``
+  l.164, 312): where the level of free sinking is two or more interfaces
+  above the final top (4 of 1.1 million column-steps over half a day of
+  ``t63-echam-1m``) that is a heating dipole estimated at order 10 K/hr,
+  which jcm does not reproduce. Wherever it is at most one interface above,
+  the two agree.
 - `science` / `compute` (stopgap) — ECHAM bounds the mass flux, not the
   heating: the cloud-base flux and the per-level entrainment are held to the
   layer's air mass per step (``zmfmax = layer_mass/dt``, ``mo_cumastr.f90``
