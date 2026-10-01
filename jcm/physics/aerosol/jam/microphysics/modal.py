@@ -38,6 +38,7 @@ import jcm.constants as c
 from jcm.physics.aerosol.jam.gas_species import SULFUR_GASES
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.microphysics import condensation
+from jcm.physics.aerosol.jam.microphysics import coagulation as coag
 from jcm.physics.aerosol.jam.microphysics import new_particle_formation as npf
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.koehler import (
@@ -189,15 +190,19 @@ def coagulation(population, env, spec, params):
 
     Intra-modal coagulation removes number at constant mass; inter-modal
     moves both mass and number to the larger mode. This is what bounds the
-    number that nucleation creates.
+    number that new-particle formation creates.
 
-    Rates follow the CMAQ v4.6 fast/approximate algorithms (Binkowski and
-    Roselle, 2003), over the Aitken, accumulation and primary-carbon modes
-    ONLY: MAM neglects coagulation involving the coarse and larger modes
-    as much slower. The Aitken-to-primary-carbon path also ages carbon, so
-    like condensation this step owes AER-06 a record of what it deposited.
+    Rates follow the CMAQ v4.6 fast algorithms (Binkowski and Roselle,
+    2003) as MAM carries them, over the Aitken, accumulation and
+    primary-carbon modes ONLY: MAM neglects coagulation involving the
+    coarse and larger modes as much slower. The Aitken-to-primary-carbon
+    path also ages carbon, so like condensation this step records the
+    soluble mass it deposits on ``pcm`` in ``population.coating`` for
+    AER-06. No tunables; ``params`` is ``None``.
+
+    Implemented in :mod:`~jcm.physics.aerosol.jam.microphysics.coagulation`.
     """
-    return population
+    return coag.coagulate(population, env, spec, params)
 
 
 def carbonaceous_ageing(population, env, spec, params):

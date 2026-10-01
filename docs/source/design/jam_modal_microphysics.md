@@ -78,7 +78,7 @@ Dependencies in brackets. Each card is implement → review → full gates.
 | **AER-02** | ✅ `moments.py`: log-normal moment algebra — `moment`/`moment_factor`, the M₃ pair `volume_from_diameter`/`diameter_from_volume`, `surface_area` (π·M₂), `mode_volume`/`mode_mass`. `koehler.py` now delegates its diameter inversion here, so the core and the diagnostics cannot disagree about it. Property tests against brute-force quadrature. **Rolled in:** the float32 NaN-gradient trap at empty modes (§9). | AER-01 |
 | **AER-03** | ✅ `condensation.py`: MAM4's gas-aerosol exchange from its own documentation — Fuchs–Sutugin per particle, Fuller (1966) diffusivity, two-point Gauss–Hermite modal integration on the **wet** diameter (not the supplement's B&S harmonic mean; §9). H₂SO₄ nonvolatile with the chemical production coupled into the solve (`SulfurGasChemistry` now publishes `_h2so4_production`); SOAG at 0.81·C with Raoult's law over SOA + 10 % oxygenated POA, semi-implicit sub-steps in a static scan. `pcm` condensate routed to accumulation and recorded in `coating` for AER-06. Sulfur moles and organic mass conserved; 20 tests. | AER-02 |
 | **AER-04** | ✅ `new_particle_formation.py`: NPF from MAM4's own documentation — binary H₂SO₄–H₂O (Vehkamäki et al. 2002 polynomials, validity clipping as MAM does it) **plus** the PBL first-order pathway (Sihto et al. 2006, 1.0×10⁻⁶ s⁻¹, 1 nm pure-acid clusters) below max(PBL top, 100 m), the larger rate winning; Kerminen & Kulmala (2002) survival to the Aitken lower bound with MAM's condensation sink from AER-03's summed uptake coefficient and the step-mean H₂SO₄; MAM's vapour-availability clipping. PBL height taken lagged — sub-decision (a) in D-A2, adopted. **Rolled in:** AER-03's gas update rewritten so the vapour can never go negative by rounding (§9). 18 tests. | AER-03 |
-| **AER-05** | A3 coagulation: CMAQ v4.6 fast/approximate algorithms (Binkowski & Roselle 2003). **Aitken, accumulation and primary-carbon only** — MAM neglects coagulation involving coarse and larger modes as much slower. Aitken↔pcm also ages, so this feeds AER-06. | AER-02 |
+| **AER-05** | ✅ `coagulation.py`: MAM4's coagulation from E3SM's `modal_aero_coag.F90` (the MAM doc-site pages are stubs; §9) — CMAQ v4.6 fast coefficients (Whitby et al. 1991 analytic moment integrals, Binkowski & Roselle 2003 correction tables in `coagulation_tables.py`, harmonic mean of the free-molecular and near-continuum limits) on the wet κ-Köhler state; semi-analytic number loss (receiver first, donors at the receivers' step-mean numbers); first-order volume transfer. **Aitken, accumulation and primary-carbon only** — MAM neglects coagulation involving coarse as much slower. Aitken mass goes to accumulation whichever partner it hit; the primary-carbon share of its sulfate and SOA is recorded in `coating` for AER-06. Checked against the monodisperse closed forms (exact) and brute-force quadrature (+3…+7 % at MAM4 geometry; §9). No tunables. 21 tests. | AER-02 |
 | **AER-06** | A4 ageing: 3-monolayer sulfate criterion on `pcm` with SOA included, `f_age = M_SO4,cond/M_SO4,age-all + M_SOA,cond/M_SOA,age-all`, transferring that fraction of POA/BC/number to `acc`. `n_so4_monolayers` default 3.0 (Liu et al. 2012 supplement S1.1.5; ECHAM-HAM's `m7_coat` uses 1.0). | AER-03, AER-05 |
 | **AER-07** | A5 renaming: transfer the upper tail of `aitken` number and mass to `accum` after continuous growth, following Easter et al. (2004). | AER-02 |
 | **AER-08** | Wire `jam_microphysics="modal"` through `echam_physics()` and the Hydra config. (Classification landed in AER-01.) | AER-01, D-A4 |
@@ -113,9 +113,11 @@ Dependencies in brackets. Each card is implement → review → full gates.
    regress, since `jam_microphysics="placeholder"` stays the default until
    AER-08.
 3. Per-process analytic checks: condensation against an isolated single-mode
-   solution, coagulation against the known self-preserving distribution,
-   nucleation rate against published tabulated values at fixed (T, RH,
-   [H₂SO₄]).
+   solution, coagulation coefficients against the monodisperse closed forms
+   and brute-force quadrature over the log-normals (the self-preserving
+   distribution would test the time integration, not MAM's coefficients,
+   and is not what MAM itself is validated against), NPF on structure, since
+   no tabulated Vehkamäki values exist outside the paper's figures (§9).
 4. Budget closure (AER-09) and gradient checks (AER-11).
 5. A single-column JAM run before/after, showing BC lifetime moving from the
    ~21-day no-ageing figure toward the observed 5–8 days.
@@ -164,7 +166,7 @@ microphysics schemes. Vehkamäki is cited in neither main text.
 | Nucleated-particle survival | Kerminen, V.-M., Kulmala, M. (2002), *Analytical formulae connecting the "real" and the "apparent" nucleation rate…*, J. Aerosol Sci. 33(4), 609–622 |
 | Condensation | Seinfeld & Pandis (1998) mass-transfer expressions, integrated over each mode's size distribution per Binkowski, F. S., Shankar, U. (1995), JGR 100, 26191–26209 |
 | H₂SO₄ accommodation coefficient (0.65) | Pöschl, U., et al. (1998), J. Phys. Chem. A 102(49), 10082–10089 |
-| Coagulation | Binkowski, F., Roselle, S. (2003), *Models-3 CMAQ aerosol component – 1*, JGR 108(D6), 4183, doi:10.1029/2001JD001409 — MAM uses CMAQ v4.6's fast/approximate algorithms |
+| Coagulation | Binkowski, F., Roselle, S. (2003), *Models-3 CMAQ aerosol component – 1*, JGR 108(D6), 4183, doi:10.1029/2001JD001409 — MAM uses CMAQ v4.6's fast/approximate algorithms. The analytic moment forms are Whitby, E. R., McMurry, P. H., Shankar, U., Binkowski, F. S. (1991), *Modal aerosol dynamics modeling*, EPA 600/3-91/020, appendix H. Implementation reference: E3SM `components/eam/src/chemistry/modal_aero/modal_aero_coag.F90` (`modal_aero_coag_sub`, `getcoags_wrapper_f`, `getcoags`; BSD-3), read 2026-10-01 |
 | Renaming (Aitken → accumulation) | Easter, R. C., et al. (2004), *MIRAGE* |
 | Water uptake / κ | Ghan & Zaveri (2007) equilibrium Köhler; κ per Petters, M. D., Kreidenweis, S. M. (2007), ACP 7(8), 1961–1971 — already the basis of ``koehler.py`` |
 | MAM3 / CAM5 | Liu, X., et al. (2012), GMD 5, 709–739, doi:10.5194/gmd-5-709-2012 (+ supplement) |
@@ -481,6 +483,96 @@ of tens of particles per kg is below the ulp of a 1e8–1e9 kg⁻¹ number
 and is lost at the add. That is a property of accumulating tendencies in
 float32, not of this process; running the aerosol core in float64
 is the standing recommendation.
+
+### AER-05: the reference is E3SM's Fortran, because MAM's coagulation pages are empty
+
+The MAM documentation site that carried AER-03 and AER-04 has
+`coagulation/coag_equations`, `coag_numerics`, `coag_verification`,
+`aging/` and `amicphys_coupling/` as title-only stubs (fetched
+2026-10-01). The formulation therefore comes from E3SM's
+`modal_aero_coag.F90` (BSD-3 — a formulation reference, unlike the GPL
+`mam4-jax`), which is also what the documentation would have described.
+What it pins down that the Liu et al. (2012) supplement does not:
+
+- `pair_option_acoag = 3`: three donor→receiver pairs, Aitken→accum,
+  pcm→accum, Aitken→pcm, with accumulation the *effective* receiver of
+  every species (pcm has no sulfate or SOA slot). Species map to the same
+  species in the receiver; a species with no slot there would be lost
+  (not the case for MAM4's membership, and the code mirrors the rule).
+- Receiver first: accumulation loses number to itself only,
+  `N/(1 + Δt β N)`; then pcm (self + accumulation at its step mean);
+  then Aitken (self + both at their step means). No mode gains number.
+- Three closed forms of the donor solution, switched at
+  `|a + bN| < 0.01` and `|a| < 0.001`; the general form is the exact
+  solution of `dN/dt = −(aN + bN²)` and the other two are its
+  well-conditioned limits.
+- Coefficients on the **wet** diameter and wet density of the
+  start-of-step state; the 3rd-moment transfer is divided by the donor's
+  `dg³ exp(4.5 ln²σ)` to make a first-order volume loss rate.
+- The 3-hour coagulation frequency in the comments is dead: `deltat =
+  deltat_main`, every step.
+
+### AER-05: CMAQ's nine-term free-molecular form, and why it is kept
+
+`getcoags` writes the last term of Whitby's H.7a as `2 r⁻¹ es_i(4) +
+es_j(1)`; the moment expansion of `(d_i + d_j)² (d_i^{-3/2} + d_j^{-3/2})`
+gives `2 r⁻¹ es_i(4) es_j(1)` — one term, not two. The tables settle which
+to use: at σ_g = 1 the eight genuine terms sum to 8 against the exact
+`4√2`, and `bm0 = 0.70710678 = 4√2/8` exactly; the intermodal table has
+`bm0ij(1,1,1) = 0.628539 = 4√2/9`, i.e. it was **fitted with the
+nine-term form** and absorbs it at that corner. At MAM4 geometry the
+nine-term form is 1.6 % (Aitken→accum), 5.9 % (Aitken→pcm) and 4.3 %
+(pcm→accum) above the eight-term one before the table and the harmonic
+mean, so swapping the expression under the fitted table would make the
+result *worse*, not better. Kept as MAM has it, pinned by
+`test_monodisperse_corners_are_the_classical_constants`.
+
+### AER-05: the fast method against quadrature, measured
+
+With the per-pair kernel as the harmonic mean of the free-molecular and
+near-continuum forms (Binkowski and Shankar 1995, A5/A6) integrated by
+brute force over both log-normals, the fast coefficients at MAM4
+geometry (285 K, 900 hPa) are **+3.4 to +7.4 %** high: Aitken→accum
+β₀ +7.4 %, β₃ +6.9 %; Aitken→pcm +4.9/+4.3 %; pcm→accum +5.6/+4.2 %;
+self-coagulation +3.4 to +4.8 %. Over a sweep of donor 10–60 nm,
+receiver 60–1000 nm, σ_g 1.6–2.0 the worst case is 14.3 % (β₀) and
+11.8 % (β₃). The bias is the method's — a harmonic mean of modal
+integrals is not the integral of the harmonic mean — and is the price
+MAM pays for closed forms; the test holds it at 10 % at MAM4 geometry.
+In the monodisperse limit the forms are exact to float32 rounding.
+
+### AER-05: the 3rd-moment limits underflow float32
+
+Whitby's H.7b/H.10b carry the donor's `d³` (~2e-23 m³ for Aitken) in
+both limits, which puts each at ~1e-37 and their product in the
+harmonic mean at ~1e-75: float32 returns `β_ij3 = 0` exactly (measured
+2026-10-01 at MAM4 geometry — every mass transfer silently off). `d³`
+is factored out before the harmonic mean, which is algebraically
+identical and keeps both limits ~1e-16. Pinned by
+`test_third_moment_coefficient_survives_float32`.
+
+### AER-05: what crosses the seam to ageing, and the operator split it implies
+
+MAM computes the aged fraction of primary carbon twice per step, inside
+gas-aerosol exchange from the condensed shell and inside coagulation
+from the coagulated shell (`vol_shell`, the Aitken sulfate+SOA whose
+partner was pcm, with the SOA scaled by `soa_equivso4_factor`). This
+scaffold records both deposits in `population.coating` as mass by
+species and lets AER-06 compute the fraction once from their sum. That
+is a different operator split from MAM's — one transfer at the end
+instead of two in sequence — equivalent to first order in the step; it
+is the D-A1 decision applied, and AER-06 is where to revisit it if the
+single-column BC lifetime comes out wrong. The non-hygroscopic Aitken
+species that coagulate onto pcm (sea salt, marine organics) are routed
+to accumulation with the rest and not counted as shell, as in MAM.
+
+### AER-05: the scaffold criterion narrows again
+
+Through AER-04 a populated population with no gas and no SOA was inert
+under the full core and bitwise equal to the placeholder; coagulation
+acts on any two particles, so that criterion now holds only on a clean
+atmosphere (empty modes, no gas). `modal_test` pins both the surviving
+criterion and the reason it narrowed.
 
 ### D-A3, D-A4 — still open
 

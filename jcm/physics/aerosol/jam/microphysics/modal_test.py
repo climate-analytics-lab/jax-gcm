@@ -123,17 +123,32 @@ class ScaffoldEquivalenceTest(unittest.TestCase):
         _, place = PlaceholderMicrophysics()(state, diagnostics, None, None)
         self._assert_jam_state_equal(modal["_jam_state"], place["_jam_state"])
 
-    def test_full_core_matches_the_placeholder_when_there_is_nothing_to_exchange(self):
-        # No gas and no SOA: condensation has no vapour to deposit and no
-        # semi-volatile aerosol to evaporate, so the population is inert.
+    def test_full_core_matches_the_placeholder_on_a_clean_atmosphere(self):
+        """Empty modes and no gas: nothing to condense, form or collide.
+
+        Through AER-04 a POPULATED population with no gas and no SOA was
+        inert too; coagulation (AER-05) acts on any two particles, so the
+        criterion that survives is the clean-atmosphere one.
+        """
         masses, numbers = _population(soa=False)
+        masses = {k: jnp.zeros_like(v) for k, v in masses.items()}
+        numbers = {k: jnp.zeros_like(v) for k, v in numbers.items()}
         state, diagnostics = _state_and_diagnostics({**masses, **numbers})
         tendency, modal = JamModalMicrophysics()(state, diagnostics, None, None)
         _, place = PlaceholderMicrophysics()(state, diagnostics, None, None)
         self._assert_jam_state_equal(modal["_jam_state"], place["_jam_state"])
         for key, value in tendency.tracers.items():
             self.assertTrue(bool(jnp.all(value == 0.0)),
-                            msg=f"{key} tendency is nonzero with nothing to exchange")
+                            msg=f"{key} tendency is nonzero on a clean atmosphere")
+
+    def test_populated_modes_coagulate_even_with_nothing_to_exchange(self):
+        """The reason the populated no-gas criterion no longer holds, pinned."""
+        masses, numbers = _population(soa=False)
+        state, diagnostics = _state_and_diagnostics({**masses, **numbers})
+        tendency, _ = JamModalMicrophysics()(state, diagnostics, None, None)
+        for short in ("ait", "acc", "pcm"):
+            self.assertTrue(bool(jnp.all(tendency.tracers[number_name(short)] < 0.0)))
+        self.assertTrue(bool(jnp.all(tendency.tracers[number_name("cor")] == 0.0)))
 
     def test_full_core_evaporates_soa_when_soag_is_absent(self):
         """The reason the old bitwise criterion no longer holds, pinned."""
@@ -208,14 +223,14 @@ class ProcessScaffoldTest(unittest.TestCase):
     def test_unimplemented_processes_are_still_identities(self):
         """TEMPORARY — each card must delete its process from this list.
 
-        AER-03 removed ``gas_aerosol_exchange``; AER-04 removed
-        ``nucleation``. If this test still passes in full after
-        AER-05..AER-07 land, those cards did nothing.
+        AER-03 removed ``gas_aerosol_exchange``, AER-04 ``nucleation``,
+        AER-05 ``coagulation``. If this test still passes in full after
+        AER-06 and AER-07 land, those cards did nothing.
         """
         masses, numbers = _population()
         population = ModalPopulation(masses=masses, numbers=numbers)
         env = _environment(masses, numbers)
-        still_identity = {"rename", "coagulation", "carbonaceous_ageing"}
+        still_identity = {"rename", "carbonaceous_ageing"}
         for name, process in PROCESS_ORDER:
             if name not in still_identity:
                 continue
