@@ -76,7 +76,7 @@ Dependencies in brackets. Each card is implement → review → full gates.
 |---|---|---|
 | **AER-01** | ✅ `JamModalMicrophysics` skeleton: subclass, `spec = MAM4_SPEC`, process-order scaffold, `_jam_state` via the shared κ-Köhler diagnostics (moved to `koehler.py`), zero tendency, bitwise-equal to `PlaceholderMicrophysics`. Classified in `layout_audit_test.py` — that could not wait for AER-08, since the roster assertion fails on any unclassified `PhysicsTerm`. | — |
 | **AER-02** | ✅ `moments.py`: log-normal moment algebra — `moment`/`moment_factor`, the M₃ pair `volume_from_diameter`/`diameter_from_volume`, `surface_area` (π·M₂), `mode_volume`/`mode_mass`. `koehler.py` now delegates its diameter inversion here, so the core and the diagnostics cannot disagree about it. Property tests against brute-force quadrature. **Rolled in:** the float32 NaN-gradient trap at empty modes (§9). | AER-01 |
-| **AER-03** | A2 condensation: Seinfeld & Pandis mass transfer integrated over each mode's size distribution (Binkowski & Shankar 1995), accommodation coefficient 0.65 for H₂SO₄ (Pöschl et al. 1998). H₂SO₄ irreversible, SOA reversible. Must also record the soluble mass deposited on `pcm` — AER-06 consumes it (D-A1). Conserves S and C to rounding. | AER-02 |
+| **AER-03** | ✅ `condensation.py`: MAM4's gas-aerosol exchange from its own documentation — Fuchs–Sutugin per particle, Fuller (1966) diffusivity, two-point Gauss–Hermite modal integration on the **wet** diameter (not the supplement's B&S harmonic mean; §9). H₂SO₄ nonvolatile with the chemical production coupled into the solve (`SulfurGasChemistry` now publishes `_h2so4_production`); SOAG at 0.81·C with Raoult's law over SOA + 10 % oxygenated POA, semi-implicit sub-steps in a static scan. `pcm` condensate routed to accumulation and recorded in `coating` for AER-06. Sulfur moles and organic mass conserved; 20 tests. | AER-02 |
 | **AER-04** | A1 nucleation: binary H₂SO₄–H₂O (Vehkamäki et al. 2002) **plus** the PBL first-order pathway (Sihto et al. 2006, 1.0×10⁻⁶ s⁻¹), with Kerminen & Kulmala (2002) survival to the Aitken lower bound. Competes with AER-03 for the same `g_h2so4`. Settles the PBL-height sub-decision in D-A2. | AER-03 |
 | **AER-05** | A3 coagulation: CMAQ v4.6 fast/approximate algorithms (Binkowski & Roselle 2003). **Aitken, accumulation and primary-carbon only** — MAM neglects coagulation involving coarse and larger modes as much slower. Aitken↔pcm also ages, so this feeds AER-06. | AER-02 |
 | **AER-06** | A4 ageing: 3-monolayer sulfate criterion on `pcm` with SOA included, `f_age = M_SO4,cond/M_SO4,age-all + M_SOA,cond/M_SOA,age-all`, transferring that fraction of POA/BC/number to `acc`. `n_so4_monolayers` default 3.0 (Liu et al. 2012 supplement S1.1.5; ECHAM-HAM's `m7_coat` uses 1.0). | AER-03, AER-05 |
@@ -219,7 +219,8 @@ rather than working around it.
 same `g_h2so4` and the pair is genuinely stiff, but no measurement here
 yet justifies the cost. Revisit with a trigger, not a hunch: if AER-04
 shows a single step depleting `g_h2so4` by more than ~50 %, sub-cycle
-that pair. The driver is a fold over `self.processes`, so adding
+that pair. AER-03 publishes the measurement as
+`_modal_condensation_h2so4_depletion`. The driver is a fold over `self.processes`, so adding
 sub-cycling is a driver change, not an architecture change.
 
 ### D-A2 — nucleation scheme: BINARY **PLUS** PBL, NO TERNARY
@@ -305,6 +306,87 @@ configuration run float32, the same trap was in the brand-new
 every upstream parameter. Same failure class, same PR
 (`CLAUDE.md`, "related findings get rolled in"). Regression tests:
 `koehler_test.py`, `moments_test.py::test_empty_mode_is_finite…`.
+
+### AER-03: the formulation is MAM4's own, and it is not the one the supplement names
+
+The card was planned from the Liu et al. (2012) supplement, which says
+condensation is "integrated over the size distribution of each mode
+(Binkowski and Shankar, 1995)" — the harmonic mean of the free-molecular
+and near-continuum growth laws. MAM4's own documentation
+(`mam_doc_site/gas_aer_exch/`, seven pages, read 2026-10-01) describes
+the code that runs in E3SM, and it is different: the Fuchs–Sutugin
+integrand `f(Kn, α)·D_p` is integrated by **two-point Gauss–Hermite
+quadrature** after factoring out `D_p^β`, with `β` the integrand's local
+log-slope at the mode's **wet** geometric-mean diameter. The
+documentation is followed because it describes the implementation; the
+supplement's citation is the earlier CAM5 scheme. Pinned in
+`condensation_test.py` against brute-force integration of the same
+integrand (≤3 % at every mode bound, which is MAM's own verification
+tolerance for the two-point rule) and against the continuum limit
+`2πD·M₁`.
+
+Two further things the documentation settled that the supplement does
+not state:
+
+- **Chemical production is coupled into the condensation solve.** MAM4
+  solves `dq/dt = P* − q·ΣC` with the step-mean production `P*` because
+  sequential splitting of source and sink at climate-model steps was
+  shown to produce large errors (Wan et al. 2013; Wang et al. 2019). jcm's
+  additive split would commit exactly that error, so `SulfurGasChemistry`
+  now publishes `_h2so4_production` and the core reads it; the tendency
+  the core returns is the condensation part only, so the two sum
+  correctly. Pinned: with zero initial gas, condensation of what is
+  produced within the step is nonzero (the split would give zero).
+- **SOAG's coefficient is 0.81 of H₂SO₄'s**, from the Fuller ratio at
+  typical conditions with the SOAG diffusion volume scaled by molecular
+  weight; the equilibrium is `1e-10 mol/mol` at 298 K and 1 atm with
+  ΔH_vap = 156 kJ/mol, over SOA plus 10 % of POA taken as oxygenated.
+
+### AER-03: the sub-step scan is bounded, and MAM's loop is not
+
+MAM4 integrates the nonlinear SOA system with semi-implicit Euler and
+**adaptive, unbounded** sub-steps (each may move the most-imbalanced mode
+by at most α = 5 %). A data-dependent loop count is not
+reverse-differentiable, so here the same scheme runs inside a
+fixed-length `lax.scan`; a sub-step that finds no time remaining is a
+no-op, so the result is independent of the length whenever the adaptive
+count fits.
+
+Measured 2026-10-01 on a continental-strength population (number
+~1e9 kg⁻¹, dt = 1800 s): the result became **exactly** scan-length
+independent between 200 and 400 sub-steps in every SOAG regime, and a
+cap of 10 changed SOA masses by 10–50 %. The default is therefore 400,
+and `condensation_soag_substep_shortfall` publishes the fraction of the
+step the scan did not reach. **This is a known difference from MAM**: a
+more polluted column scales the demand with the total uptake
+coefficient, the cap will bind there, and the last sub-step is then
+oversized — unconditionally stable and conserving, but first-order. The
+diagnostic exists so that is visible, not silent. Pinned: shortfall is
+zero at the default and the result is bitwise identical at 800; at 10
+the shortfall is positive.
+
+### AER-03: MAM's 1e-20 safeguards are not float32-safe
+
+`numerics_SOA` floors the solvent amount and the gas/saturation scale at
+ε = 1e-20 mol/mol. The reverse-mode derivative of `x / max(y, ε)` carries
+`1/ε²`, and 1e-40 is below the smallest float32 subnormal — the same trap
+as AER-02, found the same way (a NaN gradient in float32, finite in
+float64, only when the gas tracers were absent and everything sat at the
+floors). MAM runs in float64 and never meets it. The floors here are
+**1e-15 mol/mol** (squares to 1e-30, a float32 normal; five orders below
+any SOAG amount that matters) and every division by a floored quantity
+goes through the double-`where` so the dead branch divides by 1.0.
+Pinned in float32 at an empty mode with no gas.
+
+### AER-03: the primary-carbon mode's condensate
+
+`pcm` carries no sulfate or SOA slot (`_PCARBON_SPECIES`) yet has surface
+area and takes up vapour like any mode. MAM moves that condensate to
+accumulation "along with" the aged carbon; the carbon transfer is AER-06
+and needs the deposited amount to compute `f_age`. So the condensate is
+routed to accumulation now and recorded, by species, in
+`ModalPopulation.coating`. This is also the sulfur leak the `mam4-jax`
+adapter had to close separately.
 
 ### The refactor is not bitwise, and here is exactly how much
 

@@ -227,7 +227,13 @@ class SulfurGasChemistry(PhysicsTerm):
     name: ClassVar[str] = "jam_sulfur_gas_chemistry"
     category: ClassVar[str] = "aerosol_gas_chemistry"
     requires: ClassVar[tuple[str, ...]] = ("oxidants", "pressure_full")
-    provides: ClassVar[tuple[str, ...]] = ()
+    # The step-mean H2SO4 production [kg/kg/s] is published for the modal
+    # microphysics core, which solves condensation with the source coupled
+    # in (MAM4's ``numerics_SO4``). Under jcm's additive split the core
+    # otherwise only sees the step-start gas, and sequential splitting of
+    # production and condensation at climate-model steps is the error MAM4
+    # was changed to avoid (Wan et al. 2013; Wang et al. 2019).
+    provides: ClassVar[tuple[str, ...]] = ("_h2so4_production",)
 
     def __init__(self, params: SulfurGasParameters | None = None):
         """Hold the (differentiable) chemistry knobs."""
@@ -264,4 +270,5 @@ class SulfurGasChemistry(PhysicsTerm):
             specific_humidity=jnp.zeros_like(state.specific_humidity),
             tracers=tends,
         )
-        return tendency, diagnostics
+        return tendency, {**diagnostics,
+                          "_h2so4_production": tends[gas_name("h2so4")]}
