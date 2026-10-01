@@ -1101,7 +1101,7 @@ def main(argv=None):
     arm.add_argument("--extra", nargs="+", action="extend", default=[],
                      metavar="OVERRIDE",
                      help="raw Hydra overrides appended last, e.g. "
-                          "+physics.convection.trigger_cape=150.0")
+                          "+physics.convection.entrpen=2e-4")
     k8s = ap.add_argument_group("Kubernetes sites")
     k8s.add_argument("--pin", action="append", default=[], metavar="jcm=REF",
                      help="the jcm commit the pod clones (default: the "
