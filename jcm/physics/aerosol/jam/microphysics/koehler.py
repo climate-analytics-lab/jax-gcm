@@ -19,12 +19,16 @@ import jax.numpy as jnp
 import jcm.constants as c
 
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
+from jcm.physics.aerosol.jam.microphysics import moments
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 
-#: Floors to keep radius/density/κ finite where a mode is empty.
-_TINY_NUM = 1.0e-30      # kg^-1
-_TINY_VOL = 1.0e-40      # m³/kg
+#: Floors that decide whether a mode is populated. The thresholds live in
+#: ``moments`` so the microphysics core and these diagnostics agree on what
+#: "empty" means; they are only ever used as ``where`` predicates here, never
+#: as divisors — see ``moments.diameter_from_volume`` for why that matters.
+_TINY_NUM = moments.TINY_NUMBER   # kg^-1
+_TINY_VOL = moments.TINY_VOLUME   # m³/kg
 
 
 def saturation_ratio(
@@ -84,24 +88,25 @@ def equilibrium_modal_state(
             total_vol = total_vol + v
             vol_kappa = vol_kappa + v * props.hygroscopicity
 
-        number = jnp.maximum(numbers[number_name(mode.short)], _TINY_NUM)
+        number = numbers[number_name(mode.short)]
 
-        # Volume-weighted κ and the DRY material density (guarded); the
-        # wet density follows once the growth factor is known.
-        safe_vol = jnp.maximum(total_vol, _TINY_VOL)
-        rho_dry = jnp.where(
-            total_vol > _TINY_VOL, total_mass / safe_vol, default_density)
-        kappa = jnp.where(total_vol > _TINY_VOL, vol_kappa / safe_vol, 0.0)
+        # Volume-weighted κ and the DRY material density. Double-where, not
+        # a floored divisor: ``mass / max(vol, tiny)`` has reverse-mode
+        # cotangent ``-mass / tiny^2``, and ``1e-80`` underflows in float32,
+        # so an empty mode gave NaN gradients for rho, kappa and r_wet
+        # (measured 2026-10-01; finite in float64). The unselected branch
+        # divides by 1.0 and the result is masked, which is finite in both.
+        has_volume = total_vol > _TINY_VOL
+        safe_vol = jnp.where(has_volume, total_vol, 1.0)
+        rho_dry = jnp.where(has_volume, total_mass / safe_vol, default_density)
+        kappa = jnp.where(has_volume, vol_kappa / safe_vol, 0.0)
 
-        # Number-median dry diameter from total volume of a log-normal mode:
-        #   V = N (π/6) Dg³ exp(9/2 ln²σ)   →   Dg = (V / (N k))^(1/3)
-        ln_sigma = jnp.log(mode.geom_std_dev)
-        k = (jnp.pi / 6.0) * jnp.exp(4.5 * ln_sigma ** 2)
-        dg_cubed = total_vol / (number * k)
-        dg = jnp.cbrt(jnp.maximum(dg_cubed, mode.dgnum_lo ** 3))
-        dg = jnp.clip(dg, mode.dgnum_lo, mode.dgnum_hi)
+        # Number-median dry diameter from the mode's total volume: the
+        # log-normal M_3 inversion, owned by ``moments`` so the microphysics
+        # core and this diagnostic cannot disagree about it.
+        dg = moments.diameter_from_volume(total_vol, number, mode)
         # Empty mode → fall back to the mode's reference diameter.
-        dg = jnp.where(total_vol > _TINY_VOL, dg, mode.dgnum)
+        dg = jnp.where(has_volume, dg, mode.dgnum)
         r_dry = 0.5 * dg
 
         # κ-Köhler sub-saturated growth factor (Petters & Kreidenweis 2007,

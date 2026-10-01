@@ -75,7 +75,7 @@ Dependencies in brackets. Each card is implement → review → full gates.
 | Card | Title | Deps |
 |---|---|---|
 | **AER-01** | ✅ `JamModalMicrophysics` skeleton: subclass, `spec = MAM4_SPEC`, process-order scaffold, `_jam_state` via the shared κ-Köhler diagnostics (moved to `koehler.py`), zero tendency, bitwise-equal to `PlaceholderMicrophysics`. Classified in `layout_audit_test.py` — that could not wait for AER-08, since the roster assertion fails on any unclassified `PhysicsTerm`. | — |
-| **AER-02** | Modal moment helpers: dry/wet diameter from mass+number, mode surface area, the M₀/M₃ conversions every later card needs. Property tests (moment self-consistency, σ_g invariance). | AER-01 |
+| **AER-02** | ✅ `moments.py`: log-normal moment algebra — `moment`/`moment_factor`, the M₃ pair `volume_from_diameter`/`diameter_from_volume`, `surface_area` (π·M₂), `mode_volume`/`mode_mass`. `koehler.py` now delegates its diameter inversion here, so the core and the diagnostics cannot disagree about it. Property tests against brute-force quadrature. **Rolled in:** the float32 NaN-gradient trap at empty modes (§9). | AER-01 |
 | **AER-03** | A2 condensation: Seinfeld & Pandis mass transfer integrated over each mode's size distribution (Binkowski & Shankar 1995), accommodation coefficient 0.65 for H₂SO₄ (Pöschl et al. 1998). H₂SO₄ irreversible, SOA reversible. Must also record the soluble mass deposited on `pcm` — AER-06 consumes it (D-A1). Conserves S and C to rounding. | AER-02 |
 | **AER-04** | A1 nucleation: binary H₂SO₄–H₂O (Vehkamäki et al. 2002) **plus** the PBL first-order pathway (Sihto et al. 2006, 1.0×10⁻⁶ s⁻¹), with Kerminen & Kulmala (2002) survival to the Aitken lower bound. Competes with AER-03 for the same `g_h2so4`. Settles the PBL-height sub-decision in D-A2. | AER-03 |
 | **AER-05** | A3 coagulation: CMAQ v4.6 fast/approximate algorithms (Binkowski & Roselle 2003). **Aitken, accumulation and primary-carbon only** — MAM neglects coagulation involving coarse and larger modes as much slower. Aitken↔pcm also ages, so this feeds AER-06. | AER-02 |
@@ -269,6 +269,57 @@ the first step). Two options, to settle in AER-04:
 
 (a) is the lighter option and the likely answer, but it needs the
 first-step behaviour pinned down before it is chosen.
+
+### Terminology (2026-10-01)
+
+The H₂SO₄-vapour new-particle process is called **new-particle formation
+(NPF)** in prose from here on. "Condensation nuclei activation" is a
+*different* process — particles becoming droplets — and is what the
+existing `ArgActivation` term already implements, so using it for NPF
+would mislabel the physics. The function in `modal.py` keeps the name the
+MAM literature uses; AER-04 is the card that implements it.
+
+## 9. Findings rolled in from AER-02
+
+### The float32 NaN-gradient trap at empty modes
+
+Measured 2026-10-01, before any fix, with `jax.grad` through
+`equilibrium_modal_state` at an accumulation mode with zero mass or zero
+number:
+
+| dtype | `r_dry` | `rho` | `kappa` | `r_wet` |
+|---|---|---|---|---|
+| float32 | NaN (∂/∂number) | NaN (∂/∂mass) | NaN (∂/∂mass) | NaN (both) |
+| float64 | finite | finite | finite | finite |
+
+Cause: a floored divisor, `x / max(y, tiny)`. Its reverse-mode cotangent
+is `-x / max(y, tiny)²`, and `tiny²` (1e-60, 1e-80) underflows to zero in
+float32, giving `0/0`. `jnp.where` does not rescue it — the unselected
+branch's cotangent is `NaN × 0 = NaN`. The fix is the standard double
+`where`: divide by a harmless `1.0` in the unselected branch and mask the
+*result*. Forward values are unchanged on every populated mode.
+
+Float32-only, and the user runs float64 — but CI and the default
+configuration run float32, the same trap was in the brand-new
+`diameter_from_volume`, and a NaN cotangent at one empty mode reaches
+every upstream parameter. Same failure class, same PR
+(`CLAUDE.md`, "related findings get rolled in"). Regression tests:
+`koehler_test.py`, `moments_test.py::test_empty_mode_is_finite…`.
+
+### The refactor is not bitwise, and here is exactly how much
+
+Pointing `koehler` at `moments.diameter_from_volume` was meant to be
+bitwise-neutral and was measured instead of assumed. `rho`, `kappa`,
+`mass`, `number`: **identical** in both dtypes. `r_dry`, `r_wet`:
+**1 ulp in float32** (3.6e-15 on 1e-7), **~2.6 ulp in float64** (5.8e-16
+relative). The source is the σ_g moment constant — the old code evaluated
+`(π/6)·exp(4.5·ln²σ)` with `jnp` in the working dtype; `moments` evaluates
+`0.5·k²·ln²σ` with `math` in float64 and casts. Different association,
+different `exp` implementation, last-digit difference. No reference
+rounding exists to prefer, every consumer's test tolerance is ≥1e-6, and
+keeping two definitions of the M₃ inversion is the drift this card exists
+to remove — so the shift is accepted and recorded rather than hidden
+behind a bitwise claim it would not survive.
 
 ### D-A3, D-A4 — still open
 
