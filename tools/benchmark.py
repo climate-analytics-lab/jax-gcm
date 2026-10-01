@@ -303,6 +303,32 @@ def _auto_ozone_files(cfg) -> list[str]:
     return ["hf://" + mm.bundle_path(manifest, product, token, int(nlev))]
 
 
+def _auto_terrain_files(cfg) -> list[str]:
+    """``hf://`` terrain bundle ``terrain.kind=auto`` falls back to.
+
+    The same lazy-resolution gap :func:`_auto_ozone_files` covers: ``auto``
+    resolves inside model construction to the packaged
+    ``jcm/data/bc/<grid>/terrain.nc`` when its shape matches, else to the
+    mirror's ``bundles/<grid>/terrain.nc``
+    (``jcm.forcing_assembly._resolve_auto_terrain``), and the literal-path walk
+    cannot see either. jcm raises when neither exists, so a cold cache is a hard
+    failure the prefetch can prevent -- the T106 members hit it.
+
+    A grid whose truncation has a packaged terrain file is left to the packaged
+    stage (the mirror bundle exists for it too, but the run never opens it), so
+    the only grids enumerated are the ones that must come from the mirror.
+    """
+    if str((cfg.get("terrain") or {}).get("kind", "")) != "auto":
+        return []
+    trunc = (cfg.get("grid") or {}).get("spectral_truncation")
+    if trunc is None:
+        return []
+    token = f"t{int(trunc)}"
+    if (REPO / "jcm" / "data" / "bc" / token / "terrain.nc").exists():
+        return []
+    return [f"hf://bundles/{token}/terrain.nc"]
+
+
 # Per-product ``available_years`` override each ``{year}`` forcing key honours,
 # mirroring ``jcm.runners._product_available_years`` — a preset may mix yearly
 # products with different coverage (era5 surface files run to 2024 while the
@@ -334,9 +360,9 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
     Walks the COMPOSED forcing/terrain/dycore config for keys ending in
     ``file`` and returns the concrete paths, skipping ``auto``/``null``/``none``
     (resolved lazily at build time) and unset ``???`` values — then ADDS the
-    ``auto`` emission and ozone bundles resolved lazily at build time (see
-    :func:`_auto_emission_files`, :func:`_auto_ozone_files`), which the
-    ``file``-key walk cannot see.
+    ``auto`` emission, ozone and terrain bundles resolved lazily at build time
+    (see :func:`_auto_emission_files`, :func:`_auto_ozone_files`,
+    :func:`_auto_terrain_files`), which the ``file``-key walk cannot see.
 
     A ``{year}`` pattern (transient emissions/oxidants/ozone/surface bundles)
     is EXPANDED to its concrete yearly files here — over ``forcing.years`` and
@@ -409,6 +435,7 @@ def _preset_data_files(overrides: list[str]) -> list[str]:
             _add(v, _available_for(k) if group == "forcing" else None, k)
     out += _auto_emission_files(cfg)
     out += _auto_ozone_files(cfg)
+    out += _auto_terrain_files(cfg)
     return out
 
 

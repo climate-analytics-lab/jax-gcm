@@ -14,6 +14,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from benchmark import (  # noqa: E402
     PRESETS,
     _auto_emission_files,
+    _auto_terrain_files,
     _compose_preset,
     _preset_data_files,
     _summarize_gpu,
@@ -202,6 +203,42 @@ _MIRROR_EMISSION_BUNDLES = frozenset(
     + [f"hf://bundles/{g}_l{lv}/oxidants_pd.nc"
        for g in ("t63", "t106") for lv in (47, 95)]
 )
+
+
+class AutoTerrainPrefetchTest(unittest.TestCase):
+    """``terrain=auto`` falls back to the mirror bundle when nothing is packaged.
+
+    The T106 release-matrix members use ``terrain: auto`` and have no packaged
+    terrain, so their orography is fetched at model construction. The prefetch
+    must enumerate it, or a node without network fails after claiming a GPU.
+    """
+
+    def test_grid_without_packaged_terrain_prefetches_the_mirror_bundle(self):
+        for name in ("t106-echam-1m", "t106-echam-2m"):
+            with self.subTest(name):
+                cfg = _compose_preset(PRESETS[name])
+                self.assertEqual(_auto_terrain_files(cfg),
+                                 ["hf://bundles/t106/terrain.nc"])
+                self.assertIn("hf://bundles/t106/terrain.nc",
+                              _preset_data_files(PRESETS[name]))
+
+    def test_grid_with_packaged_terrain_prefetches_nothing(self):
+        """T63 resolves to ``jcm/data/bc/t63/terrain.nc``; the run never opens
+        the mirror copy, so warming it would only add a failure mode.
+        """
+        cfg = _compose_preset(PRESETS["t63-echam-1m"])
+        self.assertEqual(_auto_terrain_files(cfg), [])
+        self.assertNotIn("hf://bundles/t63/terrain.nc",
+                         _preset_data_files(PRESETS["t63-echam-1m"]))
+
+    def test_explicit_terrain_file_is_not_enumerated_twice(self):
+        """A preset naming its terrain (``kind: from_file``) is covered by the
+        literal-path walk alone.
+        """
+        cfg = _compose_preset(PRESETS["ma-t63-l47"])
+        self.assertEqual(_auto_terrain_files(cfg), [])
+        files = _preset_data_files(PRESETS["ma-t63-l47"])
+        self.assertEqual(files.count("hf://bundles/t63/terrain.nc"), 1)
 
 
 class AutoEmissionPrefetchTest(unittest.TestCase):
