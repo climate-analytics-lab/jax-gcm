@@ -1388,14 +1388,16 @@ JAM mixed-phase freezing follows ECHAM-HAM
 - **New output:** ``freezing_aerosol.*`` (the eight HAM freezing inputs);
   ``CloudParams2M`` gains the differentiable ``immersion_coefficient_dust``
   (32.3) and ``immersion_coefficient_bc`` (2.91e-3).
-- The 2M scheme's default ice aggregation coefficient ``ccsaut`` is ECHAM's
-  generic 95 (``mo_echam_cloud_params.f90``), which the JAM members take.
-  ECHAM-HAM's 900 (``mo_activ.f90``) is a retune for HAM's own aerosol and
+- ``CloudParams2M.default()`` sets the ice aggregation coefficient
+  ``ccsaut`` to ECHAM's generic 95 (``mo_echam_cloud_params.f90``) instead of
+  ECHAM-HAM's 900, and the JAM members take it. ECHAM-HAM's 900
+  (``mo_activ.f90``) is a retune for HAM's own aerosol and
   its insoluble dust mode, which MAM4 does not reproduce. The value is a
   tuning target of the #682 retune. ``ccraut`` keeps ECHAM-HAM's 10.6: it
   acts on droplets from AR&G activation, which JAM runs. The 2M presets
   already set 95 and 15, so the ``echam-2m`` members are unchanged; a 2M
-  scheme built in Python without a preset gets 95 instead of 900.
+  scheme built in Python without a preset gets 95 instead of 900 (see
+  :doc:`v2_to_v3`).
 - **Changes results** for the JAM members. Days 5-10 of 10-day
   ``t63-echam-jam`` runs from a state ten days past a cold start (T63L47,
   January), with dev at ``2dc609fd`` against this change at ``2366def6``:

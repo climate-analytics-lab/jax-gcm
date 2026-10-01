@@ -753,6 +753,12 @@ Other config-surface changes
 * **The L40 vertical table is deleted.** Its truncated ``vct`` put the model
   top at 274 hPa. ``40`` is gone from both supported-count lists and
   ``get_echam_levels`` asserts a composed top below 1000 Pa.
+* **2M aggregation and autoconversion defaults.** ``CloudParams2M.default()``
+  uses ECHAM's generic ``ccsaut = 95``, as in v2; v3 development builds used
+  ECHAM-HAM's 900. It also uses ECHAM-HAM's prognostic-CDNC ``ccraut = 10.6``
+  instead of v2's 15. The ``echam-2m`` presets set 95 and 15 themselves, so
+  only a 2M scheme built in Python without a preset, and the JAM members,
+  see the ``ccraut`` change.
 * **New config-trap warnings** (warnings, never errors) fire on: JAM with
   aquaplanet terrain; ``forcing=from_file`` with aquaplanet terrain; a
   prognostic aerosol module with every emission input explicitly nulled;
