@@ -53,6 +53,7 @@ records the size of the difference at MAM4 geometry.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import jax.numpy as jnp
@@ -356,6 +357,5 @@ def coagulate(population, env, spec, params=None):
     diagnostics["coagulation_aitken_mass_fraction"] = aitken_fraction
     diagnostics["coagulation_aitken_share_to_pcm"] = pcm_share
     diagnostics["coagulation_pcm_mass_fraction"] = pcm_fraction
-    return population.__class__(
-        masses=masses, numbers=numbers, gases=dict(population.gases),
-        coating=coating, diagnostics=diagnostics)
+    return dataclasses.replace(
+        population, masses=masses, numbers=numbers, coating=coating, diagnostics=diagnostics)

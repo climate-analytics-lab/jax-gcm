@@ -80,7 +80,7 @@ Dependencies in brackets. Each card is implement → review → full gates.
 | **AER-04** | ✅ `new_particle_formation.py`: NPF from MAM4's own documentation — binary H₂SO₄–H₂O (Vehkamäki et al. 2002 polynomials, validity clipping as MAM does it) **plus** the PBL first-order pathway (Sihto et al. 2006, 1.0×10⁻⁶ s⁻¹, 1 nm pure-acid clusters) below max(PBL top, 100 m), the larger rate winning; Kerminen & Kulmala (2002) survival to the Aitken lower bound with MAM's condensation sink from AER-03's summed uptake coefficient and the step-mean H₂SO₄; MAM's vapour-availability clipping. PBL height taken lagged — sub-decision (a) in D-A2, adopted. **Rolled in:** AER-03's gas update rewritten so the vapour can never go negative by rounding (§9). 18 tests. | AER-03 |
 | **AER-05** | ✅ `coagulation.py`: MAM4's coagulation from E3SM's `modal_aero_coag.F90` (the MAM doc-site pages are stubs; §9) — CMAQ v4.6 fast coefficients (Whitby et al. 1991 analytic moment integrals, Binkowski & Roselle 2003 correction tables in `coagulation_tables.py`, harmonic mean of the free-molecular and near-continuum limits) on the wet κ-Köhler state; semi-analytic number loss (receiver first, donors at the receivers' step-mean numbers); first-order volume transfer. **Aitken, accumulation and primary-carbon only** — MAM neglects coagulation involving coarse as much slower. Aitken mass goes to accumulation whichever partner it hit; the primary-carbon share of its sulfate and SOA is recorded in `coating` for AER-06. Checked against the monodisperse closed forms (exact) and brute-force quadrature (+3…+7 % at MAM4 geometry; §9). No tunables. 21 tests. | AER-02 |
 | **AER-06** | ✅ `ageing.py`: MAM4's primary-carbon ageing from E3SM's `modal_aero_gasaerexch.F90` (and its duplicate in `modal_aero_coag.F90`) — the sulfate-plus-equivalent-SOA shell deposited this step (`coating`, written by AER-03 and AER-05), as a thickness over the mode's surface (`6 e^{-2.5 ln²σ}/D_g`), against `n_so4_monolayers` of 4.76 Å; that fraction of POA, BC, marine organics and number moves to accumulation; SOA weighted by κ_SOA/κ_SO4. Runs once, last, on the sum of both deposits (D-A1). **Default `n_so4_monolayers = 8`, not the 3 this card first said** — 3 is MAM7's (Liu et al. 2012); MAM4 uses 8 (Liu et al. 2016 §2, and both E3SM's and CESM's sources; §9). **Rolled in:** the `1 − 10ε` transfer cap is dtype-aware (it was exactly 1.0 in float32 in AER-05 too). 14 tests. | AER-03, AER-05 |
-| **AER-07** | ✅ `rename.py`: MAM4's renaming from E3SM's `modal_aero_rename.F90` (doc-site page is a stub; §9) — after gas-aerosol exchange, the Aitken tail above `D_cut = √(D_v,ait · D_v,acc)` (≈55 nm) moves to accumulation: volume fraction `[F_v(D_new)V_new − F_v(D_old)V_old]/V_new`, number fraction `F_n(D_new) − F_n(D_old)` capped by it, erfc tail integrals; MAM's guards (empty, no growth, below reference diameter, relaxed number bounds ×27, guaranteed transfer past the cut). Growth measured against the new `env.dry_volume_start`. Interstitial only — cloud-borne renaming is **D-A5**. No tunables. 12 tests. | AER-02 |
+| **AER-07** | ✅ `rename.py`: MAM4's renaming from E3SM's `modal_aero_rename.F90` (doc-site page is a stub; §9) — after gas-aerosol exchange, the Aitken tail above `D_cut = √(D_v,ait · D_v,acc)` (≈55 nm) moves to accumulation: volume fraction `[F_v(D_new)V_new − F_v(D_old)V_old]/V_new`, number fraction `F_n(D_new) − F_n(D_old)` capped by it, erfc tail integrals; MAM's guards (empty, no growth, below reference diameter, relaxed number bounds ×27, guaranteed transfer past the cut). Growth measured against the new `env.dry_volume_start`. Both phases, from the combined volume (D-A5, adopted). No tunables. 16 tests. | AER-02 |
 | **AER-08** | Wire `jam_microphysics="modal"` through `echam_physics()` and the Hydra config. (Classification landed in AER-01.) | AER-01, D-A4 |
 | **AER-09** | Conservation gates: per-process sulfur/carbon/number budgets as a ledger, asserted in tests. | AER-03..07 |
 | **AER-10** | Science doc + release note; `jam.md` cross-links; reference verification (§7). | AER-09 |
@@ -282,6 +282,42 @@ on a quantity that varies over hours is accepted and pinned by a test
 above the surface comes from `MoistAirColumnState`'s `height_full` minus
 the surface `height_half`, with the geopotential as fallback. (b) stays
 available if a run without TTE-TKE ever needs the pathway above 100 m.
+
+### D-A5 — cloud-borne renaming: IN-CORE, MAM-FAITHFUL (decided 2026-10-01)
+
+MAM computes the renaming fractions once from the combined interstitial
++ cloud-borne Aitken volume and number and applies them to both phases.
+Three options were weighed: (a) renaming in the core on the combined
+population, moving the cloud-borne half through the carry store in the
+same step; (b) a separate post-core term applying fractions the core
+publishes; (c) accepting the gap and relying on resuspension. **(a) is
+adopted.** What settled it:
+
+- The carry store (`cloud_borne_store.py`) is written by a *pre-core*
+  term and read/updated through `tracer_view`/`apply_updates` by any
+  term, so the core can move cloud-borne Aitken in the same step with no
+  lag and no new term — the `AqueousSulfur` pattern, including
+  `_jam_cloud_borne` in `requires` when `spec.cloud_borne`.
+- The GPL `Mam4JaxMicrophysics` adapter packs `qqcw` and reads back
+  cloud-borne tendencies, so the AER-12 reference renames cloud-borne;
+  (c) would have been a standing A/B difference.
+- MAM's second renaming call, after aqueous chemistry, is moot in jcm:
+  `AqueousSulfur` puts its product in cloud-borne accumulation and
+  coarse only, never Aitken, so there is no cloud-borne Aitken growth
+  to rename. Only the exchange-driven call is reproduced.
+
+Implementation: `ModalPopulation.cloud_borne` carries the mirrors
+through the fold (every process now returns via `dataclasses.replace`,
+so a field only one process touches survives the others); renaming
+forms the combined volume and number and moves both phases by the same
+fractions; the driver books the cloud-borne change to the store as a
+rate via `apply_updates`, never to the tracer tendency, and only when
+the store exists (the structural probe runs before the store term).
+The store module is imported lazily in `modal.py`: the JAM package
+imports it before the core, and a module-level import closed a cycle.
+Pinned by `CloudBorneTest` (fractions against the per-cell
+transcription with combined inputs, both-phase conservation, the store
+booking through the driver, and the probe without a store).
 
 ### Terminology (2026-10-01)
 
@@ -643,7 +679,7 @@ renaming runs — `env.dry_volume_start`, a per-mode field the driver now
 computes before the fold — which in D-A1's order is exactly the
 gas-aerosol exchange step's deposit. Number is unchanged by exchange, so
 the old and new diameters share it, as in MAM. The cloud-borne half is
-D-A5.
+D-A5, adopted in-core (§8).
 
 ### AER-07: float32 and the finite-difference check
 
@@ -664,24 +700,10 @@ deleted process by process; with AER-07 its list is empty and it is
 removed. What remains of the AER-01 criterion is the clean-atmosphere
 equivalence to the placeholder, which still holds.
 
-### D-A3, D-A4, D-A5 — still open
+### D-A3, D-A4 — still open
 
 - **D-A3 — validation reference.** Is installing GPL `mam4-jax` into a
   throwaway venv for AER-12 acceptable as a *test-only* comparison, given
   it is never imported by shipped code?
 - **D-A4 — default switch.** Does `jam_microphysics` stay `"placeholder"`
   after AER-08, with `"modal"` opt-in until validated?
-- **D-A5 — cloud-borne renaming (from AER-07).** MAM renames the
-  cloud-borne Aitken particles with the same fractions as the
-  interstitial ones (computed from the combined volume), and renames
-  again after stratiform aqueous chemistry. This core owns the
-  interstitial population only; the cloud-borne phase lives in
-  `cloud_borne.py` and the aqueous pathway in `chemistry/aqueous.py`.
-  Options: (a) publish the renaming fractions as diagnostics and have
-  the cloud-borne store apply them (one step lagged, like the PBL
-  height); (b) extend the core's population with the cloud-borne
-  tracers; (c) accept the gap and let resuspension return the
-  cloud-borne Aitken to the interstitial pool where the next step
-  renames it. (c) is what runs today; it under-renames by the activated
-  Aitken fraction, which is small for a mode whose particles mostly do
-  not activate. Settle before AER-10's science doc.

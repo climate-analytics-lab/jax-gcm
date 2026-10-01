@@ -53,6 +53,7 @@ discrepancy with the plan's earlier reading of the supplement.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import jax.numpy as jnp
@@ -172,6 +173,5 @@ def age(population, env, spec, params):
 
     diagnostics["ageing_fraction"] = fraction
     diagnostics["ageing_shell_volume"] = shell_volume
-    return population.__class__(
-        masses=masses, numbers=numbers, gases=dict(population.gases),
-        coating={}, diagnostics=diagnostics)
+    return dataclasses.replace(
+        population, masses=masses, numbers=numbers, coating={}, diagnostics=diagnostics)

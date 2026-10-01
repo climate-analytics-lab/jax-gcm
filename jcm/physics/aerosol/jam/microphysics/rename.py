@@ -32,13 +32,14 @@ step with the volume cannot produce an absurd diameter; and when
 :math:`D_{new}` is already past the cut, :math:`D_{old}` is taken no
 larger than :math:`0.99 D_{cut}` to guarantee some transfer.
 
-**What this core does and does not rename.** The population here is the
-interstitial one; MAM renames the cloud-borne Aitken particles with the
-same fractions (from the combined interstitial + cloud-borne volume),
-and MAM also renames after stratiform aqueous chemistry. Neither is
-done here: the cloud-borne phase is owned by ``cloud_borne.py`` and the
-aqueous pathway by ``chemistry/aqueous.py``, outside this core. Recorded
-as an open item in the design doc (D-A5), not silently dropped.
+**Both phases.** MAM computes the fractions once from the combined
+interstitial + cloud-borne volume and number of the Aitken mode and
+applies them to both phases; so does this (D-A5). The cloud-borne part
+does not grow during gas-aerosol exchange, so it enters the old and the
+new volume alike. MAM also renames after stratiform aqueous chemistry;
+jcm's ``AqueousSulfur`` puts its product into the cloud-borne
+accumulation and coarse modes only, never Aitken, so that call has
+nothing to act on here and is not reproduced.
 
 The growth this process sees is whatever ran before it in the step —
 gas-aerosol exchange, in D-A1's order — measured as the change in the
@@ -48,6 +49,7 @@ and the 1e-6 growth threshold are numerical guards, not physics.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import jax.numpy as jnp
@@ -152,29 +154,49 @@ def rename_aitken(population, env, spec, params=None):
             "before the continuous-growth processes ran")
     masses = dict(population.masses)
     numbers = dict(population.numbers)
+    cloud_borne = dict(population.cloud_borne)
     diagnostics = dict(population.diagnostics)
 
     donor = spec.mode("aitken")
     receiver = spec.mode("accum")
-    volume_new = moments.mode_volume(masses, donor, spec)
-    volume_old = env.dry_volume_start[donor.short]
+    zeros = jnp.zeros_like(env.temperature)
+
+    def cb_mass(species, mode):
+        return cloud_borne.get(mass_name(species, mode.short, cloud_borne=True), zeros)
+
+    def cb_number(mode):
+        return cloud_borne.get(number_name(mode.short, cloud_borne=True), zeros)
+
+    # Cloud-borne volume is unchanged by exchange: in both old and new.
+    volume_cloud_borne = zeros
+    for species in donor.species:
+        volume_cloud_borne = volume_cloud_borne + jnp.maximum(
+            cb_mass(species, donor), 0.0) / spec.species_props(species).density
+    volume_new = moments.mode_volume(masses, donor, spec) + volume_cloud_borne
+    volume_old = env.dry_volume_start[donor.short] + volume_cloud_borne
+    number = numbers[number_name(donor.short)] + jnp.maximum(cb_number(donor), 0.0)
     volume_fraction, number_fraction = transfer_fractions(
-        volume_old, volume_new, numbers[number_name(donor.short)], donor, receiver)
+        volume_old, volume_new, number, donor, receiver)
+
+    def move(store, source, target, fraction):
+        if source not in store:
+            return
+        moved = jnp.maximum(store[source], 0.0) * fraction
+        store[source] = store[source] - moved
+        if target in store:        # MAM aborts at init if a slot is missing
+            store[target] = store[target] + moved
 
     for species in donor.species:
-        source = mass_name(species, donor.short)
-        moved = jnp.maximum(masses[source], 0.0) * volume_fraction
-        masses[source] = masses[source] - moved
-        target = mass_name(species, receiver.short)
-        if target in masses:        # MAM aborts at init if a slot is missing
-            masses[target] = masses[target] + moved
-    source = number_name(donor.short)
-    moved = jnp.maximum(numbers[source], 0.0) * number_fraction
-    numbers[source] = numbers[source] - moved
-    numbers[number_name(receiver.short)] = numbers[number_name(receiver.short)] + moved
+        move(masses, mass_name(species, donor.short),
+             mass_name(species, receiver.short), volume_fraction)
+        move(cloud_borne, mass_name(species, donor.short, cloud_borne=True),
+             mass_name(species, receiver.short, cloud_borne=True), volume_fraction)
+    move(numbers, number_name(donor.short), number_name(receiver.short), number_fraction)
+    move(cloud_borne, number_name(donor.short, cloud_borne=True),
+         number_name(receiver.short, cloud_borne=True), number_fraction)
 
     diagnostics["rename_volume_fraction"] = volume_fraction
     diagnostics["rename_number_fraction"] = number_fraction
-    return population.__class__(
-        masses=masses, numbers=numbers, gases=dict(population.gases),
-        coating=dict(population.coating), diagnostics=diagnostics)
+    return dataclasses.replace(
+        population, masses=masses, numbers=numbers, cloud_borne=cloud_borne,
+        diagnostics=diagnostics)

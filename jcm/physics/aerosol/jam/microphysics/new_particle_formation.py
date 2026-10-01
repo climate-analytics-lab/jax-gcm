@@ -54,6 +54,7 @@ boundary of :func:`form_new_particles`.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import jax.numpy as jnp
@@ -318,6 +319,5 @@ def form_new_particles(population, env, spec, params):
 
     diagnostics["npf_rate_apparent"] = apparent
     diagnostics["npf_boundary_layer_pathway"] = use_pbl.astype(temperature.dtype)
-    return population.__class__(
-        masses=masses, numbers=numbers, gases=gases,
-        coating=dict(population.coating), diagnostics=diagnostics)
+    return dataclasses.replace(
+        population, masses=masses, numbers=numbers, gases=gases, diagnostics=diagnostics)

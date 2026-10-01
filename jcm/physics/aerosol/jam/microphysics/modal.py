@@ -58,6 +58,18 @@ from jcm.physics.aerosol.jam.tracer_layout import (
 from jcm.physics_interface import PhysicsTendency
 
 
+def _store():
+    """Import the cloud-borne store lazily.
+
+    ``cloud_borne_store`` imports ``microphysics.mam4_data``, which runs
+    this package's ``__init__``, which imports this module: a module-level
+    import of the store here closes that cycle and fails at package import
+    with a partially initialised ``cloud_borne_store``.
+    """
+    from jcm.physics.aerosol.jam import cloud_borne_store
+    return cloud_borne_store
+
+
 @dataclasses.dataclass(frozen=True)
 class MicrophysicsEnvironment:
     """Per-step ambient fields the processes share.
@@ -111,6 +123,12 @@ class ModalPopulation:
     #: Gas-phase precursors ``g_<species>`` [kg/kg]; condensation and
     #: new-particle formation consume them.
     gases: dict[str, jnp.ndarray] = dataclasses.field(default_factory=dict)
+    #: Cloud-borne mirrors ``mc_<sp>_<mode>`` / ``nc_<mode>`` read from the
+    #: carry store (D-A5); empty for a population without the explicit
+    #: phase. Only renaming writes them — the other processes act on the
+    #: interstitial phase, as in MAM — and the driver books the change to
+    #: the store, not to the tracer tendency.
+    cloud_borne: dict[str, jnp.ndarray] = dataclasses.field(default_factory=dict)
     #: Soluble mass [kg/kg] deposited on the primary-carbon mode this step,
     #: by species. Written by condensation and coagulation, read by ageing
     #: (D-A1): MAM computes the aged fraction inside those two processes,
@@ -163,8 +181,9 @@ def rename(population, env, spec, params):
     Aitken sizes without bound. The supplement to Liu et al. (2012) is
     explicit that this runs *after* continuous growth, which is what fixes
     its position behind ``gas_aerosol_exchange`` here; the growth is
-    measured against ``env.dry_volume_start``. Interstitial only — the
-    cloud-borne renaming is D-A5. No tunables; ``params`` is ``None``.
+    measured against ``env.dry_volume_start``. The fractions come from the
+    combined interstitial + cloud-borne volume and move both phases, as in
+    MAM (D-A5). No tunables; ``params`` is ``None``.
 
     Implemented in :mod:`~jcm.physics.aerosol.jam.microphysics.rename`.
     """
@@ -298,6 +317,10 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         """
         if spec is not None:
             self.spec = spec
+        # Renaming moves the cloud-borne Aitken particles too (D-A5), read
+        # from and written to the carry store the way ``AqueousSulfur`` does.
+        if self.spec.cloud_borne:
+            self.requires = (*type(self).requires, _store().CARRY_KEY)
         self.processes = PROCESS_ORDER if processes is None else tuple(processes)
         # Held in an nnx.Param so every numeric tunable is a gradient-visible
         # leaf (CLAUDE.md: physics parameters are differentiable like all
@@ -321,8 +344,8 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
             "carbonaceous_ageing": self.ageing.get_value(),
         }
 
-    def _gather(self, state) -> ModalPopulation:
-        """Read the population out of ``state.tracers``.
+    def _gather(self, state, diagnostics) -> ModalPopulation:
+        """Read the population out of ``state.tracers`` and the carry store.
 
         Absent tracers fall back to zeros: ``state.tracers`` is empty during
         ``Model.get_empty_data``'s structural probe, and the key set has to
@@ -353,7 +376,16 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
             gas_name(gas): state.tracers.get(gas_name(gas), zeros)
             for gas in SULFUR_GASES
         }
-        return ModalPopulation(masses=masses, numbers=numbers, gases=gases)
+        # Cloud-borne mirrors from the carry store (D-A5); the static key
+        # set again, zeros before the store term has run (the probe).
+        store = _store()
+        view = store.tracer_view(self.spec, state, diagnostics)
+        cloud_borne = {
+            name: view.get(name, zeros)
+            for name in (store.mirror_names(self.spec) if self.spec.cloud_borne else ())
+        }
+        return ModalPopulation(masses=masses, numbers=numbers, gases=gases,
+                               cloud_borne=cloud_borne)
 
     @staticmethod
     def _height_above_surface(state, diagnostics):
@@ -385,7 +417,7 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         return vdiff.pbl_height
 
     def __call__(self, state, diagnostics, forcing, terrain):
-        before = self._gather(state)
+        before = self._gather(state, diagnostics)
         pressure = diagnostics["pressure_full"]
         # Injected by ComposablePhysics; the fallback mirrors the other JAM
         # terms (cloud_borne.py, wetdep_term.py, drydep_term.py).
@@ -437,6 +469,17 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
                 tracers[key] = (new[key] - old[key]) / dt
         tendency = PhysicsTendency.zeros(state.temperature.shape,
                                          tracers=tracers)
+        # The cloud-borne change goes to the carry store as a rate, the
+        # way every other cloud-borne writer books it (D-A5) — only when
+        # the store is there: ``apply_updates`` would otherwise invent one,
+        # and in the structural probe (no store term has run) the gathered
+        # mirrors are zeros and there is nothing to book anyway.
+        if before.cloud_borne and _store().CARRY_KEY in diagnostics:
+            diagnostics, _ = _store().apply_updates(
+                self.spec, diagnostics,
+                {key: (after.cloud_borne[key] - before.cloud_borne[key]) / dt
+                 for key in before.cloud_borne},
+                dt)
         published = {
             f"_modal_{key}": value for key, value in after.diagnostics.items()
         }

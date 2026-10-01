@@ -203,7 +203,7 @@ class TendencySeamTest(unittest.TestCase):
         term = JamModalMicrophysics()
         tendency, _ = term(state, diagnostics, None, None)
         # Reproduce the driver's fold by hand.
-        before = term._gather(state)
+        before = term._gather(state, diagnostics)
         env = _environment(masses, numbers)
         after = before
         for name, process in term.processes:

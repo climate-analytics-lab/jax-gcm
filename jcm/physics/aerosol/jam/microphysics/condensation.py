@@ -60,6 +60,7 @@ the harness's kg/kg happens at the boundary of :func:`condense`.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import jax
@@ -475,6 +476,5 @@ def condense(population, env, spec, params):
             if mode.short == "pcm":
                 coating[species] = coating.get(species, zeros) + delta
 
-    return population.__class__(
-        masses=masses, numbers=dict(population.numbers), gases=gases,
-        coating=coating, diagnostics=diagnostics)
+    return dataclasses.replace(
+        population, masses=masses, gases=gases, coating=coating, diagnostics=diagnostics)

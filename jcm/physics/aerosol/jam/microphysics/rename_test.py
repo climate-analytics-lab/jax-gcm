@@ -34,6 +34,7 @@ from jcm.physics.aerosol.jam.microphysics.modal import (
     ModalPopulation,
     PROCESS_ORDER,
 )
+from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY, mirror_names
 from jcm.physics.aerosol.jam.tracer_layout import gas_name, mass_name, number_name
 from jcm.physics_interface import PhysicsState
 from jcm.testing import check_gradients
@@ -302,6 +303,93 @@ class ProcessTest(unittest.TestCase):
         tendency, _ = core(state, diagnostics, None, None)
         self.assertTrue(bool(jnp.all(tendency.tracers[number_name("acc")] > 0.0)))
         self.assertTrue(bool(jnp.all(tendency.tracers[number_name("ait")] < 0.0)))
+
+
+class CloudBorneTest(unittest.TestCase):
+    """D-A5: both phases renamed by fractions from the combined volume."""
+
+    def _with_cloud_borne(self, population, mass=2.0e-11, number=2.0e8):
+        cloud_borne = {name: jnp.zeros(SHAPE) for name in mirror_names(MAM4_SPEC)}
+        for sp in AIT.species:
+            cloud_borne[mass_name(sp, "ait", cloud_borne=True)] = jnp.full(SHAPE, mass)
+        cloud_borne[number_name("ait", cloud_borne=True)] = jnp.full(SHAPE, number)
+        return ModalPopulation(masses=population.masses, numbers=population.numbers,
+                               gases=population.gases, cloud_borne=cloud_borne)
+
+    def test_fractions_use_the_combined_volume_and_number(self):
+        before = _aitken_population(1.0e9)
+        env = _env(before)
+        grown = self._with_cloud_borne(_grown(before, 3.0))
+        after = rename.rename_aitken(grown, env, MAM4_SPEC, None)
+        cb_volume = sum(float(grown.cloud_borne[mass_name(sp, "ait", cloud_borne=True)][0, 0])
+                        / MAM4_SPEC.species_props(sp).density for sp in AIT.species)
+        old = float(env.dry_volume_start["ait"][0, 0]) + cb_volume
+        new = float(moments.mode_volume(grown.masses, AIT, MAM4_SPEC)[0, 0]) + cb_volume
+        n = float(grown.numbers[number_name("ait")][0, 0]) + 2.0e8
+        xv, xn = _mam_fractions(old, new, n)
+        np.testing.assert_allclose(
+            float(after.diagnostics["rename_volume_fraction"][0, 0]), xv, rtol=2e-5)
+        np.testing.assert_allclose(
+            float(after.diagnostics["rename_number_fraction"][0, 0]), xn, rtol=2e-5)
+        # And the cloud-borne presence changed the answer.
+        alone = rename.rename_aitken(_grown(before, 3.0), env, MAM4_SPEC, None)
+        self.assertFalse(np.allclose(np.asarray(alone.diagnostics["rename_volume_fraction"]),
+                                     np.asarray(after.diagnostics["rename_volume_fraction"])))
+
+    def test_cloud_borne_phase_moves_by_the_same_fractions_and_conserves(self):
+        before = _aitken_population(1.0e9)
+        grown = self._with_cloud_borne(_grown(before, 3.0))
+        after = rename.rename_aitken(grown, _env(before), MAM4_SPEC, None)
+        xv = after.diagnostics["rename_volume_fraction"]
+        xn = after.diagnostics["rename_number_fraction"]
+        for sp in AIT.species:
+            src = mass_name(sp, "ait", cloud_borne=True)
+            dst = mass_name(sp, "acc", cloud_borne=True)
+            np.testing.assert_allclose(np.asarray(after.cloud_borne[src]),
+                                       np.asarray(grown.cloud_borne[src] * (1.0 - xv)), rtol=1e-6)
+            np.testing.assert_allclose(np.asarray(after.cloud_borne[src] + after.cloud_borne[dst]),
+                                       np.asarray(grown.cloud_borne[src] + grown.cloud_borne[dst]),
+                                       rtol=1e-6)
+        src, dst = number_name("ait", cloud_borne=True), number_name("acc", cloud_borne=True)
+        np.testing.assert_allclose(np.asarray(after.cloud_borne[src]),
+                                   np.asarray(grown.cloud_borne[src] * (1.0 - xn)), rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(after.cloud_borne[dst]),
+                                   np.asarray(grown.cloud_borne[src] * xn), rtol=1e-6)
+        for name in mirror_names(MAM4_SPEC):
+            if "_ait" not in name and "_acc" not in name:
+                np.testing.assert_array_equal(np.asarray(after.cloud_borne[name]),
+                                              np.asarray(grown.cloud_borne[name]))
+
+    def test_driver_books_the_cloud_borne_change_to_the_carry_store(self):
+        population = _aitken_population(1.0e8)
+        tracers = {**population.masses, **population.numbers,
+                   gas_name("h2so4"): jnp.full(SHAPE, 5.0e-9)}
+        state = PhysicsState.zeros(SHAPE).copy(
+            temperature=jnp.full(SHAPE, T), specific_humidity=jnp.full(SHAPE, Q),
+            tracers=tracers)
+        carry = {name: jnp.zeros(SHAPE) for name in mirror_names(MAM4_SPEC)}
+        carry[number_name("ait", cloud_borne=True)] = jnp.full(SHAPE, 2.0e7)
+        carry[mass_name("so4", "ait", cloud_borne=True)] = jnp.full(SHAPE, 1.0e-11)
+        diagnostics = {"pressure_full": jnp.full(SHAPE, P), "_dt_seconds": DT,
+                       CARRY_KEY: carry}
+        core = JamModalMicrophysics(processes=PROCESS_ORDER[:2])
+        self.assertIn(CARRY_KEY, core.requires)
+        tendency, out = core(state, diagnostics, None, None)
+        new_carry = out[CARRY_KEY]
+        self.assertLess(float(new_carry[number_name("ait", cloud_borne=True)][0, 0]), 2.0e7)
+        self.assertGreater(float(new_carry[number_name("acc", cloud_borne=True)][0, 0]), 0.0)
+        np.testing.assert_allclose(
+            np.asarray(new_carry[number_name("ait", cloud_borne=True)]
+                       + new_carry[number_name("acc", cloud_borne=True)]), 2.0e7, rtol=1e-6)
+        # Cloud-borne names never appear in the tracer tendency.
+        self.assertFalse(any(k.startswith(("mc_", "nc_")) for k in tendency.tracers))
+
+    def test_without_the_store_the_probe_still_runs(self):
+        state = PhysicsState.zeros(SHAPE).copy(
+            temperature=jnp.full(SHAPE, T), specific_humidity=jnp.full(SHAPE, Q), tracers={})
+        diagnostics = {"pressure_full": jnp.full(SHAPE, P), "_dt_seconds": DT}
+        _, out = JamModalMicrophysics()(state, diagnostics, None, None)
+        self.assertNotIn(CARRY_KEY, out)   # no store to update, none invented
 
 
 if __name__ == "__main__":
