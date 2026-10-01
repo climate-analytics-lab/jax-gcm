@@ -29,8 +29,10 @@ swappable microphysics core, expressed in JCM's composable architecture:
   `PlaceholderMicrophysics` computes κ-Köhler equilibrium radii/density with
   **zero tendency** on the real MAM4 4-mode population (`mam4_data.py`,
   constants from E3SM `rad_constituents.F90` / `modal_aero_data.F90`,
-  cross-checked against MAM4-JAX). Replacing it with the real MAM4-JAX core
-  swaps only the per-step microphysics, not the contract (#490).
+  cross-checked against MAM4-JAX). Replacing it with the in-tree
+  `JamModalMicrophysics` (`modal.py`; design record in
+  `jam_modal_microphysics.md`) or the real MAM4-JAX core swaps only the
+  per-step microphysics, not the contract (#490).
 - **Tracers** (`tracer_layout.py`): aerosol mass and number are ordinary
   `state.tracers` entries (`m_`/`mc_`/`n_`/`nc_` for interstitial/cloud-borne
   mass/number, keyed by aerosol class), so the dynamical core transports them
@@ -366,7 +368,9 @@ counterpart to the differentiable path.
   rates from the cloud schemes and adding re-evaporation re-injection is
   tracked in #499.
 - **Real MAM4-JAX core** (#490) is not yet differentiable upstream; the
-  harness itself is fully differentiable.
+  harness itself is fully differentiable, and so is the in-tree `modal` core
+  (`jam_modal_microphysics.md`), which is the differentiable path through the
+  microphysics.
 
 Out of scope, tracked separately: sectional/bulk families (#491), part2pop
 diagnostics adapter (#492), SOA volatility basis (#493), heterogeneous

@@ -983,6 +983,15 @@ Interactive aerosol (JAM)
   RRTMGP, with a broadband 550 nm path so the grey two-stream scheme keeps a
   direct effect. ``jam_optics=False`` makes the aerosol radiatively passive,
   which is a clean A/B control rather than a disabled feature.
+- **An in-tree, Apache-licensed MAM4 microphysics core**,
+  ``jam_microphysics="modal"`` (``physics.jam_microphysics=modal``): gas-aerosol
+  exchange, renaming, new-particle formation, coagulation and carbonaceous
+  ageing written from MAM's documentation and E3SM's Fortran, fully
+  reverse-differentiable with every tunable a gradient-visible leaf, and a
+  per-process conservation ledger. Opt-in: the factory default stays the
+  κ-Köhler placeholder and the shipped JAM configurations stay on
+  ``mam4_jax`` until the numeric A/B against it is within tolerance
+  (``docs/source/design/jam_modal_microphysics.md``).
 - **JAM is composed through** ``physics=echam-jam*``, which is factory-built
   (``builder: echam_physics``) because the aerosol chain splits around the
   cloud term. It requires the two-moment cloud scheme; JAM with the one-moment

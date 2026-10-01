@@ -27,15 +27,18 @@ activation → aerosol inputs to ice formation → sedimentation → dry deposit
 cloud-borne exchange → aqueous sulfur chemistry → wet scavenging. Diagnostics
 thread in this call order, so custom compositions should preserve it.
 
-The microphysics core is a swap point: ``"placeholder"`` (the bare-factory
-default, keeping the Apache-2.0 core importable with no GPL dependency) is a
-**κ-Köhler equilibrium** core with zero tendency that still exposes the real MAM4
-mode/species geometry so the full harness runs end-to-end; ``"mam4_jax"`` is the
-real MAM4-JAX box model (GPL-3.0, optional ``jcm[mam4]`` extra, imported lazily)
-doing ``calcsize → wateruptake → amicphys`` (gas-aerosol exchange, rename, binary
-H₂SO₄ nucleation, coagulation, carbonaceous ageing). Every process term reads
-modal properties from the core's diagnostic and shares one population spec, and
-all process parameters are differentiable ``@tree_math.struct`` leaves.
+The microphysics core is a swap point with three cores: ``"placeholder"`` (the
+bare-factory default, keeping the Apache-2.0 core importable with no GPL
+dependency) is a **κ-Köhler equilibrium** core with zero tendency that still
+exposes the real MAM4 mode/species geometry so the full harness runs
+end-to-end; ``"modal"`` is the **in-tree, Apache-licensed MAM4 process chain**
+(gas-aerosol exchange, renaming, new-particle formation, coagulation,
+carbonaceous ageing — the section below), opt-in until validated;
+``"mam4_jax"`` is the real MAM4-JAX box model (GPL-3.0, optional ``jcm[mam4]``
+extra, imported lazily) doing ``calcsize → wateruptake → amicphys``. Every
+process term reads modal properties from the core's diagnostic and shares one
+population spec, and all process parameters are differentiable
+``@tree_math.struct`` leaves.
 
 **What ECHAM/CAM/MAM4 does.** The population geometry is **E3SM/MAM4**, not
 ESCOMP/CAM: mode names, ``nspec_amode``, ``lspectype_amode`` from
@@ -56,8 +59,10 @@ See {doc}`../design/jam_carbon_aging`.
 
 **Why we differ.**
 - `science` — where MAM4 (E3SM) and HAM disagree on a coefficient (e.g. the
-  carbon-ageing monolayer threshold: MAM4 ``amicphys`` = 3, HAM ``m7_coat`` = 1),
-  the MAM4 value is the default and the parameter is exposed and differentiable.
+  carbon-ageing monolayer threshold: MAM4 = 8 — ``n_so4_monolayers_pcage`` in
+  E3SM's and CESM's ``modal_aero_gasaerexch.F90``, Liu et al. 2016 §2; MAM7
+  used 3; HAM ``m7_coat`` = 1), the MAM4 value is the default and the parameter
+  is exposed and differentiable.
 - `compute` / `differentiability` — the MAM4-JAX core is float64 by default
   because its float32 reverse pass is non-finite upstream; forward-only production
   drivers opt into a *scoped* float32 core while the host model keeps its
@@ -82,6 +87,101 @@ days): sulphate 4.1 mg SO4/m² (ion basis; AeroCom mean 3.9, sanity band
 median 12.5) and 0.37 d (0.48), BC a 4.3 d lifetime (7.1), dust 20.9 mg/m² (mean
 37.6, median 40.2) and 1.6 d (4.1); the total AOD is 0.074 against 0.145 observed
 (ESA-CCI SU v4.21). Dust is the species that stays far from AeroCom. See {doc}`../design/dinosaur_sl_jam_configuration`.
+
+### In-tree modal microphysics core (``"modal"``)
+
+**What we do.** ``jcm/physics/aerosol/jam/microphysics/modal.py::JamModalMicrophysics``
+runs MAM4's five microphysical processes on the interstitial population as a
+pure-function fold, one pass per physics step and in MAM's ``amicphys`` order:
+gas-aerosol exchange → renaming → new-particle formation → coagulation →
+carbonaceous ageing. Each process is population-in, population-out, with the
+start-of-step κ-Köhler state (wet radii, wet density) frozen for the step as
+MAM freezes its uptake coefficients, and the tracer tendency is
+``(after − before)/Δt``. Each has one module, written from MAM's own
+documentation where it exists and from E3SM's BSD-3 Fortran where the
+documentation pages are stubs — never from the GPL ``mam4-jax`` source:
+
+- **Gas-aerosol exchange** (``condensation.py::condense``): H₂SO₄ and SOAG onto
+  every mode. Fuchs–Sutugin per particle with Fuller (1966) diffusivity and an
+  accommodation coefficient of 0.65 (Pöschl et al. 1998), integrated over each
+  mode by two-point Gauss–Hermite quadrature on the **wet** diameter (MAM's
+  ``gas_aer_exch`` documentation, not the harmonic-mean form the Liu et al. 2012
+  supplement names); H₂SO₄ nonvolatile with the same-step chemical production
+  coupled into the closed-form solve; SOAG at 0.81 of the H₂SO₄ coefficient
+  with Raoult's law over SOA plus 10 % oxygenated POA, semi-implicit sub-steps
+  in a fixed-length scan. Condensate on the primary-carbon mode goes to
+  accumulation (it has no sulfate/SOA slot) and is recorded as a shell for
+  ageing.
+- **Renaming** (``rename.py::rename_aitken``): Easter et al. (2004) as
+  ``modal_aero_rename.F90`` carries it — after exchange, the Aitken tail above
+  the cut diameter between the modes (≈55 nm, the geometric mean of the two
+  volume-mean reference diameters) is accumulation-mode by definition; erfc
+  tail integrals, number fraction capped by the volume fraction, MAM's guards.
+  Fractions come from the combined interstitial + cloud-borne volume and move
+  both phases (the cloud-borne half through the carry store).
+- **New-particle formation** (``new_particle_formation.py::form_new_particles``):
+  binary H₂SO₄–H₂O (Vehkamäki et al. 2002) with MAM's validity clipping, plus
+  the boundary-layer first-order pathway (Sihto et al. 2006, 1.0×10⁻⁶ s⁻¹,
+  1 nm clusters) below max(PBL top, 100 m), the larger rate winning; Kerminen
+  and Kulmala (2002) survival to the Aitken lower bound with MAM's condensation
+  sink from the exchange step's summed uptake coefficient; vapour-availability
+  clipping. The PBL height is TTE-TKE's, one step lagged.
+- **Coagulation** (``coagulation.py::coagulate``): CMAQ v4.6 fast coefficients
+  (Whitby et al. 1991 analytic 0th/3rd-moment integrals in the free-molecular
+  and near-continuum limits, Binkowski and Roselle 2003 correction tables,
+  harmonic mean) as ``modal_aero_coag.F90`` carries them; Aitken, accumulation
+  and primary carbon only; semi-analytic number loss, receiver first; Aitken
+  mass to accumulation whichever partner it hit, the primary-carbon share of
+  its sulfate and SOA recorded as a shell.
+- **Carbonaceous ageing** (``ageing.py::age``): the shell of sulfate plus
+  κ-equivalent SOA deposited this step, as a thickness over the mode's surface,
+  against ``n_so4_monolayers`` (8) of 4.76 Å; that fraction of the mode's POA,
+  BC, marine organics and number moves to accumulation.
+
+A conservation ledger (``ledger.py``) names the reservoir totals — sulfur
+moles over sulfate and the three sulfur gases, organic mass over POA/SOA/MOA
+and SOAG, each inert species, total number — and the contract each process
+must keep; the step closure is always published, the per-process audit on
+request.
+
+**What MAM4 does.** The same five processes in the same order (E3SM
+``modal_aero_amicphys.F90``; the documentation pages ``gas_aer_exch`` and
+``aerosol_nucleation`` for the first and third, ``modal_aero_coag.F90``,
+``modal_aero_rename.F90`` and ``modal_aero_gasaerexch.F90`` for the rest),
+with ageing evaluated twice — inside exchange from the condensed shell and
+inside coagulation from the coagulated one.
+
+**Why we differ.**
+- `science` — ageing runs once, last, on the sum of both shells rather than
+  twice in sequence; first-order equivalent, and the single place to revisit
+  if the BC lifetime disagrees. Coagulation's 0th-moment free-molecular form
+  is kept as CMAQ wrote it (nine terms where Whitby's expansion has eight)
+  because the correction tables were fitted with it. MAM's second renaming
+  call, after aqueous chemistry, has nothing to act on here: ``AqueousSulfur``
+  grows only the cloud-borne accumulation and coarse modes.
+- `compute` — the exchange sub-stepping is a fixed-length scan (400 sub-steps,
+  measured against the adaptive loop's demand of 200–400) so the step is
+  reverse-differentiable; the 3rd-moment coagulation limits carry the donor's
+  ``d³`` factored out before the harmonic mean, which otherwise underflows
+  float32 to a zero transfer; the ageing criterion is two well-scaled ratios
+  rather than MAM's ``tmp1/tmp2`` of 1e-21-sized volumes.
+- `differentiability` — every division whose dead branch MAM guards with a
+  tiny floor is a double-``where`` here, because ``x/max(y, tiny)`` has a
+  reverse derivative in ``1/tiny²`` that underflows float32 to a division by
+  zero; MAM's ``1 − 10ε`` transfer caps are taken in the working dtype (the
+  float64 literal is exactly 1.0 in float32); all tunables are
+  ``flax.struct`` leaves on the core.
+
+**Status & known limitations.** Opt-in: ``jam_microphysics="modal"`` /
+``physics.jam_microphysics=modal``; the factory default stays the placeholder
+and the shipped JAM configurations stay on ``mam4_jax`` until the A/B against
+it is within tolerance. Both cores run clear-sky; the cloudy ``amicphys``
+sub-area is the harness's job either way. No published numeric benchmark of
+the Vehkamäki rates exists outside the paper's figures, so the binary pathway
+is pinned on structure until the A/B. The fast coagulation coefficients are
++3 to +7 % above brute-force quadrature at MAM4 geometry, the method's own
+bias. MAM4 sets κ_POM = 0 where ``species.py`` carries 0.010. Design
+record, decisions and measured findings: {doc}`../design/jam_modal_microphysics`.
 
 ### Online aerosol optics
 
@@ -896,8 +996,11 @@ re-evaporation ledger).
 - ``jcm/physics/aerosol/jam/jam_terms.py`` — ``jam_aerosol_physics`` (the ordered
   chain and its options).
 - ``jcm/physics/aerosol/jam/microphysics/`` — ``mam4_data.py`` (population),
-  ``mam4_jax.py`` (real core), ``placeholder.py`` (κ-Köhler core); ``species.py``,
-  ``gas_species.py``.
+  ``mam4_jax.py`` (GPL core), ``placeholder.py`` (κ-Köhler core),
+  ``modal.py`` (in-tree core and its process fold) with ``condensation.py``,
+  ``rename.py``, ``new_particle_formation.py``, ``coagulation.py``
+  (+ ``coagulation_tables.py``), ``ageing.py``, ``moments.py``, ``koehler.py``,
+  ``ledger.py``; ``species.py``, ``gas_species.py``.
 - ``jcm/physics/aerosol/jam/activation/`` — ``arg.py``, ``arg_term.py``.
 - ``jcm/physics/aerosol/jam/cloud_borne_store.py``, ``cloud_borne.py``.
 - ``jcm/physics/convection/tracer_transport.py`` — ``ConvectiveTracerTransport``.
@@ -1899,7 +2002,10 @@ SPA's hard ``min`` for gradient calibration.
 
 **Validation evidence (aerosol).** JAM: ``jam_integration_test.py``,
 ``jam_phase0_test.py``, ``microphysics/mam4_jax_test.py``, and per-process
-``*_test.py`` under each ``jam/`` sub-package. MACv2-SP / SPA:
+``*_test.py`` under each ``jam/`` sub-package; the in-tree core's
+``microphysics/ledger_test.py`` (conservation contract per process) and the
+per-module tests under ``microphysics/`` (closed forms, quadrature, MAM
+per-cell transcriptions, float32 gradients at empty modes). MACv2-SP / SPA:
 ``macv2_sp_test.py``, ``spa_test.py``, ``per_band_optics_test.py``. Design
 references: {doc}`../design/jam_carbon_aging`,
 {doc}`../design/dinosaur_sl_jam_configuration`,
