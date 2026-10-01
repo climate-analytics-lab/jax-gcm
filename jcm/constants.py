@@ -53,7 +53,18 @@ class PhysicalConstants(NamedTuple):
     akap: float = 2.0 / 7.0            # kappa = R/cp for a diatomic gas
 
     # --- Gas constant for water vapor (J/K/kg) ------------------------------
-    rv: float = 461.0
+    # ECHAM-6.3's value (mo_physical_constants: ``rv = 461.51``). The
+    # Tiedtke-Nordeng trigger, ascent and type decisions are threshold tests
+    # whose outcome in a marginal column follows the virtual-temperature and
+    # saturation terms rv enters; with ECHAM's rv the port takes the compiled
+    # ECHAM routines' decision on all but 2 of the 758 reference columns
+    # (``tiedtke_nordeng/cumastr_reference_test.py``).
+    rv: float = 461.51
+    # ``eps`` is an independent field, not rd/rv (0.62196 with the defaults):
+    # the Tetens saturation form, the RCE closure, the radiation emulator and
+    # the ``m_water`` molar mass read the conventional 0.622. The ECHAM
+    # schemes' saturation humidity uses ECHAM's rd/rv instead
+    # (``thermodynamics.qsat_from_es``).
     eps: float = 0.622                 # Ratio of molecular weights (Md/Mv)
 
     # --- Reference pressures (Pa) -------------------------------------------

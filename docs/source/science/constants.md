@@ -13,6 +13,20 @@ module-level ``__getattr__`` forwards bare-name access (``jcm.constants.grav``) 
 the singleton so attribute-access consumers honour overrides. The dynamical core
 reads the live singleton at construction.
 
+The vapour gas constant ``rv`` is ECHAM-6.3's 461.51 J/(kg K)
+(``mo_physical_constants.f90``). Tiedtke-Nordeng's trigger, ascent and type
+tests are thresholds whose marginal outcomes follow the saturation humidity
+and the virtual-temperature coefficient ``vtmpc1 = rv/rd − 1``; with ECHAM's
+``rv`` the port, run with jcm's constants, takes ECHAM6.3's decision on all
+but 2 of the 758 reference columns
+(``tiedtke_nordeng/cumastr_reference_test.py``, the 2 follow the latent
+heats). ``eps`` is a separate field, 0.622, and is not ``rd/rv`` (0.62196,
+0.007 % away): it is the conventional molecular-weight ratio read by the
+Tetens saturation form of ``convection/saturation.py``, the ECHAM surface's
+2 m humidity diagnostic, the RCE testbed's closure, the radiation emulator's
+water-vapour volume mixing ratio and the ``m_water`` molar mass. The ECHAM
+schemes' ``qs`` uses ECHAM's ``rd/rv`` (below).
+
 **What ECHAM/CAM does.** ECHAM6 keeps physical constants as module-level
 ``PARAMETER``s in ``mo_physical_constants.f90`` (compile-time fixed; derived
 constants such as ``alf = als − alv`` computed once at init). CAM uses
@@ -147,10 +161,12 @@ through ``wv_sat_methods``.
   analytic slope, which is the slope ECHAM's derivative tables hold; the step
   is too small to be worth a surrogate gradient, so there is none.
 
-**Status & known limitations.** jcm's constants are its own unified set, not
-ECHAM's (``rv = 461.0`` against ECHAM's 461.51, ``rd = akap·cpd``), so
-``rd/rv`` is 0.62265 where ECHAM's is 0.62196. The saturation formula is
-unaffected; the ``qs`` built from it follows the constants. The idealised schemes
+**Status & known limitations.** jcm's constants are its own unified set.
+``rd = akap·cpd`` (287.04) and ``rv`` (461.51) are ECHAM's, so the ratio
+``rd/rv`` in ``qs`` is ECHAM's 0.62196. ``grav`` (9.81 against ECHAM's
+9.80665) and the latent heats (2.501e6 and 2.834e6 against 2.5008e6 and
+2.8345e6 J/kg) are not, a difference of 0.008-0.035 %. The saturation formula
+does not depend on them; the ``qs`` built from it follows the constants. The idealised schemes
 keep their own references: Betts-Miller and JAM's MAM4 humidity and ice
 nucleation use the Tetens form of ``jcm/physics/convection/saturation.py``,
 JAM's placeholder microphysics a WMO Magnus fit, SPEEDY its own

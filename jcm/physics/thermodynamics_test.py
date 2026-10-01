@@ -225,11 +225,11 @@ class TestSaturationSpecificHumidity(unittest.TestCase):
         base = float(thermo.saturation_specific_humidity(T, p))
         original_rv = c.rv
         try:
-            c.set_constants(rv=461.51)            # ECHAM's value
-            echam = float(thermo.saturation_specific_humidity(T, p))
+            c.set_constants(rv=original_rv + 1.0)
+            larger_rv = float(thermo.saturation_specific_humidity(T, p))
         finally:
             c.set_constants(rv=original_rv)
-        self.assertLess(echam, base)              # larger rv, smaller rd/rv
+        self.assertLess(larger_rv, base)          # larger rv, smaller rd/rv
         self.assertAlmostEqual(
             float(thermo.saturation_specific_humidity(T, p)), base, places=10)
 

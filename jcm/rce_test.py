@@ -454,11 +454,11 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     radiative equilibrium of ECHAM physics. The same column with RRTMGP
     (``echam_physics``) stays finite over the 80 days, its 1 Pa layer settling
     at 160.4 K, the cold edge of RRTMGP's temperature tables, and its lowest
-    level does not fog. It is not yet an equilibrium this test could pin
-    (#920): over days 40-80 Tiedtke's precipitation-flux floor creates
-    0.60 mm/d of water (#912), so precipitation is 1.6 times the 1.03 mm/d of
-    evaporation, and the largest per-level temporal scatter of the heating is
-    8.4 K/day. Humidity is prognostic
+    level does not fog. Over days 40-80 Tiedtke convects in every step and
+    precipitation is 0.99 of the 1.01 mm/d of evaporation, with no water from
+    Tiedtke's precipitation-flux floor (#912). It is not yet an equilibrium
+    this test could pin (#920): the largest per-level temporal scatter of
+    its heating is 8.7 K/day, above this column's bound. Humidity is prognostic
     (the surface evaporation supplies it; the fixed-RH closure is
     incompatible with the model's own moisture physics).
 
@@ -479,24 +479,24 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     Under ECHAM's 1M cloud scheme the column fogs its lowest level (996 hPa)
     from about day 10: over days 40-80 that level is overcast in every step
     and holds 0.46 g/kg of cloud water, and the 1M's stratiform rain is all
-    but 0.4 % of the column's 0.30 mm/d of precipitation, against 0.49 mm/d
-    of evaporation. Tiedtke triggers under it in 10.9 % of those steps, none
-    after day 65, as a plume based at 983 hPa that mostly stops one layer
+    but 2.4 % of the column's 0.31 mm/d of precipitation, against 0.50 mm/d
+    of evaporation. Tiedtke triggers under it in 15.1 % of those steps, none
+    after day 75, as a plume based at 983 hPa that mostly stops one layer
     higher, because it fails the ascent test at the first interface above
     cloud base (``mo_cuascent.f90`` l.449-451). ECHAM6.3's compiled
     ``mo_cover``/``mo_cloud``, fed this column's states, make the same fog,
     and its compiled ``cumastr`` took the port's decision on every one of
-    this column's 7680 captured steps with the port run under ECHAM's
-    physical constants; the stored reference (``echam_cumastr_reference``)
-    holds 400 states of two earlier trajectories of the column and is the
-    standing check.
-    With jcm's ``rv`` (461.0 against ECHAM's 461.51, 0.11 % in the
-    saturation humidity) the port convects in 10.9 % of the days 40-80 steps
-    where ECHAM convects in 24.3 %, and never where ECHAM does not: the
-    buoyancy of that first interface sits within hundredths of a kelvin of
-    zero. The testbed has no shear or subsidence
-    to ventilate its lowest layer (#967). The TOA shortwave albedo is
-    0.53.
+    this column's 7680 captured steps with the port run in float64 under
+    ECHAM's physical constants; the stored reference
+    (``echam_cumastr_reference``) holds 400 states of earlier trajectories
+    of the column and is the standing check. jcm's constants share ECHAM's
+    ``rv`` and differ from ECHAM's in ``grav`` and the latent heats (by
+    0.008-0.035 %). Run as this test runs it, in float32 with jcm's
+    constants, the port convects in 15.1 % of the days 40-80 steps and
+    ECHAM in 15.0 %, the two differing in 16 of the 3840 steps: the buoyancy
+    of that first interface sits within hundredths of a kelvin of zero. The
+    testbed has no shear or subsidence to ventilate its lowest layer (#967).
+    The TOA shortwave albedo is 0.56.
 
     The column is **aerosol-free** (``AerosolFree`` replaces MACv2-SP). The
     MACv2-SP plumes are a geographic climatology, and this column at 0°N/0°E
@@ -516,7 +516,7 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     re-derived (#967).
 
     What it does NOT pin, and why: a steady column water. Over days 40-80 the
-    column water still rises by 0.19 mm/d (39 % of E); the grey atmosphere's
+    column water still rises by 0.18 mm/d (36 % of E); the grey atmosphere's
     net radiative cooling is only 3-8 W/m² (#883).
 
     The 80-day integration runs once per class (``setUpClass``); the two
@@ -611,7 +611,7 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
 
         # Column water budget over the window: Δ(column water)/Δt =
         # E − P + (the Tiedtke floor source, #912) on the host's own layer
-        # mass. Measured residual 1.3e-6 mm/d against E of 0.49 mm/d; the
+        # mass. Measured residual 5e-6 mm/d against E of 0.50 mm/d; the
         # floor source is zero over this window, where Tiedtke's plume has no
         # downdraft.
         evap, water = self.evap, self.column_water
@@ -624,7 +624,7 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         strict=True, raises=AssertionError,
         reason="under ECHAM's 1M cloud scheme this column fogs its lowest "
                "level from day 11 and Tiedtke falls silent, so precipitation "
-               "is 0.61 of evaporation over days 40-80 (P 0.296, E 0.488 "
+               "is 0.64 of evaporation over days 40-80 (P 0.315, E 0.495 "
                "mm/d) against the 0.8 bound. ECHAM6.3's compiled "
                "mo_cover/mo_cloud, fed this column's captured states, "
                "reproduce jcm's cover and 1M to the Fortran reference test's "
@@ -633,14 +633,14 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
                "lowest layer. The bound was calibrated on the previous 1M's "
                "non-ECHAM evaporation sink; prescribed subsidence and RRTMGP "
                "for the testbed re-derive the pin. The same fog leaves "
-               "Tiedtke triggering in only 10.9 % of the window's steps (none "
-               "after day 65), so the pin that its convection stays alive is "
+               "Tiedtke triggering in only 15.1 % of the window's steps (none "
+               "after day 75), so the pin that its convection stays alive is "
                "re-derived with it. (#967)")
     def test_precipitation_substantially_balances_evaporation(self):
         # The RCE balance this testbed exists to pin: over the window the
         # column rains most of what it evaporates, with its convection alive.
-        # The fogged column rains 0.61 of it (P 0.296, E 0.488 mm/d; the xfail
-        # reason), and its time-mean convective precipitation is 1.3e-3 mm/d.
+        # The fogged column rains 0.64 of it (P 0.315, E 0.495 mm/d; the xfail
+        # reason), and its time-mean convective precipitation is 7.5e-3 mm/d.
         # Convection is pinned by strict positivity: the extinction it guards
         # against drives the equilibrium convective precipitation to exactly
         # zero.

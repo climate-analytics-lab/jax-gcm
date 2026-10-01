@@ -23,14 +23,12 @@ jcm runs in float64 with ECHAM's physical constants for the comparison, as
   1.5e-12, 2.1e-12 and 1.3e-12. The bounds are 1e-10, fifty times the
   largest.
 
-jcm's own constants differ from ECHAM's in ``rv`` (461.0 against 461.51),
-which moves ``qsat`` and the virtual-temperature coefficient by 0.11 %, and in
-the latent heats (2.501e6 and 2.834e6 against 2.5008e6 and 2.8345e6 J/kg).
-The model keeps its unified constants; with them 70 of the 758 columns take a
-different decision (``_JCM_CONSTANT_STEPS``). ECHAM's ``rv`` alone brings all
-but two back (``_JCM_CONSTANT_STEPS_AFTER_RV``) and the latent heats those
-two. Every one of these columns sits within hundredths of a kelvin of an
-ascent-test threshold.
+jcm's own constants share ECHAM's ``rv`` (461.51) and differ from ECHAM's in
+``grav`` (9.81 against 9.80665) and in the latent heats (2.501e6 and 2.834e6
+against 2.5008e6 and 2.8345e6 J/kg). The model keeps its unified constants;
+with them 2 of the 758 columns take a different cloud top
+(``_JCM_CONSTANT_STEPS``), both within hundredths of a kelvin of an
+ascent-test threshold, and ECHAM's latent heats bring both back.
 """
 
 import contextlib
@@ -61,14 +59,7 @@ _INPUTS = ("temperature", "humidity", "pressure", "layer_thickness", "rho",
 _RTOL = 1.0e-10
 
 #: The columns whose decision differs from ECHAM's under jcm's constants.
-_JCM_CONSTANT_STEPS = (
-    9, 11, 12, 13, 14, 15, 17, 18, 19, 28, 30, 34, 35, 37, 51, 52, 53, 60, 61,
-    64, 66, 67, 68, 223, 311, 320, 322, 323, 324, 330, 331, 332, 334, 341,
-    342, 343, 344, 345, 348, 349, 350, 353, 354, 355, 356, 357, 362, 504, 510,
-    524, 525, 558, 591, 614, 616, 620, 621, 625, 634, 636, 671, 693, 694, 695,
-    702, 719, 723, 726, 732, 733)
-#: ... and those that still differ with ECHAM's ``rv`` alone.
-_JCM_CONSTANT_STEPS_AFTER_RV = (53, 354)
+_JCM_CONSTANT_STEPS = (53, 354)
 
 
 @functools.lru_cache(maxsize=1)
@@ -229,9 +220,12 @@ class TestJcmConstants:
         assert tuple(sorted(mismatches)) == _JCM_CONSTANT_STEPS, (
             _describe(mismatches, ref))
 
-    def test_echam_rv_restores_all_but_two(self):
+    def test_echam_latent_heats_restore_the_rest(self):
         ref = _reference()
         mismatches = _decision_mismatches(
-            _port((("rv", float(ref["echam_rv"])),)), ref)
-        assert tuple(sorted(mismatches)) == _JCM_CONSTANT_STEPS_AFTER_RV, (
-            _describe(mismatches, ref))
+            _port((("alhc", float(ref["echam_alv"])),
+                   ("alhs", float(ref["echam_als"])))), ref)
+        assert not mismatches, _describe(mismatches, ref)
+
+    def test_jcm_shares_echams_rv(self):
+        np.testing.assert_equal(c.rv, float(_reference()["echam_rv"]))

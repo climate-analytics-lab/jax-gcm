@@ -400,7 +400,7 @@ off between 200 and 238 K. Three further differences a caller will notice:
 - ``phase="auto"`` is ECHAM's ``ua`` table, ice **at and below** ``tmelt``
   (previously water at ``tmelt``).
 - ``qs`` is ECHAM's ``x/(1 − vtmpc1·x)`` with ``x = MIN(es·rd/rv/p, 0.5)``:
-  the ratio is ``rd/rv`` (0.62265) rather than ``c.eps`` (0.622), and the cap
+  the ratio is ``rd/rv`` (0.62196) rather than ``c.eps`` (0.622), and the cap
   applies to ``x`` rather than to ``qs``, so ``qs`` reaches
   ``0.5/(1 − 0.5·vtmpc1) ≈ 0.72`` at very low pressure rather than 0.5 (also
   for ``tiedtke_nordeng.cuadjtq.saturation_mixing_ratio``, which no longer

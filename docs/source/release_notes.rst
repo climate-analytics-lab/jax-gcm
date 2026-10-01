@@ -1335,7 +1335,7 @@ ECHAM physics saturation is ECHAM's Sonntag (1990)
   below). The Tetens forms it replaces were up to 0.15 % off between 273
   and 330 K, 1.2-2.4 % between 238 and 273 K and 8-16 % between 200 and
   238 K. ``qs`` is ECHAM's ``x/(1 − vtmpc1·x)`` with
-  ``x = MIN(es·rd/rv/p, 0.5)``, so the ratio is ``rd/rv`` (0.62265),
+  ``x = MIN(es·rd/rv/p, 0.5)``, so the ratio is ``rd/rv`` (0.62196),
   consistent with ``vtmpc1``, rather than ``c.eps``.
 - Tiedtke-Nordeng's saturation adjustment is ECHAM's ``cuadjtq`` (#957): one
   Newton step clipped by ``kcall``, then one unclipped refinement where the
