@@ -39,6 +39,7 @@ from jcm.physics.aerosol.jam.gas_species import SULFUR_GASES
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.microphysics import condensation
 from jcm.physics.aerosol.jam.microphysics import ageing
+from jcm.physics.aerosol.jam.microphysics import ledger
 from jcm.physics.aerosol.jam.microphysics import coagulation as coag
 from jcm.physics.aerosol.jam.microphysics import moments
 from jcm.physics.aerosol.jam.microphysics import new_particle_formation as npf
@@ -298,6 +299,7 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         condensation_params: condensation.CondensationParameters | None = None,
         npf_params: npf.NewParticleFormationParameters | None = None,
         ageing_params: ageing.AgeingParameters | None = None,
+        audit: bool = False,
     ):
         """Build the core.
 
@@ -313,6 +315,12 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
                 when omitted.
             ageing_params: Primary-carbon ageing tunables; MAM4's defaults
                 when omitted.
+            audit: publish the conservation ledger per process (AER-09):
+                ``_modal_ledger_<process>_<budget>`` relative changes for
+                every budget in :mod:`.ledger`. Static, off by default —
+                the per-step sulfur, organic and number changes are always
+                published as ``_modal_ledger_step_<budget>``; this adds the
+                per-process bisection a failing gate needs.
 
         """
         if spec is not None:
@@ -322,6 +330,7 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         if self.spec.cloud_borne:
             self.requires = (*type(self).requires, _store().CARRY_KEY)
         self.processes = PROCESS_ORDER if processes is None else tuple(processes)
+        self.audit = bool(audit)
         # Held in an nnx.Param so every numeric tunable is a gradient-visible
         # leaf (CLAUDE.md: physics parameters are differentiable like all
         # the others); ``max_substeps`` is static aux inside the struct.
@@ -449,8 +458,24 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
 
         params = self._process_params()
         after = before
+        ledger_diagnostics = {}
+        budgets_before = ledger.budgets(before, self.spec)
+        running = budgets_before
         for name, process in self.processes:
             after = process(after, env, self.spec, params.get(name))
+            if self.audit:
+                budgets_after = ledger.budgets(after, self.spec)
+                for budget, value in ledger.relative_change(
+                        running, budgets_after).items():
+                    ledger_diagnostics[f"ledger_{name}_{budget}"] = value
+                running = budgets_after
+        # The step-level closure is cheap and always on: a health gate can
+        # read it without paying for the per-process ledger.
+        budgets_after = ledger.budgets(after, self.spec)
+        for budget, value in ledger.relative_change(
+                budgets_before, budgets_after).items():
+            if budget in ("sulfur", "organic", "number"):
+                ledger_diagnostics[f"ledger_step_{budget}"] = value
 
         jam_state = equilibrium_modal_state(
             after.masses, after.numbers, self.spec, saturation,
@@ -481,6 +506,7 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
                  for key in before.cloud_borne},
                 dt)
         published = {
-            f"_modal_{key}": value for key, value in after.diagnostics.items()
+            f"_modal_{key}": value
+            for key, value in {**after.diagnostics, **ledger_diagnostics}.items()
         }
         return tendency, {**diagnostics, **published, "_jam_state": jam_state}

@@ -82,7 +82,7 @@ Dependencies in brackets. Each card is implement → review → full gates.
 | **AER-06** | ✅ `ageing.py`: MAM4's primary-carbon ageing from E3SM's `modal_aero_gasaerexch.F90` (and its duplicate in `modal_aero_coag.F90`) — the sulfate-plus-equivalent-SOA shell deposited this step (`coating`, written by AER-03 and AER-05), as a thickness over the mode's surface (`6 e^{-2.5 ln²σ}/D_g`), against `n_so4_monolayers` of 4.76 Å; that fraction of POA, BC, marine organics and number moves to accumulation; SOA weighted by κ_SOA/κ_SO4. Runs once, last, on the sum of both deposits (D-A1). **Default `n_so4_monolayers = 8`, not the 3 this card first said** — 3 is MAM7's (Liu et al. 2012); MAM4 uses 8 (Liu et al. 2016 §2, and both E3SM's and CESM's sources; §9). **Rolled in:** the `1 − 10ε` transfer cap is dtype-aware (it was exactly 1.0 in float32 in AER-05 too). 14 tests. | AER-03, AER-05 |
 | **AER-07** | ✅ `rename.py`: MAM4's renaming from E3SM's `modal_aero_rename.F90` (doc-site page is a stub; §9) — after gas-aerosol exchange, the Aitken tail above `D_cut = √(D_v,ait · D_v,acc)` (≈55 nm) moves to accumulation: volume fraction `[F_v(D_new)V_new − F_v(D_old)V_old]/V_new`, number fraction `F_n(D_new) − F_n(D_old)` capped by it, erfc tail integrals; MAM's guards (empty, no growth, below reference diameter, relaxed number bounds ×27, guaranteed transfer past the cut). Growth measured against the new `env.dry_volume_start`. Both phases, from the combined volume (D-A5, adopted). No tunables. 16 tests. | AER-02 |
 | **AER-08** | ✅ `jam_microphysics="modal"` registered in `jam_terms._MICROPHYSICS` and so reachable through `echam_physics()` and Hydra (`physics.jam_microphysics=modal`); defaults unchanged per D-A4. Wiring tests in `jam_terms_test` (both factories, cloud-borne store ordering, the store requirement dropped for `cloud_borne=False`, the x64 mixed-dtype trace) and a slow six-step run in `jam_integration_test`. **Rolled in:** the SOAG sub-step scan's carry promoted to float64 under `jax_enable_x64` — a hard error on the pySES path; outputs now cast to the state dtype. | AER-01, D-A4 |
-| **AER-09** | Conservation gates: per-process sulfur/carbon/number budgets as a ledger, asserted in tests. | AER-03..07 |
+| **AER-09** | ✅ `ledger.py`: budgets per kg of air over both phases — sulfur moles (sulfate at the booked molar mass + DMS, SO₂, H₂SO₄), organic mass (POA, SOA, MOA + SOAG), each inert species, total number — and a per-process `CONTRACT` (exchange, renaming, ageing: number equal; NPF: non-decreasing; coagulation: non-increasing; every mass budget equal everywhere). `JamModalMicrophysics(audit=True)` publishes `_modal_ledger_<process>_<budget>` relative changes; the step-level sulfur/organic/number closure is always published as `_modal_ledger_step_*` for health gates. `ledger_test` holds all five processes to the contract over warm/heavy-vapour/cold/near-empty columns with a cloud-borne phase and without, checks the processes actually acted, and shows a deliberately leaking process is caught. All green at 1e-5 in float32. | AER-03..07 |
 | **AER-10** | Science doc + release note; `jam.md` cross-links; reference verification (§7). | AER-09 |
 | **AER-11** | Differentiability check: finite-difference vs autodiff through each process; no `jnp.where` NaN traps on empty modes. | AER-09 |
 | **AER-12** | A/B against `Mam4JaxMicrophysics` **if** the GPL extra can be installed in a throwaway venv — as a validation reference only, never a dependency. | AER-09 |
@@ -107,6 +107,11 @@ Dependencies in brackets. Each card is implement → review → full gates.
   not an edit to this one.
 
 ## 5. Verification
+
+The AER-09 ledger is the standing conservation gate: with ``audit=True``
+every process's relative change of every budget is a diagnostic, so a
+failure names the process. The step closure is on in every run.
+
 
 1. `ruff check .` clean, pinned 0.15.17.
 2. `pytest jcm/physics/aerosol/` green — the 428-test baseline must not
@@ -712,6 +717,25 @@ shrinking) — has its own test.
 deleted process by process; with AER-07 its list is empty and it is
 removed. What remains of the AER-01 criterion is the clean-atmosphere
 equivalence to the placeholder, which still holds.
+
+### AER-09: the ledger closes at 1e-5 in float32, and what it does not cover
+
+With all five processes real, every mass budget (sulfur moles, organic
+mass, BC, dust, sea salt) is conserved by every process to better than
+1e-5 relative in float32 across the four audit columns — warm with
+modest vapour, warm with heavy vapour (clipping and renaming active),
+cold upper troposphere (binary NPF active) and near-empty — with and
+without the cloud-borne phase; number is conserved by exchange,
+renaming and ageing, only lowered by coagulation and only raised by
+new-particle formation. No process needed a fix to pass: the
+conservation each card asserted locally holds in composition.
+
+The budgets are reservoir totals; they do not check the per-mode split
+(which is what the processes change and the per-process tests pin), nor
+water (not prognosed by the core), nor the chemistry that converts DMS →
+SO₂ → H₂SO₄ (outside the core; it only has to keep the gas keys). A gate
+on the per-step closure (``_modal_ledger_step_sulfur``) is cheap enough
+to run in production; the per-process audit is for bisection.
 
 ### D-A3 — still open
 
