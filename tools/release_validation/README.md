@@ -30,8 +30,16 @@ are only meaningful together and are regenerated together — one command per
 member, on a GPU:
 
 ```bash
-CUDA_VISIBLE_DEVICES=<idx> python -c "import os; os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
+CUDA_VISIBLE_DEVICES=<idx> python -c "import os; os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures', init_state='/scr/$USER/states/echam-1m-t63_<tag>.msgpack')"
 ```
+
+`init_state` is the member's **warm state**: the end state of a full
+release-validation year (the non-JAM members' year 1; the JAM members' year 2,
+since year 1 is the aerosol spin-up). The fixture is spun up 5 days from it, and
+the band file records where it came from (`init_state_source`: the run, its
+length, code and environment — read from the `<state>.provenance.json` that must
+sit beside the state). Without `init_state` the spin-up starts from the preset's
+own init.
 
 Set the variable first, as above. Importing jcm does not initialise a JAX
 backend, and `generate` does no device work itself, but XLA reads the setting
@@ -93,14 +101,17 @@ claims to support rather than a composition invented for the test.
 Two things to know before reading a failure:
 
 - These are **regression** bands, not a climatology. They come from a short
-  window after a short spin-up from the preset's own init, because the
-  equilibrated states on the mirror are unreadable by current jcm (#762). A
-  failure means "something changed", not "the physics is wrong".
+  window after a short spin-up from a **warm state** — the end state of a full
+  release-validation year on the release candidate's physics — so the bands
+  follow a year of spin-up (the JAM aerosol burdens take months to settle) and
+  not a cold-start transient. A failure means "something changed", not "the
+  physics is wrong".
 - The **JAM members' bands describe the post-dust-retune aerosol climate**
   (#787/#808/#840): the relative-soil-wetness saltation gate and the
-  `nduscale_reg` recalibration for jcm's winds. They were regenerated against
-  that code and the rebuilt forcing bundle, so a failure is a regression, not
-  the known-provisional state the pre-#840 bands were.
+  `nduscale_reg` recalibration for jcm's winds, and they follow the members'
+  second year: after one year of aerosol spin-up the burdens are on their
+  plateau, where a from-cold five-day window is still on the dust emission ramp.
+  A failure is a regression, not a known-provisional state.
 
 ## Workflow
 

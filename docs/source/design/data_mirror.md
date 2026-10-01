@@ -222,19 +222,25 @@ Two kinds live there today:
   together, one command per member:
 
   ```bash
-  CUDA_VISIBLE_DEVICES=<idx> python -c "import os; os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
+  CUDA_VISIBLE_DEVICES=<idx> python -c "import os; os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures', init_state='/scr/$USER/states/echam-1m-t63_<tag>.msgpack')"
   ```
 
-  in a CI-parity environment (a fresh venv with `pip install -e ".[mam4]"`
-  and the pinned CUDA jax — never a shared or long-lived one: bands drawn
-  under a different jax-rrtmgp release fail a correct model across the whole
-  column). Set the preallocation variable first: XLA reads it only when a
-  backend first comes up, and a calling process that has already touched the
-  device would otherwise hold 75 % of the card and starve the workers;
-  `generate` refuses to run without it. See `tools/release_validation/README.md` for re-deriving bands
-  on an already-published state.
+  `init_state` is the member's **warm state** — the end state of a full
+  release-validation year on the release candidate's physics (the JAM members'
+  second year; their first is the aerosol spin-up). The fixture is spun up 5 days
+  from it, and the band file records the warm state's own provenance
+  (`init_state_source`), which must sit beside the state as
+  `<state>.provenance.json`. Run it in a CI-parity environment (a fresh venv
+  with `pip install -e ".[mam4]"` and the pinned CUDA jax — never a shared or
+  long-lived one: bands drawn under a different jax-rrtmgp release fail a
+  correct model across the whole column), and set the preallocation variable
+  first: XLA reads it only when a backend first comes up, and a calling process
+  that has already touched the device would otherwise hold 75 % of the card and
+  starve the workers; `generate` refuses to run without it. See
+  `tools/release_validation/README.md` for re-deriving bands on an
+  already-published state.
 
-  and the resulting `<member>_fixture_<digest>.msgpack` is uploaded
+  The resulting `<member>_fixture_<digest>.msgpack` is uploaded
   additively under the member's `init_states/` prefix, with the pin bumped to
   the upload's commit in the same PR as the bands. The digest in the name
   means a state is never republished under an older state's name. The band
