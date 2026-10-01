@@ -329,7 +329,11 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   dynamics step earlier. The cloud schemes map ``xlm1`` to their anchor. The carry holds that
   state's temperature, humidity and condensate (the cloud schemes' anchor)
   but not its pressures or geopotential; the cover reads the received state
-  by the maintainer's decision.
+  by the maintainer's decision. The cloud schemes' ``papm1`` (their air
+  density and saturation) is likewise the received state's pressure, one
+  dynamics step after the anchor: the difference is the surface-pressure
+  change of one step, about 3e-4 of the pressure for a cyclone deepening
+  1 hPa per hour in a 900 s step.
 - Resolution-dependent defaults, `science` — ECHAM sets ``crs``, ``crt``,
   ``nex``, ``nadd``, ``csatsc``, ``cinv``, ``cvtfall``, ``csecfrl`` and
   ``clwprat`` per truncation (``mo_echam_cloud_params.f90::sucloud``; the 2M

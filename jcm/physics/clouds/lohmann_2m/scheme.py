@@ -1341,7 +1341,9 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # Air density: ECHAM's zrho = papm1/(rd·ptvm1)
         # (mo_cloud_micro_2m.f90:578), the anchor's virtual density, with
         # ptvm1 = ptm1·(1 + vtmpc1·pqm1 − (pxlm1 + pxim1)) (physc.f90:267-268),
-        # as the 1M forms it. The layer depth goes with it, dz = Δp/(ρ·g) (the
+        # as the 1M forms it, at the received state's pressure (the carry has
+        # no pressures; see the 1M's note). The layer depth goes with it,
+        # dz = Δp/(ρ·g) (the
         # virtual-temperature depth, as ECHAM's zdz from the geopotential), so
         # the layer mass the column forms as ρ·g·dz stays the moist-air
         # diagnostics' Δp.

@@ -1614,6 +1614,11 @@ class Echam1MMicrophysics(PhysicsTerm):
         # at the step start reads the anchor, including the air density
         # papm1/(rd*ptvm1) with ECHAM's virtual temperature
         # T*(1 + vtmpc1*q - (xl + xi)) (physc.f90:267, mo_cloud.f90:382).
+        # The pressure is the received state's: the carry holds the anchor's
+        # temperature, humidity and condensate, not its pressures, so
+        # ``pressure_full`` is one dynamics step after the anchor, by the
+        # surface-pressure change of that step (about 3e-4 of it for a
+        # cyclone deepening 1 hPa per hour in a 900 s step).
         inputs = cloud_scheme_inputs(state, diagnostics, tracers=("qc", "qi"))
         anchor, increment = inputs.anchor, inputs.increment
         anchor_qc, anchor_qi = anchor.tracers["qc"], anchor.tracers["qi"]
