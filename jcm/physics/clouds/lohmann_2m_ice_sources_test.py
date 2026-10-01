@@ -865,14 +865,17 @@ class TestFreezingSubstituteNumberCap:
             "INP above CDNC kept adding crystals")
         # The deck froze, and it holds no more crystals than it had droplets.
         assert float(jnp.sum(a[0].dqcdt * col["rho"])) < 0.0
-        # The working CDNC is floored at the fixed minimum (40 /cm³).
+        # The droplets available to freeze: the start CDNC raised by
+        # activation (``act``, 50 /cm³ in ``_run``) and floored at the fixed
+        # minimum (40 /cm³).
         icnc_end = np.asarray((col["qni"] + DT * a[0].dqnidt) * col["rho"])
         icnc_start = np.asarray(col["qni"] * col["rho"])
-        cdnc_start = np.maximum(np.asarray(col["qnc"] * col["rho"]),
-                                1e6 * float(_P.cdnc_min_fixed))
+        cdnc_avail = np.maximum.reduce([
+            np.asarray(col["qnc"] * col["rho"]), np.full(icnc_end.shape, 5e7),
+            np.full(icnc_end.shape, 1e6 * float(_P.cdnc_min_fixed))])
         deck = np.asarray(deck)
         assert np.all(icnc_end[deck]
-                      <= 1.0001 * (cdnc_start + icnc_start)[deck])
+                      <= 1.0001 * (cdnc_avail + icnc_start)[deck])
 
 
 # ---------------------------------------------------------------------------

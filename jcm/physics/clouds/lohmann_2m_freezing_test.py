@@ -135,7 +135,9 @@ def test_het_mxphase_freezing_reverse_mode_finite_at_singular_points(case):
 # ---------------------------------------------------------------------------
 def _closure_tendencies():
     """Run cloud_microphysics_2m on the supercooled fixture columns WITHOUT freezing_aerosol,
-    float64, jcm's own constants and default CloudParams2M (dt720 inputs).
+    float64, jcm's own constants and default CloudParams2M except ``ccsaut = 900``, the
+    value the reference was generated with, so the closure is compared at fixed
+    parameters (dt720 inputs).
     """
     from jcm.physics.clouds.lohmann_2m.scheme import cloud_microphysics_2m
     from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
@@ -144,7 +146,7 @@ def _closure_tendencies():
         d = {k[3:]: z[k] for k in z.files if k.startswith("in/")}
         rho = z["diag/dt720/rho"]
     dt = 720.0
-    p = CloudParams2M.default()
+    p = CloudParams2M.default(ccsaut=900.0)
     dz = np.diff(d["paphm1"], axis=0) / (rho * c.grav)
 
     def one(T, q, qc, qi, qnc, qni, cf, r, dz_, tke, pr):
