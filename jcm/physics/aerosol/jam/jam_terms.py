@@ -67,6 +67,7 @@ from jcm.physics.aerosol.jam.ice_nucleation.ham_freezing import (
 from jcm.physics.aerosol.jam.ice_nucleation.ice_term import IceNucleation
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+from jcm.physics.aerosol.jam.microphysics.modal import JamModalMicrophysics
 from jcm.physics.aerosol.jam.microphysics.placeholder import (
     PlaceholderMicrophysics,
 )
@@ -192,12 +193,19 @@ def _build_core(core_cls, spec, options, name):
 
 # Core resolvers (each takes a spec override, ``None`` for the core default,
 # and a ``microphysics_options`` mapping, ``None`` for none given).
-# ``placeholder``/``m7_placeholder`` are built-in; ``mam4_jax``/``m7_jax`` are
-# loaded lazily so their optional dependencies are only imported when
-# selected.
+# ``placeholder``/``m7_placeholder`` (κ-Köhler equilibrium, no microphysics)
+# and ``modal`` (the in-tree MAM4 process chain: gas-aerosol exchange,
+# renaming, new-particle formation, coagulation, ageing —
+# ``docs/source/design/jam_modal_microphysics.md``) are built in;
+# ``mam4_jax``/``m7_jax`` are loaded lazily so their optional dependencies
+# are only imported when selected. ``modal`` is opt-in until AER-09's budgets
+# and AER-12's A/B against ``mam4_jax`` have run (D-A4): the factory default
+# stays ``placeholder`` and the Hydra JAM config stays on ``mam4_jax``.
 _MICROPHYSICS = {
     "placeholder": lambda spec, options: _build_core(
         PlaceholderMicrophysics, spec, options, "placeholder"),
+    "modal": lambda spec, options: _build_core(
+        JamModalMicrophysics, spec, options, "modal"),
     "mam4_jax": lambda spec, options: _build_core(
         _load_mam4_jax(), spec, options, "mam4_jax"),
     # The κ-Köhler zero-tendency core on the M7 population (jax-gcm#1017) —

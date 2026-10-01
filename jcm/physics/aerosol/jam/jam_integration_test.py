@@ -128,6 +128,26 @@ class JamIntegrationTest(unittest.TestCase):
             "2M droplet-number tracer untouched — activation not coupled",
         )
 
+    def test_modal_core_also_runs(self):
+        """AER-08: the in-tree modal core in the full ECHAM+JAM package.
+
+        The five microphysical processes act on a cold-start population
+        for six steps: everything must stay finite, the activation
+        coupling must still hold, and the core must have done something —
+        the H2SO4 depletion diagnostic it publishes is nonzero somewhere.
+        """
+        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
+
+        model, predictions = self._run(jam_microphysics="modal")
+        dyn = predictions.dynamics
+        self.assertFalse(bool(jnp.any(jnp.isnan(dyn.temperature))))
+        for mode in MAM4_SPEC.modes:
+            for key in (number_name(mode.short), mass_name(mode.species[0], mode.short)):
+                self.assertTrue(np.all(np.isfinite(np.asarray(dyn.tracers[key]))), key)
+        physics = predictions.physics
+        self.assertGreater(float(np.max(np.asarray(physics["activated_cdnc"]))), 0.0)
+        self.assertGreater(float(np.max(np.asarray(dyn.tracers["qnc"]))), 0.0)
+
     def test_ghosh_variant_also_runs(self):
         _, predictions = self._run(jam_arg_variant="ghosh2025")
         self.assertFalse(

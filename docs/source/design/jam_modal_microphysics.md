@@ -81,7 +81,7 @@ Dependencies in brackets. Each card is implement → review → full gates.
 | **AER-05** | ✅ `coagulation.py`: MAM4's coagulation from E3SM's `modal_aero_coag.F90` (the MAM doc-site pages are stubs; §9) — CMAQ v4.6 fast coefficients (Whitby et al. 1991 analytic moment integrals, Binkowski & Roselle 2003 correction tables in `coagulation_tables.py`, harmonic mean of the free-molecular and near-continuum limits) on the wet κ-Köhler state; semi-analytic number loss (receiver first, donors at the receivers' step-mean numbers); first-order volume transfer. **Aitken, accumulation and primary-carbon only** — MAM neglects coagulation involving coarse as much slower. Aitken mass goes to accumulation whichever partner it hit; the primary-carbon share of its sulfate and SOA is recorded in `coating` for AER-06. Checked against the monodisperse closed forms (exact) and brute-force quadrature (+3…+7 % at MAM4 geometry; §9). No tunables. 21 tests. | AER-02 |
 | **AER-06** | ✅ `ageing.py`: MAM4's primary-carbon ageing from E3SM's `modal_aero_gasaerexch.F90` (and its duplicate in `modal_aero_coag.F90`) — the sulfate-plus-equivalent-SOA shell deposited this step (`coating`, written by AER-03 and AER-05), as a thickness over the mode's surface (`6 e^{-2.5 ln²σ}/D_g`), against `n_so4_monolayers` of 4.76 Å; that fraction of POA, BC, marine organics and number moves to accumulation; SOA weighted by κ_SOA/κ_SO4. Runs once, last, on the sum of both deposits (D-A1). **Default `n_so4_monolayers = 8`, not the 3 this card first said** — 3 is MAM7's (Liu et al. 2012); MAM4 uses 8 (Liu et al. 2016 §2, and both E3SM's and CESM's sources; §9). **Rolled in:** the `1 − 10ε` transfer cap is dtype-aware (it was exactly 1.0 in float32 in AER-05 too). 14 tests. | AER-03, AER-05 |
 | **AER-07** | ✅ `rename.py`: MAM4's renaming from E3SM's `modal_aero_rename.F90` (doc-site page is a stub; §9) — after gas-aerosol exchange, the Aitken tail above `D_cut = √(D_v,ait · D_v,acc)` (≈55 nm) moves to accumulation: volume fraction `[F_v(D_new)V_new − F_v(D_old)V_old]/V_new`, number fraction `F_n(D_new) − F_n(D_old)` capped by it, erfc tail integrals; MAM's guards (empty, no growth, below reference diameter, relaxed number bounds ×27, guaranteed transfer past the cut). Growth measured against the new `env.dry_volume_start`. Both phases, from the combined volume (D-A5, adopted). No tunables. 16 tests. | AER-02 |
-| **AER-08** | Wire `jam_microphysics="modal"` through `echam_physics()` and the Hydra config. (Classification landed in AER-01.) | AER-01, D-A4 |
+| **AER-08** | ✅ `jam_microphysics="modal"` registered in `jam_terms._MICROPHYSICS` and so reachable through `echam_physics()` and Hydra (`physics.jam_microphysics=modal`); defaults unchanged per D-A4. Wiring tests in `jam_terms_test` (both factories, cloud-borne store ordering, the store requirement dropped for `cloud_borne=False`, the x64 mixed-dtype trace) and a slow six-step run in `jam_integration_test`. **Rolled in:** the SOAG sub-step scan's carry promoted to float64 under `jax_enable_x64` — a hard error on the pySES path; outputs now cast to the state dtype. | AER-01, D-A4 |
 | **AER-09** | Conservation gates: per-process sulfur/carbon/number budgets as a ledger, asserted in tests. | AER-03..07 |
 | **AER-10** | Science doc + release note; `jam.md` cross-links; reference verification (§7). | AER-09 |
 | **AER-11** | Differentiability check: finite-difference vs autodiff through each process; no `jnp.where` NaN traps on empty modes. | AER-09 |
@@ -318,6 +318,19 @@ imports it before the core, and a module-level import closed a cycle.
 Pinned by `CloudBorneTest` (fractions against the per-cell
 transcription with combined inputs, both-phase conservation, the store
 booking through the driver, and the probe without a store).
+
+### D-A4 — default switch: REGISTER ``modal``, OPT-IN (decided 2026-10-01)
+
+Three positions were put: register ``"modal"`` and change no default;
+make it the default of the Hydra JAM config (`physics/echam-jam.yaml`,
+today on the GPL ``mam4_jax``); make it the default everywhere. **The
+first is adopted.** `echam_physics()` keeps ``"placeholder"`` and
+`echam-jam.yaml` keeps ``mam4_jax``; the in-tree core is selected with
+``jam_microphysics="modal"`` or ``physics.jam_microphysics=modal``. The
+trigger to revisit is concrete: AER-09's conservation ledger green and
+AER-12's A/B against ``mam4_jax`` within tolerance (which needs D-A3).
+Until then every existing JAM test and run keeps its behaviour, and the
+new core is exercised by its own wiring tests and a slow integration run.
 
 ### Terminology (2026-10-01)
 
@@ -700,10 +713,8 @@ deleted process by process; with AER-07 its list is empty and it is
 removed. What remains of the AER-01 criterion is the clean-atmosphere
 equivalence to the placeholder, which still holds.
 
-### D-A3, D-A4 — still open
+### D-A3 — still open
 
 - **D-A3 — validation reference.** Is installing GPL `mam4-jax` into a
   throwaway venv for AER-12 acceptable as a *test-only* comparison, given
   it is never imported by shipped code?
-- **D-A4 — default switch.** Does `jam_microphysics` stay `"placeholder"`
-  after AER-08, with `"modal"` opt-in until validated?

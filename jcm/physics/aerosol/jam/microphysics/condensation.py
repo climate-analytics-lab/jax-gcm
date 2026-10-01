@@ -363,7 +363,12 @@ def solve_soag(q_gas, q_soa, q_opoa, coefficients, q_equilibrium, dt, params):
                     - jnp.sum(soa / denominator, axis=0))
                    / (1.0 + jnp.sum(beta / denominator, axis=0)))
         soa_new = (soa + beta * gas_new[jnp.newaxis]) / denominator
-        return (gas_new, soa_new, remaining - step), None
+        # Under ``jax_enable_x64`` (pySES) the parameter leaves are float64
+        # while the state is float32, and the promoted outputs would not
+        # match the scan's carry dtype (a hard TypeError, measured by the
+        # package's x64 trace test). Cast back: the state's dtype rules.
+        return ((gas_new.astype(gas.dtype), soa_new.astype(soa.dtype),
+                 (remaining - step).astype(remaining.dtype)), None)
 
     (gas, soa, remaining), _ = jax.lax.scan(
         substep, (q_gas, q_soa, jnp.full_like(q_gas, dt)),

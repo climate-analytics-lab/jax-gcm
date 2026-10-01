@@ -72,6 +72,33 @@ class JamFactoryTest(unittest.TestCase):
         arg = next(t for t in terms if t.category == "aerosol_activation")
         self.assertEqual(arg._variant, "ghosh2025")
 
+    def test_modal_core_resolves_and_keeps_the_term_order(self):
+        """AER-08: ``"modal"`` selects the in-tree core at the same seat."""
+        from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
+        from jcm.physics.aerosol.jam.microphysics import JamModalMicrophysics
+
+        modal = jam_aerosol_physics(microphysics="modal")
+        placeholder = jam_aerosol_physics(microphysics="placeholder")
+        self.assertEqual([t.category for t in modal], [t.category for t in placeholder])
+        core = next(t for t in modal if t.category == "aerosol_microphysics")
+        self.assertIsInstance(core, JamModalMicrophysics)
+        # The core reads the cloud-borne store for renaming (D-A5), which the
+        # store term, composed before it, provides.
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+        self.assertIn(CARRY_KEY, core.requires)
+        self.assertLess(
+            next(i for i, t in enumerate(modal) if CARRY_KEY in t.provides),
+            modal.index(core))
+
+    def test_modal_core_without_cloud_borne_drops_the_store_requirement(self):
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+        from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
+
+        terms = jam_aerosol_physics(microphysics="modal", cloud_borne=False)
+        core = next(t for t in terms if t.category == "aerosol_microphysics")
+        self.assertFalse(core.spec.cloud_borne)
+        self.assertNotIn(CARRY_KEY, core.requires)
+
     def test_unknown_microphysics_raises(self):
         from jcm.physics.aerosol.jam import jam_aerosol_physics
 
@@ -259,6 +286,22 @@ class EchamPhysicsWiringTest(unittest.TestCase):
                  if t.category == "radiation"),
         )
 
+    def test_jam_module_builds_with_the_modal_core(self):
+        """AER-08: the ECHAM factory accepts and validates ``"modal"``."""
+        from jcm.physics.aerosol.jam.microphysics import JamModalMicrophysics
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        phys = echam_physics(aerosol_module="jam", cloud_scheme="2m",
+                             jam_microphysics="modal")
+        cores = [t for t in phys.terms if t.category == "aerosol_microphysics"]
+        self.assertEqual(len(cores), 1)
+        self.assertIsInstance(cores[0], JamModalMicrophysics)
+        # Default unchanged (D-A4): the plain JAM build is still the placeholder.
+        default = echam_physics(aerosol_module="jam", cloud_scheme="2m")
+        self.assertNotIsInstance(
+            next(t for t in default.terms if t.category == "aerosol_microphysics"),
+            JamModalMicrophysics)
+
     def test_jam_module_rejects_1m(self):
         # JAM's scavenging/resuspension terms read the process-time ledger
         # only the 2M scheme publishes; the combination must fail loudly
@@ -363,6 +406,11 @@ def _trace_float32_physics_under_x64(**physics_kwargs):
 def test_jam_package_traces_under_x64_without_mixed_dtype_scatters():
     """The ECHAM+JAM package, placeholder aerosol core, in 64-bit mode."""
     _trace_float32_physics_under_x64()
+
+
+def test_modal_jam_package_traces_under_x64_without_mixed_dtype_scatters():
+    """The same with the in-tree modal core (AER-08)."""
+    _trace_float32_physics_under_x64(jam_microphysics="modal")
 
 
 @pytest.mark.requires_extra("mam4")

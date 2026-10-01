@@ -465,8 +465,10 @@ def echam_physics(
             would let JAM fully replace MACv2-SP optics is tracked in #495.
         jam_microphysics: JAM core when ``aerosol_module="jam"`` —
             ``"placeholder"`` (κ-Köhler equilibrium on the MAM4 population,
-            default) today; ``"mam4_jax"`` is #490 (optional ``jcm[mam4]``
-            extra). ``"m7_placeholder"`` is the same κ-Köhler core on the M7
+            default) today; ``"modal"`` is the in-tree MAM4 process chain
+            (opt-in until validated — D-A4 in
+            ``docs/source/design/jam_modal_microphysics.md``); ``"mam4_jax"``
+            is #490 (optional ``jcm[mam4]`` extra). ``"m7_placeholder"`` is the same κ-Köhler core on the M7
             population instead (the ``echam-jam-m7`` preset's earlier
             chain-test vehicle, #1017). ``"m7_jax"`` is the real ECHAM-HAM M7
             core over the optional ``jcm[m7]`` extra (#1017); its switches

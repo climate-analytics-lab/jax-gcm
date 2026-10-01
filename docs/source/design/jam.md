@@ -41,8 +41,10 @@ swappable microphysics core, expressed in JCM's composable architecture:
   and sedimentation read it. Its leading `n_aer` axis is a generic aerosol-
   *class* index (mode or bin), so the struct is representation-agnostic.
 
-Every harness step is differentiable; scheme choice (placeholder vs real core,
-ARG variant) is a compose-time Python decision with no traced branching.
+Every harness step is differentiable; scheme choice (placeholder, the
+in-tree `modal` core or the `mam4_jax` adapter; ARG variant) is a
+compose-time Python decision with no traced branching. The in-tree core
+is `jam_modal_microphysics.md`.
 
 ## Term chain
 
@@ -88,7 +90,7 @@ from jcm.physics.echam.echam_terms import echam_physics
 physics = echam_physics(
     aerosol_module="jam",      # default "macv2sp"
     cloud_scheme="2m",         # ARG activated_cdnc feeds the 2M scheme
-    jam_microphysics="placeholder",
+    jam_microphysics="placeholder",  # or "modal" (in-tree), "mam4_jax" (GPL extra)
     jam_arg_variant="arg2000", # or "ghosh2025"
 )
 ```

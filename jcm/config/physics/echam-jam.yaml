@@ -56,7 +56,11 @@
 #
 # Defaults use the real MAM4-JAX core, which is an optional GPL extra:
 #     pip install jcm[mam4]
-# Without it, override the core: ``physics.jam_microphysics=placeholder``.
+# Without it, override the core: ``physics.jam_microphysics=placeholder``
+# (κ-Köhler equilibrium, no microphysics) or ``physics.jam_microphysics=modal``
+# (the in-tree MAM4 process chain, Apache-licensed; opt-in until its budgets
+# and the A/B against mam4_jax have run — D-A4 in
+# docs/source/design/jam_modal_microphysics.md).
 
 builder: echam_physics
 
@@ -71,6 +75,8 @@ radiation_scheme: rrtmgp    # the ECHAM radiation; "grey" (idealized, not ECHAM)
 # ``physics.jam_microphysics=mam4_jax_astem`` for a forward-only SOA study
 # that needs CAM's conservative corrector.
 jam_microphysics: mam4_jax
+# "placeholder" (κ-Köhler, no microphysics) or "modal" (the in-tree MAM4 core,
+# docs/source/design/jam_modal_microphysics.md) select the other cores.
 jam_arg_variant: ghosh2025  # or arg2000
 jam_aqueous_scheme: full
 # In-cloud impaction scavenging of interstitial aerosol by cloud droplets and
