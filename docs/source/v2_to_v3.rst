@@ -1385,14 +1385,35 @@ level of free sinking lies above the final top is cancelled, and a failed
 first ascent leaves no surface plume for the second. On 758 columns the port
 takes ECHAM6.3's decision on every one, and matches its fluxes and tendencies
 to 2.1e-12 or better, when it runs with ECHAM's physical constants
-(``cumastr_reference_test.py``). jcm keeps its own constants: they change 70
-of those 758 decisions, 68 of them through ``rv`` (461.0 against ECHAM's
-461.51); see :doc:`science/convection`.
+(``cumastr_reference_test.py``). With jcm's own constants, whose ``rv`` is
+now ECHAM's (:ref:`v3-rv`), 2 of those 758 decisions differ, through the
+latent heats; see :doc:`science/convection`.
 
 **This changes results for every ECHAM configuration.** The derivatives are
 those of logistic surrogates, so a finite-difference check of the scheme
 disagrees with AD near a decision, by design
 (:doc:`design/surrogate_gradients`).
+
+.. _v3-rv:
+
+The vapour gas constant is ECHAM's
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``jcm.constants.rv`` is 461.51 J/(kg K), ECHAM-6.3's value, where 2.x had
+461.0. ``vtmpc1`` (0.6078), ``cvv`` and ``rd/rv`` (0.62196) follow from it;
+``eps`` stays 0.622 and is not ``rd/rv``. Every configuration that reads
+``rv`` changes slightly: the ECHAM schemes' saturation humidity and virtual
+temperature, the moist dynamics of hybrid-level dinosaur and pySES runs, and
+the physics geopotential of every dinosaur run, which is built from the
+virtual temperature. SPEEDY's physics does not read ``rv``; its 1-day
+regression trajectory moves by at most 1.6e-6 (normalized RMS), through that
+geopotential. The magnitudes for the ECHAM presets are in the release notes.
+To reproduce a 2.x run, set the old value before building the model:
+
+.. code-block:: python
+
+   import jcm.constants as c
+   c.set_constants(rv=461.0)
 
 Two-moment microphysics: the process chain is inside the column scan
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1665,10 +1665,11 @@ Tiedtke-Nordeng takes ECHAM's decisions
   that exercise the mid-level and deep plumes and the ``zlo1`` gate), is the reference
   (``jcm/data/test/echam_cumastr_reference``): with ECHAM's physical
   constants jcm takes its decision on every column and matches its cloud-base
-  flux, precipitation and tendencies to 2.1e-12 or better. jcm keeps its own constants,
-  which change 70 of the 758 decisions, 68 of them through ``rv`` (461.0
-  against 461.51); on the whole-model RCE column's days 40-80 states the port
-  then convects in 10.9 % of the steps where ECHAM convects in 24.3 %.
+  flux, precipitation and tendencies to 2.1e-12 or better. With jcm's own
+  constants, whose ``rv`` is ECHAM's (next entry), 2 of the 758 decisions
+  differ, through the latent heats; on the whole-model RCE column's days
+  40-80 states the port, in float32, convects in 15.1 % of the steps and
+  ECHAM in 15.0 %.
 - **Breaking:** ``ConvectionParameters`` loses ``trigger_cape``,
   ``smooth_trigger_j`` and ``smooth_rh``; ``smooth_term_buoy``,
   ``smooth_term_mf``, ``smooth_term_cond``, ``smooth_precip_pa`` and
@@ -1679,9 +1680,161 @@ Tiedtke-Nordeng takes ECHAM's decisions
   ``cloud_base_excess_width``; ``ConvectionParameters`` is a ``flax.struct``
   dataclass; ``flux_tendencies.mass_flux_closure_blend`` is removed. See
   :ref:`v3-tiedtke-parameters`.
-- **Changes results** for every ECHAM configuration. In the whole-model RCE
-  column, Tiedtke convects in 10.9 % of the days 40-80 steps and its
-  precipitation is 1.3e-3 of 0.30 mm/d.
+- **Changes results** for every ECHAM configuration. Over days 5-10 of
+  ``t63-echam-1m`` / ``t63-echam-2m`` runs restarted from 30-day spin-ups
+  (against the same physics with the 2.x decisions), the exact decisions
+  move the global net TOA radiation by −1.80 / −0.43 W/m² and the shortwave
+  cloud effect by −2.08 / −0.13 W/m², and lower precipitation by 0.040 /
+  0.046 mm/day (convective 0.033 / 0.029); the area with more than 1 mm/day
+  of convective precipitation shrinks from 26.3 to 24.3 % / 26.5 to 24.8 %,
+  the humidity at 300 hPa falls by 2.8 / 2.9 % and the liquid held below
+  273.15 K by 2.4 / 0.5 g/m² (table below, with the vapour gas constant of
+  the next entry). The run-to-run spread of these numbers is 0.19 W/m² in
+  net TOA radiation and 0.006 mm/day in precipitation (1M entry above). Both
+  runs stay finite, with the sub-cloud supply carrying the lagged dynamics
+  and no evaporation floor. In the whole-model RCE column, Tiedtke convects
+  in 15.1 % of the days 40-80 steps and its precipitation is 2.4 % of
+  0.31 mm/d.
+
+.. list-table:: Global means over days 5-10, ``t63-echam-1m`` / ``t63-echam-2m`` from 30-day spin-ups
+   :header-rows: 1
+   :stub-columns: 1
+
+   * - Quantity
+     - 1M control
+     - 1M switches
+     - 1M switches + rv
+     - 2M control
+     - 2M switches
+     - 2M switches + rv
+   * - net TOA radiation (W/m²)
+     - 0.68
+     - -1.13
+     - -1.25
+     - 8.93
+     - 8.50
+     - 8.51
+   * - SW cloud effect (W/m²)
+     - -47.22
+     - -49.30
+     - -49.42
+     - -50.88
+     - -51.01
+     - -51.05
+   * - LW cloud effect (W/m²)
+     - 14.80
+     - 15.04
+     - 15.06
+     - 26.78
+     - 26.36
+     - 26.43
+   * - OLR (W/m²)
+     - 246.80
+     - 246.52
+     - 246.51
+     - 234.87
+     - 235.16
+     - 235.11
+   * - liquid water path (g/m²)
+     - 69.80
+     - 70.11
+     - 70.77
+     - 40.70
+     - 41.15
+     - 41.10
+   * - liquid below 273.15 K (g/m²)
+     - 23.81
+     - 21.40
+     - 21.80
+     - 19.23
+     - 18.76
+     - 18.70
+   * - ice water path (g/m²)
+     - 18.70
+     - 18.99
+     - 18.99
+     - 26.69
+     - 26.73
+     - 26.87
+   * - cloud cover (%)
+     - 55.25
+     - 55.93
+     - 56.03
+     - 60.24
+     - 60.12
+     - 60.30
+   * - precipitation (mm/day)
+     - 2.645
+     - 2.605
+     - 2.599
+     - 2.586
+     - 2.540
+     - 2.546
+   * - convective (mm/day)
+     - 2.045
+     - 2.012
+     - 2.010
+     - 1.932
+     - 1.903
+     - 1.903
+   * - large-scale (mm/day)
+     - 0.600
+     - 0.593
+     - 0.589
+     - 0.653
+     - 0.637
+     - 0.643
+   * - area, convective > 1 mm/day (%)
+     - 26.3
+     - 24.3
+     - 24.5
+     - 26.5
+     - 24.8
+     - 24.9
+   * - column water vapour (kg/m²)
+     - 25.05
+     - 24.86
+     - 24.84
+     - 24.92
+     - 24.75
+     - 24.73
+   * - q at 300 hPa (mg/kg)
+     - 314
+     - 305
+     - 304
+     - 351
+     - 341
+     - 340
+   * - T at 300 hPa (K)
+     - 239.44
+     - 239.18
+     - 239.18
+     - 240.06
+     - 239.84
+     - 239.83
+
+The vapour gas constant is ECHAM's
+"""""""""""""""""""""""""""""""""""
+
+- ``jcm.constants.rv`` is ECHAM-6.3's 461.51 J/(kg K)
+  (``mo_physical_constants``), from 461.0 (#968). ``vtmpc1`` (0.6078),
+  ``cvv`` and ``rd/rv`` (0.62196) follow; ``eps`` stays 0.622, a field
+  separate from ``rd/rv``. With it Tiedtke-Nordeng takes ECHAM6.3's decision
+  on 756 of the 758 reference columns under jcm's constants, against 688 at
+  461.0: its trigger and ascent tests are thresholds whose marginal outcomes
+  follow the saturation humidity and buoyancy that ``rv`` sets.
+- **Changes results**, slightly, for every configuration that reads ``rv``:
+  every ECHAM configuration (saturation humidity and virtual temperature in
+  the convection, vertical diffusion, surface and cloud schemes; the moist
+  dynamics of the hybrid-level dinosaur and of the pySES dycore), and the
+  physics geopotential, which every dinosaur configuration builds from the
+  virtual temperature. SPEEDY's physics reads its own constants, not ``rv``;
+  it sees ``rv`` only through that geopotential (and the surface air density
+  it publishes), and its 1-day regression trajectory moves by at most 1.6e-6
+  (normalized RMS). Over days 5-10 of the runs above, ``rv`` moves the
+  global net TOA radiation by −0.13 / +0.01 W/m² and precipitation by
+  −0.006 / +0.006 mm/day (table above), within the run-to-run spread.
+  ``set_constants(rv=461.0)`` restores the 2.x value.
 
 Known limitations
 ^^^^^^^^^^^^^^^^^
