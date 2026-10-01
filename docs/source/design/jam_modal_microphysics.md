@@ -124,8 +124,10 @@ failure names the process. The step closure is on in every run.
    and is not what MAM itself is validated against), NPF on structure, since
    no tabulated Vehkamäki values exist outside the paper's figures (§9).
 4. Budget closure (AER-09) and gradient checks (AER-11).
-5. A single-column JAM run before/after, showing BC lifetime moving from the
-   ~21-day no-ageing figure toward the observed 5–8 days.
+5. A single-column JAM run before/after on the BC lifetime — done as
+   `microphysics/bc_lifetime_test.py` (slow) on the release-validation
+   column, with the measured numbers and what one column can and cannot
+   say about a global lifetime in §9 (*The BC-lifetime check*).
 
 ## 6. Phase B sketch — aerosol-aware superparameterized convection
 
@@ -384,6 +386,53 @@ rather than the κ-Köhler formula), and every JAM configuration's climate
 changes through the wet sizes — the release note says so. The small
 Kelvin-dominated corner (5 nm, κ = 0.05, RH 0.98) where the two solvers
 differ by a few per cent is recorded in §9 (AER-12).
+
+### The BC-lifetime check (§5 item 5), measured 2026-10-02
+
+The ~21-day figure in `jam_carbon_aging.md` is a global-mean lifetime
+without ageing; the observed 5–8 d and the GPL core's 8.4 d (n = 8) / 4.8 d
+(n = 3) are global means from 90-day T63L47 runs. A single column cannot
+reproduce a global mean — nothing transports BC back in, and the column's
+own rain sets the removal — so the check measures the two halves of the
+claim separately, on the release validation's prescribed tropical
+convective column (`jcm.rce.jam_scavenging_column` under
+`convergent_initial_physics_data`, idealized ECHAM physics, 47 levels,
+900 s steps), with BC seeded in the boundary layer:
+
+- **Where BC sits decides its removal.** Seeded in primary carbon under the
+  placeholder core (no ageing), BC is removed only by the pathways open to
+  an insoluble mode — convective impaction, below-cloud scavenging, dry
+  deposition — with an e-folding lifetime of **2.0 d** (days 1–6); the same
+  mass seeded in accumulation is removed in **0.9 d**, through activation
+  and in-cloud scavenging.
+- **Ageing moves BC onto the faster path.** Under a sustained polluted
+  sulfuric-acid vapour (1e-11 kg/kg through the column, held each step as
+  the stand-in for the chemistry source this prescribed column has no
+  oxidants for) the modal core's BC lifetime is **1.5 d** — a quarter
+  shorter than the insoluble 2.0 d, three quarters of the way to the
+  in-cloud limit — where the placeholder's is unchanged. The accumulation
+  fraction at day 6 is 8 % against the placeholder's 0 %: a steady balance
+  of ageing in and the faster removal out, not a measure of how much aged.
+  Two things this column taught on the way: ageing at ~0.5 % per 15-minute
+  step cannot compete with a convective boundary layer that lofts and
+  scrubs its inventory within hours, so the vapour has to be there aloft
+  too (a boundary-layer-only supply left 1 % aged); and in the full
+  physics with its own chemistry the same core aged 97–99 % of the BC by
+  day 2–5 (below).
+
+Thirty-day probes with the full ECHAM physics (RRTMGP) on the same
+convective sounding, with a 1 ppb SO₂ seed and the prescribed oxidants
+supplying the acid, agree on the mechanism and on the ordering with the
+GPL core: burden remaining at day 5 — placeholder 4.6 %, modal 2.2 %,
+MAM4-JAX 3.4 % (its default 3 monolayers against our 8); the modal core
+has 97–99 % of the BC aged by day 2–5 against the placeholder's none;
+e-folding fits over days 2–30 of 9.6 d (placeholder), 8.9 d (modal) and
+6.2 d (MAM4-JAX), the long tails set by BC lofted above the convective
+outflow where every core removes slowly. On a non-precipitating
+stratocumulus column the modal core ages the BC completely and the
+lifetime is ~140 d regardless: ageing opens a path, the column has to
+have the path. A global number for the in-tree core needs the 90-day
+T63L47 run the GPL core had; that is a GPU campaign, not a test.
 
 ### D-A3 — validation reference: ``requires_extra("mam4")`` A/B, SEPARATE LOCAL VENV (decided 2026-10-01)
 

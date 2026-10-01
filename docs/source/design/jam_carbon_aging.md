@@ -46,20 +46,26 @@ mode *number* move by `xferfrac`; shell species move wholesale.
 ## The monolayer threshold is a parameter, not a constant
 
 `n` is exposed as `Mam4JaxMicrophysics(n_so4_monolayers=…)` because the
-references legitimately disagree: the MAM4 *amicphys* path receives 3 (via
-`phys_control`, the CAM5/ACME lineage), ECHAM-HAM's `m7_coat` uses 1, and the
-8 quoted from `modal_aero_gasaerexch.F90` belongs to E3SM's legacy
-`modal_aero_coag` ageing path rather than to amicphys. The spread matters
-because `n` sets carbonaceous lifetime directly — smaller means faster
-ageing. Across the two MAM4 values, 90-day T63L47 `echam-jam-aerocom` runs
+references legitimately disagree, though not along the line this page first
+drew. E3SM's amicphys receives `n_so4_monolayers_pcage` from the namelist
+(`namelist_defaults_eam.xml`, read 2026-10-02): **8.0** for the default
+physics (the EAMv1/v2 lineage) and **3.0** for the CLUBB+P3 (v3) physics,
+with 3.0 as the bare fallback; CESM's CAM hard-codes 8.0 in both
+`modal_aero_gasaerexch.F90` and `modal_aero_coag.F90`, and Liu et al. (2016)
+§2 states eight for MAM4 (the sensitivity set MAM4L1/L2/L4/L8, L8 the
+production choice). ECHAM-HAM's `m7_coat` uses 1. So 8 is MAM4's published
+and default value, 3 is E3SMv3's; the earlier reading that 8 "belongs to the
+legacy coag path" was not right (see `jam_modal_microphysics.md`, §9
+AER-06/AER-12). The spread matters because `n` sets carbonaceous lifetime
+directly — smaller means faster ageing. Across the two MAM4 values, 90-day T63L47 `echam-jam-aerocom` runs
 (area-weighted global means over days 45–90, τ = burden / (dry + wet
 removal)) give BC τ ≈ 8.4 d and burden 0.22 mg/m² at `n = 8`, and τ ≈ 4.8 d
 and 0.15 mg/m² at `n = 3`, with 56 % and 68 % of BC mass in accumulation
 respectively. Both bracket the observed 5–8 d; a factor of ~2.7 in the
 parameter moves lifetime by nearly a factor of two.
 
-The default is **3.0** — the amicphys reference value, which also reproduces
-the vendored Fortran captures.
+This adapter's default is **3.0** — E3SMv3's value, which also reproduces
+the vendored Fortran captures; the in-tree modal core defaults to MAM4's 8.
 
 Each term instance holds its own value as an **`nnx.Param` leaf**, a
 differentiable parameter per the repo convention, and passes it to the core
