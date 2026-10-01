@@ -150,17 +150,18 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   trigger conditions, the cloud-top bound and the 200 hPa demotion are level
   indices or trigger identities and carry no derivative, so gradients do not
   flow across the onset of a cloud base or of a mid-level plume.
-- `science` — jcm's physical constants are unified across its schemes, and
-  the vapour gas constant is ``rv = 461.0`` J/(kg K) against ECHAM's 461.51.
-  That moves the saturation humidity and the virtual-temperature coefficient
-  by 0.11 %, which moves marginal decisions: the ascent test at the first
-  interface above a cloud base at ``klevm1`` sits within hundredths of a
-  kelvin of zero in the whole-model RCE column, and on that column's own
-  days 40-80 states the port convects in 10.9 % of the steps where ECHAM6.3
-  convects in 24.3 %, never where ECHAM does not; with ECHAM's ``rv`` it takes
-  ECHAM's decision on every step. On the 758 reference columns jcm's
-  constants change 70 decisions, ECHAM's ``rv`` alone brings back all but
-  two, and ECHAM's latent heats those two.
+- `science` — jcm's physical constants are unified across its schemes. Its
+  vapour gas constant is ECHAM's (``rv = 461.51`` J/(kg K)); its ``grav``
+  (9.81 against 9.80665 m/s²) and latent heats (2.501e6 and 2.834e6 against
+  2.5008e6 and 2.8345e6 J/kg) differ from ECHAM's by 0.008-0.035 %. That
+  still moves marginal decisions: the ascent test at the first interface
+  above a cloud base at ``klevm1`` sits within hundredths of a kelvin of zero
+  in the whole-model RCE column. On the 758 reference columns jcm's
+  constants change 2 cloud tops, and ECHAM's latent heats bring both back. On
+  that RCE column's own days 40-80 states the port, run in float32 as the
+  model runs it, convects in 15.1 % of the steps and ECHAM6.3 in 15.0 %, the
+  two differing in 16 of the 3840 steps; in float64 with ECHAM's constants
+  the port takes ECHAM's decision on every step.
 - `science` / `compute` (stopgap) — ECHAM bounds the mass flux, not the
   heating: the cloud-base flux and the per-level entrainment are held to the
   layer's air mass per step (``zmfmax = layer_mass/dt``, ``mo_cumastr.f90``
@@ -194,8 +195,8 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   downdraft takes up (a deep-to-shallow demotion) therefore creates the
   difference as water. The amount is published as
   ``convection.precip_floor_source``, so a column budget closes as
-  ``E - P + precip_floor_source``; in the grey whole-model RCE column it is
-  ~0.06 mm/d, ~8 % of evaporation.
+  ``E - P + precip_floor_source``; in the whole-model RCE column, with grey
+  or RRTMGP radiation, it is below 0.001 mm/d over days 40-80.
 
 **Code pointers.**
 - ``jcm/physics/convection/tiedtke_nordeng/`` — ``tiedtke_nordeng.py``

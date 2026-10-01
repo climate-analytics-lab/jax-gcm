@@ -455,12 +455,13 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     (``echam_physics``) stays finite over the 80 days, its 1 Pa layer settling
     at 160.4 K, the cold edge of RRTMGP's temperature tables, and its lowest
     level does not fog. Over days 40-80 Tiedtke convects in every step and
-    precipitation is 0.99 of the 1.01 mm/d of evaporation, with no water from
-    Tiedtke's precipitation-flux floor (#912). It is not yet an equilibrium
-    this test could pin (#920): the largest per-level temporal scatter of
-    its heating is 8.7 K/day, above this column's bound. Humidity is prognostic
-    (the surface evaporation supplies it; the fixed-RH closure is
-    incompatible with the model's own moisture physics).
+    precipitation is 0.99 of the 1.01 mm/d of evaporation, Tiedtke's
+    precipitation-flux floor (#912) creating less than 0.001 mm/d of it. It
+    is not yet an equilibrium this test could pin (#920): the largest
+    per-level temporal scatter of its heating is 8.7 K/day, above this
+    column's bound. Humidity is prognostic (the surface evaporation supplies
+    it; the fixed-RH closure is incompatible with the model's own moisture
+    physics).
 
     The assertions are on the **time mean**: a single-column mass-flux scheme in
     RCE has an intrinsic high-frequency convective cycle, but the time-mean
