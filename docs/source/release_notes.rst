@@ -1445,24 +1445,34 @@ The ECHAM 1M cloud scheme is ECHAM6.3's ``cloud``
 - **Changes results** for every 1M configuration. Over days 5-10 of
   ``t63-echam-1m`` runs restarted from a 30-day spin-up, the changes of this
   entry and of the cover, inputs and overlap entries below together (jcm
-  82c2f294 against dev 8393799c) move the global net TOA radiation from −5.57 to +0.87 W/m²: the shortwave cloud effect
-  weakens from −71.48 to −47.05 W/m² and the longwave one from 32.48 to
-  14.82 W/m² (OLR +17.94 W/m²). Liquid water path falls from 111.8 to
-  69.85 g/m² (−49.4 g/m² over ocean) and the liquid held below 273.15 K from
-  76.69 to 23.93 g/m²; ice water path rises from 16.37 to 18.65 g/m². The
-  supercooled liquid fraction of the condensate falls from 0.817 to 0.414 at
-  253-258 K and from 0.722 to 0.098 at 243-248 K. Total cloud cover
-  (``radiation.total_cloud_cover``) falls from 71.07 to 55.18 %,
-  precipitation rises from 2.536 to 2.645 mm/day (convective +0.137,
-  large-scale −0.029 mm/day), column water vapour falls by 0.79 kg/m², and at
-  300 hPa the humidity falls by 15 % and the temperature by 0.90 K. The
-  lowest model level does not fog: its mean cover falls from 0.197 to 0.168.
+  66b0d11d against dev with #965 (7e14ec2f)) move the global net TOA
+  radiation from −5.63 to +0.68 W/m²: the shortwave cloud effect weakens from
+  −71.12 to −47.22 W/m² and the longwave one from 31.98 to 14.80 W/m²
+  (OLR +17.56 W/m²). Liquid water path falls from 111.0 to 69.80 g/m²
+  (−48.5 g/m² over ocean) and the liquid held below 273.15 K from 75.71 to
+  23.81 g/m²; ice water path rises from 16.12 to 18.70 g/m². The supercooled
+  liquid fraction of the condensate falls from 0.817 to 0.400 at 253-258 K
+  and from 0.723 to 0.100 at 243-248 K. Total cloud cover
+  (``radiation.total_cloud_cover``) falls from 70.53 to 55.25 %,
+  precipitation rises from 2.545 to 2.645 mm/day (convective +0.132,
+  large-scale −0.032 mm/day), column water vapour falls by 0.81 kg/m², and at
+  300 hPa the humidity falls by 16 % and the temperature by 0.89 K. The
+  lowest model level does not fog: its mean cover falls from 0.195 to 0.169.
   Runs of identical physics from the same state spread by at most
   0.19 W/m² in net TOA radiation, 0.30 W/m² in either cloud effect,
   0.9 g/m² in liquid water path, 0.26 % in cover and 0.006 mm/day in
-  precipitation, which is the noise of these numbers. Ten days measure the immediate response, not a new climate;
-  the release-matrix bands of every ECHAM member are regenerated after this
-  change (#943).
+  precipitation, which is the noise of these numbers. The branch members ran
+  on one devbox host (NVIDIA A100 80GB PCIe, jax 0.10.2) because no Nautilus
+  A100 could be scheduled, from the same spin-up checkpoints, overrides and
+  package pins as the controls, which ran on Nautilus SXM4 nodes under jax
+  0.10.1, so the spread, measured within one node type and jax version, does
+  not strictly cover that boundary; the same configuration at the previous
+  head (82c2f294, run on Nautilus) differs from these members by less than
+  the spread for the 1M (the area with lowest-level cover above 0.9 apart)
+  and by a few per cent for the 2M and JAM (2M in-cloud crystal number
+  −1.9 %, large-scale precipitation +1.2-1.7 %), which bounds it. Ten days measure the immediate response, not a new
+  climate; the release-matrix bands of every ECHAM member are regenerated
+  after this change (#943).
 
 The ECHAM cloud cover is ECHAM6.3's ``cover``; radiation masks it by condensate
 """""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -1551,18 +1561,21 @@ The cloud schemes take ECHAM's anchor, increments and detrainment
 - **Changes results** for every 2M configuration, including JAM, together
   with the cover entry above and the overlap entry below. Over days 5-10 of
   ``t63-echam-2m`` / ``t63-echam-jam`` runs restarted from 30-day spin-ups
-  (jcm 82c2f294 against dev 8393799c), the global net TOA radiation falls by
-  0.57 / 0.66 W/m² (shortwave cloud effect −0.62 / −0.42, longwave
-  +0.05 / −0.25 W/m²), total cloud cover (``radiation.total_cloud_cover``)
-  falls from 66.8 to 60.2 % / 68.7 to 61.9 %, liquid water path rises from
-  33.4 to 40.2 g/m² / 44.4 to 50.3 g/m², ice water path changes by
-  −0.14 / −0.01 g/m² (of 27.0 / 8.8), in-cloud droplet number falls by
-  1.5 / 1.9 cm⁻³, and precipitation moves by at most 0.001 mm/day. The
-  supercooled liquid fraction of the 2M rises by up to 0.08 (at 253-268 K).
-  The lowest model level does not fog: its mean cover falls from 0.164 to
-  0.144 / 0.158 to 0.142. The 2M's longwave change, JAM's ice water path and
-  both precipitation changes are within the spread of identical-physics runs
-  (0.13 W/m², 0.07 g/m², 0.006 mm/day); the other changes are outside it.
+  (jcm 66b0d11d against dev with #965 (7e14ec2f), measured as for the 1M
+  above), the global net TOA radiation falls by 0.83 / 0.68 W/m² (shortwave
+  cloud effect −0.77 / −0.53, longwave +0.07 / −0.04 W/m²), total cloud cover
+  (``radiation.total_cloud_cover``) falls from 66.65 to 60.24 % / 68.42 to
+  61.93 %, liquid water path rises from 33.60 to 40.70 g/m² / 44.17 to
+  50.04 g/m², ice water path changes by −0.18 / +0.12 g/m² (of 26.9 / 8.8),
+  in-cloud droplet number falls by 1.4 / 1.9 cm⁻³, the in-cloud crystal
+  number changes by −19 / +28 L⁻¹ (of 1079 / 590), and precipitation moves
+  by at most 0.007 mm/day. The supercooled liquid fraction of the 2M rises by
+  up to 0.08 (at 253-268 K). The lowest model level does not fog: its mean
+  cover falls from 0.162 to 0.145 / 0.159 to 0.143. The 2M's longwave cloud
+  effect, OLR and large-scale precipitation and JAM's longwave cloud effect
+  and total precipitation are within the spread of identical-physics runs
+  (0.13 and 0.16 W/m², 0.005 and 0.006 mm/day); the other changes are
+  outside it.
 
 Default cloud overlap is maximum-random, sampled by ECHAM's rule
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -1589,8 +1602,9 @@ Default cloud overlap is maximum-random, sampled by ECHAM's rule
   labels, so only its total-cover diagnostic changes. Exponential overlap
   remains available as ``cloud_overlap=2`` (``CLOUD_OVERLAP_EXPONENTIAL``,
   with ``cloud_decorrelation_km``).
-- Measured at fixed branch physics over the same days 5-10 (the branch
-  rerun with ``cloud_overlap=2``), the switch lowers total cloud cover by
+- Measured at fixed branch physics over the same days 5-10 (the branch at
+  82c2f294 rerun with ``cloud_overlap=2``; 66b0d11d keeps the same default),
+  the switch lowers total cloud cover by
   1.02 / 0.55 / 0.94 points and raises the net TOA radiation by
   0.55 / 0.22 / 0.35 W/m² in ``t63-echam-1m`` / ``t63-echam-2m`` /
   ``t63-echam-jam``, through a weaker shortwave cloud effect (+0.84 / +0.45 /
@@ -1600,8 +1614,8 @@ Default cloud overlap is maximum-random, sampled by ECHAM's rule
   precipitation (−0.010 mm/d, 1.8 times the largest spread), and part of the
   cover change is by construction, since ``radiation.total_cloud_cover`` is the sampled cover
   under the rule in use. The switch is a small part of the changes the 1M and
-  inputs entries above measure: at least 86 % of the fall in total cover
-  comes from the rest.
+  inputs entries above measure: it is 7 / 9 / 14 % of their fall in total
+  cover, so at least 85 % of that fall comes from the rest.
 - The packaged NN radiation emulator was trained on RRTMGP fluxes under
   exponential overlap at 2 km. Under the maximum-random default its
   ``radiation.total_cloud_cover`` follows the configured rule while its

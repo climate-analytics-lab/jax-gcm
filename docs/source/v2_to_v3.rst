@@ -855,9 +855,9 @@ length (code 2). RRTMGP's McICA sampler draws it by ECHAM's rank rule, and
 ``radiation.total_cloud_cover`` follows it (ECHAM's ``cld_cvr`` in
 expectation). The grey scheme's fluxes are the same under both rules; the
 emulator's fluxes carry the overlap it was trained on (exponential, #881).
-Over days 5-10 of ``t63-echam-1m`` the switch alone lowers that cover by
-1.0 point and raises the net TOA radiation by 0.55 W/m², a small part of the
-cloud changes below. To keep exponential overlap:
+Over days 5-10 of ``t63-echam-1m`` the switch alone (measured at 82c2f294)
+lowers that cover by 1.0 point and raises the net TOA radiation by 0.55 W/m²,
+a small part of the cloud changes below. To keep exponential overlap:
 
 .. code-block:: python
 
@@ -1241,15 +1241,16 @@ them, and ECHAM's binary ``lo2`` switch sets the phase instead of a linear
 238-273 K blend. Radiation sees the cover only where there is condensate, and
 the default overlap is maximum-random (above).
 
-Over days 5-10 of ``t63-echam-1m`` from a spun-up state the global net TOA
-radiation rises by **6.4 W/m²** (shortwave cloud effect **+24.4**, longwave
-**−17.7 W/m²**), the liquid water path falls from **112 to 70 g/m²**, total
-cloud cover (``radiation.total_cloud_cover``) from **71 to 55 %**, and the
-supercooled liquid fraction at 243-248 K from **0.72 to 0.10**;
-precipitation rises by 0.11 mm/day. The 2M and JAM presets move by
-**−0.6 / −0.7 W/m²** net TOA with the cover **6.6 / 6.7 points** lower and
-the liquid water path **+6.8 / +5.9 g/m²** higher, and precipitation
-unchanged. Identical-physics runs spread by about 0.2 W/m². Ten days measure
+Over days 5-10 of ``t63-echam-1m`` from a spun-up state, against dev with the
+Sonntag saturation (#965), the global net TOA radiation rises by
+**6.3 W/m²** (shortwave cloud effect **+23.9**, longwave **−17.2 W/m²**), the
+liquid water path falls from **111 to 70 g/m²**, total cloud cover
+(``radiation.total_cloud_cover``) from **71 to 55 %**, and the supercooled
+liquid fraction at 243-248 K from **0.72 to 0.10**; precipitation rises by
+0.10 mm/day. The 2M and JAM presets move by **−0.8 / −0.7 W/m²** net TOA
+with the cover **6.4 / 6.5 points** lower and the liquid water path
+**+7.1 / +5.9 g/m²** higher, and precipitation within 0.007 mm/day.
+Identical-physics runs spread by about 0.2 W/m². Ten days measure
 the immediate response, not a climate. Any tuning of the 1M cloud water, the
 cloud radiative effects or the mixed-phase partition done before this change
 should be redone, and every configuration whose truncation is not T63 (the
