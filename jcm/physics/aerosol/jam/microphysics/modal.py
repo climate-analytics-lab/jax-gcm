@@ -38,6 +38,7 @@ import jcm.constants as c
 from jcm.physics.aerosol.jam.gas_species import SULFUR_GASES
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.microphysics import condensation
+from jcm.physics.aerosol.jam.microphysics import ageing
 from jcm.physics.aerosol.jam.microphysics import coagulation as coag
 from jcm.physics.aerosol.jam.microphysics import new_particle_formation as npf
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
@@ -214,14 +215,17 @@ def carbonaceous_ageing(population, env, spec, params):
     This transfer is the only pathway that ends the exclusion, so its
     absence is what sets the ~21-day BC lifetime.
 
-    The criterion is three monolayers of sulfate with SOA included, and the
-    aged fraction is ``M_SO4,cond / M_SO4,age-all + M_SOA,cond /
-    M_SOA,age-all`` (Liu et al., 2012, supplement S1.1.5); that fraction of
-    the mode's POA, BC and number moves to accumulation. In MAM this is
-    computed inside condensation and coagulation rather than as its own
-    step - see D-A1 for why it is separate here and what that costs.
+    The criterion is MAM4's: the shell of sulfate plus hygroscopicity-
+    equivalent SOA deposited this step, as a thickness over the mode's
+    surface, against ``n_so4_monolayers`` (8 in MAM4's sources; 3 was
+    MAM7's) of sulfate; that fraction of the mode's POA, BC, marine
+    organics and number moves to accumulation. It runs last and consumes
+    ``population.coating``, which condensation and coagulation wrote
+    (D-A1).
+
+    Implemented in :mod:`~jcm.physics.aerosol.jam.microphysics.ageing`.
     """
-    return population
+    return ageing.age(population, env, spec, params)
 
 
 #: Process order, one entry per step of MAM4's ``amicphys``: gas-aerosol
@@ -264,6 +268,7 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         processes: tuple[tuple[str, Process], ...] | None = None,
         condensation_params: condensation.CondensationParameters | None = None,
         npf_params: npf.NewParticleFormationParameters | None = None,
+        ageing_params: ageing.AgeingParameters | None = None,
     ):
         """Build the core.
 
@@ -276,6 +281,8 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
             condensation_params: Gas-aerosol exchange tunables; MAM4's
                 defaults when omitted.
             npf_params: New-particle formation tunables; MAM4's defaults
+                when omitted.
+            ageing_params: Primary-carbon ageing tunables; MAM4's defaults
                 when omitted.
 
         """
@@ -291,6 +298,8 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         self.new_particle_formation = nnx.Param(
             npf.NewParticleFormationParameters()
             if npf_params is None else npf_params)
+        self.ageing = nnx.Param(
+            ageing.AgeingParameters() if ageing_params is None else ageing_params)
         # nnx-friendly marker, mirroring PlaceholderMicrophysics.
         self._initialized = True
 
@@ -299,6 +308,7 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         return {
             "gas_aerosol_exchange": self.condensation.get_value(),
             "nucleation": self.new_particle_formation.get_value(),
+            "carbonaceous_ageing": self.ageing.get_value(),
         }
 
     def _gather(self, state) -> ModalPopulation:

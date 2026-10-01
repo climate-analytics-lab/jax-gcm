@@ -73,8 +73,14 @@ _T_STD_OFFSET = 15.0            # t0 = tmelt + 15 K
 #: Sutherland viscosity of air, U.S. Standard Atmosphere 1962 p. 14.
 _VISCOSITY_BETA = 1.458e-6
 _VISCOSITY_S = 110.4
-#: MAM's ``xferfrac_max``: never move the last ten ulps of a tracer.
-_TRANSFER_MAX = 1.0 - 10.0 * 2.220446049250313e-16
+#: MAM's ``xferfrac_max`` is ``1 - 10 ε`` in float64; in float32 that literal
+#: rounds to exactly 1.0, so the cap is taken in the working dtype.
+_TRANSFER_ULPS = 10.0
+
+
+def _transfer_max(like):
+    """Largest fraction a step may move: ten ulps short of everything."""
+    return 1.0 - _TRANSFER_ULPS * jnp.finfo(jnp.asarray(like).dtype).eps
 #: Switch points of the donor number solution (``modal_aero_coag_sub``).
 _SMALL_TOTAL = 0.01
 _SMALL_INTER = 0.001
@@ -322,7 +328,8 @@ def coagulate(population, env, spec, params=None):
     loss = loss_to_acc + loss_to_pcm
     live = loss > _TINY_LOSS
     pcm_share = jnp.where(live, loss_to_pcm / jnp.where(live, loss, 1.0), 0.0)
-    aitken_fraction = jnp.clip(1.0 - jnp.exp(-loss * dt), 0.0, _TRANSFER_MAX)
+    transfer_max = _transfer_max(temperature)
+    aitken_fraction = jnp.clip(1.0 - jnp.exp(-loss * dt), 0.0, transfer_max)
     zeros = jnp.zeros_like(temperature)
     for species in aitken.species:
         source = mass_name(species, aitken.short)
@@ -337,7 +344,7 @@ def coagulate(population, env, spec, params=None):
     # --- primary-carbon mass by direct coagulation with accumulation; the
     # ageing transfer that MAM adds here is AER-06's ---
     pcm_fraction = jnp.clip(1.0 - jnp.exp(-beta_pcm_acc_3 * n_acc_avg * dt),
-                            0.0, _TRANSFER_MAX)
+                            0.0, transfer_max)
     for species in pcarbon.species:
         source = mass_name(species, pcarbon.short)
         moved = masses[source] * pcm_fraction

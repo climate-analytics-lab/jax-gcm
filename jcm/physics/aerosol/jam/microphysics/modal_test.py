@@ -146,8 +146,12 @@ class ScaffoldEquivalenceTest(unittest.TestCase):
         masses, numbers = _population(soa=False)
         state, diagnostics = _state_and_diagnostics({**masses, **numbers})
         tendency, _ = JamModalMicrophysics()(state, diagnostics, None, None)
-        for short in ("ait", "acc", "pcm"):
+        # Aitken and primary carbon only lose; accumulation also receives
+        # the aged carbon (AER-06), so the invariant there is the total.
+        for short in ("ait", "pcm"):
             self.assertTrue(bool(jnp.all(tendency.tracers[number_name(short)] < 0.0)))
+        total = sum(tendency.tracers[number_name(s)] for s in ("ait", "acc", "pcm"))
+        self.assertTrue(bool(jnp.all(total < 0.0)))
         self.assertTrue(bool(jnp.all(tendency.tracers[number_name("cor")] == 0.0)))
 
     def test_full_core_evaporates_soa_when_soag_is_absent(self):
@@ -224,13 +228,13 @@ class ProcessScaffoldTest(unittest.TestCase):
         """TEMPORARY — each card must delete its process from this list.
 
         AER-03 removed ``gas_aerosol_exchange``, AER-04 ``nucleation``,
-        AER-05 ``coagulation``. If this test still passes in full after
-        AER-06 and AER-07 land, those cards did nothing.
+        AER-05 ``coagulation``, AER-06 ``carbonaceous_ageing``. If this
+        test still passes in full after AER-07 lands, that card did nothing.
         """
         masses, numbers = _population()
         population = ModalPopulation(masses=masses, numbers=numbers)
         env = _environment(masses, numbers)
-        still_identity = {"rename", "carbonaceous_ageing"}
+        still_identity = {"rename"}
         for name, process in PROCESS_ORDER:
             if name not in still_identity:
                 continue

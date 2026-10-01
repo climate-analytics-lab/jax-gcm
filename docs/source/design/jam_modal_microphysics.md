@@ -79,7 +79,7 @@ Dependencies in brackets. Each card is implement → review → full gates.
 | **AER-03** | ✅ `condensation.py`: MAM4's gas-aerosol exchange from its own documentation — Fuchs–Sutugin per particle, Fuller (1966) diffusivity, two-point Gauss–Hermite modal integration on the **wet** diameter (not the supplement's B&S harmonic mean; §9). H₂SO₄ nonvolatile with the chemical production coupled into the solve (`SulfurGasChemistry` now publishes `_h2so4_production`); SOAG at 0.81·C with Raoult's law over SOA + 10 % oxygenated POA, semi-implicit sub-steps in a static scan. `pcm` condensate routed to accumulation and recorded in `coating` for AER-06. Sulfur moles and organic mass conserved; 20 tests. | AER-02 |
 | **AER-04** | ✅ `new_particle_formation.py`: NPF from MAM4's own documentation — binary H₂SO₄–H₂O (Vehkamäki et al. 2002 polynomials, validity clipping as MAM does it) **plus** the PBL first-order pathway (Sihto et al. 2006, 1.0×10⁻⁶ s⁻¹, 1 nm pure-acid clusters) below max(PBL top, 100 m), the larger rate winning; Kerminen & Kulmala (2002) survival to the Aitken lower bound with MAM's condensation sink from AER-03's summed uptake coefficient and the step-mean H₂SO₄; MAM's vapour-availability clipping. PBL height taken lagged — sub-decision (a) in D-A2, adopted. **Rolled in:** AER-03's gas update rewritten so the vapour can never go negative by rounding (§9). 18 tests. | AER-03 |
 | **AER-05** | ✅ `coagulation.py`: MAM4's coagulation from E3SM's `modal_aero_coag.F90` (the MAM doc-site pages are stubs; §9) — CMAQ v4.6 fast coefficients (Whitby et al. 1991 analytic moment integrals, Binkowski & Roselle 2003 correction tables in `coagulation_tables.py`, harmonic mean of the free-molecular and near-continuum limits) on the wet κ-Köhler state; semi-analytic number loss (receiver first, donors at the receivers' step-mean numbers); first-order volume transfer. **Aitken, accumulation and primary-carbon only** — MAM neglects coagulation involving coarse as much slower. Aitken mass goes to accumulation whichever partner it hit; the primary-carbon share of its sulfate and SOA is recorded in `coating` for AER-06. Checked against the monodisperse closed forms (exact) and brute-force quadrature (+3…+7 % at MAM4 geometry; §9). No tunables. 21 tests. | AER-02 |
-| **AER-06** | A4 ageing: 3-monolayer sulfate criterion on `pcm` with SOA included, `f_age = M_SO4,cond/M_SO4,age-all + M_SOA,cond/M_SOA,age-all`, transferring that fraction of POA/BC/number to `acc`. `n_so4_monolayers` default 3.0 (Liu et al. 2012 supplement S1.1.5; ECHAM-HAM's `m7_coat` uses 1.0). | AER-03, AER-05 |
+| **AER-06** | ✅ `ageing.py`: MAM4's primary-carbon ageing from E3SM's `modal_aero_gasaerexch.F90` (and its duplicate in `modal_aero_coag.F90`) — the sulfate-plus-equivalent-SOA shell deposited this step (`coating`, written by AER-03 and AER-05), as a thickness over the mode's surface (`6 e^{-2.5 ln²σ}/D_g`), against `n_so4_monolayers` of 4.76 Å; that fraction of POA, BC, marine organics and number moves to accumulation; SOA weighted by κ_SOA/κ_SO4. Runs once, last, on the sum of both deposits (D-A1). **Default `n_so4_monolayers = 8`, not the 3 this card first said** — 3 is MAM7's (Liu et al. 2012); MAM4 uses 8 (Liu et al. 2016 §2, and both E3SM's and CESM's sources; §9). **Rolled in:** the `1 − 10ε` transfer cap is dtype-aware (it was exactly 1.0 in float32 in AER-05 too). 14 tests. | AER-03, AER-05 |
 | **AER-07** | A5 renaming: transfer the upper tail of `aitken` number and mass to `accum` after continuous growth, following Easter et al. (2004). | AER-02 |
 | **AER-08** | Wire `jam_microphysics="modal"` through `echam_physics()` and the Hydra config. (Classification landed in AER-01.) | AER-01, D-A4 |
 | **AER-09** | Conservation gates: per-process sulfur/carbon/number budgets as a ledger, asserted in tests. | AER-03..07 |
@@ -573,6 +573,51 @@ under the full core and bitwise equal to the placeholder; coagulation
 acts on any two particles, so that criterion now holds only on a clean
 atmosphere (empty modes, no gas). `modal_test` pins both the surviving
 criterion and the reason it narrowed.
+
+### AER-06: MAM4 ages at eight monolayers, not three
+
+The card said 3, from the Liu et al. (2012) supplement. That is MAM7's
+value. MAM4's paper is explicit (Liu et al. 2016, §2): "A criterion of
+eight monolayers of sulfate or equivalent amount of secondary organic
+aerosol (SOA) with the same increase in volume-weighted hygroscopicity as
+sulfate is required to convert POM/BC particles in the primary carbon
+mode to the accumulation mode", with the set-1 experiments MAM4L1/L2/L4/L8
+spanning 1–8 and L8 the production choice; and
+`n_so4_monolayers_pcage = 8.0_r8` in both E3SM's and CESM's
+`modal_aero_gasaerexch.F90`. The default is 8, as a differentiable leaf
+(`AgeingParameters.n_so4_monolayers`), so the MAM7 value and ECHAM-HAM's
+1 are one argument away for the single-column lifetime check in §5.
+MAM4's paper also sets κ_POM = 0; `species.py` carries 0.010, which is
+not this card's to change and is noted for AER-10.
+
+### AER-06: the criterion's own float32 trap, and the transfer cap that was not one
+
+MAM forms the fraction as `tmp1/tmp2` with `tmp1 = V_shell D_g e^{2.5
+ln²σ}` and `tmp2 = 6 n δ V_core`, both ~1e-21 per kg of air. The
+quotient's reverse derivative is `−tmp1/tmp2²`, and `tmp2²` ~ 1e-42 is
+flushed to zero on CPU float32: measured 2026-10-01 as `−inf` for
+d/d(n_so4_monolayers), the one tunable. Rewritten as `(V_shell/V_core)
+· (D_g e^{2.5 ln²σ} / 6 n δ)` — the same number from two ratios of
+comparably sized quantities — with a core floor of 1e-22 m³/kg (1e-19
+kg/kg of carbon) below which the mode is empty for the criterion, since
+`−V_shell/V_core²` itself needs a floor to stay representable. Pinned by
+`check_gradients` on the criterion and a float32 d/dn test through the
+process.
+
+Separately: MAM's `xferfrac_max = 1 − 10 ε` is a float64 literal, and in
+float32 it rounds to exactly 1.0, so AER-05's cap was no cap. Both
+modules now take the cap in the working dtype (`_transfer_max`).
+
+### AER-06: how the shell crosses the seam
+
+`coating` holds mass per species; the criterion needs volume, so ageing
+divides by each species' density and weights SOA by κ_SOA/κ_SO4 = 0.276
+(MAM's `soa_equivso4_factor`, computed from the spec rather than
+hard-coded). The deposited sulfate and SOA were already booked to
+accumulation by the processes that deposited them — MAM does the same,
+adding `dqdt_so4(pcm)` to the accumulation slot — so ageing moves only
+the carbon species and the number, and zeroes `coating` so nothing can be
+aged twice. The scaffold's one-transfer split (§9, AER-05) stands.
 
 ### D-A3, D-A4 — still open
 
