@@ -298,8 +298,8 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     indirect effect is larger under JAM: where ECHAM's immersion rate
     completes, at the cold end of the mixed phase, every frozen droplet
     becomes a crystal, and those crystals seed the WBF transfer and
-    deposition. In 10-day T63 JAM runs, going from the closure to ECHAM-HAM's
-    rates raised the WBF transfer from 6.3 to 6.9 and the deposition from 252
+    deposition. In 10-day T63 JAM runs with ``ccsaut = 900``, going from the
+    closure to ECHAM-HAM's rates raised the WBF transfer from 6.3 to 6.9 and the deposition from 252
     to 271 g m⁻² d⁻¹, lowered the liquid water path from 45.6 to 43.1 g m⁻²
     and the supercooled fraction at 238–243 K from 0.52 to 0.45, and changed
     the ice water path by +0.2 g m⁻² (run-to-run noise: 0.75 g m⁻² in the liquid
@@ -342,25 +342,20 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     temperatures, which makes ``znidetr`` large.
   - Liquid water path lies below the observed range (50–84 g m⁻² over the
     oceans; Lohmann et al. 2007, *ACP* 7, 3425, Table 2).
-  - Under JAM the ice water path is about a quarter of the non-JAM one and the
-    mixed-phase condensate stays mostly liquid (10-day T63 January runs, JAM
-    from a state 10 days past a cold start: IWP 7.2 against 27.8 g m⁻²,
-    supercooled mass fraction at 253–258 K 0.81 against 0.28). Most of the gap is the ice
-    aggregation coefficient: the JAM presets use ECHAM-HAM's ``ccsaut = 900``,
-    the retune ``mo_activ.f90`` applies at T63 L47 with prognostic CDNC, AR&G
-    activation and ``cdnc_min_fixed = 40`` (lines 392–408), while the
-    MACv2-SP presets keep ECHAM's generic 95 (``mo_echam_cloud_params.f90``,
-    line 59). With 900 the mixed-phase ice aggregates to snow 2.7 times faster
-    per unit ice; the same JAM run with 95 (measured before the switch to
-    ECHAM-HAM's freezing rates) has IWP 21.9 instead of 7.1 g m⁻² and a
-    supercooled fraction of 0.52 instead of 0.83. ECHAM-HAM's retune was made in a model with sources of
-    ice number jcm does not have (Kärcher–Lohmann cirrus nucleation, #552;
-    detrained droplet number and cloud-base activation, #955), so the value is
-    ECHAM-HAM's but its effect here is not ECHAM-HAM's; it is left to the
-    #682 retune. The rest of the gap is the young JAM state (10 points less
-    cloud cover). The aerosol–ice coupling is not the cause: replacing JAM's
-    INP by DeMott's in the closure changed the IWP by 0.05 g m⁻², and
-    ECHAM-HAM's rates change it by +0.2 g m⁻² (above).
+  - Under JAM the mixed-phase condensate stays more liquid than in the non-JAM
+    member. Both aggregate ice with ECHAM's generic ``ccsaut = 95``
+    (``mo_echam_cloud_params.f90``, line 59). ECHAM-HAM retunes it to 900 in
+    ``mo_activ.f90`` at T63 L47 with prognostic CDNC, AR&G activation and
+    ``cdnc_min_fixed = 40`` (lines 392–408). That retune belongs with HAM's own
+    aerosol and its insoluble dust mode, which jcm's MAM4-based JAM does not
+    reproduce, so JAM keeps the generic value. ``ccsaut`` for JAM is a tuning
+    target of the #682 retune. In 10-day T63 January runs from a JAM state 10
+    days past a cold start, 95 gives an ice water path of 22.3 g m⁻² against
+    7.0 with 900. The supercooled mass fraction at 253–258 K is 0.48 against
+    0.83. The non-JAM member had 27.8 g m⁻² and 0.28, measured before the
+    Sonntag saturation. The aerosol–ice coupling does not explain the gap:
+    replacing JAM's INP by DeMott's in the closure changed the ice water path
+    by 0.05 g m⁻², and ECHAM-HAM's rates change it by +0.2 g m⁻² (above).
 - **Cirrus ICNC diagnosis (default ``nic_cirrus = 1``).** Where a cloudy cell
   holds ice at or below ``icemin`` crystals, ``update_in_cloud_water``
   diagnoses the number from the ice mass at the radius ``zrid``,

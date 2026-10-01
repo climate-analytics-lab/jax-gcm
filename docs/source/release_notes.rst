@@ -1388,44 +1388,47 @@ JAM mixed-phase freezing follows ECHAM-HAM
 - **New output:** ``freezing_aerosol.*`` (the eight HAM freezing inputs);
   ``CloudParams2M`` gains the differentiable ``immersion_coefficient_dust``
   (32.3) and ``immersion_coefficient_bc`` (2.91e-3).
-- **Changes results** for the JAM members only. Days 5-10 of 10-day
+- The 2M scheme's default ice aggregation coefficient ``ccsaut`` is ECHAM's
+  generic 95 (``mo_echam_cloud_params.f90``), which the JAM members take.
+  ECHAM-HAM's 900 (``mo_activ.f90``) is a retune for HAM's own aerosol and
+  its insoluble dust mode, which MAM4 does not reproduce. The value is a
+  tuning target of the #682 retune. ``ccraut`` keeps ECHAM-HAM's 10.6: it
+  acts on droplets from AR&G activation, which JAM runs. The 2M presets
+  already set 95 and 15, so the ``echam-2m`` members are unchanged; a 2M
+  scheme built in Python without a preset gets 95 instead of 900.
+- **Changes results** for the JAM members. Days 5-10 of 10-day
   ``t63-echam-jam`` runs from a state ten days past a cold start (T63L47,
-  January):
+  January), with dev at ``2dc609fd`` against this change at ``2366def6``:
 
   ============================================  ==============  ==============
   quantity                                      before          after
   ============================================  ==============  ==============
-  ice / liquid water path [g/m²]                7.00 / 45.6     7.18 / 43.1
-  supercooled liquid water path [g/m²]          28.9            26.5
-  supercooled mass fraction, 238-243 K          0.52            0.45
-  supercooled mass fraction, 253-258 K          0.84            0.81
-  longwave / shortwave cloud effect [W/m²]      19.80 / -38.66  19.25 / -37.67
-  net TOA radiation [W/m²]                      5.66            6.02
+  ice / liquid water path [g/m²]                7.00 / 44.6     22.3 / 40.7
+  supercooled liquid water path [g/m²]          27.9            22.1
+  supercooled mass fraction, 238-243 K          0.52            0.19
+  supercooled mass fraction, 253-258 K          0.83            0.48
+  cloud cover [%]                               57.4            56.5
+  longwave / shortwave cloud effect [W/m²]      19.66 / -38.33  23.34 / -44.42
+  net TOA radiation [W/m²]                      5.94            3.26
   ============================================  ==============  ==============
 
-  The run-to-run noise of these runs is about 0.75 g/m² in liquid water
-  path and 0.3 W/m² in the cloud effects. The aerosol-free 2M path is
-  unchanged: bit-identical on CPU, and on the GPU the ``t63-echam-2m``
-  member differs from two runs of the unchanged code by less than the
-  run-to-run noise (ice water path 27.8 against 28.0 and 27.5 g/m²). The release-matrix bands of
-  the ``echam-jam`` members shift and are regenerated with #943.
-- Two findings are left open for the maintainer, and neither is changed
-  here:
-
-  - The JAM ice water path stays about a quarter of the non-JAM one. Most
-    of that comes from the ice aggregation coefficient: JAM uses
-    ECHAM-HAM's ``ccsaut = 900`` for its configuration. The same run with
-    ECHAM's generic 95 gives an ice water path of 21.9 instead of
-    7.05 g/m², against 27.4 g/m² for the non-JAM member. Whether JAM keeps
-    900 is undecided.
-  - JAM's dust is removed about five times faster than ECHAM-HAM's.
-    Measured over five January days, the burden is 2.8 Tg and the lifetime
-    1.1 days, with 79 % of the removal dry. ECHAM6.3-HAM2.3 has 16.5 Tg,
-    5.3 days and 39 % dry (Tegen et al. 2019). The emission is comparable.
-    This also limits the JAM immersion freezing.
-
-  These numbers compare dev at ``8393799c`` with this change at
-  ``138506ba``, both before the Sonntag entry above.
+  Most of the change is ``ccsaut``. The freezing rates alone, measured with
+  ``ccsaut = 900`` before the Sonntag entry above, moved the ice water path
+  by +0.2 g/m², the liquid water path by -2.5 g/m² and the supercooled
+  fraction at 238-243 K from 0.52 to 0.45. The run-to-run noise of these
+  runs is about 0.75 g/m² in liquid water path and 0.3 W/m² in the cloud
+  effects. The aerosol-free 2M path is unchanged: bit-identical on CPU at
+  fixed parameters, and on the GPU the ``t63-echam-2m`` member differs from
+  two runs of the unchanged code by less than the run-to-run noise (ice
+  water path 27.8 against 28.0 and 27.5 g/m², before the Sonntag entry).
+  The release-matrix bands of the ``echam-jam`` members shift and are
+  regenerated with #943.
+- JAM's dust is removed about five times faster than ECHAM-HAM's. This is a
+  finding for the maintainer and is not changed here. Measured over five
+  January days, the burden is 2.8 Tg and the lifetime 1.1 days, with 79 %
+  of the removal dry. ECHAM6.3-HAM2.3 has 16.5 Tg, 5.3 days and 39 % dry
+  (Tegen et al. 2019). The emission is comparable. This also limits the JAM
+  immersion freezing.
 
   See :doc:`science/clouds_microphysics` and :doc:`science/aerosol`.
 

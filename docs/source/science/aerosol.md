@@ -254,6 +254,11 @@ carbon from classical nucleation theory (``hetfrz_classnuc.F90``; Hoose et al.
 - `science` (deliberate) — masses are floored at zero before the ratios; HAM's
   tracers enter unfloored. Transport round-off negatives have no composition
   meaning.
+- `science` (maintainer decision) — the JAM member aggregates ice with ECHAM's
+  generic ``ccsaut = 95`` rather than ECHAM-HAM's retune to 900
+  (``mo_activ.f90``, ``activ_initialize``). That retune belongs with HAM's own
+  aerosol and its insoluble dust mode, which MAM4 does not reproduce; the value
+  is a tuning target of the #682 retune.
 
 **Status & known limitations.** The dust the population carries sets the
 immersion freezing. In 10-day T63 January runs from a JAM state 10 days past a
