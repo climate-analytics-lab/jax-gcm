@@ -172,13 +172,13 @@ def assert_close(field: str, family: str, jcm, ref, prec: str, what: str = ""):
 # jcm tunables that differ from ECHAM6.3-HAM2.3 at T63 (the maintainer's tuning, kept in
 # jcm). The comparisons use ECHAM's values so the formulation is tested, not the tuning;
 # ``test_cloud_params_relevant_to_941_match_echam`` pins the differences.
-KNOWN_PARAM_DIFFERENCES = {"ccsaut": (900.0, 95.0), "ccraut": (10.6, 15.0)}
+KNOWN_PARAM_DIFFERENCES = {"ccraut": (10.6, 15.0)}
 
 
 def echam_params():
     """CloudParams2M for the comparisons: jcm's defaults built under ECHAM's constants
-    (tmelt, grav, cthomi follow them), ECHAM's aggregation/autoconversion rates
-    ``ccsaut``/``ccraut`` (KNOWN_PARAM_DIFFERENCES), and ``activation_smoothing = 0``
+    (tmelt, grav, cthomi follow them), ECHAM's autoconversion rate ``ccraut``
+    (KNOWN_PARAM_DIFFERENCES), and ``activation_smoothing = 0``
     (jcm's smooth max on the activation increment; ECHAM's is a hard MAX, F 2599-2600).
     ``n_aer_coarse`` stays: DeMott runs only in jcm's mixed-phase freezing substitute,
     which acts only on supercooled liquid in cloud, and no compared cell holds any.
@@ -593,7 +593,7 @@ def test_cloud_params_relevant_to_941_match_echam():
     z = load()
     for name in ("cqtmin", "cthomi", "ceffmin", "ceffmax", "crhoi", "cvtfall", "ccwmin",
                  "crhosno", "cn0s", "icemin", "icemax", "conv_effr2mvr", "clc_min", "fact_PK",
-                 "pow_PK", "rhoice", "fact_tke", "epsec"):
+                 "pow_PK", "rhoice", "fact_tke", "epsec", "ccsaut"):
         assert float(getattr(p, name)) == pytest.approx(float(z[f"param/{name}"]), rel=1e-12), name
     for name, (jcm_v, echam_v) in KNOWN_PARAM_DIFFERENCES.items():
         assert float(getattr(p, name)) == pytest.approx(jcm_v, rel=1e-12), name

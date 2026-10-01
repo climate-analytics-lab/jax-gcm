@@ -225,8 +225,9 @@ previous-step stash `clouds.qnc_prev`/`qni_prev` holds the raw tracers too.
 ## Deliberate omissions (tracked)
 
 - **Large-scale vertical velocity is not plumbed** (`zvervx` is TKE-only; the
-  `knvb`/`lonacc` inversion gate on `zauloc` is omitted; `het_mxphase_freezing`
-  likewise lacks `pvervel`) (#705).
+  `knvb`/`lonacc` inversion gate on `zauloc` is omitted; section 6.2 passes
+  `pvervel = 0` to `het_mxphase_freezing`, so its immersion cooling is the TKE
+  updraft's) (#705).
 - **`nic_cirrus = 2`** still expects the Kärcher–Lohmann `pnicex`/`zqinucl`
   source jcm does not compute (#552); its section-5 deposition branch returns
   zero, as in the reference with a missing external source.
@@ -236,11 +237,13 @@ previous-step stash `clouds.qnc_prev`/`qni_prev` holds the raw tracers too.
   `zqlnuccv` (lines 889-941), which needs the activated number at convective
   cloud base; and stratiform activation at cloud base (lines 742-782)
   (#955).
-- **Mixed-phase heterogeneous freezing** is a jcm closure (freezing up to an
-  INP number from DeMott (2010), or `max(ice_nuclei, DeMott)` under JAM),
-  not ECHAM's `het_mxphase_freezing` or its aerosol-free `lccnclim` mode.
-  {doc}`../science/clouds_microphysics` gives the reasons and the path to the
-  faithful form.
+- **Mixed-phase heterogeneous freezing without a prognostic aerosol** is a
+  jcm closure (freezing up to the DeMott (2010) INP number), not ECHAM's
+  aerosol-free `lccnclim` mode, which needs `pvervel` (#705). With JAM, section
+  6.2 is ECHAM-HAM's `het_mxphase_freezing` on the `ham_IN_setup` inputs the
+  aerosol publishes (`freezing_aerosol`). The choice is a static switch on the
+  presence of those inputs, so the aerosol-free composition traces the closure
+  exactly as before. {doc}`../science/clouds_microphysics` gives the details.
 
 ## The gates
 
@@ -251,11 +254,14 @@ melt-in-place fixtures, and with detrained condensate of both phases
 re-split by `lo2`. They are the contract the #940 input rewiring must
 keep. `lohmann_2m_ice_sources_test.py` pins each section-1 and section-4
 rule (`zrid`, `znidetr`, the sedimentation input, the re-split with its
-fusion heat, the raw-tracer tendencies, the JAM/DeMott maximum), and
+fusion heat, the raw-tracer tendencies, the closure's INP maximum), and
 `lohmann_2m_fortran_reference_test.py` compares them block by block and end
 to end, on designed columns, with the unmodified ECHAM routine run by a
 standalone harness (fixtures under
 `jcm/data/test/echam_cloud_reference/cloud2m_*`).
+`lohmann_2m_freezing_reference_test.py` does the same for section 6.2 with the
+HAM freezing inputs set (`cloud2m_frz_*`), and `lohmann_2m_freezing_test.py`
+pins the aerosol-free path to its output before the switch existed.
 `TestSaturationGate2M` pins that no supersaturation survives a step;
 `TestColdChainSameStepCoupling2M` pins that a deck glaciating via WBF
 exports a frozen flux the same step. Budget tests pin the

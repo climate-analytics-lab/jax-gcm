@@ -39,11 +39,16 @@ from ..cloud_utils import (
     threshold_vert_vel,
     turbulent_updraft_velocity,
 )
-from .types import MicrophysicsTendencies_2M, ScavengingLedger
+from .types import (
+    HeterogeneousFreezingAerosol,
+    MicrophysicsTendencies_2M,
+    ScavengingLedger,
+)
 from .sedimentation_melt import melting_snow_and_ice, sedimentation_ice
 from .deposition_freezing import (
     demott2010_inp,
     freezing_below_238K,
+    het_mxphase_freezing,
     mixed_phase_deposition_and_corrections,
     WBF_process,
 )
@@ -77,7 +82,7 @@ def cloud_microphysics_2m(
     layer_thickness: jnp.ndarray,   # (nlev,)  m   (dz, full-level layer depths)
     tke: jnp.ndarray,               # (nlev,)  m²/s²  turbulent kinetic energy
     activated_cdnc: jnp.ndarray,    # (nlev,)  1/m³   aerosol-activated CDNC (from MACv2-SP)
-    ice_nuclei: jnp.ndarray,        # (nlev,)  1/m³   immersion het INP (JAM #494); floored by DeMott
+    ice_nuclei: jnp.ndarray,        # (nlev,)  1/m³   external immersion INP for the DeMott closure (none in-tree)
     ice_nuclei_deposition: jnp.ndarray,  # (nlev,) 1/m³  deposition INP (pnicex; read only at nic_cirrus=2)
     dt: jnp.ndarray,                # scalar   seconds
     params: CloudParams2M,          # tunable parameters
@@ -87,6 +92,7 @@ def cloud_microphysics_2m(
     qi_m1: jnp.ndarray | None = None,                 # (nlev,)     step-start qi (ECHAM pxim1)
     detrained_qc: jnp.ndarray | None = None,  # (nlev,) kg/kg per step: liquid detrainment (ECHAM ztmst·pxtecl)
     detrained_qi: jnp.ndarray | None = None,  # (nlev,) kg/kg per step: ice detrainment (ECHAM ztmst·pxteci)
+    freezing_aerosol: HeterogeneousFreezingAerosol | None = None,  # (nlev,) leaves: HAM freezing inputs
 ) -> tuple[
     MicrophysicsTendencies_2M,      # per-level tendencies
     jnp.ndarray, jnp.ndarray,       # surface rain / snow flux [kg/m^2/s]
@@ -141,10 +147,14 @@ def cloud_microphysics_2m(
             (:func:`update_in_cloud_water`).
       6.1   Homogeneous freezing below ``cthomi``
             (:func:`freezing_below_238K`).
-      6.2   Heterogeneous mixed-phase freezing (JAM immersion INP with
-            the DeMott (2010) fallback) and the WBF process with the
-            Korolev/Mazin threshold updraft recomputed from the
-            post-freezing ice (:func:`WBF_process`).
+      6.2   Heterogeneous mixed-phase freezing and the WBF process with
+            the Korolev/Mazin threshold updraft recomputed from the
+            post-freezing ice (:func:`WBF_process`). With
+            ``freezing_aerosol`` (the HAM freezing inputs of a prognostic
+            aerosol, JAM) the freezing is ECHAM-HAM's contact + immersion
+            rates (:func:`het_mxphase_freezing`, F 2675-2840); without it,
+            jcm's aerosol-free closure that freezes droplets up to the
+            DeMott (2010) INP number.
       7.    Precipitation geometry: ``zclcstar = min(paclc, zclcpre)``,
             the layer-depth ``zauloc`` ramp, and the Marshall-Palmer
             inversion of the carry fluxes into ``zxrp1``/``zxsp1`` (rain/
@@ -445,15 +455,31 @@ def cloud_microphysics_2m(
         pressure, temperature_m1)
     melt_mask = temperature_m1 > params.tmelt  # ECHAM ll_mlt (ptm1)
 
-    # Heterogeneous mixed-phase INP [1/m³] for jcm's freezing substitute
-    # (section 6.2): the larger of the online JAM immersion INP (#494) and
-    # the DeMott (2010) diagnostic on prescribed coarse aerosol, converted
-    # to ambient density. The maximum is a stopgap: the online INP runs far
-    # below DeMott, and preferring it wherever it is non-zero switched the
-    # DeMott floor off in every JAM cell (#953 tracks the cause).
+    # Heterogeneous mixed-phase INP [1/m³] of the aerosol-free freezing
+    # closure (section 6.2): the DeMott (2010) diagnostic on prescribed
+    # coarse aerosol at ambient density, or a larger external INP a caller
+    # supplies as ``ice_nuclei`` (no in-tree composition does). Unused when
+    # ``freezing_aerosol`` selects ECHAM-HAM's rates.
     demott_floor = demott2010_inp(
         temperature_m1, params.n_aer_coarse, air_density)
     n_inp = jnp.maximum(ice_nuclei, demott_floor)
+    # The HAM freezing inputs ride the level scan with the TKE the immersion
+    # cooling rate needs (F 2800). ECHAM reads the previous step's TKE
+    # (ptkem1); this is the TKE the scheme receives, the one its updraft
+    # zvervx also uses. A static Python switch: the aerosol-free composition
+    # traces exactly the closure it had before.
+    if freezing_aerosol is None:
+        freezing_levels = ()
+    else:
+        freezing_levels = (
+            tke, freezing_aerosol.dust_soluble,
+            freezing_aerosol.dust_insoluble_accumulation,
+            freezing_aerosol.dust_insoluble_coarse,
+            freezing_aerosol.bc_soluble, freezing_aerosol.bc_insoluble,
+            freezing_aerosol.wet_radius_insoluble_aitken,
+            freezing_aerosol.wet_radius_insoluble_accumulation,
+            freezing_aerosol.wet_radius_insoluble_coarse,
+        )
 
     # ------------------------------------------------------------------
     # The flux-coupled column sweep: ECHAM's column_processes loop
@@ -472,7 +498,7 @@ def cloud_microphysics_2m(
          esw_k, esi_k, qsw_k, qsi_k, dqsw_k, dqsi_k,
          subice_k, subwat_k, thermo_k, eta_k, verv_k, visc_k, melt_k,
          act_cdnc_k, n_inp_k, inp_dep_k, is_bottom_k,
-         lvdcp_k, lsdcp_k) = level_in
+         lvdcp_k, lsdcp_k, freezing_k) = level_in
 
         zero_s = jnp.zeros_like(cf_k)
 
@@ -742,17 +768,9 @@ def cloud_microphysics_2m(
         )
 
         # --- 6.2 Heterogeneous mixed-phase freezing + WBF --------------
-        # ECHAM ll_mxphase_frz: liquid present, mixed-phase window on the
-        # corrected temperature, droplets at/above the floor, cloud
-        # present. The jcm INP substitution (JAM immersion / DeMott
-        # fallback) freezes one mean-mass droplet per new crystal up to the
-        # INP number, moving number, mass AND fusion heat together (#662
-        # finding 3). The new crystals are capped by the droplets
-        # available, as the frozen mass is capped by the liquid, so an INP
-        # number above CDNC cannot create crystals from nothing. This
-        # substitute is jcm's closure; ECHAM's het_mxphase_freezing (not
-        # wired) caps the frozen number at the droplets above cdnc_min
-        # (2818-2820), and this one leaves at least cqtmin.
+        # ECHAM ll_mxphase_frz (1541-1545): liquid present, mixed-phase
+        # window on the corrected temperature, droplets at/above the floor,
+        # cloud present.
         ll_mxfrz = (
             (zxlb > params.cqtmin)
             & (ztp1tmp < params.tmelt)
@@ -760,30 +778,64 @@ def cloud_microphysics_2m(
             & (cdnc_f >= cdnc_min_k)
             & cloud_flag
         )
-        new_crystals = jnp.where(
-            ll_mxfrz,
-            jnp.minimum(jnp.maximum(n_inp_k - icnc_f, 0.0), cdnc_f),
-            0.0,
-        )
-        icnc_het = icnc_f + new_crystals
-        mean_droplet_mass = jnp.where(
-            cdnc_f > params.epsec,
-            zxlb * rho_k / jnp.maximum(cdnc_f, params.epsec),
-            0.0,
-        )
-        frozen_mass = jnp.minimum(
-            new_crystals * mean_droplet_mass * inv_rho_k, zxlb)
-        zxib = zxib + frozen_mass
-        zxlb = zxlb - frozen_mass
-        cdnc_h = jnp.where(
-            ll_mxfrz,
-            jnp.maximum(cdnc_f - new_crystals, params.cqtmin),
-            cdnc_f,
-        )
-        # Grid-mean freezing ledger (ECHAM pfrl): only the het leg is
-        # converted here — freezing_below_238K already area-weights
-        # internally (pfrl += pxlb·paclc).
-        zfrl = zfrl + frozen_mass * paclc
+        if freezing_k:
+            # ECHAM-HAM's het_mxphase_freezing (1552-1567, 2675-2840):
+            # Brownian contact freezing on insoluble dust and immersion
+            # freezing of dust/BC-bearing droplets, as rates over the step,
+            # on the HAM freezing inputs of the composition's aerosol. The
+            # immersion rate needs the cooling of the vertical motion,
+            # ECHAM's ztte = (omega - fact_tke*sqrt(TKE)*rho*g)/(cpd*rho)
+            # (2800-2802). The turbulent part is here; the large-scale
+            # omega is not plumbed to this scheme (#705), so it enters as 0
+            # and ascent-driven immersion freezing beyond the TKE updraft is
+            # absent, as is the suppression in large-scale subsidence.
+            (tke_k, fdusol_k, fduai_k, fduci_k, fbcsol_k, fbcinsol_k,
+             rwetki_k, rwetai_k, rwetci_k) = freezing_k
+            (icnc_het, cdnc_h, zfrl, zxib, zxlb,
+             new_crystals) = het_mxphase_freezing(
+                ll_mxfrz, p_k, tke_k,
+                zero_s,             # pvervel: large-scale omega (#705)
+                paclc, fbcsol_k, fbcinsol_k, fdusol_k, fduai_k, fduci_k,
+                rho_k, inv_rho_k, rwetki_k, rwetai_k, rwetci_k,
+                ztp1tmp, cdnc_min_k,
+                icnc_f, cdnc_f, zfrl, zxib, zxlb,
+                dt, params.cqtmin, params,
+            )
+        else:
+            # The aerosol-free closure: freeze one mean-mass droplet per new
+            # crystal up to the INP number, moving number, mass AND fusion
+            # heat together (#662 finding 3). The new crystals are capped by
+            # the droplets available, as the frozen mass is capped by the
+            # liquid, so an INP number above CDNC cannot create crystals
+            # from nothing. ECHAM's aerosol-free freezing is its lccnclim
+            # mode, which needs the large-scale omega (#705); until then the
+            # INP number is DeMott (2010). ECHAM's het_mxphase_freezing caps
+            # the frozen number at the droplets above cdnc_min (2818-2820);
+            # this closure leaves at least cqtmin.
+            new_crystals = jnp.where(
+                ll_mxfrz,
+                jnp.minimum(jnp.maximum(n_inp_k - icnc_f, 0.0), cdnc_f),
+                0.0,
+            )
+            icnc_het = icnc_f + new_crystals
+            mean_droplet_mass = jnp.where(
+                cdnc_f > params.epsec,
+                zxlb * rho_k / jnp.maximum(cdnc_f, params.epsec),
+                0.0,
+            )
+            frozen_mass = jnp.minimum(
+                new_crystals * mean_droplet_mass * inv_rho_k, zxlb)
+            zxib = zxib + frozen_mass
+            zxlb = zxlb - frozen_mass
+            cdnc_h = jnp.where(
+                ll_mxfrz,
+                jnp.maximum(cdnc_f - new_crystals, params.cqtmin),
+                cdnc_f,
+            )
+            # Grid-mean freezing ledger (ECHAM pfrl): only the het leg is
+            # converted here — freezing_below_238K already area-weights
+            # internally (pfrl += pxlb·paclc).
+            zfrl = zfrl + frozen_mass * paclc
 
         # WBF with the threshold updraft recomputed from the
         # post-freezing in-cloud ice (ECHAM 1580-1594).
@@ -974,7 +1026,7 @@ def cloud_microphysics_2m(
         subsat_wrt_ice, subsat_wrt_water, thermo_term_water,
         bergeron_eta, updraft_velocity, dynamic_viscosity, melt_mask,
         activated_cdnc, n_inp, ice_nuclei_deposition, is_bottom_level,
-        lvdcp, lsdcp,
+        lvdcp, lsdcp, freezing_levels,
     )
 
     zero_scalar = jnp.array(0.0, dtype=qc.dtype)
@@ -1217,9 +1269,12 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     the public ``"clouds"`` key (set by :class:`SundqvistCloudFraction`
     upstream), together with this step's convective detrainment
     ``clouds.conv_detrainment_qc/qi`` (written by ``TiedtkeConvection``,
-    zero without a convection term), TKE from ``"vertical_diffusion"``, and
-    the SPA-style activated CDNC floor from the public ``"aerosol"`` Nccn.
-    Writes the
+    zero without a convection term), TKE from ``"vertical_diffusion"``, the
+    activated CDNC (JAM's ``activated_cdnc``, or the SPA-style floor from the
+    public ``"aerosol"`` Nccn), and, where a prognostic aerosol publishes
+    them, ECHAM-HAM's heterogeneous-freezing inputs ``"freezing_aerosol"``
+    (a :class:`HeterogeneousFreezingAerosol`), which switch section 6.2 from
+    the DeMott closure to ECHAM's contact + immersion rates. Writes the
     surface rain / snow precip flux into ``"clouds"`` along with the
     qnc / qni state-carry needed for the next step's update.
 
@@ -1413,16 +1468,21 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             )
             activated_cdnc = jnp.where(arg_cdnc > 1.0, arg_cdnc, cdnc_min_floor)
 
-        # Online heterogeneous ice nuclei (JAM #494); 0 where absent, leaving
-        # the core's DeMott floor. Immersion INP drives the mixed-phase
-        # freezing substitute. Deposition INP reaches ``update_in_cloud_water``
-        # as ECHAM's ``pnicex``, which only the nic_cirrus=2 branch reads, so
-        # it is inert at the default nic_cirrus=1.
+        # Aerosol inputs of the heterogeneous mixed-phase freezing. A
+        # prognostic aerosol (JAM) publishes ECHAM-HAM's freezing inputs as
+        # ``freezing_aerosol`` (the ham_IN_setup fields), which selects
+        # ECHAM's contact + immersion rates in section 6.2; without it the
+        # scheme uses its aerosol-free DeMott (2010) closure. ``ice_nuclei``
+        # is an optional external INP number for that closure (no in-tree
+        # term publishes it). ``ice_nuclei_deposition`` reaches
+        # ``update_in_cloud_water`` as ECHAM's ``pnicex``, read only by the
+        # nic_cirrus=2 branch (#552).
         zeros_2d = jnp.zeros_like(state.temperature)
         ice_nuclei = diagnostics.get("ice_nuclei", zeros_2d)
         ice_nuclei_deposition = diagnostics.get(
             "ice_nuclei_deposition", zeros_2d
         )
+        freezing_aerosol = diagnostics.get("freezing_aerosol")
 
         # The core owns grid-scale condensation now (the ECHAM section-5
         # zqcdif closure + supersaturation corrections run inside the
@@ -1443,7 +1503,8 @@ class Lohmann2MMicrophysics(PhysicsTerm):
          rain_flux_all, snow_flux_all) = jax.vmap(
             cloud_microphysics_2m,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                     None, None, 1, 1, 1, 1, 1, 1),
+                     None, None, 1, 1, 1, 1, 1, 1,
+                     None if freezing_aerosol is None else 1),
             out_axes=(0,) * 17,
         )(
             temperature_in, specific_humidity_in, pressure_full,
@@ -1451,7 +1512,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             cloud_fraction, air_density, layer_thickness, tke,
             activated_cdnc, ice_nuclei, ice_nuclei_deposition, dt, params_2m,
             state.temperature, state.specific_humidity, qc_m1, qi_m1,
-            detrained_qc, detrained_qi,
+            detrained_qc, detrained_qi, freezing_aerosol,
         )
 
         tendency = PhysicsTendency(

@@ -1277,10 +1277,8 @@ Lohmann 2M detrained ice carries ECHAM's crystal number
   step.
 - The DeMott (2010) INP number is converted from standard to ambient air
   density, and mixed-phase freezing creates no more crystals than there are
-  droplets. Under JAM the mixed-phase INP number is
-  ``max(ice_nuclei, DeMott)`` instead of JAM's value wherever it is
-  positive. This is a stopgap while JAM's immersion INP sits about four
-  orders of magnitude below DeMott (#953).
+  droplets. (Under JAM the mixed-phase freezing is now ECHAM-HAM's; see the
+  next entry.)
 - **New output:** ``clouds.conv_detrainment_qc`` and
   ``clouds.conv_detrainment_qi`` [kg kg⁻¹ s⁻¹], the condensate the Tiedtke
   scheme detrains each step, in its own phase split.
@@ -1361,6 +1359,80 @@ ECHAM physics saturation is ECHAM's Sonntag (1990)
   functions; ``surface.echam.AtmosphericForcing`` takes a required
   ``surface_pressure``.
   See :doc:`v2_to_v3` and :doc:`science/constants`.
+
+JAM mixed-phase freezing follows ECHAM-HAM
+""""""""""""""""""""""""""""""""""""""""""
+
+- Under JAM, supercooled cloud water freezes at ECHAM-HAM's rates:
+  Brownian contact freezing on insoluble dust and Lohmann & Diehl (2006)
+  immersion freezing of droplets holding dust or black carbon
+  (``mo_cloud_micro_2m.f90::het_mxphase_freezing``, lines 2675-2840),
+  instead of jcm's closure that raised the crystal number to an INP number.
+  The immersion rate follows the cooling of the turbulent updraft; the
+  large-scale vertical velocity is not plumbed yet (#705) and in 10-day T63
+  runs would change the rate by 0.5 %.
+- JAM's ``IceNucleation`` term computes the dust and black-carbon fractions
+  of the activated droplets and of the insoluble aerosol that ECHAM-HAM's
+  ``ham_IN_setup`` passes to that routine, from the MAM4 modes, and
+  publishes them as ``freezing_aerosol``. MAM4 has no insoluble dust, so
+  contact freezing is zero under JAM. Both routines are compared with the
+  compiled ECHAM6.3-HAM2.3 source on designed columns
+  (``cloud2m_frz_T63L47.npz``, ``hamfrz_M7.npz``).
+- **Removed:** the Niemand (2012) and jcm Lohmann-Diehl INP schemes of the
+  JAM ice term with their ``IceNucleationParameters``, the
+  ``jam_ice_scheme`` argument of ``echam_physics`` and the ``ice_scheme`` /
+  ``ice_nucleation_params`` arguments of ``jam_aerosol_physics``, and the
+  ``ice_nuclei`` / ``ice_nuclei_deposition`` outputs of JAM. The Niemand INP
+  followed Niemand et al. (2012) correctly; it sat four orders of magnitude
+  below DeMott because most mixed-phase clouds held almost no dust.
+- **New output:** ``freezing_aerosol.*`` (the eight HAM freezing inputs);
+  ``CloudParams2M`` gains the differentiable ``immersion_coefficient_dust``
+  (32.3) and ``immersion_coefficient_bc`` (2.91e-3).
+- ``CloudParams2M.default()`` sets the ice aggregation coefficient
+  ``ccsaut`` to ECHAM's generic 95 (``mo_echam_cloud_params.f90``) instead of
+  ECHAM-HAM's 900, and the JAM members take it. ECHAM-HAM's 900
+  (``mo_activ.f90``) is a retune for HAM's own aerosol and
+  its insoluble dust mode, which MAM4 does not reproduce. The value is a
+  tuning target of the #682 retune. ``ccraut`` keeps ECHAM-HAM's 10.6: it
+  acts on droplets from AR&G activation, which JAM runs. The 2M presets
+  already set 95 and 15, so the ``echam-2m`` members are unchanged; a 2M
+  scheme built in Python without a preset gets 95 instead of 900 (see
+  :doc:`v2_to_v3`).
+- **Changes results** for the JAM members. Days 5-10 of 10-day
+  ``t63-echam-jam`` runs from a state ten days past a cold start (T63L47,
+  January), with dev at ``2dc609fd`` against this change at ``2366def6``:
+
+  ============================================  ==============  ==============
+  quantity                                      before          after
+  ============================================  ==============  ==============
+  ice / liquid water path [g/m²]                7.00 / 44.6     22.3 / 40.7
+  supercooled liquid water path [g/m²]          27.9            22.1
+  supercooled mass fraction, 238-243 K          0.52            0.19
+  supercooled mass fraction, 253-258 K          0.83            0.48
+  cloud cover [%]                               57.4            56.5
+  longwave / shortwave cloud effect [W/m²]      19.66 / -38.33  23.34 / -44.42
+  net TOA radiation [W/m²]                      5.94            3.26
+  ============================================  ==============  ==============
+
+  Most of the change is ``ccsaut``. The freezing rates alone, measured with
+  ``ccsaut = 900`` before the Sonntag entry above, moved the ice water path
+  by +0.2 g/m², the liquid water path by -2.5 g/m² and the supercooled
+  fraction at 238-243 K from 0.52 to 0.45. The run-to-run noise of these
+  runs is about 0.75 g/m² in liquid water path and 0.3 W/m² in the cloud
+  effects. The aerosol-free 2M path is unchanged: bit-identical on CPU at
+  fixed parameters, and on the GPU the ``t63-echam-2m`` member differs from
+  two runs of the unchanged code by less than the run-to-run noise (ice
+  water path 27.8 against 28.0 and 27.5 g/m², before the Sonntag entry).
+  The release-matrix bands of the ``echam-jam`` members shift and are
+  regenerated with #943.
+- JAM's dust is removed about five times faster than ECHAM-HAM's. This is a
+  finding for the maintainer and is not changed here. Measured over five
+  January days, the burden is 2.8 Tg and the lifetime 1.1 days, with 79 %
+  of the removal dry. ECHAM6.3-HAM2.3 has 16.5 Tg, 5.3 days and 39 % dry
+  (Tegen et al. 2019). The emission is comparable. This also limits the JAM
+  immersion freezing.
+
+  See :doc:`science/clouds_microphysics` and :doc:`science/aerosol`.
 
 
 Known limitations

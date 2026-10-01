@@ -7,6 +7,7 @@ This module must not import any other module from this package.
 """
 
 import jax.numpy as jnp
+import tree_math
 from typing import NamedTuple
 from math import pi
 
@@ -79,6 +80,43 @@ class ScavengingLedger(NamedTuple):
     liquid_riming: jnp.ndarray             # zmsnowacl/dt [kg/kg/s, in-cloud]
     process_cloud_fraction: jnp.ndarray    # paclc at process time [1]
     condensate_evaporation: jnp.ndarray    # (zxlevap+zxievap)/dt [kg/kg/s]
+
+
+@tree_math.struct
+class HeterogeneousFreezingAerosol:
+    """The aerosol inputs of ECHAM-HAM's mixed-phase heterogeneous freezing.
+
+    The eight fields ``mo_ham_freezing.f90::ham_IN_setup`` hands to
+    ``het_mxphase_freezing`` through ``cloud_subm_1`` (mo_cloud_micro_2m.f90
+    726-734, 1552-1567), per level ``(nlev, ncols)`` (``(nlev,)`` inside the
+    column function). A composition with a prognostic aerosol publishes them
+    under the diagnostics key ``"freezing_aerosol"``; the 2M scheme then
+    freezes supercooled cloud water at ECHAM's contact and immersion rates.
+    Without it the scheme uses its aerosol-free DeMott (2010) closure.
+
+    The dust and BC fractions are dimensionless in [0, 1]:
+
+    * ``dust_soluble`` / ``bc_soluble`` (``pfracdusol`` / ``pfracbcsol``):
+      the surface-weighted number of activated droplets containing dust /
+      black carbon over the activated CDNC (immersion freezing);
+    * ``dust_insoluble_accumulation`` / ``dust_insoluble_coarse`` /
+      ``bc_insoluble`` (``pfracduai`` / ``pfracduci`` / ``pfracbcinsol``):
+      the surface-weighted dust / BC number of the insoluble modes over the
+      total insoluble number (Brownian contact freezing).
+
+    The radii [m] are the wet radii of the insoluble Aitken, accumulation and
+    coarse modes (``prwetki`` / ``prwetai`` / ``prwetci``); zero for a mode
+    the population does not have, which ECHAM treats as no contact nuclei.
+    """
+
+    dust_soluble: jnp.ndarray
+    dust_insoluble_accumulation: jnp.ndarray
+    dust_insoluble_coarse: jnp.ndarray
+    bc_soluble: jnp.ndarray
+    bc_insoluble: jnp.ndarray
+    wet_radius_insoluble_aitken: jnp.ndarray
+    wet_radius_insoluble_accumulation: jnp.ndarray
+    wet_radius_insoluble_coarse: jnp.ndarray
 
 
 def microphysics_dt_constants(dt: jnp.ndarray, params: CloudParams2M) -> tuple[jnp.ndarray, jnp.ndarray]:

@@ -13,9 +13,11 @@ the rest of ``mo_cloud_micro_2m.f90`` (F below):
 - the number tendencies are taken against the raw step-start tracers
   (F 1781, 3625-3628);
 
-plus jcm's own closures: the JAM/DeMott INP maximum (a stopgap tracked in
-#953), DeMott (2010) per standard litre converted to ambient density, and
-the mixed-phase freezing substitute capped by the droplets available.
+plus jcm's own aerosol-free closures: the maximum of an external INP and
+DeMott (2010), DeMott per standard litre converted to ambient density, and
+the mixed-phase freezing substitute capped by the droplets available. (Under
+JAM section 6.2 is ECHAM-HAM's rates instead; see
+``lohmann_2m_freezing_reference_test.py``.)
 
 Kept apart from ``lohmann_2m_test.py`` (already ~3000 lines) so the #941
 contract reads as one unit; the column water/enthalpy budgets with
@@ -797,14 +799,18 @@ def _outputs_equal(out_a, out_b):
 
 
 class TestInpFloor:
-    """``n_inp = max(ice_nuclei, DeMott)`` — the #953 stopgap."""
+    """``n_inp = max(ice_nuclei, DeMott)`` of the aerosol-free closure.
+
+    ``ice_nuclei`` is the closure's optional external INP (no in-tree term
+    publishes it since JAM moved to ECHAM-HAM's rates); DeMott stays the floor.
+    """
 
     def test_tiny_online_inp_leaves_the_demott_floor(self):
         col = _supercooled_liquid_column()
         base = _run(col)
         tiny = _run(dict(col, inp=jnp.where(col["qc"] > 0, 1e-3, 0.0)))
         assert _outputs_equal(base, tiny), (
-            "a tiny online INP switched the DeMott floor off")
+            "a tiny external INP switched the DeMott floor off")
         # ...and the floor is doing something here: fewer coarse aerosol
         # (a smaller DeMott INP) makes fewer crystals.
         cleaner = _run(col, params=_P.replace(n_aer_coarse=0.01))
@@ -817,7 +823,7 @@ class TestInpFloor:
         base = _run(col)
         large = _run(dict(col, inp=jnp.where(col["qc"] > 0, 1e5, 0.0)))
         extra = float(jnp.sum((large[0].dqnidt - base[0].dqnidt) * col["rho"]))
-        assert extra > 0.0, "a large online INP did not raise the ICNC"
+        assert extra > 0.0, "a large external INP did not raise the ICNC"
 
     def test_floor_gradient_matches_a_central_difference(self):
         """d/d n_aer_coarse where the DeMott floor sets the new crystals."""
@@ -859,14 +865,17 @@ class TestFreezingSubstituteNumberCap:
             "INP above CDNC kept adding crystals")
         # The deck froze, and it holds no more crystals than it had droplets.
         assert float(jnp.sum(a[0].dqcdt * col["rho"])) < 0.0
-        # The working CDNC is floored at the fixed minimum (40 /cm³).
+        # The droplets available to freeze: the start CDNC raised by
+        # activation (``act``, 50 /cm³ in ``_run``) and floored at the fixed
+        # minimum (40 /cm³).
         icnc_end = np.asarray((col["qni"] + DT * a[0].dqnidt) * col["rho"])
         icnc_start = np.asarray(col["qni"] * col["rho"])
-        cdnc_start = np.maximum(np.asarray(col["qnc"] * col["rho"]),
-                                1e6 * float(_P.cdnc_min_fixed))
+        cdnc_avail = np.maximum.reduce([
+            np.asarray(col["qnc"] * col["rho"]), np.full(icnc_end.shape, 5e7),
+            np.full(icnc_end.shape, 1e6 * float(_P.cdnc_min_fixed))])
         deck = np.asarray(deck)
         assert np.all(icnc_end[deck]
-                      <= 1.0001 * (cdnc_start + icnc_start)[deck])
+                      <= 1.0001 * (cdnc_avail + icnc_start)[deck])
 
 
 # ---------------------------------------------------------------------------

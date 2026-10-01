@@ -512,200 +512,187 @@ def freezing_below_238K(
 
     return ice_crystal_number, droplet_freezing_rate, droplet_number, freezing_rate, cloud_ice, cloud_liquid
 
+# ECHAM's ``eps`` in ``het_mxphase_freezing`` is ``EPSILON(1._dp)``
+# (mo_cloud_utils.f90), an additive guard on radii of 1e-8 m and liquid of
+# 1e-6 kg/kg. It is NOT ``CloudParams2M.eps`` (the float32 machine epsilon,
+# 1.2e-7), which would be comparable to the wet radii it guards.
+_ECHAM_EPS = 2.220446049250313e-16
+
+# Lohmann & Diehl (2006) contact-freezing efficiency of montmorillonite dust,
+# ``MIN(1, MAX(0, -(0.1014*(T-tmelt) + 0.3277)))`` (F 2780). ECHAM disables
+# black-carbon contact freezing (``zfrzcntbc = 0``, F 2784); the commented
+# kaolinite and BC fits of F 2781/2783 are not used.
+_CONTACT_DUST_SLOPE = 0.1014
+_CONTACT_DUST_OFFSET = 0.3277
+
+
 def het_mxphase_freezing(
-    freezing_condition: jnp.ndarray,  # Original: ld_mxphase_frz
-    pressure: jnp.ndarray,            # Original: papp1
-    tke: jnp.ndarray,                 # Original: ptkem1
-    vertical_velocity: jnp.ndarray,   # Original: pvervel
-    cloud_cover: jnp.ndarray,         # Original: paclc
-    bc_soluble_fraction: jnp.ndarray, # Original: pfracbcsol
-    bc_insoluble_fraction: jnp.ndarray, # Original: pfracbcinsol
-    dust_soluble_fraction: jnp.ndarray, # Original: pfracdusol
-    dust_accumulation_fraction: jnp.ndarray, # Original: pfracduai
-    dust_coarse_fraction: jnp.ndarray, # Original: pfracduci
-    air_density: jnp.ndarray,         # Original: prho
-    inv_air_density: jnp.ndarray,     # Original: prho_rcp
-    wet_radius_aitken: jnp.ndarray,   # Original: prwetki
-    wet_radius_accumulation: jnp.ndarray, # Original: prwetai
-    wet_radius_coarse: jnp.ndarray,   # Original: prwetci
-    temperature: jnp.ndarray,         # Original: ptp1tmp
-    min_cdnc: jnp.ndarray,            # Original: pcdnc_min
-    ice_crystal_number: jnp.ndarray,  # Original: picnc (INOUT)
-    droplet_number: jnp.ndarray,      # Original: pcdnc (INOUT)
-    freezing_rate: jnp.ndarray,       # Original: pfrl (INOUT)
-    cloud_ice: jnp.ndarray,           # Original: pxib (INOUT)
-    cloud_liquid: jnp.ndarray,        # Original: pxlb (INOUT)
-    timestep: float,                  # Original: ztmst
-    min_liquid_threshold: float,      # Original: cqtmin
+    freezing_condition: jnp.ndarray,  # ld_mxphase_frz
+    pressure: jnp.ndarray,            # papp1 [Pa]
+    tke: jnp.ndarray,                 # ptkem1 [m2/s2]
+    vertical_velocity: jnp.ndarray,   # pvervel: large-scale omega [Pa/s]
+    cloud_cover: jnp.ndarray,         # paclc
+    bc_soluble_fraction: jnp.ndarray,     # pfracbcsol
+    bc_insoluble_fraction: jnp.ndarray,   # pfracbcinsol
+    dust_soluble_fraction: jnp.ndarray,   # pfracdusol
+    dust_accumulation_fraction: jnp.ndarray,  # pfracduai (insoluble accumulation)
+    dust_coarse_fraction: jnp.ndarray,        # pfracduci (insoluble coarse)
+    air_density: jnp.ndarray,         # prho [kg/m3]
+    inv_air_density: jnp.ndarray,     # prho_rcp [m3/kg]
+    wet_radius_aitken: jnp.ndarray,   # prwetki: insoluble Aitken [m]
+    wet_radius_accumulation: jnp.ndarray,  # prwetai: insoluble accumulation [m]
+    wet_radius_coarse: jnp.ndarray,   # prwetci: insoluble coarse [m]
+    temperature: jnp.ndarray,         # ptp1tmp [K]
+    min_cdnc: jnp.ndarray,            # pcdnc_min [1/m3]
+    ice_crystal_number: jnp.ndarray,  # picnc [1/m3] (INOUT)
+    droplet_number: jnp.ndarray,      # pcdnc [1/m3] (INOUT)
+    freezing_rate: jnp.ndarray,       # pfrl [kg/kg] (INOUT)
+    cloud_ice: jnp.ndarray,           # pxib [kg/kg] (INOUT)
+    cloud_liquid: jnp.ndarray,        # pxlb [kg/kg] (INOUT)
+    timestep: float,                  # ztmst [s]
+    min_liquid_threshold: float,      # cqtmin
     params: CloudParams2M,            # threaded scheme parameters
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Heterogeneous mixed-phase freezing for cloud microphysics.
+    """Heterogeneous freezing of supercooled cloud water, ECHAM-HAM's rates.
 
-    Overview
-    --------
-    This routine simulates heterogeneous freezing in mixed-phase clouds, including
-    contact and immersion freezing by dust and soot aerosols. It updates the ice
-    crystal number concentration (ICNC), cloud droplet number concentration (CDNC),
-    freezing rate, cloud ice, and cloud liquid water mixing ratios.
+    JAX port of ``mo_cloud_micro_2m.f90::het_mxphase_freezing`` (ECHAM6.3-HAM2.3
+    r7492, F 2675-2840; Lohmann & Diehl 2006, *J. Atmos. Sci.* 63, 968), called
+    in section 6.2 where the gate ``ld_mxphase_frz`` holds (F 1541-1545). Two
+    rates freeze in-cloud liquid over the step, each as ``pxlb·(1 − exp(−k·Δt))``:
 
-    Parameters
-    ----------
-    freezing_condition : jnp.ndarray
-        Boolean mask indicating where heterogeneous freezing occurs (original: ld_mxphase_frz).
-    pressure : jnp.ndarray
-        Pressure at full levels (t-1) [Pa] (original: papp1).
-    tke : jnp.ndarray
-        Turbulent kinetic energy (t-1) [m^2/s^2] (original: ptkem1).
-    vertical_velocity : jnp.ndarray
-        Large-scale vertical velocity [m/s] (original: pvervel).
-    cloud_cover : jnp.ndarray
-        Cloud cover fraction [0..1] (original: paclc).
-    bc_soluble_fraction : jnp.ndarray
-        Fraction of BC in all soluble mixed modes (original: pfracbcsol).
-    bc_insoluble_fraction : jnp.ndarray
-        Fraction of BC in all insoluble modes (original: pfracbcinsol).
-    dust_soluble_fraction : jnp.ndarray
-        Fraction of dust aerosols in all soluble mixed modes (original: pfracdusol).
-    dust_accumulation_fraction : jnp.ndarray
-        Fraction of dust in the insoluble accumulation mode (original: pfracduai).
-    dust_coarse_fraction : jnp.ndarray
-        Fraction of dust in the insoluble coarse mode (original: pfracduci).
-    air_density : jnp.ndarray
-        Air density [kg/m^3] (original: prho).
-    inv_air_density : jnp.ndarray
-        Inverse air density [m^3/kg] (original: prho_rcp).
-    wet_radius_aitken : jnp.ndarray
-        Wet radius of Aitken insoluble mode [m] (original: prwetki).
-    wet_radius_accumulation : jnp.ndarray
-        Wet radius of accumulation insoluble mode [m] (original: prwetai).
-    wet_radius_coarse : jnp.ndarray
-        Wet radius of coarse insoluble mode [m] (original: prwetci).
-    temperature : jnp.ndarray
-        Temperature at (t) [K] (original: ptp1tmp).
-    min_cdnc : jnp.ndarray
-        Minimum CDNC concentration computed from maximum radius [1/m^3] (original: pcdnc_min).
-    ice_crystal_number : jnp.ndarray
-        Ice crystal number concentration (ICNC) [1/m^3] (INOUT) (original: picnc).
-    droplet_number : jnp.ndarray
-        Cloud droplet number concentration (CDNC) [1/m^3] (INOUT) (original: pcdnc).
-    freezing_rate : jnp.ndarray
-        Freezing rate [kg/kg] (INOUT) (original: pfrl).
-    cloud_ice : jnp.ndarray
-        Cloud ice mixing ratio in the cloudy part of the grid box [kg/kg] (INOUT) (original: pxib).
-    cloud_liquid : jnp.ndarray
-        Cloud liquid water mixing ratio in the cloudy part of the grid box [kg/kg] (INOUT) (original: pxlb).
-    timestep : float
-        Time step [s] (original: ztmst).
-    min_liquid_threshold : float
-        Minimum threshold for cloud liquid water [kg/kg] (original: cqtmin).
+    * **Brownian contact freezing** by insoluble dust (F 2741-2792): the
+      aerosol diffusivity ``D = k_B·T·C_c/(6π·η_air·r)`` of the insoluble
+      accumulation and coarse dust with Cunningham slip ``C_c``, the droplet
+      collection kernel ``4π·r_l·N_l``, the montmorillonite efficiency
+      ``min(1, max(0, −(0.1014·(T − tmelt) + 0.3277)))`` and ECHAM's
+      contact-nucleus number ``frac·(N_l + N_i)``. Black-carbon contact
+      freezing is disabled in ECHAM (F 2784) and here.
+    * **Immersion freezing** of droplets holding dust or black carbon
+      (F 2794-2805): ``(a_du·fracdusol + a_bc·fracbcsol)·exp(tmelt − T)
+      ·(−min(ztte, 0))·V_drop`` with the droplet volume
+      ``V_drop = ρ·pxlb/(ρ_w·pcdnc)``, ``a_du = 32.3`` (montmorillonite) and
+      ``a_bc = 2.91e-3`` (``CloudParams2M.immersion_coefficient_dust/_bc``),
+      acting only while the air cools. The cooling rate is ECHAM's
+      ``ztte = zomega/(cpd·ρ)``, the adiabatic cooling of the vertical motion
+      ``zomega = ω − fact_tke·√TKE·ρ·g`` (F 2800-2802): the large-scale
+      pressure velocity plus the turbulent updraft, NOT the model's
+      temperature tendency.
 
-    Returns
-    -------
-    Updated values of ice_crystal_number, droplet_number, freezing_rate,
-    cloud_ice, cloud_liquid, and freezing_rate_number.
+    The frozen mass is ``max(0, min(contact + immersion, pxlb))`` (F 2807-2809)
+    and the frozen number ``pcdnc·frl/(pxlb + eps)``, capped at the droplets
+    above ``pcdnc_min`` (F 2811-2821). Mass moves from ``pxlb`` to ``pxib``,
+    number from CDNC to ICNC with both floored at ``cqtmin`` (F 2823-2835), and
+    the returned ``pfrl`` is the grid-mean frozen mass ``frl·paclc``
+    (F 2837-2838). Where the gate is false every INOUT argument is returned
+    unchanged and ``pfrln`` is zero.
+
+    The HAM freezing inputs (the fractions and the insoluble-mode wet radii)
+    are the outputs of ``mo_ham_freezing.f90::ham_IN_setup``; jcm's JAM
+    population supplies them through
+    :func:`jcm.physics.aerosol.jam.ice_nucleation.ham_freezing.ham_freezing_aerosol`.
+
+    Differentiability: every singular operation (the cube root of the droplet
+    volume, ``√TKE``, the ``1/r`` of the diffusivities, ``exp(tmelt − T)``) is
+    evaluated on a safe argument where its result is discarded, so neither AD
+    mode differentiates it at a singular point (the double-``where`` of
+    ``JAX_gotchas.md``). Values are ECHAM's to round-off; ``1 − exp(−x)`` is
+    evaluated as ``−expm1(−x)`` so float32 keeps the small rates.
+
+    Returns:
+        ``(picnc, pcdnc, pfrl, pxib, pxlb, pfrln)`` with ``pfrl`` grid-mean
+        [kg/kg] and ``pfrln`` the frozen number [1/m3].
 
     """
-    # -------------------------------------------------------------------------
-    # 1. Aerosol diffusivity due to Brownian motion
-    # -------------------------------------------------------------------------
-    # Compute aerosol diffusivity for different modes
-    ztmp1 = 1.0 + 1.26 * 6.6e-8 / (wet_radius_aitken + 1e-12) * (c.p0s1_bg / pressure) * (temperature / c.tmelt)
-    ztmp2 = 1.0 + 1.26 * 6.6e-8 / (wet_radius_accumulation + 1e-12) * (c.p0s1_bg / pressure) * (temperature / c.tmelt)
-    ztmp3 = 1.0 + 1.26 * 6.6e-8 / (wet_radius_coarse + 1e-12) * (c.p0s1_bg / pressure) * (temperature / c.tmelt)
+    mask = freezing_condition
+    # The melting point and gravity are the parameter set's, as for the
+    # section-6.2 gate that admits the cell (``ztp1tmp < params.tmelt``), so
+    # an override of either moves the gate and the rates together.
+    tmelt = params.tmelt
+    t = temperature
 
-    zeta_air = 1e-5 * (1.718 + 0.0049 * (temperature - c.tmelt) - 1.2e-5 * (temperature - c.tmelt) ** 2)
+    # --- Brownian diffusivities of the insoluble modes (F 2741-2771) ------
+    # ECHAM MERGEs a diffusivity to 0 where the radius is below EPSILON
+    # (F 2755-2771); the radius is replaced by 1 m there so the discarded
+    # branch's 1/r and 1/r**2 stay finite in both AD modes.
+    zetaair = 1.0e-5 * (1.718 + 0.0049 * (t - tmelt)
+                        - 1.2e-5 * (t - tmelt) * (t - tmelt))
 
-    aerosol_diffusivity_bc = c.ak * temperature * ztmp1 / (6.0 * pi * zeta_air * (wet_radius_aitken + 1e-12))
-    aerosol_diffusivity_bc = jnp.where(wet_radius_aitken < 1e-12, 0.0, aerosol_diffusivity_bc)
+    def diffusivity(r_wet):
+        has = r_wet >= _ECHAM_EPS
+        r = jnp.where(has, r_wet, 1.0) + _ECHAM_EPS
+        slip = 1.0 + 1.26 * 6.6e-8 / r * (c.p0s1_bg / pressure) * (t / tmelt)
+        d = c.ak * t * slip / (6.0 * pi * zetaair * r)
+        return jnp.where(has, d, 0.0)
 
-    aerosol_diffusivity_dust_accum = c.ak * temperature * ztmp2 / (6.0 * pi * zeta_air * (wet_radius_accumulation + 1e-12))
-    aerosol_diffusivity_dust_accum = jnp.where(wet_radius_accumulation < 1e-12, 0.0, aerosol_diffusivity_dust_accum)
+    d_bc_ki = diffusivity(wet_radius_aitken)
+    d_du_ai = diffusivity(wet_radius_accumulation)
+    d_du_ci = diffusivity(wet_radius_coarse)
 
-    aerosol_diffusivity_dust_coarse = c.ak * temperature * ztmp3 / (6.0 * pi * zeta_air * (wet_radius_coarse + 1e-12))
-    aerosol_diffusivity_dust_coarse = jnp.where(wet_radius_coarse < 1e-12, 0.0, aerosol_diffusivity_dust_coarse)
+    # --- droplet radius and collection kernel (F 2775-2778) ---------------
+    # Inside the gate pxlb > cqtmin and pcdnc >= pcdnc_min > 0; outside it
+    # the value is discarded, so the cube root runs on 1.
+    liquid = mask & (cloud_liquid > 0.0) & (droplet_number > 0.0)
+    safe_cdnc = jnp.where(liquid, droplet_number, 1.0)
+    safe_xlb = jnp.where(liquid, cloud_liquid, 1.0)
+    vol_base = jnp.where(
+        liquid, 0.75 * safe_xlb * air_density / (pi * c.rhow * safe_cdnc), 1.0)
+    zradl = jnp.where(liquid, vol_base ** (1.0 / 3.0), 0.0)
+    zf1 = 4.0 * pi * zradl * droplet_number * inv_air_density
 
-    # -------------------------------------------------------------------------
-    # 2. Freezing rates (contact and immersion freezing)
-    # -------------------------------------------------------------------------
-    # Compute mean volume radius of cloud droplets. Double-where guard on
-    # the cube root: it has an infinite derivative at cloud_liquid == 0 and
-    # the freezing rates below vanish there (and are additionally
-    # where-masked on freezing_condition), so without a safe base the
-    # backward pass multiplies 0 × ∞ = NaN at liquid-free points. Forward
-    # values are unchanged (radius was 0 there, and every consumer scales
-    # by cloud_liquid).
-    has_liquid = cloud_liquid > 0.0
-    droplet_radius_base = jnp.where(
-        has_liquid,
-        0.75 * cloud_liquid * air_density / (pi * c.rhow * droplet_number),
-        1.0,
-    )
-    droplet_radius = jnp.where(has_liquid, droplet_radius_base ** (1.0 / 3.0), 0.0)
+    # --- contact freezing (F 2780-2792) ------------------------------------
+    zfrzcntdu = jnp.clip(
+        -(_CONTACT_DUST_SLOPE * (t - tmelt) + _CONTACT_DUST_OFFSET), 0.0, 1.0)
+    zfrzcntbc = 0.0   # ECHAM disables BC contact freezing (F 2784)
+    kernel = (safe_xlb / safe_cdnc * air_density * zf1
+              * (zfrzcntdu * (d_du_ai * dust_accumulation_fraction
+                              + d_du_ci * dust_coarse_fraction)
+                 + zfrzcntbc * d_bc_ki * bc_insoluble_fraction)
+              * (droplet_number + ice_crystal_number))
+    # ECHAM's pxlb*(1 - EXP(-x)) as -expm1(-x): the same in exact arithmetic
+    # and to round-off in float64, but float32 would lose every rate below
+    # its epsilon (1 - exp(-x) is exactly 0 for x < 6e-8), which is where
+    # small dust fractions put the immersion freezing.
+    zfrzcnt = cloud_liquid * (-jnp.expm1(
+        -kernel / jnp.maximum(cloud_liquid, min_liquid_threshold) * timestep))
 
-    # Contact freezing by dust and soot
-    contact_freezing_dust = jnp.minimum(1.0, jnp.maximum(0.0, -(0.1014 * (temperature - c.tmelt) + 0.3277)))
-    contact_freezing_bc = 0.0  # BC contact freezing disabled
+    # --- immersion freezing (F 2794-2805) ----------------------------------
+    znaimm = (params.immersion_coefficient_dust * dust_soluble_fraction
+              + params.immersion_coefficient_bc * bc_soluble_fraction)
+    has_tke = tke > 0.0
+    sqrt_tke = jnp.where(has_tke, jnp.sqrt(jnp.where(has_tke, tke, 1.0)), 0.0)
+    zomega = vertical_velocity - params.fact_tke * sqrt_tke * air_density * params.grav
+    ztte = zomega / c.cpd * inv_air_density
+    # exp(tmelt - T) is at most exp(35) inside the gate (T > cthomi); the
+    # discarded branch runs at tmelt so a cold non-gate cell cannot overflow
+    # float32 (exp(88.7)).
+    t_gate = jnp.where(mask, t, tmelt)
+    rate_imm = (-znaimm * air_density / c.rhow * jnp.exp(tmelt - t_gate)
+                * jnp.minimum(ztte, 0.0))
+    zfrzimm = cloud_liquid * (-jnp.expm1(
+        -rate_imm * safe_xlb / safe_cdnc * timestep))
 
-    # Immersion freezing by dust and soot
-    immersion_freezing_dust = 32.3 * dust_soluble_fraction
-    immersion_freezing_bc = 2.91e-3 * bc_soluble_fraction
+    # --- frozen mass and number (F 2807-2821) ------------------------------
+    frl = jnp.maximum(0.0, jnp.minimum(zfrzcnt + zfrzimm, cloud_liquid))
+    frln_raw = jnp.maximum(droplet_number * frl / (cloud_liquid + _ECHAM_EPS), 0.0)
 
-    # Compute freezing rates
-    freezing_rate_contact = (
-        cloud_liquid / droplet_number * air_density * 4.0 * pi * droplet_radius * droplet_number * inv_air_density
-        * (contact_freezing_dust * (aerosol_diffusivity_dust_accum * dust_accumulation_fraction
-                                    + aerosol_diffusivity_dust_coarse * dust_coarse_fraction)
-           + contact_freezing_bc * aerosol_diffusivity_bc * bc_insoluble_fraction)
-        * (droplet_number + ice_crystal_number)
-    )
+    freezing_rate = jnp.where(mask, frl, freezing_rate)
+    frln = jnp.where(
+        mask, jnp.maximum(jnp.minimum(frln_raw, droplet_number - min_cdnc), 0.0),
+        0.0)
 
-    freezing_rate_immersion = -(
-        (immersion_freezing_dust + immersion_freezing_bc) * air_density / c.rhow
-        * jnp.exp(c.tmelt - temperature) * jnp.minimum(vertical_velocity - params.fact_tke * jnp.sqrt(jnp.maximum(tke, 1.0e-30)) * air_density * c.grav, 0.0)
-    )
-
-    freezing_rate_contact = cloud_liquid * (1.0 - jnp.exp(-freezing_rate_contact / jnp.maximum(cloud_liquid, min_liquid_threshold) * timestep))
-    freezing_rate_immersion = cloud_liquid * (1.0 - jnp.exp(-freezing_rate_immersion * cloud_liquid / droplet_number * timestep))
-
-    # Total freezing rate
-    total_freezing_rate = freezing_rate_contact + freezing_rate_immersion
-    total_freezing_rate = jnp.clip(total_freezing_rate, 0.0, cloud_liquid)
-
-    # Freezing rate for number concentration
-    freezing_rate_number = droplet_number * total_freezing_rate / (cloud_liquid + 1e-12)
-    freezing_rate_number = jnp.maximum(freezing_rate_number, 0.0)
-
-    # -------------------------------------------------------------------------
-    # 3. Update cloud properties
-    # -------------------------------------------------------------------------
-    freezing_rate = jnp.where(freezing_condition, total_freezing_rate, freezing_rate)
-    freezing_rate_number = jnp.where(freezing_condition, freezing_rate_number, 0.0)
-
+    # --- state update (F 2823-2838) ----------------------------------------
     droplet_number = jnp.where(
-        freezing_condition,
-        jnp.maximum(droplet_number - freezing_rate_number, min_cdnc),
-        droplet_number
-    )
-
+        mask, jnp.maximum(droplet_number - frln, min_liquid_threshold),
+        droplet_number)
     ice_crystal_number = jnp.where(
-        freezing_condition,
-        jnp.maximum(ice_crystal_number + freezing_rate_number, min_liquid_threshold),
-        ice_crystal_number
-    )
+        mask, jnp.maximum(ice_crystal_number + frln, min_liquid_threshold),
+        ice_crystal_number)
+    cloud_liquid = jnp.where(mask, cloud_liquid - freezing_rate, cloud_liquid)
+    cloud_ice = jnp.where(mask, cloud_ice + freezing_rate, cloud_ice)
+    freezing_rate = jnp.where(mask, freezing_rate * cloud_cover, freezing_rate)
 
-    cloud_liquid = jnp.where(
-        freezing_condition,
-        cloud_liquid - freezing_rate,
-        cloud_liquid
-    )
+    return ice_crystal_number, droplet_number, freezing_rate, cloud_ice, cloud_liquid, frln
 
-    cloud_ice = jnp.where(
-        freezing_condition,
-        cloud_ice + freezing_rate,
-        cloud_ice
-    )
-
-    return ice_crystal_number, droplet_number, freezing_rate, cloud_ice, cloud_liquid, freezing_rate_number
 
 def WBF_process(
     wbf_mask: jnp.ndarray,                 # Original: ld_WBF

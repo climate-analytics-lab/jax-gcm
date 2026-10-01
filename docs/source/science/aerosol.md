@@ -23,7 +23,7 @@ vertical transport (turbulent diffusion of all tracers + convective transport of
 interstitial/gas tracers) → prescribed oxidants + gas-phase sulfur chemistry
 (producing the H₂SO₄/SOAG the core condenses the same step) →
 **microphysics core** → optional online optics → ARG
-activation → heterogeneous ice nucleation → sedimentation → dry deposition →
+activation → aerosol inputs to ice formation → sedimentation → dry deposition →
 cloud-borne exchange → aqueous sulfur chemistry → wet scavenging. Diagnostics
 thread in this call order, so custom compositions should preserve it.
 
@@ -201,10 +201,86 @@ a ``0.7·√TKE`` updraft.
 **Status & known limitations.** The ``ghosh2025`` variant's coefficients are
 fitted to the paper's tables (flagged in code) and off by default. A negative
 floor is applied before the number-weighted fraction to survive spectral ringing
-on the cold-start aerosol field. The deposition-nucleation half of the
-aerosol→ice pathway is computed (``ice_nuclei_deposition``) but read by the 2M
-scheme only under ``nic_cirrus = 2``, whose source is itself hollow, so it is
-inert on the shipped ``nic_cirrus = 1`` default (#679, #552).
+on the cold-start aerosol field. The per-mode activated number is also HAM's
+``nact_strat`` in the aerosol inputs to ice formation (next section).
+
+### Aerosol inputs to ice formation
+
+**What we do.** ``jcm/physics/aerosol/jam/ice_nucleation/`` computes the inputs
+ECHAM-HAM's two-moment scheme gives its heterogeneous mixed-phase freezing,
+``het_mxphase_freezing`` (see {doc}`clouds_microphysics`), and publishes them as
+``freezing_aerosol``. ``ham_freezing.py::ham_freezing_aerosol`` is a port of
+``mo_ham_freezing.f90`` (``get_aerofreez_nc``, ``aero_massvolratio``,
+``aero_nc_surfw`` and the mixed-phase part of ``ham_IN_setup``):
+
+- **immersion**, on the soluble classes: the droplets activated on a class hold
+  its dust and black carbon, counted by surface weighting as
+  ``(volume ratio of the species in the class)^(2/3)`` times the class's
+  activated number, summed over the classes and divided by the activated CDNC
+  (``fracdusol``, ``fracbcsol``);
+- **contact**, on the insoluble classes: ``(mass ratio)^(2/3)`` times the class
+  number, over the number of all insoluble classes (``fracduai``, ``fracduci``,
+  ``fracbcinsol``), with the insoluble classes' wet radii.
+
+Every fraction is ``min(n/(N + ε), 1)``. The activated number of a class is
+ARG's activated fraction times the class number, so the classes sum to
+``activated_cdnc``. A class's composition is its whole population, interstitial
+plus cloud-borne.
+
+The **MAM4 → HAM mapping** (``MAM4_FREEZING_CLASSES``) is:
+
+- accumulation and coarse are HAM's soluble accumulation and coarse modes. MAM4
+  emits dust into them and treats every particle as internally mixed, so they
+  carry the aged dust and black carbon. MAM4's Aitken mode carries neither, so
+  HAM's exclusion of the soluble Aitken black carbon changes nothing;
+- primary carbon is HAM's insoluble Aitken mode (fresh, hydrophobic BC and OC),
+  and the only insoluble class;
+- MAM4 has no insoluble dust. The dust contact inputs are therefore zero, and
+  because ECHAM disables black-carbon contact freezing, the JAM mixed-phase
+  freezing is immersion freezing of dust- and BC-bearing droplets.
+
+**What ECHAM/CAM does.** ECHAM-HAM's ``cloud_subm_1`` calls ``ham_IN_setup`` on
+the M7 modes, where freshly emitted dust sits in the insoluble accumulation and
+coarse modes and ages into the soluble ones; contact freezing therefore acts on
+fresh dust. CAM computes its heterogeneous freezing rates on MAM dust and black
+carbon from classical nucleation theory (``hetfrz_classnuc.F90``; Hoose et al.
+2010, Wang et al. 2014), a different formulation.
+
+**Why we differ.**
+- `science` — MAM4 has no insoluble dust mode, so contact freezing, which HAM
+  applies to fresh insoluble dust, has no population to act on. Adding a jcm-own
+  insoluble share of the MAM4 dust would be a new aerosol parameterisation, not
+  HAM's.
+- `science` (deliberate) — masses are floored at zero before the ratios; HAM's
+  tracers enter unfloored. Transport round-off negatives have no composition
+  meaning.
+- `science` (maintainer decision) — the JAM member aggregates ice with ECHAM's
+  generic ``ccsaut = 95`` rather than ECHAM-HAM's retune to 900
+  (``mo_activ.f90``, ``activ_initialize``). That retune belongs with HAM's own
+  aerosol and its insoluble dust mode, which MAM4 does not reproduce; the value
+  is a tuning target of the #682 retune.
+
+**Status & known limitations.** The dust the population carries sets the
+immersion freezing. In 10-day T63 January runs from a JAM state 10 days past a
+cold start, two thirds of the cloudy 238–264 K cells hold less than
+10⁻⁴ µg m⁻³ of dust (median 10⁻⁵ µg m⁻³), and the global dust burden is
+2.8 Tg against ECHAM6.3-HAM2.3's 16.5 Tg (Tegen et al. 2019, *GMD* 12, 1643,
+Table 3). The emission, 1000 Tg yr⁻¹ in the MAM4 size windows, is close to
+HAM's 1124 Tg yr⁻¹, but the lifetime is 1.1 days against HAM's 5.3, and dry
+removal (sedimentation plus surface deposition) takes 79 % of the sink against
+HAM's 39 %. That removal belongs to the deposition, sedimentation and
+wet-scavenging schemes (see *Emissions, deposition, sedimentation, wet
+scavenging* above), which keep their present form for v3. ECHAM's immersion
+rate needs the cooling of the large-scale vertical motion as well as the
+turbulent updraft; only the latter reaches the 2M scheme (#705). The cirrus
+inputs of ``ham_IN_setup`` (the soluble aerosol number ``zascs`` and the
+freezing-mode number and radius) are not computed; their consumers, cirrus
+nucleation ``zninucl`` and the Kärcher–Lohmann scheme, are absent (#955, #552).
+
+The partition is compared with the compiled ``ham_IN_setup`` in
+``ham_freezing_reference_test.py`` (exact on nine designed M7 cells); the MAM4
+mapping, a hand-computed cell and the gradients are in
+``ice_nucleation_test.py``.
 
 ### Cloud-borne aerosol store
 
@@ -451,7 +527,7 @@ cancels and its below-cloud term acts on the grid mean.
   runs after ``TiedtkeConvection`` in the ECHAM chain, so its convective
   precipitation flux and updraft-area footprint are the current step's.
 
-### Emissions, deposition, sedimentation, wet scavenging, ice nucleation
+### Emissions, deposition, sedimentation, wet scavenging
 
 **What we do.** Natural emissions are faithful ports of the HAMMOZ schemes — Gong
 (2003) sea-salt, Nightingale (2000) DMS, Tegen et al. (2002) dust — collapsed to
@@ -467,21 +543,12 @@ Slinn & Slinn (1980) sub-layer resistance; sedimentation
 scavenging (``wetdep/``) is in-cloud nucleation + below-cloud impaction + a
 **re-evaporation re-injection ledger** that returns carried aerosol to the
 interstitial phase where precip evaporates, and it deliberately excludes the
-sedimenting cloud-ice flux from the in-cloud carrier flux. Ice nucleation
-(``ice_nucleation/``) writes an ``ice_nuclei`` field for the 2M cloud scheme, with
-two schemes: ``niemand`` (default; Niemand et al. 2012) and ``lohmann_diehl``
-(Lohmann & Diehl 2006 + Meyers 1992 deposition). The 2M scheme freezes
-mixed-phase droplets up to ``max(ice_nuclei, DeMott)``. The maximum is a
-stopgap: the immersion INP of the default ``niemand`` scheme sits about four
-orders of magnitude below the DeMott (2010) value, for a reason outside the
-cloud scheme (#953). See
-{doc}`clouds_microphysics`.
+sedimenting cloud-ice flux from the in-cloud carrier flux.
 
 **What ECHAM/CAM does.** Deposition mirrors ``mo_hammoz_drydep`` /
 Ganzeveld (Slinn & Slinn 1980); sedimentation ``mo_ham_sedimentation``; wet
 scavenging ``mo_hammoz_wetdep`` / ``mo_ham_wetdep`` (``peffwat`` / ``peffice``
-re-evaporation ledger); ice nucleation Lohmann & Diehl (2006), Niemand et al.
-(2012), Meyers et al. (1992).
+re-evaporation ledger).
 
 **Why we differ.**
 - `science` (provenance correction) — dry deposition is a **HAMMOZ/Ganzeveld
@@ -489,8 +556,7 @@ re-evaporation ledger); ice nucleation Lohmann & Diehl (2006), Niemand et al.
   surface, *not* a CAM ``aero_model_drydep`` port; ``r_a`` uses a neutral log-law
   (a Monin-Obukhov stability correction is a noted future refinement). Convectively
   scavenged aerosol is deposited directly (convection exposes no evaporation
-  profile). Ice-nucleation active-site densities are calibratable rather than
-  claiming exact published coefficients.
+  profile).
 
 **Code pointers (JAM).**
 - ``jcm/physics/aerosol/jam/jam_terms.py`` — ``jam_aerosol_physics`` (the ordered
