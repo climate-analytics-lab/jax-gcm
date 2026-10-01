@@ -29,7 +29,7 @@ thread in this call order, so custom compositions should preserve it.
 
 The microphysics core is a swap point with three cores: ``"placeholder"`` (the
 bare-factory default, keeping the Apache-2.0 core importable with no GPL
-dependency) is a **κ-Köhler equilibrium** core with zero tendency that still
+dependency) is an **equilibrium water-uptake** core with zero tendency that still
 exposes the real MAM4 mode/species geometry so the full harness runs
 end-to-end; ``"modal"`` is the **in-tree, Apache-licensed MAM4 process chain**
 (gas-aerosol exchange, renaming, new-particle formation, coagulation,
@@ -175,17 +175,16 @@ inside coagulation from the coagulated one.
 **Status & known limitations.** Opt-in: ``jam_microphysics="modal"`` /
 ``physics.jam_microphysics=modal``; the factory default stays the placeholder
 and the shipped JAM configurations stay on ``mam4_jax``. Against the MAM4-JAX
-core on the same state with both κ-Köhler states dry
-(``microphysics/ab_mam4_jax_test.py``, the ``extras-tests`` job), every
-process agrees: exchange gases to 0.4 %, renaming to ~1 %, new-particle
-formation to 1.5 %, coagulation to ~1 %, the full step to 0.1–4 % on gases
-and numbers, and the Vehkamäki rate is the same function to four figures.
-At mid humidity the two cores are fed different wet diameters — MAM's
-water uptake has crystallization/deliquescence hysteresis (no growth below
-RH ≈ 0.35) and the Kelvin term, the harness's κ-Köhler state has neither —
-and every uptake-dependent process inherits that ratio (Aitken uptake up
-to 2.4×); whether the harness adopts MAM's uptake is an open decision
-(D-A6). Both cores run clear-sky; the cloudy ``amicphys`` sub-area is the
+core on the same state (``microphysics/ab_mam4_jax_test.py``, the
+``extras-tests`` job), every process agrees, dry and at mixed humidity:
+exchange gases to 0.4 %, renaming to ~1 %, new-particle formation to 1.5 %,
+coagulation to ~1 %, the full step to 0.1–4 % on gases and numbers; the
+Vehkamäki rate is the same function to four figures, and the per-mode wet
+radius and density agree to 1 %. That last point is since D-A6: the shared
+water-uptake state (``koehler.py``) is now MAM's Köhler solve with the
+Kelvin term, humidity cap and hysteresis, replacing a κ-Köhler growth factor
+without them that had the Aitken mode up to 2× too wet at mid humidity.
+Both cores run clear-sky; the cloudy ``amicphys`` sub-area is the
 harness's job either way. The fast coagulation coefficients are +3 to +7 %
 above brute-force quadrature at MAM4 geometry, the method's own bias. MAM4
 sets κ_POM = 0 where ``species.py`` carries 0.010. Design record, decisions

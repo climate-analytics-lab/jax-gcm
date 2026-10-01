@@ -990,11 +990,17 @@ Interactive aerosol (JAM)
   reverse-differentiable with every tunable a gradient-visible leaf, and a
   per-process conservation ledger. Checked process by process against the
   MAM4-JAX core on the same state (``ab_mam4_jax_test.py``): within a few
-  per cent everywhere when both water-uptake states are dry. Opt-in: the
-  factory default stays the κ-Köhler placeholder and the shipped JAM
-  configurations stay on ``mam4_jax`` while the harness's water uptake
-  (κ-Köhler, no hysteresis or Kelvin term) differs from MAM's
-  (``docs/source/design/jam_modal_microphysics.md``, D-A6).
+  per cent everywhere, dry and humid. Opt-in for now: the factory default
+  stays the placeholder and the shipped JAM configurations stay on
+  ``mam4_jax`` (``docs/source/design/jam_modal_microphysics.md``, D-A4).
+- **JAM's equilibrium water uptake is MAM's** (``koehler.py``, shared by
+  every core and read by activation, sedimentation, deposition and optics):
+  the Köhler solve with the Kelvin term at the volume-mean particle,
+  humidity capped at 0.98, and crystallization/deliquescence hysteresis
+  (no water below RH 0.35, linear to 0.80). It replaces a κ-Köhler growth
+  factor without a Kelvin term or hysteresis that grew the Aitken mode up
+  to 2× too wet at mid humidity against MAM4-JAX (D-A6). **Changes the
+  climate** of every JAM configuration through the wet sizes.
 - **JAM is composed through** ``physics=echam-jam*``, which is factory-built
   (``builder: echam_physics``) because the aerosol chain splits around the
   cloud term. It requires the two-moment cloud scheme; JAM with the one-moment

@@ -13,6 +13,10 @@ are physical/configuration constants from the E3SM/MAM4 Fortran sources
 and ``rad_constituents.F90`` (``sigmag``, ``dgnum``/lo/hi), cross-checked
 against the MAM4-JAX port ``mam4_jax/data.py`` @ commit
 ``ccd872b6592d0f1ffa7ee43e51f7952b999fd57b``. These are data, not code.
+The water-uptake hysteresis humidities (``rhcrystal`` 0.35, ``rhdeliques``
+0.80 for every mode; MAM4's physical-property tables, read back from
+``mam4_jax.core.data.RHCRYSTAL_AMODE`` / ``RHDELIQUES_AMODE`` 2026-10-02)
+are the :class:`AerosolMode` defaults.
 """
 
 from __future__ import annotations

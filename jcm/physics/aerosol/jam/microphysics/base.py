@@ -7,7 +7,7 @@ needs, and each step writes the ``_jam_state`` diagnostic the downstream
 harness terms read.
 
 Concrete cores:
-  * :class:`PlaceholderMicrophysics` — κ-Köhler equilibrium radii, zero
+  * :class:`PlaceholderMicrophysics` — MAM water-uptake equilibrium radii, zero
     tendency. Exercises the harness end-to-end.
   * (later) a wrapper around MAM4-JAX's ``amicphys`` — issue #490.
 """

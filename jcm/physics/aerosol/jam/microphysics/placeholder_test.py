@@ -39,12 +39,11 @@ class WetDensityTest(unittest.TestCase):
         return aer, cor
 
     def test_matches_the_mass_weighted_mixture(self):
-        # ρ_wet = (ρ_dry + (g³-1)ρ_w)/g³ with g the κ-Köhler growth factor:
-        # the density of the same particle the wet radius describes.
+        # ρ_wet = (ρ_dry + (g³-1)ρ_w)/g³ with g the water-uptake growth factor
+        # the wet radius was built from: the density of that same particle.
         for rh in (0.5, 0.8, 0.95, 0.99):
             aer, cor = self._sea_salt(rh)
-            kappa = float(aer.kappa[cor, 0, 0])
-            growth3 = 1.0 + kappa * rh / (1.0 - rh)
+            growth3 = float(aer.r_wet[cor, 0, 0] / aer.r_dry[cor, 0, 0]) ** 3
             rho_dry = MAM4_SPEC.species_props("ss").density
             expected = (rho_dry + (growth3 - 1.0) * RHO_WATER) / growth3
             self.assertAlmostEqual(

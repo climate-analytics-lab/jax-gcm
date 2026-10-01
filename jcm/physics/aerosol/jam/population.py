@@ -72,6 +72,12 @@ class AerosolMode:
         soluble: whether the mode is treated as soluble (CCN-relevant).
         can_activate: whether ARG activation may draw droplets from it.
         sediments: whether gravitational settling acts on it.
+        rh_crystallization: relative humidity below which the mode holds no
+            water (MAM's ``rhcrystal``); between it and
+            ``rh_deliquescence`` the Köhler water volume is scaled linearly
+            (the hysteresis branch of ``modal_aero_wateruptake``). MAM4's
+            physical-property tables give 0.35 / 0.80 for every mode.
+        rh_deliquescence: see ``rh_crystallization``.
 
     """
 
@@ -94,6 +100,8 @@ class AerosolMode:
     #: carries HAM's own per-class value (M7) sets it directly here instead
     #: of needing an entry in that MAM4-specific table.
     csr_conv: float | None = None
+    rh_crystallization: float = 0.35
+    rh_deliquescence: float = 0.80
 
     # ------------------------------------------------------------------
     # Geometry: per-class conversions from mass to number / surface area.

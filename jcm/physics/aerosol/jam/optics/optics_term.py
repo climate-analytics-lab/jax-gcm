@@ -527,10 +527,11 @@ class JamOpticsTerm(PhysicsTerm):
                 # Hygroscopic water volume from the DRY volume just summed
                 # and the mode's growth factor, ``V_w = V_dry·(g³ − 1)`` with
                 # ``g = r_wet/r_dry``. Both cores grow a mode by applying ONE
-                # ratio to the whole of it — the placeholder core's κ-Köhler
-                # factor with the Kelvin term dropped, MAM4's ``wateruptake``
-                # Köhler solve (Kelvin kept) rescaling ``dgncur_awet`` from
-                # ``dgncur_a`` — so every radius scales by the same ``g`` and
+                # ratio to the whole of it — the shared state's MAM water
+                # uptake (``koehler.py``: Köhler solve with the Kelvin term,
+                # hysteresis) and MAM4-JAX's ``wateruptake`` both rescale the
+                # number-median diameter by the volume-mean particle's
+                # wet/dry ratio — so every radius scales by the same ``g`` and
                 # the wet third moment is exactly ``g³`` times the dry one.
                 # Only that RATIO appears here, so the identity holds for any
                 # ``σ_g`` and also where a core clips ``dg`` to a per-mode

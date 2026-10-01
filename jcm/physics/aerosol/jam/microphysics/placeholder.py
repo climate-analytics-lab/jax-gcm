@@ -1,4 +1,4 @@
-"""κ-Köhler equilibrium placeholder microphysics core.
+"""Equilibrium water-uptake placeholder microphysics core.
 
 Computes diagnostic per-mode dry/wet radius, density and hygroscopicity from
 the prognostic mass + number tracers, with **zero** tendency. It is
@@ -9,7 +9,7 @@ wired in later. No coagulation/condensation/nucleation/ageing happens here —
 those belong to a real core (MAM4-JAX, #490; or the in-tree
 :mod:`~jcm.physics.aerosol.jam.microphysics.modal`).
 
-The κ-Köhler diagnostics themselves now live in
+The water-uptake diagnostics themselves (MAM's Köhler solve with hysteresis) live in
 :mod:`~jcm.physics.aerosol.jam.microphysics.koehler`, because every core
 needs them and none owns them. They are re-exported here unchanged.
 """
@@ -38,7 +38,7 @@ __all__ = [
 ]
 
 class PlaceholderMicrophysics(ModalMicrophysicsTerm):
-    """Zero-tendency κ-Köhler equilibrium core on the MAM4 4-mode population."""
+    """Zero-tendency equilibrium water-uptake core on the MAM4 4-mode population."""
 
     name: ClassVar[str] = "jam_placeholder_microphysics"
     requires: ClassVar[tuple[str, ...]] = ("pressure_full",)

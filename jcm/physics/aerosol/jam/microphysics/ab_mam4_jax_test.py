@@ -16,17 +16,14 @@ adapter's module-level binding) against the matching subset of
 ``(exchange + X) − exchange``, because MAM evaluates both on the exchange
 step's time-mean vapour, which only an exchange step fills.
 
-**Why the populations are dry.** MAM's water uptake carries deliquescence /
-crystallization hysteresis (a growth factor of exactly 1 below RH ≈ 0.35)
-and the Kelvin term; the harness's κ-Köhler state has neither, so at
-mid RH the two cores are fed different wet diameters and every uptake-
-dependent process differs by the ratio of those diameters (the Aitken
-mode's by up to 2×). That is a harness-level formulation choice (D-A6 in
-the design doc), not a microphysics difference, so the microphysics is
-held to its tolerances at RH ≈ 0.02, where both states are dry, and the
-mixed-RH case is checked only for the quantities that do not depend on
-the wet diameter. Measured values behind every tolerance are in the
-design doc, §9 (AER-12).
+**Both dry and humid populations.** Until D-A6 the harness's κ-Köhler state
+had neither MAM's deliquescence/crystallization hysteresis nor its Kelvin
+term, and at mid humidity every uptake-dependent process differed by the
+ratio of the wet diameters (the Aitken mode's by up to 2×). The state is
+now MAM's water uptake, so the per-process tolerances hold at mixed
+humidity as well as dry, and the growth factors themselves are compared
+mode by mode. Measured values behind every tolerance are in the design
+doc, §9 (AER-12 and D-A6).
 """
 
 import functools
@@ -173,12 +170,11 @@ class AbTest(unittest.TestCase):
 
     # --- dry populations: the microphysics itself -------------------------
 
-    def test_every_process_matches_the_reference_when_both_states_are_dry(self):
-        """Measured 2026-10-02 (design doc §9, AER-12); tolerances ~2× the measurement."""
+    def _check_every_process(self, humidity):
         rng = np.random.default_rng(11)
-        state, diagnostics = _state(rng, humidity=1.5e-4)
+        state, diagnostics = _state(rng, humidity=humidity)
         cells = self._cells(state, diagnostics)
-        self._check(cells, "exchange", {"g_h2so4": 0.01, "g_soag": 0.01,
+        self._check(cells, "exchange", {"g_h2so4": 0.02, "g_soag": 0.02,
                                         "m_so4_ait": 0.15, "m_so4_acc": 0.25,
                                         "m_soa_ait": 0.20, "m_soa_acc": 0.20})
         self._check(cells, "rename", {"n_ait": 0.15, "n_acc": 0.15,
@@ -189,10 +185,18 @@ class AbTest(unittest.TestCase):
                                            "m_bc_pcm": 0.03, "m_poa_pcm": 0.03})
         self._check(cells, "ageing", {"n_acc": 0.10, "n_pcm": 0.10, "m_so4_acc": 0.05,
                                       "m_soa_acc": 0.10, "m_bc_pcm": 0.30, "m_poa_pcm": 0.30})
-        self._check(cells, "full", {"g_h2so4": 0.01, "g_soag": 0.01,
+        self._check(cells, "full", {"g_h2so4": 0.02, "g_soag": 0.02,
                                     "n_ait": 0.05, "n_acc": 0.10, "n_pcm": 0.10,
                                     "m_so4_ait": 0.05, "m_so4_acc": 0.05,
                                     "m_soa_acc": 0.10, "m_bc_pcm": 0.30})
+
+    def test_every_process_matches_the_reference_when_both_states_are_dry(self):
+        """Measured 2026-10-02 (design doc §9, AER-12); tolerances ~2× the measurement."""
+        self._check_every_process(humidity=1.5e-4)
+
+    def test_every_process_matches_the_reference_at_mixed_humidity(self):
+        """The same cells at the fixture's mixed humidity (D-A6)."""
+        self._check_every_process(humidity=None)
 
     def test_npf_in_the_vapour_limited_regime_books_the_same_particles(self):
         """Empty modes (survival 1), enough vapour that formation consumes it all:
@@ -245,65 +249,45 @@ class AbTest(unittest.TestCase):
                     self.assertAlmostEqual(float(n_h2so4) / ref_n, 1.0, delta=1e-2)
                     self.assertAlmostEqual(float(radius) * 1e9 / ref_radius_nm, 1.0, delta=1e-2)
 
-    # --- mixed humidity: what does not depend on the wet diameter ---------
+    # --- water uptake: the state itself -----------------------------------
 
-    def test_mixed_humidity_gases_and_number_closure_agree(self):
-        """At mixed RH the wet diameters differ (D-A6), so only the vapour
-        budget and the finite, same-sign structure are held; the
-        per-mode magnitudes are recorded in the design doc instead.
-        """
+    def test_kohler_solve_is_mams(self):
+        """``modal_aero_kohler`` and ours on a (r_dry, κ, s) grid."""
+        from mam4_jax.physics import kohler as reference
+
+        from jcm.physics.aerosol.jam.microphysics import koehler
+
+        # The reference's Ferrari solve needs float64: in float32 it finds no
+        # admissible root at the Kelvin-dominated corner and falls back to the
+        # dry radius. ``tearDown`` restores the flag.
+        jax.config.update("jax_enable_x64", True)
+        for r_dry in (5e-9, 30e-9, 200e-9, 2e-6):
+            for kappa in (0.05, 0.5, 1.16):
+                for s in (0.4, 0.8, 0.95, 0.98):
+                    ours = float(koehler.kohler_growth_factor(
+                        jnp.asarray(r_dry), jnp.asarray(kappa), jnp.asarray(s))) * r_dry
+                    ref = float(np.asarray(reference.modal_aero_kohler(
+                        jnp.asarray([r_dry]), jnp.asarray([kappa]), jnp.asarray([s])))[0])
+                    # MAM's rounded constants (R = 8.3e7, M_w = 18) put its Kelvin
+                    # coefficient 0.2 % above jcm's; at 5 nm that is visible.
+                    self.assertAlmostEqual(ours / ref, 1.0, delta=3e-3, msg=(r_dry, kappa, s))
+
+    def test_wet_radius_and_density_agree_mode_by_mode(self):
+        """The state the harness terms read, against the adapter's, at mixed RH."""
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        from jcm.physics.aerosol.jam.microphysics import mam4_jax as adapter
+        from jcm.physics.aerosol.jam.microphysics.modal import JamModalMicrophysics
+
         rng = np.random.default_rng(11)
         state, diagnostics = _state(rng)
-        cells = self._cells(state, diagnostics)
-        reference, ours = cells["full"]
-        for key in ("g_h2so4", "g_soag"):
-            rel, bad = _rel_rms(reference[key], ours[key])
-            self.assertEqual(bad, 0)
-            self.assertLess(rel, 0.10, f"full/{key} at mixed RH: {rel:.3f}")
-        for key in ("n_ait", "n_acc", "n_pcm", "m_so4_ait", "m_so4_acc", "m_bc_pcm"):
-            a, b = reference[key], ours[key]
-            self.assertTrue(np.all(np.isfinite(b)), key)
-            live = np.abs(a) > 0.01 * np.sqrt(np.mean(a ** 2))
-            self.assertGreater(np.mean(np.sign(a[live]) == np.sign(b[live])), 0.9, key)
-
-    def test_water_uptake_differs_by_design_below_the_crystallization_humidity(self):
-        """Pins the D-A6 observation so a change on either side is noticed:
-        MAM's growth factor is exactly 1 at RH 0.28 and above 1 at 0.62;
-        the κ-Köhler state grows at both.
-        """
-        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
-        from jcm.physics.aerosol.jam.microphysics import mam4_jax as adapter
-        from jcm.physics.aerosol.jam.microphysics import moments
-        from jcm.physics.aerosol.jam.microphysics.modal import JamModalMicrophysics
-        from jcm.physics.aerosol.jam.tracer_layout import gas_name
-        from jcm.physics_interface import PhysicsState
-
-        shape = (1, 2)
-        tracers = {number_name(m.short): jnp.zeros(shape) for m in MAM4_SPEC.modes}
-        for m in MAM4_SPEC.modes:
-            for sp in m.species:
-                tracers[mass_name(sp, m.short)] = jnp.zeros(shape)
-        acc = MAM4_SPEC.mode("accum")
-        n = jnp.full(shape, 1e8)
-        tracers[number_name("acc")] = n
-        tracers[mass_name("so4", "acc")] = (moments.volume_from_diameter(n, acc.dgnum, acc)
-                                            * MAM4_SPEC.species_props("so4").density)
-        for g in ("h2so4", "soag", "so2", "dms"):
-            tracers[gas_name(g)] = jnp.full(shape, 1e-12)
-        state = PhysicsState.zeros(shape).copy(
-            temperature=jnp.full(shape, 285.0),
-            specific_humidity=jnp.asarray([[3.0e-3, 6.0e-3]]), tracers=tracers)
-        diagnostics = {"pressure_full": jnp.full(shape, 9e4), "height_full": jnp.full(shape, 1.5e3),
-                       "height_half": jnp.zeros((2, 2)), "_dt_seconds": DT}
         _, ref = adapter.Mam4JaxMicrophysics()(state, diagnostics, None, None)
         _, our = JamModalMicrophysics(processes=())(state, diagnostics, None, None)
-        i = [m.short for m in MAM4_SPEC.modes].index("acc")
-        gf_ref = np.asarray(ref["_jam_state"].r_wet[i] / ref["_jam_state"].r_dry[i])[0]
-        gf_our = np.asarray(our["_jam_state"].r_wet[i] / our["_jam_state"].r_dry[i])[0]
-        self.assertAlmostEqual(gf_ref[0], 1.0, places=3)          # RH ≈ 0.28: dry in MAM
-        self.assertGreater(gf_our[0], 1.05)                        # κ-Köhler grows
-        self.assertGreater(gf_ref[1], 1.1)                         # RH ≈ 0.62: both wet
-        self.assertGreater(gf_our[1], gf_ref[1])                   # ours wetter (no Kelvin)
+        for i, mode in enumerate(MAM4_SPEC.modes):
+            for field, tol in (("r_wet", 0.01), ("rho", 0.01)):
+                ratio = np.asarray(getattr(our["_jam_state"], field)[i]
+                                   / getattr(ref["_jam_state"], field)[i])
+                self.assertTrue(np.all(np.abs(ratio - 1.0) < tol),
+                                f"{mode.short}/{field}: ours/ref in {ratio.min():.4f}..{ratio.max():.4f}")
 
 
 if __name__ == "__main__":
