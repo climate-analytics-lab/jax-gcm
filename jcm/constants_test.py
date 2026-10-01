@@ -387,7 +387,10 @@ class DryDepositionHonoursOverrideTest(_OverrideCase):
 
 
 class HetMxphaseFreezingHonoursOverrideTest(_OverrideCase):
-    """``lohmann_2m/deposition_freezing.py::het_mxphase_freezing`` reads grav and cpd.
+    """``lohmann_2m/deposition_freezing.py::het_mxphase_freezing`` follows grav.
+
+    It reads ``params.grav``, which ``CloudParams2M.default()`` takes from the
+    live constants, and ``c.cpd``.
 
     Its immersion rate carries ECHAM's cooling ``fact_tke*sqrt(TKE)*g/cpd``
     (mo_cloud_micro_2m.f90:2800-2802), linear in g while the frozen fraction is

@@ -102,6 +102,34 @@ def test_het_mxphase_freezing_gradient_through_immersion_coefficients():
     assert all(np.isfinite(float(x)) and float(x) > 0.0 for x in g)
 
 
+def test_het_mxphase_freezing_follows_the_parameter_melting_point_and_gravity():
+    """The rates take tmelt and grav from the parameter set, as the 6.2 gate does.
+
+    Immersion freezing scales as exp(tmelt - T) and as the TKE cooling's g, so at a
+    warm supercooled cell (266 K, small frozen fraction) raising ``params.tmelt`` by
+    1 K multiplies it by about e, and doubling ``params.grav`` by about 2; the
+    derivatives with respect to both are live.
+    """
+    from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+    from jcm.physics.clouds.lohmann_2m.deposition_freezing import het_mxphase_freezing
+    a = _het_args(n=1, temperature=jnp.array([266.0]), bc_soluble_fraction=jnp.zeros((1,)),
+                  bc_insoluble_fraction=jnp.zeros((1,)), dust_accumulation_fraction=jnp.zeros((1,)),
+                  dust_coarse_fraction=jnp.zeros((1,)))
+    base = CloudParams2M.default()
+
+    def frozen(tmelt, grav):
+        p = CloudParams2M.default(tmelt=tmelt, grav=grav)
+        return het_mxphase_freezing(**a, timestep=720.0, min_liquid_threshold=p.cqtmin,
+                                    params=p)[2][0]
+    t0, g0 = float(base.tmelt), float(base.grav)
+    ref = float(frozen(t0, g0))
+    assert ref > 0.0
+    np.testing.assert_allclose(float(frozen(t0 + 1.0, g0)) / ref, np.e, rtol=1e-2)
+    np.testing.assert_allclose(float(frozen(t0, 2.0 * g0)) / ref, 2.0, rtol=1e-2)
+    d_tmelt, d_grav = jax.grad(frozen, argnums=(0, 1))(t0, g0)
+    assert float(d_tmelt) > 0.0 and float(d_grav) > 0.0
+
+
 @pytest.mark.parametrize("case", ["no_aerosol", "no_tke", "no_radius", "cold_outside_gate",
                                   "no_liquid", "gate_edges"])
 def test_het_mxphase_freezing_reverse_mode_finite_at_singular_points(case):

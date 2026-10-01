@@ -604,7 +604,10 @@ def het_mxphase_freezing(
 
     """
     mask = freezing_condition
-    tmelt = c.tmelt
+    # The melting point and gravity are the parameter set's, as for the
+    # section-6.2 gate that admits the cell (``ztp1tmp < params.tmelt``), so
+    # an override of either moves the gate and the rates together.
+    tmelt = params.tmelt
     t = temperature
 
     # --- Brownian diffusivities of the insoluble modes (F 2741-2771) ------
@@ -657,7 +660,7 @@ def het_mxphase_freezing(
               + params.immersion_coefficient_bc * bc_soluble_fraction)
     has_tke = tke > 0.0
     sqrt_tke = jnp.where(has_tke, jnp.sqrt(jnp.where(has_tke, tke, 1.0)), 0.0)
-    zomega = vertical_velocity - params.fact_tke * sqrt_tke * air_density * c.grav
+    zomega = vertical_velocity - params.fact_tke * sqrt_tke * air_density * params.grav
     ztte = zomega / c.cpd * inv_air_density
     # exp(tmelt - T) is at most exp(35) inside the gate (T > cthomi); the
     # discarded branch runs at tmelt so a cold non-gate cell cannot overflow
