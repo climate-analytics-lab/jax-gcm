@@ -356,7 +356,8 @@ Neither changes a result; both used to give no sign at all.
 
 Nine modules captured constants at import time and so ignored
 ``set_constants``: JAM activation, dry-deposition resistances, sedimentation,
-ice nucleation, the WMO tropopause diagnostic, JAM aqueous chemistry, two
+JAM ice nucleation (whose successor, ECHAM-HAM's freezing inputs, reads no
+constants), the WMO tropopause diagnostic, JAM aqueous chemistry, two
 TTE-TKE modules and the emissions preparation tool. They now read the live
 singleton.
 
@@ -508,8 +509,8 @@ Direct callers of the scheme functions:
   increments over the step (``temperature_increment``,
   ``humidity_increment``, ``qc_increment``, ``qi_increment``,
   ``qnc_increment``, ``qni_increment``) follow ``params`` as optional
-  arguments that default to zero, with ``detrained_qc``/``detrained_qi``
-  after them. **An old positional call that passed the provisional state
+  arguments that default to zero, with ``detrained_qc``/``detrained_qi`` and
+  ``freezing_aerosol`` after them. **An old positional call that passed the provisional state
   still runs**: that state is now read as the anchor and the omitted
   increments are zero, so the step's condensation is silently lost. Keyword
   callers fail loudly. Build the arguments with
@@ -912,9 +913,9 @@ length (code 2). RRTMGP's McICA sampler draws it by ECHAM's rank rule, and
 ``radiation.total_cloud_cover`` follows it (ECHAM's ``cld_cvr`` in
 expectation). The grey scheme's fluxes are the same under both rules; the
 emulator's fluxes carry the overlap it was trained on (exponential, #881).
-Over days 5-10 of ``t63-echam-1m`` the switch alone lowers that cover by
-1.0 point and raises the net TOA radiation by 0.55 W/m², a small part of the
-cloud changes below. To keep exponential overlap:
+Over days 5-10 of ``t63-echam-1m`` the switch alone (measured at 82c2f294)
+lowers that cover by 1.0 point and raises the net TOA radiation by 0.55 W/m²,
+a small part of the cloud changes below. To keep exponential overlap:
 
 .. code-block:: python
 
@@ -956,6 +957,12 @@ Other config-surface changes
 * **The L40 vertical table is deleted.** Its truncated ``vct`` put the model
   top at 274 hPa. ``40`` is gone from both supported-count lists and
   ``get_echam_levels`` asserts a composed top below 1000 Pa.
+* **2M aggregation and autoconversion defaults.** ``CloudParams2M.default()``
+  uses ECHAM's generic ``ccsaut = 95``, as in v2; v3 development builds used
+  ECHAM-HAM's 900. It also uses ECHAM-HAM's prognostic-CDNC ``ccraut = 10.6``
+  instead of v2's 15. The ``echam-2m`` presets set 95 and 15 themselves, so
+  only a 2M scheme built in Python without a preset, and the JAM members,
+  see the ``ccraut`` change.
 * **New config-trap warnings** (warnings, never errors) fire on: JAM with
   aquaplanet terrain; ``forcing=from_file`` with aquaplanet terrain; a
   prognostic aerosol module with every emission input explicitly nulled;
@@ -1298,15 +1305,16 @@ them, and ECHAM's binary ``lo2`` switch sets the phase instead of a linear
 238-273 K blend. Radiation sees the cover only where there is condensate, and
 the default overlap is maximum-random (above).
 
-Over days 5-10 of ``t63-echam-1m`` from a spun-up state the global net TOA
-radiation rises by **6.4 W/m²** (shortwave cloud effect **+24.4**, longwave
-**−17.7 W/m²**), the liquid water path falls from **112 to 70 g/m²**, total
-cloud cover (``radiation.total_cloud_cover``) from **71 to 55 %**, and the
-supercooled liquid fraction at 243-248 K from **0.72 to 0.10**;
-precipitation rises by 0.11 mm/day. The 2M and JAM presets move by
-**−0.6 / −0.7 W/m²** net TOA with the cover **6.6 / 6.7 points** lower and
-the liquid water path **+6.8 / +5.9 g/m²** higher, and precipitation
-unchanged. Identical-physics runs spread by about 0.2 W/m². Ten days measure
+Over days 5-10 of ``t63-echam-1m`` from a spun-up state, against dev with the
+Sonntag saturation (#965), the global net TOA radiation rises by
+**6.3 W/m²** (shortwave cloud effect **+23.9**, longwave **−17.2 W/m²**), the
+liquid water path falls from **111 to 70 g/m²**, total cloud cover
+(``radiation.total_cloud_cover``) from **71 to 55 %**, and the supercooled
+liquid fraction at 243-248 K from **0.72 to 0.10**; precipitation rises by
+0.10 mm/day. The 2M and JAM presets move by **−0.8 / −0.7 W/m²** net TOA
+with the cover **6.4 / 6.5 points** lower and the liquid water path
+**+7.1 / +5.9 g/m²** higher, and precipitation within 0.007 mm/day.
+Identical-physics runs spread by about 0.2 W/m². Ten days measure
 the immediate response, not a climate. Any tuning of the 1M cloud water, the
 cloud radiative effects or the mixed-phase partition done before this change
 should be redone, and every configuration whose truncation is not T63 (the

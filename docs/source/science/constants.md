@@ -50,7 +50,7 @@ Every consumer in the package now reads constants **when the value is used**
 — inside the function, at construction, or at trace time — so an override
 reaches all of them: the dinosaur dycore wrapper takes the live singleton at
 construction, and the JAM activation / sedimentation / dry-deposition /
-ice-nucleation / aqueous-chemistry chain, the TTE-TKE closure, the emissions
+aqueous-chemistry chain, the 2M heterogeneous freezing, the TTE-TKE closure, the emissions
 preparation step and the WMO-tropopause diagnostic all read theirs per call.
 
 The contract is about *timing*, not merely about the import form, and the
@@ -100,8 +100,9 @@ SPEEDY-specific ``jcm/physics/speedy/physical_constants_test.py``.
 ``jcm/constants_test.py`` adds the structural import guard plus per-module
 behavioural checks: with gravity overridden, the tropopause geopotential
 height, the ARG maximum supersaturation, the Stokes settling velocity, the
-quasi-laminar deposition resistance and the ice-nucleation cooling rate all
-move, and each restores the original constants afterwards.
+quasi-laminar deposition resistance and the 2M immersion freezing (through its
+cooling rate ``fact_tke·√TKE·g/cpd``) all move, and each restores the original
+constants afterwards.
 
 ## Saturation vapour pressure of the ECHAM physics
 
