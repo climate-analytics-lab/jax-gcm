@@ -501,3 +501,120 @@ class TestCoupledEchamSmoke(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPysesAfterPhysicsState(unittest.TestCase):
+    """``after_physics_state`` is the lump_all state the pySES dynamics starts from."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dycore = PysesCamSEDycore(
+            nx=3, npt=4, dt_seconds=900.0,
+            terrain_file=T63_TERRAIN, tracer_specs=_TRACER_SPECS,
+        )
+        cls.state = cls.dycore.initial_state(None, tracer_specs=_TRACER_SPECS)
+        grid = cls.dycore.to_physics_state(cls.state)
+        shape = grid.temperature.shape
+        rng = np.random.default_rng(7)
+        noise = jnp.asarray(rng.standard_normal(shape), dtype=jnp.float32)
+        cls.tendency = PhysicsTendency(
+            u_wind=1e-4 * noise, v_wind=-1e-4 * noise,
+            temperature=1e-4 * noise,
+            specific_humidity=1e-9 * jnp.abs(noise),
+            tracers={"qc": 1e-10 * jnp.abs(noise), "qi": jnp.zeros(shape),
+                     "co2_vmr": jnp.zeros(shape)},
+        )
+
+    def test_equals_the_state_step_hands_to_its_dynamics(self):
+        """With pyses's coupling step reduced to its lump_all add, the two agree."""
+        from unittest import mock
+
+        from pyses.dynamical_cores import run_dycore
+        from pyses.dynamical_cores.model_state import (
+            sum_dynamics_series, sum_tracers_series,
+        )
+
+        def lump_only(ms, h_grid, v_grid, physics_config, diffusion_config,
+                      timestep_config, dims, model, physics_forcing=None):
+            dt = timestep_config["physics_dt"]
+            return {**ms,
+                    "dynamics": sum_dynamics_series(
+                        [ms["dynamics"], physics_forcing["dynamics"]],
+                        [1.0, dt], model),
+                    "tracers": sum_tracers_series(
+                        [ms["tracers"], physics_forcing["tracers"]],
+                        [1.0, dt], model)}
+
+        after = self.dycore.after_physics_state(self.state, self.tendency)
+        with mock.patch.object(run_dycore, "advance_coupling_step", lump_only):
+            stepped = self.dycore.to_physics_state(
+                self.dycore.step(self.state, self.tendency))
+        for name in ("temperature", "specific_humidity", "u_wind", "v_wind"):
+            np.testing.assert_array_equal(np.asarray(getattr(after, name)),
+                                          np.asarray(getattr(stepped, name)))
+        np.testing.assert_array_equal(np.asarray(after.tracers["qc"]),
+                                      np.asarray(stepped.tracers["qc"]))
+
+    def test_differs_from_the_gridpoint_add_by_the_gll_projection(self):
+        after = self.dycore.after_physics_state(self.state, self.tendency)
+        naive = DynamicalCore.after_physics_state(
+            self.dycore, self.state, self.tendency)
+        added = self.dycore.dt_seconds * np.asarray(self.tendency.temperature)
+        residual = np.asarray(after.temperature - naive.temperature)
+        rel = np.sqrt(np.mean(residual ** 2)) / np.sqrt(np.mean(added ** 2))
+        # Column noise is not C0 on the GLL mesh: the DSS projection moves it.
+        self.assertGreater(rel, 0.05)
+        self.assertTrue(np.isfinite(np.asarray(after.specific_humidity)).all())
+
+    def test_no_tendency_is_the_state(self):
+        after = self.dycore.after_physics_state(self.state, None)
+        np.testing.assert_array_equal(
+            np.asarray(after.temperature),
+            np.asarray(self.dycore.to_physics_state(self.state).temperature))
+
+    def test_dribbled_couplings(self):
+        """dribble_all has no post-physics state: the protocol default.
+
+        hybrid lumps the tracers (moisture included) and dribbles the dynamics
+        forcing in pieces that sum to the lump's increment, so every field,
+        winds and temperature included, comes from the lump.
+        """
+        from pyses.dynamical_cores.physics_dynamics_coupling import coupling_types
+
+        tc = self.dycore.timestep_config
+        lumped = self.dycore.after_physics_state(self.state, self.tendency)
+        naive = DynamicalCore.after_physics_state(
+            self.dycore, self.state, self.tendency)
+        try:
+            self.dycore.timestep_config = {
+                **tc, "physics_dynamics_coupling": coupling_types.dribble_all}
+            dribble = self.dycore.after_physics_state(self.state, self.tendency)
+            self.dycore.timestep_config = {
+                **tc, "physics_dynamics_coupling":
+                    coupling_types.lump_tracers_dribble_dynamics}
+            hybrid = self.dycore.after_physics_state(self.state, self.tendency)
+        finally:
+            self.dycore.timestep_config = tc
+        np.testing.assert_array_equal(np.asarray(dribble.temperature),
+                                      np.asarray(naive.temperature))
+        for name in ("temperature", "u_wind", "v_wind", "specific_humidity"):
+            np.testing.assert_array_equal(np.asarray(getattr(hybrid, name)),
+                                          np.asarray(getattr(lumped, name)))
+        self.assertFalse(np.array_equal(np.asarray(hybrid.temperature),
+                                        np.asarray(naive.temperature)))
+        np.testing.assert_array_equal(np.asarray(hybrid.tracers["qc"]),
+                                      np.asarray(lumped.tracers["qc"]))
+
+    def test_hybrid_dribble_sums_to_the_lumped_physics_increment(self):
+        """The hybrid dribble of pySES adds ``physics_dt·forcing["dynamics"]`` in all.
+
+        ``_advance_coupling_step`` adds ``forcing["dynamics"]`` once per tracer
+        sub-step with that sub-step's dt, so the pieces sum to the lump's
+        ``physics_dt·forcing`` exactly when the sub-steps tile the physics
+        step, which is what makes the lumped winds and temperature the
+        post-physics state under hybrid coupling.
+        """
+        tc = self.dycore.timestep_config
+        self.assertAlmostEqual(
+            tc["tracer_subcycle"] * tc["tracer_advection"]["dt"], tc["physics_dt"],
+            places=9)

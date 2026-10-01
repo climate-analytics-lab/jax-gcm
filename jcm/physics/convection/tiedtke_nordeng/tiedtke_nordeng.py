@@ -2000,22 +2000,28 @@ class TiedtkeConvection(PhysicsTerm):
             moistening_rate=tendency.specific_humidity,
         )
 
-        # These floors protect the provisional CloudData consumed by the
-        # downstream microphysics. They can affect what that scheme computes,
-        # but do not modify ``tendency`` above or directly update prognostic
-        # state; the final summed qc/qi tendency is capped and accounted once
-        # at the physics interface.
+        # These floors keep the CloudData condensate view non-negative for the
+        # terms downstream that read it (JAM's aqueous chemistry, the COSP
+        # and AeroCom fallbacks); the cloud schemes take their condensate from
+        # ``cloud_scheme_inputs`` instead. They do not modify ``tendency``
+        # above or directly update prognostic state; the final summed qc/qi
+        # tendency is capped and accounted once at the physics interface.
         #
         # The same detrainment is also published on its own, as ECHAM's
         # ``pxtecl``/``pxteci``: the cloud-tracer tendency this term returns
         # is the detrained condensate and nothing else (``plude`` split by
         # phase in ``flux_tendencies``; the in-plume condensate flux enters
-        # the VAPOUR budget, as in cudtdq), taken after ``cap_scale`` so it
-        # is exactly what was added to ``clouds.qc/qi`` here. Its phase split
+        # the VAPOUR budget, as in cudtdq), taken after ``cap_scale``: the
+        # tendency applied to ``clouds.qc/qi`` here, before their clip at
+        # zero, and the one in the running tendency. Its phase split
         # is at tmelt on the environment temperature this term received
-        # (ECHAM ``pten`` in cudtdq, mo_cufluxdts.f90:646-666). The 1M scheme
-        # consumes that split as-is through the ``clouds.qc/qi`` advance; the
-        # Lohmann 2M re-splits the total by its WBF criterion
+        # (ECHAM ``pten`` in cudtdq, mo_cufluxdts.f90:646-666). The cloud
+        # schemes read these fields through
+        # ``jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs``, which takes
+        # them out of the running condensate tendency and hands them on by
+        # themselves, as ECHAM passes pxtecl/pxteci (physc.f90:1081). The 1M
+        # scheme uses that split as-is; the Lohmann 2M re-splits the total by
+        # its WBF criterion
         # (mo_cloud_micro_2m.f90:1300-1316) and needs the ice part to undo
         # the ice latent heat booked here (``zalv = als``) for condensate it
         # reclassifies as liquid.

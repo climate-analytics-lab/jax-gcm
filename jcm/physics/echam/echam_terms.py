@@ -47,6 +47,11 @@ from jcm.physics.gravity_waves.hines import HinesGwd, HinesParameters
 from jcm.physics.gravity_waves.sso import LottMillerSso, SSOParameters
 from jcm.physics.physics_term import with_field_overrides
 from jcm.physics.physics_term import PhysicsTerm
+from jcm.physics.resolution_defaults import (
+    default_parameters,
+    defaults_flag_kwargs,
+    spectral_truncation,
+)
 from jcm.physics.radiation.nn_emulator_scheme import NNEmulatorRadiation
 from jcm.physics.radiation.aerosol_free import (
     resolve_aerosol_free_interval,
@@ -106,6 +111,39 @@ def default_radiation_parameters(aerosol_module: str = "macv2sp"
         cloud_inhomogeneity_ice=0.7 if aerosol_module == "jam" else 0.8)
 
 
+def _warn_if_shared_cloud_constants_differ(cover_params, cloud_params, cloud_scheme):
+    """Warn when jcm's two copies of one ECHAM cloud constant differ.
+
+    ECHAM has one ``csecfrl`` (``mo_echam_cloud_params.f90`` l.76) and one
+    ``cthomi`` (l.54), read by both its cover and its cloud scheme. jcm holds
+    one copy in the cover's ``CloudParameters`` (``csecfrl``, ``t_ice``) and
+    one in the cloud scheme's parameters (the 1M's ``csecfrl`` and
+    ``cthomi``; the 2M's ``cthomi``). Differing copies are allowed, and are a
+    departure from ECHAM, so they are reported rather than refused. Values
+    that are not concrete at construction (traced) are not compared.
+    """
+    import math
+    import warnings
+
+    import numpy as np
+
+    pairs = [("t_ice", "cthomi")]
+    if cloud_scheme == "1m":
+        pairs.insert(0, ("csecfrl", "csecfrl"))
+    for cover_name, cloud_name in pairs:
+        try:
+            a = float(np.asarray(getattr(cover_params, cover_name)))
+            b = float(np.asarray(getattr(cloud_params, cloud_name)))
+        except Exception:  # a traced leaf has no value to compare at build time
+            continue
+        if not math.isclose(a, b, rel_tol=1e-6):
+            warnings.warn(
+                f"CloudParameters.{cover_name} = {a:g} but the {cloud_scheme} "
+                f"cloud scheme's {cloud_name} = {b:g}: ECHAM has one "
+                f"{cloud_name} for its cover and its cloud scheme; the two jcm "
+                "copies are used as given.", UserWarning, stacklevel=3)
+
+
 def echam_physics(
     *,
     convection: ConvectionParameters | Mapping[str, Any] | None = None,
@@ -150,6 +188,7 @@ def echam_physics(
     diagnose_omega: bool = False,
     cu_lmfmid: bool | None = None,
     prescribed_surface_fluxes: bool = False,
+    coords=None,
 ):
     """Create a ``ComposablePhysics`` with the standard ECHAM term ordering.
 
@@ -318,6 +357,14 @@ def echam_physics(
             instead) and with ``cu_lmfmid`` in a ``convection`` mapping;
             with a mapping of other fields it sets the base the mapping is
             applied to.
+        coords: The model's coordinate system. The schemes whose tunable
+            parameters have resolution-dependent defaults (the cloud cover's
+            ``CloudParameters``, the 1M ``MicrophysicsParameters``) take the
+            defaults for its spectral truncation
+            (:mod:`jcm.physics.resolution_defaults`); ``None`` takes the T63
+            defaults. An explicit ``Parameters`` object is used as given, and
+            a field-override mapping replaces its fields on top of the grid's
+            defaults.
         prescribed_surface_fluxes: Forced surface mode (jax-gcm#301):
             compose ``TteTkeVerticalDiffusion(couple_surface=False)``
             (interior-only mixing — the implicit solve's surface Robin BC
@@ -481,9 +528,18 @@ def echam_physics(
         convection_p = ConvectionParameters.default(cu_lmfmid=cu_lmfmid)
     else:
         convection_p = convection or ConvectionParameters.default()
-    clouds_p = clouds or CloudParameters.default()
-    microphysics_p = microphysics or MicrophysicsParameters.default()
-    microphysics_2m_p = microphysics_2m or CloudParams2M.default()
+    # Resolution defaults are built here, at construction, for the run's
+    # truncation (T63 without a grid), so the parameter pytree the caller
+    # gets back is final. An explicit Parameters object is used as given.
+    truncation = 63 if coords is None else spectral_truncation(coords)
+    clouds_are_defaults = clouds is None
+    microphysics_are_defaults = microphysics is None
+    clouds_p = clouds or default_parameters(CloudParameters, truncation)
+    microphysics_p = microphysics or default_parameters(
+        MicrophysicsParameters, truncation)
+    microphysics_2m_are_defaults = microphysics_2m is None
+    microphysics_2m_p = microphysics_2m or default_parameters(
+        CloudParams2M, truncation)
     if isinstance(radiation_scheme, PhysicsTerm):
         # A radiation term instance carries its own parameters; the factory
         # reads them back (below) rather than composing a second, possibly
@@ -515,6 +571,11 @@ def echam_physics(
         (convection_p, clouds_p, microphysics_p, microphysics_2m_p,
          radiation_p, vertical_diffusion_p, surface_p, aerosol_p, hines_p,
          sso_p) = _resolved.values()
+
+    if cloud_scheme in ("1m", "2m"):
+        _warn_if_shared_cloud_constants_differ(
+            clouds_p, microphysics_p if cloud_scheme == "1m" else microphysics_2m_p,
+            cloud_scheme)
 
     if isinstance(radiation_scheme, PhysicsTerm):
         if radiation_scheme.category != "radiation":
@@ -568,9 +629,15 @@ def echam_physics(
     band_config = RadiationBandConfig.for_terms([rad_term])
 
     if cloud_scheme == "1m":
-        micro_term = Echam1MMicrophysics(params=microphysics_p)
+        micro_term = Echam1MMicrophysics(
+            params=microphysics_p,
+            **defaults_flag_kwargs(
+                Echam1MMicrophysics, microphysics_are_defaults))
     elif cloud_scheme == "2m":
-        micro_term = Lohmann2MMicrophysics(params=microphysics_2m_p)
+        micro_term = Lohmann2MMicrophysics(
+            params=microphysics_2m_p,
+            **defaults_flag_kwargs(
+                Lohmann2MMicrophysics, microphysics_2m_are_defaults))
         # SPA activation knobs live on AerosolParameters — wire them into
         # the 2M term so it stays self-contained at compose time. Pass the
         # values through untouched (no float() cast) so the gradient path
@@ -765,7 +832,8 @@ def echam_physics(
             EchamBoundaryConditions(),
             *aerosol_terms,
             SimpleChemistry(),
-            SundqvistCloudFraction(params=clouds_p),
+            SundqvistCloudFraction(
+                params=clouds_p, params_are_defaults=clouds_are_defaults),
             rad_term,
             TteTkeVerticalDiffusion(
                 params=vertical_diffusion_p,

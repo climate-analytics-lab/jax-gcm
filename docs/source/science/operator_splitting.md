@@ -20,7 +20,13 @@ tendencies are summed, but terms run in list order and each receives the
 sequentially anyway — vertical diffusion and convection publish their updated
 thermodynamics via ``advance_thermo_run``
 (``jcm/physics/diagnostics/moist_air_state.py``), which downstream convection
-and microphysics consume — so term order is **not** free:
+consumes, and the host publishes the running tendency sum ``_tendency_run``
+before every term. The cloud microphysics takes ECHAM's inputs from these
+(``jcm/physics/clouds/cloud_inputs.py``): the previous step's post-physics
+state, carried by the model from ``DynamicalCore.after_physics_state``, as the
+anchor, and the dynamics of the last step plus every upstream term as the
+increments, with the convective detrainment apart — so term order is **not**
+free:
 ``echam_physics()`` ships the validated ECHAM ``physc`` sequence, and
 reordering coupled terms (e.g. convection before vertical diffusion) is a
 known-unstable configuration. The full engineering treatment is
@@ -41,8 +47,16 @@ forcing to the dynamics despite multiple dynamics sub-evaluations per physics
   keeps the ``replace()`` / ``remove()`` / ``__add__()`` composition algebra
   simple for loosely-coupled terms, at a small accuracy cost; where the
   sequential coupling *matters* (vdiff → convection → clouds thermodynamics) it
-  is restored explicitly through the ``advance_thermo_run`` diagnostics channel,
-  which is why the shipped orderings are load-bearing rather than arbitrary.
+  is restored explicitly through the ``advance_thermo_run`` and
+  ``_tendency_run`` channels, which is why the shipped orderings are
+  load-bearing rather than arbitrary. The cloud scheme's anchor is the carried
+  post-physics state rather than ECHAM's ``x(t−Δt)`` because jcm's split is
+  sequential: the carried state is the one the dynamics advanced from, so
+  differencing against it counts the dynamics once and does not count as an
+  increment the part of the physics tendency the dycore's projection dropped
+  (on Dinosaur about 22 % of each physics increment of T and q, #954). For
+  those modal fields the anchor is therefore not exactly the state the cloud
+  scheme left saturated.
 - `compute` / `differentiability` — one physics call per ``dt`` (rather than one
   per RK substage) keeps the autodiff tape small under ``jax.checkpoint``, and
   the ``physics_state`` carry is threaded as an explicit JAX pytree rather than
@@ -73,7 +87,9 @@ scheme.
   ``initial_physics_carry``.
 - ``jcm/physics_interface.py`` — ``compute_physics_step_gridpoint``,
   ``verify_state``, ``verify_tendencies``.
-- ``jcm/dycore/base.py`` — ``DynamicalCore.step``.
+- ``jcm/dycore/base.py`` — ``DynamicalCore.step``,
+  ``DynamicalCore.after_physics_state``.
+- ``jcm/physics/clouds/cloud_inputs.py`` — ``cloud_scheme_inputs``.
 
 **Validation evidence.** ``jcm/model_test.py`` (operator-split physics: snapshot
 and averaged modes for SPEEDY and ECHAM-hybrid, step purity, carry threading,

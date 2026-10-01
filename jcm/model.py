@@ -37,7 +37,8 @@ from jcm.date import (
 from jcm.forcing import ForcingData, default_forcing
 from jcm.predictions import ModelPredictions
 from jcm.physics_interface import (
-    PhysicsState, Physics, compute_physics_step_gridpoint, verify_state,
+    POST_PHYSICS_STATE_KEY, PhysicsState, Physics,
+    compute_physics_step_gridpoint, verify_state,
 )
 from jcm.physics.speedy.speedy_terms import speedy_physics
 from jcm.terrain import TerrainData
@@ -360,16 +361,16 @@ def _op_split_trajectory(
             empty_snaps[name] = jnp.zeros(
                 (n_snaps,) + tmpl.shape, dtype=jnp.result_type(tmpl.dtype, jnp.float32))
 
-    # The saved-trajectory physics payload must not carry the per-step
-    # ``_sampler_state`` snapshot (state fields the StateSampler term
-    # publishes for the observers) — that would duplicate the dynamics
-    # fields in every saved frame. It stays in the *carry* (the scan needs a
-    # structure-stable pytree and the observers read it every ``dt``) but is
-    # stripped from what gets saved.
-    def _strip_sampler(diag):
-        if isinstance(diag, dict) and "_sampler_state" in diag:
-            return {k: v for k, v in diag.items() if k != "_sampler_state"}
-        return diag
+    # The saved-trajectory physics payload, and the averaging accumulator
+    # behind it, must not carry the per-step state copies that live in the
+    # carry: the ``_sampler_state`` snapshot (state fields the StateSampler
+    # term publishes for the observers) and the ``_post_physics_state`` anchor
+    # of the cloud schemes. Either would duplicate the dynamics fields in
+    # every saved frame (the anchor is ~20 MiB per frame for the 2M at
+    # T63L47). Both stay in the *carry* (the scan needs a structure-stable
+    # pytree, the observers and the cloud schemes read them every ``dt``, and
+    # resume continues from the carry) but are stripped from what gets
+    # averaged and saved (``_without_unsaved_carry_slots``).
 
     def _averaged_outer_step():
         @jax.checkpoint
@@ -398,7 +399,7 @@ def _op_split_trajectory(
                     if jnp.issubdtype(new.dtype, jnp.inexact)
                     else new
                 ),
-                diag_sum, physics_state_next,
+                diag_sum, _without_unsaved_carry_slots(physics_state_next),
             )
             obs = observe_fn(physics_state_next, obs_x) if have_observers else None
             if have_snapshots:
@@ -432,7 +433,7 @@ def _op_split_trajectory(
             averaged_dynamics = tree_map(lambda s: s / inner_steps, x_sum)
             preds = post_process_fn(x_next, ps_next).replace(
                 dynamics=averaged_dynamics,
-                physics=_strip_sampler(diag_sum),
+                physics=diag_sum,
             )
             # The traced clock holds whole seconds, so an odd-length interval's
             # half-second midpoint is floored here. The exact label (exact to
@@ -495,7 +496,7 @@ def _op_split_trajectory(
                 lambda x: (jnp.zeros_like(x, dtype=float)
                            if jnp.issubdtype(x.dtype, jnp.inexact)
                            else jnp.zeros_like(x)),
-                empty_diagnostics,
+                _without_unsaved_carry_slots(empty_diagnostics),
             )
             outer_step_fn = _averaged_outer_step()
             outer_step = lambda c, xs: outer_step_fn(
@@ -537,6 +538,21 @@ def _op_split_trajectory(
                 observations, snapshots, times, time_bounds)
 
     return integrate
+
+
+#: Carry slots that hold per-step copies of state fields for the next step's
+#: physics or for the observers, and are never saved: the StateSampler's
+#: ``_sampler_state`` and the cloud schemes' post-physics anchor.
+_UNSAVED_CARRY_SLOTS = ("_sampler_state", POST_PHYSICS_STATE_KEY)
+
+
+def _without_unsaved_carry_slots(physics_state):
+    """``physics_state`` without the carry slots that are never saved."""
+    if isinstance(physics_state, dict) and any(
+            k in physics_state for k in _UNSAVED_CARRY_SLOTS):
+        return {k: v for k, v in physics_state.items()
+                if k not in _UNSAVED_CARRY_SLOTS}
+    return physics_state
 
 
 class Model:
@@ -742,6 +758,12 @@ class Model:
             if hasattr(self.dycore, flag):
                 setattr(self.dycore, flag, True)
         self._dycore_field_names = tuple(self.dycore.physics_field_names())
+        # Whether the composed physics carries the previous step's
+        # post-physics state (a tendency-driven cloud scheme's anchor, see
+        # ``jcm.physics.clouds.cloud_inputs``). Settled here from the
+        # composition: packages that do not ask skip the extra conversion.
+        self._post_physics_fields = tuple(
+            getattr(self.physics, "post_physics_fields", lambda: ())())
         missing = [f for f in required if f not in self._dycore_field_names]
         if missing:
             raise ValueError(
@@ -1170,6 +1192,29 @@ class Model:
                 physics_tendency, new_physics_state = auto_axes(
                     call, axes=axis, out_sharding=specs,
                 )(*args)
+            if self._post_physics_fields:
+                # The state the dynamics is about to start from, as the dycore
+                # forms it from this tendency, carried to the next step's
+                # physics: the difference from the next step's gridpoint state
+                # is then the dynamics alone, which the cloud schemes need as
+                # an increment (ECHAM's ``ptte``/``pqte`` hold it at
+                # ``cloud``). It stays differentiable: one step back through
+                # the carry, like ``_prev_step``.
+                with profiling.scope(profiling.BRIDGE_TO_PHYSICS):
+                    post_physics = self.dycore.after_physics_state(
+                        state, physics_tendency)
+                    new_physics_state = self.physics.record_post_physics_state(
+                        new_physics_state, post_physics)
+                    if axis is not None and POST_PHYSICS_STATE_KEY in new_physics_state:
+                        # Recorded outside the auto-sharded physics region:
+                        # give the slot the column sharding every other carry
+                        # leaf has, which the scan carry type requires.
+                        new_physics_state = {
+                            **new_physics_state,
+                            POST_PHYSICS_STATE_KEY: _reshard_columns(
+                                new_physics_state[POST_PHYSICS_STATE_KEY],
+                                physics_state_grid.temperature.shape[-1], axis),
+                        }
             with profiling.scope(profiling.DYNAMICS):
                 state_next = self.dycore.step(state, physics_tendency)
             return state_next, new_physics_state
@@ -1204,13 +1249,11 @@ class Model:
         """
         # No logging inside the scan: a host callback here makes the whole
         # integration ineligible for XLA's persistent compilation cache.
-        if isinstance(physics_state, dict) and "_sampler_state" in physics_state:
-            # The StateSampler's per-step state snapshot exists only for the
-            # per-dt observer channel; saving it would duplicate the dynamics
-            # fields in every frame.
-            physics_state = {
-                k: v for k, v in physics_state.items() if k != "_sampler_state"
-            }
+        # The StateSampler's per-step state snapshot exists only for the per-dt
+        # observer channel, and the cloud schemes' post-physics anchor only
+        # for the next step's physics; saving either would duplicate the
+        # dynamics fields in every frame. Both stay in the carry.
+        physics_state = _without_unsaved_carry_slots(physics_state)
         return Predictions(
             dynamics=verify_state(self.dycore.to_physics_state(state)),
             physics=physics_state if not output_averages else None,

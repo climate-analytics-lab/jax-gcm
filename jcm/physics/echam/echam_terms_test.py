@@ -812,3 +812,29 @@ class TestConvectiveDetrainmentCarry(unittest.TestCase):
                         rtol=1e-6)
         finally:
             monkey.undo()
+
+
+class TestSharedCloudConstants(unittest.TestCase):
+    """ECHAM's one csecfrl and cthomi: jcm's two copies warn when they differ."""
+
+    @staticmethod
+    def _shared_warnings(**kwargs):
+        import warnings
+        from jcm.physics.echam.echam_terms import echam_physics
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            echam_physics(**kwargs)
+        return [str(w.message) for w in caught if "ECHAM has one" in str(w.message)]
+
+    def test_defaults_do_not_warn(self):
+        for scheme in ("1m", "2m"):
+            self.assertEqual(self._shared_warnings(cloud_scheme=scheme), [])
+
+    def test_differing_copies_warn(self):
+        for kwargs, name in (({"clouds": {"csecfrl": 1e-5}}, "csecfrl"),
+                             ({"microphysics": {"cthomi": 240.0}}, "cthomi"),
+                             ({"cloud_scheme": "2m", "clouds": {"t_ice": 240.0}},
+                              "cthomi")):
+            found = self._shared_warnings(**kwargs)
+            self.assertEqual(len(found), 1, kwargs)
+            self.assertIn(name, found[0])

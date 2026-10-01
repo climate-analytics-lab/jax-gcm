@@ -866,6 +866,59 @@ class PysesCamSEDycore(DynamicalCore):
             "sim_time": state["sim_time"] + self.dt_seconds,
         }
 
+    def after_physics_state(self, state, physics_tendency: PhysicsTendency | None):
+        """Gridpoint (pg2) state after the lumped physics add, before the dynamics.
+
+        With ``coupling="lump_all"`` :meth:`step` adds ``physics_dt × forcing``
+        to the dynamics and the tracers in one go before the subcycled
+        dynamics (pyses ``_advance_coupling_step``, the ``lump_all`` branch).
+        This forms that same state — the forcing built by
+        :meth:`_forcing_from_tendency` (FV→GLL scatter, DSS projection, the
+        ``q → r`` chain rule at the current moisture) summed with pyses's own
+        ``sum_dynamics_series`` / ``sum_tracers_series`` — and gathers it back
+        to the physics columns with :meth:`to_physics_state`. The difference
+        from ``to_physics_state(state) + dt·P`` is what the GLL projection and
+        the nonlinear moisture conversion do to the tendency; no dynamics is
+        evaluated.
+
+        ``coupling="hybrid"`` lumps the tracers (moisture included) and
+        dribbles the dynamics forcing over the tracer sub-steps, adding
+        ``forcing["dynamics"]`` once per sub-step with the sub-step's dt
+        (``run_dycore.py::_advance_coupling_step``). Those pieces sum to
+        ``physics_dt·forcing["dynamics"]``, the same DSS-projected forcing the
+        lump adds, so the post-physics winds and temperature are formed from
+        the lump too: the part of the tendency the GLL representation cannot
+        hold is then not counted as dynamics, as for the tracers. The
+        interleaving with the dynamics sub-steps is dynamics.
+        ``coupling="dribble_all"`` dribbles everything and takes the protocol
+        default (:meth:`DynamicalCore.after_physics_state`).
+        """
+        from pyses.dynamical_cores.model_state import (
+            sum_dynamics_series,
+            sum_tracers_series,
+        )
+        from pyses.dynamical_cores.physics_dynamics_coupling import (
+            coupling_types,
+        )
+
+        coupling = self.timestep_config["physics_dynamics_coupling"]
+        if physics_tendency is None:
+            return self.to_physics_state(state)
+        if coupling == coupling_types.dribble_all:
+            return super().after_physics_state(state, physics_tendency)
+
+        ms = state["model_state"]
+        forcing = self._forcing_from_tendency(physics_tendency, ms)
+        physics_dt = self.timestep_config["physics_dt"]
+        tracers = sum_tracers_series([ms["tracers"], forcing["tracers"]],
+                                     [1.0, physics_dt], self.model)
+        dynamics = sum_dynamics_series([ms["dynamics"], forcing["dynamics"]],
+                                       [1.0, physics_dt], self.model)
+        return self.to_physics_state({
+            "model_state": {**ms, "dynamics": dynamics, "tracers": tracers},
+            "sim_time": state["sim_time"],
+        })
+
     # ------------------------------------------------------------------
     # Sim-time accounting
     # ------------------------------------------------------------------

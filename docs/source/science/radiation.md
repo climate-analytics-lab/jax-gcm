@@ -36,17 +36,37 @@ term list):
 **Partial-cloud / overlap** differs by backend. **RRTMGP** uses full **McICA**
 (``jcm/physics/radiation/mcica.py``): one stochastic binary cloud profile per
 g-point, seeded deterministically per column and model step, with three overlap
-rules — random, maximum-random (Geleyn-Hollingsworth), and
-generalised-exponential with a decorrelation length. The **grey** backend
-instead combines one clear and one cloudy beam weighted by the overlap-derived
-total cover (``column_total_cover``); the **NN emulator's** fluxes carry
-whatever overlap its RRTMGP training labels embedded — the network sees only
-layer cloud fractions and paths, so the runtime ``cloud_overlap`` /
-``cloud_decorrelation_km`` knobs change its *reported total-cover diagnostic*
-(a post-hoc ``expected_total_cover``) and not its heating or fluxes; **SPEEDY**
-carries its own cloud formulation. Swapping backends therefore changes the
-cloud-overlap treatment, not just the gas optics. The AeroCom
-total-cloud-cover diagnostic uses the maximum-random closure.
+rules — random, maximum-random (Geleyn-Hollingsworth: maximum overlap of
+adjacent cloudy layers, random across a clear layer), and
+generalised-exponential with a decorrelation length
+(``RadiationParameters.cloud_overlap``, ``cloud_decorrelation_km``). The
+default is **maximum-random**, ECHAM6.3's default (``i_overlap = 1``,
+``mo_radiation_parameters.f90`` l.71), with the rank rule of ECHAM's
+``mo_cld_sampling.f90::sample_cld_state`` (l.66-83). ECHAM runs that chain
+from the top down on the surface-first column its ``psrad_interface`` hands
+the radiation (``mo_psrad_interface.f90`` l.221-227): a sub-column keeps the
+rank of the level above where it is cloudy there and otherwise draws a new
+rank in that level's clear part. jcm runs the same rule from the bottom up on
+its top-first column; the two directions give every sub-column cloud pattern
+the same probability, so the expected total cover is ECHAM's ``cld_cvr``,
+the adjacent-layer Geleyn-Hollingsworth product (``mo_radiation.f90``
+l.436-442). The rank
+comparisons are piecewise constant in the cover, as the ``r < cf`` test of
+every rule is, so the sampled masks carry no cover gradient and need no
+surrogate. ECHAM's sampler also offers random overlap (and maximum, which jcm
+does not); exponential is a jcm option with no ECHAM counterpart. The **grey**
+backend instead combines one clear and one cloudy beam weighted by
+``column_total_cover``, which is the column's largest cover under both
+maximum-random and exponential overlap (a closed-form approximation, not
+ECHAM's adjacent-layer product above) and ``1 - ∏(1 - f)`` under random; the
+**NN emulator's** fluxes carry whatever overlap its RRTMGP training labels
+embedded — the network sees only layer cloud fractions and paths, so the
+runtime ``cloud_overlap`` / ``cloud_decorrelation_km`` knobs change its
+*reported total-cover diagnostic* (a post-hoc ``expected_total_cover``) and
+not its heating or fluxes; **SPEEDY** carries its own cloud formulation.
+Swapping backends therefore changes the cloud-overlap treatment, not just the
+gas optics. The AeroCom total-cloud-cover diagnostic uses the maximum-random
+closure.
 
 **Offline**, the total cloud cover jcm reports from saved output is also
 maximum-random — ECHAM's own ``aclcov`` (``mo_cloud.f90`` §10.2), as
@@ -153,8 +173,8 @@ microphysics):
 
 | input | ECHAM6.3-HAM2.3 | jcm |
 |---|---|---|
-| cloud fraction | ``aclc`` from ``cover``, this step, before radiation | ``clouds.cloud_fraction`` from Sundqvist, this step, before radiation |
-| cloud water / ice | ``xlm1``/``xim1``, the step-start state | the step-start ``qc``/``qi`` tracers |
+| cloud fraction | ``aclc`` from ``cover``, this step, before radiation, zeroed where ``xlm1`` and ``xim1`` are both ≤ 0 (``mo_radiation.f90`` l.433-434) | ``clouds.cloud_fraction`` from the cover, this step, before radiation, zeroed where ``qc`` and ``qi`` are both ≤ 0 (``cloud_data.radiation_cloud_fields``) |
+| cloud water / ice | ``xlm1``/``xim1``, the step-start state, clipped at 0 | the step-start ``qc``/``qi`` tracers, clipped at 0 |
 | droplet number, 1M | ``acdnc`` prescribed profile, set at the first step from that step's pressure; × ``x_cdnc`` of the step's plumes | profile at this step's pressure; × this step's ``aerosol.cdnc_factor`` |
 | droplet number, 2M | ``acdnc`` = ``zcdnc`` at the end of the previous step's ``cloud_micro_2m`` | step-start ``qnc`` tracer (the previous step's microphysics output, after that step's transport) × air density |
 | crystal number, 2M | ``icnc_instantan`` = ``picnc`` at the end of the previous step's ``cloud_micro_2m`` | step-start ``qni`` tracer × air density |
@@ -205,8 +225,13 @@ radius.
 **What ECHAM/CAM does.** ECHAM6-HAM2.3 runs the **PSrad/RRTMG** two-stream
 correlated-k scheme (``mo_psrad_interface.f90``; Pincus & Stevens 2013; RRTMG:
 Mlawer et al. 1997, Iacono et al. 2008) with **McICA** sub-column sampling (Pincus,
-Barker & Morcrette 2003) and generalised exponential-random overlap (Räisänen et
-al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
+Barker & Morcrette 2003) and maximum-random overlap by default (``i_overlap = 1``,
+``mo_radiation_parameters.f90`` l.71): ``mo_cld_sampling.f90::sample_cld_state``
+offers maximum-random, maximum and random, and no exponential rule. Its
+maximum-random sampler (l.66-83) keeps a sub-column's rank below a cloudy cell
+of that sub-column and redraws it in the clear part otherwise, and the total
+cover it reports is the adjacent-layer Geleyn-Hollingsworth product
+(``mo_radiation.f90`` l.436-442); jcm's McICA samples the same rule. Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
 **RRTMGP** (Pincus, Mlawer & Delamere 2019) with liquid effective radius from
 ``cloud_optical_properties.F90`` (``reltab``). MACv2-SP is Stevens et al. (2017),
 ``mo_bc_aeropt_splumes.f90``. The NN emulator architecture is Ukkonen (2024),
@@ -278,11 +303,20 @@ al. 2004). Cloud optics use ECHAM's ``mo_cloud_optics.f90`` LUTs. CAM6 runs
   agree to float32 reduction order, which is the check the harness applies.
 
 **Status & known limitations.**
+- **The packaged NN emulator was trained on exponential overlap.** Its training
+  labels are RRTMGP fluxes under the exponential rule at 2 km, the default when
+  they were generated, so under the maximum-random default its fluxes and its
+  published ``total_cloud_cover`` describe different overlaps until it is
+  retrained (#881).
 - **Cloud inhomogeneity carries ECHAM's T63 values, not its per-resolution
   table.** ECHAM raises the ice factor at higher truncation (``zinhomi = 0.85``
   at T127+) and uses ``zinhoml3 = 0.4`` at T31; jcm takes the T63 values at
-  every resolution and exposes them as parameters, the same T63 convention as
-  the other ECHAM cloud constants. The 2M + SPA composition (no ECHAM-HAM
+  every resolution and exposes them as parameters (#974). The cover's and the
+  microphysics' constants, by contrast, take ECHAM's per-truncation defaults
+  ({doc}`../design/resolution_defaults`, which also gives why these two are
+  held: ``RadiationParameters`` cannot record the truncation its defaults were
+  built for, and ECHAM-HAM's JAM value of ``zinhomi`` is defined at T63
+  only). The 2M + SPA composition (no ECHAM-HAM
   counterpart: HAM activates with Lin-Leaitch or ARG) keeps ECHAM6's
   ``zinhomi = 0.8``. On RRTMGP, a mixed-phase layer in a ``ktype = 4``
   column weights its combined ssa/asymmetry by the scaled rather than the

@@ -1,649 +1,512 @@
-"""Sundqvist diagnostic cloud scheme for ECHAM physics.
+"""ECHAM6.3's diagnostic cloud cover (``mo_cover.f90::cover``).
 
-This module implements:
-- Cloud fraction diagnosis based on relative humidity
-  (:func:`calculate_cloud_fraction`, wrapped by the composable
-  :class:`SundqvistCloudFraction` term)
-- The linearised-Newton condensation/evaporation step
-  (:func:`condensation_evaporation`), consumed by the 2M cloud scheme
+The cover is the Sundqvist (1989) / Lohmann and Roeckner (1996) relative-
+humidity closure as ECHAM6.3-HAM2.3 r7492 codes it in ``mo_cover.f90``
+(l.101-261), called once per step before radiation (``physc.f90`` l.543):
 
-Based on the Sundqvist (1989) / Lohmann and Roeckner (1996) scheme used
-in ICON/ECHAM (``mo_cover.f90`` / ``mo_cloud.f90``).
+1. saturation specific humidity in ECHAM's form, over ice or over water per
+   ECHAM's ``lo2`` switch (l.215-224), with ECHAM's vapour pressure, the
+   Sonntag (1990) fit its tables hold
+   (:mod:`jcm.physics.clouds.echam_saturation`);
+2. critical relative humidity ``rhc = crt + (crs - crt)·exp(1 - (p_s/p)^nex)``
+   (l.233);
+3. over ice-free ocean without convection, a stratocumulus enhancement at the
+   low-level inversion found by a level search between ECHAM's ``jbmin`` and
+   the surface (l.179-207, 234-247; :func:`stratocumulus_saturation_factor`);
+4. ``b0 = (q/(qs·zsat) - rhc)/(1 - rhc)`` clipped to ``[0, 1]`` and
+   ``cover = 1 - sqrt(1 - b0)`` (l.248-251).
+
+The values are ECHAM's: the cover is exactly 0 where ``b0 <= 0`` and exactly 1
+where ``b0 >= 1``, at every level (ECHAM computes all levels, ``ktdia = 1``,
+``physc.f90`` l.444). Where the reference derivative is useless (the clip's
+plateaux, the square root's infinite slope at saturation, the inversion
+test), the derivative is that of a named smooth surrogate, through
+:func:`jcm.physics.surrogate_gradient.with_surrogate_gradient`; see
+``docs/source/design/surrogate_gradients.md`` and the cloud-cover section of
+``docs/source/science/clouds_microphysics.md``.
+
+The module also holds :func:`saturation_specific_humidity`, a linear
+mixed-phase blend of the Sonntag (1990) fits that tests build humidity
+profiles from. It is not ECHAM's phase rule, and neither the cover nor the 1M
+scheme uses it.
 """
+
+from __future__ import annotations
+
+import dataclasses
+from typing import Tuple
 
 import jax
 import jax.numpy as jnp
-from typing import Tuple
-import tree_math
+from flax import struct
 
 import jcm.constants as c
 from jcm.physics import thermodynamics
+from jcm.physics.clouds import echam_saturation as es
+from jcm.physics.clouds.echam_cloud_defaults import (
+    CTHOMI_BELOW_TMELT,
+    echam_cloud_defaults,
+    inversion_levels,
+)
+from jcm.physics.resolution_defaults import (
+    check_defaults_grid,
+    spectral_truncation,
+)
+from jcm.physics.surrogate_gradient import with_surrogate_gradient
 
 
-@tree_math.struct
+@struct.dataclass
 class CloudParameters:
-    """Configuration parameters for the Sundqvist cloud scheme"""
+    """Parameters of the ECHAM cloud cover.
 
-    # Cloud fraction parameters
-    crt: float           # Critical relative humidity aloft
-    crs: float           # Critical relative humidity near surface
-    nex: float           # Exponent for RH threshold profile
+    The numeric fields are differentiable pytree leaves. ``crt``, ``crs``,
+    ``nex``, ``csatsc``, ``cinv``, ``csecfrl`` and ``nadd`` have
+    resolution-dependent defaults (ECHAM's ``mo_echam_cloud_params.f90``
+    table, :func:`~jcm.physics.clouds.echam_cloud_defaults.echam_cloud_defaults`):
+    build them with :meth:`default` ``(truncation=...)`` or :meth:`for_grid`.
 
-    # Stratocumulus inversion enhancement (ECHAM ``mo_cover.f90:219-244``).
-    # When the column has a low-level inversion (or strongest-stable
-    # layer) at altitudes between ``inversion_z_max`` and the surface,
-    # cf at that level is enhanced by ``zsat = csatsc + zgam`` ≤ 1
-    # where zgam captures the lapse-rate stability — at a true inversion
-    # zgam=0 and zsat=csatsc, boosting the apparent RH that drives cf.
-    csatsc: float        # Saturation factor for stratocumulus (0.7 = strong)
-    cinv: float          # dT/dz threshold (fraction of dry adiabatic) below
-                         # which a layer is considered too unstable to support
-                         # the stratocumulus enhancement
-    inversion_z_max: float   # Highest altitude for inversion search (m)
-    inversion_z_min: float   # Lowest altitude for inversion search (m)
+    ``csecfrl`` and ``t_ice`` are ECHAM's ``csecfrl`` and ``cthomi``
+    (``mo_echam_cloud_params.f90`` l.76, l.54), one value each, which
+    ECHAM's cover and cloud scheme share. jcm holds a second copy in the
+    cloud scheme's parameters (``MicrophysicsParameters.csecfrl``/``cthomi``;
+    the 2M's ``CloudParams2M.cthomi``); the defaults agree, and an override of
+    one copy leaves the other unchanged. ``echam_physics`` warns when the
+    copies it builds differ.
 
-    # Numerical parameters
-    epsilon: float       # Small number for numerical stability
+    Static fields (``pytree_node=False``):
 
-    # Cloud ice temperature thresholds
-    t_ice: float         # Temperature below which all cloud is ice (K)
-    t_mix_min: float     # Lower bound of mixed phase (K)
-    t_mix_max: float     # Upper bound of mixed phase (K)
+    * ``nadd`` selects which extra level below the inversion is enhanced, a
+      level index, so it chooses a code path rather than scaling a value.
+    * ``smooth_b0`` and ``smooth_inv_thr`` are the widths of the surrogates
+      that define the derivatives; the value does not depend on them, so a
+      gradient with respect to them would mean nothing. Zero selects the
+      reference derivative.
+    * ``defaults_truncation`` records the truncation whose defaults the
+      fields were built from (``None`` for a non-spectral grid), so that the
+      term can warn when it runs on a different grid.
+    """
 
-    # Cloud-top pressure cutoff (ECHAM ``jks`` analogue). ECHAM
-    # ``mo_cover.f90`` zeros cloud cover for all levels above ``jks``
-    # (``DO jk=1,jks-1: paclc=0``) so no cloud forms in the stratosphere.
-    # We express that level cutoff as a pressure threshold (portable across
-    # hybrid grids): cloud fraction is forced to zero wherever the full-level
-    # pressure is below ``cloud_top_pressure_pa``. Without it the RH-based
-    # Sundqvist closure fills the cold (here ~180 K, qsat→0) stratosphere with
-    # spurious cloud — the q/qsat ratio reaches ~80× — saturating cf there.
-    # Set to 0 to disable the cutoff.
-    cloud_top_pressure_pa: float
-
-    # Smoothing widths (maintainability review B.2.4); differentiable,
-    # annealable; width -> 0 recovers the hard constructs.
-    smooth_b0: float         # soft-clip width of the b0 ramp [-]
-    smooth_inv_score: float  # softmax sharpness of the inversion pick [K/m]
-    smooth_inv_thr: float    # width of the cinv stability gate [K/m]
-    # Strength of the proximity-gated downward tie-break in the inversion
-    # softmax [-], in units of the softmax exponent (#677). ECHAM's ``zknvb``
-    # scan (mo_cover.f90:236-244) picks exactly ONE level and, on the
-    # clip-to-0 plateau where several adjacent levels tie, resolves to the
-    # LOWEST (nearest-surface) one. The bias is applied only among levels at
-    # the column maximum (see ``_stratocumulus_zsat``), so it collapses the
-    # plateau onto its lowest level without dragging a well-separated single
-    # maximum onto a weakly-stable neighbour. Set to 0 to recover the
-    # un-tie-broken softmax (the pre-#677 1/N smear).
-    smooth_inv_depth: float
+    crt: jnp.ndarray       # critical relative humidity aloft
+    crs: jnp.ndarray       # critical relative humidity at the surface
+    nex: jnp.ndarray       # exponent of the critical-RH profile
+    csatsc: jnp.ndarray    # stratocumulus saturation factor at an inversion
+    cinv: jnp.ndarray      # inversion stability threshold, fraction of g/cpd
+    csecfrl: jnp.ndarray   # cloud ice [kg/kg] above which lo2 selects ice
+    t_ice: jnp.ndarray     # cthomi [K]: below it lo2 always selects ice
+    nadd: int = struct.field(pytree_node=False, default=0)
+    # Width of the softplus surrogate of the b0 clip [1] (see
+    # ``_cover_surrogate``).
+    smooth_b0: float = struct.field(pytree_node=False, default=0.02)
+    # Width of the sigmoid surrogate of the inversion stability test [K/m]
+    # (see ``_zsat_surrogate``).
+    smooth_inv_thr: float = struct.field(pytree_node=False, default=2.0e-4)
+    defaults_truncation: int | None = struct.field(
+        pytree_node=False, default=63)
 
     @classmethod
-    def default(cls, crt=0.75, crs=0.975, nex=2.0,
-                 csatsc=0.7, cinv=0.25,
-                 inversion_z_max=2000.0, inversion_z_min=500.0,
-                 epsilon=1.0e-12,
-                 t_ice=238.15, t_mix_min=238.15, t_mix_max=273.15,
-                 cloud_top_pressure_pa=1000.0,
-                 smooth_b0=0.02, smooth_inv_score=5.0e-4,
-                 smooth_inv_thr=2.0e-4,
-                 smooth_inv_depth=10.0) -> 'CloudParameters':
-        """Return default cloud parameters.
+    def default(cls, *, truncation: int | None = 63,
+                **overrides) -> "CloudParameters":
+        """Defaults for a spectral truncation, with field overrides on top.
 
-        Defaults match ECHAM6.3 T63 ``mo_echam_cloud_params.f90``
-        (``crt=0.75``, ``crs=0.975``, ``nex=2``, ``csatsc=0.7``,
-        ``cinv=0.25``). The inversion altitude range
-        (``inversion_z_max=2000`` m, ``inversion_z_min=500`` m)
-        replaces ECHAM's ``jbmin`` / ``jbmax`` level indices with
-        a portable height-based equivalent (ECHAM derives its level
-        indices from the same 2000 m / 500 m thresholds anyway, see
-        ``mo_echam_cloud_params.f90:152-162``).
+        Args:
+            truncation: the run's triangular truncation; ``None`` means a grid
+                that is not spectral (T63 defaults, with a warning). ECHAM's
+                values at T31/T63/T127/T255, interpolated between them (see
+                :mod:`jcm.physics.clouds.echam_cloud_defaults`).
+            **overrides: field values that replace the defaults.
+
+        Returns:
+            The parameters. ``defaults_truncation`` is ``truncation``.
+
         """
-        return cls(
-            crt=jnp.array(crt),
-            crs=jnp.array(crs),
-            nex=jnp.array(nex),
-            csatsc=jnp.array(csatsc),
-            cinv=jnp.array(cinv),
-            inversion_z_max=jnp.array(inversion_z_max),
-            inversion_z_min=jnp.array(inversion_z_min),
-            epsilon=jnp.array(epsilon),
-            t_ice=jnp.array(t_ice),
-            t_mix_min=jnp.array(t_mix_min),
-            t_mix_max=jnp.array(t_mix_max),
-            cloud_top_pressure_pa=jnp.array(cloud_top_pressure_pa),
-            smooth_b0=jnp.array(smooth_b0),
-            smooth_inv_score=jnp.array(smooth_inv_score),
-            smooth_inv_thr=jnp.array(smooth_inv_thr),
-            smooth_inv_depth=jnp.array(smooth_inv_depth),
+        table = echam_cloud_defaults(truncation)
+        values = dict(
+            crt=table["crt"], crs=table["crs"], nex=float(table["nex"]),
+            csatsc=table["csatsc"], cinv=table["cinv"],
+            csecfrl=table["csecfrl"],
+            t_ice=c.tmelt - CTHOMI_BELOW_TMELT,
+            nadd=int(table["nadd"]),
+            defaults_truncation=truncation,
         )
+        valid = {f.name for f in dataclasses.fields(cls)}
+        unknown = sorted(set(overrides) - valid)
+        if unknown:
+            raise ValueError(
+                f"unknown CloudParameters field(s) {unknown}; valid fields: "
+                f"{sorted(valid)}")
+        values.update(overrides)
+        static = {"nadd", "smooth_b0", "smooth_inv_thr", "defaults_truncation"}
+        params = cls(**{
+            name: (value if name in static or isinstance(value, jax.Array)
+                   else jnp.asarray(value))
+            for name, value in values.items()})
+        params.validate()
+        return params
+
+    @classmethod
+    def for_grid(cls, coords, **overrides) -> "CloudParameters":
+        """:meth:`default` for the truncation of ``coords``."""
+        return cls.default(truncation=spectral_truncation(coords), **overrides)
+
+    def validate(self) -> None:
+        """Reject static fields outside their domain."""
+        if int(self.nadd) != self.nadd or self.nadd < 0:
+            raise ValueError(f"nadd must be a non-negative integer, got "
+                             f"{self.nadd!r}")
+        for name in ("smooth_b0", "smooth_inv_thr"):
+            if float(getattr(self, name)) < 0.0:
+                raise ValueError(f"{name} must be >= 0 (0 selects the "
+                                 "reference derivative)")
 
 
 def critical_relative_humidity(
     pressure: jnp.ndarray,
-    surface_pressure: float,
+    surface_pressure: jnp.ndarray,
     config: CloudParameters,
 ) -> jnp.ndarray:
-    """ECHAM critical RH profile from ``mo_cover.f90``.
+    """``rhc = crt + (crs - crt)·exp(1 - (p_s/p)^nex)`` (``mo_cover.f90`` l.233).
 
-    ECHAM names ``crs`` as the near-surface value and ``crt`` as the
-    free-tropospheric value. The exponent uses surface pressure divided by
-    full-level pressure, not a linear sigma interpolation.
+    Args:
+        pressure: full-level pressure [Pa], shape ``(nlev, *horiz)``.
+        surface_pressure: surface pressure [Pa] (ECHAM's ``paphm1(klevp1)``),
+            shape ``(*horiz)``.
+        config: the cover parameters.
+
+    Returns:
+        The critical relative humidity, shape ``(nlev, *horiz)``.
+
     """
-    pressure_safe = jnp.maximum(pressure, 1.0)
-    surface_pressure_safe = jnp.maximum(surface_pressure, 1.0)
+    ps = jnp.asarray(surface_pressure)[None]
     return config.crt + (config.crs - config.crt) * jnp.exp(
-        1.0 - (surface_pressure_safe / pressure_safe) ** config.nex
-    )
+        1.0 - (ps / pressure) ** config.nex)
 
+
+def cover_saturation_vapor_pressure(
+    temperature: jnp.ndarray, ice: jnp.ndarray,
+) -> jnp.ndarray:
+    """Return the saturation vapour pressure [Pa] the cover uses.
+
+    The one place the cover takes ``es`` from: ECHAM's Sonntag (1990) fit,
+    :func:`jcm.physics.clouds.echam_saturation.es_water` / ``es_ice``.
+
+    Args:
+        temperature: [K].
+        ice: ``True`` where the ice surface applies (ECHAM's ``lo2``).
+
+    """
+    return jnp.where(ice, es.es_ice(temperature), es.es_water(temperature))
+
+
+def cover_saturation_specific_humidity(
+    temperature: jnp.ndarray,
+    cloud_ice: jnp.ndarray,
+    pressure: jnp.ndarray,
+    config: CloudParameters,
+) -> jnp.ndarray:
+    """Return the saturation specific humidity the cover divides by.
+
+    ECHAM's ``lo2`` phase choice (ice where ``T < cthomi``, or ``T < tmelt``
+    and ``xi > csecfrl``) and its ``MIN(ua/p, 0.5)/(1 - vtmpc1·...)`` form
+    (``mo_cover.f90`` l.215-224), with ``es`` from
+    :func:`cover_saturation_vapor_pressure`. The switch is ECHAM's hard
+    switch, value and derivative alike: the derivative is that of the branch
+    in use.
+    """
+    ice = es.lo2_ice_phase(temperature, cloud_ice, config.csecfrl,
+                           config.t_ice)
+    return es.qsat_from_es(
+        cover_saturation_vapor_pressure(temperature, ice), pressure)
+
+
+# ---------------------------------------------------------------------------
+# Stratocumulus enhancement at the low-level inversion
+# ---------------------------------------------------------------------------
+
+def _inversion_lapse(temperature, geopotential):
+    """ECHAM's ``zdtdz`` per level [K/m] (``mo_cover.f90`` l.194 and l.244).
+
+    Level ``k`` owns the lapse across the interface above it,
+    ``(T[k-1] - T[k])·g/(Φ[k-1] - Φ[k])``. Level 0 has none and is never in
+    the search range (``jbmin >= 1``); it is set to 0.
+    """
+    lapse = ((temperature[:-1] - temperature[1:]) * c.grav
+             / (geopotential[:-1] - geopotential[1:]))
+    return jnp.concatenate([jnp.zeros_like(lapse[:1]), lapse], axis=0)
+
+
+def _inversion_selection(lapse, jbmin, jbmax, nadd):
+    """ECHAM's inversion search, the discrete part (``mo_cover.f90`` l.188-247).
+
+    ECHAM scans from the lowest level up to ``jbmin`` and keeps the level with
+    the largest ``min(0, zdtdz)``, updating only on strict improvement, so on
+    a tie the lowest level wins. It enhances only if that level is at or above
+    ``jbmax``, at the level itself and ``nadd`` levels below it.
+
+    Returns:
+        ``best``: the largest clipped lapse in the range, ``(*horiz)``;
+        ``levels``: a ``(nlev, *horiz)`` 0/1 mask of the enhanced levels,
+        already zero where the chosen level lies below ``jbmax``;
+        ``lapse_at_choice``: ``zdtdz`` at the chosen level, ``(*horiz)``.
+        The existence test ``best > -cinv·g/cpd`` is left to the caller.
+
+    """
+    kx = lapse.shape[0]
+    level = jnp.arange(kx).reshape((kx,) + (1,) * (lapse.ndim - 1))
+    score = jnp.where(level >= jbmin, jnp.minimum(lapse, 0.0), -jnp.inf)
+    best = jnp.max(score, axis=0)
+    # ``argmax`` returns the first maximum; over the reversed axis that is the
+    # largest index, i.e. the lowest level, as ECHAM's upward scan keeps.
+    choice = kx - 1 - jnp.argmax(score[::-1], axis=0)
+    lapse_at_choice = jnp.take_along_axis(lapse, choice[None], axis=0)[0]
+    enhanced = (level == choice[None]) | (level == choice[None] + nadd)
+    in_range = (choice <= jbmax)[None]
+    return best, (enhanced & in_range).astype(lapse.dtype), lapse_at_choice
+
+
+def _zsat_from(found, levels, lapse_at_choice, csatsc, enhance):
+    """``zsat = min(1, csatsc + max(0, -zdtdz·cpd/g))`` at the enhanced levels.
+
+    ``mo_cover.f90`` l.244-246; 1 elsewhere. ``found`` is 1 where the search
+    found a level more stable than the threshold (a float, so that the
+    surrogate can make it smooth).
+    """
+    zgam = jnp.maximum(0.0, -lapse_at_choice * c.cpd / c.grav)
+    reduction = found * enhance * (1.0 - jnp.minimum(1.0, csatsc + zgam))
+    return 1.0 - levels * reduction[None]
+
+
+def _zsat_exact(lapse, csatsc, cinv, enhance, *, jbmin, jbmax, nadd):
+    """ECHAM's ``zsat`` exactly: the stability test is a hard ``>``."""
+    best, levels, lapse_at_choice = _inversion_selection(
+        lapse, jbmin, jbmax, nadd)
+    found = (best > -cinv * c.grav / c.cpd).astype(lapse.dtype)
+    return _zsat_from(found, levels, lapse_at_choice, csatsc, enhance)
+
+
+def _zsat_surrogate(lapse, csatsc, cinv, enhance, *, jbmin, jbmax, nadd,
+                    width):
+    """Return the surrogate of :func:`_zsat_exact` that defines its derivative.
+
+    Identical except that the stability test ``best > -cinv·g/cpd`` is the
+    sigmoid ``σ((best + cinv·g/cpd)/width)``. That gives the cover a
+    derivative with respect to ``cinv`` and to the lapse rate at the chosen
+    level where a column is near the threshold, instead of none. The level
+    choice itself keeps its reference derivative, zero: which level is chosen
+    is piecewise constant in the temperature profile, and a smooth selection
+    (a softmax over levels) would differ from ECHAM's value by the whole
+    enhancement wherever two levels compete, so its derivative would describe
+    a different function. The derivative through the chosen level's own
+    ``zgam`` and through ``csatsc`` is the reference one.
+    """
+    best, levels, lapse_at_choice = _inversion_selection(
+        lapse, jbmin, jbmax, nadd)
+    found = jax.nn.sigmoid((best + cinv * c.grav / c.cpd) / width)
+    return _zsat_from(found, levels, lapse_at_choice, csatsc, enhance)
+
+
+def stratocumulus_saturation_factor(
+    temperature: jnp.ndarray,
+    geopotential: jnp.ndarray,
+    config: CloudParameters,
+    inversion_range: tuple[int, int],
+    enhance_allowed: jnp.ndarray | None = None,
+) -> jnp.ndarray:
+    """ECHAM's stratocumulus saturation factor ``zsat`` per level.
+
+    ``mo_cover.f90`` l.179-207 and 234-247: over ice-free ocean without
+    convection (``enhance_allowed``), the level between ``jbmin`` and the
+    surface with the largest ``min(0, dT/dz)`` (the lowest one on a tie) is
+    the inversion, provided that value exceeds ``-cinv·g/cpd``. If that level
+    is at or above ``jbmax``, ``zsat = min(1, csatsc + max(0, -dT/dz·cpd/g))``
+    there and ``nadd`` levels below it; ``zsat = 1`` everywhere else. The
+    cover then uses ``q/(qs·zsat)``.
+
+    The derivative is that of :func:`_zsat_surrogate` (width
+    ``config.smooth_inv_thr``), or ECHAM's own with a zero width.
+
+    Args:
+        temperature: ``(nlev, *horiz)`` [K], top first.
+        geopotential: full-level geopotential ``(nlev, *horiz)`` [m2 s-2];
+            only differences between levels enter.
+        config: the cover parameters.
+        inversion_range: ECHAM's ``(jbmin, jbmax)`` as 0-based top-first
+            level indices, from
+            :func:`~jcm.physics.clouds.echam_cloud_defaults.inversion_levels`.
+        enhance_allowed: ``(*horiz)`` boolean gate; ``None`` allows it
+            everywhere.
+
+    Returns:
+        ``zsat``, shape ``(nlev, *horiz)``, in ``[csatsc, 1]``.
+
+    """
+    jbmin, jbmax = inversion_range
+    lapse = _inversion_lapse(temperature, geopotential)
+    if enhance_allowed is None:
+        enhance = jnp.ones(lapse.shape[1:], lapse.dtype)
+    else:
+        enhance = jnp.broadcast_to(
+            jnp.asarray(enhance_allowed), lapse.shape[1:]).astype(lapse.dtype)
+    static = dict(jbmin=int(jbmin), jbmax=int(jbmax), nadd=int(config.nadd))
+
+    def exact(lapse_, csatsc_, cinv_, enhance_):
+        return _zsat_exact(lapse_, csatsc_, cinv_, enhance_, **static)
+
+    if config.smooth_inv_thr == 0.0:
+        return exact(lapse, config.csatsc, config.cinv, enhance)
+
+    def surrogate(lapse_, csatsc_, cinv_, enhance_):
+        return _zsat_surrogate(lapse_, csatsc_, cinv_, enhance_, **static,
+                               width=float(config.smooth_inv_thr))
+
+    return with_surrogate_gradient(exact, surrogate)(
+        lapse, config.csatsc, config.cinv, enhance)
+
+
+# ---------------------------------------------------------------------------
+# The closure
+# ---------------------------------------------------------------------------
+
+def _cover_exact(b0_raw):
+    """ECHAM's ``1 - sqrt(1 - clip(b0, 0, 1))`` (``mo_cover.f90`` l.249-251).
+
+    Written with a safe square root so that the reference derivative (the
+    zero-width case) is finite on the saturated plateau; the value is exactly
+    ECHAM's everywhere.
+    """
+    arg = 1.0 - jnp.clip(b0_raw, 0.0, 1.0)
+    positive = arg > 0.0
+    return jnp.where(positive, 1.0 - jnp.sqrt(jnp.where(positive, arg, 1.0)),
+                     1.0)
+
+
+#: Floor under the surrogate's ``1 - b0``: below it the surrogate is held
+#: flat. The true surrogate slope there is below ``sqrt(floor)/(2·width)``,
+#: i.e. zero at any float precision.
+_SURROGATE_ARG_FLOOR = 1.0e-30
+
+
+def _cover_surrogate(b0_raw, width):
+    """Return the smooth cover whose derivative the cover carries.
+
+    ``1 - sqrt(1 - b0_s)`` with the softplus clip
+    ``b0_s = w·softplus(x/w) - w·softplus((x - 1)/w)`` of width ``w``, which
+    equals the identity inside ``[0, 1]`` away from the edges and approaches
+    0 and 1 exponentially. ``1 - b0_s`` is formed as
+    ``w·(softplus((1 - x)/w) - softplus(-x/w))``, which stays accurate where
+    it is small. Because ``b0_s < 1`` for every finite ``x``, the square
+    root's slope is bounded: the surrogate's ``d cover/d b0`` is below
+    ``1/(2·sqrt(w·ln 2))`` (4.2 at ``w = 0.02``; the measured peak is 2.26, at
+    ``b0 = 0.98``), where the reference is unbounded as ``b0 -> 1`` and zero
+    on both plateaux. The surrogate differs
+    from the reference by at most ``sqrt(w·ln 2)`` (0.12 at ``w = 0.02``),
+    at ``b0 = 1``.
+    """
+    arg = width * (jax.nn.softplus((1.0 - b0_raw) / width)
+                   - jax.nn.softplus(-b0_raw / width))
+    above = arg > _SURROGATE_ARG_FLOOR
+    return jnp.where(above, 1.0 - jnp.sqrt(jnp.where(above, arg, 1.0)),
+                     1.0 - jnp.sqrt(_SURROGATE_ARG_FLOOR))
+
+
+def cover_from_b0(b0_raw: jnp.ndarray, width: float) -> jnp.ndarray:
+    """Return the cover from the unclipped ``b0``: ECHAM's value, surrogate slope.
+
+    Args:
+        b0_raw: ``(q/(qs·zsat) - rhc)/(1 - rhc)``, unclipped.
+        width: the static surrogate width ``smooth_b0``; 0 selects the
+            reference derivative.
+
+    Returns:
+        ``1 - sqrt(1 - clip(b0_raw, 0, 1))``, exactly.
+
+    """
+    if width == 0.0:
+        return _cover_exact(b0_raw)
+    return with_surrogate_gradient(
+        _cover_exact, lambda x: _cover_surrogate(x, width))(b0_raw)
+
+
+def calculate_cloud_fraction(
+    temperature: jnp.ndarray,
+    specific_humidity: jnp.ndarray,
+    cloud_ice: jnp.ndarray,
+    pressure: jnp.ndarray,
+    surface_pressure: jnp.ndarray,
+    geopotential: jnp.ndarray,
+    config: CloudParameters,
+    inversion_range: tuple[int, int],
+    enhance_allowed: jnp.ndarray | None = None,
+) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    """ECHAM's cloud cover, ``mo_cover.f90::cover`` (r7492 l.101-261).
+
+    Broadcasting-native: the level is axis 0 and any trailing axes are
+    horizontal, so a ``(nlev,)`` column, a ``(nlev, ncols)`` block and a
+    ``(nlev, nlon, nlat)`` grid run the same code.
+
+    Args:
+        temperature: ``(nlev, *horiz)`` [K], top first (ECHAM ``ptm1``).
+        specific_humidity: ``(nlev, *horiz)`` [kg/kg] (``pqm1``).
+        cloud_ice: ``(nlev, *horiz)`` [kg/kg] (``pxim1``), for ``lo2``.
+        pressure: full-level pressure ``(nlev, *horiz)`` [Pa] (``papm1``).
+        surface_pressure: ``(*horiz)`` [Pa] (``paphm1(klevp1)``).
+        geopotential: full-level geopotential ``(nlev, *horiz)`` [m2 s-2]
+            (``pgeo``); only level differences enter.
+        config: the cover parameters.
+        inversion_range: ECHAM's ``(jbmin, jbmax)``, 0-based top-first.
+        enhance_allowed: ``(*horiz)`` gate of the stratocumulus enhancement
+            (ECHAM: water fraction > 0.5, ice fraction < 1e-12, ``ktype == 0``);
+            ``None`` allows it everywhere.
+
+    Returns:
+        ``(cloud_fraction, relative_humidity)``, each ``(nlev, *horiz)``.
+        ``relative_humidity`` is ``q/qs`` with the cover's ``qs`` (ice where
+        ``lo2``), without the inversion factor and unclipped.
+
+    """
+    qs = cover_saturation_specific_humidity(
+        temperature, cloud_ice, pressure, config)
+    rhc = critical_relative_humidity(pressure, surface_pressure, config)
+    zsat = stratocumulus_saturation_factor(
+        temperature, geopotential, config, inversion_range, enhance_allowed)
+    zqr = specific_humidity / (qs * zsat)
+    b0_raw = (zqr - rhc) / (1.0 - rhc)
+    cloud_fraction = cover_from_b0(b0_raw, float(config.smooth_b0))
+    return cloud_fraction, specific_humidity / qs
+
+
+# ---------------------------------------------------------------------------
+# Mixed-phase saturation for other callers (the cover does not use it)
+# ---------------------------------------------------------------------------
 
 def saturation_specific_humidity(
     pressure: jnp.ndarray,
     temperature: jnp.ndarray,
     t_mix_min: float = 238.15,
 ) -> jnp.ndarray:
-    """Mixed-phase saturation specific humidity [kg/kg] of the dev 1M scheme.
+    """Saturation specific humidity [kg/kg] on a linear mixed-phase blend.
 
-    The saturation vapour pressure blends Sonntag (1990) over water and over
-    ice (:func:`jcm.physics.thermodynamics.es_water` / ``es_ice``) linearly in
+    The vapour pressure blends Sonntag (1990) over water and over ice
+    (:func:`jcm.physics.thermodynamics.es_water` / ``es_ice``) linearly in
     temperature between ``t_mix_min`` and ``tmelt``, and ``qs`` is formed as
-    ECHAM forms it (:func:`jcm.physics.thermodynamics.qsat_from_es`). The blend
-    is the phase rule of the 1M saturation adjustment
-    (``echam_1m._saturation_adjustment_layer``), which pairs its latent heat
-    and its condensate partition with the same weight; ECHAM's ``mo_cloud``
-    instead chooses ice or water per cell with the binary ``lo2`` switch
-    (l.647-652, 697-705), as the cover already does here (:func:`_qs_cover`).
-    That difference is part of the 1M fidelity gap tracked in #940.
+    ECHAM forms it (:func:`jcm.physics.thermodynamics.qsat_from_es`). The
+    blend is not ECHAM's phase rule: the cover
+    (:func:`cover_saturation_specific_humidity`) and the 1M scheme choose ice
+    or water per cell with ``lo2``. Tests build humidity profiles from it.
 
     Args:
-        pressure: Pressure (Pa)
-        temperature: Temperature (K)
-        t_mix_min: Lower endpoint of the mixed-phase blend (K). Callers
-            holding a :class:`CloudParameters` must pass
-            ``config.t_mix_min`` so the ``es`` ramp cannot desynchronise
-            from the latent-heat ramp built on the same field (#667).
+        pressure: pressure [Pa].
+        temperature: temperature [K].
+        t_mix_min: lower end of the blend [K].
 
     Returns:
-        Saturation specific humidity (kg/kg)
+        Saturation specific humidity [kg/kg].
 
     """
     weight = jnp.clip(
         (temperature - t_mix_min) / (c.tmelt - t_mix_min), 0.0, 1.0)
-    es = (weight * thermodynamics.es_water(temperature)
-          + (1.0 - weight) * thermodynamics.es_ice(temperature))
-    return thermodynamics.qsat_from_es(es, pressure)
-
-
-def _qs_cover(
-    pressure: jnp.ndarray,
-    temperature: jnp.ndarray,
-    cloud_ice: jnp.ndarray,
-    t_ice: float = 238.15,
-) -> jnp.ndarray:
-    # qs for the CLOUD-COVER decision, as mo_cover.f90 forms it (l.215-223):
-    # ECHAM's binary lo2 phase switch
-    #   lo2 = (T < cthomi) OR (T < tmelt AND qi > csecfrl)
-    # (prepare_ua_index_spline, mo_echam_convect_tables.f90 l.664-667) picks
-    # the ``ua`` table — Sonntag over ice, since lo2 implies T < tmelt — or
-    # the ``uaw`` table, Sonntag over water; ice memory: ice saturation only
-    # where ice already exists or homogeneous freezing guarantees it
-    # (csecfrl = 5e-6 kg/kg at T63). ``t_ice`` is the homogeneous-freezing
-    # threshold (ECHAM cthomi), wired from ``CloudParameters.t_ice`` (#667).
-    lo2 = (temperature < t_ice) | (
-        (temperature < c.tmelt) & (cloud_ice > 5.0e-6)
-    )
-    es = jnp.where(lo2, thermodynamics.es_ice(temperature),
-                   thermodynamics.es_water(temperature))
-    return thermodynamics.qsat_from_es(es, pressure)
-
-
-def _full_level_heights(
-    temperature: jnp.ndarray,
-    pressure: jnp.ndarray,
-    surface_pressure: float,
-) -> jnp.ndarray:
-    """Hydrostatic height of each full level above the surface interface.
-
-    Single-column ``(nlev,)`` fields in physics ordering (0=TOA,
-    N-1=surface). Layer thickness between adjacent full levels is
-    ``dz = (R_d·T_avg/g)·ln(p_below/p_above)``; the cumulative sum from the
-    bottom full level up gives its height above that level, and
-    ``z_bottom = (R_d·T[-1]/g)·ln(p_surf/p[-1])`` lifts the whole profile so
-    the origin is the surface INTERFACE, not the lowest full level.
-
-    ECHAM measures its ``jbmin``/``jbmax`` reference heights from the
-    surface half-level (``mo_echam_cloud_params.f90:146-161``:
-    ``zh(jk) = (zph(nlev+1) − zp(jk))/(grav·1.25)``), so even the bottom
-    full level sits ~half a layer (~30-60 m) above ground. Omitting
-    ``z_bottom`` put that level at z=0 and shifted the whole 500-2000 m
-    inversion search window down by the offset (#677).
-    """
-    p_safe = jnp.maximum(pressure, 1.0)
-    ps_safe = jnp.maximum(jnp.asarray(surface_pressure), 1.0)
-    # ``log(p_below / p_above)`` between adjacent levels (k+1 below, k above);
-    # thickness assigned to the upper level k. Shape (nlev-1,).
-    log_ratio = jnp.log(p_safe[1:] / p_safe[:-1])  # +ve going up
-    T_avg = 0.5 * (temperature[:-1] + temperature[1:])
-    dz_layer = c.rd * T_avg / c.grav * log_ratio       # (nlev-1,), m
-    z_bottom = c.rd * temperature[-1] / c.grav * jnp.log(ps_safe / p_safe[-1])
-    return z_bottom + jnp.concatenate([
-        jnp.cumsum(dz_layer[::-1])[::-1],   # each upper level over the bottom
-        jnp.zeros(1),                       # bottom full level (level=N-1)
-    ])
-
-
-def _stratocumulus_zsat(
-    temperature: jnp.ndarray,
-    pressure: jnp.ndarray,
-    surface_pressure: float,
-    config: CloudParameters,
-    enhance_allowed: jnp.ndarray | None = None,
-) -> jnp.ndarray:
-    """Per-layer stratocumulus saturation factor ``zsat`` ∈ (0, 1].
-
-    Ports the ECHAM ``mo_cover.f90:160-244`` low-level inversion
-    enhancement: for each column we find the level with the most
-    inversion-like lapse rate (``zdtdz`` closest to 0 / most positive)
-    inside the boundary layer (between ``inversion_z_min`` and
-    ``inversion_z_max`` above the surface), provided it exceeds the
-    ECHAM stability threshold ``-cinv·g/cp``. At that single level
-    only, ``zsat = min(1, csatsc + max(0, -dT/dz · cp/g))``; everywhere
-    else ``zsat = 1`` (no enhancement). Multiplying ``q/qsat`` by
-    ``1/zsat`` boosts the apparent RH that drives cf, which is how
-    ECHAM injects extra cloud cover at the BL-top inversion that
-    persistent stratocumulus decks live on.
-
-    Level fields are single-column arrays of shape ``(nlev,)`` in physics
-    convention (level=0 TOA, level=N-1 surface); ``surface_pressure`` is a
-    scalar used to set the height origin at the surface interface.
-
-    The pick is a differentiable surrogate for ECHAM's discrete ``zknvb``
-    scan (a softmax over the BL-masked clipped lapse with a stability-gate
-    weight), but it collapses onto a single level: a downward depth bias
-    (``config.smooth_inv_depth``) resolves the clip-to-0 plateau to the
-    lowest qualifying level exactly as ECHAM's strict-improvement scan does
-    (#677), so the boost is delivered at one level rather than smeared.
-
-    Returns:
-        ``zsat`` of shape ``(nlev,)`` — multiply ``qsat`` by this in
-        the cf formula.
-
-    """
-    # Built at call time, not as a default argument: a jax array in a
-    # ``def`` default is created at import and initialises the JAX backend
-    # on ``import`` (#859).
-    if enhance_allowed is None:
-        enhance_allowed = jnp.array(True)
-    nlev = temperature.shape[0]
-
-    z_full = _full_level_heights(temperature, pressure, surface_pressure)
-
-    # dT/dz across the interface ABOVE each level: ECHAM's
-    # ``zdtdz(jk) = (T(jk-1) − T(jk))·g/(geo(jk-1) − geo(jk))`` belongs to
-    # level jk — the level BELOW the interface, i.e. the cloud-topped
-    # boundary layer itself. The previous port assigned the lapse to the
-    # UPPER level and enhanced there, landing the csatsc boost in the
-    # warm dry layer ABOVE the marine-Sc inversion instead of in the Sc
-    # deck (review finding 2.25).
-    dT = temperature[:-1] - temperature[1:]              # (nlev-1,)
-    # Layer thickness = difference of the full-level heights (consistent
-    # with the same hydrostatic z used for the BL mask). ECHAM divides the
-    # temperature jump by the geopotential difference g·dz, i.e. dT/dz.
-    dz = jnp.maximum(z_full[:-1] - z_full[1:], 1.0)      # (nlev-1,), avoid /0
-    dTdz_layer = dT / dz                                 # (nlev-1,) across interface k|k+1
-    # Level k (k ≥ 1) owns the lapse across the interface above it.
-    dTdz = jnp.concatenate([jnp.zeros(1), dTdz_layer])
-
-    # ECHAM's ``zdtdz = MIN(0, zdtdz)`` clip — clips inversions (zdtdz>0)
-    # to 0, leaving normal lapses unchanged. The argmax then finds the
-    # level with the LEAST-NEGATIVE lapse, which is the BL-top inversion
-    # if there is one (clip→0 is the maximum value), otherwise the most
-    # stable lapse near the surface.
-    dTdz_clipped = jnp.minimum(dTdz, 0.0)
-
-    # Mask: only consider levels in the BL altitude range AND whose
-    # zdtdz exceeds the ECHAM stability threshold ``-cinv*g/cp``
-    # (otherwise the layer is too unstable to sustain stratocumulus).
-    # Use the SAME ``-cinv*g/cp`` initial value ECHAM seeds ``zdtmin``
-    # with, so any ``dTdz_clipped > -cinv*g/cp`` qualifies.
-    # Smooth inversion selection (review B.2.4). The argmax pick +
-    # one-hot .at[knvb].set made csatsc and cinv gradient-dead (the
-    # level index is piecewise-constant in T, and cinv appeared only in
-    # an inequality). Replaced by:
-    #   * a smooth validity weight per level: the cinv stability gate
-    #     becomes a sigmoid in (dTdz_clipped - threshold), so cinv is
-    #     in the value;
-    #   * a softmax over the (BL-masked) clipped lapse with a downward
-    #     depth bias reproducing ECHAM's take-the-LOWEST-level
-    #     tie-breaking on the clip-to-0 plateau (see smooth_inv_depth
-    #     below);
-    #   * a per-level zsat candidate (csatsc + zgam_k), applied with
-    #     weight a_k. With the depth bias strong enough to break plateau
-    #     ties (#677) the weight concentrates on the single lowest
-    #     qualifying level, matching ECHAM's one-level pick; widths -> 0
-    #     recover the hard pick.
-    dtdz_threshold = -config.cinv * c.grav / c.cpd
-    in_bl = (z_full >= config.inversion_z_min) & (z_full <= config.inversion_z_max)
-    v_valid = jnp.where(
-        in_bl,
-        jax.nn.sigmoid(
-            (dTdz_clipped - dtdz_threshold) / config.smooth_inv_thr
-        ),
-        0.0,
-    )
-    # Proximity-gated downward tie-break (#677). ECHAM's ``zknvb`` scan picks
-    # the single BL level with the largest clipped lapse and, on the
-    # clip-to-0 plateau where several adjacent levels tie, resolves to the
-    # LOWEST (nearest-surface) one. The previous 0.01·smooth_inv_score bias
-    # gave only a 1 % per-level preference — too weak to break a plateau, so
-    # the boost was smeared ~1/N across the tied levels. Because
-    # ``cc = 1 − sqrt(1 − b0)`` is concave in RH, that diluted boost is NOT
-    # equivalent to a full boost at one level, so subtropical Sc cover was
-    # under-diagnosed.
-    #
-    # A plain depth ramp added to EVERY level's score collapses the plateau
-    # but also drags a well-separated single maximum down onto a
-    # weakly-stable neighbour — measured on a T63L47 state, a global 5×
-    # ramp mis-picked ~14 % of columns one level too low, the mirror of the
-    # "one level too high" bug this routine already fixes. So the depth
-    # preference is GATED by proximity to the column max: it acts only among
-    # the (near-)plateau levels and leaves a clear maximum untouched.
-    #   * ``prox`` ≈ 0.5 on the plateau (levels at the max), decaying to 0
-    #     for the more-stable levels below it (width ``smooth_inv_thr``);
-    #   * ``smooth_inv_depth · prox · k`` (k growing toward the surface) then
-    #     collapses the plateau onto its lowest level with an
-    #     ``exp(smooth_inv_depth·prox)`` per-level preference.
-    # On the same state this gives peak-share ≈ 1.0 with < 0.2 % overrides,
-    # concentrating the full boost on the single ECHAM-correct level.
-    # ``smooth_inv_depth -> 0`` recovers the un-tie-broken softmax (the
-    # pre-#677 1/N smear).
-    score_bl = jnp.where(in_bl, dTdz_clipped, -1e30)
-    plateau = jnp.max(score_bl)
-    prox = jax.nn.sigmoid((score_bl - plateau) / config.smooth_inv_thr)
-    depth_bias = config.smooth_inv_depth * prox * jnp.arange(nlev)
-    score = (jnp.where(in_bl, dTdz_clipped, -1e10) / config.smooth_inv_score
-             + depth_bias)
-    a_lev = jax.nn.softmax(score) * v_valid
-
-    zgam_lev = jnp.maximum(-dTdz * c.cpd / c.grav, 0.0)
-    zsat_cand = jnp.minimum(1.0, config.csatsc + zgam_lev)
-    enhance_f = jnp.asarray(enhance_allowed, dtype=zsat_cand.dtype)
-    zsat = 1.0 - a_lev * enhance_f * (1.0 - zsat_cand)
-    return zsat
-
-
-def calculate_cloud_fraction(
-    temperature: jnp.ndarray,
-    specific_humidity: jnp.ndarray,
-    pressure: jnp.ndarray,
-    surface_pressure: float,
-    config: CloudParameters,
-    enhance_allowed: jnp.ndarray | None = None,
-    cloud_ice: jnp.ndarray | None = None,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Diagnose cloud fraction following ECHAM ``mo_cover.f90``.
-
-    Implements the full ECHAM scheme:
-
-    1. ``rhc = crt + (crs - crt)·exp(1 - (p_surf/p)^nex)`` (crit RH profile,
-       :func:`critical_relative_humidity`)
-    2. Stratocumulus inversion enhancement at the BL-top level (when one
-       is present in the column): ``zsat = min(1, csatsc + zgam)`` where
-       ``zgam`` captures lapse-rate stability — see
-       :func:`_stratocumulus_zsat`. zsat = 1 elsewhere.
-    3. ``zqr = q / (qsat · zsat)`` — apparent RH after the inversion boost
-    4. ``b₀ = (zqr - rhc) / (1 - rhc)``, clipped to ``[0, 1]``
-    5. ``cc = 1 - sqrt(1 - b₀)``
-
-    Returns the diagnosed cloud fraction and a *grid-mean* relative
-    humidity ``q/qsat`` (NOT clipped to ≤1; supersaturated cells carry
-    RH > 1 so downstream code can act on the actual super-saturation
-    rather than seeing a saturated diagnostic).
-
-    Args:
-        temperature: Temperature (K) — single column, shape (nlev,).
-        specific_humidity: Specific humidity (kg/kg) — shape (nlev,).
-        pressure: Full-level pressure (Pa) — shape (nlev,).
-        surface_pressure: Surface pressure (Pa) — scalar.
-        config: Cloud configuration (``crt``, ``crs``, ``nex``,
-            ``csatsc``, ``cinv``, ``inversion_z_min/max``).
-
-    Returns:
-        Tuple of ``(cloud_fraction, relative_humidity)`` of shape
-        ``(nlev,)``.
-
-    """
-    # Built at call time, not as a default argument: a jax array in a
-    # ``def`` default is created at import and initialises the JAX backend
-    # on ``import`` (#859).
-    if enhance_allowed is None:
-        enhance_allowed = jnp.array(True)
-    if cloud_ice is None:
-        cloud_ice = jnp.zeros_like(temperature)
-    qs = _qs_cover(pressure, temperature, cloud_ice, t_ice=config.t_ice)
-
-    # Diagnostic relative humidity — NOT clipped at 1. ECHAM uses
-    # ``zqr = q/(qsat·zsat)`` directly without clipping; super-saturated
-    # cells naturally drive ``b₀ > 1`` which gets clipped to 1 below
-    # (giving ``cc = 1``). Clipping RH itself loses information that
-    # callers (e.g. downstream microphysics) may want to act on.
-    rel_humidity = specific_humidity / (qs + config.epsilon)
-
-    rhc = critical_relative_humidity(pressure, surface_pressure, config)
-
-    # Stratocumulus inversion enhancement (1 everywhere except at BL-top
-    # inversion where it drops to ``csatsc`` ≤ 1, boosting ``zqr``).
-    zsat = _stratocumulus_zsat(
-        temperature, pressure, surface_pressure, config,
-        enhance_allowed=enhance_allowed,
-    )
-    zqr = specific_humidity / (qs * zsat + config.epsilon)
-
-    b0_raw = (zqr - rhc) / (1.0 - rhc + config.epsilon)
-    # Softplus soft-clip to [0, 1] (review B.2.4): the hard clip made
-    # d(cf)/d(crt) exactly zero over the entire sub-critical and
-    # saturated RH ranges (~62% of state space) and fed the sqrt map an
-    # exact 1 at saturation (infinite slope). The softplus pair equals
-    # the identity in the interior, decays exponentially instead of
-    # snapping at the edges, and — because b0 approaches 1 only
-    # asymptotically — bounds the d(cc)/d(b0) slope at saturation.
-    # Width -> 0 recovers the hard clip.
-    w_b0 = config.smooth_b0
-    b0 = (w_b0 * jax.nn.softplus(b0_raw / w_b0)
-          - w_b0 * jax.nn.softplus((b0_raw - 1.0) / w_b0))
-
-    # Cloud fraction: cc = 1 - sqrt(1 - b0). Guard sqrt against b0 == 1
-    # via the double-where pattern so ``jax.grad`` doesn't pick up a
-    # 0*inf from d(sqrt)/dx at 0.
-    sqrt_arg_raw = 1.0 - b0
-    sqrt_arg_safe = jnp.where(sqrt_arg_raw > 0.0, sqrt_arg_raw, 1.0)
-    cloud_fraction = jnp.where(
-        sqrt_arg_raw > 0.0,
-        1.0 - jnp.sqrt(sqrt_arg_safe),
-        1.0,                     # b0 >= 1 → cc = 1
-    )
-
-    # No minimum cloud-fraction truncation: a cf < 0.01 → 0 cutoff is not an
-    # ECHAM mo_cover convention and would add a gradient discontinuity.
-
-    # Stratospheric cutoff (ECHAM ``jks``, mo_cover.f90:142-144): no cloud
-    # above ``cloud_top_pressure_pa``. The RH-closure otherwise fills the
-    # cold, near-zero-qsat stratosphere with spurious cloud (q/qsat ~80×).
-    cloud_fraction = jnp.where(
-        pressure < config.cloud_top_pressure_pa, 0.0, cloud_fraction
-    )
-
-    return cloud_fraction, rel_humidity
-
-
-def _qs_and_dqs_dt(
-    pressure: jnp.ndarray,
-    temperature: jnp.ndarray,
-    t_mix_min: float = 238.15,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Saturation specific humidity and its temperature derivative.
-
-    :func:`saturation_specific_humidity` (the dev 1M scheme's mixed-phase
-    blend of Sonntag over water and over ice) and a Newton slope in the form
-    ECHAM's steps use (:func:`~jcm.physics.thermodynamics.dqsat_dT_from_es`).
-    The slope blends the two phases' analytic ``des/dT`` with the weight held
-    fixed, so it omits the ``(es_w − es_i)·dweight/dT`` term of the blend's
-    own derivative (9.2 % at 240 K, 9.8 % at 238.15 K); it is the per-phase
-    slope a Newton step on a fixed phase takes, and the blend itself is the
-    #940 gap.
-    Closed form so the Newton step is reproducible under JIT. ``t_mix_min``
-    must be the same value the caller's latent-heat ramp uses (#667).
-    """
-    weight = jnp.clip(
-        (temperature - t_mix_min) / (c.tmelt - t_mix_min), 0.0, 1.0)
-    es_water = thermodynamics.es_water(temperature)
-    es_ice = thermodynamics.es_ice(temperature)
-    es = weight * es_water + (1.0 - weight) * es_ice
-    des_dt = (weight * es_water * thermodynamics.dlnes_dT_water(temperature)
-              + (1.0 - weight) * es_ice
-              * thermodynamics.dlnes_dT_ice(temperature))
-    qs = thermodynamics.qsat_from_es(es, pressure)
-    dqs_dt = thermodynamics.dqsat_dT_from_es(es, des_dt, pressure)
-    return qs, dqs_dt
-
-
-def condensation_evaporation(
-    temperature: jnp.ndarray,
-    specific_humidity: jnp.ndarray,
-    cloud_water: jnp.ndarray,
-    cloud_ice: jnp.ndarray,
-    cloud_fraction: jnp.ndarray,
-    pressure: jnp.ndarray,
-    dt: float,
-    config: CloudParameters,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Linearised-Newton condensation / evaporation step.
-
-    Faithful port of the per-cell condensation block in ECHAM
-    ``mo_cloud.f90`` (lines 696-784 of echam6.3). The previous
-    implementation used the instantaneous ``cond = (q - q_s)/dt``
-    adjustment that ignores the warming feedback; on highly super-
-    saturated columns it released ``L · (q - q_s)/cp`` of latent heat
-    per step (60+ K at 100 % supersat), driving the per-level heating
-    spike documented in PR #458.
-
-    Newton step::
-
-        cond = (q - q_s(T)) / (1 + L/cp · dq_s/dT)
-
-    The ``1 + L/cp · dq_s/dT`` denominator is the warming-feedback
-    damper: a parcel that condenses ``cond`` warms by ``L·cond/cp``,
-    which raises ``q_s`` by ``dq_s/dT · L·cond/cp``. The implicit
-    equation ``q - cond = q_s(T + L·cond/cp)`` linearised around T
-    solves to the Newton form above. In the warm troposphere
-    ``L/cp · dq_s/dT ≈ 5`` so the per-step heating drops ~6× compared
-    to the bare formula.
-
-    We act on the WHOLE grid (no cloud-fraction weighting). ECHAM
-    weights pass 1 by ``zclcaux`` then runs a grid-box-wide pass-2
-    cleanup; the net effect for our microphysics chain is closer to
-    the unweighted single-pass form. One pass is sufficient because the
-    moist-static-energy budget converges at the per-step scale we use
-    (verified by ``test_no_oversat_after_step``).
-
-    Args:
-        temperature: Temperature (K)
-        specific_humidity: Specific humidity (kg/kg)
-        cloud_water: Cloud liquid water (kg/kg)
-        cloud_ice: Cloud ice (kg/kg)
-        cloud_fraction: Cloud fraction [0-1] (currently unused — see
-            module docstring on why we don't ECHAM-style weight here)
-        pressure: Pressure (Pa)
-        dt: Time step (s)
-        config: Cloud configuration
-
-    Returns:
-        Tuple of (dT/dt, dq/dt, dqc/dt, dqi/dt)
-
-    """
-    # Phase weight + latent heat per phase (Sundqvist mixed-phase split).
-    weight_liquid = jnp.clip(
-        (temperature - config.t_mix_min)
-        / (config.t_mix_max - config.t_mix_min),
-        0.0, 1.0,
-    )
-    L_eff = weight_liquid * c.alhc + (1.0 - weight_liquid) * c.alhs
-    L_cp = L_eff / c.cpd
-
-    # ---- Pass 1: linearised Newton step ---------------------------------
-    # ECHAM's ``cuadjtq`` and ``mo_cloud`` lines 776-779 (``zqcon``).
-    qs, dqs_dt = _qs_and_dqs_dt(
-        pressure, temperature, t_mix_min=config.t_mix_min)
-    q_excess = specific_humidity - qs
-    cond1 = q_excess / (1.0 + L_cp * dqs_dt)
-
-    # Cap evaporation at available cloud water/ice.
-    total_cloud = cloud_water + cloud_ice
-    cond1 = jnp.maximum(cond1, -total_cloud)
-    # Cap condensation at available vapour.
-    cond1 = jnp.minimum(cond1, jnp.maximum(specific_humidity, 0.0))
-
-    # ---- Pass 2: grid-box super-saturation cleanup ----------------------
-    # ECHAM ``mo_cloud`` lines 762-784: re-evaluate q_s at the post-pass-1
-    # temperature; condense any residual super-saturation that exceeds the
-    # ``zoversat = 1 % · q_s_new`` tolerance. This pass is what stops
-    # moisture accumulating in the column when pass 1 is conservative
-    # (small per-step condensation due to the warming-feedback denominator).
-    T_p1 = temperature + L_cp * cond1
-    q_p1 = specific_humidity - cond1
-    qs_p1, _ = _qs_and_dqs_dt(pressure, T_p1, t_mix_min=config.t_mix_min)
-    oversat_tol = 0.01 * qs_p1                   # ECHAM's ``zoversat``
-    cond2 = jnp.maximum(
-        (q_p1 - qs_p1 - oversat_tol) / (1.0 + L_cp * dqs_dt),
-        0.0,                                      # pass 2 only condenses
-    )
-    cond2 = jnp.minimum(cond2, jnp.maximum(q_p1, 0.0))
-
-    cond_total = cond1 + cond2
-
-    # Convert to rates so the caller (which integrates as
-    # ``q_new = q + dqdt*dt``) sees the right magnitude.
-    dqdt = -cond_total / dt
-
-    # Partition between liquid and ice. Wrap the evap-branch divisions
-    # in a safe double-where pattern so jax.grad through the unused
-    # branch doesn't pick up a 0/eps NaN when cloud_water = cloud_ice = 0
-    # (the common case at the start of the simulation).
-    #
-    # The guard threshold is 1e-30, NOT ``> 0``: the division VJP on the
-    # SELECTED branch computes ``-g * x / (safe_total * safe_total)``, and
-    # for 0 < total_cloud < ~1e-154 (spectral-ringing condensate tails reach
-    # 1e-287 in real columns) the squared denominator underflows to 0, giving
-    # 0/0 = NaN in the reverse pass while the forward is finite. Same fix as
-    # the column-sweep's ``_saturation_adjustment_layer`` (which uses
-    # ``config.d_epsilon``; ``CloudParameters`` has no such field, hence the
-    # literal).
-    has_cloud = total_cloud > 1.0e-30
-    safe_total = jnp.where(has_cloud, total_cloud, 1.0)
-    qc_frac = jnp.where(has_cloud, cloud_water / safe_total, 0.0)
-    qi_frac = jnp.where(has_cloud, cloud_ice / safe_total, 0.0)
-    L_evap = jnp.where(
-        has_cloud,
-        (cloud_water * c.alhc + cloud_ice * c.alhs) / safe_total,
-        L_eff,                                    # fallback (unused)
-    )
-
-    dqcdt = jnp.where(
-        cond_total > 0,                           # condensation
-        weight_liquid * cond_total / dt,
-        cond_total * qc_frac / dt,                # evaporation
-    )
-    dqidt = jnp.where(
-        cond_total > 0,
-        (1.0 - weight_liquid) * cond_total / dt,
-        cond_total * qi_frac / dt,
-    )
-
-    # Temperature tendency. Latent heat uses the same mixed-phase L the
-    # Newton step used so the moist static energy budget is consistent.
-    L_for_dT = jnp.where(cond_total > 0, L_eff, L_evap)
-    dtedt = L_for_dT * cond_total / (c.cpd * dt)
-
-    return dtedt, dqdt, dqcdt, dqidt
+    vapour = (weight * thermodynamics.es_water(temperature)
+              + (1.0 - weight) * thermodynamics.es_ice(temperature))
+    return thermodynamics.qsat_from_es(vapour, pressure)
 
 
 # ---------------------------------------------------------------------------
@@ -665,38 +528,42 @@ from jcm.terrain import TerrainData  # noqa: E402
 
 
 class SundqvistCloudFraction(PhysicsTerm):
-    """Sundqvist (1989) / Lohmann-Roeckner (1996) diagnostic cloud fraction.
+    """ECHAM6.3's diagnostic cloud cover, ``mo_cover.f90::cover``.
 
-    Pure cloud-fraction diagnostic — operates on column-vectorized state
-    ``(nlev, ncols)``. Reads ``pressure_full`` / ``surface_pressure`` from
-    the moist-air diagnostics dict and ``qc`` / ``qi`` from
-    ``state.tracers``. Writes ``cloud_fraction``, plus a pass-through of
-    the input ``qc`` / ``qi``, into the public ``"clouds"`` key
-    (:class:`CloudData` typed sub-struct, shared with the downstream
-    microphysics terms) and publishes ``"cover_relative_humidity"``: the
-    ``q / qsat`` the cover closure actually sees, with ``qsat`` over ice where
-    the cell carries cloud ice below ``t_ice`` (ECHAM ``mo_cover`` ``lo2``
-    switch). That is a scheme-internal closure variable — it jumps by tens of
-    percent across the ice threshold in adjacent cells — so it deliberately
+    Operates on a ``(nlev, ncols)`` block or any broadcastable layout. Reads
+    ``pressure_full`` / ``surface_pressure`` from the moist-air diagnostics,
+    the temperature, humidity, geopotential and ``qi`` from ``state`` (ECHAM
+    ``ptm1``, ``pqm1``, ``pgeo``, ``pxim1``), the land fraction from
+    ``terrain`` and the sea-ice fraction from ``forcing``.
+
+    **Time level.** ``state`` is the state the physics receives this step,
+    which already contains this step's dynamics. ECHAM's ``cover`` reads the
+    ``t - Δt`` fields with no tendency of any kind (``physc.f90`` l.543-548),
+    a state one dynamics step earlier. In 1M and 2M runs the carry holds the
+    previous step's post-physics temperature, humidity, ``qc`` and ``qi``
+    (the cloud schemes' anchor), but not its pressures or geopotential,
+    which the cover also reads; the cover reads the received state by the
+    maintainer's decision.
+    Like ECHAM's, this term runs first in the step, before radiation.
+    Writes ``cloud_fraction``, plus a pass-through of the ``qc`` / ``qi`` the
+    downstream microphysics starts from, into the public ``"clouds"`` key
+    (:class:`CloudData`), and publishes ``"cover_relative_humidity"``: the
+    ``q / qs`` the cover closure sees, with ``qs`` over ice where ECHAM's
+    ``lo2`` selects it. That is a scheme-internal closure variable, so it
     does NOT overwrite the public water-saturation ``"relative_humidity"``
     from :class:`~jcm.physics.diagnostics.moist_air_state.MoistAirColumnState`.
 
-    **No q ↔ qc/qi condensation tendency is emitted.** Saturation
-    adjustment (cuadjtq Newton step) lives in the downstream microphysics
-    term — the 1M scheme
-    (:class:`~jcm.physics.clouds.echam_1m.Echam1MMicrophysics`) does it
-    inside its column sweep
-    (:func:`~jcm.physics.clouds.echam_1m._saturation_adjustment_layer`),
-    and the 2M scheme
-    (:class:`~jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics`) does
-    it via :func:`mixed_phase_deposition_and_corrections`. This matches
-    ECHAM's ``mo_cloud.f90`` where condensation, autoconversion, rain
-    evap, and flux propagation all live in the cloud routine alongside
-    the cloud-fraction diagnostic — splitting condensation out into a
-    separate upstream term (the previous JCM layout) double-counted
-    against 2M and created a rain-evap ↔ re-condensation feedback with
-    the 1M column-sweep variant, both of which are resolved by this
-    structure.
+    **No q <-> qc/qi tendency is emitted**; condensation belongs to the
+    downstream microphysics term (the 1M
+    :class:`~jcm.physics.clouds.echam_1m.Echam1MMicrophysics` or the 2M
+    :class:`~jcm.physics.clouds.lohmann_2m.Lohmann2MMicrophysics`), as in
+    ECHAM, where ``cover`` diagnoses and ``cloud`` condenses.
+
+    ``cache_coords`` must run before the term is called: it computes ECHAM's
+    inversion-search levels ``jbmin``/``jbmax`` from the model's levels. It
+    also checks that the parameters' resolution defaults were built for the
+    model's truncation and warns once if they were not, unless the caller
+    supplied the parameters explicitly.
     """
 
     name: ClassVar[str] = "sundqvist_cloud_fraction"
@@ -714,8 +581,8 @@ class SundqvistCloudFraction(PhysicsTerm):
         "cover_relative_humidity": {
             "units": "1",
             "long_name": (
-                "relative humidity seen by the Sundqvist cloud cover "
-                "(ice saturation where cloud ice is present below t_ice)"),
+                "relative humidity seen by the ECHAM cloud cover "
+                "(ice saturation where ECHAM's lo2 switch selects it)"),
         },
     }
     # Carry seeded as zeros; cloud fraction / qc / qi are rebuilt every
@@ -725,9 +592,24 @@ class SundqvistCloudFraction(PhysicsTerm):
     # carry shape stays stable after step 1.
     carry_slots: ClassVar[dict[str, type]] = {"clouds": CloudData}
 
-    def __init__(self, params: CloudParameters | None = None):
-        """Hold the scheme-native :class:`CloudParameters`."""
-        self.params = nnx.Param(params or CloudParameters.default())
+    def __init__(self, params: CloudParameters | None = None, *,
+                 params_are_defaults: bool = False):
+        """Hold the scheme's :class:`CloudParameters`.
+
+        Args:
+            params: the parameters; ``None`` takes the T63 defaults.
+            params_are_defaults: ``True`` when ``params`` are resolution
+                defaults built by the physics factory or the runner (with or
+                without field overrides), rather than an object the user
+                supplied. Only then does ``cache_coords`` warn if they were
+                built for another truncation.
+
+        """
+        self._params_user_supplied = (params is not None
+                                      and not params_are_defaults)
+        self.params = nnx.Param(params if params is not None
+                                else CloudParameters.default())
+        self._inversion_range: tuple[int, int] | None = None
 
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
@@ -737,6 +619,24 @@ class SundqvistCloudFraction(PhysicsTerm):
             TracerSpec("qi", units="kg/kg"),
         )
 
+    def cache_coords(self, coords) -> None:
+        """Compute ``jbmin``/``jbmax`` and check the parameters' grid.
+
+        ``jbmin``/``jbmax`` are grid geometry (``mo_echam_cloud_params.f90``
+        l.132-162), computed from the model's own levels here. The tunable
+        parameters are not touched: they were fixed at construction.
+        """
+        jbmin, jbmax = inversion_levels(coords)
+        if jbmin < 1:
+            raise ValueError(
+                "ECHAM's inversion search needs a level above jbmin; the grid "
+                f"gives jbmin={jbmin} (0-based).")
+        self._inversion_range = (jbmin, jbmax)
+        if not self._params_user_supplied:
+            check_defaults_grid(
+                type(self).__name__,
+                self.params.get_value().defaults_truncation, coords)
+
     def __call__(
         self,
         state: PhysicsState,
@@ -744,75 +644,57 @@ class SundqvistCloudFraction(PhysicsTerm):
         forcing: ForcingData,
         terrain: TerrainData,
     ) -> tuple[PhysicsTendency, dict]:
-        """Diagnose cloud fraction + the cover's humidity, no q tendency."""
-        nlev, ncols = state.temperature.shape
+        """Diagnose the cover and its humidity; no tendency."""
+        if self._inversion_range is None:
+            raise RuntimeError(
+                f"{type(self).__name__}.cache_coords(coords) must run before "
+                "the term is called: it computes ECHAM's inversion-search "
+                "levels from the model grid.")
+        nlev = state.temperature.shape[0]
+        horiz = state.temperature.shape[1:]
         params = self.params.get_value()
+        zeros = jnp.zeros_like(state.temperature)
 
-        pressure_full = diagnostics["pressure_full"]
-        surface_pressure = diagnostics["surface_pressure"]
-        # Post-vdiff condensate from the sequential thermo_run view when
-        # available (the ECHAM ordering runs vertical diffusion first);
-        # step-start tracers as the fallback.
+        # The condensate the downstream microphysics starts from. At this
+        # term's position (before vertical diffusion) ``thermo_run`` still
+        # holds the step-start tracers.
         tr = diagnostics.get("thermo_run") or {}
-        qc = tr.get("qc", state.tracers.get(
-            "qc", jnp.zeros_like(state.temperature)))
-        qi = tr.get("qi", state.tracers.get(
-            "qi", jnp.zeros_like(state.temperature)))
+        qc = tr.get("qc", state.tracers.get("qc", zeros))
+        qi = tr.get("qi", state.tracers.get("qi", zeros))
+        # ECHAM's cover reads the step-start cloud ice ``xim1`` for lo2.
+        qi_m1 = state.tracers.get("qi", zeros)
 
-        # Cloud fraction is purely diagnostic: ``cc = 1 - sqrt(1 - b0)``
-        # with ``b0 = (RH - RH_crit) / (1 - RH_crit)``. Vmap over columns
-        # so :func:`calculate_cloud_fraction` works on (nlev,) slices.
-        # ECHAM guards on the stratocumulus enhancement (mo_cover.f90:
-        # 179-185): ocean columns (pfrw > 0.5) with no sea ice
-        # (pfri < 1e-12, from forcing.sice_am) and no active convection
-        # (ktype == 0).
-        #
-        # One-step lag on ``ktype`` (#677): this term is composed BEFORE
-        # radiation (which consumes the cloud fraction it writes) and hence
-        # before ``TiedtkeConvection``, so the current step's ``ktype`` does
-        # not yet exist here. ``ktype`` is therefore read from the previous
-        # step's ``convection`` carry — the same cross-step-consumer pattern
-        # as ConvectiveTracerTransport / tracer_diffusion, with a no-op
-        # (enhancement-allowed) fallback on step 0 when the key is absent.
-        # ECHAM's ``cover`` runs after ``cucall`` and sees the same-step
-        # ktype; matching that would require moving the cloud-fraction
-        # diagnostic after convection, which breaks the same-step
-        # cloud->radiation coupling that motivates its early placement. The
-        # convective mask over marine-Sc (subsidence) regions is
-        # slowly varying, so the one-step lag is physically negligible. It
-        # is deliberately NOT declared in ``requires`` (that would make
-        # ``_validate_ordering`` reject the earlier placement); the general
-        # mechanism for typed lagged reads is tracked by the diagnostics.get
-        # stale-read issue.
-        is_ocean = jnp.reshape(terrain.fmask, (-1,)) < 0.5
+        # Stratocumulus gate (mo_cover.f90 l.181): water fraction > 0.5,
+        # ice fraction < 1e-12 and ktype == 0, with ECHAM's fractions
+        # frw = (1 - frl)(1 - seaice) and fri = 1 - frl - frw
+        # (physc.f90 l.402-403).
+        land = jnp.reshape(jnp.asarray(terrain.fmask), horiz)
         sice = getattr(forcing, "sice_am", None)
-        no_sea_ice = (
-            jnp.reshape(jnp.asarray(sice), (-1,)) < 1e-12
-            if sice is not None
-            else jnp.ones_like(is_ocean, dtype=bool)
-        )
+        sea_ice = (jnp.reshape(jnp.asarray(sice), horiz) if sice is not None
+                   else jnp.zeros_like(land))
+        frw = (1.0 - land) * (1.0 - sea_ice)
+        fri = 1.0 - land - frw
+        # ``ktype`` is the previous step's, read from the ``convection``
+        # carry: this term runs before convection within the step. ECHAM's
+        # ``cover`` likewise reads the previous step's type: ``itype`` is set
+        # from ``rtype`` (physc.f90 l.528) before ``cucall`` (l.987) and
+        # ``rtype`` is written back only after ``cloud`` (l.1124). Step 0 has
+        # no carry and allows the enhancement, as ECHAM's initial rtype = 0
+        # does. Deliberately not in ``requires`` (that would force this term
+        # after convection); it is a cross-step read.
         conv = diagnostics.get("convection")
         no_convection = (
-            jnp.reshape(conv.ktype, (-1,)) == 0
+            jnp.reshape(conv.ktype, horiz) == 0
             if conv is not None and hasattr(conv, "ktype")
-            else jnp.ones_like(is_ocean, dtype=bool)
-        )
-        enhance_allowed = is_ocean & no_sea_ice & no_convection
+            else jnp.ones(horiz, dtype=bool))
+        enhance_allowed = (frw > 0.5) & (fri < 1.0e-12) & no_convection
 
-        cf_T, rh_T = jax.vmap(
-            calculate_cloud_fraction,
-            in_axes=(1, 1, 1, 0, None, 0, 1),
-            out_axes=(0, 0),
-        )(
-            state.temperature, state.specific_humidity, pressure_full,
-            surface_pressure, params, enhance_allowed, qi,
-        )
-        cloud_fraction = cf_T.T  # back to (nlev, ncols)
-        rel_humidity = rh_T.T
+        cloud_fraction, rel_humidity = calculate_cloud_fraction(
+            state.temperature, state.specific_humidity, qi_m1,
+            diagnostics["pressure_full"], diagnostics["surface_pressure"],
+            state.geopotential, params, self._inversion_range,
+            enhance_allowed)
 
-        # No condensation tendency — the downstream microphysics term
-        # owns saturation adjustment now (see class docstring).
-        zeros = jnp.zeros_like(state.temperature)
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),
             v_wind=jnp.zeros_like(state.v_wind),
@@ -820,11 +702,6 @@ class SundqvistCloudFraction(PhysicsTerm):
             specific_humidity=zeros,
             tracers={"qc": zeros, "qi": zeros},
         )
-
-        # Write cloud_fraction (the only thing this term computes) plus a
-        # pass-through of the input qc / qi so downstream terms see a
-        # populated CloudData with the latest state values.
-        #
         # The convective-detrainment fields are reset to zero here because
         # ``prev_clouds`` is the PREVIOUS step's carry: this term seeds the
         # step's ``clouds`` upstream of convection, and those fields must
@@ -835,7 +712,7 @@ class SundqvistCloudFraction(PhysicsTerm):
         # one that did — would feed a stale detrainment to the microphysics
         # on every step.
         prev_clouds = diagnostics.get(
-            "clouds", CloudData.zeros((ncols,), nlev),
+            "clouds", CloudData.zeros(horiz, nlev),
         )
         clouds = prev_clouds.copy(
             cloud_fraction=cloud_fraction,
@@ -844,7 +721,6 @@ class SundqvistCloudFraction(PhysicsTerm):
             conv_detrainment_qc=zeros,
             conv_detrainment_qi=zeros,
         )
-
         return tendency, {
             **diagnostics,
             "clouds": clouds,

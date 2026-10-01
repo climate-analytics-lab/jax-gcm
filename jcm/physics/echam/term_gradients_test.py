@@ -216,6 +216,14 @@ _CONDENSATE_CLIP_KINK = (
 _ENVIRONMENT = ("['thermo_run']/['temperature']",
                 "['thermo_run']/['specific_humidity']")
 
+# The 1M scheme follows ECHAM's ``cloud`` argument list instead: the step-start
+# state is its anchor (``ptm1``, ``pqm1``) and the running tendency of the
+# upstream terms, ``_tendency_run``, is its increment (``ztmst*ptte``). This
+# check holds plumbing keys fixed, so only the anchor can be live here; the
+# increment path is differentiated by the package test below and by
+# ``echam_1m_test.py``.
+_ONE_MOMENT_ENVIRONMENT = ("[0]/temperature", "[0]/specific_humidity")
+
 _PBL_HEIGHT_DEFECT = (
     "jcm/physics/vertical_diffusion/tte_tke/turbulence_coefficients.py:392 — "
     "compute_boundary_layer_height picks the PBL top with jnp.argmax over the "
@@ -224,28 +232,6 @@ _PBL_HEIGHT_DEFECT = (
     "identically zero. It is not only a diagnostic: it sets the mixing length "
     "at turbulence_coefficients.py:108-111, so the diffusion's dependence on "
     "the PBL depth is invisible to a gradient. (#843)"
-)
-
-_ONE_MOMENT_SATURATION_CANCELLATION = (
-    "no float32 adjoint identity holds on the convecting column. The "
-    "saturation adjustment runs at 95 % relative humidity, where `q - qs` and "
-    "the pass-2 `q_p1 - qs_p1 - 0.01*qs_p1` are each a difference of two "
-    "nearly equal numbers, and the Rotstayn rain evaporation below the deck "
-    "compounds it: the per-level derivatives in the lowest ten layers land "
-    "50 % from their float64 values and the projection's summands reach 2.9e3 "
-    "against a total of 5.2e2. jvp and vjp are that same double sum "
-    "contracted in opposite orders, so they split — 4.5 % in the checked "
-    "direction and 0.19 % to 37 % over seeds 0-5, against 1.3e-6 with the "
-    "inputs promoted to float64. It is reduction order and not an asymmetry: "
-    "there is no `custom_jvp`, `custom_vjp` or `stop_gradient` in the scheme "
-    "for one to come from, and the gap does not move when the phase-partition "
-    "floor this column's condensate tail sits on is swept from 1e-18 to 1e-9. "
-    "Recorded rather than absorbed into `adjoint_rtol`: with no difference "
-    "reference on this cell the adjoint identity is the only quantitative "
-    "check left, and a tolerance loose enough to pass it — the 1.2e-1 this "
-    "cell used to carry — could not detect a 10 % gradient error, nor did it "
-    "hold at seeds 4 and 5. The stable column of the same term sits at 3.6e-4 "
-    "and keeps a real tolerance. (#843)"
 )
 
 _MACV2_PER_BAND_RATIO_NOISE = (
@@ -403,28 +389,28 @@ _CHECKS: dict = {
     ("macv2_sp_aerosol", "stable"): _Check(
         xfail_reference=_MACV2_PER_BAND_RATIO_NOISE),
 
-    # ``sundqvist_cloud_fraction`` at the stable column crosses the cover's
-    # ice-memory switch under this direction: ``_qs_cover`` takes the ice fit
-    # where the cell's cloud ice exceeds csecfrl = 5e-6 kg/kg (ECHAM
-    # mo_cover.f90's ``lo2``, a deliberate hard switch, which its second
-    # condition T < cthomi shares). The column carries no cloud ice, so the
-    # zero qi leaf takes an absolute step, and the plus side crosses 5e-6 at
-    # the cold levels (30-35) between eps = 2e-6 and 4e-6: the cover's
-    # relative humidity jumps by 0.03-0.08 there and the plus secant grows as
-    # jump/eps. That is the scheme's own switch, so the adjoint identity and
-    # the liveness of the temperature and humidity the cover reads are what
-    # remain, and both hold at the default tolerance. The term is a
-    # diagnostic: its tendency ledger is structural zeros, and so are the two
-    # convective-detrainment fields of the ``clouds`` it returns, which it
-    # clears for the convection downstream to fill. The convecting column
-    # takes the default difference reference.
-    ("sundqvist_cloud_fraction", "stable"): _Check(
+    # ``sundqvist_cloud_fraction``'s value is ECHAM's cover, and its
+    # derivative is, by design, that of the smooth surrogates of the b0 clip
+    # and of the inversion stability test (``sundqvist._cover_surrogate``,
+    # ``_zsat_surrogate``; docs/source/design/surrogate_gradients.md). A
+    # central difference of the value therefore disagrees with AD wherever a
+    # level sits near a clip edge or a column near the stability threshold
+    # (8 % on the convecting column's projection), which is the surrogate
+    # working, not a lost gradient. The cell checks what a surrogate
+    # derivative must satisfy here: finite, not identically zero, adjoint,
+    # and live in the temperature and humidity. That the derivative is the
+    # surrogate's, that the surrogate is smooth, and how far it lies from the
+    # value are checked on the functions themselves in ``sundqvist_test.py``.
+    # Its tendency ledger is structurally zero (the cover emits none), and so
+    # are the step's convective-detrainment fields of ``clouds``, which the
+    # cover resets for ``TiedtkeConvection`` to write.
+    "sundqvist_cloud_fraction": _Check(
         reference="adjoint",
-        live_inputs=("[0]/temperature", "[0]/specific_humidity"),
         skip_outputs=("u_wind", "v_wind", "temperature", "specific_humidity",
                       "tracers/qc", "tracers/qi",
                       "clouds/conv_detrainment_qc",
-                      "clouds/conv_detrainment_qi")),
+                      "clouds/conv_detrainment_qi"),
+        live_inputs=("[0]/temperature", "[0]/specific_humidity")),
 
     # TTE-TKE, the 1M microphysics and Hines each cross an internal activation
     # boundary under this direction, and none of them has a central difference
@@ -440,15 +426,14 @@ _CHECKS: dict = {
     # the 1M scheme's top-to-bottom flux ``lax.scan``, and the Hines
     # ``lax.scan`` over the wave spectrum. Each relaxation is sized to the
     # spread actually measured over seeds 0-5 rather than to what passes —
-    # at most 3.0e-5 for TTE-TKE, 1.2e-5 for Hines and 3.6e-4 for the 1M
-    # scheme's stable column — so the tolerances below keep 30x to 80x of
-    # headroom and still detect a tenth-of-a-percent asymmetry. In float64
-    # the same jvp and vjp projections agree to 1.6e-13 (TTE-TKE) and 1.9e-15
-    # (Hines), so the float32 spread is reduction order, not a jvp/vjp
-    # asymmetry — and there is no ``custom_jvp``, ``custom_vjp`` or
-    # ``stop_gradient`` anywhere in the three schemes for one to come from.
-    # The 1M scheme's two operating points part company here: the convecting
-    # one reaches 37 % and is recorded as a defect rather than absorbed.
+    # at most 3.0e-5 for TTE-TKE and 1.2e-5 for Hines — so the tolerances
+    # below keep 30x to 80x of headroom and still detect a tenth-of-a-percent
+    # asymmetry; the 1M scheme's stable column keeps 2e-3 and its convecting
+    # column the default. In float64 the same jvp and vjp projections agree to
+    # 1.6e-13 (TTE-TKE) and 1.9e-15 (Hines), so the float32 spread is
+    # reduction order, not a jvp/vjp asymmetry. The 1M scheme's surrogate
+    # derivatives are ``custom_jvp`` rules whose reverse mode is the transpose
+    # of their forward rule, so they add no asymmetry either.
     "tte_tke_vertical_diffusion": _Check(
         reference="adjoint", adjoint_rtol=1.0e-3,
         live_inputs=("[0]/u_wind",), xfail_reference=_PBL_HEIGHT_DEFECT),
@@ -456,19 +441,33 @@ _CHECKS: dict = {
     # returns the momentum tendencies as structural zeros, and publishes
     # ``wbf`` as a zero on purpose (the 1M scheme has no explicit
     # Wegener-Bergeron-Findeisen transfer, but the key stays so the AeroCom
-    # diagnostic set is scheme-independent — echam_1m.py:1418). There is
+    # diagnostic set is scheme-independent). There is
     # nothing for the liveness guard to find in any of the three.
     "echam_1m_microphysics": _Check(
-        reference="adjoint", adjoint_rtol=2.0e-3, live_inputs=_ENVIRONMENT,
+        reference="adjoint", adjoint_rtol=2.0e-3, live_inputs=_ONE_MOMENT_ENVIRONMENT,
         skip_outputs=("u_wind", "v_wind", "wbf")),
-    # The convecting column keeps the default adjoint tolerance and fails it;
-    # see ``_ONE_MOMENT_SATURATION_CANCELLATION`` for why that is recorded
-    # rather than absorbed. Everything else about the cell is the term entry
-    # above.
+    # On the stable column ECHAM's cover is exactly 0 at every level but the
+    # enhanced inversion level, where it is exactly 1 (the 0.88 relative
+    # humidity there over csatsc = 0.7 is supersaturated): the deck's
+    # humidity sits below the critical value everywhere else. The 1M
+    # therefore evaporates all the seeded condensate, in the clear cells by
+    # the clear-cell rule and in the overcast one by the evaporation cap at
+    # the available condensate. Neither depends on the running temperature
+    # or humidity, and no precipitation process runs, so those input
+    # gradients and the process diagnostics' gradients are exactly zero.
+    # The cell checks the tendencies, which depend on the condensate, and
+    # asserts no live environment inputs; the convecting column keeps both.
+    ("echam_1m_microphysics", "stable"): _Check(
+        reference="adjoint", adjoint_rtol=2.0e-3, outputs="tendency",
+        skip_outputs=("u_wind", "v_wind")),
+    # The convecting column keeps the default adjoint tolerance. It makes no
+    # surface snow (the snow from aloft melts in the warm column), so
+    # ``clouds.precip_snow`` is structurally zero there and the per-output
+    # liveness guard would reject it; the ``clouds`` outputs are checked on
+    # the stable column above, and the tendencies here.
     ("echam_1m_microphysics", "convecting"): _Check(
-        reference="adjoint", live_inputs=_ENVIRONMENT,
-        skip_outputs=("u_wind", "v_wind", "wbf"),
-        xfail_reference=_ONE_MOMENT_SATURATION_CANCELLATION),
+        reference="adjoint", live_inputs=_ONE_MOMENT_ENVIRONMENT,
+        skip_outputs=("u_wind", "v_wind", "wbf", "clouds")),
     # Hines returns a structurally zero moisture tendency — it moves momentum
     # and returns the dissipated energy as heat, nothing else — so there is
     # nothing for the liveness guard to find in that field.

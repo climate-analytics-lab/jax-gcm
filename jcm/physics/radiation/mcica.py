@@ -1,8 +1,10 @@
 """Monte Carlo Independent Column Approximation (McICA) sub-column generator.
 
-Implements the Räisänen et al. (2004) generalized exponential-random
-overlap stochastic sub-column generator used by RRTMGP-class radiation
-schemes to handle subgrid cloud variability + vertical overlap. Each
+Stochastic sub-column generators for RRTMGP-class radiation schemes, which
+handle subgrid cloud variability and vertical overlap: the Räisänen et al.
+(2004) generator for the random and generalised-exponential rules, and
+ECHAM6.3's ``mo_cld_sampling.f90::sample_cld_state`` chain for
+maximum-random. Each
 sub-column is a binary cloud profile: cloudy or clear at every level.
 Radiation is then run *as if the column were homogeneous* in each
 sub-column; averaging across many sub-columns (or across radiation
@@ -18,10 +20,26 @@ The classical reference is
 Three overlap rules are supported:
 
 - ``"random"``      independent draws at each level (no overlap).
-- ``"maximum_random"`` maximum within continuous cloud banks, random
-  across clear layers (Geleyn-Hollingsworth 1979).
+- ``"maximum_random"`` ECHAM6.3's rule and jcm's default (``i_overlap =
+  1``, ``mo_radiation_parameters.f90`` l.71), the rank chain of
+  ``mo_cld_sampling.f90::sample_cld_state`` (l.66-83). ECHAM runs that chain
+  top-down on the surface-first column ``psrad_interface`` hands its
+  radiation (``mo_psrad_interface.f90`` l.221-227, 459, 476): each level
+  keeps the rank of the level above where the sub-column is cloudy there and
+  otherwise draws a fresh rank in that level's clear part. jcm runs the same
+  rule bottom-up on its top-first column: each level keeps the rank of the
+  level below where the sub-column is cloudy there, and otherwise redraws in
+  that level's clear part. The two directions give every sub-column cloud
+  pattern the same probability (verified exactly, by enumerating the
+  patterns of random profiles, and by ``mcica_test.py``), so in both
+  adjacent cloudy layers overlap maximally and layers separated by clear air
+  overlap randomly. Its expected total cover is the adjacent-layer
+  Geleyn-Hollingsworth (1979) product ECHAM reports as ``cld_cvr``
+  (``mo_radiation.f90`` l.436-442; :func:`expected_total_cover`), the same
+  read from either end.
 - ``"exponential"``  generalised-exponential overlap with a configurable
-  decorrelation length (ECHAM6 default ~2 km).
+  decorrelation length (jcm default 2 km), a jcm option: ECHAM6.3's
+  sampler has no exponential rule.
 
 Determinism: the caller is responsible for constructing a PRNG key that
 reflects whatever stochastic axes it cares about (model step, column
@@ -143,18 +161,16 @@ def _alpha_from_overlap(
     """Return per-interface decorrelation factors α_k.
 
     ``α_k`` is the probability that the rank random number at layer k
-    inherits its value from layer k-1 (full correlation). Random
-    overlap → all zeros; maximum overlap → all ones; the
-    generalised-exponential rule blends them via
-    ``α_k = exp(-Δz_k / L_cld)``.
+    inherits its value from layer k-1 (full correlation), for the two rules
+    whose correlation does not depend on the sampled sub-column: random
+    overlap → all zeros; the generalised-exponential rule
+    ``α_k = exp(-Δz_k / L_cld)``. Maximum-random keeps a rank depending on
+    the sub-column's own cloud (:func:`_maximum_random_ranks`), so it has no
+    such factor.
     """
     nlev = cloud_fraction.shape[0]
     if overlap == "random":
         return jnp.zeros((nlev - 1,) + cloud_fraction.shape[1:])
-    if overlap == "maximum_random":
-        # α = 1 between two cloudy layers (so they share a rank within
-        # one cloud bank), 0 across a clear layer that separates banks.
-        return jnp.where(cloud_fraction[:-1] > 0, 1.0, 0.0)
     if overlap == "exponential":
         decorrelation_m = decorrelation_km * 1000.0
         # Use the layer thickness at level k as the displacement between
@@ -164,9 +180,43 @@ def _alpha_from_overlap(
         dz = layer_thickness[1:]
         return jnp.exp(-dz / decorrelation_m)
     raise ValueError(
-        f"Unknown overlap rule {overlap!r}; "
-        "choose 'random', 'maximum_random', or 'exponential'."
+        f"No decorrelation factor for overlap rule {overlap!r}; "
+        "'random' and 'exponential' have one, 'maximum_random' keeps ranks "
+        "by the sub-column's cloud (_maximum_random_ranks)."
     )
+
+
+def _maximum_random_ranks(u: jnp.ndarray, cloud_fraction: jnp.ndarray) -> jnp.ndarray:
+    """ECHAM's maximum-random rank rule for one sub-column, TOA-first.
+
+    The rule of ``mo_cld_sampling.f90::sample_cld_state`` (l.66-83), in this
+    module's convention (a cell is cloudy where its rank is below the cover;
+    ECHAM tests ``rank > 1 - cover``, the same rule for ``1 - rank``), run
+    from the bottom up: the lowest level takes ``u`` as its rank, and each
+    level above keeps the rank of the level below where the sub-column is
+    cloudy there and otherwise takes ``cf_below + u_k·(1 − cf_below)``,
+    uniform over the clear part of the level below. ECHAM runs the chain
+    from the top down on its surface-first column (see the module
+    docstring); the two directions give every cloud pattern the same
+    probability. ``u`` is ``[nlev]`` uniforms. Sequential in k from the
+    bottom → reversed ``lax.scan``.
+
+    The ranks depend on the cover only through the redraw's clear-part
+    offset and through the comparisons that pick keep or redraw; the masks
+    built from them are ``r < cf`` comparisons again, piecewise constant in
+    the cover, so the sampler carries no cover gradient, as for the other
+    two rules.
+    """
+
+    def step(r_below, inputs):
+        u_k, cf_below = inputs
+        r_k = jnp.where(r_below < cf_below, r_below,
+                        cf_below + u_k * (1.0 - cf_below))
+        return r_k, r_k
+
+    _, r_upper = jax.lax.scan(step, u[-1], (u[:-1], cloud_fraction[1:]),
+                              reverse=True)
+    return jnp.concatenate([r_upper, u[-1:]], axis=0)
 
 
 def _rank_chain(u: jnp.ndarray, y: jnp.ndarray, alpha: jnp.ndarray) -> jnp.ndarray:
@@ -191,7 +241,7 @@ def generate_subcolumns(
     layer_thickness: jnp.ndarray,
     *,
     n_subcols: int,
-    overlap: _OverlapRule = "exponential",
+    overlap: _OverlapRule = "maximum_random",
     decorrelation_km: float = 2.0,
     key: jax.Array,
 ) -> jnp.ndarray:
@@ -205,8 +255,8 @@ def generate_subcolumns(
             schemes (like grey two-stream) that don't have enough
             spectral subdivision to absorb the stochastic noise.
         overlap: overlap assumption.
-        decorrelation_km: vertical decorrelation length for
-            ``"exponential"`` overlap. ECHAM6 default ≈ 2 km.
+        decorrelation_km: vertical decorrelation length [km] of the
+            ``"exponential"`` rule; inert under the other two.
         key: a JAX PRNG key. Construct deterministically via
             ``jax.random.fold_in`` over whatever stochastic axes the
             caller wants reproducible (model_step, column index,
@@ -218,15 +268,22 @@ def generate_subcolumns(
 
     """
     nlev = cloud_fraction.shape[0]
-    alpha = _alpha_from_overlap(
-        cloud_fraction, layer_thickness, overlap, decorrelation_km,
-    )
+    if overlap == "maximum_random":
+        def ranks(u, y):
+            return _maximum_random_ranks(u, cloud_fraction)
+    else:
+        alpha = _alpha_from_overlap(
+            cloud_fraction, layer_thickness, overlap, decorrelation_km,
+        )
+
+        def ranks(u, y):
+            return _rank_chain(u, y, alpha)
 
     def per_subcol(s_key):
         u_key, y_key = jax.random.split(s_key)
         u = jax.random.uniform(u_key, (nlev,))
         y = jax.random.uniform(y_key, (nlev - 1,))
-        r = _rank_chain(u, y, alpha)
+        r = ranks(u, y)
         return (r < cloud_fraction).astype(jnp.float32)
 
     subcol_keys = jax.random.split(key, n_subcols)
@@ -291,19 +348,26 @@ def column_total_cover(
 def expected_total_cover(
     cloud_fraction: jnp.ndarray,
     layer_thickness: jnp.ndarray,
-    overlap: _OverlapRule = "exponential",
+    overlap: _OverlapRule = "maximum_random",
     decorrelation_km: float = 2.0,
 ) -> jnp.ndarray:
     """Closed-form expectation of the sub-column total cloud cover.
 
     The diagnostic counterpart of :func:`generate_subcolumns`: the EXACT
     expectation of the total cover under the rank chain that
-    ``per_subcol`` samples, with the SAME per-interface correlations
-    ``_alpha_from_overlap`` produces for the configured rule — so a scheme
-    that cannot afford sub-column draws (the NN emulator) publishes the
-    cover the McICA sampler reports in expectation, for any rule.
+    ``per_subcol`` samples for the configured rule — so a scheme that
+    cannot afford sub-column draws (the NN emulator) publishes the cover the
+    McICA sampler reports in expectation, for any rule.
 
-    The chain inherits the previous rank with probability ``a_k`` and
+    Under maximum-random that is ECHAM's ``cld_cvr`` (``mo_radiation.f90``
+    l.436-442), the adjacent-layer Geleyn-Hollingsworth product
+    ``1 − (1 − c_1)·Π_k (1 − max(c_k, c_{k−1}))/(1 − min(c_{k−1}, 1 − ε))``:
+    once a sub-column is clear in a level its next rank is a fresh draw in
+    that level's clear part, so the probability of staying clear one level
+    up depends on the two covers alone, ``(1 − max)/(1 − c_below)``, and the
+    product over the column is the same read from the top or the bottom.
+
+    For random and exponential overlap the chain inherits the previous rank with probability ``a_k`` and
     refreshes it otherwise, so a column partitions into rank *segments*
     sharing one uniform; a segment spanning layers ``s..k`` is clear with
     probability ``1 - max(cf_s..cf_k)``. Conditioning on the start of the
@@ -316,14 +380,19 @@ def expected_total_cover(
     expectation: an inherited rank keeps its history across several
     interfaces, and the pairwise form can overstate cover by several
     points on three-layer profiles (PR #730 review). At a = 0 this reduces
-    to the random product, and under maximum_random's bank-structured a
-    (1 within a cloud bank, 0 across clear) to the classic max-random
-    product.
+    to the random product.
 
     Unlike :func:`column_total_cover` (the grey beam-split's deliberate
     ``max`` approximation), this is for DIAGNOSTIC output (CMIP ``clt``).
     """
     cf = jnp.clip(cloud_fraction, 0.0, 1.0)
+    if overlap == "maximum_random":
+        # ECHAM bounds the divisor with 1 - EPSILON; a level with cover 1
+        # makes every sub-column cloudy, and its numerator is then 0.
+        eps = jnp.finfo(cf.dtype).eps
+        stay_clear = ((1.0 - jnp.maximum(cf[1:], cf[:-1]))
+                      / (1.0 - jnp.minimum(cf[:-1], 1.0 - eps)))
+        return 1.0 - (1.0 - cf[0]) * jnp.prod(stay_clear, axis=0)
     alpha = _alpha_from_overlap(cf, layer_thickness, overlap, decorrelation_km)
     nlev = cf.shape[0]
     if nlev == 1:

@@ -169,6 +169,38 @@ class TestEffectiveTimeStepResolution(unittest.TestCase):
                 model = self._build_pyses_with_mocks(_compose(overrides))
                 self.assertNotIn("time_step", model.call_args.kwargs)
 
+    def test_pyses_builds_the_model_physics_with_the_dycore_grid(self):
+        """Both Hydra doors give the physics the grid the model runs on.
+
+        The dycore needs the physics' tracer declarations, so the physics is
+        built once without the grid for those, and the physics the model runs
+        is built with ``dycore.coords``.
+        """
+        from jcm.runners import _build_pyses_model
+
+        cfg = _compose(["dycore=pyses_ne30l47"])
+        first = mock.MagicMock()
+        first.required_tracers.return_value = ()
+        on_grid = mock.MagicMock()
+        dycore = mock.MagicMock()
+        dycore.dt_seconds = 900.0
+        with mock.patch("jcm.runners.build_physics",
+                        side_effect=[first, on_grid]) as build, \
+                mock.patch("jcm.dycore.pyses.PysesCamSEDycore",
+                           return_value=dycore), \
+                mock.patch("jcm.runners._pyses_lid_sponge_term"), \
+                mock.patch("jcm.runners.Model") as model:
+            _build_pyses_model(cfg)
+        self.assertEqual(build.call_count, 2)
+        self.assertEqual(build.call_args_list[0].args, (cfg,))
+        self.assertEqual(build.call_args_list[1].args, (cfg, dycore.coords))
+        # The model runs the grid-built physics (plus the lid sponge), never
+        # the tracer-declaration build.
+        on_grid.__add__.assert_called_once()
+        first.__add__.assert_not_called()
+        self.assertIs(model.call_args.kwargs["physics"],
+                      on_grid.__add__.return_value)
+
     def test_pyses_warns_when_the_runner_value_disagrees(self):
         """A conflicting value is ignored loudly, not silently."""
         cfg = _compose(["dycore=pyses_ne30l47", "run.time_step=30"])

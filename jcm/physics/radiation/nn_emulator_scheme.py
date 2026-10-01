@@ -254,11 +254,15 @@ def radiation_scheme_emulated(
         toa_lw_up_clear=lw_flux_up_clear[0],
         # No sub-column machinery here, so column cover is the analytic
         # EXPECTATION of the McICA draw at the CONFIGURED overlap rule
-        # (default exponential + decorrelation length — the same
-        # parameters RRTMGP hands generate_subcolumns, so swapping the
-        # radiation backend does not move clt). Publishing the old
-        # placeholder 0 fed aerocom_cmor's clt a clear sky under full
-        # cloud (PR #730 review, both rounds).
+        # (default maximum-random — the same parameters RRTMGP hands
+        # generate_subcolumns, so swapping the radiation backend does not
+        # move clt). Publishing the old placeholder 0 fed aerocom_cmor's
+        # clt a clear sky under full cloud (PR #730 review, both rounds).
+        # The network's fluxes carry the overlap of its training labels
+        # instead: the shipped weights were trained on RRTMGP run with
+        # exponential overlap at 2 km, so under the maximum-random default
+        # this cover and the fluxes describe different overlaps until the
+        # emulator is retrained (#881).
         total_cloud_cover=jnp.broadcast_to(
             expected_total_cover(
                 cloud_fraction, layer_thickness,

@@ -29,6 +29,22 @@ transported. The **pySES** backend instead carries every declared tracer as a
 pySES passive tracer in physical units — advected and vertically remapped by
 the spectral-element dynamics itself (with sub-cycling for the tracer CFL) —
 so transport differs between the backends by construction.
+
+**The post-physics state.** ``DynamicalCore.after_physics_state`` returns the
+gridpoint state the dynamics starts from, after the physics tendency is
+applied: the dinosaur backend's ``state + dt·T(P)`` with its own spectral
+projection ``T``, the pySES backend's lumped forcing add gathered back to the
+pg2 columns, and ``x + dt·P`` for a backend that adds on the physics grid (the
+protocol default). The model carries it one step for the tendency-driven cloud
+schemes, whose dynamics increment is the next state minus it (see
+{doc}`operator_splitting`). Because ``T(P) ≠ P`` for the modal fields, the
+difference from ``x + dt·P`` is the part of the physics tendency the
+truncation drops. In a spun-up T63L47 2M run that is 6.0–6.4 K/day rms in
+temperature and 2.0–2.1 g/kg/day in humidity, against 7.6–7.7 K/day and
+0.9–1.1 g/kg/day of true dynamics: a humidity increment reconstructed from
+``x + dt·P`` would be dominated by it, and a temperature increment would be
+of the same order as the dynamics.
+
 **Moist coupling and the mass mixing-ratio contract.** On hybrid coordinates the
 dynamics is moist: the virtual temperature is
 
@@ -121,7 +137,7 @@ rely on.
 
 **Code pointers.**
 - ``jcm/dycore/base.py`` — ``DynamicalCore`` protocol (``initial_state``,
-  ``step``, ``to_physics_state``, ``Predictions``).
+  ``step``, ``to_physics_state``, ``after_physics_state``, ``Predictions``).
 - ``jcm/dycore/dinosaur/dycore.py`` — ``DinosaurDycore``,
   ``semi_lagrangian_available`` / ``_require_semi_lagrangian``,
   ``resolve_advection`` (transport selection), transport

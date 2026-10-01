@@ -107,7 +107,8 @@ def _column(ncols=None):
     )
 
 
-def _run(band_mode="per_band", specific_humidity=None, weights=None):
+def _run(band_mode="per_band", specific_humidity=None, weights=None,
+         parameters=None):
     """Drive the scheme on a single column."""
     col = _column()
     if specific_humidity is not None:
@@ -116,6 +117,8 @@ def _run(band_mode="per_band", specific_humidity=None, weights=None):
     n_lw = n_input_features(band_mode, N_BND_LW)
     if weights is None:
         weights = init_emulator_weights(sw_features=n_sw, lw_features=n_lw)
+    if parameters is None:
+        parameters = RadiationParameters.default()
     return radiation_scheme_emulated(
         col["temperature"], col["specific_humidity"],
         col["pressure_levels"], col["pressure_interfaces"],
@@ -123,7 +126,7 @@ def _run(band_mode="per_band", specific_humidity=None, weights=None):
         col["cloud_water"], col["cloud_ice"], col["cloud_fraction"],
         col["surface_temperature"], col["surface_albedo_vis"],
         col["surface_albedo_nir"], col["surface_emissivity"],
-        _solar(), 0.0, 0.0, RadiationParameters.default(), _aerosol(),
+        _solar(), 0.0, 0.0, parameters, _aerosol(),
         col["ozone_vmr"], 400e-6, weights, None, None, band_mode,
         col["r_eff_liq_um"], col["r_eff_ice_um"],
     )
@@ -324,18 +327,29 @@ class TotalCloudCoverTest(unittest.TestCase):
 
     def test_scheme_publishes_the_derived_cover(self):
         _, diag = _run()
-        # The fixture is 50% cover at every level with 500 m layers and the
-        # default exponential overlap (L = 2 km): cover sits strictly
-        # between the maximum (0.5) and random (1 - 0.5^47) limits.
+        # The fixture is 50% cover at every level, one contiguous bank, so
+        # under the default maximum-random overlap the cover is the bank's
+        # maximum, 0.5.
         got = float(diag.total_cloud_cover)
-        self.assertGreater(got, 0.5)
-        self.assertLess(got, 1.0 - 0.5 ** NLEV + 1e-6)
+        self.assertAlmostEqual(got, 0.5, places=5)
         # And matches the shared closed form for the same configuration.
         from jcm.physics.radiation.mcica import expected_total_cover
         want = float(expected_total_cover(
             jnp.full((NLEV,), 0.5), jnp.full((NLEV,), 500.0),
-            "exponential", 2.0))
+            "maximum_random", 2.0))
         self.assertAlmostEqual(got, want, places=5)
+
+    def test_scheme_publishes_the_configured_rule(self):
+        """The cover follows ``cloud_overlap``: exponential sits above 0.5."""
+        from jcm.physics.radiation.radiation_types import (
+            CLOUD_OVERLAP_EXPONENTIAL)
+        _, diag = _run(parameters=RadiationParameters.default(
+            cloud_overlap=CLOUD_OVERLAP_EXPONENTIAL))
+        got = float(diag.total_cloud_cover)
+        # 500 m layers against a 2 km decorrelation length: strictly between
+        # the maximum (0.5) and random (1 - 0.5^nlev) limits.
+        self.assertGreater(got, 0.5)
+        self.assertLess(got, 1.0 - 0.5 ** NLEV + 1e-6)
 
 
 class NegativeHumidityTest(unittest.TestCase):

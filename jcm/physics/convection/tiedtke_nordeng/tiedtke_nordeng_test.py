@@ -909,9 +909,17 @@ def test_detrainment_from_a_previous_step_never_survives_into_this_one():
     fields, so between it and convection they read zero, and convection
     then writes this step's values — never the carried ones.
     """
+    from dinosaur.sigma_coordinates import SigmaCoordinates
+
     from jcm.physics.clouds.sundqvist import SundqvistCloudFraction
+    from jcm.utils import get_coords
 
     nlev, ncols = 16, 1
+    cover = SundqvistCloudFraction()
+    # The cover needs its inversion-search levels from a grid with the
+    # column's level count; which levels they are does not matter here.
+    cover.cache_coords(
+        get_coords(SigmaCoordinates.equidistant(nlev), spectral_truncation=63))
     stale = CloudData.zeros((ncols,), nlev).copy(
         conv_detrainment_qc=jnp.full((nlev, ncols), 1.0e-3),
         conv_detrainment_qi=jnp.full((nlev, ncols), 2.0e-3),
@@ -920,8 +928,7 @@ def test_detrainment_from_a_previous_step_never_survives_into_this_one():
     diagnostics["surface_pressure"] = jnp.full((ncols,), 1.0e5)
     forcing = SimpleNamespace(sice_am=None)
 
-    _, after_cover = SundqvistCloudFraction()(
-        state, diagnostics, forcing, terrain)
+    _, after_cover = cover(state, diagnostics, forcing, terrain)
     np.testing.assert_array_equal(
         np.asarray(after_cover["clouds"].conv_detrainment_qc), 0.0)
     np.testing.assert_array_equal(

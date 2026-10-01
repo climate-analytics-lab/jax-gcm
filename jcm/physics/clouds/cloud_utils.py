@@ -41,6 +41,59 @@ def latent_heat_over_cp(
     return c.alhc * inv_cp, c.alhs * inv_cp
 
 
+def sundqvist_condensation(
+    humidity_increment, saturation_increment, cloud_fraction,
+    ice_in_cloud, liquid_in_cloud, provisional_humidity, ice_weight,
+    qsec, epsec,
+):
+    """ECHAM's section-5 condensation in the cloudy part, split by phase.
+
+    Both ECHAM cloud schemes close the cloudy part of the cell at saturation
+    and condense the part of the step's humidity increment that the
+    saturation humidity does not absorb (``mo_cloud.f90`` lines 726-750 for
+    the 1M scheme, ``mo_cloud_micro_2m.f90`` lines 1431-1466 for the 2M):
+
+        zqcdif = (ztmst·pqte − zdqsat)·paclc
+        zqcdif = min(max(zqcdif, −(zxib + zxlb)·paclc), qsec·zqp1)
+
+    The two schemes differ only in how ``zdqsat`` is built from the
+    temperature increment, which each computes itself and passes in. A
+    negative ``zqcdif`` dissipates both phases in proportion to the in-cloud
+    ice fraction ``zifrac = clip(zxib/max(epsec, zxib + zxlb), 0, 1)``; a
+    positive one deposits (``lo2``) or condenses (not ``lo2``).
+
+    ``ice_weight`` is ``lo2`` as a number, 1 for ice and 0 for liquid. The
+    growth branch is ``ice_weight·zqcdif`` and ``(1 − ice_weight)·zqcdif``,
+    which for a weight of exactly 0 or 1 is ECHAM's selection bit for bit and
+    lets a caller give the weight a surrogate derivative.
+
+    Args:
+        humidity_increment: ``ztmst·pqte`` [kg/kg].
+        saturation_increment: ``zdqsat`` [kg/kg].
+        cloud_fraction: ``paclc`` / ``zclcaux``.
+        ice_in_cloud, liquid_in_cloud: ``zxib``, ``zxlb`` (non-negative).
+        provisional_humidity: ``zqp1`` [kg/kg].
+        ice_weight: ``lo2`` as 0/1 (or a float weight equal to it).
+        qsec: ECHAM ``qsec = 1 − cqtmin``.
+        epsec: ECHAM ``epsec`` (1e-12).
+
+    Returns:
+        ``(zqcdif, zcnd, zdep)`` [kg/kg].
+
+    """
+    total_in_cloud = ice_in_cloud + liquid_in_cloud
+    zqcdif = (humidity_increment - saturation_increment) * cloud_fraction
+    zqcdif = jnp.clip(zqcdif, -total_in_cloud * cloud_fraction,
+                      qsec * provisional_humidity)
+    dissipation = zqcdif < 0.0
+    zifrac = jnp.clip(ice_in_cloud / jnp.maximum(total_in_cloud, epsec),
+                      0.0, 1.0)
+    zcnd = jnp.where(dissipation, zqcdif * (1.0 - zifrac),
+                     (1.0 - ice_weight) * zqcdif)
+    zdep = jnp.where(dissipation, zqcdif * zifrac, ice_weight * zqcdif)
+    return zqcdif, zcnd, zdep
+
+
 def eff_ice_crystal_radius(
     pxice: jnp.ndarray, picnc: jnp.ndarray, params: CloudParams2M,
 ) -> jnp.ndarray:
@@ -542,15 +595,18 @@ def prescribed_droplet_number(
     :func:`continental_columns` mask) times the MACv2-SP Twomey factor
     ``cdnc_factor``. ECHAM passes one ``acdnc`` to both its radiation
     (``mo_cloud_optics.f90``) and its 1M cloud scheme (``mo_cloud.f90``,
-    ``pacdnc``), so this is the one call both jcm consumers make:
-    ``Echam1MMicrophysics`` and the radiation's
-    ``cloud_optics.radiation_effective_radii``.
+    ``pacdnc``). The radiation's ``cloud_optics.radiation_effective_radii``
+    calls this with the MACv2-SP factor. ``Echam1MMicrophysics`` calls it
+    twice: with a factor of 1 for ECHAM's ``pacdnc``, which its Bigg and
+    contact freezing (section 6.2) read, and with the MACv2-SP factor for
+    the autoconversion (``autoconversion_twomey``, on by default) and the
+    published ``clouds.droplet_number``.
 
-    The Twomey factor reaches both. In MPI-ESM1.2 it scales the radiation's
-    droplet number only and leaves the cloud microphysics' unperturbed
-    (Mauritsen et al. 2019, JAMES, section 2.2); the extra path through the
-    1M autoconversion is jcm's existing aerosol-cloud formulation, recorded
-    in #932 and kept as it is for v3.0.
+    In MPI-ESM1.2 the Twomey factor scales the radiation's droplet number
+    only and leaves the cloud microphysics' unperturbed (Mauritsen et al.
+    2019, JAMES, section 2.2). Its reaching the 1M autoconversion is jcm's
+    aerosol-cloud formulation, the maintainer's decision recorded in #932;
+    the freezing keeps ECHAM's unscaled number.
 
     Args:
         pressure: full-level pressure [Pa], ``(nlev, *horiz)``.

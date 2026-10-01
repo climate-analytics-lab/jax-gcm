@@ -31,6 +31,7 @@ from flax import nnx
 from jcm import profiling
 from jcm.physics_interface import (
     OUTPUT_ARRAY_TYPES,
+    POST_PHYSICS_STATE_KEY,
     Physics,
     PhysicsState,
     PhysicsTendency,
@@ -163,6 +164,17 @@ class ComposablePhysics(nnx.Module, Physics):
         # ``None`` means "single device" — the constraints become no-ops.
         self._column_state_sharding: NamedSharding | None = None
         self._column_surface_sharding: NamedSharding | None = None
+        # Union of the terms' ``requires_post_physics_fields``, in first-
+        # declared order. Decided here, from the composition, so a package
+        # none of whose terms reads the previous step's post-physics state
+        # (SPEEDY, Held-Suarez, the idealised stacks) carries no slot and
+        # the host does no extra work for it.
+        post_fields: list[str] = []
+        for t in terms:
+            for name in getattr(t, "requires_post_physics_fields", ()):
+                if name not in post_fields:
+                    post_fields.append(name)
+        self._post_physics_fields = tuple(post_fields)
         self._validate_ordering()
 
     # ------------------------------------------------------------------
@@ -236,6 +248,87 @@ class ComposablePhysics(nnx.Module, Physics):
                     needed.append(field)
             available.update(term.provides)
         return tuple(needed)
+
+    def post_physics_fields(self) -> tuple[str, ...]:
+        """Return the post-physics fields the composed terms read one step later.
+
+        Temperature and humidity as named, plus the declared names that are
+        tracers of this composition (a name that is neither is ignored).
+        Empty means no ``_post_physics_state`` slot.
+        """
+        declared = {spec.name for spec in self.required_tracers()}
+        return tuple(
+            name for name in self._post_physics_fields
+            if name in ("temperature", "specific_humidity") or name in declared
+        )
+
+    def _slot_names(self) -> tuple[str, ...]:
+        """Fields the slot stores: temperature and humidity always, then the tracers.
+
+        Temperature and humidity are kept even when no term names them so the
+        slot has one fixed structure whatever the declaration.
+        """
+        return tuple(dict.fromkeys(
+            ("temperature", "specific_humidity") + self.post_physics_fields()))
+
+    def _post_physics_slot(self, fields: dict, valid) -> dict:
+        """Assemble the ``_post_physics_state`` slot from per-field arrays."""
+        tracers = {
+            name: value for name, value in fields.items()
+            if name not in ("temperature", "specific_humidity")
+        }
+        return {
+            "temperature": fields["temperature"],
+            "specific_humidity": fields["specific_humidity"],
+            "tracers": tracers,
+            "valid": valid,
+        }
+
+    def _empty_post_physics_slot(self, like: jnp.ndarray) -> dict:
+        """Build an invalid (``valid = 0``) slot shaped like ``like`` (nlev, *horiz)."""
+        fields = {name: jnp.zeros_like(like) for name in self._slot_names()}
+        return self._post_physics_slot(
+            fields, jnp.zeros((), dtype=like.dtype))
+
+    def record_post_physics_state(self, physics_data, post_physics_state):
+        """Write the step's post-physics state into the carry, flagged valid.
+
+        ``post_physics_state`` is the dycore's gridpoint
+        :class:`~jcm.physics_interface.PhysicsState` after the physics
+        tendency and before the dynamics
+        (:meth:`jcm.dycore.base.DynamicalCore.after_physics_state`). It is
+        stored in the layout the terms see — flattened ``(nlev, ncols)``
+        columns on the ``vectorize_columns`` path, the grid otherwise — at
+        the carry's working dtype.
+        """
+        names = self.post_physics_fields()
+        if not names or not isinstance(physics_data, dict):
+            return physics_data
+        slot_prev = physics_data.get(POST_PHYSICS_STATE_KEY)
+        dtype = (slot_prev["temperature"].dtype if slot_prev is not None
+                 else post_physics_state.temperature.dtype)
+
+        def pick(name):
+            if name == "temperature":
+                return post_physics_state.temperature
+            if name == "specific_humidity":
+                return post_physics_state.specific_humidity
+            return post_physics_state.tracers[name]
+
+        def layout(field):
+            if self.vectorize_columns:
+                nlev = field.shape[0]
+                field = field.reshape(nlev, -1)
+            return field.astype(dtype)
+
+        fields = {name: layout(pick(name)) for name in self._slot_names()}
+        if self.vectorize_columns:
+            # Same column sharding as the state the terms receive, so the
+            # carried anchor and x_n are laid out alike (no-op on one device).
+            fields = _shard_columns(fields, self._column_state_sharding,
+                                    self._column_surface_sharding)
+        slot = self._post_physics_slot(fields, jnp.ones((), dtype=dtype))
+        return {**physics_data, POST_PHYSICS_STATE_KEY: slot}
 
     def stable_time_step_minutes(self, coords) -> float | None:
         """Most restrictive per-term stable time step (minutes), or ``None``.
@@ -400,6 +493,8 @@ class ComposablePhysics(nnx.Module, Physics):
             "specific_humidity": state.specific_humidity,
             "q_tendency": tendencies.specific_humidity,
         }
+        diagnostics = self._ensure_post_physics_slot(
+            diagnostics, state.temperature)
 
         return tendencies, self._drop_step_local(diagnostics)
 
@@ -533,7 +628,24 @@ class ComposablePhysics(nnx.Module, Physics):
             self._column_surface_sharding,
         )
         tendencies = _reshape_tendencies_to_3d(acc, nlev, nlat, nlon)
+        diagnostics = self._ensure_post_physics_slot(
+            diagnostics, vectorized_state.temperature)
         return tendencies, self._drop_step_local(diagnostics)
+
+    def _ensure_post_physics_slot(self, diagnostics: dict, like) -> dict:
+        """Give the diagnostics an invalid post-physics slot where none rides in.
+
+        On a live step the previous carry's slot passes through the term loop
+        untouched and ``Model`` overwrites it after the physics. Where nothing
+        rode in — the construction-time structural probe
+        (:meth:`get_empty_data`), a host that calls without a carry — an
+        invalid zero slot keeps the output structure the same as the carry's,
+        which the ``lax.scan`` carry and the averaging accumulator require.
+        """
+        if not self.post_physics_fields() or POST_PHYSICS_STATE_KEY in diagnostics:
+            return diagnostics
+        return {**diagnostics,
+                POST_PHYSICS_STATE_KEY: self._empty_post_physics_slot(like)}
 
     def get_empty_data(self, coords) -> dict[str, jnp.ndarray]:
         """Return a zero-filled template of the per-step diagnostics dict.
@@ -657,6 +769,13 @@ class ComposablePhysics(nnx.Module, Physics):
                     "Namespace per-term keys (e.g. ``_radiation``, ``_clouds``)."
                 )
             carry.update(slot)
+        if self.post_physics_fields():
+            nodal_shape = coords.horizontal.nodal_shape
+            nlev = coords.nodal_shape[0]
+            shape = ((nlev, nodal_shape[0] * nodal_shape[1])
+                     if self.vectorize_columns else (nlev,) + tuple(nodal_shape))
+            carry[POST_PHYSICS_STATE_KEY] = self._empty_post_physics_slot(
+                jnp.zeros(shape))
         return carry
 
     # Underscore-prefixed keys that are pure plumbing (timestep, sliced
@@ -720,6 +839,9 @@ class ComposablePhysics(nnx.Module, Physics):
         # Cross-step (q, dq/dt) handoff for the lagged dynamics-tendency
         # reconstruction (#699) — carry plumbing, not an output field.
         "_prev_step",
+        # The previous step's post-physics state, the cloud schemes' anchor
+        # (``physics_interface.POST_PHYSICS_STATE_KEY``) — carry plumbing.
+        POST_PHYSICS_STATE_KEY,
         # Cross-step per-species mass expectation for the #713 budget
         # gauge — carry plumbing, not an output field.
         "_budget_expected",

@@ -22,6 +22,7 @@ from jcm.forcing import ForcingData
 from jcm.physics import thermodynamics
 from jcm.physics.aerosol.spa import spa_activated_cdnc
 from jcm.physics.clouds.cloud_data import CLOUD_OUTPUT_ATTRS
+from jcm.physics.clouds.cloud_inputs import cloud_scheme_inputs
 from jcm.physics.diagnostics.moist_air_state import advance_thermo_run
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -36,6 +37,7 @@ from ..cloud_utils import (
     ice_volume_mean_radius_schumann,
     latent_heat_over_cp,
     minimum_CDNC,
+    sundqvist_condensation,
     threshold_vert_vel,
     turbulent_updraft_velocity,
 )
@@ -70,13 +72,13 @@ from .assembly import (
 
 
 def cloud_microphysics_2m(
-    temperature: jnp.ndarray,       # (nlev,)  K      post-upstream provisional T
-    specific_humidity: jnp.ndarray, # (nlev,)  kg/kg  post-upstream provisional q
-    pressure: jnp.ndarray,          # (nlev,)  Pa
-    qc: jnp.ndarray,                # (nlev,)  kg/kg post-upstream cloud liquid
-    qi: jnp.ndarray,                # (nlev,)  kg/kg post-upstream cloud ice
-    qnc: jnp.ndarray,               # (nlev,)  kg^-1 cloud droplet number per kg of air
-    qni: jnp.ndarray,               # (nlev,)  kg^-1 ice crystal number per kg of air
+    temperature_m1: jnp.ndarray,       # (nlev,)  K      anchor T (ECHAM ptm1)
+    specific_humidity_m1: jnp.ndarray, # (nlev,)  kg/kg  anchor q (ECHAM pqm1)
+    pressure: jnp.ndarray,             # (nlev,)  Pa
+    qc_m1: jnp.ndarray,                # (nlev,)  kg/kg  anchor cloud liquid (ECHAM pxlm1)
+    qi_m1: jnp.ndarray,                # (nlev,)  kg/kg  anchor cloud ice (ECHAM pxim1)
+    qnc_m1: jnp.ndarray,               # (nlev,)  kg^-1  anchor droplet number per kg of air
+    qni_m1: jnp.ndarray,               # (nlev,)  kg^-1  anchor crystal number per kg of air
     cloud_fraction: jnp.ndarray,    # (nlev,)  [0,1]
     air_density: jnp.ndarray,       # (nlev,)  kg/m^3
     layer_thickness: jnp.ndarray,   # (nlev,)  m   (dz, full-level layer depths)
@@ -86,12 +88,14 @@ def cloud_microphysics_2m(
     ice_nuclei_deposition: jnp.ndarray,  # (nlev,) 1/m³  deposition INP (pnicex; read only at nic_cirrus=2)
     dt: jnp.ndarray,                # scalar   seconds
     params: CloudParams2M,          # tunable parameters
-    temperature_m1: jnp.ndarray | None = None,        # (nlev,) K   step-start T (ECHAM ptm1)
-    specific_humidity_m1: jnp.ndarray | None = None,  # (nlev,)     step-start q (ECHAM pqm1)
-    qc_m1: jnp.ndarray | None = None,                 # (nlev,)     step-start qc (ECHAM pxlm1)
-    qi_m1: jnp.ndarray | None = None,                 # (nlev,)     step-start qi (ECHAM pxim1)
-    detrained_qc: jnp.ndarray | None = None,  # (nlev,) kg/kg per step: liquid detrainment (ECHAM ztmst·pxtecl)
-    detrained_qi: jnp.ndarray | None = None,  # (nlev,) kg/kg per step: ice detrainment (ECHAM ztmst·pxteci)
+    temperature_increment: jnp.ndarray | None = None,  # (nlev,) K      ztmst·ptte
+    humidity_increment: jnp.ndarray | None = None,     # (nlev,) kg/kg  ztmst·pqte
+    qc_increment: jnp.ndarray | None = None,           # (nlev,) kg/kg  ztmst·pxlte
+    qi_increment: jnp.ndarray | None = None,           # (nlev,) kg/kg  ztmst·pxite
+    qnc_increment: jnp.ndarray | None = None,          # (nlev,) kg^-1  ztmst·pxtte(cdnc)
+    qni_increment: jnp.ndarray | None = None,          # (nlev,) kg^-1  ztmst·pxtte(icnc)
+    detrained_qc: jnp.ndarray | None = None,           # (nlev,) kg/kg  ztmst·pxtecl
+    detrained_qi: jnp.ndarray | None = None,           # (nlev,) kg/kg  ztmst·pxteci
     freezing_aerosol: HeterogeneousFreezingAerosol | None = None,  # (nlev,) leaves: HAM freezing inputs
 ) -> tuple[
     MicrophysicsTendencies_2M,      # per-level tendencies
@@ -169,69 +173,78 @@ def cloud_microphysics_2m(
     algebra with no cross-level coupling, so it runs vectorized after the
     sweep on the stacked per-level outputs.
 
-    State-splitting convention (operator-split host vs ECHAM leapfrog):
-    the primary ``temperature``/``specific_humidity``/``qc``/``qi`` are
-    the POST-UPSTREAM provisional state (ECHAM ``ptm1 + ztmst·ptte``
-    etc.), which is what the returned tendencies are relative to; ``qc``
-    and ``qi`` include this step's convective detrainment. The optional
-    ``*_m1`` arguments are the step-start state (ECHAM ``ptm1``/``pqm1``/
-    ``pxlm1``/``pxim1``): saturation anchors evaluate there, and the
-    differences ``(x - x_m1)`` — less the detrained condensate for ``qc``
-    and ``qi`` — play the role of ECHAM's accumulated tendencies
-    ``ztmst·ptte``/``ztmst·pqte``/``ztmst·pxlte``/``ztmst·pxite`` in the
-    condensation closure, the clear-sky-evaporation split and (for ice)
-    the sedimentation input.
+    Inputs, in ECHAM's terms (``ztmst = dt``; ``cloud_micro_interface``
+    receives the same set, ``physc.f90:1073-1081``):
 
-    What those increments hold in the composed ECHAM stack
-    (``echam_physics``) differs by variable. ``temperature`` and
-    ``specific_humidity`` come from the running thermodynamic view
-    ``thermo_run``, so ``dT``/``dq`` carry this step's vertical-diffusion
-    and convection increments. ``qc``/``qi`` come from ``clouds.qc/qi``,
-    which ``SundqvistCloudFraction`` snapshots from ``thermo_run`` AHEAD of
-    vertical diffusion (the factory composes the cover term before
-    ``TteTkeVerticalDiffusion``); vertical diffusion advances only
-    ``thermo_run``, never ``clouds``, and after it only the convection term
-    adds to ``clouds.qc/qi`` — its detrainment. The pure condensate
-    increments are therefore zero in that stack (up to the convection
-    term's clip of ``clouds.qc/qi`` at zero, which leaves them positive
-    where the step-start tracer is negative): vertical diffusion's
-    condensate increment never reaches the scheme, and the sedimentation
-    input is the step-start ice ``qi_m1``. The dynamics and radiation
-    increments ECHAM also accumulates in its tendencies reach none of the
-    four. #940 rewires the stack to supply the condensate, dynamics and
-    radiation increments. When omitted, the ``*_m1`` arguments default to
-    the provisional state less the detrained condensate (zero upstream
-    increments), which reduces section 5 to a pure saturation adjustment.
+    - the anchor state ``temperature_m1``, ``specific_humidity_m1``,
+      ``qc_m1``, ``qi_m1``, ``qnc_m1``, ``qni_m1`` — ECHAM's ``ptm1``,
+      ``pqm1``, ``pxlm1``, ``pxim1`` and ``pxtm1`` of the number tracers.
+      Saturation, the step-start subsaturations, the moist heat capacity and
+      every other quantity ECHAM evaluates at the previous time level are
+      evaluated here;
+    - the increments ``*_increment`` — ECHAM's ``ztmst·ptte``,
+      ``ztmst·pqte``, ``ztmst·pxlte``, ``ztmst·pxite``, ``ztmst·pxtte``:
+      everything that changed the state since the anchor (the dynamics and
+      every physics process upstream of the cloud scheme), EXCLUDING
+      convective detrainment. Omitted increments are zero;
+    - ``detrained_qc``, ``detrained_qi`` — ECHAM's ``ztmst·pxtecl``,
+      ``ztmst·pxteci``: the liquid and ice parts of this step's convective
+      detrainment, as mass per step, kept apart from the increments.
+      Omitted is zero. ECHAM's 2M uses only their sum ``zxtec`` (the
+      boundary condition 'Detrained condensate', 555-570): it is not
+      sedimented this step, it brings its own crystal number ``znidetr``
+      where ECHAM's ``ll_cv`` holds, and the section-4 ``lo2`` criterion
+      re-splits it into ice and liquid.
 
-    Convective detrainment arrives separately as ``detrained_qc`` /
-    ``detrained_qi`` [kg/kg per step], the liquid and ice parts of the
-    condensate the convection scheme added to ``qc``/``qi`` this step
-    (ECHAM ``ztmst·pxtecl``/``ztmst·pxteci``; default zero). ECHAM's 2M
-    uses only their sum ``zxtec`` (the boundary condition 'Detrained
-    condensate', 555-570): it is not sedimented this step, it brings its
-    own crystal number ``znidetr`` where ECHAM's ``ll_cv`` holds, and the
-    section-4 ``lo2`` criterion re-splits it into ice and liquid.
+    The provisional state the returned tendencies are relative to is formed
+    here as ``anchor + increment`` (``anchor + (increment + detrained)`` for
+    the condensate, as convection split it), the same expression
+    :func:`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs` uses, so the
+    term's and the column's provisional state agree to the bit. With every
+    increment omitted the provisional state is the anchor, and section 5
+    reduces to a pure saturation adjustment.
 
     The large-scale vertical velocity is not plumbed to this scheme yet:
     ECHAM's ``zvervx`` (updraft for the WBF gate) uses only the TKE term
     here, and the ``knvb``/``lonacc`` inversion-level exception on
-    ``zauloc`` is omitted (it needs ``pvervel``) — listed in #941.
+    ``zauloc`` is omitted (it needs ``pvervel``) — tracked in #705.
 
     qnc / qni are stored per kg of air; the scheme interior uses per-m^3,
     so we convert at the boundary.
     """
-    if temperature_m1 is None:
-        temperature_m1 = temperature
-    if specific_humidity_m1 is None:
-        specific_humidity_m1 = specific_humidity
-    if detrained_qc is None:
-        detrained_qc = jnp.zeros_like(qc)
-    if detrained_qi is None:
-        detrained_qi = jnp.zeros_like(qi)
-    if qc_m1 is None:
-        qc_m1 = qc - detrained_qc
-    if qi_m1 is None:
-        qi_m1 = qi - detrained_qi
+    def _or_zeros(value):
+        return jnp.zeros_like(qc_m1) if value is None else value
+
+    temperature_increment = _or_zeros(temperature_increment)
+    humidity_increment = _or_zeros(humidity_increment)
+    qc_increment = _or_zeros(qc_increment)
+    qi_increment = _or_zeros(qi_increment)
+    qnc_increment = _or_zeros(qnc_increment)
+    qni_increment = _or_zeros(qni_increment)
+    detrained_qc = _or_zeros(detrained_qc)
+    detrained_qi = _or_zeros(detrained_qi)
+
+    # ------------------------------------------------------------------
+    # Upstream increments (ECHAM's accumulated tendencies × ztmst)
+    # ------------------------------------------------------------------
+    dT_up = temperature_increment                 # ztmst·ptte
+    dq_up = humidity_increment                    # ztmst·pqte
+    # The condensate increments EXCLUDE this step's convective detrainment:
+    # ECHAM keeps it out of pxlte/pxite and hands it to the 2M separately as
+    # zxtec (555-570), and the sweep treats it by its own rules (not
+    # sedimented this step, own crystal number, re-split by lo2).
+    dqc_up = qc_increment                         # ztmst·pxlte
+    dqi_up = qi_increment                         # ztmst·pxite
+    zxtec = detrained_qc + detrained_qi           # ztmst·zxtec, both phases
+
+    # Provisional state (ECHAM ptm1 + ztmst·ptte, pxlm1 + ztmst·(pxlte +
+    # pxtecl), ...): what the returned tendencies are relative to. The
+    # condensate carries the detrainment as convection split it.
+    temperature = temperature_m1 + dT_up
+    qc = qc_m1 + (qc_increment + detrained_qc)
+    qi = qi_m1 + (qi_increment + detrained_qi)
+    qnc = qnc_m1 + qnc_increment
+    qni = qni_m1 + qni_increment
 
     eps_dt = jnp.finfo(qc.dtype).eps
     zero = jnp.zeros_like(qc)
@@ -243,19 +256,6 @@ def cloud_microphysics_2m(
     # so the column enthalpy identity closes against ``cp·dT`` (the enthalpy
     # gate uses the same moist cp). #706.
     lvdcp, lsdcp = latent_heat_over_cp(specific_humidity_m1)
-
-    # ------------------------------------------------------------------
-    # Upstream increments (ECHAM's accumulated tendencies × ztmst)
-    # ------------------------------------------------------------------
-    dT_up = temperature - temperature_m1          # ztmst·ptte
-    dq_up = specific_humidity - specific_humidity_m1  # ztmst·pqte
-    # The condensate increments EXCLUDE this step's convective detrainment:
-    # ECHAM keeps it out of pxlte/pxite and hands it to the 2M separately as
-    # zxtec (555-570), and the sweep treats it by its own rules (not
-    # sedimented this step, own crystal number, re-split by lo2).
-    dqc_up = (qc - qc_m1) - detrained_qc          # ztmst·pxlte
-    dqi_up = (qi - qi_m1) - detrained_qi          # ztmst·pxite
-    zxtec = detrained_qc + detrained_qi           # ztmst·zxtec, both phases
 
     # ------------------------------------------------------------------
     # Entry floor on the number tracers
@@ -286,12 +286,14 @@ def cloud_microphysics_2m(
     # source into ice-free cells.
     #
     # The floor shapes only the WORKING numbers. The number tendencies are
-    # taken against the RAW step-start tracers, as ECHAM passes
-    # pxtm1(:,jk,idt_cdnc/idt_icnc) unfloored to
-    # update_tendencies_and_important_vars (1781) and forms
-    # pxtte = (n/ρ − pxtm1)/ztmst (3625-3628): the end-of-step tracer is
-    # then exactly the scheme's number, so an out-of-range raw value is
-    # removed within the step instead of being carried and re-floored.
+    # taken against the RAW provisional tracers (anchor + increment,
+    # unfloored), the state the host adds them to. ECHAM passes the unfloored
+    # pxtm1(:,jk,idt_cdnc/idt_icnc) to update_tendencies_and_important_vars
+    # (1781) and replaces its tendency with pxtte = (n/ρ − pxtm1)/ztmst
+    # (3625-3628); for jcm's additive host the same end state is reached from
+    # the provisional tracer. The end-of-step tracer is then exactly the
+    # scheme's number, so an out-of-range raw value is removed within the
+    # step instead of being carried and re-floored.
     qnc_raw = qnc
     qni_raw = qni
     inv_rho = 1.0 / jnp.maximum(air_density, eps_dt)
@@ -403,7 +405,7 @@ def cloud_microphysics_2m(
     #   zvervx = −100·ω/(g·ρ) + 100·fact_tke·sqrt(TKE),
     # with the turbulent term zeroed at the lowest level (line 815). The
     # large-scale term −100·ω/(g·ρ) needs the pressure velocity, which is
-    # not plumbed to this scheme (#941); it is the term to add here.
+    # not plumbed to this scheme (#705); it is the term to add here.
     updraft_velocity = turbulent_updraft_velocity(tke, params)
 
     # ------------------------------------------------------------------
@@ -664,7 +666,6 @@ def cloud_microphysics_2m(
 
         zxib = jnp.maximum(zxib, 0.0)
         zxlb = jnp.maximum(zxlb, 0.0)
-        zxilb = zxib + zxlb
 
         # --- 5. Condensation source zqcdif → zcnd / zdep ---------------
         # The Sundqvist moisture-convergence closure (ECHAM 1389-1470):
@@ -688,27 +689,18 @@ def cloud_microphysics_2m(
                             + lsdcp_k * (sub_k + zxievap + xisub_k)))
         zdqsat = (zdqsat * zdqsdt
                   / (1.0 + cf_k * zlc * zdqsdt))
-        zqcdif = (dq_up_k - zdqsat) * cf_k
-        # Bounds: dissipation limited to the available condensate,
+        # The bounds and the phase split are the 1M scheme's too (shared
+        # helper): dissipation limited to the available condensate,
         # condensation to (almost) the available vapour (ECHAM qsec·zqp1,
-        # qsec = 1 − cqtmin ≈ xsec).
-        zqcdif = jnp.clip(zqcdif, -zxilb * cf_k, params.xsec * zqp1)
-
-        ll_dissip = zqcdif < 0.0
-        zifrac = jnp.clip(zxib / jnp.maximum(zxilb, params.epsec), 0.0, 1.0)
-        frac = jnp.where(ll_dissip, zifrac, 1.0)
-        zcnd0 = jnp.where(ll_dissip, zqcdif * (1.0 - zifrac), 0.0)
+        # qsec = 1 − cqtmin ≈ xsec); in the liquid-growth regime the full
+        # zqcdif condenses (the saturation adjustment of ECHAM #485).
+        _zqcdif, zcnd0, zdep0 = sundqvist_condensation(
+            dq_up_k, zdqsat, cf_k, zxib, zxlb, zqp1,
+            lo2.astype(zqp1.dtype), params.xsec, params.epsec)
         if params.nic_cirrus == 2:
             # ECHAM: zdep = zqinucl·zifrac — the Kärcher-Lohmann
             # nucleated vapour, which jcm does not compute (#552).
             zdep0 = zero_s
-        else:
-            zdep0 = zqcdif * frac
-        ll_growth_liq = jnp.logical_and(~ll_dissip, ~lo2)
-        zdep0 = jnp.where(ll_growth_liq, 0.0, zdep0)
-        # Saturation adjustment for water condensation (ECHAM #485): in
-        # the liquid-growth regime the full zqcdif condenses.
-        zcnd0 = jnp.where(ll_growth_liq, zqcdif, zcnd0)
 
         # --- 5.4 Supersaturation corrections ---------------------------
         (zcnd, zdep, ztp1tmp, zqp1tmp, zqsp1tmp,
@@ -1081,11 +1073,12 @@ def cloud_microphysics_2m(
         # state against ``ccwmin`` (#662 finding 6).
         ice_mmr_prev=qi - detrainment_move,
         liq_mmr_prev=qc + detrainment_move,
-        # ECHAM convention: pxtm1_cdnc / pxtm1_icnc are the step-start
-        # tracer values in per-kg-of-air, RAW (1781; see the entry floor).
-        # The working cdnc/icnc are per-m³, so the tendency subtracts
-        # per-kg from per-m³·1/ρ, and the negative-mass repair removes the
-        # whole number where it zeroes the condensate (3632-3652).
+        # The baseline of the number tendencies: the RAW provisional tracers
+        # per kg of air (anchor + increment; ECHAM's pxtm1 for its
+        # replacing tendency, 1781; see the entry floor). The working
+        # cdnc/icnc are per-m³, so the tendency subtracts per-kg from
+        # per-m³·1/ρ, and the negative-mass repair removes the whole number
+        # where it zeroes the condensate (3632-3652).
         tracer_tm1_cdnc=qnc_raw,
         tracer_tm1_icnc=qni_raw,
         condensation_rate=condensation_rate,
@@ -1150,12 +1143,11 @@ def cloud_microphysics_2m(
     # sets cf = clip(RH, 0.01, 1) wherever a clear cell has any condensation
     # or deposition — is a second, RH-based cloud-cover closure, and
     # ``SundqvistCloudFraction`` is the one this stack uses. Publishing the
-    # raw value substitutes it: an ice-supersaturated stratospheric column
-    # above ``cloud_top_pressure_pa``, which Sundqvist deliberately reports
-    # as cloud-free, comes back overcast (cf = 1) on ~1e-6 kg/kg of ice, and
-    # COSP, AeroCom and the JAM cloud-borne / aqueous / wetdep terms all read
-    # it. Clipping to the incoming cover keeps the emptying behaviour and
-    # drops the closure substitution.
+    # raw value substitutes it: a clear cell (cover exactly 0, below the
+    # critical humidity) with a trace of ice deposition comes back with
+    # cf = clip(RH, 0.01, 1), and COSP, AeroCom and the JAM cloud-borne /
+    # aqueous / wetdep terms all read it. Clipping to the incoming cover
+    # keeps the emptying behaviour and drops the closure substitution.
     cloud_fraction_final = jnp.minimum(cloud_fraction_final, cloud_fraction_in)
 
     # update_tendencies' tracer_tendency_{cdnc,icnc} is already in per-kg-
@@ -1265,18 +1257,21 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     ``nondimensionalize=False`` so the modal/nodal converters don't apply
     the gram/kg scaling that mass mixing ratios get.
 
-    Reads the post-condensation ``cloud_fraction`` / ``qc`` / ``qi`` from
-    the public ``"clouds"`` key (set by :class:`SundqvistCloudFraction`
-    upstream), together with this step's convective detrainment
-    ``clouds.conv_detrainment_qc/qi`` (written by ``TiedtkeConvection``,
-    zero without a convection term), TKE from ``"vertical_diffusion"``, the
-    activated CDNC (JAM's ``activated_cdnc``, or the SPA-style floor from the
-    public ``"aerosol"`` Nccn), and, where a prognostic aerosol publishes
-    them, ECHAM-HAM's heterogeneous-freezing inputs ``"freezing_aerosol"``
-    (a :class:`HeterogeneousFreezingAerosol`), which switch section 6.2 from
-    the DeMott closure to ECHAM's contact + immersion rates. Writes the
+    Its thermodynamic and condensate inputs are ECHAM's: the anchor state,
+    the increments since it and the convective detrainment, formed by
+    :func:`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs` from the
+    carried post-physics state, the upstream running tendency and the
+    convection scheme's detrainment (``clouds.conv_detrainment_qc/qi``,
+    written by ``TiedtkeConvection``, zero without a convection term). Reads
+    ``cloud_fraction`` from the public ``"clouds"`` key (set by :class:`SundqvistCloudFraction`
+    upstream), TKE from ``"vertical_diffusion"``, the activated CDNC (JAM's
+    ``activated_cdnc``, or the SPA-style floor from the public ``"aerosol"``
+    Nccn), and, where a prognostic aerosol publishes them, ECHAM-HAM's
+    heterogeneous-freezing inputs ``"freezing_aerosol"`` (a
+    :class:`HeterogeneousFreezingAerosol`), which switch section 6.2 from the
+    DeMott closure to ECHAM's contact + immersion rates. Writes the
     surface rain / snow precip flux into ``"clouds"`` along with the
-    qnc / qni state-carry needed for the next step's update.
+    number tracers the step started from (``qnc_prev``/``qni_prev``).
 
     Must be composed downstream of ``SundqvistCloudFraction`` and
     (because it reads TKE) downstream of ``TteTkeVerticalDiffusion``.
@@ -1296,12 +1291,26 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = (
         "autoconv", "accretn", "wbf", "clouds",
     )
+    # ECHAM's anchor (ptm1, pqm1, pxlm1, pxim1, pxtm1 of cdnc/icnc) is the
+    # previous step's post-physics state; the model carries it for this term
+    # (``jcm.physics.clouds.cloud_inputs``).
+    requires_post_physics_fields: ClassVar[tuple[str, ...]] = (
+        "temperature", "specific_humidity", "qc", "qi", "qnc", "qni",
+    )
     # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
     # the cover term; this term fills the precip / 2M / process-rate fields.
     output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS
 
-    def __init__(self, params: 'CloudParams2M | None' = None):
-        """Hold the scheme-native :class:`CloudParams2M`."""
+    def __init__(self, params: 'CloudParams2M | None' = None, *,
+                 params_are_defaults: bool = False):
+        """Hold the scheme-native :class:`CloudParams2M`.
+
+        ``params_are_defaults`` marks parameters that are the resolution
+        defaults of a grid rather than the caller's own choice (the factory
+        and the Hydra runner set it), so ``cache_coords`` can check them
+        against the grid; parameters left ``None`` are defaults too.
+        """
+        self.params_are_defaults = params is None or params_are_defaults
         if params is None:
             params = CloudParams2M.default()
         self.params = nnx.Param(params)
@@ -1312,6 +1321,17 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         self._spa_prefactor = nnx.Param(jnp.array(1.0))
         self._spa_exponent = nnx.Param(jnp.array(0.5))
         self._spa_cap_smoothing = nnx.Param(jnp.array(0.0))
+
+    def cache_coords(self, coords) -> None:
+        """Warn if default parameters were built for another grid.
+
+        The parameters were fixed at construction and are not re-resolved;
+        parameters the caller supplied are not checked.
+        """
+        if self.params_are_defaults:
+            from jcm.physics.resolution_defaults import check_defaults_grid
+            check_defaults_grid(type(self).__name__,
+                                self.params.get_value().defaults_truncation, coords)
 
     def configure_spa(self, prefactor: float, exponent: float,
                       cap_smoothing: float = 0.0) -> None:
@@ -1360,61 +1380,38 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         params_2m = self.params.get_value()
 
         pressure_full = diagnostics["pressure_full"]
-        air_density = diagnostics["air_density"]
-        layer_thickness = diagnostics["layer_thickness"]
 
-        # Provisional state (sequential vdiff->convection->cloud coupling,
-        # ECHAM physc order). T and q are the running view ``thermo_run``,
-        # which the upstream vdiff and convection terms have advanced with
-        # their tendencies. qc and qi are ``clouds.qc/qi``: the cover term
-        # snapshots them from ``thermo_run`` before vertical diffusion runs
-        # (echam_physics composes SundqvistCloudFraction ahead of
-        # TteTkeVerticalDiffusion, and vdiff advances only ``thermo_run``),
-        # and the convection term then adds its detrainment. So the T and q
-        # increments carry vdiff + convection, while the condensate
-        # increments less the detrainment are zero up to the convection
-        # term's clip at zero: vdiff's condensate increment does not reach
-        # the scheme, and the ice it sediments is the step-start ``qi_m1``.
-        # #940 rewires this to supply the condensate (and the dynamics and
-        # radiation) increments; the scheme already treats whatever arrives
-        # as ECHAM's accumulated tendencies.
-        #
-        # The provisional state is what the returned tendencies are relative
-        # to (the host's additive sum with the upstream tendencies telescopes
-        # back to the correct final state), while the STEP-START state
-        # supplies ECHAM's (ptm1, pqm1, pxlm1, pxim1) anchors: saturation
-        # evaluates there, and the differences, less the detrained
-        # condensate, play the role of the accumulated tendencies (see
-        # ``cloud_microphysics_2m``). Falls back to the step-start state if
-        # no upstream term seeded ``thermo_run``.
-        thermo_run = diagnostics.get("thermo_run")
-        if thermo_run is None:
-            temperature_in = state.temperature
-            specific_humidity_in = state.specific_humidity
-        else:
-            temperature_in = thermo_run["temperature"]
-            specific_humidity_in = thermo_run["specific_humidity"]
+        # ECHAM's cloud_micro_interface inputs (physc.f90:1073-1081): the
+        # anchor state at the previous time level, the increments since then
+        # (the dynamics of the last step and every physics term upstream of
+        # this one, radiation and vertical diffusion's condensate included),
+        # and the convective detrainment by itself. The anchor is the
+        # previous step's post-physics state carried by the model where it is
+        # valid, the received state otherwise (first step, single column);
+        # see ``jcm.physics.clouds.cloud_inputs``.
+        inputs = cloud_scheme_inputs(
+            state, diagnostics, tracers=("qc", "qi", "qnc", "qni"))
+        anchor, increment = inputs.anchor, inputs.increment
+        provisional = inputs.provisional
+
+        # Air density: ECHAM's zrho = papm1/(rd·ptvm1)
+        # (mo_cloud_micro_2m.f90:578), the anchor's virtual density, with
+        # ptvm1 = ptm1·(1 + vtmpc1·pqm1 − (pxlm1 + pxim1)) (physc.f90:267-268),
+        # as the 1M forms it, at the received state's pressure (the carry has
+        # no pressures; see the 1M's note). The layer depth goes with it,
+        # dz = Δp/(ρ·g) (the
+        # virtual-temperature depth, as ECHAM's zdz from the geopotential), so
+        # the layer mass the column forms as ρ·g·dz stays the moist-air
+        # diagnostics' Δp.
+        virtual_temperature = anchor.temperature * (
+            1.0 + c.vtmpc1 * anchor.specific_humidity
+            - (anchor.tracers["qc"] + anchor.tracers["qi"]))
+        air_density = pressure_full / (c.rd * virtual_temperature)
+        layer_mass = diagnostics["air_density"] * diagnostics["layer_thickness"]
+        layer_thickness = layer_mass / air_density
 
         clouds = diagnostics["clouds"]
-        qc_interim = clouds.qc
-        qi_interim = clouds.qi
         cloud_fraction = clouds.cloud_fraction
-        # This step's convective detrainment, kg/kg per step: the liquid and
-        # ice parts the convection term added to ``clouds.qc/qi`` (ECHAM
-        # ztmst·pxtecl / ztmst·pxteci; zero without a convection term, as
-        # the cover term resets the fields every step). The scheme needs it
-        # apart from the other increments: it is not sedimented this step,
-        # carries its own crystal number and is re-split by lo2.
-        detrained_qc = dt * clouds.conv_detrainment_qc
-        detrained_qi = dt * clouds.conv_detrainment_qi
-
-        zeros = jnp.zeros_like(state.temperature)
-        qnc = state.tracers.get("qnc", zeros)
-        qni = state.tracers.get("qni", zeros)
-        # Step-start tracers — the baseline the upstream increments in
-        # ``clouds.qc``/``clouds.qi`` accumulated on (ECHAM pxlm1/pxim1).
-        qc_m1 = state.tracers.get("qc", zeros)
-        qi_m1 = state.tracers.get("qi", zeros)
 
         if "vertical_diffusion" in diagnostics:
             tke = diagnostics["vertical_diffusion"].tke
@@ -1460,7 +1457,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             inv_cf_min = 1.0 / jnp.maximum(cloud_fraction, params_2m.epsec)
             qc_in_cloud_kgm3 = jnp.where(
                 cloud_fraction > params_2m.epsec,
-                qc_interim * inv_cf_min * air_density, 0.0,
+                provisional.tracers["qc"] * inv_cf_min * air_density, 0.0,
             )
             cdnc_min_floor = jnp.where(
                 cloud_fraction > params_2m.epsec,
@@ -1503,16 +1500,19 @@ class Lohmann2MMicrophysics(PhysicsTerm):
          rain_flux_all, snow_flux_all) = jax.vmap(
             cloud_microphysics_2m,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-                     None, None, 1, 1, 1, 1, 1, 1,
+                     None, None, 1, 1, 1, 1, 1, 1, 1, 1,
                      None if freezing_aerosol is None else 1),
             out_axes=(0,) * 17,
         )(
-            temperature_in, specific_humidity_in, pressure_full,
-            qc_interim, qi_interim, qnc, qni,
+            anchor.temperature, anchor.specific_humidity, pressure_full,
+            anchor.tracers["qc"], anchor.tracers["qi"],
+            anchor.tracers["qnc"], anchor.tracers["qni"],
             cloud_fraction, air_density, layer_thickness, tke,
             activated_cdnc, ice_nuclei, ice_nuclei_deposition, dt, params_2m,
-            state.temperature, state.specific_humidity, qc_m1, qi_m1,
-            detrained_qc, detrained_qi, freezing_aerosol,
+            increment.temperature, increment.specific_humidity,
+            increment.tracers["qc"], increment.tracers["qi"],
+            increment.tracers["qnc"], increment.tracers["qni"],
+            inputs.detrained_qc, inputs.detrained_qi, freezing_aerosol,
         )
 
         tendency = PhysicsTendency(
@@ -1528,12 +1528,10 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             },
         )
 
-        # ``qnc_prev``/``qni_prev`` keep this step's RAW step-start number
-        # tracers: the baseline the number tendencies are taken against
-        # (ECHAM pxtm1, mo_cloud_micro_2m.f90:1781), not the scheme's
-        # entry-floored working numbers. No term reads them; they record the
-        # state the scheme started from. The surface precipitation comes
-        # from the lax.scan carry.
+        # ``qnc_prev``/``qni_prev`` record the raw number tracers of the
+        # state this term receives, not the scheme's entry-floored working
+        # numbers. No term reads them. The surface precipitation comes from
+        # the lax.scan carry.
         clouds_next = clouds.copy(
             # ECHAM writes the post-microphysics cloud fraction back to
             # ``paclc``: cells the scheme has just emptied of both condensates,
@@ -1541,7 +1539,8 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             # the aerosol cloud-borne partition read this, and must see the
             # cloud the step actually leaves behind.
             cloud_fraction=cloud_fraction_all.T,
-            qnc_prev=qnc, qni_prev=qni,
+            qnc_prev=state.tracers.get("qnc", jnp.zeros_like(state.temperature)),
+            qni_prev=state.tracers.get("qni", jnp.zeros_like(state.temperature)),
             precip_rain=surface_rain_flux,
             precip_snow=surface_snow_flux,
             # Per-level precipitation flux profiles for satellite-simulator

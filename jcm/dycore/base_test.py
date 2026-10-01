@@ -185,3 +185,57 @@ class RegistryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AfterPhysicsStateDefaultTest(unittest.TestCase):
+    """The protocol default of ``after_physics_state`` is the gridpoint add."""
+
+    def _setup(self):
+        from jcm.dycore._fake_cubed_sphere import FakeCubedSphereDycore
+        from jcm.physics.physics_term import TracerSpec
+        from jcm.physics_interface import PhysicsTendency
+
+        dycore = FakeCubedSphereDycore(nelem=2, gll=2, nlev=3)
+        specs = {"qc": TracerSpec("qc"), "passive": TracerSpec("passive")}
+        state = dycore.initial_state(None, tracer_specs=specs)
+        shape = state.temperature.shape
+        ramp = jnp.arange(np.prod(shape), dtype=jnp.float32).reshape(shape)
+        tendency = PhysicsTendency(
+            u_wind=1e-3 * ramp, v_wind=-1e-3 * ramp,
+            temperature=1e-4 * ramp, specific_humidity=1e-9 * ramp,
+            tracers={"qc": 1e-10 * ramp},
+        )
+        return dycore, state, tendency
+
+    def test_default_is_state_plus_dt_times_tendency(self):
+        dycore, state, tendency = self._setup()
+        after = dycore.after_physics_state(state, tendency)
+        before = dycore.to_physics_state(state)
+        dt = dycore.dt_seconds
+        np.testing.assert_array_equal(
+            np.asarray(after.temperature),
+            np.asarray(before.temperature + dt * tendency.temperature))
+        np.testing.assert_array_equal(
+            np.asarray(after.tracers["qc"]),
+            np.asarray(before.tracers["qc"] + dt * tendency.tracers["qc"]))
+        # A tracer the tendency does not carry is left as it is.
+        np.testing.assert_array_equal(np.asarray(after.tracers["passive"]),
+                                      np.asarray(before.tracers["passive"]))
+        np.testing.assert_array_equal(np.asarray(after.geopotential),
+                                      np.asarray(before.geopotential))
+
+    def test_default_matches_a_backend_that_adds_on_the_physics_grid(self):
+        """For the identity-dynamics fake, ``step`` IS the gridpoint add."""
+        dycore, state, tendency = self._setup()
+        after = dycore.after_physics_state(state, tendency)
+        stepped = dycore.to_physics_state(dycore.step(state, tendency))
+        for name in ("u_wind", "v_wind", "temperature", "specific_humidity"):
+            np.testing.assert_array_equal(np.asarray(getattr(after, name)),
+                                          np.asarray(getattr(stepped, name)))
+
+    def test_no_tendency_returns_the_state(self):
+        dycore, state, _ = self._setup()
+        after = dycore.after_physics_state(state, None)
+        np.testing.assert_array_equal(
+            np.asarray(after.temperature),
+            np.asarray(dycore.to_physics_state(state).temperature))

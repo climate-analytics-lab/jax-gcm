@@ -133,41 +133,41 @@ Formulation choices inside the sweep, for provenance:
 
 ## The state-splitting convention
 
-ECHAM is leapfrog: the scheme receives the t−1 state (`ptm1`, `pqm1`,
-`pxlm1`, `pxim1`) plus accumulated tendencies (`ptte`, `pqte`, …) and *adds*
-its own contributions to the tendencies. jcm is additive operator-split: each
-term returns its own tendency against a provisional post-upstream state.
+ECHAM's scheme receives the previous time level (`ptm1`, `pqm1`, `pxlm1`,
+`pxim1`, the number tracers' `pxtm1`) plus the tendencies accumulated since
+(`ptte`, `pqte`, `pxlte`, `pxite`, `pxtte`) and the convective detrainment
+apart (`pxtecl`, `pxteci`), and *adds* its own contributions to the
+tendencies. jcm's terms each return their own tendency against a provisional
+state, and the host sums them.
 
-The mapping used (and documented on `cloud_microphysics_2m`):
+`cloud_microphysics_2m` takes ECHAM's split directly:
 
-- primary inputs = the **post-upstream provisional** state (`thermo_run` T/q,
-  `clouds.qc/qi` including this step's convective detrainment) — what the
-  returned tendencies are relative to;
-- optional `*_m1` inputs = the **step-start** state — ECHAM's t−1 anchors.
-  Every quantity ECHAM evaluates at t−1 reads them: saturation and the other
-  section-1 fields, `zrid`, the temperature tests of `lo2_2d`, `ll_cv` and
-  `lo2`, the moist `cp`, melting and falling-ice sublimation;
-- `detrained_qc` and `detrained_qi` = the convective detrainment of this
-  step as mass per step (ECHAM `ztmst·pxtecl`, `ztmst·pxteci`).
+- the **anchor** `*_m1` = ECHAM's previous time level. Every quantity ECHAM
+  evaluates at t−1 reads it: the air density (the term forms ECHAM's
+  `zrho = papm1/(rd·ptvm1)`, `mo_cloud_micro_2m.f90:578`, from the anchor and
+  passes it in with the layer depth `Δp/(ρ·g)` that keeps the layer mass),
+  saturation and the other section-1 fields,
+  `zrid`, the temperature tests of `ll_cv` and `lo2`, the moist `cp`,
+  melting and falling-ice sublimation;
+- the **increments** `*_increment` = `ztmst·ptte`, `ztmst·pqte`,
+  `ztmst·pxlte`, `ztmst·pxite`, `ztmst·pxtte` — everything since the anchor
+  except the convective detrainment. They play the role of ECHAM's
+  accumulated tendencies in the condensation closure and the
+  clear-sky-evaporation split, and the ice increment feeds sedimentation;
+- `detrained_qc`, `detrained_qi` = `ztmst·pxtecl`, `ztmst·pxteci`, mass per
+  step. The scheme uses their sum `zxtec` as ECHAM does (next section): it
+  is not sedimented this step, carries its own crystal number, and enters
+  the clear-sky-evaporation split after the `lo2` re-split.
 
-The pure upstream increments are `(x − x_m1)` for T and q, and
-`(qc − qc_m1) − detrained_qc`, `(qi − qi_m1) − detrained_qi` for the
-condensate. They play the role of `ztmst·pqte` and `ztmst·ptte` in the
-condensation closure, and of `ztmst·pxlte` and `ztmst·pxite` in the
-clear-sky-evaporation split; the ice increment also feeds sedimentation.
-Today the T and q increments carry this step's vertical-diffusion,
-prescribed-flux and Tiedtke tendencies, because those terms advance
-`thermo_run`. The condensate increments are zero in the ECHAM ordering: the
-cover term snapshots `clouds.qc/qi` from `thermo_run` before vertical
-diffusion runs, vertical diffusion advances only `thermo_run`, and the
-convection term's addition is the detrainment the scheme receives
-separately. The sedimentation input is therefore the step-start ice, and
-the vertical-diffusion condensate increment reaches the state without
-passing through the scheme. ECHAM's `ptte`/`pqte`/`pxlte`/`pxite` also
-carry the dynamics, radiative heating and gravity-wave drag. The #940
-rewiring supplies all of these.
+The column forms the provisional state as `anchor + increment` (plus the
+detrainment for the condensate) — what the returned tendencies are relative
+to. The term fills these from
+`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs`: the anchor is the
+previous step's post-physics state carried by the model, and the increments
+are the dynamics since then plus every upstream term's tendency (see
+[operator-split physics](operator_split_physics.md#coupling-within-physics)).
 
-The ledger reconstruction is identical either way:
+The section-8 ledger reconstructs ECHAM's end state as
 `pxlm1 + Δt·(upstream+own) ≡ qc_provisional + Δt·own`, so the negative-mass
 guard bounds the true end-of-step state and the host's tendency sum
 telescopes exactly as ECHAM's INOUT accumulation.
@@ -184,13 +184,17 @@ at `tmelt` for the one-moment scheme and heated the column accordingly
   [kg kg⁻¹ s⁻¹], the condensate tendencies the Tiedtke term adds to
   `clouds.qc`/`clouds.qi` this step, in Tiedtke's own split (liquid where its
   environment temperature exceeds `tmelt`). They are zero under every other
-  convection scheme and are written to the output as
-  `clouds.conv_detrainment_qc` and `clouds.conv_detrainment_qi`. Tiedtke
-  keeps advancing `clouds.qc`/`clouds.qi`, so the one-moment contract is
-  unchanged.
-- The `Lohmann2MMicrophysics` wrapper passes `Δt·conv_detrainment_qc` and
-  `Δt·conv_detrainment_qi` to the column function as `detrained_qc` and
-  `detrained_qi`. It forms the other increments as it always has.
+  convection scheme (the cover term resets them every step) and are written
+  to the output as `clouds.conv_detrainment_qc` and
+  `clouds.conv_detrainment_qi`. They are the one channel the cloud schemes
+  receive detrainment through.
+- `cloud_inputs.cloud_scheme_inputs`, which both cloud-scheme wrappers call,
+  takes `Δt·conv_detrainment_qc` and `Δt·conv_detrainment_qi` out of the
+  running condensate tendency (Tiedtke returns its detrainment as its qc/qi
+  tendency) and passes them to the column function as `detrained_qc` and
+  `detrained_qi`, beside the anchor and the other increments. The one-moment
+  scheme uses Tiedtke's split as it stands, as ECHAM's `cloud` adds
+  `pxtecl`/`pxteci` to its condensate increments.
 - The column function takes `zxtec = detrained_qc + detrained_qi`, splits it
   by the section-4 `lo2`, and moves `move = liq_part − detrained_qc` from ice
   to liquid (negative where convective liquid becomes ice) with the
@@ -202,10 +206,7 @@ at `tmelt` for the one-moment scheme and heated the column accordingly
   host's additive sum is unchanged.
 
 Detrainment arrives separately from the other increments because ECHAM
-passes it separately and because the input rewiring of #940, which forms
-the increments from every upstream term and the dynamics, replaces only the
-way the wrapper forms the other increments. The two changes compose without
-touching each other.
+passes it separately (`physc.f90:1081`) and applies these rules to it alone.
 
 ## The number-tendency rule
 
@@ -214,13 +215,15 @@ arithmetic (ECHAM lines 600-605), so dycore ringing cannot drive the
 activation or diagnosis steps, and applies no upper bound at entry: the
 crystal number is capped at `icemax` only after the detrained number joins
 it (line 1252), and the droplet number is not capped. The returned number
-tendencies are taken against the raw tracers, as ECHAM passes the raw
-`pxtm1` to its ledger (lines 1780-1781) and writes
-`pxtte = (N/ρ − pxtm1)/ztmst` (lines 3625-3628). The end-of-step tracer is
-then the scheme's crystal or droplet number per kilogram, or zero where the
-negative-mass repair removed the condensate (lines 3641-3652), and an
-out-of-range tracer value does not persist from step to step. The
-previous-step stash `clouds.qnc_prev`/`qni_prev` holds the raw tracers too.
+tendencies are taken against the raw provisional tracers (anchor plus
+increment, unfloored), which the host adds them to; ECHAM passes the raw
+`pxtm1` to its ledger (lines 1780-1781) and replaces its tendency with
+`pxtte = (N/ρ − pxtm1)/ztmst` (lines 3625-3628), the same end state. The
+end-of-step tracer is then the scheme's crystal or droplet number per
+kilogram, or zero where the negative-mass repair removed the condensate
+(lines 3641-3652), and an out-of-range tracer value does not persist from
+step to step. `clouds.qnc_prev`/`qni_prev` record the raw number tracers of
+the state the term receives.
 
 ## Deliberate omissions (tracked)
 
@@ -251,8 +254,7 @@ previous-step stash `clouds.qnc_prev`/`qni_prev` holds the raw tracers too.
 (modelled on CAM's `check_energy_chng`) close the water and enthalpy budgets
 against the surface fluxes for warm-liquid, WBF, cold-fallout, and
 melt-in-place fixtures, and with detrained condensate of both phases
-re-split by `lo2`. They are the contract the #940 input rewiring must
-keep. `lohmann_2m_ice_sources_test.py` pins each section-1 and section-4
+re-split by `lo2`. `lohmann_2m_ice_sources_test.py` pins each section-1 and section-4
 rule (`zrid`, `znidetr`, the sedimentation input, the re-split with its
 fusion heat, the raw-tracer tendencies, the closure's INP maximum), and
 `lohmann_2m_fortran_reference_test.py` compares them block by block and end

@@ -190,7 +190,8 @@ def test_het_mxphase_freezing_matches_echam(step, prec):
 # ===========================================================================
 def run_jcm_column(step, prec, columns):
     """cloud_microphysics_2m with the HAM freezing inputs; the #941 test's mapping of ECHAM's
-    leapfrog inputs to jcm's operator-split provisional state (no detrainment here).
+    inputs to jcm's anchor and increments (``ptm1`` etc. as the anchor, ``ztmst`` times the
+    accumulated tendencies as the increments; no detrainment here).
     """
     from jcm.physics.clouds.lohmann_2m.scheme import cloud_microphysics_2m
     from jcm.physics.clouds.lohmann_2m.types import HeterogeneousFreezingAerosol
@@ -202,20 +203,24 @@ def run_jcm_column(step, prec, columns):
                 qnc=d["xtm1_cdnc"] + dt * d["xtte_cdnc"], qni=d["xtm1_icnc"] + dt * d["xtte_icnc"])
     dz = g["rho"] * 0.0 + (np.diff(d["paphm1"], axis=0) / (g["rho"] * c.grav))
 
-    def one(T, q, qc, qi, qnc, qni, cf, rho, dz_, tke, pr, t1, q1, qc1, qi1, *frz):
-        zero = jnp.zeros_like(T)
+    def one(t1, q1, qc1, qi1, qnc1, qni1, cf, rho, dz_, tke, pr,
+            dT, dq, dqc, dqi, dqnc, dqni, *frz):
+        zero = jnp.zeros_like(t1)
         fa = HeterogeneousFreezingAerosol(
             dust_soluble=frz[0], dust_insoluble_accumulation=frz[1], dust_insoluble_coarse=frz[2],
             bc_soluble=frz[3], bc_insoluble=frz[4], wet_radius_insoluble_aitken=frz[5],
             wet_radius_insoluble_accumulation=frz[6], wet_radius_insoluble_coarse=frz[7])
         o = cloud_microphysics_2m(
-            T, q, pr, qc, qi, qnc, qni, cf, rho, dz_, tke, zero, zero, zero,
-            jnp.asarray(dt, T.dtype), p, temperature_m1=t1, specific_humidity_m1=q1,
-            qc_m1=qc1, qi_m1=qi1, freezing_aerosol=fa)
+            t1, q1, pr, qc1, qi1, qnc1, qni1, cf, rho, dz_, tke, zero, zero, zero,
+            jnp.asarray(dt, t1.dtype), p, temperature_increment=dT, humidity_increment=dq,
+            qc_increment=dqc, qi_increment=dqi, qnc_increment=dqnc, qni_increment=dqni,
+            freezing_aerosol=fa)
         return o[0]
 
-    args = [prov["T"], prov["q"], prov["qc"], prov["qi"], prov["qnc"], prov["qni"], d["paclc"],
-            g["rho"], dz, d["ptkem1"], d["papm1"], d["ptm1"], d["pqm1"], d["pxlm1"], d["pxim1"]]
+    args = [d["ptm1"], d["pqm1"], d["pxlm1"], d["pxim1"], d["xtm1_cdnc"], d["xtm1_icnc"],
+            d["paclc"], g["rho"], dz, d["ptkem1"], d["papm1"],
+            dt * d["ptte"], dt * d["pqte"], dt * d["pxlte"], dt * d["pxite"],
+            dt * d["xtte_cdnc"], dt * d["xtte_icnc"]]
     args += [d[k] for k in FRZ_KEYS]
     tend = jax.vmap(one, in_axes=1, out_axes=1)(*[_j(sel(a), prec) for a in args])
     return dict(qc=sel(prov["qc"]) + dt * np.asarray(tend.dqcdt),

@@ -1717,14 +1717,16 @@ class TestColumnWaterConservation2M:
         qnc = jnp.where(qc_m1 > 0, 5e7, 0.0)
         qni = jnp.where(qi_m1 > 0, 1e4, 0.0)
 
+        # Anchor (T_m1, q_m1, qc_m1, qi_m1); upstream warming 0.4 K and 1 %
+        # moistening, no condensate increment, and the detrainment apart.
         tend, rain_sfc, snow_sfc, *_ = cloud_microphysics_2m(
-            T_m1 + 0.4, q_m1 * 1.01, p, qc_m1 + det_qc, qi_m1 + det_qi,
+            T_m1, q_m1, p, qc_m1, qi_m1,
             qnc, qni, cf, rho, jnp.full(nlev, 500.0),
             jnp.full(nlev, 0.3), jnp.full(nlev, 5e7),
             jnp.zeros(nlev), jnp.zeros(nlev),
             1800.0, CloudParams2M.default(),
-            temperature_m1=T_m1, specific_humidity_m1=q_m1,
-            qc_m1=qc_m1, qi_m1=qi_m1,
+            temperature_increment=jnp.full(nlev, 0.4),
+            humidity_increment=q_m1 * 0.01,
             detrained_qc=det_qc, detrained_qi=det_qi,
         )
         mref = np.asarray(rho * 500.0)
@@ -2077,17 +2079,33 @@ class TestColumnEnthalpyConservation2M:
 
     @staticmethod
     def _run(cols, **extra):
+        """Run the column on ``cols``, the provisional state.
+
+        ``extra`` may name the step-start condensate ``qc_m1``/``qi_m1`` and
+        the detrainment ``detrained_qc``/``detrained_qi`` that ``cols``'s
+        condensate holds; they become the column function's anchor, its
+        increments (provisional less anchor less detrainment) and its
+        detrainment. Without them the anchor is ``cols`` itself.
+        """
         from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
         from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
 
         T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke, inp = cols
         nlev = T.shape[0]
         z = jnp.zeros(nlev)
+        extra = dict(extra)
+        det_qc = extra.pop("detrained_qc", z)
+        det_qi = extra.pop("detrained_qi", z)
+        qc_m1 = extra.pop("qc_m1", qc - det_qc)
+        qi_m1 = extra.pop("qi_m1", qi - det_qi)
+        assert not extra, extra
         tend, rain_sfc, snow_sfc, *_ = cloud_microphysics_2m(
-            T, q, p, qc, qi, qnc, qni, cf, rho, dz, tke,
+            T, q, p, qc_m1, qi_m1, qnc, qni, cf, rho, dz, tke,
             jnp.full(nlev, 5e7), inp, z,
             TestColumnEnthalpyConservation2M.DT, CloudParams2M.default(),
-            **extra,
+            qc_increment=(qc - qc_m1) - det_qc,
+            qi_increment=(qi - qi_m1) - det_qi,
+            detrained_qc=det_qc, detrained_qi=det_qi,
         )
         return tend, float(rain_sfc), float(snow_sfc)
 
@@ -2369,10 +2387,9 @@ class TestColumnEnthalpyConservation2M:
         RH-based cover closure competing with ``SundqvistCloudFraction``.
 
         The fixture is the state that makes the difference stark: an
-        ice-supersaturated column at 5 hPa, above ``cloud_top_pressure_pa``,
-        where Sundqvist deliberately reports no cloud because "the RH-closure
-        otherwise fills the cold, near-zero-qsat stratosphere with spurious
-        cloud". Unclipped it comes back overcast.
+        ice-supersaturated column at 5 hPa handed to the scheme with a cover
+        of exactly 0, which the scheme must not turn into cloud of its own.
+        Unclipped it comes back overcast.
         """
         import numpy as np
         from jcm.physics import thermodynamics
@@ -2385,7 +2402,7 @@ class TestColumnEnthalpyConservation2M:
         qsi = 0.622 * esi / jnp.maximum(p - 0.378 * esi, 1e-12)
         q = 1.6 * qsi                               # strongly supersaturated
         zeros = jnp.zeros(nlev)
-        # cloud_fraction = 0 everywhere: Sundqvist reports no stratospheric cloud.
+        # cloud_fraction = 0 everywhere: the incoming cover is clear.
         cols = (T, q, p, zeros, zeros, zeros, zeros, zeros,
                 rho, jnp.full(nlev, 500.0), zeros, zeros)
 
@@ -3025,14 +3042,17 @@ class TestEchamUtilityWiring2M:
     def _run(self, column):
         from jcm.physics.clouds.lohmann_2m import cloud_microphysics_2m
         n = self.NLEV
+        # The anchor is the step-start column; the upstream warming is the
+        # temperature increment, and every other field has none.
         return cloud_microphysics_2m(
-            column["temperature"], column["humidity"], column["pressure"],
+            column["temperature_m1"], column["humidity"], column["pressure"],
             column["qc"], column["qi"], column["qnc"], column["qni"],
             column["cloud_fraction"], column["air_density"],
             column["layer_thickness"], column["tke"],
             jnp.full(n, 5.0e7), jnp.zeros(n), jnp.zeros(n),
             1800.0, _P,
-            temperature_m1=column["temperature_m1"],
+            temperature_increment=(column["temperature"]
+                                   - column["temperature_m1"]),
         )
 
     @staticmethod

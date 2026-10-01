@@ -25,8 +25,8 @@ block and is not contaminated by differences elsewhere in the column:
 * ``update_in_cloud_water`` with ``prid = zrid`` (F 1511, 2610-2624): the ICNC
   diagnosis.
 * ``znidetr`` (F 958-983).
-* End to end, through ``cloud_microphysics_2m(..., detrained_qc=,
-  detrained_qi=)``: the number tendencies against the RAW tracer
+* End to end, through ``cloud_microphysics_2m`` with ECHAM's anchor,
+  increments and ``detrained_qc``/``detrained_qi``: the number tendencies against the RAW tracer
   (F 1781, 3625-3652) where ECHAM pins the end-of-step number, and the end
   state of clear cells that receive detrained condensate (the section-4
   split and the ``ptte`` fix, F 1300-1317).
@@ -267,15 +267,17 @@ def run_jcm_znidetr(g, dt, prec):
 def run_jcm_column(inp: dict, g: dict, dt: float, prec: str) -> dict:
     """ECHAM cloud_micro_interface -> jcm cloud_microphysics_2m, column by column.
 
-    Mapping (ECHAM's leapfrog tendencies -> jcm's operator-split provisional state):
-    T = ptm1 + ztmst*ptte, q = pqm1 + ztmst*pqte, qc = pxlm1 + ztmst*pxlte +
-    detrained_qc, qi = pxim1 + ztmst*pxite + detrained_qi, the ``*_m1`` = ECHAM's m1
-    fields; the detrained condensate ztmst*zxtec is split into liquid and ice at
-    ztconv > tmelt, exactly as cudtdq split it (mo_cufluxdts.f90:645-664, pten = the
-    convection temperature ztconv); the raw number tracers qnc/qni = pxtm1 +
-    ztmst*pxtte (per kg of air); air density = ECHAM's papm1/(rd*ptvm1); layer
-    thickness dp/(rho*grav) so jcm's rho*g*dz is ECHAM's dp; TKE = ptkem1; no aerosol
-    (activated_cdnc = ice_nuclei = 0). Returns the end-of-step state X + dt*dX/dt.
+    Mapping: the anchor = ECHAM's m1 fields (ptm1, pqm1, pxlm1, pxim1 and the
+    number tracers' pxtm1, per kg of air); the increments = ztmst times ECHAM's
+    accumulated tendencies (ptte, pqte, pxlte, pxite, pxtte); the detrained
+    condensate ztmst*zxtec split into liquid and ice at ztconv > tmelt, exactly
+    as cudtdq split it (mo_cufluxdts.f90:645-664, pten = the convection
+    temperature ztconv), as ``detrained_qc``/``detrained_qi``; air density =
+    ECHAM's papm1/(rd*ptvm1); layer thickness dp/(rho*grav) so jcm's rho*g*dz is
+    ECHAM's dp; TKE = ptkem1; no aerosol (activated_cdnc = ice_nuclei = 0).
+    jcm's tendencies are relative to the provisional state anchor + increment
+    (+ detrainment for the condensate). Returns the end-of-step state
+    X + dt*dX/dt.
     """
     from jcm.physics.clouds.lohmann_2m.scheme import cloud_microphysics_2m
     p = echam_params()
@@ -290,17 +292,23 @@ def run_jcm_column(inp: dict, g: dict, dt: float, prec: str) -> dict:
                 qni=inp["xtm1_icnc"] + dt * inp["xtte_icnc"])
     dz = g["dp"] / (g["rho"] * c.grav)
 
-    def one(T, q, qc, qi, qnc, qni, cf, rho, dz_, tke, pr, t1, q1, qc1, qi1, dqc, dqi):
-        zero = jnp.zeros_like(T)
+    def one(t1, q1, qc1, qi1, qnc1, qni1, cf, rho, dz_, tke, pr,
+            dT, dq, dqc_, dqi_, dqnc, dqni, dqc, dqi):
+        zero = jnp.zeros_like(t1)
         out = cloud_microphysics_2m(
-            T, q, pr, qc, qi, qnc, qni, cf, rho, dz_, tke, zero, zero, zero,
-            jnp.asarray(dt, T.dtype), p, temperature_m1=t1, specific_humidity_m1=q1,
-            qc_m1=qc1, qi_m1=qi1, detrained_qc=dqc, detrained_qi=dqi)
+            t1, q1, pr, qc1, qi1, qnc1, qni1, cf, rho, dz_, tke, zero, zero, zero,
+            jnp.asarray(dt, t1.dtype), p,
+            temperature_increment=dT, humidity_increment=dq,
+            qc_increment=dqc_, qi_increment=dqi_,
+            qnc_increment=dqnc, qni_increment=dqni,
+            detrained_qc=dqc, detrained_qi=dqi)
         return out[0]
 
-    args = [prov["T"], prov["q"], prov["qc"], prov["qi"], prov["qnc"], prov["qni"],
-            inp["paclc"], g["rho"], dz, inp["ptkem1"], inp["papm1"], inp["ptm1"], inp["pqm1"],
-            inp["pxlm1"], inp["pxim1"], det_qc, det_qi]
+    args = [inp["ptm1"], inp["pqm1"], inp["pxlm1"], inp["pxim1"],
+            inp["xtm1_cdnc"], inp["xtm1_icnc"],
+            inp["paclc"], g["rho"], dz, inp["ptkem1"], inp["papm1"],
+            dt * inp["ptte"], dt * inp["pqte"], dt * inp["pxlte"], dt * inp["pxite"],
+            dt * inp["xtte_cdnc"], dt * inp["xtte_icnc"], det_qc, det_qi]
     tend = jax.vmap(one, in_axes=1, out_axes=1)(*[_j(a, prec) for a in args])
     return dict(T=prov["T"] + dt * np.asarray(tend.dtedt), q=prov["q"] + dt * np.asarray(tend.dqdt),
                 qc=prov["qc"] + dt * np.asarray(tend.dqcdt), qi=prov["qi"] + dt * np.asarray(tend.dqidt),

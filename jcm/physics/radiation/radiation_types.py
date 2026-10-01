@@ -54,13 +54,25 @@ class RadiationParameters:
     # cf <= 2*eps). Read by the RRTMGP and grey two-stream schemes.
     cld_frac_min: float
 
-    # Cloud overlap selector for partial-cloud radiation. 0 = random,
-    # 1 = maximum_random (Geleyn-Hollingsworth), 2 = exponential
-    # (generalised, matches ECHAM6's PSRAD setting). The string forms
-    # are exposed as module-level constants for readability; the
-    # struct stores the int code so it is JAX-traceable.
+    # Cloud overlap rule of partial-cloud radiation: the RRTMGP McICA
+    # sampler, the grey scheme's clear/cloudy beam weight and the emulator's
+    # total-cover diagnostic. 0 = random; 1 = maximum-random
+    # (Geleyn-Hollingsworth: maximum overlap of adjacent cloudy layers,
+    # random across a clear layer); 2 = generalised exponential (Raisanen et
+    # al. 2004) with the decorrelation length below. The default is
+    # maximum-random, ECHAM6.3's default (``i_overlap = 1``,
+    # mo_radiation_parameters.f90 l.71), sampled as ECHAM's
+    # mo_cld_sampling.f90::sample_cld_state samples it (l.66-83: a
+    # sub-column keeps its rank only under its own cloud), whose expected
+    # total cover is ECHAM's cld_cvr (mo_radiation.f90 l.436-442). ECHAM's
+    # sampler offers maximum-random, maximum and random only; exponential is
+    # a jcm option with no ECHAM counterpart. The int codes are the
+    # module-level CLOUD_OVERLAP_* constants; readers resolve the code at
+    # trace time.
     cloud_overlap: int
-    cloud_decorrelation_km: float  # decorrelation length for overlap=2
+    # Decorrelation length [km] of the exponential rule (code 2); inert under
+    # random and maximum-random.
+    cloud_decorrelation_km: float
     # Calibration aid (maintainability review B.2.7): when nonzero, the
     # McICA sub-column key ignores the model step, so the stochastic
     # cloud masks are a FIXED function of the column — the discrete
@@ -100,7 +112,7 @@ class RadiationParameters:
                  lw_band_limits=LW_BAND_LIMITS,
                  sw_band_limits=SW_BAND_LIMITS,
                  min_cos_zenith=0.035, cld_frac_min=1e-3,
-                 cloud_overlap=2, cloud_decorrelation_km=2.0,
+                 cloud_overlap=1, cloud_decorrelation_km=2.0,
                  mcica_freeze_step=0.0,
                  cloud_inhomogeneity_liquid=0.8,
                  cloud_inhomogeneity_liquid_convective=0.8,
@@ -132,6 +144,7 @@ class RadiationParameters:
 
 
 # Cloud-overlap rule integer codes (JAX-friendly; see ``RadiationParameters``).
+# ``CLOUD_OVERLAP_MAXIMUM_RANDOM`` is the default, ECHAM6.3's ``i_overlap = 1``.
 CLOUD_OVERLAP_RANDOM: int = 0
 CLOUD_OVERLAP_MAXIMUM_RANDOM: int = 1
 CLOUD_OVERLAP_EXPONENTIAL: int = 2

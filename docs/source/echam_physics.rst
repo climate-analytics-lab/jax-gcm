@@ -38,13 +38,17 @@ The ECHAM physics package includes the following components, executed in sequenc
 Process Coupling
 ^^^^^^^^^^^^^^^^
 
-JAX-GCM's outer ``ComposablePhysics`` coupling is **process-parallel**:
-every term receives the same prognostic input state and the returned tendencies
-are summed. Terms execute in a validated order and may consume diagnostics
-produced by earlier terms, but they do not see earlier tendency contributions
-applied to the prognostic state until the next model step. Tightly coupled
-calculations that require internal sequential updates are implemented inside a
-single process term.
+Every ``ComposablePhysics`` term receives the same prognostic input state and
+the returned tendencies are summed. Terms execute in ECHAM's ``physc`` order
+(radiation, vertical diffusion, convection, cloud microphysics), except that
+gravity-wave and orographic drag run after the cloud scheme
+(``physc.f90`` runs them before ``cucall``), and see what earlier terms did
+through the running tendency sum
+(``_tendency_run``), the running thermodynamic state (``thermo_run``) and the
+cross-step carry, so the coupling is partly sequential and the order is
+load-bearing. The cloud microphysics receives ECHAM's inputs this way: the
+previous step's post-physics state as its anchor, and the dynamics and every
+upstream term as increments. See :doc:`design/operator_split_physics`.
 
 Each parameterization is described in detail below.
 
@@ -346,19 +350,19 @@ diffusion term (column-mode tests, dry dynamical-core runs).
 Cloud Cover
 ^^^^^^^^^^^
 
-**Type**: Diagnostic cloud cover scheme based on Sundqvist et al. (1989)
+**Type**: ECHAM6.3's diagnostic cloud cover, ``mo_cover.f90::cover`` (Sundqvist et al. 1989; Lohmann and Roeckner 1996)
 
-**Description**: Diagnoses cloud fraction from relative humidity using a threshold-based approach. Cloud fraction increases from zero at a critical relative humidity to full cover at saturation.
+**Description**: Diagnoses cloud cover from relative humidity: zero at or below a critical relative humidity, full at saturation, ``1 - sqrt(1 - b0)`` in between, with ECHAM's stratocumulus enhancement at a low-level inversion over ice-free ocean. The values are ECHAM's, checked column by column against the ECHAM Fortran; the derivatives of the clip and of the inversion test are those of smooth surrogates. See :doc:`science/clouds_microphysics` for the formulation, the vapour pressure and the time level.
 
 **Key Features**:
 
-- RH-based diagnostic cloud fraction
-- Critical RH varies with height (lower threshold at top of atmosphere, higher near surface)
-- Power-law interpolation between surface and TOA thresholds
-- Mixed-phase partitioning between liquid and ice based on temperature
-- Separate treatment above and below freezing
+- Critical relative humidity ``crt + (crs - crt)·exp(1 - (p_s/p)^nex)``
+- Saturation over ice or water by ECHAM's ``lo2`` rule (ice below ``t_ice``, or below 0 °C where cloud ice exceeds ``csecfrl``)
+- ECHAM's inversion search between its levels ``jbmin`` and the surface, computed from the model's own vertical grid
+- No stratospheric cutoff, as in ECHAM; radiation and COSP use the cover only where there is condensate (``mo_radiation.f90``)
+- Resolution-dependent defaults for ``crt``, ``crs``, ``nex``, ``nadd``, ``csatsc``, ``cinv`` and ``csecfrl`` (ECHAM's table, interpolated between its truncations; built by ``echam_physics(coords=...)``)
 
-**Configurable Parameters** (:py:class:`CloudParameters`):
+**Configurable Parameters** (:py:class:`~jcm.physics.clouds.sundqvist.CloudParameters`; T63 defaults shown):
 
 .. list-table::
    :header-rows: 1
@@ -366,26 +370,34 @@ Cloud Cover
 
    * - Parameter
      - Description
-     - Default
+     - Default (T63)
    * - ``crt``
-     - Critical RH aloft for cloud formation
+     - Critical RH aloft
      - 0.75
    * - ``crs``
-     - Critical RH near the surface for cloud formation
+     - Critical RH at the surface
      - 0.975
    * - ``nex``
-     - Exponent for the ECHAM ``mo_cover`` RH profile
+     - Exponent of the critical-RH profile
      - 2.0
-   * - ``t_ice``
-     - Temperature for pure ice phase (K)
-     - 238.15
    * - ``csatsc``
-     - Saturation factor for stratocumulus
+     - Stratocumulus saturation factor at an inversion
      - 0.7
-
-.. admonition:: Gap vs. ICON-A
-
-   ICON-A uses the Sundqvist et al. (1989) scheme with additional tuning for the representation of marine stratocumulus and Arctic low clouds. The JAX-GCM implementation captures the core RH-based diagnostic but may lack some of the refined tuning parameters.
+   * - ``cinv``
+     - Inversion stability threshold, as a fraction of the dry adiabatic lapse rate
+     - 0.25
+   * - ``csecfrl``
+     - Cloud ice [kg/kg] above which ice saturation applies below 0 °C
+     - 5e-6
+   * - ``t_ice``
+     - Homogeneous-freezing temperature ``cthomi`` (K)
+     - 238.15
+   * - ``nadd`` (static)
+     - Offset of the second enhanced level below the inversion level (ECHAM enhances levels ``jb`` and ``jb + nadd`` only)
+     - 0
+   * - ``smooth_b0``, ``smooth_inv_thr`` (static)
+     - Widths of the derivative surrogates (0 selects the reference derivative)
+     - 0.02, 2e-4 K/m
 
 
 Cloud Microphysics
@@ -395,32 +407,48 @@ JAX-GCM ships two cloud microphysics schemes; the 1-moment scheme is the default
 
 **1-moment (default)** — :py:func:`jcm.physics.clouds.echam_1m.cloud_microphysics_column_sweep`
 
-Bulk single-moment scheme based on ICON's ``mo_cloud.f90`` (single-moment branch). Tracks cloud liquid (``qc``) and cloud ice (``qi``) as prognostic tracers; rain and snow fluxes are computed within each column and not advected.
+The ECHAM6.3 single-moment scheme, a transcription of ``mo_cloud.f90::cloud``
+(r7492). Cloud liquid (``qc``) and cloud ice (``qi``) are prognostic tracers;
+rain and snow are fluxes that fall through the column within the step and are
+not advected. One top-down ``lax.scan`` runs ECHAM's sections at every level in
+ECHAM's order:
 
-Key processes:
+1. **Melting** of the incoming snow and of cloud ice above ``tmelt``;
+   **sublimation** of the incoming snow (Lin et al. 1983) and **evaporation** of
+   the incoming rain (Rotstayn 1997), at the anchor state (below).
+2. **Ice sedimentation** (the analytic exponential integral, with ECHAM's
+   ``EPSILON(1._wp)`` floor on the ice), the ``lo2`` phase switch, and the return
+   of all condensate of a cloud-free cell to vapour.
+3. **Condensation** in the cloudy part driven by the step's humidity and
+   temperature increments, ``zqcdif = (Δq − Δq_sat)·paclc``, then the whole-box
+   1 % supersaturation check; a clear cell that gains condensate is cloudy for
+   the rest of the step.
+4. **Freezing**: all cloud water below ``cthomi``; Bigg and contact freezing
+   between ``cthomi`` and ``tmelt``.
+5. **Autoconversion** (cloud water → rain), selected by
+   ``MicrophysicsParameters.autoconversion_scheme``:
 
-1. **Autoconversion** (cloud water → rain). Two formulations are selectable via ``MicrophysicsParameters.autoconversion_scheme``:
+   - ``"beheng"`` (default): Beheng (1994) implicit form, ECHAM's.
+     ``ccraut`` is its rate prefactor (default 15.0).
+   - ``"kk2000"``: Khairoutdinov & Kogan (2000) explicit form, a jcm option.
+     ``ccraut_kk_threshold`` is the in-cloud qc threshold (default 1e-5 kg/kg).
 
-   - ``"beheng"`` (default): Beheng (1994) implicit form, robust at large dt. ``ccraut`` is its rate prefactor (default 15.0).
-   - ``"kk2000"``: Khairoutdinov & Kogan (2000) explicit form. ``ccraut_kk_threshold`` is the in-cloud qc threshold above which autoconversion fires (default 1e-5 kg/kg).
+   and **accretion** of cloud water by rain (``ccracl``, default 6.0).
+6. **Aggregation** of cloud ice to snow (Levkov et al. 1992), accretion of ice
+   and **riming** of cloud water by snow.
+7. The **precipitation fluxes** and the precipitating fraction (reset to the
+   local cover where the level's own production dominates), and the return of
+   condensate below ``ccwmin`` to vapour with the cover write-back.
 
-2. **Accretion** of cloud droplets by raindrops (``ccracl`` coefficient, default 6.0)
-3. **Ice autoconversion + aggregation** of cloud ice by snow (Levkov et al., 1992)
-4. **Riming** of cloud water by falling snow
-5. **Melting / freezing** at the 0 °C level
-6. **Sedimentation** with terminal velocity parameterisations:
-
-   - Ice uses the integral form ``zxised = xi · exp(-vt·dt/dz) + flux_in / (rho·vt) · (1 - exp(...))`` for stability at the long ECHAM-default ``dt = 12 min`` timestep
-   - Rain and snow use the simpler instantaneous form
-
-7. **Evaporation** of rain in subsaturated layers (Rotstayn 1997; the 1M port has no snow sublimation)
+The anchor is the previous step's post-physics state and the increments are
+the dynamics since then plus ``dt`` times the running tendency of the physics
+terms composed before the scheme, with the convective detrainment passed
+separately, as for the 2M (see :doc:`design/operator_split_physics`).
 
 The scheme publishes no effective radius: as in ECHAM, the radiation forms the
 droplet and crystal radii itself from the step's state
 (:py:func:`~jcm.physics.radiation.cloud_optics.radiation_effective_radii`; see
 the radiation page of the model description).
-
-The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICON ``mo_cloud.f90:267-1080`` structure, with Rotstayn 1997 rain evaporation) is the only 1-moment path: :py:class:`~jcm.physics.clouds.echam_1m.Echam1MMicrophysics` vmaps it over columns, and its in-sweep saturation adjustment closes the rain-evap → re-condensation feedback loop.
 
 **Configurable parameters** (:py:class:`jcm.physics.clouds.echam_1m.MicrophysicsParameters`):
 
@@ -450,13 +478,22 @@ The column sweep (top-down ``lax.scan`` propagation of rain and snow fluxes, ICO
      - Snow density (kg/m³)
      - 100.0
    * - ``cvtfall``
-     - Ice/snow terminal-velocity factor (ECHAM ``mo_echam_cloud_params`` value at T63; the 2M scheme uses the same)
-     - 2.5
+     - Ice/snow fall-speed factor; ECHAM's value depends on the truncation
+     - 2.5 at T63
+   * - ``csecfrl``
+     - Cloud ice above which ``T < tmelt`` selects the ice phase (kg/kg);
+       resolution dependent
+     - 5e-6 at T63
+   * - ``autoconversion_twomey``
+     - Apply the MACv2-SP Twomey factor to the autoconversion's droplet number
+       (jcm's aerosol-cloud interaction; MPI-ESM1.2 scales the radiation's
+       number only)
+     - True
 
-The droplet number the autoconversion sees is not a parameter: it is ECHAM's
-prescribed ``acdnc`` profile times the MACv2-SP Twomey factor
-(:py:func:`~jcm.physics.clouds.cloud_utils.prescribed_droplet_number`), the same
-number the radiation forms the droplet radius from.
+The droplet number is not a parameter: it is ECHAM's prescribed ``acdnc``
+profile. The radiation's droplet number
+(:py:func:`~jcm.physics.clouds.cloud_utils.prescribed_droplet_number`) is that
+profile times the MACv2-SP Twomey factor.
 
 **2-moment** — :py:func:`jcm.physics.clouds.lohmann_2m.cloud_microphysics_2m`
 
@@ -464,8 +501,8 @@ Two-moment scheme based on ECHAM6.3-HAM with the SPA cloud-droplet activation cl
 
 .. admonition:: Notes
 
-   - The Sundqvist condensation that feeds the microphysics uses a linearised Newton step (``cond = (q - qs) / (1 + L/cp · dqs/dT)``) ported from ICON ``mo_cloud.f90`` with the Newton denominator that damps the per-step heating by ~6× in the warm troposphere — without it, single-step condensation at 100 % supersat produced ~+60 K heating spikes vs ECHAM's ~+12 K.
-   - ``qc`` and ``qi`` are declared as prognostic tracers via ``Echam1MMicrophysics.required_tracers``; they survive between physics calls. ``qr`` and ``qs`` are NOT prognostic — they are downward column fluxes per ICON ``mo_cloud.f90:267-268`` (``zrfl/zsfl`` reset to 0 at TOA each call).
+   - Both microphysics schemes condense in the cloudy part the humidity increment that the saturation humidity, moved by the temperature increment, does not absorb (ECHAM's ``zqcdif``), followed by a whole-box supersaturation check; neither relaxes the grid-mean state to saturation.
+   - ``qc`` and ``qi`` are declared as prognostic tracers via ``Echam1MMicrophysics.required_tracers``; they survive between physics calls. ``qr`` and ``qs`` are NOT prognostic — they are downward column fluxes (ECHAM ``mo_cloud.f90`` ``zrfl``/``zsfl``, zero at the model top each call).
 
 
 Cloud–Aerosol Coupling (SPA activation)

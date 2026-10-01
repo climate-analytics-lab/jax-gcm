@@ -34,6 +34,19 @@ from jcm.terrain import TerrainData
 # typed ``@tree_math.struct``.
 PhysicsCarryState: TypeAlias = Dict[str, Any]
 
+#: Cross-step carry key for the previous step's POST-PHYSICS state: the
+#: gridpoint state after the physics tendency was applied and before the
+#: dynamics ran, as the dynamical core actually advanced from it
+#: (:meth:`jcm.dycore.base.DynamicalCore.after_physics_state`). The slot is a
+#: dict ``{"temperature", "specific_humidity", "tracers": {name: ...},
+#: "valid"}`` in the physics package's own layout, present only when a
+#: composed term declares ``requires_post_physics_fields``. ``valid`` is a
+#: scalar, 1 once ``Model`` has written the slot and 0 in the construction
+#: template, so a first step, a checkpoint that predates the slot and a host
+#: without a dynamical core all read as "no anchor". Consumers:
+#: :func:`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs`.
+POST_PHYSICS_STATE_KEY = "_post_physics_state"
+
 logger = logging.getLogger(__name__)
 
 
@@ -270,6 +283,29 @@ class Physics:
         declarations (``PhysicsTerm.requires_dycore_fields``).
         """
         return ()
+
+    def post_physics_fields(self) -> tuple[str, ...]:
+        """Fields of the post-physics state this physics carries to the next step.
+
+        Names are ``"temperature"``, ``"specific_humidity"`` or tracer names.
+        Non-empty means the host must hand every step's post-physics state to
+        :meth:`record_post_physics_state` (see :data:`POST_PHYSICS_STATE_KEY`).
+        Default is empty: no slot, no cost. ``ComposablePhysics`` aggregates
+        per-term declarations (``PhysicsTerm.requires_post_physics_fields``).
+        """
+        return ()
+
+    def record_post_physics_state(self, physics_data: Any,
+                                  post_physics_state: PhysicsState) -> Any:
+        """Store the step's post-physics state in the cross-step carry.
+
+        Called by ``Model`` after the physics, with the gridpoint state
+        :meth:`jcm.dycore.base.DynamicalCore.after_physics_state` returns,
+        only when :meth:`post_physics_fields` is non-empty. Default: the
+        carry unchanged.
+        """
+        del post_physics_state
+        return physics_data
 
     def compute_tendencies(self, state: PhysicsState, forcing: ForcingData, terrain: TerrainData, prev_physics_data=None) -> Tuple[PhysicsTendency, Any]:
         """Compute the physical tendencies given the current state and data structs.

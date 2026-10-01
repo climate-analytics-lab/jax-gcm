@@ -13,6 +13,8 @@ from __future__ import annotations
 import jax.numpy as jnp
 import tree_math
 
+from jcm.physics.surrogate_gradient import with_surrogate_gradient
+
 
 @tree_math.struct
 class CloudData:
@@ -37,8 +39,9 @@ class CloudData:
     # Convective detrainment of cloud condensate [kg/kg/s], grid-mean,
     # (nlev, ncols): ECHAM's ``pxtecl`` (liquid) / ``pxteci`` (ice). They
     # are the part of this step's ``clouds.qc`` / ``clouds.qi`` increment
-    # that the convection term ADDED, exactly as applied (after its
-    # tendency cap), written by ``TiedtkeConvection`` every step and zero
+    # that the convection term ADDED, as it applies it (after its tendency
+    # cap, before the clip of ``clouds.qc/qi`` at zero; the same rate is in
+    # the running tendency), written by ``TiedtkeConvection`` every step and zero
     # otherwise: ``SundqvistCloudFraction`` resets them when it seeds the
     # step's ``clouds`` from the carry, so a step without convection — or
     # a restart into a stack without it — can never re-apply a previous
@@ -46,17 +49,18 @@ class CloudData:
     #
     # The split is Tiedtke's own: all liquid where the environment
     # temperature it received exceeds tmelt, all ice otherwise (``cudtdq``,
-    # mo_cufluxdts.f90:646-666, keyed to ``pten``). The 1M scheme uses that
-    # split as-is — ECHAM's mo_cloud adds ``pxtecl``/``pxteci`` straight
-    # into its provisional condensate, which is what the ``clouds.qc/qi``
-    # advance already delivers — so its contract does not depend on these
-    # fields. The Lohmann 2M scheme needs them separately because ECHAM's
-    # 2M ignores that split: it re-splits the TOTAL detrained condensate
-    # by its own WBF criterion (mo_cloud_micro_2m.f90:1300-1316), sediments
-    # only the pre-detrainment ice, gives the detrained ice a crystal
-    # number, and undoes the ice latent heat convection booked for
-    # condensate it reclassifies as liquid — all of which need the
-    # detrained part distinguished from the rest of the increment.
+    # mo_cufluxdts.f90:646-666, keyed to ``pten``). Both cloud schemes read
+    # these fields through ``cloud_inputs.cloud_scheme_inputs``, which takes
+    # them out of the running condensate tendency and passes them on by
+    # themselves, as ECHAM passes ``pxtecl``/``pxteci`` (physc.f90:1081).
+    # The 1M scheme uses the split as-is: ECHAM's mo_cloud adds
+    # ``pxtecl``/``pxteci`` to its condensate increments (mo_cloud.f90:
+    # 666-680). ECHAM's 2M ignores it: it re-splits the TOTAL detrained
+    # condensate by its own WBF criterion (mo_cloud_micro_2m.f90:1300-1316),
+    # sediments only the pre-detrainment ice, gives the detrained ice a
+    # crystal number, and undoes the ice latent heat convection booked for
+    # condensate it reclassifies as liquid, all of which need the detrained
+    # part distinguished from the rest of the increment.
     conv_detrainment_qc: jnp.ndarray  # Detrained cloud liquid [kg/kg/s] (nlev, ncols)
     conv_detrainment_qi: jnp.ndarray  # Detrained cloud ice    [kg/kg/s] (nlev, ncols)
 
@@ -349,15 +353,65 @@ CLOUD_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
 
 
 def radiation_cloud_fields(state, diagnostics):
-    """Return ECHAM-ordered cloud fields for radiation.
+    """Return the cloud fields radiation sees, as ECHAM hands them over.
 
-    ECHAM ``physc`` calls ``cover`` before radiation, then passes the
-    diagnosed cloud fraction plus the pre-cloud-step ``xlm1`` / ``xim1``
-    condensate fields into radiation. Large-scale cloud microphysics runs
-    later. Mirror that here: fresh cloud fraction comes from
-    ``diagnostics["clouds"]``, while condensate comes from state tracers.
+    ECHAM ``physc`` calls ``cover`` before radiation and passes radiation
+    the diagnosed cover with the grid-mean condensate ``xlm1``/``xim1`` of
+    the previous time level (``physc.f90`` l.566-573); the cloud
+    microphysics runs later. jcm passes the ``qc``/``qi`` of the state the
+    physics receives, which contains the last step's dynamics: the time level
+    of the cover's inputs, one dynamics step after ECHAM's (the cloud schemes'
+    anchor, the carried post-physics state, is where jcm maps ``xlm1``). Inside ``radiation`` (``mo_radiation.f90`` l.428-434) the
+    condensate is clipped at zero, ``xq = MAX(qm, 0)``, and the cover is
+    kept only where there is condensate,
+    ``xc_frc = MERGE(cld_frc, 0, xq_liq > 0 .OR. xq_ice > 0)``. That masked
+    cover is what the radiative transfer, its total-cover diagnostic and
+    COSP (``cosp_f3d``, ``mo_psrad_interface.f90`` l.414) see; the cover
+    field itself is not changed. This returns the same: the step-start
+    ``qc``/``qi`` tracers clipped at zero, and the diagnosed
+    ``clouds.cloud_fraction`` zeroed where both are zero.
+
+    Derivatives. The clip takes the one-sided derivative at zero (1 at
+    ``q >= 0``, 0 below; :func:`_nonnegative`), not the 1/2 of a symmetric
+    ``max`` tie, so a pure-ice cell keeps its full sensitivity to liquid
+    and a pure-liquid cell to ice. The mask is ECHAM's hard test with its
+    reference derivative: in a cell with cover but no condensate the
+    radiation's derivative with respect to that cell's condensate is zero,
+    although a trace of condensate switches its optics on. A surrogate on
+    the mask would not change that, because the in-cloud path's clear-cell
+    guard (``mcica.in_cloud_path``) and McICA's sampled sub-column masks
+    select on the masked value. Reaching the one-sided derivative would need
+    the radiation's derivative pass to see the unmasked cover, with a matching
+    treatment of that guard and of the sampling; that is tracked in #973.
     """
     clouds = diagnostics["clouds"]
-    cloud_water = state.tracers.get("qc", jnp.zeros_like(state.temperature))
-    cloud_ice = state.tracers.get("qi", jnp.zeros_like(state.temperature))
-    return cloud_water, cloud_ice, clouds.cloud_fraction
+    zeros = jnp.zeros_like(state.temperature)
+    cloud_water = _nonnegative(state.tracers.get("qc", zeros))
+    cloud_ice = _nonnegative(state.tracers.get("qi", zeros))
+    return (cloud_water, cloud_ice,
+            condensate_masked_cover(clouds.cloud_fraction, cloud_water,
+                                    cloud_ice))
+
+
+def _nonnegative(q):
+    """ECHAM's ``MAX(q, 0)``, with the one-sided derivative at zero.
+
+    The value is ``jnp.maximum(q, 0)`` exactly. The derivative is that of
+    ``where(q >= 0, q, 0)``: 1 at and above zero, 0 below, where a symmetric
+    ``max`` gives 1/2 at the tie. Zero condensate is a state the model
+    visits constantly (every pure-ice or pure-liquid cell), and the useful
+    derivative there is the one-sided one.
+    """
+    return with_surrogate_gradient(
+        lambda x: jnp.maximum(x, 0.0),
+        lambda x: jnp.where(x >= 0.0, x, 0.0))(q)
+
+
+def condensate_masked_cover(cloud_fraction, cloud_water, cloud_ice):
+    """ECHAM's ``MERGE(cld_frc, 0, xq_liq > 0 .OR. xq_ice > 0)``.
+
+    ``mo_radiation.f90`` l.433-434: the cover where either condensate is
+    positive, 0 elsewhere.
+    """
+    has_condensate = (cloud_water > 0.0) | (cloud_ice > 0.0)
+    return jnp.where(has_condensate, cloud_fraction, 0.0)

@@ -53,22 +53,46 @@ def _qsat(T, p, phase):
     return qs
 
 
-_OPTIONAL = dict(temperature_m1="T_m1", specific_humidity_m1="q_m1",
-                 qc_m1="qc_m1", qi_m1="qi_m1",
-                 detrained_qc="det_qc", detrained_qi="det_qi")
+def _anchor_and_increments(T, q, qc, qi, T_m1=None, q_m1=None, qc_m1=None,
+                           qi_m1=None, det_qc=None, det_qi=None):
+    """Return the column function's anchor, increments and detrainment of a column.
+
+    The columns here name the provisional state ``T``/``q``/``qc``/``qi``,
+    whose condensate holds this step's detrainment ``det_qc``/``det_qi``, and,
+    where it differs, the anchor ``T_m1``/``q_m1``/``qc_m1``/``qi_m1``
+    (default: the provisional state less the detrainment). The increments are
+    the provisional state less the anchor, and less the detrainment for the
+    condensate, ECHAM's ``ztmst·ptte`` ... ``ztmst·pxite``.
+    """
+    zeros = jnp.zeros_like(T)
+    det_qc = zeros if det_qc is None else det_qc
+    det_qi = zeros if det_qi is None else det_qi
+    T_m1 = T if T_m1 is None else T_m1
+    q_m1 = q if q_m1 is None else q_m1
+    qc_m1 = qc - det_qc if qc_m1 is None else qc_m1
+    qi_m1 = qi - det_qi if qi_m1 is None else qi_m1
+    anchor = (T_m1, q_m1, qc_m1, qi_m1)
+    increments = dict(
+        temperature_increment=T - T_m1, humidity_increment=q - q_m1,
+        qc_increment=(qc - qc_m1) - det_qc, qi_increment=(qi - qi_m1) - det_qi,
+        detrained_qc=det_qc, detrained_qi=det_qi)
+    return anchor, increments
 
 
 def _run(col, params=_P, dt=DT):
     """Call the column function on a dict of named inputs."""
     n = col["T"].shape[0]
     zeros = jnp.zeros(n)
+    (T_m1, q_m1, qc_m1, qi_m1), increments = _anchor_and_increments(
+        col["T"], col["q"], col["qc"], col["qi"],
+        **{k: col[k] for k in ("T_m1", "q_m1", "qc_m1", "qi_m1",
+                               "det_qc", "det_qi") if k in col})
     return cloud_microphysics_2m(
-        col["T"], col["q"], col["p"], col["qc"], col["qi"],
+        T_m1, q_m1, col["p"], qc_m1, qi_m1,
         col.get("qnc", zeros), col.get("qni", zeros),
         col["cf"], col["rho"], col.get("dz", jnp.full(n, 500.0)),
         col.get("tke", zeros), col.get("act", jnp.full(n, 5e7)),
-        col.get("inp", zeros), zeros, dt, params,
-        **{arg: col[key] for arg, key in _OPTIONAL.items() if key in col},
+        col.get("inp", zeros), zeros, dt, params, **increments,
     )
 
 
@@ -983,12 +1007,13 @@ class TestColumnAndVmapAgree:
 
         def one(T, q, p, qc, qi, qnc, qni, cf, rho, tke, T_m1, q_m1,
                 qc_m1, qi_m1, det_qc, det_qi):
+            anchor, increments = _anchor_and_increments(
+                T, q, qc, qi, T_m1, q_m1, qc_m1, qi_m1, det_qc, det_qi)
             return cloud_microphysics_2m(
-                T, q, p, qc, qi, qnc, qni, cf, rho, jnp.full(n, 500.0), tke,
+                anchor[0], anchor[1], p, anchor[2], anchor[3], qnc, qni, cf,
+                rho, jnp.full(n, 500.0), tke,
                 jnp.full(n, 5e7), jnp.zeros(n), jnp.zeros(n), DT, _P,
-                temperature_m1=T_m1, specific_humidity_m1=q_m1,
-                qc_m1=qc_m1, qi_m1=qi_m1,
-                detrained_qc=det_qc, detrained_qi=det_qi)
+                **increments)
 
         batched = jax.vmap(one)(*(stacked[k] for k in keys))
         for i, col in enumerate(cols):
@@ -1007,12 +1032,15 @@ class TestColumnAndVmapAgree:
 class TestTermPassesDetrainment:
     """``Lohmann2MMicrophysics`` hands ``clouds.conv_detrainment_*`` to the scheme.
 
-    The convection term adds its detrained condensate to ``clouds.qc/qi`` and
-    publishes the two parts as kg/kg/s. A turbulent, crystal-free mixed-phase
-    column receives detrained ICE at one level: the term must pass
-    ``dt·conv_detrainment_*`` to the column function (the tendencies equal a
-    direct call with those arguments, and differ from one without them), and
-    the scheme's lo2 criterion must reclassify the ice as liquid.
+    The convection term returns its detrained condensate as its qc/qi
+    tendency, so it sits in the running tendency ``_tendency_run``, adds it
+    to ``clouds.qc/qi``, and publishes the two parts as kg/kg/s. A turbulent,
+    crystal-free mixed-phase column receives detrained ICE at one level: the
+    term must pass ``dt·conv_detrainment_*`` to the column function as the
+    detrainment, out of the increments (the tendencies equal a direct call
+    with those arguments, and differ from one with the same ice as an
+    increment), and the scheme's lo2 criterion must reclassify the ice as
+    liquid.
     """
 
     NLEV, NCOLS, K, D, DT = 8, 3, 3, 2e-5, 900.0
@@ -1042,6 +1070,7 @@ class TestTermPassesDetrainment:
             shape, temperature=temperature, specific_humidity=humidity,
             tracers={"qc": jnp.zeros(shape), "qi": jnp.zeros(shape),
                      "qnc": jnp.zeros(shape), "qni": jnp.zeros(shape)})
+        zeros = jnp.zeros(shape)
         diagnostics = {
             "_dt_seconds": self.DT,
             "pressure_full": pressure,
@@ -1050,31 +1079,50 @@ class TestTermPassesDetrainment:
             "clouds": clouds,
             "aerosol": AerosolData.zeros((ncols,), nlev),
             "vertical_diffusion": SimpleNamespace(tke=jnp.full(shape, 0.5)),
+            # The running tendency after the convection term: its detrained
+            # ice is its qi tendency, nothing else moves.
+            "_tendency_run": {
+                "u_wind": zeros, "v_wind": zeros,
+                "temperature": zeros, "specific_humidity": zeros,
+                "tracers": {"qc": zeros, "qi": rate_qi,
+                            "qnc": zeros, "qni": zeros},
+            },
         }
         return state, diagnostics
 
     def _direct(self, state, diagnostics, with_detrainment):
+        """Run the column function on the term's inputs, the ice as detrainment or not.
+
+        The anchor is the received state (no carried post-physics state) and
+        the only change since it is the convection term's ice; without the
+        detrainment arguments that ice is an upstream increment instead. The
+        air density is ECHAM's ``papm1/(rd·ptvm1)`` at the anchor, as the term
+        forms it, with the layer depth that keeps the diagnostics' layer mass.
+        """
         clouds = diagnostics["clouds"]
         n = self.NLEV
+        virtual_temperature = state.temperature * (
+            1.0 + c.vtmpc1 * state.specific_humidity
+            - (state.tracers["qc"] + state.tracers["qi"]))
+        rho = diagnostics["pressure_full"] / (c.rd * virtual_temperature)
+        dz = (diagnostics["air_density"] * diagnostics["layer_thickness"]) / rho
         outs = []
         for j in range(self.NCOLS):
-            kwargs = {}
+            detr_qc = self.DT * clouds.conv_detrainment_qc[:, j]
+            detr_qi = self.DT * clouds.conv_detrainment_qi[:, j]
             if with_detrainment:
-                kwargs = dict(
-                    detrained_qc=self.DT * clouds.conv_detrainment_qc[:, j],
-                    detrained_qi=self.DT * clouds.conv_detrainment_qi[:, j])
+                kwargs = dict(detrained_qc=detr_qc, detrained_qi=detr_qi)
+            else:
+                kwargs = dict(qc_increment=detr_qc, qi_increment=detr_qi)
             outs.append(cloud_microphysics_2m(
                 state.temperature[:, j], state.specific_humidity[:, j],
-                diagnostics["pressure_full"][:, j], clouds.qc[:, j],
-                clouds.qi[:, j], jnp.zeros(n), jnp.zeros(n),
-                clouds.cloud_fraction[:, j], diagnostics["air_density"][:, j],
-                diagnostics["layer_thickness"][:, j],
+                diagnostics["pressure_full"][:, j],
+                state.tracers["qc"][:, j], state.tracers["qi"][:, j],
+                jnp.zeros(n), jnp.zeros(n),
+                clouds.cloud_fraction[:, j], rho[:, j], dz[:, j],
                 diagnostics["vertical_diffusion"].tke[:, j],
                 jnp.zeros(n), jnp.zeros(n), jnp.zeros(n), self.DT, _P,
-                temperature_m1=state.temperature[:, j],
-                specific_humidity_m1=state.specific_humidity[:, j],
-                qc_m1=state.tracers["qc"][:, j],
-                qi_m1=state.tracers["qi"][:, j], **kwargs)[0])
+                **kwargs)[0])
         return outs
 
     def test_detrainment_reaches_the_scheme_and_is_reclassified(self):
@@ -1092,8 +1140,8 @@ class TestTermPassesDetrainment:
                 np.testing.assert_allclose(np.asarray(term[:, j]),
                                            np.asarray(direct), rtol=1e-5,
                                            atol=1e-12, err_msg=name)
-            # Without the detrainment arguments the detrained ice would be an
-            # upstream increment: sedimented, and kept as ice.
+            # As an upstream increment the same ice would be sedimented and
+            # kept as ice.
             gap = float(jnp.abs(tendency.tracers["qc"][self.K, j]
                                 - without_d[j].dqcdt[self.K]))
             assert gap > 0.1 * self.D / self.DT, gap

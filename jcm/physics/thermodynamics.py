@@ -204,8 +204,8 @@ def dqsat_dT_from_es(es, des_dT, pressure):
     ``x`` in the slope. Below the cap both are the analytic derivative, and
     equal the ``(1/p)·zcor²·dua`` that ``mo_cloud`` and ``precalc_land`` use
     everywhere; at the cap (the top few levels) those keep the
-    uncapped ``dua/p``, a difference in the dev 1M scheme that is part of
-    #940.
+    uncapped ``dua/p``, as the 1M scheme's condensation does
+    (``mo_cloud.f90`` l.700-704).
 
     Args:
         es: Saturation vapour pressure [Pa].

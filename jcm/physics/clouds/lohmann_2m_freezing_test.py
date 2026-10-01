@@ -260,17 +260,23 @@ def test_2m_term_freezes_with_the_published_freezing_aerosol():
     gap = jnp.max(jnp.abs(with_fa.tracers["qni"] - without.tracers["qni"]))
     assert float(gap) > 1e3, float(gap)
     clouds = diagnostics["clouds"]
+    # The term's inputs are ECHAM's: the anchor is the received state (no carried
+    # post-physics state here), the increments are zero, and the air density is the
+    # anchor's virtual density with the layer depth that keeps the layer mass.
+    import jcm.constants as consts
+    virtual_temperature = state.temperature * (
+        1.0 + consts.vtmpc1 * state.specific_humidity
+        - (state.tracers["qc"] + state.tracers["qi"]))
+    rho = diagnostics["pressure_full"] / (consts.rd * virtual_temperature)
+    dz = diagnostics["air_density"] * diagnostics["layer_thickness"] / rho
     for j in range(_NCOLS):
         c = lambda x: x[:, j]  # noqa: E731
         direct = cloud_microphysics_2m(
             c(state.temperature), c(state.specific_humidity), c(diagnostics["pressure_full"]),
-            c(clouds.qc), c(clouds.qi), c(state.tracers["qnc"]), c(state.tracers["qni"]),
-            c(clouds.cloud_fraction), c(diagnostics["air_density"]),
-            c(diagnostics["layer_thickness"]), c(diagnostics["vertical_diffusion"].tke),
+            c(state.tracers["qc"]), c(state.tracers["qi"]),
+            c(state.tracers["qnc"]), c(state.tracers["qni"]),
+            c(clouds.cloud_fraction), c(rho), c(dz), c(diagnostics["vertical_diffusion"].tke),
             c(diagnostics["activated_cdnc"]), jnp.zeros(_NLEV), jnp.zeros(_NLEV), _DT, p,
-            temperature_m1=c(state.temperature), specific_humidity_m1=c(state.specific_humidity),
-            qc_m1=c(state.tracers["qc"]), qi_m1=c(state.tracers["qi"]),
-            detrained_qc=jnp.zeros(_NLEV), detrained_qi=jnp.zeros(_NLEV),
             freezing_aerosol=jax.tree_util.tree_map(c, fa))[0]
         for name, got, want in (("qni", with_fa.tracers["qni"], direct.dqnidt),
                                 ("qi", with_fa.tracers["qi"], direct.dqidt),

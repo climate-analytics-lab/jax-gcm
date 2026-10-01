@@ -1,662 +1,725 @@
-"""Unit tests for the Sundqvist cloud fraction and condensation helpers."""
+"""Tests of the ECHAM cloud cover (``sundqvist.py``, ``mo_cover.f90::cover``).
 
-import jax.numpy as jnp
+Value tests compare against :func:`_echam_cover_reference`, a NumPy
+transcription of ``mo_cover.f90`` l.164-252 written as the Fortran loops run
+(the upward inversion scan with ECHAM's ``FSEL`` update rule, then the level
+loop), at designed points: relative humidity below, at and above the critical
+value, exact saturation, each inversion case, each surface and convective
+type, and cold cells with and without ice. The comparison against the
+unmodified Fortran itself lives in ``echam_fortran_reference_test.py``.
+
+Derivative tests follow ``docs/source/design/surrogate_gradients.md``: for
+each surrogate, ``check_surrogate_gradient`` on the wrapped function,
+``check_gradients`` on the surrogate alone, and a bound on the distance
+between surrogate and reference.
+"""
+
 import jax
-from jcm.physics import thermodynamics
-from .sundqvist import (
-    CloudParameters,
-    saturation_specific_humidity, calculate_cloud_fraction,
-    condensation_evaporation, critical_relative_humidity, _qs_and_dqs_dt,
-)
+import jax.numpy as jnp
+import numpy as np
+import pytest
+
 import jcm.constants as c
-from jcm.testing import check_gradients
+from jcm.physics import thermodynamics
+from jcm.physics.clouds import echam_saturation as es
+from jcm.physics.clouds.sundqvist import (
+    CloudParameters,
+    SundqvistCloudFraction,
+    _cover_exact,
+    _cover_surrogate,
+    _zsat_exact,
+    _zsat_surrogate,
+    _inversion_lapse,
+    calculate_cloud_fraction,
+    cover_from_b0,
+    cover_saturation_specific_humidity,
+    critical_relative_humidity,
+    saturation_specific_humidity,
+    stratocumulus_saturation_factor,
+)
+from jcm.physics.echam.echam_levels import get_echam_levels
+from jcm.physics.surrogate_gradient import with_surrogate_gradient
+from jcm.testing import check_gradients, check_surrogate_gradient
+
+L47_RANGE = (39, 44)   # ECHAM's jbmin/jbmax = 40/45, 0-based
 
 
+# ---------------------------------------------------------------------------
+# Column construction and the NumPy transcription of mo_cover.f90
+# ---------------------------------------------------------------------------
+
+def _l47_pressures(ps=101325.0):
+    hc = get_echam_levels(47)
+    a = np.asarray(hc.a_boundaries, np.float64)
+    b = np.asarray(hc.b_boundaries, np.float64)
+    ph = a + b * ps
+    return ph, 0.5 * (ph[:-1] + ph[1:])
 
 
-def _qs_for_cover(pressure, temperature):
-    """Build qs consistent with the cover's lo2 phase switch for ice-free columns.
+def _geopotential(temperature, p_half, p_full):
+    """Hydrostatic full-level geopotential above the surface [m2 s-2]."""
+    t = np.asarray(temperature, np.float64)
+    n = t.shape[0]
+    phi = np.zeros(n)
+    phi_half_below = 0.0
+    for k in range(n - 1, -1, -1):
+        phi[k] = phi_half_below + c.rd * t[k] * np.log(p_half[k + 1] / p_full[k])
+        phi_half_below += c.rd * t[k] * np.log(
+            p_half[k + 1] / max(p_half[k], 1e-3))
+    return phi
 
-    The cloud-fraction decision now uses ECHAM's binary lo2 saturation
-    (water unless T < cthomi or ice is present — review finding 2.27), so
-    test humidities built as a fraction of qs must use the same surface,
-    not the legacy mixed-phase blend.
+
+def _l47_column(inversion_level=None, inversion_jump=3.0, ps=101325.0):
+    """Build an L47 column: 288 K surface, 6.5 K/km troposphere, 210 K above.
+
+    ``inversion_level`` (0-based) is made ``inversion_jump`` K colder than the
+    level above it, so its ``zdtdz`` is positive: an inversion on top of it.
     """
-    from jcm.physics.clouds.sundqvist import _qs_cover
-    return jax.vmap(lambda p_, t_: _qs_cover(p_, t_, jnp.zeros_like(t_)))(
-        pressure, temperature)
+    ph, pf = _l47_pressures(ps)
+    z_est = 7000.0 * np.log(ps / pf)
+    t = np.maximum(288.0 - 6.5e-3 * z_est, 210.0)
+    if inversion_level is not None:
+        t[inversion_level] = t[inversion_level - 1] - inversion_jump
+        t[inversion_level + 1:] = (
+            t[inversion_level]
+            + 6.5e-3 * (z_est[inversion_level] - z_est[inversion_level + 1:]))
+    return t, ph, pf, _geopotential(t, ph, pf)
 
 
-class TestCondensationLinearisation:
-    """The condensation step ports ECHAM ``mo_cloud.f90`` lines 696-784.
+def _es_numpy(t, ice):
+    """Evaluate the selected formula, written out (``echam_saturation``)."""
+    if es.SATURATION_FORMULA == "sonntag":
+        def fit(tt, a):
+            return np.exp(a[0] / tt + a[1] + a[2] * 0.01 * tt
+                          + a[3] * tt * tt * 1e-5 + a[4] * np.log(tt))
+        return np.where(ice, fit(t, es.ICE_COEFFICIENTS),
+                        fit(t, es.WATER_COEFFICIENTS))
+    def tetens(tt, ab):
+        return 610.78 * np.exp(ab[0] * (tt - c.tmelt) / (tt - c.tmelt + ab[1]))
+    return np.where(ice, tetens(t, es.TETENS_ICE), tetens(t, es.TETENS_WATER))
 
-    These tests pin down the three changes that take the per-step heating
-    at high supersaturation from ``+60 K`` (pre-fix) to ``+10 K``
-    (post-fix, ECHAM-matching) on a Tibetan-style column:
 
-    * Newton denominator ``1 + L/cp · dq_s/dT`` damps the step by ~6× in
-      the warm troposphere.
-    * Two-pass adjustment cleans up residual super-saturation.
-    * 1 % over-saturation tolerance allows micro-residuals so we don't
-      thrash near saturation on every column every step.
+def _qs_numpy(t, qi, p, csecfrl=5e-6, cthomi=238.15):
+    ice = (t < cthomi) | ((t < c.tmelt) & (qi > csecfrl))
+    e = _es_numpy(t, ice)
+    x = np.minimum(e * c.rd / c.rv / p, 0.5)
+    return x / (1.0 - (c.rv / c.rd - 1.0) * x)
+
+
+def _echam_cover_reference(t, q, qi, pf, ps, geo, row, jbmin, jbmax,
+                           enhance=True):
+    """``mo_cover.f90`` l.164-252 for one column, as the Fortran loops run.
+
+    Indices are 0-based and top-first; ECHAM's "no level found" value
+    ``knvb = 1`` is represented by ``-1``.
     """
+    g, cpd = c.grav, c.cpd
+    nlev = t.shape[0]
+    dtmin = -row["cinv"] * g / cpd
+    knvb = -1
+    if enhance:
+        for jk in range(nlev - 1, jbmin - 1, -1):
+            dtdz = min(0.0, (t[jk - 1] - t[jk]) * g / (geo[jk - 1] - geo[jk]))
+            if dtmin - dtdz < 0.0:        # FSEL(dtmin - dtdz, keep, new)
+                knvb = jk
+            dtmin = max(dtdz, dtmin)
+    qs = _qs_numpy(t, qi, pf, csecfrl=row["csecfrl"])
+    cover = np.zeros(nlev)
+    for jk in range(nlev):
+        rhc = row["crt"] + (row["crs"] - row["crt"]) * np.exp(
+            1.0 - (ps / pf[jk]) ** row["nex"])
+        zsat = 1.0
+        jb = knvb
+        if jbmin <= jb <= jbmax and jk in (jb, jb + row["nadd"]):
+            dtdz = (t[jb - 1] - t[jb]) * g / (geo[jb - 1] - geo[jb])
+            zsat = min(1.0, row["csatsc"] + max(0.0, -dtdz * cpd / g))
+        b0 = (q[jk] / (qs[jk] * zsat) - rhc) / (1.0 - rhc)
+        cover[jk] = 1.0 - np.sqrt(1.0 - min(max(b0, 0.0), 1.0))
+    return cover, knvb
 
-    def _config(self):
-        return CloudParameters.default()
 
-    def test_warming_feedback_dampens_supersat_heating(self):
-        """At 50 % supersaturation in the warm troposphere, the linearised
-        Newton step (``1 + L/cp · dqs/dT`` denominator) must reduce the
-        single-step heating by a factor close to ``1 + L/cp · dqs/dT``
-        compared to the bare ``q_excess`` formula.
+def _row(params):
+    return dict(crt=float(params.crt), crs=float(params.crs),
+                nex=float(params.nex), csatsc=float(params.csatsc),
+                cinv=float(params.cinv), csecfrl=float(params.csecfrl),
+                nadd=int(params.nadd))
+
+
+def _jcm_cover(t, q, qi, pf, ps, geo, params, enhance=True,
+               inversion_range=L47_RANGE):
+    cf, rh = calculate_cloud_fraction(
+        jnp.asarray(t), jnp.asarray(q), jnp.asarray(qi), jnp.asarray(pf),
+        jnp.asarray(ps), jnp.asarray(geo), params, inversion_range,
+        jnp.asarray(enhance))
+    return np.asarray(cf), np.asarray(rh)
+
+
+@pytest.fixture(autouse=True)
+def _x64():
+    """Value comparisons against the float64 transcription run in x64."""
+    previous = jax.config.jax_enable_x64
+    jax.config.update("jax_enable_x64", True)
+    yield
+    jax.config.update("jax_enable_x64", previous)
+
+
+@pytest.fixture(params=es.SATURATION_FORMULAS)
+def formula(request, monkeypatch):
+    """Run a value test under ECHAM's formula and the Tetens test utility."""
+    monkeypatch.setattr(es, "SATURATION_FORMULA", request.param)
+    return request.param
+
+
+# ---------------------------------------------------------------------------
+# Closure values
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("formula")
+class TestClosure:
+    """``rhc`` and ``cover = 1 - sqrt(1 - clip(b0, 0, 1))`` (l.233, 248-251)."""
+
+    def test_critical_rh_profile(self):
+        params = CloudParameters.default()
+        p = jnp.array([100000.0, 95000.0, 70000.0, 50000.0, 20000.0])
+        rhc = critical_relative_humidity(p, jnp.asarray(100000.0), params)
+        expected = 0.75 + (0.975 - 0.75) * np.exp(
+            1.0 - (100000.0 / np.asarray(p)) ** 2)
+        np.testing.assert_allclose(np.asarray(rhc), expected, rtol=1e-6)
+        assert float(rhc[0]) == pytest.approx(0.975)
+
+    def test_rh_below_critical_is_exactly_clear(self):
+        """``b0 < 0`` gives a cover of exactly 0, not a small positive one."""
+        params = CloudParameters.default()
+        t, ph, pf, geo = _l47_column()
+        qi = np.zeros_like(t)
+        qs = _qs_numpy(t, qi, pf)
+        rhc = np.asarray(critical_relative_humidity(
+            jnp.asarray(pf), jnp.asarray(ph[-1]), params))
+        cf, _ = _jcm_cover(t, (rhc - 0.01) * qs, qi, pf, ph[-1], geo,
+                           params, enhance=False)
+        assert np.all(cf == 0.0), cf
+
+    def test_rh_at_critical(self):
+        """``b0 = 0``: exactly 0; ``q = rhc·qs`` lands within rounding of it."""
+        assert float(cover_from_b0(jnp.array(0.0), 0.02)) == 0.0
+        params = CloudParameters.default()
+        t, ph, pf, geo = _l47_column()
+        qi = np.zeros_like(t)
+        rhc = np.asarray(critical_relative_humidity(
+            jnp.asarray(pf), jnp.asarray(ph[-1]), params))
+        cf, _ = _jcm_cover(t, rhc * _qs_numpy(t, qi, pf), qi, pf, ph[-1],
+                           geo, params, enhance=False)
+        assert np.all(cf < 1e-13), cf
+
+    def test_rh_above_critical_follows_the_closure(self):
+        params = CloudParameters.default()
+        t, ph, pf, geo = _l47_column()
+        qi = np.zeros_like(t)
+        q = 0.9 * _qs_numpy(t, qi, pf)
+        cf, _ = _jcm_cover(t, q, qi, pf, ph[-1], geo, params, enhance=False)
+        ref, _ = _echam_cover_reference(t, q, qi, pf, ph[-1], geo,
+                                        _row(params), *L47_RANGE,
+                                        enhance=False)
+        np.testing.assert_allclose(cf, ref, rtol=1e-10, atol=1e-12)
+        # rhc exceeds 0.9 in the lowest levels (crs = 0.975 at the surface)
+        assert np.all(cf[:35] > 0.0) and np.all(cf[42:] == 0.0)
+        assert np.all(cf < 1.0)
+
+    @pytest.mark.parametrize("rh", [1.0 + 1e-9, 1.3])
+    def test_saturation_is_exactly_overcast(self, rh):
+        """``b0 >= 1`` gives exactly 1 (``b0 = 1`` itself: next test)."""
+        params = CloudParameters.default()
+        t, ph, pf, geo = _l47_column()
+        qi = np.zeros_like(t)
+        cf, _ = _jcm_cover(t, rh * _qs_numpy(t, qi, pf), qi, pf, ph[-1], geo,
+                           params, enhance=False)
+        assert np.all(cf == 1.0), cf
+
+    def test_exact_saturation_point(self):
+        """``b0 = 1`` exactly: value 1 and a finite surrogate slope."""
+        x = jnp.array([1.0])
+        assert float(cover_from_b0(x, 0.02)[0]) == 1.0
+        slope = jax.grad(lambda v: cover_from_b0(v, 0.02).sum())(x)
+        assert np.isfinite(float(slope[0])) and float(slope[0]) > 0.0
+
+    def test_no_stratospheric_cutoff(self):
+        """ECHAM computes the cover at every level (ktdia = 1).
+
+        A supersaturated layer at 5 hPa is overcast, as in ECHAM; nothing
+        forces the cover to zero above a pressure.
         """
-        T = jnp.array(290.0)
-        p = jnp.array(50000.0)
-        cf = jnp.array(0.5)
-        config = self._config()
-        qs, dqs_dt = _qs_and_dqs_dt(p, T)
-        q = 1.5 * qs   # 50 % supersat
+        params = CloudParameters.default()
+        t = np.array([200.0, 205.0, 250.0, 280.0])
+        pf = np.array([500.0, 5000.0, 50000.0, 90000.0])
+        geo = np.array([3.5e5, 2.0e5, 5.5e4, 9.0e3])
+        qi = np.zeros(4)
+        q = 1.2 * _qs_numpy(t, qi, pf)
+        cf, _ = _jcm_cover(t, q, qi, pf, 100000.0, geo, params,
+                           enhance=False, inversion_range=(1, 2))
+        assert np.all(cf == 1.0)
 
-        dT, _, _, _ = condensation_evaporation(
-            T, q, jnp.array(0.0), jnp.array(0.0), cf, p, 1800.0, config,
-        )
-        dT_per_step = float(dT) * 1800.0
 
-        # Naive (pre-fix) ΔT = L/cp · q_excess
-        naive_dT = float(c.alhc / c.cpd * (q - qs))
-        # Expected damping factor at this T
-        damping = float(1.0 + c.alhc / c.cpd * dqs_dt)
+@pytest.mark.usefixtures("formula")
+class TestPhase:
+    """The cover's ``lo2`` saturation (l.215-224)."""
 
-        # Post-fix ΔT must be no larger than naive/damping × 1.2 (allow
-        # 20 % slack for the cloud-fraction weighting + two-pass cleanup).
-        assert dT_per_step <= naive_dT / damping * 1.2, (
-            f"single-step heating {dT_per_step:.2f} K not damped enough "
-            f"(naive {naive_dT:.2f}, damping {damping:.2f})"
-        )
+    def _cover_and_rh(self, t, qi, rh_water, params=None):
+        """Return the cover's ``q/qs`` for ``q = rh_water·qs_water``."""
+        params = params or CloudParameters.default()
+        pf = np.full(3, 50000.0)
+        geo = np.array([2e4, 1e4, 0.0])
+        q = rh_water * np.asarray(es.qsat_from_es(
+            es.es_water(jnp.full(3, t)), jnp.asarray(pf)))
+        return _jcm_cover(np.full(3, t), q, np.full(3, qi), pf, 100000.0,
+                          geo, params, enhance=False,
+                          inversion_range=(1, 2))
 
-    def test_extreme_supersat_no_runaway_heating(self):
-        """At 100 % supersaturation (the runaway condition that drove the
-        T63 + Tibetan column failure in PR #458), the per-step heating
-        must stay below 15 K. Pre-fix this hit 60+ K.
+    @staticmethod
+    def _ratio(t):
+        p = jnp.asarray(50000.0)
+        return float(es.qsat_from_es(es.es_water(t), p)
+                     / es.qsat_from_es(es.es_ice(t), p))
+
+    def test_cold_cell_uses_ice(self):
+        """Below cthomi the ice table applies with or without ice."""
+        _, rh = self._cover_and_rh(230.0, 0.0, 0.8)
+        assert rh[0] == pytest.approx(0.8 * self._ratio(230.0), rel=1e-9)
+
+    def test_mixed_phase_without_ice_uses_water(self):
+        _, rh = self._cover_and_rh(255.0, 0.0, 0.8)
+        assert rh[0] == pytest.approx(0.8, rel=1e-9)
+
+    def test_mixed_phase_ice_threshold_is_strict(self):
+        """``xi > csecfrl`` is strict: at the threshold, water."""
+        _, rh_at = self._cover_and_rh(255.0, 5.0e-6, 0.8)
+        _, rh_above = self._cover_and_rh(255.0, 5.1e-6, 0.8)
+        assert rh_at[0] == pytest.approx(0.8, rel=1e-9)
+        assert rh_above[0] == pytest.approx(0.8 * self._ratio(255.0),
+                                            rel=1e-9)
+
+    def test_csecfrl_comes_from_the_resolution_defaults(self):
+        """At T127 ECHAM's csecfrl is 1e-5, so 6e-6 of ice stays water."""
+        _, rh63 = self._cover_and_rh(255.0, 6.0e-6, 0.8)
+        _, rh127 = self._cover_and_rh(
+            255.0, 6.0e-6, 0.8, CloudParameters.default(truncation=127))
+        assert rh63[0] == pytest.approx(0.8 * self._ratio(255.0), rel=1e-9)
+        assert rh127[0] == pytest.approx(0.8, rel=1e-9)
+
+    def test_melting_point_uses_water(self):
+        _, rh = self._cover_and_rh(c.tmelt, 1.0e-3, 0.8)
+        assert rh[0] == pytest.approx(0.8, rel=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Stratocumulus enhancement
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("formula")
+class TestInversion:
+    """ECHAM's inversion search and ``zsat`` (l.179-207, 234-247)."""
+
+    def _case(self, t, ph, pf, geo, params=None, enhance=True, rh=0.8):
+        params = params or CloudParameters.default()
+        qi = np.zeros_like(t)
+        q = rh * _qs_numpy(t, qi, pf)
+        cf, _ = _jcm_cover(t, q, qi, pf, ph[-1], geo, params, enhance=enhance)
+        ref, knvb = _echam_cover_reference(t, q, qi, pf, ph[-1], geo,
+                                           _row(params), *L47_RANGE,
+                                           enhance=enhance)
+        cf_plain, _ = _jcm_cover(t, q, qi, pf, ph[-1], geo, params,
+                                 enhance=False)
+        np.testing.assert_allclose(cf, ref, rtol=1e-10, atol=1e-12)
+        return cf, cf_plain, knvb
+
+    def test_inversion_inside_range_enhances_that_level_only(self):
+        t, ph, pf, geo = _l47_column(inversion_level=42)
+        cf, cf_plain, knvb = self._case(t, ph, pf, geo)
+        assert knvb == 42
+        changed = np.nonzero(cf != cf_plain)[0]
+        assert list(changed) == [42]
+        zsat = np.asarray(stratocumulus_saturation_factor(
+            jnp.asarray(t), jnp.asarray(geo), CloudParameters.default(),
+            L47_RANGE))
+        assert zsat[42] == pytest.approx(0.7)          # zgam = 0 at an inversion
+        assert np.all(np.delete(zsat, 42) == 1.0)
+
+    def test_most_stable_level_below_jbmax_blocks_enhancement(self):
+        """A surface-based inversion is chosen and suppresses enhancement.
+
+        ECHAM searches down to the lowest level, so a near-surface inversion
+        wins the search and, lying below ``jbmax``, gives no enhancement at
+        all, even though a weaker inversion exists inside the range.
         """
-        T = jnp.array(290.0)
-        p = jnp.array(50000.0)
-        cf = jnp.array(0.5)
-        config = self._config()
-        qs, _ = _qs_and_dqs_dt(p, T)
-        q = 2.0 * qs
+        t, ph, pf, geo = _l47_column(inversion_level=41, inversion_jump=1.0)
+        t[46] = t[45] - 4.0                   # a stronger inversion at the ground
+        geo = _geopotential(t, ph, pf)
+        cf, cf_plain, knvb = self._case(t, ph, pf, geo)
+        assert knvb in (41, 46)
+        # both inversions clip to 0: the tie goes to the lowest level
+        assert knvb == 46
+        np.testing.assert_array_equal(cf, cf_plain)
 
-        dT, _, _, _ = condensation_evaporation(
-            T, q, jnp.array(0.0), jnp.array(0.0), cf, p, 1800.0, config,
-        )
-        dT_per_step = float(dT) * 1800.0
-        assert dT_per_step < 15.0, (
-            f"single-step heating {dT_per_step:.2f} K — pre-fix it was 60 K, "
-            f"the linearised port should bring it under 15 K"
-        )
+    def test_no_level_stable_enough_gives_no_enhancement(self):
+        """A dry-adiabatic boundary layer is more unstable than -cinv·g/cpd."""
+        t, ph, pf, geo = _l47_column()
+        z = geo / c.grav
+        bl = z < 2500.0
+        t[bl] = 300.0 - 9.8e-3 * z[bl]
+        geo = _geopotential(t, ph, pf)
+        cf, cf_plain, knvb = self._case(t, ph, pf, geo)
+        assert knvb == -1
+        np.testing.assert_array_equal(cf, cf_plain)
 
-    def test_no_oversat_after_two_passes(self):
-        """The two-pass cleanup must leave the column within
-        ``1 + oversat_frac`` of saturation. Default ``oversat_frac=0.01``
-        → no more than 1 % super-sat after the call.
-        """
-        T = jnp.array(290.0)
-        p = jnp.array(50000.0)
-        cf = jnp.array(1.0)   # full overcast — so pass 1 absorbs most
-        config = self._config()
-        qs, _ = _qs_and_dqs_dt(p, T)
-        q = 1.20 * qs
+    def test_weakly_stable_level_uses_zgam(self):
+        """A stable but non-inverted layer gets ``csatsc + zgam``."""
+        t, ph, pf, geo = _l47_column()
+        # make the 42/41 lapse -1 K/km (more stable than the -6.5 elsewhere)
+        dz = (geo[41] - geo[42]) / c.grav
+        t[:42] = t[:42] - (t[41] - (t[42] - 1.0e-3 * dz))
+        geo = _geopotential(t, ph, pf)
+        cf, cf_plain, knvb = self._case(t, ph, pf, geo)
+        lapse = (t[41] - t[42]) * c.grav / (geo[41] - geo[42])
+        zsat = np.asarray(stratocumulus_saturation_factor(
+            jnp.asarray(t), jnp.asarray(geo), CloudParameters.default(),
+            L47_RANGE))
+        assert knvb == 42
+        assert zsat[42] == pytest.approx(0.7 - lapse * c.cpd / c.grav,
+                                         rel=1e-9)
 
-        dT, dq, _, _ = condensation_evaporation(
-            T, q, jnp.array(0.0), jnp.array(0.0), cf, p, 1800.0, config,
-        )
-        T_after = float(T) + float(dT) * 1800.0
-        q_after = float(q) + float(dq) * 1800.0
-        qs_after, _ = _qs_and_dqs_dt(p, jnp.array(T_after))
-        rh_after = q_after / float(qs_after)
-        assert rh_after <= 1.011, (
-            f"post-condensation RH = {rh_after*100:.2f} % "
-            f"(should be within 1 % oversat tolerance)"
-        )
+    def test_nadd_enhances_the_level_below(self):
+        """T31's ``nadd = 1`` enhances the chosen level and the one below."""
+        params = CloudParameters.default(truncation=31)
+        t, ph, pf, geo = _l47_column(inversion_level=42)
+        zsat = np.asarray(stratocumulus_saturation_factor(
+            jnp.asarray(t), jnp.asarray(geo), params, L47_RANGE))
+        assert list(np.nonzero(zsat < 1.0)[0]) == [42, 43]
+        assert zsat[43] == zsat[42] == pytest.approx(float(params.csatsc))
+        self._case(t, ph, pf, geo, params=params)
 
-    def test_subsaturated_column_unchanged(self):
-        """A subsaturated column with no cloud water/ice must produce zero
-        condensation tendencies (no spontaneous evaporation when there's
-        nothing to evaporate).
-        """
-        T = jnp.array(290.0)
-        p = jnp.array(50000.0)
-        config = self._config()
-        qs, _ = _qs_and_dqs_dt(p, T)
-        q = 0.5 * qs   # 50 % RH
-
-        dT, dq, dqc, dqi = condensation_evaporation(
-            T, q, jnp.array(0.0), jnp.array(0.0), jnp.array(0.5),
-            p, 1800.0, config,
-        )
-        assert jnp.allclose(dT, 0.0)
-        assert jnp.allclose(dq, 0.0)
-        assert jnp.allclose(dqc, 0.0)
-        assert jnp.allclose(dqi, 0.0)
-
-    def test_moist_static_energy_per_step(self):
-        """The per-step adjustment conserves moist static energy
-        ``cp · ΔT + L · Δq = 0`` to within the linearisation residual
-        (sub-1 % even at strong supersaturation).
-        """
-        T = jnp.array(290.0)
-        p = jnp.array(50000.0)
-        cf = jnp.array(0.5)
-        config = self._config()
-        qs, _ = _qs_and_dqs_dt(p, T)
-        q = 1.30 * qs
-
-        dT, dq, _, _ = condensation_evaporation(
-            T, q, jnp.array(0.0), jnp.array(0.0), cf, p, 1800.0, config,
-        )
-        delta_T = float(dT) * 1800.0
-        delta_q = float(dq) * 1800.0
-        h_change = c.cpd * delta_T + c.alhc * delta_q
-        h_baseline = c.cpd * float(T) + c.alhc * float(q)
-        rel = abs(h_change) / h_baseline
-        assert rel < 1e-2, f"moist static energy drift {rel*100:.3f} %"
+    def test_gate_off_gives_no_enhancement(self):
+        t, ph, pf, geo = _l47_column(inversion_level=42)
+        cf, cf_plain, _ = self._case(t, ph, pf, geo, enhance=False)
+        np.testing.assert_array_equal(cf, cf_plain)
 
 
+# ---------------------------------------------------------------------------
+# The term: surface types, convective types, layouts
+# ---------------------------------------------------------------------------
+
+class _Forcing:
+    def __init__(self, sice):
+        self.sice_am = sice
 
 
-
-class TestSaturationFunctions:
-    """Test saturation vapor pressure and humidity calculations"""
-    
-    def test_cover_qsat_is_echam_lo2_on_sonntag(self):
-        """The cover's qs: Sonntag over ice where lo2, over water elsewhere."""
-        from jcm.physics.clouds.sundqvist import _qs_cover
-        p = jnp.array([6.0e4, 6.0e4, 6.0e4, 6.0e4])
-        T = jnp.array([230.0, 260.0, 260.0, 280.0])
-        qi = jnp.array([0.0, 0.0, 1.0e-5, 1.0e-5])
-        es = jnp.array([
-            thermodynamics.es_ice(T[0]),       # T < cthomi
-            thermodynamics.es_water(T[1]),     # no ice: water
-            thermodynamics.es_ice(T[2]),       # ice above csecfrl
-            thermodynamics.es_water(T[3]),     # above tmelt
-        ])
-        assert jnp.allclose(_qs_cover(p, T, qi, t_ice=238.15),
-                            thermodynamics.qsat_from_es(es, p), rtol=1e-6)
-
-    def test_saturation_specific_humidity(self):
-        """Test saturation specific humidity calculation"""
-        # Standard atmosphere at sea level
-        p_sfc = 101325.0  # Pa
-        t_sfc = 288.15    # K (15°C)
-        
-        qs = saturation_specific_humidity(jnp.array(p_sfc), jnp.array(t_sfc))
-        
-        # Should be around 10 g/kg
-        assert 0.008 < qs < 0.012
-        
-        # Should increase as pressure decreases (at constant temperature)
-        pressures = jnp.linspace(100000, 20000, 10)
-        qs_vals = jax.vmap(lambda p: saturation_specific_humidity(p, t_sfc))(pressures)
-        assert jnp.all(jnp.diff(qs_vals) > 0)  # qs increases as pressure decreases
-        
-        # Test mixed phase region
-        t_mixed = 260.0  # K
-        p_mid = 50000.0  # Pa
-        qs_mixed = saturation_specific_humidity(jnp.array(p_mid), jnp.array(t_mixed))
-        
-        # Should be between pure ice and pure water values
-        qs_ice = thermodynamics.qsat_from_es(
-            thermodynamics.es_ice(jnp.array(t_mixed)), p_mid)
-        qs_water = thermodynamics.qsat_from_es(
-            thermodynamics.es_water(jnp.array(t_mixed)), p_mid)
-        assert qs_ice <= qs_mixed <= qs_water
+class _Terrain:
+    def __init__(self, fmask):
+        self.fmask = fmask
 
 
-class TestCloudFraction:
-    """Test cloud fraction calculations"""
+def _term_inputs(ncols, inversion=True):
+    from jcm.physics_interface import PhysicsState
+    t, ph, pf, geo = _l47_column(inversion_level=42 if inversion else None)
+    qi = np.zeros_like(t)
+    q = 0.8 * _qs_numpy(t, qi, pf)
+    tile = lambda a: jnp.asarray(np.repeat(a[:, None], ncols, axis=1))  # noqa: E731
+    state = PhysicsState(
+        u_wind=tile(np.zeros(47)), v_wind=tile(np.zeros(47)),
+        temperature=tile(t), specific_humidity=tile(q),
+        geopotential=tile(geo),
+        normalized_surface_pressure=jnp.full((ncols,), ph[-1] / c.p0),
+        tracers={"qc": tile(np.zeros(47)), "qi": tile(qi)})
+    diags = {"pressure_full": tile(pf),
+             "surface_pressure": jnp.full((ncols,), ph[-1])}
+    return state, diags
 
-    def test_critical_rh_matches_echam_mo_cover(self):
-        """Pin ``mo_cover.f90`` critical-RH profile and parameter meanings."""
-        config = CloudParameters.default()
-        pressure = jnp.array([100000.0, 95000.0, 70000.0, 50000.0, 20000.0])
-        p_sfc = 100000.0
 
-        rhc = critical_relative_humidity(pressure, p_sfc, config)
-        expected = config.crt + (config.crs - config.crt) * jnp.exp(
-            1.0 - (p_sfc / pressure) ** config.nex
-        )
+def _cached_term(params=None, **kw):
+    from jcm.utils import get_coords
+    term = SundqvistCloudFraction(params, **kw)
+    term.cache_coords(get_coords(get_echam_levels(47), spectral_truncation=63))
+    return term
 
-        assert abs(float(config.crs) - 0.975) < 1e-7
-        assert abs(float(config.crt) - 0.75) < 1e-7
-        assert abs(float(config.nex) - 2.0) < 1e-7
-        assert jnp.allclose(rhc, expected)
-        assert jnp.isclose(rhc[0], config.crs)
-        assert rhc[-1] < 0.751
 
-    def test_cloud_fraction_uses_echam_threshold_profile(self):
-        """A 70 kPa, 84.5% RH layer should cloud under ECHAM T63 defaults.
+class TestTerm:
 
-        This RH is above the ``mo_cover`` threshold but below the old
-        sigma-interpolation threshold, so it catches the ordering/formula
-        regression directly through ``calculate_cloud_fraction``.
-        """
-        config = CloudParameters.default()
-        pressure = jnp.array([70000.0])
-        temperature = jnp.array([260.0])
-        p_sfc = 100000.0
+    def test_requires_cache_coords(self):
+        state, diags = _term_inputs(1)
+        with pytest.raises(RuntimeError, match="cache_coords"):
+            SundqvistCloudFraction()(state, diags, _Forcing(None),
+                                     _Terrain(jnp.zeros(1)))
 
-        qs = _qs_for_cover(pressure, temperature)
-        specific_humidity = 0.845 * qs
+    def test_inversion_levels_cached(self):
+        assert _cached_term()._inversion_range == L47_RANGE
+
+    def test_surface_and_convective_gate(self):
+        """Enhanced only over ice-free ocean without convection (l.181)."""
+        state, diags = _term_inputs(5)
+        #          ocean  land  sea-ice  ocean+ktype1  ocean(seaice 1e-13)
+        fmask = jnp.array([0.0, 1.0, 0.0, 0.0, 0.0])
+        sice = jnp.array([0.0, 0.0, 0.2, 0.0, 1e-13])
+        # the previous step's convection carry: only ``ktype`` is read
+        conv = type("Convection", (), {"ktype": jnp.array([0, 0, 0, 1, 0])})()
+        diags = {**diags, "convection": conv}
+        _, out = _cached_term()(state, diags, _Forcing(sice), _Terrain(fmask))
+        cf = np.asarray(out["clouds"].cloud_fraction)
+        enhanced = cf[42] > cf[42, 1]
+        assert list(enhanced) == [True, False, False, False, True]
+        assert np.all(cf[:42] == cf[:42, :1]) and np.all(cf[43:] == cf[43:, :1])
+
+    def test_column_and_block_agree(self):
+        """Broadcasting-native: (nlev,) and (nlev, ncols) give the same cover."""
+        t, ph, pf, geo = _l47_column(inversion_level=42)
+        qi = np.zeros_like(t)
+        q = 0.8 * _qs_numpy(t, qi, pf)
+        params = CloudParameters.default()
+        col, _ = _jcm_cover(t, q, qi, pf, ph[-1], geo, params)
+        scale = np.array([1.0, 0.95, 1.05])
+        block_args = [np.stack([a * s for s in scale], axis=1)
+                      for a in (t, q, qi, pf, geo)]
         cf, _ = calculate_cloud_fraction(
-            temperature, specific_humidity, pressure, p_sfc, config
-        )
+            *(jnp.asarray(a) for a in block_args[:4]),
+            jnp.asarray(ph[-1] * scale), jnp.asarray(block_args[4]),
+            params, L47_RANGE, jnp.ones(3, bool))
+        for k in range(3):
+            one, _ = _jcm_cover(*(a[:, k] for a in block_args[:4]),
+                                ph[-1] * scale[k], block_args[4][:, k], params)
+            np.testing.assert_array_equal(np.asarray(cf)[:, k], one)
+        np.testing.assert_array_equal(np.asarray(cf)[:, 0], col)
+        grid = [a.reshape(47, 1, 3) for a in block_args]
+        cf3, _ = calculate_cloud_fraction(
+            *(jnp.asarray(a) for a in grid[:4]),
+            jnp.asarray((ph[-1] * scale).reshape(1, 3)), jnp.asarray(grid[4]),
+            params, L47_RANGE, jnp.ones((1, 3), bool))
+        np.testing.assert_array_equal(np.asarray(cf3)[:, 0, :],
+                                      np.asarray(cf))
 
-        assert cf[0] > 0.03
-    
-    def test_cloud_fraction_basic(self):
-        """Test basic cloud fraction calculation"""
-        config = CloudParameters.default()
-        
-        # Create test profile
-        nlev = 20
-        pressure = jnp.linspace(100000, 20000, nlev)
-        temperature = jnp.linspace(288, 220, nlev)
-        
-        # Dry case - use 30% relative humidity everywhere
-        # This creates a realistic dry atmosphere
-        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
-        specific_humidity = 0.3 * qs  # 30% RH everywhere
-        cf, rh = calculate_cloud_fraction(
-            temperature, specific_humidity, pressure, 100000.0, config
-        )
-        
-        # With 30% RH, should have no clouds anywhere
-        assert jnp.all(cf < 0.01)  # No significant clouds
-        assert jnp.all(rh < 0.35)  # RH should be around 30%
-        
-        # Saturated case - should have clouds
-        qs = _qs_for_cover(pressure, temperature)
-        specific_humidity = 0.95 * qs  # 95% relative humidity (cover qs)
-        cf, rh = calculate_cloud_fraction(
-            temperature, specific_humidity, pressure, 100000.0, config
-        )
-        
-        assert jnp.any(cf > 0.5)  # Should have significant clouds
-        assert jnp.all(rh > 0.9)   # High relative humidity
 
-    def test_stratospheric_cloud_cutoff(self):
-        """No cloud above the cloud-top pressure (ECHAM ``jks``).
+# ---------------------------------------------------------------------------
+# Surrogates
+# ---------------------------------------------------------------------------
 
-        A supersaturated column reaching into the stratosphere must form
-        cloud in the troposphere but NOT above ``cloud_top_pressure_pa``.
-        The RH closure otherwise fills the cold (qsat→0) stratosphere with
-        spurious cloud (q/qsat ~80× at ~180 K), which inflates total cloud
-        cover and corrupts the radiation cloud field.
+class TestCoverSurrogate:
+    """The b0 clip and square root (``_cover_surrogate``, width smooth_b0)."""
+
+    WIDTH = 0.02
+    POINTS = jnp.array([-0.4, -0.05, 0.0, 0.1, 0.5, 0.9, 0.99, 1.0, 1.05, 1.6])
+
+    def _wrapped(self):
+        return with_surrogate_gradient(
+            _cover_exact, lambda x: _cover_surrogate(x, self.WIDTH))
+
+    def test_value_exact_and_derivative_is_the_surrogates(self):
+        check_surrogate_gradient(
+            self._wrapped(), _cover_exact,
+            lambda x: _cover_surrogate(x, self.WIDTH), (self.POINTS,))
+        np.testing.assert_array_equal(
+            np.asarray(cover_from_b0(self.POINTS, self.WIDTH)),
+            np.asarray(_cover_exact(self.POINTS)))
+
+    def test_surrogate_is_smooth(self):
+        check_gradients(lambda x: _cover_surrogate(x, self.WIDTH),
+                        (jnp.linspace(-0.3, 1.4, 23),), rtol=1e-4)
+
+    def test_distance_bound(self):
+        """``|surrogate - exact| <= sqrt(w ln 2)``, the value at ``b0 = 1``."""
+        x = jnp.linspace(-1.0, 3.0, 4001)
+        gap = np.abs(np.asarray(_cover_surrogate(x, self.WIDTH)
+                                - _cover_exact(x)))
+        bound = np.sqrt(self.WIDTH * np.log(2.0))
+        assert gap.max() <= bound * (1 + 1e-6)
+        assert gap.max() >= 0.9 * bound
+        far = (np.asarray(x) < -0.2) | (np.asarray(x) > 1.2)
+        assert gap[far].max() < 1e-3
+
+    def test_slope_is_bounded(self):
+        """Surrogate slope below ``1/(2 sqrt(w ln 2))`` (peak 2.26 at w = 0.02); finite."""
+        x = jnp.linspace(-1.0, 5.0, 6001)
+        slope = np.asarray(jax.vmap(jax.grad(
+            lambda v: cover_from_b0(v, self.WIDTH)))(x))
+        assert np.all(np.isfinite(slope)) and np.all(slope >= 0.0)
+        assert slope.max() < 1.0 / (2.0 * np.sqrt(self.WIDTH * np.log(2.0)))
+
+    def test_zero_width_selects_the_reference_derivative(self):
+        x = jnp.array([-0.5, 0.5, 1.5])
+        slope = np.asarray(jax.vmap(jax.grad(lambda v: cover_from_b0(v, 0.0)))(x))
+        np.testing.assert_allclose(slope, [0.0, 0.5 / np.sqrt(0.5), 0.0])
+
+
+class TestInversionSurrogate:
+    """The stability test of the inversion search (``_zsat_surrogate``)."""
+
+    WIDTH = 2.0e-4
+    STATIC = dict(jbmin=39, jbmax=44, nadd=0)
+
+    def _args(self, bump=0.0):
+        t, ph, pf, geo = _l47_column(inversion_level=None)
+        dz = (geo[41] - geo[42]) / c.grav
+        # level 42 at -2.4e-3 K/m (+ bump): just above the -2.44e-3 threshold
+        t[:42] -= t[41] - (t[42] + (-2.4e-3 + bump) * dz)
+        geo = _geopotential(t, ph, pf)
+        lapse = _inversion_lapse(jnp.asarray(t), jnp.asarray(geo))
+        return (lapse, jnp.asarray(0.7), jnp.asarray(0.25), jnp.asarray(1.0))
+
+    def _exact(self, *a):
+        return _zsat_exact(*a, **self.STATIC)
+
+    def _surrogate(self, *a):
+        return _zsat_surrogate(*a, **self.STATIC, width=self.WIDTH)
+
+    def test_value_exact_and_derivative_is_the_surrogates(self):
+        f = with_surrogate_gradient(self._exact, self._surrogate)
+        check_surrogate_gradient(f, self._exact, self._surrogate, self._args())
+
+    def test_surrogate_is_smooth(self):
+        check_gradients(self._surrogate, self._args(), rtol=1e-3)
+
+    def test_cinv_carries_a_gradient_near_the_threshold(self):
+        f = with_surrogate_gradient(self._exact, self._surrogate)
+        lapse, csatsc, cinv, enhance = self._args()
+        g = jax.grad(lambda ci: f(lapse, csatsc, ci, enhance).sum())(cinv)
+        assert np.isfinite(float(g)) and float(g) < 0.0
+
+    def test_distance_bound(self):
+        """``|surrogate - exact| <= (1 - csatsc)·max|H - σ|``.
+
+        Half the enhancement at the threshold itself, and below
+        ``0.3·exp(-5)`` once the chosen level is 5 widths from it.
         """
-        # The default cutoff is now ECHAM-like 10 hPa (finding 2.26: the
-        # 100 hPa stopgap deleted TTL cirrus); this test pins the cutoff
-        # MECHANISM, so it sets 100 hPa explicitly.
-        config = CloudParameters.default(cloud_top_pressure_pa=10000.0)
-        pressure = jnp.array([90000.0, 50000.0, 30000.0, 8000.0, 5000.0, 3000.0])
-        temperature = jnp.array([285.0, 250.0, 225.0, 200.0, 190.0, 185.0])
-        qs = _qs_for_cover(pressure, temperature)
-        specific_humidity = 1.2 * qs  # supersaturated at every level
-        cf, _ = calculate_cloud_fraction(
-            temperature, specific_humidity, pressure, 100000.0, config
-        )
-        below = pressure >= config.cloud_top_pressure_pa
-        above = pressure < config.cloud_top_pressure_pa
-        assert jnp.all(cf[below] > 0.5), "tropospheric cloud should form"
-        assert jnp.all(cf[above] == 0.0), "no cloud above the cutoff"
-
-        # Disabling the cutoff (0 Pa) restores the (spurious) stratospheric
-        # cloud — confirms the cutoff is what suppresses it.
-        cfg_off = CloudParameters.default(cloud_top_pressure_pa=0.0)
-        cf_off, _ = calculate_cloud_fraction(
-            temperature, specific_humidity, pressure, 100000.0, cfg_off
-        )
-        assert jnp.any(cf_off[above] > 0.5)
-
-    def test_cloud_fraction_profile(self):
-        """Test that critical RH varies with height"""
-        config = CloudParameters.default()
-        
-        # Create pressure levels
-        pressure = jnp.array([100000, 70000, 50000, 30000, 20000])
-        temperature = jnp.array([288, 268, 248, 228, 218])
-        p_sfc = 100000.0
-        
-        # Set constant relative humidity
-        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
-        rh_target = 0.8
-        specific_humidity = rh_target * qs
-        
-        cf, rh = calculate_cloud_fraction(
-            temperature, specific_humidity, pressure, p_sfc, config
-        )
-        
-        # Cloud fraction should increase with height at same RH
-        # (because critical RH decreases with height)
-        assert cf[0] < cf[-1]  # More clouds at top than bottom
-
-
-class TestCondensationEvaporation:
-    """Test condensation/evaporation processes"""
-    
-    def test_condensation(self):
-        """Test condensation in supersaturated conditions"""
-        config = CloudParameters.default()
-        
-        temperature = jnp.array(280.0)
-        pressure = jnp.array(90000.0)
-        cloud_fraction = jnp.array(0.5)
-        cloud_water = jnp.array(0.0005)
-        cloud_ice = jnp.array(0.0)
-        dt = 1800.0  # 30 minutes
-        
-        # Create supersaturated conditions
-        qs = saturation_specific_humidity(pressure, temperature)
-        specific_humidity = 1.1 * qs  # 110% relative humidity
-        
-        dtedt, dqdt, dqcdt, dqidt = condensation_evaporation(
-            temperature, specific_humidity, cloud_water, cloud_ice,
-            cloud_fraction, pressure, dt, config
-        )
-        
-        # Should have condensation
-        assert dqdt < 0  # Humidity decreases
-        assert dqcdt > 0  # Cloud water increases
-        assert dtedt > 0  # Temperature increases (latent heat release)
-    
-    def test_evaporation(self):
-        """Test evaporation in subsaturated conditions"""
-        config = CloudParameters.default()
-        
-        temperature = jnp.array(280.0)
-        pressure = jnp.array(90000.0)
-        cloud_fraction = jnp.array(0.5)
-        cloud_water = jnp.array(0.001)
-        cloud_ice = jnp.array(0.0)
-        dt = 1800.0
-        
-        # Create subsaturated conditions
-        qs = saturation_specific_humidity(pressure, temperature)
-        specific_humidity = 0.7 * qs  # 70% relative humidity
-        
-        dtedt, dqdt, dqcdt, dqidt = condensation_evaporation(
-            temperature, specific_humidity, cloud_water, cloud_ice,
-            cloud_fraction, pressure, dt, config
-        )
-        
-        # Should have evaporation
-        assert dqdt > 0   # Humidity increases
-        assert dqcdt < 0  # Cloud water decreases
-        assert dtedt < 0  # Temperature decreases (latent heat consumption)
-        
-        # Check evaporation doesn't exceed available cloud water
-        assert dqcdt >= -cloud_water / dt
+        for bump, bound in ((0.0, 0.3 * 0.5), (5 * self.WIDTH, 0.3 * np.exp(-5)),
+                            (-5 * self.WIDTH, 0.3 * np.exp(-5))):
+            args = self._args(bump)
+            gap = np.abs(np.asarray(self._surrogate(*args) - self._exact(*args)))
+            assert gap.max() <= bound * 1.01, (bump, gap.max())
 
 
 class TestJaxTransformations:
-    """JIT/grad coverage for the live helpers the physics term composes."""
 
-    def test_jit_and_grad_through_live_path(self):
-        """JIT and grad work through cloud fraction + condensation."""
-        config = CloudParameters.default()
+    def test_jit_and_grad_through_the_cover(self):
+        params = CloudParameters.default()
+        t, ph, pf, geo = _l47_column(inversion_level=42)
+        qi = np.zeros_like(t)
+        q = jnp.asarray(0.95 * _qs_numpy(t, qi, pf))
 
-        pressure = jnp.linspace(100000, 20000, 10)
-        temperature = jnp.linspace(288, 220, 10)
-        specific_humidity = jnp.ones(10) * 0.005
-        cloud_water = jnp.zeros(10)
-        cloud_ice = jnp.zeros(10)
+        def total(temp):
+            return calculate_cloud_fraction(
+                temp, q, jnp.asarray(qi), jnp.asarray(pf),
+                jnp.asarray(ph[-1]), jnp.asarray(geo), params,
+                L47_RANGE)[0].sum()
 
-        def live_path(t):
-            cf, _ = calculate_cloud_fraction(
-                t, specific_humidity, pressure, 100000.0, config
-            )
-            dtedt, dqdt, dqcdt, dqidt = condensation_evaporation(
-                t, specific_humidity, cloud_water, cloud_ice,
-                cf, pressure, 1800.0, config
-            )
-            return cf, dtedt
+        g = jax.jit(jax.grad(total))(jnp.asarray(t))
+        assert np.all(np.isfinite(np.asarray(g)))
+        assert np.any(np.asarray(g) != 0.0)
 
-        cf, dtedt = jax.jit(live_path)(temperature)
-        assert cf.shape == temperature.shape
-        assert dtedt.shape == temperature.shape
+    @pytest.mark.parametrize("zero", ["smooth_b0", "smooth_inv_thr", "both"])
+    def test_zero_widths_give_a_finite_derivative(self, zero):
+        """A surrogate width of 0 selects the reference derivative, never a NaN."""
+        fields = ({"smooth_b0": 0.0, "smooth_inv_thr": 0.0} if zero == "both"
+                  else {zero: 0.0})
+        params = CloudParameters.default(**fields)
+        t, ph, pf, geo = _l47_column(inversion_level=42)
+        qi = np.zeros_like(t)
+        q = jnp.asarray(0.95 * _qs_numpy(t, qi, pf))
 
-        grad = jax.grad(lambda t: jnp.sum(live_path(t)[1] ** 2))(temperature)
-        assert grad.shape == temperature.shape
-        assert jnp.all(jnp.isfinite(grad))
+        def total(temp, hum):
+            return calculate_cloud_fraction(
+                temp, hum, jnp.asarray(qi), jnp.asarray(pf),
+                jnp.asarray(ph[-1]), jnp.asarray(geo), params,
+                L47_RANGE)[0].sum()
 
+        for g in jax.grad(total, argnums=(0, 1))(jnp.asarray(t), q):
+            assert np.all(np.isfinite(np.asarray(g)))
 
-class TestCondensationToCloudWater:
-    """Tests for within-timestep condensation producing cloud condensate.
-
-    ``condensation_evaporation`` must emit positive qc/qi tendencies from
-    supersaturation even when initial qc/qi are zero, so that microphysics
-    (called next in the term chain) can convert condensate to precipitation.
-    """
-
-    def test_supersaturated_column_produces_cloud_water(self):
-        """A supersaturated column must produce a positive qc tendency.
-
-        This is the key regression test: with cloud_water=0 but RH > 100%,
-        the scheme must condense moisture into cloud water within the call.
-        """
-        config = CloudParameters.default()
-        nlev = 20
-        pressure = jnp.linspace(100000, 20000, nlev)
-        temperature = jnp.linspace(290, 220, nlev)
-
-        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
-        specific_humidity = jnp.where(pressure > 60000, 1.05 * qs, 0.3 * qs)
-
-        cloud_water = jnp.zeros(nlev)
-        cloud_ice = jnp.zeros(nlev)
-
-        _, _, dqcdt, _ = condensation_evaporation(
-            temperature, specific_humidity, cloud_water, cloud_ice,
-            jnp.zeros(nlev), pressure, 1800.0, config
-        )
-
-        assert jnp.max(dqcdt) > 0.0, \
-            f"dqc/dt should be > 0 for supersaturated column, got {float(jnp.max(dqcdt)):.6e}"
-
-    def test_subsaturated_column_no_cloud_water(self):
-        """A dry subsaturated column with no initial condensate stays dry."""
-        config = CloudParameters.default()
-        nlev = 20
-        pressure = jnp.linspace(100000, 20000, nlev)
-        temperature = jnp.linspace(290, 220, nlev)
-
-        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
-        specific_humidity = 0.3 * qs
-
-        cloud_water = jnp.zeros(nlev)
-        cloud_ice = jnp.zeros(nlev)
-
-        _, _, dqcdt, dqidt = condensation_evaporation(
-            temperature, specific_humidity, cloud_water, cloud_ice,
-            jnp.zeros(nlev), pressure, 1800.0, config
-        )
-
-        assert jnp.allclose(dqcdt, 0.0), \
-            "dqc/dt should remain 0 for dry column"
-        assert jnp.allclose(dqidt, 0.0), \
-            "dqi/dt should remain 0 for dry column"
-
-    def test_cold_supersaturated_column_produces_cloud_ice(self):
-        """A cold supersaturated column should produce a cloud-ice tendency."""
-        config = CloudParameters.default()
-        nlev = 10
-        pressure = jnp.linspace(50000, 20000, nlev)
-        temperature = jnp.full(nlev, 240.0)  # Below freezing
-
-        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
-        specific_humidity = 1.1 * qs
-
-        cloud_water = jnp.zeros(nlev)
-        cloud_ice = jnp.zeros(nlev)
-
-        _, _, _, dqidt = condensation_evaporation(
-            temperature, specific_humidity, cloud_water, cloud_ice,
-            jnp.zeros(nlev), pressure, 1800.0, config
-        )
-
-        assert jnp.max(dqidt) > 0.0, \
-            f"dqi/dt should be > 0 for cold supersaturated column, got {float(jnp.max(dqidt)):.6e}"
-
-
-class TestSundqvistGradients:
-    """AD against a central difference for cover and condensation (#820).
-
-    Both are green, and the scheme's two selectors are smooth by
-    construction rather than by fixture: review B.2.4 replaced the hard
-    ``clip(b0, 0, 1)`` with a softplus pair (``sundqvist.py:404``) and the
-    ``argmax`` inversion pick with a sigmoid gate and a softmax over the
-    BL-masked lapse (``sundqvist.py:316/326``), precisely so that ``crt`` and
-    ``cinv`` carry a gradient across the sub-critical and saturated ranges.
-    The remaining kinks are the ordinary ``maximum``/``minimum`` floors on
-    pressure and saturation; the operating points below sit off them.
-    """
-
-    NLEV = 14
-
-    def _column(self):
-        """Return (temperature, humidity, pressure) for a moist column."""
-        temperature = jnp.linspace(232.0, 295.0, self.NLEV)
-        pressure = jnp.linspace(2.0e4, 1.0e5, self.NLEV)
-        qs = jax.vmap(saturation_specific_humidity)(pressure, temperature)
-        return temperature, 0.82 * qs, pressure, qs
-
-    def test_cloud_fraction_gradients_match_a_central_difference(self):
-        """Single column: ``calculate_cloud_fraction`` is vmapped by callers.
-
-        Checked in float64: the column's curvature leaves the best float32
-        rung within ~1.5e-3 of consistency, which is float32 rounding in the
-        secants, not a kink.
-        """
-        with jax.enable_x64(True):
-            temperature, humidity, pressure, _ = self._column()
-            config = CloudParameters.default()
-            check_gradients(
-                lambda t, q, p: calculate_cloud_fraction(t, q, p, 1.0e5,
-                                                         config),
-                tuple(jnp.asarray(a, jnp.float64)
-                      for a in (temperature, humidity, pressure)),
-                rtol=1e-3)
-
-    def test_cloud_fraction_gradients_float32(self):
-        """The same column in float32, the model's working precision.
-
-        rtol 2e-3: the best float32 rung sits ~1.5e-3 from consistency
-        (secant round-off at this column's curvature), twice the float64
-        check's 1e-3.
-        """
-        temperature, humidity, pressure, _ = self._column()
-        config = CloudParameters.default()
-        check_gradients(
-            lambda t, q, p: calculate_cloud_fraction(t, q, p, 1.0e5, config),
-            (temperature, humidity, pressure), rtol=2e-3)
-
-    def test_condensation_gradients_column_and_block_agree(self):
-        """``condensation_evaporation`` is elementwise, so both shapes check.
-
-        Supersaturated at 1.06x, well clear of the ``q == qs`` switch.
-        """
-        temperature, _, pressure, qs = self._column()
-        config = CloudParameters.default()
-        cloud_water = jnp.full(self.NLEV, 3.0e-4)
-        cloud_ice = jnp.full(self.NLEV, 5.0e-5)
-        cloud_fraction = jnp.full(self.NLEV, 0.6)
-        f = lambda t, q, qc, qi, cf, p: condensation_evaporation(  # noqa: E731
-            t, q, qc, qi, cf, p, 1800.0, config)
-
-        args = (temperature, 1.06 * qs, cloud_water, cloud_ice,
-                cloud_fraction, pressure)
-        check_gradients(f, args, rtol=1e-3)
-
-        stack = lambda a: jnp.stack(  # noqa: E731
-            [a * (1.0 + 0.03 * k) for k in range(3)], axis=1)
-        check_gradients(f, tuple(stack(a) for a in args), rtol=1e-3)
-
-
-class TestStratocumulusInversionPick:
-    """The Sc enhancement picks ONE level, the lowest on a plateau (#677).
-
-    ECHAM's ``zknvb`` scan (``mo_cover.f90:236-244``) is a
-    strict-improvement scan from the surface up, so on the clip-to-0
-    plateau of a weakly-capped / isothermal boundary layer it resolves to
-    the lowest qualifying level and enhances there alone. The differentiable
-    softmax surrogate reproduces that with a per-level downward depth bias
-    (``smooth_inv_depth``); before #677 the bias was 500x too weak and the
-    boost was smeared ~1/N across the tied levels.
-    """
-
-    def _plateau_column(self, nlev=20):
-        """Return a column with an isothermal (dT/dz=0) BL plateau."""
-        import jcm.constants as c
-        p = jnp.linspace(2e4, 1.013e5, nlev)
-        t = jnp.linspace(220.0, 290.0, nlev)
-        # heights the scheme sees (surface-last), to locate the BL band
-        p_safe = jnp.maximum(p, 1.0)
-        dz = (c.rd * 0.5 * (t[:-1] + t[1:]) / c.grav
-              * jnp.log(p_safe[1:] / p_safe[:-1]))
-        z = jnp.concatenate([jnp.cumsum(dz[::-1])[::-1], jnp.zeros(1)])
-        in_bl = jnp.where((z >= 500.0) & (z <= 2000.0))[0]
-        # flatten those levels to a common temperature -> dT/dz=0 plateau
-        tval = float(t[int(in_bl[0])])
-        for k in [int(x) for x in in_bl]:
-            t = t.at[k].set(tval)
-        return t, p, [int(x) for x in in_bl]
-
-    def test_isothermal_bl_boosts_exactly_one_level(self):
-        from jcm.physics.clouds.sundqvist import _stratocumulus_zsat
-        t, p, in_bl = self._plateau_column()
-        cfg = CloudParameters.default()
-        zsat = _stratocumulus_zsat(t, p, p[-1], cfg,
-                                   enhance_allowed=jnp.array(True))
-        enh = 1.0 - zsat                      # per-level enhancement
-        # exactly one level carries essentially all of the enhancement
-        peak = float(jnp.max(enh))
-        share = float(jnp.max(enh) / jnp.sum(enh))
-        assert peak > 0.25, f"peak boost too weak: {peak}"
-        assert share > 0.95, f"boost still smeared, peak share={share}"
-        # ... and it is the LOWEST (nearest-surface, largest index) BL level
-        assert int(jnp.argmax(enh)) == max(in_bl)
-
-    def test_height_origin_lifts_the_bottom_level(self):
-        """The lowest full level sits above the surface interface, not at 0.
-
-        ECHAM measures its search-window heights from the surface half-level
-        (``mo_echam_cloud_params.f90:146-161``); a genuine surface pressure
-        above the lowest full-level pressure must lift the whole profile by
-        the bottom half-layer thickness (~30-60 m), not leave it at z=0
-        (#677).
-        """
-        import jcm.constants as c
-        from jcm.physics.clouds.sundqvist import _full_level_heights
-        t, p, _ = self._plateau_column()
-        ps = p[-1] + 7.0e2            # ~7 hPa bottom half-layer -> ~60 m
-        z = _full_level_heights(t, p, ps)
-        # bottom full level lifted off the ground by the hydrostatic offset
-        expect_bottom = float(c.rd * t[-1] / c.grav * jnp.log(ps / p[-1]))
-        assert 20.0 < float(z[-1]) < 120.0, float(z[-1])
-        assert abs(float(z[-1]) - expect_bottom) < 1e-3
-        # and the whole profile is exactly the old (z_bottom=0) profile
-        # shifted up by that constant offset
-        z0 = _full_level_heights(t, p, p[-1])   # ps == lowest level -> offset 0
-        assert float(z0[-1]) == 0.0
-        assert bool(jnp.allclose(z - z0, expect_bottom, atol=1e-4))
-
-    def test_smooth_inv_depth_zero_recovers_smear(self):
-        """Setting the depth bias to 0 recovers the diluted 1/N plateau split."""
-        from jcm.physics.clouds.sundqvist import _stratocumulus_zsat
-        t, p, in_bl = self._plateau_column()
+    def test_parameter_gradients_are_live(self):
+        """crt, crs, csatsc carry gradients through the surrogate."""
+        t, ph, pf, geo = _l47_column(inversion_level=42)
+        qi = np.zeros_like(t)
+        # 0.672 = 0.96·csatsc: inside the ramp at the enhanced level 42
+        q = jnp.asarray(0.672 * _qs_numpy(t, qi, pf))
         base = CloudParameters.default()
-        cfg0 = base.__class__(**{**base.__dict__,
-                                 'smooth_inv_depth': jnp.array(0.0)})
-        enh = 1.0 - _stratocumulus_zsat(t, p, p[-1], cfg0,
-                                        enhance_allowed=jnp.array(True))
-        share = float(jnp.max(enh) / jnp.sum(enh))
-        assert share < 0.6, f"depth=0 should smear, got peak share={share}"
+
+        def total(params):
+            return calculate_cloud_fraction(
+                jnp.asarray(t), q, jnp.asarray(qi), jnp.asarray(pf),
+                jnp.asarray(ph[-1]), jnp.asarray(geo), params,
+                L47_RANGE)[0].sum()
+
+        g = jax.grad(total)(base)
+        for name in ("crt", "crs", "csatsc", "nex"):
+            value = float(getattr(g, name))
+            assert np.isfinite(value) and value != 0.0, name
+
+
+# ---------------------------------------------------------------------------
+# The mixed-phase helper kept for other callers
+# ---------------------------------------------------------------------------
+
+class TestMixedPhaseHelper:
+
+    def test_blends_the_sonntag_fits(self):
+        """The water fit at and above ``tmelt``, ice at and below 238.15 K.
+
+        Linear in temperature between, with ``qs`` in ECHAM's form, both
+        from ``thermodynamics``.
+        """
+        p = jnp.array(60000.0)
+        mixed = (255.0 - 238.15) / (c.tmelt - 238.15)
+        for temp, weight in ((c.tmelt + 5.0, 1.0), (c.tmelt, 1.0),
+                             (255.0, mixed), (238.15, 0.0), (230.0, 0.0)):
+            t = jnp.array(temp)
+            vapour = (weight * thermodynamics.es_water(t)
+                      + (1.0 - weight) * thermodynamics.es_ice(t))
+            np.testing.assert_allclose(
+                float(saturation_specific_humidity(p, t)),
+                float(thermodynamics.qsat_from_es(vapour, p)), rtol=1e-6)
+        qs = saturation_specific_humidity(jnp.array(101325.0), jnp.array(288.15))
+        assert 0.008 < float(qs) < 0.012
+
+
+def test_cover_qs_is_echams_form():
+    """``x/(1 - vtmpc1·x)`` with ``x = min(es·rd/rv/p, 0.5)`` (l.221-223)."""
+    params = CloudParameters.default()
+    t = jnp.array([230.0, 260.0, 300.0])
+    p = jnp.array([30000.0, 60000.0, 100000.0])
+    qs = cover_saturation_specific_humidity(t, jnp.zeros(3), p, params)
+    np.testing.assert_allclose(np.asarray(qs),
+                               _qs_numpy(np.asarray(t), np.zeros(3),
+                                         np.asarray(p)), rtol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# The formulation against the Fortran
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("prec", ["float64", "float32"])
+@pytest.mark.parametrize("formula_variant,nn", [
+    ("tetens", 63), ("sonntag", 31), ("sonntag", 63), ("sonntag", 127),
+    ("sonntag", 255)])
+def test_formulation_matches_echam(monkeypatch, formula_variant, nn, prec):
+    """Every Fortran cover column, under ECHAM's formula and the test Tetens.
+
+    ``sonntag`` (the cover's formula) against the primary reference at ECHAM's
+    four truncations, each with its parameter row (the same comparison
+    ``echam_fortran_reference_test`` makes); ``tetens`` (the test utility)
+    against the reference's ``tetens`` variant, ECHAM's routine with that
+    pair inside, which confirms the formulation independently of the vapour
+    pressure. Both at the reference module's own tolerances.
+    """
+    from jcm.physics.clouds import echam_fortran_reference_test as ref
+
+    if prec == "float32" and nn != 63:
+        pytest.skip("the resolution reference is float64 only")
+    monkeypatch.setattr(es, "SATURATION_FORMULA", formula_variant)
+    which = None if nn == 63 else nn
+    inp = ref.echam_inputs("cover", formula_variant, which)
+    want = ref.echam_outputs("cover", formula_variant, which)["paclc"]
+    with ref.echam_constants(), ref.precision(prec):
+        got = ref.run_jcm_cover(inp, nn=nn)["paclc"]
+    rtol = ref.RTOL_F64 if prec == "float64" else ref.RTOL_F32
+    atol = (ref.ATOL if prec == "float64" else ref.ATOL_F32)["paclc"]
+    d = ref.B0_ERROR[prec]
+    scale = np.max(np.abs(want), axis=0)
+    tol = (atol + rtol * scale[None]
+           + np.minimum(np.sqrt(d), d / (2.0 * np.maximum(1.0 - want, 1e-300))))
+    bad = np.abs(got - want) > tol
+    names = ref.column_names("cover")
+    assert not bad.any(), [names[j] for j in np.nonzero(bad.any(axis=0))[0]]

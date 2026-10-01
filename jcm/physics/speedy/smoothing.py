@@ -80,8 +80,9 @@ def smooth_clip01(x, width):
     """Softplus-pair soft clip to [0, 1]; exact ``jnp.clip(x, 0, 1)`` at 0.
 
     Identity in the interior, exponential (never exactly flat) tails at
-    the edges, so gradients survive saturation. Same construction as the
-    Sundqvist cover ``smooth_b0`` (mo_cover review B.2.4).
+    the edges, so gradients survive saturation. The same construction is
+    the surrogate that defines the derivative of the ECHAM cloud cover's
+    clip (``sundqvist._cover_surrogate``, width ``smooth_b0``).
     """
     on, w = _safe_width(width)
     soft = w * jax.nn.softplus(x / w) - w * jax.nn.softplus((x - 1.0) / w)
