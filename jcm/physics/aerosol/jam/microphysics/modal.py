@@ -40,7 +40,9 @@ from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.microphysics import condensation
 from jcm.physics.aerosol.jam.microphysics import ageing
 from jcm.physics.aerosol.jam.microphysics import coagulation as coag
+from jcm.physics.aerosol.jam.microphysics import moments
 from jcm.physics.aerosol.jam.microphysics import new_particle_formation as npf
+from jcm.physics.aerosol.jam.microphysics import rename as renaming
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.koehler import (
     equilibrium_modal_state,
@@ -87,6 +89,10 @@ class MicrophysicsEnvironment:
     height_above_surface: jnp.ndarray
     pbl_height: jnp.ndarray
     dt: float                  # [s]
+    # Dry volume [m³/kg] of each mode (keyed by ``mode.short``) at the
+    # START of the step. Renaming measures continuous growth against it;
+    # ``None`` only in tests that exercise other processes alone.
+    dry_volume_start: dict[str, jnp.ndarray] | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -156,9 +162,13 @@ def rename(population, env, spec, params):
     number and mass transfer across. Without it, condensation inflates
     Aitken sizes without bound. The supplement to Liu et al. (2012) is
     explicit that this runs *after* continuous growth, which is what fixes
-    its position behind ``gas_aerosol_exchange`` here.
+    its position behind ``gas_aerosol_exchange`` here; the growth is
+    measured against ``env.dry_volume_start``. Interstitial only — the
+    cloud-borne renaming is D-A5. No tunables; ``params`` is ``None``.
+
+    Implemented in :mod:`~jcm.physics.aerosol.jam.microphysics.rename`.
     """
-    return population
+    return renaming.rename_aitken(population, env, spec, params)
 
 
 def nucleation(population, env, spec, params):
@@ -400,6 +410,9 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
             height_above_surface=self._height_above_surface(state, diagnostics),
             pbl_height=self._pbl_height(state, diagnostics),
             dt=dt,
+            dry_volume_start={
+                mode.short: moments.mode_volume(before.masses, mode, self.spec)
+                for mode in self.spec.modes},
         )
 
         params = self._process_params()

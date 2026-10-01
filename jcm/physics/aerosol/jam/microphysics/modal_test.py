@@ -20,6 +20,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jcm.physics.aerosol.jam.gas_species import SULFUR_GASES
+from jcm.physics.aerosol.jam.microphysics import moments
 from jcm.physics.aerosol.jam.microphysics.koehler import (
     equilibrium_modal_state,
     saturation_ratio,
@@ -29,7 +30,6 @@ from jcm.physics.aerosol.jam.microphysics.modal import (
     PROCESS_ORDER,
     JamModalMicrophysics,
     MicrophysicsEnvironment,
-    ModalPopulation,
 )
 from jcm.physics.aerosol.jam.microphysics.placeholder import (
     PlaceholderMicrophysics,
@@ -101,6 +101,8 @@ def _environment(masses, numbers, *, h2so4_production=0.0):
         height_above_surface=jnp.full(SHAPE, 500.0),
         pbl_height=jnp.zeros(SHAPE[1:]),
         dt=DT,
+        dry_volume_start={mode.short: moments.mode_volume(masses, mode, MAM4_SPEC)
+                          for mode in MAM4_SPEC.modes},
     )
 
 
@@ -223,30 +225,6 @@ class ProcessScaffoldTest(unittest.TestCase):
             ["gas_aerosol_exchange", "rename", "nucleation",
              "coagulation", "carbonaceous_ageing"],
         )
-
-    def test_unimplemented_processes_are_still_identities(self):
-        """TEMPORARY — each card must delete its process from this list.
-
-        AER-03 removed ``gas_aerosol_exchange``, AER-04 ``nucleation``,
-        AER-05 ``coagulation``, AER-06 ``carbonaceous_ageing``. If this
-        test still passes in full after AER-07 lands, that card did nothing.
-        """
-        masses, numbers = _population()
-        population = ModalPopulation(masses=masses, numbers=numbers)
-        env = _environment(masses, numbers)
-        still_identity = {"rename"}
-        for name, process in PROCESS_ORDER:
-            if name not in still_identity:
-                continue
-            out = process(population, env, MAM4_SPEC, None)
-            for key, before in population.masses.items():
-                np.testing.assert_array_equal(
-                    np.asarray(out.masses[key]), np.asarray(before),
-                    err_msg=f"{name} changed mass {key}")
-            for key, before in population.numbers.items():
-                np.testing.assert_array_equal(
-                    np.asarray(out.numbers[key]), np.asarray(before),
-                    err_msg=f"{name} changed number {key}")
 
     def test_process_sequence_can_be_overridden(self):
         masses, numbers = _population()
