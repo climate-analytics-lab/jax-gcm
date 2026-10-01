@@ -227,11 +227,34 @@ def test_jam_package_traces_under_x64_without_mixed_dtype_scatters():
 @pytest.mark.requires_extra("mam4")
 def test_mam4_jam_package_traces_under_x64_without_mixed_dtype_scatters():
     """The same with the MAM4-JAX aerosol core, whose import sets x64 itself."""
+    import gc
+
     import jax
+    import jax.numpy as jnp
 
     before = bool(jax.config.read("jax_enable_x64"))
     _trace_float32_physics_under_x64(jam_microphysics="mam4_jax")
     assert bool(jax.config.read("jax_enable_x64")) == before
+
+    # Tracing under x64 turns MAM4-JAX's module-level float64 numpy constants
+    # (``data.MMR_TO_VMR`` and the like) into float64 arrays, and JAX keeps
+    # that conversion in a weak cache keyed on the numpy array's identity, not
+    # on ``jax_enable_x64``. The trace's reference cycles hold those copies
+    # until the cyclic GC next runs; while they live, an x64-OFF use of the
+    # same constant is handed the float64 copy. That is what the scoped
+    # float32 core (``core_dtype="float32"``) does in mam4_jax_test.py, and
+    # eagerly it fails inside amicphys with ``RuntimeProgramInputMismatch``
+    # (``f32[35]`` expected, ``f64[35]`` given), but only when a collection has
+    # not happened to run in between. Collect here, after the helper's frame
+    # (and so its model and physics) is gone, instead of leaving the next test
+    # to the collector's timing, and check that no float64 copy outlives the
+    # trace.
+    gc.collect()
+    from jcm.physics.aerosol.jam.microphysics import mam4_jax as adapter
+
+    with jax.enable_x64(False):
+        assert jnp.asarray(adapter.data.MMR_TO_VMR).dtype == jnp.float32, (
+            "a float64 copy of a MAM4-JAX constant outlived the x64 trace")
 
 
 if __name__ == "__main__":
