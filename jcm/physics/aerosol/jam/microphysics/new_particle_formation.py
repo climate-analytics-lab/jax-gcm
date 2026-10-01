@@ -83,6 +83,34 @@ _Q_FLOOR = 4.0e-16
 
 #: ``numerics_clipping``: an apparent rate below this [m⁻³ s⁻¹] is zero.
 _RATE_FLOOR_M3 = 1.0e-12
+#: MAM's early return (``modal_aero_newnuc.F90``: ``rateloge <= -13.82``): a
+#: critical-cluster rate below this [cm⁻³ s⁻¹] — about 0.1 cm⁻³ per day — is
+#: no formation, BEFORE survival and clipping are evaluated. Found by the
+#: AER-12 A/B: below Vehkamäki's validity the fit returns a cluster larger
+#: than the Aitken bound, the survival exponent turns positive and
+#: ``0 · exp(+large)`` is NaN (measured in float64 at 291 K, 9.9e3 cm⁻³).
+_RATE_FLOOR_CM3 = 1.0e-6
+#: Molar mass [kg/mol] at which MAM counts the new particles' sulfate
+#: (``mwso4``, pure sulfate) — the host mass is booked at the aerosol
+#: species' 0.115, so a particle of the booked diameter and density holds
+#: 115/96 of its "pure" mass. Counting from the pure mass is what MAM does
+#: (``qnuma_del = qso4a_del·mw_so4a/mass_part``); counting from the host
+#: mass gave 1.19× MAM's number (AER-12).
+_M_SO4_PURE = 0.09606
+#: MAM's early return (``modal_aero_newnuc.F90``: ``rateloge <= -13.82``): a
+#: critical-cluster rate below this [cm⁻³ s⁻¹] — about 0.1 cm⁻³ per day — is
+#: no formation, BEFORE survival and clipping are evaluated. Found by the
+#: AER-12 A/B: below Vehkamäki's validity the fit returns a cluster larger
+#: than the Aitken bound, the survival exponent turns positive and
+#: ``0 · exp(+large)`` is NaN (measured in float64 at 291 K, 9.9e3 cm⁻³).
+_RATE_FLOOR_CM3 = 1.0e-6
+#: Molar mass [kg/mol] at which MAM counts the new particles' sulfate
+#: (``mwso4``, pure sulfate) — the host mass is booked at the aerosol
+#: species' 0.115, so a particle of the booked diameter and density holds
+#: 115/96 of its "pure" mass. Counting from the pure mass is what MAM does
+#: (``qnuma_del = qso4a_del·mw_so4a/mass_part``); counting from the host
+#: mass gave 1.19× MAM's number (AER-12).
+_M_SO4_PURE = 0.09606
 #: Sulfate [kg/kg per step] below which formation books nothing: 1e-30 is
 #: a hundred-thousandth of one H₂SO₄ molecule per kg of air.
 _MASS_FLOOR = 1.0e-30
@@ -240,8 +268,11 @@ def survival_to_aitken(rate, n_h2so4, radius, temperature, relative_humidity,
     growing = growth_rate > _GROWTH_FLOOR
     safe_growth = jnp.where(growing, growth_rate, 1.0)
     eta = jnp.where(growing, gamma * sink / safe_growth, 0.0)
+    # Survival is a fraction: the exponent is clamped at zero so a cluster
+    # the fit puts above the Aitken bound (only outside Vehkamäki's
+    # validity, where the rate is already zeroed) cannot make it overflow.
     survival = jnp.where(
-        growing, jnp.exp(eta / d_final_nm - eta / d_initial_nm), 0.0)
+        growing, jnp.exp(jnp.minimum(eta / d_final_nm - eta / d_initial_nm, 0.0)), 0.0)
     apparent = jnp.where(already_large, rate, rate * survival)
     diameter = jnp.where(already_large, dry_diameter, _AITKEN_LO)
     return apparent, diameter
@@ -287,7 +318,7 @@ def form_new_particles(population, env, spec, params):
     rate = jnp.where(use_pbl, rate_p, rate_b)
     n_h2so4 = jnp.where(use_pbl, n_p, n_b)
     radius = jnp.where(use_pbl, r_p, r_b)
-    rate = jnp.where(q_mean > _Q_FLOOR, rate, 0.0)
+    rate = jnp.where((q_mean > _Q_FLOOR) & (rate >= _RATE_FLOOR_CM3), rate, 0.0)
 
     apparent, diameter = survival_to_aitken(
         rate, n_h2so4, radius, temperature, env.saturation, concentration,
@@ -321,8 +352,13 @@ def form_new_particles(population, env, spec, params):
                        jnp.where(clipping, numerics.divide(available, safe_wanted), 1.0),
                        0.0)
     factor = jnp.where(rate_per_m3 * factor < _RATE_FLOOR_M3, 0.0, factor)
-    number_delta = number_tendency * dt * factor
     so4_delta = wanted * factor
+    # Number from the pure-sulfate mass of what was booked (MAM's
+    # bookkeeping, see ``_M_SO4_PURE``), not from the host mass: the same
+    # as ``so4_delta·(96/115)/particle_mass``, written without dividing by
+    # a ~1e-21 kg particle mass, whose reverse rule would overflow float32
+    # (the AER-11 class).
+    number_delta = number_tendency * dt * factor * (_M_SO4_PURE / m_so4)
 
     aitken = spec.mode("aitken").short
     numbers[number_name(aitken)] = numbers[number_name(aitken)] + number_delta

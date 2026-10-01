@@ -174,14 +174,22 @@ inside coagulation from the coagulated one.
 
 **Status & known limitations.** Opt-in: ``jam_microphysics="modal"`` /
 ``physics.jam_microphysics=modal``; the factory default stays the placeholder
-and the shipped JAM configurations stay on ``mam4_jax`` until the A/B against
-it is within tolerance. Both cores run clear-sky; the cloudy ``amicphys``
-sub-area is the harness's job either way. No published numeric benchmark of
-the Vehkamäki rates exists outside the paper's figures, so the binary pathway
-is pinned on structure until the A/B. The fast coagulation coefficients are
-+3 to +7 % above brute-force quadrature at MAM4 geometry, the method's own
-bias. MAM4 sets κ_POM = 0 where ``species.py`` carries 0.010. Design
-record, decisions and measured findings: {doc}`../design/jam_modal_microphysics`.
+and the shipped JAM configurations stay on ``mam4_jax``. Against the MAM4-JAX
+core on the same state with both κ-Köhler states dry
+(``microphysics/ab_mam4_jax_test.py``, the ``extras-tests`` job), every
+process agrees: exchange gases to 0.4 %, renaming to ~1 %, new-particle
+formation to 1.5 %, coagulation to ~1 %, the full step to 0.1–4 % on gases
+and numbers, and the Vehkamäki rate is the same function to four figures.
+At mid humidity the two cores are fed different wet diameters — MAM's
+water uptake has crystallization/deliquescence hysteresis (no growth below
+RH ≈ 0.35) and the Kelvin term, the harness's κ-Köhler state has neither —
+and every uptake-dependent process inherits that ratio (Aitken uptake up
+to 2.4×); whether the harness adopts MAM's uptake is an open decision
+(D-A6). Both cores run clear-sky; the cloudy ``amicphys`` sub-area is the
+harness's job either way. The fast coagulation coefficients are +3 to +7 %
+above brute-force quadrature at MAM4 geometry, the method's own bias. MAM4
+sets κ_POM = 0 where ``species.py`` carries 0.010. Design record, decisions
+and measured findings: {doc}`../design/jam_modal_microphysics`.
 
 ### Online aerosol optics
 

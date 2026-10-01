@@ -988,10 +988,13 @@ Interactive aerosol (JAM)
   exchange, renaming, new-particle formation, coagulation and carbonaceous
   ageing written from MAM's documentation and E3SM's Fortran, fully
   reverse-differentiable with every tunable a gradient-visible leaf, and a
-  per-process conservation ledger. Opt-in: the factory default stays the
-  κ-Köhler placeholder and the shipped JAM configurations stay on
-  ``mam4_jax`` until the numeric A/B against it is within tolerance
-  (``docs/source/design/jam_modal_microphysics.md``).
+  per-process conservation ledger. Checked process by process against the
+  MAM4-JAX core on the same state (``ab_mam4_jax_test.py``): within a few
+  per cent everywhere when both water-uptake states are dry. Opt-in: the
+  factory default stays the κ-Köhler placeholder and the shipped JAM
+  configurations stay on ``mam4_jax`` while the harness's water uptake
+  (κ-Köhler, no hysteresis or Kelvin term) differs from MAM's
+  (``docs/source/design/jam_modal_microphysics.md``, D-A6).
 - **JAM is composed through** ``physics=echam-jam*``, which is factory-built
   (``builder: echam_physics``) because the aerosol chain splits around the
   cloud term. It requires the two-moment cloud scheme; JAM with the one-moment

@@ -85,7 +85,7 @@ Dependencies in brackets. Each card is implement → review → full gates.
 | **AER-09** | ✅ `ledger.py`: budgets per kg of air over both phases — sulfur moles (sulfate at the booked molar mass + DMS, SO₂, H₂SO₄), organic mass (POA, SOA, MOA + SOAG), each inert species, total number — and a per-process `CONTRACT` (exchange, renaming, ageing: number equal; NPF: non-decreasing; coagulation: non-increasing; every mass budget equal everywhere). `JamModalMicrophysics(audit=True)` publishes `_modal_ledger_<process>_<budget>` relative changes; the step-level sulfur/organic/number closure is always published as `_modal_ledger_step_*` for health gates. `ledger_test` holds all five processes to the contract over warm/heavy-vapour/cold/near-empty columns with a cloud-borne phase and without, checks the processes actually acted, and shows a deliberately leaking process is caught. All green at 1e-5 in float32. | AER-03..07 |
 | **AER-10** | ✅ Science register: a new `In-tree modal microphysics core` section in `docs/source/science/aerosol.md` (what we do per process with code pointers, what MAM4 does, why we differ by `science`/`compute`/`differentiability`, status), the swap-point paragraph and code-pointer / validation lists updated, and the page's existing claim that MAM4 ages at 3 monolayers corrected to 8. Release note under *Interactive aerosol (JAM)*. `jam.md` cross-links. References re-verified for the cards' findings (§7). | AER-09 |
 | **AER-11** | ✅ Differentiability sweep: `modal_gradients_test` — forward and reverse mode finite through each process alone and the full core at ten operating points (clean, empty modes with vapour, mass without number, number without mass, negative tracers, cold, warm-saturated, vapour overload, populated with and without the cloud-borne store), parameter derivatives finite at each, AD against a float64 central difference through the whole fold in state and parameters, every tunable leaf live or named dead. The modal core joins the repo-wide `term_gradients_test` as the `echam_jam_2m_modal` composition. **Found and fixed:** a second float32 class — reverse-mode *overflow* of `cot · y⁻²` in quotients of small quantities (coagulation's harmonic mean, NPF's clipping ratio, coagulation's pcm share) — and negative input tracers reaching the κ-Köhler state; §9. New `numerics.py`. | AER-09 |
-| **AER-12** | A/B against `Mam4JaxMicrophysics` **if** the GPL extra can be installed in a throwaway venv — as a validation reference only, never a dependency. | AER-09 |
+| **AER-12** | ✅ `ab_mam4_jax_test.py` (`requires_extra("mam4")`, run by CI's extras job; locally in the `jcm-aer-mam4` venv — D-A3): both cores on the same state, the GPL adapter's calcsize+wateruptake baseline subtracted, each process isolated through `amicphys`'s `mdo_*` switches against the matching subset of `PROCESS_ORDER`. **With both states dry, every process agrees with MAM4-JAX:** exchange gases 0.4 %, renaming 0.6–1.2 %, NPF 1.5 %, coagulation 0.7–1.3 %, full step 0.1–4 % on gases and numbers; the binary rate is the same function to four figures. **Found and fixed** (§9): a float64 NaN below Vehkamäki's validity, and particle number booked 1.19× MAM's. **Found and not ours:** at mixed RH every uptake-dependent process differs by the wet-diameter ratio — MAM's water uptake has hysteresis and the Kelvin term, the harness's κ-Köhler state has neither — **D-A6**, open. | AER-09 |
 
 ## 4. Design constraints
 
@@ -399,6 +399,100 @@ point, except those named dead with a reason. The core is also the
 ``echam_jam_2m_modal`` composition of the repo-wide
 ``term_gradients_test``, whose parameter cases replay it on the ECHAM
 column at both soundings.
+
+### D-A6 — water uptake: MAM's hysteresis and Kelvin term, or the harness's κ-Köhler? (OPEN, from AER-12)
+
+The A/B's one systematic disagreement is not in the microphysics. MAM's
+`modal_aero_wateruptake` gives a growth factor of exactly 1.000 up to
+RH ≈ 0.35 (crystallization), a curve below κ-Köhler's between there and
+deliquescence, and a Kelvin suppression visible on the Aitken mode near
+saturation (measured on a pure-sulfate accumulation mode at 285 K:
+1.000/1.000/1.000/1.000/1.005/1.044/1.099/1.177/1.287/1.454/1.675/2.363
+against κ-Köhler's 1.004/1.020/1.039/1.062/1.089/1.123/1.167/1.225/1.307/
+1.436/1.677/2.472 at RH 0.02…0.97; Aitken 2.029 vs 2.472 at 0.97). The
+harness's `koehler.py` — the placeholder core's `_jam_state`, read by
+activation, sedimentation, deposition and optics — is pure κ-Köhler with
+the Kelvin term dropped. Fed MAM's wet diameters the in-tree exchange
+agrees to 1–2 % per mode; fed κ-Köhler's it takes up 2.4× more on the
+Aitken mode at mid RH, and renaming, NPF survival and ageing inherit the
+difference. Options: (a) implement MAM's water uptake in `koehler.py`
+(hysteresis + Kelvin), changing `_jam_state` for every JAM consumer and
+the placeholder core — a harness-wide behaviour change with its own
+validation; (b) keep κ-Köhler and accept that the modal core cannot
+match `mam4_jax` at mid RH, recording the measured ratios; (c) give the
+modal core its own MAM-faithful uptake for the microphysics only, so the
+two cores' `_jam_state` diverge. The user's call; (a) is the faithful
+one and the heaviest.
+
+### AER-12: what the A/B measured, and what it changed
+
+Setup: `jcm-aer-mam4` venv with `mam4-jax==0.4.0` (jax 0.10.2); the
+adapter imported inside the tests; `amicphys`'s `mdo_gasaerexch /
+mdo_rename / mdo_newnuc / mdo_coag / mdo_pcarbonaging` keyword switches
+toggled through the adapter's module-level binding; the adapter's
+tendency with every switch off (MAM's `calcsize` + `wateruptake` alone)
+subtracted as a baseline; populations built with number and mass
+consistent with a diameter inside each mode's bounds, so that baseline
+is inert. Renaming and NPF isolated as `(exchange + X) − exchange`,
+since MAM's `newnuc` reads the step-mean vapour only `gasaerexch` fills
+(a `newnuc`-only run is a no-op in MAM). Both cores at
+`n_so4_monolayers = 8`.
+
+**Dry states (RH ≈ 0.02), relative RMS difference, 48 cells:** exchange
+`g_h2so4` 0.004, `g_soag` 0.004, per-mode so4/soa 0.05–0.13 (median
+ratios 1.00–1.07); renaming 0.07 (medians 1.006–1.012); NPF 0.015
+(median 0.96); coagulation 0.007–0.013 on every number and mass;
+exchange + coagulation + ageing: numbers 0.04, accumulation so4 0.002,
+BC 0.15 (median 0.997 — the two-transfer vs one-transfer operator split
+of D-A1 scatters, it does not bias); full step: gases 0.001–0.004,
+numbers 0.015–0.04, so4 0.006–0.009, BC 0.15. The binary rate is the
+same function to four figures over 236–295 K, RH 0.3/0.6, 1e6–1e9 cm⁻³;
+cluster size and radius within 0.6 % (one trailing digit of one
+coefficient differs between E3SM's Fortran, `−1.4177e-11`, and the
+paper/documentation, `−1.42177e-11`; ours keeps the documented value).
+
+**Mixed RH, same cells:** exchange Aitken so4 1.37×, renaming 1.6×, NPF
+0.46×, ageing 1.13–1.19× — all traced to the wet diameter (D-A6);
+gases still within 0.08.
+
+**Fixed in this card.** (1) A float64 NaN in NPF: below Vehkamäki's
+concentration bound the fit returns a 16 nm "cluster" above the Aitken
+bound, the survival exponent turns positive and `0 · exp(+large)` is NaN.
+MAM returns before survival when the rate is under 1e-6 cm⁻³ s⁻¹
+(`rateloge <= −13.82`); so does ours now, and the exponent is clamped at
+zero. (2) Particle number: MAM counts new particles from the
+pure-sulfate mass (`mwso4` = 96) of what was booked while the host mass
+is at 115; counting from the host mass gave 1.19× MAM's number in the
+vapour-limited regime (now 0.993).
+
+**Confirmed from E3SM's `modal_aero_amicphys.F90` on the way:** the
+process order gasaerexch → rename → newnuc → coag → pcarbon-aging (D-A1
+is MAM's order, no longer only the adapter's word); `ntsubstep = 1`, so
+MAM does not sub-cycle the chain either; `rename_method_optaa = 40`
+(E3SM default) adds one rule to the renaming we transcribed — when the
+old diameter is already past `0.99 D_cut` the old volume is rescaled to
+that diameter before the tail difference — inactive for populations
+inside their bounds, which is where the 0.6–1.2 % agreement was
+measured; the renaming cut for Aitken → accumulation is the same
+`√(D_v,ait D_v,acc)` (the namelist `dp_cut_accum_rename` is the
+accumulation → coarse pair); and the monolayer count is a namelist
+quantity, 8.0 for E3SM's default physics and CAM's hard-coded MAM4, 3.0
+for E3SMv3's CLUBB+P3 physics — so the adapter's default of 3 is
+E3SMv3's and its docstring's "8 belongs to the legacy coag path" is
+not right; our 8 stands as MAM4's reference.
+
+**One reference behaviour not reproduced, by choice.** In the
+transition where `J·Δt·m_particle` is comparable to the vapour, the GPL
+core's formation self-limits progressively (its number falls below the
+one-shot vapour limit by a J-dependent factor, ratio 0.45–0.58 at two
+cells), where ours and E3SM's Fortran take the whole vapour in one
+step. The test holds the agreement where the limit is clearly reached.
+
+**What the D-A4 trigger now says.** The ledger is green (AER-09) and
+the A/B is within tolerance at dry RH for every process. The mixed-RH
+difference is D-A6's to settle; flipping the default before that would
+make the modal core's climate differ from `mam4_jax`'s by the water
+uptake, not by the microphysics.
 
 ### D-A3 — validation reference: ``requires_extra("mam4")`` A/B, SEPARATE LOCAL VENV (decided 2026-10-01)
 

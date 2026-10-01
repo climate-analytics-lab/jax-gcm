@@ -284,5 +284,41 @@ class ProcessTest(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(np.asarray(grad))))
 
 
+class ReferenceBookkeepingTest(unittest.TestCase):
+    """What the AER-12 A/B against MAM4-JAX changed, pinned."""
+
+    def test_rate_below_mam_floor_forms_nothing_and_stays_finite(self):
+        """Below Vehkamäki's concentration bound the fit returns a cluster
+        above the Aitken bound; MAM returns before survival for rates
+        under 1e-6 cm⁻³ s⁻¹, and so must we (this was a float64 NaN).
+        """
+        population = _population(empty_modes=True, gas=1.8e-13)
+        # Free troposphere: the fixture's default 50 m / 800 m PBL would
+        # select the empirical pathway instead of the binary one at issue.
+        env = _env(population, temperature=291.3, height=2000.0, pbl=0.0)
+        out = npf.form_new_particles(_after_exchange(population, env), env, MAM4_SPEC,
+                                     npf.NewParticleFormationParameters())
+        self.assertTrue(bool(jnp.all(jnp.isfinite(out.diagnostics["npf_rate_apparent"]))))
+        self.assertTrue(bool(jnp.all(out.diagnostics["npf_rate_apparent"] == 0.0)))
+        np.testing.assert_array_equal(np.asarray(out.numbers[number_name("ait")]),
+                                      np.asarray(population.numbers[number_name("ait")]))
+
+    def test_number_is_counted_from_the_pure_sulfate_mass(self):
+        """MAM: ``qnuma_del = qso4a_del · mw_so4a(96) / mass_part`` while the
+        host mass is booked at the aerosol species' 115 — one particle of
+        the booked size holds 115/96 of its pure mass.
+        """
+        population = _population(empty_modes=True, gas=1.0e-9)      # vapour-limited
+        env = _env(population, temperature=240.0)
+        before = _after_exchange(population, env)
+        after = npf.form_new_particles(before, env, MAM4_SPEC,
+                                       npf.NewParticleFormationParameters())
+        d_number = after.numbers[number_name("ait")] - before.numbers[number_name("ait")]
+        d_mass = after.masses[mass_name("so4", "ait")] - before.masses[mass_name("so4", "ait")]
+        particle_mass = (math.pi / 6.0) * npf._AITKEN_LO ** 3 * npf.RHO_H2SO4
+        np.testing.assert_allclose(np.asarray(d_number * particle_mass / d_mass),
+                                   npf._M_SO4_PURE / M_SO4, rtol=1e-5)
+
+
 if __name__ == "__main__":
     unittest.main()
