@@ -760,7 +760,10 @@ class TestColdPrecipitation:
         zcolleffi = math.exp(0.025 * (t - c.tmelt))
         zsaci1 = (zxib - zsaut) * (1.0 - math.exp(-k1 * zcolleffi * DT))
         want = cf * zsaut + min(cf, zclcpre) * zsaci1
-        assert f(inter.zsub) == 0.0 and f(inter.zdep) == 0.0
+        # Saturated over ice to round-off: neither sublimation nor deposition
+        # beyond the last bits of ``qs_ice``.
+        assert f(inter.zsub) == pytest.approx(0.0, abs=1e-12 * xip)
+        assert f(inter.zdep) == pytest.approx(0.0, abs=1e-12 * xip)
         assert f(inter.zspr) == pytest.approx(want, rel=1e-10)
 
     def test_riming_by_incoming_snow(self):
@@ -1309,15 +1312,17 @@ class TestSweepGradients:
                 assert np.all(np.isfinite(np.asarray(g))), fields
 
     def test_float32_derivative_where_the_precipitation_nearly_cancels(self):
-        """A float32 column whose lowest-level ``zpresum`` is ~1e-19 keeps a finite gradient.
+        """A float32 column whose ``zpresum`` is ~1e-19 keeps a finite gradient.
 
         Ice deposited aloft falls as snow that sublimates to a round-off
-        remainder (-2e-18 kg/m²/s), which nearly cancels the ``EPSILON``-floor
-        ice flux reaching the lowest level. ECHAM discards the precipitating
-        fraction there (``zpresum <= cqtmin``, F:1196); the division that forms
-        it is guarded by that same condition, since between the dtype's tiny
-        and ``cqtmin`` its reverse-mode rule ``-(0·x)·zpresum**-2`` overflows
-        to ``0·inf`` in float32.
+        remainder (7e-20 kg/m²/s), which reaches every level below. ECHAM
+        discards the precipitating fraction there (``zpresum <= cqtmin``,
+        F:1196); the division that forms it is guarded by that same
+        condition, since between the dtype's tiny and ``cqtmin`` its
+        reverse-mode rule ``-(0·x)·zpresum**-2`` overflows to ``0·inf`` in
+        float32: without the guard this column's gradient is not finite. The
+        remainder is round-off, so the humidity (0.5375 of saturation) is the
+        one that reaches the case with the model's constants.
         """
         with jax.enable_x64(False):
             dtype = jnp.float32
@@ -1326,7 +1331,7 @@ class TestSweepGradients:
             t = jnp.linspace(200.0, 295.0, nlev).astype(dtype)
             # e_s·rd/rv/p over water, formed in float32 as the case was found.
             esw = _es_and_derivative(t, ice=False)[0]
-            q = (0.55 * jnp.minimum(esw * c.rd / c.rv / p, 0.01)).astype(dtype)
+            q = (0.5375 * jnp.minimum(esw * c.rd / c.rv / p, 0.01)).astype(dtype)
             dp = jnp.full(nlev, 99000.0 / nlev, dtype)
             rho = p / (c.rd * t)
             dz = dp / (rho * c.grav)
