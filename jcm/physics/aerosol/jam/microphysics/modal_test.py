@@ -98,6 +98,8 @@ def _environment(masses, numbers, *, h2so4_production=0.0):
         state_start=equilibrium_modal_state(masses, numbers, MAM4_SPEC,
                                             saturation),
         h2so4_production=jnp.full(SHAPE, h2so4_production),
+        height_above_surface=jnp.full(SHAPE, 500.0),
+        pbl_height=jnp.zeros(SHAPE[1:]),
         dt=DT,
     )
 
@@ -206,14 +208,14 @@ class ProcessScaffoldTest(unittest.TestCase):
     def test_unimplemented_processes_are_still_identities(self):
         """TEMPORARY — each card must delete its process from this list.
 
-        AER-03 removed ``gas_aerosol_exchange``. If this test still passes
-        in full after AER-04..AER-07 land, those cards did nothing.
+        AER-03 removed ``gas_aerosol_exchange``; AER-04 removed
+        ``nucleation``. If this test still passes in full after
+        AER-05..AER-07 land, those cards did nothing.
         """
         masses, numbers = _population()
         population = ModalPopulation(masses=masses, numbers=numbers)
         env = _environment(masses, numbers)
-        still_identity = {"rename", "nucleation", "coagulation",
-                          "carbonaceous_ageing"}
+        still_identity = {"rename", "coagulation", "carbonaceous_ageing"}
         for name, process in PROCESS_ORDER:
             if name not in still_identity:
                 continue

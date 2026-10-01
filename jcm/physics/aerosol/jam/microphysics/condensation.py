@@ -261,8 +261,15 @@ def solve_h2so4(q_gas, production, coefficients, dt):
         dt: step [s].
 
     Returns:
-        ``(condensed, fraction)`` — the condensed molar mixing ratio and the
-        per-mode partition ``C_i / C_total`` (zero where nothing condenses).
+        ``(condensed, fraction, mean, q_new)`` — the condensed molar mixing
+        ratio, the end-of-step vapour (non-negative by construction),
+        the per-mode partition ``C_i / C_total`` (zero where nothing
+        condenses), and the time-mean vapour over the step. The mean is
+        what new-particle formation evaluates its rate on
+        (``numerics_coupling``): for the analytic regime it is the exact
+        average of the linearised solution, ``s + (q⁰ − s)(1 − e^{−τ})/τ``;
+        in the Taylor and neglect regimes the trapezoid of start and end,
+        which the expansion is accurate to anyway.
 
     """
     total = jnp.sum(coefficients, axis=0)
@@ -278,7 +285,16 @@ def solve_h2so4(q_gas, production, coefficients, dt):
                       jnp.where(tau >= _NEGLECT_BELOW, taylor, none))
     condensed = q_gas + dt * production - q_new
     fraction = _safe_divide(coefficients, total[jnp.newaxis], _RATE_FLOOR)
-    return condensed, fraction
+
+    # Time-mean of the vapour over the step, for new-particle formation.
+    # ``(1 − e^{−τ})/τ`` through -expm1 so it is 1 − τ/2 + … rather than a
+    # cancellation as τ → 0; only used where the analytic branch is.
+    analytic_mean = (source_over_sink
+                     + (q_gas - source_over_sink)
+                     * (-jnp.expm1(-tau)) / jnp.maximum(tau, _ANALYTIC_ABOVE))
+    mean = jnp.where(tau > _ANALYTIC_ABOVE, analytic_mean,
+                     0.5 * (q_gas + q_new))
+    return condensed, fraction, mean, q_new
 
 
 def soag_equilibrium(temperature, pressure, params):
@@ -403,18 +419,30 @@ def condense(population, env, spec, params):
     # --- H2SO4: nonvolatile, with chemical production coupled in ---
     q_h2so4 = gases.get(gas_name("h2so4"), zeros) * to_molar_h2so4
     production = env.h2so4_production * to_molar_h2so4
-    condensed, fraction = solve_h2so4(q_h2so4, production, coefficients, dt)
-    # Remove from the gas exactly what the modes receive. Below the rate
-    # floor the partition is zero and a sub-1e-15-relative condensed amount
-    # stays in the gas, which is the conserving side of that rounding.
-    applied = condensed * jnp.sum(fraction, axis=0)
+    condensed, fraction, q_mean, q_new = solve_h2so4(
+        q_h2so4, production, coefficients, dt)
+    # The vapour becomes the SOLVED end-of-step value, which is
+    # non-negative by construction. Subtracting ``condensed * sum(fraction)``
+    # instead left a residual of -1.6e-17 kg/kg from a 1e-10 input at full
+    # depletion (float32: the partition sums to 1 ± eps), and a negative
+    # tracer poisoned the new-particle clipping downstream. The cost is a
+    # conservation error of |sum(fraction) - 1| * condensed, i.e. float32
+    # rounding, which the budget test tolerates; positivity is exact.
+    # Note the gas tendency this produces is the condensation part only
+    # (q_new is solved from q^n, the production enters as a separate term
+    # from the chemistry's own tendency): q_new - q^n - dt P*.
     gases[gas_name("h2so4")] = (gases.get(gas_name("h2so4"), zeros)
-                                - applied / to_molar_h2so4)
+                                + (q_new - q_h2so4 - dt * production)
+                                / to_molar_h2so4)
     so4_per_mode = condensed[jnp.newaxis] * fraction * (m_so4 / M_AIR)
-    # A fraction by construction; clipped because float32 rounding of the
-    # partition sum can put it a few ulp outside [0, 1].
+    # A fraction by construction; clipped because float32 rounding can put
+    # it a few ulp outside [0, 1].
     diagnostics["condensation_h2so4_depletion"] = jnp.clip(_safe_divide(
-        applied, q_h2so4 + dt * production, _EPS_GAS), 0.0, 1.0)
+        condensed, q_h2so4 + dt * production, _EPS_GAS), 0.0, 1.0)
+    # The coupling quantities new-particle formation reads (molar mixing
+    # ratio and 1/s); see ``numerics_coupling`` on MAM's page.
+    diagnostics["condensation_h2so4_step_mean"] = q_mean
+    diagnostics["condensation_h2so4_uptake_sum"] = jnp.sum(coefficients, axis=0)
 
     # --- SOAG: semi-volatile, Raoult's law over SOA + oxygenated POA ---
     q_soag = gases.get(gas_name("soag"), zeros) * to_molar_soag

@@ -77,7 +77,7 @@ Dependencies in brackets. Each card is implement → review → full gates.
 | **AER-01** | ✅ `JamModalMicrophysics` skeleton: subclass, `spec = MAM4_SPEC`, process-order scaffold, `_jam_state` via the shared κ-Köhler diagnostics (moved to `koehler.py`), zero tendency, bitwise-equal to `PlaceholderMicrophysics`. Classified in `layout_audit_test.py` — that could not wait for AER-08, since the roster assertion fails on any unclassified `PhysicsTerm`. | — |
 | **AER-02** | ✅ `moments.py`: log-normal moment algebra — `moment`/`moment_factor`, the M₃ pair `volume_from_diameter`/`diameter_from_volume`, `surface_area` (π·M₂), `mode_volume`/`mode_mass`. `koehler.py` now delegates its diameter inversion here, so the core and the diagnostics cannot disagree about it. Property tests against brute-force quadrature. **Rolled in:** the float32 NaN-gradient trap at empty modes (§9). | AER-01 |
 | **AER-03** | ✅ `condensation.py`: MAM4's gas-aerosol exchange from its own documentation — Fuchs–Sutugin per particle, Fuller (1966) diffusivity, two-point Gauss–Hermite modal integration on the **wet** diameter (not the supplement's B&S harmonic mean; §9). H₂SO₄ nonvolatile with the chemical production coupled into the solve (`SulfurGasChemistry` now publishes `_h2so4_production`); SOAG at 0.81·C with Raoult's law over SOA + 10 % oxygenated POA, semi-implicit sub-steps in a static scan. `pcm` condensate routed to accumulation and recorded in `coating` for AER-06. Sulfur moles and organic mass conserved; 20 tests. | AER-02 |
-| **AER-04** | A1 nucleation: binary H₂SO₄–H₂O (Vehkamäki et al. 2002) **plus** the PBL first-order pathway (Sihto et al. 2006, 1.0×10⁻⁶ s⁻¹), with Kerminen & Kulmala (2002) survival to the Aitken lower bound. Competes with AER-03 for the same `g_h2so4`. Settles the PBL-height sub-decision in D-A2. | AER-03 |
+| **AER-04** | ✅ `new_particle_formation.py`: NPF from MAM4's own documentation — binary H₂SO₄–H₂O (Vehkamäki et al. 2002 polynomials, validity clipping as MAM does it) **plus** the PBL first-order pathway (Sihto et al. 2006, 1.0×10⁻⁶ s⁻¹, 1 nm pure-acid clusters) below max(PBL top, 100 m), the larger rate winning; Kerminen & Kulmala (2002) survival to the Aitken lower bound with MAM's condensation sink from AER-03's summed uptake coefficient and the step-mean H₂SO₄; MAM's vapour-availability clipping. PBL height taken lagged — sub-decision (a) in D-A2, adopted. **Rolled in:** AER-03's gas update rewritten so the vapour can never go negative by rounding (§9). 18 tests. | AER-03 |
 | **AER-05** | A3 coagulation: CMAQ v4.6 fast/approximate algorithms (Binkowski & Roselle 2003). **Aitken, accumulation and primary-carbon only** — MAM neglects coagulation involving coarse and larger modes as much slower. Aitken↔pcm also ages, so this feeds AER-06. | AER-02 |
 | **AER-06** | A4 ageing: 3-monolayer sulfate criterion on `pcm` with SOA included, `f_age = M_SO4,cond/M_SO4,age-all + M_SOA,cond/M_SOA,age-all`, transferring that fraction of POA/BC/number to `acc`. `n_so4_monolayers` default 3.0 (Liu et al. 2012 supplement S1.1.5; ECHAM-HAM's `m7_coat` uses 1.0). | AER-03, AER-05 |
 | **AER-07** | A5 renaming: transfer the upper tail of `aitken` number and mass to `accum` after continuous growth, following Easter et al. (2004). | AER-02 |
@@ -268,8 +268,18 @@ the first step). Two options, to settle in AER-04:
   temperature/humidity profile, which is self-contained but duplicates a
   diagnosis the host already makes.
 
-(a) is the lighter option and the likely answer, but it needs the
-first-step behaviour pinned down before it is chosen.
+**Adopted in AER-04: (a), the lagged height.** The core reads
+`diagnostics["vertical_diffusion"].pbl_height` when it is there and takes
+zero when it is not — the first step of a run, and any configuration
+without the TTE-TKE scheme. Zero is not "no boundary layer": the pathway
+applies below max(PBL top, 100 m), so a missing height degrades to a
+100 m surface layer rather than switching the pathway off, which is the
+behaviour MAM's own floor prescribes for a shallow PBL. One step of lag
+on a quantity that varies over hours is accepted and pinned by a test
+(`test_hundred_metre_floor_applies_when_pbl_height_is_absent`). Height
+above the surface comes from `MoistAirColumnState`'s `height_full` minus
+the surface `height_half`, with the geopotential as fallback. (b) stays
+available if a run without TTE-TKE ever needs the pathway above 100 m.
 
 ### Terminology (2026-10-01)
 
@@ -280,7 +290,7 @@ existing `ArgActivation` term already implements, so using it for NPF
 would mislabel the physics. The function in `modal.py` keeps the name the
 MAM literature uses; AER-04 is the card that implements it.
 
-## 9. Findings rolled in from AER-02
+## 9. Findings rolled in from AER-02 onward
 
 ### The float32 NaN-gradient trap at empty modes
 
@@ -402,6 +412,75 @@ rounding exists to prefer, every consumer's test tolerance is ≥1e-6, and
 keeping two definitions of the M₃ inversion is the drift this card exists
 to remove — so the shift is accepted and recorded rather than hidden
 behind a bitwise claim it would not survive.
+
+### AER-04: the NPF formulation is also MAM's own, not the supplement's
+
+As with AER-03, the implemented formulation is MAM's documentation
+(`mam_doc_site/aerosol_nucleation/`, read 2026-10-01), where it differs
+from the Liu et al. (2012) supplement's two-line description:
+
+- the **condensation sink** in the Kerminen–Kulmala survival is MAM's
+  `CS' = C_sum / (4π D_g α)` built from the gas-aerosol exchange step's
+  summed uptake coefficient, not Kerminen and Kulmala's own integral over
+  the size distribution — so NPF reads AER-03's published diagnostics
+  (`condensation_h2so4_uptake_sum`, `condensation_h2so4_step_mean`) and
+  must run after it, which D-A1's order guarantees;
+- the **growth rate** uses the step-mean H₂SO₄ of the same exchange step,
+  and the critical-cluster rate is zeroed below a 4e-16 molar floor;
+- **clipping** scales the rate by `available / wanted` sulfate and drops
+  it to zero below 1e-12 m⁻³ s⁻¹.
+
+**Units in the growth expressions are inferred, not quoted.** MAM's page
+labels `GR` as m s⁻¹, but with its own constant `3.0e-9` and inputs the
+expression is Kerminen and Kulmala's eq. 20 and comes out in nm h⁻¹;
+`γ` is then in nm² m² h⁻¹ and `η = γ CS'/GR` in nm, the only reading
+under which `η/D` with `D` in nm is dimensionless. That reading is
+implemented, documented in the module docstring, and pinned by
+`test_eta_is_of_order_nanometres` — a wrong reading is off by 3600 or
+1e9, not by a tolerance.
+
+**No numeric Vehkamäki benchmark exists outside the paper's figures.**
+The binary pathway is therefore pinned on structure: validity clipping
+(not extrapolation), monotonicity in vapour and humidity, a cold/warm
+ratio above 1e10, and critical clusters of 1–200 molecules and 0.2–3 nm.
+AER-12's A/B against `mam4-jax` is the numeric check, if D-A3 allows it.
+
+### AER-04: the growth-rate floor is the same float32 trap again
+
+`gamma·sink / max(GR, tiny)` has cotangent `−gamma·sink / tiny²`, and
+`1e-60` underflows in float32 to a division by zero — measured as a NaN
+gradient through the full core at an empty mode with no gas, exactly the
+pattern of the AER-02 finding. Fixed with the same double-`where`
+(divide by 1.0 in the dead branch) and a 1e-9 nm h⁻¹ floor below which
+nothing survives; pinned by
+`test_gradient_finite_in_float32_with_no_gas_and_an_empty_mode`.
+
+### AER-04: AER-03's gas update could go negative by rounding
+
+The first end-to-end probe produced a NaN in the Aitken update. Two
+causes, both fixed: the condensation step updated the vapour as
+`q − condensed + dt·production`, which can round to a value of order
+−1e-17 when the vapour is fully depleted, and the NPF clipping then
+divided by a `wanted` sulfate that is zero wherever nothing forms. The
+condensation update now books the solved end-of-step vapour directly
+(`gases[h2so4] += (q_new − q − dt·production)`), so it is non-negative by
+construction and `condensation_test` asserts it; the clipping guards
+both branches.
+
+### AER-04: a zero Aitken increment at heavy aerosol load is physics, then float32
+
+The probe fixture (1e6–1e9 kg⁻¹ in every mode, 1e-9 kg/kg per species)
+has a condensation sink of 0.03–0.08 s⁻¹ — a polluted boundary layer —
+and the Kerminen–Kulmala survival there is 1e-250 or smaller: float64
+gives `J_app` of 1e-256 to 1e-42 cm⁻³ s⁻¹ and float32 underflows it to
+zero. Scaling the fixture's numbers by 1e-2 (sink 4e-4–1e-3 s⁻¹) gives
+`J_app` of 270–480 cm⁻³ s⁻¹ with float32 and float64 agreeing to 1e-6,
+and the clipping then limits the booked sulfate to what the vapour
+holds. The remaining float32 effect is the ordinary one: an increment
+of tens of particles per kg is below the ulp of a 1e8–1e9 kg⁻¹ number
+and is lost at the add. That is a property of accumulating tendencies in
+float32, not of this process; running the aerosol core in float64
+is the standing recommendation.
 
 ### D-A3, D-A4 — still open
 

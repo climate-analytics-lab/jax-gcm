@@ -68,7 +68,9 @@ def _env(population, *, production=0.0, temperature=T):
         air_density=pressure / (c.rd * temp),
         state_start=equilibrium_modal_state(
             population.masses, population.numbers, MAM4_SPEC, sat),
-        h2so4_production=jnp.full(SHAPE, production), dt=DT)
+        h2so4_production=jnp.full(SHAPE, production),
+        height_above_surface=jnp.full(SHAPE, 500.0),
+        pbl_height=jnp.zeros(SHAPE[1:]), dt=DT)
 
 
 def _sulfur_moles(population):
@@ -163,8 +165,12 @@ class SulfuricAcidTest(unittest.TestCase):
     def test_analytic_regime_matches_closed_form(self):
         q, p, dt = jnp.asarray(5e-12), jnp.asarray(0.0), 1800.0
         coefficients = jnp.asarray([2e-3, 1e-3])        # two modes
-        condensed, fraction = cond.solve_h2so4(q, p, coefficients, dt)
+        condensed, fraction, mean, _ = cond.solve_h2so4(q, p, coefficients, dt)
         total = 3e-3
+        # Exact time-mean of q0 e^{-total t} over the step.
+        self.assertAlmostEqual(
+            float(mean) / (5e-12 * (1 - math.exp(-total * dt)) / (total * dt)),
+            1.0, places=4)
         self.assertAlmostEqual(float(condensed) / (5e-12 * (1 - math.exp(-total * dt))),
                                1.0, places=5)
         np.testing.assert_allclose(np.asarray(fraction), [2 / 3, 1 / 3], rtol=1e-6)
@@ -173,7 +179,7 @@ class SulfuricAcidTest(unittest.TestCase):
         # With no initial gas, everything that is produced and condenses
         # must come from P*: the sequential split would give zero.
         q, p, dt = jnp.asarray(0.0), jnp.asarray(1e-15), 1800.0
-        condensed, _ = cond.solve_h2so4(q, p, jnp.asarray([2e-3]), dt)
+        condensed, _, _, _ = cond.solve_h2so4(q, p, jnp.asarray([2e-3]), dt)
         expected = p * dt - (p / 2e-3) * (1 - math.exp(-2e-3 * dt))
         self.assertAlmostEqual(float(condensed) / float(expected), 1.0, places=5)
 
@@ -200,6 +206,9 @@ class SulfuricAcidTest(unittest.TestCase):
                             cond.CondensationParameters())
         self.assertTrue(bool(jnp.all(out.gases[gas_name("h2so4")]
                                      <= population.gases[gas_name("h2so4")])))
+        # Never negative, even at full depletion: a -1.6e-17 residual from
+        # a 1e-10 input is what the subtractive update used to leave.
+        self.assertTrue(bool(jnp.all(out.gases[gas_name("h2so4")] >= 0.0)))
         for mode in MAM4_SPEC.modes:
             key = mass_name("so4", mode.short)
             if key in out.masses:

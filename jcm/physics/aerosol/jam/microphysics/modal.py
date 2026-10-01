@@ -38,6 +38,7 @@ import jcm.constants as c
 from jcm.physics.aerosol.jam.gas_species import SULFUR_GASES
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.microphysics import condensation
+from jcm.physics.aerosol.jam.microphysics import new_particle_formation as npf
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
 from jcm.physics.aerosol.jam.microphysics.koehler import (
     equilibrium_modal_state,
@@ -74,6 +75,15 @@ class MicrophysicsEnvironment:
     # Step-mean H2SO4 chemical production [kg/kg/s], published by the
     # chemistry term; zero when no chemistry is composed.
     h2so4_production: jnp.ndarray
+    # Height of each level above the surface [m], ``(nlev, ncols)``, and
+    # the boundary-layer height [m], ``(ncols,)``. The latter is published
+    # by TTE-TKE vertical diffusion, which runs AFTER this core in the
+    # ECHAM order (term 21 against 12), so it is one step lagged and
+    # absent on the first step; the D-A2 sub-decision records why the lag
+    # is accepted. Absent, it is zero and the empirical new-particle
+    # pathway falls back to MAM's 100 m minimum.
+    height_above_surface: jnp.ndarray
+    pbl_height: jnp.ndarray
     dt: float                  # [s]
 
 
@@ -152,6 +162,10 @@ def rename(population, env, spec, params):
 def nucleation(population, env, spec, params):
     """New-particle formation from H2SO4 vapour. **AER-04.**
 
+    The function keeps the name the MAM literature uses for the process;
+    in prose it is new-particle formation (NPF). Implemented in
+    :mod:`~jcm.physics.aerosol.jam.microphysics.new_particle_formation`.
+
     Two pathways, because MAM's default is not binary alone (D-A2):
 
     * binary H2SO4-H2O homogeneous nucleation (Vehkamaki et al., 2002),
@@ -167,7 +181,7 @@ def nucleation(population, env, spec, params):
     on the way. New particles enter the Aitken mode. This is the sole
     source of new particle *number* in the population.
     """
-    return population
+    return npf.form_new_particles(population, env, spec, params)
 
 
 def coagulation(population, env, spec, params):
@@ -244,6 +258,7 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         *,
         processes: tuple[tuple[str, Process], ...] | None = None,
         condensation_params: condensation.CondensationParameters | None = None,
+        npf_params: npf.NewParticleFormationParameters | None = None,
     ):
         """Build the core.
 
@@ -255,6 +270,8 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
                 to the whole step.
             condensation_params: Gas-aerosol exchange tunables; MAM4's
                 defaults when omitted.
+            npf_params: New-particle formation tunables; MAM4's defaults
+                when omitted.
 
         """
         if spec is not None:
@@ -266,12 +283,18 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         self.condensation = nnx.Param(
             condensation.CondensationParameters()
             if condensation_params is None else condensation_params)
+        self.new_particle_formation = nnx.Param(
+            npf.NewParticleFormationParameters()
+            if npf_params is None else npf_params)
         # nnx-friendly marker, mirroring PlaceholderMicrophysics.
         self._initialized = True
 
     def _process_params(self) -> dict[str, Any]:
         """Per-process parameter structs, keyed by process name."""
-        return {"gas_aerosol_exchange": self.condensation.get_value()}
+        return {
+            "gas_aerosol_exchange": self.condensation.get_value(),
+            "nucleation": self.new_particle_formation.get_value(),
+        }
 
     def _gather(self, state) -> ModalPopulation:
         """Read the population out of ``state.tracers``.
@@ -307,6 +330,35 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         }
         return ModalPopulation(masses=masses, numbers=numbers, gases=gases)
 
+    @staticmethod
+    def _height_above_surface(state, diagnostics):
+        """Level height above the surface [m], from the moist-air term.
+
+        ``MoistAirColumnState`` runs first in the ECHAM order and publishes
+        ``height_full``/``height_half`` as geopotential height, so the
+        surface is the bottom interface (physics frame: top first, index
+        -1). Falls back to the state's geopotential when the moist-air
+        term is not composed, as in the unit tests.
+        """
+        if "height_full" in diagnostics and "height_half" in diagnostics:
+            return diagnostics["height_full"] - diagnostics["height_half"][-1]
+        height = state.geopotential / c.grav
+        return height - height[-1]
+
+    @staticmethod
+    def _pbl_height(state, diagnostics):
+        """Lagged boundary-layer height [m] ``(ncols,)``, zero if absent.
+
+        A Python-level branch on the key, like ``tracer_diffusion.py``:
+        presence is a property of the composition, not of the data, so it
+        is static per trace.
+        """
+        vdiff = diagnostics.get("vertical_diffusion")
+        if vdiff is None:
+            return jnp.zeros(state.temperature.shape[1:],
+                             dtype=state.temperature.dtype)
+        return vdiff.pbl_height
+
     def __call__(self, state, diagnostics, forcing, terrain):
         before = self._gather(state)
         pressure = diagnostics["pressure_full"]
@@ -330,6 +382,8 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
             air_density=pressure / (c.rd * state.temperature),
             state_start=state_start,
             h2so4_production=diagnostics.get("_h2so4_production", zeros),
+            height_above_surface=self._height_above_surface(state, diagnostics),
+            pbl_height=self._pbl_height(state, diagnostics),
             dt=dt,
         )
 
