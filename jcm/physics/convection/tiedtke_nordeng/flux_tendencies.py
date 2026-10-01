@@ -184,6 +184,7 @@ def convective_precip_fluxes(
     updraft_velocity: jnp.ndarray = 2.0,
     use_updraft_cover: bool = False,
     updraft_layer_mass: jnp.ndarray | None = None,
+    surface_pressure: jnp.ndarray | None = None,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
            jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """ECHAM ``cuflx`` precipitation budget (mo_cufluxdts.f90:265-491).
@@ -234,6 +235,10 @@ def convective_precip_fluxes(
             ``Δp`` (``Δp/g`` [kg/m²]), the taper weight for the cover's
             sub-cloud ``p_s − p_half`` reconstruction. Required when
             ``use_updraft_cover``; the ledger passes ``dp_lev / g``.
+        surface_pressure: The column's surface (bottom interface) pressure
+            [Pa], the denominator of the ``cevapcu`` profile's ``eta``. The
+            ledger passes it; without it the lowest full-level pressure
+            stands in.
 
     Returns:
         ``(rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux,
@@ -293,8 +298,13 @@ def convective_precip_fluxes(
     from .tiedtke_nordeng import saturation_mixing_ratio
     qs_env = jax.vmap(saturation_mixing_ratio)(pressure, temperature)
 
-    # ECHAM cevapcu(jk) profile (iniphy.f90:87-89) with eta ≈ p/p_surface.
-    eta = pressure / jnp.maximum(pressure[-1], 1.0)
+    # ECHAM cevapcu(jk) profile (iniphy.f90:87-89). ECHAM's ``ceta`` is the
+    # grid's full-level hybrid coordinate, ``a/101325 + b`` at the layer
+    # midpoint (mo_hyb.f90:212-220); the column's own ``p/p_s`` is that value
+    # exactly on a sigma grid and at the reference surface pressure on a
+    # hybrid one.
+    p_surface = pressure[-1] if surface_pressure is None else surface_pressure
+    eta = pressure / jnp.maximum(p_surface, 1.0)
     cevapcu = (
         1.93e-6 * 261.0
         * jnp.sqrt(1.0e3 / (38.3 * 0.293) * jnp.sqrt(jnp.clip(eta, 1e-4, 1.0)))
@@ -570,6 +580,7 @@ def calculate_tendencies(
         updraft_velocity=config.cu_updraft_velocity,
         use_updraft_cover=use_updraft_cover,
         updraft_layer_mass=mass,
+        surface_pressure=env.paph[-1],
     )
     plude = updraft_state.plude
 
@@ -685,11 +696,10 @@ def mass_flux_closure(
 
     Returns ECHAM's constant fallback ``zmfub = 0.01 kg m⁻² s⁻¹``
     (``mo_cumastr.f90:567``), floored/capped to ``[cmfcmin, cmfcmax]``. This
-    is the value ECHAM uses for the cloud-base mass flux when the boundary-
-    layer moisture-budget closure ``zdqpbl/(g·Δq)`` is not applicable; the
-    live scheme (``tiedtke_nordeng_convection``) applies that moisture
-    closure directly and the Nordeng ``zmfub1`` rescale for deep columns, so
-    this function supplies only the constant fallback.
+    is the first-guess flux ECHAM gives a column whose cloud-base moisture
+    budget fails ``zlo1``, which it then makes non-convective;
+    ``tiedtke_nordeng_convection`` uses ``ECHAM_MFUB_FALLBACK`` directly for
+    the plume that gate rejects.
 
     It replaces the former ``cape/(g·τ)`` "closure", which had units of
     m s⁻¹ — dimensionally a velocity, not a mass flux (review finding 2.5).
@@ -709,39 +719,6 @@ def mass_flux_closure(
 
     """
     del cape, cin, moisture_conv, ktype
-    return jnp.clip(
-        jnp.asarray(ECHAM_MFUB_FALLBACK), config.cmfcmin, config.cmfcmax,
-    )
-
-
-def mass_flux_closure_blend(
-    cape: jnp.ndarray,
-    cin: jnp.ndarray,
-    moisture_conv: jnp.ndarray,
-    type_weights: jnp.ndarray,
-    config: ConvectionParameters,
-) -> jnp.ndarray:
-    """Type-weighted cloud-base mass-flux fallback.
-
-    Type-weighted counterpart of :func:`mass_flux_closure`. Because ECHAM's
-    fallback (``mo_cumastr.f90:567``) is the SAME constant ``0.01 kg m⁻² s⁻¹``
-    for all convection types, the type weighting is degenerate and this
-    returns the same faithful constant as :func:`mass_flux_closure`. Kept as
-    a separate entry point for the (differentiable) live call site.
-
-    Args:
-        cape: CAPE (J/kg) — unused.
-        cin: CIN (J/kg) — unused.
-        moisture_conv: Low-level moisture convergence (kg/m2/s) — unused.
-        type_weights: ``(3,)`` (deep, shallow, mid) weights — unused (the
-            fallback constant is type-independent).
-        config: Convection configuration (supplies the clip bounds).
-
-    Returns:
-        Cloud base mass flux (kg/m2/s).
-
-    """
-    del cape, cin, moisture_conv, type_weights
     return jnp.clip(
         jnp.asarray(ECHAM_MFUB_FALLBACK), config.cmfcmin, config.cmfcmax,
     )

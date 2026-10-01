@@ -28,7 +28,6 @@ from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import (
     ECHAM_MFUB_FALLBACK,
     calculate_tendencies,
     mass_flux_closure,
-    mass_flux_closure_blend,
 )
 from jcm.physics.convection.tiedtke_nordeng.updraft import (
     UpdatedraftState,
@@ -82,14 +81,6 @@ class TestConstantFallbackClosure:
         for v in vals:
             assert v == pytest.approx(ECHAM_MFUB_FALLBACK, rel=1e-6)
         assert ECHAM_MFUB_FALLBACK == pytest.approx(0.01)
-
-    def test_blend_matches_the_same_constant(self):
-        cfg = ConvectionParameters.default()
-        mfb = mass_flux_closure_blend(
-            jnp.array(3000.0), jnp.array(0.0), jnp.array(0.0),
-            jnp.array([1.0, 0.0, 0.0]), cfg,
-        )
-        assert float(mfb) == pytest.approx(ECHAM_MFUB_FALLBACK, rel=1e-6)
 
 
 # --------------------------------------------------------------------------

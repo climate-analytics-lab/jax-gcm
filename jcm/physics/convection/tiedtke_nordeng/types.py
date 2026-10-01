@@ -7,14 +7,45 @@ them without pulling in the full orchestrator. This module must not
 import any other module from this package (no cycles).
 """
 
+import jax
 import jax.numpy as jnp
 from typing import NamedTuple
+from flax import struct
 import tree_math
 
 
-@tree_math.struct
+#: Fields of :class:`ConvectionParameters` that are static
+#: (``pytree_node=False``): the widths of the surrogates that define the
+#: derivatives of ECHAM's convective decisions (:mod:`.switches`). The value
+#: does not depend on them, so a gradient with respect to one would mean
+#: nothing.
+SURROGATE_WIDTH_FIELDS = (
+    "ascent_condensate_width", "ascent_buoyancy_width",
+    "ascent_mass_flux_width", "precip_onset_width",
+    "deep_convergence_width", "sub_cloud_supply_width",
+    "cloud_base_excess_width",
+)
+
+
+@struct.dataclass
 class ConvectionParameters:
-    """Configuration parameters for Tiedtke-Nordeng convection scheme"""
+    """Configuration parameters for Tiedtke-Nordeng convection scheme.
+
+    The numeric fields are differentiable pytree leaves, except the
+    surrogate widths (:data:`SURROGATE_WIDTH_FIELDS`), which are static
+    (``pytree_node=False``). ECHAM decides by hard comparisons whether a
+    column convects, which plume type it carries, where the plume stops and
+    where it starts to rain; jcm keeps each decision's value exactly and
+    gives it the derivative of a logistic surrogate whose width is one of
+    these fields (:mod:`~jcm.physics.convection.tiedtke_nordeng.switches`,
+    ``docs/source/design/surrogate_gradients.md``). A width of zero selects
+    the reference derivative. ECHAM has no CAPE trigger, and neither does
+    this scheme: a surface plume convects when ``cubase`` finds a buoyant
+    cloud base, the cloud-base moisture budget passes ``cumastr``'s ``zlo1``
+    test and the ascents leave ``kctop`` above ``klevm1`` (a cloud base above
+    ``klevm1`` passes by itself, its test in ``cuasc`` repeating
+    ``cubase``'s; one at ``klevm1`` needs the first interface above it).
+    """
 
     # Entrainment/detrainment parameters
     entrpen: float           # Entrainment rate for penetrative convection (m⁻¹)
@@ -68,35 +99,11 @@ class ConvectionParameters:
                              # above the level of non-buoyancy (``cmfctop``)
     cu_mfub1_min: float      # Floor on the Nordeng deep cloud-base mass flux
                              # ``zmfub1`` [kg/m²/s] (mo_cumastr.f90:902,
-                             # ``0.001``), applied scaled by the trigger weight
+                             # ``0.001``)
 
     # Downdraft parameters
     cmfdeps: float           # Downdraft mass flux fraction for LFS threshold
     entrdd: float            # Downdraft fractional entrainment rate (m⁻¹)
-
-    # Smooth-trigger parameters (maintainability review Part B). The
-    # hard CAPE/type/termination gates gave every convection parameter an
-    # exactly-zero gradient over most of state space; each gate is now a
-    # sigmoid whose WIDTH is itself a differentiable, annealable
-    # parameter — width → 0 recovers the hard behaviour exactly.
-    trigger_cape: float      # CAPE activation threshold (J/kg; ex-hardcoded 100)
-    smooth_trigger_j: float  # Sigmoid width of the CAPE trigger (J/kg)
-    cu_dqcv_width: float     # Width [kg/m2/s] of the deep/shallow moisture-
-                             # convergence sigmoid. ECHAM's test is a hard
-                             # switch ``zdqcv > MAX(0, -1.1*pqhfla*g)``
-                             # (mo_cumastr.f90:571); the default keeps this
-                             # hard at atmospheric flux scales (~1% of a
-                             # typical tropical E) while staying
-                             # differentiable. Replaced the non-ECHAM CAPE
-                             # sigmoid at 1000 J/kg (#699).
-    smooth_rh: float         # Width of the moist-free-troposphere RH gate
-    smooth_term_buoy: float  # Updraft-termination buoyancy width (m/s²; ~3e-4 ≈ 0.01 K)
-    smooth_term_mf: float    # Updraft-termination mass-flux-ratio width
-    smooth_precip_pa: float  # zdnoprc precip-onset width (Pa)
-    smooth_term_cond: float  # Updraft-termination condensation width
-                             # (kg/kg): the ascent continues only where the
-                             # plume condenses (``pqu < zqold``); the gate is
-                             # exactly zero without condensation
 
     # Cloud-base sub-grid buoyancy excess — ECHAM ``cubase``
     # (mo_cuinitialize.f90:291) ``zlift = MAX(cminbuoy, MIN(cmaxbuoy,
@@ -141,6 +148,31 @@ class ConvectionParameters:
                              # it off is the escape hatch for a dycore that
                              # cannot supply omega — see ``TiedtkeConvection``.
 
+    # Surrogate widths (static). Each is the width of the logistic whose
+    # derivative one of ECHAM's hard decisions carries; see ``switches.py``.
+    # The ascent test (mo_cuascent.f90:442-451), per factor:
+    ascent_condensate_width: float = struct.field(
+        pytree_node=False, default=1.0e-8)   # condensed vapour [kg/kg]
+    ascent_buoyancy_width: float = struct.field(
+        pytree_node=False, default=0.01)     # ``zbuo`` [K]
+    ascent_mass_flux_width: float = struct.field(
+        pytree_node=False, default=2.0e-3)   # ``pmfu/pmfub - 0.01`` [-]
+    # The precipitation onset ``zpbase - paphp1 >= zdnoprc``
+    # (mo_cuascent.f90:454-455) [Pa].
+    precip_onset_width: float = struct.field(
+        pytree_node=False, default=2.0e3)
+    # The deep/shallow test ``zdqcv > MAX(0, -1.1·pqhfla·g)``
+    # (mo_cumastr.f90:571-574), per unit of ``g`` [kg/m²/s].
+    deep_convergence_width: float = struct.field(
+        pytree_node=False, default=2.0e-7)
+    # The ``zlo1`` gate of the cloud-base moisture budget
+    # (mo_cumastr.f90:563-566): ``zdqpbl > 0`` per unit of ``g`` [kg/m²/s],
+    # and ``zqumqe > zdqmin`` as a fraction of ``zdqmin`` [-].
+    sub_cloud_supply_width: float = struct.field(
+        pytree_node=False, default=2.0e-7)
+    cloud_base_excess_width: float = struct.field(
+        pytree_node=False, default=0.1)
+
     @classmethod
     def default(cls, entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
                  cu_centrmax=3.0e-4,
@@ -149,17 +181,25 @@ class ConvectionParameters:
                  cevapcu=2.0e-5, cu_updraft_velocity=2.0,
                  cu_cmfctop=0.2, cu_mfub1_min=1.0e-3,
                  cmfdeps=0.3, entrdd=2.0e-4,
-                 trigger_cape=100.0, smooth_trigger_j=25.0,
-                 cu_dqcv_width=2.0e-7, smooth_rh=0.02,
-                 smooth_term_buoy=3.0e-4, smooth_term_mf=2.0e-3,
-                 smooth_precip_pa=2.0e3, smooth_term_cond=1.0e-8,
                  cu_cminbuoy=0.2, cu_cmaxbuoy=1.0, cu_cbfac=1.0,
                  cu_thvsig=1.0,
                  cu_midlev_rh=0.90, cu_midlev_zmin=1500.0,
                  cu_midlev_ptop=30_000.0,
-                 lmfdudv=True, cu_lmfmid=True) -> 'ConvectionParameters':
-        """Return default convection parameters"""
-        return cls(
+                 lmfdudv=True, cu_lmfmid=True,
+                 **widths) -> 'ConvectionParameters':
+        """Return default convection parameters.
+
+        The numeric arguments become array leaves. ``widths`` may set any of
+        the static surrogate widths (:data:`SURROGATE_WIDTH_FIELDS`), which
+        stay Python floats.
+        """
+        unknown = sorted(set(widths) - set(SURROGATE_WIDTH_FIELDS))
+        if unknown:
+            raise TypeError(
+                f"ConvectionParameters.default() got unknown field(s) "
+                f"{unknown}; the surrogate widths are "
+                f"{list(SURROGATE_WIDTH_FIELDS)}")
+        params = cls(
             entrpen=jnp.array(entrpen),
             entrscv=jnp.array(entrscv),
             entrmid=jnp.array(entrmid),
@@ -176,14 +216,6 @@ class ConvectionParameters:
             cu_mfub1_min=jnp.array(cu_mfub1_min),
             cmfdeps=jnp.array(cmfdeps),
             entrdd=jnp.array(entrdd),
-            trigger_cape=jnp.array(trigger_cape),
-            smooth_trigger_j=jnp.array(smooth_trigger_j),
-            cu_dqcv_width=jnp.array(cu_dqcv_width),
-            smooth_rh=jnp.array(smooth_rh),
-            smooth_term_buoy=jnp.array(smooth_term_buoy),
-            smooth_term_mf=jnp.array(smooth_term_mf),
-            smooth_precip_pa=jnp.array(smooth_precip_pa),
-            smooth_term_cond=jnp.array(smooth_term_cond),
             cu_cminbuoy=jnp.array(cu_cminbuoy),
             cu_cmaxbuoy=jnp.array(cu_cmaxbuoy),
             cu_cbfac=jnp.array(cu_cbfac),
@@ -193,7 +225,24 @@ class ConvectionParameters:
             cu_midlev_ptop=jnp.array(cu_midlev_ptop),
             lmfdudv=jnp.array(lmfdudv),
             cu_lmfmid=jnp.array(cu_lmfmid),
+            **{k: float(v) for k, v in widths.items()},
         )
+        params.validate()
+        return params
+
+    def validate(self):
+        """Reject a negative surrogate width (a width is a scale, or zero)."""
+        for name in SURROGATE_WIDTH_FIELDS:
+            value = getattr(self, name)
+            if isinstance(value, jax.Array) or not isinstance(
+                    value, (int, float)):
+                raise TypeError(
+                    f"ConvectionParameters.{name} is a static surrogate "
+                    f"width and must be a Python number, got "
+                    f"{type(value).__name__}")
+            if value < 0:
+                raise ValueError(
+                    f"ConvectionParameters.{name} must be >= 0, got {value}")
 
 
 class ConvectionState(NamedTuple):

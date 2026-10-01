@@ -174,7 +174,7 @@ Convection
 - Evaporatively-driven downdrafts
 - Convective precipitation (rain and snow)
 - Convective transport of cloud water and ice tracers
-- **Cuadjtq saturation adjustment** (ECHAM ``mo_cuadjust.f90::cuadjtq``, compared with the compiled routine): two damped Newton steps ``cond = (q - qs) / (1 + L/cp · dqs/dT)`` on ECHAM's ``ua`` saturation (Sonntag 1990, :py:mod:`jcm.physics.thermodynamics`), the first clipped by ``kcall`` (``0`` both signs for the half-level environment, ``1`` condensation only in the updraft and at cloud base, ``2`` evaporation only in the downdraft), the second unclipped where the first was non-zero, in :py:func:`jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq`. The updraft, cloud-base and CAPE parcels use its ``kcall=1`` wrapper :py:func:`~jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq_newton`, the downdraft wet bulb its ``kcall=2`` wrapper :py:func:`~jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq_newton_evap`; the ``1 + L/cp · dqs/dT`` denominator accounts for the warming that condensation causes, and every step conserves total water.
+- **Cuadjtq saturation adjustment** (ECHAM ``mo_cuadjust.f90::cuadjtq``, compared with the compiled routine): two damped Newton steps ``cond = (q - qs) / (1 + L/cp · dqs/dT)`` on ECHAM's ``ua`` saturation (Sonntag 1990, :py:mod:`jcm.physics.thermodynamics`), the first clipped by ``kcall`` (``0`` both signs for the half-level environment, ``1`` condensation only in the updraft and at cloud base, ``2`` evaporation only in the downdraft), the second unclipped where the first was non-zero, in :py:func:`jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq`. The updraft and cloud-base parcels use its ``kcall=1`` wrapper :py:func:`~jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq_newton`, the downdraft wet bulb its ``kcall=2`` wrapper :py:func:`~jcm.physics.convection.tiedtke_nordeng.cuadjtq.cuadjtq_newton_evap`; the ``1 + L/cp · dqs/dT`` denominator accounts for the warming that condensation causes, and every step conserves total water.
 - **Mass-flux CFL cap**: at cloud base the updraft mass flux is capped to the layer-mass-per-timestep, ``mfu_cb ≤ rho_cb · dz_cb / dt``, to prevent the explicit transport step from violating CFL when the closure suggests an unphysically large mass flux. This is the JAX-side analogue of ECHAM's implicit upwind transport.
 
 **Activation Criteria**:
@@ -203,9 +203,13 @@ The convergence integral uses ECHAM's ``pqte``: the same-step vdiff moisture
 tendency plus the dynamics (advection + hyperdiffusion) tendency of the
 just-completed dycore step, reconstructed one step lagged from the physics
 carry — the same information provenance as ECHAM's leapfrog dynamics
-tendency. It enters only this classification switch, never a closure
-amplitude (a lagged amplitude is the compounding convergence feedback the
-closure work deliberately excluded).
+tendency. Its integral over the layers below the cloud base, ``zdqpbl``,
+decides whether a surface plume may convect at all (ECHAM's ``zlo1`` gate,
+which also requires the cloud-base parcel to carry more than 1 % more water
+than the environment there) and sets the plume's first-guess cloud-base flux
+``zdqpbl/(g·zqumqe)``. ECHAM has no CAPE trigger, and neither does jcm; each
+of these decisions is ECHAM's in the value and carries the derivative of a
+logistic surrogate (:doc:`science/convection`).
 
 **Configurable Parameters** (:py:class:`ConvectionParameters`):
 
@@ -217,17 +221,17 @@ closure work deliberately excluded).
      - Description
      - Default
    * - ``entrpen``
-     - Entrainment rate for penetrative convection (1/Pa)
+     - Entrainment rate for penetrative convection (1/m)
      - 1.0e-4
    * - ``entrscv``
-     - Entrainment rate for shallow convection (1/Pa)
-     - 3.0e-4
+     - Entrainment rate for shallow convection (1/m)
+     - 3.0e-3
    * - ``entrmid``
-     - Entrainment rate for mid-level convection (1/Pa)
+     - Entrainment rate for mid-level convection (1/m)
      - 1.0e-4
    * - ``tau``
-     - CAPE closure timescale (s)
-     - 3600.0
+     - CAPE-consumption timescale of the Nordeng closure, ECHAM ``cmftau`` (s)
+     - 7200.0
    * - ``cmfcmax``
      - Maximum cloud base mass flux (kg/m2/s)
      - 1.0
@@ -238,12 +242,27 @@ closure work deliberately excluded).
      - Fractional downdraft mass flux at LFS
      - 0.3
    * - ``cprcon``
-     - Precipitation conversion coefficient (1/m)
-     - 1.4e-3
-   * - ``cu_dqcv_width``
-     - Width of the deep/shallow moisture-convergence sigmoid (kg/m²/s);
-       ECHAM's hard switch in a differentiable form
-     - 2.0e-7
+     - Precipitation conversion coefficient (s²/m²), applied per unit of
+       geopotential depth
+     - 2.5e-4
+   * - ``ascent_buoyancy_width``, ``ascent_mass_flux_width``,
+       ``ascent_condensate_width``
+     - Widths of the surrogates of the ascent test's buoyancy (K), 1 %
+       flux (fraction of the cloud-base flux) and condensation (kg/kg)
+       conditions. Static; derivative only
+     - 0.01, 2.0e-3, 1.0e-8
+   * - ``precip_onset_width``
+     - Width of the surrogate of the ``zdnoprc`` precipitation onset (Pa).
+       Static; derivative only
+     - 2000.0
+   * - ``deep_convergence_width``, ``sub_cloud_supply_width``
+     - Widths of the surrogates of the deep/shallow test and of the
+       ``zdqpbl > 0`` gate (kg/m²/s). Static; derivative only
+     - 2.0e-7, 2.0e-7
+   * - ``cloud_base_excess_width``
+     - Width of the surrogate of the ``zqumqe > zdqmin`` gate, as a fraction
+       of ``zdqmin``. Static; derivative only
+     - 0.1
    * - ``cu_cminbuoy``
      - Floor on the cloud-base sub-grid buoyancy excess ``zlift`` (K)
      - 0.2
@@ -925,7 +944,7 @@ To customize physics parameters:
    from jcm.physics.radiation.radiation_types import RadiationParameters
 
    convection = ConvectionParameters.default(
-       tau=7200.0,        # Slower CAPE closure (2 hours)
+       tau=3600.0,        # Faster Nordeng closure (1 hour; the default is 2)
        entrpen=2.0e-4     # Stronger entrainment
    )
 

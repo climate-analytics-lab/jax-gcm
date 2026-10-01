@@ -214,8 +214,9 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
     wrapper must hand ``vertical_diffusion.qv_tendency`` straight to the
     scheme as ``moisture_tend_profile`` — no lagged q-snapshot arithmetic —
     and the environment (T, q) must be the vdiff-advanced ``thermo_run``
-    view, not the raw step-start state. Without a vdiff diagnostic the
-    profile must be zeros (supply falls back to the surface-E floor).
+    view, not the raw step-start state. Without a vdiff diagnostic no
+    profile is passed, and the scheme delivers the surface evaporation to
+    the lowest layer itself.
     """
     nlev, ncols = 4, 2
     dt = 60.0
@@ -234,8 +235,12 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
         pressure_half=None,
     ):
         zeros = jnp.zeros_like(temperature)
+        # Probe: whether a profile was passed rides out on dvdt.
+        no_profile = moisture_tend_profile is None
+        profile = zeros if no_profile else moisture_tend_profile
         return ConvectionTendencies(
-            dtedt=zeros, dqdt=moisture_tend_profile, dudt=zeros, dvdt=zeros,
+            dtedt=zeros, dqdt=profile, dudt=zeros,
+            dvdt=jnp.ones_like(temperature) if no_profile else zeros,
             qc_conv=temperature, qi_conv=humidity,
             precip_formation=jnp.zeros_like(temperature),
             precip_flux=jnp.zeros_like(temperature),
@@ -287,6 +292,7 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
     # The closure profile handed to the scheme is the same-step vdiff
     # qv tendency, and the environment is the vdiff-advanced thermo_run.
     assert jnp.allclose(tendency.specific_humidity, qv_tend_vdiff)
+    assert jnp.allclose(tendency.v_wind, 0.0)
     conv = diagnostics_out["convection"]
     assert jnp.allclose(conv.qc_conv, thermo_run["temperature"])
     assert jnp.allclose(conv.qi_conv, thermo_run["specific_humidity"])
@@ -301,7 +307,7 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
     assert not jnp.allclose(
         tendency.tracers["qc"], thermo_run["specific_humidity"])
 
-    # Without a vdiff diagnostic (and without thermo_run): zeros profile and
+    # Without a vdiff diagnostic (and without thermo_run): no profile, and
     # the raw state as environment.
     diagnostics_no_vdiff = {
         k: v for k, v in diagnostics.items()
@@ -310,7 +316,7 @@ def test_wrapper_feeds_same_step_vdiff_qv_tendency_to_closure(monkeypatch):
     tendency2, diagnostics_out2 = TiedtkeConvection()(
         state, diagnostics_no_vdiff, forcing=None, terrain=terrain,
     )
-    assert jnp.allclose(tendency2.specific_humidity, 0.0)
+    assert jnp.allclose(tendency2.v_wind, 1.0)
     assert jnp.allclose(
         diagnostics_out2["convection"].qc_conv, state.temperature,
     )

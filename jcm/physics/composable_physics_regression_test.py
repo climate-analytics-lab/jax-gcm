@@ -227,6 +227,15 @@ class TestEchamReferenceTrajectory(_Float32ReferenceTest):
     is inside the 3 % tolerance — 0.84 % in specific humidity, 0.14 % in v,
     0.10 % in u, 4e-5 in temperature — and the fingerprint follows the
     physics it pins. The speedy reference is unchanged.
+
+    Regenerated 2026-10-01 for Tiedtke-Nordeng's exact ECHAM decisions
+    (#968) and ECHAM's vapour gas constant ``rv = 461.51``, with
+    ``regenerate_regression_references.sh`` (jax/jaxlib 0.10.2). The shift
+    is inside the 3 % tolerance: 0.79 % in specific humidity, 0.13 % in v,
+    0.10 % in u, 4e-5 in temperature; either change alone moves the fields by
+    as much (0.80 % and 0.76 % in specific humidity). The speedy reference
+    moves by at most 1.6e-6: SPEEDY's physics does not read ``rv``, but the
+    geopotential the dycore hands it is built from the virtual temperature.
     """
 
     @pytest.mark.slow

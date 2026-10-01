@@ -373,8 +373,8 @@ STATE=/runs/mx_echam_jam_t63_l47_<spin-tag>/mx_echam_jam_t63_l47_<spin-tag>_day1
 L="python tools/release_validation/launch.py --site nautilus \
    --members echam-jam-t63-l47 --tag $TAG --days 60 --init $STATE --submit"
 $L --suffix control
-for cape in 50 150 200; do
-  $L --suffix cape$cape --extra +physics.convection.trigger_cape=$cape.0
+for e in 5 20 30; do    # Tiedtke's penetrative entrainment, 1e-5 /m (ECHAM: 10)
+  $L --suffix entrpen$e --extra +physics.convection.entrpen=${e}e-5
 done
 ```
 

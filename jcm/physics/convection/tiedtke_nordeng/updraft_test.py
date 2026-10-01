@@ -341,12 +341,12 @@ class TestCloudBaseInitialisation(unittest.TestCase):
 
         The dry parcel is ECHAM ``cubase``'s DSE walk up the half levels,
         ``pcpcu·T + pgeoh`` conserved with the environment's MOIST heat
-        capacity (mo_cuinitialize.f90:294) from the bottom full level's dry
-        static energy ``pcpen·T + pgeo`` to the cloud-base interface — built
-        here by hand from the column's hydrostatic half-level geopotential.
-        The condensation warming itself is ``cuadjtq``'s, whose ``L/cp``
-        table is DRY (``alv/cpd``, mo_echam_convect_tables.f90:214), hence
-        ``cpd`` below.
+        capacity (mo_cuinitialize.f90:294) from the lowest interface's
+        environment, ``pcpcu(klev)·ptenh(klev) + pgeoh(klev)``, to the
+        cloud-base interface — built here by hand from the column's
+        half-level environment. The condensation warming itself is
+        ``cuadjtq``'s, whose ``L/cp`` table is DRY (``alv/cpd``,
+        mo_echam_convect_tables.f90:214), hence ``cpd`` below.
         """
         from jcm.physics.convection.tiedtke_nordeng.updraft import (
             column_environment,
@@ -355,8 +355,8 @@ class TestCloudBaseInitialisation(unittest.TestCase):
         state, pressure, temperature, q_surf = self._run(kbase, surf_rh=1.0)
         _, _, humidity = self._column(surf_rh=1.0)
         env = column_environment(temperature, humidity, pressure)
-        cp = c.cpd * (1.0 + c.vtmpc2 * np.asarray(humidity))
-        s0 = cp[-1] * float(temperature[-1]) + float(env.geo[-1])
+        s0 = (float(env.cpcu[-1]) * float(env.tenh[-1])
+              + float(env.geoh[-1]))
         t_dry = (s0 - float(env.geoh[kbase])) / float(env.cpcu[kbase])
         dT = float(state.tu[kbase]) - t_dry
         expected = c.alhc * float(state.lu[kbase]) / c.cpd
@@ -664,6 +664,86 @@ class TestCloudBaseBuoyancyGate(unittest.TestCase):
         layers = np.arange(nlev - 1)
         has_sink = (mfd[1:] < 0.0) | (layers >= int(state.kbase))
         self.assertGreaterEqual(float(np.min(source[~has_sink])), -1e-12)
+
+class TestAscentEndsAtTheFirstFailure(unittest.TestCase):
+    """``cuasc`` visits no interface above the first failed ascent test.
+
+    On reference columns (``jcm/data/test/echam_cumastr_reference``) the
+    published plume above the overshoot interface keeps ``cuini``'s
+    environment (``ptu = ptenh``, ``pqu = pqenh``, ``plu = 0``) and carries no
+    flux, as ECHAM's ``klab = 0`` latch leaves it (mo_cuascent.f90:294).
+    """
+
+    _INPUTS = ("temperature", "humidity", "pressure", "layer_thickness", "rho",
+               "u_wind", "v_wind", "qc", "qi", "land_fraction",
+               "moisture_supply", "moisture_tend_profile", "thvsig", "omega",
+               "qte_dynamics", "layer_mass", "humidity_m1", "pressure_half")
+
+    @classmethod
+    def _column(cls, group, ktype):
+        import os
+        path = os.path.join(os.path.dirname(__file__), os.pardir, os.pardir,
+                            os.pardir, "data", "test",
+                            "echam_cumastr_reference", "echam_cumastr.npz")
+        with np.load(path) as z:
+            rows = np.where((z["group"] == group) & (z["echam_ktype"] == ktype))[0]
+            i = int(rows[0])
+            return {k: jnp.asarray(z[f"input_{k}"][i]) for k in cls._INPUTS}
+
+    @staticmethod
+    def _run(a, **changes):
+        from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+            tiedtke_nordeng_convection,
+        )
+        a = {**a, **changes}
+        return tiedtke_nordeng_convection(
+            a["temperature"], a["humidity"], a["pressure"],
+            a["layer_thickness"], a["rho"], a["u_wind"], a["v_wind"], a["qc"],
+            a["qi"], 900.0, None, a["land_fraction"], a["moisture_supply"],
+            a["moisture_tend_profile"], a["thvsig"], a["omega"],
+            a["qte_dynamics"], a["layer_mass"], a["humidity_m1"], False,
+            a["pressure_half"])
+
+    def test_plume_above_the_overshoot_is_the_environment(self):
+        from jcm.physics.convection.tiedtke_nordeng.updraft import (
+            column_environment,
+        )
+        from jcm.physics.thermodynamics import moist_isobaric_heat_capacity
+        for group, ktype in (("rce_warm", 2), ("deep_rce_warm", 1)):
+            a = self._column(group, ktype)
+            _, state = self._run(a)
+            env = column_environment(
+                a["temperature"], a["humidity"], a["pressure"],
+                moist_isobaric_heat_capacity(a["humidity_m1"]),
+                a["pressure_half"], condensate=a["qc"] + a["qi"])
+            above = int(state.ktop) - 1   # the overshoot interface
+            self.assertEqual(int(state.ktype), ktype)
+            np.testing.assert_array_equal(
+                np.asarray(state.tu[:above]), np.asarray(env.tenh[:above]))
+            np.testing.assert_array_equal(
+                np.asarray(state.qu[:above]), np.asarray(env.qenh[:above]))
+            np.testing.assert_array_equal(np.asarray(state.lu[:above]), 0.0)
+            np.testing.assert_array_equal(np.asarray(state.mfu[:above]), 0.0)
+            self.assertGreater(float(state.mfu[above]), 0.0)
+
+    def test_precipitation_onset_takes_the_land_depth_on_land_columns(self):
+        """Use ECHAM's land ``zdnoprc`` where the column is land.
+
+        ECHAM takes the land depth wherever ``loland``, which ``physc`` reads
+        from the binary land-sea mask by default: on jcm's fractional land,
+        a land fraction of 0.5 or more.
+        """
+        a = self._column("deep_rce_warm", 1)
+        sea, _ = self._run(a, land_fraction=jnp.asarray(0.0))
+        coast, _ = self._run(a, land_fraction=jnp.asarray(0.3))
+        half, _ = self._run(a, land_fraction=jnp.asarray(0.5))
+        land, _ = self._run(a, land_fraction=jnp.asarray(1.0))
+        np.testing.assert_array_equal(np.asarray(coast.precip_formation),
+                                      np.asarray(sea.precip_formation))
+        np.testing.assert_array_equal(np.asarray(half.precip_formation),
+                                      np.asarray(land.precip_formation))
+        self.assertFalse(np.array_equal(np.asarray(sea.precip_formation),
+                                        np.asarray(land.precip_formation)))
 
 
 if __name__ == "__main__":

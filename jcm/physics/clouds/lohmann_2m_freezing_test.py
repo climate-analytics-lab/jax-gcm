@@ -163,9 +163,10 @@ def test_het_mxphase_freezing_reverse_mode_finite_at_singular_points(case):
 # ---------------------------------------------------------------------------
 def _closure_tendencies():
     """Run cloud_microphysics_2m on the supercooled fixture columns WITHOUT freezing_aerosol,
-    float64, jcm's own constants and default CloudParams2M except ``ccsaut = 900``, the
-    value the reference was generated with, so the closure is compared at fixed
-    parameters (dt720 inputs).
+    float64, with jcm's constants and default CloudParams2M except ``rv = 461.0`` and
+    ``ccsaut = 900``, the values the reference was generated with at dev 2dc609fd, so
+    the closure's code path is compared at fixed constants and parameters (dt720
+    inputs). jcm's own ``rv`` is ECHAM's 461.51.
     """
     from jcm.physics.clouds.lohmann_2m.scheme import cloud_microphysics_2m
     from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
@@ -184,9 +185,15 @@ def _closure_tendencies():
 
     args = [d["ptm1"], d["pqm1"], d["pxlm1"], d["pxim1"], d["xtm1_cdnc"], d["xtm1_icnc"],
             d["paclc"], rho, dz, d["ptkem1"], d["papm1"]]
-    with jax.enable_x64(True):
-        t = jax.vmap(one, in_axes=1, out_axes=1)(*[jnp.asarray(x, jnp.float64) for x in args])
-        return {k: np.asarray(getattr(t, k)) for k in TEND_FIELDS}
+    saved = c.physical_constants
+    c.set_constants(rv=461.0)
+    try:
+        with jax.enable_x64(True):
+            t = jax.vmap(one, in_axes=1, out_axes=1)(
+                *[jnp.asarray(x, jnp.float64) for x in args])
+            return {k: np.asarray(getattr(t, k)) for k in TEND_FIELDS}
+    finally:
+        c.set_constants(saved)
 
 
 def test_aerosol_free_closure_unchanged():
