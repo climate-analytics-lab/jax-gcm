@@ -56,7 +56,11 @@ def _run(core, days, *, seed_mode="pcm", sustained_h2so4=None, dt=900.0, nlev=47
     state, seed, pressure = jam_scavenging_column(vertical, physics)
     nlev = state.temperature.shape[0]
     boundary_layer = jnp.zeros(nlev).at[-5:].set(1.0)
-    seed = dict(seed)
+    # The column's seeds are float32 by construction; under ``jax_enable_x64``
+    # the physics returns float64 tendencies and the SCM's scan carry must
+    # hold one dtype, so the seeds take the working precision.
+    dtype = jnp.asarray(1.0).dtype
+    seed = {name: jnp.asarray(value, dtype) for name, value in seed.items()}
     seed[f"m_bc_{seed_mode}"] = boundary_layer * 1.0e-9 + 1e-30
     if seed_mode == "acc":
         seed["n_acc"] = seed["n_acc"] + boundary_layer * 2.0e8

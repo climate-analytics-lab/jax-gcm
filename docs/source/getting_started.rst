@@ -68,6 +68,9 @@ has runnable end-to-end examples:
 - `05_jcm_echam_demo <https://github.com/climate-analytics-lab/jax-gcm/blob/main/notebooks/05_jcm_echam_demo.ipynb>`_
   — the full ECHAM physics package on a hybrid vertical grid, the
   configuration the production runs use.
+- `07_jam_modal_microphysics <https://github.com/climate-analytics-lab/jax-gcm/blob/main/notebooks/07_jam_modal_microphysics.ipynb>`_
+  — the JAM aerosol module's in-tree modal microphysics core, process by
+  process with figures, through to a short aquaplanet run with maps.
 
 Quick Start Examples
 --------------------

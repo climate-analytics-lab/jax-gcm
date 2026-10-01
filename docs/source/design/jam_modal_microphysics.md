@@ -129,6 +129,16 @@ failure names the process. The step closure is on in every run.
    column, with the measured numbers and what one column can and cannot
    say about a global lifetime in §9 (*The BC-lifetime check*).
 
+`notebooks/07_jam_modal_microphysics.ipynb` walks the same ground with
+figures — the water uptake, the exchange coefficient, renaming, NPF,
+coagulation, ageing, the ledger, parameter sensitivities, the BC-lifetime
+columns — and ends in a ten-day T21 aquaplanet run with maps of what the
+core produces from the marine sources (an aquaplanet because the packaged
+real terrain on that coarse grid excites the orography × surface
+instability `echam_with_land_test.py` documents, with or without an
+aerosol module). It is the presentation copy of the validation, not a
+gate: the tests are.
+
 ## 6. Phase B sketch — aerosol-aware superparameterized convection
 
 The scientific target. Not startable yet.
