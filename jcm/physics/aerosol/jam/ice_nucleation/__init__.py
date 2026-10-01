@@ -1,8 +1,10 @@
-"""Heterogeneous ice nucleation (dust/BC) for the JAM harness (#494).
+"""Aerosol inputs to heterogeneous ice formation for the JAM harness (#953).
 
-Immersion + deposition freezing on the prognostic dust and black-carbon
-populations, via a switchable parameterization (``"niemand"`` singular
-active-site, or ``"lohmann_diehl"`` ECHAM-HAM number-based). The
-:class:`IceNucleation` term writes an ``ice_nuclei`` diagnostic [m⁻³] that the
-2-moment cloud scheme reads to set the heterogeneous ice-crystal number.
+:class:`~jcm.physics.aerosol.jam.ice_nucleation.ice_term.IceNucleation`
+computes ECHAM-HAM's mixed-phase freezing inputs (``mo_ham_freezing.f90``:
+the dust and black-carbon fractions of the activated droplets and of the
+insoluble aerosol, and the insoluble-mode wet radii) from the prognostic
+population and publishes them as ``freezing_aerosol``, which the 2-moment
+cloud scheme's ``het_mxphase_freezing`` turns into contact and immersion
+freezing rates.
 """

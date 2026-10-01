@@ -45,6 +45,7 @@ Based on the ECHAM6/ICON microphysics as described in:
 # (``from jcm.physics.clouds.lohmann_2m import ...``).
 
 from .types import (
+    HeterogeneousFreezingAerosol,
     MicrophysicsTendencies_2M,
     microphysics_dt_constants,
 )
@@ -76,6 +77,7 @@ from .scheme import (
 )
 
 __all__ = [
+    "HeterogeneousFreezingAerosol",
     "MicrophysicsTendencies_2M",
     "microphysics_dt_constants",
     "melting_snow_and_ice",

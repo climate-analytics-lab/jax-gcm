@@ -106,8 +106,9 @@
   ``jcm/physics/clouds/lohmann_2m_params.py::CloudParams2M``); no CAM
   ``micro_mg`` / PUMAS ``qsmall`` / ``mincld`` / ``dcs`` constants enter. The
   scheme is not a complete port of ECHAM-HAM. Several section-1 number
-  sources are absent, the mixed-phase heterogeneous freezing is a jcm
-  closure, and a small set of jcm-only bounds remains (the Koop
+  sources are absent, the mixed-phase heterogeneous freezing is ECHAM-HAM's
+  only where a prognostic aerosol supplies its inputs (JAM) and a jcm closure
+  otherwise, and a small set of jcm-only bounds remains (the Koop
   homogeneous-freezing floor, the ``icemax`` cap on the ICNC diagnosis and
   the falling-ice cover threshold). The
   absent processes and the deliberate deviations are listed below. See
@@ -266,8 +267,11 @@ two-moment microphysics** (``mo_cloud_micro_2m.f90``; Lohmann et al. 2007, Lohma
 & Hoose 2009; Roeckner et al. 2003 for the Marshall-Palmer precipitation
 inversion). CAM6 uses **MG2/PUMAS** two-moment microphysics (Gettelman & Morrison
 2015; ``micro_mg`` / ``micro_pumas_v1``). DeMott et al. (2010), *PNAS*
-doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count. Without
-prognostic HAM aerosol, ECHAM's two-moment scheme takes its aerosol inputs
+doi:10.1073/pnas.0910818107 is the ice-nucleating-particle count. With
+prognostic HAM aerosol, ``cloud_subm_1`` calls ``mo_ham_freezing.f90::ham_IN_setup``,
+which reduces the M7 modes to the dust and black-carbon fractions and insoluble
+radii ``het_mxphase_freezing`` reads (mo_cloud_micro_2m.f90 lines 726–734,
+1552–1567). Without it, ECHAM's two-moment scheme takes its aerosol inputs
 from the ``lccnclim`` mode: ``ccnclim_IN_setup``
 (``mo_ccnclim.f90:524-583``) feeds the aerosol freezing routine
 ``het_mxphase_freezing`` constant dust and black-carbon fractions (lines
@@ -407,39 +411,75 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   ECHAM 6.3 comments out), the precipitating-fraction reset, the ``ccwmin``
   correction and cover write-back (jumps of at most ``ccwmin``), and the
   low-pressure ``ub`` branch of the supersaturation check.
+- `differentiability`: ``het_mxphase_freezing`` evaluates each singular
+  operation (the cube root of the droplet volume, ``√TKE``, the ``1/r`` of the
+  Brownian diffusivities, ``exp(tmelt − T)``) on a safe argument where ECHAM
+  discards the result, so its values are ECHAM's and its derivatives stay
+  finite at zero aerosol, TKE, radius or liquid and outside the gate. ECHAM's
+  caps on the frozen mass and number are kinks, kept as written.
 
 **Status & known limitations (stated openly).**
-- **Mixed-phase heterogeneous freezing is a jcm closure.** In cells with
-  liquid between ``cthomi`` and ``tmelt`` (ECHAM's ``ll_mxfrz``), droplets of
-  mean mass freeze until the crystal number reaches the INP number ``n_inp``.
-  The droplets available cap the number frozen, the liquid available caps the
-  mass, and number, mass and fusion heat move together. The droplet number is
-  floored at ``cqtmin``; ECHAM's ``het_mxphase_freezing`` instead caps the
-  number frozen at the droplets above ``cdnc_min`` (lines 2818–2820).
-  - Without JAM, ``n_inp`` is the **DeMott et al. (2010)** parameterisation
-    (``jcm/physics/clouds/lohmann_2m/deposition_freezing.py::demott2010_inp``)
-    on a prescribed number of particles larger than 0.5 µm, ``n_aer_coarse``
-    (0.5 cm⁻³ at standard conditions, spatially constant). DeMott et al.
-    report INP per standard litre, at 273.15 K and about 1013 hPa, so the
-    function converts to ambient air by ``ρ/ρ_STP``. It applies only within
-    the fitted range, 238–264 K. The parameterisation appears in neither the
-    ECHAM nor the CAM source tree.
-  - Because detrained ice carries crystal number, heterogeneous freezing is
-    a second-order crystal source. In T63 January test runs it supplied
-    about 200 crystals m⁻² s⁻¹ against about 3×10⁵ from detrainment. The
-    choice of INP closure therefore moves a small term, and DeMott stays the
-    closure until ECHAM's ``lccnclim`` mode can replace it.
-  - With JAM, ``n_inp = max(ice_nuclei, DeMott)``, where ``ice_nuclei`` is
-    JAM's immersion INP on prognostic dust and black carbon. This is a
-    stopgap. JAM's immersion INP is positive in nearly every mixed-phase cloud
-    cell but about four orders of magnitude below the DeMott value, for a
-    reason outside the cloud scheme (#953). Taking the larger keeps
-    heterogeneous freezing active in JAM. JAM sets ``n_inp`` only where it
-    exceeds DeMott, which at present is rare, so aerosol–ice coupling through
-    this path is weak.
-  - JAM's deposition INP (``ice_nuclei_deposition``) is read only by the
-    ``nic_cirrus = 2`` branch of ``update_in_cloud_water``, so it is inert at
-    the default ``nic_cirrus = 1`` (#679, #552).
+- **Mixed-phase heterogeneous freezing** acts in cells with liquid between
+  ``cthomi`` and ``tmelt`` (ECHAM's gate ``ll_mxphase_frz``, lines 1541–1545).
+  Which formulation runs is set by the composition.
+  - **With JAM: ECHAM-HAM's rates.** ``het_mxphase_freezing``
+    (``jcm/physics/clouds/lohmann_2m/deposition_freezing.py``; lines
+    2675–2840; Lohmann & Diehl 2006, *J. Atmos. Sci.* 63, 968) freezes cloud
+    water over the step by Brownian contact freezing on insoluble dust and by
+    immersion freezing of droplets that hold dust or black carbon,
+    ``(32.3·f_du + 2.91·10⁻³·f_bc)·exp(tmelt − T)·(−min(ztte, 0))·V_drop``
+    per second, with the droplet volume ``V_drop = ρ·q_l/(ρ_w·N_l)``
+    (montmorillonite; the coefficients are the differentiable
+    ``CloudParams2M.immersion_coefficient_dust/_bc``). The frozen number is
+    capped at the droplets above ``cdnc_min``; mass, number and fusion heat
+    move together and the returned freezing is cover-weighted (line 2837).
+    The dust and BC fractions and the insoluble-mode radii are ECHAM-HAM's
+    ``ham_IN_setup`` fields, which JAM computes from its population (see
+    {doc}`aerosol`, *Aerosol inputs to ice formation*) and publishes as
+    ``freezing_aerosol``. With MAM4 there is no insoluble dust, and ECHAM
+    disables black-carbon contact freezing (line 2784), so contact freezing
+    is zero and the JAM mixed-phase freezing is immersion freezing.
+  - The immersion rate acts only while the air cools. ECHAM's cooling rate
+    ``ztte`` is the adiabatic cooling of the vertical motion,
+    ``(ω − fact_tke·√TKE·ρ·g)/(cpd·ρ)`` (lines 2800–2802), not the model's
+    temperature tendency. The large-scale ``ω`` is not plumbed to the scheme
+    (#705) and enters as 0: in 10-day T63 JAM runs the TKE updraft cools every
+    gate cell, and adding the dycore's ``ω`` changes the immersion rate
+    (weighted by ``exp(tmelt − T)`` and the droplet volume) by 0.5 % and turns
+    it off in no cell.
+  - **Without JAM: an aerosol-free closure.** Droplets of mean mass freeze
+    until the crystal number reaches the INP number ``n_inp``, the **DeMott
+    et al. (2010)** parameterisation
+    (``deposition_freezing.py::demott2010_inp``) on a prescribed number of
+    particles larger than 0.5 µm, ``n_aer_coarse`` (0.5 cm⁻³ at standard
+    conditions, spatially constant). DeMott et al. report INP per standard
+    litre, at 273.15 K and about 1013 hPa, so the function converts to
+    ambient air by ``ρ/ρ_STP``. It applies only within the fitted range,
+    238–264 K. The droplets available cap the number frozen, the liquid
+    available caps the mass, and number, mass and fusion heat move together.
+    The droplet number is floored at ``cqtmin``; ECHAM's
+    ``het_mxphase_freezing`` instead caps the number frozen at the droplets
+    above ``cdnc_min`` (lines 2818–2820). The parameterisation appears in
+    neither the ECHAM nor the CAM source tree; ECHAM's own aerosol-free mode
+    ``lccnclim`` (see *What ECHAM/CAM does*) feeds ``het_mxphase_freezing``
+    constant fractions and would replace it once ``ω`` is plumbed (#705).
+  - Heterogeneous freezing is a second-order ice source in both. Detrained ice
+    carries its own crystal number, about 10⁵ crystals m⁻² s⁻¹ in T63 January
+    runs, against 10²–10³ from heterogeneous freezing, and the freezing itself
+    moves 0.01–0.04 g m⁻² d⁻¹ of a mixed-phase ice budget of about 500. Its
+    indirect effect is larger under JAM: where ECHAM's immersion rate
+    completes, at the cold end of the mixed phase, every frozen droplet
+    becomes a crystal, and those crystals seed the WBF transfer and
+    deposition. In 10-day T63 JAM runs with ``ccsaut = 900``, going from the
+    closure to ECHAM-HAM's rates raised the WBF transfer from 6.3 to 6.9 and the deposition from 252
+    to 271 g m⁻² d⁻¹, lowered the liquid water path from 45.6 to 43.1 g m⁻²
+    and the supercooled fraction at 238–243 K from 0.52 to 0.45, and changed
+    the ice water path by +0.2 g m⁻² (run-to-run noise: 0.75 g m⁻² in the liquid
+    path).
+  - ``ice_nuclei`` remains an optional input of the closure (an external INP
+    number, the larger of it and DeMott is used); no in-tree term publishes
+    it. ``ice_nuclei_deposition`` reaches ``update_in_cloud_water`` as
+    ECHAM's ``pnicex``, read only by the ``nic_cirrus = 2`` branch (#552).
 - **Absent by decision.** These ECHAM-HAM processes are not in the 2M scheme:
   - the droplet number of detrained liquid, ``zqlnuccv`` (lines 889–941), and
     stratiform activation at cloud base copied to the levels above (lines
@@ -453,20 +493,11 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     cap is the soluble-aerosol number ``zascs``, which the scheme does not
     receive, and the ice budget stands without it (#955).
   - Kärcher–Lohmann cirrus, ``nic_cirrus = 2`` (lines 1001–1117; #552).
-  - aerosol-driven mixed-phase freezing, ``het_mxphase_freezing`` (lines
-    2675–2840). jcm's transliteration
-    (``deposition_freezing.py::het_mxphase_freezing``) is exported but
-    unused. It carries two transcription errors: its immersion rate
-    multiplies by the pressure velocity ``ω − fact_tke·√TKE·ρ·g`` itself,
-    where ECHAM multiplies by the cooling rate ``ztte = ω/(cpd·ρ)`` built from
-    it (line 2802), and its returned freezing rate lacks ECHAM's cover
-    weighting ``·paclc`` (line 2837).
   - ECHAM's aerosol-free freezing mode, ``lccnclim`` (see *What ECHAM/CAM
-    does*). It is the faithful replacement for the DeMott closure. It waits
-    for the large-scale vertical velocity, which the immersion rate needs
-    (#705), and for the two transcription errors above to be fixed.
-  - the large-scale term ``−100·ω/(g·ρ)`` of the updraft ``zvervx`` (line
-    816; #705).
+    does*). It is the faithful replacement for the DeMott closure and waits
+    for the large-scale vertical velocity (#705).
+  - the large-scale ``ω`` in the updraft ``zvervx`` (``−100·ω/(g·ρ)``, line
+    816) and in the immersion cooling rate (line 2800; #705).
 - **Known biases of the 2M ice.** Four biases remain, measured in 10-day T63
   January runs from a spun-up state. No parameter has been tuned to them. A
   retune follows together with the convection retune (#682).
@@ -483,11 +514,20 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     temperatures, which makes ``znidetr`` large.
   - Liquid water path lies below the observed range (50–84 g m⁻² over the
     oceans; Lohmann et al. 2007, *ACP* 7, 3425, Table 2).
-  - Under JAM the mixed-phase condensate stays mostly liquid: in the same
-    validation, from a cold-started JAM state 20 days old, the supercooled
-    mass fraction at 253–258 K is 0.84, against 0.27 without JAM. The cause
-    has not been established; the droplet number from ARG activation and the
-    short spin-up are the candidates.
+  - Under JAM the mixed-phase condensate stays more liquid than in the non-JAM
+    member. Both aggregate ice with ECHAM's generic ``ccsaut = 95``
+    (``mo_echam_cloud_params.f90``, line 59). ECHAM-HAM retunes it to 900 in
+    ``mo_activ.f90`` at T63 L47 with prognostic CDNC, AR&G activation and
+    ``cdnc_min_fixed = 40`` (lines 392–408). That retune belongs with HAM's own
+    aerosol and its insoluble dust mode, which jcm's MAM4-based JAM does not
+    reproduce, so JAM keeps the generic value. ``ccsaut`` for JAM is a tuning
+    target of the #682 retune. In 10-day T63 January runs from a JAM state 10
+    days past a cold start, 95 gives an ice water path of 22.3 g m⁻² against
+    7.0 with 900. The supercooled mass fraction at 253–258 K is 0.48 against
+    0.83. The non-JAM member had 27.8 g m⁻² and 0.28, measured before the
+    Sonntag saturation. The aerosol–ice coupling does not explain the gap:
+    replacing JAM's INP by DeMott's in the closure changed the ice water path
+    by 0.05 g m⁻², and ECHAM-HAM's rates change it by +0.2 g m⁻² (above).
 - **Cirrus ICNC diagnosis (default ``nic_cirrus = 1``).** Where a cloudy cell
   holds ice at or below ``icemin`` crystals, ``update_in_cloud_water``
   diagnoses the number from the ice mass at the radius ``zrid``,
@@ -539,9 +579,11 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
 - ``jcm/physics/clouds/lohmann_2m/`` — ``scheme.py`` (``cloud_microphysics_2m``,
   ``Lohmann2MMicrophysics``, process-order docstring, the section-1 fields),
   ``deposition_freezing.py``
-  (``demott2010_inp`` used; ``het_mxphase_freezing`` defined/exported/unused),
+  (``het_mxphase_freezing``, ECHAM-HAM's rates under JAM; ``demott2010_inp``,
+  the aerosol-free closure's INP),
   ``sedimentation_melt.py``, ``precip.py``, ``assembly.py``,
-  ``jcm/physics/clouds/lohmann_2m/types.py``;
+  ``jcm/physics/clouds/lohmann_2m/types.py`` (``HeterogeneousFreezingAerosol``,
+  the HAM freezing inputs);
   ``jcm/physics/clouds/lohmann_2m_params.py`` (``CloudParams2M``);
   ``jcm/physics/clouds/cloud_utils.py``
   (``effective_2_volmean_radius_param_Schuman_2011``);
@@ -555,5 +597,12 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
 truncations, the surrogates), ``cloud_data_test.py`` (radiation's condensate
 mask and its effect on McICA overlap), ``echam_cloud_defaults_test.py``,
 ``echam_saturation_test.py``, ``echam_1m_test.py``,
-``lohmann_2m_test.py``, ``cloud_utils_test.py``, ``cloud_data_test.py``. Design
+``lohmann_2m_test.py``, ``cloud_utils_test.py``.
+The ECHAM-HAM comparisons: ``lohmann_2m_fortran_reference_test.py`` (the #941
+ice sources) and ``lohmann_2m_freezing_reference_test.py`` (heterogeneous
+mixed-phase freezing against the compiled ``cloud_micro_interface`` with the HAM
+freezing inputs set: ``het_mxphase_freezing`` agrees to round-off on every
+freezing column; the large-scale-``ω`` column is a strict xfail, #705);
+``lohmann_2m_freezing_test.py`` (gradients, and the aerosol-free path pinned to
+its output before the ECHAM-HAM rates). Design
 reference: {doc}`../design/lohmann_2m_column_processes`.

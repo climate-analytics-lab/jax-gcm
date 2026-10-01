@@ -2463,8 +2463,8 @@ class TestColumnEnthalpyConservation2M:
     def test_het_freezing_moves_mass_and_fusion_heat(self):
         """Immersion INP must freeze droplet MASS, not just crystal number.
 
-        The aerosol → ice coupling of #494 sets ICNC from the online INP and
-        freezes one mean-mass droplet per new crystal. That transfer was
+        The aerosol-free closure sets ICNC from the INP number and freezes
+        one mean-mass droplet per new crystal. That transfer was
         applied to the local in-cloud arrays but never added to the freezing
         accumulator the assembly ledger reads, so raising INP created
         crystals with zero mass and destroyed droplets with zero mass — the
@@ -2482,7 +2482,7 @@ class TestColumnEnthalpyConservation2M:
         nlev = cols[0].shape[0]
         qc = cols[3]
 
-        cols[11] = jnp.zeros(nlev)                       # no online INP
+        cols[11] = jnp.zeros(nlev)                       # no external INP
         base, _, _ = self._run(tuple(cols))
         cols[11] = jnp.where(qc > 0, 1e6, 0.0)           # 1e6 /m³ immersion INP
         high, _, _ = self._run(tuple(cols))
@@ -2681,7 +2681,7 @@ class TestPrecipFluxProfiles2M:
         # nothing can be falling out of the top layer). Allow an f32-roundoff
         # floor: the flux-coupled scan can land a physically-zero level at a
         # few 1e-16, ~12 orders below the ~1e-3 rain signal (surfaces under
-        # the HAM ccsaut/ccraut default retune), so a hard ``>= 0`` is too
+        # the default ccsaut/ccraut), so a hard ``>= 0`` is too
         # tight — use the same 1e-12 tolerance as the equality checks above.
         assert jnp.all(rain_prof >= -1e-12)
         assert jnp.all(snow_prof >= -1e-12)

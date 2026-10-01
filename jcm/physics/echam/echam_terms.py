@@ -168,7 +168,6 @@ def echam_physics(
     jam_optics: bool = True,
     jam_arg_variant: str = "arg2000",
     jam_aqueous_scheme: str = "full",
-    jam_ice_scheme: str = "niemand",
     jam_dust_preset: int = 4,
     jam_dust_nudged: bool = False,
     jam_dust_nduscale_scale: float | None = None,
@@ -301,8 +300,6 @@ def echam_physics(
             the JAM aerosol radiatively passive, which controlled A/B
             experiments rely on).
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
-        jam_ice_scheme: heterogeneous ice nucleation scheme — ``"niemand"``
-            (default) or ``"lohmann_diehl"`` (drives the 2M ICNC).
         jam_dust_preset: HAMMOZ ``ndust`` preset for the Tegen dust scheme —
             4 (default, HAM2: Stier 2005 + East-Asian soils), 3 (Stier 2005)
             or 2 (Cheng 2008). The resolution-dependent regional tuning vector
@@ -703,7 +700,6 @@ def echam_physics(
             optics=jam_optics,
             arg_variant=jam_arg_variant,
             aqueous_scheme=jam_aqueous_scheme,
-            ice_scheme=jam_ice_scheme,
             dust_preset=jam_dust_preset,
             dust_nudged=jam_dust_nudged,
             dust_nduscale_scale=jam_dust_nduscale_scale,

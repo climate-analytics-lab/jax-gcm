@@ -1158,7 +1158,6 @@ _JAM_2M_PARAMETER_TERMS = (
     "jam_prescribed_oxidants",
     "jam_sulfur_gas_chemistry",
     "arg_activation",
-    "jam_ice_nucleation",
     "jam_sedimentation",
     "jam_dry_deposition",
     "lohmann_2m_microphysics",
@@ -1199,7 +1198,7 @@ _SPEEDY_PARAMETER_POINTS = ("convecting", "stable")
 # the terms that read it — all of them built by the aerosol-cloud package,
 # which also re-checks TTE-TKE itself on a zero-TKE carry.
 _LAMINAR_TERMS = ("tte_tke_vertical_diffusion", "arg_activation",
-                  "jam_ice_nucleation", "lohmann_2m_microphysics")
+                  "lohmann_2m_microphysics")
 
 # SPEEDY's standard vertical grid; the soundings are the same functions of
 # height as the ECHAM columns, sampled at its sigma levels.

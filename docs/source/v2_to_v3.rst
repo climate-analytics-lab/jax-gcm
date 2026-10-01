@@ -356,7 +356,8 @@ Neither changes a result; both used to give no sign at all.
 
 Nine modules captured constants at import time and so ignored
 ``set_constants``: JAM activation, dry-deposition resistances, sedimentation,
-ice nucleation, the WMO tropopause diagnostic, JAM aqueous chemistry, two
+JAM ice nucleation (whose successor, ECHAM-HAM's freezing inputs, reads no
+constants), the WMO tropopause diagnostic, JAM aqueous chemistry, two
 TTE-TKE modules and the emissions preparation tool. They now read the live
 singleton.
 
@@ -508,8 +509,8 @@ Direct callers of the scheme functions:
   increments over the step (``temperature_increment``,
   ``humidity_increment``, ``qc_increment``, ``qi_increment``,
   ``qnc_increment``, ``qni_increment``) follow ``params`` as optional
-  arguments that default to zero, with ``detrained_qc``/``detrained_qi``
-  after them. **An old positional call that passed the provisional state
+  arguments that default to zero, with ``detrained_qc``/``detrained_qi`` and
+  ``freezing_aerosol`` after them. **An old positional call that passed the provisional state
   still runs**: that state is now read as the anchor and the omitted
   increments are zero, so the step's condensation is silently lost. Keyword
   callers fail loudly. Build the arguments with
@@ -899,6 +900,12 @@ Other config-surface changes
 * **The L40 vertical table is deleted.** Its truncated ``vct`` put the model
   top at 274 hPa. ``40`` is gone from both supported-count lists and
   ``get_echam_levels`` asserts a composed top below 1000 Pa.
+* **2M aggregation and autoconversion defaults.** ``CloudParams2M.default()``
+  uses ECHAM's generic ``ccsaut = 95``, as in v2; v3 development builds used
+  ECHAM-HAM's 900. It also uses ECHAM-HAM's prognostic-CDNC ``ccraut = 10.6``
+  instead of v2's 15. The ``echam-2m`` presets set 95 and 15 themselves, so
+  only a 2M scheme built in Python without a preset, and the JAM members,
+  see the ``ccraut`` change.
 * **New config-trap warnings** (warnings, never errors) fire on: JAM with
   aquaplanet terrain; ``forcing=from_file`` with aquaplanet terrain; a
   prognostic aerosol module with every emission input explicitly nulled;
