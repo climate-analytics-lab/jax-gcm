@@ -40,6 +40,7 @@ import math
 
 import jax.numpy as jnp
 
+from jcm.physics.aerosol.jam.microphysics import numerics
 from jcm.physics.aerosol.jam.population import AerosolMode, ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name
 
@@ -124,7 +125,7 @@ def diameter_from_volume(volume, number, mode: AerosolMode):
     populated = number > TINY_NUMBER
     safe_number = jnp.where(populated, number, 1.0)
     cubed = jnp.where(
-        populated, volume / (safe_number * volume_factor(mode)), 0.0)
+        populated, numerics.divide(volume, safe_number * volume_factor(mode)), 0.0)
     diameter = jnp.cbrt(jnp.maximum(cubed, mode.dgnum_lo ** 3))
     return jnp.clip(diameter, mode.dgnum_lo, mode.dgnum_hi)
 

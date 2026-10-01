@@ -70,6 +70,7 @@ from flax import struct
 import jcm.constants as c
 
 from jcm.physics.aerosol.jam.gas_species import GAS_SPECIES
+from jcm.physics.aerosol.jam.microphysics import numerics
 from jcm.physics.aerosol.jam.tracer_layout import gas_name, mass_name, number_name
 
 #: Molecular weight of dry air [kg/mol], MAM's gas-aerosol exchange Table 1.
@@ -238,11 +239,16 @@ def _safe_divide(numerator, denominator, floor):
 
     Double ``where`` so the unselected branch never forms ``x/0`` — its
     cotangent would be NaN and would poison the gradient through the
-    selected branch (see ``moments.diameter_from_volume``).
+    selected branch (see ``moments.diameter_from_volume``) — and the live
+    quotient through :func:`numerics.divide`, whose reverse pass never
+    forms ``denominator⁻²``: with a floor of 1e-15 that square is 1e-30,
+    and the cotangent the end-of-step κ-Köhler state sends back through
+    the sub-step scan (~1e17) overflowed it to ``inf`` on the ECHAM column
+    (AER-11).
     """
     live = denominator > floor
     safe = jnp.where(live, denominator, 1.0)
-    return jnp.where(live, numerator / safe, 0.0)
+    return jnp.where(live, numerics.divide(numerator, safe), 0.0)
 
 
 def solve_h2so4(q_gas, production, coefficients, dt):

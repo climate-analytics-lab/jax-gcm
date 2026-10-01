@@ -60,6 +60,7 @@ import jax.numpy as jnp
 
 import jcm.constants as c
 
+from jcm.physics.aerosol.jam.microphysics import numerics
 from jcm.physics.aerosol.jam.microphysics.coagulation_tables import BM0, BM0IJ, BM3I
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 
@@ -99,11 +100,13 @@ def _sigma_class(geom_std_dev: float) -> int:
 
 
 def _harmonic_mean(a, b):
-    """Combine two limits as ``a b / (a + b)``, zero where both vanish."""
-    total = a + b
-    live = total > 0.0
-    safe = jnp.where(live, total, 1.0)
-    return jnp.where(live, a * b / safe, 0.0)
+    """Combine two limits as ``a b / (a + b)``, zero where both vanish.
+
+    Through :func:`numerics.harmonic_mean`: the plain quotient's reverse
+    pass forms ``cot · (a+b)⁻²``, which overflows float32 under the
+    cotangent the number equation sends back (AER-11).
+    """
+    return numerics.harmonic_mean(a, b)
 
 
 def _moment_powers(ln_sigma: float) -> dict[int, float]:
@@ -328,7 +331,9 @@ def coagulate(population, env, spec, params=None):
     loss_to_pcm = beta_ait_pcm_3 * n_pcm_avg
     loss = loss_to_acc + loss_to_pcm
     live = loss > _TINY_LOSS
-    pcm_share = jnp.where(live, loss_to_pcm / jnp.where(live, loss, 1.0), 0.0)
+    # Through the safe quotient: ``loss`` can sit at its 1e-37 floor, whose
+    # square is not a float32 number (AER-11).
+    pcm_share = jnp.where(live, numerics.divide(loss_to_pcm, jnp.where(live, loss, 1.0)), 0.0)
     transfer_max = _transfer_max(temperature)
     aitken_fraction = jnp.clip(1.0 - jnp.exp(-loss * dt), 0.0, transfer_max)
     zeros = jnp.zeros_like(temperature)

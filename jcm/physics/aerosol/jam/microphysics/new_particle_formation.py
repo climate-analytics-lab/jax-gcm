@@ -63,6 +63,7 @@ from flax import struct
 import jcm.constants as c
 
 from jcm.physics.aerosol.jam.gas_species import GAS_SPECIES
+from jcm.physics.aerosol.jam.microphysics import numerics
 from jcm.physics.aerosol.jam.microphysics.condensation import M_AIR
 from jcm.physics.aerosol.jam.tracer_layout import gas_name, mass_name, number_name
 
@@ -82,6 +83,9 @@ _Q_FLOOR = 4.0e-16
 
 #: ``numerics_clipping``: an apparent rate below this [m⁻³ s⁻¹] is zero.
 _RATE_FLOOR_M3 = 1.0e-12
+#: Sulfate [kg/kg per step] below which formation books nothing: 1e-30 is
+#: a hundred-thousandth of one H₂SO₄ molecule per kg of air.
+_MASS_FLOOR = 1.0e-30
 
 #: Aitken mode bounds used for the survival target (``equations_growth``);
 #: the documented ``D_p,lo`` is a log-blend of MAM4's 8.7 and 26 nm, ≈12.5 nm.
@@ -296,17 +300,26 @@ def form_new_particles(population, env, spec, params):
     particle_mass = (math.pi / 6.0) * diameter ** 3 * RHO_H2SO4    # kg
     mass_tendency = particle_mass * number_tendency                 # kg/kg/s
 
-    # Clipping: never book more sulfate than the vapour can supply. Both
-    # guards are needed: ``wanted`` is zero wherever no particles form,
-    # and dividing by it in the live branch of a single ``where`` gave
-    # -inf * 0 = NaN (measured 2026-10-01). ``available`` is floored at
-    # zero so a vapour that is negative by rounding reads as empty.
+    # Clipping: never book more sulfate than the vapour can supply.
+    # ``available`` is floored at zero so a vapour that is negative by
+    # rounding reads as empty.
     available = jnp.maximum(gases.get(gas_name("h2so4"), zeros), 0.0) * (m_so4 / m_h2so4)
     wanted = mass_tendency * dt
-    forming = wanted > 0.0
-    safe_wanted = jnp.where(forming, wanted, 1.0)
-    factor = jnp.where(forming & (wanted > available),
-                       available / safe_wanted, 1.0)
+    # Formation wanting less than ``_MASS_FLOOR`` books nothing — number and
+    # mass alike, so nothing is overdrawn — and the clipping ratio is only
+    # evaluated where it is live. Both are for the reverse pass: with the
+    # vapour fully consumed and ``wanted`` ~1e-32 kg/kg the ratio is live
+    # and ``available / wanted`` has the rule ``cot · wanted⁻²``, which
+    # overflows float32 to ``0 · inf = NaN`` even though the true
+    # sensitivity is zero (measured 2026-10-01 on the AER-11 sweep, a mode
+    # with number and no mass). The floor keeps the live divisor ≥ 1e-30
+    # and :func:`numerics.divide` never forms its square.
+    forming = wanted > _MASS_FLOOR
+    clipping = forming & (wanted > available)
+    safe_wanted = jnp.where(clipping, wanted, 1.0)
+    factor = jnp.where(forming,
+                       jnp.where(clipping, numerics.divide(available, safe_wanted), 1.0),
+                       0.0)
     factor = jnp.where(rate_per_m3 * factor < _RATE_FLOOR_M3, 0.0, factor)
     number_delta = number_tendency * dt * factor
     so4_delta = wanted * factor

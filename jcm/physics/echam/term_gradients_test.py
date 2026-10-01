@@ -674,6 +674,12 @@ _FACTORIES = {
     "idealized": lambda: idealized_echam_physics(checkpoint_terms=False),
     "echam_jam_2m": lambda: echam_physics(
         aerosol_module="jam", cloud_scheme="2m", checkpoint_terms=False),
+    # The same package with the in-tree modal microphysics core in the
+    # microphysics seat (AER-08; opt-in, D-A4). Only that term differs, so
+    # only its parameters are checked here.
+    "echam_jam_2m_modal": lambda: echam_physics(
+        aerosol_module="jam", cloud_scheme="2m", jam_microphysics="modal",
+        checkpoint_terms=False),
 }
 
 
@@ -800,7 +806,7 @@ def _replay(point_name: str, idealized: bool = False,
                           background=_jam_background(tracer_names))
     terrain = TerrainData.single_column(orog=point.orography_m)
     forcing = _ocean_forcing(point)
-    if composition == "echam_jam_2m":
+    if composition.startswith("echam_jam_2m"):
         # ~2.5 nmol/L of seawater DMS [kg/m³]; JAM's DMS emissions emit
         # nothing from the zero concentration ``ForcingData`` defaults to.
         forcing = forcing.copy(dms_seawater=jnp.full((1, 1), 1.5e-7))
@@ -1367,6 +1373,10 @@ _SPEEDY_PARAMETER_TERMS = (
 _PARAMETER_TERMS = {
     "echam": _ECHAM_PARAMETER_TERMS,
     "echam_jam_2m": _JAM_2M_PARAMETER_TERMS,
+    # The in-tree modal core's tunables (condensation, new-particle
+    # formation, ageing structs); every other term of this composition is
+    # checked under ``echam_jam_2m``.
+    "echam_jam_2m_modal": ("jam_modal_microphysics",),
     "idealized": ("grey_two_stream_radiation",),
     "speedy": _SPEEDY_PARAMETER_TERMS,
 }
@@ -1637,7 +1647,8 @@ def test_every_parameterised_term_is_covered():
     factories = {**_FACTORIES,
                  "speedy": lambda: speedy_physics(checkpoint_terms=False)}
     seen: set[str] = set()
-    for composition in ("echam", "echam_jam_2m", "idealized", "speedy"):
+    for composition in ("echam", "echam_jam_2m", "echam_jam_2m_modal",
+                        "idealized", "speedy"):
         physics = factories[composition]()
         parameterised = []
         for term in physics.terms:

@@ -362,17 +362,26 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         the same in the probe and in a real step.
         """
         zeros = jnp.zeros_like(state.temperature)
+
+        # Negative tracers are real input — spectral transport rings
+        # around sharp sources — and every JAM consumer treats them as
+        # empty rather than pumping them (the storage A/B measured pumping
+        # as net-negative). So does this core: it reads the population
+        # floored at zero and books ``after − floored_before``, which leaves
+        # a negative excursion exactly where transport put it. Unfloored, a
+        # negative sulfate mass gives the κ-Köhler state a negative wet
+        # density and the coagulation kernel ``sqrt(3kT/ρ)`` a NaN that the
+        # forward ``where`` masks and reverse mode does not (AER-11).
+        def read(key):
+            return jnp.maximum(state.tracers.get(key, zeros), 0.0)
+
         masses = {
-            mass_name(sp, mode.short): state.tracers.get(
-                mass_name(sp, mode.short), zeros
-            )
+            mass_name(sp, mode.short): read(mass_name(sp, mode.short))
             for mode in self.spec.modes
             for sp in mode.species
         }
         numbers = {
-            number_name(mode.short): state.tracers.get(
-                number_name(mode.short), zeros
-            )
+            number_name(mode.short): read(number_name(mode.short))
             for mode in self.spec.modes
         }
         # The gas list is static too (``SULFUR_GASES``), for the same
@@ -381,16 +390,13 @@ class JamModalMicrophysics(ModalMicrophysicsTerm):
         # real step. Keys the host does not carry are dropped at the merge
         # (``composable_physics`` folds a term's tracer tendencies into
         # the state's own key set), so emitting them is harmless.
-        gases = {
-            gas_name(gas): state.tracers.get(gas_name(gas), zeros)
-            for gas in SULFUR_GASES
-        }
+        gases = {gas_name(gas): read(gas_name(gas)) for gas in SULFUR_GASES}
         # Cloud-borne mirrors from the carry store (D-A5); the static key
         # set again, zeros before the store term has run (the probe).
         store = _store()
         view = store.tracer_view(self.spec, state, diagnostics)
         cloud_borne = {
-            name: view.get(name, zeros)
+            name: jnp.maximum(view.get(name, zeros), 0.0)
             for name in (store.mirror_names(self.spec) if self.spec.cloud_borne else ())
         }
         return ModalPopulation(masses=masses, numbers=numbers, gases=gases,

@@ -20,6 +20,7 @@ import jcm.constants as c
 
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.microphysics import moments
+from jcm.physics.aerosol.jam.microphysics import numerics
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
 
@@ -98,8 +99,11 @@ def equilibrium_modal_state(
         # divides by 1.0 and the result is masked, which is finite in both.
         has_volume = total_vol > _TINY_VOL
         safe_vol = jnp.where(has_volume, total_vol, 1.0)
-        rho_dry = jnp.where(has_volume, total_mass / safe_vol, default_density)
-        kappa = jnp.where(has_volume, vol_kappa / safe_vol, 0.0)
+        # ... and through ``numerics.divide``, so the live quotient's reverse
+        # pass never forms ``vol⁻²`` either: a volume of 1e-33 m³/kg (the
+        # ECHAM column's top) has a square no float32 holds (AER-11).
+        rho_dry = jnp.where(has_volume, numerics.divide(total_mass, safe_vol), default_density)
+        kappa = jnp.where(has_volume, numerics.divide(vol_kappa, safe_vol), 0.0)
 
         # Number-median dry diameter from the mode's total volume: the
         # log-normal M_3 inversion, owned by ``moments`` so the microphysics

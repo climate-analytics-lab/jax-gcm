@@ -84,7 +84,7 @@ Dependencies in brackets. Each card is implement → review → full gates.
 | **AER-08** | ✅ `jam_microphysics="modal"` registered in `jam_terms._MICROPHYSICS` and so reachable through `echam_physics()` and Hydra (`physics.jam_microphysics=modal`); defaults unchanged per D-A4. Wiring tests in `jam_terms_test` (both factories, cloud-borne store ordering, the store requirement dropped for `cloud_borne=False`, the x64 mixed-dtype trace) and a slow six-step run in `jam_integration_test`. **Rolled in:** the SOAG sub-step scan's carry promoted to float64 under `jax_enable_x64` — a hard error on the pySES path; outputs now cast to the state dtype. | AER-01, D-A4 |
 | **AER-09** | ✅ `ledger.py`: budgets per kg of air over both phases — sulfur moles (sulfate at the booked molar mass + DMS, SO₂, H₂SO₄), organic mass (POA, SOA, MOA + SOAG), each inert species, total number — and a per-process `CONTRACT` (exchange, renaming, ageing: number equal; NPF: non-decreasing; coagulation: non-increasing; every mass budget equal everywhere). `JamModalMicrophysics(audit=True)` publishes `_modal_ledger_<process>_<budget>` relative changes; the step-level sulfur/organic/number closure is always published as `_modal_ledger_step_*` for health gates. `ledger_test` holds all five processes to the contract over warm/heavy-vapour/cold/near-empty columns with a cloud-borne phase and without, checks the processes actually acted, and shows a deliberately leaking process is caught. All green at 1e-5 in float32. | AER-03..07 |
 | **AER-10** | ✅ Science register: a new `In-tree modal microphysics core` section in `docs/source/science/aerosol.md` (what we do per process with code pointers, what MAM4 does, why we differ by `science`/`compute`/`differentiability`, status), the swap-point paragraph and code-pointer / validation lists updated, and the page's existing claim that MAM4 ages at 3 monolayers corrected to 8. Release note under *Interactive aerosol (JAM)*. `jam.md` cross-links. References re-verified for the cards' findings (§7). | AER-09 |
-| **AER-11** | Differentiability check: finite-difference vs autodiff through each process; no `jnp.where` NaN traps on empty modes. | AER-09 |
+| **AER-11** | ✅ Differentiability sweep: `modal_gradients_test` — forward and reverse mode finite through each process alone and the full core at ten operating points (clean, empty modes with vapour, mass without number, number without mass, negative tracers, cold, warm-saturated, vapour overload, populated with and without the cloud-borne store), parameter derivatives finite at each, AD against a float64 central difference through the whole fold in state and parameters, every tunable leaf live or named dead. The modal core joins the repo-wide `term_gradients_test` as the `echam_jam_2m_modal` composition. **Found and fixed:** a second float32 class — reverse-mode *overflow* of `cot · y⁻²` in quotients of small quantities (coagulation's harmonic mean, NPF's clipping ratio, coagulation's pcm share) — and negative input tracers reaching the κ-Köhler state; §9. New `numerics.py`. | AER-09 |
 | **AER-12** | A/B against `Mam4JaxMicrophysics` **if** the GPL extra can be installed in a throwaway venv — as a validation reference only, never a dependency. | AER-09 |
 
 ## 4. Design constraints
@@ -336,6 +336,69 @@ trigger to revisit is concrete: AER-09's conservation ledger green and
 AER-12's A/B against ``mam4_jax`` within tolerance (which needs D-A3).
 Until then every existing JAM test and run keeps its behaviour, and the
 new core is exercised by its own wiring tests and a slow integration run.
+
+### AER-11: the second float32 class — reverse-mode overflow, not dead branches
+
+AER-02..07 found and fixed the *dead-branch* class: ``x / max(y, tiny)``
+with ``tiny²`` underflowing, cured by the double-``where``. The AER-11
+sweep found a class the double-``where`` does not touch: a **live**
+quotient of two small numbers under a large cotangent. JAX's reverse
+rule for ``x / y`` forms ``cot · y⁻²`` *before* multiplying by ``x``;
+for coagulation's harmonic mean of two ~1e-15 m³ s⁻¹ limits under the
+number equation's ``dN/dβ = −Δt N² ≈ 1e19``, that intermediate is
+~1e47, past float32, and a perfectly finite derivative — forward mode
+and the central difference both agree on it — comes back ``inf`` and
+then ``NaN``. Measured as ``d n_acc / d m_bc_acc`` on a populated
+column, i.e. at the model's ordinary operating point, not a corner.
+
+The cure is :mod:`numerics`: ``divide(x, y)`` is ``x / y`` with a
+``custom_jvp`` of ``(dx − z·dy)/y`` where ``z = x/y`` is the computed
+value — reverse mode then forms ``cot/y`` and ``−z·cot/y`` and never
+``y⁻²``; exact in value and derivative, only the evaluation order
+differs. Applied where a small denominator can meet a large cotangent:
+the coagulation kernel's harmonic mean (through ``numerics.harmonic_mean``),
+NPF's vapour-clipping ratio, coagulation's primary-carbon share (whose
+floor is 1e-37), condensation's floored quotients (``_safe_divide``,
+floors 1e-15), the κ-Köhler density and hygroscopicity quotients and
+the moment inversion in ``moments`` — the last three found by the
+repo-wide test on the ECHAM column, whose top levels carry masses of
+1e-33 kg/kg: a volume that small has a square no float32 holds, and
+the end-of-step ``_jam_state`` sends a ~1e17 cotangent back through the
+exchange sub-step scan. The plain ``/`` stays where the denominator is
+O(1).
+
+Two more findings from the same sweep:
+
+- **NPF's clipping ratio was live at 1e-32 kg/kg.** With the vapour fully
+  consumed by exchange and formation still wanting ~1e-32 kg/kg, the
+  clip branch is selected and its reverse rule forms ``wanted⁻²`` — the
+  true sensitivity is zero (nothing available) but the rule's
+  intermediate is ``inf``. Formation wanting less than 1e-30 kg/kg per
+  step (a hundred-thousandth of one H₂SO₄ molecule per kg of air) now
+  books nothing — number and mass alike, so nothing is overdrawn — and
+  the ratio goes through ``divide``.
+- **Negative tracers reach the κ-Köhler state.** Spectral transport
+  rings around sharp sources, so negative masses are real input; a
+  negative sulfate mass gave the Aitken mode a negative wet density and
+  the kernel's ``sqrt(3kT/ρ)`` a NaN that the forward ``where`` masked
+  and reverse mode did not. The core now reads its population floored
+  at zero — the convention every JAM consumer already follows — and
+  books ``after − floored_before``, which leaves a negative excursion
+  exactly where transport put it rather than pumping it. The placeholder
+  core's ``_jam_state`` on negative tracers is the harness's existing
+  behaviour and is not changed here.
+
+The sweep itself (`modal_gradients_test`): jvp and vjp through each
+process alone and the full core at ten operating points; parameter
+derivatives at each; AD against a float64 central difference through
+the whole fold with respect to O(1) multipliers on the tracer groups and
+to every parameter struct (``pbl_minimum_depth`` and ``pbl_enabled``
+held fixed, being step switches); and a liveness table — every float
+leaf of every parameter struct moves the outputs at the populated
+point, except those named dead with a reason. The core is also the
+``echam_jam_2m_modal`` composition of the repo-wide
+``term_gradients_test``, whose parameter cases replay it on the ECHAM
+column at both soundings.
 
 ### D-A3 — validation reference: ``requires_extra("mam4")`` A/B, SEPARATE LOCAL VENV (decided 2026-10-01)
 
