@@ -337,6 +337,25 @@ AER-12's A/B against ``mam4_jax`` within tolerance (which needs D-A3).
 Until then every existing JAM test and run keeps its behaviour, and the
 new core is exercised by its own wiring tests and a slow integration run.
 
+### D-A3 — validation reference: ``requires_extra("mam4")`` A/B, SEPARATE LOCAL VENV (decided 2026-10-01)
+
+The repository had already settled the licensing half: ``mam4-jax`` is
+the opt-in ``jcm[mam4]`` extra (GPL-3.0, never bundled, never imported
+by default), the ``extras-tests`` CI job installs every extra, and a
+test gates on it only through ``@pytest.mark.requires_extra("mam4")``
+with the import inside the test. AER-12 follows that pattern: the A/B
+against ``Mam4JaxMicrophysics`` is such a test, run by CI's extras job.
+Locally it runs in a second venv (``jcm-aer-mam4``) so the working venv
+stays GPL-free and ``mam4-jax``'s process-wide ``jax_enable_x64`` flip
+on import cannot leak into other local runs. Two rules, both already in
+§4: the comparison reads outputs only — the in-tree core is never
+corrected by reading ``mam4-jax`` source, only MAM's documentation,
+E3SM's BSD-3 Fortran and the papers — and a disagreement is a finding to
+record, not a number to tune toward. The options declined: installing
+the extra into the working venv (simplest, but the GPL package in the
+dev environment and the x64 flip on every run), and no numeric A/B
+(leaves D-A4's flip trigger without its second half).
+
 ### Terminology (2026-10-01)
 
 The H₂SO₄-vapour new-particle process is called **new-particle formation
@@ -736,9 +755,3 @@ water (not prognosed by the core), nor the chemistry that converts DMS →
 SO₂ → H₂SO₄ (outside the core; it only has to keep the gas keys). A gate
 on the per-step closure (``_modal_ledger_step_sulfur``) is cheap enough
 to run in production; the per-process audit is for bisection.
-
-### D-A3 — still open
-
-- **D-A3 — validation reference.** Is installing GPL `mam4-jax` into a
-  throwaway venv for AER-12 acceptable as a *test-only* comparison, given
-  it is never imported by shipped code?
