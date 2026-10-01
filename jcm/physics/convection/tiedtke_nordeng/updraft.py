@@ -499,7 +499,9 @@ def calculate_updraft(
             jnp.asarray(ktype == 2, dtype=dtype),
             jnp.asarray(ktype == 3, dtype=dtype),
         ])
-    is_midlevel = (ktype == 3)
+    # A JAX bool even for a Python-int ``ktype``, so ``~is_midlevel`` is a
+    # logical, not a bitwise integer, negation.
+    is_midlevel = jnp.asarray(ktype) == 3
     w_deep, w_shallow, w_mid = type_weights[0], type_weights[1], type_weights[2]
     levels = jnp.arange(nlev)
 
