@@ -125,7 +125,9 @@ six-month fit sits inside a 195-day record):
 from year to year with the same sign and size, which a spin-up drift would not,
 and BC exceeds the limit in both; the whole-year slopes of SO4, BC and POA are
 below 0.001 /day, and the slope of the year-2 / year-1 ratio over the settled
-days is at most 0.001 /day for all five species. The whole-year dust slope sits
+days is at most 0.001 /day for all five species. On JAM T63 L95, measured the same way, the year-2
+same-window slopes of BC (+0.0022) and POA (−0.0026) exceed the limit while the
+five whole-year slopes are at most 0.0008 /day. The whole-year dust slope of L47 sits
 at the limit because dust emission is event-driven (the same 30-day block holds
 a storm in one year and none in the other); the year-over-year ratio is the
 better statistic for it, which is why it is reported for a two-year record.
