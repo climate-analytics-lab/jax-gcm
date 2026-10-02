@@ -98,7 +98,9 @@ its moist-adiabatic stability; that sets the evaporation (1.04-1.20 mm/d) and
 the TOA net the pins are measured at.
 
 Provenance: `dev` at 40701518 with that interior stability, jax 0.10.2,
-jax-rrtmgp 0.5.0, float32, CPU. The 40-day window means of the trajectories
+jax-rrtmgp 0.5.0, float32, CPU; the test's trajectory with the land tile merged
+(`dev` at f1f0df1e) gives P / E 0.965, E 1.18 mm/d and TOA net 38.5 W/m², inside
+the spread of the trajectories. The 40-day window means of the trajectories
 agree across the run-to-run noise; the slow part of the evolution is what the
 later windows measure, and the first window is the furthest from stationary
 (P / E 0.96, drift 0.048 mm/d in days 40-80 of the test's trajectory; 0.99 and

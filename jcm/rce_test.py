@@ -480,8 +480,9 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
     range of the window mean, rounded outward. Measured on dev 40701518 with
     the interior stability of ``echam_physics()`` (ECHAM's moist,
     cloud-weighted buoyancy, :doc:`/science/vertical_diffusion`; jax 0.10.2,
-    jax-rrtmgp 0.5.0, float32, CPU); the table and the measurements are in
-    the design page.
+    jax-rrtmgp 0.5.0, float32, CPU; with the land tile merged, dev f1f0df1e,
+    this trajectory gives P / E 0.965 and TOA net 38.5 W/m²); the table and
+    the measurements are in the design page.
 
     ============================  ==================  =====================
     quantity                      measured extreme    pinned
