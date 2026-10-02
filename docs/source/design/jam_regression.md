@@ -297,22 +297,22 @@ is drawn from it.
 
 How long the spin-up takes was measured on JAM T63 L47 and L95, each run for two
 consecutive years on one commit (the second started from the first's end state).
-From the cold dry init the burdens lie below their equilibrated values for the
-first 90-150 days of year 1 (dust, SO4 and sea salt by up to +110 %, +66 % and
-+50 % of year 1 in the first two months of year 2 relative to year 1, converging
-to a few percent from day ~150 on L47 and ~90-120 on L95), while the mass budget
-closes to under 0.1 % throughout, so the early deficit is the water cycle and
-winds spinning up, not an aerosol accumulation. Year 1's end state is already on
+From the cold dry init the burdens of year 1 lie below those of year 2 in the same
+season by up to ~110 % (dust), ~65 % (SO4) and ~50 % (sea salt) in the first two
+months, and the two years agree to within a few percent from day ~150 on L47 and
+day ~90-120 on L95, while the mass budget closes to under 0.1 % throughout, so
+the early deficit is the water cycle and winds spinning up, not an aerosol
+accumulation. Year 1's end state is already on
 the equilibrated trajectory; year 2 is the first whole equilibrated year.
 
 A state outlives code changes that add carry fields: `load_checkpoint` seeds a
 field a newer model carries from its documented initial value and drops one it no
 longer carries, reporting each in the log (#731), and the aerosol tracers
-themselves are unchanged. It does not outlive a change of climate: after the
-land-surface energy balance (#979) lengthened aerosol lifetimes (dust 1.6 to 2.0
-days), a state taken before it needed a further year to re-equilibrate (burdens
-+100 % at first, within ~10 % of the new equilibrium from day 60 of the next
-year). States are therefore drawn from the final physics of a release.
+themselves are unchanged. It does not outlive a change of climate: after the land-surface energy balance
+(#979) lengthened aerosol lifetimes (dust 1.6 to 2.0 days), the burdens of the
+first year started from a pre-#979 state were up to ~+100 % above the pre-#979
+year (BC, SO4) and decayed over the year, and the following year differed from
+that one by under ~10 % in most 30-day blocks from day 60 on. States are therefore drawn from the final physics of a release.
 
 Publication is **through the data engine** — a `_MANIFEST_PRODUCTS` row, sha256
 in the registry, publication-gated — not by hand, like every other mirror
