@@ -101,6 +101,18 @@ growth. A clear releases the mappings: six Tiedtke derivative checks took a
 process from 4,171 to 22,436 mappings, and the clear brought it back to
 5,459.
 
+The heaviest single tests are the two-step gradient cases of
+`jcm/physics/echam/gradient_finiteness_test.py`, which differentiate the ECHAM
+composition eagerly and so hold a tape plus one executable per primitive. They
+are two parametrizations of one function in one module, so the hook above has
+no boundary to act on between them; the module therefore calls the same three
+steps (`jax.clear_caches`, `gc.collect`, `malloc_trim`) around each case itself,
+and runs the physics with its production rematerialisation
+(`checkpoint_terms=True`). In the radiation shard's single process they peak at
+11.6 GiB (`1m`) and 12.1 GiB (`2m`) against a runner with 14.5 GiB free; the
+module docstring holds the budget and what is left to cut (jitting the
+differentiated function, which waits on #987).
+
 ## Derecho login nodes: a 10 GiB cgroup, not a slow CPU
 
 Interactive work on a Derecho login node runs inside a per-user memory
