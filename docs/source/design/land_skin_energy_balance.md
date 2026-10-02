@@ -220,9 +220,10 @@ every other temperature tendency, so the convection and cloud schemes after
 runs `radheat` before `cucall`, which forms its environment from `ptm1 +
 ptte·dt`).
 
-**Emissivity.** The balance uses jcm's land emissivity (0.95,
-`SurfaceOpticsParameters.land_emissivity`), the value the radiation solves
-with; ECHAM uses 0.996 for every surface.
+**Emissivity.** The balance uses the land emissivity
+(`SurfaceOpticsParameters.land_emissivity`, ECHAM's `cemiss = 0.996`), the
+value the radiation solves with; see the *Surface emissivity* section of
+{doc}`../science/surface`.
 
 ## 3. Implicit coupling: Richtmyer–Morton per tile
 

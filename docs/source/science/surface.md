@@ -124,9 +124,7 @@ uses the same humidity factors and the same implicit surface balance
     uses BETHY;
   - the wet-skin fraction is 0;
   - the snow depth is the bundle's ``SWE = 60 mm·snowc``;
-  - one soil layer over the prescribed ``stl_am`` stands in for JSBACH's five;
-  - the land emissivity is jcm's 0.95, the value the radiation uses, where
-    ECHAM has 0.996.
+  - one soil layer over the prescribed ``stl_am`` stands in for JSBACH's five.
 - `differentiability` — the bare-soil, dew, water-stress and melt switches keep
   ECHAM's values and take the derivatives of named smooth surrogates (widths in
   ``JsbachLandParameters``).
@@ -332,3 +330,56 @@ under forest is not masked.
 **Validation evidence.** ``jcm/physics/surface/echam/albedo_test.py`` pins each
 scheme at hand-evaluated ECHAM points; ``jcm/physics/forcing/echam_boundary_conditions_test.py`` checks that ``alb0``, ``snowc_am`` and the
 land-cover maps reach the radiation input.
+
+## Surface emissivity
+
+**What we do.** Land, open water and sea ice all have the longwave emissivity
+ε = 0.996. Each tile's value is a differentiable leaf of
+``SurfaceOpticsParameters`` (``land_emissivity``, ``ocean_emissivity``,
+``seaice_emissivity``), defaulting to
+``jcm/physics/surface/echam/surface_types.py::ECHAM_SURFACE_EMISSIVITY``.
+``EchamBoundaryConditions`` hands the radiation the tile-fraction-weighted
+grid-box value together with the albedos, and the radiation solves its
+longwave with it; the land tile's own value goes to the land skin balance,
+``Rn = SW_net + ε·LW↓ − ε·σ·T⁴``, and to the longwave re-emission at the new
+skin temperature (the radiation's value, see *The ECHAM land tile*). The
+surface is therefore a near-blackbody that reflects 0.4 % of the downward
+longwave, over land, water and ice alike.
+
+**What ECHAM/CAM does.** ECHAM6.3 has one surface emissivity, the parameter
+``mo_radiation_parameters.f90::cemiss = 0.996``, shared by every surface. The
+radiation uses it as the surface boundary of every longwave band
+(``mo_psrad_interface.f90``, ``zsemiss = cemiss``) and as the emission in the
+surface-flux bookkeeping of ``radheat.f90``. The surface uses it for the
+downward longwave over the tile mix
+(``mo_surface_boundary.f90::longwave_down_rad``), the land net longwave
+(``mo_surface_land.f90::land_rad``) and the skin temperature's emission
+derivative (``update_surfacetemp.f90``); JSBACH's ``Emissivity`` is
+``cemiss`` (``mo_jsbach_constants.f90``).
+
+**Why we differ.** The value is ECHAM's. The structure differs in one
+respect: `differentiability` — the emissivity is held as three leaves rather
+than one constant, so a tile's value can be perturbed or differentiated on
+its own (the land balance reads the land leaf, the radiation the blend); the
+three are equal by default.
+``SurfaceParameters.emissivity``, the standalone tile-flux reference of
+``jcm/physics/surface/echam/`` (discarded by ``EchamSurface``, see above),
+carries the same value.
+
+**Status & known limitations.** The emissivity is a constant: ECHAM's
+``cemiss`` has no spectral, soil-type or snow dependence either, and none is
+modelled here.
+
+**Code pointers.**
+- ``jcm/physics/surface/echam/surface_types.py`` —
+  ``ECHAM_SURFACE_EMISSIVITY``, ``SurfaceParameters``.
+- ``jcm/physics/forcing/echam_boundary_conditions.py`` —
+  ``SurfaceOpticsParameters``, ``_surface_optical_properties``.
+- ``jcm/physics/vertical_diffusion/tte_tke/matrix_solver.py`` — the land
+  skin balance's net radiation.
+
+**Validation evidence.**
+``jcm/physics/forcing/echam_boundary_conditions_test.py`` pins the defaults at
+0.996 for every tile and checks each tile fraction weights its own
+emissivity; ``jcm/physics/surface/echam/jsbach_land_test.py`` reproduces the
+land balance against the compiled ECHAM6.3 routines at ECHAM's emissivity.
