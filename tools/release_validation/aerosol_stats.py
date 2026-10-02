@@ -5,8 +5,9 @@ release gate can score, and applies the two tolerance tiers described in
 ``docs/source/design/jam_regression.md``:
 
 * **absolute physics gates** — the exponential drift ``|d ln B/dt|`` of every
-  species' burden (over the final six months of a record shorter than a year,
-  over its final year once it covers one: the sources are seasonal), the
+  species' burden (a straight line over the final six months of a record
+  shorter than a year; over its final year once it covers one, fit jointly with
+  the annual harmonic because the sources are seasonal), the
   mass-budget residual, and the
   per-step dynamics residual from the #713 in-step gauge. These are the runaway
   detector: an aerosol runaway grows multiplicatively with the meteorology
@@ -523,12 +524,13 @@ def drift_window_days(days: np.ndarray,
     """Fit window [days] of the drift statistic for this record.
 
     The sources behind most of the burdens are seasonal (dust, biomass-burning
-    BC, sulfate), so a least-squares slope over a window shorter than a year
-    reads the seasonal swing as growth or decay. Once the record covers a year
-    the window is its final 365 days, which hold every season exactly once; a
-    shorter record (a ``--last-n`` slice, or a cold-start year scored over its
-    settled months) keeps the final six months, where a from-zero spin-up ramp
-    is already behind it. A record that starts from a cold init and covers a
+    BC, sulfate), so a straight-line fit over a window shorter than a year reads
+    the seasonal swing as growth or decay. Once the record covers a year the
+    window is its final 365 days, which hold every season exactly once, and the
+    fit removes the annual harmonic (:func:`log_drift`); a shorter record (a
+    ``--last-n`` slice, or a cold-start year scored over its settled months)
+    keeps the final six months with a straight line, where a from-zero spin-up
+    ramp is already behind it. A record that starts from a cold init and covers a
     whole year therefore has to be sliced with ``--last-n`` to its settled
     months: the whole-year rule is for a warm or second year.
     """
@@ -564,6 +566,14 @@ def log_drift(days: np.ndarray, values: np.ndarray,
     unit time, so it shows up as a slope that is large regardless of the
     species' absolute loading, while a merely noisy but stationary burden
     averages to zero.
+
+    A window of a year or more is fit jointly with the annual harmonic,
+    ``ln B = a + b t + c cos(2 pi t / 365) + d sin(2 pi t / 365)``, and ``b`` is
+    returned. A straight line over one cycle only cancels a seasonal swing for
+    particular phases (a stationary burden of amplitude 0.5 in ``ln B`` fits up
+    to 0.0026 /day of "drift" at the worst phase), and the fitted harmonic
+    absorbs the swing whatever its phase. A shorter window is a straight line:
+    it cannot hold a cycle, so the harmonic is not identifiable there.
     """
     good = np.isfinite(values) & (values > 0)
     if good.sum() < 3:
@@ -572,7 +582,13 @@ def log_drift(days: np.ndarray, values: np.ndarray,
     sel = d >= (d[-1] - window_days)
     if sel.sum() < 3:
         sel = np.ones_like(d, dtype=bool)
-    return float(np.polyfit(d[sel], np.log(v[sel]), 1)[0])
+    t, y = d[sel], np.log(v[sel])
+    if window_days >= YEAR_DAYS and t[-1] - t[0] >= YEAR_DAYS - 2 * float(np.median(np.diff(t))) \
+            and t.size >= 8:
+        w = 2.0 * np.pi * t / YEAR_DAYS
+        design = np.column_stack([np.ones_like(t), t - t.mean(), np.cos(w), np.sin(w)])
+        return float(np.linalg.lstsq(design, y, rcond=None)[0][1])
+    return float(np.polyfit(t, y, 1)[0])
 
 
 def standard_error(values: np.ndarray) -> float:

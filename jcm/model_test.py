@@ -2528,6 +2528,113 @@ class TestReleaseMatrixGeneratePreallocationGuard(unittest.TestCase):
                 generate("speedy-t31")
 
 
+class TestReleaseMatrixReusedStateAncestry(unittest.TestCase):
+    """A reused fixture state is described by the ancestry recorded beside it."""
+
+    MEMBER = "speedy-t31"
+
+    def _spun_up(self, tmp, warm=None, record=None):
+        """Run ``_prepare_state`` with a stand-in worker; return the state path."""
+        from pathlib import Path
+        from unittest import mock
+
+        from jcm.data.test.release_matrix import generate_stats
+
+        def worker(call, env=None):
+            (Path(tmp) / f"{self.MEMBER}_fixture.partial").write_bytes(
+                b"spun up")
+
+        with mock.patch.object(generate_stats, "_run_worker", worker):
+            path, _ = generate_stats._prepare_state(
+                self.MEMBER, Path(tmp), None if warm is None else str(warm),
+                record)
+        return path
+
+    def _warm(self, tmp, name, contents):
+        import hashlib
+        import json
+        from pathlib import Path
+
+        path = Path(tmp) / name
+        path.write_bytes(contents)
+        rec = {"sha256": hashlib.sha256(contents).hexdigest(),
+               "member": self.MEMBER, "experiment": "e", "arm": self.MEMBER,
+               "days": 365.0, "jcm_sha": "b" * 40, "environment": "env"}
+        (path.with_name(path.name + ".provenance.json")
+         ).write_text(json.dumps(rec))
+        return path, rec
+
+    def _reuse(self, tmp, **kwargs):
+        import xarray as xr
+        from unittest import mock
+
+        import numpy as np
+        from pathlib import Path
+
+        from jcm.data.test.release_matrix import generate_stats
+
+        window = xr.Dataset({"temperature": ("time", np.array([280.0, 281.0]))},
+                            coords={"time": [0, 1]})
+        bands = Path(tmp) / "bands.nc"
+        with mock.patch.object(generate_stats, "_run_worker"), \
+                mock.patch.object(generate_stats, "band_path",
+                                  lambda member: bands), \
+                mock.patch.object(generate_stats, "_stats_windows",
+                                  lambda *a: [window, window]):
+            generate_stats.generate(self.MEMBER, out_dir=tmp,
+                                    n_reproducibility_repeats=1,
+                                    write_state=False, **kwargs)
+        return xr.open_dataset(bands)
+
+    def test_reuse_without_init_state_reports_the_recorded_warm_ancestry(self):
+        import json
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            warm, rec = self._warm(tmp, "warm.msgpack", b"a warm state")
+            self._spun_up(tmp, warm, rec)
+            ds = self._reuse(tmp)
+            self.assertEqual(json.loads(ds.attrs["init_state_source"]), rec)
+            self.assertIn("warm state", ds.attrs["init_state_provenance"])
+            self.assertIn("reused", ds.attrs["init_state_provenance"])
+
+    def test_a_different_warm_state_is_refused(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            warm, rec = self._warm(tmp, "warm.msgpack", b"a warm state")
+            other, _ = self._warm(tmp, "other.msgpack", b"another warm state")
+            self._spun_up(tmp, warm, rec)
+            with self.assertRaisesRegex(ValueError, "not from the init_state"):
+                self._reuse(tmp, init_state=str(other))
+
+    def test_a_cold_state_is_not_relabelled_warm(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            warm, _ = self._warm(tmp, "warm.msgpack", b"a warm state")
+            self._spun_up(tmp)                       # spun up from the preset
+            with self.assertRaisesRegex(ValueError, "preset's own init"):
+                self._reuse(tmp, init_state=str(warm))
+            ds = self._reuse(tmp)
+            self.assertNotIn("init_state_source", ds.attrs)
+            self.assertIn("preset's own init", ds.attrs["init_state_provenance"])
+
+    def test_a_state_with_no_record_is_described_as_the_caller_states_it(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / f"{self.MEMBER}_fixture_000000000000.msgpack"
+            state.write_bytes(b"an older fixture state")
+            from jcm.data.test.release_matrix.generate_stats import state_digest
+            digest = state_digest(state)
+            state = state.rename(
+                Path(tmp) / f"{self.MEMBER}_fixture_{digest}.msgpack")
+            ds = self._reuse(tmp)
+            self.assertIn("no ancestry record", ds.attrs["init_state_provenance"])
+
+
 class TestReleaseMatrixReusedStateDigest(unittest.TestCase):
     """``write_state=False`` must verify, not trust, the state's digest."""
 

@@ -774,6 +774,12 @@ def warm_state_source(init_state, member: str) -> dict:
     return source
 
 
+def ancestry_path(state_path) -> Path:
+    """Record of how a fixture state was spun up, written beside it by :func:`generate`."""
+    path = Path(state_path)
+    return path.with_name(path.name + ".ancestry.json")
+
+
 def _prepare_state(member: str, out_dir: Path, init_state=None,
                    source=None) -> tuple[str, str]:
     """Produce ``member``'s fixture init state; return ``(path, provenance)``.
@@ -792,7 +798,14 @@ def _prepare_state(member: str, out_dir: Path, init_state=None,
     out_path = out_dir / Path(
         state_mirror_path(member, state_digest(tmp_path))).name
     tmp_path.replace(out_path)
-    return str(out_path), _spinup_description(member, init_state, source)
+    description = _spinup_description(member, init_state, source)
+    # Bound to the state file, so a later reuse (``write_state=False``) reads
+    # its ancestry from here rather than trusting whatever the caller passes.
+    import json
+    ancestry_path(out_path).write_text(json.dumps(
+        {"spin_up_description": description, "init_state_source": source},
+        sort_keys=True))
+    return str(out_path), description
 
 
 def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
@@ -823,8 +836,11 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
             docstring). Its provenance record ``<init_state>.provenance.json``
             is required (:func:`warm_state_source`) and goes into the band
             file as ``init_state_source``. With ``write_state=False`` the
-            reused state is not re-spun from it, but the record must still be
-            present and verified: it is the reused state's recorded ancestry.
+            reused state is not re-spun from it; the ancestry written beside
+            the state (:func:`ancestry_path`) is what the band file records,
+            and an ``init_state`` that is not the state it was spun up from is
+            refused. A state with no ancestry record (written before records
+            existed) is described as the caller states it, and says so.
 
     Returns:
         ``(state_path, band_path)``.
@@ -889,14 +905,35 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
                 f"{member}_fixture_*.msgpack in {out_dir}; found "
                 f"{[f.name for f in found]}")
         state_path = str(found[0])
-        # Still a spin-up state — ``write_state=False`` only ever reuses one
-        # this module wrote — so describe it as such rather than as an opaque
-        # "reused file", which would leave the fixture unable to say where its
-        # own initial condition came from.
-        provenance = (
-            _spinup_description(member, init_state, source)
-            + "; state reused from an earlier generate() call rather than "
-            "re-spun")
+        # The state's ancestry is what was recorded beside it when it was
+        # spun up, not what the caller says now: a reused fixture described by
+        # the call's ``init_state`` would carry a false provenance whenever the
+        # argument was omitted or named another state.
+        import json
+        recorded = (json.loads(ancestry_path(state_path).read_text())
+                    if ancestry_path(state_path).exists() else None)
+        if recorded is not None:
+            bound = recorded.get("init_state_source")
+            if source is not None and (
+                    bound is None or bound["sha256"] != source["sha256"]):
+                was = ("the preset's own init" if bound is None
+                       else f"warm state {bound['sha256'][:12]}")
+                raise ValueError(
+                    f"{state_path} was spun up from {was}, not from the "
+                    f"init_state given ({source['sha256'][:12]}); reuse it "
+                    "without init_state, or regenerate it")
+            source = bound
+            provenance = (recorded["spin_up_description"]
+                          + "; state reused from an earlier generate() call "
+                          "rather than re-spun")
+        else:
+            # A state written before ancestry records existed, or copied
+            # without its record: say that the description is the caller's.
+            provenance = (
+                _spinup_description(member, init_state, source)
+                + "; state reused from an earlier generate() call rather than "
+                "re-spun; no ancestry record beside the state, so the "
+                "description is as stated by the caller")
     # The band file names its state by the digest in the state's filename,
     # and the regression later checks the fetched state against that digest.
     # So the digest recorded here must be the file's actual content hash,

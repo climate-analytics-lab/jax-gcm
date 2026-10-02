@@ -194,12 +194,37 @@ class TestWholeYearDrift:
         assert abs(stats["dlnB_dt_so4_per_day"]) < 0.05 * A.DRIFT_LIMIT_PER_DAY
         assert all(ok for *_rest, ok in A.physics_gates(stats))
 
+    def test_a_stationary_seasonal_cycle_of_any_phase_passes(self):
+        """A straight line over one cycle cancels the swing only at some phases.
+
+        Amplitude 0.5 in ln B at the worst phase fits 0.0026 /day, over the
+        limit; the annual harmonic fitted jointly absorbs it at every phase.
+        """
+        for phase in (0.0, 0.5 * np.pi, np.pi, 1.5 * np.pi, 0.9):
+            values = 3.0 * np.exp(0.5 * np.cos(2 * np.pi * self.DAYS / 365.0
+                                               + phase))
+            plain = np.polyfit(self.DAYS, np.log(values), 1)[0]
+            days, series = _series(self.DAYS, values)
+            stats = A.summarize(days, series)
+            assert abs(stats["dlnB_dt_so4_per_day"]) < 0.02 * A.DRIFT_LIMIT_PER_DAY
+            if abs(np.sin(phase)) > 0.9:
+                assert abs(plain) > A.DRIFT_LIMIT_PER_DAY
+
+    def test_a_noisy_seasonal_year_with_a_real_trend_reads_the_trend(self):
+        """The harmonic must not eat a real drift: 0.003 /day on top of the cycle."""
+        rng = np.random.default_rng(3)
+        values = (3.0 * np.exp(0.4 * np.cos(2 * np.pi * self.DAYS / 365.0 + 1.0)
+                               + 0.003 * self.DAYS
+                               + 0.03 * rng.standard_normal(self.DAYS.size)))
+        assert A.log_drift(self.DAYS, values, A.YEAR_DAYS) == pytest.approx(
+            0.003, abs=3e-4)
+
     def test_a_x60_runaway_in_40_days_still_fails(self):
         """The #658-class growth the gate exists for: x60 over the last 40 days
         of an otherwise seasonal year.
 
-        The whole-year fit dilutes a late runaway (0.0039 /day here, against
-        0.018 over the last six months), so it clears the limit by a factor ~2
+        The whole-year fit dilutes a late runaway (0.0082 /day here, against
+        0.018 over the last six months), so it clears the limit by a factor ~4
         rather than ~9; it must still clear it.
         """
         values = self._seasonal(self.DAYS)
@@ -208,7 +233,7 @@ class TestWholeYearDrift:
                                * (self.DAYS[tail] - (self.DAYS[-1] - 40.0)))
         days, series = _series(self.DAYS, values)
         stats = A.summarize(days, series)
-        assert stats["dlnB_dt_so4_per_day"] > 1.5 * A.DRIFT_LIMIT_PER_DAY
+        assert stats["dlnB_dt_so4_per_day"] > 2 * A.DRIFT_LIMIT_PER_DAY
         failed = [n for n, _v, _lim, ok in A.physics_gates(stats) if not ok]
         assert "dlnB_dt_so4_per_day" in failed
 
