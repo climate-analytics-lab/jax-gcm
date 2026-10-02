@@ -1,0 +1,153 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "base_version": "echam-6.3.02p4 (MPI svn r4310) / HAM2.3 / MOZ1.0, tree echam6.3.0-ham2.3-moz1.0.r7492",
+  "routines": [
+   "vdiff.f90::vdiff statements: constants (l.564-573), full-level thermodynamics and saturation loop (l.658-682), half-level averaging loop (l.684-700), buoyancy / shear / Richardson-number block (l.777-799)",
+   "mo_surface_land.f90::precalc_land",
+   "mo_surface_ocean.f90::precalc_ocean",
+   "mo_surface_ice.f90::precalc_ice",
+   "mo_surface_boundary.f90::atm_conditions (the surface cells' full-level inputs)"
+  ],
+  "compiled_unmodified": [
+   "mo_kind.f90",
+   "mo_math_constants.f90",
+   "mo_physical_constants.f90",
+   "mo_physc2.f90",
+   "mo_echam_cloud_params.f90",
+   "mo_echam_convect_tables.f90",
+   "mo_surface_boundary.f90",
+   "mo_surface_land.f90",
+   "mo_surface_ocean.f90",
+   "mo_surface_ice.f90"
+  ],
+  "verbatim_line_ranges": {
+   "fsel.inc": {
+    "source": "vdiff.f90",
+    "lines": [
+     4,
+     4
+    ]
+   },
+   "consts.inc": {
+    "source": "vdiff.f90",
+    "lines": [
+     564,
+     573
+    ]
+   },
+   "sat.inc": {
+    "source": "vdiff.f90",
+    "lines": [
+     658,
+     682
+    ]
+   },
+   "half.inc": {
+    "source": "vdiff.f90",
+    "lines": [
+     684,
+     700
+    ]
+   },
+   "buoy.inc": {
+    "source": "vdiff.f90",
+    "lines": [
+     777,
+     799
+    ]
+   }
+  },
+  "md5": {
+   "mo_kind.f90": "f7db37634d715105ed356b1a260a85ac",
+   "mo_math_constants.f90": "243280e0c9c1d4835bb13d24797820a7",
+   "mo_physical_constants.f90": "564906f3c4d084a935584d64a5b0d7a3",
+   "mo_physc2.f90": "7b46d9a32fb0903154eedc56a921fc29",
+   "mo_echam_cloud_params.f90": "79141c43dbee90134ba3254ac72583d2",
+   "mo_echam_convect_tables.f90": "ce2f14c2d84e7aa5c30149456671da0c",
+   "mo_surface_boundary.f90": "d821f188346af82de3e73723ffac40bf",
+   "mo_surface_land.f90": "851042b7e53431613c2bfde8b77e6f13",
+   "mo_surface_ocean.f90": "7684ddbcf451c446b6ada0dc839fb190",
+   "mo_surface_ice.f90": "57dc76305d40520aefd51128c20d6f63",
+   "vdiff.f90": "f8de37399283b576408e2a546c1e10a0"
+  }
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -D__LP64__ -ffp-contract=off -fimplicit-none (-DSAT_SONNTAG for the analytic-table build)",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "location": "not in the repository (own code, built from a local ECHAM6.3 tree at build time)",
+  "stubs": [
+   "mo_exception",
+   "mo_control",
+   "mo_submodel",
+   "mo_time_control",
+   "mo_radiation_parameters",
+   "mo_column",
+   "mo_param_switches"
+  ],
+  "stub_note": "Stubs declare names that routines this harness never calls read (run switches, I/O, clock); none holds a number the compiled statements use, except time_step_len = delta_time = 720 s for the surface cells' pressure-scaled coefficients, which the Richardson numbers do not read.",
+  "constants_set_by_driver": {
+   "ckap": 0.4,
+   "cb": 5.0,
+   "cc": 5.0,
+   "cvdifts": 1.5,
+   "source": "iniphy.f90:59-67"
+  }
+ },
+ "variants": {
+  "echam_tables": "ECHAM as it runs: the spline lookup tables of mo_echam_convect_tables.f90 (arrays echam_*)",
+  "analytic_tables": "the same statements with the tables replaced by the Sonntag (1990) fit they tabulate (harness module sat_analytic_tables.f90, -DSAT_SONNTAG; arrays echam_analytic_*)"
+ },
+ "optimisation_independence": "the -O2 and -O0 builds (both variants) give bit-identical arrays",
+ "model_states": {
+  "jcm": "40701518 (origin/dev, 2026-10-02)",
+  "configuration": "t63-echam-1m, init=from_state sonntag-spin1m.ckpt (30 sim-days of spin-up), 1 simulated day on CPU, instantaneous fields every 0.25 d (output_averages=false)",
+  "snapshots": 4,
+  "selection": "seed 962; 10 columns per class per snapshot: bl_unstable, bl_stable, cloudy, saturated, melting_crossing, cold, low_cloud, random (320); plus 64 designed columns",
+  "surface_cells": "96: the 48 lowest-level cells with cover > 0 and 48 with cover = 0, skin temperature within [-6, +8] K of the air (land), [-4, +6] (water), <= 272 K (ice)"
+ },
+ "jcm_capture_provenance": {
+  "code": {
+   "dinosaur": {
+    "version": "1.5.0"
+   },
+   "flax": {
+    "version": "0.12.8"
+   },
+   "jax": {
+    "version": "0.10.2"
+   },
+   "jaxlib": {
+    "version": "0.10.2"
+   },
+   "jcm": {
+    "branch": "fix/962-moist-richardson",
+    "dirty": false,
+    "sha": "40701518c36089e4cbec38938caf5b1abb818e5d",
+    "version": "3.0.0rc1"
+   },
+   "numpy": {
+    "version": "2.4.6"
+   },
+   "rrtmgp": {
+    "version": "0.5.0"
+   },
+   "xarray": {
+    "version": "2026.9.0"
+   }
+  },
+  "environment": {
+   "device_count": 1,
+   "device_kind": "cpu",
+   "env": {},
+   "jax_enable_x64": false,
+   "platform": "cpu",
+   "platform_version": "cpu",
+   "python": "3.11.12"
+  },
+  "run_hash": "5a94cc037727",
+  "created": "2026-10-02T15:08:36+00:00"
+ },
+ "arrays_md5_of_npz": "8f92626a7af12a78ef55f2aff794fd4f"
+}
