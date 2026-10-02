@@ -55,27 +55,29 @@ deliberately explicit and additive).
 
 Where each member starts
 ------------------------
-Every member spins up for ``SPIN_UP_DAYS`` from a **warm state** and the bands
-cover the ``STATS_DAYS`` that follow. A warm state is the end state of a full
-release-validation year (``tools/release_validation``) on the release
-candidate's physics: the non-JAM members' year 1, the JAM members' year 2 (their
-year 1 is the aerosol spin-up — the burdens take months to settle, so a state
-taken any earlier bands a transient). It is passed as ``init_state=`` and must
-carry the provenance record ``<state>.provenance.json`` (:func:`warm_state_source`:
-the run that produced it, its length, code and environment), which the band file
-repeats as ``init_state_source``, so a fixture says whose trajectory it
-describes.
+A member spins up for ``SPIN_UP_DAYS`` from the state given as ``init_state=``
+when there is one, else from its **preset's own init**; the bands cover the
+``STATS_DAYS`` that follow, and the band file records which it was
+(``init_state_provenance``).
+
+The intended ``init_state`` is a **warm state**: the end state of a full
+release-validation year on the release candidate's physics (the non-JAM members'
+year 1; the JAM members' year 2 or later, since their year 1 is the aerosol
+spin-up and the burdens take months to settle, so a state taken any earlier bands
+a transient). A warm state must carry the provenance record
+``<state>.provenance.json`` (:func:`warm_state_source`: the run that produced
+it, its length, code and environment), which the band file repeats as
+``init_state_source``, so a fixture says whose trajectory it describes.
+
+A cold start from the preset's own init is the way to bootstrap a new matrix
+member before a warm state exists, but it bands a transient (a JAM member's dust
+burden was still rising 40 % over days 35-40, tracking a still-ramping emission),
+so a fixture drawn that way is a weaker regression signal.
 
 The equilibrated year-2 states the mirror hosts from the #638 campaign cannot be
-used instead: current jcm cannot read them, being unstamped *and* structurally
-stale (118 physics-carry arrays where an ECHAM T63L47 model now expects 146; 51
-vs 56 for SPEEDY), which #834 refuses rather than guessing at.
-
-Without ``init_state`` a member spins up from its **preset's own init** — the
-cold start every fresh member begins with. That is the way to bootstrap a new
-matrix member before a warm state exists, but it bands a transient (a JAM member's
-dust burden was still rising 40 % over days 35–40, tracking a still-ramping
-emission), so a fixture drawn that way is a weaker regression signal.
+used as ``init_state``: current jcm cannot read them, being unstamped *and*
+structurally stale (118 physics-carry arrays where an ECHAM T63L47 model now
+expects 146; 51 vs 56 for SPEEDY), which #834 refuses rather than guessing at.
 
 Either way these are **regression** bands, not a climatology: a five-day window
 is a few weather events of one trajectory. Treat a failure as "something

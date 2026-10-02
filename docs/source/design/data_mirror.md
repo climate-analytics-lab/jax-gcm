@@ -227,10 +227,11 @@ Two kinds live there today:
 
   `init_state` is the member's **warm state** — the end state of a full
   release-validation year on the release candidate's physics (the JAM members'
-  second year; their first is the aerosol spin-up). The fixture is spun up 5 days
-  from it, and the band file records the warm state's own provenance
+  second year or later; their first is the aerosol spin-up). The fixture is spun
+  up 5 days from it, and the band file records the warm state's own provenance
   (`init_state_source`), which must sit beside the state as
-  `<state>.provenance.json`. Run it in a CI-parity environment (a fresh venv
+  `<state>.provenance.json`; without `init_state` the spin-up starts from the
+  preset's own init and the band file says so. Run it in a CI-parity environment (a fresh venv
   with `pip install -e ".[mam4]"` and the pinned CUDA jax — never a shared or
   long-lived one: bands drawn under a different jax-rrtmgp release fail a
   correct model across the whole column), and set the preallocation variable

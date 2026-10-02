@@ -34,33 +34,12 @@ CUDA_VISIBLE_DEVICES=<idx> python -c "import os; os.environ['XLA_PYTHON_CLIENT_P
 ```
 
 `init_state` is the member's **warm state**: the end state of a full
-release-validation year (the non-JAM members' year 1; the JAM members' year 2,
-since year 1 is the aerosol spin-up). The fixture is spun up 5 days from it, and
-the band file records where it came from (`init_state_source`: the run, its
-length, code and environment — read from the `<state>.provenance.json` that must
-sit beside the state). Without `init_state` the spin-up starts from the preset's
-own init.
-
-Set the variable first, as above. Importing jcm does not initialise a JAX
-backend, and `generate` does no device work itself, but XLA reads the setting
-only when a backend first comes up: a process that has already touched the
-device (a notebook that built a model first) holds 75% of the card under the
-default, starving the workers that actually integrate the model. `generate`
-refuses to run without it.
-
-**Generate in a CI-parity environment** — a fresh venv with
-`pip install -e ".[mam4]"` plus a CUDA jax build of the pinned version
-(`pip install "jax[cuda12]==<the pinned jax>"`), so every dependency resolves
-to the repo's pins — **never in a shared or long-lived environment**. The bands
-are only valid under the dependencies the test later runs with: a jax-rrtmgp
-release a pin has moved past shifts the radiation of the whole column, so bands
-drawn under it fail a correct model across the whole column, indistinguishably
-from a physics regression. Each band file records the versions it was drawn under
-(`bands_environment`) and the ones its init state was spun up under
-(`init_state_environment`); check them first when a whole member fails
-together. To re-derive bands on an already-published state, pass
-`write_state=False` with the state in `out_dir`, plus
-`state_environment=<its init_state_environment>` so that record is kept.
+release-validation year (the non-JAM members' year 1; the JAM members' year 2 or
+later, since year 1 is the aerosol spin-up). The fixture is spun up 5 days from
+it, and the band file records where it came from (`init_state_source`: the run,
+its length, code and environment — read from the `<state>.provenance.json` that
+must sit beside the state). Without `init_state` the spin-up starts from the
+preset's own init, and the band file says so (`init_state_provenance`).
 
 then upload the file it wrote — `<member>_fixture_<digest>.msgpack`, whose
 name carries a digest of its own contents — additively under that member's
@@ -101,17 +80,18 @@ claims to support rather than a composition invented for the test.
 Two things to know before reading a failure:
 
 - These are **regression** bands, not a climatology. They come from a short
-  window after a short spin-up from a **warm state** — the end state of a full
-  release-validation year on the release candidate's physics — so the bands
-  follow a year of spin-up (the JAM aerosol burdens take months to settle) and
-  not a cold-start transient. A failure means "something changed", not "the
-  physics is wrong".
+  window after a short spin-up; drawn from a **warm state** (a full
+  release-validation year, see above) they follow a year of spin-up — the JAM
+  aerosol burdens take months to settle — and drawn from the preset's own init
+  they band a cold-start transient, a weaker signal. The band file's
+  `init_state_provenance` says which. A failure means "something changed", not
+  "the physics is wrong".
 - The **JAM members' bands describe the post-dust-retune aerosol climate**
   (#787/#808/#840): the relative-soil-wetness saltation gate and the
-  `nduscale_reg` recalibration for jcm's winds, and they follow the members'
-  second year: after one year of aerosol spin-up the burdens are on their
-  plateau, where a from-cold five-day window is still on the dust emission ramp.
-  A failure is a regression, not a known-provisional state.
+  `nduscale_reg` recalibration for jcm's winds. Drawn from a warm state (a JAM
+  member's second year or later) the burdens are on their plateau, where a
+  from-cold five-day window is still on the dust emission ramp. A failure is a
+  regression, not a known-provisional state.
 
 ## Workflow
 

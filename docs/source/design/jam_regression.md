@@ -280,39 +280,46 @@ uncorrected Δp gives a column-integrated water vapour of 1.1 kg/m², against
 29.5 kg/m² corrected. Every burden computed from a pre-#710 file before this
 fix was wrong by a comparable factor.
 
-## Not yet done: the spun-up state (#762's other half)
+## The spun-up state (#762's other half)
 
 Issue #762 asks for two things. This document covers the statistics; the
-**published spun-up JAM state** is deliberately not delivered, and #762 stays
-open for it.
+**published spun-up JAM state** is delivered separately, and #762 stays open for
+its publication.
 
-The plan, unchanged:
+The artefact is a full `jcm.checkpoint.save_checkpoint` msgpack per grid (T63 L47
+and T63 L95), produced by the release-validation recipe: a cold first year, which
+is the aerosol spin-up, and a warm second year started from its end state (the
+`tools/release_validation` README and jcm-monitor's experiments do this), whose
+end state is the published one. It carries a provenance record
+(`<state>.provenance.json`: the run, its length, code, environment and the state
+it started from) that `generate_stats.warm_state_source` checks before a fixture
+is drawn from it.
 
-* The artefact is a full `jcm.checkpoint.save_checkpoint` msgpack per grid
-  (T63 L47 and T63 L95), produced by the release-validation matrix itself:
-  year 1, then `launch.py --resume` for a year 2 once the year-1 aerosol gates
-  above pass, publishing the day-730 state as
-  `bundles/<grid>/init_states/echam_jam_year2.msgpack`.
-* It is published **through the data engine** — a `_MANIFEST_PRODUCTS` row,
-  sha256 in the registry, publication-gated — not by hand, like every other
-  mirror artefact.
-* Consumption is **opt-in** via new `ma-t63-l47-warm` / `ma-t63-l95-warm`
-  configurations (base + `init=from_state`), never a production default: a
-  default warm start would hide exactly the cold-start regressions the matrix
-  exists to catch.
+How long the spin-up takes was measured on JAM T63 L47 and L95, each run for two
+consecutive years on one commit (the second started from the first's end state).
+From the cold dry init the burdens lie below their equilibrated values for the
+first 90-150 days of year 1 (dust, SO4 and sea salt by up to +110 %, +66 % and
++50 % of year 1 in the first two months of year 2 relative to year 1, converging
+to a few percent from day ~150 on L47 and ~90-120 on L95), while the mass budget
+closes to under 0.1 % throughout, so the early deficit is the water cycle and
+winds spinning up, not an aerosol accumulation. Year 1's end state is already on
+the equilibrated trajectory; year 2 is the first whole equilibrated year.
 
-Two things block it, and neither is a matter of effort:
+A state outlives code changes that add carry fields: `load_checkpoint` seeds a
+field a newer model carries from its documented initial value and drops one it no
+longer carries, reporting each in the log (#731), and the aerosol tracers
+themselves are unchanged. It does not outlive a change of climate: after the
+land-surface energy balance (#979) lengthened aerosol lifetimes (dust 1.6 to 2.0
+days), a state taken before it needed a further year to re-equilibrate (burdens
++100 % at first, within ~10 % of the new equilibrium from day 60 of the next
+year). States are therefore drawn from the final physics of a release.
 
-1. **The aerosol mass budget is open.** A spun-up state is a *frozen* copy of
-   the model's aerosol; publishing one taken from a run whose sulfate budget
-   does not close would enshrine the defect and hand every warm-started run a
-   contaminated aerosol population. The gates in this document are the
-   precondition — there is no year-2 state to publish until a year-1 run passes
-   them.
-2. **Issue #731** — a checkpoint breaks when a diagnostic struct gains a leaf —
-   is a prerequisite for any state with a shelf life, and is its own PR. A
-   published state that stops loading on the next physics change is worse than
-   no published state.
+Publication is **through the data engine** — a `_MANIFEST_PRODUCTS` row, sha256
+in the registry, publication-gated — not by hand, like every other mirror
+artefact, and consumption is **opt-in** via `ma-t63-l47-warm` / `ma-t63-l95-warm`
+configurations (base + `init=from_state`), never a production default: a default
+warm start would hide exactly the cold-start regressions the matrix exists to
+catch.
 
 The secondary check that state would enable is also specified and also waiting:
 a 10-day T63 L47 warm-start regression test against a stored
