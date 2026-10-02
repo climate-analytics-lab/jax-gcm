@@ -467,8 +467,9 @@ def jam_scavenging_column(vertical, physics, *, sst: float = 302.0,
 
 
 #: Large-scale moisture convergence [kg/m²/s] the prescribed JAM column is
-#: taken to be under at its first step (~17 mm/day), spread over the lower
-#: free troposphere — see :func:`convergent_initial_physics_data`.
+#: taken to be under at its first step (~17 mm/day), spread over the lower half
+#: of the column down to the surface — see
+#: :func:`convergent_initial_physics_data`.
 JAM_COLUMN_CONVERGENCE = 2.0e-4
 
 
@@ -490,11 +491,17 @@ def convergent_initial_physics_data(scm: SingleColumnModel, state: PhysicsState,
 
     This returns the model's own initial carry with ``_prev_step`` stating
     that the previous step's physics removed ``convergence`` [kg/m²/s] of
-    vapour from the lower free troposphere (the middle of the column down to
-    four levels above the surface) — i.e. that the column is under that much
-    large-scale moisture convergence, as a deep tropical column is. From
-    there the deep plume's own drying keeps the lagged convergence signal
-    alive, exactly as it would under sustained ascent.
+    vapour from the lower half of the column, the sub-cloud layers included —
+    i.e. that the column is under that much large-scale moisture convergence,
+    as a deep tropical column is. The sub-cloud layers must carry their share:
+    ECHAM's cloud-base gate ``zlo1`` needs the moisture supply of exactly those
+    layers, ``zdqpbl = Σ pqte·Δp`` below cloud base, to be positive, and in a
+    column whose dynamics undoes the physics every step that supply is the
+    previous step's other physics (the lagged ``pqte``): zero, to round-off, in
+    a sub-cloud layer that the convergence does not reach, so convection would
+    start or not on the sign of a rounding error. From there the deep plume's
+    own drying keeps the lagged convergence signal alive, exactly as it would
+    under sustained ascent.
 
     Args:
         scm: The single-column model the carry is for.
@@ -521,9 +528,9 @@ def convergent_initial_physics_data(scm: SingleColumnModel, state: PhysicsState,
     p_half = a_half + b_half * c.p0 * state.normalized_surface_pressure
     mass = jnp.diff(p_half) / c.grav
     levels = jnp.arange(nlev)
-    lower_ft = (levels >= nlev // 2) & (levels < nlev - 4)
+    lower_half = levels >= nlev // 2
     q_tendency = jnp.where(
-        lower_ft, -convergence / jnp.sum(jnp.where(lower_ft, mass, 0.0)), 0.0)
+        lower_half, -convergence / jnp.sum(jnp.where(lower_half, mass, 0.0)), 0.0)
     data["_prev_step"] = {
         **prev,
         "specific_humidity": jnp.reshape(
