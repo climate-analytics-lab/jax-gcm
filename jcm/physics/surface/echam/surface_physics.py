@@ -384,11 +384,12 @@ def correct_surface_longwave(radiation: RadiationData, t_old, t_new, pressure_ha
         Δ = ε·σ·T_old³·(4·T_new − 3·T_old) − ε·σ·T_old⁴
 
     with ``ε`` the emissivity the radiation solved with. ``Δ`` is added to the
-    surface upward flux and the lowest-level heating, and written back into the
-    radiation carry: the cached longwave then always describes the current
-    surface, so successive steps telescope exactly as the shortwave zenith
-    rescale does, and a radiation solve starts from the temperature the last
-    correction left.
+    surface upward flux (all-sky, and clear-sky where the scheme solved it: the
+    surface emits the same in both) and the lowest-level heating, and written
+    back into the radiation carry: the cached longwave then always describes
+    the current surface, so successive steps telescope exactly as the
+    shortwave zenith rescale does, and a radiation solve starts from the
+    temperature the last correction left.
 
     Returns:
         ``(radiation, heating)``: the corrected carry and the lowest-level
@@ -401,9 +402,13 @@ def correct_surface_longwave(radiation: RadiationData, t_old, t_new, pressure_ha
     dp_k = pressure_half[-1] - pressure_half[-2]
     heating = (d_up * c.grav / (c.cpd * dp_k.reshape(d_up.shape))).astype(dtype)
     shape = radiation.surface_lw_up.shape
+    # A scheme without a clear-sky solve leaves the clear-sky profile at zero.
+    clear_solved = radiation.lw_flux_up_clear[-1] != 0.0
     radiation = radiation.copy(
         surface_lw_up=radiation.surface_lw_up + d_up.reshape(shape),
         lw_flux_up=radiation.lw_flux_up.at[-1].add(d_up.reshape(shape)),
+        lw_flux_up_clear=radiation.lw_flux_up_clear.at[-1].add(
+            jnp.where(clear_solved, d_up.reshape(shape), 0.0).astype(dtype)),
         lw_heating_rate=radiation.lw_heating_rate.at[-1].add(
             heating.reshape(radiation.lw_heating_rate.shape[1:])),
     )

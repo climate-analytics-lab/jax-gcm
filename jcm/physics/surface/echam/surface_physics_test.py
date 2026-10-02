@@ -673,6 +673,13 @@ class TestLongwaveReEmission:
         np.testing.assert_allclose(heating * c.cpd * dp / c.grav, [d_up, 0.0], rtol=1e-5)
         np.testing.assert_allclose(out.lw_heating_rate[-1], heating, rtol=1e-6)
         np.testing.assert_allclose(out.toa_lw_up, 240.0)
+        # No clear-sky solve: the clear-sky profile keeps its zeros. With one,
+        # its surface emission moves with the all-sky one.
+        np.testing.assert_array_equal(out.lw_flux_up_clear, 0.0)
+        clear = rad.copy(lw_flux_up_clear=jnp.full_like(rad.lw_flux_up, 430.0))
+        out_c, _ = correct_surface_longwave(clear, t_old, t_new, p_half)
+        np.testing.assert_allclose(out_c.lw_flux_up_clear[-1], [430.0 + d_up, 430.0], rtol=1e-6)
+        np.testing.assert_allclose(out_c.lw_flux_up_clear[:-1], 430.0)
         # Successive corrections telescope from the last corrected value.
         out2, _ = correct_surface_longwave(out, t_new, t_old, p_half)
         np.testing.assert_allclose(
