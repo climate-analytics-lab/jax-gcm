@@ -820,8 +820,9 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
             preset's own init (see "Where each member starts" in the module
             docstring). Its provenance record ``<init_state>.provenance.json``
             is required (:func:`warm_state_source`) and goes into the band
-            file as ``init_state_source``. With ``write_state=False`` it
-            describes the reused state's ancestry and is not read again.
+            file as ``init_state_source``. With ``write_state=False`` the
+            reused state is not re-spun from it, but the record must still be
+            present and verified: it is the reused state's recorded ancestry.
 
     Returns:
         ``(state_path, band_path)``.
