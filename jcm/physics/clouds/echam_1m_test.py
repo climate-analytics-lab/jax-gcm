@@ -247,6 +247,58 @@ class TestParameters:
             with_field_overrides(base, {"t_mix_min": 1.0}, scheme="test")
 
 
+class TestConfigDoorOverrides:
+    """An override from a config mapping runs the scheme (``++...params.ccraut=``).
+
+    ``cloud_microphysics_column_sweep`` casts every floating parameter leaf to
+    the state's precision with ``leaf.astype``, which only an array has, so a
+    config override must be an array like the defaults. The ``jax.grad`` tests
+    cannot cover this: their leaves are tracers, which have ``astype`` whatever
+    the override was.
+    """
+
+    OVERRIDES = [("ccraut", 40.0), ("ccsaut", 20.0), ("ccsacl", 0.8)]
+
+    @pytest.mark.parametrize("field,value", OVERRIDES)
+    def test_sweep_runs_and_equals_the_array_built_parameters(self, field, value):
+        from jcm.physics.physics_term import with_field_overrides
+        base = MicrophysicsParameters.default()
+        over = with_field_overrides(base, {field: value}, scheme="test")
+        leaf = getattr(over, field)
+        assert isinstance(leaf, jax.Array)
+        assert leaf.dtype == getattr(base, field).dtype and leaf.shape == ()
+
+        col = mixed_column()
+        tend, state = run_sweep(*col, DT, over)
+        ref_tend, ref_state = run_sweep(
+            *col, DT, MicrophysicsParameters.default(**{field: value}))
+        leaves = jax.tree.leaves((tend, state))
+        assert all(np.all(np.isfinite(np.asarray(x))) for x in leaves)
+        for got, want in zip(leaves, jax.tree.leaves((ref_tend, ref_state))):
+            np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+        # The override reaches the scheme: the default parameters differ.
+        default_tend, _ = run_sweep(*col, DT, base)
+        assert any(np.any(np.asarray(a) != np.asarray(b)) for a, b in zip(
+            jax.tree.leaves(tend), jax.tree.leaves(default_tend)))
+        # The abstract trace the model's get_empty_data takes of the call.
+        shapes = jax.eval_shape(lambda: run_sweep(*col, DT, over))
+        assert jax.tree.leaves(shapes)
+
+    def test_term_runs_with_an_overridden_parameter(self):
+        from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
+        from jcm.physics.physics_term import with_field_overrides
+
+        over = with_field_overrides(MicrophysicsParameters.default(),
+                                    {"ccraut": 40.0}, scheme="test")
+        state, diag, forcing, terrain = _term_inputs()
+        tend, _ = Echam1MMicrophysics(over)(state, diag, forcing, terrain)
+        ref, _ = Echam1MMicrophysics(
+            MicrophysicsParameters.default(ccraut=40.0))(
+                state, diag, forcing, terrain)
+        for got, want in zip(jax.tree.leaves(tend), jax.tree.leaves(ref)):
+            np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+
+
 def _precip_of(params):
     """Surface precipitation of a mixed-phase column, for gradient checks."""
     col = mixed_column()

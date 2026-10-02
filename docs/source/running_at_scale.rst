@@ -206,7 +206,9 @@ Two consequences worth committing to memory:
 
   The field is applied on top of what that preset would otherwise use, and
   both styles share one conversion: an unknown field is an error listing the
-  valid ones, and a numeric field stays a differentiable parameter.
+  valid ones, a numeric value takes the dtype and shape of the field it
+  replaces (a list of the wrong length is an error, not a broadcast), and a
+  numeric field stays a differentiable parameter.
 
   Physical-constant overrides are the same story — ``constants`` starts as an
   empty mapping, so each base field is *added*::

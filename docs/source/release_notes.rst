@@ -764,6 +764,16 @@ Scheme parameters on the factory-built presets
   factory-built JAM presets, or ``seasalt=`` / ``dms=`` of ``echam_physics``,
   a mapping or a ``Parameters`` object. They need ``aerosol_module="jam"``
   and are rejected without it rather than ignored.
+- A numeric override takes the dtype and shape of the field it replaces, on
+  both preset styles (:func:`jcm.physics.physics_term.with_field_overrides`).
+  The 1M cloud scheme casts its parameters to the state's precision, so
+  ``++physics.terms.echam_1m_microphysics.params.ccraut=20.0`` (likewise
+  ``ccsaut`` and ``ccsacl``) stopped with ``AttributeError: 'float' object has
+  no attribute 'astype'`` before the first step; the override is now the
+  array its default is. A scalar field takes a number, a profile field a list
+  of its length, and an integer or boolean field only a value it can
+  represent. A value of another shape is an error naming the config key, never
+  a broadcast (#682 retune pilot).
 
 Provenance records the parameters
 """""""""""""""""""""""""""""""""
