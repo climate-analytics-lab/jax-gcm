@@ -643,5 +643,109 @@ class TestEchamSurfaceTerm:
         np.testing.assert_allclose(np.asarray(surface.momentum_flux_v), -0.02)
 
 
+class TestLongwaveReEmission:
+    """The cached surface longwave follows the skin temperature (ECHAM ``radheat``, #979)."""
+
+    def _radiation(self, ncols=2, nlev=4):
+        from jcm.physics.radiation.radiation_types import RadiationData
+        return RadiationData.zeros((ncols,), nlev).copy(
+            surface_emissivity=jnp.full((ncols,), 0.95),
+            surface_lw_up=jnp.full((ncols,), 450.0),
+            lw_flux_up=jnp.full((nlev + 1, ncols), 450.0),
+            toa_lw_up=jnp.full((ncols,), 240.0))
+
+    def test_emission_change_heats_the_lowest_layer_and_holds_the_toa(self):
+        import numpy as np
+
+        import jcm.constants as c
+        from jcm.physics.surface.echam.surface_physics import correct_surface_longwave
+
+        rad = self._radiation()
+        p_half = jnp.linspace(2.0e4, 1.0e5, 5)[:, None] * jnp.ones((1, 2))
+        t_old, t_new = jnp.array([300.0, 300.0]), jnp.array([302.0, 300.0])
+        out, heating = correct_surface_longwave(rad, t_old, t_new, p_half)
+        d_up = 4.0 * 0.95 * c.sbc * 300.0 ** 3 * 2.0      # land_rad's zteffl4, linearised
+        np.testing.assert_allclose(out.surface_lw_up, [450.0 + d_up, 450.0], rtol=1e-6)
+        np.testing.assert_allclose(out.lw_flux_up[-1], out.surface_lw_up, rtol=1e-6)
+        np.testing.assert_allclose(out.lw_flux_up[:-1], 450.0)
+        # The extra emission is the lowest layer's: c_pd·Δp/g·heating = Δ.
+        dp = float(p_half[-1, 0] - p_half[-2, 0])
+        np.testing.assert_allclose(heating * c.cpd * dp / c.grav, [d_up, 0.0], rtol=1e-5)
+        np.testing.assert_allclose(out.lw_heating_rate[-1], heating, rtol=1e-6)
+        np.testing.assert_allclose(out.toa_lw_up, 240.0)
+        # No clear-sky solve: the clear-sky profile keeps its zeros. With one,
+        # its surface emission moves with the all-sky one.
+        np.testing.assert_array_equal(out.lw_flux_up_clear, 0.0)
+        clear = rad.copy(lw_flux_up_clear=jnp.full_like(rad.lw_flux_up, 430.0))
+        out_c, _ = correct_surface_longwave(clear, t_old, t_new, p_half)
+        np.testing.assert_allclose(out_c.lw_flux_up_clear[-1], [430.0 + d_up, 430.0], rtol=1e-6)
+        np.testing.assert_allclose(out_c.lw_flux_up_clear[:-1], 430.0)
+        # Successive corrections telescope from the last corrected value.
+        out2, _ = correct_surface_longwave(out, t_new, t_old, p_half)
+        np.testing.assert_allclose(
+            out2.surface_lw_up[0],
+            450.0 + d_up - 4.0 * 0.95 * c.sbc * 302.0 ** 3 * 2.0, rtol=1e-6)
+
+    def test_term_publishes_the_new_skin_and_its_emission(self):
+        """``EchamSurface`` after the land balance: the grid surface temperature is
+        the new skin, the only tendency is the lowest-level re-emission, and that
+        heating advances the running thermodynamic state the later terms read.
+        """
+        import numpy as np
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+
+        nlev, ncols = 4, 1
+        z_half = jnp.linspace(4000.0, 0.0, nlev + 1)[:, None]
+        p_half = jnp.linspace(6.0e4, 1.0e5, nlev + 1)[:, None]
+        state = PhysicsState(
+            u_wind=jnp.full((nlev, ncols), 5.0), v_wind=jnp.zeros((nlev, ncols)),
+            temperature=jnp.full((nlev, ncols), 295.0),
+            specific_humidity=jnp.full((nlev, ncols), 0.008),
+            geopotential=9.81 * 0.5 * (z_half[:-1] + z_half[1:]),
+            normalized_surface_pressure=jnp.ones((ncols,)), tracers={})
+        diagnostics = {
+            "_dt_seconds": 720.0,
+            "pressure_full": 0.5 * (p_half[:-1] + p_half[1:]), "pressure_half": p_half,
+            "height_full": 0.5 * (z_half[:-1] + z_half[1:]),
+            "surface": SurfaceData.zeros((ncols,), nlev).copy(
+                surface_temperature=jnp.array([300.0]),
+                land_surface_temperature=jnp.array([303.0]),
+                roughness_length=jnp.array([0.01])),
+            "vertical_diffusion": VerticalDiffusionData.zeros((ncols,), nlev).copy(
+                surface_exchange_heat=jnp.full((ncols, 3), 0.01),
+                surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
+                surface_exchange_momentum=jnp.full((ncols, 3), 0.012)),
+            "radiation": self._radiation(ncols, nlev),
+            "thermo_run": {"temperature": state.temperature,
+                           "specific_humidity": state.specific_humidity},
+        }
+        forcing = ForcingData.zeros((1, 1)).copy(
+            sea_surface_temperature=jnp.full((1, 1), 290.0))
+        tend, out = EchamSurface()(state, diagnostics, forcing,
+                                   TerrainData.single_column(fmask=1.0))
+        np.testing.assert_allclose(out["surface"].surface_temperature, 303.0)
+        assert float(out["radiation"].surface_lw_up[0]) > 450.0 + 15.0
+        heat = np.asarray(tend.temperature)
+        assert heat[-1, 0] > 0.0 and np.all(heat[:-1] == 0.0)
+        np.testing.assert_allclose(out["radiation"].lw_heating_rate[-1], heat[-1], rtol=1e-6)
+        assert float(jnp.max(jnp.abs(tend.specific_humidity))) == 0.0
+        # The running view is the step-start temperature plus the heating, in
+        # the lowest level only: convection and the cloud scheme read it.
+        run = out["thermo_run"]
+        np.testing.assert_allclose(
+            run["temperature"], np.asarray(state.temperature) + heat * 720.0, rtol=1e-6)
+        assert run["temperature"][-1, 0] > state.temperature[-1, 0]
+        np.testing.assert_array_equal(run["temperature"][:-1], state.temperature[:-1])
+        np.testing.assert_array_equal(run["specific_humidity"], state.specific_humidity)
+
+
 if __name__ == "__main__":
     pytest.main([__file__])

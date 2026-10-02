@@ -21,21 +21,22 @@ convention, ``clip(sice, 0, 1 − land)``). The
 colder, humidity-poor ice surface suppresses the sensible and latent exchange
 over ice relative to open water; the sensible flux is linear in ``tsea`` so the
 temperature blend equals a flux blend, while for evaporation and the stability
-factor blending the temperature is SPEEDY's chosen approximation. The **ECHAM multi-tile** scheme (``jcm/physics/surface/echam/``)
-carries water/ice/land tile machinery (``ocean.py``, ``sea_ice.py``,
-``land.py``), but its per-step albedo/radiative/tile energy-balance computation
-(``surface_physics.py::surface_physics_step``) is currently **diagnostic-only
-and discarded**: the tile state is re-initialised from prescribed forcing every
-call (no prognostic memory — no precipitation input, snow, or soil moisture;
-#672), and the active surface albedos come from ``EchamBoundaryConditions``
-instead (see *Surface albedo* below). The ECHAM turbulent surface fluxes are *delivered* by the vdiff term
-(which carries the surface exchange as the bottom-row Robin BC of its implicit
-solve, see {doc}`vertical_diffusion`), so ``EchamSurface`` returns zero
-u/v/T/qᵥ tendencies and republishes the vdiff-delivered fluxes as the public
-``"surface"`` fields. The 10 m wind is likewise the vdiff term's per-tile
-surface-layer reduction (ECHAM ``nsurf_diag``, see {doc}`vertical_diffusion`),
-the one 10 m profile the coupling contract's wind and the AeroCom ``uas``/``vas``
-use.
+factor blending the temperature is SPEEDY's chosen approximation. The **ECHAM multi-tile** surface has three tiles: open water at the
+prescribed SST, sea ice at ``min(SST, ctfreez)``, and land. The land tile is a
+*prescribed-moisture land* with a prognostic skin temperature (*The ECHAM land
+tile* below). The ECHAM turbulent surface fluxes are *delivered* by the vdiff
+term, which couples the surface to its implicit solve tile by tile (see
+{doc}`vertical_diffusion`). ``EchamSurface`` therefore returns no turbulent
+tendencies and republishes the vdiff-delivered fluxes as the public
+``"surface"`` fields; its one tendency is the longwave re-emission at the new
+skin temperature. The tile machinery in ``jcm/physics/surface/echam/``
+(``ocean.py``, ``sea_ice.py``, ``land.py``,
+``surface_physics.py::surface_physics_step``) is diagnostic-only bookkeeping
+and is discarded; the active surface albedos come from
+``EchamBoundaryConditions`` (see *Surface albedo* below). The 10 m wind is the
+vdiff term's per-tile surface-layer reduction (ECHAM ``nsurf_diag``, see
+{doc}`vertical_diffusion`), the one 10 m profile the coupling contract's wind
+and the AeroCom ``uas``/``vas`` use.
 
 **What ECHAM/CAM does.** ECHAM6's ``vdiff``/``mo_surface`` scheme couples the
 surface into a single tridiagonal spanning the column plus the surface exchange,
@@ -49,13 +50,11 @@ sea-ice tiles return zero prognostic temperature tendencies (SST and ice are
 prescribed from boundary forcing); slab / mixed-layer evolution lives outside the
 repo.
 
-**Status & known limitations.** The ECHAM land tile is simplified: snow cover
-is prescribed (snow-covered land evaporates at the potential rate and the
-latent heat of the land moisture flux takes the sublimation share of the
-snow-covered fraction, see {doc}`vertical_diffusion`, but there is no snow
-mass, melt or frozen-soil model — #672); ocean/sea-ice are
-diagnostic-flux-only over prescribed surface temperatures — any prognostic
-slab-ocean or interactive sea-ice configuration is out of scope.
+**Status & known limitations.** The ECHAM land tile keeps its soil moisture,
+snow cover and deep soil temperature prescribed (see *The ECHAM land tile*;
+the rest of JSBACH is #672). Ocean and sea ice carry diagnostic fluxes only,
+over prescribed surface temperatures; a prognostic slab-ocean or interactive
+sea-ice configuration is out of scope.
 
 **Code pointers.**
 - ``jcm/physics/surface/speedy_surface_flux.py`` — ``get_surface_fluxes``, the
@@ -69,6 +68,130 @@ slab-ocean or interactive sea-ice configuration is out of scope.
 ``turbulent_fluxes_test.py``, ``surface_types_test.py``. The ``pev_vdiff``
 delivered-equals-reported identity is exercised through the vdiff column tests.
 
+## The ECHAM land tile
+
+**What we do.** The ECHAM hosts' land is a *prescribed-moisture land*
+(``jcm/physics/surface/echam/jsbach_land.py``, solved inside the vdiff term).
+It applies JSBACH's evaporation form to prescribed soil moisture and snow, and
+carries a prognostic skin temperature from the surface energy balance, coupled
+implicitly to the lowest model level.
+
+- **Evaporation** carries JSBACH's humidity factors,
+  ``E = ρ·C_h|U|·(csat·q_s − cair·q_a)`` (``mo_soil.f90::update_soil``). Bare
+  soil evaporates only while ``h·q_s > q_a`` (``qair_fact = 1``), with ``h``
+  from ``calc_relative_humidity_upper`` of the upper layer's fill. The
+  vegetated fraction transpires through ``1/(1 + C_h|U|·r_c)``, with
+  ``r_c = 1/(g_c·β)`` and the water-stress factor ``β`` running between the
+  wilting (0.35) and critical (0.75) fractions of the root-zone fill. The
+  snow-covered and glacier land evaporates at the potential rate.
+- **Skin temperature** follows ``C_s·dT_s/dt = Rn − SH − LH − G``, with
+  ``G = Λ·(T_s − stl_am)`` the flux into a soil whose temperature is the
+  prescribed ERA5 soil-layer climatology. ECHAM's ``update_surfacetemp`` solves
+  it with the lowest level, against the land tile's own Richtmyer–Morton
+  coefficients. ``C_s`` (1.46e5 J m⁻²K⁻¹) and ``Λ`` (10.4 W m⁻²K⁻¹) are
+  JSBACH's top-layer capacity and the conductance to its second layer
+  (``update_soiltemp``). Snow grades the top layer by depth, glaciers take
+  ice, and a snow- or glacier-covered surface is held at the melting point,
+  with the excess reported as melt.
+- The skin temperature is what the longwave emission, the land albedo's
+  melting ramp, the surface saturation and the surface-layer stability see.
+  Between radiation calls the surface longwave is re-emitted at the current
+  skin temperature, and the change heats the lowest level, as ECHAM's
+  ``radheat`` does; the convection and cloud schemes after it see that heating.
+  The land absorbs the held downward shortwave through the land albedo of the
+  last radiation solve, as ECHAM's JSBACH takes the radiation's net shortwave
+  and moves its albedo only at a radiation step. The surface temperature the
+  radiation solves with, and the re-emission corrects, is the grid value snapped
+  to the land skin where ``fmask > 0.5`` and to the SST elsewhere, where ECHAM's
+  ``radtemp`` is the tile-weighted T⁴ mean (#988).
+
+**What ECHAM/CAM does.** ECHAM6.3 couples JSBACH: a five-layer soil-water and
+soil-temperature model, prognostic snow and an interception reservoir, BETHY
+canopy conductance from LAI and PAR, and precipitation as the land's input. It
+uses the same humidity factors and the same implicit surface balance
+(``mo_surface_land.f90::richtmyer_land``, ``update_surfacetemp.f90``).
+
+**Why we differ.**
+- `science` — the JSBACH state the forcing bundle does not carry has stand-ins:
+  - the root-zone fill is ``soilw_am``;
+  - the upper-layer fill is ``soilw_rel`` (ERA5 swvl1 over its field
+    capacity, the quantity ECHAM6.3's 5-layer soil reads); ``soilw_am``
+    stands in for a bundle without it;
+  - the vegetated fraction is the forest fraction;
+  - the unstressed canopy conductance is ECHAM3's formula
+    (``mo_canopy.f90::unstressed_canopy_cond_par``), evaluated every step with
+    half the net shortwave as PAR and a leaf area index of 4, where ECHAM6.3
+    uses BETHY;
+  - the wet-skin fraction is 0;
+  - the snow depth is the bundle's ``SWE = 60 mm·snowc``;
+  - one soil layer over the prescribed ``stl_am`` stands in for JSBACH's five;
+  - the land emissivity is jcm's 0.95, the value the radiation uses, where
+    ECHAM has 0.996.
+- `differentiability` — the bare-soil, dew, water-stress and melt switches keep
+  ECHAM's values and take the derivatives of named smooth surrogates (widths in
+  ``JsbachLandParameters``).
+
+The Amazon's dry-season evaporation is limited by that constant-LAI ECHAM3
+canopy conductance standing in for BETHY: in 240 days of T63L47 `t63-echam-1m`
+its JJA latent heat is 110 W m⁻², 18 % below the prescribed land's (134) and
+11 % below MERRA-2's (124), with a wet soil (β ≈ 0.9). The LAI climatology and
+the BETHY canopy are #672's.
+
+The derivations and the measured effect are in
+{doc}`../design/land_skin_energy_balance`.
+
+**Fixed land temperature.** `JsbachLandParameters.land_temperature =
+"prescribed"` holds the land skin at the forcing's land temperature every step
+(`forcing_land_temperature`, today `stl_am`), with the same evaporation form,
+humidity factors and per-tile coupling as the prognostic skin. The surface
+energy budget is then open by construction, and `surface.land_energy_residual`
+(`Rn − SH − LH`) is the heat the prescription supplies or removes. This is the
+fixed-SST and fixed-land-temperature configuration Andrews et al. (2021, *J.
+Geophys. Res. Atmos.*, doi:10.1029/2020JD033880) use to measure the effective
+radiative forcing without the land's warming response; for that method the
+forcing carries the model's own control-run land temperature in `stl_am`.
+`stl_am` is a monthly climatology with no diurnal cycle, so the prescribed skin
+has none either; a sub-daily land-temperature forcing is #984. From the command
+line: `+physics.terms.tte_tke_vertical_diffusion.land_params.land_temperature=prescribed`
+(`+physics.land_surface.land_temperature=prescribed` for the factory-built
+presets).
+
+**Status & known limitations.** Soil moisture, snow cover and soil temperature
+stay prescribed. There is no bucket, no interception, no snow mass or melt
+water and no runoff, and precipitation does not reach the land (#672).
+Prescribed snow cannot run out, so a snow-covered skin stays at the melting
+point for as long as the climatology keeps the snow. The soil under the skin is
+held at ERA5's climatology, so where the model's skin runs colder than it the
+soil keeps supplying heat (about 30 W m⁻² in the semi-arid boxes' monsoon
+season): the limitation of one layer over a prescribed soil, which a
+prognostic soil temperature removes (#672). The surface-layer exchange coefficients follow ICON's stable branch
+rather than ECHAM6.3's (#982).
+
+**Code pointers.**
+- ``jcm/physics/surface/echam/jsbach_land.py`` — ``humidity_factors``,
+  ``unstressed_canopy_conductance``, ``top_layer_thermal_properties``,
+  ``update_surfacetemp``, ``richtmyer_morton``, ``melt_cap``,
+  ``JsbachLandParameters``.
+- ``jcm/physics/vertical_diffusion/tte_tke/matrix_solver.py`` —
+  ``couple_surface_tiles``.
+- ``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion.py`` —
+  ``TteTkeVerticalDiffusion`` (the land inputs).
+- ``jcm/physics/surface/echam/surface_physics.py`` —
+  ``correct_surface_longwave``.
+- ``jcm/physics/forcing/echam_boundary_conditions.py`` — the skin seed.
+
+**Validation evidence.**
+- ``jcm/physics/surface/echam/jsbach_land_test.py`` checks against the compiled
+  ECHAM6.3 / JSBACH Fortran (``jcm/data/test/echam_land_reference``): the
+  humidity factors, the canopy conductance, the top-layer capacity and
+  conductance, the Richtmyer–Morton coefficients and the energy balance.
+- ``jcm/physics/vertical_diffusion/tte_tke/land_coupling_test.py`` closes the
+  land budget to round-off, checks that a dry hot soil stops evaporating while
+  a wet one does not, and checks the derivatives through the hinge and the
+  implicit solve.
+- ``jcm/checkpoint_test.py::TestLandSkinTemperatureMigration`` restores a
+  checkpoint written before the field existed.
+
 ## Surface albedo
 
 **What we do.** ``EchamBoundaryConditions``
@@ -80,8 +203,8 @@ per-tile schemes in ``jcm/physics/surface/echam/albedo.py`` (fractions
 - **Land** — ``land_albedo``, JSBACH's broadband scheme
   ``mo_land_surface.f90::update_land_surface_fast``. The snow-free background
   is ``forcing.alb0``; the snow cover is ``forcing.snowc_am``; snow on the
-  ground brightens it towards ``0.4 → 0.8`` as the land temperature
-  ``stl_am`` falls from the melting point to 5 K below it; forest
+  ground brightens it towards ``0.4 → 0.8`` as the land skin
+  temperature falls from the melting point to 5 K below it; forest
   (``forcing.forest_fraction``) hides the ground snow behind a canopy
   fraction ``forest·(1 − exp(−max(LAI, 2)))``; glacier cells
   (``forcing.glacier_fraction``) take the glacier albedo ``0.75 → 0.85`` over
@@ -108,7 +231,8 @@ sun, as in ECHAM, whose radiation reads the surface albedo at a radiation step
 (``trigrad``) and replays the transmissivities in between (``radheat``).
 The hand-off is step-local: it is dropped before the cross-step carry, so it is
 never checkpointed, and a restart replays the held ``radiation.surface_*`` of
-the last solve bit for bit.
+the last solve bit for bit. The land tile's own albedo is held the same way, on
+the ``surface`` carry (``land_albedo_at_solve``), for the land energy balance.
 
 The land-surface maps follow one convention across products, regrids and
 consumers (``jcm/data/regridding.py::CONDITIONAL_FIELDS``): ``lsm`` is the land

@@ -1735,6 +1735,94 @@ JAM mixed-phase freezing follows ECHAM-HAM
 
   See :doc:`science/clouds_microphysics` and :doc:`science/aerosol`.
 
+The ECHAM land evaporates in JSBACH's form and closes a skin energy balance
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The ECHAM hosts' land tile is a prescribed-moisture land (#979). Its
+  moisture flux carries JSBACH's humidity factors,
+  ``ρ·C·(csat·q_s − cair·q_a)`` (``mo_soil.f90::update_soil``). Bare soil
+  evaporates only while ``h·q_s`` exceeds the air humidity, with ``h`` from the
+  upper layer's fill (``calc_relative_humidity_upper`` of the bundle's
+  ``soilw_rel``, ECHAM6.3's 5-layer path). The forest fraction transpires
+  through ECHAM3's canopy conductance (evaluated every step from the absorbed
+  PAR, leaf area index 4), limited by JSBACH's water stress between the wilting
+  (0.35) and critical (0.75) fractions of ``soilw_am``. Snow and glacier
+  evaporate at the potential rate. The beta form it replaces,
+  ``cair = csat = soilw_am``, let a dry 307 K soil evaporate like a wet one.
+- The land skin temperature is prognostic. It is solved each step from
+  ``C_s·dT_s/dt = Rn − SH − LH − G`` with ECHAM's ``update_surfacetemp``,
+  coupled implicitly to the lowest level. ``G = Λ·(T_s − stl_am)`` flows into a
+  soil at the prescribed ERA5 temperature, which until now *was* the land
+  temperature. ``C_s`` and ``Λ`` are JSBACH's top-layer capacity and
+  conductance; snow grades the layer by depth, and snow or glacier holds the
+  skin at the melting point. The skin is what the radiation, the land albedo,
+  the surface saturation and the surface-layer stability see. Between
+  radiation calls the surface longwave is re-emitted at it and the change
+  heats the lowest level, which the convection and cloud schemes after it see
+  (ECHAM's ``radheat``), and the land absorbs the held downward shortwave
+  through the land albedo of the last radiation solve
+  (``surface.land_albedo_at_solve``).
+- Heat and moisture couple to the surface tile by tile through ECHAM's
+  Richtmyer–Morton relations (``richtmyer_land``/``_ocean``/``_ice``, then
+  ``blend_zq_zt``). Each tile's flux is taken against its own lowest-level
+  value, which changes the fluxes of mixed coastal and sea-ice cells by a few
+  per cent; pure cells are unchanged. ``VDiffParameters`` defaults
+  ``tpfac2``/``tpfac3`` to ECHAM's exact ``1/tpfac1`` and ``1 − 1/tpfac1``
+  (they were 0.667/0.333).
+- **Compared with the compiled Fortran.**
+  ``jcm/physics/surface/echam/jsbach_land_test.py`` reproduces, in float64 at
+  round-off and on 324 land columns plus scans through every switch, the
+  outputs of ECHAM6.3 / JSBACH's own ``richtmyer_land``,
+  ``update_surfacetemp``, ``update_soiltemp``, ``unstressed_canopy_cond_par``,
+  the relative-humidity and stress functions, and ``update_soil``'s
+  humidity-factor block (``jcm/data/test/echam_land_reference``, compiled
+  unmodified in a local harness).
+- The bare-soil, dew, water-stress and melt switches keep ECHAM's values and
+  take the derivatives of named smooth surrogates; the widths are static
+  fields of ``JsbachLandParameters``.
+- **New parameters.** ``JsbachLandParameters`` (wilting and critical
+  fractions, leaf area index, canopy constants, PAR fraction, soil, snow and
+  ice thermal constants, critical snow depth) are differentiable leaves of
+  ``TteTkeVerticalDiffusion(land_params=...)``, set from the CLI as
+  ``+physics.terms.tte_tke_vertical_diffusion.land_params.<field>=...``.
+  ``land_temperature="prescribed"`` holds the land skin at the forcing's land
+  temperature with the same evaporation form and coupling, for the
+  fixed-SST and fixed-land-temperature effective-radiative-forcing method of
+  Andrews et al. (2021). **New outputs** on ``surface``:
+  ``land_surface_temperature``, the land tile's ``land_net_radiation``,
+  ``land_sensible_heat_flux``, ``land_latent_heat_flux``,
+  ``ground_heat_flux``, ``snow_melt_heat_flux``, ``land_heat_storage`` and
+  ``land_evaporation``, which close ``Rn = SH + LH + G + melt + storage``,
+  ``land_energy_residual`` (``Rn − SH − LH``, the open budget of a prescribed
+  skin), and ``cair``, ``csat``, ``water_stress_factor``,
+  ``bare_soil_humidity``, ``canopy_conductance`` and ``land_albedo_at_solve``.
+- A checkpoint written before this change restores with the skin seeded from
+  ``stl_am`` and the land albedo of the last solve unset, which the land
+  balance replaces with the current step's until the radiation next solves
+  (the new carry fields migrate by name).
+- A run's first step from a cold start has no land evaporation, as in ECHAM
+  (``init_surface`` sets ``zcair = zcsat = 0``); a restored carry is
+  unaffected.
+- **Changes results** for every ECHAM configuration. Over days 5-10 of T63
+  members against the prescribed land: net TOA radiation +4.1 W m⁻² (1M and
+  2M) and +3.7 (JAM), land latent heat about halved (1M 62 → 33 W m⁻²), land
+  precipitation −43 to −46 % and ocean precipitation +8 to +11 %, with less
+  land cloud. Over 240 days of ``t63-echam-1m``, the spring surface surplus
+  ``H + LH − Rn`` of the Sahel, Mexican plateau and India falls from 157, 102
+  and 347 to 17, 33 and 30 W m⁻², land precipitation between 40°S and 40°N
+  from 6.83 to 3.66 mm d⁻¹ (GPCP 2.74), and land convective rain moves from a
+  02 h to a 14 h local-time maximum as the land heats its boundary layer by
+  day. The numbers and box tables are in
+  :doc:`design/land_skin_energy_balance`. See :doc:`science/surface`.
+- **Retune items.** Net TOA radiation rises by 4-5.5 W m⁻² with the drier,
+  less cloudy land (7.47 W m⁻² over days 30-240 of the 1M run, inside the
+  release gate's 10 W m⁻²). JAM's dust emission falls by 34 % (1741 → 1154
+  Tg yr⁻¹, burden −19 %) because the 10 m wind and friction velocity over the
+  sources fall by 11 %, so the dust calibration ``jam_dust_nduscale_scale``,
+  set against the prescribed land's winds, needs redoing on this surface, and
+  with it the dust-borne ice nuclei. Both belong to #682; nothing is retuned
+  here.
+
 
 Tiedtke-Nordeng takes ECHAM's decisions
 """""""""""""""""""""""""""""""""""""""

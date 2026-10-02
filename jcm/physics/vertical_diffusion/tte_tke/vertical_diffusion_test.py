@@ -278,6 +278,21 @@ class TestMatrixSolver:
         # Expected solution: [1.0, 1.0, 1.0] for both columns
         assert jnp.allclose(solution, jnp.array([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]), atol=1e-6)
     
+    def test_time_weights_are_echams(self):
+        """tpfac2 = 1/tpfac1 and tpfac3 = 1 - tpfac2 exactly, as ECHAM derives them.
+
+        ECHAM's ``ztpfac2 = 1/cvdifts`` (mo_soil.f90:1684,
+        mo_surface_boundary.f90:90). The surface coupling reads the implicit
+        value as ``tpfac1·bb``; with the earlier rounded 0.667/0.333 the
+        product was 1.0005, which put a ~3 W/m2 gap between the sensible flux
+        a land energy balance computes and the one the column receives.
+        """
+        p = VDiffParameters.default()
+        assert float(p.tpfac1) * float(p.tpfac2) == pytest.approx(1.0, abs=1e-7)
+        assert float(p.tpfac2) + float(p.tpfac3) == pytest.approx(1.0, abs=1e-7)
+        q = VDiffParameters.default(tpfac1=2.0)
+        assert float(q.tpfac2) == 0.5 and float(q.tpfac3) == 0.5
+
     def test_matrix_system_setup(self):
         """Test setup of matrix system."""
         ncol, nlev = 2, 5
@@ -307,14 +322,16 @@ class TestMatrixSolver:
         assert jnp.all(matrix_system.matrix_coeffs[:, :, 1, :] > 0)  # Diagonal > 0
 
     def test_matrix_system_setup_surface_robin_row(self):
-        """The surface exchange enters the bottom row exactly as k_sfc.
+        """The momentum drag enters the bottom row exactly as k_sfc.
 
-        With ``surface_exchange``/``surface_target`` given, the bottom
-        diagonal of the momentum/heat/moisture matrices must grow by
-        ``k_sfc = dt·tpfac1·ρ_s·C·recip_air_mass[K]`` and the bottom RHS by
-        ``tpfac2·k_sfc·X_s`` (ECHAM's ``zcfh_sfc·zqdp`` Robin row). The
-        hydrometeor/TKE/thv matrices must be untouched (no surface term,
-        matching ECHAM's bottom elimination 5.4 for xl/xi).
+        With ``surface_momentum`` given, the bottom diagonal of the momentum
+        matrix grows by ``k_sfc = dt·tpfac1·ρ_s·C_m·recip_air_mass[K]`` and the
+        bottom u/v RHS by ``tpfac2·k_sfc·u_s`` (ECHAM's ``zcfm·zqdp`` row with
+        the fraction-weighted box coefficient). Heat and moisture no longer
+        have a Robin row: they couple tile by tile through the
+        Richtmyer–Morton relations (``TestPerTileCoupling``), and the
+        hydrometeor/TKE/thv matrices never have a surface term (ECHAM's bottom
+        elimination 5.4 for xl/xi).
         """
         ncol, nlev = 2, 5
         state = create_test_atmospheric_state(ncol, nlev)
@@ -323,51 +340,33 @@ class TestMatrixSolver:
         k = jnp.ones((ncol, nlev)) * 8.0
         dt = 300.0
         c_m = jnp.array([0.02, 0.05])
-        c_h = jnp.array([0.03, 0.04])
-        c_q = jnp.array([0.01, 0.06])
-        u_s = jnp.zeros(ncol)
+        u_s = jnp.array([0.3, -0.2])
         v_s = jnp.zeros(ncol)
-        t_s = jnp.array([290.0, 295.0])
-        q_s = jnp.array([0.012, 0.015])
 
         base = setup_matrix_system(state, params, k, k, k, dt, k)
         coupled = setup_matrix_system(
-            state, params, k, k, k, dt, k,
-            surface_exchange=(c_m, c_h, c_q),
-            surface_target=(u_s, v_s, t_s, q_s),
-        )
+            state, params, k, k, k, dt, k, surface_momentum=(c_m, u_s, v_s))
 
         rho_s = state.pressure_half[:, -1] / (PHYS_CONST.rd * state.temperature[:, -1])
         k_sfc_m = dt * params.tpfac1 * rho_s * c_m / state.air_mass[:, -1]
-        k_sfc_h = dt * params.tpfac1 * rho_s * c_h / state.air_mass[:, -1]
-        # Moisture row uses the same moist Δp/g mass as every other row
-        # (ECHAM's single zqdp measure).
-        k_sfc_q = dt * params.tpfac1 * rho_s * c_q / state.air_mass[:, -1]
 
         diag_delta = coupled.matrix_coeffs[:, -1, 1, :] - base.matrix_coeffs[:, -1, 1, :]
         assert jnp.allclose(diag_delta[:, 0], k_sfc_m, rtol=1e-4)
-        assert jnp.allclose(diag_delta[:, 1], k_sfc_h, rtol=1e-4)
-        assert jnp.allclose(diag_delta[:, 2], k_sfc_q, rtol=1e-4)
-        # No surface term for hydrometeors, TKE, thv_var.
-        assert jnp.allclose(diag_delta[:, 3:], 0.0)
-        # Only the bottom row changes.
-        assert jnp.allclose(
-            coupled.matrix_coeffs[:, :-1], base.matrix_coeffs[:, :-1],
-        )
+        assert jnp.allclose(diag_delta[:, 1:], 0.0)
+        assert jnp.allclose(coupled.matrix_coeffs[:, :-1], base.matrix_coeffs[:, :-1])
 
         rhs_delta = coupled.rhs_vectors[:, -1, :] - base.rhs_vectors[:, -1, :]
         tp2 = params.tpfac2
-        assert jnp.allclose(rhs_delta[:, 0], tp2 * k_sfc_m * u_s, atol=1e-12)
+        # float32: the difference of two RHS loads of O(tp2·u) carries ~1e-7 of u.
+        assert jnp.allclose(rhs_delta[:, 0], tp2 * k_sfc_m * u_s, rtol=1e-3, atol=1e-6)
         assert jnp.allclose(rhs_delta[:, 1], tp2 * k_sfc_m * v_s, atol=1e-12)
-        assert jnp.allclose(rhs_delta[:, 2], tp2 * k_sfc_h * t_s, rtol=1e-4)
-        assert jnp.allclose(rhs_delta[:, 3], tp2 * k_sfc_q * q_s, rtol=1e-4)
-        assert jnp.allclose(rhs_delta[:, 4:], 0.0)
+        assert jnp.allclose(rhs_delta[:, 2:], 0.0)
 
     def test_vertical_diffusion_step_conservation(self):
         """Test that vertical diffusion step conserves mass.
 
         JUSTIFICATION (surface-coupling change): ``vertical_diffusion_step``
-        without ``surface_exchange``/``surface_target`` keeps the legacy
+        without ``surface_momentum``/``surface_tiles`` keeps the
         zero-flux bottom boundary, so the interior operator remains exactly
         conservative — that invariant is what this test pins. With the
         surface BC wired in (the default ``vertical_diffusion_column``
@@ -384,10 +383,11 @@ class TestMatrixSolver:
         exchange_coeff_moisture = jnp.ones((ncol, nlev)) * 6.0
         dt = 300.0
 
-        tendencies, surface_fluxes = vertical_diffusion_step(
+        tendencies, surface_fluxes, land = vertical_diffusion_step(
             state, params, exchange_coeff_momentum,
             exchange_coeff_heat, exchange_coeff_moisture, dt
         )
+        assert land is None
 
         # Check that tendencies are finite
         assert jnp.all(jnp.isfinite(tendencies.u_tendency))
@@ -1634,15 +1634,17 @@ class TestSurfaceTilePhase:
         assert scale > 0.0
         assert abs(e) < 1e-3 * scale
 
-    def test_term_wets_snowy_land_and_charges_its_sublimation(self):
-        """The term's land tile follows JSBACH with the prescribed snow cover.
+    def test_term_evaporates_land_in_jsbachs_form(self):
+        """The term's land tile follows JSBACH's humidity factors (#979).
 
-        Snow evaporates at the potential rate (wetness ``s + (1-s)·w``), and
-        the reported latent heat charges the sublimation heat to that snow
-        share: ``LH/E = alv + (als - alv)·s / (s + (1-s)·w)``.
+        Re-derived from the beta form ``cair = csat = s + (1-s)·w`` the land
+        tile used to carry. With JSBACH's factors (``update_soil`` 2503-2574):
+        a snow-free bare soil whose ``h·q_s`` is below the air humidity does
+        not evaporate at all; the snow-covered share evaporates at the
+        potential rate and all of it sublimates (``LH/E = als``); a wet soil
+        evaporates with the condensation heat; snow over half the land plus
+        glacier on the rest is wholly at the potential rate.
         """
-        from types import SimpleNamespace
-
         from jcm.forcing import ForcingData
         from jcm.physics.surface.echam.surface_types import SurfaceData
         from jcm.physics_interface import PhysicsState
@@ -1670,15 +1672,20 @@ class TestSurfaceTilePhase:
             "height_half": to_col(vstate.height_half),
             "surface": SurfaceData.zeros((1,), nlev).copy(
                 roughness_length=jnp.full((1,), 0.01)),
+            # A restored carry: the previous step's exchange velocities, which
+            # the canopy factor reads (a cold start has none, and no land
+            # evaporation; checked last).
             "vertical_diffusion": VerticalDiffusionData.zeros((1,), nlev).copy(
-                tke=jnp.full((nlev, 1), 3.0)),
-            "radiation": SimpleNamespace(surface_sw_down=jnp.zeros(1),
-                                         surface_lw_down=jnp.zeros(1)),
+                tke=jnp.full((nlev, 1), 3.0),
+                surface_exchange_heat=jnp.full_like(
+                    VerticalDiffusionData.zeros((1,), nlev).surface_exchange_heat, 0.01)),
+            # No radiation: the land keeps the prescribed soil temperature, so
+            # the comparison is of the evaporation form alone (the energy
+            # balance is TestLandEnergyBalance's).
         }
         terrain = TerrainData.single_column(fmask=1.0)
-        soil, snow = 0.2, 0.5
 
-        def fluxes(snow_cover, glacier=None):
+        def fluxes(soil, snow_cover, glacier=None):
             forcing = ForcingData.zeros((1, 1)).copy(
                 stl_am=jnp.full((1, 1), t_land),
                 soilw_am=jnp.full((1, 1), soil),
@@ -1692,20 +1699,25 @@ class TestSurfaceTilePhase:
             return (float(out.surface_evaporation.ravel()[0]),
                     float(out.surface_latent_heat.ravel()[0]))
 
-        e_bare, lh_bare = fluxes(0.0)
-        e_snow, lh_snow = fluxes(snow)
-        assert e_bare > 1e-7, "vacuous test: no land evaporation"
-        np.testing.assert_allclose(lh_bare / e_bare, PHYS_CONST.alhc,
-                                   rtol=1e-5)
-        wet = snow + (1.0 - snow) * soil
-        # Wetter surface, same exchange: E scales with the wetness.
-        np.testing.assert_allclose(e_snow / e_bare, wet / soil, rtol=0.05)
-        np.testing.assert_allclose(
-            lh_snow / e_snow,
-            PHYS_CONST.alhc + (PHYS_CONST.alhs - PHYS_CONST.alhc) * snow / wet,
-            rtol=1e-5)
-        # Half glacier, the rest fully snow covered (``snowc`` is the share
-        # of the NON-glacier land): all snow — potential rate, all sublimated.
-        e_full, lh_full = fluxes(1.0, glacier=0.5)
-        assert e_full > e_snow  # wetness 1 > 0.6
+        e_dry, _ = fluxes(0.2, 0.0)
+        assert e_dry == 0.0, "a dry bare soil (h·q_s < q_a) must not evaporate"
+        e_wet, lh_wet = fluxes(0.95, 0.0)
+        assert e_wet > 1e-6, "vacuous test: no wet-soil evaporation"
+        np.testing.assert_allclose(lh_wet / e_wet, PHYS_CONST.alhc, rtol=1e-5)
+        e_snow, lh_snow = fluxes(0.2, 0.5)
+        assert e_snow > 1e-7
+        np.testing.assert_allclose(lh_snow / e_snow, PHYS_CONST.alhs, rtol=1e-5)
+        # snowc is the share of the NON-glacier land: half glacier, the rest
+        # fully snow covered — all of the land at the potential rate. Twice
+        # the factors of the half-snow case, which the implicit coupling damps:
+        # E ∝ c·D/(D + c·k) for cair = csat = c, so the ratio sits below 2.
+        e_full, lh_full = fluxes(0.2, 1.0, glacier=0.5)
+        assert 1.5 < e_full / e_snow < 2.0, e_full / e_snow
         np.testing.assert_allclose(lh_full / e_full, PHYS_CONST.alhs, rtol=1e-5)
+        # ECHAM's cold start (init_surface: zcair = zcsat = 0): a carry with no
+        # land exchange velocity is the first step, and the land does not
+        # evaporate on it, however wet.
+        diagnostics["vertical_diffusion"] = VerticalDiffusionData.zeros((1,), nlev).copy(
+            tke=jnp.full((nlev, 1), 3.0))
+        e_cold, _ = fluxes(0.95, 0.5)
+        assert e_cold == 0.0, e_cold
