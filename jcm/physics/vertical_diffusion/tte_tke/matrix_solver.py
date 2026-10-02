@@ -8,10 +8,14 @@ import jax
 import jax.numpy as jnp
 
 import jcm.constants as c
+from jcm.physics.surface.echam import jsbach_land
 from .vertical_diffusion_types import (
     VDiffState, VDiffParameters, VDiffMatrixSystem, VDiffTendencies,
-    VDiffSurfaceFluxes,
+    VDiffSurfaceFluxes, SurfaceTiles, LandBalanceOutputs,
 )
+
+#: Tile order of the TTE-TKE surface: open water, sea ice, land.
+LAND_TILE = 2
 
 
 def _surface_air_density(state: VDiffState) -> jnp.ndarray:
@@ -28,8 +32,7 @@ def setup_matrix_system(
     exchange_coeff_moisture: jnp.ndarray,
     dt: float,
     tke_exchange_coeff: jnp.ndarray = None,
-    surface_exchange: tuple = None,
-    surface_target: tuple = None,
+    surface_momentum: tuple = None,
 ) -> VDiffMatrixSystem:
     """Set up the tridiagonal matrix system for vertical diffusion.
 
@@ -38,25 +41,25 @@ def setup_matrix_system(
     - where prefactor = rho / dz = p / (Tv * Rd * dz) at half levels
     - This gets divided by air_mass to give: K* / dm = dt * tpfac1 * K / dz²
 
-    Surface boundary condition (ECHAM-faithful Robin row)
-    -----------------------------------------------------
-    When ``surface_exchange``/``surface_target`` are given, the bulk surface
-    exchange enters the BOTTOM row of the momentum (u, v), heat (T) and
-    moisture (qv) matrices exactly as ECHAM's ``zcfh_sfc·zqdp`` does in the
-    Richtmyer–Morton bottom elimination (``mo_surface_ocean.f90:510-515``):
+    Surface boundary condition
+    --------------------------
+    Momentum: with ``surface_momentum = (C_m, u_s, v_s)`` the bulk drag enters
+    the BOTTOM row of the u/v matrix as a Robin term, exactly as ECHAM's
+    fraction-weighted ``cdum`` does (``mo_surface.f90:1205-1219`` →
+    ``vdiff.f90:1099-1100``)::
 
-        k_sfc = dt · tpfac1 · ρ_s · C_grid · recip_air_mass[:, K]
-        aa[:, K, diag, im] += k_sfc
-        rhs[:, K, ivar]    += tpfac2 · k_sfc · X_s_eff
+        k_sfc = dt · tpfac1 · ρ_s · C_m · recip_air_mass[:, K]
+        aa[:, K, diag, mom] += k_sfc
+        rhs[:, K, u/v]      += tpfac2 · k_sfc · u_s/v_s
 
-    with ``ρ_s = p_half[K+1/2]/(Rd·T_K)`` and ``C_grid`` the tile-collapsed
-    exchange *velocity* [m/s] (CH·|U| etc.). This is the same dimensionless
-    row entry as ECHAM's ``zcfh_sfc·zqdp = α·Δt·g·ρ_s·C/Δp_K``; the RHS
-    constant is divided by α because the solver works in ``bb = X̂/α`` units
-    (``X̂ = α·X_new + (1−α)·X_old``). The hydrometeor (qc/qi), TKE and
-    thv_var matrices get NO surface term — matching ECHAM's bottom
-    elimination 5.4, which handles only xl/xi with a zero surface
-    coefficient (``vdiff.f90:933-941``).
+    with ``ρ_s = p_half[K+1/2]/(Rd·T_K)``: the dimensionless row entry of
+    ECHAM's ``zcfm·zqdp``, the RHS constant divided by α because the solver
+    works in ``bb = X̂/α`` units. Heat and moisture get no surface term here:
+    they couple tile by tile through the Richtmyer–Morton relations in
+    :func:`vertical_diffusion_step`. The hydrometeor (qc/qi), TKE and thv_var
+    matrices get no surface term at all, matching ECHAM's bottom elimination
+    5.4, which handles only xl/xi with a zero surface coefficient
+    (``vdiff.f90:933-941``).
 
     Args:
         state: Atmospheric state
@@ -66,13 +69,9 @@ def setup_matrix_system(
         exchange_coeff_moisture: Moisture exchange coefficient [m²/s]
         dt: Time step [s]
         tke_exchange_coeff: TKE exchange coefficient [m²/s]
-        surface_exchange: Optional ``(C_m, C_h, C_q)`` grid-collapsed surface
-            exchange velocities [m/s], each (ncol,). ``None`` keeps the
-            legacy zero-flux (insulating, free-slip) bottom boundary.
-        surface_target: Optional ``(u_s, v_s, T_s_eff, q_s_eff)`` surface
-            target values, each (ncol,). ``T_s_eff`` must already include
-            the ``−φ_K/cpd`` dry-static-energy compensation (the solver
-            diffuses T, not s = cp·T + gz; see ``vertical_diffusion_column``).
+        surface_momentum: Optional ``(C_m, u_s, v_s)``: the fraction-weighted
+            momentum exchange velocity [m/s] and the surface velocity, each
+            (ncol,). ``None`` keeps the free-slip bottom boundary.
 
     Returns:
         Matrix system ready for solution
@@ -170,35 +169,15 @@ def setup_matrix_system(
     # Setup right-hand side vectors
     rhs_vectors = setup_rhs_vectors(state, params)
 
-    # Surface Robin term on the bottom row (see docstring). Only u, v, T,
-    # qv couple to the surface; qc/qi/TKE/thv_var keep the zero-flux bottom.
-    if surface_exchange is not None:
-        c_mom, c_heat, c_moist = surface_exchange
-        u_s, v_s, t_s_eff, q_s_eff = surface_target
-
-        # k_sfc = dt·tpfac1·ρ_s·C_grid·recip_air_mass[K] for every row —
-        # the same moist Δp/g measure as the interior rows (ECHAM zqdp),
-        # so the delivered-E identity Σ (dp/g)·dq/dt == E is exact in the
-        # model's own budget convention.
+    # Momentum Robin term on the bottom row (see docstring).
+    if surface_momentum is not None:
+        c_mom, u_s, v_s = surface_momentum
         rho_s = _surface_air_density(state)
-        dt_tp1_rho = dt * params.tpfac1 * rho_s
-        k_sfc_mom = dt_tp1_rho * c_mom * recip_air_mass[:, -1]
-        k_sfc_heat = dt_tp1_rho * c_heat * recip_air_mass[:, -1]
-        k_sfc_moist = dt_tp1_rho * c_moist * recip_air_mass[:, -1]
-
-        # Bottom diagonals: ECHAM's "+ zcfhw*zqdp" inside zdiscw
-        # (mo_surface_ocean.f90:510).
+        k_sfc_mom = dt * params.tpfac1 * rho_s * c_mom * recip_air_mass[:, -1]
         matrix_coeffs = matrix_coeffs.at[:, -1, 1, 0].add(k_sfc_mom)
-        matrix_coeffs = matrix_coeffs.at[:, -1, 1, 1].add(k_sfc_heat)
-        matrix_coeffs = matrix_coeffs.at[:, -1, 1, 2].add(k_sfc_moist)
-
-        # Bottom RHS: tpfac2·k_sfc·X_s — ECHAM's "+ zcfh_sfc·zqdp·X_s" term,
-        # divided by α because rhs is loaded in X_old/α (bb) units.
         tpfac2 = params.tpfac2
         rhs_vectors = rhs_vectors.at[:, -1, 0].add(tpfac2 * k_sfc_mom * u_s)
         rhs_vectors = rhs_vectors.at[:, -1, 1].add(tpfac2 * k_sfc_mom * v_s)
-        rhs_vectors = rhs_vectors.at[:, -1, 2].add(tpfac2 * k_sfc_heat * t_s_eff)
-        rhs_vectors = rhs_vectors.at[:, -1, 3].add(tpfac2 * k_sfc_moist * q_s_eff)
 
     return VDiffMatrixSystem(
         matrix_coeffs=matrix_coeffs,
@@ -292,7 +271,7 @@ def setup_rhs_vectors(
     Following ICON's semi-implicit time stepping (mo_vdiff_solver.f90):
     - Matrix equation: (I - dt*tpfac1*L) * bb = tpfac2 * X_old
     - New value: X_new = bb + tpfac3 * X_old
-    - where tpfac1=1.5, tpfac2=1/tpfac1=0.667, tpfac3=1-tpfac2=0.333
+    - where tpfac1=1.5, tpfac2=1/tpfac1, tpfac3=1-tpfac2 (ECHAM's cvdifts)
 
     The tpfac2 factor scales the RHS to achieve the semi-implicit scheme.
     """
@@ -353,6 +332,57 @@ def solve_tridiagonal_system(
     return solution
 
 
+def _safe_pivot(x):
+    """Keep a pivot's sign and keep it away from zero.
+
+    ``jnp.sign(x)·eps + eps`` returned exactly 0 for a tiny negative pivot,
+    and the following divisions produced inf that grew ~18 orders of magnitude
+    in back-substitution; this form is never zero.
+    """
+    eps = 1e-20
+    return jnp.where(jnp.abs(x) > eps, x, jnp.where(x < 0, -eps, eps))
+
+
+def forward_sweep(a, b, c, d):
+    """Thomas elimination from the top: ``(cp, dp, pivot)``, each [ncol, nlev].
+
+    Row ``k`` is reduced to ``x_k = dp_k − cp_k·x_{k+1}``. ``pivot_k`` is the
+    eliminated diagonal ``b_k − a_k·cp_{k−1}``, so at the bottom row
+    ``pivot_K`` and ``dp_K·pivot_K`` are ECHAM's eliminated ``1 + zfac·(1 −
+    zebsh_{K−1})`` and ``ztdif_K + zfac·ztdif_{K−1}`` (``vdiff.f90:887-931``,
+    with ``cp = −zebsh``), the inputs of the Richtmyer–Morton coefficients.
+    """
+    pivot_0 = _safe_pivot(b[:, 0])
+    cp_0 = c[:, 0] / pivot_0
+    dp_0 = d[:, 0] / pivot_0
+
+    def step(carry, inputs):
+        cp_prev, dp_prev = carry
+        a_i, b_i, c_i, d_i = inputs
+        pivot_i = _safe_pivot(b_i - a_i * cp_prev)
+        cp_i = c_i / pivot_i
+        dp_i = (d_i - a_i * dp_prev) / pivot_i
+        return (cp_i, dp_i), (cp_i, dp_i, pivot_i)
+
+    _, (cp_r, dp_r, pv_r) = jax.lax.scan(
+        step, (cp_0, dp_0), (a[:, 1:].T, b[:, 1:].T, c[:, 1:].T, d[:, 1:].T))
+    cp = jnp.concatenate([cp_0[None, :], cp_r], axis=0).T
+    dp = jnp.concatenate([dp_0[None, :], dp_r], axis=0).T
+    pivot = jnp.concatenate([pivot_0[None, :], pv_r], axis=0).T
+    return cp, dp, pivot
+
+
+def back_substitute(cp, dp, x_bottom):
+    """Upward sweep ``x_k = dp_k − cp_k·x_{k+1}`` from a given bottom value."""
+    def step(x_next, inputs):
+        cp_i, dp_i = inputs
+        x_i = dp_i - cp_i * x_next
+        return x_i, x_i
+
+    _, x_rest = jax.lax.scan(step, x_bottom, (cp[:, :-1].T[::-1], dp[:, :-1].T[::-1]))
+    return jnp.concatenate([x_rest[::-1], x_bottom[None, :]], axis=0).T
+
+
 @jax.jit
 def solve_tridiagonal_single(
     a: jnp.ndarray,
@@ -361,82 +391,19 @@ def solve_tridiagonal_single(
     d: jnp.ndarray
 ) -> jnp.ndarray:
     """Solve a single tridiagonal system using Thomas algorithm.
-    
+
     Args:
         a: Sub-diagonal [ncol, nlev]
         b: Diagonal [ncol, nlev]
         c: Super-diagonal [ncol, nlev]
         d: Right-hand side [ncol, nlev]
-        
+
     Returns:
         Solution [ncol, nlev]
 
     """
-    ncol, nlev = b.shape
-    
-    # Forward sweep (elimination)
-    # Guard pivots from underflow to prevent NaN with ill-conditioned matrices.
-    # The previous form ``jnp.sign(x) * 1e-20 + 1e-20`` returned exactly 0
-    # when ``x`` was a tiny *negative* number (sign(-eps)*1e-20 + 1e-20 ==
-    # -1e-20 + 1e-20 == 0) — so subsequent ``/_safe(x)`` divisions produced
-    # inf, which after a few back-substitutions explodes the solution by
-    # ~18 orders of magnitude. The new form preserves sign and is never
-    # exactly zero.
-    def _safe(x):
-        eps = 1e-20
-        return jnp.where(
-            jnp.abs(x) > eps,
-            x,
-            jnp.where(x < 0, -eps, eps),
-        )
-
-    # Initialize first row
-    cp_0 = c[:, 0] / _safe(b[:, 0])
-    dp_0 = d[:, 0] / _safe(b[:, 0])
-
-    # Remaining rows
-    def forward_step(carry, inputs):
-        cp_prev, dp_prev = carry
-        a_i, b_i, c_i, d_i = inputs
-
-        denom_i = _safe(b_i - a_i * cp_prev)
-        cp_i = c_i / denom_i
-        dp_i = (d_i - a_i * dp_prev) / denom_i
-
-        return (cp_i, dp_i), (cp_i, dp_i)
-    
-    _, forward_outputs = jax.lax.scan(
-        forward_step,
-        (cp_0, dp_0), # initial carry
-        (a[:, 1:].T, b[:, 1:].T, c[:, 1:].T, d[:, 1:].T) # inputs
-    )
-    
-    # Reconstruct cp and dp arrays
-    cp_rest, dp_rest = forward_outputs
-    cp = jnp.concatenate([cp_0[None, :], cp_rest], axis=0).T
-    dp = jnp.concatenate([dp_0[None, :], dp_rest], axis=0).T
-
-    # Back substitution
-    x_last = dp[:, -1]
-    def backward_step(carry, inputs):
-        """Backward substitution step for scan."""
-        x_next = carry
-        cp_i, dp_i = inputs
-        
-        x_i = dp_i - cp_i * x_next
-        
-        return x_i, x_i
-    
-    # Prepare inputs for backward scan (reverse order, skip last element)
-    backward_inputs = (cp[:, :-1].T[::-1], dp[:, :-1].T[::-1])
-
-    _, backward_outputs = jax.lax.scan(backward_step, x_last, backward_inputs)
-    
-    # Reconstruct solution array (reverse the outputs and add last element)
-    x_rest = backward_outputs[::-1]
-    x = jnp.concatenate([x_rest, x_last[None, :]], axis=0).T
-    
-    return x
+    cp, dp, _ = forward_sweep(a, b, c, d)
+    return back_substitute(cp, dp, dp[:, -1])
 
 
 @jax.jit
@@ -513,69 +480,156 @@ def compute_tendencies_from_solution(
     )
 
 
-@jax.jit
-def diagnose_surface_fluxes(
-    solution: jnp.ndarray,
-    state: VDiffState,
-    params: VDiffParameters,
-    surface_exchange: tuple,
-    surface_target: tuple,
-    latent_heat_exchange: tuple = None,
-) -> VDiffSurfaceFluxes:
-    """Diagnose the delivered surface fluxes from the implicit solution.
+def _momentum_stress(solution, state, params, surface_momentum):
+    """Stress the atmosphere exerts on the surface, from the implicit solution.
 
-    Port of ECHAM's post-solve flux diagnosis (``mo_surface_ocean.f90:
-    620-634``): the flux is evaluated at the α-weighted implicit bottom-level
-    value ``X̂_K = tpfac1·bb_K`` the solver itself used, so reported flux ==
-    delivered flux by construction:
-
-        E  = ρ_s·C_q·(q_s_eff − X̂_K)         [kg/m²/s, positive up]
-        SH = ρ_s·cpd·C_h·(T_s_eff − T̂_K)     [W/m²,   positive up]
-        LH = ρ_s·C_L·(q_L − X̂_K)              [W/m², per-tile latent heats]
-        τ  = ρ_s·C_m·(Û_K − û_s)             [N/m², momentum flux into the
-                                              surface, positive with the wind]
-
-    Implementation note: the fluxes are written in the algebraically
-    equivalent form ``ρ_s·C·tpfac1·(tpfac2·X_s − bb_K)``. With ECHAM's exact
-    ``tpfac2 = 1/tpfac1`` this IS the formula above; with the port's rounded
-    defaults (0.667/0.333) this form is the one that keeps the ``pev_vdiff``
-    column-budget identity ``Σ_k dm_k·dX_k/dt == flux`` (``vdiff.f90:
-    1544-1551``) exact to round-off, because ``tpfac2·k_sfc·X_s`` is what the
-    bottom RHS actually carried into the solve.
+    ``τ = ρ_s·C_m·tpfac1·(bb_K − tpfac2·u_s)`` — ECHAM's ``zcfm·zudif``
+    diagnosis (``mo_surface_land.f90::update_stress_land``) on the α-weighted
+    bottom value the solver used, so the stress equals the column's momentum
+    change (positive with the wind; the column receives −τ).
     """
-    c_mom, c_heat, c_moist = surface_exchange
-    u_s, v_s, t_s_eff, q_s_eff = surface_target
+    c_mom, u_s, v_s = surface_momentum
+    rho_s = _surface_air_density(state)
+    tp1, tp2 = params.tpfac1, params.tpfac2
+    stress_u = rho_s * c_mom * tp1 * (solution[:, -1, 0] - tp2 * u_s)
+    stress_v = rho_s * c_mom * tp1 * (solution[:, -1, 1] - tp2 * v_s)
+    return stress_u, stress_v
+
+
+def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
+                         matrix_system: VDiffMatrixSystem, dt: float,
+                         tiles: SurfaceTiles):
+    """Heat and moisture coupled to the surface tile by tile, as ECHAM does.
+
+    ECHAM eliminates the column from the top once (``vdiff.f90:887-931``),
+    after which the lowest level obeys, for each tile ``t`` on its own exchange
+    coefficient ``k_t = Δt·α·ρ_s·C_t·g/Δp_K`` (``richtmyer_land``, ``_ocean``,
+    ``_ice``; :func:`~jcm.physics.surface.echam.jsbach_land.richtmyer_morton`)::
+
+        X̂_K,t = E_t·X̂_s,t + F_t
+
+    The prescribed tiles (open water at the SST, sea ice at ``min(SST,
+    ctfreez)``) give ``X̂_K,t`` directly. The land tile, when
+    ``tiles.land`` is given, first solves its skin energy balance against its
+    own ``E``/``F`` (``update_surfacetemp``; ``mo_soil.f90:1843-1853``), with the
+    snow-melt cap of ``update_soil`` 1859-1863; with
+    ``land_temperature="prescribed"`` it keeps the prescribed value instead.
+    The column's bottom value is
+    the fraction-weighted blend ``bb_K = tpfac2·Σ_t f_t·X̂_K,t``
+    (``blend_zq_zt``), and back-substitution completes the solve.
+
+    Each tile's flux is evaluated against its OWN lowest-level value
+    (``postproc_ocean``/``_ice``, ``update_soil`` 1892-1911); because the
+    eliminated bottom row then reads ``D·bb_K = R + tpfac2·Σ_t f_t·k_t·(X̂_s,t −
+    X̂_K,t)``, the grid-mean flux is exactly what the column receives (the
+    ``pev_vdiff`` identity) when ``tpfac1·tpfac2 = 1``. Heat is carried as
+    ``T`` with the surface value ``T_s − φ_K/c_pd`` (the solver diffuses T,
+    not s = c_p·T + φ; the shift makes the bottom exchange the dry-static-energy
+    flux), so the land balance reads ECHAM's dry static energies as
+    ``s_s = c_pd·T̂_s`` and ``s_K = E·s_s + c_pd·F + (1 − E)·φ_K``.
+
+    Returns:
+        ``(T_solution, q_solution, VDiffSurfaceFluxes-without-stress parts,
+        land outputs or None)``: the bb-unit solutions ``(ncol, nlev)``, a dict
+        of grid fluxes, and :class:`LandBalanceOutputs`.
+
+    """
+    tp1, tp2, tp3 = params.tpfac1, params.tpfac2, params.tpfac3
+    mc, rhs = matrix_system.matrix_coeffs, matrix_system.rhs_vectors
+
+    def eliminate(ivar, imat):
+        cp, dp, pivot = forward_sweep(mc[:, :, 0, imat], mc[:, :, 1, imat],
+                                      mc[:, :, 2, imat], rhs[:, :, ivar])
+        return cp, dp, pivot[:, -1], dp[:, -1] * pivot[:, -1]
+
+    cp_t, dp_t, den_t, r_t = eliminate(2, 1)
+    cp_q, dp_q, den_q, r_q = eliminate(3, 2)
 
     rho_s = _surface_air_density(state)
-    tp1 = params.tpfac1
-    tp2 = params.tpfac2
+    k_scale = (dt * tp1 * rho_s / state.air_mass[:, -1])[:, None]
+    k_h = k_scale * tiles.exchange_heat
+    k_q = k_scale * tiles.exchange_moisture
+    en, fn, eq, fq = jsbach_land.richtmyer_morton(
+        den_t[:, None], den_q[:, None], r_t[:, None], r_q[:, None], k_h, k_q,
+        tiles.cair, tiles.csat, tp1)
 
-    bb_u = solution[:, -1, 0]
-    bb_v = solution[:, -1, 1]
-    bb_t = solution[:, -1, 2]
-    bb_qv = solution[:, -1, 3]
+    cpd = c.cpd
+    phi_k = c.grav * (state.height_full[:, -1] - state.height_half[:, -1])
+    x_s = tiles.temperature - (phi_k / cpd)[:, None]
+    q_s = tiles.saturation_humidity
 
-    evaporation = rho_s * c_moist * tp1 * (tp2 * q_s_eff - bb_qv)
-    sensible_heat = rho_s * c.cpd * c_heat * tp1 * (tp2 * t_s_eff - bb_t)
-    if latent_heat_exchange is None:
-        # No per-tile latent heats supplied: all condensation (open water).
-        latent_heat = c.alhc * evaporation
-    else:
-        c_lh, q_lh = latent_heat_exchange
-        latent_heat = rho_s * c_lh * tp1 * (tp2 * q_lh - bb_qv)
-    # Stress the atmosphere exerts (positive with the wind); the delivered
-    # column momentum change is −τ (drag), matching the old surface-term
-    # convention of publishing τ = ρ·C_M·u and applying −τ/(ρ·dz).
-    stress_u = rho_s * c_mom * tp1 * (bb_u - tp2 * u_s)
-    stress_v = rho_s * c_mom * tp1 * (bb_v - tp2 * v_s)
+    land = tiles.land
+    prescribed = (land is not None and jsbach_land.check_land_temperature_mode(land.params)
+                  == "prescribed")
+    if land is not None:
+        il = LAND_TILE
+        t_old = land.temperature
+        rn_old = (land.net_shortwave + land.emissivity * land.longwave_down
+                  - land.emissivity * c.sbc * t_old ** 4)
+    if prescribed:
+        # Fixed land temperature: the skin stays at the prescribed value the
+        # tiles already carry; nothing is solved and the budget stays open.
+        t_hat = t_new = t_old
+    elif land is not None:
+        s_hat = jsbach_land.update_surfacetemp(
+            cpd, en[:, il], cpd * fn[:, il] + (1.0 - en[:, il]) * phi_k, eq[:, il], fq[:, il],
+            cpd * t_old, q_s[:, il], land.saturation_slope, rn_old,
+            land.conductance * (land.soil_temperature - t_old),
+            rho_s * tiles.exchange_heat[:, il], tiles.cair[:, il], tiles.csat[:, il],
+            tiles.sublimation_fraction[:, il], land.heat_capacity + dt * land.conductance,
+            dt, tp1, land.emissivity)
+        t_hat = s_hat / cpd
+        # ECHAM forms the new (unfiltered) temperature from the uncapped ŝ and
+        # then melts the excess, but evaluates the fluxes at the capped ŝ.
+        t_hat = jsbach_land.melt_cap(t_hat, land.melt_capped, land.params)
+        t_new = jsbach_land.melt_cap(tp2 * s_hat / cpd + tp3 * t_old,
+                                     land.melt_capped, land.params)
+        q_hat = q_s[:, il] + land.saturation_slope * (t_hat - t_old)
+        # The land constants are float64 leaves under x64; the tiles keep the
+        # state's precision.
+        x_s = x_s.at[:, il].set((t_hat - phi_k / cpd).astype(x_s.dtype))
+        q_s = q_s.at[:, il].set(q_hat.astype(q_s.dtype))
 
-    return VDiffSurfaceFluxes(
-        evaporation=evaporation,
-        sensible_heat=sensible_heat,
-        latent_heat=latent_heat,
-        stress_u=stress_u,
-        stress_v=stress_v,
+    x_k = en * x_s + fn                      # X̂_K per tile (update_land)
+    q_k = eq * q_s + fq
+    frac = tiles.fraction
+    sol_t = back_substitute(cp_t, dp_t, tp2 * jnp.sum(frac * x_k, axis=1))
+    sol_q = back_substitute(cp_q, dp_q, tp2 * jnp.sum(frac * q_k, axis=1))
+
+    rho = rho_s[:, None]
+    sh_t = rho * cpd * tiles.exchange_heat * (x_s - x_k)
+    e_t = rho * tiles.exchange_moisture * (tiles.csat * q_s - tiles.cair * q_k)
+    e_pot_t = rho * tiles.exchange_moisture * (q_s - q_k)
+    lh_t = c.alhc * e_t + (c.alhs - c.alhc) * tiles.sublimation_fraction * e_pot_t
+    fluxes = dict(
+        evaporation=jnp.sum(frac * e_t, axis=1),
+        sensible_heat=jnp.sum(frac * sh_t, axis=1),
+        latent_heat=jnp.sum(frac * lh_t, axis=1),
     )
+
+    land_out = None
+    if land is not None:
+        rn = rn_old - 4.0 * land.emissivity * c.sbc * t_old ** 3 * (t_hat - t_old)
+        sh_l, lh_l = sh_t[:, LAND_TILE], lh_t[:, LAND_TILE]
+        residual = rn - sh_l - lh_l
+        if prescribed:
+            ground = storage = melt = jnp.zeros_like(rn)
+        else:
+            ground = land.conductance * (t_new - land.soil_temperature)
+            storage = land.heat_capacity * (t_new - t_old) / dt
+            melt = residual - ground - storage
+        land_out = LandBalanceOutputs(
+            temperature=t_new,
+            ground_heat_flux=ground,
+            net_radiation=rn,
+            sensible_heat_flux=sh_l,
+            latent_heat_flux=lh_l,
+            evaporation=e_t[:, LAND_TILE],
+            heat_storage=storage,
+            melt_heat_flux=melt,
+            energy_residual=residual,
+        )
+    return sol_t, sol_q, fluxes, land_out
 
 
 @jax.jit
@@ -587,9 +641,8 @@ def vertical_diffusion_step(
     exchange_coeff_moisture: jnp.ndarray,
     dt: float,
     tke_exchange_coeff: jnp.ndarray = None,
-    surface_exchange: tuple = None,
-    surface_target: tuple = None,
-    latent_heat_exchange: tuple = None,
+    surface_momentum: tuple = None,
+    surface_tiles: SurfaceTiles = None,
 ) -> tuple:
     """Perform one vertical diffusion time step.
 
@@ -601,52 +654,46 @@ def vertical_diffusion_step(
         exchange_coeff_moisture: Moisture exchange coefficient
         dt: Time step [s]
         tke_exchange_coeff: TKE exchange coefficient
-        surface_exchange: Optional ``(C_m, C_h, C_q)`` surface exchange
-            velocities [m/s] — enables the ECHAM Robin bottom row (see
-            :func:`setup_matrix_system`). ``None`` keeps the legacy
-            zero-flux bottom boundary.
-        surface_target: Optional ``(u_s, v_s, T_s_eff, q_s_eff)`` targets.
-        latent_heat_exchange: Optional ``(C_L, q_L)`` pair giving the latent
-            heat of the delivered moisture flux as ``ρ_s·C_L·(q_L − X̂_K)``
-            (per-tile condensation/sublimation heats folded in by the
-            caller). ``None`` reports ``alhc·E``.
+        surface_momentum: Optional ``(C_m, u_s, v_s)``: the momentum Robin row
+            (see :func:`setup_matrix_system`). ``None``: free slip.
+        surface_tiles: Optional :class:`SurfaceTiles`: heat and moisture
+            coupled tile by tile (:func:`couple_surface_tiles`). ``None``:
+            insulating, zero-flux bottom.
 
     Returns:
-        ``(tendencies, surface_fluxes)`` — tendencies for all variables and
-        the delivered surface fluxes (zeros for the zero-flux boundary).
+        ``(tendencies, surface_fluxes, land)`` — tendencies for all variables,
+        the delivered grid-mean surface fluxes (zero for the zero-flux
+        boundary) and the land tile's :class:`LandBalanceOutputs` (``None``
+        unless ``surface_tiles.land`` is given).
 
     """
     # Default TKE exchange coefficient if not provided
     if tke_exchange_coeff is None:
         tke_exchange_coeff = exchange_coeff_momentum
 
-    # Set up matrix system
     matrix_system = setup_matrix_system(
         state, params, exchange_coeff_momentum,
         exchange_coeff_heat, exchange_coeff_moisture, dt, tke_exchange_coeff,
-        surface_exchange=surface_exchange, surface_target=surface_target,
+        surface_momentum=surface_momentum,
     )
-
-    # Solve the system
     solution = solve_tridiagonal_system(
         matrix_system.matrix_coeffs,
         matrix_system.rhs_vectors,
         matrix_system.variable_to_matrix
     )
 
-    # Compute tendencies
-    tendencies = compute_tendencies_from_solution(
-        solution, state, params, dt
-    )
+    ncol = state.u.shape[0]
+    zero = jnp.zeros(ncol)
+    fluxes = dict(evaporation=zero, sensible_heat=zero, latent_heat=zero)
+    land = None
+    if surface_tiles is not None:
+        sol_t, sol_q, fluxes, land = couple_surface_tiles(
+            state, params, matrix_system, dt, surface_tiles)
+        solution = solution.at[:, :, 2].set(sol_t).at[:, :, 3].set(sol_q)
+    stress_u = stress_v = zero
+    if surface_momentum is not None:
+        stress_u, stress_v = _momentum_stress(solution, state, params, surface_momentum)
 
-    # Diagnose the delivered surface fluxes from the implicit solution
-    # (reported == delivered by construction; zero for the zero-flux BC).
-    if surface_exchange is not None:
-        surface_fluxes = diagnose_surface_fluxes(
-            solution, state, params, surface_exchange, surface_target,
-            latent_heat_exchange,
-        )
-    else:
-        surface_fluxes = VDiffSurfaceFluxes.zeros(state.u.shape[0])
-
-    return tendencies, surface_fluxes
+    tendencies = compute_tendencies_from_solution(solution, state, params, dt)
+    surface_fluxes = VDiffSurfaceFluxes(stress_u=stress_u, stress_v=stress_v, **fluxes)
+    return tendencies, surface_fluxes, land

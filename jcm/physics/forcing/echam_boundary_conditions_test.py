@@ -32,7 +32,9 @@ def _optics(land, ice, **overrides):
     )
     kwargs.update(overrides)
     p = kwargs.pop("p", P)
-    return _surface_optical_properties(land, ice, p, **kwargs)
+    # The grid (vis, nir, emissivity) triple; the fourth value is the land
+    # tile's own albedo, which the land energy balance absorbs with.
+    return _surface_optical_properties(land, ice, p, **kwargs)[:3]
 
 
 class SurfaceOpticsTest(unittest.TestCase):
@@ -191,6 +193,42 @@ class EchamBoundaryConditionsTermTest(unittest.TestCase):
         np.testing.assert_allclose(rad["albedo_vis"], expected,
                                    rtol=1e-5)
 
+
+
+class LandSkinTemperatureTest(unittest.TestCase):
+    """The land skin temperature is prognostic and seeds from stl_am (#979)."""
+
+    def _surface(self, t_skin):
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        return SurfaceData.zeros((4,), 3).copy(
+            land_surface_temperature=jnp.asarray(t_skin, jnp.float32))
+
+    def test_unset_skin_seeds_from_the_soil_temperature(self):
+        """A zero carry — cold start, or a checkpoint from before the field — reads stl_am."""
+        term = _cached_term()
+        state, diagnostics, forcing, terrain = _term_inputs(stl_am=jnp.full((4,), 280.0))
+        out = term(state, {**diagnostics, "surface": self._surface([0.0] * 4)},
+                   forcing, terrain)[1]
+        np.testing.assert_allclose(out["surface"].land_surface_temperature, 280.0)
+        np.testing.assert_allclose(out["surface"].surface_temperature, 280.0)
+
+    def test_carried_skin_drives_the_albedo_and_the_radiation(self):
+        """A set skin temperature replaces stl_am in the land albedo's melting ramp and
+        in the grid surface temperature the radiation solves with.
+        """
+        term = _cached_term()
+        state, diagnostics, forcing, terrain = _term_inputs(
+            stl_am=jnp.full((4,), 260.0), snowc_am=jnp.full((4,), 1.0))
+        skin = [260.0, 270.0, 0.0, 275.0]
+        out = term(state, {**diagnostics, "surface": self._surface(skin)}, forcing, terrain)[1]
+        np.testing.assert_allclose(out["surface"].surface_temperature,
+                                   [260.0, 270.0, 260.0, 275.0])
+        albedo = out[SURFACE_OPTICS_KEY]["land_albedo"]
+        # Snow albedo ramps from 0.8 at 5 K below the melting point to 0.4 at it.
+        np.testing.assert_allclose(albedo, [0.8, 0.8 - 0.4 * (270.0 - 268.15) / 5.0, 0.8, 0.4],
+                                   rtol=1e-5)
+        np.testing.assert_allclose(out[SURFACE_OPTICS_KEY]["land_emissivity"],
+                                   P.land_emissivity)
 
 
 class SolveTimeSurfaceOpticsTest(unittest.TestCase):

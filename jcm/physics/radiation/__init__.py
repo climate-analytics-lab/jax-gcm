@@ -29,6 +29,9 @@ from jcm.physics_interface import PhysicsTendency
 #: the reflected flux and the heating rate always describe one solve — as in
 #: ECHAM, whose radiation reads the surface albedo only at a radiation step
 #: (``trigrad``) and replays the transmissivities in between (``radheat``).
+#: The land tile's own ``land_albedo`` rides in the same dict and is held the
+#: same way, on ``surface.land_albedo_at_solve`` (:func:`hold_land_albedo`), so
+#: the land's net shortwave is the solve's.
 #:
 #: Step-local: ``ComposablePhysics`` removes it before the diagnostics become
 #: the cross-step carry (``_STEP_LOCAL_KEYS``), so it is never checkpointed
@@ -54,6 +57,32 @@ def surface_optics_for_solve(diagnostics: dict, ncols: int):
     return (optics["albedo_vis"].reshape(ncols),
             optics["albedo_nir"].reshape(ncols),
             optics["emissivity"].reshape(ncols))
+
+
+def hold_land_albedo(diagnostics: dict, solved) -> dict:
+    """Hold the land tile's albedo of the last radiation solve on the ``surface`` carry.
+
+    ``solved`` is the radiation term's own gate (:func:`radiation_should_compute`,
+    read before the step counter advances). On a solve the land albedo this
+    step's :data:`SURFACE_OPTICS_KEY` carries, the one the grid albedo the
+    solve used was built from, goes to ``surface.land_albedo_at_solve``;
+    between solves the carried value stays, as ``surface_sw_down`` and
+    ``surface_sw_up`` do. The land energy balance then absorbs the held
+    downward shortwave through the albedo that shortwave was solved with
+    (ECHAM's JSBACH takes the radiation's net shortwave, and changes its
+    interactive albedo only at a radiation step).
+
+    A no-op where there is nothing to hold: no boundary-condition term
+    published the land albedo, or the ``surface`` carry has no such slot.
+    """
+    surface = diagnostics.get("surface")
+    optics = diagnostics.get(SURFACE_OPTICS_KEY)
+    held = getattr(surface, "land_albedo_at_solve", None)
+    if held is None or optics is None or "land_albedo" not in optics:
+        return diagnostics
+    fresh = optics["land_albedo"].reshape(held.shape).astype(held.dtype)
+    return {**diagnostics, "surface": surface.copy(
+        land_albedo_at_solve=jnp.where(solved, fresh, held))}
 
 
 def radiation_should_compute(
@@ -191,6 +220,7 @@ __all__ = [
     "cached_radiation_tendency",
     "surface_optics_for_solve",
     "current_cos_zenith",
+    "hold_land_albedo",
     "radiation_should_compute",
     "rescale_cached_radiation",
 ]

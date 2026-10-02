@@ -16,11 +16,11 @@ Two schemes live here as peers, selectable via
   ``p₀=10⁵ Pa``) plus a moisture-buoyancy term, weighted by the lowest
   level's cloud cover (:func:`surface_bulk_richardson`). Stability functions are
   Louis (1979) — momentum and heat have separate forms in both stable
-  and unstable branches. Per-tile heat roughness ``z0h`` and surface
-  wetness come from ``state.roughness_heat`` and
-  ``state.surface_wetness``, which the caller populates from the
-  boundary forcing (open water / ice are fully saturated; land uses the
-  soil-moisture-derived ``cair``-style fraction).
+  and unstable branches. Per-tile heat roughness ``z0h`` and the
+  humidity factors come from ``state.roughness_heat`` and
+  ``state.surface_cair``/``surface_csat`` (open water / ice are fully
+  saturated; land uses JSBACH's factors, see
+  ``jcm.physics.surface.echam.jsbach_land.humidity_factors``).
 
 Both schemes return
 ``(surface_exchange_heat, surface_exchange_moisture, surface_exchange_momentum)``
@@ -76,9 +76,14 @@ def surface_bulk_richardson(
     l.512, 555, 595). The latent heat is that of the lowest-level air
     (``FSEL(T - tmelt, alv, als)``), the same for every tile.
 
+    The tile's surface humidity is ``csat·q_s + (1 − cair)·q_a`` from its
+    humidity factors (``state.surface_cair``/``surface_csat``; 1 = fully
+    saturated open water/ice).
+
     Args:
-        state: Atmospheric state; ``fsl`` and the tile humidity factors come
-            from ``params`` and ``state.surface_wetness``.
+        state: Atmospheric state; ``fsl`` comes from ``params`` and the tile
+            humidity factors from ``state.surface_cair``/``surface_csat``
+            (``state.surface_wetness`` when they are ``None``).
         params: Vertical diffusion parameters.
         wind_speed_surface: Lowest-level wind speed [m/s] (ncol,).
         temperature_surface: Tile skin temperature [K] (ncol, nsfc_type).
@@ -131,15 +136,21 @@ def surface_bulk_richardson(
     ri_tiles = []
     for isfc in range(nsfc_type):
         T_s = temperature_surface[:, isfc]
-        wetness = jnp.clip(state.surface_wetness[:, isfc], 0.0, 1.0)
+        cair_all = (state.surface_cair if state.surface_cair is not None
+                    else state.surface_wetness)
+        csat_all = (state.surface_csat if state.surface_csat is not None
+                    else state.surface_wetness)
+        cair = jnp.clip(cair_all[:, isfc], 0.0, 1.0)
+        csat = jnp.clip(csat_all[:, isfc], 0.0, 1.0)
 
-        # Tile saturation q at the surface — open water / ice are fully
-        # saturated, land is wetness-weighted between qsat and ambient
-        # ``qv_air`` (mirrors the JSBACH ``cair·qsat + (1-cair)·qair``
-        # form in mo_turbulence_diag). Ice saturation below tmelt (the sea
-        # ice tile always, frozen land), water above.
+        # Tile surface humidity as ECHAM's surface layer sees it,
+        # ``csat·q_s + (1 − cair)·q_a`` (precalc_land ``ztvl``/``zqmitte``/
+        # ``zqddif``, mo_surface_land.f90:200-232): open water / ice are fully
+        # saturated (cair = csat = 1), land carries JSBACH's factors. Ice
+        # saturation below tmelt (the sea ice tile always, frozen land),
+        # water above.
         qsat_s = saturation_specific_humidity(T_s, p_sfc)
-        qts = wetness * qsat_s + (1.0 - wetness) * qv_air
+        qts = csat * qsat_s + (1.0 - cair) * qv_air
 
         exner_sfc = (p0 / jnp.maximum(p_sfc, 1.0)) ** (rd / cp)
         theta_s = T_s * exner_sfc
@@ -179,9 +190,9 @@ def compute_surface_exchange_coefficients_echam_louis(
 
       1. the bulk Richardson number of :func:`surface_bulk_richardson`: the
          θ_l difference plus the moisture buoyancy, weighted by the
-         lowest level's cloud cover, with the tile's effective surface
-         humidity (``state.surface_wetness``: 1.0 = fully saturated open
-         water/ice; <1 = soil-moisture-limited land);
+         lowest level's cloud cover, with the tile's surface humidity
+         ``csat·q_s + (1 − cair)·q_a`` (``state.surface_cair``/
+         ``surface_csat``: 1 = fully saturated open water/ice);
       2. Louis (1979) stability functions on top of a log-law neutral drag
          computed from the per-tile momentum roughness
          ``state.roughness_length`` and heat roughness

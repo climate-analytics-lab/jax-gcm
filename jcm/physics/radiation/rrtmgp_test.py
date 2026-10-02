@@ -547,6 +547,62 @@ class TestRRTMGPTermComputeAndCache(_RRTMGPTermFixture):
         )
 
 
+class TestLandAlbedoHeldBetweenSolves(_RRTMGPTermFixture):
+    """The land tile's albedo follows the radiation's solve cadence (#979).
+
+    The radiation holds ``surface_sw_down``/``_sw_up`` between solves, so the
+    land's net shortwave must use the land albedo of the same solve:
+    ``surface.land_albedo_at_solve`` is written when the term solves and held
+    when it replays its cache. The fixture's interval is two steps, so call 0
+    solves, call 1 replays and call 2 solves again.
+    """
+
+    @staticmethod
+    def _optics(ncols, land_albedo):
+        return {
+            "albedo_vis": jnp.full((ncols,), 0.07), "albedo_nir": jnp.full((ncols,), 0.07),
+            "emissivity": jnp.full((ncols,), 0.98),
+            "land_albedo": jnp.full((ncols,), land_albedo),
+            "land_emissivity": jnp.full((ncols,), 0.95),
+        }
+
+    def _grey(self, rrtmgp_term):
+        from flax import nnx
+        from jcm.physics.radiation.grey_two_stream.radiation_scheme import (
+            GreyTwoStreamRadiation,
+        )
+
+        term = GreyTwoStreamRadiation(params=rrtmgp_term.params.get_value())
+        term._lats = nnx.Variable(rrtmgp_term._lats.get_value())
+        term._lons = nnx.Variable(rrtmgp_term._lons.get_value())
+        return term
+
+    @pytest.mark.parametrize("scheme", ["rrtmgp", "grey"])
+    def test_a_solve_refreshes_it_and_a_replay_holds_it(self, scheme):
+        from jcm.physics.radiation import SURFACE_OPTICS_KEY
+
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        if scheme == "grey":
+            term = self._grey(term)
+        ncols = self.NCOLS
+        held = []
+        # The albedo the boundary conditions publish at calls 0 (solve), 1
+        # (replay) and 2 (solve).
+        for albedo in (0.70, 0.40, 0.25):
+            diagnostics = {**diagnostics, SURFACE_OPTICS_KEY: self._optics(ncols, albedo)}
+            _, diagnostics = term(state, diagnostics, forcing, None)
+            held.append(np.asarray(diagnostics["surface"].land_albedo_at_solve))
+        np.testing.assert_allclose(held[0], 0.70)   # solved with 0.70
+        np.testing.assert_allclose(held[1], 0.70)   # replay: still the solve's
+        np.testing.assert_allclose(held[2], 0.25)   # next solve
+
+    def test_without_published_land_optics_nothing_is_held(self):
+        """A host with no boundary-condition term leaves the slot unset."""
+        term, state, diagnostics, forcing = self._term_and_inputs()
+        _, out = term(state, diagnostics, forcing, None)
+        np.testing.assert_array_equal(np.asarray(out["surface"].land_albedo_at_solve), 0.0)
+
+
 class TestRRTMGPTermEffectiveRadii(_RRTMGPTermFixture):
     """The term radiates with radii of the CURRENT state (#929).
 

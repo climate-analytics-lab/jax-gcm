@@ -114,7 +114,7 @@ across-trajectory ranges are small; they separate this column from a fogged or
 decoupled boundary layer and not from small changes of it. Three properties
 are measured and not pinned.
 
-- *The column is overcast (#920).* The maximum-random total cloud cover
+- *The column is overcast.* The maximum-random total cloud cover
   (`jcm.analysis.total_cloud_cover`) is 1.0 in every step, from a deck between
   237 and 626 hPa whose mean layer cover is 0.97-1.0 at 237-302 hPa and
   375-538 hPa, 0.83 at 337 hPa, 0.92 at 581 hPa and 0.66 at 626 hPa (days 40-80;
@@ -123,8 +123,7 @@ are measured and not pinned.
 - *Its hydrological cycle is weak.* P = 1.15 and E = 1.20 mm/d in days 40-80
   (a latent heat flux of 35 W/m²), falling to 1.04 mm/d in days 160-200
   (30 W/m²), and the net atmospheric radiative cooling is 33 W/m², with a TOA
-  shortwave albedo of 0.47. Why this single column goes overcast and is
-  radiatively weak is the open question of #920.
+  shortwave albedo of 0.47.
 - *The column is in balance but still adjusting.* P / E is 0.96, 0.99, 1.00,
   1.00 and the water drift 0.048, 0.011, −0.001, 0.003 mm/d over the four
   windows of the 200-day run, P and E fall together from 1.15 and 1.20 to

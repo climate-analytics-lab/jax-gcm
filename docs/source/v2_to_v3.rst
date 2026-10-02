@@ -13,10 +13,10 @@ coming from v1, read :doc:`v1_to_v2` first.
    :local:
    :depth: 1
 
-Read this first: the five changes that silently alter results
--------------------------------------------------------------
+Read this first: the six changes that silently alter results
+------------------------------------------------------------
 
-Most items below fail loudly. These five do not, so check them before
+Most items below fail loudly. These six do not, so check them before
 comparing any v3 number against a v2 one.
 
 1. **Specific humidity is kg/kg everywhere** (:ref:`v3-q-units`). A v2-written
@@ -41,6 +41,11 @@ comparing any v3 number against a v2 one.
    (1M) presets' net TOA radiation, cloud cover and liquid water path, less
    in the 2M and JAM presets. Cloud and radiation numbers from before this
    change, and any tuning of them, are not comparable.
+6. **The ECHAM land evaporates in JSBACH's form and has a prognostic skin
+   temperature** (:ref:`v3-echam-land`). The land temperature was the
+   prescribed ERA5 soil climatology and its evaporation a beta factor on the
+   full saturation deficit; both change every ECHAM configuration's surface
+   fluxes, land precipitation and the circulation they drive.
 
 Installation and dependencies
 -----------------------------
@@ -1334,6 +1339,62 @@ cloud radiative effects or the mixed-phase partition done before this change
 should be redone, and every configuration whose truncation is not T63 (the
 shipped T106 and T119 members, whose values are interpolated between T63 and
 T127, and T127 or T255 grids) now takes its truncation's cloud parameters.
+
+.. _v3-echam-land:
+
+The ECHAM land: JSBACH's evaporation form and a skin energy balance
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+In v2 the ECHAM hosts' land surface temperature was ``forcing.stl_am``, ERA5's
+top-soil-layer monthly climatology, and the land evaporated as
+``ρ·C·w·(q_s − q_a)`` with ``w = soilw_am``. A dry, hot surface therefore
+evaporated like a wet one and never cooled. In v3 the land is a
+prescribed-moisture land: JSBACH's humidity factors (``cair``/``csat``) on the
+prescribed soil moisture, and a skin temperature from the surface energy
+balance, solved implicitly with the lowest level, over a soil held at
+``stl_am`` (see :doc:`science/surface` and
+:doc:`design/land_skin_energy_balance`). Nothing fails; every ECHAM climate
+number changes. Any tuning done against the old land surface should be redone.
+Over days 5-10 of the T63 presets the land evaporates about half as much, land
+precipitation falls by 43-46 %, ocean precipitation rises by 8-11 %, and net
+TOA radiation rises by about 4 W m⁻² as the land loses cloud. Land convection
+now peaks in the early afternoon instead of at night. The box budgets and the
+240-day numbers are in :doc:`design/land_skin_energy_balance`.
+
+What a user has to know:
+
+- **New outputs** on ``surface``: ``land_surface_temperature`` (prognostic,
+  carried), the land budget (``land_net_radiation``,
+  ``land_sensible_heat_flux``, ``land_latent_heat_flux``,
+  ``ground_heat_flux``, ``snow_melt_heat_flux``, ``land_heat_storage``,
+  ``land_evaporation``, ``land_energy_residual``), and the factors (``cair``,
+  ``csat``, ``water_stress_factor``, ``bare_soil_humidity``,
+  ``canopy_conductance``), and ``land_albedo_at_solve``, the land albedo of
+  the last radiation solve. ``surface.surface_temperature`` over land is now
+  the skin temperature, not ``stl_am``.
+- **To keep a prescribed land temperature** (fixed-SST and fixed-land-
+  temperature forcing runs), set ``land_temperature="prescribed"``, e.g.
+  ``+physics.terms.tte_tke_vertical_diffusion.land_params.land_temperature=prescribed``:
+  the skin is the forcing's ``stl_am`` every step, with the JSBACH evaporation
+  form unchanged.
+- **New parameters**: ``JsbachLandParameters`` held by
+  ``TteTkeVerticalDiffusion(land_params=...)``. Set them from the term-list
+  presets as ``+physics.terms.tte_tke_vertical_diffusion.land_params.leaf_area_index=5``,
+  or from the factory-built presets as ``+physics.land_surface.leaf_area_index=5``.
+- ``VDiffParameters.default()`` now derives ``tpfac2 = 1/tpfac1`` and
+  ``tpfac3 = 1 − tpfac2`` exactly (they were 0.667/0.333). Keep the three
+  consistent if you override ``tpfac1``.
+- **Checkpoints** written before this change restore normally; the new carry
+  fields are seeded and the skin starts from ``stl_am``.
+- **Direct callers of the TTE-TKE solver** (not the term):
+  ``vertical_diffusion_step`` returns ``(tendencies, surface_fluxes, land)``
+  and takes ``surface_momentum=(C_m, u_s, v_s)`` and
+  ``surface_tiles=SurfaceTiles(...)`` instead of ``surface_exchange``,
+  ``surface_target`` and ``latent_heat_exchange``. ``setup_matrix_system`` takes
+  ``surface_momentum``, and heat and moisture couple per tile through
+  ``couple_surface_tiles``. ``prepare_vertical_diffusion_state`` accepts
+  ``surface_cair``/``surface_csat`` (default: ``surface_wetness`` for both, the
+  former behaviour).
 
 SPEEDY shortwave heating is applied every step
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

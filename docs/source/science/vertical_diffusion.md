@@ -7,10 +7,16 @@ It carries a prognostic TKE (and θᵥ-variance) budget — shear + buoyancy pro
 − dissipation + transport — diagnoses exchange coefficients from a mixing length
 and √TKE, and solves the diffusion implicitly (backward Euler) with a tridiagonal
 Thomas solve (``matrix_solver.py``, following ``mo_vdiff_solver.f90``). The term
-owns the whole turbulent column ECHAM-style: per-tile surface exchange velocities
-enter the implicit solve as the bottom-row Robin boundary condition for u/v/T/qᵥ,
-and the delivered surface fluxes are diagnosed from the implicit solution (the
-``pev_vdiff`` identity — reported equals delivered by construction). Surface-layer
+owns the whole turbulent column ECHAM-style. Momentum couples to the surface
+through one bottom-row Robin term with the fraction-weighted drag. Heat and
+moisture couple tile by tile, as ECHAM6.3's ``richtmyer_land``/``_ocean``/``_ice``
+and ``blend_zq_zt`` do. After the top-down elimination, each tile relates the
+lowest level to its own surface value, ``X̂_K,t = E_t·X̂_s,t + F_t``. The land
+tile solves its skin energy balance against its own coefficients (see
+{doc}`surface`), the bottom value is the fraction-weighted blend, and each tile's
+flux is taken against its own lowest-level value. The delivered fluxes are
+diagnosed from the implicit solution (the ``pev_vdiff`` identity: reported
+equals delivered by construction). Surface-layer
 exchange coefficients use a faithful Louis (1979, unstable) / Mauritsen (2007,
 stable) port (``surface_layer.py``, ``mo_turbulence_diag::sfc_exchange_coeff``).
 The interior stability — the Richardson number that scales the mixing length
@@ -27,15 +33,19 @@ mass exactly.
 **What ECHAM/CAM does.** ICON/ECHAM6 ``vdiff`` (Brinkop & Roeckner 1995;
 Mauritsen et al. 2007 total-turbulent-energy closure) — prognostic TKE,
 Louis/Mauritsen surface-layer stability functions, and an implicit column solve
-folding the surface exchange into a single tridiagonal (``mo_vdiff_solver.f90``,
-``mo_turbulence_diag.f90``). ECHAM diffuses every tracer with the heat exchange
+whose bottom row couples to the surface tiles through the Richtmyer–Morton
+elimination (ECHAM6.3 ``vdiff.f90`` with ``mo_surface_land/ocean/ice``;
+ICON's ``mo_vdiff_solver.f90``, ``mo_turbulence_diag.f90``). ECHAM diffuses every tracer with the heat exchange
 coefficient ``cfh`` (the ``pxtte`` update in ``mo_vdiff_solver``); CAM diffuses
 all constituents likewise.
 
 **Why we differ.**
 - `science` — the surface-layer exchange uses a Louis (1979) / Mauritsen (2007)
   form matching ECHAM/ICON to order of magnitude across the Richardson-number
-  range, not a bit-exact reproduction of every ECHAM branch.
+  range, not a bit-exact reproduction of every ECHAM branch. Against ECHAM6.3's
+  compiled ``precalc_land``, its unstable branch agrees to 0.1 %, and its stable
+  branch (Mauritsen) gives 1.5× the heat and 2.1× the momentum exchange at
+  Ri ≈ 0.3 (#982).
 - `compute` — the TTE-TKE column solve covers only its fixed variable block
   (u, v, T, qᵥ, qc, qi, TKE, θᵥ variance), so aerosol/gas tracers are mixed by the
   separate ``TracerVerticalDiffusion`` term rather than in the same tridiagonal
@@ -45,18 +55,24 @@ all constituents likewise.
 first step — it reads the previous step's ``kh`` carry, which is seeded to
 zero on step 0 (zero exchange coefficient, zero tendency)
 and reads the previous step's ``kh`` carry, because vdiff runs after the aerosol
-block in the ECHAM ordering. The exchange coefficients use constant
-stability coefficients (``c_m = 0.4``, ``c_h = 0.5``) and a stability factor on
-the mixing length (``compute_mixing_length``), where ECHAM uses Louis stability
-functions of the interior Richardson number and its own mixing-length family;
-see *Interior stability*.
+block in the ECHAM ordering. The closure that the buoyancy feeds is simplified:
+the exchange coefficients use constant ``c_m = 0.4`` and ``c_h = 0.5``, the
+Richardson number enters only as an ad hoc factor on the mixing length (1 when
+unstable, falling to 0.1 as ``Ri`` goes from 0 to 0.25), the mixing length is
+capped at a tenth of a fixed 1000 m boundary-layer height, and TKE and the
+exchange coefficients are stored on full levels. ECHAM's differs on each count:
+Louis stability functions of ``Ri``, the Blackadar mixing length with the
+Holtslag-Boville asymptote and a diagnosed boundary-layer extension, and TKE and
+the coefficients on the interfaces (*Interior stability*, below). That port is
+post-v3 work, to be done with the land fixes (#672), and the #682 retune is done
+against the current closure.
 
 **Code pointers.**
 - ``jcm/physics/vertical_diffusion/tte_tke/`` — ``vertical_diffusion.py``
   (``TteTkeVerticalDiffusion``, ``vertical_diffusion_column``),
   ``turbulence_coefficients.py`` (``compute_exchange_coefficients`` and the K
   floor), ``matrix_solver.py`` (``setup_matrix_system``,
-  ``solve_tridiagonal_system``, ``diagnose_surface_fluxes``),
+  ``solve_tridiagonal_system``, ``couple_surface_tiles``),
   ``surface_layer.py`` (``compute_surface_exchange_coefficients_echam_louis``),
   ``tke_budget.py``, ``vertical_diffusion_types.py`` (the floors).
 - ``jcm/physics/vertical_diffusion/tracer_diffusion.py`` —
@@ -163,13 +179,14 @@ liquid-water potential temperature subtracts ``(L/c_p)·(θ/T)·q_x`` with the s
 ``alhc·E`` over open water, ``alhs·E`` over sea ice, and over land
 ``alhc·E + (alhs − alhc)·s·E_pot`` with ``s`` the snow-covered fraction (the
 prescribed ``snowc_am``, glaciers fully covered) and ``E_pot`` the flux at full
-wetness. The land wetness itself takes JSBACH's form ``s + (1 − s)·w``: the
-snow-covered part evaporates at the potential rate and the snow-free part at
-the soil availability ``w`` (``soilw_am``), so the land flux always covers the
-snow share the sublimation heat is charged to. Every tile flux is linear in
-the one implicit bottom value, so the per-tile latent heats fold into one
-exchange pair and the reported latent heat stays exactly consistent with the
-delivered moisture flux.
+wetness. The land's moisture flux carries JSBACH's humidity factors,
+``ρ·C·(csat·q_s − cair·q̂_K)`` (see {doc}`surface`). The snow-covered share
+evaporates at the potential rate within them, so the land flux always covers
+the snow share the sublimation heat is charged to. The same factors set the
+surface humidity the surface-layer buoyancy sees, ``csat·q_s + (1 − cair)·q_a``
+(``precalc_land``). Each tile's latent heat comes from its own flux against its
+own lowest-level value, and the reported latent heat is their fraction-weighted
+sum, so it stays exactly consistent with the delivered moisture flux.
 
 **What ECHAM/CAM does.** ECHAM's ``precalc_ocean``/``precalc_ice``/
 ``precalc_land`` read the tile saturation from the ``tlucua`` table
@@ -182,25 +199,27 @@ snow fraction entering the land ``csat``/``cair`` as
 ``snow_fract + (1 − snow_fract)·(…)`` (``qsat_fact``).
 
 **Why we differ.** The snow-covered fraction is the prescribed climatology
-until snow is prognostic (#672), and the snow-free land wetness is the
-prescribed soil availability rather than JSBACH's wet-skin / relative-humidity
-/ canopy-resistance composite (see {doc}`surface`).
+until snow is prognostic (#672), and JSBACH's humidity factors are built on
+prescribed soil moisture with no wet skin (see {doc}`surface`).
 
 **Code pointers.**
 - ``jcm/physics/vertical_diffusion/tte_tke/surface_layer.py`` —
   ``compute_surface_exchange_coefficients_echam_louis``.
 - ``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion.py`` —
-  ``vertical_diffusion_column`` (tile collapse and latent-heat pair),
-  ``TteTkeVerticalDiffusion`` (sublimation fractions).
+  ``vertical_diffusion_column`` (the surface tiles),
+  ``TteTkeVerticalDiffusion`` (sublimation fractions, JSBACH factors).
 - ``jcm/physics/vertical_diffusion/tte_tke/matrix_solver.py`` —
-  ``diagnose_surface_fluxes``.
+  ``couple_surface_tiles``.
 
 **Validation evidence.**
 ``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion_test.py`` —
 ``TestSurfaceTilePhase``: ``LH/E`` equals ``alhs`` over sea ice, ``alhc`` over
-open water and ``alhc + (alhs − alhc)·s/w`` over snow-covered land, the term
-wets snowy land as ``s + (1 − s)·w``, and a column at the ice saturation of a
-260 K tile exchanges no moisture.
+open water and ``alhc + (alhs − alhc)·s/w`` for a tile with factors ``w``; the
+term's land follows JSBACH's factors (a dry bare soil does not evaporate, and
+snow sublimates at the potential rate); and a column at the ice saturation of a
+260 K tile exchanges no moisture. ``land_coupling_test.py``: a single tile
+reproduces the Robin row exactly, and mixed tiles close the column budget
+against their own fluxes.
 
 ## Ten-metre wind diagnostic
 

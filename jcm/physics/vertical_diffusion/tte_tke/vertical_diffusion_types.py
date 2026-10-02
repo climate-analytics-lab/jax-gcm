@@ -13,10 +13,15 @@ import tree_math
 class VDiffParameters:
     """Parameters for vertical diffusion scheme."""
 
-    # Implicitness factors (following ICON's tpfac1, tpfac2, tpfac3)
+    # Implicitness factors. ECHAM's ``cvdifts`` (iniphy.f90:67) is tpfac1; its
+    # ``ztpfac2 = 1/cvdifts`` and ``ztpfac3 = 1 - ztpfac2`` (mo_soil.f90:1684,
+    # mo_surface_boundary.f90:90) follow from it exactly. The solver works in
+    # bb = X̂/tpfac1 units and the surface coupling reads X̂ = tpfac1·bb, so
+    # the column budget of the surface fluxes closes to round-off only with
+    # tpfac1·tpfac2 = 1: keep the three consistent when overriding one.
     tpfac1: float       # Factor for new timestep (implicit)
-    tpfac2: float       # Factor for old timestep (explicit part)
-    tpfac3: float       # Factor for time interpolation
+    tpfac2: float       # Factor for old timestep (explicit part), 1/tpfac1
+    tpfac3: float       # Factor for time interpolation, 1 - tpfac2
 
     # Turbulence parameters
     totte_min: float    # Minimum TTE value
@@ -98,7 +103,7 @@ class VDiffParameters:
         )
 
     @classmethod
-    def default(cls, tpfac1=1.5, tpfac2=0.667, tpfac3=0.333,
+    def default(cls, tpfac1=1.5, tpfac2=None, tpfac3=None,
                  totte_min=1.0e-6, z0m_min=1.0e-5, cchar=0.018,
                  nsfc_type=3, iwtr=0, iice=1, ilnd=2, itop=1,
                  surface_layer_scheme=1,
@@ -111,7 +116,14 @@ class VDiffParameters:
         string aliases ``"businger_dyer"`` / ``"echam_louis"`` —
         ``__post_init__`` normalizes either form to the canonical int on
         the constructed instance.
+
+        ``tpfac2``/``tpfac3`` default to ECHAM's ``1/tpfac1`` and
+        ``1 - 1/tpfac1``.
         """
+        if tpfac2 is None:
+            tpfac2 = 1.0 / tpfac1
+        if tpfac3 is None:
+            tpfac3 = 1.0 - tpfac2
         return cls(
             tpfac1=jnp.array(tpfac1),
             tpfac2=jnp.array(tpfac2),
@@ -193,7 +205,78 @@ class VDiffState(NamedTuple):
     # E_pot``), 0 over open water. Sets only the latent heat attached to the
     # surface moisture flux; the moisture flux itself does not depend on it.
     surface_sublimation_fraction: jnp.ndarray = None
-    
+
+    # JSBACH's humidity factors per tile (ncol, nsfc_type): the moisture flux
+    # is ρ·C·(csat·q_s − cair·q̂_K) (mo_soil.f90:1900-1902) and the
+    # surface-layer humidity ``csat·q_s + (1 − cair)·q_a`` (precalc_land
+    # 200-232). 1 over water and ice; ``None`` takes ``surface_wetness`` for
+    # both, the special case cair = csat.
+    surface_cair: jnp.ndarray = None
+    surface_csat: jnp.ndarray = None
+
+
+class LandBalanceInputs(NamedTuple):
+    """Per-column inputs of the land skin energy balance (all ``(ncol,)``).
+
+    The land tile (index 2) of :class:`SurfaceTiles` is then not prescribed:
+    its skin temperature is solved with the lowest level by
+    :func:`jcm.physics.surface.echam.jsbach_land.update_surfacetemp`. Its
+    snow-covered share (``pfracsu``) is the tile's ``sublimation_fraction``,
+    the one value both the balance and the reported latent heat read.
+    """
+
+    temperature: jnp.ndarray          # step-start skin temperature [K]
+    soil_temperature: jnp.ndarray     # prescribed soil temperature below [K]
+    saturation_slope: jnp.ndarray     # dq_s/dT at the skin [1/K]
+    net_shortwave: jnp.ndarray        # SW absorbed by the land [W/m2]
+    longwave_down: jnp.ndarray        # downward LW at the surface [W/m2]
+    emissivity: jnp.ndarray           # land emissivity [1]
+    heat_capacity: jnp.ndarray        # skin-layer capacity C_s [J/m2/K]
+    conductance: jnp.ndarray          # conductance to the soil Λ [W/m2/K]
+    melt_capped: jnp.ndarray          # bool: snow/glacier holds T <= tmelt
+    params: object                    # JsbachLandParameters (melt-cap width)
+
+
+class SurfaceTiles(NamedTuple):
+    """The surface as the implicit solve sees it, per tile (ncol, nsfc_type).
+
+    Heat and moisture couple tile by tile through ECHAM's Richtmyer–Morton
+    relations (``richtmyer_land/_ocean/_ice`` then ``blend_zq_zt``); see
+    :func:`~.matrix_solver.vertical_diffusion_step`.
+    """
+
+    fraction: jnp.ndarray              # tile fraction [1], sums to 1
+    exchange_heat: jnp.ndarray         # C_h·|U| [m/s]
+    exchange_moisture: jnp.ndarray     # C_q·|U| [m/s]
+    cair: jnp.ndarray                  # humidity factors [1]
+    csat: jnp.ndarray
+    temperature: jnp.ndarray           # surface temperature [K]
+    saturation_humidity: jnp.ndarray   # q_s(T_s) [kg/kg]
+    sublimation_fraction: jnp.ndarray  # sublimating share of E_pot [1]
+    land: LandBalanceInputs = None     # None: the land tile is prescribed too
+
+
+class LandBalanceOutputs(NamedTuple):
+    """The land tile's balance after the solve (all ``(ncol,)``, W/m2 unless noted).
+
+    ``energy_residual = net_radiation − sensible − latent``. With a prognostic
+    skin it equals ``ground + melt + storage`` to round-off: ``melt`` is the
+    energy a snow- or glacier-covered surface held at the melting point does
+    not take up (prescribed snow has no mass to melt). With a prescribed skin
+    the budget is open: ``ground``, ``melt`` and ``storage`` are 0 and the
+    residual is the heat the prescription supplies or removes.
+    """
+
+    temperature: jnp.ndarray            # new skin temperature [K]
+    ground_heat_flux: jnp.ndarray       # Λ·(T_new − T_soil), into the ground
+    net_radiation: jnp.ndarray          # SW + εLW↓ − εσT⁴ (linearised, implicit T)
+    sensible_heat_flux: jnp.ndarray     # land tile, positive up
+    latent_heat_flux: jnp.ndarray       # land tile, positive up
+    evaporation: jnp.ndarray            # land tile [kg/m2/s], positive up
+    heat_storage: jnp.ndarray           # C_s·(T_new − T_old)/Δt
+    melt_heat_flux: jnp.ndarray         # energy into melt at a capped surface
+    energy_residual: jnp.ndarray        # Rn − SH − LH
+
 
 
 class VDiffTendencies(NamedTuple):
@@ -234,7 +317,7 @@ class VDiffSurfaceFluxes(NamedTuple):
     # Downward momentum flux INTO the surface (positive with the wind);
     # the delivered column momentum change is its negative (verified
     # against the column-integrated tendency; see
-    # matrix_solver.diagnose_surface_fluxes). Matches the #754
+    # matrix_solver._momentum_stress). Matches the #754
     # surface-exchange contract sign as-is.
     stress_u: jnp.ndarray        # τ_u into the surface [N/m²] (ncol,)
     stress_v: jnp.ndarray        # τ_v into the surface [N/m²] (ncol,)
@@ -290,6 +373,8 @@ class VDiffDiagnostics(NamedTuple):
     # (filled by ``vertical_diffusion_column`` after the matrix step; zero
     # when the solve runs with the interior-only, zero-flux bottom BC).
     surface_fluxes: 'VDiffSurfaceFluxes' = None
+    # The land tile's energy balance (``None`` when the land is prescribed).
+    land_balance: 'LandBalanceOutputs' = None
 
 
 class VDiffMatrixSystem(NamedTuple):

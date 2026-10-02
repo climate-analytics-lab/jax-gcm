@@ -5,17 +5,22 @@ physics, integrating turbulence coefficient calculations with the matrix solver.
 """
 
 import functools
+import logging
 
 import jax
 import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
-from jcm.forcing import land_snow_cover, land_wetness
+from jcm.forcing import land_snow_cover
 from jcm.physics.surface.echam.albedo import CTFREEZ
-from jcm.physics.thermodynamics import saturation_specific_humidity
+from jcm.physics.thermodynamics import (
+    saturation_specific_humidity,
+    saturation_specific_humidity_and_derivative,
+)
 from .vertical_diffusion_types import (
-    VDiffState, VDiffParameters, VDiffTendencies, VDiffDiagnostics
+    VDiffState, VDiffParameters, VDiffTendencies, VDiffDiagnostics,
+    LandBalanceInputs, SurfaceTiles,
 )
 from .moist_buoyancy import (
     interfaces_to_levels, interior_buoyancy_and_shear, richardson_number,
@@ -102,6 +107,8 @@ def prepare_vertical_diffusion_state(
     roughness_heat: jnp.ndarray = None,
     surface_wetness: jnp.ndarray = None,
     surface_sublimation_fraction: jnp.ndarray = None,
+    surface_cair: jnp.ndarray = None,
+    surface_csat: jnp.ndarray = None,
 ) -> VDiffState:
     """Prepare the vertical diffusion state from input variables.
 
@@ -139,6 +146,9 @@ def prepare_vertical_diffusion_state(
             evaporation that sublimates (ncol, nsfc_type), see
             :class:`VDiffState`. When ``None``: 1 for the sea-ice tile
             (index 1 of the water/ice/land ordering) and 0 elsewhere.
+        surface_cair, surface_csat: JSBACH's humidity factors per tile
+            (ncol, nsfc_type), see :class:`VDiffState`. ``None``: both
+            ``surface_wetness``.
 
     Returns:
         Complete vertical diffusion state
@@ -156,6 +166,10 @@ def prepare_vertical_diffusion_state(
     if surface_sublimation_fraction is None:
         surface_sublimation_fraction = _default_sublimation_fraction(
             roughness_length)
+    if surface_cair is None:
+        surface_cair = surface_wetness
+    if surface_csat is None:
+        surface_csat = surface_wetness
 
     return VDiffState(
         u=u,
@@ -181,6 +195,8 @@ def prepare_vertical_diffusion_state(
         ocean_u=ocean_u,
         ocean_v=ocean_v,
         surface_sublimation_fraction=surface_sublimation_fraction,
+        surface_cair=surface_cair,
+        surface_csat=surface_csat,
     )
 
 
@@ -190,24 +206,30 @@ def vertical_diffusion_column(
     params: VDiffParameters,
     dt: float,
     couple_surface: bool = True,
+    land: LandBalanceInputs = None,
 ) -> Tuple[VDiffTendencies, VDiffDiagnostics]:
     """Compute vertical diffusion for a single column.
 
-    By default the implicit solve carries the ECHAM surface exchange as the
-    bottom-row Robin boundary condition for u, v, T and qv: the per-tile
-    exchange velocities are computed *before* the matrix step, collapsed to
-    grid coefficients / targets (see inline comments), fed into the solve,
-    and the delivered surface fluxes are diagnosed from the implicit
-    solution (reported == delivered by construction — ECHAM's ``pev_vdiff``
-    identity). Set ``couple_surface=False`` to run the interior-only
-    operator with the legacy zero-flux (insulating, free-slip) boundaries —
-    used by tests that pin the interior diffusion in isolation.
+    By default the implicit solve carries the ECHAM surface exchange: the
+    per-tile exchange velocities are computed *before* the matrix step;
+    momentum couples through the fraction-weighted Robin bottom row, heat and
+    moisture tile by tile through ECHAM's Richtmyer–Morton relations
+    (:func:`~.matrix_solver.couple_surface_tiles`), and the delivered surface
+    fluxes are diagnosed from the implicit solution (reported == delivered by
+    construction — ECHAM's ``pev_vdiff`` identity). With ``land`` given, the
+    land tile's skin temperature is solved with the lowest level instead of
+    prescribed. Set ``couple_surface=False`` to run the interior-only
+    operator with zero-flux (insulating, free-slip) boundaries — used by the
+    forced-flux mode and by tests that pin the interior diffusion.
 
     Args:
         state: Vertical diffusion state
         params: Vertical diffusion parameters
         dt: Time step [s]
-        couple_surface: Static flag — include the surface Robin BC (default).
+        couple_surface: Static flag — include the surface coupling (default).
+        land: Inputs of the land skin energy balance, or ``None`` for a
+            prescribed land temperature. Its ``saturation_slope`` is filled
+            here, at the surface pressure the tiles' saturation uses.
 
     Returns:
         Tuple of (tendencies, diagnostics)
@@ -312,83 +334,45 @@ def vertical_diffusion_column(
     )
 
     if couple_surface:
-        # === Tile collapse for the surface Robin BC ========================
-        # Every tile surface value X_s is prescribed this step (SST forcing,
-        # min(SST, ctfreez) ice, stl_am land — the ECHAM "ocean branch"
-        # where the Richtmyer–Morton handshake degenerates to a plain Robin
-        # BC), so the per-tile rows collapse linearly to one grid
-        # coefficient and one flux-weighted target per variable:
-        #
-        #   moisture:  C_q = Σ_t f_t·w_t·C_E,t
-        #              q_s_eff = Σ_t f_t·w_t·C_E,t·q_sat(T_s,t, p_sfc) / C_q
-        #   heat:      C_h = Σ_t f_t·C_H,t
-        #              T_s_eff = Σ_t f_t·C_H,t·T_s,t / C_h − φ_K/cpd
-        #   momentum:  C_m = Σ_t f_t·C_M,t ; target = (ocean_u, ocean_v)
-        #
-        # The wetness weighting w_t reproduces the port's own tile formula
-        # (surface_layer.py: qts = w·qsat + (1−w)·q_air ⇒ flux ρC·w·(qsat −
-        # q̂)), ECHAM's cair = csat = w special case of richtmyer_land.
-        #
-        # The −φ_K/cpd term on the heat target is MANDATORY: the solver
-        # diffuses T, not dry static energy s = cp·T + gz (a pre-existing
-        # interior infidelity, tracked separately). Coupling T_K directly to
-        # T_s would drive a spurious flux equal to the adiabatic lapse
-        # across the lowest half-layer; exchanging with T_s − φ_K/cpd (φ_K =
-        # g·(height_full[K] − height_half[K+1/2]), height above the surface)
-        # makes the bottom exchange exactly the dry-static-energy flux
-        # ρ·C_H·(s_s − ŝ_K)/cp.
-        # ====================================================================
-        frac = state.surface_fraction                       # (ncol, nsfc)
-        wet = jnp.clip(state.surface_wetness, 0.0, 1.0)
-        ch_t = diagnostics.surface_exchange_heat
-        ce_t = diagnostics.surface_exchange_moisture
-        cm_t = diagnostics.surface_exchange_momentum
-
-        c_mom = jnp.sum(frac * cm_t, axis=1)
-        c_heat = jnp.sum(frac * ch_t, axis=1)
-        c_moist = jnp.sum(frac * wet * ce_t, axis=1)
-
-        # Per-tile saturation humidity at the surface pressure — the same
-        # thermodynamics the ECHAM-Louis surface layer uses for its qts
-        # (ECHAM's ``ua`` table: Sonntag over ice at and below tmelt, over
-        # water above).
+        # === Surface coupling =================================================
+        # Momentum: one fraction-weighted drag against the surface current,
+        # ECHAM's box-averaged ``cdum`` (mo_surface.f90:1205-1219).
+        # Heat and moisture: tile by tile (richtmyer_land/_ocean/_ice and
+        # blend_zq_zt, see couple_surface_tiles). Each tile's moisture flux is
+        # ρ·C·(csat·q_s − cair·q̂_K): cair = csat = 1 over water and ice, the
+        # JSBACH factors over land. The surface saturation is ECHAM's ``ua``
+        # table (Sonntag over ice at and below tmelt, over water above).
+        # =====================================================================
+        frac = state.surface_fraction
+        c_mom = jnp.sum(frac * diagnostics.surface_exchange_momentum, axis=1)
+        surface_momentum = (c_mom, state.ocean_u, state.ocean_v)
+        cair = state.surface_cair if state.surface_cair is not None else state.surface_wetness
+        csat = state.surface_csat if state.surface_csat is not None else state.surface_wetness
+        sub = state.surface_sublimation_fraction
+        if sub is None:
+            sub = _default_sublimation_fraction(frac)
         p_sfc = state.pressure_half[:, -1]
         qsat_tiles = saturation_specific_humidity(
             state.surface_temperature, p_sfc[:, None],
         )
-        tiny = 1.0e-12  # C floors at 1e-6 per tile; guard the 0-fraction limit
-        q_s_eff = (
-            jnp.sum(frac * wet * ce_t * qsat_tiles, axis=1)
-            / jnp.maximum(c_moist, tiny)
+        if land is not None:
+            _, dqs = saturation_specific_humidity_and_derivative(
+                land.temperature, p_sfc)
+            land = land._replace(saturation_slope=dqs)
+        surface_tiles = SurfaceTiles(
+            fraction=frac,
+            exchange_heat=diagnostics.surface_exchange_heat,
+            exchange_moisture=diagnostics.surface_exchange_moisture,
+            cair=jnp.clip(cair, 0.0, 1.0),
+            csat=jnp.clip(csat, 0.0, 1.0),
+            temperature=state.surface_temperature,
+            saturation_humidity=qsat_tiles,
+            sublimation_fraction=sub,
+            land=land,
         )
-        phi_k = c.grav * (state.height_full[:, -1] - state.height_half[:, -1])
-        t_s_eff = (
-            jnp.sum(frac * ch_t * state.surface_temperature, axis=1)
-            / jnp.maximum(c_heat, tiny)
-        ) - phi_k / c.cpd
-
-        surface_exchange = (c_mom, c_heat, c_moist)
-        surface_target = (state.ocean_u, state.ocean_v, t_s_eff, q_s_eff)
-
-        # Latent heat of the delivered moisture flux, per tile as ECHAM
-        # reports it: ``alv·E`` over open water, ``als·E`` over sea ice
-        # (postproc_ice ``pahfli = als·zqhfli``) and JSBACH's
-        # ``alv·E + (als − alv)·snow_fract·E_pot`` over land (mo_soil.f90),
-        # E_pot being the flux at full wetness. Every tile flux is linear in
-        # the one implicit bottom value, so the sum collapses exactly like
-        # the moisture row: LH = ρ·C_L·tp1·(tp2·q_L − X̂_K).
-        sub = state.surface_sublimation_fraction
-        if sub is None:
-            sub = _default_sublimation_fraction(wet)
-        k_lh = ce_t * (c.alhc * wet + (c.alhs - c.alhc) * sub)
-        c_lh = jnp.sum(frac * k_lh, axis=1)
-        q_lh = (jnp.sum(frac * k_lh * qsat_tiles, axis=1)
-                / jnp.maximum(c_lh, tiny))
-        latent_heat_exchange = (c_lh, q_lh)
     else:
-        surface_exchange = None
-        surface_target = None
-        latent_heat_exchange = None
+        surface_momentum = None
+        surface_tiles = None
 
     # The matrix solver returns ``tke_tendency = (matrix_tke_new -
     # state_for_solver.tke) / dt``. Since the caller computes
@@ -399,12 +383,11 @@ def vertical_diffusion_column(
     #   new_tke_tend = (matrix_tke_new - state.tke) / dt
     #                = ((post_source_tke + dt * transport_tend) - state.tke) / dt
     #                = (post_source_tke - state.tke) / dt + transport_tend
-    tendencies, surface_fluxes = vertical_diffusion_step(
+    tendencies, surface_fluxes, land_balance = vertical_diffusion_step(
         state_for_solver, params,
         exchange_coeff_momentum, exchange_coeff_heat, exchange_coeff_moisture,
         dt, tke_exchange_coeff,
-        surface_exchange=surface_exchange, surface_target=surface_target,
-        latent_heat_exchange=latent_heat_exchange,
+        surface_momentum=surface_momentum, surface_tiles=surface_tiles,
     )
     tke_tend_rebased = (
         tendencies.tke_tendency + (post_source_tke - state.tke) / dt
@@ -421,7 +404,8 @@ def vertical_diffusion_column(
         tke_tendency=tke_tend_rebased,
         thv_var_tendency=thv_var_tend_rebased,
     )
-    diagnostics = diagnostics._replace(surface_fluxes=surface_fluxes)
+    diagnostics = diagnostics._replace(surface_fluxes=surface_fluxes,
+                                       land_balance=land_balance)
 
     return tendencies, diagnostics
 
@@ -549,12 +533,50 @@ from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.diagnostics.moist_air_state import advance_thermo_run  # noqa: E402
+from jcm.physics.radiation import SURFACE_OPTICS_KEY  # noqa: E402
+from jcm.physics.surface.echam import jsbach_land  # noqa: E402
+from jcm.physics.surface.echam.jsbach_land import JsbachLandParameters  # noqa: E402
 from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (  # noqa: E402
     VerticalDiffusionData,
 )
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec  # noqa: E402
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
+
+
+_LOGGER = logging.getLogger(__name__)
+_LOGGED_NO_SOILW_REL = False
+
+
+def _upper_layer_fill(forcing: ForcingData):
+    """Return the bare soil's upper-layer fill: ``soilw_rel``, else ``soilw_am``.
+
+    ``soilw_rel`` (ERA5 swvl1 over the field capacity of the 0-7 cm layer) is
+    the quantity ECHAM6.3's 5-layer soil gives ``calc_relative_humidity_upper``;
+    a bundle built before it existed carries only ``soilw_am``, which stands in
+    (the two agree within a few per cent in most land boxes). Logged once.
+    """
+    global _LOGGED_NO_SOILW_REL
+    if forcing.soilw_rel is not None:
+        return forcing.soilw_rel
+    if not _LOGGED_NO_SOILW_REL:
+        _LOGGER.warning(
+            "forcing has no soilw_rel (a bundle built before #787): the bare-soil "
+            "humidity of the ECHAM land tile uses soilw_am instead")
+        _LOGGED_NO_SOILW_REL = True
+    return forcing.soilw_am
+
+
+def forcing_land_temperature(forcing: ForcingData):
+    """Return the land skin temperature a fixed-land-temperature run holds [K].
+
+    The one place the ``land_temperature="prescribed"`` land tile reads it:
+    today ``forcing.stl_am``, ERA5's monthly soil-temperature climatology,
+    which has no diurnal cycle. A sub-daily land-temperature channel (#984)
+    replaces this function's body, not the physics. (The prognostic skin's
+    soil below and its seed stay ``stl_am``.)
+    """
+    return forcing.stl_am
 
 
 class TteTkeVerticalDiffusion(PhysicsTerm):
@@ -578,6 +600,14 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
     exported as ``surface_evaporation`` / ``surface_sensible_heat`` /
     ``surface_latent_heat`` / ``surface_stress_u/v``, which the downstream
     ``EchamSurface`` term republishes as the public ``"surface"`` fluxes.
+
+    The land tile is JSBACH's prescribed-moisture land (#979;
+    :mod:`jcm.physics.surface.echam.jsbach_land`): its moisture flux carries
+    JSBACH's humidity factors ``cair``/``csat``, and its skin temperature
+    (``surface.land_surface_temperature``, carried) is solved with the lowest
+    level from the land energy balance against the prescribed soil
+    temperature ``stl_am``. The term writes the land tile's balance and
+    factors onto the ``"surface"`` diagnostics.
 
     Reads the previous-step TKE from
     ``diagnostics["vertical_diffusion"].tke`` and writes the updated
@@ -603,7 +633,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         "height_full", "height_half",
         "surface", "clouds",
     )
-    provides: ClassVar[tuple[str, ...]] = ("vertical_diffusion",)
+    provides: ClassVar[tuple[str, ...]] = ("vertical_diffusion", "surface")
     # The structural shape comes from the declarative slot; the TKE
     # field gets a non-zero seed in :meth:`initial_carry_state` below.
     carry_slots: ClassVar[dict[str, type]] = {
@@ -611,11 +641,15 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
     }
 
     def __init__(self, params: VDiffParameters | None = None,
-                 couple_surface: bool = True):
+                 couple_surface: bool = True,
+                 land_params: JsbachLandParameters | None = None):
         """Hold the scheme-native :class:`VDiffParameters`.
 
         Args:
             params: Scheme parameters (defaults to ECHAM values).
+            land_params: Constants of the JSBACH land tile
+                (:class:`~jcm.physics.surface.echam.jsbach_land.JsbachLandParameters`),
+                differentiable leaves.
             couple_surface: Static flag forwarded to
                 :func:`vertical_diffusion_column`. ``True`` (default): the
                 implicit solve carries the surface exchange as its
@@ -631,6 +665,8 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         """
         self.params = nnx.Param(params or VDiffParameters.default())
         self.couple_surface = couple_surface
+        self.land_params = nnx.Param(land_params or JsbachLandParameters.default())
+        jsbach_land.check_land_temperature_mode(self.land_params.get_value())
 
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
@@ -711,18 +747,32 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         surface_fraction = surface_fraction.at[:, 2].set(land_fraction)
 
         # Per-tile surface temperature: SST for water, min(SST, ctfreez)
-        # for ice (saline freezing point, ECHAM iniphy.f90:71), stl_am
-        # for land.
+        # for ice (saline freezing point, ECHAM iniphy.f90:71), the land
+        # skin temperature for land.
         surface_in = diagnostics["surface"]
         # Water-tile temperature straight from the SST FORCING, not the
         # blended ``surface.surface_temperature`` (which is snapped to
         # one-or-the-other in mixed coastal cells — with fmask > 0.5 the
         # residual ocean fraction would exchange with the LAND
-        # temperature through the new Robin delivery row, corrupting
-        # coastal fluxes; Codex review on #555). Same per-tile sources
-        # as EchamSurface's rebuild.
+        # temperature, corrupting coastal fluxes; Codex review on #555).
+        # Same per-tile sources as EchamSurface.
         sst_col = forcing.sea_surface_temperature.reshape(ncols)
-        land_temp_col = forcing.stl_am.reshape(ncols)
+        stl_col = forcing.stl_am.reshape(ncols)
+        # The land skin temperature is prognostic (#979), carried in
+        # ``surface.land_surface_temperature`` and seeded from stl_am when
+        # unset (<= 0) by EchamBoundaryConditions; the same rule here keeps a
+        # composition without that term well defined. With
+        # ``land_temperature="prescribed"`` it is the forcing's, every step.
+        land_p = self.land_params.get_value()
+        prescribed_land = jsbach_land.check_land_temperature_mode(land_p) == "prescribed"
+        carried = getattr(surface_in, "land_surface_temperature", None)
+        if prescribed_land:
+            land_temp_col = forcing_land_temperature(forcing).reshape(ncols)
+        elif carried is None:
+            land_temp_col = stl_col
+        else:
+            carried = carried.reshape(ncols)
+            land_temp_col = jnp.where(carried > 0.0, carried, stl_col)
         ice_temp_col = jnp.where(
             sea_ice_fraction > 0.0,
             jnp.minimum(sst_col, CTFREEZ),
@@ -753,26 +803,104 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # Snow-covered share of the land: the prescribed ``snowc_am`` cover
         # of the non-glacier land plus the glaciers, fully snow covered as
         # JSBACH sets them (#672; convention on ``ForcingData``).
-        snow_col = land_snow_cover(
-            forcing.snowc_am.reshape(ncols),
-            None if forcing.glacier_fraction is None
-            else forcing.glacier_fraction.reshape(ncols))
-
-        # Land wetness in JSBACH's form (mo_soil.f90 ``qsat_fact``): the
-        # snow-covered part evaporates at the potential rate, the snow-free
-        # part at the soil's availability. That keeps the land flux at least
-        # the snow part's potential flux, which the sublimation latent heat
-        # below is charged against.
-        glac_col = (None if forcing.glacier_fraction is None
+        glac_col = (jnp.zeros(ncols) if forcing.glacier_fraction is None
                     else forcing.glacier_fraction.reshape(ncols))
-        surface_wetness = jnp.stack([
-            jnp.ones(ncols),
-            jnp.ones(ncols),
-            land_wetness(
-                jnp.clip(forcing.soilw_am.reshape(ncols), 0.0, 1.0),
-                glac_col,
-                snow_cover=jnp.clip(forcing.snowc_am.reshape(ncols), 0.0, 1.0)),
-        ], axis=1)
+        snowc_col = jnp.clip(forcing.snowc_am.reshape(ncols), 0.0, 1.0)
+        snow_col = land_snow_cover(snowc_col, glac_col)
+
+        # === Land tile: JSBACH's humidity factors (#979) ======================
+        # Prescribed-moisture land: soilw_am is the root-zone fill ws/wsmx the
+        # water-stress factor reads, soilw_rel (ERA5 swvl1 over its field
+        # capacity) the upper-layer fill ECHAM6.3's 5-layer soil gives the
+        # bare-soil humidity. Vegetated fraction = the forest fraction.
+        w_root = jnp.clip(forcing.soilw_am.reshape(ncols), 0.0, 1.0)
+        w_upper = jnp.clip(_upper_layer_fill(forcing).reshape(ncols), 0.0, 1.0)
+        veg_col = (jnp.zeros(ncols) if forcing.forest_fraction is None
+                   else jnp.clip(forcing.forest_fraction.reshape(ncols), 0.0, 1.0))
+        radiation = diagnostics.get("radiation")
+        optics = diagnostics.get(SURFACE_OPTICS_KEY)
+        zeros = jnp.zeros(ncols)
+        sw_down = zeros if radiation is None else radiation.surface_sw_down.reshape(ncols)
+        lw_down = zeros if radiation is None else radiation.surface_lw_down.reshape(ncols)
+        if optics is not None and "land_albedo" in optics:
+            land_albedo = optics["land_albedo"].reshape(ncols)
+            land_emissivity = optics["land_emissivity"].reshape(ncols)
+        else:
+            from jcm.physics.forcing.echam_boundary_conditions import (
+                SurfaceOpticsParameters,
+            )
+            land_albedo = jnp.clip(jnp.asarray(forcing.alb0).reshape(ncols), 0.0, 1.0)
+            land_emissivity = jnp.full(ncols, SurfaceOpticsParameters().land_emissivity)
+        # The held downward shortwave is absorbed through the albedo it was
+        # solved with: the radiation holds the land albedo of its last solve
+        # beside surface_sw_down/_up (ECHAM's JSBACH takes the radiation's net
+        # shortwave and moves its interactive albedo only at a radiation
+        # step), so a skin crossing the snow-albedo ramp between solves does
+        # not open the budget against the held upward shortwave. Unset (<= 0:
+        # a cold start, an older checkpoint, a radiation term that does not
+        # hold it) the current step's albedo is used.
+        solve_albedo = getattr(surface_in, "land_albedo_at_solve", None)
+        if solve_albedo is not None:
+            solve_albedo = solve_albedo.reshape(ncols)
+            land_albedo = jnp.where(solve_albedo > 0.0, solve_albedo, land_albedo)
+        land_sw_net = sw_down * (1.0 - land_albedo)
+        canopy_conductance = jsbach_land.unstressed_canopy_conductance(
+            land_p.leaf_area_index, land_p.par_fraction * land_sw_net, land_p)
+        # The canopy factor reads the land tile's exchange velocity C_h·|U|;
+        # like ECHAM's zchl it is the previous step's (ECHAM's factors are the
+        # ones update_soil formed at the end of the previous step, and this
+        # step's coefficients depend on them through the surface-layer
+        # humidity). A cold start has none: see below.
+        prev_exchange = jnp.asarray(prev_vdiff.surface_exchange_heat).reshape(ncols, nsfc_type)
+        p_sfc = pressure_half[-1].reshape(ncols)
+        q_sat_land = saturation_specific_humidity(land_temp_col, p_sfc)
+        bare_h = jsbach_land.bare_soil_relative_humidity(w_upper)
+        cair_land, csat_land, stress = jsbach_land.humidity_factors(
+            bare_h, w_root, snowc_col, glac_col, veg_col, canopy_conductance,
+            prev_exchange[:, 2], state.specific_humidity[-1].reshape(ncols), q_sat_land,
+            land_p)
+        # ECHAM starts the land without evaporation: a run that is not a
+        # restart sets zcair = zcsat = 0 (mo_surface.f90::init_surface), and
+        # update_soil forms the first factors at the end of that step. A carry
+        # without a land exchange velocity is that first step.
+        cold_start = prev_exchange[:, 2] <= 0.0
+        cair_land = jnp.where(cold_start, 0.0, cair_land)
+        csat_land = jnp.where(cold_start, 0.0, csat_land)
+        # The land constants are float64 leaves under x64; the land tile keeps
+        # the state's precision.
+        dtype = state.temperature.dtype
+        cair_land, csat_land, stress, bare_h, canopy_conductance = (
+            x.astype(dtype) for x in (cair_land, csat_land, stress, bare_h, canopy_conductance))
+        ones = jnp.ones(ncols, dtype)
+        surface_cair = jnp.stack([ones, ones, cair_land], axis=1)
+        surface_csat = jnp.stack([ones, ones, csat_land], axis=1)
+
+        # === Land tile: skin energy balance (#979) ============================
+        # Solved with the lowest level in the implicit solve whenever the
+        # surface is coupled and there is radiation to drive it; otherwise the
+        # land keeps the prescribed soil temperature.
+        land_inputs = None
+        if self.couple_surface and radiation is not None:
+            heat_capacity, conductance = (
+                x.astype(dtype) for x in jsbach_land.top_layer_thermal_properties(
+                    snowc_col, glac_col, land_p))
+            # Snow deeper than ECHAM's critical depth (the bundle's own
+            # snowc = SWE/60 mm), or any glacier, holds the skin at tmelt.
+            melt_capped = (glac_col > 0.0) | (
+                (1.0 - glac_col) * snowc_col * land_p.full_cover_snow_water_equivalent
+                > land_p.critical_snow_depth)
+            land_inputs = LandBalanceInputs(
+                temperature=land_temp_col,
+                soil_temperature=stl_col,
+                saturation_slope=zeros,   # filled by vertical_diffusion_column
+                net_shortwave=land_sw_net,
+                longwave_down=lw_down,
+                emissivity=land_emissivity,
+                heat_capacity=heat_capacity,
+                conductance=conductance,
+                melt_capped=melt_capped,
+                params=land_p,
+            )
 
         # Share of each tile's potential evaporation that sublimates (sets
         # the reported latent heat only): all of it over sea ice, the
@@ -809,8 +937,10 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             surface_fraction=surface_fraction,
             roughness_length=roughness,
             roughness_heat=roughness_heat,
-            surface_wetness=surface_wetness,
+            surface_wetness=surface_csat,
             surface_sublimation_fraction=surface_sublimation_fraction,
+            surface_cair=surface_cair,
+            surface_csat=surface_csat,
             ocean_u=ocean_u,
             ocean_v=ocean_v,
             tke=tke.T,
@@ -819,6 +949,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
 
         vdiff_tendencies, vdiff_diagnostics = vertical_diffusion_column(
             vdiff_state, params, dt, couple_surface=self.couple_surface,
+            land=land_inputs,
         )
 
         u_tend = vdiff_tendencies.u_tendency.T
@@ -923,4 +1054,36 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             d_qi=qi_tend,
         )
 
-        return tendency, {**diagnostics, "vertical_diffusion": vdiff_out}
+        # The land tile onto the public surface namespace. A prescribed land
+        # (forced fluxes, or no radiation) keeps stl_am and reports no balance.
+        lb = vdiff_diagnostics.land_balance
+        if lb is None:
+            balance = {name: zeros for name in (
+                "land_net_radiation", "land_sensible_heat_flux", "land_latent_heat_flux",
+                "ground_heat_flux", "snow_melt_heat_flux", "land_heat_storage",
+                "land_evaporation", "land_energy_residual")}
+            new_land_temperature = land_temp_col if prescribed_land else stl_col
+        else:
+            balance = dict(
+                land_net_radiation=lb.net_radiation,
+                land_sensible_heat_flux=lb.sensible_heat_flux,
+                land_latent_heat_flux=lb.latent_heat_flux,
+                ground_heat_flux=lb.ground_heat_flux,
+                snow_melt_heat_flux=lb.melt_heat_flux,
+                land_heat_storage=lb.heat_storage,
+                land_evaporation=lb.evaporation,
+                land_energy_residual=lb.energy_residual,
+            )
+            new_land_temperature = lb.temperature
+        surface_out = surface_in.copy(
+            land_surface_temperature=new_land_temperature,
+            cair=cair_land,
+            csat=csat_land,
+            water_stress_factor=stress,
+            bare_soil_humidity=bare_h,
+            canopy_conductance=canopy_conductance,
+            **balance,
+        )
+
+        return tendency, {**diagnostics, "vertical_diffusion": vdiff_out,
+                          "surface": surface_out}
