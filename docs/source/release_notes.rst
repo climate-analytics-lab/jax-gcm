@@ -999,6 +999,27 @@ radiation parameters. A slow test now differentiates every term's outputs with
 respect to every float parameter of the ECHAM, ECHAM+JAM (2M), grey and SPEEDY
 packages.
 
+Finite gradients under ``jax.jit`` through the tracer mass fixer
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+``jax.jit`` of the ECHAM two-step ``d(mean T)/d(solar constant)`` with the 1M
+cloud scheme returned NaN while the eager gradient was finite (#987). The
+dycore's semi-Lagrangian tracer mass fixer rescales each tracer by
+``target / current``, the ratio of its global mass before and after transport,
+behind a mask that the totals are positive. The reverse rule of that quotient
+needs ``current**-2``, which is ``inf`` in float32 below about 1.08e-19, far
+above the mask's 1e-30. In a compiled program the 1M composition's ice
+tendency in clear cells is a rounding residue (~1e-29 kg/kg/s; op-by-op
+evaluation gives exactly zero) whose global total, ~3e-21, passes the mask, and
+a zero cotangent times the ``inf`` was NaN over the whole dynamical state. The fixer, and the column hole-filler
+``jcm.filters.mass_conserving_positivity`` (whose gradient was also NaN in any
+column with no positive mass and ``inf`` in one holding only a residue), now
+divide through ``jcm.filters.stable_quotient``: the plain quotient, with its
+exact derivative evaluated without the square. Forward results are
+bit-identical. The two-step gradient under ``jax.jit`` now agrees with the
+eager one to float32 rounding (1.19573e-05 and 1.19572e-05) for both cloud
+schemes.
+
 
 Corrected physics
 ^^^^^^^^^^^^^^^^^

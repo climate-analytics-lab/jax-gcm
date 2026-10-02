@@ -453,6 +453,229 @@ class AfterPhysicsStateTest(unittest.TestCase):
                                       np.asarray(grid.temperature))
 
 
+def _plain_quotient_fixer(dycore, state_ref, state_new):
+    """Apply the mass fixer written with a bare ``target / current``.
+
+    The formulation ``DinosaurDycore._fix_nodal_tracer_mass`` must reproduce
+    bit for bit, kept here as the reference for the forward and as the control
+    for the derivative tests below.
+    """
+    import jax.numpy as jnp
+
+    w = jnp.asarray(dycore.coords.horizontal.quadrature_weights)
+    dp_ref = dycore._nodal_tracer_column_weight(state_ref)
+    dp_new = dycore._nodal_tracer_column_weight(state_new)
+    tracers = dict(state_new.tracers)
+    for name in dycore._nodal_tracers:
+        q_ref, q_new = state_ref.tracers[name], tracers[name]
+        target = jnp.sum(q_ref * dp_ref * w)
+        current = jnp.sum(q_new * dp_new * w)
+        tiny = jnp.asarray(1e-300, dtype=q_new.dtype) if \
+            q_new.dtype == jnp.float64 else jnp.asarray(1e-30, q_new.dtype)
+        ok = (current > tiny) & (target > tiny)
+        safe_current = jnp.where(ok, current, 1.0)
+        safe_target = jnp.where(ok, target, 1.0)
+        scale = jnp.where(
+            ok, jnp.clip(safe_target / safe_current, 2.0 / 3.0, 1.5), 1.0)
+        tracers[name] = q_new * scale
+    return state_new.replace(tracers=tracers)
+
+
+@unittest.skipUnless(_sl_available(), "needs the semi-Lagrangian dinosaur")
+class TracerMassFixerGradientTest(unittest.TestCase):
+    """The mass fixer differentiates finitely whatever the tracer totals are.
+
+    The fixer rescales a tracer by ``target / current``, the ratio of its
+    global mass before and after transport, and guards the division with a
+    positivity mask. A mask does not bound the *derivative*: the quotient's
+    reverse rule needs ``current**-2``, which is ``inf`` in float32 for any
+    ``current`` below ~1.08e-19, so a total that is positive but is only a
+    rounding residue (a cloud scheme's cancelling corrections in clear air,
+    summing to ~1e-21) passes the mask and turns a zero cotangent into ``nan``
+    over the whole dynamical state. Every derivative case below sits in that
+    band, whose edges follow the working dtype.
+    """
+
+    # Global mass totals the forward is compared at, spanning an empty field,
+    # a subnormal, the old guard, the unguarded band, an ordinary field and a
+    # large one.
+    TOTALS = (0.0, 1e-40, 1e-30, 3e-21, 1e-10, 1.0)
+
+    def _setup(self):
+        import jax.numpy as jnp
+        import numpy as np
+
+        from jcm.physics.physics_term import TracerSpec
+
+        dycore = _small_dycore(tracer_specs={"dust": TracerSpec(name="dust")})
+        state = dycore.initial_state(None, random_seed=0)
+        dtype = state.tracers["dust"].dtype
+        # integral(dp w) over the grid: a uniform tracer of value f has
+        # global mass f * measure.
+        w = np.asarray(dycore.coords.horizontal.quadrature_weights)
+        dp = np.asarray(dycore._nodal_tracer_column_weight(state))
+        measure = float((dp * w).sum())
+
+        def with_total(total):
+            """Return the state with a uniform ``dust`` field of global mass ``total``."""
+            field = jnp.full(state.tracers["dust"].shape, total / measure, dtype)
+            return state.replace(tracers={**state.tracers, "dust": field})
+
+        return dycore, state, with_total, dtype
+
+    @staticmethod
+    def _unguarded_total(dtype):
+        """Return a total above the fixer's guard whose square underflows ``dtype``."""
+        import numpy as np
+
+        return 1e-2 * float(np.sqrt(np.finfo(dtype).tiny))
+
+    def test_forward_is_the_plain_quotient_bit_for_bit(self):
+        import itertools
+
+        dycore, _, with_total, _ = self._setup()
+        for t_ref, t_new in itertools.product(self.TOTALS, self.TOTALS):
+            ref, new = with_total(t_ref), with_total(t_new)
+            got = dycore._fix_nodal_tracer_mass(ref, new)
+            expected = _plain_quotient_fixer(dycore, ref, new)
+            np.testing.assert_array_equal(
+                np.asarray(got.tracers["dust"]),
+                np.asarray(expected.tracers["dust"]),
+                err_msg=f"totals ({t_ref}, {t_new})")
+
+    def _pullback(self, dycore, fixer, state_ref, state_new, ct):
+        """Reverse-mode pullback of ``fixer`` w.r.t. the new tracer field, jitted."""
+        import jax
+
+        def f(q_new):
+            return fixer(
+                state_ref,
+                state_new.replace(tracers={**state_new.tracers, "dust": q_new}),
+            ).tracers["dust"]
+
+        @jax.jit
+        def run(q_new, cotangent):
+            return jax.vjp(f, q_new)[1](cotangent)[0]
+
+        q_new = state_new.tracers["dust"]
+        return np.asarray(run(q_new, ct * np.ones_like(q_new)))
+
+    def test_zero_and_unit_cotangents_are_finite_in_the_unguarded_band(self):
+        dycore, _, with_total, dtype = self._setup()
+        total = self._unguarded_total(dtype)
+        # Before and after transport differ by a rounding-sized fraction, so
+        # the ratio is ~1 and unclipped.
+        ref, new = with_total(total), with_total(total * (1.0 + 1e-6))
+        for ct in (0.0, 1.0):
+            grad = self._pullback(
+                dycore, dycore._fix_nodal_tracer_mass, ref, new, ct)
+            self.assertTrue(np.all(np.isfinite(grad)), ct)
+            # The control: the plain quotient is not finite at this point,
+            # so the assertion above fails if the helper is removed.
+            plain = self._pullback(
+                dycore, lambda a, b: _plain_quotient_fixer(dycore, a, b),
+                ref, new, ct)
+            self.assertFalse(np.all(np.isfinite(plain)), ct)
+
+    def test_empty_fields_have_a_finite_zero_cotangent_gradient(self):
+        dycore, _, with_total, _ = self._setup()
+        zero = with_total(0.0)
+        grad = self._pullback(
+            dycore, dycore._fix_nodal_tracer_mass, zero, zero, 0.0)
+        np.testing.assert_array_equal(grad, 0.0)
+
+    def test_step_with_a_residue_tendency_has_a_finite_zero_cotangent_pullback(self):
+        # The path the two-step ECHAM gradient takes: a cold-start (empty)
+        # tracer receives a rounding-sized physics tendency, the fixer sees
+        # totals in the unguarded band, and a zero cotangent must stay zero
+        # through the whole dynamical state.
+        from unittest import mock
+
+        import jax
+        import jax.numpy as jnp
+
+        from jcm.dycore.dinosaur import dycore as dycore_mod
+        from jcm.physics_interface import PhysicsTendency
+
+        dycore, state, with_total, dtype = self._setup()
+        state = with_total(0.0)
+        measure = float(np.sum(
+            np.asarray(dycore._nodal_tracer_column_weight(state))
+            * np.asarray(dycore.coords.horizontal.quadrature_weights)))
+        total = self._unguarded_total(dtype)
+        shape = state.tracers["dust"].shape
+        zeros = jnp.zeros(shape, dtype)
+        tendency = PhysicsTendency(
+            u_wind=zeros, v_wind=zeros, temperature=zeros,
+            specific_humidity=zeros,
+            tracers={"dust": jnp.full(
+                shape, total / measure / dycore.dt_seconds, dtype)},
+        )
+
+        def zero_pullback():
+            @jax.jit
+            def run(s):
+                out, vjp = jax.vjp(lambda x: dycore.step(x, tendency), s)
+                return vjp(jax.tree.map(jnp.zeros_like, out))[0]
+
+            return jax.tree.leaves(run(state))
+
+        leaves = [np.asarray(x) for x in zero_pullback()]
+        self.assertTrue(all(np.all(np.isfinite(x)) for x in leaves))
+        # The control: with the plain quotient in the fixer the same pullback
+        # is not finite, so this test fails if the helper is taken out.
+        with mock.patch.object(dycore_mod, "stable_quotient",
+                               lambda numerator, denominator: numerator / denominator):
+            plain = [np.asarray(x) for x in zero_pullback()]
+        self.assertFalse(all(np.all(np.isfinite(x)) for x in plain))
+
+    def test_gradient_matches_a_float64_finite_difference(self):
+        # Ordinary field, ratio inside the clip: compare the directional
+        # derivative of <ct, fixed(q)> with a central difference of a float64
+        # numpy re-implementation (no dependence on the code under test).
+        import jax
+        import jax.numpy as jnp
+
+        dycore, state, _, dtype = self._setup()
+        w = np.asarray(dycore.coords.horizontal.quadrature_weights, np.float64)
+        dp = np.asarray(dycore._nodal_tracer_column_weight(state), np.float64)
+        rng = np.random.default_rng(0)
+        shape = state.tracers["dust"].shape
+        q_ref = 1e-9 * (1.0 + 0.5 * rng.random(shape))
+        q_new = 1.02 * q_ref * (1.0 + 0.01 * rng.standard_normal(shape))
+        ct = rng.standard_normal(shape)
+        direction = rng.standard_normal(shape) * q_new
+
+        def numpy_fixed(q):
+            scale = np.clip((q_ref * dp * w).sum() / (q * dp * w).sum(),
+                            2.0 / 3.0, 1.5)
+            return q * scale
+
+        eps = 1e-6
+        fd = (np.sum(ct * numpy_fixed(q_new + eps * direction))
+              - np.sum(ct * numpy_fixed(q_new - eps * direction))) / (2 * eps)
+
+        ref = state.replace(tracers={
+            **state.tracers, "dust": jnp.asarray(q_ref, dtype)})
+        new = state.replace(tracers={
+            **state.tracers, "dust": jnp.asarray(q_new, dtype)})
+        out = np.asarray(dycore._fix_nodal_tracer_mass(ref, new).tracers["dust"])
+        np.testing.assert_allclose(out, numpy_fixed(q_new), rtol=1e-5)
+
+        def f(q):
+            return dycore._fix_nodal_tracer_mass(
+                ref, new.replace(tracers={**new.tracers, "dust": q})
+            ).tracers["dust"]
+
+        q0 = jnp.asarray(q_new, dtype)
+        _, jvp = jax.jvp(f, (q0,), (jnp.asarray(direction, dtype),))
+        vjp = jax.vjp(f, q0)[1](jnp.asarray(ct, dtype))[0]
+        forward = float(np.sum(ct * np.asarray(jvp, np.float64)))
+        reverse = float(np.sum(np.asarray(vjp, np.float64) * direction))
+        np.testing.assert_allclose(forward, fd, rtol=2e-3)
+        np.testing.assert_allclose(reverse, fd, rtol=2e-3)
+
+
 class TrajectoryToXarrayTest(unittest.TestCase):
     """``DinosaurDycore.to_xarray`` converts a real run's predictions.
 

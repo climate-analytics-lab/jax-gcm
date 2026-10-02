@@ -37,6 +37,7 @@ from jcm.dycore.dinosaur.state_bridge import (
     physics_state_to_dynamics_state,
     physics_tendency_to_dynamics_tendency,
 )
+from jcm.filters import stable_quotient
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
 
@@ -958,11 +959,25 @@ class DinosaurDycore(DynamicalCore):
             # see benign inputs, or its cotangent (∝ target/current²) blows
             # up through empty fields — qc/qi start at zero in every
             # cold-start run and this NaN'd the two-step gradient gate.
+            #
+            # ``tiny`` only keeps the totals positive; it is no bound on the
+            # derivative. A bare ``target / current`` differentiates through
+            # ``current**-2``, which is ``inf`` in float32 for every
+            # ``current`` below 2**-63 ≈ 1.08e-19, far above ``tiny``. A total
+            # in that band is not hypothetical: the ice tendency of clear
+            # cells in the ECHAM 1M composition is exactly zero when evaluated
+            # op by op and a ~1e-29 kg/kg/s rounding residue in a fused XLA
+            # program; its global total, ~3e-21, passes the mask, and through
+            # a bare quotient a zero cotangent times the ``inf`` is a NaN over
+            # the whole dynamical state. :func:`jcm.filters.stable_quotient`
+            # has the plain quotient's value and its exact derivative without
+            # the square.
             safe_current = jnp.where(ok, current, 1.0)
             safe_target = jnp.where(ok, target, 1.0)
             scale = jnp.where(
                 ok,
-                jnp.clip(safe_target / safe_current, 2.0 / 3.0, 1.5),
+                jnp.clip(stable_quotient(safe_target, safe_current),
+                         2.0 / 3.0, 1.5),
                 1.0,
             )
             tracers[name] = q_new * scale
