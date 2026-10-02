@@ -303,6 +303,9 @@ class _Check:
     #: ``"key/field"`` entry drops one field of a struct-valued diagnostic
     #: (see ``_drop_outputs``).
     skip_outputs: tuple[str, ...] = ()
+    #: Input leaves held fixed in this cell on top of ``_FIXED_INPUTS``, each
+    #: because the replay puts it on a code-path selector (see ``_freeze``).
+    fixed_inputs: tuple[str, ...] = ()
     xfail_reference: str | None = None
     xfail_finiteness: str | None = None
 
@@ -310,6 +313,13 @@ class _Check:
 # Cells that are not the default. Keyed by (term, operating point); a term name
 # alone applies to both points.
 _CHECKS: dict = {
+    # The boundary conditions read the carried land skin temperature (#979),
+    # which a cold start holds at exactly 0 — the "unset" value that selects
+    # the stl_am seed. Along that leaf the term jumps from the seed to the
+    # perturbation itself, so no two-sided derivative exists there; once set
+    # (every later step) it is an ordinary input, checked over land by
+    # ``test_land_tile_term_gradients``.
+    "echam_boundary_conditions": _Check(fixed_inputs=("land_surface_temperature",)),
     # The idealized grey radiation is not in the ECHAM composition; its term is
     # checked on its own by the ``test_grey_radiation_term_*`` tests below.
     # Finiteness holds at both points; only the two-sided reference is
@@ -1012,8 +1022,97 @@ def test_term_gradients_against_a_reference(term_name, point_name):
         reference=check.reference,
         adjoint_rtol=check.adjoint_rtol,
         live_inputs=check.live_inputs,
-        fixed_inputs=_FIXED_INPUTS,
+        fixed_inputs=_FIXED_INPUTS + check.fixed_inputs,
     )
+
+
+# The land tile (#979). Both soundings sit over ocean, where the land tile's
+# fraction is zero and nothing the vdiff or the surface term returns depends on
+# it. The two terms that carry it — the vdiff, which solves the land skin
+# energy balance with the lowest level through JSBACH's humidity factors, and
+# ``EchamSurface``, which re-emits the cached longwave at the new skin
+# temperature — are therefore also handed each column as land, the way
+# ``_LAND_TERMS`` hands it to Lott-Miller. The forcing's soil fill (0.3) is
+# below the critical fill and puts the bare-soil switch on the ``stable``
+# column's near-saturated air inactive and the canopy water-stressed, so the
+# surrogate derivatives of both are on the checked path; half the land is
+# forest (the ocean forcing has none), so the canopy is on it too. The canopy
+# factor reads the previous step's land exchange velocity, which a cold start
+# has not got (it is 0, and the first step transpires at the unstressed
+# rate), so these cells run on the warm replay (``_warm_replay``).
+_LAND_TILE_TERMS = ("tte_tke_vertical_diffusion", "echam_surface")
+
+
+def _as_land(forcing, terrain):
+    """Return the replay's column as land with a half-forested cover."""
+    return (forcing.copy(forest_fraction=jnp.full_like(forcing.stl_am, 0.5)),
+            dataclasses.replace(terrain, fmask=jnp.ones_like(terrain.fmask)))
+_LAND_TILE_SKIP = (
+    # The PBL height is the #843 staircase (see ``_PBL_HEIGHT_DEFECT``).
+    "vertical_diffusion/pbl_height",
+    # The tile fractions, built from the fixed land and sea-ice fractions.
+    "vertical_diffusion/surface_fraction",
+    # Zero by construction away from a snow or glacier melt cap: the budget
+    # residual of a balance that closes.
+    "surface/snow_melt_heat_flux",
+)
+# What each term's land path must be live in: the vdiff's balance in the
+# lowest level's state; the surface term's re-emission in the skin
+# temperature the vdiff hands it.
+_LAND_TILE_LIVE = {
+    "tte_tke_vertical_diffusion": ("[0]/temperature", "[0]/specific_humidity",
+                                   "[1]/['surface']/land_surface_temperature"),
+    "echam_surface": ("[1]/['surface']/land_surface_temperature",),
+}
+
+
+@pytest.mark.parametrize("point_name", sorted(_POINTS))
+@pytest.mark.parametrize("term_name", _LAND_TILE_TERMS)
+def test_land_tile_term_gradients(term_name, point_name):
+    """The land tile's derivatives are finite, adjoint and live."""
+    # The surface term's only tendency is the lowest-level heating; its wind
+    # and humidity tendencies are structural zeros.
+    skip = _LAND_TILE_SKIP + (("u_wind", "v_wind", "specific_humidity")
+                              if term_name == "echam_surface" else ())
+    f, (state, free, forcing, terrain) = _term_function(
+        _warm_replay(point_name, "echam"), term_name, skip_outputs=skip)
+    args = (state, free, *_as_land(forcing, terrain))
+    _assert_derivatives_are_finite(f, args, f"{term_name}/land/{point_name}")
+    check_gradients(
+        f, args, atol=1e-8, reference="adjoint", adjoint_rtol=1.0e-3,
+        live_inputs=_LAND_TILE_LIVE[term_name], fixed_inputs=_FIXED_INPUTS)
+
+
+@pytest.mark.parametrize("point_name", sorted(_POINTS))
+def test_land_tile_parameters_are_live(point_name):
+    """Every land-tile constant moves the land balance over land.
+
+    The parameter sweep below checks the vdiff's land constants for
+    finiteness on the ocean replays, where they move nothing; here the column
+    is land, and each leaf of ``JsbachLandParameters`` that enters the balance
+    must carry a non-zero derivative of it.
+    """
+    replay = _warm_replay(point_name, "echam")
+    term = next(t for t in replay.physics.terms if t.name == "tte_tke_vertical_diffusion")
+    graphdef, land_params, rest = nnx.split(term, nnx.PathContains("land_params"), ...)
+    snapshot = replay.snapshots["tte_tke_vertical_diffusion"]
+    forcing, land = _as_land(replay.forcing, replay.terrain)
+
+    def call(land_params_):
+        rebuilt = nnx.merge(graphdef, land_params_, rest)
+        _, out = rebuilt(replay.state, dict(snapshot), forcing, land)
+        sf = out["surface"]
+        return (sf.land_surface_temperature, sf.land_latent_heat_flux,
+                sf.ground_heat_flux, sf.cair, sf.csat)
+
+    primal, vjp_fun = jax.vjp(call, land_params)
+    grads = vjp_fun(_cotangent(primal, 1))[0]["land_params"].get_value()
+    assert all(np.all(np.isfinite(np.asarray(v))) for v in jax.tree.leaves(grads))
+    live = {name: float(np.abs(np.asarray(getattr(grads, name))))
+            for name in ("leaf_area_index", "soil_heat_capacity", "soil_thermal_diffusivity",
+                         "moisture_wilting_fraction", "moisture_critical_fraction",
+                         "par_fraction")}
+    assert all(v > 0.0 for v in live.values()), live
 
 
 @pytest.mark.parametrize("point_name", sorted(_POINTS))

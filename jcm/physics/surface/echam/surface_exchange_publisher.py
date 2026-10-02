@@ -138,7 +138,7 @@ class EchamSurfaceExchange(PhysicsTerm):
             # the surface (positive with the wind; the delivered column
             # momentum change is their negative — verified against the
             # column-integrated vdiff tendency, and see the diagnosis in
-            # tte_tke/matrix_solver.py::diagnose_surface_fluxes), which is
+            # tte_tke/matrix_solver.py::_momentum_stress), which is
             # exactly the contract sign. No flip, unlike SPEEDY's
             # on-the-atmosphere ``ustr``.
             stress_u=surface.momentum_flux_u.reshape(ncols),

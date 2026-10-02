@@ -255,6 +255,27 @@ class SurfaceData:
     ch: jnp.ndarray                  # Heat exchange coefficient [1] (ncols,)
     cm: jnp.ndarray                  # Momentum exchange coefficient [1] (ncols,)
 
+    # --- The land tile (jcm.physics.surface.echam.jsbach_land, #979) -------
+    # PROGNOSTIC: the land skin temperature [K], carried from step to step.
+    # A value <= 0 means "not yet set" (a cold start, or a checkpoint written
+    # before it existed): EchamBoundaryConditions then seeds it from stl_am.
+    land_surface_temperature: jnp.ndarray
+    # The land tile's energy balance this step [W/m2]:
+    # net_radiation = sensible + latent + ground + melt + storage, exactly.
+    land_net_radiation: jnp.ndarray       # SW + εLW↓ − εσT⁴, absorbed
+    land_sensible_heat_flux: jnp.ndarray  # positive up
+    land_latent_heat_flux: jnp.ndarray    # positive up
+    ground_heat_flux: jnp.ndarray         # Λ·(T_s − stl_am), into the ground
+    snow_melt_heat_flux: jnp.ndarray      # taken up by melt at a capped surface
+    land_heat_storage: jnp.ndarray        # C_s·dT_s/dt
+    land_evaporation: jnp.ndarray         # land tile [kg/m2/s], positive up
+    # JSBACH's humidity factors of the land tile and their ingredients [1]
+    cair: jnp.ndarray
+    csat: jnp.ndarray
+    water_stress_factor: jnp.ndarray
+    bare_soil_humidity: jnp.ndarray
+    canopy_conductance: jnp.ndarray       # unstressed, [m/s]
+
     @classmethod
     def zeros(cls, nodal_shape, nlev):
         return cls(
@@ -269,6 +290,7 @@ class SurfaceData:
             effective_evaporation=jnp.zeros(nodal_shape),
             ch=jnp.zeros(nodal_shape),
             cm=jnp.zeros(nodal_shape),
+            **{name: jnp.zeros(nodal_shape) for name in LAND_FIELDS},
         )
 
     def copy(self, **kwargs):
@@ -284,6 +306,46 @@ class SurfaceData:
             'effective_evaporation': self.effective_evaporation,
             'ch': self.ch,
             'cm': self.cm,
+            **{name: getattr(self, name) for name in LAND_FIELDS},
         }
         new_data.update(kwargs)
         return SurfaceData(**new_data)
+
+
+#: The land-tile fields of :class:`SurfaceData`, in declaration order.
+LAND_FIELDS = (
+    "land_surface_temperature", "land_net_radiation", "land_sensible_heat_flux",
+    "land_latent_heat_flux", "ground_heat_flux", "snow_melt_heat_flux",
+    "land_heat_storage", "land_evaporation", "cair", "csat",
+    "water_stress_factor", "bare_soil_humidity", "canopy_conductance",
+)
+
+#: CF attributes of the land-tile outputs (``surface.<field>``).
+LAND_OUTPUT_ATTRS = {
+    "surface.land_surface_temperature": {
+        "units": "K", "long_name": "land skin temperature (prognostic)"},
+    "surface.land_net_radiation": {
+        "units": "W m-2", "long_name": "net radiation absorbed by the land tile"},
+    "surface.land_sensible_heat_flux": {
+        "units": "W m-2", "long_name": "land-tile sensible heat flux, positive up"},
+    "surface.land_latent_heat_flux": {
+        "units": "W m-2", "long_name": "land-tile latent heat flux, positive up"},
+    "surface.ground_heat_flux": {
+        "units": "W m-2", "long_name": "ground heat flux into the soil below the skin"},
+    "surface.snow_melt_heat_flux": {
+        "units": "W m-2",
+        "long_name": "energy taken up by melt at a snow- or glacier-covered land surface"},
+    "surface.land_heat_storage": {
+        "units": "W m-2", "long_name": "heat storage rate of the land skin layer"},
+    "surface.land_evaporation": {
+        "units": "kg m-2 s-1", "long_name": "land-tile evaporation, positive up"},
+    "surface.cair": {"units": "1", "long_name": "JSBACH land humidity factor of the air (cair)"},
+    "surface.csat": {
+        "units": "1", "long_name": "JSBACH land humidity factor of the surface saturation (csat)"},
+    "surface.water_stress_factor": {
+        "units": "1", "long_name": "JSBACH root-zone water-stress factor"},
+    "surface.bare_soil_humidity": {
+        "units": "1", "long_name": "relative humidity of the bare soil surface"},
+    "surface.canopy_conductance": {
+        "units": "m s-1", "long_name": "unstressed canopy conductance"},
+}

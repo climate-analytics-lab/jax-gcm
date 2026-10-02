@@ -363,11 +363,51 @@ from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
+from jcm.physics.radiation.radiation_types import RadiationData  # noqa: E402
 from jcm.physics.surface.echam.surface_types import (  # noqa: E402
+    LAND_OUTPUT_ATTRS,
     AtmosphericForcing,
     SurfaceData,
     SurfaceParameters,
 )
+
+
+def correct_surface_longwave(radiation: RadiationData, t_old, t_new, pressure_half):
+    """Re-emit the cached surface longwave at the new surface temperature.
+
+    ECHAM holds the absorbed downward longwave between radiation calls and
+    emits from the current surface temperature every step, the change heating
+    the lowest layer with the top of atmosphere held (``radheat.f90:404-410``),
+    linearised about the old temperature as ``land_rad`` forms it
+    (``zteffl4 = T_old³·(4·T_new − 3·T_old)``, ``mo_surface_land.f90:612``)::
+
+        Δ = ε·σ·T_old³·(4·T_new − 3·T_old) − ε·σ·T_old⁴
+
+    with ``ε`` the emissivity the radiation solved with. ``Δ`` is added to the
+    surface upward flux and the lowest-level heating, and written back into the
+    radiation carry: the cached longwave then always describes the current
+    surface, so successive steps telescope exactly as the shortwave zenith
+    rescale does, and a radiation solve starts from the temperature the last
+    correction left.
+
+    Returns:
+        ``(radiation, heating)``: the corrected carry and the lowest-level
+        heating ``Δ·g/(c_pd·Δp_K)`` [K/s] to apply this step, ``(ncols,)``.
+
+    """
+    dtype = radiation.surface_lw_up.dtype
+    eps = radiation.surface_emissivity.reshape(t_old.shape)
+    d_up = (4.0 * eps * c.sbc * t_old ** 3 * (t_new - t_old)).astype(dtype)
+    dp_k = pressure_half[-1] - pressure_half[-2]
+    heating = (d_up * c.grav / (c.cpd * dp_k.reshape(d_up.shape))).astype(dtype)
+    shape = radiation.surface_lw_up.shape
+    radiation = radiation.copy(
+        surface_lw_up=radiation.surface_lw_up + d_up.reshape(shape),
+        lw_flux_up=radiation.lw_flux_up.at[-1].add(d_up.reshape(shape)),
+        lw_heating_rate=radiation.lw_heating_rate.at[-1].add(
+            heating.reshape(radiation.lw_heating_rate.shape[1:])),
+    )
+    return radiation, heating
 from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
 from jcm.terrain import TerrainData  # noqa: E402
 
@@ -393,15 +433,21 @@ class EchamSurface(PhysicsTerm):
     albedo/radiative/tile bookkeeping; the explicit bulk fluxes that step
     computes remain available as reference/tile diagnostics but are no
     longer the delivery path.
+
+    After the vdiff's land energy balance it publishes the new grid surface
+    temperature and re-emits the cached surface longwave at it
+    (:func:`correct_surface_longwave`, ECHAM ``radheat``) — the one non-zero
+    tendency of this term, a heating of the lowest level.
     """
 
     name: ClassVar[str] = "echam_surface"
     category: ClassVar[str] = "surface"
     requires: ClassVar[tuple[str, ...]] = (
-        "pressure_full", "height_full",
+        "pressure_full", "pressure_half", "height_full",
         "vertical_diffusion", "radiation", "surface",
     )
-    provides: ClassVar[tuple[str, ...]] = ("surface",)
+    provides: ClassVar[tuple[str, ...]] = ("surface", "radiation")
+    output_attrs: ClassVar = LAND_OUTPUT_ATTRS
 
     def __init__(self, params: SurfaceParameters | None = None):
         """Hold the scheme-native :class:`SurfaceParameters`."""
@@ -441,7 +487,9 @@ class EchamSurface(PhysicsTerm):
         surface_fractions = surface_fractions.at[:, 2].set(land_fraction)
 
         # Per-tile surface temperatures: SST for ocean, min(SST, ctfreez)
-        # for ice (saline freezing point), stl_am for land. Read straight
+        # for ice (saline freezing point), stl_am for land (this bookkeeping
+        # step is diagnostic-only; the land's prognostic skin temperature is
+        # the vdiff's, published below). Read straight
         # from forcing rather than the upstream-blended
         # ``_surface.surface_temperature``, which is snapped to one-or-the-
         # other via ``where(fmask>0.5)`` in EchamBoundaryConditions and would
@@ -513,17 +561,12 @@ class EchamSurface(PhysicsTerm):
         )
 
         # No turbulent-flux tendencies here: the vdiff term's implicit solve
-        # already carried the surface exchange into the column (bottom-row
-        # Robin BC), replacing the old operator-split single-layer delivery
-        # (imp_* × bulk flux into the lowest level), which silently discarded
-        # ~half the flux at T63L47 (delivered = imp·bulk, imp ≈ 0.5).
-        tendency = PhysicsTendency(
-            u_wind=jnp.zeros_like(state.u_wind),
-            v_wind=jnp.zeros_like(state.v_wind),
-            temperature=jnp.zeros_like(state.temperature),
-            specific_humidity=jnp.zeros_like(state.specific_humidity),
-            tracers={},
-        )
+        # already carried the surface exchange into the column, replacing the
+        # old operator-split single-layer delivery (imp_* × bulk flux into
+        # the lowest level), which silently discarded ~half the flux at T63L47
+        # (delivered = imp·bulk, imp ≈ 0.5). The only tendency is the
+        # longwave re-emission at the new surface temperature, below.
+        temperature_tendency = jnp.zeros_like(state.temperature)
 
         ch = atm_forcing.exchange_coeff_heat[:, 0]
         cm = atm_forcing.exchange_coeff_momentum[:, 0]
@@ -538,7 +581,30 @@ class EchamSurface(PhysicsTerm):
         # imp_moist factor) no longer exists. The field is kept for API
         # stability (the Tiedtke moisture-budget closure reads it).
         evaporation = vdiff.surface_evaporation.reshape(ncols)
+        # The grid surface temperature after the land balance, snapped by
+        # fmask as EchamBoundaryConditions forms it for the radiation.
+        t_grid_old = prev_surface.surface_temperature.reshape(ncols)
+        t_grid_new = jnp.where(land_fraction > 0.5,
+                               prev_surface.land_surface_temperature.reshape(ncols),
+                               ocean_temp)
+        out = {}
+        if isinstance(radiation, RadiationData):
+            radiation_out, heating = correct_surface_longwave(
+                radiation, t_grid_old, t_grid_new, diagnostics["pressure_half"])
+            temperature_tendency = temperature_tendency.at[-1].set(
+                heating.reshape(temperature_tendency.shape[1:]).astype(
+                    temperature_tendency.dtype))
+            out["radiation"] = radiation_out
+        tendency = PhysicsTendency(
+            u_wind=jnp.zeros_like(state.u_wind),
+            v_wind=jnp.zeros_like(state.v_wind),
+            temperature=temperature_tendency,
+            specific_humidity=jnp.zeros_like(state.specific_humidity),
+            tracers={},
+        )
         surface_out = prev_surface.copy(
+            surface_temperature=t_grid_new,
+            skin_temperature=t_grid_new,
             sensible_heat_flux=vdiff.surface_sensible_heat.reshape(ncols),
             latent_heat_flux=vdiff.surface_latent_heat.reshape(ncols),
             momentum_flux_u=vdiff.surface_stress_u.reshape(ncols),
@@ -549,4 +615,4 @@ class EchamSurface(PhysicsTerm):
             cm=cm,
         )
 
-        return tendency, {**diagnostics, "surface": surface_out}
+        return tendency, {**diagnostics, **out, "surface": surface_out}

@@ -46,6 +46,7 @@ from jcm.physics.forcing.echam_boundary_conditions import (
 from jcm.physics.gravity_waves.hines import HinesGwd, HinesParameters
 from jcm.physics.gravity_waves.sso import LottMillerSso, SSOParameters
 from jcm.physics.physics_term import with_field_overrides
+from jcm.physics.surface.echam.jsbach_land import JsbachLandParameters
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.resolution_defaults import (
     default_parameters,
@@ -153,6 +154,7 @@ def echam_physics(
     radiation: RadiationParameters | Mapping[str, Any] | None = None,
     vertical_diffusion: VDiffParameters | Mapping[str, Any] | None = None,
     surface: SurfaceParameters | Mapping[str, Any] | None = None,
+    land_surface: JsbachLandParameters | Mapping[str, Any] | None = None,
     aerosol: AerosolParameters | Mapping[str, Any] | None = None,
     hines: HinesParameters | Mapping[str, Any] | None = None,
     sso: SSOParameters | Mapping[str, Any] | None = None,
@@ -230,6 +232,9 @@ def echam_physics(
             own parameters.
         vertical_diffusion: Override for TTE-TKE ``VDiffParameters``.
         surface: Override for ``SurfaceParameters``.
+        land_surface: Override for the land tile's
+            :class:`~jcm.physics.surface.echam.jsbach_land.JsbachLandParameters`
+            (the JSBACH evaporation form and skin energy balance, #979).
         aerosol: Override for MACv2-SP ``AerosolParameters``. Also
             supplies the SPA activation knobs read by the 2M scheme
             when ``cloud_scheme="2m"``.
@@ -476,11 +481,11 @@ def echam_physics(
         convection=convection, clouds=clouds, microphysics=microphysics,
         microphysics_2m=microphysics_2m, radiation=radiation,
         vertical_diffusion=vertical_diffusion, surface=surface,
-        aerosol=aerosol, hines=hines, sso=sso)
+        land_surface=land_surface, aerosol=aerosol, hines=hines, sso=sso)
     field_overrides = {name: value for name, value in _scheme_args.items()
                        if isinstance(value, Mapping)}
     (convection, clouds, microphysics, microphysics_2m, radiation,
-     vertical_diffusion, surface, aerosol, hines, sso) = (
+     vertical_diffusion, surface, land_surface, aerosol, hines, sso) = (
         None if name in field_overrides else value
         for name, value in _scheme_args.items())
     # An override of a scheme that is not composed would be silently
@@ -556,6 +561,7 @@ def echam_physics(
         radiation_p = radiation or default_radiation_parameters(aerosol_module)
     vertical_diffusion_p = vertical_diffusion or VDiffParameters.default()
     surface_p = surface or SurfaceParameters.default()
+    land_surface_p = land_surface or JsbachLandParameters.default()
     aerosol_p = aerosol or AerosolParameters.default()
     hines_p = hines or HinesParameters.default()
     sso_p = sso or SSOParameters.default()
@@ -564,13 +570,14 @@ def echam_physics(
             convection=convection_p, clouds=clouds_p,
             microphysics=microphysics_p, microphysics_2m=microphysics_2m_p,
             radiation=radiation_p, vertical_diffusion=vertical_diffusion_p,
-            surface=surface_p, aerosol=aerosol_p, hines=hines_p, sso=sso_p)
+            surface=surface_p, land_surface=land_surface_p, aerosol=aerosol_p,
+            hines=hines_p, sso=sso_p)
         _resolved.update({
             name: with_field_overrides(_resolved[name], fields, scheme=name)
             for name, fields in field_overrides.items()})
         (convection_p, clouds_p, microphysics_p, microphysics_2m_p,
-         radiation_p, vertical_diffusion_p, surface_p, aerosol_p, hines_p,
-         sso_p) = _resolved.values()
+         radiation_p, vertical_diffusion_p, surface_p, land_surface_p,
+         aerosol_p, hines_p, sso_p) = _resolved.values()
 
     if cloud_scheme in ("1m", "2m"):
         _warn_if_shared_cloud_constants_differ(
@@ -837,6 +844,7 @@ def echam_physics(
             rad_term,
             TteTkeVerticalDiffusion(
                 params=vertical_diffusion_p,
+                land_params=land_surface_p,
                 couple_surface=not prescribed_surface_fluxes,
             ),
             *prescribed_terms,

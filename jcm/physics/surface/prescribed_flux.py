@@ -292,7 +292,7 @@ class PrescribedSurfaceFlux(PhysicsTerm):
         # - the vdiff surface_stress_u/v fields are, like the contract,
         #   positive-down (the delivered column momentum change is their
         #   negative — see tte_tke/matrix_solver.py::
-        #   diagnose_surface_fluxes), so the prescribed stress passes
+        #   _momentum_stress), so the prescribed stress passes
         #   through unnegated.
         # The published latent heat is the vaporization value alhc*E; a
         # coupler whose evaporation includes sublimation accounts for the
