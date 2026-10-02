@@ -128,6 +128,22 @@ uses the same humidity factors and the same implicit surface balance
 The derivations and the measured effect are in
 {doc}`../design/land_skin_energy_balance`.
 
+**Fixed land temperature.** `JsbachLandParameters.land_temperature =
+"prescribed"` holds the land skin at the forcing's land temperature every step
+(`forcing_land_temperature`, today `stl_am`), with the same evaporation form,
+humidity factors and per-tile coupling as the prognostic skin. The surface
+energy budget is then open by construction, and `surface.land_energy_residual`
+(`Rn − SH − LH`) is the heat the prescription supplies or removes. This is the
+fixed-SST and fixed-land-temperature configuration Andrews et al. (2021, *J.
+Geophys. Res. Atmos.*, doi:10.1029/2020JD033880) use to measure the effective
+radiative forcing without the land's warming response; for that method the
+forcing carries the model's own control-run land temperature in `stl_am`.
+`stl_am` is a monthly climatology with no diurnal cycle, so the prescribed skin
+has none either; a sub-daily land-temperature forcing is #984. From the command
+line: `+physics.terms.tte_tke_vertical_diffusion.land_params.land_temperature=prescribed`
+(`+physics.land_surface.land_temperature=prescribed` for the factory-built
+presets).
+
 **Status & known limitations.** Soil moisture, snow cover and soil temperature
 stay prescribed. There is no bucket, no interception, no snow mass or melt
 water and no runoff, and precipitation does not reach the land (#672).

@@ -129,10 +129,41 @@ class JsbachLandParameters:
     #: Width of the melt cap [K].
     melt_width: float = struct.field(pytree_node=False, default=0.5)
 
+    # --- configuration (static) ------------------------------------------
+    #: How the land skin temperature is set. ``"prognostic"`` (default) solves
+    #: the surface energy balance. ``"prescribed"`` holds the skin at the
+    #: forcing's land temperature every step
+    #: (:func:`~jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion.forcing_land_temperature`)
+    #: with the same evaporation form, humidity factors and per-tile coupling;
+    #: the surface energy budget is then open and its residual is published as
+    #: ``surface.land_energy_residual``. That is the fixed-SST and fixed-land-
+    #: temperature configuration of Andrews et al. (2021) for the effective
+    #: radiative forcing. From the command line::
+    #:
+    #:     python -m jcm.main +configuration=t63-echam-1m \
+    #:         +physics.terms.tte_tke_vertical_diffusion.land_params.land_temperature=prescribed
+    #:
+    #: (``+physics.land_surface.land_temperature=prescribed`` for the presets
+    #: built by ``echam_physics``).
+    land_temperature: str = struct.field(pytree_node=False, default="prognostic")
+
     @classmethod
     def default(cls) -> "JsbachLandParameters":
         """ECHAM6.3 / JSBACH values with the documented jcm stand-ins."""
         return cls()
+
+
+#: The values of :attr:`JsbachLandParameters.land_temperature`.
+LAND_TEMPERATURE_MODES = ("prognostic", "prescribed")
+
+
+def check_land_temperature_mode(params: JsbachLandParameters) -> str:
+    """Return ``params.land_temperature``, refusing a value that is not a mode."""
+    mode = params.land_temperature
+    if mode not in LAND_TEMPERATURE_MODES:
+        raise ValueError(f"JsbachLandParameters.land_temperature must be one of "
+                         f"{LAND_TEMPERATURE_MODES}, got {mode!r}")
+    return mode
 
 
 # ---------------------------------------------------------------------------

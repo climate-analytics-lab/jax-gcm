@@ -269,6 +269,9 @@ class SurfaceData:
     snow_melt_heat_flux: jnp.ndarray      # taken up by melt at a capped surface
     land_heat_storage: jnp.ndarray        # C_s·dT_s/dt
     land_evaporation: jnp.ndarray         # land tile [kg/m2/s], positive up
+    # Rn − SH − LH: ground + melt + storage with a prognostic skin; with a
+    # prescribed one, the heat the prescription supplies or removes.
+    land_energy_residual: jnp.ndarray
     # JSBACH's humidity factors of the land tile and their ingredients [1]
     cair: jnp.ndarray
     csat: jnp.ndarray
@@ -316,7 +319,7 @@ class SurfaceData:
 LAND_FIELDS = (
     "land_surface_temperature", "land_net_radiation", "land_sensible_heat_flux",
     "land_latent_heat_flux", "ground_heat_flux", "snow_melt_heat_flux",
-    "land_heat_storage", "land_evaporation", "cair", "csat",
+    "land_heat_storage", "land_evaporation", "land_energy_residual", "cair", "csat",
     "water_stress_factor", "bare_soil_humidity", "canopy_conductance",
 )
 
@@ -337,6 +340,9 @@ LAND_OUTPUT_ATTRS = {
         "long_name": "energy taken up by melt at a snow- or glacier-covered land surface"},
     "surface.land_heat_storage": {
         "units": "W m-2", "long_name": "heat storage rate of the land skin layer"},
+    "surface.land_energy_residual": {
+        "units": "W m-2",
+        "long_name": "land-tile net radiation minus sensible and latent heat flux"},
     "surface.land_evaporation": {
         "units": "kg m-2 s-1", "long_name": "land-tile evaporation, positive up"},
     "surface.cair": {"units": "1", "long_name": "JSBACH land humidity factor of the air (cair)"},

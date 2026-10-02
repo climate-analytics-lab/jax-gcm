@@ -512,7 +512,9 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
     ctfreez)``) give ``X̂_K,t`` directly. The land tile, when
     ``tiles.land`` is given, first solves its skin energy balance against its
     own ``E``/``F`` (``update_surfacetemp``; ``mo_soil.f90:1843-1853``), with the
-    snow-melt cap of ``update_soil`` 1859-1863. The column's bottom value is
+    snow-melt cap of ``update_soil`` 1859-1863; with
+    ``land_temperature="prescribed"`` it keeps the prescribed value instead.
+    The column's bottom value is
     the fraction-weighted blend ``bb_K = tpfac2·Σ_t f_t·X̂_K,t``
     (``blend_zq_zt``), and back-substitution completes the solve.
 
@@ -557,11 +559,18 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
     q_s = tiles.saturation_humidity
 
     land = tiles.land
+    prescribed = (land is not None and jsbach_land.check_land_temperature_mode(land.params)
+                  == "prescribed")
     if land is not None:
         il = LAND_TILE
         t_old = land.temperature
         rn_old = (land.net_shortwave + land.emissivity * land.longwave_down
                   - land.emissivity * c.sbc * t_old ** 4)
+    if prescribed:
+        # Fixed land temperature: the skin stays at the prescribed value the
+        # tiles already carry; nothing is solved and the budget stays open.
+        t_hat = t_new = t_old
+    elif land is not None:
         s_hat = jsbach_land.update_surfacetemp(
             cpd, en[:, il], cpd * fn[:, il] + (1.0 - en[:, il]) * phi_k, eq[:, il], fq[:, il],
             cpd * t_old, q_s[:, il], land.saturation_slope, rn_old,
@@ -601,9 +610,14 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
     land_out = None
     if land is not None:
         rn = rn_old - 4.0 * land.emissivity * c.sbc * t_old ** 3 * (t_hat - t_old)
-        ground = land.conductance * (t_new - land.soil_temperature)
-        storage = land.heat_capacity * (t_new - t_old) / dt
         sh_l, lh_l = sh_t[:, LAND_TILE], lh_t[:, LAND_TILE]
+        residual = rn - sh_l - lh_l
+        if prescribed:
+            ground = storage = melt = jnp.zeros_like(rn)
+        else:
+            ground = land.conductance * (t_new - land.soil_temperature)
+            storage = land.heat_capacity * (t_new - t_old) / dt
+            melt = residual - ground - storage
         land_out = LandBalanceOutputs(
             temperature=t_new,
             ground_heat_flux=ground,
@@ -612,7 +626,8 @@ def couple_surface_tiles(state: VDiffState, params: VDiffParameters,
             latent_heat_flux=lh_l,
             evaporation=e_t[:, LAND_TILE],
             heat_storage=storage,
-            melt_heat_flux=rn - sh_l - lh_l - ground - storage,
+            melt_heat_flux=melt,
+            energy_residual=residual,
         )
     return sol_t, sol_q, fluxes, land_out
 

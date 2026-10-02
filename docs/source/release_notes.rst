@@ -1769,13 +1769,17 @@ The ECHAM land evaporates in JSBACH's form and closes a skin energy balance
   ice thermal constants, critical snow depth) are differentiable leaves of
   ``TteTkeVerticalDiffusion(land_params=...)``, set from the CLI as
   ``+physics.terms.tte_tke_vertical_diffusion.land_params.<field>=...``.
-  **New outputs** on ``surface``: ``land_surface_temperature``, the land
-  tile's ``land_net_radiation``, ``land_sensible_heat_flux``,
-  ``land_latent_heat_flux``, ``ground_heat_flux``, ``snow_melt_heat_flux``,
-  ``land_heat_storage`` and ``land_evaporation``, which close
-  ``Rn = SH + LH + G + melt + storage``, and ``cair``, ``csat``,
-  ``water_stress_factor``, ``bare_soil_humidity`` and
-  ``canopy_conductance``.
+  ``land_temperature="prescribed"`` holds the land skin at the forcing's land
+  temperature with the same evaporation form and coupling, for the
+  fixed-SST and fixed-land-temperature effective-radiative-forcing method of
+  Andrews et al. (2021). **New outputs** on ``surface``:
+  ``land_surface_temperature``, the land tile's ``land_net_radiation``,
+  ``land_sensible_heat_flux``, ``land_latent_heat_flux``,
+  ``ground_heat_flux``, ``snow_melt_heat_flux``, ``land_heat_storage`` and
+  ``land_evaporation``, which close ``Rn = SH + LH + G + melt + storage``,
+  ``land_energy_residual`` (``Rn − SH − LH``, the open budget of a prescribed
+  skin), and ``cair``, ``csat``, ``water_stress_factor``,
+  ``bare_soil_humidity`` and ``canopy_conductance``.
 - A checkpoint written before this change restores with the skin seeded from
   ``stl_am`` (the new carry fields migrate by name).
 - A run's first step from a cold start has no land evaporation, as in ECHAM

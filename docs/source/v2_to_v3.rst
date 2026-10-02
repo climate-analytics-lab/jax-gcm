@@ -1353,10 +1353,15 @@ What a user has to know:
   carried), the land budget (``land_net_radiation``,
   ``land_sensible_heat_flux``, ``land_latent_heat_flux``,
   ``ground_heat_flux``, ``snow_melt_heat_flux``, ``land_heat_storage``,
-  ``land_evaporation``), and the factors (``cair``, ``csat``,
-  ``water_stress_factor``, ``bare_soil_humidity``, ``canopy_conductance``).
-  ``surface.surface_temperature`` over land is now the skin temperature, not
-  ``stl_am``.
+  ``land_evaporation``, ``land_energy_residual``), and the factors (``cair``,
+  ``csat``, ``water_stress_factor``, ``bare_soil_humidity``,
+  ``canopy_conductance``). ``surface.surface_temperature`` over land is now the
+  skin temperature, not ``stl_am``.
+- **To keep a prescribed land temperature** (fixed-SST and fixed-land-
+  temperature forcing runs), set ``land_temperature="prescribed"``, e.g.
+  ``+physics.terms.tte_tke_vertical_diffusion.land_params.land_temperature=prescribed``:
+  the skin is the forcing's ``stl_am`` every step, with the JSBACH evaporation
+  form unchanged.
 - **New parameters**: ``JsbachLandParameters`` held by
   ``TteTkeVerticalDiffusion(land_params=...)``. Set them from the term-list
   presets as ``+physics.terms.tte_tke_vertical_diffusion.land_params.leaf_area_index=5``,

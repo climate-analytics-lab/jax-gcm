@@ -253,9 +253,12 @@ class SurfaceTiles(NamedTuple):
 class LandBalanceOutputs(NamedTuple):
     """The land tile's balance after the solve (all ``(ncol,)``, W/m2 unless noted).
 
-    ``storage = net_radiation − sensible − latent − ground − melt`` holds to
-    round-off: ``melt`` is the energy a snow- or glacier-covered surface held at
-    the melting point does not take up (prescribed snow has no mass to melt).
+    ``energy_residual = net_radiation − sensible − latent``. With a prognostic
+    skin it equals ``ground + melt + storage`` to round-off: ``melt`` is the
+    energy a snow- or glacier-covered surface held at the melting point does
+    not take up (prescribed snow has no mass to melt). With a prescribed skin
+    the budget is open: ``ground``, ``melt`` and ``storage`` are 0 and the
+    residual is the heat the prescription supplies or removes.
     """
 
     temperature: jnp.ndarray            # new skin temperature [K]
@@ -266,6 +269,7 @@ class LandBalanceOutputs(NamedTuple):
     evaporation: jnp.ndarray            # land tile [kg/m2/s], positive up
     heat_storage: jnp.ndarray           # C_s·(T_new − T_old)/Δt
     melt_heat_flux: jnp.ndarray         # energy into melt at a capped surface
+    energy_residual: jnp.ndarray        # Rn − SH − LH
 
 
 

@@ -353,3 +353,68 @@ class TestTerm:
         assert float(sf.land_surface_temperature[2]) <= c.tmelt + 1e-3
         assert float(sf.snow_melt_heat_flux[2]) > 0.0
         assert np.all(np.asarray(sf.canopy_conductance) > 0.0)
+
+
+class TestPrescribedLandTemperature:
+    """``land_temperature="prescribed"``: the fixed-land-temperature configuration."""
+
+    def _term(self, mode="prescribed"):
+        from jcm.physics.surface.echam.jsbach_land import JsbachLandParameters
+        from .vertical_diffusion import TteTkeVerticalDiffusion
+        return TteTkeVerticalDiffusion(land_params=JsbachLandParameters(land_temperature=mode))
+
+    def test_holds_the_forcing_temperature_and_publishes_an_open_budget(self):
+        """Over several steps the skin is the forcing's land temperature exactly; the
+        humidity factors are the prognostic tile's at the same skin; the budget
+        diagnostics stay finite, with the residual ``Rn − SH − LH`` and no
+        ground, melt or storage term.
+        """
+        inputs = TestTerm()._inputs(TestTerm.COLUMNS)
+        state, diagnostics, forcing, terrain = inputs
+        forcing = forcing.copy(stl_am=jnp.asarray([303.0, 297.0, 268.0]))
+        term = self._term()
+        for _ in range(3):
+            _, out = term(state, diagnostics, forcing, terrain)
+            sf = out["surface"]
+            np.testing.assert_array_equal(np.asarray(sf.land_surface_temperature),
+                                          np.asarray(forcing.stl_am))
+            for name in ("land_net_radiation", "land_sensible_heat_flux",
+                         "land_latent_heat_flux", "land_energy_residual", "land_evaporation"):
+                assert np.all(np.isfinite(np.asarray(getattr(sf, name)))), name
+            np.testing.assert_allclose(
+                sf.land_energy_residual,
+                sf.land_net_radiation - sf.land_sensible_heat_flux - sf.land_latent_heat_flux,
+                atol=1e-3)
+            for name in ("ground_heat_flux", "snow_melt_heat_flux", "land_heat_storage"):
+                np.testing.assert_array_equal(np.asarray(getattr(sf, name)), 0.0)
+            diagnostics = {**diagnostics, "surface": sf,
+                           "vertical_diffusion": out["vertical_diffusion"]}
+        # The same evaporation form: a prognostic tile carrying the same skin
+        # forms the same factors.
+        state0, diag0, forcing0, terrain0 = inputs
+        diag0 = {**diag0, "surface": diag0["surface"].copy(
+            land_surface_temperature=jnp.asarray([303.0, 297.0, 268.0]))}
+        forcing0 = forcing0.copy(stl_am=jnp.asarray([303.0, 297.0, 268.0]))
+        _, prog = self._term("prognostic")(state0, diag0, forcing0, terrain0)
+        _, pres = term(state0, diag0, forcing0, terrain0)
+        for name in ("cair", "csat", "water_stress_factor", "canopy_conductance"):
+            np.testing.assert_array_equal(np.asarray(getattr(pres["surface"], name)),
+                                          np.asarray(getattr(prog["surface"], name)), err_msg=name)
+        # ... and with a prognostic skin the residual is the closed budget's G + melt + storage.
+        sp = prog["surface"]
+        np.testing.assert_allclose(
+            sp.land_energy_residual,
+            sp.ground_heat_flux + sp.snow_melt_heat_flux + sp.land_heat_storage, atol=1e-2)
+
+    def test_an_unknown_mode_is_refused(self):
+        with pytest.raises(ValueError, match="land_temperature"):
+            self._term("fixed")
+
+    def test_the_config_override_reaches_the_term(self):
+        """The term-list override path (``physics.terms.<name>.land_params``)."""
+        from jcm.runners import _build_term
+        term = _build_term("tte_tke_vertical_diffusion", {
+            "_target_": "jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion."
+                        "TteTkeVerticalDiffusion",
+            "land_params": {"land_temperature": "prescribed"}})
+        assert term.land_params.get_value().land_temperature == "prescribed"

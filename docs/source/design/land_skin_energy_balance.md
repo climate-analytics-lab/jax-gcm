@@ -295,10 +295,15 @@ land keeps the prescribed `stl_am`.
 New outputs on the `surface` namespace: `land_surface_temperature`,
 `land_net_radiation`, `land_sensible_heat_flux`, `land_latent_heat_flux`,
 `ground_heat_flux`, `snow_melt_heat_flux`, `land_heat_storage`,
-`land_evaporation`, `cair`, `csat`, `water_stress_factor`,
-`bare_soil_humidity` and `canopy_conductance`. The land budget closes from
-output alone:
-`land_net_radiation = sensible + latent + ground + melt + storage`.
+`land_evaporation`, `land_energy_residual`, `cair`, `csat`,
+`water_stress_factor`, `bare_soil_humidity` and `canopy_conductance`. The land
+budget closes from output alone:
+`land_net_radiation = sensible + latent + ground + melt + storage`, and
+`land_energy_residual = land_net_radiation − sensible − latent` is
+`ground + melt + storage`. With `land_temperature = "prescribed"` the skin is
+the forcing's every step, nothing is solved, ground, melt and storage are 0,
+and the residual is the heat the prescription supplies or removes (the
+fixed-land-temperature configuration, {doc}`../science/surface`).
 
 ## 6. Checked against the compiled Fortran
 

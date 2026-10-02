@@ -603,6 +603,18 @@ def _upper_layer_fill(forcing: ForcingData):
     return forcing.soilw_am
 
 
+def forcing_land_temperature(forcing: ForcingData):
+    """Return the land skin temperature a fixed-land-temperature run holds [K].
+
+    The one place the ``land_temperature="prescribed"`` land tile reads it:
+    today ``forcing.stl_am``, ERA5's monthly soil-temperature climatology,
+    which has no diurnal cycle. A sub-daily land-temperature channel (#984)
+    replaces this function's body, not the physics. (The prognostic skin's
+    soil below and its seed stay ``stl_am``.)
+    """
+    return forcing.stl_am
+
+
 class TteTkeVerticalDiffusion(PhysicsTerm):
     """TKE-based ECHAM vertical-diffusion / boundary-layer term.
 
@@ -685,6 +697,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         self.params = nnx.Param(params or VDiffParameters.default())
         self.couple_surface = couple_surface
         self.land_params = nnx.Param(land_params or JsbachLandParameters.default())
+        jsbach_land.check_land_temperature_mode(self.land_params.get_value())
 
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
@@ -779,9 +792,14 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # The land skin temperature is prognostic (#979), carried in
         # ``surface.land_surface_temperature`` and seeded from stl_am when
         # unset (<= 0) by EchamBoundaryConditions; the same rule here keeps a
-        # composition without that term well defined.
+        # composition without that term well defined. With
+        # ``land_temperature="prescribed"`` it is the forcing's, every step.
+        land_p = self.land_params.get_value()
+        prescribed_land = jsbach_land.check_land_temperature_mode(land_p) == "prescribed"
         carried = getattr(surface_in, "land_surface_temperature", None)
-        if carried is None:
+        if prescribed_land:
+            land_temp_col = forcing_land_temperature(forcing).reshape(ncols)
+        elif carried is None:
             land_temp_col = stl_col
         else:
             carried = carried.reshape(ncols)
@@ -826,7 +844,6 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # water-stress factor reads, soilw_rel (ERA5 swvl1 over its field
         # capacity) the upper-layer fill ECHAM6.3's 5-layer soil gives the
         # bare-soil humidity. Vegetated fraction = the forest fraction.
-        land_p = self.land_params.get_value()
         w_root = jnp.clip(forcing.soilw_am.reshape(ncols), 0.0, 1.0)
         w_upper = jnp.clip(_upper_layer_fill(forcing).reshape(ncols), 0.0, 1.0)
         veg_col = (jnp.zeros(ncols) if forcing.forest_fraction is None
@@ -1062,8 +1079,8 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             balance = {name: zeros for name in (
                 "land_net_radiation", "land_sensible_heat_flux", "land_latent_heat_flux",
                 "ground_heat_flux", "snow_melt_heat_flux", "land_heat_storage",
-                "land_evaporation")}
-            new_land_temperature = stl_col
+                "land_evaporation", "land_energy_residual")}
+            new_land_temperature = land_temp_col if prescribed_land else stl_col
         else:
             balance = dict(
                 land_net_radiation=lb.net_radiation,
@@ -1073,6 +1090,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
                 snow_melt_heat_flux=lb.melt_heat_flux,
                 land_heat_storage=lb.heat_storage,
                 land_evaporation=lb.evaporation,
+                land_energy_residual=lb.energy_residual,
             )
             new_land_temperature = lb.temperature
         surface_out = surface_in.copy(
