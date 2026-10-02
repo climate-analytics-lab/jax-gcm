@@ -182,7 +182,8 @@ the term that closes the budget.
 
 **What the skin feeds.** The step-start skin temperature is what the land
 albedo's melting ramp, the grid surface temperature the radiation solves with
-(snapped by `fmask > 0.5`), the surface-layer saturation, buoyancy and
+(snapped by `fmask > 0.5`, where ECHAM's `radtemp` is the tile-weighted T⁴
+mean, #988), the surface-layer saturation, buoyancy and
 Richardson number, and the Richtmyer–Morton coefficients all see.
 
 **Shortwave between radiation calls.** The radiation holds the downward and

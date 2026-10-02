@@ -100,7 +100,10 @@ implicitly to the lowest model level.
   ``radheat`` does; the convection and cloud schemes after it see that heating.
   The land absorbs the held downward shortwave through the land albedo of the
   last radiation solve, as ECHAM's JSBACH takes the radiation's net shortwave
-  and moves its albedo only at a radiation step.
+  and moves its albedo only at a radiation step. The surface temperature the
+  radiation solves with, and the re-emission corrects, is the grid value snapped
+  to the land skin where ``fmask > 0.5`` and to the SST elsewhere, where ECHAM's
+  ``radtemp`` is the tile-weighted T⁴ mean (#988).
 
 **What ECHAM/CAM does.** ECHAM6.3 couples JSBACH: a five-layer soil-water and
 soil-temperature model, prognostic snow and an interception reservoir, BETHY
