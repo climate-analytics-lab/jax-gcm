@@ -1792,9 +1792,14 @@ The ECHAM land evaporates in JSBACH's form and closes a skin energy balance
   02 h to a 14 h local-time maximum as the land heats its boundary layer by
   day. The numbers and box tables are in
   :doc:`design/land_skin_energy_balance`. See :doc:`science/surface`.
-- **Retune item.** Net TOA radiation rises by 4-5.5 W m⁻² with the drier,
+- **Retune items.** Net TOA radiation rises by 4-5.5 W m⁻² with the drier,
   less cloudy land (7.47 W m⁻² over days 30-240 of the 1M run, inside the
-  release gate's 10 W m⁻²). Retuning the presets against it belongs to #682.
+  release gate's 10 W m⁻²). JAM's dust emission falls by 34 % (1741 → 1154
+  Tg yr⁻¹, burden −19 %) because the 10 m wind and friction velocity over the
+  sources fall by 11 %, so the dust calibration ``jam_dust_nduscale_scale``,
+  set against the prescribed land's winds, needs redoing on this surface, and
+  with it the dust-borne ice nuclei. Both belong to #682; nothing is retuned
+  here.
 
 
 Tiedtke-Nordeng takes ECHAM's decisions

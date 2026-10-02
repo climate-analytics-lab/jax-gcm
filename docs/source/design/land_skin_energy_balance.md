@@ -424,3 +424,27 @@ In every preset the land evaporates about half as much, its rain falls by
 raises net TOA radiation by about 4 W m⁻² globally. The step costs the same:
 the steady 5-day chunk of the 1M member takes 77.8 s against 77.6 s on one
 A100.
+
+**JAM's dust.** The dust scheme reads the surface layer's 10 m wind and
+friction velocity, so the land surface reaches it through the wind over the
+source regions. In the JAM member (days 5-10, global; source columns are the
+prescribed-land member's columns with dust emission):
+
+| quantity | prescribed land | this land | change |
+|---|---|---|---|
+| dust emission [Tg yr⁻¹] | 1741 | 1154 | −34 % |
+| … North Africa / Arabia / East Asia / Australia | 416 / 177 / 9 / 1001 | 254 / 257 / 15 / 487 | −39 / +45 / +60 / −51 % |
+| dust dry / wet sink [Tg yr⁻¹] | 1277 / 366 | 933 / 130 | −27 / −64 % |
+| dust burden [Tg] | 5.7 | 4.6 | −19 % |
+| 10 m wind over the sources, land tile [m s⁻¹] | 5.10 | 4.55 | −11 % |
+| friction velocity over the sources [m s⁻¹] | 0.296 | 0.263 | −11 % |
+| saltation gate, land mean | 10.4 % | 8.4 % | −19 % |
+| soil-wetness gate, land mean | 0.673 | 0.673 | prescribed |
+| SO₄ / BC burden [Tg] | 2.34 / 0.115 | 2.55 / 0.122 | +9 / +6 % |
+
+The source winds weaken by about a tenth, and the emission, a threshold
+function of the friction velocity, falls by a third. The dust calibration
+(`jam_dust_nduscale_scale`, set in #808 against the prescribed land's wind
+distribution) therefore needs redoing on this surface, as does everything
+calibrated against JAM's dust, including the immersion-freezing ice nuclei
+that follow it.
