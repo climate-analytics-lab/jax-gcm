@@ -598,8 +598,12 @@ truncations, the surrogates), ``cloud_data_test.py`` (radiation's condensate
 mask and its effect on McICA overlap), ``echam_cloud_defaults_test.py``,
 ``echam_saturation_test.py``, ``echam_1m_test.py``,
 ``lohmann_2m_test.py``, ``cloud_utils_test.py``.
-The ECHAM-HAM comparisons: ``lohmann_2m_fortran_reference_test.py`` (the #941
-ice sources) and ``lohmann_2m_freezing_reference_test.py`` (heterogeneous
+The ECHAM-HAM comparisons: ``lohmann_2m_fortran_reference_test.py`` (the ice
+sources against the compiled ECHAM6.3-HAM2.3 ``cloud_micro_interface``, building
+block by building block and end to end: the crystal radius, both ``lo2``
+criteria, the sedimentation of the pre-detrainment ice, the ICNC diagnosis, the
+detrained crystal number and the number tendencies) and
+``lohmann_2m_freezing_reference_test.py`` (heterogeneous
 mixed-phase freezing against the compiled ``cloud_micro_interface`` with the HAM
 freezing inputs set: ``het_mxphase_freezing`` agrees to round-off on every
 freezing column; the large-scale-``ω`` column is a strict xfail, #705);

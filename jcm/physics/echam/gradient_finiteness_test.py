@@ -36,37 +36,52 @@ Both exercise the shared SSO / vertical-diffusion / surface / convection terms;
 1M adds ``echam_1m`` (ice sedimentation guard) and 2M adds ``lohmann_2m`` +
 ``cloud_utils`` (effective-radius guard).
 
+**What each case differentiates.** The 1M case is ``jax.jit(jax.grad(f))`` of
+the whole two-step function: one compiled program, the form in which a
+production run differentiates. A derivative that overflows only once XLA has
+fused the program is NaN there and finite eagerly, which is what the tracer
+mass fixer's was (#987), so an eager gradient cannot stand in for it. The 2M
+case is the eager op-by-op gradient, the graph that exposed #558 and the one
+``term_gradients_test`` replays term by term. Each way of differentiating is
+therefore covered by one scheme. 2M under ``jit`` and 1M eagerly were each
+measured finite when the split was made (#987), and are not run because each
+is a further case of 10-13 GiB in the shard.
+
 **Memory budget.** The job that runs this test is one process on a GitHub
 runner with 4 vCPU and 15989 MiB (14809 MiB free at start, 3071 MiB of swap),
-shared with every other test of its shard. The gradient is taken eagerly, op by
-op, so the process holds the tape of every term it has run and one compiled
-executable per primitive and shape. The test is arranged around three facts
-about that:
+shared with every other test of its shard. The cases are arranged around three
+facts, with peaks measured as resident set size of a fresh pytest process on
+four pinned cores of the dev workstation (jax 0.10.2):
 
-* *Rematerialisation is the production setting.* ``echam_physics`` wraps each
-  term in ``jax.checkpoint`` (``checkpoint_terms=True``, its default, which a
-  model run uses), so the backward recomputes a term's forward instead of
-  keeping its tape. The land skin balance reads the radiation's surface fluxes
-  (#979), so every term after vertical diffusion is on the S0 path in step 1
-  as well as in step 2, and without rematerialisation Tiedtke alone would keep
-  about 1.7 GB of tape per step. With it the live arrays at the end of the
-  forward pass are 1468 MiB (5864 MiB without) and the eager peak of a fresh
-  process is 11622 MiB for ``1m`` and 12946 MiB for ``2m`` (14320 and
-  14941 MiB without).
+* *Rematerialisation pays only where the gradient is eager.* ``echam_physics``
+  wraps each term in ``jax.checkpoint`` (``checkpoint_terms=True``, its
+  default, which a model run uses), so an eager backward recomputes a term's
+  forward instead of keeping its tape. The land skin balance reads the
+  radiation's surface fluxes (#979), so every term after vertical diffusion is
+  on the S0 path in step 1 as well as in step 2, and without rematerialisation
+  Tiedtke alone would keep about 1.7 GB of tape per step. With it the live
+  arrays at the end of the eager forward pass are 1468 MiB (5864 MiB without)
+  and the 2M case peaks at 12042 MiB alone (14941 MiB without it, as measured
+  for #979). A compiled program has no tape to drop, and there the same
+  wrapper costs memory: the 1M ``jit(grad)`` with it peaked at 13217 MiB, took
+  404 s to compile and needs 5.2 GiB of static temporaries; without it
+  9896 MiB, 204 s and 3.8 GiB. The jitted case therefore sets
+  ``checkpoint_terms=False``. With it the gradient is as finite and correct
+  (1.19572e-05 either way), so the choice is memory, not coverage.
 * *Each case starts from a cleared process.* The root ``conftest.py`` drops
   JAX's compiled-executable caches and returns the freed heap to the OS only at
-  a class or module boundary, and the two cases are one function of one
-  module, so ``_fresh_process_memory`` does it before and after each. Without
-  it the second case starts from the 11-14 GB the first (or the module before
-  it) left mapped. In the radiation shard's single process the peak is
-  11875 MiB during ``1m`` and 12359 MiB during ``2m``, 2.4 GiB under the
-  runner's free memory; both cases in a fresh pytest process peak at
-  12045 MiB.
-* *About 5 GB of that peak is not array data*, but eager-mode executables and
-  allocator slack. ``jax.jit`` of the differentiated function removes most of
-  it (a whole-program ``jit(grad)`` peaks at 9310-10835 MiB), and is the
-  remaining lever, but the ``jit`` gradient of the 1M scheme is NaN where the
-  eager one is finite (#987), so the test stays eager until that is fixed.
+  a class or module boundary, and the cases are parametrizations of one
+  function of one module, so ``_fresh_process_memory`` does it before and after
+  each. Without it the second case starts from the 10-14 GB the first (or the
+  module before it) left mapped. The eager case runs first because it is the
+  larger and the one that suffers most from a heap another case left behind
+  (the other order peaks 0.5 GiB higher, at 12956 MiB). All four tests of the
+  module in one fresh pytest process peak at 12448 MiB, 2361 MiB under the
+  runner's free memory, and take 16 min on the loaded workstation.
+* *About 5 GB of the eager peak is not array data*, but eager-mode executables
+  and allocator slack. ``jax.jit`` of the differentiated function removes most
+  of it: the jitted 1M case runs in 428 s at 9896 MiB, against 718 s at
+  12042 MiB for the eager 2M case.
 
 Precision: the ``0 * inf = nan`` poison is dtype-agnostic, so this runs at the
 session's default (float32) — cheap, in-process, and it never touches the
@@ -111,41 +126,52 @@ _EXPECTED_GRAD = 1.196e-5
 # not lower it further; the rest is the model's own backward.
 _RRTMGP_COL_CHUNKS = "16"
 
+# (cloud scheme, aerosol module, differentiate under ``jax.jit``). 1M is the
+# whole-function ``jit(grad)`` a production run's compiled step is, 2M the eager
+# op-by-op gradient; see "What each case differentiates" in the module docstring.
 _CONFIGS = [
-    ("1m", "macv2sp"),
-    ("2m", "macv2sp"),
+    pytest.param("2m", "macv2sp", False, id="2m-macv2sp-eager"),
+    pytest.param("1m", "macv2sp", True, id="1m-macv2sp-jit"),
 ]
 
 
-def _mean_temperature_after_two_steps(solar_constant, *, cloud_scheme, aerosol_module):
+def _mean_temperature_after_two_steps(solar_constant, *, cloud_scheme,
+                                      aerosol_module, checkpoint_terms=True):
     """d/dS0 target: mean air temperature after ``_STEPS`` op-split steps.
 
     Uses the model's per-step function directly (a plain Python loop rather
     than the outer ``lax.scan``) so the graph is a fixed unroll — this is
     exactly the chained backward that exposed #558.
     """
-    coords = get_coords(get_echam_levels(47), spectral_truncation=21)
-    forcing = default_forcing(coords.horizontal)
-    rad = dataclasses.replace(RadiationParameters.default(), solar_constant=solar_constant)
-    # ``checkpoint_terms`` is left at ``echam_physics``' default, the setting a
-    # model run uses: see "Memory budget" in the module docstring.
-    physics = echam_physics(
-        radiation=rad,
-        cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,
-    )
-    model = Model(coords=coords, physics=physics, time_step=15.0)
-    # ``bootstrap_state`` populates ``_final_dycore_state`` from the
-    # balanced-isothermal start AND seeds the cross-step physics carry exactly
-    # as the production rollout / resume path does (Model.run and Model.resume
-    # both build it when None — model.py). Stepping with a ``None`` carry would
-    # synthesise a *zero* carry, so e.g. the TTE-TKE term would start from
-    # TKE=0 instead of its seeded ECHAM 0.01 floor — a state production never
-    # produces — so we bootstrap here to differentiate the same trajectory the
-    # model actually runs. (The #558 poison triggers — SSO zero-orography
-    # denominators, the zero-wind ``sqrt(u**2+v**2)``, and clear/ice-free
-    # fractional powers — are all independent of this carry and remain
-    # exercised.)
-    model.bootstrap_state(balanced_isothermal_state(model))
+    # The model is built from concrete values. Under ``jax.jit`` those
+    # constructions must run at trace time rather than be staged, because the
+    # build reads their values (``int(model.dt_si.m)``, grid constants); only
+    # the solar constant is traced. Eagerly this context changes nothing.
+    with jax.ensure_compile_time_eval():
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        forcing = default_forcing(coords.horizontal)
+        rad = dataclasses.replace(
+            RadiationParameters.default(), solar_constant=solar_constant)
+        # ``checkpoint_terms`` is ``echam_physics``' default, the setting a
+        # model run uses, wherever the gradient is eager; see "Memory budget"
+        # in the module docstring for why the jitted case turns it off.
+        physics = echam_physics(
+            radiation=rad, checkpoint_terms=checkpoint_terms,
+            cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,
+        )
+        model = Model(coords=coords, physics=physics, time_step=15.0)
+        # ``bootstrap_state`` populates ``_final_dycore_state`` from the
+        # balanced-isothermal start AND seeds the cross-step physics carry
+        # exactly as the production rollout / resume path does (Model.run and
+        # Model.resume both build it when None — model.py). Stepping with a
+        # ``None`` carry would synthesise a *zero* carry, so e.g. the TTE-TKE
+        # term would start from TKE=0 instead of its seeded ECHAM 0.01 floor —
+        # a state production never produces — so we bootstrap here to
+        # differentiate the same trajectory the model actually runs. (The #558
+        # poison triggers — SSO zero-orography denominators, the zero-wind
+        # ``sqrt(u**2+v**2)``, and clear/ice-free fractional powers — are all
+        # independent of this carry and remain exercised.)
+        model.bootstrap_state(balanced_isothermal_state(model))
 
     step = model._get_op_split_step_fn(forcing)
     state = model._final_dycore_state
@@ -184,33 +210,41 @@ def _fresh_process_memory():
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("cloud_scheme,aerosol_module", _CONFIGS)
+@pytest.mark.parametrize("cloud_scheme,aerosol_module,jit", _CONFIGS)
 def test_two_step_gradient_is_finite_and_correct(cloud_scheme, aerosol_module,
-                                                  monkeypatch):
+                                                  jit, monkeypatch):
     """Reverse-mode d(meanT)/d(solar_constant) is finite and correct.
 
     Finiteness is the #558 guard (a re-introduced degenerate-state poison NaNs
     the cotangent); the value check additionally catches a guard that silently
-    changes the physics.
+    changes the physics. With ``jit`` the whole differentiated function is one
+    compiled program, the form in which a production run differentiates; a
+    cotangent that is NaN only once XLA has fused the program (#987) is
+    invisible to the eager case.
     """
     # Read when RRTMGP's column map is traced, i.e. inside jax.grad below.
     monkeypatch.setenv("JCM_RRTMGP_COL_CHUNKS", _RRTMGP_COL_CHUNKS)
-    grad = jax.grad(
+    gradient = jax.grad(
         lambda s: _mean_temperature_after_two_steps(
             s, cloud_scheme=cloud_scheme, aerosol_module=aerosol_module,
+            checkpoint_terms=not jit,
         )
-    )(jnp.asarray(_S0))
+    )
+    grad = (jax.jit(gradient) if jit else gradient)(jnp.asarray(_S0))
+    mode = "jit" if jit else "eager"
 
     assert jnp.isfinite(grad), (
-        f"{cloud_scheme}/{aerosol_module}: reverse-mode gradient is {grad} — "
-        "a degenerate-state cotangent poison has been re-introduced (#558)."
+        f"{cloud_scheme}/{aerosol_module} ({mode}): reverse-mode gradient is "
+        f"{grad} — a degenerate-state cotangent poison has been re-introduced "
+        "(#558; under jit also a derivative that overflows only in the compiled "
+        "program, #987)."
     )
     # 2% tolerance absorbs the float32-vs-float64 difference; the poison-vs-clean
     # signal is NaN-vs-finite, and a wrong-but-finite guard would miss by far
     # more than 2%.
     assert float(grad) == pytest.approx(_EXPECTED_GRAD, rel=2e-2), (
-        f"{cloud_scheme}/{aerosol_module}: gradient {float(grad):.4e} is far "
-        f"from the validated {_EXPECTED_GRAD:.4e}."
+        f"{cloud_scheme}/{aerosol_module} ({mode}): gradient "
+        f"{float(grad):.4e} is far from the validated {_EXPECTED_GRAD:.4e}."
     )
 
 
