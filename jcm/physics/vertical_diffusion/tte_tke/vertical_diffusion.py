@@ -22,14 +22,16 @@ from .vertical_diffusion_types import (
     VDiffState, VDiffParameters, VDiffTendencies, VDiffDiagnostics,
     LandBalanceInputs, SurfaceTiles,
 )
+from .moist_buoyancy import (
+    interfaces_to_levels, interior_buoyancy_and_shear, richardson_number,
+)
 from .turbulence_coefficients import (
-    compute_richardson_number, compute_mixing_length, compute_exchange_coefficients,
+    compute_mixing_length, compute_exchange_coefficients,
     compute_turbulence_diagnostics
 )
 from .matrix_solver import vertical_diffusion_step
 from .tke_budget import (
     compute_tke_exchange_coefficient,
-    compute_tke_diagnostics,
     echam_tke_source_update,
     echam_thv_variance_source_update,
 )
@@ -89,6 +91,7 @@ def prepare_vertical_diffusion_state(
     qv: jnp.ndarray,
     qc: jnp.ndarray,
     qi: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
     pressure_full: jnp.ndarray,
     pressure_half: jnp.ndarray,
     geopotential: jnp.ndarray,
@@ -116,6 +119,7 @@ def prepare_vertical_diffusion_state(
         qv: Water vapor mixing ratio [kg/kg] (ncol, nlev)
         qc: Cloud water mixing ratio [kg/kg] (ncol, nlev)
         qi: Cloud ice mixing ratio [kg/kg] (ncol, nlev)
+        cloud_fraction: Cloud cover [-] (ncol, nlev), ECHAM's ``paclc``
         pressure_full: Full level pressure [Pa] (ncol, nlev)
         pressure_half: Half level pressure [Pa] (ncol, nlev+1)
         geopotential: Geopotential [m²/s²] (ncol, nlev)
@@ -174,6 +178,7 @@ def prepare_vertical_diffusion_state(
         qv=qv,
         qc=qc,
         qi=qi,
+        cloud_fraction=cloud_fraction,
         pressure_full=pressure_full,
         pressure_half=pressure_half,
         geopotential=geopotential,
@@ -230,12 +235,13 @@ def vertical_diffusion_column(
         Tuple of (tendencies, diagnostics)
 
     """
-    # Compute turbulence coefficients
-    ri = compute_richardson_number(
-        state.u, state.v, state.temperature,
-        state.height_full, state.height_half
-    )
-    
+    # One moist, cloud-weighted interior buoyancy and squared shear per
+    # interface, as ECHAM forms them (``zbuoy``/``zshear``, vdiff.f90
+    # l.777-799): the Richardson number below and the TKE source further down
+    # read these same two arrays.
+    buoyancy, shear = interior_buoyancy_and_shear(state)
+    ri = richardson_number(buoyancy, shear)
+
     # Estimate boundary layer height (initial guess)
     pbl_height_guess = jnp.full(state.u.shape[0], 1000.0)
     
@@ -266,15 +272,15 @@ def vertical_diffusion_column(
     # avoided this for decades by doing the source step analytically.
     # ===========================================================================
 
-    # Step 1: analytic implicit source/sink update on a per-cell basis.
-    shear_sq = _column_shear_squared(state.u, state.v, state.height_full)
-    buoy_n2 = _column_buoyancy_freq_squared(
-        state.temperature, state.height_full,
-    )
+    # Step 1: analytic implicit source/sink update on a per-cell basis. The
+    # shear and the buoyancy are ECHAM's ``zshear`` and the moist ``zbuoy`` of
+    # the interface above each level (``zzb = zshear*zsm - zbuoy*zsh``,
+    # vdiff.f90 l.837), so a saturated stable layer is not damped by its dry
+    # stability.
     post_source_tke = echam_tke_source_update(
         prev_tke=state.tke,
-        shear_squared=shear_sq,
-        buoy_freq_squared=buoy_n2,
+        shear_squared=interfaces_to_levels(shear),
+        buoy_freq_squared=interfaces_to_levels(buoyancy),
         mixing_length=mixing_length,
         dt=dt,
     )
@@ -317,15 +323,6 @@ def vertical_diffusion_column(
 
     tke_exchange_coeff = compute_tke_exchange_coefficient(
         post_source_tke, mixing_length,
-    )
-
-    # Diagnostics still use the old per-source decomposition for now —
-    # they're informational, not on the integration path.
-    tke_shear_prod, tke_buoyancy_prod, tke_dissipation, _ = (
-        compute_tke_diagnostics(
-            state_for_solver, params,
-            exchange_coeff_momentum, exchange_coeff_heat, mixing_length,
-        )
     )
 
     # Per-tile exchange velocities are computed BEFORE the matrix step so
@@ -414,43 +411,8 @@ def vertical_diffusion_column(
 
 
 # ----------------------------------------------------------------------
-# Helper: column-wise shear² and N², independent of K coefficients so
-# they can be fed into the ECHAM analytic TKE update.
+# Helper: the virtual-potential-temperature gradient of the variance budget.
 # ----------------------------------------------------------------------
-
-@jax.jit
-def _column_shear_squared(u: jnp.ndarray, v: jnp.ndarray,
-                          height_full: jnp.ndarray) -> jnp.ndarray:
-    """(du/dz)² + (dv/dz)² on full levels [1/s²].
-
-    Vertical differences are between adjacent full levels; the top
-    level inherits the value just below (matches
-    ``compute_shear_production``'s padding convention).
-    """
-    dz = jnp.diff(height_full, axis=1)
-    # ``height_full`` decreases with index (level 0 = top), so dz < 0;
-    # squaring makes sign irrelevant.
-    du_dz = jnp.diff(u, axis=1) / dz
-    dv_dz = jnp.diff(v, axis=1) / dz
-    s2 = du_dz * du_dz + dv_dz * dv_dz
-    # Pad top: re-use the topmost interior gradient.
-    return jnp.concatenate([s2[:, :1], s2], axis=1)
-
-
-@jax.jit
-def _column_buoyancy_freq_squared(temperature: jnp.ndarray,
-                                  height_full: jnp.ndarray) -> jnp.ndarray:
-    """N² = (g/T) · (dθ/dz) approximated as (g/T) · (dT/dz + g/cp) [1/s²].
-
-    Positive when stably stratified (the warmer-above lapse). Matches
-    the sign convention used in ``compute_buoyancy_production``.
-    """
-    dz = jnp.diff(height_full, axis=1)
-    dT_dz = jnp.diff(temperature, axis=1) / dz
-    dT_dz_full = jnp.concatenate([dT_dz[:, :1], dT_dz], axis=1)
-    lapse = c.grav / c.cpd
-    return (c.grav / temperature) * (dT_dz_full + lapse)
-
 
 def _column_thv_gradient(temperature: jnp.ndarray,
                          pressure_full: jnp.ndarray,
@@ -481,7 +443,7 @@ def _column_thv_gradient(temperature: jnp.ndarray,
     dz = jnp.diff(height_full, axis=1)
     dthv_dz = jnp.diff(theta_v, axis=1) / dz
     # Repeat the topmost interior value so the result is (ncol, nlev), the
-    # same convention ``_column_buoyancy_freq_squared`` uses.
+    # alignment of ``interfaces_to_levels``.
     return jnp.concatenate([dthv_dz[:, :1], dthv_dz], axis=1)
 
 
@@ -493,6 +455,7 @@ def vertical_diffusion_scheme(
     qv: jnp.ndarray,
     qc: jnp.ndarray,
     qi: jnp.ndarray,
+    cloud_fraction: jnp.ndarray,
     pressure_full: jnp.ndarray,
     pressure_half: jnp.ndarray,
     geopotential: jnp.ndarray,
@@ -517,6 +480,7 @@ def vertical_diffusion_scheme(
         qv: Water vapor mixing ratio [kg/kg] (ncol, nlev)
         qc: Cloud water mixing ratio [kg/kg] (ncol, nlev)
         qi: Cloud ice mixing ratio [kg/kg] (ncol, nlev)
+        cloud_fraction: Cloud cover [-] (ncol, nlev)
         pressure_full: Full level pressure [Pa] (ncol, nlev)
         pressure_half: Half level pressure [Pa] (ncol, nlev+1)
         geopotential: Geopotential [m²/s²] (ncol, nlev)
@@ -538,7 +502,7 @@ def vertical_diffusion_scheme(
     """
     # Prepare state
     state = prepare_vertical_diffusion_state(
-        u, v, temperature, qv, qc, qi,
+        u, v, temperature, qv, qc, qi, cloud_fraction,
         pressure_full, pressure_half, geopotential,
         height_full, height_half,
         surface_temperature, surface_fraction, roughness_length,
@@ -554,7 +518,7 @@ def vertical_diffusion_scheme(
 # Vectorized version for multiple columns
 vertical_diffusion_scheme_vectorized = jax.vmap(
     vertical_diffusion_scheme,
-    in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None),
+    in_axes=(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None),
     out_axes=(0, 0)
 )
 
@@ -659,10 +623,15 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
     # ``vertical_diffusion`` is read for the previous step's TKE — that
     # comes from prev_physics_data, not a same-step upstream term, so it
     # is intentionally not in ``requires``.
+    # ``clouds`` is the cloud cover that weights the saturated buoyancy of the
+    # interior stability and of the lowest level (ECHAM's ``paclc`` from
+    # ``cover``, diagnosed before ``vdiff`` within the step): required, so a
+    # stack without a cover term is rejected at composition instead of mixing
+    # every cloudy layer on its dry stability.
     requires: ClassVar[tuple[str, ...]] = (
         "pressure_full", "pressure_half",
         "height_full", "height_half",
-        "surface",
+        "surface", "clouds",
     )
     provides: ClassVar[tuple[str, ...]] = ("vertical_diffusion", "surface")
     # The structural shape comes from the declarative slot; the TKE
@@ -958,6 +927,7 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             qv=state.specific_humidity.T,
             qc=qc.T,
             qi=qi.T,
+            cloud_fraction=diagnostics["clouds"].cloud_fraction.T,
             pressure_full=pressure_full.T,
             pressure_half=pressure_half.T,
             geopotential=state.geopotential.T,

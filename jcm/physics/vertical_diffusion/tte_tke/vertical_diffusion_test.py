@@ -33,57 +33,61 @@ PHYS_CONST = PhysicalConstants()
 class TestTurbulenceCoefficients:
     """Test turbulence coefficient calculations."""
     
+    @staticmethod
+    def _ri_state(temperature, cloud_fraction=0.0):
+        """Build a top-first column on a hydrostatic grid with the given temperatures."""
+        ncol, nlev = temperature.shape
+        pressure_half = jnp.linspace(90000.0, 100000.0, nlev + 1)[None, :] * jnp.ones((ncol, 1))
+        pressure_full = 0.5 * (pressure_half[:, :-1] + pressure_half[:, 1:])
+        # Hypsometric heights above the surface, top-first.
+        dz = (PHYS_CONST.rd * temperature / PHYS_CONST.grav
+              * jnp.log(pressure_half[:, 1:] / pressure_half[:, :-1]))
+        height_half = jnp.concatenate(
+            [jnp.sum(dz, axis=1, keepdims=True),
+             jnp.sum(dz, axis=1, keepdims=True) - jnp.cumsum(dz, axis=1)], axis=1)
+        height_full = 0.5 * (height_half[:, :-1] + height_half[:, 1:])
+        zero = jnp.zeros((ncol, nlev))
+        state = create_test_atmospheric_state(ncol, nlev)
+        return state._replace(
+            u=jnp.full((ncol, nlev), 10.0) + zero, v=zero,
+            temperature=temperature, qv=zero + 1e-3, qc=zero, qi=zero,
+            cloud_fraction=zero + cloud_fraction,
+            pressure_full=pressure_full, pressure_half=pressure_half,
+            geopotential=PHYS_CONST.grav * height_full,
+            height_full=height_full, height_half=height_half)
+
     def test_richardson_number_stable(self):
         """Test Richardson number calculation for stable conditions."""
-        # Setup stable profile (temperature increasing with height)
+        # Stable profile (temperature increasing upward), top-first
         ncol, nlev = 2, 5
-        u = jnp.ones((ncol, nlev)) * 10.0  # Constant wind
-        v = jnp.zeros((ncol, nlev))
-        temperature = jnp.array([
-            [280.0, 285.0, 290.0, 295.0, 300.0],
-            [285.0, 290.0, 295.0, 300.0, 305.0]
-        ])
-        
-        height_full = jnp.array([
-            [100.0, 300.0, 500.0, 700.0, 900.0],
-            [100.0, 300.0, 500.0, 700.0, 900.0]
-        ])
-        height_half = jnp.array([
-            [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0],
-            [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0]
-        ])
-        
-        ri = compute_richardson_number(u, v, temperature, height_full, height_half)
-        
-        # Richardson number should be positive for stable conditions
-        assert jnp.all(ri > 0)
-        assert ri.shape == (ncol, nlev - 1)
-    
-    def test_richardson_number_unstable(self):
-        """Test Richardson number calculation for unstable conditions."""
-        # Setup unstable profile (temperature decreasing with height)
-        ncol, nlev = 2, 5
-        u = jnp.ones((ncol, nlev)) * 10.0
-        v = jnp.zeros((ncol, nlev))
         temperature = jnp.array([
             [300.0, 295.0, 290.0, 285.0, 280.0],
             [305.0, 300.0, 295.0, 290.0, 285.0]
         ])
-        
-        height_full = jnp.array([
-            [100.0, 300.0, 500.0, 700.0, 900.0],
-            [100.0, 300.0, 500.0, 700.0, 900.0]
+        state = self._ri_state(temperature)
+        # a little shear so the ECHAM shear floor is not the denominator
+        state = state._replace(u=jnp.linspace(2.0, 10.0, nlev)[None, :] * jnp.ones((ncol, 1)))
+
+        ri = compute_richardson_number(state)
+
+        # Richardson number should be positive for stable conditions
+        assert jnp.all(ri > 0)
+        assert ri.shape == (ncol, nlev - 1)
+
+    def test_richardson_number_unstable(self):
+        """Test Richardson number calculation for unstable conditions."""
+        # Unstable profile (temperature decreasing upward), top-first
+        temperature = jnp.array([
+            [280.0, 285.0, 290.0, 295.0, 300.0],
+            [285.0, 290.0, 295.0, 300.0, 305.0]
         ])
-        height_half = jnp.array([
-            [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0],
-            [0.0, 200.0, 400.0, 600.0, 800.0, 1000.0]
-        ])
-        
-        ri = compute_richardson_number(u, v, temperature, height_full, height_half)
-        
+        state = self._ri_state(temperature)
+
+        ri = compute_richardson_number(state)
+
         # Richardson number should be negative for unstable conditions
         assert jnp.all(ri < 0)
-    
+
     def test_mixing_length_computation(self):
         """Test mixing length computation."""
         ncol, nlev = 2, 5
@@ -453,7 +457,7 @@ class TestVerticalDiffusionScheme:
         
         # Run vertical diffusion
         tendencies, diagnostics = vertical_diffusion_scheme(
-            u, v, temperature, qv, qc, qi,
+            u, v, temperature, qv, qc, qi, jnp.zeros_like(temperature),
             pressure_full, pressure_half, geopotential,
             height_full, height_half,
             surface_temperature, surface_fraction, roughness_length,
@@ -521,7 +525,7 @@ class TestVerticalDiffusionScheme:
         
         # Run vertical diffusion
         tendencies, diagnostics = vertical_diffusion_scheme(
-            u, v, temperature, qv, qc, qi,
+            u, v, temperature, qv, qc, qi, jnp.zeros_like(temperature),
             pressure_full, pressure_half, geopotential,
             height_full, height_half,
             surface_temperature, surface_fraction, roughness_length,
@@ -577,7 +581,7 @@ class TestVerticalDiffusionScheme:
         
         # Run vertical diffusion
         tendencies, diagnostics = vertical_diffusion_scheme(
-            u, v, temperature, qv, qc, qi,
+            u, v, temperature, qv, qc, qi, jnp.zeros_like(temperature),
             pressure_full, pressure_half, geopotential,
             height_full, height_half,
             surface_temperature, surface_fraction, roughness_length,
@@ -651,7 +655,7 @@ class TestUtilityFunctions:
         
         # Prepare state
         state = prepare_vertical_diffusion_state(
-            u, v, temperature, qv, qc, qi,
+            u, v, temperature, qv, qc, qi, jnp.zeros_like(temperature),
             pressure_full, pressure_half, geopotential,
             height_full, height_half,
             surface_temperature, surface_fraction, roughness_length,
@@ -713,6 +717,7 @@ def create_test_atmospheric_state(ncol: int, nlev: int) -> VDiffState:
     
     return VDiffState(
         u=u, v=v, temperature=temperature, qv=qv, qc=qc, qi=qi,
+        cloud_fraction=jnp.zeros_like(temperature),
         pressure_full=pressure_full, pressure_half=pressure_half,
         geopotential=geopotential, air_mass=air_mass,
         surface_temperature=surface_temperature, surface_fraction=surface_fraction,
@@ -785,6 +790,7 @@ class TestTKEStability:
 
         state = VDiffState(
             u=u, v=v, temperature=temperature, qv=qv, qc=qc, qi=qi,
+            cloud_fraction=jnp.zeros_like(temperature),
             pressure_full=pressure_full, pressure_half=pressure_half,
             geopotential=geopotential, air_mass=air_mass,
             surface_temperature=surface_temperature, surface_fraction=surface_fraction,
@@ -953,6 +959,7 @@ def _make_marine_bl_state(
         qv=qv_tf,
         qc=jnp.zeros((ncol, nlev)),
         qi=jnp.zeros((ncol, nlev)),
+        cloud_fraction=jnp.zeros((ncol, nlev)),
         pressure_full=col(p_full),
         pressure_half=col(p_half),
         geopotential=col(z_full_sf) * grav,
@@ -1088,6 +1095,7 @@ class TestSurfaceCoupledSolve:
         from jcm.physics_interface import PhysicsState
         from jcm.terrain import TerrainData
         from jcm.forcing import ForcingData
+        from jcm.physics.clouds.cloud_data import CloudData
         from .vertical_diffusion import TteTkeVerticalDiffusion
         from .vertical_diffusion_types import VerticalDiffusionData
 
@@ -1125,6 +1133,7 @@ class TestSurfaceCoupledSolve:
             "height_full": to_col(vstate.height_full),
             "height_half": to_col(vstate.height_half),
             "surface": surface_in,
+            "clouds": CloudData.zeros((ncols,), nlev),
             "vertical_diffusion": vdiff_in,
             "radiation": SimpleNamespace(
                 surface_sw_down=jnp.zeros(ncols),
@@ -1362,6 +1371,7 @@ class TestThvVarianceBudget:
             temperature=jnp.linspace(260.0, 290.0, nlev)[None, :],
             qv=jnp.full((ncol, nlev), 5e-3),
             qc=jnp.zeros((ncol, nlev)), qi=jnp.zeros((ncol, nlev)),
+            cloud_fraction=jnp.zeros((ncol, nlev)),
             pressure_full=jnp.linspace(60000.0, 100000.0, nlev)[None, :],
             pressure_half=jnp.linspace(58000.0, 101000.0, nlev + 1)[None, :],
             geopotential=z * 9.81,
@@ -1649,6 +1659,7 @@ class TestSurfaceTilePhase:
         from jcm.physics.surface.echam.surface_types import SurfaceData
         from jcm.physics_interface import PhysicsState
         from jcm.terrain import TerrainData
+        from jcm.physics.clouds.cloud_data import CloudData
         from .vertical_diffusion import TteTkeVerticalDiffusion
         from .vertical_diffusion_types import VerticalDiffusionData
 
@@ -1672,6 +1683,7 @@ class TestSurfaceTilePhase:
             "height_half": to_col(vstate.height_half),
             "surface": SurfaceData.zeros((1,), nlev).copy(
                 roughness_length=jnp.full((1,), 0.01)),
+            "clouds": CloudData.zeros((1,), nlev),
             # A restored carry: the previous step's exchange velocities, which
             # the canopy factor reads (a cold start has none, and no land
             # evaporation; checked last).
@@ -1721,3 +1733,143 @@ class TestSurfaceTilePhase:
             tke=jnp.full((nlev, 1), 3.0))
         e_cold, _ = fluxes(0.95, 0.5)
         assert e_cold == 0.0, e_cold
+
+
+class TestMoistInteriorWiring:
+    """The cloud cover reaches the column, and one moist buoyancy feeds both consumers."""
+
+    @staticmethod
+    def _cloudy_state(cover=0.8):
+        state = _make_marine_bl_state(ncol=1, sst_offset=1.0, wind=8.0, rh=0.97)
+        nlev = state.u.shape[1]
+        # overcast through the lowest ten levels (top-first: the last ten)
+        cc = jnp.zeros((1, nlev)).at[:, nlev - 10:].set(cover)
+        return state._replace(cloud_fraction=cc)
+
+    def test_ri_and_tke_source_read_the_same_moist_buoyancy(self):
+        import unittest.mock as mock
+
+        import jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion as vd
+        from .moist_buoyancy import (
+            interfaces_to_levels, interior_buoyancy_terms, richardson_number,
+        )
+
+        state = self._cloudy_state()
+        params = VDiffParameters.default()
+        terms = interior_buoyancy_terms(state)
+        captured = {}
+
+        real_tke = vd.echam_tke_source_update
+
+        def tke_spy(**kw):
+            captured["tke"] = kw
+            return real_tke(**kw)
+
+        real_ml = vd.compute_mixing_length
+
+        def ml_spy(*a, **kw):
+            captured["ri"] = a[2]
+            return real_ml(*a, **kw)
+
+        column_fn = getattr(vd.vertical_diffusion_column, "__wrapped__",
+                            vd.vertical_diffusion_column)
+        with mock.patch.object(vd, "echam_tke_source_update", side_effect=tke_spy), \
+             mock.patch.object(vd, "compute_mixing_length", side_effect=ml_spy):
+            column_fn(state, params, 900.0, couple_surface=False)
+
+        np.testing.assert_allclose(
+            np.asarray(captured["ri"]),
+            np.asarray(richardson_number(terms.buoyancy, terms.shear)), rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(captured["tke"]["buoy_freq_squared"]),
+            np.asarray(interfaces_to_levels(terms.buoyancy)), rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(captured["tke"]["shear_squared"]),
+            np.asarray(interfaces_to_levels(terms.shear)), rtol=1e-6)
+        # anti-vacuity: the cloud changes the buoyancy the consumers read
+        clear = interior_buoyancy_terms(state._replace(cloud_fraction=jnp.zeros_like(state.cloud_fraction)))
+        assert float(jnp.max(jnp.abs(terms.buoyancy - clear.buoyancy))) > 1e-5
+
+    @staticmethod
+    def _term_call(cover, spy=None):
+        import unittest.mock as mock
+        from types import SimpleNamespace
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+        import jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion as vd
+        from .vertical_diffusion import TteTkeVerticalDiffusion
+        from .vertical_diffusion_types import VerticalDiffusionData
+
+        vstate = TestMoistInteriorWiring._cloudy_state(cover)
+        nlev = vstate.u.shape[1]
+        to_col = lambda a: jnp.asarray(a).T  # noqa: E731
+        state = PhysicsState(
+            u_wind=to_col(vstate.u), v_wind=to_col(vstate.v),
+            temperature=to_col(vstate.temperature),
+            specific_humidity=to_col(vstate.qv),
+            geopotential=to_col(vstate.geopotential),
+            normalized_surface_pressure=jnp.ones((1,)),
+            tracers={"qc": jnp.zeros((nlev, 1)), "qi": jnp.zeros((nlev, 1))},
+        )
+        clouds = CloudData.zeros((1,), nlev).copy(cloud_fraction=to_col(vstate.cloud_fraction))
+        diagnostics = {
+            "_dt_seconds": 900.0,
+            "pressure_full": to_col(vstate.pressure_full),
+            "pressure_half": to_col(vstate.pressure_half),
+            "height_full": to_col(vstate.height_full),
+            "height_half": to_col(vstate.height_half),
+            "surface": SurfaceData.zeros((1,), nlev).copy(
+                surface_temperature=vstate.surface_temperature[:, 0],
+                roughness_length=jnp.full((1,), 1e-4)),
+            "clouds": clouds,
+            "vertical_diffusion": VerticalDiffusionData.zeros((1,), nlev).copy(
+                tke=jnp.full((nlev, 1), 1.0)),
+            "radiation": SimpleNamespace(surface_sw_down=jnp.zeros(1),
+                                         surface_lw_down=jnp.zeros(1)),
+        }
+        forcing = ForcingData.zeros((1, 1)).copy(
+            sea_surface_temperature=jnp.reshape(vstate.surface_temperature[:, 0], (1, 1)))
+        term = TteTkeVerticalDiffusion()
+        if spy is None:
+            return term(state, diagnostics, forcing, TerrainData.single_column(fmask=0.0))
+        with mock.patch.object(vd, "prepare_vertical_diffusion_state", side_effect=spy):
+            return term(state, diagnostics, forcing, TerrainData.single_column(fmask=0.0))
+
+    def test_term_hands_the_clouds_cover_to_the_column(self):
+        import jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion as vd
+
+        captured = {}
+        real = vd.prepare_vertical_diffusion_state
+
+        def spy(*a, **kw):
+            captured["cloud_fraction"] = kw["cloud_fraction"]
+            return real(*a, **kw)
+
+        self._term_call(0.8, spy=spy)
+        expected = self._cloudy_state(0.8).cloud_fraction
+        np.testing.assert_array_equal(np.asarray(captured["cloud_fraction"]),
+                                      np.asarray(expected))
+        assert float(jnp.max(expected)) == pytest.approx(0.8)
+
+    def test_cover_changes_the_turbulence(self):
+        """The cover reaches the TKE budget, not only the Richardson number."""
+        _, clear = self._term_call(0.0)
+        _, cloudy = self._term_call(0.9)
+        tke_clear = np.asarray(clear["vertical_diffusion"].tke)
+        tke_cloudy = np.asarray(cloudy["vertical_diffusion"].tke)
+        assert np.all(np.isfinite(tke_cloudy))
+        assert np.max(np.abs(tke_cloudy - tke_clear)) > 1e-3 * np.max(tke_clear)
+
+    def test_composition_without_a_cover_term_is_rejected(self):
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.diagnostics.moist_air_state import MoistAirColumnState
+        from jcm.physics.forcing.echam_boundary_conditions import EchamBoundaryConditions
+        from .vertical_diffusion import TteTkeVerticalDiffusion
+
+        with pytest.raises(ValueError, match="clouds"):
+            ComposablePhysics(terms=[MoistAirColumnState(), EchamBoundaryConditions(),
+                                     TteTkeVerticalDiffusion()])

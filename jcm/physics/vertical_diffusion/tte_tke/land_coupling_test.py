@@ -286,6 +286,7 @@ class TestTerm:
         from types import SimpleNamespace
 
         from jcm.forcing import ForcingData
+        from jcm.physics.clouds.cloud_data import CloudData
         from jcm.physics.radiation import SURFACE_OPTICS_KEY
         from jcm.physics.surface.echam.surface_types import SurfaceData
         from jcm.physics_interface import PhysicsState
@@ -307,6 +308,7 @@ class TestTerm:
             "height_full": tc(vs.height_full), "height_half": tc(vs.height_half),
             "surface": SurfaceData.zeros((n,), nlev).copy(
                 roughness_length=jnp.full((n,), 0.05), land_surface_temperature=skin),
+            "clouds": CloudData.zeros((n,), nlev),
             "vertical_diffusion": VerticalDiffusionData.zeros((n,), nlev).copy(
                 tke=jnp.full((nlev, n), 1.0),
                 surface_exchange_heat=jnp.full((n, 3), 0.02)),

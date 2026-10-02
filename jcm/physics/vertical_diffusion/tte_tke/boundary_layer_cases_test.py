@@ -186,6 +186,7 @@ def _make_column(
     return VDiffState(
         u=col(flip(u)), v=col(flip(v)), temperature=col(t_tf),
         qv=col(flip(qv)), qc=jnp.zeros((ncol, nlev)), qi=jnp.zeros((ncol, nlev)),
+        cloud_fraction=jnp.zeros((ncol, nlev)),
         pressure_full=col(p_full_tf), pressure_half=col(p_half_tf),
         geopotential=col(z_full_tf) * G,
         air_mass=air_mass,
@@ -234,9 +235,7 @@ def _closure_diagnostics(state, params):
     Returns ``(ri, mixing_length, km, kh, kq, shear_prod, buoy_prod, diss)``,
     all as plain numpy arrays for the single column (top-first ordering).
     """
-    ri = compute_richardson_number(
-        state.u, state.v, state.temperature, state.height_full, state.height_half,
-    )
+    ri = compute_richardson_number(state)
     pbl_guess = jnp.full(state.u.shape[0], 1000.0)  # matches the scheme's guess
     ml = compute_mixing_length(state.height_full, state.height_half, ri, pbl_guess)
     km, kh, kq = compute_exchange_coefficients(state, params, ml, ri)

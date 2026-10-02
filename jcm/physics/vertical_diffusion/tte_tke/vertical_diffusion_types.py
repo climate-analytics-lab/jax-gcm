@@ -155,7 +155,13 @@ class VDiffState(NamedTuple):
     qv: jnp.ndarray            # Water vapor mixing ratio [kg/kg] (ncol, nlev)
     qc: jnp.ndarray            # Cloud water mixing ratio [kg/kg] (ncol, nlev)
     qi: jnp.ndarray            # Cloud ice mixing ratio [kg/kg] (ncol, nlev)
-    
+    cloud_fraction: jnp.ndarray  # Cloud cover [-] (ncol, nlev): ECHAM's ``paclc``
+                                 # from ``cover``, which weights the saturated
+                                 # buoyancy of the interior and of the lowest
+                                 # level (``moist_buoyancy.py``). Required: a
+                                 # silent clear-sky default would make the
+                                 # stability of every cloudy layer dry.
+
     # Atmospheric structure
     pressure_full: jnp.ndarray      # Full level pressure [Pa] (ncol, nlev)
     pressure_half: jnp.ndarray      # Half level pressure [Pa] (ncol, nlev+1)

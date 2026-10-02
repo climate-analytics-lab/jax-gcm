@@ -571,6 +571,20 @@ published ``o3_source`` name and the result is bit-identical on 4-D input, so
 Only the ``Returns`` docstring changed: it no longer claims a fixed
 ``(time, nplev_target, lat, lon)`` shape.
 
+The TTE-TKE vertical diffusion takes the cloud cover
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The interior stability and the surface layer's Richardson number weight the
+saturated buoyancy by the cloud cover, so ``TteTkeVerticalDiffusion`` now
+requires the ``clouds`` diagnostic (the Sundqvist cover that every packaged
+ECHAM stack composes upstream of it; a hand-composed stack without a cover
+term is refused at construction), ``VDiffState`` has a required
+``cloud_fraction`` field, ``prepare_vertical_diffusion_state`` and
+``vertical_diffusion_scheme`` take ``cloud_fraction`` after ``qi``, and
+``compute_richardson_number`` takes the state instead of
+``(u, v, temperature, height_full, height_half)``. See
+:doc:`science/vertical_diffusion`.
+
 Configuration changes
 ---------------------
 
@@ -1463,6 +1477,20 @@ latent heats; see :doc:`science/convection`.
 those of logistic surrogates, so a finite-difference check of the scheme
 disagrees with AD near a decision, by design
 (:doc:`design/surrogate_gradients`).
+
+.. _v3-moist-stability:
+
+ECHAM boundary-layer stability is moist and cloud-weighted
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The TTE-TKE vertical diffusion's interior Richardson number and TKE buoyancy
+are ECHAM6.3's moist, cloud-weighted buoyancy, and the surface layer takes the
+lowest level's cloud cover. Over a 10-day ``t63-echam-1m`` A/B the global-mean
+PBL height rises 187 → 200 m, the total cloud cover falls 0.566 → 0.527 (low
+cloud 0.332 → 0.290), the latent heat flux rises 65.2 → 67.1 W/m², the reflected
+shortwave falls 102.9 → 98.6 W/m² and the unstable fraction of the interior
+interfaces falls 3.0 % → 1.3 %. The 1-day ECHAM regression trajectory moves by 13 %
+in specific humidity (normalized RMS). The full table is in the release notes.
 
 .. _v3-rv:
 

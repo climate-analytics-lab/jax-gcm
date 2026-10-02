@@ -421,23 +421,38 @@ class HetMxphaseFreezingHonoursOverrideTest(_OverrideCase):
 
 
 class TurbulenceDefaultArgHonoursOverrideTest(_OverrideCase):
-    """``turbulence_coefficients`` froze grav in a *default argument*.
+    """The turbulence coefficients read ``grav`` when traced (#772).
 
-    The subtle case: the module already used the approved ``c`` alias and read
-    ``c.cpd`` live two lines down, but ``gravity: float = c.grav`` was
-    evaluated once when the ``def`` executed at import.
+    A default argument would have been evaluated once when the ``def`` executed
+    at import and frozen the pre-override value.
     """
 
     def test_richardson_number_moves_with_gravity(self):
         from jcm.physics.vertical_diffusion.tte_tke.turbulence_coefficients import (
             compute_richardson_number,
         )
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VDiffState,
+        )
 
-        u = jnp.asarray([[1.0, 4.0, 9.0]])
-        v = jnp.zeros((1, 3))
-        temperature = jnp.asarray([[290.0, 284.0, 276.0]])
-        height_full = jnp.asarray([[10.0, 200.0, 800.0]])
-        height_half = jnp.asarray([[0.0, 100.0, 500.0]])
+        nlev = 3
+        # Weak shear, so ECHAM's shear floor is the denominator and, with the
+        # geopotential given, the buoyancy (which carries g²) is what moves.
+        # (Where the shear exceeds the floor, g cancels: Ri = Δθ·Δφ/(θ·Δu²).)
+        one = lambda *v: jnp.asarray([list(v)])  # noqa: E731
+        zero = jnp.zeros((1, nlev))
+        pressure_half = one(80000.0, 85000.0, 92000.0, 100000.0)
+        state = VDiffState(
+            u=one(1.0, 1.5, 2.0), v=zero, temperature=one(290.0, 284.0, 276.0),
+            qv=zero + 2e-3, qc=zero, qi=zero, cloud_fraction=zero,
+            pressure_full=0.5 * (pressure_half[:, :-1] + pressure_half[:, 1:]),
+            pressure_half=pressure_half,
+            geopotential=one(20000.0, 12000.0, 5000.0),
+            air_mass=zero, surface_temperature=zero, surface_fraction=zero,
+            roughness_length=zero, roughness_heat=zero, surface_wetness=zero,
+            height_full=zero, height_half=jnp.zeros((1, nlev + 1)),
+            tke=zero, thv_variance=zero, ocean_u=jnp.zeros(1), ocean_v=jnp.zeros(1),
+        )
 
         def ri():
             # The function is ``@jax.jit``-ed, so its trace — constants and
@@ -446,9 +461,7 @@ class TurbulenceDefaultArgHonoursOverrideTest(_OverrideCase):
             # value. An override after tracing does not propagate until
             # recompilation, which is why the docs say to override first.
             jax.clear_caches()
-            return compute_richardson_number(
-                u, v, temperature, height_full, height_half
-            )[0, 0]
+            return compute_richardson_number(state)[0, 0]
 
         baseline, doubled_g = self.under_grav(2.0, ri)
         self.assertNotAlmostEqual(baseline, doubled_g, places=6)

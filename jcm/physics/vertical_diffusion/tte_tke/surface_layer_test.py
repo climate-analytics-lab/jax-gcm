@@ -29,7 +29,7 @@ def _build_state(T_air, T_sfc, q_air=0.005, u=5.0, p_sfc=101325.0,
     state = VDiffState(
         u=jnp.full((ncol, nlev), u), v=zero,
         temperature=T_arr,
-        qv=qv, qc=zero, qi=zero,
+        qv=qv, qc=zero, qi=zero, cloud_fraction=zero,
         pressure_full=p_full, pressure_half=p_half,
         geopotential=height_full * 9.80665,
         air_mass=jnp.full((ncol, nlev), 100.0),

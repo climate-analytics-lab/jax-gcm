@@ -236,6 +236,17 @@ class TestEchamReferenceTrajectory(_Float32ReferenceTest):
     as much (0.80 % and 0.76 % in specific humidity). The speedy reference
     moves by at most 1.6e-6: SPEEDY's physics does not read ``rv``, but the
     geopotential the dycore hands it is built from the virtual temperature.
+
+    Regenerated 2026-10-02 for the TTE-TKE interior stability being ECHAM's
+    moist, cloud-weighted buoyancy (#962), on the tree that includes the land
+    tile (#979), with ``REGENERATE=1`` (jax/jaxlib 0.10.2). The shift is outside
+    the 3 % tolerance in specific humidity only: 13.1 % in specific humidity,
+    1.5 % in v, 1.1 % in u, 0.026 % in temperature, 4e-4 % in surface pressure
+    and 0 in condensate. It is the humidity in the Richardson number, not the
+    cloud weighting: with the cover held at 0 everywhere the shift is identical
+    to three places, the TKE source reading the dry buoyancy takes it to
+    12.2 %, and ECHAM's shear floor against the former 1e-10 to 13.0 %. The
+    speedy reference is bit-identical.
     """
 
     @pytest.mark.slow

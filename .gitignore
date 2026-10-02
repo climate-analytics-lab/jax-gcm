@@ -33,6 +33,8 @@ jcm/outputs
 !jcm/data/mirror_manifest.json
 # ECHAM Fortran reference test data: provenance and the known-gaps table
 !jcm/data/test/echam_cloud_reference/*.json
+# ... and the TTE-TKE vdiff reference set's provenance
+!jcm/data/test/echam_vdiff_reference/*.json
 *.png
 outputs/
 runs/
@@ -212,3 +214,6 @@ docs/source/speedy_translation.rst
 # Model checkpoints — runs write these into the cwd (run=pyses_year sets a
 # RELATIVE checkpoint_path), and they are gigabytes. Never committable.
 *.ckpt
+
+# tools/release_validation/scm_check.py writes its result archive to the working directory
+/scm_jam_result.npz

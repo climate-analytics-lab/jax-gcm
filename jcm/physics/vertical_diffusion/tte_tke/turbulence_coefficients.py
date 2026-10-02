@@ -9,64 +9,30 @@ import jax.numpy as jnp
 from typing import Tuple
 
 import jcm.constants as c
+from .moist_buoyancy import interior_buoyancy_and_shear, richardson_number
 from .vertical_diffusion_types import VDiffParameters, VDiffState, VDiffDiagnostics
 
 
 @jax.jit
-def compute_richardson_number(
-    u: jnp.ndarray,
-    v: jnp.ndarray,
-    temperature: jnp.ndarray,
-    height_full: jnp.ndarray,
-    height_half: jnp.ndarray,
-    gravity: float | None = None,
-) -> jnp.ndarray:
-    """Compute bulk Richardson number for atmospheric stability.
+def compute_richardson_number(state: VDiffState) -> jnp.ndarray:
+    """Interior Richardson number of every interface between adjacent full levels.
 
-    The dry form, from ``∂T/∂z + g/cpd``. ECHAM's ``vdiff`` (l.776-799) forms
-    the interior buoyancy from the liquid-water and virtual potential
-    temperatures, total water and the ``ua`` saturation of the half level,
-    weighted by cloud cover; that moist form is not ported (#962).
-    
+    ECHAM6's ``zri = zbuoy / MAX(zshear, zepshr)`` (``vdiff.f90`` l.799):
+    the moist, cloud-weighted buoyancy of :func:`~.moist_buoyancy.
+    interior_buoyancy_and_shear` over the squared shear, floored at ECHAM's
+    ``zepshr = 1e-5`` s⁻². Saturated, cloudy layers therefore have the
+    stability of the moist-adiabatic lapse rate rather than the dry one.
+
     Args:
-        u: Zonal wind [m/s] (ncol, nlev)
-        v: Meridional wind [m/s] (ncol, nlev)
-        temperature: Temperature [K] (ncol, nlev)
-        height_full: Full level heights [m] (ncol, nlev)
-        height_half: Half level heights [m] (ncol, nlev+1)
-        gravity: Gravitational acceleration [m/s²]. ``None`` (the
-            default) reads ``jcm.constants.grav`` at trace time, so a
-            ``set_constants`` override applies; a default argument
-            would have captured it at import instead (#772).
-        
+        state: Atmospheric state; reads the wind, temperature, humidity,
+            condensate, cloud cover, pressures and geopotential.
+
     Returns:
-        Richardson number [-] (ncol, nlev-1)
+        Richardson number [-] (ncol, nlev-1); ``[:, i]`` is the interface
+        between full levels ``i`` and ``i + 1``.
 
     """
-    # Compute vertical gradients between adjacent full levels
-    du_dz = jnp.diff(u, axis=1) / jnp.diff(height_full, axis=1)
-    dv_dz = jnp.diff(v, axis=1) / jnp.diff(height_full, axis=1)
-    dt_dz = jnp.diff(temperature, axis=1) / jnp.diff(height_full, axis=1)
-    
-    # Wind shear squared
-    shear_squared = du_dz**2 + dv_dz**2
-    
-    # Average temperature for stability calculation
-    temp_avg = 0.5 * (temperature[:, :-1] + temperature[:, 1:])
-    
-    # Brunt-Väisälä frequency squared (buoyancy frequency)
-    # N² = (g/T) * (dT/dz + g/cp)
-    # Resolved here, not as a default argument: a default is evaluated
-    # once at import and would freeze the pre-override value (#772).
-    gravity = c.grav if gravity is None else gravity
-    lapse_rate = gravity / c.cpd
-    buoyancy_freq_squared = (gravity / temp_avg) * (dt_dz + lapse_rate)
-    
-    # Richardson number: Ri = N² / (du/dz)²
-    # Add small value to prevent division by zero
-    ri = buoyancy_freq_squared / jnp.maximum(shear_squared, 1e-10)
-    
-    return ri
+    return richardson_number(*interior_buoyancy_and_shear(state))
 
 
 @jax.jit
@@ -481,10 +447,7 @@ def compute_turbulence_diagnostics(
     ncol = state.u.shape[0]
     
     # Compute Richardson number
-    ri = compute_richardson_number(
-        state.u, state.v, state.temperature,
-        state.height_full, state.height_half
-    )
+    ri = compute_richardson_number(state)
     
     # Compute mixing length
     pbl_height = compute_boundary_layer_height(state, exchange_coeff_heat)
