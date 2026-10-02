@@ -5,7 +5,9 @@ release gate can score, and applies the two tolerance tiers described in
 ``docs/source/design/jam_regression.md``:
 
 * **absolute physics gates** — the exponential drift ``|d ln B/dt|`` of every
-  species' burden over the final six months, the mass-budget residual, and the
+  species' burden (over the final six months of a record shorter than a year,
+  over its final year once it covers one: the sources are seasonal), the
+  mass-budget residual, and the
   per-step dynamics residual from the #713 in-step gauge. These are the runaway
   detector: an aerosol runaway grows multiplicatively with the meteorology
   entirely normal, so a climatological range gate does not notice it until the
@@ -507,8 +509,54 @@ def collect(files) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     return np.asarray(days, dtype=float), series
 
 
+#: Length of a seasonal cycle. A record that covers this many days is scored
+#: over its final year, which holds each season exactly once (see
+#: :func:`drift_window_days`).
+YEAR_DAYS = 365.0
+
+#: The fit window [days] for a record shorter than a year: its final six months.
+SHORT_RECORD_WINDOW_DAYS = 182.5
+
+
+def drift_window_days(days: np.ndarray,
+                      window_start: float | None = None) -> float:
+    """Fit window [days] of the drift statistic for this record.
+
+    The sources behind most of the burdens are seasonal (dust, biomass-burning
+    BC, sulfate), so a least-squares slope over a window shorter than a year
+    reads the seasonal swing as growth or decay. Once the record covers a year
+    the window is its final 365 days, which hold every season exactly once; a
+    shorter record (a ``--last-n`` slice, or a cold-start year scored over its
+    settled months) keeps the final six months, where a from-zero spin-up ramp
+    is already behind it. A record that starts from a cold init and covers a
+    whole year therefore has to be sliced with ``--last-n`` to its settled
+    months: the whole-year rule is for a warm or second year.
+    """
+    covered = covered_days(days, window_start)
+    return YEAR_DAYS if covered >= YEAR_DAYS - 1e-6 \
+        else SHORT_RECORD_WINDOW_DAYS
+
+
+def yoy_burden_ratio(days: np.ndarray, values: np.ndarray) -> float:
+    """Mean burden of the final 365 days over that of the 365 days before it.
+
+    Reported when the record holds two years; the same seasons are compared, so
+    the seasonal cycle cancels and what is left is interannual variability plus
+    any real drift. NaN when there is no earlier year or no finite samples.
+    """
+    days, values = np.asarray(days, float), np.asarray(values, float)
+    last = days > days[-1] - YEAR_DAYS
+    prev = (days > days[-1] - 2 * YEAR_DAYS) & ~last
+    ok = np.isfinite(values)
+    if not (ok & last).any() or not (ok & prev).any():
+        return float("nan")
+    previous = float(np.mean(values[ok & prev]))
+    return float(np.mean(values[ok & last]) / previous) if previous > 0 \
+        else float("nan")
+
+
 def log_drift(days: np.ndarray, values: np.ndarray,
-              window_days: float = 182.5) -> float:
+              window_days: float = SHORT_RECORD_WINDOW_DAYS) -> float:
     """``d ln B / dt`` [1/day] from a least-squares fit over the last window.
 
     A logarithmic slope is the right statistic for an aerosol burden because
@@ -675,9 +723,13 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
         # yields a slope dominated by its own noise. Both are reported
         # unscored (see :func:`unscored_gates`) rather than gated, because a
         # gate FAIL for something never measured is worse than no number.
-        drift = log_drift(days, b)
+        drift = log_drift(days, b, drift_window_days(days, window_start))
         if np.isfinite(drift) and span_days >= MIN_WINDOW_DAYS:
             stats[f"dlnB_dt_{species}_per_day"] = drift
+        if covered_days(days, window_start) >= 2 * YEAR_DAYS - 1e-6:
+            yoy = yoy_burden_ratio(days, b)
+            if np.isfinite(yoy):
+                stats[f"yoy_burden_ratio_{species}"] = yoy
 
     for species in LIFETIME_SPECIES:
         b = series.get(f"burden_{species}")

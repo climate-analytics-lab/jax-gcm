@@ -23,7 +23,8 @@ record.
 | statistic | why it exists |
 |---|---|
 | `burden_<sp>_mg_m2` for so4, bc, du, ss, poa, soa | the loading itself, against the AeroCom-magnitude anchors. Includes the **cloud-borne** phase, which is 20–25 % of sulfate mass and which the report omitted until #762. |
-| `dlnB_dt_<sp>_per_day` over the final six months | the runaway detector — see below. |
+| `dlnB_dt_<sp>_per_day` over the final six months (final year for a record of a year or more) | the runaway detector — see below. |
+| `yoy_burden_ratio_<sp>` | mean burden of the final 365 days over the 365 before; reported for a two-year record, not gated. |
 | `lifetime_<sp>_days` for so4, bc, du, ss | burden ÷ deposition separates "source too big" from "sink too small" in one number. A burden time series alone cannot. |
 | `budget_residual_<sp>` and `budget_residual_max` | mass conservation: does what came in, minus what left, equal the change in what is held? |
 | `so4_frac_above_500hPa` | #658 was a *free-tropospheric* accumulation: 85 % of the growth sat above 600 hPa while the boundary layer looked fine. A column burden hides that; this does not. |
@@ -64,7 +65,7 @@ so they are the same number for every member and every release.
 
 | gate | limit |
 |---|---|
-| `\|d ln B/dt\|` per species, final six months | `< 0.002 /day` |
+| `\|d ln B/dt\|` per species, final six months (final year for a record of a year or more) | `< 0.002 /day` |
 | `\|budget residual\|`, max over species | `< 5 %` |
 | `dyn_frac_per_step_<sp>` | `< 0.1 % per step` |
 
@@ -93,16 +94,53 @@ right statistic is the slope of `ln B`, not of `B`. That makes one threshold
 work for every species regardless of its loading, and makes a merely noisy but
 stationary burden average to zero.
 
-The window is the **final six months**. A from-zero spin-up year ramps for its
-first months by design; scoring the whole record would call that ramp a
+The window depends on how much record there is. A record shorter than a year
+— the 40 saves (~195 days) the release recipe scores of a cold-start year —
+is fit over its **final six months**: a from-zero spin-up year ramps for its
+first months by design, and scoring the whole record would call that ramp a
 runaway. Tropospheric burdens equilibrate in weeks (lifetimes ~4–7 days), so
 six months is comfortably past the ramp while still long enough that a slope of
-0.002 /day is resolvable above the noise.
+0.002 /day is resolvable above the noise. A record that covers a year or more —
+a warm or second year scored whole, or two years in one directory — is fit over
+its **final 365 days**, which hold every season exactly once. A cold-start
+year therefore has to be sliced with `--last-n` to its settled months; the
+whole-year rule is for a record that no longer contains a spin-up ramp.
+
+The reason for the longer window is the seasonal sources. Dust, biomass-burning
+carbon and sulfate all have a seasonal cycle, and a least-squares slope over
+part of a cycle reads the cycle as growth or decay. Measured on JAM T63 L47,
+two consecutive years of the release recipe on dev `80699ac8` (the second
+started from the first's end state; each scored over its last 40 saves, so the
+six-month fit sits inside a 195-day record):
+
+| species | final six months, year 1 | final six months, year 2 | whole year 2 | year-1 day 150 to year-2 end |
+|---|---|---|---|---|
+| SO4 | +0.0020 | +0.0025 | +0.0003 | +0.0002 |
+| BC | +0.0032 | +0.0033 | +0.0004 | +0.0003 |
+| POA | −0.0016 | −0.0014 | +0.0007 | −0.00004 |
+| dust | −0.0021 | −0.0011 | −0.0021 | −0.0004 |
+| sea salt | +0.0003 | −0.0003 | −0.0011 | −0.0001 |
+
+(slopes of `ln B`, per day; the limit is 0.002.) The same-window slopes repeat
+from year to year with the same sign and size, which a spin-up drift would not,
+and BC exceeds the limit in both; the whole-year slopes of SO4, BC and POA are
+below 0.001 /day, and the slope of the year-2 / year-1 ratio over the settled
+days is at most 0.001 /day for all five species. The whole-year dust slope sits
+at the limit because dust emission is event-driven (the same 30-day block holds
+a storm in one year and none in the other); the year-over-year ratio is the
+better statistic for it, which is why it is reported for a two-year record.
+
+The longer window is less sensitive to a late runaway, and that is the price. A
+×60 growth over the last 40 days of an otherwise seasonal year fits a slope of
+0.018 /day over the final six months (9× the limit) and 0.0039 /day over the
+final year (2×); a 0.03 /day growth over the last 120 days fits 0.027 and 0.008.
+It still fails, but with a smaller margin, and the budget-closure and per-step
+dynamics gates below do not depend on this window.
 
 `0.002 /day` is a factor e over ~500 days: a burden that genuinely has not
 settled may still move that much over a validation year, but the ×60-in-40-days
-growth of a #658-class runaway exceeds it by an order of magnitude, and — the
-point of the gate — so does the much gentler growth those runaways show for
+growth of a #658-class runaway exceeds it by an order of magnitude over the
+six-month window — and so does the much gentler growth those runaways show for
 months *before* they become visible. On the August-2026 year the gate fails on
 sulfate at day 300, on a window that ends before the burden leaves its anchor
 range at all.

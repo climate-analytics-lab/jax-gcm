@@ -217,7 +217,8 @@ It reduces each chunk file separately (a JAM year is ~60 GB and must never
 be opened as one array, so budget ~40 min for a full T63 L47 year;
 `--series-out` saves the reduction and `--series-in` re-scores it without
 re-reading the run) and reports per-species burdens including the
-cloud-borne phase, their logarithmic drift over the final six months,
+cloud-borne phase, their logarithmic drift (over the final six months of a record
+shorter than a year, over the final year of a longer one: the sources are seasonal),
 lifetimes, the mass-budget residual, sulfate's upper-level and hemispheric
 distribution, AOD/Ångström, near-surface CDNC and N100, and the modal dry
 radii. Three of those are **absolute gates**, not climatological ranges:
