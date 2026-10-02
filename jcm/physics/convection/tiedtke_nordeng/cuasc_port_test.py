@@ -271,7 +271,10 @@ class TestAscentStops:
         """Above a saturated boundary layer the environment is warm-bottomed
         but very dry: the plume, diluted by the shallow entrainment, no
         longer condenses at the first interface above cloud base — and
-        stops there, although it is still warmer than its surroundings.
+        stops there, although it is still buoyant: ECHAM's buoyancy, the
+        virtual-temperature excess (mo_cuascent.f90:449), is about 1 K
+        there, carried by the plume's moisture (its temperature is the
+        environment's to round-off).
         """
         cfg, T, q, p, p_half, dz, rho, env, kb = _column()
         dry = jnp.arange(T.shape[0]) < kb
@@ -289,7 +292,9 @@ class TestAscentStops:
             mfu[k], float(cfg.cu_cmfctop) * mfu[kb], rtol=1e-6)
         assert np.all(mfu[:k] == 0.0)
         # ... although the mixed parcel there is still buoyant.
-        assert float(up.tu[k]) > float(env_d.tenh[k])
+        tu, qu = float(up.tu[k]), float(up.qu[k])
+        tenh, qenh = float(env_d.tenh[k]), float(env_d.qenh[k])
+        assert tu * (1 + c.vtmpc1 * qu) - tenh * (1 + c.vtmpc1 * qenh) > 0.5
         # And it did not condense: no condensate gained above the base.
         assert float(up.pdmfup[k]) == 0.0
         # The overshoot carries the air mixed in that layer (cuasc forms the

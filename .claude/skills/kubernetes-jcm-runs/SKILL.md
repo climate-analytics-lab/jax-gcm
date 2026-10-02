@@ -140,8 +140,8 @@ from the matrix's own override list:
 ```bash
 python tools/release_validation/launch.py --site nautilus --submit    # 7 members
 python tools/release_validation/launch.py --site nautilus --members echam-jam-t63-l47 \
-    --days 60 --init <state> --suffix cape150 \
-    --extra +physics.convection.trigger_cape=150.0 --submit            # one arm
+    --days 60 --init <state> --suffix entrpen20 \
+    --extra +physics.convection.entrpen=2e-4 --submit                  # one arm
 python tools/release_validation/launch.py --site nautilus --fetch --members <m> --tag <t>
 ```
 
