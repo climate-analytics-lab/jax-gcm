@@ -48,7 +48,10 @@ from jcm.physics.radiation import SURFACE_OPTICS_KEY, current_cos_zenith
 from jcm.physics.radiation.radiation_types import RadiationData
 from jcm.physics.surface.echam import albedo as albedo_scheme
 from jcm.physics.surface.echam.albedo import EchamSurfaceAlbedoParameters
-from jcm.physics.surface.echam.surface_types import SurfaceData
+from jcm.physics.surface.echam.surface_types import (
+    ECHAM_SURFACE_EMISSIVITY,
+    SurfaceData,
+)
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.terrain import TerrainData
@@ -59,15 +62,21 @@ class SurfaceOpticsParameters:
     """Surface albedo and emissivity constants (#347, #672).
 
     Albedo follows ECHAM 6.3's per-tile schemes
-    (:mod:`jcm.physics.surface.echam.albedo`); emissivity is a per-tile
-    constant. Every numeric value is a differentiable pytree leaf.
+    (:mod:`jcm.physics.surface.echam.albedo`). Emissivity is held per tile
+    so each can be tuned and differentiated on its own, but all three default
+    to ECHAM's single surface emissivity ``cemiss = 0.996``
+    (:data:`~jcm.physics.surface.echam.surface_types.ECHAM_SURFACE_EMISSIVITY`;
+    ``mo_radiation_parameters.f90::cemiss``, used for every surface by
+    ``mo_psrad_interface.f90``, ``mo_surface_land.f90::land_rad`` and
+    ``update_surfacetemp.f90``). Every numeric value is a differentiable
+    pytree leaf.
     """
 
     albedo: EchamSurfaceAlbedoParameters = struct.field(
         default_factory=EchamSurfaceAlbedoParameters)
-    land_emissivity: jnp.ndarray = 0.95
-    ocean_emissivity: jnp.ndarray = 0.98
-    seaice_emissivity: jnp.ndarray = 0.95
+    land_emissivity: jnp.ndarray = ECHAM_SURFACE_EMISSIVITY
+    ocean_emissivity: jnp.ndarray = ECHAM_SURFACE_EMISSIVITY
+    seaice_emissivity: jnp.ndarray = ECHAM_SURFACE_EMISSIVITY
 
 
 def _tile_partition(land_fraction, sea_ice_fraction):

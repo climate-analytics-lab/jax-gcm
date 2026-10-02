@@ -1273,7 +1273,8 @@ bias and should be redone.
 Code that built ``SurfaceOpticsParameters(land_albedo_vis=...)`` must move
 the value to the new structure, e.g.
 ``SurfaceOpticsParameters(albedo=EchamSurfaceAlbedoParameters(snow_albedo_max=0.75))``;
-the emissivities are unchanged.
+the three emissivity fields keep their names, and their defaults are now
+ECHAM's single ``cemiss = 0.996`` (:doc:`release_notes`).
 
 Cloud droplets follow ECHAM
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^

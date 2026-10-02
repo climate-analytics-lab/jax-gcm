@@ -1845,6 +1845,55 @@ The ECHAM land evaporates in JSBACH's form and closes a skin energy balance
   here.
 
 
+ECHAM surface emissivity is ECHAM's cemiss
+""""""""""""""""""""""""""""""""""""""""""
+
+- The ECHAM hosts' surface longwave emissivity is ECHAM6.3's single
+  ``cemiss = 0.996`` (``mo_radiation_parameters.f90``) for land, open water
+  and sea ice, where jcm had 0.95, 0.98 and 0.95 (a grid-box 0.970 on the
+  packaged T63 land-sea mask). ``SurfaceOpticsParameters.land_emissivity`` /
+  ``ocean_emissivity`` / ``seaice_emissivity`` and the standalone tile-flux
+  reference's ``SurfaceParameters.emissivity`` (0.99; ``EchamSurface``
+  discards its results) all default to
+  ``surface_types.ECHAM_SURFACE_EMISSIVITY``. The radiation's surface
+  boundary, the land skin balance and the longwave re-emission read it, as
+  ECHAM's radiation, ``land_rad`` and ``update_surfacetemp`` read ``cemiss``.
+  The three per-tile values stay separate differentiable leaves. See
+  :doc:`science/surface`.
+- **Changes results** for every ECHAM configuration, in the direction of more
+  surface longwave cooling: a higher emissivity raises the emission
+  ``ε·σ·T⁴`` by more than the absorbed downward longwave ``ε·LW↓``, because
+  the surface is warmer than the sky's effective temperature. Days 5-10 of
+  10-day ``t63-echam-1m`` runs from a spun-up state (T63L47, January,
+  instantaneous 6-hourly snapshots, one run per arm), with dev at
+  ``f1f0df1e`` against this change at ``610ebed0``:
+
+  ====================================  ===============  ===============
+  quantity [W/m² unless stated]         before           after
+  ====================================  ===============  ===============
+  grid-box emissivity                   0.9703           0.9960
+  surface longwave down / up            327.0 / 389.9    326.7 / 391.3
+  surface net longwave (down - up)      -62.9            -64.6
+  surface net longwave, land            -60.1            -62.6
+  land net radiation                    38.9             36.5
+  land sensible / latent heat           28.0 / 32.5      27.3 / 32.2
+  land skin temperature [K]             276.15           275.95
+  net TOA radiation                     -6.38            -6.98
+  outgoing longwave radiation           243.2            244.1
+  precipitation, global / land [mm/d]   2.314 / 1.993    2.332 / 1.976
+  ====================================  ===============  ===============
+
+  The surface longwave change is the emissivity's: ``Δε·(σT⁴ − LW↓)`` on the
+  control's own fields is 1.7 globally and 2.8 over land (``Δε`` is 0.026 and
+  0.045), against 1.7 and 2.5 in the runs. The runs were not repeated, so the
+  run-to-run noise of the turbulent fluxes, skin temperature and
+  precipitation is not measured and their changes (a few tenths of W/m² or of
+  a kelvin) are not read as an effect.
+- **Retune item.** Net TOA radiation falls by 0.6 W/m² and the outgoing
+  longwave rises by 0.9. This is the control of the #682 retune: it is
+  adopted first so that no tuning absorbs the old emissivity.
+
+
 Tiedtke-Nordeng takes ECHAM's decisions
 """""""""""""""""""""""""""""""""""""""
 

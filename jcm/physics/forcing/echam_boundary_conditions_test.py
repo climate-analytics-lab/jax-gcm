@@ -15,9 +15,18 @@ from jcm.physics.forcing.echam_boundary_conditions import (
 )
 from jcm.physics.radiation import SURFACE_OPTICS_KEY, current_cos_zenith
 from jcm.physics.surface.echam import albedo as albedo_scheme
+from jcm.physics.surface.echam.surface_types import (
+    ECHAM_SURFACE_EMISSIVITY,
+    SurfaceParameters,
+)
 from jcm.physics_interface import PhysicsState
 
 P = SurfaceOpticsParameters()
+
+# The defaults are one value for every tile, so a test of the per-tile
+# bookkeeping (which fraction weights which emissivity) needs distinct ones.
+P_DISTINCT = P.replace(land_emissivity=0.90, ocean_emissivity=0.97,
+                       seaice_emissivity=0.93)
 
 
 def _optics(land, ice, **overrides):
@@ -49,28 +58,51 @@ class SurfaceOpticsTest(unittest.TestCase):
                                    rtol=1e-6)
         np.testing.assert_allclose(nir, [0.2, float(ocean_nir[0]), 0.75],
                                    rtol=1e-6)
-        np.testing.assert_allclose(emis, [0.95, 0.98, 0.95])
+        np.testing.assert_allclose(emis, [P.land_emissivity,
+                                          P.ocean_emissivity,
+                                          P.seaice_emissivity])
+
+    def test_default_emissivity_is_echams_cemiss_for_every_tile(self):
+        # ECHAM6.3 has one surface emissivity, mo_radiation_parameters.f90::
+        # cemiss = 0.996, for land, water and ice alike. Pinned as a literal
+        # so a change to the constant is a visible, reviewed edit.
+        self.assertEqual(ECHAM_SURFACE_EMISSIVITY, 0.996)
+        for tile in (P.land_emissivity, P.ocean_emissivity,
+                     P.seaice_emissivity,
+                     SurfaceParameters.default().emissivity):
+            np.testing.assert_allclose(float(tile), 0.996, rtol=1e-6)
+        _, _, emis = _optics(jnp.array([1.0, 0.0, 0.0, 0.3]),
+                             jnp.array([0.0, 0.0, 1.0, 0.2]))
+        np.testing.assert_allclose(emis, 0.996, rtol=1e-6)
+
+    def test_each_tile_fraction_weights_its_own_emissivity(self):
+        _, _, emis = _optics(jnp.array([1.0, 0.0, 0.0, 0.5]),
+                             jnp.array([0.0, 0.0, 1.0, 0.25]), p=P_DISTINCT)
+        np.testing.assert_allclose(
+            emis, [0.90, 0.97, 0.93, 0.5 * 0.90 + 0.25 * 0.97 + 0.25 * 0.93],
+            rtol=1e-6)
 
     def test_polar_land_flagged_as_sea_ice_stays_a_convex_blend(self):
         # The bundle carries icec = 1 over Antarctic/Arctic land, where
         # lsm = 1 as well. Unclipped, the tiles summed to 2 and emissivity
         # reached 1.90 -- so surface reflectance 1 - eps went negative and
         # RRTMGP was handed an impossible surface (#703).
-        vis, nir, emis = _optics(jnp.array([1.0]), jnp.array([1.0]))
-        np.testing.assert_allclose(emis, [0.95])
+        vis, nir, emis = _optics(jnp.array([1.0]), jnp.array([1.0]),
+                                 p=P_DISTINCT)
+        np.testing.assert_allclose(emis, [0.90])
         np.testing.assert_allclose(vis, [0.2], rtol=1e-6)
         np.testing.assert_allclose(nir, [0.2], rtol=1e-6)
 
     def test_blend_is_convex_across_the_whole_fraction_plane(self):
         f = jnp.linspace(0.0, 1.0, 11)
         land, ice = (x.ravel() for x in jnp.meshgrid(f, f))
-        vis, nir, emis = _optics(land, ice)
+        vis, nir, emis = _optics(land, ice, p=P_DISTINCT)
         ocean_vis, ocean_nir = albedo_scheme.ocean_albedo_per_band(
             jnp.ones(1), P.albedo)
         for got, tiles in (
             (vis, (0.2, float(ocean_vis[0]), 0.75)),
             (nir, (0.2, float(ocean_nir[0]), 0.75)),
-            (emis, (0.95, 0.98, 0.95)),
+            (emis, (0.90, 0.97, 0.93)),
         ):
             self.assertGreaterEqual(float(jnp.min(got)), min(tiles) - 1e-6)
             self.assertLessEqual(float(jnp.max(got)), max(tiles) + 1e-6)
