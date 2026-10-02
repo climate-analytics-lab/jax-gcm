@@ -300,7 +300,7 @@ consecutive years on one commit (the second started from the first's end state).
 From the cold dry init the burdens of year 1 lie below those of year 2 in the same
 season by up to ~110 % (dust), ~65 % (SO4) and ~50 % (sea salt) in the first two
 months, and the two years agree to within a few percent from day ~150 on L47 and
-day ~90-120 on L95, while the mass budget closes to under 0.1 % throughout, so
+day ~90-120 on L95, while the mass budget closes to within 0.15 % throughout, so
 the early deficit is the water cycle and winds spinning up, not an aerosol
 accumulation. Year 1's end state is already on
 the equilibrated trajectory; year 2 is the first whole equilibrated year.
