@@ -20,6 +20,7 @@ from jcm.constants import grav, rd
 from jcm.physics.gravity_waves.sso import (
     SSOParameters, sso_drag,
 )
+from jcm.physics.gravity_waves.sso.lott_miller import _energy_conserving_cap
 from jcm.testing import check_gradients
 
 
@@ -117,6 +118,142 @@ class TestSSOBasic:
         np.testing.assert_allclose(np.asarray(tend_half.dudt),
                                    0.5 * np.asarray(tend_full.dudt),
                                    rtol=1e-6, atol=1e-12)
+
+
+def _captured_blowup_columns():
+    """Load the twelve worst columns of the t63-echam-1m CPU blow-up (#981).
+
+    ``jcm/data/test/sso_cpu_blowup_cols.npz`` holds the SSO inputs at the
+    western-Tibet / Himalaya / Andes columns where, from the last sane state of
+    the cold start (step 2 of 12 minutes, float32), the CPU-compiled scheme
+    returned 0.3-2.5 m/s² at a level the drag did not touch (a 32 m/s wind
+    over 12 minutes) while the same function run op-by-op returned < 3e-3.
+    Everything is the model's own state: the terrain fields are the T63
+    descriptors of those columns, ``pressure_*`` and ``height_full`` the
+    diagnostics the term reads.
+    """
+    from importlib import resources
+
+    path = resources.files("jcm.data.test") / "sso_cpu_blowup_cols.npz"
+    with resources.as_file(path) as f:
+        d = np.load(f)
+        return {k: np.asarray(d[k]) for k in d.files}
+
+
+def _run_captured_columns(cols):
+    """``sso_drag`` vmapped over the captured columns under ``jax.jit``.
+
+    Mirrors how :class:`LottMillerSso` calls it (``surface_height`` and
+    ``mean_orography`` are both the grid-mean orography); float32 whatever the
+    process default, as the model runs it.
+    """
+    config = SSOParameters.default()
+
+    def one(pf, ph, hf, T, u, v, orog, std, sig, gam, the, pic, val, fmask):
+        mass = (ph[1:] - ph[:-1]) / grav
+        t, _ = sso_drag(
+            jnp.asarray(cols["dt"]), jnp.zeros((), jnp.float32), hf, orog,
+            ph, pf, mass, T, u, v, orog, std, sig, gam, the, pic, val, fmask,
+            config, nktopg=1, ntop=1)
+        return t
+
+    args = [jnp.asarray(cols[k], jnp.float32) for k in (
+        "pressure_full", "pressure_half", "height_full", "temperature",
+        "u_wind", "v_wind", "orog", "orostd", "orosig", "orogam", "orothe",
+        "oropic", "oroval", "fmask")]
+    return jax.jit(jax.vmap(one))(*args)
+
+
+class TestSSOEnergyCap:
+    """The drag never accelerates the wind, however XLA compiles the cap (#981).
+
+    The cap's branch test is a difference of nearly equal squares, which is
+    exactly zero in exact arithmetic at every level the drag does not touch;
+    XLA:CPU evaluated it differently in each of its consumers, so the cap's
+    rescale ran on a placeholder denominator and a calm level was accelerated
+    by ~2 m/s². These tests pin the invariants the Fortran guarantees by
+    construction rather than a compiler's rounding.
+    """
+
+    def test_captured_columns_never_accelerate_the_wind(self):
+        cols = _captured_blowup_columns()
+        t = _run_captured_columns(cols)
+        dt = float(cols["dt"])
+        u, v = cols["u_wind"], cols["v_wind"]
+        speed_old = np.hypot(u, v)
+        speed_new = np.hypot(u + dt * np.asarray(t.dudt),
+                             v + dt * np.asarray(t.dvdt))
+        # ``|u*| <= |u|`` per level, to the round-off of forming u + dt*a.
+        assert np.all(speed_new <= speed_old * (1.0 + 1e-5) + 1e-4), (
+            "drag accelerated the wind: worst level gained "
+            f"{float(np.max(speed_new - speed_old)):.3g} m/s")
+        # ... which bounds the tendency itself by twice the wind per step.
+        bound = 2.0 * speed_old / dt * (1.0 + 1e-5) + 1e-9
+        assert np.all(np.hypot(np.asarray(t.dudt), np.asarray(t.dvdt)) <= bound)
+
+    def test_frictional_heating_is_non_negative_and_zero_where_no_drag(self):
+        cols = _captured_blowup_columns()
+        t = _run_captured_columns(cols)
+        dudt, dvdt, dis = (np.asarray(x) for x in (t.dudt, t.dvdt, t.dissip))
+        assert np.all(dis >= 0.0)
+        untouched = (dudt == 0.0) & (dvdt == 0.0)
+        assert untouched.any(), "fixture has no drag-free level to test"
+        # A level the scheme leaves alone has no frictional heating: no
+        # rounding residue of 0.5*(|u|² - |u + dt*0|²).
+        assert np.all(dis[untouched] == 0.0)
+
+    @staticmethod
+    def _echam_cap(u, v, du, dv, dt):
+        """ECHAM's ``IF (zdis < 0)`` branch (mo_ssortns.f90::orodrag), float64."""
+        zust, zvst = u + dt * du, v + dt * dv
+        zdis = 0.5 * (u ** 2 + v ** 2 - zust ** 2 - zvst ** 2)
+        gain = zdis < 0.0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            zred = np.sqrt((u ** 2 + v ** 2) / (zust ** 2 + zvst ** 2))
+        zust2, zvst2 = zust * zred, zvst * zred
+        du2 = np.where(gain, (zust2 - u) / dt, du)
+        dv2 = np.where(gain, (zvst2 - v) / dt, dv)
+        zdis2 = np.where(
+            gain, 0.5 * (u ** 2 + v ** 2 - zust2 ** 2 - zvst2 ** 2), zdis)
+        return du2, dv2, zdis2 / dt
+
+    def test_cap_is_the_echam_branch(self):
+        """Same tendencies and heating as ECHAM's branch, both sides of it."""
+        rng = np.random.default_rng(981)
+        n = 4000
+        dt = 720.0
+        u = rng.normal(0.0, 20.0, n).astype(np.float32)
+        v = rng.normal(0.0, 20.0, n).astype(np.float32)
+        # Increment as a multiple of the wind: < 2 slows it (no cap), > 2
+        # reverses it past its own speed and gains energy (the cap acts); a
+        # random crosswind part makes the speed gain depend on direction.
+        alpha = rng.uniform(0.0, 3.0, n).astype(np.float32)
+        cross = rng.normal(0.0, 0.5, n).astype(np.float32)
+        du = (-alpha * u - cross * v) / dt
+        dv = (-alpha * v + cross * u) / dt
+        # A quarter of the levels carry no drag at all, as most of a column does.
+        none = rng.random(n) < 0.25
+        du = np.where(none, 0.0, du).astype(np.float32)
+        dv = np.where(none, 0.0, dv).astype(np.float32)
+        ref = self._echam_cap(*(x.astype(np.float64) for x in (u, v, du, dv)), dt)
+        got = [np.asarray(x) for x in jax.jit(_energy_conserving_cap)(
+            jnp.asarray(u), jnp.asarray(v), jnp.asarray(du), jnp.asarray(dv),
+            jnp.float32(dt))]
+        wind_scale = np.max(np.hypot(u, v)) / dt
+        np.testing.assert_allclose(got[0], ref[0], rtol=1e-4, atol=1e-5 * wind_scale)
+        np.testing.assert_allclose(got[1], ref[1], rtol=1e-4, atol=1e-5 * wind_scale)
+        np.testing.assert_allclose(got[2], ref[2], rtol=1e-3,
+                                   atol=1e-5 * wind_scale ** 2 * dt)
+        # The branch really was exercised: some levels were capped back.
+        capped = (got[0] != du) | (got[1] != dv)
+        assert capped.sum() > 100 and (~capped).sum() > 100
+
+    def test_cap_leaves_a_calm_drag_free_level_alone(self):
+        z = jnp.zeros(3, jnp.float32)
+        du, dv, dis = jax.jit(_energy_conserving_cap)(
+            z, z, z, z, jnp.float32(720.0))
+        for x in (du, dv, dis):
+            np.testing.assert_array_equal(np.asarray(x), 0.0)
 
 
 class TestSSOJaxTransforms:

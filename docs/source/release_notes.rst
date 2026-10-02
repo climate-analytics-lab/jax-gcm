@@ -1924,6 +1924,26 @@ The vapour gas constant is ECHAM's
   −0.006 / +0.006 mm/day (table above), within the run-to-run spread.
   ``set_constants(rv=461.0)`` restores the 2.x value.
 
+Sub-grid orographic drag never accelerates the wind
+"""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``t63-echam-1m`` went 100 % NaN within three to five 12-minute steps on CPU, from a
+  cold or a warm start, while the same commit was healthy on a GPU (#981). The
+  Lott-Miller SSO energy cap (``mo_ssortns.f90::orodrag``, ``IF (zdis < 0)``) tested a
+  difference of nearly equal squares, which is rounding noise at every level the
+  drag does not touch. XLA:CPU evaluated that test differently in each of the
+  places it was read, so a level the drag did not touch could be rescaled with a
+  placeholder denominator and accelerated by 0.3-2.5 m/s² (a 32 m/s level to over
+  400 m/s within one 12-minute step) over the Himalaya and Andes. The cap is now ``u*·min(1, |u|/|u*|)``,
+  branch-free, with the kinetic-energy change formed from the wind increment.
+  ``jax_enable_x64`` did not cure it, since the same mechanism acts in float64.
+- **Changes results** only at round-off: it is ECHAM's rescale in exact arithmetic.
+  The frictional heating at a level the drag does not touch is now exactly zero
+  rather than ~1e-11 K/s of either sign, and no level can gain kinetic energy. CPU
+  runs of ``t63-echam-1m`` that diverged now integrate; a GPU's result is unchanged
+  to round-off. See ``JAX_gotchas.md`` for how to recognise this class of
+  failure.
+
 Known limitations
 ^^^^^^^^^^^^^^^^^
 

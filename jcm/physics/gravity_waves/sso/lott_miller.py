@@ -110,6 +110,13 @@ _MIN_LOW_LEVEL_WIND = 0.10  # security floor on low-level wind (gvsec)
 # finite.
 _MIN_OROG_STD = 1.0e-6      # [m]
 
+# Floor on the squared wind speed [m²/s²] that divides the energy-conserving
+# cap's quotient in ``_orodrag``. Both the forward ``0/0`` at an exactly calm
+# level and the reverse-mode ``den**-2`` need it above float32's underflow of
+# the square (see the comment at the cap); it is a speed of 1e-9 m/s, whose
+# correction (``<= speed/dt``) is ~1e-12 m/s².
+_MIN_SPEED2 = 1.0e-18
+
 
 def _safe_denom(x, floor):
     """Floor ``|x|`` at ``floor`` (sign-preserving) for use as a divisor.
@@ -653,6 +660,80 @@ def _gwprofil(paphm1, prho, pri, pstab, pvph, pdmod, ptau0, pstd, psig,
 
 
 # ---------------------------------------------------------------------------
+# Energy-conserving cap + frictional heating (orodrag lines 481-494)
+# ---------------------------------------------------------------------------
+
+def _energy_conserving_cap(u, v, dudt, dvdt, dt):
+    """Cap the drag so it never accelerates the wind; return the heating.
+
+    ECHAM (``mo_ssortns.f90::orodrag``) forms ``zdis = 0.5*(|u|² - |u*|²)`` for
+    the updated wind ``u* = u + dt*a`` and, ``IF (zdis < 0)``, scales ``u*`` back
+    to the old speed ``|u|``; the drag may turn or slow the wind but never
+    accelerate it. That is ``u* -> u* * min(1, |u|/|u*|)``, written here with no
+    ``IF``/``where`` at all, for two reasons that both come from ``zdis`` being
+    a difference of nearly equal squares:
+
+    * ``gain = 0.5*(|u*|² - |u|²)`` is formed from the increment
+      (``|u*|² - |u|² = Δu (2u + Δu) + Δv (2v + Δv)``), so it is exactly 0
+      wherever the drag is exactly 0, in any evaluation order. Formed as a
+      difference of squares it is rounding noise of either sign (about 1e-5
+      m²/s² at 30 m/s in float32) at every level the scheme does not touch.
+    * a branch test on that noise, consumed in more than one place, is
+      evaluated independently at each: XLA:CPU duplicates the cheap
+      elementwise producer of ``zdis`` into every consumer fusion and LLVM
+      contracts multiply-adds differently in each copy (an operand with a
+      second use cannot be fused), so a ``speed2_new = where(zdis < 0, ...,
+      1)`` guard and the select that applies the rescale can disagree. The
+      rescale then runs on a quotient built from the guard's placeholder
+      denominator, i.e. ``zred`` equal to the wind speed, and a level the drag
+      did not touch is accelerated by up to 2.5 m/s² (the CPU-only blow-up of
+      #981). A select whose arms differ by orders of magnitude at its own
+      threshold is not safe to drive from a quantity that is zero in exact
+      arithmetic.
+
+    ``max(gain, 0)`` is continuous, and the quotient below is ``|u|²/|u*|²``
+    when the wind gained energy and ``|u|²/|u|² = 1`` otherwise, so every
+    evaluation of it, whichever side of the threshold rounding puts it on, is
+    within round-off of the other.
+
+    The quotient's denominator is ``|u|² + 2*gain_pos >= |u|²``, so it is never
+    the updated wind's own square, which is exactly zero at an exactly calm
+    level and — when the blocked-flow drag stops the wind in one step with
+    ``orography_std`` just above ``_MIN_OROG_STD`` — nearly zero: the
+    ``1/den**2`` derivative of a quotient over that square is infinite in
+    float32 (#663). The denominator is still floored, at ``_MIN_SPEED2``,
+    because ``0/0`` at ``|u|² = 0`` (calm level, no drag) is NaN and JAX's
+    division derivative forms ``den**-2``, which only stays inside float32's
+    range above ~1e-19; ``u*`` is also ~0 there, so the correction vanishes.
+
+    Args:
+        u, v: Wind before the drag [m/s].
+        dudt, dvdt: Drag tendency before the cap [m/s²].
+        dt: Physics time step [s].
+
+    Returns:
+        ``(dudt, dvdt, dissipation)``: the capped tendencies [m/s²] and the
+        frictional heating ``zdis/dt`` [W/kg], which is the kinetic energy lost
+        where the wind slowed and zero where it was capped back to its old
+        speed (ECHAM's recomputed ``zdis`` is round-off there).
+
+    """
+    zdu = dt * dudt
+    zdv = dt * dvdt
+    gain = 0.5 * (zdu * (2.0 * u + zdu) + zdv * (2.0 * v + zdv))
+    gain_pos = jnp.maximum(gain, 0.0)
+    speed2_old = u ** 2 + v ** 2
+    zred = jnp.sqrt(jnp.maximum(
+        speed2_old / jnp.maximum(speed2_old + 2.0 * gain_pos, _MIN_SPEED2),
+        1.0e-30))
+    # u*·zred - u == dt*a + u*·(zred - 1), so the tendency is unchanged (exactly,
+    # not to round-off) wherever zred == 1.
+    dudt = dudt + (u + zdu) * (zred - 1.0) / dt
+    dvdt = dvdt + (v + zdv) * (zred - 1.0) / dt
+    return dudt, dvdt, jnp.maximum(-gain, 0.0) / dt
+
+
+# ---------------------------------------------------------------------------
 # orodrag — combine wave-drag tendency + blocked-flow wake drag
 # ---------------------------------------------------------------------------
 
@@ -728,36 +809,9 @@ def _orodrag(paphm1, papm1, pmair, pum1, pvm1, ptm1, phgeo,
     zdudt = jnp.where(use_block, block_du, zdudt_wave)
     zdvdt = jnp.where(use_block, block_dv, zdvdt_wave)
 
-    # Energy dissipation (lines 481-494)
-    zust = pum1 + pdtime * zdudt
-    zvst = pvm1 + pdtime * zdvdt
-    zdis_pre = 0.5 * (pum1 ** 2 + pvm1 ** 2 - zust ** 2 - zvst ** 2)
-    # If zdis < 0: rescale tendencies so KE conserved. ECHAM forms the
-    # quotient only inside that branch (mo_ssortns.f90::orodrag, ``IF
-    # (zdis<0)``), where |u_st|² > |u|² ≥ 0 keeps its denominator positive,
-    # so the discarded evaluation gets a denominator of 1 instead (the
-    # double-where, as the ``zxrp1_base`` guard in ``clouds/echam_1m.py``
-    # does it). A floor under the denominator is not enough: where the
-    # updated wind is zero — an exactly calm level, or the blocked-flow drag
-    # stopping the flow in one step when ``orography_std`` sits just above
-    # ``_MIN_OROG_STD`` — the floored quotient's derivative (``1/den**2``,
-    # below float32's range) is infinite, and the ``where``'s zero cotangent
-    # makes every wind and orography gradient NaN.
-    # The floor on the ratio keeps sqrt's derivative finite at a calm level
-    # inside the branch (ratio 0).
-    rescale = zdis_pre < 0.0
-    speed2_new = jnp.where(rescale, zust ** 2 + zvst ** 2, 1.0)
-    zred = jnp.sqrt(jnp.maximum((pum1 ** 2 + pvm1 ** 2) / speed2_new, 1.0e-30))
-    zust_corr = zust * zred
-    zvst_corr = zvst * zred
-    new_du = (zust_corr - pum1) / pdtime
-    new_dv = (zvst_corr - pvm1) / pdtime
-    zdudt = jnp.where(rescale, new_du, zdudt)
-    zdvdt = jnp.where(rescale, new_dv, zdvdt)
-    zust_final = pum1 + pdtime * zdudt
-    zvst_final = pvm1 + pdtime * zdvdt
-    zdis = 0.5 * (pum1 ** 2 + pvm1 ** 2 - zust_final ** 2 - zvst_final ** 2)
-    pdis = zdis / pdtime
+    # Energy dissipation and the energy-conserving cap (lines 481-494).
+    zdudt, zdvdt, pdis = _energy_conserving_cap(
+        pum1, pvm1, zdudt, zdvdt, pdtime)
     return zdudt, zdvdt, pdis
 
 
