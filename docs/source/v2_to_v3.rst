@@ -1355,8 +1355,9 @@ What a user has to know:
   ``ground_heat_flux``, ``snow_melt_heat_flux``, ``land_heat_storage``,
   ``land_evaporation``, ``land_energy_residual``), and the factors (``cair``,
   ``csat``, ``water_stress_factor``, ``bare_soil_humidity``,
-  ``canopy_conductance``). ``surface.surface_temperature`` over land is now the
-  skin temperature, not ``stl_am``.
+  ``canopy_conductance``), and ``land_albedo_at_solve``, the land albedo of
+  the last radiation solve. ``surface.surface_temperature`` over land is now
+  the skin temperature, not ``stl_am``.
 - **To keep a prescribed land temperature** (fixed-SST and fixed-land-
   temperature forcing runs), set ``land_temperature="prescribed"``, e.g.
   ``+physics.terms.tte_tke_vertical_diffusion.land_params.land_temperature=prescribed``:

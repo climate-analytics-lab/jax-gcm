@@ -355,6 +355,86 @@ class TestTerm:
         assert np.all(np.asarray(sf.canopy_conductance) > 0.0)
 
 
+class TestLandAlbedoOfTheLastSolve:
+    """The land absorbs the held shortwave through the albedo of the solve it came from (#979).
+
+    The radiation holds ``surface_sw_down``/``_sw_up`` between solves and
+    ``surface.land_albedo_at_solve`` beside them. A snow-covered skin that
+    warms through the melting ramp between two solves has a lower albedo now
+    than at the solve; the held downward flux still describes the solve, so
+    absorbing it through the current albedo would put more energy into the land
+    than the held upward flux leaves for the column to account for.
+    """
+
+    SNOW_COLUMN = (0.5, 0.6, 0.0, 272.0)
+    SW_DOWN = 700.0
+
+    @staticmethod
+    def _albedo_at(skin):
+        from jcm.physics.surface.echam.albedo import (
+            EchamSurfaceAlbedoParameters, land_albedo,
+        )
+        return float(land_albedo(
+            jnp.asarray(0.2), jnp.asarray(0.6), jnp.asarray(skin),
+            EchamSurfaceAlbedoParameters()))
+
+    def _term_inputs(self, held, current, solve_albedo):
+        """Return term inputs whose held shortwave was solved with ``solve_albedo``."""
+        from jcm.physics.radiation import SURFACE_OPTICS_KEY
+
+        state, diagnostics, forcing, terrain = TestTerm()._inputs([self.SNOW_COLUMN])
+        diagnostics["radiation"].surface_sw_up = jnp.full((1,), self.SW_DOWN * solve_albedo)
+        diagnostics[SURFACE_OPTICS_KEY]["land_albedo"] = jnp.full((1,), current)
+        diagnostics["surface"] = diagnostics["surface"].copy(
+            land_albedo_at_solve=jnp.full((1,), held))
+        return state, diagnostics, forcing, terrain
+
+    def _run(self, monkeypatch, *inputs):
+        from . import vertical_diffusion as vd
+
+        seen = {}
+        real = vd.vertical_diffusion_column
+
+        def spy(*args, **kwargs):
+            seen["net_shortwave"] = np.asarray(kwargs["land"].net_shortwave)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(vd, "vertical_diffusion_column", spy)
+        _, out = vd.TteTkeVerticalDiffusion()(*inputs)
+        return seen["net_shortwave"], out["surface"]
+
+    def test_the_land_absorbs_the_held_flux_through_the_albedo_of_its_solve(self, monkeypatch):
+        cold, warm = self._albedo_at(268.0), self._albedo_at(274.0)
+        assert cold - warm > 0.2, "the skin must cross the ramp between the solves"
+        net, _ = self._run(monkeypatch, *self._term_inputs(held=cold, current=warm,
+                                                           solve_albedo=cold))
+        np.testing.assert_allclose(net, self.SW_DOWN * (1.0 - cold), rtol=1e-6)
+        # The column budget closes: the all-land column's tile net is the held
+        # downward flux less the held upward flux.
+        np.testing.assert_allclose(net, self.SW_DOWN - self.SW_DOWN * cold, rtol=1e-6)
+
+    def test_an_unset_slot_uses_the_current_albedo(self, monkeypatch):
+        """A cold start, an older checkpoint or a radiation term that holds nothing."""
+        warm = self._albedo_at(274.0)
+        net, _ = self._run(monkeypatch, *self._term_inputs(held=0.0, current=warm,
+                                                           solve_albedo=warm))
+        np.testing.assert_allclose(net, self.SW_DOWN * (1.0 - warm), rtol=1e-6)
+
+    def test_holding_the_solves_albedo_is_the_same_as_the_albedo_it_was_solved_with(
+            self, monkeypatch):
+        """Every land field of a held step equals the step whose albedo is the solve's."""
+        cold, warm = self._albedo_at(268.0), self._albedo_at(274.0)
+        _, held = self._run(monkeypatch, *self._term_inputs(held=cold, current=warm,
+                                                            solve_albedo=cold))
+        _, current = self._run(monkeypatch, *self._term_inputs(held=0.0, current=cold,
+                                                               solve_albedo=cold))
+        for name in ("land_surface_temperature", "land_net_radiation",
+                     "land_sensible_heat_flux", "land_latent_heat_flux",
+                     "ground_heat_flux", "snow_melt_heat_flux", "land_heat_storage"):
+            np.testing.assert_array_equal(getattr(held, name), getattr(current, name),
+                                          err_msg=name)
+
+
 class TestPrescribedLandTemperature:
     """``land_temperature="prescribed"``: the fixed-land-temperature configuration."""
 

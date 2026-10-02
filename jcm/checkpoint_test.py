@@ -925,11 +925,14 @@ class TestPostPhysicsSlotAcrossRestart(unittest.TestCase):
 class TestLandSkinTemperatureMigration(unittest.TestCase):
     """A checkpoint written before the prognostic land skin temperature (#979).
 
-    ``SurfaceData`` gained ``land_surface_temperature`` and the land-balance
-    diagnostics. A file without them restores through the name-matched carry
-    migration: the new leaves take the bootstrapped zeros, which
-    ``EchamBoundaryConditions`` reads as "unset" and seeds from ``stl_am`` on
-    the first step — the value the land had when it was prescribed.
+    ``SurfaceData`` gained ``land_surface_temperature``, the land-balance
+    diagnostics and ``land_albedo_at_solve``. A file without them restores
+    through the name-matched carry migration: the new leaves take the
+    bootstrapped zeros, which ``EchamBoundaryConditions`` reads as "unset" for
+    the skin and seeds from ``stl_am`` on the first step — the value the land
+    had when it was prescribed — and which the land balance reads as "unset"
+    for the albedo and replaces with the current step's until the radiation
+    next solves.
     """
 
     def _model(self):
@@ -969,6 +972,13 @@ class TestLandSkinTemperatureMigration(unittest.TestCase):
                             for line in logs.output), logs.output)
         restored = np.asarray(target.physics_carry["surface"].land_surface_temperature)
         np.testing.assert_array_equal(restored, 0.0)
+        # The land albedo of the last radiation solve is among those fields: a
+        # file without it restores it as unset (0), which the land balance
+        # reads as "use the current albedo" until the next solve.
+        self.assertTrue(any("surface.land_albedo_at_solve" in line and "seeded" in line
+                            for line in logs.output), logs.output)
+        np.testing.assert_array_equal(
+            np.asarray(target.physics_carry["surface"].land_albedo_at_solve), 0.0)
 
         from jcm.forcing import default_forcing
 
@@ -977,3 +987,21 @@ class TestLandSkinTemperatureMigration(unittest.TestCase):
         stl = np.asarray(default_forcing(target.coords.horizontal).stl_am).ravel()
         assert np.all(skin > 100.0), "the skin was not seeded"
         np.testing.assert_allclose(skin, stl, rtol=1e-6)
+
+    def test_the_held_land_albedo_round_trips_by_name(self):
+        """A file that has the slot restores the albedo the radiation last solved with."""
+        donor = self._model()
+        donor.bootstrap_state()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(donor, path, elapsed_days=0.0)
+            payload = _read_payload(path)
+            key = "surface.land_albedo_at_solve"
+            payload["physics"][key] = np.full_like(np.asarray(payload["physics"][key]), 0.63)
+            _write_payload(path, payload)
+
+            target = self._model()
+            target.bootstrap_state()
+            load_checkpoint(target, path)
+        np.testing.assert_allclose(
+            np.asarray(target.physics_carry["surface"].land_albedo_at_solve), 0.63)

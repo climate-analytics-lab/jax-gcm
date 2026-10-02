@@ -278,6 +278,13 @@ class SurfaceData:
     water_stress_factor: jnp.ndarray
     bare_soil_humidity: jnp.ndarray
     canopy_conductance: jnp.ndarray       # unstressed, [m/s]
+    # The land albedo the radiation last SOLVED with [1]: written by the
+    # radiation term on a solve and held between solves, as its
+    # surface_sw_down/_sw_up are, so the land's net shortwave is that solve's.
+    # A value <= 0 means "not yet set" (a cold start before the first solve, a
+    # checkpoint written before it existed, or a radiation term that does not
+    # hold it): the land then uses the current step's albedo.
+    land_albedo_at_solve: jnp.ndarray
 
     @classmethod
     def zeros(cls, nodal_shape, nlev):
@@ -321,6 +328,7 @@ LAND_FIELDS = (
     "land_latent_heat_flux", "ground_heat_flux", "snow_melt_heat_flux",
     "land_heat_storage", "land_evaporation", "land_energy_residual", "cair", "csat",
     "water_stress_factor", "bare_soil_humidity", "canopy_conductance",
+    "land_albedo_at_solve",
 )
 
 #: CF attributes of the land-tile outputs (``surface.<field>``).
@@ -354,4 +362,8 @@ LAND_OUTPUT_ATTRS = {
         "units": "1", "long_name": "relative humidity of the bare soil surface"},
     "surface.canopy_conductance": {
         "units": "m s-1", "long_name": "unstressed canopy conductance"},
+    "surface.land_albedo_at_solve": {
+        "units": "1",
+        "long_name": "land albedo of the last radiation solve, which the land's net "
+                     "shortwave uses until the next"},
 }

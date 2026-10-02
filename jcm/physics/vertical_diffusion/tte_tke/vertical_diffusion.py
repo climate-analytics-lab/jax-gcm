@@ -862,6 +862,18 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             )
             land_albedo = jnp.clip(jnp.asarray(forcing.alb0).reshape(ncols), 0.0, 1.0)
             land_emissivity = jnp.full(ncols, SurfaceOpticsParameters().land_emissivity)
+        # The held downward shortwave is absorbed through the albedo it was
+        # solved with: the radiation holds the land albedo of its last solve
+        # beside surface_sw_down/_up (ECHAM's JSBACH takes the radiation's net
+        # shortwave and moves its interactive albedo only at a radiation
+        # step), so a skin crossing the snow-albedo ramp between solves does
+        # not open the budget against the held upward shortwave. Unset (<= 0:
+        # a cold start, an older checkpoint, a radiation term that does not
+        # hold it) the current step's albedo is used.
+        solve_albedo = getattr(surface_in, "land_albedo_at_solve", None)
+        if solve_albedo is not None:
+            solve_albedo = solve_albedo.reshape(ncols)
+            land_albedo = jnp.where(solve_albedo > 0.0, solve_albedo, land_albedo)
         land_sw_net = sw_down * (1.0 - land_albedo)
         canopy_conductance = jsbach_land.unstressed_canopy_conductance(
             land_p.leaf_area_index, land_p.par_fraction * land_sw_net, land_p)

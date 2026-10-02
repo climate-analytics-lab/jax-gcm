@@ -492,6 +492,7 @@ class TermComputeFullTest(unittest.TestCase):
         forcing = SimpleNamespace(solar=_solar(), co2_vmr=jnp.asarray(400.0))
         tendency, rad_out, _radii = term._compute_full(
             state, diagnostics, forcing, None, params)
+        self.call_inputs = (term, state, diagnostics, forcing)
         return (tendency, rad_out), shape, ncols, nlev
 
     def test_zero_tendency_holds_on_the_cached_substep(self):
@@ -520,6 +521,30 @@ class TermComputeFullTest(unittest.TestCase):
         zeroed = term._zero_if_requested(cached)
         np.testing.assert_array_equal(
             np.asarray(zeroed.temperature), np.zeros(shape))
+
+    def test_land_albedo_is_held_between_solves(self):
+        """The term holds the land albedo of its solve on the surface carry (#979)."""
+        from jcm.physics.radiation import SURFACE_OPTICS_KEY
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+
+        _, _, ncols, nlev = self._run_term()
+        term, state, diagnostics, forcing = self.call_inputs
+        # Radiation interval 7200 s at dt 3600 s: call 0 solves, call 1 replays.
+        diagnostics = {**diagnostics, "_dt_seconds": 3600.0,
+                       "surface": SurfaceData.zeros((ncols,), nlev).copy(
+                           surface_temperature=jnp.full((ncols,), 288.0))}
+        held = []
+        for albedo in (0.70, 0.40, 0.25):
+            diagnostics = {**diagnostics, SURFACE_OPTICS_KEY: {
+                "albedo_vis": jnp.full((ncols,), 0.1),
+                "albedo_nir": jnp.full((ncols,), 0.25),
+                "emissivity": jnp.full((ncols,), 0.98),
+                "land_albedo": jnp.full((ncols,), albedo)}}
+            _, diagnostics = term(state, diagnostics, forcing, None)
+            held.append(np.asarray(diagnostics["surface"].land_albedo_at_solve))
+        np.testing.assert_allclose(held[0], 0.70)
+        np.testing.assert_allclose(held[1], 0.70)
+        np.testing.assert_allclose(held[2], 0.25)
 
     def test_term_handles_production_per_band_layout(self):
         (tendency, rad_out), shape, ncols, nlev = self._run_term()

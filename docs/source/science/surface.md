@@ -98,6 +98,9 @@ implicitly to the lowest model level.
   Between radiation calls the surface longwave is re-emitted at the current
   skin temperature, and the change heats the lowest level, as ECHAM's
   ``radheat`` does; the convection and cloud schemes after it see that heating.
+  The land absorbs the held downward shortwave through the land albedo of the
+  last radiation solve, as ECHAM's JSBACH takes the radiation's net shortwave
+  and moves its albedo only at a radiation step.
 
 **What ECHAM/CAM does.** ECHAM6.3 couples JSBACH: a five-layer soil-water and
 soil-temperature model, prognostic snow and an interception reservoir, BETHY
@@ -219,7 +222,8 @@ sun, as in ECHAM, whose radiation reads the surface albedo at a radiation step
 (``trigrad``) and replays the transmissivities in between (``radheat``).
 The hand-off is step-local: it is dropped before the cross-step carry, so it is
 never checkpointed, and a restart replays the held ``radiation.surface_*`` of
-the last solve bit for bit.
+the last solve bit for bit. The land tile's own albedo is held the same way, on
+the ``surface`` carry (``land_albedo_at_solve``), for the land energy balance.
 
 The land-surface maps follow one convention across products, regrids and
 consumers (``jcm/data/regridding.py::CONDITIONAL_FIELDS``): ``lsm`` is the land

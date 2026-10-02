@@ -1746,7 +1746,9 @@ The ECHAM land evaporates in JSBACH's form and closes a skin energy balance
   the surface saturation and the surface-layer stability see. Between
   radiation calls the surface longwave is re-emitted at it and the change
   heats the lowest level, which the convection and cloud schemes after it see
-  (ECHAM's ``radheat``).
+  (ECHAM's ``radheat``), and the land absorbs the held downward shortwave
+  through the land albedo of the last radiation solve
+  (``surface.land_albedo_at_solve``).
 - Heat and moisture couple to the surface tile by tile through ECHAM's
   Richtmyer–Morton relations (``richtmyer_land``/``_ocean``/``_ice``, then
   ``blend_zq_zt``). Each tile's flux is taken against its own lowest-level
@@ -1780,9 +1782,11 @@ The ECHAM land evaporates in JSBACH's form and closes a skin energy balance
   ``land_evaporation``, which close ``Rn = SH + LH + G + melt + storage``,
   ``land_energy_residual`` (``Rn − SH − LH``, the open budget of a prescribed
   skin), and ``cair``, ``csat``, ``water_stress_factor``,
-  ``bare_soil_humidity`` and ``canopy_conductance``.
+  ``bare_soil_humidity``, ``canopy_conductance`` and ``land_albedo_at_solve``.
 - A checkpoint written before this change restores with the skin seeded from
-  ``stl_am`` (the new carry fields migrate by name).
+  ``stl_am`` and the land albedo of the last solve unset, which the land
+  balance replaces with the current step's until the radiation next solves
+  (the new carry fields migrate by name).
 - A run's first step from a cold start has no land evaporation, as in ECHAM
   (``init_surface`` sets ``zcair = zcsat = 0``); a restored carry is
   unaffected.

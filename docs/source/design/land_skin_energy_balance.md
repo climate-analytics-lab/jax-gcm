@@ -185,6 +185,21 @@ albedo's melting ramp, the grid surface temperature the radiation solves with
 (snapped by `fmask > 0.5`), the surface-layer saturation, buoyancy and
 Richardson number, and the Richtmyer–Morton coefficients all see.
 
+**Shortwave between radiation calls.** The radiation holds the downward and
+upward surface shortwave between solves (rescaled to the sun,
+`rescale_cached_radiation`), so the land absorbs the held downward flux
+through the land albedo of the same solve: the radiation term writes it to
+`surface.land_albedo_at_solve` when it solves (`hold_land_albedo`, from the
+`land_albedo` that `EchamBoundaryConditions` publishes every step for the
+next solve) and the vertical diffusion reads it in place of the step's own
+albedo. ECHAM does the same: JSBACH takes the radiation's net shortwave
+(`mo_jsbach_interface.f90`, `swnet`) and moves its interactive albedo only at
+a radiation step. A skin crossing the snow-albedo ramp between solves therefore
+absorbs `SW↓·(1 − α_solve)`, and in an all-land cell the land's net equals the
+held `SW↓ − SW↑`. A value `<= 0` is unset (a cold start before the first
+solve, a checkpoint from before the slot existed, a radiation term that does
+not hold it) and the step's own albedo is used.
+
 **Longwave between radiation calls.** ECHAM holds the absorbed downward
 longwave between radiation calls and emits from the current surface
 temperature every step, the emission change heating the lowest layer with the
@@ -300,7 +315,8 @@ New outputs on the `surface` namespace: `land_surface_temperature`,
 `land_net_radiation`, `land_sensible_heat_flux`, `land_latent_heat_flux`,
 `ground_heat_flux`, `snow_melt_heat_flux`, `land_heat_storage`,
 `land_evaporation`, `land_energy_residual`, `cair`, `csat`,
-`water_stress_factor`, `bare_soil_humidity` and `canopy_conductance`. The land
+`water_stress_factor`, `bare_soil_humidity`, `canopy_conductance` and
+`land_albedo_at_solve`. The land
 budget closes from output alone:
 `land_net_radiation = sensible + latent + ground + melt + storage`, and
 `land_energy_residual = land_net_radiation − sensible − latent` is

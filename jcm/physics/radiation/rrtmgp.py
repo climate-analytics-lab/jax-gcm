@@ -1034,6 +1034,7 @@ from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation import (  # noqa: E402
     cached_radiation_tendency,
     current_cos_zenith,
+    hold_land_albedo,
     radiation_should_compute,
     rescale_cached_radiation,
     surface_optics_for_solve,
@@ -1322,9 +1323,9 @@ class RRTMGPRadiation(PhysicsTerm):
                 lambda t: t.astype(state.temperature.dtype), tend)
             return tend, rad, radii_carried
 
+        solved = radiation_should_compute(diagnostics, params)
         tendency, new_radiation, (r_eff_liq, r_eff_ice) = jax.lax.cond(
-            radiation_should_compute(diagnostics, params),
-            _compute, _use_cached,
+            solved, _compute, _use_cached,
         )
         # Advance the radiation-local step counter on every call (both
         # compute and cached paths). The McICA seed in ``_compute_full``
@@ -1342,9 +1343,9 @@ class RRTMGPRadiation(PhysicsTerm):
             r_eff_liq=r_eff_liq,
             r_eff_ice=r_eff_ice,
         )
-        return tendency, {
+        return tendency, hold_land_albedo({
             **diagnostics, "radiation": new_radiation, "clouds": clouds,
-        }
+        }, solved)
 
     def _compute_full(
         self, state, diagnostics, forcing, terrain, params,
