@@ -19,7 +19,11 @@ plus two upper-boundary dissipation terms:
   and a native-grid file with only ``orog``/``lsm`` falls back to
   ``terrain.py::get_simplified_sso_descriptors``, whose **hard-coded
   approximations** (``orostd = 0.25·orog``, slope 0.1 over land, anisotropy 0.5)
-  are a placeholder rather than a measurement.
+  are a placeholder rather than a measurement. Its energy-conserving cap
+  (``mo_ssortns.f90::orodrag`` lines 442-452) is ECHAM's ``IF (zdis < 0)``
+  rescale written as ``u*·min(1, |u|/|u*|)``, branch-free, with the kinetic
+  energy change formed from the wind increment: the heating is never negative
+  and is exactly zero at a level the drag does not touch.
 - **Frontal spectral GWD** (``jcm/physics/gravity_waves/spectral/term.py::FrontalGravityWaveDrag``):
   a faithful JAX port of CAM's spectral non-orographic scheme with a
   frontogenesis-triggered source. See {doc}`../design/frontal_gravity_wave_drag`.
@@ -74,6 +78,12 @@ frontogenesis source (ESCOMP/CAM ``cam_cesm2_2_rel``: ``gw_common.F90`` +
   omits ``gw_diffusion.F90`` (matching CAM's ``lapply_vdiff=.false.``), the
   ridge/IGW/top-taper options and history plumbing (full list in
   {doc}`../design/frontal_gravity_wave_drag`).
+- `compute` — the Lott-Miller cap has no ``IF``: ECHAM's ``zdis`` is a
+  difference of nearly equal squares, rounding noise at every drag-free level,
+  and a ``where`` driven by it and read in two places is evaluated differently
+  in each by XLA:CPU's fusion (see ``JAX_gotchas.md``). The branch-free form
+  equals the Fortran in exact arithmetic and is within round-off of itself under
+  any compilation.
 - `differentiability` — a heating-bounded stability limiter (``limit_tendency_sum``,
   default on) caps ``Σ_l |gwut_l|`` rather than only the net, because ECHAM/CAM
   never operate this scheme with a lid layer as thin as ECHAM L47 (``ρ→0`` drives
