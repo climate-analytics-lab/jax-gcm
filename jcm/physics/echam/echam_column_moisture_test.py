@@ -48,7 +48,11 @@ from jcm.utils import get_coords
 
 _T63_BC_DIR = Path("jcm/data/bc/t63")
 _GPU_ENV = "JCM_RUN_GPU_INTEGRATION_TESTS"
-_TIBET_I, _TIBET_J = 154, 40   # orog ≈ 2800 m, fmask = 1.0
+_TIBET_I, _TIBET_J = 154, 40   # orog ≈ 2800 m, fmask = 1.0 (71.2°W 14.0°S, Andes)
+# A high column whose own soil evaporates from the dry start (see
+# test_q_negatives_stay_below_1_percent_of_q_max): 65.6°W 25.2°S, orog 2296 m,
+# all land, no glacier, January soilw_am 0.45 (β = 0.25, h = 0.42).
+_EVAP_I, _EVAP_J = 157, 34
 
 
 def _gpu_required():
@@ -73,11 +77,38 @@ def _q_sat(T, p):
     return 0.622 * e / (p - (1.0 - 0.622) * e)
 
 
-def _build_model_and_step(physics_factory, n_steps: int):
+def _soil_evaporates_at_start(i, j):
+    """JSBACH's criterion for a column whose own soil evaporates from the dry start.
+
+    The bare soil evaporates while ``h·q_sat > q_air`` (``q_air = 0`` here, so
+    ``h > 0``) and the canopy while the water-stress factor ``β > 0``, i.e. the
+    root-zone fill ``soilw_am`` exceeds the wilting fraction (0.35). January is
+    the first forcing month the bootstrap reads.
+    """
+    import xarray as xr
+
+    from jcm.physics.surface.echam import jsbach_land
+
+    params = jsbach_land.JsbachLandParameters.default()
+    with xr.open_dataset(_T63_BC_DIR / "forcing.nc") as f, \
+            xr.open_dataset(_T63_BC_DIR / "terrain.nc") as t:
+        w = float(f.soilw_am.transpose("lon", "lat", "time").values[i, j, 0])
+        land = float(t.lsm.transpose("lon", "lat").values[i, j])
+        glacier = float(f.glac.transpose("lon", "lat").values[i, j])
+        orog = float(t.orog.transpose("lon", "lat").values[i, j])
+    h = float(jsbach_land.bare_soil_relative_humidity(w))
+    return (land >= 0.999 and glacier <= 0.0 and orog >= 2000.0
+            and w > float(params.moisture_wilting_fraction) and h > 0.0)
+
+
+def _build_model_and_step(physics_factory, n_steps: int,
+                          column: tuple[int, int] = (_TIBET_I, _TIBET_J)):
     """Build the standard T63L47 + real terrain + sponge model with the
     given physics package and step it forward ``n_steps`` × 12 min.
-    Returns the column profile at the Tibetan grid point at every step.
+    Returns the profile of ``column`` (the Tibetan grid point by default) at
+    every step.
     """
+    col_i, col_j = column
     coords = get_coords(get_echam_levels(47), spectral_truncation=63)
     terrain = TerrainData.from_file(_T63_BC_DIR / "terrain.nc", coords=coords)
     forcing = ForcingData.from_file(
@@ -98,9 +129,9 @@ def _build_model_and_step(physics_factory, n_steps: int):
     for step in range(1, n_steps + 1):
         model.resume(forcing=forcing, save_interval=dt_days, total_time=dt_days)
         s = model.dycore.to_physics_state(model._final_dycore_state)
-        T = np.asarray(s.temperature[:, _TIBET_I, _TIBET_J])
-        q = np.asarray(s.specific_humidity[:, _TIBET_I, _TIBET_J])
-        ps = float(s.normalized_surface_pressure[_TIBET_I, _TIBET_J]) * 1e5
+        T = np.asarray(s.temperature[:, col_i, col_j])
+        q = np.asarray(s.specific_humidity[:, col_i, col_j])
+        ps = float(s.normalized_surface_pressure[col_i, col_j]) * 1e5
         p_half = a + b * ps
         p_full = 0.5 * (p_half[:-1] + p_half[1:])
         history.append((step, T, q, p_full))
@@ -115,8 +146,21 @@ def _full_physics():
 
 
 def _no_surface_physics():
+    """Full physics without a surface moisture source.
+
+    The surface exchange is a boundary condition of the vertical diffusion's
+    implicit solve (the vdiff term couples every tile; ``EchamSurface`` only
+    publishes), so the source goes with an uncoupled vdiff (zero-flux bottom),
+    not with the ``surface`` term alone.
+    """
     from jcm.physics.dissipation import UpperSponge
-    return echam_physics().remove("surface") + UpperSponge(
+    from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion import (
+        TteTkeVerticalDiffusion,
+    )
+    physics = echam_physics().remove("surface")
+    physics = physics.replace(
+        TteTkeVerticalDiffusion.category, TteTkeVerticalDiffusion(couple_surface=False))
+    return physics + UpperSponge(
         n_sponge_levels=5, sponge_timescale_s=3 * 3600.0, enspodi=2.0,
     )
 
@@ -139,9 +183,19 @@ class TestTibetanColumnMoisture(unittest.TestCase):
                              msg=f"step {step}: surface-removed run produced negative q")
 
     def test_q_negatives_stay_below_1_percent_of_q_max(self):
-        """``q`` at the Tibetan column may be slightly negative from
+        """``q`` at a high, evaporating column may be slightly negative from
         spectral round-trip of advected moisture, but never by more than
         1 % of the column's positive moisture content.
+
+        The bound is relative to the column's OWN moisture source, so the
+        column must have one under the land's evaporation form (JSBACH's
+        humidity factors): from the dry start, its bare soil evaporates while
+        ``h·q_sat > q_air`` and its canopy while ``β > 0``
+        (:func:`_soil_evaporates_at_start`). The Tibetan column (154, 40) no
+        longer qualifies: its January ``soilw_am`` is 0.03, so ``β = 0`` and
+        ``h = 0.002``, and its moisture is only what the transport brings in
+        from its neighbours, ringing included. The column used here (157, 34)
+        is the highest-β column at or above 2000 m that qualifies.
 
         Pre-hyperdiff fix the worst negative-to-max ratio hit ~50 % by
         step 20 (q_min = -1 g/kg vs q_max = 2 g/kg); the convective
@@ -152,7 +206,11 @@ class TestTibetanColumnMoisture(unittest.TestCase):
         would need positive-definite tracer advection in the dycore.
         """
         _gpu_required()
-        history = _build_model_and_step(_full_physics, n_steps=60)
+        self.assertTrue(_soil_evaporates_at_start(_EVAP_I, _EVAP_J),
+                        msg="the probe column no longer evaporates from the dry start")
+        self.assertFalse(_soil_evaporates_at_start(_TIBET_I, _TIBET_J))
+        history = _build_model_and_step(_full_physics, n_steps=60,
+                                        column=(_EVAP_I, _EVAP_J))
         worst_ratio = 0.0
         for _step, _T, q, _p in history:
             q_max = float(q.max())
