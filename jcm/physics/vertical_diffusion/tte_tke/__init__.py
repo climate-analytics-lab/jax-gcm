@@ -30,6 +30,14 @@ from .turbulence_coefficients import (
 )
 from .surface_layer import (
     compute_surface_exchange_coefficients_echam_louis,
+    surface_bulk_richardson,
+)
+from .moist_buoyancy import (
+    InteriorBuoyancyTerms,
+    cloud_weighted_buoyancy_multipliers,
+    interior_buoyancy_and_shear,
+    interior_buoyancy_terms,
+    richardson_number,
 )
 
 from .matrix_solver import (
@@ -64,6 +72,12 @@ __all__ = [
     "compute_exchange_coefficients",
     "compute_surface_exchange_coefficients",
     "compute_surface_exchange_coefficients_echam_louis",
+    "surface_bulk_richardson",
+    "InteriorBuoyancyTerms",
+    "cloud_weighted_buoyancy_multipliers",
+    "interior_buoyancy_and_shear",
+    "interior_buoyancy_terms",
+    "richardson_number",
     "compute_boundary_layer_height",
     "compute_friction_velocity",
     "compute_turbulence_diagnostics",

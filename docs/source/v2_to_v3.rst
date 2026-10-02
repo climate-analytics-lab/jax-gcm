@@ -566,6 +566,20 @@ published ``o3_source`` name and the result is bit-identical on 4-D input, so
 Only the ``Returns`` docstring changed: it no longer claims a fixed
 ``(time, nplev_target, lat, lon)`` shape.
 
+The TTE-TKE vertical diffusion takes the cloud cover
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The interior stability and the surface layer's Richardson number weight the
+saturated buoyancy by the cloud cover, so ``TteTkeVerticalDiffusion`` now
+requires the ``clouds`` diagnostic (the Sundqvist cover that every packaged
+ECHAM stack composes upstream of it; a hand-composed stack without a cover
+term is refused at construction), ``VDiffState`` has a required
+``cloud_fraction`` field, ``prepare_vertical_diffusion_state`` and
+``vertical_diffusion_scheme`` take ``cloud_fraction`` after ``qi``, and
+``compute_richardson_number`` takes the state instead of
+``(u, v, temperature, height_full, height_half)``. See
+:doc:`science/vertical_diffusion`.
+
 Configuration changes
 ---------------------
 

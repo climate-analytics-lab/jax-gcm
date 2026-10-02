@@ -13,6 +13,9 @@ and the delivered surface fluxes are diagnosed from the implicit solution (the
 ``pev_vdiff`` identity — reported equals delivered by construction). Surface-layer
 exchange coefficients use a faithful Louis (1979, unstable) / Mauritsen (2007,
 stable) port (``surface_layer.py``, ``mo_turbulence_diag::sfc_exchange_coeff``).
+The interior stability — the Richardson number that scales the mixing length
+and the buoyancy term of the TKE budget — is ECHAM's moist, cloud-weighted
+buoyancy of each interface (see *Interior stability* below).
 **K floors** hold minimum diffusivities: exchange coefficients clip to ECHAM's
 free-troposphere background, mixing length floors at 1 m, friction velocity at
 0.01 m/s, TKE at the ECHAM lower bound. Tracer diffusion is a separate generic
@@ -42,11 +45,11 @@ all constituents likewise.
 first step — it reads the previous step's ``kh`` carry, which is seeded to
 zero on step 0 (zero exchange coefficient, zero tendency)
 and reads the previous step's ``kh`` carry, because vdiff runs after the aerosol
-block in the ECHAM ordering. The interior Richardson number is the dry one,
-``N² = (g/T̄)·(∂T/∂z + g/cpd)`` (``compute_richardson_number``); ECHAM's
-``vdiff`` forms it from moist, cloud-weighted buoyancy with the ``ua``
-saturation of each half level, which the surface layer here already does
-(#962).
+block in the ECHAM ordering. The exchange coefficients use constant
+stability coefficients (``c_m = 0.4``, ``c_h = 0.5``) and a stability factor on
+the mixing length (``compute_mixing_length``), where ECHAM uses Louis stability
+functions of the interior Richardson number and its own mixing-length family;
+see *Interior stability*.
 
 **Code pointers.**
 - ``jcm/physics/vertical_diffusion/tte_tke/`` — ``vertical_diffusion.py``
@@ -58,6 +61,91 @@ saturation of each half level, which the surface layer here already does
   ``tke_budget.py``, ``vertical_diffusion_types.py`` (the floors).
 - ``jcm/physics/vertical_diffusion/tracer_diffusion.py`` —
   ``TracerVerticalDiffusion``, ``diffuse_tracers_implicit``.
+
+## Interior stability
+
+**What we do.** The buoyancy of every interior interface is ECHAM's
+``zbuoy``: the liquid-water potential temperature ``θ_l = θ − (L/c_p)(θ/T)·x``
+(``x = q_c + q_i``) and the total water ``q_t = q + x`` of the two adjacent full
+levels, averaged to the interface with the layer masses
+(``zsdep1 = Δp_k/(Δp_k + Δp_{k+1})``), weighted by the interface's cloud cover
+``cc`` (the same mass-weighted average of the cover)::
+
+    zbuoy = (∂θ_l/∂z · zdus1 + θ · zdus2 · ∂q_t/∂z) · g / θ_v
+    zdus1 = cc · zmult5 + (1 − cc) · zmult1
+    zdus2 = cc · zmult4 + (1 − cc) · vtmpc1
+
+``zmult1 = 1 + vtmpc1·q_t`` and ``zmult5 = zmult1 − (L/c_p T · zmult1 − rv/rd) ·
+(rd/rv)(L/R_d T) q_s / (1 + (rd/rv)(L/c_p T)(L/R_d T) q_s)`` carry the latent
+heating of the condensation a displaced parcel undergoes, and ``zmult4 =
+(L/c_p T)·zmult5 − 1``. ``q_s`` is the mass-weighted average of the full levels'
+saturation humidities from ECHAM's ``ua`` table
+(``jcm/physics/thermodynamics.py::saturation_specific_humidity``), not the
+saturation at the mean temperature, and ``L`` is the condensation heat at and
+above the melting point and the sublimation heat below it, averaged like the
+rest. A saturated, cloudy layer therefore mixes on its moist-adiabatic
+stability: a layer of uniform ``θ_l`` and ``q_t`` is neutral whatever its dry
+static stability.
+
+The Richardson number ``Ri = zbuoy / max(zshear, 10⁻⁵ s⁻²)`` and the TKE
+source ``l (c_m·zshear − c_h·zbuoy)`` read this one ``zbuoy``, and the surface
+layer's bulk Richardson number takes the lowest level's cover into the same
+multipliers, on every tile. The cover is the Sundqvist diagnostic
+(``SundqvistCloudFraction``, ECHAM's ``cover``) of the same step, which the
+composition requires upstream of the vertical diffusion.
+
+**What ECHAM/CAM does.** ``vdiff.f90::vdiff`` (r7492) l.658-700 forms
+``zlteta1``, ``ztvir1``, ``zqss`` (from the ``ua`` table), and the half-level
+averages ``zqssm``, ``ztmitte``, ``zfaxen``, ``zccover``; l.777-799 forms
+``zbuoy``, ``zshear`` and ``zri = zbuoy/MAX(zshear, zepshr)``, with
+``zepshr = 1e-5``. The TKE budget (l.837) uses the same ``zbuoy``. The
+surface exchange routines (``mo_surface_land.f90::precalc_land`` l.224-236 and
+the ocean and ice analogues) apply the multipliers to the lowest level with
+``paclc(klev)``.
+
+**Why we differ.**
+- `science` — the closure's stability treatment is not ECHAM's. ECHAM sets the
+  momentum and heat exchange from Louis (1979) stability functions ``zsm``,
+  ``zsh`` of this Richardson number (l.819-832) and a Blackadar mixing length
+  with the Holtslag-Boville asymptote (l.801-817) up to a PBL extension
+  (l.737-761); the
+  term here uses constant ``c_m``, ``c_h`` and an ad hoc factor on the mixing
+  length that falls from 1 to 0.1 as ``Ri`` goes from 0 to 0.25
+  (``compute_mixing_length``). The buoyancy that enters is ECHAM's; what is
+  done with it is the simplified closure.
+- `differentiability` — the latent heat switches at the melting point
+  (``FSEL(T − tmelt, alv, als)``, a 13% jump), and the shear is floored under the
+  denominator of ``Ri``. Both are ECHAM's exact values and are differentiated as
+  they stand: the floor is a floor under a denominator, which stays in the value,
+  and the phase switch is the class of jumps the ``ua`` table itself carries
+  (see {doc}`../design/surrogate_gradients` and #843). ``cc`` weights the
+  multipliers linearly, so the buoyancy is differentiable in the cover.
+
+**Code pointers.**
+- ``jcm/physics/vertical_diffusion/tte_tke/moist_buoyancy.py`` —
+  ``interior_buoyancy_terms``, ``cloud_weighted_buoyancy_multipliers`` (the one
+  implementation both the interior and the surface layer call),
+  ``richardson_number``.
+- ``jcm/physics/vertical_diffusion/tte_tke/turbulence_coefficients.py`` —
+  ``compute_richardson_number``.
+- ``jcm/physics/vertical_diffusion/tte_tke/surface_layer.py`` —
+  ``surface_bulk_richardson``.
+- ``jcm/physics/vertical_diffusion/tte_tke/vertical_diffusion.py`` —
+  ``vertical_diffusion_column`` (the TKE source), ``TteTkeVerticalDiffusion``
+  (reads ``diagnostics["clouds"]``).
+
+**Validation evidence.**
+``jcm/physics/vertical_diffusion/tte_tke/moist_buoyancy_test.py`` compares the
+interior ``zbuoy``/``zshear``/``zri`` and their ingredients with the compiled
+statements of ``vdiff.f90`` for 384 columns, and the surface Richardson number
+with ``precalc_land``/``precalc_ocean``/``precalc_ice`` for 96 cells
+(``jcm/data/test/echam_vdiff_reference/``): float64 agreement to the tables'
+interpolation error (6.5e-14 of the largest value in ``zqss``) and 2e-15 in
+the buoyancy and Richardson number; with the tables replaced by the Sonntag fit
+they tabulate, to round-off. The limits are pinned: a layer of uniform ``θ_l``,
+``q_t`` is neutral while dry-stable, the conditionally unstable layer's
+Richardson number falls monotonically with the cover through zero, the dry
+clear limit is ``(g/θ)∂θ/∂z``.
 
 ## Surface saturation and latent heat
 

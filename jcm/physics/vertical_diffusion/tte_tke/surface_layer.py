@@ -13,7 +13,8 @@ Two schemes live here as peers, selectable via
 - ``"echam_louis"``: faithful port of ECHAM/ICON
   ``mo_turbulence_diag::sfc_exchange_coeff``. Bulk Richardson uses
   potential temperatures (with Exner ``(p₀/p)^(R/cₚ)`` referenced to
-  ``p₀=10⁵ Pa``) plus a moisture-buoyancy term. Stability functions are
+  ``p₀=10⁵ Pa``) plus a moisture-buoyancy term, weighted by the lowest
+  level's cloud cover (:func:`surface_bulk_richardson`). Stability functions are
   Louis (1979) — momentum and heat have separate forms in both stable
   and unstable branches. Per-tile heat roughness ``z0h`` and surface
   wetness come from ``state.roughness_heat`` and
@@ -46,64 +47,55 @@ import jax.numpy as jnp
 
 import jcm.constants as c
 from jcm.physics.thermodynamics import saturation_specific_humidity
+from .moist_buoyancy import cloud_weighted_buoyancy_multipliers
 from .vertical_diffusion_types import VDiffParameters, VDiffState
 
 
 @jax.jit
-def compute_surface_exchange_coefficients_echam_louis(
+def surface_bulk_richardson(
     state: VDiffState,
     params: VDiffParameters,
     wind_speed_surface: jnp.ndarray,
     temperature_surface: jnp.ndarray,
     temperature_air: jnp.ndarray,
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """ECHAM-faithful per-tile surface exchange coefficient.
+) -> jnp.ndarray:
+    """Bulk Richardson number of the surface layer, per tile (ncol, nsfc_type).
 
-    Mirrors ``mo_turbulence_diag::sfc_exchange_coeff``. Loops over each
-    surface tile (water/ice/land) and computes:
+    ECHAM's ``zril``/``zriw``/``zrii`` (``mo_surface_land.f90::precalc_land``
+    l.200-236 and the ocean and ice analogues), with the layer-mean
+    quantities weighted ``fsl·air + (1 - fsl)·surface`` (``fsl`` =
+    ``params.surface_layer_fsl``)::
 
-      1. Effective surface specific humidity, blending tile saturation
-         with ambient air using ``state.surface_wetness`` (1.0 = fully
-         saturated open water/ice; <1 = soil-moisture-limited land).
-      2. Bulk Richardson number using θ_l difference + moisture
-         buoyancy (Brutsaert clear-sky form, since paclc≈0 at the
-         surface in this single-column harness path).
-      3. Louis (1979) stability functions on top of a log-law neutral
-         drag computed from the per-tile momentum roughness
-         ``state.roughness_length`` and heat roughness
-         ``state.roughness_heat``.
+        zbuoy = zdus1·(θ_l,air − θ_s) + zdus2·θ_mid·(q_t,air − q_t,s)
+        Ri    = z_ref·g·zbuoy / (θ_v,mid·max(|U|², 1))
 
-    Returns ``(surface_exchange_heat, surface_exchange_moisture,
-    surface_exchange_momentum)`` = (CH·|U|, CE·|U|, CM·|U|) in m/s, per tile
-    (heat and moisture are equal in this scheme). The caller multiplies by ρ to
-    get the flux factor. The momentum coefficient ``cfm`` is the Louis (1979) /
-    Mauritsen (2007) drag and is now returned (previously discarded), so the
-    surface momentum stress is built from a real CM·|U| rather than the interior
-    diffusivity.
+    where ``(zdus1, zdus2)`` are the cloud-weighted multipliers of
+    :func:`~.moist_buoyancy.cloud_weighted_buoyancy_multipliers` with the
+    lowest level's cloud cover ``state.cloud_fraction[:, -1]``, the ``paclc``
+    ECHAM hands to the surface for every tile (``mo_surface.f90``
+    l.512, 555, 595). The latent heat is that of the lowest-level air
+    (``FSEL(T - tmelt, alv, als)``), the same for every tile.
+
+    Args:
+        state: Atmospheric state; ``fsl`` and the tile humidity factors come
+            from ``params`` and ``state.surface_wetness``.
+        params: Vertical diffusion parameters.
+        wind_speed_surface: Lowest-level wind speed [m/s] (ncol,).
+        temperature_surface: Tile skin temperature [K] (ncol, nsfc_type).
+        temperature_air: Lowest-level air temperature [K] (ncol,).
+
+    Returns:
+        Bulk Richardson number [-], (ncol, nsfc_type).
+
     """
     # Read shared physical constants by attribute access on the
-    # ``jcm.constants`` module so any ``set_constants`` override is
-    # honoured. The local names below (``cp``, ``grav``, …) are purely
-    # local aliases for readability in the formulas that follow.
-    Rd = c.rd
+    # ``jcm.constants`` module so any ``set_constants`` override is honoured.
+    rd = c.rd
     cp = c.cpd
-    grav = c.grav
     p0 = c.p0     # 1.0e5 Pa — same as ECHAM's p0ref
-    rv_over_rd = c.rv / Rd
-    rd_over_rv = Rd / c.rv
-    karman = c.karman_const
-    vtmpc1 = rv_over_rd - 1.0   # ≈ 0.608 (q-buoyancy coefficient)
-
+    vtmpc1 = c.vtmpc1
     fsl = params.surface_layer_fsl
-    cb = params.louis_cb
-    cc = params.louis_cc
-
-    ncol, nsfc_type = temperature_surface.shape
-
-    # Neutral drag for every tile, from the one helper the 10 m reduction also
-    # uses (so the reduction's stability factor is this scheme's own).
-    bn_all, cfn_m_all = echam_louis_neutral_drag(state, params,
-                                                 wind_speed_surface)
+    nsfc_type = temperature_surface.shape[1]
 
     # --- Atmospheric inputs at the lowest level (klev) -------------------
     p_air = state.pressure_full[:, -1]            # (ncol,)
@@ -111,6 +103,7 @@ def compute_surface_exchange_coefficients_echam_louis(
     T_air = temperature_air                        # (ncol,)
     qv_air = state.qv[:, -1]                       # (ncol,)
     qx_air = state.qc[:, -1] + state.qi[:, -1]    # total cloud water
+    cover = state.cloud_fraction[:, -1]           # paclc(klev)
     z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
 
     # Phase of the latent heat in the surface-layer buoyancy: vdiff.f90's
@@ -119,7 +112,7 @@ def compute_surface_exchange_coefficients_echam_louis(
     # the same value for every tile.
     Lv = jnp.where(T_air >= c.tmelt, c.alhc, c.alhs)
 
-    exner_air = (p0 / jnp.maximum(p_air, 1.0)) ** (Rd / cp)
+    exner_air = (p0 / jnp.maximum(p_air, 1.0)) ** (rd / cp)
     theta_air = T_air * exner_air                                  # ptheta_b
     thetav_air = theta_air * (1.0 + vtmpc1 * qv_air - qx_air)      # pthetav_b
     # Liquid-water potential temperature, vdiff.f90's
@@ -133,16 +126,11 @@ def compute_surface_exchange_coefficients_echam_louis(
     # blend (``phase="auto"`` of jcm.physics.thermodynamics).
     qsat_air = saturation_specific_humidity(T_air, p_air)
     qtl = qv_air + qx_air                                          # zqtl
+    zdu2 = jnp.maximum(wind_speed_surface ** 2, 1.0)               # zepdu2 = 1.0
 
-    # --- Per-tile loop -------------------------------------------------
-    surface_exchange_heat = jnp.zeros((ncol, nsfc_type))
-    surface_exchange_moisture = jnp.zeros((ncol, nsfc_type))
-    surface_exchange_momentum = jnp.zeros((ncol, nsfc_type))
-
+    ri_tiles = []
     for isfc in range(nsfc_type):
         T_s = temperature_surface[:, isfc]
-        z0 = jnp.maximum(state.roughness_length[:, isfc], params.z0m_min)
-        z0h = jnp.maximum(state.roughness_heat[:, isfc], params.z0m_min)
         wetness = jnp.clip(state.surface_wetness[:, isfc], 0.0, 1.0)
 
         # Tile saturation q at the surface — open water / ice are fully
@@ -153,7 +141,7 @@ def compute_surface_exchange_coefficients_echam_louis(
         qsat_s = saturation_specific_humidity(T_s, p_sfc)
         qts = wetness * qsat_s + (1.0 - wetness) * qv_air
 
-        exner_sfc = (p0 / jnp.maximum(p_sfc, 1.0)) ** (Rd / cp)
+        exner_sfc = (p0 / jnp.maximum(p_sfc, 1.0)) ** (rd / cp)
         theta_s = T_s * exner_sfc
         thetav_s = theta_s * (1.0 + vtmpc1 * qts)
 
@@ -165,30 +153,76 @@ def compute_surface_exchange_coefficients_echam_louis(
         theta_mid = w1 * theta_air + ws * theta_s
         thetav_mid = w1 * thetav_air + ws * thetav_s
 
-        # Cloud-cover-weighted buoyancy coefficients
-        # (paclc_b≈0 in the surface boundary layer for clear-sky tests;
-        # we still compute the cloudy-sky multipliers so the formula
-        # remains correct when paclc>0 is fed through.)
-        zfux = Lv / (cp * jnp.maximum(T_mid, 100.0))
-        zfox = Lv / (Rd * jnp.maximum(T_mid, 100.0))
-        zmult1 = 1.0 + vtmpc1 * qtmid
-        zmult2 = zfux * zmult1 - rv_over_rd
-        zmult3 = (rd_over_rv * zfox * qsmid
-                  / (1.0 + rd_over_rv * zfox * zfux * qsmid))
-        zmult5 = zmult1 - zmult2 * zmult3
-        zmult4 = zfux * zmult5 - 1.0
-
-        # No cloud at surface — but keep the mixed form for completeness
-        aclc = jnp.zeros_like(T_air)
-        zdus1 = aclc * zmult5 + (1.0 - aclc) * zmult1
-        zdus2 = aclc * zmult4 + (1.0 - aclc) * vtmpc1
+        zdus1, zdus2 = cloud_weighted_buoyancy_multipliers(
+            Lv, T_mid, qtmid, qsmid, cover)
 
         # Bulk Richardson with full ECHAM buoyancy
         zdthetal = thetal_air - theta_s
         zdqt = qtl - qts
-        zdu2 = jnp.maximum(wind_speed_surface ** 2, 1.0)   # zepdu2 = 1.0
         zbuoy = zdus1 * zdthetal + zdus2 * theta_mid * zdqt
-        ri = z_ref * grav * zbuoy / (thetav_mid * zdu2)
+        ri_tiles.append(z_ref * c.grav * zbuoy / (thetav_mid * zdu2))
+    return jnp.stack(ri_tiles, axis=1)
+
+
+@jax.jit
+def compute_surface_exchange_coefficients_echam_louis(
+    state: VDiffState,
+    params: VDiffParameters,
+    wind_speed_surface: jnp.ndarray,
+    temperature_surface: jnp.ndarray,
+    temperature_air: jnp.ndarray,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """ECHAM-faithful per-tile surface exchange coefficient.
+
+    Mirrors ``mo_turbulence_diag::sfc_exchange_coeff``. For each surface tile
+    (water/ice/land) it takes
+
+      1. the bulk Richardson number of :func:`surface_bulk_richardson`: the
+         θ_l difference plus the moisture buoyancy, weighted by the
+         lowest level's cloud cover, with the tile's effective surface
+         humidity (``state.surface_wetness``: 1.0 = fully saturated open
+         water/ice; <1 = soil-moisture-limited land);
+      2. Louis (1979) stability functions on top of a log-law neutral drag
+         computed from the per-tile momentum roughness
+         ``state.roughness_length`` and heat roughness
+         ``state.roughness_heat``.
+
+    Returns ``(surface_exchange_heat, surface_exchange_moisture,
+    surface_exchange_momentum)`` = (CH·|U|, CE·|U|, CM·|U|) in m/s, per tile
+    (heat and moisture are equal in this scheme). The caller multiplies by ρ to
+    get the flux factor. The momentum coefficient ``cfm`` is the Louis (1979) /
+    Mauritsen (2007) drag, so the surface momentum stress is built from a real
+    CM·|U| rather than the interior diffusivity.
+    """
+    # Read shared physical constants by attribute access on the
+    # ``jcm.constants`` module so any ``set_constants`` override is
+    # honoured.
+    karman = c.karman_const
+
+    cb = params.louis_cb
+    cc = params.louis_cc
+
+    ncol, nsfc_type = temperature_surface.shape
+
+    # Neutral drag for every tile, from the one helper the 10 m reduction also
+    # uses (so the reduction's stability factor is this scheme's own).
+    bn_all, cfn_m_all = echam_louis_neutral_drag(state, params,
+                                                 wind_speed_surface)
+
+    z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
+    zdu2 = jnp.maximum(wind_speed_surface ** 2, 1.0)               # zepdu2 = 1.0
+    ri_all = surface_bulk_richardson(
+        state, params, wind_speed_surface, temperature_surface, temperature_air)
+
+    # --- Per-tile loop -------------------------------------------------
+    surface_exchange_heat = jnp.zeros((ncol, nsfc_type))
+    surface_exchange_moisture = jnp.zeros((ncol, nsfc_type))
+    surface_exchange_momentum = jnp.zeros((ncol, nsfc_type))
+
+    for isfc in range(nsfc_type):
+        z0 = jnp.maximum(state.roughness_length[:, isfc], params.z0m_min)
+        z0h = jnp.maximum(state.roughness_heat[:, isfc], params.z0m_min)
+        ri = ri_all[:, isfc]
 
         # ---- Louis (1979) stability + log-law neutral ----------------
         # Effective roughness lengths capped to ½·z_ref via

@@ -9,7 +9,8 @@ d(e)/dt = P_s + P_b - ε + ∂/∂z(K_e ∂e/∂z)
 where:
 - e = TKE (turbulent kinetic energy)
 - P_s = Shear production = K_m * (∂u/∂z)²
-- P_b = Buoyancy production = -K_h * (g/θ) * (∂θ/∂z)
+- P_b = Buoyancy production = -K_h * N², with N² ECHAM's moist, cloud-weighted
+  ``zbuoy`` (moist_buoyancy.py)
 - ε = Dissipation = C_ε * e^(3/2) / l
 - K_e = TKE exchange coefficient
 """
@@ -18,7 +19,7 @@ import jax
 import jax.numpy as jnp
 from typing import Tuple
 
-import jcm.constants as c
+from .moist_buoyancy import interfaces_to_levels, interior_buoyancy_and_shear
 from .vertical_diffusion_types import VDiffState, VDiffParameters
 
 
@@ -70,52 +71,28 @@ def compute_shear_production(
 
 @jax.jit
 def compute_buoyancy_production(
-    temperature: jnp.ndarray,
-    dz: jnp.ndarray,
+    buoyancy_freq_squared: jnp.ndarray,
     exchange_coeff_heat: jnp.ndarray,
-    gravity: float | None = None,
 ) -> jnp.ndarray:
     """Compute buoyancy production term in TKE budget.
-    
-    P_b = -K_h * (g/θ) * (∂θ/∂z)
-    
+
+    P_b = -K_h * N²
+
+    ``N²`` is ECHAM's moist, cloud-weighted ``zbuoy`` (see
+    :mod:`~.moist_buoyancy`), the same quantity the TKE source update
+    :func:`echam_tke_source_update` and the Richardson number read.
+
     Args:
-        temperature: Temperature [K] (ncol, nlev)
-        dz: Increments between full level heights [m] (ncol, nlev-1)
+        buoyancy_freq_squared: Moist buoyancy frequency squared, positive when
+            stably stratified [1/s²] (ncol, nlev)
         exchange_coeff_heat: Heat exchange coefficient [m²/s] (ncol, nlev)
-        gravity: Gravitational acceleration [m/s²]. ``None`` (the
-            default) reads ``jcm.constants.grav`` at trace time, so a
-            ``set_constants`` override applies; a default argument
-            would have captured it at import instead (#772).
-        
+
     Returns:
-        Buoyancy production [m²/s³] (ncol, nlev)
+        Buoyancy production [m²/s³] (ncol, nlev); negative for stable
+        stratification.
 
     """
-    # Compute vertical temperature gradient
-    dt_dz = jnp.diff(temperature, axis=1) / dz
-    
-    # Extend to full levels (nlev) by padding with boundary values
-    dt_dz_extended = jnp.concatenate([
-        dt_dz[:, :1],  # Extend top value
-        dt_dz          # Interior values (nlev-1)
-    ], axis=1)
-    
-    # Average temperature for buoyancy frequency
-    temp_avg = temperature  # Use full level temperature directly
-    
-    # Buoyancy production: P_b = -K_h * (g/T) * (dT/dz + g/cp)
-    # Note: The dry adiabatic lapse rate g/cp is included for stability
-    # Resolved here, not as a default argument: a default is evaluated
-    # once at import and would freeze the pre-override value (#772).
-    gravity = c.grav if gravity is None else gravity
-    lapse_rate = gravity / c.cpd
-    buoyancy_freq = (gravity / temp_avg) * (dt_dz_extended + lapse_rate)
-    
-    # Buoyancy production (negative for stable stratification)
-    buoyancy_production = -exchange_coeff_heat * buoyancy_freq
-    
-    return buoyancy_production
+    return -exchange_coeff_heat * buoyancy_freq_squared
 
 
 @jax.jit
@@ -194,8 +171,9 @@ def echam_tke_source_update(
     Args:
         prev_tke: TKE at previous step [m²/s²], shape (ncol, nlev).
         shear_squared: (du/dz)² + (dv/dz)² [1/s²], shape (ncol, nlev).
-        buoy_freq_squared: N² (positive for stable stratification)
-            [1/s²], shape (ncol, nlev).
+        buoy_freq_squared: ECHAM's moist, cloud-weighted ``zbuoy`` (positive
+            for stable stratification) [1/s²], shape (ncol, nlev); see
+            :mod:`.moist_buoyancy`.
         mixing_length: Turbulent length scale [m], shape (ncol, nlev).
         dt: Time step [s].
         c_m, c_h: Stability function values in the neutral limit
@@ -294,9 +272,10 @@ def compute_tke_diagnostics(
     shear_production = compute_shear_production(
         state.u, state.v, dz, exchange_coeff_momentum
     )
-    
+
+    buoyancy, _ = interior_buoyancy_and_shear(state)
     buoyancy_production = compute_buoyancy_production(
-        state.temperature, dz, exchange_coeff_heat
+        interfaces_to_levels(buoyancy), exchange_coeff_heat
     )
     
     dissipation = compute_dissipation(state.tke, mixing_length)
