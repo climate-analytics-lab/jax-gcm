@@ -128,6 +128,12 @@ uses the same humidity factors and the same implicit surface balance
   ECHAM's values and take the derivatives of named smooth surrogates (widths in
   ``JsbachLandParameters``).
 
+The Amazon's dry-season evaporation is limited by that constant-LAI ECHAM3
+canopy conductance standing in for BETHY: in 240 days of T63L47 `t63-echam-1m`
+its JJA latent heat is 110 W m⁻², 18 % below the prescribed land's (134) and
+11 % below MERRA-2's (124), with a wet soil (β ≈ 0.9). The LAI climatology and
+the BETHY canopy are #672's.
+
 The derivations and the measured effect are in
 {doc}`../design/land_skin_energy_balance`.
 
