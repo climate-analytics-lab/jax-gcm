@@ -170,6 +170,100 @@ class TestDrift:
         assert abs(A.log_drift(days, values)) < A.DRIFT_LIMIT_PER_DAY
 
 
+class TestWholeYearDrift:
+    """A record of a year or more is scored over its final year (seasons cancel)."""
+
+    DAYS = np.arange(5, 370, 5, dtype=float)       # 73 five-day chunks = 365 d
+
+    def _seasonal(self, days, amplitude=0.35):
+        """Return a stationary burden whose ln B has a seasonal cycle.
+
+        cos(2 pi d / 365) climbs through the last half of a year, so the last
+        six months alone fit a steep positive slope; the whole period fits none.
+        """
+        return 3.0 * np.exp(amplitude * np.cos(2 * np.pi * days / 365.0))
+
+    def test_the_old_window_reads_the_seasonal_cycle_as_drift(self):
+        values = self._seasonal(self.DAYS)
+        assert A.log_drift(self.DAYS, values) > 1.5 * A.DRIFT_LIMIT_PER_DAY
+
+    def test_a_year_of_seasonal_cycle_passes_the_drift_gate(self):
+        values = self._seasonal(self.DAYS)
+        days, series = _series(self.DAYS, values)
+        stats = A.summarize(days, series)
+        assert abs(stats["dlnB_dt_so4_per_day"]) < 0.05 * A.DRIFT_LIMIT_PER_DAY
+        assert all(ok for *_rest, ok in A.physics_gates(stats))
+
+    def test_a_stationary_seasonal_cycle_of_any_phase_passes(self):
+        """A straight line over one cycle cancels the swing only at some phases.
+
+        Amplitude 0.5 in ln B at the worst phase fits 0.0026 /day, over the
+        limit; the annual harmonic fitted jointly absorbs it at every phase.
+        """
+        for phase in (0.0, 0.5 * np.pi, np.pi, 1.5 * np.pi, 0.9):
+            values = 3.0 * np.exp(0.5 * np.cos(2 * np.pi * self.DAYS / 365.0
+                                               + phase))
+            plain = np.polyfit(self.DAYS, np.log(values), 1)[0]
+            days, series = _series(self.DAYS, values)
+            stats = A.summarize(days, series)
+            assert abs(stats["dlnB_dt_so4_per_day"]) < 0.02 * A.DRIFT_LIMIT_PER_DAY
+            if abs(np.sin(phase)) > 0.9:
+                assert abs(plain) > A.DRIFT_LIMIT_PER_DAY
+
+    def test_a_noisy_seasonal_year_with_a_real_trend_reads_the_trend(self):
+        """The harmonic must not eat a real drift: 0.003 /day on top of the cycle."""
+        rng = np.random.default_rng(3)
+        values = (3.0 * np.exp(0.4 * np.cos(2 * np.pi * self.DAYS / 365.0 + 1.0)
+                               + 0.003 * self.DAYS
+                               + 0.03 * rng.standard_normal(self.DAYS.size)))
+        assert A.log_drift(self.DAYS, values, A.YEAR_DAYS) == pytest.approx(
+            0.003, abs=3e-4)
+
+    def test_a_x60_runaway_in_40_days_still_fails(self):
+        """The #658-class growth the gate exists for: x60 over the last 40 days
+        of an otherwise seasonal year.
+
+        The whole-year fit dilutes a late runaway (0.0082 /day here, against
+        0.018 over the last six months), so it clears the limit by a factor ~4
+        rather than ~9; it must still clear it.
+        """
+        values = self._seasonal(self.DAYS)
+        tail = self.DAYS > self.DAYS[-1] - 40.0
+        values[tail] *= np.exp(np.log(60.0) / 40.0
+                               * (self.DAYS[tail] - (self.DAYS[-1] - 40.0)))
+        days, series = _series(self.DAYS, values)
+        stats = A.summarize(days, series)
+        assert stats["dlnB_dt_so4_per_day"] > 2 * A.DRIFT_LIMIT_PER_DAY
+        failed = [n for n, _v, _lim, ok in A.physics_gates(stats) if not ok]
+        assert "dlnB_dt_so4_per_day" in failed
+
+    def test_a_record_shorter_than_a_year_keeps_the_six_month_window(self):
+        short = self.DAYS[:40]                      # 200 days, --last-n 40
+        assert A.drift_window_days(short) == A.SHORT_RECORD_WINDOW_DAYS
+        assert A.drift_window_days(self.DAYS) == A.YEAR_DAYS
+        # a slice carries the label of the chunk before it, which is what makes
+        # its first window start where it really starts
+        assert A.drift_window_days(self.DAYS[33:], window_start=165.0) \
+            == A.SHORT_RECORD_WINDOW_DAYS
+        assert A.drift_window_days(self.DAYS[:], window_start=0.0) == A.YEAR_DAYS
+
+    def test_two_years_are_fit_over_the_second_only(self):
+        """A first-year spin-up ramp is outside the final 365 days."""
+        days = np.arange(5, 735, 5, dtype=float)     # 146 chunks = 730 d
+        values = np.where(days < 150, np.exp(0.01 * days), np.exp(1.5))
+        stats = A.summarize(*_series(days, values))
+        assert abs(stats["dlnB_dt_so4_per_day"]) < A.DRIFT_LIMIT_PER_DAY
+
+    def test_year_over_year_ratio_is_reported_for_two_years_only(self):
+        days = np.arange(5, 735, 5, dtype=float)
+        values = np.where(days <= 365, 2.0, 2.2)
+        stats = A.summarize(*_series(days, values))
+        assert stats["yoy_burden_ratio_so4"] == pytest.approx(1.1)
+        one_year = A.summarize(*_series(self.DAYS, self._seasonal(self.DAYS)))
+        assert "yoy_burden_ratio_so4" not in one_year
+        assert np.isnan(A.yoy_burden_ratio(self.DAYS, np.ones(self.DAYS.size)))
+
+
 class TestUncertainty:
     def test_autocorrelation_inflates_the_standard_error(self):
         rng = np.random.default_rng(1)

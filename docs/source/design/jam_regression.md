@@ -23,7 +23,8 @@ record.
 | statistic | why it exists |
 |---|---|
 | `burden_<sp>_mg_m2` for so4, bc, du, ss, poa, soa | the loading itself, against the AeroCom-magnitude anchors. Includes the **cloud-borne** phase, which is 20–25 % of sulfate mass and which the report omitted until #762. |
-| `dlnB_dt_<sp>_per_day` over the final six months | the runaway detector — see below. |
+| `dlnB_dt_<sp>_per_day` over the final six months (final year, annual harmonic removed, for a record of a year or more) | the runaway detector — see below. |
+| `yoy_burden_ratio_<sp>` | mean burden of the final 365 days over the 365 before; reported for a two-year record, not gated. |
 | `lifetime_<sp>_days` for so4, bc, du, ss | burden ÷ deposition separates "source too big" from "sink too small" in one number. A burden time series alone cannot. |
 | `budget_residual_<sp>` and `budget_residual_max` | mass conservation: does what came in, minus what left, equal the change in what is held? |
 | `so4_frac_above_500hPa` | #658 was a *free-tropospheric* accumulation: 85 % of the growth sat above 600 hPa while the boundary layer looked fine. A column burden hides that; this does not. |
@@ -64,7 +65,7 @@ so they are the same number for every member and every release.
 
 | gate | limit |
 |---|---|
-| `\|d ln B/dt\|` per species, final six months | `< 0.002 /day` |
+| `\|d ln B/dt\|` per species, final six months (final year, annual harmonic removed, for a record of a year or more) | `< 0.002 /day` |
 | `\|budget residual\|`, max over species | `< 5 %` |
 | `dyn_frac_per_step_<sp>` | `< 0.1 % per step` |
 
@@ -93,16 +94,83 @@ right statistic is the slope of `ln B`, not of `B`. That makes one threshold
 work for every species regardless of its loading, and makes a merely noisy but
 stationary burden average to zero.
 
-The window is the **final six months**. A from-zero spin-up year ramps for its
-first months by design; scoring the whole record would call that ramp a
-runaway. Tropospheric burdens equilibrate in weeks (lifetimes ~4–7 days), so
-six months is comfortably past the ramp while still long enough that a slope of
-0.002 /day is resolvable above the noise.
+The window depends on how much record there is. A record shorter than a year
+— the 40 saves (~195 days) the release recipe scores of a cold-start year —
+is fit with a straight line over its **final six months**: a from-zero spin-up
+year ramps for its first months by design, and scoring the whole record would
+call that ramp a runaway. Tropospheric burdens equilibrate in weeks (lifetimes
+~4–7 days), so six months is comfortably past the ramp while still long enough
+that a slope of 0.002 /day is resolvable above the noise. A record that covers a
+year or more — a warm or second year scored whole, or two years in one
+directory — is fit over its **final 365 days**, which hold every season exactly
+once, jointly with the annual harmonic: `ln B = a + b t + c cos(2πt/365) +
+d sin(2πt/365)`, and `b` is the statistic. A cold-start year therefore has to be
+sliced with `--last-n` to its settled months; the whole-year rule is for a record
+that no longer contains a spin-up ramp.
+
+The reason for the longer window and the harmonic is the seasonal sources. Dust,
+biomass-burning carbon and sulfate all have a seasonal cycle, and a
+least-squares line over part of a cycle reads the cycle as growth or decay. A
+line over exactly one cycle cancels a sinusoidal swing only at particular phases
+(a stationary burden of amplitude 0.5 in `ln B` fits up to 0.0026 /day at the
+worst phase), whereas the fitted harmonic absorbs a sinusoidal swing at every
+phase and leaves a real trend alone (a 0.003 /day trend under such a cycle is
+recovered to 3×10⁻⁴). Measured on JAM T63 L47, two consecutive years of the
+release recipe on dev `80699ac8` (the second started from the first's end state;
+each scored over its last 40 saves, so the six-month fit sits inside a 195-day
+record; the last column is the cycle-free comparison, `mean ln(B_year2 /
+B_year1) / 365` over days 150 to 365 of the two years):
+
+| species | six-month line, year 1 | six-month line, year 2 | whole-year line, year 2 | whole year with annual harmonic, year 2 | year over year |
+|---|---|---|---|---|---|
+| SO4 | +0.0020 | +0.0025 | +0.0003 | +0.0001 | +0.00006 |
+| BC | +0.0032 | +0.0033 | +0.0004 | −0.0006 | +0.00003 |
+| POA | −0.0016 | −0.0014 | +0.0007 | −0.0014 | +0.00003 |
+| dust | −0.0021 | −0.0011 | −0.0021 | −0.0011 | −0.00015 |
+| sea salt | +0.0003 | −0.0003 | −0.0011 | +0.0001 | −0.00012 |
+
+(slopes of `ln B`, per day; the limit is 0.002.) The six-month slopes repeat from
+year to year with the same sign and size, which a spin-up drift would not, and
+BC exceeds the limit in both; the whole-year slopes are inside the limit for all
+five species, and the year-over-year drift is below 0.0002 /day. On JAM T63 L95,
+measured the same way, the year-2 six-month slopes of BC (+0.0022) and POA
+(−0.0026) exceed the limit while the five whole-year slopes with the harmonic are
+at most 0.0016 /day (SO4 −0.0001, BC −0.0008, dust +0.0007, sea salt −0.0004,
+POA −0.0016) and the year-over-year drift is below 0.00015 /day.
+
+**What a one-year record resolves.** The year-over-year drift is the better
+estimate of the true drift, and it is small everywhere it can be formed (at most
+0.0004 /day over the whole of year 2 against year 1, in the L47 and L95 pairs of
+years before the land-surface change and the L47 pair after it), while the whole-year slope of a stationary
+year scatters by about ±0.001 /day. Over the five warm years measured (L47 and
+L95, before and after the land-surface change) × five species it lies in −0.0019
+to +0.0010 /day with the annual harmonic (RMS 0.0009), −0.0021 to +0.0008 with a
+plain line (RMS 0.0007) and −0.0029 to +0.0008 with the semi-annual harmonic as
+well (RMS 0.00075; dust, whose cycle is event-driven, gets worse). The scatter is
+the cycle's non-sinusoidal part and its interannual variability: over exactly one
+period a trend and an arbitrary periodic function cannot be told apart, so no
+choice of harmonics removes it. The annual harmonic is kept because it removes
+the phase-dependent 0.0026 /day above without the extra noise of the higher
+ones. The consequence is that on a one-year record the
+`0.002 /day` limit sits at the resolution floor: the gate separates a runaway
+from a stationary year, not a 0.002 /day creep, and POA (−0.0012 to −0.0019 in
+every warm year, true drift about zero) is the species that reads closest to the
+limit. A two-year record gets the cycle-free comparison for free, which is why
+`yoy_burden_ratio_<sp>` (the final year's mean over the previous year's) is
+reported for one.
+
+The longer window is less sensitive to a late runaway, and that is the price. A
+×60 growth over the last 40 days of an otherwise seasonal year fits a slope of
+0.014–0.019 /day over the final six months (7–9× the limit, depending on the
+phase and amplitude of the seasonal cycle underneath) and 0.0082 /day over the
+final year (4×); a 0.03 /day growth over the last 120 days fits 0.022–0.027 and
+0.011. It still fails, but with a smaller margin, and the budget-closure and per-step
+dynamics gates below do not depend on this window.
 
 `0.002 /day` is a factor e over ~500 days: a burden that genuinely has not
 settled may still move that much over a validation year, but the ×60-in-40-days
-growth of a #658-class runaway exceeds it by an order of magnitude, and — the
-point of the gate — so does the much gentler growth those runaways show for
+growth of a #658-class runaway exceeds it by an order of magnitude over the
+six-month window — and so does the much gentler growth those runaways show for
 months *before* they become visible. On the August-2026 year the gate fails on
 sulfate at day 300, on a window that ends before the burden leaves its anchor
 range at all.
@@ -240,39 +308,46 @@ uncorrected Δp gives a column-integrated water vapour of 1.1 kg/m², against
 29.5 kg/m² corrected. Every burden computed from a pre-#710 file before this
 fix was wrong by a comparable factor.
 
-## Not yet done: the spun-up state (#762's other half)
+## The spun-up state (#762's other half)
 
 Issue #762 asks for two things. This document covers the statistics; the
-**published spun-up JAM state** is deliberately not delivered, and #762 stays
-open for it.
+**published spun-up JAM state** is delivered separately, and #762 stays open for
+its publication.
 
-The plan, unchanged:
+The artefact is a full `jcm.checkpoint.save_checkpoint` msgpack per grid (T63 L47
+and T63 L95), produced by the release-validation recipe: a cold first year, which
+is the aerosol spin-up, and a warm second year started from its end state (the
+`tools/release_validation` README and jcm-monitor's experiments do this), whose
+end state is the published one. It carries a provenance record
+(`<state>.provenance.json`: the run, its length, code, environment and the state
+it started from) that `generate_stats.warm_state_source` checks before a fixture
+is drawn from it.
 
-* The artefact is a full `jcm.checkpoint.save_checkpoint` msgpack per grid
-  (T63 L47 and T63 L95), produced by the release-validation matrix itself:
-  year 1, then `launch.py --resume` for a year 2 once the year-1 aerosol gates
-  above pass, publishing the day-730 state as
-  `bundles/<grid>/init_states/echam_jam_year2.msgpack`.
-* It is published **through the data engine** — a `_MANIFEST_PRODUCTS` row,
-  sha256 in the registry, publication-gated — not by hand, like every other
-  mirror artefact.
-* Consumption is **opt-in** via new `ma-t63-l47-warm` / `ma-t63-l95-warm`
-  configurations (base + `init=from_state`), never a production default: a
-  default warm start would hide exactly the cold-start regressions the matrix
-  exists to catch.
+How long the spin-up takes was measured on JAM T63 L47 and L95, each run for two
+consecutive years on one commit (the second started from the first's end state).
+From the cold dry init the burdens of year 1 lie below those of year 2 in the same
+season by up to ~110 % (dust), ~65 % (SO4) and ~50 % (sea salt) in the first two
+months, and the two years agree to within a few percent from day ~150 on L47 and
+day ~90-120 on L95, while the mass budget closes to within 0.15 % throughout, so
+the early deficit is the water cycle and winds spinning up, not an aerosol
+accumulation. Year 1's end state is already on
+the equilibrated trajectory; year 2 is the first whole equilibrated year.
 
-Two things block it, and neither is a matter of effort:
+A state outlives code changes that add carry fields: `load_checkpoint` seeds a
+field a newer model carries from its documented initial value and drops one it no
+longer carries, reporting each in the log (#731), and the aerosol tracers
+themselves are unchanged. It does not outlive a change of climate: after the land-surface energy balance
+(#979) lengthened aerosol lifetimes (dust 1.6 to 2.0 days), the burdens of the
+first year started from a pre-#979 state were up to ~+100 % above the pre-#979
+year (BC, SO4) and decayed over the year, and the following year differed from
+that one by under ~10 % in most 30-day blocks from day 60 on. States are therefore drawn from the final physics of a release.
 
-1. **The aerosol mass budget is open.** A spun-up state is a *frozen* copy of
-   the model's aerosol; publishing one taken from a run whose sulfate budget
-   does not close would enshrine the defect and hand every warm-started run a
-   contaminated aerosol population. The gates in this document are the
-   precondition — there is no year-2 state to publish until a year-1 run passes
-   them.
-2. **Issue #731** — a checkpoint breaks when a diagnostic struct gains a leaf —
-   is a prerequisite for any state with a shelf life, and is its own PR. A
-   published state that stops loading on the next physics change is worse than
-   no published state.
+Publication is **through the data engine** — a `_MANIFEST_PRODUCTS` row, sha256
+in the registry, publication-gated — not by hand, like every other mirror
+artefact, and consumption is **opt-in** via `ma-t63-l47-warm` / `ma-t63-l95-warm`
+configurations (base + `init=from_state`), never a production default: a default
+warm start would hide exactly the cold-start regressions the matrix exists to
+catch.
 
 The secondary check that state would enable is also specified and also waiting:
 a 10-day T63 L47 warm-start regression test against a stored

@@ -28,7 +28,7 @@ Regenerating
 ------------
 One command per member, on a GPU::
 
-    CUDA_VISIBLE_DEVICES=<idx> python -c "import os; os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures')"
+    CUDA_VISIBLE_DEVICES=<idx> python -c "import os; os.environ['XLA_PYTHON_CLIENT_PREALLOCATE'] = 'false'; from jcm.data.test.release_matrix.generate_stats import generate; generate('echam-1m-t63', out_dir='/scr/$USER/fixtures', init_state='/scr/$USER/states/echam-1m-t63_<tag>.msgpack')"
 
 Set the variable first, as above. Importing jcm does not initialise a JAX
 backend and ``generate`` itself does no device work, so a fresh invocation
@@ -55,28 +55,38 @@ deliberately explicit and additive).
 
 Where each member starts
 ------------------------
-Every member spins up for ``SPIN_UP_DAYS`` from its **preset's own init**, and
-the bands cover the ``STATS_DAYS`` that follow. The mirror does host older
-equilibrated year-2 states from the #638 campaign, and starting from those
-would give better-conditioned bands than any short spin-up, but current jcm
-cannot read them: they are unstamped *and* structurally stale, storing 118
-physics-carry arrays where an ECHAM T63L47 model now expects 146 (51 vs 56 for
-SPEEDY). An unstamped file carries no field names, so #834 refuses the
-structural difference rather than guessing at it — correctly. Re-equilibrating
-them is #762's deliverable, not this module's.
+A member spins up for ``SPIN_UP_DAYS`` from the state given as ``init_state=``
+when there is one, else from its **preset's own init**; the bands cover the
+``STATS_DAYS`` that follow, and the band file records which it was
+(``init_state_provenance``).
 
-Consequence, and it is a real limitation rather than a detail: a five-day
-window out of a from-cold transient gives bands that are narrow, fast-moving
-and unrepresentative of the model's climate. They are a *regression* signal —
-"this member still produces what it produced" — and not a climatology. Treat a
-failure as "something changed", not as "the physics is wrong".
+The intended ``init_state`` is a **warm state**: the end state of a full
+release-validation year on the release candidate's physics (the non-JAM members'
+year 1; the JAM members' year 2 or later, since their year 1 is the aerosol
+spin-up and the burdens take months to settle, so a state taken any earlier bands
+a transient). A warm state must carry the provenance record
+``<state>.provenance.json`` (:func:`warm_state_source`: the run that produced
+it, its length, code and environment), which the band file repeats as
+``init_state_source``, so a fixture says whose trajectory it describes.
+
+A cold start from the preset's own init is the way to bootstrap a new matrix
+member before a warm state exists, but it bands a transient (a JAM member's dust
+burden was still rising 40 % over days 35-40, tracking a still-ramping emission),
+so a fixture drawn that way is a weaker regression signal.
+
+The equilibrated year-2 states the mirror hosts from the #638 campaign cannot be
+used as ``init_state``: current jcm cannot read them, being unstamped *and*
+structurally stale (118 physics-carry arrays where an ECHAM T63L47 model now
+expects 146; 51 vs 56 for SPEEDY), which #834 refuses rather than guessing at.
+
+Either way these are **regression** bands, not a climatology: a five-day window
+is a few weather events of one trajectory. Treat a failure as "something
+changed", not as "the physics is wrong".
 
 The JAM members' bands describe the aerosol climate on the dust retune
 (#787/#808/#840): the ECHAM-like relative-soil-wetness saltation gate and the
-``nduscale_reg`` recalibration for jcm's wind climate. They were regenerated
-against that code and the rebuilt forcing bundle (which carries the
-``soilw_rel`` channel the gate reads), so a failure is a regression, not the
-known-provisional state the pre-#840 bands were.
+``nduscale_reg`` recalibration for jcm's wind climate, so a failure is a
+regression, not a known-provisional state.
 """
 
 from __future__ import annotations
@@ -594,11 +604,17 @@ def report_backend() -> None:
     print(f"  backend {jax.default_backend()} on {jax.devices()}", flush=True)
 
 
-def write_spinup_state(member: str, out_path: str):
-    """Subprocess entry point for the spin-up stage."""
+def write_spinup_state(member: str, out_path: str, init_state=None):
+    """Subprocess entry point for the spin-up stage.
+
+    ``init_state`` is a stamped checkpoint to resume from (a warm state, see
+    :func:`warm_state_source`); ``None`` starts from the preset's own init.
+    """
     from jcm.checkpoint import save_checkpoint
 
-    exp = _load_member(member, {}, SPIN_UP_DAYS)
+    exp = _load_member(
+        member, _from_state_overrides(init_state) if init_state else {},
+        SPIN_UP_DAYS)
     exp.model.run(**{**exp.run_kwargs, "forcing": exp.forcing})
     save_checkpoint(exp.model, out_path, elapsed_days=SPIN_UP_DAYS)
 
@@ -702,28 +718,98 @@ def _stats_windows(member, state_path, n_runs, tmp_dir):
     return runs
 
 
-def _prepare_state(member: str, out_dir: Path) -> tuple[str, str]:
+def _spinup_description(member: str, init_state=None, source=None) -> str:
+    """Where a fixture state's initial condition came from, as the band file says it."""
+    if init_state is None:
+        return (f"{SPIN_UP_DAYS:g}-day spin-up from the preset's own init "
+                f"({members()[member]})")
+    return (f"{SPIN_UP_DAYS:g}-day spin-up from the warm state "
+            f"{Path(init_state).name} (sha256 {source['sha256'][:12]}, "
+            f"{source['experiment']}/{source['arm']}, {source['days']:g} "
+            f"sim-days, jcm {source['jcm_sha'][:8]})")
+
+
+def warm_state_source(init_state, member: str) -> dict:
+    """Provenance record of a warm state, read from the sidecar beside it.
+
+    A fixture is only as reproducible as the state it resumes from, so a warm
+    state is never taken on trust: the file ``<state>.provenance.json`` must
+    sit beside it and carry the keys below, its ``sha256`` must be the state's
+    actual content hash, and it must be a state of ``member`` — a state from
+    another configuration would not load, or worse would load through the
+    carry migration into a model it was not spun up for.
+
+    Keys: ``sha256`` (of the state file), ``member``, ``experiment`` and
+    ``arm`` (the run that produced it), ``days`` (sim-days it had run),
+    ``jcm_sha`` (the code that integrated it) and ``environment`` (the
+    :func:`generation_environment` string of the integrating venv).
+    """
+    import hashlib
+    import json
+
+    path = Path(init_state)
+    sidecar = path.with_name(path.name + ".provenance.json")
+    if not sidecar.exists():
+        raise FileNotFoundError(
+            f"warm state {path} has no provenance record at {sidecar}; a "
+            "fixture cannot say where its initial condition came from")
+    source = json.loads(sidecar.read_text())
+    missing = [k for k in ("sha256", "member", "experiment", "arm", "days",
+                           "jcm_sha", "environment") if k not in source]
+    if missing:
+        raise ValueError(f"{sidecar} lacks {missing}")
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 22), b""):
+            h.update(block)
+    if h.hexdigest() != source["sha256"]:
+        raise ValueError(
+            f"warm state {path} hashes to {h.hexdigest()[:12]}... but its "
+            f"provenance record says {source['sha256'][:12]}...: the file was "
+            "changed after it was recorded")
+    if source["member"] != member:
+        raise ValueError(
+            f"warm state {path} is a state of {source['member']!r}, not "
+            f"{member!r}")
+    return source
+
+
+def ancestry_path(state_path) -> Path:
+    """Record of how a fixture state was spun up, written beside it by :func:`generate`."""
+    path = Path(state_path)
+    return path.with_name(path.name + ".ancestry.json")
+
+
+def _prepare_state(member: str, out_dir: Path, init_state=None,
+                   source=None) -> tuple[str, str]:
     """Produce ``member``'s fixture init state; return ``(path, provenance)``.
 
-    Spun up for ``SPIN_UP_DAYS`` from the preset's own init and written with
-    the current checkpoint schema, so the stats window — and the regression
-    test — can resume it with no migration escape hatch.
+    Spun up for ``SPIN_UP_DAYS`` from ``init_state`` (a warm state) when given,
+    else from the preset's own init, and written with the current checkpoint
+    schema, so the stats window — and the regression test — can resume it with
+    no migration escape hatch.
     """
-    print(f"  {SPIN_UP_DAYS:g}-day spin-up from the preset's own init …",
+    print(f"  {_spinup_description(member, init_state, source)} …",
           flush=True)
     tmp_path = out_dir / f"{member}_fixture.partial"
     _run_worker(
-        f"write_spinup_state as w; w({member!r}, {str(tmp_path)!r})")
+        f"write_spinup_state as w; w({member!r}, {str(tmp_path)!r}, "
+        f"{None if init_state is None else str(init_state)!r})")
     out_path = out_dir / Path(
         state_mirror_path(member, state_digest(tmp_path))).name
     tmp_path.replace(out_path)
-    return str(out_path), (
-        f"{SPIN_UP_DAYS:g}-day spin-up from the preset's own init "
-        f"({members()[member]})")
+    description = _spinup_description(member, init_state, source)
+    # Bound to the state file, so a later reuse (``write_state=False``) reads
+    # its ancestry from here rather than trusting whatever the caller passes.
+    import json
+    ancestry_path(out_path).write_text(json.dumps(
+        {"spin_up_description": description, "init_state_source": source},
+        sort_keys=True))
+    return str(out_path), description
 
 
 def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
-             write_state=True, state_environment=None):
+             write_state=True, state_environment=None, init_state=None):
     """Generate ``member``'s fixture: its init state and its bands.
 
     Args:
@@ -745,6 +831,16 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
             condition, so the file has to say both. Ignored when
             ``write_state`` is True: the state is then spun up here, under
             the same environment as the bands.
+        init_state: A warm state to spin the fixture up from instead of the
+            preset's own init (see "Where each member starts" in the module
+            docstring). Its provenance record ``<init_state>.provenance.json``
+            is required (:func:`warm_state_source`) and goes into the band
+            file as ``init_state_source``. With ``write_state=False`` the
+            reused state is not re-spun from it; the ancestry written beside
+            the state (:func:`ancestry_path`) is what the band file records,
+            and an ``init_state`` that is not the state it was spun up from is
+            refused. A state with no ancestry record (written before records
+            existed) is described as the caller states it, and says so.
 
     Returns:
         ``(state_path, band_path)``.
@@ -789,8 +885,13 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
     out_dir = Path(out_dir or ".")
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Checked before any GPU work: a warm state without a matching provenance
+    # record would yield bands that cannot say where they started.
+    source = (warm_state_source(init_state, member)
+              if init_state is not None else None)
     if write_state:
-        state_path, provenance = _prepare_state(member, out_dir)
+        state_path, provenance = _prepare_state(member, out_dir, init_state,
+                                                source)
     else:
         # Reuse the one state this module has already written for the
         # member. The name carries a content digest, so glob rather than
@@ -804,14 +905,35 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
                 f"{member}_fixture_*.msgpack in {out_dir}; found "
                 f"{[f.name for f in found]}")
         state_path = str(found[0])
-        # Still a spin-up state — ``write_state=False`` only ever reuses one
-        # this module wrote — so describe it as such rather than as an opaque
-        # "reused file", which would leave the fixture unable to say where its
-        # own initial condition came from.
-        provenance = (
-            f"{SPIN_UP_DAYS:g}-day spin-up from the preset's own init "
-            f"({members()[member]}); state reused from an earlier generate() "
-            "call rather than re-spun")
+        # The state's ancestry is what was recorded beside it when it was
+        # spun up, not what the caller says now: a reused fixture described by
+        # the call's ``init_state`` would carry a false provenance whenever the
+        # argument was omitted or named another state.
+        import json
+        recorded = (json.loads(ancestry_path(state_path).read_text())
+                    if ancestry_path(state_path).exists() else None)
+        if recorded is not None:
+            bound = recorded.get("init_state_source")
+            if source is not None and (
+                    bound is None or bound["sha256"] != source["sha256"]):
+                was = ("the preset's own init" if bound is None
+                       else f"warm state {bound['sha256'][:12]}")
+                raise ValueError(
+                    f"{state_path} was spun up from {was}, not from the "
+                    f"init_state given ({source['sha256'][:12]}); reuse it "
+                    "without init_state, or regenerate it")
+            source = bound
+            provenance = (recorded["spin_up_description"]
+                          + "; state reused from an earlier generate() call "
+                          "rather than re-spun")
+        else:
+            # A state written before ancestry records existed, or copied
+            # without its record: say that the description is the caller's.
+            provenance = (
+                _spinup_description(member, init_state, source)
+                + "; state reused from an earlier generate() call rather than "
+                "re-spun; no ancestry record beside the state, so the "
+                "description is as stated by the caller")
     # The band file names its state by the digest in the state's filename,
     # and the regression later checks the fetched state against that digest.
     # So the digest recorded here must be the file's actual content hash,
@@ -882,6 +1004,13 @@ def generate(member: str, out_dir=None, n_reproducibility_repeats=None,
     # whatever currently sits at a reconstructed name.
     stats_ds.attrs["init_state"] = state_mirror_path(member, digest)
     stats_ds.attrs["init_state_provenance"] = provenance
+    if source is not None:
+        # The warm state this fixture was spun up from, as its own record
+        # states it (run, days, code, environment): the fixture's bands are a
+        # regression signal against THAT trajectory, so they say whose it is.
+        import json
+        stats_ds.attrs["init_state_source"] = json.dumps(source,
+                                                         sort_keys=True)
     stats_ds.attrs["stats_days"] = STATS_DAYS
     stats_ds.attrs["reproducibility_repeats"] = n_reproducibility_repeats
     # What the bands were drawn under, and what their initial state was spun

@@ -5,7 +5,10 @@ release gate can score, and applies the two tolerance tiers described in
 ``docs/source/design/jam_regression.md``:
 
 * **absolute physics gates** — the exponential drift ``|d ln B/dt|`` of every
-  species' burden over the final six months, the mass-budget residual, and the
+  species' burden (a straight line over the final six months of a record
+  shorter than a year; over its final year once it covers one, fit jointly with
+  the annual harmonic because the sources are seasonal), the
+  mass-budget residual, and the
   per-step dynamics residual from the #713 in-step gauge. These are the runaway
   detector: an aerosol runaway grows multiplicatively with the meteorology
   entirely normal, so a climatological range gate does not notice it until the
@@ -507,8 +510,55 @@ def collect(files) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     return np.asarray(days, dtype=float), series
 
 
+#: Length of a seasonal cycle. A record that covers this many days is scored
+#: over its final year, which holds each season exactly once (see
+#: :func:`drift_window_days`).
+YEAR_DAYS = 365.0
+
+#: The fit window [days] for a record shorter than a year: its final six months.
+SHORT_RECORD_WINDOW_DAYS = 182.5
+
+
+def drift_window_days(days: np.ndarray,
+                      window_start: float | None = None) -> float:
+    """Fit window [days] of the drift statistic for this record.
+
+    The sources behind most of the burdens are seasonal (dust, biomass-burning
+    BC, sulfate), so a straight-line fit over a window shorter than a year reads
+    the seasonal swing as growth or decay. Once the record covers a year the
+    window is its final 365 days, which hold every season exactly once, and the
+    fit removes the annual harmonic (:func:`log_drift`); a shorter record (a
+    ``--last-n`` slice, or a cold-start year scored over its settled months)
+    keeps the final six months with a straight line, where a from-zero spin-up
+    ramp is already behind it. A record that starts from a cold init and covers a
+    whole year therefore has to be sliced with ``--last-n`` to its settled
+    months: the whole-year rule is for a warm or second year.
+    """
+    covered = covered_days(days, window_start)
+    return YEAR_DAYS if covered >= YEAR_DAYS - 1e-6 \
+        else SHORT_RECORD_WINDOW_DAYS
+
+
+def yoy_burden_ratio(days: np.ndarray, values: np.ndarray) -> float:
+    """Mean burden of the final 365 days over that of the 365 days before it.
+
+    Reported when the record holds two years; the same seasons are compared, so
+    the seasonal cycle cancels and what is left is interannual variability plus
+    any real drift. NaN when there is no earlier year or no finite samples.
+    """
+    days, values = np.asarray(days, float), np.asarray(values, float)
+    last = days > days[-1] - YEAR_DAYS
+    prev = (days > days[-1] - 2 * YEAR_DAYS) & ~last
+    ok = np.isfinite(values)
+    if not (ok & last).any() or not (ok & prev).any():
+        return float("nan")
+    previous = float(np.mean(values[ok & prev]))
+    return float(np.mean(values[ok & last]) / previous) if previous > 0 \
+        else float("nan")
+
+
 def log_drift(days: np.ndarray, values: np.ndarray,
-              window_days: float = 182.5) -> float:
+              window_days: float = SHORT_RECORD_WINDOW_DAYS) -> float:
     """``d ln B / dt`` [1/day] from a least-squares fit over the last window.
 
     A logarithmic slope is the right statistic for an aerosol burden because
@@ -516,6 +566,19 @@ def log_drift(days: np.ndarray, values: np.ndarray,
     unit time, so it shows up as a slope that is large regardless of the
     species' absolute loading, while a merely noisy but stationary burden
     averages to zero.
+
+    A window of a year or more is fit jointly with the annual harmonic,
+    ``ln B = a + b t + c cos(2 pi t / 365) + d sin(2 pi t / 365)``, and ``b`` is
+    returned. A straight line over one cycle only cancels a sinusoidal seasonal
+    swing for particular phases (a stationary burden of amplitude 0.5 in
+    ``ln B`` fits up to 0.0026 /day of "drift" at the worst phase), and the
+    fitted harmonic absorbs such a swing whatever its phase. The cycle's higher
+    harmonics are not removed: over exactly one period a trend and an arbitrary
+    periodic function cannot be told apart, so a one-year slope of a stationary
+    burden still scatters by ~0.001 /day (``jam_regression.md``, "What a
+    one-year record resolves"); :func:`yoy_burden_ratio` is the cycle-free
+    comparison. A shorter window is a straight line: it cannot hold a cycle, so
+    the harmonic is not identifiable there.
     """
     good = np.isfinite(values) & (values > 0)
     if good.sum() < 3:
@@ -524,7 +587,13 @@ def log_drift(days: np.ndarray, values: np.ndarray,
     sel = d >= (d[-1] - window_days)
     if sel.sum() < 3:
         sel = np.ones_like(d, dtype=bool)
-    return float(np.polyfit(d[sel], np.log(v[sel]), 1)[0])
+    t, y = d[sel], np.log(v[sel])
+    if window_days >= YEAR_DAYS and t[-1] - t[0] >= YEAR_DAYS - 2 * float(np.median(np.diff(t))) \
+            and t.size >= 8:
+        w = 2.0 * np.pi * t / YEAR_DAYS
+        design = np.column_stack([np.ones_like(t), t - t.mean(), np.cos(w), np.sin(w)])
+        return float(np.linalg.lstsq(design, y, rcond=None)[0][1])
+    return float(np.polyfit(t, y, 1)[0])
 
 
 def standard_error(values: np.ndarray) -> float:
@@ -675,9 +744,13 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
         # yields a slope dominated by its own noise. Both are reported
         # unscored (see :func:`unscored_gates`) rather than gated, because a
         # gate FAIL for something never measured is worse than no number.
-        drift = log_drift(days, b)
+        drift = log_drift(days, b, drift_window_days(days, window_start))
         if np.isfinite(drift) and span_days >= MIN_WINDOW_DAYS:
             stats[f"dlnB_dt_{species}_per_day"] = drift
+        if covered_days(days, window_start) >= 2 * YEAR_DAYS - 1e-6:
+            yoy = yoy_burden_ratio(days, b)
+            if np.isfinite(yoy):
+                stats[f"yoy_burden_ratio_{species}"] = yoy
 
     for species in LIFETIME_SPECIES:
         b = series.get(f"burden_{species}")
