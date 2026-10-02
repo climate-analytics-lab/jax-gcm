@@ -292,7 +292,7 @@ def setup_rhs_vectors(
     Following ICON's semi-implicit time stepping (mo_vdiff_solver.f90):
     - Matrix equation: (I - dt*tpfac1*L) * bb = tpfac2 * X_old
     - New value: X_new = bb + tpfac3 * X_old
-    - where tpfac1=1.5, tpfac2=1/tpfac1=0.667, tpfac3=1-tpfac2=0.333
+    - where tpfac1=1.5, tpfac2=1/tpfac1, tpfac3=1-tpfac2 (ECHAM's cvdifts)
 
     The tpfac2 factor scales the RHS to achieve the semi-implicit scheme.
     """
@@ -536,12 +536,11 @@ def diagnose_surface_fluxes(
                                               surface, positive with the wind]
 
     Implementation note: the fluxes are written in the algebraically
-    equivalent form ``ρ_s·C·tpfac1·(tpfac2·X_s − bb_K)``. With ECHAM's exact
-    ``tpfac2 = 1/tpfac1`` this IS the formula above; with the port's rounded
-    defaults (0.667/0.333) this form is the one that keeps the ``pev_vdiff``
-    column-budget identity ``Σ_k dm_k·dX_k/dt == flux`` (``vdiff.f90:
-    1544-1551``) exact to round-off, because ``tpfac2·k_sfc·X_s`` is what the
-    bottom RHS actually carried into the solve.
+    equivalent form ``ρ_s·C·tpfac1·(tpfac2·X_s − bb_K)``, which with ECHAM's
+    ``tpfac2 = 1/tpfac1`` (the default) IS the formula above and keeps the
+    ``pev_vdiff`` column-budget identity ``Σ_k dm_k·dX_k/dt == flux``
+    (``vdiff.f90:1544-1551``) exact to round-off, because
+    ``tpfac2·k_sfc·X_s`` is what the bottom RHS carried into the solve.
     """
     c_mom, c_heat, c_moist = surface_exchange
     u_s, v_s, t_s_eff, q_s_eff = surface_target

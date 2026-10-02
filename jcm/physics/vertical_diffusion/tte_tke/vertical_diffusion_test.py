@@ -278,6 +278,21 @@ class TestMatrixSolver:
         # Expected solution: [1.0, 1.0, 1.0] for both columns
         assert jnp.allclose(solution, jnp.array([[1.0, 1.0, 1.0], [1.0, 1.0, 1.0]]), atol=1e-6)
     
+    def test_time_weights_are_echams(self):
+        """tpfac2 = 1/tpfac1 and tpfac3 = 1 - tpfac2 exactly, as ECHAM derives them.
+
+        ECHAM's ``ztpfac2 = 1/cvdifts`` (mo_soil.f90:1684,
+        mo_surface_boundary.f90:90). The surface coupling reads the implicit
+        value as ``tpfac1·bb``; with the earlier rounded 0.667/0.333 the
+        product was 1.0005, which put a ~3 W/m2 gap between the sensible flux
+        a land energy balance computes and the one the column receives.
+        """
+        p = VDiffParameters.default()
+        assert float(p.tpfac1) * float(p.tpfac2) == pytest.approx(1.0, abs=1e-7)
+        assert float(p.tpfac2) + float(p.tpfac3) == pytest.approx(1.0, abs=1e-7)
+        q = VDiffParameters.default(tpfac1=2.0)
+        assert float(q.tpfac2) == 0.5 and float(q.tpfac3) == 0.5
+
     def test_matrix_system_setup(self):
         """Test setup of matrix system."""
         ncol, nlev = 2, 5

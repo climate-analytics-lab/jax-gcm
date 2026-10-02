@@ -13,10 +13,15 @@ import tree_math
 class VDiffParameters:
     """Parameters for vertical diffusion scheme."""
 
-    # Implicitness factors (following ICON's tpfac1, tpfac2, tpfac3)
+    # Implicitness factors. ECHAM's ``cvdifts`` (iniphy.f90:67) is tpfac1; its
+    # ``ztpfac2 = 1/cvdifts`` and ``ztpfac3 = 1 - ztpfac2`` (mo_soil.f90:1684,
+    # mo_surface_boundary.f90:90) follow from it exactly. The solver works in
+    # bb = X̂/tpfac1 units and the surface coupling reads X̂ = tpfac1·bb, so
+    # the column budget of the surface fluxes closes to round-off only with
+    # tpfac1·tpfac2 = 1: keep the three consistent when overriding one.
     tpfac1: float       # Factor for new timestep (implicit)
-    tpfac2: float       # Factor for old timestep (explicit part)
-    tpfac3: float       # Factor for time interpolation
+    tpfac2: float       # Factor for old timestep (explicit part), 1/tpfac1
+    tpfac3: float       # Factor for time interpolation, 1 - tpfac2
 
     # Turbulence parameters
     totte_min: float    # Minimum TTE value
@@ -98,7 +103,7 @@ class VDiffParameters:
         )
 
     @classmethod
-    def default(cls, tpfac1=1.5, tpfac2=0.667, tpfac3=0.333,
+    def default(cls, tpfac1=1.5, tpfac2=None, tpfac3=None,
                  totte_min=1.0e-6, z0m_min=1.0e-5, cchar=0.018,
                  nsfc_type=3, iwtr=0, iice=1, ilnd=2, itop=1,
                  surface_layer_scheme=1,
@@ -111,7 +116,14 @@ class VDiffParameters:
         string aliases ``"businger_dyer"`` / ``"echam_louis"`` —
         ``__post_init__`` normalizes either form to the canonical int on
         the constructed instance.
+
+        ``tpfac2``/``tpfac3`` default to ECHAM's ``1/tpfac1`` and
+        ``1 - 1/tpfac1``.
         """
+        if tpfac2 is None:
+            tpfac2 = 1.0 / tpfac1
+        if tpfac3 is None:
+            tpfac3 = 1.0 - tpfac2
         return cls(
             tpfac1=jnp.array(tpfac1),
             tpfac2=jnp.array(tpfac2),
