@@ -442,95 +442,99 @@ class TestRceIntegrationRrtmgp(unittest.TestCase):
 
 @pytest.mark.slow
 class TestRceWholeModelTiedtke(unittest.TestCase):
-    """RCE on the *full* ECHAM term stack with Tiedtke convection.
+    """RCE on the *full* ECHAM term stack, with RRTMGP radiation.
 
     Unlike the minimal radiative-convective ``rce_physics`` stack, this drives
-    the complete ECHAM column — surface turbulent fluxes, TTE-TKE vertical
-    diffusion, 1-moment microphysics, Sundqvist clouds, Tiedtke-Nordeng
-    convection and radiation — as a genuine single-column integration of the
-    whole model. The radiation is the idealized grey two-stream
-    (``idealized_echam_physics``), so what this pins is the ECHAM moist
-    physics' ledgers and equilibrium under a simple radiative driver, not the
-    radiative equilibrium of ECHAM physics. The same column with RRTMGP
-    (``echam_physics``) stays finite over the 80 days, its 1 Pa layer settling
-    at 160.4 K, the cold edge of RRTMGP's temperature tables, and its lowest
-    level does not fog. Over days 40-80 Tiedtke convects in every step and
-    precipitation is 0.99 of the 1.01 mm/d of evaporation, Tiedtke's
-    precipitation-flux floor (#912) creating less than 0.001 mm/d of it. It
-    is not yet an equilibrium this test could pin (#920): the largest
-    per-level temporal scatter of its heating is 8.7 K/day, above this
-    column's bound. Humidity is prognostic (the surface evaporation supplies
-    it; the fixed-RH closure is incompatible with the model's own moisture
-    physics).
-
-    The assertions are on the **time mean**: a single-column mass-flux scheme in
-    RCE has an intrinsic high-frequency convective cycle, but the time-mean
-    column must be a physical radiative-convective equilibrium whose
-    high-frequency scatter stays bounded and whose convection never dies out
-    (that last pin sits with P/E in the expected failure, below). It guards
-    the column water budget, which carries the finite-volume
-    convective ledger on the model's half levels in the steps where Tiedtke
-    triggers.
-
-    With no large-scale convergence the column never classifies deep (ECHAM's
-    ``zdqcv`` test), so its convection is the shallow plume. That plume
-    entrains at ``entrscv`` and, as in ``cuasc``, stops at the first interface
-    where it no longer condenses or is not buoyant.
-
-    Under ECHAM's 1M cloud scheme the column fogs its lowest level (996 hPa)
-    from about day 10: over days 40-80 that level is overcast in every step
-    and holds 0.46 g/kg of cloud water, and the 1M's stratiform rain is all
-    but 2.4 % of the column's 0.31 mm/d of precipitation, against 0.50 mm/d
-    of evaporation. Tiedtke triggers under it in 15.1 % of those steps, none
-    after day 75, as a plume based at 983 hPa that mostly stops one layer
-    higher, because it fails the ascent test at the first interface above
-    cloud base (``mo_cuascent.f90`` l.449-451). ECHAM6.3's compiled
-    ``mo_cover``/``mo_cloud``, fed this column's states, make the same fog,
-    and its compiled ``cumastr`` took the port's decision on every one of
-    this column's 7680 captured steps with the port run in float64 under
-    ECHAM's physical constants; the stored reference
-    (``echam_cumastr_reference``) holds 400 states of earlier trajectories
-    of the column and is the standing check. jcm's constants share ECHAM's
-    ``rv`` and differ from ECHAM's in ``grav`` and the latent heats (by
-    0.008-0.035 %). Run as this test runs it, in float32 with jcm's
-    constants, the port convects in 15.1 % of the days 40-80 steps and
-    ECHAM in 15.0 %, the two differing in 16 of the 3840 steps: the buoyancy
-    of that first interface sits within hundredths of a kelvin of zero. The
-    testbed has no shear or subsidence to ventilate its lowest layer (#967).
-    The TOA shortwave albedo is 0.56.
+    the complete ECHAM column (``echam_physics()``: surface turbulent fluxes,
+    TTE-TKE vertical diffusion, the Sundqvist cover, Tiedtke-Nordeng
+    convection, the 1-moment microphysics and RRTMGP radiation) as a genuine
+    single-column integration of the whole model. The configuration is in
+    ``docs/source/design/rce_testbed.md``: SST 300 K, 0°N/0°E, 47 levels,
+    ``dt`` 900 s, a prescribed uniform 5 m/s wind (the surface evaporation
+    needs a wind), prognostic humidity, no large-scale forcing (an RCE column
+    has no mean vertical motion), 80 days. The solar constant is 420 W/m²,
+    which at this fixed sun delivers 431 W/m² at the top of the atmosphere, 5 %
+    above RCEMIP's 409.6; it is left at the value the testbed was built with.
+    The CRE diagnostic is off (``radiation_compute_cre=False``): it adds a
+    clear-sky solve and nothing else, and every number below is identical with
+    it on.
 
     The column is **aerosol-free** (``AerosolFree`` replaces MACv2-SP). The
     MACv2-SP plumes are a geographic climatology, and this column at 0°N/0°E
     sits in the Central African biomass-burning plume (AOD 0.33 at 550 nm,
-    SSA 0.87, Ångström 2). Measured over days 40-80, that plume raises the
-    atmosphere's shortwave absorption from 151-157 to 176 W/m² and cuts its
-    net radiative cooling from 3-8 to 1.5 W/m². An RCE test means the
-    idealised clear-air column, not a smoke plume.
+    SSA 0.87, Ångström 2), which on its own absorbs ~100 W/m² of shortwave in
+    the lower troposphere. An RCE test means the idealised clear-air column.
+
+    The assertions are on the **time mean** over days 40-80: a single-column
+    mass-flux scheme in RCE has an intrinsic high-frequency convective cycle,
+    but the time-mean column must be a physical radiative-convective
+    equilibrium whose scatter stays bounded and whose convection never dies
+    out. The integration runs once per class (``setUpClass``) and the tests
+    read its series.
+
+    **Where the bounds come from.** Each is the extreme over seven
+    trajectories (the one this test runs, and six differing from it only by
+    1e-4 K of initial temperature noise) and over the 40-day windows days
+    40-80 and 80-120 (the unperturbed trajectory also over 120-160 and
+    160-200), plus a margin of at least three times the across-trajectory
+    range of the window mean, rounded outward. Measured at ``dev`` at
+    ee1e4e63 (jax 0.10.2, jax-rrtmgp 0.5.0, float32, CPU); the table and the
+    measurements are in the design page.
+
+    ============================  ==================  =====================
+    quantity                      measured extreme    pinned
+    ============================  ==================  =====================
+    P / E                         0.989 .. 1.001      > 0.95
+    Tiedtke steps (ktype > 0)     1.000               > 0.90
+    time-mean convective P        0.59 .. 0.67 mm/d   > 0
+    column water drift            -0.0006 .. 0.0114   |.| < 0.05 mm/d
+    water budget residual / E     < 6.4e-5            < 1e-3
+    rms of the mean heating       0.0081 .. 0.0491    < 0.1 K/day
+    largest per-level std         8.1 .. 8.8          < 10 K/day
+    model-top T (days 40-80 min)  160.2 .. 160.4      > 155 K
+    TOA net (SW dn - SW up - OLR) 47.8 .. 52.3        40 .. 60 W/m²
+    TOA SW albedo                 0.463 .. 0.473      0.44 .. 0.50
+    lowest-level cover (mean)     0 .. 0.001          < 0.01
+    ============================  ==================  =====================
+
+    The flicker bound is a real change from the 8.0 K/day of the grey column:
+    under RRTMGP the mixed-phase deck at 495 hPa (256 K) scatters by up to
+    8.8 K/day in its heating, where the grey column's largest scatter was
+    5.4. The near-surface state (air 1.1 K below the SST, 20.1 g/kg) is
+    pinned to a band around the measurement, ``297.5 .. 300.0`` K and
+    ``18 .. 22`` g/kg.
+
+    **What the column is, and is not.** It is in balance, though not fully
+    stationary: over the four windows of the 200-day run P/E is 0.989-1.000,
+    the water drift is within 0.011 mm/d and the lowest level stays clear,
+    while P and E themselves fall slowly (1.01 to 0.92 mm/d) and the TOA net
+    rises by 1.5 W/m² per window as the upper troposphere adjusts. It is
+    overcast: the maximum-random total cloud cover is 1.0 in every step, from
+    a deck between 270 and 630 hPa whose layer covers are 0.9-1.0 at 337-375
+    and 453-581 hPa and 0.66 at 413 hPa (days 40-80; a thin layer at 208-237
+    hPa appears later in the 200-day run). The 1 Pa top layer cools from its
+    200 K start and holds 160.2-160.4 K from about day 40, at the lower edge
+    of RRTMGP's temperature tables, where jax-rrtmgp 0.5.0 extends them
+    linearly as ECHAM's RRTMG does; it is a property of a model top without
+    dynamical or sponge heating and is pinned only to stay finite and above
+    155 K.
 
     The column water budget IS pinned: every term's ledger is conservative in
     the host's own layer mass except Tiedtke's, which creates the water its
     precipitation-flux floor removes (ECHAM behaviour, #912) and publishes it
     as ``convection.precip_floor_source``, so over the averaging window the
     change of column water equals evaporation minus precipitation plus that
-    source. That P substantially balances E, and that the convection stays
-    alive, is a separate test, a strict expected failure until the testbed is
-    re-derived (#967).
-
-    What it does NOT pin, and why: a steady column water. Over days 40-80 the
-    column water still rises by 0.18 mm/d (36 % of E); the grey atmosphere's
-    net radiative cooling is only 3-8 W/m² (#883).
-
-    The 80-day integration runs once per class (``setUpClass``); the two
-    tests read its series.
+    source.
     """
 
     @classmethod
     def setUpClass(cls):
-        from jcm.physics.echam.testing import idealized_echam_physics
+        from jcm.physics.echam.echam_terms import echam_physics
 
         nlev = 47
-        physics = idealized_echam_physics(
+        physics = echam_physics(
             radiation=RadiationParameters.default(solar_constant=420.0),
+            radiation_compute_cre=False,
         ).replace("aerosol", AerosolFree())
         scm = rce_column(
             sst=300.0, relative_humidity=0.7, lat_deg=0.0, nlev=nlev,
@@ -541,12 +545,10 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         ic = rce_initial_state(scm.vertical, sst=300.0, relative_humidity=0.7).copy(
             u_wind=jnp.full(nlev, 5.0),
         )
-        # 80 days = 40-day spin-up + the 40-day averaging window below.
-        # Measured windowed rms mean tendency (K/day) across trajectories that
-        # differ only in round-off: days 10-50: 0.15-0.16, 20-50: 0.12-0.14,
-        # 30-60: 0.10-0.11, 40-80: 0.10-0.11. The lowest level is overcast in
-        # every step only from about day 30 and the column water is still
-        # rising, so the window stays as late as the run allows (~30 s on CPU).
+        # 80 days = 40-day spin-up + the 40-day averaging window below (about
+        # 90 s on CPU). The column is stationary from about day 40: the
+        # windowed quantities of days 40-80 and 80-120 agree to the pinned
+        # margins (class docstring).
         preds = run_rce(scm, ic, n_days=80.0)
 
         cls.spd = int(round(86400.0 / 900.0))
@@ -555,8 +557,19 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         cls.q = np.asarray(preds.relaxed_states["specific_humidity"])
         cls.tot = np.asarray(preds.tendencies.temperature) * 86400.0  # K/day
 
+        # The vertical axis of every series is the physics frame's: pick the
+        # surface and the model top by pressure, not by array position.
+        vertical = scm.coords.vertical
+        ps = float(np.asarray(ic.normalized_surface_pressure) * c.p0)
+        pfull = np.asarray(_pressure_centers(vertical, jnp.asarray(ps)))
+        cls.i_surface = int(np.argmax(pfull))
+        cls.i_top = int(np.argmin(pfull))
+
         def column(x):
             return np.asarray(x).reshape(len(preds.times), -1)[:, 0]
+
+        def profile(x):
+            return np.asarray(x).reshape(len(preds.times), nlev, -1)[:, :, 0]
 
         cls.precip_conv = column(preds.physics_data["convection"].precip_conv)
         rain = column(preds.physics_data["clouds"].precip_rain)
@@ -564,9 +577,13 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         cls.total_precip = cls.precip_conv + rain + snow
         cls.evap = column(preds.physics_data["surface"].effective_evaporation)
         cls.floor_source = column(preds.physics_data["convection"].precip_floor_source)
+        cls.convecting = column(preds.physics_data["convection"].ktype) > 0
+        cls.cloud_fraction = profile(preds.physics_data["clouds"].cloud_fraction)
+        radiation = preds.physics_data["radiation"]
+        cls.sw_down = column(radiation.toa_sw_down)
+        cls.sw_up = column(radiation.toa_sw_up)
+        cls.olr = column(radiation.toa_lw_up)
 
-        vertical = scm.coords.vertical
-        ps = float(np.asarray(ic.normalized_surface_pressure) * c.p0)
         mass = np.diff(np.asarray(vertical.a_boundaries)
                        + np.asarray(vertical.b_boundaries) * ps) / c.grav
         qc = np.asarray(preds.tracer_states["qc"])
@@ -580,22 +597,27 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(T)))
         self.assertTrue(np.all(np.isfinite(q)))
 
+        # The 1 Pa top layer sits at the lower edge of RRTMGP's temperature
+        # tables, finite and well above the runaway the tables' mirroring
+        # caused before jax-rrtmgp 0.5.0 (a layer below 160 K cooling faster).
+        self.assertGreater(float(T[window][:, self.i_top].min()), 155.0)
+
         # Time-mean radiative-convective equilibrium over the last 40 days: the
         # mean total heating tends to zero even though instantaneous physics
         # fluctuates.
         mean_tend = tot[window].mean(axis=0)
-        self.assertLess(float(np.sqrt(np.mean(mean_tend ** 2))), 0.2)  # K/day
+        self.assertLess(float(np.sqrt(np.mean(mean_tend ** 2))), 0.1)  # K/day
 
-        # Physical near-surface state: air temperature within a few K of the SST,
-        # and a realistic surface specific humidity (several to ~25 g/kg).
-        self.assertGreater(float(T[-1, -1]), 294.0)
-        self.assertLess(float(T[-1, -1]), 306.0)
-        self.assertGreater(float(q[-1, -1]) * 1e3, 5.0)
-        self.assertLess(float(q[-1, -1]) * 1e3, 30.0)
+        # Near-surface state: the air a degree or so below the SST (an upward
+        # sensible heat flux) at about 80 % relative humidity.
+        t_surface = float(T[window][:, self.i_surface].mean())
+        q_surface = float(q[window][:, self.i_surface].mean()) * 1e3
+        self.assertGreater(t_surface, 297.5)
+        self.assertLess(t_surface, 300.0)
+        self.assertGreater(q_surface, 18.0)  # g/kg
+        self.assertLess(q_surface, 22.0)
 
-        # The precipitation is finite and the column precipitates. That its
-        # convection stays alive is pinned with P/E in the expected failure
-        # below: under the fogged lowest level it rests on few triggers.
+        # The precipitation is finite and the column precipitates.
         precip, total = self.precip_conv, self.total_precip
         self.assertTrue(np.all(np.isfinite(precip)))
         self.assertTrue(np.all(np.isfinite(total)))
@@ -603,49 +625,60 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
 
         # The high-frequency flicker is bounded: the largest per-level
         # temporal standard deviation of the total heating over the window.
-        # It sits in the mixed-phase cloud deck at 375-413 hPa (250-256 K),
-        # whose cover flickers (temporal standard deviation 0.43-0.46): its
-        # radiative heating scatters by 6-7 K/day, partly offset by the rest
-        # of the physics. Measured 5.4 K/day.
+        # It sits in the mixed-phase cloud deck at 495 hPa (256 K), whose
+        # heating scatters by 8.1-8.8 K/day between trajectories and windows.
         max_temporal_std = float(np.max(tot[window].std(axis=0)))
-        self.assertLess(max_temporal_std, 8.0)  # K/day
+        self.assertLess(max_temporal_std, 10.0)  # K/day
 
         # Column water budget over the window: Δ(column water)/Δt =
         # E − P + (the Tiedtke floor source, #912) on the host's own layer
-        # mass. Measured residual 5e-6 mm/d against E of 0.50 mm/d; the
-        # floor source is zero over this window, where Tiedtke's plume has no
-        # downdraft.
+        # mass. Measured residual below 6.4e-5 of E, which is float32
+        # round-off on a sum of ~1 mm/d terms.
         evap, water = self.evap, self.column_water
         dwater_dt = (water[-1] - water[-40 * spd - 1]) / (40 * spd * 900.0)
         residual = float(evap[window].mean() - total[window].mean()
                          + self.floor_source[window].mean() - dwater_dt)
-        self.assertLess(abs(residual), 1e-2 * float(evap[window].mean()))
+        self.assertLess(abs(residual), 1e-3 * float(evap[window].mean()))
 
-    @pytest.mark.xfail(
-        strict=True, raises=AssertionError,
-        reason="under ECHAM's 1M cloud scheme this column fogs its lowest "
-               "level from day 11 and Tiedtke falls silent, so precipitation "
-               "is 0.64 of evaporation over days 40-80 (P 0.315, E 0.495 "
-               "mm/d) against the 0.8 bound. ECHAM6.3's compiled "
-               "mo_cover/mo_cloud, fed this column's captured states, "
-               "reproduce jcm's cover and 1M to the Fortran reference test's "
-               "tolerance and make the same fog: it is ECHAM's own behaviour "
-               "on a column with no shear or subsidence to ventilate its "
-               "lowest layer. The bound was calibrated on the previous 1M's "
-               "non-ECHAM evaporation sink; prescribed subsidence and RRTMGP "
-               "for the testbed re-derive the pin. The same fog leaves "
-               "Tiedtke triggering in only 15.1 % of the window's steps (none "
-               "after day 75), so the pin that its convection stays alive is "
-               "re-derived with it. (#967)")
     def test_precipitation_substantially_balances_evaporation(self):
         # The RCE balance this testbed exists to pin: over the window the
-        # column rains most of what it evaporates, with its convection alive.
-        # The fogged column rains 0.64 of it (P 0.315, E 0.495 mm/d; the xfail
-        # reason), and its time-mean convective precipitation is 7.5e-3 mm/d.
-        # Convection is pinned by strict positivity: the extinction it guards
-        # against drives the equilibrium convective precipitation to exactly
-        # zero.
-        window = self.window
+        # column rains what it evaporates (P/E 0.989-1.001 across trajectories
+        # and windows), its water is steady, and its convection is alive.
+        window, spd = self.window, self.spd
         self.assertGreater(float(self.total_precip[window].mean()),
-                           0.8 * float(self.evap[window].mean()))
+                           0.95 * float(self.evap[window].mean()))
+
+        # Steady column water: the drift over the window is the difference of
+        # the two ends of a 40-day series, in mm/d (kg/m²/s × 86400).
+        water = self.column_water
+        drift = (water[-1] - water[-40 * spd - 1]) / (40 * spd * 900.0) * 86400.0
+        self.assertLess(abs(float(drift)), 0.05)
+
+        # Convection is alive: Tiedtke triggers in every step of every
+        # measured window, and its time-mean precipitation is 0.59-0.67 mm/d,
+        # about 0.65 of the total. The extinction this guards against drives
+        # the equilibrium convective precipitation to exactly zero, which the
+        # strict positivity catches; the step fraction catches the column
+        # that convects only occasionally.
         self.assertGreater(float(self.precip_conv[window].mean()), 0.0)
+        self.assertGreater(float(self.convecting[window].mean()), 0.90)
+
+    def test_toa_balance_and_lowest_level_stays_clear(self):
+        window = self.window
+
+        # Top-of-atmosphere balance. In a fixed-SST RCE the net flux need not
+        # vanish: it is the implied ocean heat flux, +48 to +52 W/m² here.
+        sw_down = float(self.sw_down[window].mean())
+        sw_up = float(self.sw_up[window].mean())
+        toa_net = sw_down - sw_up - float(self.olr[window].mean())
+        self.assertGreater(toa_net, 40.0)
+        self.assertLess(toa_net, 60.0)
+        albedo = sw_up / sw_down
+        self.assertGreater(albedo, 0.44)
+        self.assertLess(albedo, 0.50)
+
+        # No fog: the lowest model level holds no cloud cover in the time
+        # mean (0-0.001 across trajectories and windows). A fogged level has a
+        # mean cover of 1.
+        lowest_cover = float(self.cloud_fraction[window][:, self.i_surface].mean())
+        self.assertLess(lowest_cover, 0.01)
