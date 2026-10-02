@@ -362,6 +362,7 @@ from typing import ClassVar  # noqa: E402
 from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
+from jcm.physics.diagnostics.moist_air_state import advance_thermo_run  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm  # noqa: E402
 from jcm.physics.radiation.radiation_types import RadiationData  # noqa: E402
 from jcm.physics.surface.echam.surface_types import (  # noqa: E402
@@ -442,7 +443,9 @@ class EchamSurface(PhysicsTerm):
     After the vdiff's land energy balance it publishes the new grid surface
     temperature and re-emits the cached surface longwave at it
     (:func:`correct_surface_longwave`, ECHAM ``radheat``) — the one non-zero
-    tendency of this term, a heating of the lowest level.
+    tendency of this term, a heating of the lowest level, which advances the
+    running thermodynamic state (``thermo_run``) as every other temperature
+    tendency does.
     """
 
     name: ClassVar[str] = "echam_surface"
@@ -607,6 +610,14 @@ class EchamSurface(PhysicsTerm):
             specific_humidity=jnp.zeros_like(state.specific_humidity),
             tracers={},
         )
+        # The re-emission heating advances the running thermodynamic view like
+        # every other temperature tendency, so convection and the cloud scheme
+        # downstream see it. ECHAM's ``physc`` runs ``radheat`` after ``vdiff``
+        # and before ``cucall``; ``radheat`` adds the lowest layer's heating at
+        # the new surface temperature to ``tte``, and ``mo_cumastr::cumastr``
+        # forms its environment as ``ptm1 + ptte * dt``.
+        diagnostics = advance_thermo_run(
+            diagnostics, dt, d_temperature=temperature_tendency)
         surface_out = prev_surface.copy(
             surface_temperature=t_grid_new,
             skin_temperature=t_grid_new,

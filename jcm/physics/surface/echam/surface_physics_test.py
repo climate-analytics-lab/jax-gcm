@@ -688,7 +688,8 @@ class TestLongwaveReEmission:
 
     def test_term_publishes_the_new_skin_and_its_emission(self):
         """``EchamSurface`` after the land balance: the grid surface temperature is
-        the new skin, and the only tendency is the lowest-level re-emission.
+        the new skin, the only tendency is the lowest-level re-emission, and that
+        heating advances the running thermodynamic state the later terms read.
         """
         import numpy as np
 
@@ -723,6 +724,8 @@ class TestLongwaveReEmission:
                 surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
                 surface_exchange_momentum=jnp.full((ncols, 3), 0.012)),
             "radiation": self._radiation(ncols, nlev),
+            "thermo_run": {"temperature": state.temperature,
+                           "specific_humidity": state.specific_humidity},
         }
         forcing = ForcingData.zeros((1, 1)).copy(
             sea_surface_temperature=jnp.full((1, 1), 290.0))
@@ -734,6 +737,14 @@ class TestLongwaveReEmission:
         assert heat[-1, 0] > 0.0 and np.all(heat[:-1] == 0.0)
         np.testing.assert_allclose(out["radiation"].lw_heating_rate[-1], heat[-1], rtol=1e-6)
         assert float(jnp.max(jnp.abs(tend.specific_humidity))) == 0.0
+        # The running view is the step-start temperature plus the heating, in
+        # the lowest level only: convection and the cloud scheme read it.
+        run = out["thermo_run"]
+        np.testing.assert_allclose(
+            run["temperature"], np.asarray(state.temperature) + heat * 720.0, rtol=1e-6)
+        assert run["temperature"][-1, 0] > state.temperature[-1, 0]
+        np.testing.assert_array_equal(run["temperature"][:-1], state.temperature[:-1])
+        np.testing.assert_array_equal(run["specific_humidity"], state.specific_humidity)
 
 
 if __name__ == "__main__":

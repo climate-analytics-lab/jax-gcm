@@ -198,7 +198,11 @@ vertical diffusion, so `EchamSurface` applies the change after the balance:
 `Δ` is added to `radiation.surface_lw_up` and to the lowest-level longwave
 heating `Δ·g/(c_pd·Δp_K)`. Both are written back into the radiation carry, so
 successive steps build on one another the way the shortwave zenith rescale
-does.
+does. The heating advances the running thermodynamic state (`thermo_run`) like
+every other temperature tendency, so the convection and cloud schemes after
+`EchamSurface` see it, as they see `radheat`'s tendency in ECHAM (`physc.f90`
+runs `radheat` before `cucall`, which forms its environment from `ptm1 +
+ptte·dt`).
 
 **Emissivity.** The balance uses jcm's land emissivity (0.95,
 `SurfaceOpticsParameters.land_emissivity`), the value the radiation solves

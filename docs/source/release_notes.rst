@@ -1745,7 +1745,8 @@ The ECHAM land evaporates in JSBACH's form and closes a skin energy balance
   skin at the melting point. The skin is what the radiation, the land albedo,
   the surface saturation and the surface-layer stability see. Between
   radiation calls the surface longwave is re-emitted at it and the change
-  heats the lowest level (ECHAM's ``radheat``).
+  heats the lowest level, which the convection and cloud schemes after it see
+  (ECHAM's ``radheat``).
 - Heat and moisture couple to the surface tile by tile through ECHAM's
   Richtmyer–Morton relations (``richtmyer_land``/``_ocean``/``_ice``, then
   ``blend_zq_zt``). Each tile's flux is taken against its own lowest-level

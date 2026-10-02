@@ -97,7 +97,7 @@ implicitly to the lowest model level.
   melting ramp, the surface saturation and the surface-layer stability see.
   Between radiation calls the surface longwave is re-emitted at the current
   skin temperature, and the change heats the lowest level, as ECHAM's
-  ``radheat`` does.
+  ``radheat`` does; the convection and cloud schemes after it see that heating.
 
 **What ECHAM/CAM does.** ECHAM6.3 couples JSBACH: a five-layer soil-water and
 soil-temperature model, prognostic snow and an interception reservoir, BETHY
