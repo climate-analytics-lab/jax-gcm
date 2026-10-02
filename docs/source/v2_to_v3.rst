@@ -1418,6 +1418,18 @@ disagrees with AD near a decision, by design
 
 .. _v3-rv:
 
+ECHAM boundary-layer stability is moist and cloud-weighted
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The TTE-TKE vertical diffusion's interior Richardson number and TKE buoyancy
+are ECHAM6.3's moist, cloud-weighted buoyancy, and the surface layer takes the
+lowest level's cloud cover. Over a 10-day ``t63-echam-1m`` A/B the global-mean
+PBL height rises 187 → 200 m, the total cloud cover falls 0.566 → 0.527 (low
+cloud 0.332 → 0.290), the latent heat flux rises 65.2 → 67.1 W/m², the reflected
+shortwave falls 102.9 → 98.6 W/m² and the unstable fraction of the interior
+interfaces falls 3.0 % → 1.3 %. The 1-day ECHAM regression trajectory moves by 13 %
+in specific humidity (normalized RMS). The full table is in the release notes.
+
 The vapour gas constant is ECHAM's
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

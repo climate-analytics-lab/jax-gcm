@@ -1069,6 +1069,54 @@ ECHAM surface albedo and frozen-surface saturation
   the change: the ECHAM albedo and land latent heat, the JAM dust snow gate,
   and SPEEDY's snow albedo if pointed at it.
 
+ECHAM boundary-layer stability is moist and cloud-weighted
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The TTE-TKE vertical diffusion forms the interior Richardson number and the
+  buoyancy term of its TKE budget from ECHAM6.3's one ``zbuoy``
+  (``vdiff.f90`` l.658-700, 777-799): the liquid-water potential temperature
+  and total water of the adjacent levels, averaged to the interface by layer
+  mass and weighted by the interface's cloud cover with the ``ua``-table
+  saturation humidity, over the squared shear floored at ECHAM's
+  ``zepshr = 1e-5``. A saturated cloudy layer mixes on its moist-adiabatic
+  stability; the humidity enters even where there is no cloud. The surface
+  layer's bulk Richardson number takes the lowest level's cover into the same
+  multipliers on every tile (``precalc_land``/``_ocean``/``_ice``). **Changes
+  results** for every ECHAM configuration. A 10-day ``t63-echam-1m`` A/B from
+  the spun-up state (``dev`` at 40701518, 40 instantaneous snapshots each):
+  the interior stability alone moves most of it, the surface layer's cover
+  very little (PBL height 200.3 against 200.5 m, lowest-level condensate 53.7
+  against 54.4 mg/kg).
+
+  ==============================================  =============  =============
+  global mean, days 0-10                          before         after        
+  ==============================================  =============  =============
+  PBL height (m)                                  186.7          200.3        
+  total cloud cover                               0.566          0.527        
+  low cloud cover (below 680 hPa)                 0.332          0.290        
+  lowest-level cloud cover                        0.176          0.158        
+  lowest-level condensate (mg/kg)                 57.8           53.7         
+  latent heat flux (W/m²)                         65.2           67.1         
+  sensible heat flux (W/m²)                       23.4           23.4         
+  convective / stratiform precipitation (mm/d)    1.96 / 0.65    2.01 / 0.63  
+  TOA shortwave reflected (W/m²)                  102.9          98.6         
+  outgoing longwave (W/m²)                        246.0          246.6        
+  unstable interior interfaces                    3.0 %          1.3 %        
+  ==============================================  =============  =============
+
+  The larger mixing leaves the model columns less unstable: in the lowest six
+  interfaces the unstable fraction falls from 21.6 % to 9.8 %. The ECHAM 1-day
+  T21L16 trajectory moves by 13 % (normalized RMS) in specific humidity, 1.5 %
+  in ``v``, 1.1 % in ``u`` and 0.03 % in temperature, almost all of it the
+  humidity in the Richardson number rather than the cloud weighting. The
+  whole-model RCE column evaporates 1.20 mm/d instead of 1.01 and its TOA net
+  falls from 47.9 to 38.4 W/m² (days 40-80); its bounds are re-derived in
+  :doc:`design/rce_testbed`. See :doc:`science/vertical_diffusion`.
+- **API:** ``TteTkeVerticalDiffusion`` requires the ``clouds`` diagnostic,
+  ``VDiffState.cloud_fraction`` is required, ``prepare_vertical_diffusion_state``
+  and ``vertical_diffusion_scheme`` take ``cloud_fraction`` after ``qi``, and
+  ``compute_richardson_number`` takes the state; see :doc:`v2_to_v3`.
+
 Moist dynamics: condensate loading and one tracer contract
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
