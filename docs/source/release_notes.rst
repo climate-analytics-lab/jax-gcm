@@ -1018,7 +1018,8 @@ divide through ``jcm.filters.stable_quotient``: the plain quotient, with its
 exact derivative evaluated without the square. Forward results are
 bit-identical. The two-step gradient under ``jax.jit`` now agrees with the
 eager one to float32 rounding (1.19573e-05 and 1.19572e-05) for both cloud
-schemes.
+schemes, and the slow two-step gradient test now differentiates the 1M case as
+one ``jax.jit(jax.grad(f))`` program (the 2M case stays eager).
 
 
 Corrected physics
