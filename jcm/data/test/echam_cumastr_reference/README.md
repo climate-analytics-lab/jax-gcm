@@ -14,8 +14,10 @@ repository.
 
 Every column is the exact set of arguments jcm's
 `tiedtke_nordeng_convection` received at one step of the whole-model
-radiative-convective column of `jcm/rce_test.py::TestRceWholeModelTiedtke`
-(80 days, `dt = 900` s, 47 levels, float32), captured from two checkouts:
+radiative-convective column of `jcm/rce_test.py::TestRceWholeModelTiedtke` as it
+was configured at capture, with the idealized grey radiation (80 days,
+`dt = 900` s, 47 levels, float32; the test now runs RRTMGP, see
+`docs/source/design/rce_testbed.md`), captured from two checkouts:
 
 | `group` | source | columns | what it exercises |
 |---|---|---|---|

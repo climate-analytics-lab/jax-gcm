@@ -59,6 +59,22 @@ ordinary operating point:
    that makes a denominator merely *positive* has not made it safe to divide
    by — a zero numerator over it still gives `0 * inf = nan`. A guard floor
    sized in float64 (`1e-30`, `1e-154`) is therefore not a guard at all here.
+   Rounding noise reaches the band as readily as physics does. The dycore's
+   tracer mass fixer rescaled a tracer by `target / current` behind
+   `current > 1e-30`; a compiled XLA program left a ~1e-29 kg/kg/s residue in a
+   clear-cell ice tendency, whose global total, ~3e-21, sat in the unguarded
+   `1e-30 … 1e-19` band, and a zero cotangent times the `inf` was NaN over the
+   whole dynamical state. Eager and `jax_debug_nans`' de-optimised rerun round
+   the same tendency to exactly zero, so the mask was off there: the eager
+   gradient was finite, `jax.jit` of it was NaN, and the debugger found
+   nothing (#987). A gradient that is NaN under `jit` but finite eagerly, with
+   no NaN in the de-optimised rerun, is therefore a compiled-program rounding
+   difference, not a missing guard in the jaxpr; localise it by removing terms
+   from the jitted step and by `XLA_FLAGS=--xla_disable_hlo_passes=algsimp`
+   (or `fusion`). Where a denominator can be small, divide through
+   `jcm.filters.stable_quotient(n, d)` after the double `where`: its value is
+   `n / d` bit for bit and its derivative `(dn - (n / d) dd) / d` is the same
+   derivative without the square.
 
 The house idiom is the **double `where`**: make the *argument* safe before the
 singular operation, then mask the result, so the singular function is never
@@ -85,6 +101,46 @@ infinity on a large-magnitude field cannot hide behind the small ones; with
 `reference="adjoint"` and `live_inputs=(...)` it fences finiteness and
 liveness where an output is piecewise constant (a level index) and no
 difference quotient exists.
+
+## A branch on a rounding residue is evaluated once per consumer
+
+A `jnp.where` predicate computed from a difference of nearly equal quantities
+is rounding noise wherever the exact difference is zero, and under `jit` that
+noise is not one value: XLA duplicates cheap elementwise producers into every
+consumer fusion, and on CPU LLVM contracts multiply-adds differently in each
+copy (an operand with a second use cannot be fused), so each consumer can see a
+different sign. If two selects read the same predicate and their arms differ
+wildly at the threshold, the wind speed and a placeholder `1.0` for instance,
+the program mixes the two arms in one cell. `jax.disable_jit()` and a float64
+rerun of the *same* column can both look clean, because op-by-op evaluation has
+one materialised predicate and the noise is smaller, not absent.
+
+The Lott-Miller SSO energy cap did exactly this (#981): `zdis = 0.5*(|u|² -
+|u + dt*a|²)` is 0 at every level without drag, and
+
+```python
+zust = u + dt * du; zvst = v + dt * dv
+zdis = 0.5 * (u**2 + v**2 - zust**2 - zvst**2)
+rescale = zdis < 0.0
+s2 = jnp.where(rescale, zust**2 + zvst**2, 1.0)            # consumer 1
+zred = jnp.sqrt(jnp.maximum((u**2 + v**2) / s2, 1e-30))
+du_new = jnp.where(rescale, (zust * zred - u) / dt, du)     # consumer 2
+```
+
+returned 1.8 m/s² on a calm 30 m/s level under `jax.jit` on XLA:CPU (jax
+0.10.2) with `du = dv = 0` as runtime inputs, and 0 op-by-op. The optimised HLO
+holds the `compare ... direction=LT` in three separate fusions;
+`XLA_FLAGS=--xla_disable_hlo_passes=fusion` or `--xla_backend_optimization_level=0`
+removes it, `--xla_cpu_enable_fast_math=false` does not.
+
+Write the branch so that every evaluation of it is within round-off of every
+other: form the quantity without cancellation (`|u*|² - |u|² = Δu (2u + Δu) +
+Δv (2v + Δv)` is exactly 0 for `Δ = 0`), and make the arms agree at the threshold
+(`u* · min(1, |u|/|u*|)` instead of a `where` between a rescale and a
+placeholder). Suspect this whenever a CPU run blows up where the GPU does not:
+compare each term's tendencies `jit` against `jax.disable_jit()` on one state,
+then look for the predicate in the compiled HLO
+(`jax.jit(f).lower(*args).compile().as_text()`).
 
 ## Static arguments hold whole objects, and `Model` is one
 

@@ -11,7 +11,9 @@ expects to find in the typed ``RadiationData`` / ``SurfaceData`` /
   temperature-dependent sea ice; zenith-dependent open water) and per-tile
   emissivities, all held in a differentiable
   :class:`SurfaceOpticsParameters` (#347, #672).
-- Surface temperature (land = ``forcing.stl_am``; ocean = ``forcing.sea_surface_temperature``).
+- Surface temperature (land = the prognostic skin temperature carried in
+  ``surface.land_surface_temperature``, seeded from ``forcing.stl_am`` when
+  unset; ocean = ``forcing.sea_surface_temperature``).
 - Roughness length (1 cm over land, 0.1 mm over ocean).
 - CO2 and CH4 from ``forcing.co2_vmr`` / ``forcing.ch4_vmr``; O3 from the
   ``forcing.ozone_climatology`` when loaded, else this term's analytical
@@ -113,6 +115,10 @@ def _surface_optical_properties(
     bare-ice constants. Canopy snow and the leaf area index are not carried
     either; ``land_albedo`` then uses JSBACH's own ``MAX(lai, 2)`` floor and
     a snow-free canopy. Prognostic snow is the open half of #672.
+
+    Returns ``(albedo_vis, albedo_nir, emissivity, land_albedo)``: the last is
+    the land tile's own broadband albedo, which the land energy balance
+    absorbs with.
     """
     land_fraction, sea_ice_fraction, ocean_fraction = _tile_partition(
         land_fraction, sea_ice_fraction)
@@ -138,7 +144,7 @@ def _surface_optical_properties(
         + ocean_fraction * p.ocean_emissivity
         + sea_ice_fraction * p.seaice_emissivity
     )
-    return albedo_vis, albedo_nir, emissivity
+    return albedo_vis, albedo_nir, emissivity, land
 
 
 def sea_ice_surface_temperature(sea_surface_temperature, sea_ice_fraction):
@@ -259,12 +265,23 @@ class EchamBoundaryConditions(PhysicsTerm):
         land_fraction = col(terrain.fmask)
         sea_ice_fraction = col(forcing.sice_am)
         sst = col(forcing.sea_surface_temperature)
+        # The land skin temperature is prognostic (the vdiff's land energy
+        # balance, #979) and carried in ``surface.land_surface_temperature``.
+        # Unset (<= 0: a cold start, or a carry restored from a checkpoint
+        # written before the field existed) seeds it from the prescribed soil
+        # temperature, the value the land had when it was prescribed.
+        prev_surface = diagnostics.get("surface")
+        carried = (None if prev_surface is None
+                   else getattr(prev_surface, "land_surface_temperature", None))
         land_temperature = col(forcing.stl_am)
+        if carried is not None:
+            carried = col(carried)
+            land_temperature = jnp.where(carried > 0.0, carried, land_temperature)
         cos_zenith = current_cos_zenith(
             forcing.solar, self._lons.get_value(), self._lats.get_value(),
         ).reshape(ncols)
 
-        albedo_vis, albedo_nir, emissivity = _surface_optical_properties(
+        albedo_vis, albedo_nir, emissivity, land_albedo = _surface_optical_properties(
             land_fraction, sea_ice_fraction, self.surface_optics.get_value(),
             background_albedo=col(forcing.alb0),
             # ``snowc_am`` is a cover fraction on the mirror bundles
@@ -365,6 +382,11 @@ class EchamBoundaryConditions(PhysicsTerm):
             "albedo_vis": albedo_vis,
             "albedo_nir": albedo_nir,
             "emissivity": emissivity,
+            # The land tile's own albedo and emissivity, for the land energy
+            # balance (the radiation reads only the three grid values above).
+            "land_albedo": land_albedo,
+            "land_emissivity": jnp.broadcast_to(
+                self.surface_optics.get_value().land_emissivity, land_albedo.shape),
         }
         radiation = diagnostics.get(
             "radiation", RadiationData.zeros((ncols,), nlev),
@@ -375,6 +397,7 @@ class EchamBoundaryConditions(PhysicsTerm):
             surface_temperature=surface_temperature,
             skin_temperature=surface_temperature,
             roughness_length=roughness_length,
+            land_surface_temperature=land_temperature,
         )
         chemistry_zero = diagnostics.get(
             "chemistry", ChemistryData.zeros((ncols,), nlev),

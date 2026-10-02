@@ -999,6 +999,27 @@ radiation parameters. A slow test now differentiates every term's outputs with
 respect to every float parameter of the ECHAM, ECHAM+JAM (2M), grey and SPEEDY
 packages.
 
+Finite gradients under ``jax.jit`` through the tracer mass fixer
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+``jax.jit`` of the ECHAM two-step ``d(mean T)/d(solar constant)`` with the 1M
+cloud scheme returned NaN while the eager gradient was finite (#987). The
+dycore's semi-Lagrangian tracer mass fixer rescales each tracer by
+``target / current``, the ratio of its global mass before and after transport,
+behind a mask that the totals are positive. The reverse rule of that quotient
+needs ``current**-2``, which is ``inf`` in float32 below about 1.08e-19, far
+above the mask's 1e-30. In a compiled program the 1M composition's ice
+tendency in clear cells is a rounding residue (~1e-29 kg/kg/s; op-by-op
+evaluation gives exactly zero) whose global total, ~3e-21, passes the mask, and
+a zero cotangent times the ``inf`` was NaN over the whole dynamical state. The fixer, and the column hole-filler
+``jcm.filters.mass_conserving_positivity`` (whose gradient was also NaN in any
+column with no positive mass and ``inf`` in one holding only a residue), now
+divide through ``jcm.filters.stable_quotient``: the plain quotient, with its
+exact derivative evaluated without the square. Forward results are
+bit-identical. The two-step gradient under ``jax.jit`` now agrees with the
+eager one to float32 rounding (1.19573e-05 and 1.19572e-05) for both cloud
+schemes.
+
 
 Corrected physics
 ^^^^^^^^^^^^^^^^^
@@ -1190,6 +1211,19 @@ RCE initial state seeds a mixed sub-cloud layer
   trigger finds no cloud base at all in a sounding running at ``lapse_rate``
   to the surface. Pass ``mixed_layer_top_m=0.0`` to restore the previous
   profile; see :doc:`design/convective_trigger_soundings` for the reasoning.
+
+The whole-model RCE testbed runs RRTMGP
+"""""""""""""""""""""""""""""""""""""""
+
+- ``rce_test.py::TestRceWholeModelTiedtke`` now integrates ``echam_physics()``
+  with RRTMGP (it ran the idealized grey scheme, whose atmosphere cools by
+  7 W/m² and whose lowest level fogs under the ECHAM 1M) and pins the
+  column's equilibrium from seven trajectories (six perturbed by 1e-4 K of
+  initial noise) and up to four 40-day windows: P/E 0.989-1.001, Tiedtke in every step, column water
+  steady to 0.012 mm/d, a clear lowest level. No public API changes; see
+  :doc:`design/rce_testbed` for the configuration, the bounds and their
+  provenance. The column is finite for the 200 days run under jax-rrtmgp
+  0.5.0 and is overcast (total cloud cover 1.0).
 
 Grey two-stream shortwave conserves energy
 """"""""""""""""""""""""""""""""""""""""""
@@ -1722,6 +1756,94 @@ JAM mixed-phase freezing follows ECHAM-HAM
 
   See :doc:`science/clouds_microphysics` and :doc:`science/aerosol`.
 
+The ECHAM land evaporates in JSBACH's form and closes a skin energy balance
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The ECHAM hosts' land tile is a prescribed-moisture land (#979). Its
+  moisture flux carries JSBACH's humidity factors,
+  ``ρ·C·(csat·q_s − cair·q_a)`` (``mo_soil.f90::update_soil``). Bare soil
+  evaporates only while ``h·q_s`` exceeds the air humidity, with ``h`` from the
+  upper layer's fill (``calc_relative_humidity_upper`` of the bundle's
+  ``soilw_rel``, ECHAM6.3's 5-layer path). The forest fraction transpires
+  through ECHAM3's canopy conductance (evaluated every step from the absorbed
+  PAR, leaf area index 4), limited by JSBACH's water stress between the wilting
+  (0.35) and critical (0.75) fractions of ``soilw_am``. Snow and glacier
+  evaporate at the potential rate. The beta form it replaces,
+  ``cair = csat = soilw_am``, let a dry 307 K soil evaporate like a wet one.
+- The land skin temperature is prognostic. It is solved each step from
+  ``C_s·dT_s/dt = Rn − SH − LH − G`` with ECHAM's ``update_surfacetemp``,
+  coupled implicitly to the lowest level. ``G = Λ·(T_s − stl_am)`` flows into a
+  soil at the prescribed ERA5 temperature, which until now *was* the land
+  temperature. ``C_s`` and ``Λ`` are JSBACH's top-layer capacity and
+  conductance; snow grades the layer by depth, and snow or glacier holds the
+  skin at the melting point. The skin is what the radiation, the land albedo,
+  the surface saturation and the surface-layer stability see. Between
+  radiation calls the surface longwave is re-emitted at it and the change
+  heats the lowest level, which the convection and cloud schemes after it see
+  (ECHAM's ``radheat``), and the land absorbs the held downward shortwave
+  through the land albedo of the last radiation solve
+  (``surface.land_albedo_at_solve``).
+- Heat and moisture couple to the surface tile by tile through ECHAM's
+  Richtmyer–Morton relations (``richtmyer_land``/``_ocean``/``_ice``, then
+  ``blend_zq_zt``). Each tile's flux is taken against its own lowest-level
+  value, which changes the fluxes of mixed coastal and sea-ice cells by a few
+  per cent; pure cells are unchanged. ``VDiffParameters`` defaults
+  ``tpfac2``/``tpfac3`` to ECHAM's exact ``1/tpfac1`` and ``1 − 1/tpfac1``
+  (they were 0.667/0.333).
+- **Compared with the compiled Fortran.**
+  ``jcm/physics/surface/echam/jsbach_land_test.py`` reproduces, in float64 at
+  round-off and on 324 land columns plus scans through every switch, the
+  outputs of ECHAM6.3 / JSBACH's own ``richtmyer_land``,
+  ``update_surfacetemp``, ``update_soiltemp``, ``unstressed_canopy_cond_par``,
+  the relative-humidity and stress functions, and ``update_soil``'s
+  humidity-factor block (``jcm/data/test/echam_land_reference``, compiled
+  unmodified in a local harness).
+- The bare-soil, dew, water-stress and melt switches keep ECHAM's values and
+  take the derivatives of named smooth surrogates; the widths are static
+  fields of ``JsbachLandParameters``.
+- **New parameters.** ``JsbachLandParameters`` (wilting and critical
+  fractions, leaf area index, canopy constants, PAR fraction, soil, snow and
+  ice thermal constants, critical snow depth) are differentiable leaves of
+  ``TteTkeVerticalDiffusion(land_params=...)``, set from the CLI as
+  ``+physics.terms.tte_tke_vertical_diffusion.land_params.<field>=...``.
+  ``land_temperature="prescribed"`` holds the land skin at the forcing's land
+  temperature with the same evaporation form and coupling, for the
+  fixed-SST and fixed-land-temperature effective-radiative-forcing method of
+  Andrews et al. (2021). **New outputs** on ``surface``:
+  ``land_surface_temperature``, the land tile's ``land_net_radiation``,
+  ``land_sensible_heat_flux``, ``land_latent_heat_flux``,
+  ``ground_heat_flux``, ``snow_melt_heat_flux``, ``land_heat_storage`` and
+  ``land_evaporation``, which close ``Rn = SH + LH + G + melt + storage``,
+  ``land_energy_residual`` (``Rn − SH − LH``, the open budget of a prescribed
+  skin), and ``cair``, ``csat``, ``water_stress_factor``,
+  ``bare_soil_humidity``, ``canopy_conductance`` and ``land_albedo_at_solve``.
+- A checkpoint written before this change restores with the skin seeded from
+  ``stl_am`` and the land albedo of the last solve unset, which the land
+  balance replaces with the current step's until the radiation next solves
+  (the new carry fields migrate by name).
+- A run's first step from a cold start has no land evaporation, as in ECHAM
+  (``init_surface`` sets ``zcair = zcsat = 0``); a restored carry is
+  unaffected.
+- **Changes results** for every ECHAM configuration. Over days 5-10 of T63
+  members against the prescribed land: net TOA radiation +4.1 W m⁻² (1M and
+  2M) and +3.7 (JAM), land latent heat about halved (1M 62 → 33 W m⁻²), land
+  precipitation −43 to −46 % and ocean precipitation +8 to +11 %, with less
+  land cloud. Over 240 days of ``t63-echam-1m``, the spring surface surplus
+  ``H + LH − Rn`` of the Sahel, Mexican plateau and India falls from 157, 102
+  and 347 to 17, 33 and 30 W m⁻², land precipitation between 40°S and 40°N
+  from 6.83 to 3.66 mm d⁻¹ (GPCP 2.74), and land convective rain moves from a
+  02 h to a 14 h local-time maximum as the land heats its boundary layer by
+  day. The numbers and box tables are in
+  :doc:`design/land_skin_energy_balance`. See :doc:`science/surface`.
+- **Retune items.** Net TOA radiation rises by 4-5.5 W m⁻² with the drier,
+  less cloudy land (7.47 W m⁻² over days 30-240 of the 1M run, inside the
+  release gate's 10 W m⁻²). JAM's dust emission falls by 34 % (1741 → 1154
+  Tg yr⁻¹, burden −19 %) because the 10 m wind and friction velocity over the
+  sources fall by 11 %, so the dust calibration ``jam_dust_nduscale_scale``,
+  set against the prescribed land's winds, needs redoing on this surface, and
+  with it the dust-borne ice nuclei. Both belong to #682; nothing is retuned
+  here.
+
 
 Tiedtke-Nordeng takes ECHAM's decisions
 """""""""""""""""""""""""""""""""""""""
@@ -1748,14 +1870,15 @@ Tiedtke-Nordeng takes ECHAM's decisions
 - Each decision's derivative is that of a logistic surrogate
   (``tiedtke_nordeng/switches.py``, :doc:`design/surrogate_gradients`); the
   value does not depend on the widths.
-- ECHAM6.3's compiled convection, run on 758 columns (whole-model RCE states,
+- ECHAM6.3's compiled convection, run on 758 columns (states of the
+  whole-model RCE column in its earlier grey-radiation configuration,
   and the same states under a synthetic ascent, convergence or divergence
   that exercise the mid-level and deep plumes and the ``zlo1`` gate), is the reference
   (``jcm/data/test/echam_cumastr_reference``): with ECHAM's physical
   constants jcm takes its decision on every column and matches its cloud-base
   flux, precipitation and tendencies to 2.1e-12 or better. With jcm's own
   constants, whose ``rv`` is ECHAM's (next entry), 2 of the 758 decisions
-  differ, through the latent heats; on the whole-model RCE column's days
+  differ, through the latent heats; on that column's days
   40-80 states the port, in float32, convects in 15.1 % of the steps and
   ECHAM in 15.0 %.
 - **Breaking:** ``ConvectionParameters`` loses ``trigger_cape``,
@@ -1780,7 +1903,7 @@ Tiedtke-Nordeng takes ECHAM's decisions
   the next entry). The run-to-run spread of these numbers is 0.19 W/m² in
   net TOA radiation and 0.006 mm/day in precipitation (1M entry above). Both
   runs stay finite, with the sub-cloud supply carrying the lagged dynamics
-  and no evaporation floor. In the whole-model RCE column, Tiedtke convects
+  and no evaporation floor. In that grey-radiation column, Tiedtke convects
   in 15.1 % of the days 40-80 steps and its precipitation is 2.4 % of
   0.31 mm/d.
 
@@ -1923,6 +2046,26 @@ The vapour gas constant is ECHAM's
   global net TOA radiation by −0.13 / +0.01 W/m² and precipitation by
   −0.006 / +0.006 mm/day (table above), within the run-to-run spread.
   ``set_constants(rv=461.0)`` restores the 2.x value.
+
+Sub-grid orographic drag never accelerates the wind
+"""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``t63-echam-1m`` went 100 % NaN within three to five 12-minute steps on CPU, from a
+  cold or a warm start, while the same commit was healthy on a GPU (#981). The
+  Lott-Miller SSO energy cap (``mo_ssortns.f90::orodrag``, ``IF (zdis < 0)``) tested a
+  difference of nearly equal squares, which is rounding noise at every level the
+  drag does not touch. XLA:CPU evaluated that test differently in each of the
+  places it was read, so a level the drag did not touch could be rescaled with a
+  placeholder denominator and accelerated by 0.3-2.5 m/s² (a 32 m/s level to over
+  400 m/s within one 12-minute step) over the Himalaya and Andes. The cap is now ``u*·min(1, |u|/|u*|)``,
+  branch-free, with the kinetic-energy change formed from the wind increment.
+  ``jax_enable_x64`` did not cure it, since the same mechanism acts in float64.
+- **Changes results** only at round-off: it is ECHAM's rescale in exact arithmetic.
+  The frictional heating at a level the drag does not touch is now exactly zero
+  rather than ~1e-11 K/s of either sign, and no level can gain kinetic energy. CPU
+  runs of ``t63-echam-1m`` that diverged now integrate; a GPU's result is unchanged
+  to round-off. See ``JAX_gotchas.md`` for how to recognise this class of
+  failure.
 
 Known limitations
 ^^^^^^^^^^^^^^^^^
@@ -2083,18 +2226,6 @@ Calibration and capability gaps
   ``+configuration=`` group composes, and its coverage is the ``rce_test.py`` /
   ``betts_miller_test.py`` unit suites rather than the release-validation
   matrix.
-- **The whole-model single-column RCE fogs its lowest level under the ECHAM
-  1M.** The column of ``rce_test.py::TestRceWholeModelTiedtke`` (grey
-  radiation, SST 300 K, a prescribed uniform 5 m/s wind, no subsidence) fogs
-  its lowest level from about day 10, and over days 40-80 it rains 0.65 of
-  what it evaporates (P 0.29-0.31, E 0.45-0.47 mm/day) against the test's
-  0.8. ECHAM6.3's compiled ``cover``, ``cloud`` and ``cumastr``, fed the
-  column's captured states, make the same fog and keep convection off in all
-  but a few percent of the steps, so this is ECHAM's behaviour on a column with nothing to ventilate its
-  lowest layer. That pin, calibrated on the previous 1M, is a strict expected
-  failure until the testbed is re-derived with prescribed subsidence and
-  RRTMGP (#967); the column's other pins stay live. The T63 climate of the
-  1M, 2M and JAM presets shows no low-cloud rise.
 
 :ref:`The migration guide <v3-support-matrix>` carries the support matrix and
 the evidence behind each accepted-limitation verdict.

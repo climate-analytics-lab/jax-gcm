@@ -67,7 +67,11 @@ are diagnostics that terms rewrite within a step or two of the restart.
 The one bounded exception is a radiation sub-cycle cache seeded this way,
 which starts one radiation interval (default 2 h) stale — the same
 staleness `init=from_state` already accepts, and negligible against
-losing the restart.
+losing the restart. The land albedo of the last radiation solve
+(`surface.land_albedo_at_solve`, which the land energy balance absorbs the
+held shortwave through) is such a cache field: a file without it restores it
+as 0, "unset", and the land uses the current step's albedo until the next
+solve, at most one radiation interval.
 
 **Except where a slot is prognostic.** A term whose carry slot holds the
 only copy of a physical quantity declares it in

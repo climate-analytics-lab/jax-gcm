@@ -36,7 +36,7 @@ from .matrix_solver import (
     setup_matrix_system,
     solve_tridiagonal_system,
     vertical_diffusion_step,
-    diagnose_surface_fluxes
+    couple_surface_tiles,
 )
 
 from .vertical_diffusion import (
@@ -72,7 +72,7 @@ __all__ = [
     "setup_matrix_system",
     "solve_tridiagonal_system",
     "vertical_diffusion_step",
-    "diagnose_surface_fluxes",
+    "couple_surface_tiles",
 
     # Main interface
     "TteTkeVerticalDiffusion",

@@ -30,6 +30,17 @@ The pieces it wires together:
   terms communicate only through tendencies and the diagnostics dict, so one
   term cannot overwrite the ``q`` that downstream terms read within a step.)
 
+**The whole-model column.** ``physics=`` accepts any composed package, and the
+testbed's whole-model column is ``echam_physics()`` itself (RRTMGP radiation,
+``AerosolFree`` in place of MACv2-SP, Tiedtke-Nordeng convection, the 1M
+microphysics, surface exchange and TTE-TKE) with ``interactive_humidity=True``,
+a fixed 5 m/s wind, no large-scale forcing and a solar constant of 420 W/m²
+(431 W/m² at the top of the atmosphere at this fixed sun, 5 % above RCEMIP's
+409.6). ``rce_test.py::TestRceWholeModelTiedtke`` pins its equilibrium, and
+``docs/source/design/rce_testbed.md`` gives the configuration, why the
+radiation is RRTMGP and not the grey scheme, and the bounds with their
+measured spread.
+
 Units note: ``PhysicsState.specific_humidity`` is **kg/kg** — the canonical
 physics convention (confirmed against a full-model run: surface q ≈ 0.02 kg/kg,
 RH ~0.2–1), which radiation, ``SundqvistCloudFraction``, ``TiedtkeConvection``

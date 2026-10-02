@@ -12,10 +12,13 @@ import numpy as np
 
 from jcm.physics.radiation import (
     _CACHED_SW_FIELDS,
+    SURFACE_OPTICS_KEY,
     cached_radiation_tendency,
+    hold_land_albedo,
     rescale_cached_radiation,
 )
 from jcm.physics.radiation.radiation_types import RadiationData
+from jcm.physics.surface.echam.surface_types import SurfaceData
 
 NCOLS, NLEV = 4, 3
 
@@ -224,6 +227,32 @@ class CachedFieldCoverageTest(unittest.TestCase):
                 np.asarray(getattr(rad, name)) * 0.5,
                 rtol=1e-6, err_msg=name,
             )
+
+
+class HeldLandAlbedoTest(unittest.TestCase):
+    """``hold_land_albedo``: the land albedo of the last solve rides the surface carry (#979)."""
+
+    def _diagnostics(self, held, current):
+        return {
+            "surface": SurfaceData.zeros((NCOLS,), NLEV).copy(
+                land_albedo_at_solve=jnp.full((NCOLS,), held)),
+            SURFACE_OPTICS_KEY: {"land_albedo": jnp.full((NCOLS,), current)},
+        }
+
+    def test_a_solve_takes_this_steps_albedo(self):
+        out = hold_land_albedo(self._diagnostics(0.7, 0.4), jnp.asarray(True))
+        np.testing.assert_allclose(out["surface"].land_albedo_at_solve, 0.4)
+
+    def test_a_replay_keeps_the_solves_albedo(self):
+        out = hold_land_albedo(self._diagnostics(0.7, 0.4), jnp.asarray(False))
+        np.testing.assert_allclose(out["surface"].land_albedo_at_solve, 0.7)
+
+    def test_nothing_to_hold_is_a_no_op(self):
+        no_optics = {"surface": SurfaceData.zeros((NCOLS,), NLEV)}
+        self.assertIs(hold_land_albedo(no_optics, jnp.asarray(True)), no_optics)
+        no_land = {**self._diagnostics(0.7, 0.4), SURFACE_OPTICS_KEY: {"albedo_vis": 0.1}}
+        self.assertIs(hold_land_albedo(no_land, jnp.asarray(True)), no_land)
+        self.assertEqual(hold_land_albedo({}, jnp.asarray(True)), {})
 
 
 if __name__ == "__main__":

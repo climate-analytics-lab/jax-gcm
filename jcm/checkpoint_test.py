@@ -920,3 +920,88 @@ class TestPostPhysicsSlotAcrossRestart(unittest.TestCase):
             load_checkpoint(second, path)
         self.assertEqual(
             _max_abs_diff(saved, second.physics_carry["_post_physics_state"]), 0.0)
+
+
+class TestLandSkinTemperatureMigration(unittest.TestCase):
+    """A checkpoint written before the prognostic land skin temperature (#979).
+
+    ``SurfaceData`` gained ``land_surface_temperature``, the land-balance
+    diagnostics and ``land_albedo_at_solve``. A file without them restores
+    through the name-matched carry migration: the new leaves take the
+    bootstrapped zeros, which ``EchamBoundaryConditions`` reads as "unset" for
+    the skin and seeds from ``stl_am`` on the first step — the value the land
+    had when it was prescribed — and which the land balance reads as "unset"
+    for the albedo and replaces with the current step's until the radiation
+    next solves.
+    """
+
+    def _model(self):
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.diagnostics.moist_air_state import MoistAirColumnState
+        from jcm.physics.forcing.echam_boundary_conditions import EchamBoundaryConditions
+
+        coords = get_held_suarez_coords(spectral_truncation=21)
+        physics = ComposablePhysics(
+            terms=[MoistAirColumnState(), EchamBoundaryConditions()],
+            vectorize_columns=True)
+        return Model(coords=coords, terrain=TerrainData.from_coords(coords), time_step=30,
+                     physics=physics)
+
+    def test_pre_979_file_restores_and_seeds_the_skin_from_stl(self):
+        from jcm.physics.surface.echam.surface_types import LAND_FIELDS
+
+        donor = self._model()
+        donor.bootstrap_state()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(donor, path, elapsed_days=0.0)
+            payload = _read_payload(path)
+            # Strip the fields #979 added, as a file from before it holds them.
+            for name in LAND_FIELDS:
+                del payload["physics"][f"surface.{name}"]
+            fields = payload["physics_fields"]["surface"]
+            payload["physics_fields"]["surface"] = {
+                k: v for k, v in fields.items() if v not in LAND_FIELDS}
+            _write_payload(path, payload)
+
+            target = self._model()
+            target.bootstrap_state()
+            with self.assertLogs("jcm.checkpoint", level="INFO") as logs:
+                load_checkpoint(target, path)
+        self.assertTrue(any("surface.land_surface_temperature" in line and "seeded" in line
+                            for line in logs.output), logs.output)
+        restored = np.asarray(target.physics_carry["surface"].land_surface_temperature)
+        np.testing.assert_array_equal(restored, 0.0)
+        # The land albedo of the last radiation solve is among those fields: a
+        # file without it restores it as unset (0), which the land balance
+        # reads as "use the current albedo" until the next solve.
+        self.assertTrue(any("surface.land_albedo_at_solve" in line and "seeded" in line
+                            for line in logs.output), logs.output)
+        np.testing.assert_array_equal(
+            np.asarray(target.physics_carry["surface"].land_albedo_at_solve), 0.0)
+
+        from jcm.forcing import default_forcing
+
+        target.resume(save_interval=1, total_time=1)
+        skin = np.asarray(target.physics_carry["surface"].land_surface_temperature).ravel()
+        stl = np.asarray(default_forcing(target.coords.horizontal).stl_am).ravel()
+        assert np.all(skin > 100.0), "the skin was not seeded"
+        np.testing.assert_allclose(skin, stl, rtol=1e-6)
+
+    def test_the_held_land_albedo_round_trips_by_name(self):
+        """A file that has the slot restores the albedo the radiation last solved with."""
+        donor = self._model()
+        donor.bootstrap_state()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(donor, path, elapsed_days=0.0)
+            payload = _read_payload(path)
+            key = "surface.land_albedo_at_solve"
+            payload["physics"][key] = np.full_like(np.asarray(payload["physics"][key]), 0.63)
+            _write_payload(path, payload)
+
+            target = self._model()
+            target.bootstrap_state()
+            load_checkpoint(target, path)
+        np.testing.assert_allclose(
+            np.asarray(target.physics_carry["surface"].land_albedo_at_solve), 0.63)
