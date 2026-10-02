@@ -1198,8 +1198,8 @@ The whole-model RCE testbed runs RRTMGP
   with RRTMGP (it ran the idealized grey scheme, whose atmosphere cools by
   7 W/m² and whose lowest level fogs under the ECHAM 1M) and pins the
   column's equilibrium from seven trajectories (six perturbed by 1e-4 K of
-  initial noise) and up to four 40-day windows: P/E 0.989-1.001, Tiedtke in every step, column water
-  steady to 0.012 mm/d, a clear lowest level. No public API changes; see
+  initial noise) and up to four 40-day windows: P/E 0.958-1.001, Tiedtke in
+  0.98 of the steps, column water steady to 0.05 mm/d, a clear lowest level. No public API changes; see
   :doc:`design/rce_testbed` for the configuration, the bounds and their
   provenance. The column is finite for the 200 days run under jax-rrtmgp
   0.5.0 and is overcast (total cloud cover 1.0).
