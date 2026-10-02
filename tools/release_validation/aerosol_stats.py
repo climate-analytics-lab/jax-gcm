@@ -569,11 +569,16 @@ def log_drift(days: np.ndarray, values: np.ndarray,
 
     A window of a year or more is fit jointly with the annual harmonic,
     ``ln B = a + b t + c cos(2 pi t / 365) + d sin(2 pi t / 365)``, and ``b`` is
-    returned. A straight line over one cycle only cancels a seasonal swing for
-    particular phases (a stationary burden of amplitude 0.5 in ``ln B`` fits up
-    to 0.0026 /day of "drift" at the worst phase), and the fitted harmonic
-    absorbs the swing whatever its phase. A shorter window is a straight line:
-    it cannot hold a cycle, so the harmonic is not identifiable there.
+    returned. A straight line over one cycle only cancels a sinusoidal seasonal
+    swing for particular phases (a stationary burden of amplitude 0.5 in
+    ``ln B`` fits up to 0.0026 /day of "drift" at the worst phase), and the
+    fitted harmonic absorbs such a swing whatever its phase. The cycle's higher
+    harmonics are not removed: over exactly one period a trend and an arbitrary
+    periodic function cannot be told apart, so a one-year slope of a stationary
+    burden still scatters by ~0.001 /day (``jam_regression.md``, "What a
+    one-year record resolves"); :func:`yoy_burden_ratio` is the cycle-free
+    comparison. A shorter window is a straight line: it cannot hold a cycle, so
+    the harmonic is not identifiable there.
     """
     good = np.isfinite(values) & (values > 0)
     if good.sum() < 3:

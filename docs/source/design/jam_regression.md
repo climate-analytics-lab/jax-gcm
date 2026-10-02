@@ -111,35 +111,53 @@ that no longer contains a spin-up ramp.
 The reason for the longer window and the harmonic is the seasonal sources. Dust,
 biomass-burning carbon and sulfate all have a seasonal cycle, and a
 least-squares line over part of a cycle reads the cycle as growth or decay. A
-line over exactly one cycle cancels it only at particular phases (a stationary
-burden of amplitude 0.5 in `ln B` fits up to 0.0026 /day at the worst phase),
-whereas the fitted harmonic absorbs it at every phase and leaves a real trend
-alone (a 0.003 /day trend under a cycle is recovered to 3×10⁻⁴). Measured on JAM
-T63 L47, two consecutive years of the release recipe on dev `80699ac8` (the
-second started from the first's end state; each scored over its last 40 saves,
-so the six-month fit sits inside a 195-day record):
+line over exactly one cycle cancels a sinusoidal swing only at particular phases
+(a stationary burden of amplitude 0.5 in `ln B` fits up to 0.0026 /day at the
+worst phase), whereas the fitted harmonic absorbs a sinusoidal swing at every
+phase and leaves a real trend alone (a 0.003 /day trend under such a cycle is
+recovered to 3×10⁻⁴). Measured on JAM T63 L47, two consecutive years of the
+release recipe on dev `80699ac8` (the second started from the first's end state;
+each scored over its last 40 saves, so the six-month fit sits inside a 195-day
+record; the last column is the cycle-free comparison, `mean ln(B_year2 /
+B_year1) / 365` over days 150 to 365 of the two years):
 
-| species | six-month line, year 1 | six-month line, year 2 | whole year with annual harmonic, year 2 |
-|---|---|---|---|
-| SO4 | +0.0020 | +0.0025 | +0.0001 |
-| BC | +0.0032 | +0.0033 | −0.0006 |
-| POA | −0.0016 | −0.0014 | −0.0014 |
-| dust | −0.0021 | −0.0011 | −0.0011 |
-| sea salt | +0.0003 | −0.0003 | +0.0001 |
+| species | six-month line, year 1 | six-month line, year 2 | whole-year line, year 2 | whole year with annual harmonic, year 2 | year over year |
+|---|---|---|---|---|---|
+| SO4 | +0.0020 | +0.0025 | +0.0003 | +0.0001 | +0.00006 |
+| BC | +0.0032 | +0.0033 | +0.0004 | −0.0006 | +0.00003 |
+| POA | −0.0016 | −0.0014 | +0.0007 | −0.0014 | +0.00003 |
+| dust | −0.0021 | −0.0011 | −0.0021 | −0.0011 | −0.00015 |
+| sea salt | +0.0003 | −0.0003 | −0.0011 | +0.0001 | −0.00012 |
 
 (slopes of `ln B`, per day; the limit is 0.002.) The six-month slopes repeat from
 year to year with the same sign and size, which a spin-up drift would not, and
-BC exceeds the limit in both; with the harmonic removed the year-2 slopes are
-inside the limit for all five species, and the slope of `ln(year 2 / year 1)`
-over the settled days (day 150 on) is at most 0.0008 /day. On JAM T63 L95, measured the same
-way, the year-2 six-month slopes of BC (+0.0022) and POA (−0.0026) exceed the
-limit while the five whole-year slopes are at most 0.0016 /day (SO4 −0.0001, BC
-−0.0008, dust +0.0007, sea salt −0.0004, POA −0.0016), with a ratio slope of at
-most 0.0011 /day. POA's whole-year slope is negative and within 40% of the limit
-in every warm year measured (−0.0012 to −0.0019, L47 and L95).
-Burdens driven by single events (dust storms, one year holding a storm in a
-30-day block the other does not) are better compared year over year, which is
-why `yoy_burden_ratio_<sp>` is reported for a two-year record.
+BC exceeds the limit in both; the whole-year slopes are inside the limit for all
+five species, and the year-over-year drift is below 0.0002 /day. On JAM T63 L95,
+measured the same way, the year-2 six-month slopes of BC (+0.0022) and POA
+(−0.0026) exceed the limit while the five whole-year slopes with the harmonic are
+at most 0.0016 /day (SO4 −0.0001, BC −0.0008, dust +0.0007, sea salt −0.0004,
+POA −0.0016) and the year-over-year drift is below 0.00015 /day.
+
+**What a one-year record resolves.** The year-over-year drift is the better
+estimate of the true drift, and it is small everywhere it can be formed (at most
+0.0004 /day over the whole of year 2 against year 1, in the L47 and L95 pairs of
+years before the land-surface change and the L47 pair after it), while the whole-year slope of a stationary
+year scatters by about ±0.001 /day. Over the five warm years measured (L47 and
+L95, before and after the land-surface change) × five species it lies in −0.0019
+to +0.0010 /day with the annual harmonic (RMS 0.0009), −0.0021 to +0.0008 with a
+plain line (RMS 0.0007) and −0.0029 to +0.0008 with the semi-annual harmonic as
+well (RMS 0.00075; dust, whose cycle is event-driven, gets worse). The scatter is
+the cycle's non-sinusoidal part and its interannual variability: over exactly one
+period a trend and an arbitrary periodic function cannot be told apart, so no
+choice of harmonics removes it. The annual harmonic is kept because it removes
+the phase-dependent 0.0026 /day above without the extra noise of the higher
+ones. The consequence is that on a one-year record the
+`0.002 /day` limit sits at the resolution floor: the gate separates a runaway
+from a stationary year, not a 0.002 /day creep, and POA (−0.0012 to −0.0019 in
+every warm year, true drift about zero) is the species that reads closest to the
+limit. A two-year record gets the cycle-free comparison for free, which is why
+`yoy_burden_ratio_<sp>` (the final year's mean over the previous year's) is
+reported for one.
 
 The longer window is less sensitive to a late runaway, and that is the price. A
 ×60 growth over the last 40 days of an otherwise seasonal year fits a slope of
