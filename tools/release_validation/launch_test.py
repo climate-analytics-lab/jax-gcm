@@ -591,12 +591,12 @@ def test_arm_overrides_land_last(scratch, repo, gitrepo, remote, capsys):
     """An arm's settings win: warm start, then the raw overrides, last of all."""
     remote["refs/heads/dev"] = _commit(gitrepo, "a")
     arm = ["--days", "30", "--init", "/runs/spin/checkpoint_day90.ckpt",
-           "--extra", "+physics.convection.trigger_cape=150.0", "run.foo=1"]
+           "--extra", "+physics.convection.entrpen=2e-4", "run.foo=1"]
     [job] = _k8s(gitrepo, capsys, "--tag", "arm", "--suffix", "c150", *arm)
     ovs = _jcm_main_overrides(job)
     assert ovs[-4:] == ["init=from_state",
                         "init.file=/runs/spin/checkpoint_day90.ckpt",
-                        "+physics.convection.trigger_cape=150.0", "run.foo=1"]
+                        "+physics.convection.entrpen=2e-4", "run.foo=1"]
     assert "run.total_time=30.0" in ovs
     assert '[ "$LAST" -lt 30 ]' in _script(job)    # the gate follows --days
     # The PBS door layers the same arm the same way (a local state path).
@@ -605,12 +605,12 @@ def test_arm_overrides_land_last(scratch, repo, gitrepo, remote, capsys):
     state.write_bytes(b"x")
     launch.main(["--repo", str(repo), "--members", MEMBER, "--tag", "arm",
                  "--suffix", "c150", "--days", "30", "--init", str(state),
-                 "--extra", "+physics.convection.trigger_cape=150.0"])
+                 "--extra", "+physics.convection.entrpen=2e-4"])
     pbs = (repo / "runs" / "mx_speedy_t31_arm_c150.pbs").read_text()
     body = pbs.split("python -u -m jcm.main", 1)[1].split("\necho ")[0]
     assert shlex.split(body.replace("\\\n", " "))[-3:] == [
         "init=from_state", f"init.file={state}",
-        "+physics.convection.trigger_cape=150.0"]
+        "+physics.convection.entrpen=2e-4"]
 
 
 def test_extra_overrides_are_shell_quoted(scratch, repo, gitrepo, remote,

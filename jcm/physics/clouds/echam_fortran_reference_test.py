@@ -649,8 +649,8 @@ def test_reference_data_integrity():
 
 @pytest.mark.xfail(strict=True, reason=(
     "jcm constants differ from ECHAM6.3 mo_physical_constants.f90: grav 9.81 vs "
-    "9.80665, rv 461.0 vs 461.51, alhc 2.501e6 vs 2.5008e6, alhs 2.834e6 vs "
-    "2.8345e6, eps 0.622 vs rd/rv = 0.621958 (relative 1e-4 to 1e-3)."))
+    "9.80665, alhc 2.501e6 vs 2.5008e6, alhs 2.834e6 vs 2.8345e6, eps 0.622 vs "
+    "rd/rv = 0.621958 (relative 7e-5 to 3.5e-4)."))
 def test_physical_constants_match_echam():
     """Check jcm's global constants against ECHAM6.3's (the comparisons above run
     with ECHAM's substituted, so this is the only place their difference

@@ -22,8 +22,11 @@ energy. At each level, in order:
 
 `zlift` is the sub-grid thermal excess of the warmest boundary-layer plumes
 (`MIN(MAX(cminbuoy, MIN(cmaxbuoy, thvsig·cbfac)), 1.0)`), so it is **at most
-1 K**. CAPE never enters: `has_cloud_base` gates everything upstream of the
-trigger weight.
+1 K**. CAPE never enters. A cloud base is necessary, not sufficient: the
+column then convects only if its sub-cloud layer gains moisture and the
+cloud-base parcel is wetter than its environment (`cumastr`'s `zlo1` gate),
+and, for a cloud base at `klevm1`, only if the plume passes the first
+interface above it (see {doc}`../science/convection`).
 
 ## The consequence
 
