@@ -8,6 +8,17 @@ from typing import NamedTuple
 import jax.numpy as jnp
 import tree_math
 
+# ECHAM6.3 has one longwave surface emissivity, ``cemiss = 0.996``
+# (``mo_radiation_parameters.f90::cemiss``, a PARAMETER), and applies it to
+# every surface: the radiation's surface boundary
+# (``mo_psrad_interface.f90``, ``zsemiss = cemiss`` in all longwave bands), the
+# downward longwave over the tile mix (``mo_surface_boundary.f90::
+# longwave_down_rad``), the land balance (``mo_surface_land.f90::land_rad``,
+# ``update_surfacetemp.f90``; JSBACH's ``Emissivity`` in
+# ``mo_jsbach_constants.f90``) and the longwave re-emission
+# (``radheat.f90``). Water, ice and land are not distinguished.
+ECHAM_SURFACE_EMISSIVITY = 0.996
+
 
 @tree_math.struct
 class SurfaceParameters:
@@ -46,7 +57,7 @@ class SurfaceParameters:
     def default(cls,  nsfc_type=3, iwtr=0, iice=1, ilnd=2,
                  ml_depth=50.0, rho_water=1025.0, cp_water=3994.0,
                  rho_ice=917.0, cp_ice=2106.0, conduct_ice=2.2,
-                 emissivity=0.99, stefan_boltzmann=5.67e-8,
+                 emissivity=ECHAM_SURFACE_EMISSIVITY, stefan_boltzmann=5.67e-8,
                  z0_water=1e-4, z0_ice=1e-3, z0_land=0.1,
                  von_karman=0.4, min_wind_speed=1.0) -> 'SurfaceParameters':
         """Return default surface parameters"""
