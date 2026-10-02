@@ -327,6 +327,100 @@ carries ICON's Mauritsen (2007) functions (#982).
 
 ## 7. Measured effect
 
-*(Filled in from the acceptance runs: the 240-day T63 1M run's box budgets
-against the control and the evaporation-only arm, and the 10-day A/B per
-preset.)*
+**240 days of `t63-echam-1m`.** T63L47 from the 1M spin-up, 1 January to
+28 August, 5-day means, against the same model with the prescribed land
+temperature and the beta evaporation form (dev 80699ac8), and against an arm
+with JSBACH's bare-soil form alone and the prescribed temperature. Box means
+over land (land fraction ≥ 0.5, cos-latitude weights); observations are
+MERRA-2 latent heat and GPCP precipitation (2001-2020). `S = H + LH − Rn` is
+the grid surface surplus: the energy the surface hands the atmosphere beyond
+what it absorbs, which a real land closes with its ground-heat flux.
+
+| box, season | LH: prescribed / form only / this land / MERRA-2 [W m⁻²] | P: … / GPCP [mm d⁻¹] | S: prescribed / form only / this land [W m⁻²] |
+|---|---|---|---|
+| Sahel, MAM | 149 / 63 / 37 / 14 | 7.6 / 2.7 / 2.0 / 0.6 | 157 / 38 / 17 |
+| Mexican plateau, MAM | 64 / 1 / 27 / 20 | 9.5 / 3.8 / 3.0 / 0.6 | 102 / 38 / 33 |
+| India, MAM | 308 / 138 / 75 / 24 | 26.8 / 12.6 / 8.0 / 0.7 | 347 / 132 / 30 |
+| Amazon, MAM | 113 / 137 / 108 / 128 | 6.2 / 9.1 / 7.3 / 9.1 | −19 / 37 / 3 |
+| Congo, MAM | 166 / 170 / 101 / 114 | 13.8 / 14.8 / 8.8 / 5.0 | 111 / 121 / 12 |
+| Sahel, JJA | 179 / 109 / 68 / 55 | 16.3 / 9.5 / 6.7 / 3.9 | 207 / 99 / 32 |
+| Mexican plateau, JJA | 134 / 22 / 60 / 50 | 10.9 / 6.1 / 7.9 / 2.9 | 129 / −26 / 10 |
+| India, JJA | 290 / 261 / 142 / 93 | 26.4 / 20.4 / 10.5 / 8.0 | 239 / 211 / 25 |
+| Amazon, JJA | 134 / 130 / 110 / 124 | 9.1 / 7.4 / 3.5 / 3.2 | 48 / 50 / 15 |
+| Congo, JJA | 123 / 122 / 95 / 98 | 7.1 / 7.5 / 4.7 / 3.4 | 60 / 57 / 10 |
+| Gobi, MAM | 12 / 1 / 7 / 12 | 3.0 / 1.9 / 2.0 / 0.4 | −43 / −49 / −21 |
+
+- The land tile's own budget closes from output to round-off in every box
+  (`Rn = SH + LH + G + melt + storage`). What remains of the grid surplus is
+  the ground-heat flux from the prescribed soil: the skin runs 0.5-3.6 K
+  colder than ERA5's soil-temperature climatology `stl_am` in these boxes, and
+  the soil held at `stl_am` supplies the difference (Sahel JJA 32, India JJA
+  26, Amazon JJA 16 W m⁻²). A prognostic soil temperature (#672) would let it
+  run down.
+- The Gobi's deficit has other sources and does not close with the land
+  surface: in MAM, 13 W m⁻² melts a prescribed snow cover that never thins,
+  and the skin is warmer than `stl_am` (8 W m⁻² into the soil).
+- The wet tropics evaporate 3-15 % below MERRA-2: Amazon 108 against 128
+  (MAM) and 110 against 124 (JJA), Congo 101 against 114 and 95 against
+  98 W m⁻². The Amazon's dry-season (JJA) evaporation is 18 % below the
+  prescribed land's, which was 8 % above MERRA-2; its soil is wet (β ≈ 0.9),
+  so the canopy conductance limits it. Congo, where the prescribed land
+  evaporated 25-45 % above MERRA-2, comes down to it, and its precipitation
+  falls with its surplus.
+- Days 30-240, global means: precipitation 2.96 → 2.67 mm d⁻¹ (land
+  4.31 → 2.51, ocean 2.41 → 2.74; land 40°S-40°N 6.83 → 3.66 against GPCP's
+  2.74), land latent heat 77 → 47 W m⁻², land sensible heat 36 → 42 W m⁻²,
+  OLR 242.6 → 239.6 W m⁻² and net TOA radiation 1.95 → 7.47 W m⁻². The
+  tropical Atlantic's MAM rain rises from 0.63 to 1.37 mm d⁻¹ (GPCP 6.24) and
+  its JJA rain from 1.78 to 4.29 (7.61).
+- The water-positivity correction the physics applies after the transport
+  stays at 0.0002-0.0003 mm d⁻¹ over land.
+
+**The diurnal cycle.** Composites by local solar time over days 30-240 from
+the 3-hourly snapshots (eight bins; first harmonic by vector averaging,
+Covey et al. 2016):
+
+| region | sensible heat: mean / 1st-harmonic amplitude / hour of max | convective rain: mean [mm d⁻¹] / amplitude / hour of max |
+|---|---|---|
+| tropical land, prescribed | 47 / 2.7 / 05 | 8.6 / 9 % / 02 |
+| tropical land, this land | 50 / 79 / 13 | 4.4 / 136 % / 14 |
+| Sahel, this land | 66 / 100 / 13 | 3.6 / 122 % / 14 |
+| Amazon, this land | 29 / 52 / 13 | 5.1 / 162 % / 14 |
+| tropical ocean, this land | 21 / 1.1 / 08 | 3.9 / 14 % / 03 |
+
+The land now heats its boundary layer by day (Sahel sensible heat 211 W m⁻²
+in the 12-15 h bin) and its convection follows: deep convective rain peaks
+in the early afternoon, the near-noon timing known for ECHAM's Tiedtke
+convection over land (Bechtold et al. 2004), earlier than the observed late
+afternoon (Dai 2006). The ocean keeps its nocturnal maximum.
+
+**Ten days of each preset.** Days 5-10 of T63L47 members from the presets'
+spin-ups (January), this land against the prescribed one (dev 80699ac8);
+land and ocean split by the land tile's fraction (> 0.5). Values are the
+prescribed land's, then the change:
+
+| quantity | 1M | 2M | JAM |
+|---|---|---|---|
+| net TOA [W m⁻²] | 0.68, +4.10 | 8.93, +4.12 | 9.20, +3.69 |
+| … over land | −69.7, +8.0 | −63.7, +11.0 | −64.1, +12.0 |
+| SW CRE [W m⁻²] | −47.2, +0.9 | −50.9, +1.0 | −50.3, +0.7 |
+| LW CRE [W m⁻²] | 14.8, +0.3 | 26.8, +0.6 | 26.9, +0.6 |
+| OLR [W m⁻²] | 246.8, −3.3 | 234.9, −3.2 | 234.5, −3.2 |
+| cloud cover [%] | 55.3, +0.0 | 60.2, −1.2 | 61.9, −0.9 |
+| … over land | 52.5, −4.5 | 56.4, −7.9 | 57.0, −8.3 |
+| LWP [g m⁻²] | 69.8, −3.7 | 40.7, −3.4 | 45.1, −4.2 |
+| IWP [g m⁻²] | 18.7, −1.1 | 26.7, −0.7 | 28.7, −1.8 |
+| precipitation [mm d⁻¹] | 2.65, −0.28 | 2.59, −0.27 | 2.70, −0.31 |
+| … convective | 2.05, −0.21 | 1.93, −0.22 | 1.99, −0.22 |
+| … large-scale | 0.60, −0.07 | 0.65, −0.05 | 0.71, −0.09 |
+| … over land | 3.70, −1.58 | 3.48, −1.50 | 3.36, −1.55 |
+| … over ocean | 2.22, +0.25 | 2.22, +0.23 | 2.43, +0.19 |
+| column water vapour [kg m⁻²] | 25.05, −0.06 | 24.92, −0.27 | 24.80, −0.20 |
+| land latent heat [W m⁻²] | 62.2, −29.5 | 63.2, −30.7 | 64.1, −30.0 |
+| land sensible heat [W m⁻²] | 32.0, −2.4 | 28.9, −2.6 | 28.8, −2.7 |
+
+In every preset the land evaporates about half as much, its rain falls by
+43-46 %, the ocean rains 8-11 % more, and the land loses cloud, which
+raises net TOA radiation by about 4 W m⁻² globally. The step costs the same:
+the steady 5-day chunk of the 1M member takes 77.8 s against 77.6 s on one
+A100.

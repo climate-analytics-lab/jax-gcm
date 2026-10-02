@@ -1284,6 +1284,11 @@ balance, solved implicitly with the lowest level, over a soil held at
 ``stl_am`` (see :doc:`science/surface` and
 :doc:`design/land_skin_energy_balance`). Nothing fails; every ECHAM climate
 number changes. Any tuning done against the old land surface should be redone.
+Over days 5-10 of the T63 presets the land evaporates about half as much, land
+precipitation falls by 43-46 %, ocean precipitation rises by 8-11 %, and net
+TOA radiation rises by about 4 W m⁻² as the land loses cloud. Land convection
+now peaks in the early afternoon instead of at night. The box budgets and the
+240-day numbers are in :doc:`design/land_skin_energy_balance`.
 
 What a user has to know:
 

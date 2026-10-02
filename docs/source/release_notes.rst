@@ -1778,8 +1778,23 @@ The ECHAM land evaporates in JSBACH's form and closes a skin energy balance
   ``canopy_conductance``.
 - A checkpoint written before this change restores with the skin seeded from
   ``stl_am`` (the new carry fields migrate by name).
-- **Changes results** for every ECHAM configuration. The measured effect is in
+- A run's first step from a cold start has no land evaporation, as in ECHAM
+  (``init_surface`` sets ``zcair = zcsat = 0``); a restored carry is
+  unaffected.
+- **Changes results** for every ECHAM configuration. Over days 5-10 of T63
+  members against the prescribed land: net TOA radiation +4.1 W m⁻² (1M and
+  2M) and +3.7 (JAM), land latent heat about halved (1M 62 → 33 W m⁻²), land
+  precipitation −43 to −46 % and ocean precipitation +8 to +11 %, with less
+  land cloud. Over 240 days of ``t63-echam-1m``, the spring surface surplus
+  ``H + LH − Rn`` of the Sahel, Mexican plateau and India falls from 157, 102
+  and 347 to 17, 33 and 30 W m⁻², land precipitation between 40°S and 40°N
+  from 6.83 to 3.66 mm d⁻¹ (GPCP 2.74), and land convective rain moves from a
+  02 h to a 14 h local-time maximum as the land heats its boundary layer by
+  day. The numbers and box tables are in
   :doc:`design/land_skin_energy_balance`. See :doc:`science/surface`.
+- **Retune item.** Net TOA radiation rises by 4-5.5 W m⁻² with the drier,
+  less cloudy land (7.47 W m⁻² over days 30-240 of the 1M run, inside the
+  release gate's 10 W m⁻²). Retuning the presets against it belongs to #682.
 
 
 Known limitations
