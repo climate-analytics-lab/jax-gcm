@@ -1191,6 +1191,19 @@ RCE initial state seeds a mixed sub-cloud layer
   to the surface. Pass ``mixed_layer_top_m=0.0`` to restore the previous
   profile; see :doc:`design/convective_trigger_soundings` for the reasoning.
 
+The whole-model RCE testbed runs RRTMGP
+"""""""""""""""""""""""""""""""""""""""
+
+- ``rce_test.py::TestRceWholeModelTiedtke`` now integrates ``echam_physics()``
+  with RRTMGP (it ran the idealized grey scheme, whose atmosphere cools by
+  7 W/m² and whose lowest level fogs under the ECHAM 1M) and pins the
+  column's equilibrium from seven trajectories (six perturbed by 1e-4 K of
+  initial noise) and up to four 40-day windows: P/E 0.989-1.001, Tiedtke in every step, column water
+  steady to 0.012 mm/d, a clear lowest level. No public API changes; see
+  :doc:`design/rce_testbed` for the configuration, the bounds and their
+  provenance. The column is finite for the 200 days run under jax-rrtmgp
+  0.5.0 and is overcast (total cloud cover 1.0).
+
 Grey two-stream shortwave conserves energy
 """"""""""""""""""""""""""""""""""""""""""
 
@@ -1748,14 +1761,15 @@ Tiedtke-Nordeng takes ECHAM's decisions
 - Each decision's derivative is that of a logistic surrogate
   (``tiedtke_nordeng/switches.py``, :doc:`design/surrogate_gradients`); the
   value does not depend on the widths.
-- ECHAM6.3's compiled convection, run on 758 columns (whole-model RCE states,
+- ECHAM6.3's compiled convection, run on 758 columns (states of the
+  whole-model RCE column in its earlier grey-radiation configuration,
   and the same states under a synthetic ascent, convergence or divergence
   that exercise the mid-level and deep plumes and the ``zlo1`` gate), is the reference
   (``jcm/data/test/echam_cumastr_reference``): with ECHAM's physical
   constants jcm takes its decision on every column and matches its cloud-base
   flux, precipitation and tendencies to 2.1e-12 or better. With jcm's own
   constants, whose ``rv`` is ECHAM's (next entry), 2 of the 758 decisions
-  differ, through the latent heats; on the whole-model RCE column's days
+  differ, through the latent heats; on that column's days
   40-80 states the port, in float32, convects in 15.1 % of the steps and
   ECHAM in 15.0 %.
 - **Breaking:** ``ConvectionParameters`` loses ``trigger_cape``,
@@ -1780,7 +1794,7 @@ Tiedtke-Nordeng takes ECHAM's decisions
   the next entry). The run-to-run spread of these numbers is 0.19 W/m² in
   net TOA radiation and 0.006 mm/day in precipitation (1M entry above). Both
   runs stay finite, with the sub-cloud supply carrying the lagged dynamics
-  and no evaporation floor. In the whole-model RCE column, Tiedtke convects
+  and no evaporation floor. In that grey-radiation column, Tiedtke convects
   in 15.1 % of the days 40-80 steps and its precipitation is 2.4 % of
   0.31 mm/d.
 
@@ -2103,18 +2117,6 @@ Calibration and capability gaps
   ``+configuration=`` group composes, and its coverage is the ``rce_test.py`` /
   ``betts_miller_test.py`` unit suites rather than the release-validation
   matrix.
-- **The whole-model single-column RCE fogs its lowest level under the ECHAM
-  1M.** The column of ``rce_test.py::TestRceWholeModelTiedtke`` (grey
-  radiation, SST 300 K, a prescribed uniform 5 m/s wind, no subsidence) fogs
-  its lowest level from about day 10, and over days 40-80 it rains 0.65 of
-  what it evaporates (P 0.29-0.31, E 0.45-0.47 mm/day) against the test's
-  0.8. ECHAM6.3's compiled ``cover``, ``cloud`` and ``cumastr``, fed the
-  column's captured states, make the same fog and keep convection off in all
-  but a few percent of the steps, so this is ECHAM's behaviour on a column with nothing to ventilate its
-  lowest layer. That pin, calibrated on the previous 1M, is a strict expected
-  failure until the testbed is re-derived with prescribed subsidence and
-  RRTMGP (#967); the column's other pins stay live. The T63 climate of the
-  1M, 2M and JAM presets shows no low-cloud rise.
 
 :ref:`The migration guide <v3-support-matrix>` carries the support matrix and
 the evidence behind each accepted-limitation verdict.

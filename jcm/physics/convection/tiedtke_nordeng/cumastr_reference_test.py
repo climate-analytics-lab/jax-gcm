@@ -2,7 +2,9 @@
 
 ``jcm/data/test/echam_cumastr_reference/`` holds what ECHAM6.3's compiled
 ``cucall``/``cumastr`` returns for 758 columns (provenance in the README
-there): 400 states of jcm's whole-model radiative-convective column, where
+there): 400 states of jcm's whole-model radiative-convective column (its
+grey-radiation configuration at capture; the stored arguments do not depend on
+the column the testbed runs now), where
 ECHAM's shallow plume at the first interface above cloud base decides whether
 the column convects at all; 100 of them with a synthetic resolved ascent (the
 mid-level trigger) and 100 with a synthetic moisture convergence (deep

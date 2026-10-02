@@ -99,7 +99,8 @@ carries, where the plume stops and where it rains are hard comparisons in
 
 ECHAM has no CAPE trigger, and neither does the port.
 ``jcm/data/test/echam_cumastr_reference`` holds what ECHAM6.3's compiled
-``cucall`` returns for 758 columns — whole-model RCE column states, where the
+``cucall`` returns for 758 columns — states of the whole-model RCE column in its
+earlier grey-radiation configuration, where the
 first ascent test above a cloud base at ``klevm1`` decides whether the column
 convects, and the same states under a resolved ascent (mid-level plumes), a
 moisture convergence (deep plumes) or a sub-cloud divergence and a humid
@@ -156,9 +157,9 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   2.5008e6 and 2.8345e6 J/kg) differ from ECHAM's by 0.008-0.035 %. That
   still moves marginal decisions: the ascent test at the first interface
   above a cloud base at ``klevm1`` sits within hundredths of a kelvin of zero
-  in the whole-model RCE column. On the 758 reference columns jcm's
+  in that grey-radiation RCE column. On the 758 reference columns jcm's
   constants change 2 cloud tops, and ECHAM's latent heats bring both back. On
-  that RCE column's own days 40-80 states the port, run in float32 as the
+  that column's own days 40-80 states the port, run in float32 as the
   model runs it, convects in 15.1 % of the steps and ECHAM6.3 in 15.0 %, the
   two differing in 16 of the 3840 steps; in float64 with ECHAM's constants
   the port takes ECHAM's decision on every step.
@@ -205,7 +206,8 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   difference as water. The amount is published as
   ``convection.precip_floor_source``, so a column budget closes as
   ``E - P + precip_floor_source``; in the whole-model RCE column, with grey
-  or RRTMGP radiation, it is below 0.001 mm/d over days 40-80.
+  or RRTMGP radiation, it is below 0.001 mm/d over days 40-80
+  ({doc}`../design/rce_testbed`).
 
 **Code pointers.**
 - ``jcm/physics/convection/tiedtke_nordeng/`` — ``tiedtke_nordeng.py``
