@@ -1477,7 +1477,7 @@ those of logistic surrogates, so a finite-difference check of the scheme
 disagrees with AD near a decision, by design
 (:doc:`design/surrogate_gradients`).
 
-.. _v3-rv:
+.. _v3-moist-stability:
 
 ECHAM boundary-layer stability is moist and cloud-weighted
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -1490,6 +1490,8 @@ cloud 0.332 → 0.290), the latent heat flux rises 65.2 → 67.1 W/m², the refl
 shortwave falls 102.9 → 98.6 W/m² and the unstable fraction of the interior
 interfaces falls 3.0 % → 1.3 %. The 1-day ECHAM regression trajectory moves by 13 %
 in specific humidity (normalized RMS). The full table is in the release notes.
+
+.. _v3-rv:
 
 The vapour gas constant is ECHAM's
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
