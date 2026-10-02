@@ -3248,6 +3248,94 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         rad = self._params(physics, "radiation")
         self.assertAlmostEqual(float(rad.cloud_inhomogeneity_ice), 0.7)
 
+    def _emission_term(self, physics, name):
+        return next(t for t in physics.terms if t.name == name).params.get_value()
+
+    def test_seasalt_scale_reaches_the_jam_preset(self):
+        # The sea-salt emission scale, a #682 calibration lever: the CLI
+        # string reaches the Gong term; the other field keeps its default.
+        physics = build_physics(_compose(
+            [*self._JAM, "+physics.seasalt.scale=1.7"]))
+        ss = self._emission_term(physics, "jam_seasalt_emissions")
+        self.assertAlmostEqual(float(ss.scale), 1.7)
+        self.assertAlmostEqual(float(ss.wind_exponent), 3.41, places=5)
+        dms = self._emission_term(physics, "jam_dms_emissions")
+        self.assertEqual(float(dms.flux_scale), 1.0)
+
+    def test_dms_flux_scale_reaches_the_jam_preset(self):
+        physics = build_physics(_compose(
+            [*self._JAM, "+physics.dms.flux_scale=0.6"]))
+        dms = self._emission_term(physics, "jam_dms_emissions")
+        self.assertAlmostEqual(float(dms.flux_scale), 0.6)
+        ss = self._emission_term(physics, "jam_seasalt_emissions")
+        self.assertEqual(float(ss.scale), 1.0)
+
+    def test_emission_override_changes_exactly_one_recorded_parameter(self):
+        # The override is applied to the object the factory resolved, so the
+        # provenance record differs from the un-overridden preset by that one
+        # value and the pytree structure (leaves vs static aux) is unchanged.
+        from flax import nnx
+
+        from jcm.provenance import describe_params
+
+        base = build_physics(_compose([*self._JAM]))
+        base_p = describe_params(base)
+        for override, key in (
+                ("+physics.seasalt.scale=1.7",
+                 "jam_seasalt_emissions.params.scale"),
+                ("+physics.dms.flux_scale=0.6",
+                 "jam_dms_emissions.params.flux_scale")):
+            with self.subTest(override=override):
+                tuned = build_physics(_compose([*self._JAM, override]))
+                tuned_p = describe_params(tuned)
+                self.assertEqual(base_p.keys(), tuned_p.keys())
+                self.assertEqual(
+                    sorted(k for k in base_p if base_p[k] != tuned_p[k]),
+                    [key])
+                self.assertEqual([t.name for t in base.terms],
+                                 [t.name for t in tuned.terms])
+                self.assertEqual(
+                    jax.tree_util.tree_structure(nnx.state(base, nnx.Param)),
+                    jax.tree_util.tree_structure(nnx.state(tuned, nnx.Param)))
+
+    def test_emission_overrides_stay_differentiable_leaves(self):
+        physics = build_physics(_compose(
+            [*self._JAM, "+physics.seasalt.scale=1.7",
+             "+physics.dms.flux_scale=0.6"]))
+        for term, field, value in (("jam_seasalt_emissions", "scale", 1.7),
+                                   ("jam_dms_emissions", "flux_scale", 0.6)):
+            with self.subTest(field=field):
+                params = self._emission_term(physics, term)
+                leaf = getattr(params, field)
+                self.assertTrue(any(x is leaf for x
+                                    in jax.tree_util.tree_leaves(params)))
+                grads = jax.grad(lambda p: getattr(p, field) ** 2,
+                                 allow_int=True)(params)
+                self.assertAlmostEqual(float(getattr(grads, field)),
+                                       2 * value, places=5)
+
+    def test_emission_override_on_a_preset_without_jam_is_rejected(self):
+        # echam-forced-flux composes MACv2-SP, which has no sea-salt or DMS
+        # emission to tune; the override would be dropped without a trace.
+        for override, name in (("+physics.seasalt.scale=1.7", "seasalt"),
+                               ("+physics.dms.flux_scale=0.6", "dms")):
+            with self.subTest(override=override):
+                with self.assertRaisesRegex(
+                        ValueError, rf"\['{name}'\] would be ignored"):
+                    build_physics(_compose([*self._FORCED, override]))
+
+    def test_emission_unknown_field_is_rejected_with_the_valid_names(self):
+        for override, pattern in (
+                ("+physics.seasalt.scal=1.7",
+                 r"seasalt: unknown SeaSaltParameters field\(s\) \['scal'\]"
+                 r".*Valid fields: .*'scale'"),
+                ("+physics.dms.flux_scal=0.6",
+                 r"dms: unknown DmsParameters field\(s\) \['flux_scal'\]"
+                 r".*Valid fields: \['flux_scale'\]")):
+            with self.subTest(override=override):
+                with self.assertRaisesRegex(ValueError, pattern):
+                    build_physics(_compose([*self._JAM, override]))
+
     def test_unknown_field_is_rejected_with_the_valid_names(self):
         cfg = _compose([*self._JAM, "+physics.convection.entrpn=4e-4"])
         with self.assertRaisesRegex(

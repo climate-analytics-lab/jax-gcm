@@ -386,10 +386,11 @@ from something that does not move: a permanent archive
 (`<prefix>_day<N>.ckpt`, written every 30 days by the JAM members) or the
 final checkpoint of a finished run — not the rotating `checkpoint.msgpack` of
 one still running. The factory-built JAM presets take per-scheme fields as
-`+physics.convection.<field>=` (#935); the term-list presets (echam-1m/2m)
-as `+physics.terms.tiedtke_convection.params.<field>=`. On the PBS path the
-same flags build the same arm, but `--resume` there regenerates from the
-command line, so repeat them.
+`+physics.convection.<field>=` (#935), and the sea-salt and DMS emission scales
+as `+physics.seasalt.scale=` and `+physics.dms.flux_scale=`; the term-list
+presets (echam-1m/2m) as `+physics.terms.tiedtke_convection.params.<field>=`.
+On the PBS path the same flags build the same arm, but `--resume` there
+regenerates from the command line, so repeat them.
 
 ### Fetching, scoring and ingesting
 

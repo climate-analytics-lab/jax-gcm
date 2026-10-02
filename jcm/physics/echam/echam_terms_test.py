@@ -239,6 +239,90 @@ class TestEchamComposablePhysics(unittest.TestCase):
                         ValueError, rf"\['{name}'\] would be ignored"):
                     echam_physics(checkpoint_terms=False, **kwargs)
 
+    def test_jam_natural_emission_parameters_reach_their_terms(self):
+        """``seasalt`` / ``dms`` set the JAM emission terms' parameters.
+
+        A mapping is applied on top of the class default and keeps the
+        fields it does not name; a Parameters object is used as given; with
+        neither, the terms keep the defaults.
+        """
+        from jcm.physics.aerosol.jam.emissions.dms import DmsParameters
+        from jcm.physics.aerosol.jam.emissions.seasalt import SeaSaltParameters
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", jam_microphysics="placeholder")
+
+        def emission_params(physics):
+            by_name = {t.name: t.params.get_value() for t in physics.terms
+                       if t.name in ("jam_seasalt_emissions",
+                                     "jam_dms_emissions")}
+            return by_name["jam_seasalt_emissions"], by_name["jam_dms_emissions"]
+
+        default_ss, default_dms = SeaSaltParameters.default(), DmsParameters.default()
+        ss, dms = emission_params(echam_physics(**jam))
+        self.assertEqual(float(ss.scale), float(default_ss.scale))
+        self.assertEqual(float(dms.flux_scale), float(default_dms.flux_scale))
+
+        # Mappings: only the named field moves.
+        ss, dms = emission_params(echam_physics(
+            **jam, seasalt={"scale": 1.7}, dms={"flux_scale": 0.6}))
+        self.assertAlmostEqual(float(ss.scale), 1.7)
+        self.assertEqual(float(ss.wind_exponent),
+                         float(default_ss.wind_exponent))
+        self.assertAlmostEqual(float(dms.flux_scale), 0.6)
+        # Each mapping reaches its own term only.
+        ss, dms = emission_params(echam_physics(**jam, dms={"flux_scale": 0.6}))
+        self.assertEqual(float(ss.scale), float(default_ss.scale))
+        ss, dms = emission_params(echam_physics(**jam, seasalt={"scale": 1.7}))
+        self.assertEqual(float(dms.flux_scale), float(default_dms.flux_scale))
+
+        # Objects are used as given (the Python-API form of the same door).
+        ss, dms = emission_params(echam_physics(
+            **jam, seasalt=SeaSaltParameters(
+                scale=2.5, wind_exponent=3.0),
+            dms=DmsParameters(flux_scale=0.4)))
+        self.assertAlmostEqual(float(ss.scale), 2.5)
+        self.assertAlmostEqual(float(ss.wind_exponent), 3.0)
+        self.assertAlmostEqual(float(dms.flux_scale), 0.4)
+
+    def test_jam_natural_emission_override_rejects_unknown_fields(self):
+        """A typo'd field is an error naming the scheme and the valid fields."""
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", jam_microphysics="placeholder")
+        with self.assertRaisesRegex(
+                ValueError, r"seasalt: unknown SeaSaltParameters field\(s\) "
+                r"\['scal'\].*Valid fields: .*'scale'"):
+            echam_physics(**jam, seasalt={"scal": 1.7})
+        with self.assertRaisesRegex(
+                ValueError, r"dms: unknown DmsParameters field\(s\) "
+                r"\['flux_scal'\].*Valid fields: \['flux_scale'\]"):
+            echam_physics(**jam, dms={"flux_scal": 0.6})
+
+    def test_jam_natural_emission_parameters_without_jam_are_rejected(self):
+        """The emission parameters need the JAM chain, mapping or object.
+
+        MACv2-SP composes no sea-salt or DMS emission, so either form would
+        be dropped without a trace.
+        """
+        from jcm.physics.aerosol.jam.emissions.dms import DmsParameters
+        from jcm.physics.aerosol.jam.emissions.seasalt import SeaSaltParameters
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        for kwargs, names in (
+                (dict(seasalt={"scale": 1.7}), "seasalt"),
+                (dict(dms={"flux_scale": 0.6}), "dms"),
+                (dict(seasalt=SeaSaltParameters.default()), "seasalt"),
+                (dict(dms=DmsParameters.default()), "dms"),
+                (dict(seasalt={"scale": 1.7}, dms={"flux_scale": 0.6}),
+                 "seasalt', 'dms")):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(
+                        ValueError, rf"\['{names}'\] would be ignored"):
+                    echam_physics(checkpoint_terms=False, **kwargs)
+
     def test_echam_physics_accepts_custom_radiation_term(self):
         """A radiation PhysicsTerm can be passed directly."""
         from jcm.physics.echam.echam_terms import echam_physics

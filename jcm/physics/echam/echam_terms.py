@@ -19,7 +19,7 @@ otherwise use.
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from jcm.physics.aerosol import Macv2SpAerosol
 from jcm.physics.aerosol.macv2_sp_params import AerosolParameters
@@ -70,6 +70,12 @@ from jcm.physics.vertical_diffusion.tte_tke import TteTkeVerticalDiffusion
 from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
     VDiffParameters,
 )
+
+if TYPE_CHECKING:
+    # Only the annotations of ``echam_physics`` name these: the JAM package is
+    # imported in the JAM branch of the factory, not for every composition.
+    from jcm.physics.aerosol.jam.emissions.dms import DmsParameters
+    from jcm.physics.aerosol.jam.emissions.seasalt import SeaSaltParameters
 
 
 #: Raised for ``echam_physics(radiation_scheme="grey")``. The grey two-stream
@@ -158,6 +164,8 @@ def echam_physics(
     aerosol: AerosolParameters | Mapping[str, Any] | None = None,
     hines: HinesParameters | Mapping[str, Any] | None = None,
     sso: SSOParameters | Mapping[str, Any] | None = None,
+    seasalt: SeaSaltParameters | Mapping[str, Any] | None = None,
+    dms: DmsParameters | Mapping[str, Any] | None = None,
     gw_scheme: str = "hines",
     checkpoint_terms: bool = True,
     radiation_scheme: str | PhysicsTerm = "rrtmgp",
@@ -211,9 +219,9 @@ def echam_physics(
     the valid ones, and numeric fields stay differentiable pytree leaves.
     A mapping for a scheme the composition does not include (``microphysics``
     with ``cloud_scheme="2m"``, ``hines`` with ``gw_scheme`` ``"frontal"`` or
-    ``"none"``, ``aerosol`` with ``aerosol_module="jam"``, ``radiation``
-    with a radiation term instance) and a mapping
-    that sets ``cu_lmfmid`` alongside the scalar ``cu_lmfmid`` flag are
+    ``"none"``, ``aerosol`` with ``aerosol_module="jam"``, ``seasalt`` and
+    ``dms`` without it, ``radiation`` with a radiation term instance) and a
+    mapping that sets ``cu_lmfmid`` alongside the scalar ``cu_lmfmid`` flag are
     rejected rather than ignored.
 
     Args:
@@ -240,6 +248,15 @@ def echam_physics(
             when ``cloud_scheme="2m"``.
         hines: Override for non-orographic GW ``HinesParameters``.
         sso: Override for sub-grid-scale orography ``SSOParameters``.
+        seasalt: Override for the JAM Gong (2003) sea-salt emission
+            :class:`~jcm.physics.aerosol.jam.emissions.seasalt.SeaSaltParameters`
+            (``scale``, the overall emission multiplier, and
+            ``wind_exponent``). ``aerosol_module="jam"`` only: an argument
+            given without it is rejected rather than ignored.
+        dms: Override for the JAM Nightingale (2000) DMS sea-air emission
+            :class:`~jcm.physics.aerosol.jam.emissions.dms.DmsParameters`
+            (``flux_scale``, the multiplier on the emitted DMS flux).
+            ``aerosol_module="jam"`` only, as ``seasalt``.
         gw_scheme: Non-orographic gravity-wave scheme: ``"hines"`` (ECHAM's
             Doppler-spread scheme, the default), ``"frontal"`` (CAM's
             frontogenesis-triggered spectral scheme — requires a
@@ -481,11 +498,13 @@ def echam_physics(
         convection=convection, clouds=clouds, microphysics=microphysics,
         microphysics_2m=microphysics_2m, radiation=radiation,
         vertical_diffusion=vertical_diffusion, surface=surface,
-        land_surface=land_surface, aerosol=aerosol, hines=hines, sso=sso)
+        land_surface=land_surface, aerosol=aerosol, hines=hines, sso=sso,
+        seasalt=seasalt, dms=dms)
     field_overrides = {name: value for name, value in _scheme_args.items()
                        if isinstance(value, Mapping)}
     (convection, clouds, microphysics, microphysics_2m, radiation,
-     vertical_diffusion, surface, land_surface, aerosol, hines, sso) = (
+     vertical_diffusion, surface, land_surface, aerosol, hines, sso,
+     seasalt, dms) = (
         None if name in field_overrides else value
         for name, value in _scheme_args.items())
     # An override of a scheme that is not composed would be silently
@@ -507,6 +526,16 @@ def echam_physics(
             f"gw_scheme={gw_scheme!r}, aerosol_module={aerosol_module!r}; "
             "radiation overrides need a named "
             "radiation_scheme, a term instance carries its own parameters).")
+    # The natural-emission parameters belong to the JAM chain, which a MACv2-SP
+    # composition does not include. Unlike the arguments above they have no
+    # earlier behaviour to keep, so a Parameters object is refused as well as
+    # a mapping: either would otherwise be dropped without a trace.
+    _jam_only = [n for n in ("seasalt", "dms") if _scheme_args[n] is not None]
+    if _jam_only and aerosol_module != "jam":
+        raise ValueError(
+            f"{_jam_only} would be ignored: the sea-salt and DMS emission "
+            "parameters belong to the JAM aerosol chain "
+            f"(aerosol_module={aerosol_module!r}, not 'jam').")
     if cu_lmfmid is not None and "cu_lmfmid" in field_overrides.get(
             "convection", {}):
         raise ValueError(
@@ -565,19 +594,29 @@ def echam_physics(
     aerosol_p = aerosol or AerosolParameters.default()
     hines_p = hines or HinesParameters.default()
     sso_p = sso or SSOParameters.default()
+    if aerosol_module == "jam":
+        # Imported here, not at module scope: the JAM package is only worth
+        # loading for a JAM composition (as ``jam_aerosol_physics`` below).
+        from jcm.physics.aerosol.jam.emissions.dms import DmsParameters
+        from jcm.physics.aerosol.jam.emissions.seasalt import (
+            SeaSaltParameters)
+        seasalt_p = seasalt or SeaSaltParameters.default()
+        dms_p = dms or DmsParameters.default()
+    else:
+        seasalt_p = dms_p = None
     if field_overrides:
         _resolved = dict(
             convection=convection_p, clouds=clouds_p,
             microphysics=microphysics_p, microphysics_2m=microphysics_2m_p,
             radiation=radiation_p, vertical_diffusion=vertical_diffusion_p,
             surface=surface_p, land_surface=land_surface_p, aerosol=aerosol_p,
-            hines=hines_p, sso=sso_p)
+            hines=hines_p, sso=sso_p, seasalt=seasalt_p, dms=dms_p)
         _resolved.update({
             name: with_field_overrides(_resolved[name], fields, scheme=name)
             for name, fields in field_overrides.items()})
         (convection_p, clouds_p, microphysics_p, microphysics_2m_p,
          radiation_p, vertical_diffusion_p, surface_p, land_surface_p,
-         aerosol_p, hines_p, sso_p) = _resolved.values()
+         aerosol_p, hines_p, sso_p, seasalt_p, dms_p) = _resolved.values()
 
     if cloud_scheme in ("1m", "2m"):
         _warn_if_shared_cloud_constants_differ(
@@ -710,6 +749,8 @@ def echam_physics(
             dust_preset=jam_dust_preset,
             dust_nudged=jam_dust_nudged,
             dust_nduscale_scale=jam_dust_nduscale_scale,
+            seasalt=seasalt_p,
+            dms=dms_p,
             anthropogenic=jam_anthropogenic,
             prescribed_speciated=jam_prescribed_speciated,
             convective_transport=jam_convective_transport,

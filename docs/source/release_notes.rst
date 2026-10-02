@@ -758,6 +758,12 @@ Scheme parameters on the factory-built presets
   set both as the scalar flag and in ``convection`` are rejected. In Python,
   ``echam_physics`` accepts the same mappings in place of ``Parameters``
   objects.
+- The JAM sea-salt and DMS emission scales, the other calibration levers of
+  the retune (#682), are reachable the same way: ``+physics.seasalt.scale=``
+  (Gong sea salt) and ``+physics.dms.flux_scale=`` (Nightingale DMS) on the
+  factory-built JAM presets, or ``seasalt=`` / ``dms=`` of ``echam_physics``,
+  a mapping or a ``Parameters`` object. They need ``aerosol_module="jam"``
+  and are rejected without it rather than ignored.
 
 Provenance records the parameters
 """""""""""""""""""""""""""""""""
