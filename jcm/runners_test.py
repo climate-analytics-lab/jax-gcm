@@ -3477,6 +3477,23 @@ class TestTermListNumericOverrides(unittest.TestCase):
         # The preset's own YAML values (ccsaut: 95.0) are array leaves too.
         self.assertIsInstance(params.ccsaut, jax.Array)
 
+    def test_a_flag_set_to_two_is_an_error_not_a_true_flag(self):
+        cfg = _compose([
+            *self._ECHAM,
+            "++physics.terms.echam_1m_microphysics.params."
+            "autoconversion_twomey=2"])
+        with self.assertRaisesRegex(
+                ValueError, r"physics\.terms\.echam_1m_microphysics\.params"
+                r"\.autoconversion_twomey: 2 is not representable as bool"):
+            build_physics(cfg)
+        # A Hydra boolean sets it.
+        off = build_physics(_compose([
+            *self._ECHAM,
+            "++physics.terms.echam_1m_microphysics.params."
+            "autoconversion_twomey=false"]))
+        self.assertIs(self._term_params(
+            off, "echam_1m_microphysics").autoconversion_twomey, False)
+
     def test_a_list_for_a_scalar_field_names_the_config_key(self):
         cfg = _compose([
             *self._ECHAM,

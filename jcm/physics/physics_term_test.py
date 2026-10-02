@@ -25,6 +25,7 @@ class _Toy:
     code: jnp.ndarray          # an integer selector held as a 0-d array
     plain_float: float         # a Python-float leaf
     plain_int: int = struct.field(pytree_node=False, default=2)
+    plain_flag: bool = struct.field(pytree_node=False, default=True)
     mode: str = struct.field(pytree_node=False, default="a")
 
 
@@ -113,11 +114,30 @@ def test_non_real_values_are_an_error(value):
 
 
 def test_python_scalar_leaves_keep_their_python_type():
-    out = _override(plain_float=3600, plain_int=5, mode="b")
+    out = _override(plain_float=3600, plain_int=5, plain_flag=False)
     assert out.plain_float == 3600.0 and type(out.plain_float) is float
-    # Integers, flags and strings are code-path selectors and spellings the
-    # class interprets itself: passed through as given.
-    assert out.plain_int == 5 and out.mode == "b"
+    assert out.plain_int == 5 and type(out.plain_int) is int
+    assert out.plain_flag is False
+    out = _override(plain_int=3.0, plain_flag=0, mode="b")
+    assert out.plain_int == 3 and type(out.plain_int) is int
+    assert out.plain_flag is False
+    out = _override(plain_flag=1)
+    assert out.plain_flag is True
+    # A string is a spelling the class interprets itself: passed through.
+    assert _override(mode="b").mode == "b"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("plain_int", 2.5),       # an integer selector is not truncated
+    ("plain_flag", 2),        # a flag is not silently true
+    ("plain_flag", 0.5),
+])
+def test_python_integer_and_boolean_leaves_take_only_representable_values(
+        field, value):
+    with pytest.raises(ValueError, match=rf"toy\.{field}: .* not representable"):
+        _override(**{field: value})
+    with pytest.raises(ValueError, match=rf"toy\.{field}: this field is a scalar"):
+        _override(**{field: [value]})
 
 
 def test_overridden_leaf_is_a_differentiable_pytree_leaf():

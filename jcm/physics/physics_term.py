@@ -443,25 +443,27 @@ def _like_base_leaf(base_leaf, value, where: str):
       of numbers, becomes an array of ``base_leaf.dtype`` and ``base_leaf.shape``.
       A different shape (a scalar for a profile, a list of the wrong length) is
       an error rather than a broadcast: a silently broadcast value would
-      overwrite a per-level or per-plume profile. For an integer or boolean
-      leaf the value must be exactly representable (``2.5`` for an integer
-      selector is an error, not a truncation). A Python scalar override of a
-      weakly typed leaf (every default built from a Python number) is built
+      overwrite a per-level or per-plume profile. A Python scalar override of
+      a weakly typed leaf (every default built from a Python number) is built
       the same way, so it is weakly typed too and keeps the value from
       promoting a float32 state to float64 under ``jax_enable_x64``.
-    - **Python float leaf**: a real scalar (a Hydra ``3600`` for a float
-      field) becomes a ``float``; a sequence is an error.
-    - **Anything else** (ints, bools, strings, ``None``: code-path selectors
-      and flags, and values the class's ``__post_init__`` interprets) and any
-      non-numeric value: returned unchanged.
+    - **Python scalar leaf** (``float``, ``int``, ``bool``): a real scalar
+      becomes a value of that type (a Hydra ``3600`` for a float field becomes
+      ``3600.0``); a sequence is an error.
+    - **Integer or boolean leaf**, array or Python scalar: the value must be
+      exactly representable. ``2.5`` for an integer selector and ``2`` for a
+      flag are errors, not a truncation and a silently true flag.
+    - **Anything else** (strings, ``None``, mappings: spellings the class's
+      ``__post_init__`` interprets) and any non-numeric value: returned
+      unchanged.
 
     The conversion also works on a tracer (the dtype and shape checks use only
     static information; the representability check needs a concrete value and is
     skipped for one).
     """
+    python_type = type(base_leaf) if type(base_leaf) in (float, int, bool) else None
     is_array_leaf = isinstance(base_leaf, (jax.Array, np.ndarray, np.generic))
-    if not (is_array_leaf or type(base_leaf) is float) \
-            or not _is_numeric_override(value):
+    if not (is_array_leaf or python_type) or not _is_numeric_override(value):
         return value
 
     traced = isinstance(value, jax.core.Tracer)
@@ -488,16 +490,16 @@ def _like_base_leaf(base_leaf, value, where: str):
             f"{tuple(arr.shape)} ({value!r}); a value is not broadcast over a "
             "field of another shape.")
 
-    if not is_array_leaf:
-        return float(arr) if not traced else value
-
-    dtype = base_leaf.dtype
+    dtype = (base_leaf.dtype if is_array_leaf
+             else np.dtype({float: "f8", int: "i8", bool: "?"}[python_type]))
     if not traced and dtype.kind != "f":
         # numpy's cast truncates a float and wraps an overflowing integer.
         if not np.array_equal(arr.astype(dtype), arr):
             raise ValueError(
                 f"{where}: {value!r} is not representable as {dtype} (the "
                 "field is an integer or boolean selector).")
+    if python_type:
+        return value if traced else python_type(arr.item())
     if traced:
         new = jnp.asarray(arr)
     elif getattr(base_leaf, "weak_type", False) and arr.ndim == 0:
@@ -522,11 +524,12 @@ def with_field_overrides(base, overrides: Mapping[str, Any] | None, *,
 
     A numeric value takes the kind of the field it replaces: the array fields
     of a scheme's defaults are replaced by arrays of the same dtype and shape
-    (a Python-float field by a float), so numeric fields stay ordinary pytree
-    leaves (differentiable, never static) that behave exactly like the
-    defaults wherever a scheme reads them, whichever door built them. A value
-    whose shape is not the field's is an error, not a broadcast, and an
-    integer or boolean field takes only a value it can represent.
+    (a Python float, int or bool field by a value of that type), so numeric
+    fields stay ordinary pytree leaves (differentiable, never static) that
+    behave exactly like the defaults wherever a scheme reads them, whichever
+    door built them. A value whose shape is not the field's is an error, not a
+    broadcast, and an integer or boolean field takes only a value it can
+    represent.
     A class's ``__post_init__`` normalizes its documented spellings (the
     string aliases of enum-like fields), which are passed to it as given. The
     constructor bypasses the cross-field checks in ``default()``, so the
