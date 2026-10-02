@@ -59,6 +59,22 @@ ordinary operating point:
    that makes a denominator merely *positive* has not made it safe to divide
    by — a zero numerator over it still gives `0 * inf = nan`. A guard floor
    sized in float64 (`1e-30`, `1e-154`) is therefore not a guard at all here.
+   Rounding noise reaches the band as readily as physics does. The dycore's
+   tracer mass fixer rescaled a tracer by `target / current` behind
+   `current > 1e-30`; a compiled XLA program left a ~1e-29 kg/kg/s residue in a
+   clear-cell ice tendency, whose global total, ~3e-21, sat in the unguarded
+   `1e-30 … 1e-19` band, and a zero cotangent times the `inf` was NaN over the
+   whole dynamical state. Eager and `jax_debug_nans`' de-optimised rerun round
+   the same tendency to exactly zero, so the mask was off there: the eager
+   gradient was finite, `jax.jit` of it was NaN, and the debugger found
+   nothing (#987). A gradient that is NaN under `jit` but finite eagerly, with
+   no NaN in the de-optimised rerun, is therefore a compiled-program rounding
+   difference, not a missing guard in the jaxpr; localise it by removing terms
+   from the jitted step and by `XLA_FLAGS=--xla_disable_hlo_passes=algsimp`
+   (or `fusion`). Where a denominator can be small, divide through
+   `jcm.filters.stable_quotient(n, d)` after the double `where`: its value is
+   `n / d` bit for bit and its derivative `(dn - (n / d) dd) / d` is the same
+   derivative without the square.
 
 The house idiom is the **double `where`**: make the *argument* safe before the
 singular operation, then mask the result, so the singular function is never
