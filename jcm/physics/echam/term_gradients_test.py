@@ -1102,6 +1102,34 @@ _LAND_TILE_LIVE = {
 }
 
 
+# The vdiff's land cells check the adjoint identity in float64. The identity is
+# exact for AD, so what a float32 check measures is round-off: the forward
+# contraction sums terms of 1e6 into a total of 2e5 (19.6x cancellation at the
+# convecting point, 34.8x at the stable one), and the jvp's float32 noise sets
+# the mismatch. That noise is a property of the compiled code, not of the AD: at
+# seed 0 the convecting cell's mismatch is 8.4e-4 on AVX2+FMA code (1.2x under
+# a tolerance of 1e-3) and 6.1e-5 on code without FMA (``--xla_cpu_max_isa=AVX``),
+# identical on 1 and 4 threads, so a runner with a different instruction set
+# lands on the other side of the tolerance. Over seeds 0-3 the float32 range is
+# 4.5e-5 to 8.4e-4 (convecting) and 3.1e-6 to 2.4e-4 (stable); in float64 it is
+# 9e-15 to 1.5e-13, so ``_LAND_TILE_FLOAT64_ADJOINT_RTOL`` keeps four orders of
+# magnitude of headroom and still rejects any asymmetry above round-off. The
+# float32 finiteness check stays: the model runs in float32 and that is where a
+# degenerate-state cotangent (#558) would appear. The surface term's cells
+# have no such cancellation (1.1e-7 in float32) and stay in float32.
+_LAND_TILE_IN_FLOAT64 = ("tte_tke_vertical_diffusion",)
+_LAND_TILE_FLOAT64_ADJOINT_RTOL = 1.0e-8
+
+
+def _promoted_to_float64(args):
+    """``args`` with every floating-point array leaf as float64."""
+    return jax.tree.map(
+        lambda x: (x.astype(jnp.float64)
+                   if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating)
+                   else x),
+        args)
+
+
 @pytest.mark.parametrize("point_name", sorted(_POINTS))
 @pytest.mark.parametrize("term_name", _LAND_TILE_TERMS)
 def test_land_tile_term_gradients(term_name, point_name):
@@ -1114,6 +1142,15 @@ def test_land_tile_term_gradients(term_name, point_name):
         _warm_replay(point_name, "echam"), term_name, skip_outputs=skip)
     args = (state, free, *_as_land(forcing, terrain))
     _assert_derivatives_are_finite(f, args, f"{term_name}/land/{point_name}")
+    if term_name in _LAND_TILE_IN_FLOAT64:
+        # Scoped, so the process-global flag (which ``conftest.py`` pins) is
+        # untouched; ``f`` closes over float32 replay constants, which promote.
+        with jax.enable_x64(True):
+            check_gradients(
+                f, _promoted_to_float64(args), atol=1e-8, reference="adjoint",
+                adjoint_rtol=_LAND_TILE_FLOAT64_ADJOINT_RTOL,
+                live_inputs=_LAND_TILE_LIVE[term_name], fixed_inputs=_FIXED_INPUTS)
+        return
     check_gradients(
         f, args, atol=1e-8, reference="adjoint", adjoint_rtol=1.0e-3,
         live_inputs=_LAND_TILE_LIVE[term_name], fixed_inputs=_FIXED_INPUTS)
