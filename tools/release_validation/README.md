@@ -382,9 +382,10 @@ one still running. The factory-built JAM presets take per-scheme fields as
 `+physics.convection.<field>=` (#935), the sea-salt and DMS emission scales
 as `+physics.seasalt.scale=` and `+physics.dms.flux_scale=`, and the wet-removal
 scalings as `+physics.wetdep.incloud_scale=` and `+physics.wetdep.impact_scale=`
-(likewise `drydep`, `sedimentation`, `activation`, `oxidants`, `sulfur_gas`,
-`aqueous`, `cloud_borne_exchange`, `tracer_diffusion` and
-`anthropogenic_params`: `+physics.<scheme>.<field>=`, an unknown field is an
+(stratiform in-cloud and below-cloud) with `+physics.conv_transport.conv_scav_scale=`
+for the convective in-plume scavenging (likewise `drydep`, `sedimentation`,
+`activation`, `oxidants`, `sulfur_gas`, `aqueous`, `cloud_borne_exchange`,
+`tracer_diffusion` and `anthropogenic_params`: `+physics.<scheme>.<field>=`, an unknown field is an
 error listing the valid ones; the `oxidants` proxies are superseded by the
 oxidant climatology a run supplies, which is the default); the term-list
 presets (echam-1m/2m) as `+physics.terms.tiedtke_convection.params.<field>=`.

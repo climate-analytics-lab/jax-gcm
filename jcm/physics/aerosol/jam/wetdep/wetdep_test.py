@@ -664,6 +664,70 @@ class WetDepTermTest(unittest.TestCase):
         _, cb_half = run(incloud_scale=0.5)
         self.assertTrue(bool(((cb < cb_half) & (cb_half < 0.0)).all()))
 
+    def test_conv_transport_door_scales_only_the_convective_ledger(self):
+        # ``echam_physics(conv_transport={"conv_scav_scale": s})`` -- what
+        # ``+physics.conv_transport.conv_scav_scale=`` builds -- scales the
+        # in-plume convective scavenging the transport term publishes and
+        # WetScavenging folds into the AeroCom ``wet_*`` ledger. At zero the
+        # convective contribution is gone from the ledger, and the removal
+        # WetScavenging computes itself (stratiform in-cloud, below-cloud) is
+        # untouched: its tendencies are identical at every scale.
+        import dataclasses
+
+        from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
+            _species_of)
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        state, diagnostics, spec, mass_name = self._setup()
+        nlev, ncols = state.temperature.shape
+        diagnostics = self._attach_convection(diagnostics, nlev, ncols)
+        conv = diagnostics["convection"]
+        # A precipitating plume with a sub-cloud release: what the in-plume
+        # removal reads besides the mass flux and condensate attached above.
+        diagnostics["convection"] = dataclasses.replace(
+            conv, precip_efficiency=jnp.where(conv.qc_conv > 0.0, 0.5, 0.0),
+            precip_evap_fraction=jnp.full_like(conv.qc_conv, 0.3))
+        diagnostics["_dt_seconds"] = 1800.0
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        species = _species_of(key)
+
+        def run(scale):
+            physics = echam_physics(
+                checkpoint_terms=False, aerosol_module="jam",
+                cloud_scheme="2m", jam_microphysics="placeholder",
+                conv_transport={"conv_scav_scale": scale})
+            transport = next(t for t in physics.terms
+                             if t.name == "convective_tracer_transport")
+            wetdep = next(t for t in physics.terms
+                          if t.category == "aerosol_wetdep")
+            _, published = transport(state, diagnostics, None, None)
+            tend, out = wetdep(state, published, None, None)
+            return published["_conv_scav_flux"], np.asarray(
+                out[f"wet_{species}"]), tend
+
+        flux1, wet1, tend1 = run(1.0)
+        flux0, wet0, tend0 = run(0.0)
+        flux_half, wet_half, _ = run(0.5)
+
+        self.assertTrue(bool((np.asarray(flux1[key]) > 0.0).all()))
+        for nm, f in flux0.items():
+            np.testing.assert_array_equal(np.asarray(f), 0.0, err_msg=nm)
+        self.assertTrue(bool(((0.0 < np.asarray(flux_half[key]))
+                              & (np.asarray(flux_half[key])
+                                 < np.asarray(flux1[key]))).all()))
+        # The ledger moves with the published convective flux and nothing
+        # else: at scale 1 it exceeds scale 0 by exactly the fluxes of this
+        # species' tracers (every mode's mass of it).
+        self.assertTrue(bool(((wet0 < wet_half) & (wet_half < wet1)).all()))
+        folded = sum(np.asarray(f) for nm, f in flux1.items()
+                     if _species_of(nm) == species)
+        np.testing.assert_allclose(wet1 - wet0, folded, rtol=1e-4)
+        # WetScavenging's own removal does not read the transport fluxes.
+        for nm in tend1.tracers:
+            np.testing.assert_array_equal(
+                np.asarray(tend1.tracers[nm]), np.asarray(tend0.tracers[nm]),
+                err_msg=nm)
+
     def test_cloud_borne_removed_at_full_incloud_rate(self):
         # Cloud-borne aerosol is entirely in-droplet: its stratiform removal
         # must not scale with the interstitial activated fraction, and must

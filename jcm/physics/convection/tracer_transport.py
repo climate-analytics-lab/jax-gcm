@@ -97,6 +97,8 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+import dataclasses
+
 import jax
 import jax.numpy as jnp
 import tree_math
@@ -124,13 +126,27 @@ class ConvTransportParameters:
     csr_conv: jnp.ndarray          # (K,) per-tracer fraction of the aerosol
                                    # entering the cloudy plume that is in
                                    # the condensate [-] (HAMMOZ ``csr_conv``)
+    # One scalar over every tracer's ``csr_conv``: the lever that scales the
+    # in-plume (convective) scavenging as a whole, where the per-tracer array
+    # is a layout of the modes. It multiplies at use, not into ``csr_conv``
+    # itself, so it stays a differentiable leaf of its own whichever object
+    # supplied the fractions. 1 is HAMMOZ as written.
+    conv_scav_scale: jnp.ndarray = dataclasses.field(
+        default_factory=lambda: jnp.asarray(1.0))
 
     @classmethod
     def default(cls, csr_conv=()) -> "ConvTransportParameters":
-        """Build unit transport scale with the given per-tracer ``csr_conv``."""
+        """Build unit scales with the given per-tracer ``csr_conv``.
+
+        An empty ``csr_conv`` (the default) is "the transport term's own
+        fractions": :class:`ConvectiveTracerTransport` fills it from the mode
+        layout it was composed with, which is what lets a field-override
+        mapping be applied to this default before the layout is known.
+        """
         return cls(
             transport_scale=jnp.asarray(1.0),
             csr_conv=jnp.asarray(csr_conv, dtype=jnp.float32),
+            conv_scav_scale=jnp.asarray(1.0),
         )
 
 
@@ -444,8 +460,12 @@ class ConvectiveTracerTransport(PhysicsTerm):
         tracer entering the cloudy plume that is in the condensate — HAMMOZ's
         per-mode ``csr_conv`` for aerosol, 0 for gases; ``None`` disables
         scavenging entirely. It is the default of the differentiable
-        ``params.csr_conv``; tracers given a positive value publish a
-        ``_conv_scav_flux`` entry.
+        ``params.csr_conv`` (also for a ``params`` object whose ``csr_conv`` is
+        empty, as ``ConvTransportParameters.default()`` builds); tracers given
+        a positive value publish a ``_conv_scav_flux`` entry. The fraction the
+        plume uses is ``params.csr_conv * params.conv_scav_scale``, which the
+        plume budget clips to ``[0, 1]``: a scavenging fraction is never above
+        one.
         """
         if not tracer_names:
             raise ValueError(
@@ -460,10 +480,16 @@ class ConvectiveTracerTransport(PhysicsTerm):
         self._csr_conv = (
             tuple(float(x) for x in csr_conv) if csr_conv is not None else None
         )
+        layout = (self._csr_conv if self._csr_conv is not None
+                  else (0.0,) * len(tracer_names))
         if params is None:
-            params = ConvTransportParameters.default(
-                self._csr_conv if self._csr_conv is not None
-                else (0.0,) * len(tracer_names))
+            params = ConvTransportParameters.default(layout)
+        elif jnp.shape(params.csr_conv) == (0,):
+            # A class default whose fractions were left to the composition
+            # (a mapping applied to ``ConvTransportParameters.default()``):
+            # the layout's fractions, every other field as given.
+            params = dataclasses.replace(
+                params, csr_conv=jnp.asarray(layout, dtype=jnp.float32))
         elif jnp.shape(params.csr_conv) != (len(tracer_names),):
             raise ValueError(
                 "params.csr_conv must hold one fraction per tracer: got shape "
@@ -488,7 +514,11 @@ class ConvectiveTracerTransport(PhysicsTerm):
             ])
             if self._csr_conv is not None:
                 scav_kwargs = dict(
-                    csr_conv=jnp.asarray(params.csr_conv, dtype=q.dtype),
+                    # The plume budget clips the fraction to [0, 1]
+                    # (``convective_tracer_tendency``), so a scale that takes
+                    # it past one is the fraction one.
+                    csr_conv=(jnp.asarray(params.csr_conv, dtype=q.dtype)
+                              * params.conv_scav_scale),
                     precip_efficiency=conv.precip_efficiency,
                     plume_condensate=conv.qc_conv + conv.qi_conv,
                     evap_fraction=conv.precip_evap_fraction,

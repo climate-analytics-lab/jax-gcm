@@ -768,23 +768,27 @@ Scheme parameters on the factory-built presets
   chiefly wet deposition, the retune's reserve lever on the aerosol burden:
   ``+physics.wetdep.incloud_scale=`` (the multiplier on stratiform in-cloud
   removal) and ``+physics.wetdep.impact_scale=`` (on the inertial-impaction
-  efficiency of below-cloud removal). The arguments of ``echam_physics`` are
-  ``wetdep``, ``drydep``, ``sedimentation``, ``activation``, ``oxidants``,
-  ``sulfur_gas``, ``aqueous``, ``cloud_borne_exchange``, ``tracer_diffusion``
-  and ``anthropogenic_params``, each a mapping or a ``Parameters`` object, with
+  efficiency of below-cloud removal). The convective in-plume scavenging,
+  which the convective tracer transport owns, is scaled as a whole by
+  ``+physics.conv_transport.conv_scav_scale=`` (default 1: HAMMOZ's per-mode
+  ``csr_conv`` times the scale, at most one). The arguments of
+  ``echam_physics`` are ``wetdep``, ``drydep``, ``sedimentation``,
+  ``activation``, ``oxidants``, ``sulfur_gas``, ``aqueous``,
+  ``cloud_borne_exchange``, ``tracer_diffusion``, ``conv_transport`` and
+  ``anthropogenic_params``, each a mapping or a ``Parameters`` object, with
   the same rules as ``seasalt``: an unknown field is an error listing the
   valid ones, and an argument whose scheme is not composed is rejected
   (without ``aerosol_module="jam"``; ``anthropogenic_params`` without
-  ``jam_anthropogenic``; ``cloud_borne_exchange`` without ``jam_cloud_borne``).
+  ``jam_anthropogenic``; ``cloud_borne_exchange`` without ``jam_cloud_borne``;
+  ``conv_transport`` without ``jam_convective_transport``).
   A valid override of a field no run reads warns instead
   (``wetdep.conv_scav_ratio`` with convective tracer transport; the fallbacks
   ``oxidants.o3_fallback_vmr``, ``oxidants.cos_zenith_fallback``,
   ``activation.updraft_default`` and ``drydep.u_star_default``), and the
   ``oxidants`` proxies are read only when the run supplies no oxidant
   climatology (``forcing.oxidants_file``, ``auto`` by default).
-  The dust parameters beyond the ``jam_dust_*`` flags and the convective tracer
-  transport parameters (which own the convective in-plume scavenging, so
-  ``incloud_scale`` does not reach it) have no such argument yet (#995).
+  ``incloud_scale`` scales the stratiform in-cloud removal only. The dust
+  parameters beyond the ``jam_dust_*`` flags have no such argument yet (#995).
 - A numeric override takes the dtype and shape of the field it replaces, on
   both preset styles (:func:`jcm.physics.physics_term.with_field_overrides`).
   The 1M cloud scheme casts its parameters to the state's precision, so
