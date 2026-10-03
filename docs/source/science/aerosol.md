@@ -332,7 +332,10 @@ closed plume budget:
   once, where it meets cloud — the whole plume at the first level holding
   condensate above HAMMOZ's ``zmin = 1e-10``, the air entrained at each such
   level above — and the ``1 − csr_conv`` outside the condensate rides the plume
-  to the top.
+  to the top. One scalar, ``ConvTransportParameters.conv_scav_scale`` (default
+  1, which is HAMMOZ as written), multiplies every tracer's fraction before the
+  plume budget clips it to at most one: a calibration lever on the convective
+  in-plume scavenging as a whole, not an ECHAM-HAM quantity.
 - **Removal.** Each cloudy level removes, from the share in the condensate of
   the air that continues through its top, the fraction of the plume
   condensate converted to precipitation there,

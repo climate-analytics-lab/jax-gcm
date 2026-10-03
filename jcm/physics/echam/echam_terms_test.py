@@ -338,6 +338,8 @@ class TestEchamComposablePhysics(unittest.TestCase):
         "wetdep": ("jam_wet_deposition", "incloud_scale", 0.5),
         "tracer_diffusion": ("tracer_vertical_diffusion", "diffusion_scale",
                              0.7),
+        "conv_transport": ("convective_tracer_transport", "conv_scav_scale",
+                           0.5),
     }
     #: Doors whose parameters are held by more than one term: argument ->
     #: the other terms that must carry the same value.
@@ -356,8 +358,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
 
         A scheme added to ``jam_aerosol_physics`` must either join
         ``JAM_PARAMETER_CLASSES`` (and so gain the door) or be named here as
-        one whose base object is composition-derived (#995); it cannot be
-        left out silently.
+        one without a mapping door yet (#995); it cannot be left out silently.
         """
         import inspect
         import typing
@@ -372,9 +373,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
             if name in hints and any(
                 getattr(a, "__name__", "").endswith("Parameters")
                 for a in typing.get_args(hints[name]))}
-        self.assertEqual(
-            parameter_args,
-            set(JAM_PARAMETER_CLASSES) | {"dust", "conv_transport"})
+        self.assertEqual(parameter_args, set(JAM_PARAMETER_CLASSES) | {"dust"})
         self.assertLessEqual(set(JAM_PARAMETER_CLASSES),
                              set(inspect.signature(echam_physics).parameters))
         for name, cls in JAM_PARAMETER_CLASSES.items():
@@ -401,12 +400,23 @@ class TestEchamComposablePhysics(unittest.TestCase):
                 got = self._jam_term_params(tuned, term)
                 self.assertAlmostEqual(float(getattr(got, field)) / value, 1.0,
                                        places=5)
-                default = JAM_PARAMETER_CLASSES[arg].default()
-                for f in dataclasses.fields(default):
+                # Every other field is what the composition holds without the
+                # override (the class default, but for the per-tracer
+                # fractions of ``conv_transport``, which the term takes from
+                # its mode layout).
+                untuned = self._jam_term_params(baseline, term)
+                for f in dataclasses.fields(untuned):
                     if f.name != field:
                         np.testing.assert_array_equal(
                             np.asarray(getattr(got, f.name)),
-                            np.asarray(getattr(default, f.name)), err_msg=f.name)
+                            np.asarray(getattr(untuned, f.name)),
+                            err_msg=f.name)
+                    if f.name != field and arg != "conv_transport":
+                        np.testing.assert_array_equal(
+                            np.asarray(getattr(got, f.name)),
+                            np.asarray(getattr(
+                                JAM_PARAMETER_CLASSES[arg].default(), f.name)),
+                            err_msg=f.name)
                 self.assertEqual([t.name for t in baseline.terms],
                                  [t.name for t in tuned.terms])
                 for other in self._JAM_ALSO.get(arg, ()):
@@ -438,6 +448,32 @@ class TestEchamComposablePhysics(unittest.TestCase):
                          [t.name for t in physics.terms])
         mixing = self._jam_term_params(physics, "tracer_vertical_diffusion")
         self.assertAlmostEqual(float(mixing.diffusion_scale), 0.7)
+
+    def test_conv_transport_mapping_keeps_the_layout_fractions(self):
+        """The mapping sets scalars; the per-tracer fractions stay the layout's.
+
+        ``csr_conv`` is one fraction per transported tracer, built from the
+        population's mode layout, so a mapping is applied on a default that
+        leaves it to the term. It is not itself overridable.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        base = self._jam_term_params(
+            echam_physics(**self._JAM_KWARGS), "convective_tracer_transport")
+        tuned = self._jam_term_params(
+            echam_physics(**self._JAM_KWARGS, conv_transport={
+                "conv_scav_scale": 0.4, "transport_scale": 0.8}),
+            "convective_tracer_transport")
+        self.assertGreater(base.csr_conv.shape[0], 1)
+        self.assertGreater(float(base.csr_conv.max()), 0.0)
+        np.testing.assert_array_equal(np.asarray(tuned.csr_conv),
+                                      np.asarray(base.csr_conv))
+        self.assertAlmostEqual(float(tuned.conv_scav_scale), 0.4)
+        self.assertAlmostEqual(float(tuned.transport_scale), 0.8)
+        self.assertEqual(float(base.conv_scav_scale), 1.0)
+        with self.assertRaisesRegex(ValueError, "conv_transport.csr_conv"):
+            echam_physics(**self._JAM_KWARGS,
+                          conv_transport={"csr_conv": [0.5]})
 
     def test_wetdep_mapping_and_object_forms(self):
         """The wet-removal levers: mapping on the default, object as given."""
@@ -543,7 +579,8 @@ class TestEchamComposablePhysics(unittest.TestCase):
                         echam_physics(checkpoint_terms=False, **{arg: given})
         jam = dict(self._JAM_KWARGS)
         for flag, arg in (("jam_anthropogenic", "anthropogenic_params"),
-                          ("jam_cloud_borne", "cloud_borne_exchange")):
+                          ("jam_cloud_borne", "cloud_borne_exchange"),
+                          ("jam_convective_transport", "conv_transport")):
             with self.subTest(flag=flag):
                 with self.assertRaisesRegex(
                         ValueError, rf"\['{arg}'\] would be ignored"):
