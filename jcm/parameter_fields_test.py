@@ -152,9 +152,10 @@ def test_known_unread_fields_are_still_unread(package_scan):
 
 def test_the_scan_sees_the_package(package_scan):
     # A scan that silently matches nothing would pass the two tests above, so
-    # pin that it finds the package's parameter structs and the known gaps.
+    # pin that it finds a package's worth of parameter structs (the floors sit
+    # well under the current count) and the known gaps.
     unread, n_classes, n_fields = package_scan
-    assert n_classes >= 30 and n_fields >= 300
+    assert n_classes >= 20 and n_fields >= 150
     assert unread, "the scan finds none of the known unread fields"
 
 

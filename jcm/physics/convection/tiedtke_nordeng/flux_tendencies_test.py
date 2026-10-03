@@ -351,10 +351,6 @@ class TestTaperWeightPlumbing(unittest.TestCase):
             float(a.precip_conv), float(s.precip_conv), places=9)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestCevapcuProfile(unittest.TestCase):
     """ECHAM's ``cevapcu(jk)`` (iniphy.f90:87-89) and its leading coefficient."""
 
@@ -362,7 +358,7 @@ class TestCevapcuProfile(unittest.TestCase):
 
     @staticmethod
     def _iniphy(eta):
-        """Evaluate the profile as ECHAM writes it, with the literal ``1.93E-6``."""
+        """Evaluate iniphy.f90:87-89 as transcribed, with the literal ``1.93E-6``."""
         return (
             1.93e-6 * 261.0
             * jnp.sqrt(1.0e3 / (38.3 * 0.293) * jnp.sqrt(jnp.clip(eta, 1e-4, 1.0)))
@@ -370,9 +366,13 @@ class TestCevapcuProfile(unittest.TestCase):
         )
 
     def test_default_is_iniphys_expression_exactly(self):
-        # ``ConvectionParameters`` carries the coefficient as an array leaf,
-        # so the exactness has to hold for that form as well as for the
-        # float, in both precisions the model runs in.
+        # Parameterising the coefficient must not move a bit of the default
+        # profile. ``ConvectionParameters`` carries it as an array leaf, so
+        # the equality has to hold for that form as well as for the float, in
+        # both precisions the model runs in. Whether the transcription agrees
+        # with compiled ECHAM is the job of the cumastr reference data
+        # (``jcm/data/test/echam_cumastr_reference``, whose sub-cloud
+        # evaporation columns run the profile), not of this comparison.
         for x64 in (False, True):
             with jax.enable_x64(x64):
                 eta = self.ETA.astype(jnp.float64 if x64 else jnp.float32)
@@ -470,16 +470,16 @@ class TestSubCloudEvaporationCoefficient(unittest.TestCase):
             for kwargs in ({}, {"cevapcu_coefficient": ECHAM_CEVAPCU_COEFFICIENT},
                            {"cevapcu_coefficient": leaf}):
                 out = self._run(flag, **kwargs)
-                # A few float32 ulp of room for the platform's ``exp`` in the
-                # saturation humidity; the profile itself is compared exactly
-                # in ``TestCevapcuProfile``.
-                np.testing.assert_allclose(float(out[0]), rain, rtol=2e-6)
+                # Room for the platform's ``exp`` in the saturation humidity
+                # (a change of the profile moves these by 1e-2 or more); the
+                # profile itself is compared exactly in ``TestCevapcuProfile``.
+                np.testing.assert_allclose(float(out[0]), rain, rtol=1e-5)
                 np.testing.assert_allclose(
-                    np.asarray(out[4]), adj, rtol=2e-6, atol=1e-12)
+                    np.asarray(out[4]), adj, rtol=1e-5, atol=1e-12)
                 np.testing.assert_allclose(
-                    np.asarray(out[5]), flux, rtol=2e-6, atol=1e-12)
+                    np.asarray(out[5]), flux, rtol=1e-5, atol=1e-12)
                 np.testing.assert_allclose(
-                    np.asarray(out[7]), evap, rtol=2e-6, atol=1e-12)
+                    np.asarray(out[7]), evap, rtol=1e-5, atol=1e-12)
 
     def test_doubling_the_coefficient_changes_the_evaporation_tendency(self):
         total = float(jnp.sum(self.pdmfup))
@@ -542,3 +542,7 @@ class TestSubCloudEvaporationCoefficient(unittest.TestCase):
             jnp.asarray(ECHAM_CEVAPCU_COEFFICIENT))
         self.assertTrue(np.isfinite(float(slope)))
         self.assertLess(float(slope), 0.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

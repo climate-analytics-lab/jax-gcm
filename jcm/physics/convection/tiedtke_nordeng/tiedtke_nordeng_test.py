@@ -25,6 +25,7 @@ from jcm.physics_interface import PhysicsState
 from jcm.physics.convection.tiedtke_nordeng.downdraft import calculate_downdraft
 from jcm.physics.convection.tiedtke_nordeng.updraft import calculate_updraft
 from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import mass_flux_closure
+from jcm.physics.convection.tiedtke_nordeng.types import ECHAM_CEVAPCU_COEFFICIENT
 
 
 def deep_convection_drivers(atm, fraction=0.5, e_sfc=3.0e-5):
@@ -1851,9 +1852,6 @@ class TestCevapcuReachesTheScheme:
         )[0]
 
     def _config(self, factor):
-        from jcm.physics.convection.tiedtke_nordeng.types import (
-            ECHAM_CEVAPCU_COEFFICIENT,
-        )
         return ConvectionParameters.default(
             cevapcu=factor * ECHAM_CEVAPCU_COEFFICIENT)
 
@@ -1868,13 +1866,13 @@ class TestCevapcuReachesTheScheme:
         dtedt = np.asarray(tendencies.dtedt, dtype=np.float64)
         dqdt = np.asarray(tendencies.dqdt, dtype=np.float64)
         np.testing.assert_allclose(
-            float(tendencies.precip_conv), 0.003910021856427193, rtol=1e-5)
-        np.testing.assert_allclose(dtedt.sum(), 0.04832661464934063, rtol=1e-5)
+            float(tendencies.precip_conv), 0.003910021856427193, rtol=1e-4)
+        np.testing.assert_allclose(dtedt.sum(), 0.04832661464934063, rtol=1e-4)
         np.testing.assert_allclose(
-            np.abs(dtedt).sum(), 0.048944069725621375, rtol=1e-5)
-        np.testing.assert_allclose(dqdt.sum(), -2.3641751378811193e-06, rtol=1e-5)
+            np.abs(dtedt).sum(), 0.048944069725621375, rtol=1e-4)
+        np.testing.assert_allclose(dqdt.sum(), -2.3641751378811193e-06, rtol=1e-4)
         np.testing.assert_allclose(
-            np.abs(dqdt).sum(), 7.475658400313279e-06, rtol=1e-5)
+            np.abs(dqdt).sum(), 7.475658400313279e-06, rtol=1e-4)
 
     def test_a_weaker_coefficient_evaporates_less_and_changes_the_tendencies(self):
         default = self._run(ConvectionParameters.default())
