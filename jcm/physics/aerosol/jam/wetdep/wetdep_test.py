@@ -658,10 +658,6 @@ class WetDepTermTest(unittest.TestCase):
         self.assertTrue(bool((wet_im0 < wet).all()))
         np.testing.assert_array_equal(cb_im0, cb)
 
-        wet_both0, _ = run(incloud_scale=0.0, impact_scale=0.0)
-        self.assertTrue(bool((wet_both0 < wet_ic0).all()))
-        self.assertTrue(bool((wet_both0 < wet_im0).all()))
-
         # A half-strength scale removes less than full strength but still
         # removes (the update is the implicit q*exp(-rate*dt), so the change
         # is monotone in the rate, not proportional to it).

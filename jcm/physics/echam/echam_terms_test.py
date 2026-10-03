@@ -446,6 +446,29 @@ class TestEchamComposablePhysics(unittest.TestCase):
         self.assertAlmostEqual(float(wet.sol_factb), 0.2)
         self.assertAlmostEqual(float(wet.impact_scale), 0.4)
 
+    def test_inert_conv_scav_ratio_override_warns(self):
+        """``conv_scav_ratio`` moves nothing with convective tracer transport.
+
+        The in-plume scavenging then belongs to the transport term, so a sweep
+        over the ratio would run identical arms: the override is valid, and
+        flagged. Without convective transport the ratio is read and nothing
+        is said; the live scales never warn.
+        """
+        import warnings
+
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        with self.assertWarnsRegex(UserWarning, "conv_scav_ratio has no effect"):
+            echam_physics(**self._JAM_KWARGS, wetdep={"conv_scav_ratio": 0.5})
+        for kwargs in (
+                dict(wetdep={"conv_scav_ratio": 0.5},
+                     jam_convective_transport=False),
+                dict(wetdep={"incloud_scale": 0.5, "impact_scale": 0.5})):
+            with self.subTest(kwargs=kwargs):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error")
+                    echam_physics(**self._JAM_KWARGS, **kwargs)
+
     def test_jam_scheme_mappings_reject_unknown_fields(self):
         """A typo'd field names the scheme and lists the valid fields."""
         from jcm.physics.aerosol.jam.jam_terms import JAM_PARAMETER_CLASSES

@@ -19,6 +19,7 @@ otherwise use.
 
 from __future__ import annotations
 
+import warnings
 from typing import TYPE_CHECKING, Any, Mapping
 
 from jcm.physics.aerosol import Macv2SpAerosol
@@ -145,7 +146,6 @@ def _warn_if_shared_cloud_constants_differ(cover_params, cloud_params, cloud_sch
     that are not concrete at construction (traced) are not compared.
     """
     import math
-    import warnings
 
     import numpy as np
 
@@ -330,7 +330,8 @@ def echam_physics(
             which the convective tracer transport owns
             (``jam_convective_transport=True``, the default: its per-mode
             ``csr_conv``, which has no argument here yet, jax-gcm#995), and
-            ``conv_scav_ratio`` is read only without it.
+            ``conv_scav_ratio`` is read only without it (a mapping that sets
+            it with convective transport on warns).
         tracer_diffusion: Override for the JAM tracers' turbulent vertical
             mixing
             :class:`~jcm.physics.vertical_diffusion.tracer_diffusion.TracerDiffusionParameters`
@@ -701,6 +702,20 @@ def echam_physics(
                        scheme=name)
                    if isinstance(value, Mapping) else value)
             for name, value in _jam_args.items()}
+    # ``conv_scav_ratio`` is the environment-profile convective in-cloud
+    # scavenging, which WetScavenging retires (``in_plume_convective``) when the
+    # convective tracer transport scavenges inside the plume instead. A value
+    # that cannot move the run is valid but would make a sweep over it run
+    # identical arms, so it is flagged, not rejected.
+    if (isinstance(_jam_args["wetdep"], Mapping)
+            and "conv_scav_ratio" in _jam_args["wetdep"]
+            and jam_convective_transport):
+        warnings.warn(
+            "wetdep.conv_scav_ratio has no effect with "
+            "jam_convective_transport=True: the convective in-cloud "
+            "scavenging is then the transport term's per-mode csr_conv, "
+            "not this ratio (it is read only with "
+            "jam_convective_transport=False).", UserWarning, stacklevel=2)
     if field_overrides:
         _resolved = dict(
             convection=convection_p, clouds=clouds_p,
