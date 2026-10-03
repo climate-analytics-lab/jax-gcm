@@ -323,6 +323,171 @@ class TestEchamComposablePhysics(unittest.TestCase):
                         ValueError, rf"\['{names}'\] would be ignored"):
                     echam_physics(checkpoint_terms=False, **kwargs)
 
+    #: The JAM process schemes behind ``echam_physics``'s mapping door beyond
+    #: sea salt and DMS: argument -> (term name, one field, a value for it).
+    _JAM_DOORS = {
+        "anthropogenic_params": ("jam_anthropogenic_emissions", "scale", 1.2),
+        "oxidants": ("jam_prescribed_oxidants", "oh_ref", 3.0e6),
+        "sulfur_gas": ("jam_sulfur_gas_chemistry", "soag_production", 1.0e-16),
+        "aqueous": ("jam_aqueous_sulfur", "rate_scale", 0.8),
+        "activation": ("arg_activation", "w_min", 0.2),
+        "cloud_borne_exchange": ("jam_cloud_borne_exchange",
+                                 "activation_timescale", 600.0),
+        "sedimentation": ("jam_sedimentation", "velocity_scale", 0.9),
+        "drydep": ("jam_dry_deposition", "z0", 2.0e-4),
+        "wetdep": ("jam_wet_deposition", "incloud_scale", 0.5),
+        "tracer_diffusion": ("tracer_vertical_diffusion", "diffusion_scale",
+                             0.7),
+    }
+    _JAM_KWARGS = dict(checkpoint_terms=False, aerosol_module="jam",
+                       cloud_scheme="2m", jam_microphysics="placeholder",
+                       jam_anthropogenic=True)
+
+    @staticmethod
+    def _jam_term_params(physics, term):
+        return next(t for t in physics.terms
+                    if t.name == term).params.get_value()
+
+    def test_jam_door_table_covers_the_factory_arguments(self):
+        """The door lists every JAM scheme the JAM factory takes ``Parameters`` for.
+
+        A scheme added to ``jam_aerosol_physics`` must either join
+        ``JAM_PARAMETER_CLASSES`` (and so gain the door) or be named here as
+        one whose base object is composition-derived (#995); it cannot be
+        left out silently.
+        """
+        import inspect
+        import typing
+
+        from jcm.physics.aerosol.jam.jam_terms import (
+            JAM_PARAMETER_CLASSES, jam_aerosol_physics)
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        hints = typing.get_type_hints(jam_aerosol_physics)
+        parameter_args = {
+            name for name in inspect.signature(jam_aerosol_physics).parameters
+            if name in hints and any(
+                getattr(a, "__name__", "").endswith("Parameters")
+                for a in typing.get_args(hints[name]))}
+        self.assertEqual(
+            parameter_args,
+            set(JAM_PARAMETER_CLASSES) | {"dust", "conv_transport"})
+        self.assertLessEqual(set(JAM_PARAMETER_CLASSES),
+                             set(inspect.signature(echam_physics).parameters))
+        for name, cls in JAM_PARAMETER_CLASSES.items():
+            self.assertIs(typing.get_args(hints[name])[0], cls, name)
+        # This test file exercises every door but sea salt and DMS (above).
+        self.assertEqual(set(self._JAM_DOORS),
+                         set(JAM_PARAMETER_CLASSES) - {"seasalt", "dms"})
+
+    def test_jam_scheme_mappings_reach_their_terms_only(self):
+        """Each mapping sets its own scheme's field and nothing else.
+
+        Every other field of that scheme keeps its default, and no other
+        term's parameters move.
+        """
+        import dataclasses
+
+        from jcm.physics.aerosol.jam.jam_terms import JAM_PARAMETER_CLASSES
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        baseline = echam_physics(**self._JAM_KWARGS)
+        for arg, (term, field, value) in self._JAM_DOORS.items():
+            with self.subTest(door=arg):
+                tuned = echam_physics(**self._JAM_KWARGS, **{arg: {field: value}})
+                got = self._jam_term_params(tuned, term)
+                self.assertAlmostEqual(float(getattr(got, field)) / value, 1.0,
+                                       places=5)
+                default = JAM_PARAMETER_CLASSES[arg].default()
+                for f in dataclasses.fields(default):
+                    if f.name != field:
+                        np.testing.assert_array_equal(
+                            np.asarray(getattr(got, f.name)),
+                            np.asarray(getattr(default, f.name)), err_msg=f.name)
+                self.assertEqual([t.name for t in baseline.terms],
+                                 [t.name for t in tuned.terms])
+                for before, after in zip(baseline.terms, tuned.terms):
+                    if after.name == term or not hasattr(after, "params"):
+                        continue
+                    for a, b in zip(
+                            jax.tree_util.tree_leaves(before.params.get_value()),
+                            jax.tree_util.tree_leaves(after.params.get_value())):
+                        np.testing.assert_array_equal(
+                            np.asarray(a), np.asarray(b), err_msg=after.name)
+
+    def test_wetdep_mapping_and_object_forms(self):
+        """The wet-removal levers: mapping on the default, object as given."""
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetDepParameters
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        default = WetDepParameters.default()
+        wet = self._jam_term_params(
+            echam_physics(**self._JAM_KWARGS,
+                          wetdep={"incloud_scale": 0.5, "impact_scale": 0.25}),
+            "jam_wet_deposition")
+        self.assertAlmostEqual(float(wet.incloud_scale), 0.5)
+        self.assertAlmostEqual(float(wet.impact_scale), 0.25)
+        self.assertEqual(float(wet.sol_factb), float(default.sol_factb))
+        # Not given: the scheme's default, scales of one.
+        wet = self._jam_term_params(
+            echam_physics(**self._JAM_KWARGS), "jam_wet_deposition")
+        self.assertEqual(float(wet.incloud_scale), 1.0)
+        self.assertEqual(float(wet.impact_scale), 1.0)
+        # An object is used as given, unscaled fields included.
+        obj = WetDepParameters(
+            incloud_scale=jnp.asarray(0.3), sol_factb=jnp.asarray(0.2),
+            mu_water_air=default.mu_water_air,
+            impact_scale=jnp.asarray(0.4),
+            conv_scav_ratio=default.conv_scav_ratio,
+            conv_updraft_velocity=default.conv_updraft_velocity)
+        wet = self._jam_term_params(
+            echam_physics(**self._JAM_KWARGS, wetdep=obj), "jam_wet_deposition")
+        self.assertAlmostEqual(float(wet.incloud_scale), 0.3)
+        self.assertAlmostEqual(float(wet.sol_factb), 0.2)
+        self.assertAlmostEqual(float(wet.impact_scale), 0.4)
+
+    def test_jam_scheme_mappings_reject_unknown_fields(self):
+        """A typo'd field names the scheme and lists the valid fields."""
+        from jcm.physics.aerosol.jam.jam_terms import JAM_PARAMETER_CLASSES
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        for arg, (_, field, value) in self._JAM_DOORS.items():
+            with self.subTest(door=arg):
+                cls = JAM_PARAMETER_CLASSES[arg].__name__
+                with self.assertRaisesRegex(
+                        ValueError,
+                        rf"{arg}: unknown {cls} field\(s\) \['{field}_typo'\]"
+                        rf".*Valid fields: .*'{field}'"):
+                    echam_physics(**self._JAM_KWARGS,
+                                  **{arg: {f"{field}_typo": value}})
+
+    def test_jam_scheme_parameters_without_their_scheme_are_rejected(self):
+        """A scheme the composition lacks would drop its parameters silently.
+
+        MACv2-SP composes none of the JAM schemes; the anthropogenic emission
+        and the cloud-borne exchange are composed only with their flag. A
+        mapping and an object are refused alike.
+        """
+        from jcm.physics.aerosol.jam.jam_terms import JAM_PARAMETER_CLASSES
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        for arg, (_, field, value) in self._JAM_DOORS.items():
+            for form, given in (
+                    ("mapping", {field: value}),
+                    ("object", JAM_PARAMETER_CLASSES[arg].default())):
+                with self.subTest(door=arg, form=form):
+                    with self.assertRaisesRegex(
+                            ValueError, rf"\['{arg}'\] would be ignored"):
+                        echam_physics(checkpoint_terms=False, **{arg: given})
+        jam = dict(self._JAM_KWARGS)
+        for flag, arg in (("jam_anthropogenic", "anthropogenic_params"),
+                          ("jam_cloud_borne", "cloud_borne_exchange")):
+            with self.subTest(flag=flag):
+                with self.assertRaisesRegex(
+                        ValueError, rf"\['{arg}'\] would be ignored"):
+                    echam_physics(**{**jam, flag: False},
+                                  **{arg: {self._JAM_DOORS[arg][1]: 1.5}})
+
     def test_echam_physics_accepts_custom_radiation_term(self):
         """A radiation PhysicsTerm can be passed directly."""
         from jcm.physics.echam.echam_terms import echam_physics

@@ -619,6 +619,55 @@ class WetDepTermTest(unittest.TestCase):
                 err_msg=str(pair),
             )
 
+    def test_factory_door_scales_change_the_removal(self):
+        # ``echam_physics(wetdep={...})`` -- what ``+physics.wetdep.<field>=``
+        # builds -- must move the removal of the term it composes, each scale
+        # on its own pathway: ``incloud_scale`` on the in-droplet (cloud-borne)
+        # removal, ``impact_scale`` on the below-cloud impaction of the
+        # interstitial aerosol. Compared through the AeroCom ``wet_*`` ledger,
+        # the deposition diagnostic the retune scores.
+        from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
+            _species_of)
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        state, diagnostics, spec, mass_name = self._setup()
+        species, short = spec.modes[0].species[0], spec.modes[0].short
+        cb_key = mass_name(species, short, cloud_borne=True)
+        wet_key = f"wet_{_species_of(mass_name(species, short))}"
+
+        def run(**wetdep):
+            physics = echam_physics(
+                checkpoint_terms=False, aerosol_module="jam",
+                cloud_scheme="2m", jam_microphysics="placeholder",
+                wetdep=wetdep)
+            term = next(t for t in physics.terms
+                        if t.category == "aerosol_wetdep")
+            _, out = term(state, diagnostics, None, None)
+            return (np.asarray(out[wet_key]),
+                    self._cb_rate(diagnostics, out, cb_key))
+
+        wet, cb = run()
+        self.assertTrue(bool((wet > 0.0).all()))
+        self.assertTrue(bool((cb < 0.0).all()))
+
+        wet_ic0, cb_ic0 = run(incloud_scale=0.0)
+        self.assertTrue(bool((wet_ic0 < wet).all()))
+        np.testing.assert_array_equal(cb_ic0, 0.0)
+
+        wet_im0, cb_im0 = run(impact_scale=0.0)
+        self.assertTrue(bool((wet_im0 < wet).all()))
+        np.testing.assert_array_equal(cb_im0, cb)
+
+        wet_both0, _ = run(incloud_scale=0.0, impact_scale=0.0)
+        self.assertTrue(bool((wet_both0 < wet_ic0).all()))
+        self.assertTrue(bool((wet_both0 < wet_im0).all()))
+
+        # A half-strength scale removes less than full strength but still
+        # removes (the update is the implicit q*exp(-rate*dt), so the change
+        # is monotone in the rate, not proportional to it).
+        _, cb_half = run(incloud_scale=0.5)
+        self.assertTrue(bool(((cb < cb_half) & (cb_half < 0.0)).all()))
+
     def test_cloud_borne_removed_at_full_incloud_rate(self):
         # Cloud-borne aerosol is entirely in-droplet: its stratiform removal
         # must not scale with the interstitial activated fraction, and must
