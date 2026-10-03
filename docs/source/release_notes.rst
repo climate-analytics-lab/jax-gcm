@@ -2010,7 +2010,10 @@ Tiedtke-Nordeng takes ECHAM's decisions
   ``1.93e-6`` (v2: ``2.0e-5``, a linear rate in the downdraft's
   pseudo-evaporation, which ECHAM's ``cuadjtq`` replaces). A value on the old
   scale is 10.4 times ECHAM's. ``convective_precip_fluxes`` takes it as
-  ``cevapcu_coefficient``. See :ref:`v3-tiedtke-parameters`.
+  ``cevapcu_coefficient``. See :ref:`v3-tiedtke-parameters`. A test now fails
+  any ``*Parameters`` field that no code reads
+  (``jcm/parameter_fields_test.py``); the twelve other such fields found are
+  tracked in #999.
 - **Changes results** for every ECHAM configuration. Over days 5-10 of
   ``t63-echam-1m`` / ``t63-echam-2m`` runs restarted from 30-day spin-ups
   (against the same physics with the 2.x decisions), the exact decisions
