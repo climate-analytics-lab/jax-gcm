@@ -470,24 +470,39 @@ class TestEchamComposablePhysics(unittest.TestCase):
         self.assertAlmostEqual(float(wet.sol_factb), 0.2)
         self.assertAlmostEqual(float(wet.impact_scale), 0.4)
 
-    def test_inert_conv_scav_ratio_override_warns(self):
-        """``conv_scav_ratio`` moves nothing with convective tracer transport.
+    def test_override_of_a_field_no_run_reads_warns(self):
+        """A valid override that cannot move the run is flagged.
 
-        The in-plume scavenging then belongs to the transport term, so a sweep
-        over the ratio would run identical arms: the override is valid, and
-        flagged. Without convective transport the ratio is read and nothing
-        is said; the live scales never warn.
+        ``conv_scav_ratio`` is read only without convective tracer transport
+        (the in-plume scavenging then belongs to the transport term); the
+        oxidant ozone and solar-geometry fallbacks, ARG's default updraft and
+        the dry-deposition default friction velocity are never read here
+        because the boundary conditions and the vertical-diffusion carry
+        supply what they stand in for. A sweep over any of them would run
+        identical arms. The live fields never warn.
         """
         import warnings
 
         from jcm.physics.echam.echam_terms import echam_physics
 
-        with self.assertWarnsRegex(UserWarning, "conv_scav_ratio has no effect"):
-            echam_physics(**self._JAM_KWARGS, wetdep={"conv_scav_ratio": 0.5})
+        for kwargs in (dict(wetdep={"conv_scav_ratio": 0.5}),
+                       dict(oxidants={"o3_fallback_vmr": 5e-8}),
+                       dict(oxidants={"cos_zenith_fallback": 0.5}),
+                       dict(activation={"updraft_default": 0.5}),
+                       dict(drydep={"u_star_default": 0.5})):
+            with self.subTest(kwargs=kwargs):
+                (scheme, fields), = kwargs.items()
+                with self.assertWarnsRegex(
+                        UserWarning, rf"{scheme}\.{next(iter(fields))} has no effect"):
+                    echam_physics(**self._JAM_KWARGS, **kwargs)
         for kwargs in (
                 dict(wetdep={"conv_scav_ratio": 0.5},
                      jam_convective_transport=False),
-                dict(wetdep={"incloud_scale": 0.5, "impact_scale": 0.5})):
+                dict(wetdep={"incloud_scale": 0.5, "impact_scale": 0.5}),
+                dict(oxidants={"oh_ref": 3.0e6, "h2o2_ref_vmr": 4e-10,
+                               "no3_ref_vmr": 2e-12}),
+                dict(activation={"tke_factor": 0.5, "w_min": 0.2},
+                     drydep={"z_ref": 12.0, "z0": 2e-4})):
             with self.subTest(kwargs=kwargs):
                 with warnings.catch_warnings():
                     warnings.simplefilter("error")

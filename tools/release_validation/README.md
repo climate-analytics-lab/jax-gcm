@@ -385,7 +385,8 @@ scalings as `+physics.wetdep.incloud_scale=` and `+physics.wetdep.impact_scale=`
 (likewise `drydep`, `sedimentation`, `activation`, `oxidants`, `sulfur_gas`,
 `aqueous`, `cloud_borne_exchange`, `tracer_diffusion` and
 `anthropogenic_params`: `+physics.<scheme>.<field>=`, an unknown field is an
-error listing the valid ones); the term-list
+error listing the valid ones; the `oxidants` proxies are superseded by the
+oxidant climatology a run supplies, which is the default); the term-list
 presets (echam-1m/2m) as `+physics.terms.tiedtke_convection.params.<field>=`.
 On the PBS path the same flags build the same arm, but `--resume` there
 regenerates from the command line, so repeat them.

@@ -295,8 +295,13 @@ def echam_physics(
             ``jam_anthropogenic=True`` only.
         oxidants: Override for the prescribed-oxidant
             :class:`~jcm.physics.aerosol.jam.chemistry.oxidants.OxidantParameters`
-            (the OH, H2O2, NO3 and O3 reference scales and the fallbacks
-            used without chemistry or radiation). JAM only, as ``seasalt``.
+            (``oh_ref``, ``h2o2_ref_vmr``, ``no3_ref_vmr``). JAM only, as
+            ``seasalt``. These proxies are read only when the run supplies no
+            oxidant climatology (``forcing.oxidants_file``, ``auto`` by
+            default), which supersedes them; the ozone and solar-geometry
+            fallbacks (``o3_fallback_vmr``, ``cos_zenith_fallback``) are never
+            read in this factory's compositions, and a mapping that sets them
+            warns.
         sulfur_gas: Override for the gas-phase sulfur
             :class:`~jcm.physics.aerosol.jam.chemistry.sulfur_gas.SulfurGasParameters`
             (``soag_production``). JAM only.
@@ -305,8 +310,9 @@ def echam_physics(
             (``rate_scale``). JAM only.
         activation: Override for the ARG activation
             :class:`~jcm.physics.aerosol.jam.activation.arg_term.ArgParameters`
-            (the updraft closure: ``updraft_default``, ``tke_factor``,
-            ``w_min``). JAM only.
+            (the TKE updraft closure, ``tke_factor`` and ``w_min``; the
+            ``updraft_default`` fallback is never read here and warns). JAM
+            only.
         cloud_borne_exchange: Override for the interstitial/cloud-borne
             exchange
             :class:`~jcm.physics.aerosol.jam.cloud_borne.CloudBorneExchangeParameters`
@@ -318,7 +324,8 @@ def echam_physics(
             (``velocity_scale``). JAM only.
         drydep: Override for the Slinn surface dry deposition
             :class:`~jcm.physics.aerosol.jam.drydep.drydep_term.DryDepParameters`
-            (``z_ref``, ``z0``, ``u_star_default``). JAM only.
+            (``z_ref`` and ``z0``; the ``u_star_default`` fallback is never
+            read here and warns). JAM only.
         wetdep: Override for the JAM wet-scavenging
             :class:`~jcm.physics.aerosol.jam.wetdep.wetdep_term.WetDepParameters`
             (``incloud_scale``, the multiplier on the stratiform in-cloud
@@ -703,20 +710,43 @@ def echam_physics(
                        scheme=name)
                    if isinstance(value, Mapping) else value)
             for name, value in _jam_args.items()}
-    # ``conv_scav_ratio`` is the environment-profile convective in-cloud
-    # scavenging, which WetScavenging retires (``in_plume_convective``) when the
-    # convective tracer transport scavenges inside the plume instead. A value
-    # that cannot move the run is valid but would make a sweep over it run
-    # identical arms, so it is flagged, not rejected.
-    if (isinstance(_jam_args["wetdep"], Mapping)
-            and "conv_scav_ratio" in _jam_args["wetdep"]
-            and jam_convective_transport):
-        warnings.warn(
-            "wetdep.conv_scav_ratio has no effect with "
-            "jam_convective_transport=True: the convective in-cloud "
-            "scavenging is then the transport term's per-mode csr_conv, "
-            "not this ratio (it is read only with "
-            "jam_convective_transport=False).", UserWarning, stacklevel=2)
+    # Fields a valid mapping can set but no run of this composition reads. A
+    # sweep over one would run identical arms, so each is flagged, not
+    # rejected (the scheme still takes the object, and a configuration that
+    # composes differently may read it).
+    _jam_inert_fields = {
+        ("wetdep", "conv_scav_ratio"): (
+            jam_convective_transport,
+            "the convective in-cloud scavenging is then the transport term's "
+            "per-mode csr_conv; this ratio is read only with "
+            "jam_convective_transport=False"),
+        ("oxidants", "o3_fallback_vmr"): (
+            True,
+            "EchamBoundaryConditions supplies the ozone before the oxidants "
+            "in every echam_physics composition, so this fallback for an "
+            "absent ozone is never read"),
+        ("oxidants", "cos_zenith_fallback"): (
+            True,
+            "EchamBoundaryConditions supplies the solar geometry before the "
+            "oxidants in every echam_physics composition, so this fallback "
+            "for an absent one is never read"),
+        ("activation", "updraft_default"): (
+            True,
+            "the TKE-based updraft reads the vertical-diffusion carry, which "
+            "every echam_physics composition seeds at initialisation, so "
+            "this fallback for its absence is never read"),
+        ("drydep", "u_star_default"): (
+            True,
+            "the surface friction velocity comes from the vertical-diffusion "
+            "carry, which every echam_physics composition seeds at "
+            "initialisation, so this fallback for its absence is never read"),
+    }
+    for (_scheme, _field), (_inert, _why) in _jam_inert_fields.items():
+        if (_inert and isinstance(_jam_args[_scheme], Mapping)
+                and _field in _jam_args[_scheme]):
+            warnings.warn(
+                f"{_scheme}.{_field} has no effect: {_why}.",
+                UserWarning, stacklevel=2)
     if field_overrides:
         _resolved = dict(
             convection=convection_p, clouds=clouds_p,

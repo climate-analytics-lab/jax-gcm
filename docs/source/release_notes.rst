@@ -776,6 +776,12 @@ Scheme parameters on the factory-built presets
   valid ones, and an argument whose scheme is not composed is rejected
   (without ``aerosol_module="jam"``; ``anthropogenic_params`` without
   ``jam_anthropogenic``; ``cloud_borne_exchange`` without ``jam_cloud_borne``).
+  A valid override of a field no run reads warns instead
+  (``wetdep.conv_scav_ratio`` with convective tracer transport; the fallbacks
+  ``oxidants.o3_fallback_vmr``, ``oxidants.cos_zenith_fallback``,
+  ``activation.updraft_default`` and ``drydep.u_star_default``), and the
+  ``oxidants`` proxies are read only when the run supplies no oxidant
+  climatology (``forcing.oxidants_file``, ``auto`` by default).
   The dust parameters beyond the ``jam_dust_*`` flags and the convective tracer
   transport parameters (which own the convective in-plume scavenging, so
   ``incloud_scale`` does not reach it) have no such argument yet (#995).
