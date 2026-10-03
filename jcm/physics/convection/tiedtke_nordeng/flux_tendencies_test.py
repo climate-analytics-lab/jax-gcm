@@ -15,11 +15,21 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+import jcm.constants as c
 from jcm.physics.convection.tiedtke_nordeng.flux_tendencies import (
     calculate_tendencies,
+    cevapcu_profile,
     convective_precip_fluxes,
     updraft_area_cover,
 )
+from jcm.physics.convection.tiedtke_nordeng.tiedtke_nordeng import (
+    saturation_mixing_ratio,
+)
+from jcm.physics.convection.tiedtke_nordeng.types import (
+    ECHAM_CEVAPCU_COEFFICIENT,
+    ConvectionParameters,
+)
+from jcm.testing import check_gradients
 
 
 class TestUpdraftAreaCover(unittest.TestCase):
@@ -343,3 +353,192 @@ class TestTaperWeightPlumbing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCevapcuProfile(unittest.TestCase):
+    """ECHAM's ``cevapcu(jk)`` (iniphy.f90:87-89) and its leading coefficient."""
+
+    ETA = jnp.array([1.0e-5, 1.0e-3, 0.05, 0.3, 0.7, 0.99, 1.0])
+
+    @staticmethod
+    def _iniphy(eta):
+        """Evaluate the profile as ECHAM writes it, with the literal ``1.93E-6``."""
+        return (
+            1.93e-6 * 261.0
+            * jnp.sqrt(1.0e3 / (38.3 * 0.293) * jnp.sqrt(jnp.clip(eta, 1e-4, 1.0)))
+            * 0.5 / c.grav
+        )
+
+    def test_default_is_iniphys_expression_exactly(self):
+        # ``ConvectionParameters`` carries the coefficient as an array leaf,
+        # so the exactness has to hold for that form as well as for the
+        # float, in both precisions the model runs in.
+        for x64 in (False, True):
+            with jax.enable_x64(x64):
+                eta = self.ETA.astype(jnp.float64 if x64 else jnp.float32)
+                want = np.asarray(self._iniphy(eta))
+                leaf = jnp.asarray(ConvectionParameters.default().cevapcu)
+                for got in (cevapcu_profile(eta),
+                            cevapcu_profile(eta, ECHAM_CEVAPCU_COEFFICIENT),
+                            cevapcu_profile(eta, leaf)):
+                    np.testing.assert_array_equal(np.asarray(got), want)
+
+    def test_coefficient_scales_the_whole_level_dependent_profile(self):
+        base = np.asarray(cevapcu_profile(self.ETA))
+        doubled = np.asarray(
+            cevapcu_profile(self.ETA, 2.0 * ECHAM_CEVAPCU_COEFFICIENT))
+        # A power-of-two factor is exact, so the ratio is 2 at every level.
+        np.testing.assert_array_equal(doubled, 2.0 * base)
+        # The shape stays ECHAM's: it grows with eta, and the clip at the top
+        # keeps it positive.
+        self.assertTrue(np.all(np.diff(base) > 0.0))
+        self.assertGreater(float(base[0]), 0.0)
+
+    def test_default_parameter_is_echams_coefficient(self):
+        self.assertEqual(ECHAM_CEVAPCU_COEFFICIENT, 1.93e-6)
+        self.assertEqual(
+            float(ConvectionParameters.default().cevapcu),
+            float(np.float32(ECHAM_CEVAPCU_COEFFICIENT)))
+
+
+class TestSubCloudEvaporationCoefficient(unittest.TestCase):
+    """``cevapcu`` sets how fast convective rain evaporates below cloud base.
+
+    The column is chosen so that ECHAM's Kessler chain, not its cap, decides
+    the evaporation. ``cuflx`` takes the weaker of two limits per layer:
+    the chain ``(√(rain/cover) − cevapcu(k)·Δp·(qs − q))²·cover``, and a cap
+    that moistens the layer to no more than 80 % of saturation in one step
+    (``zrmin``). Where the cap binds the coefficient changes nothing — in the
+    warm, dry column of ``TestSubCloudEvaporationCover`` it does not, at
+    ``dt`` = 1800 s, anywhere between 0.5x and 2x ECHAM's value — so a test
+    of the coefficient has to sit where the chain is the smaller limit:
+    half-saturated sub-cloud air and a 600 s step.
+    """
+
+    DT = 600.0
+    PRECIP_PER_PLUME_LAYER = 1.0e-3
+    # Regression values (float32) of ``_run`` at ECHAM's coefficient: the
+    # surface rain, then ``pdmfup_adj``, ``precip_flux`` and ``evap_fraction``
+    # per layer, for the constant 0.05 cover (``False``) and the updraft-area
+    # cover (``True``). Taken with the profile's ``1.93E-6`` as the literal of
+    # iniphy.f90:87-89, which ``TestCevapcuProfile`` compares the profile
+    # against exactly.
+    PINNED = {
+        False: (
+            0.00044985744,
+            [0.0, 0.001, 0.00039263256, -0.00051661086, -0.00042616433],
+            [0.0, 0.0, 0.001, 0.0013926326, 0.0008760218],
+            [0.0, 0.0, 0.30368373, 0.3709599, 0.48647687],
+        ),
+        True: (
+            0.0011125670,
+            [0.0, 0.001, 0.00048980233, -0.0002662827, -0.000110952766],
+            [0.0, 0.0, 0.001, 0.0014898024, 0.0012235197],
+            [0.0, 0.0, 0.25509885, 0.17873693, 0.09068327],
+        ),
+    }
+
+    def setUp(self):
+        self.temperature = jnp.array([278.0, 282.0, 286.0, 290.0, 294.0])
+        self.pressure = jnp.array([2.0e4, 4.0e4, 6.0e4, 8.0e4, 1.0e5])
+        self.dp_lev = jnp.full((5,), 2.0e4)
+        self.humidity = 0.5 * jax.vmap(saturation_mixing_ratio)(
+            self.pressure, self.temperature)
+        self.pdmfup = jnp.array(
+            [0.0, 1.0, 1.0, 0.0, 0.0]) * self.PRECIP_PER_PLUME_LAYER
+        self.mfu = jnp.array([0.0, 0.05, 0.05, 0.0, 0.0])
+        self.tu = jnp.array([0.0, 282.0, 286.0, 0.0, 0.0])
+
+    def _run(self, use_updraft_cover=False, **kwargs):
+        return convective_precip_fluxes(
+            self.temperature, self.humidity, self.pressure, self.dp_lev, 2,
+            self.pdmfup, jnp.zeros((5,)), self.DT,
+            updraft_temperature=self.tu, updraft_mass_flux=self.mfu,
+            ktype=jnp.array(1), updraft_velocity=2.0,
+            use_updraft_cover=use_updraft_cover,
+            updraft_layer_mass=self.dp_lev / 9.80665, **kwargs)
+
+    def _evaporated(self, factor, **kwargs):
+        """Column rain evaporated, i.e. what ``cudtdq`` charges as a sink."""
+        out = self._run(
+            cevapcu_coefficient=factor * ECHAM_CEVAPCU_COEFFICIENT, **kwargs)
+        return float(jnp.sum(self.pdmfup - out[4]))
+
+    def test_default_coefficient_gives_the_regression_fluxes(self):
+        leaf = jnp.asarray(ConvectionParameters.default().cevapcu)
+        for flag, (rain, adj, flux, evap) in self.PINNED.items():
+            for kwargs in ({}, {"cevapcu_coefficient": ECHAM_CEVAPCU_COEFFICIENT},
+                           {"cevapcu_coefficient": leaf}):
+                out = self._run(flag, **kwargs)
+                # A few float32 ulp of room for the platform's ``exp`` in the
+                # saturation humidity; the profile itself is compared exactly
+                # in ``TestCevapcuProfile``.
+                np.testing.assert_allclose(float(out[0]), rain, rtol=2e-6)
+                np.testing.assert_allclose(
+                    np.asarray(out[4]), adj, rtol=2e-6, atol=1e-12)
+                np.testing.assert_allclose(
+                    np.asarray(out[5]), flux, rtol=2e-6, atol=1e-12)
+                np.testing.assert_allclose(
+                    np.asarray(out[7]), evap, rtol=2e-6, atol=1e-12)
+
+    def test_doubling_the_coefficient_changes_the_evaporation_tendency(self):
+        total = float(jnp.sum(self.pdmfup))
+        evaporated = {f: self._evaporated(f) for f in (0.0, 0.5, 1.0, 2.0)}
+        # No coefficient, no evaporation: the chain depletes nothing.
+        self.assertEqual(evaporated[0.0], 0.0)
+        # More coefficient, more evaporation; doubling it is a first-order
+        # change of the tendency (about a fifth of the column's rain here),
+        # not a rounding one.
+        self.assertGreater(evaporated[1.0], 1.2 * evaporated[0.5])
+        self.assertGreater(evaporated[2.0], 1.2 * evaporated[1.0])
+        self.assertLess(evaporated[2.0], total)
+        # The per-layer ledger the tendencies are built from moves with it,
+        # not only the column total: the first sub-cloud layer, which the
+        # doubled coefficient evaporates more of, is charged a larger sink.
+        doubled = self._run(
+            cevapcu_coefficient=2.0 * ECHAM_CEVAPCU_COEFFICIENT)
+        default = self._run()
+        self.assertLess(float(doubled[4][3]), float(default[4][3]) - 1.0e-4)
+        self.assertLess(float(doubled[0]), float(default[0]))
+        # The updraft-area cover the HAM submodel selects shares the profile.
+        self.assertGreater(
+            self._evaporated(2.0, use_updraft_cover=True),
+            self._evaporated(0.5, use_updraft_cover=True))
+
+    def test_the_saturation_cap_leaves_the_coefficient_inert_where_it_binds(self):
+        # ECHAM's ``zrmin``: a layer is not moistened beyond 80 % of
+        # saturation in one step, whatever the chain asks for. In warm, dry
+        # sub-cloud air under a 1800 s step the cap is the smaller limit at
+        # every coefficient from 0.5x to 1e6x ECHAM's, so the evaporation is
+        # the cap's and neither depends on the coefficient nor consumes all
+        # the rain. This is ECHAM's formulation, not a plumbing failure; it is
+        # why the tests above use half-saturated air and a 600 s step.
+        self.humidity = jnp.full((5,), 1.0e-3)
+        self.pdmfup = jnp.array([0.0, 2.0e-3, 2.0e-3, 0.0, 0.0])
+        self.DT = 1800.0
+        capped = [self._evaporated(f) for f in (0.5, 1.0, 2.0, 1.0e6)]
+        self.assertEqual(len(set(capped)), 1)
+        self.assertGreater(capped[0], 0.0)
+        self.assertLess(capped[0], float(jnp.sum(self.pdmfup)))
+
+    def test_coefficient_gradient_is_finite_and_not_zero(self):
+        """d(fluxes)/d(cevapcu) is the AD derivative, and it is live.
+
+        ``live_inputs`` asserts the coefficient's reverse gradient is finite
+        and not identically zero, which is the failure this guards: a
+        parameter the scheme never reads has a trivially finite zero for a
+        gradient.
+        """
+        def fluxes(coefficient):
+            out = self._run(cevapcu_coefficient=coefficient)
+            return out[0], out[4], out[5], out[7]
+
+        check_gradients(
+            fluxes, (jnp.asarray(ECHAM_CEVAPCU_COEFFICIENT),), rtol=2e-2,
+            live_inputs=("[0]",))
+        # The sign is the physics: a larger coefficient evaporates more, so
+        # less rain reaches the surface.
+        slope = jax.grad(lambda x: fluxes(x)[0])(
+            jnp.asarray(ECHAM_CEVAPCU_COEFFICIENT))
+        self.assertTrue(np.isfinite(float(slope)))
+        self.assertLess(float(slope), 0.0)

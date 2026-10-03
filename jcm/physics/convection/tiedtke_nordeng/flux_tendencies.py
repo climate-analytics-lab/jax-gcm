@@ -21,6 +21,7 @@ from .tiedtke_nordeng import ConvectionParameters, ConvectionTendencies
 from .updraft import UpdatedraftState, column_environment
 from .downdraft import DowndraftState
 from .half_levels import HalfLevelEnvironment
+from .types import ECHAM_CEVAPCU_COEFFICIENT
 
 #: Floor on the assumed updraft velocity inside :func:`updraft_area_cover`'s
 #: division [m/s]: a slower "updraft" is not one, and a tiny epsilon there
@@ -169,6 +170,34 @@ def calculate_precipitation_rate(
     return jnp.sum(updraft_state.pdmfup)
 
 
+def cevapcu_profile(eta: jnp.ndarray,
+                    coefficient=ECHAM_CEVAPCU_COEFFICIENT) -> jnp.ndarray:
+    """ECHAM's level-dependent rain-evaporation coefficient ``cevapcu(jk)``.
+
+    ``coefficient·261·√(10³/(38.3·0.293)·√eta)·0.5/g`` (``iniphy.f90:87-89``)
+    in [(kg m⁻² s⁻¹)^½ Pa⁻¹], the factor of ``Δp·(qs − q)`` that
+    :func:`convective_precip_fluxes` subtracts from the square root of the
+    rain intensity. ECHAM hard-codes ``coefficient = 1.93E-6``
+    (:data:`~jcm.physics.convection.tiedtke_nordeng.types.ECHAM_CEVAPCU_COEFFICIENT`);
+    here it is the differentiable ``ConvectionParameters.cevapcu``, which
+    scales the whole profile. ``eta`` is clipped to [1e-4, 1] so the double
+    square root keeps a finite derivative at a vanishing pressure.
+
+    Args:
+        eta: Hybrid full-level coordinate ``ceta`` (``p/p_s`` of the column).
+        coefficient: Leading coefficient (see above).
+
+    Returns:
+        The profile, shaped like ``eta``.
+
+    """
+    return (
+        coefficient * 261.0
+        * jnp.sqrt(1.0e3 / (38.3 * 0.293) * jnp.sqrt(jnp.clip(eta, 1e-4, 1.0)))
+        * 0.5 / c.grav
+    )
+
+
 def convective_precip_fluxes(
     temperature: jnp.ndarray,
     humidity: jnp.ndarray,
@@ -185,6 +214,7 @@ def convective_precip_fluxes(
     use_updraft_cover: bool = False,
     updraft_layer_mass: jnp.ndarray | None = None,
     surface_pressure: jnp.ndarray | None = None,
+    cevapcu_coefficient: jnp.ndarray = ECHAM_CEVAPCU_COEFFICIENT,
 ) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray,
            jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """ECHAM ``cuflx`` precipitation budget (mo_cufluxdts.f90:265-491).
@@ -202,8 +232,9 @@ def convective_precip_fluxes(
        capped so the layer is not moistened beyond 80 % of saturation in
        one step. The evaporated amount is charged (negative) into
        ``pdmfup`` so the same cudtdq ledger cools/moistens the layer.
-       ``cevapcu`` is ECHAM's level-dependent profile (iniphy.f90:87-89),
-       NOT a linear rate coefficient.
+       ``cevapcu`` is ECHAM's level-dependent profile (iniphy.f90:87-89;
+       :func:`cevapcu_profile`), NOT a linear rate coefficient; its leading
+       coefficient is the ``cevapcu_coefficient`` argument.
     3. Deplete the surface rain/snow fluxes proportionally by the total
        sub-cloud evaporation.
 
@@ -239,6 +270,10 @@ def convective_precip_fluxes(
             [Pa], the denominator of the ``cevapcu`` profile's ``eta``. The
             ledger passes it; without it the lowest full-level pressure
             stands in.
+        cevapcu_coefficient: Leading coefficient of the ``cevapcu`` profile
+            (ECHAM's ``1.93E-6``; the ledger passes
+            ``ConvectionParameters.cevapcu``). It scales the whole profile,
+            so it sets how fast rain evaporates below cloud base.
 
     Returns:
         ``(rain_sfc, snow_sfc, prain, pdpmel, pdmfup_adj, precip_flux,
@@ -305,11 +340,7 @@ def convective_precip_fluxes(
     # hybrid one.
     p_surface = pressure[-1] if surface_pressure is None else surface_pressure
     eta = pressure / jnp.maximum(p_surface, 1.0)
-    cevapcu = (
-        1.93e-6 * 261.0
-        * jnp.sqrt(1.0e3 / (38.3 * 0.293) * jnp.sqrt(jnp.clip(eta, 1e-4, 1.0)))
-        * 0.5 / c.grav
-    )
+    cevapcu = cevapcu_profile(eta, cevapcu_coefficient)
 
     # --- pass 1: rain/snow partition + melting (cuflx 296-313) ------------
     def partition_step(carry, xs):
@@ -581,6 +612,7 @@ def calculate_tendencies(
         use_updraft_cover=use_updraft_cover,
         updraft_layer_mass=mass,
         surface_pressure=env.paph[-1],
+        cevapcu_coefficient=config.cevapcu,
     )
     plude = updraft_state.plude
 

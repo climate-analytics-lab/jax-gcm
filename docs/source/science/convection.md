@@ -363,6 +363,15 @@ arrays, and the surface interface carries no flux:
   column's ``p/p_s`` for ECHAM's ``ceta``, the grid's full-level hybrid
   coordinate at the reference surface pressure: the same on a sigma grid,
   and within the ``p_s/101325`` ratio of the ``a`` term on a hybrid one.
+- `differentiability` — the profile's leading coefficient, ECHAM's hard-coded
+  ``1.93E-6`` (``iniphy.f90:87-89``), is the parameter
+  ``ConvectionParameters.cevapcu``, defaulting to ECHAM's value, so that
+  calibration and gradients reach the sub-cloud evaporation; it scales the
+  whole level-dependent profile. As in ECHAM (``mo_cufluxdts.f90:428-432``) a
+  layer evaporates the smaller of the Kessler chain and the amount that
+  moistens it to 80 % of saturation in one step, so where that cap binds
+  (warm, dry sub-cloud air under a long step) the coefficient does not
+  change the result.
 - `science` — the overshoot never reaches the top interface of the model:
   jcm's ascent test fails above interface 2 (0-based), where a flux through
   the model top would leave the column. ECHAM's level loop could place the

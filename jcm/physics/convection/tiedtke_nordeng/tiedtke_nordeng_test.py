@@ -1826,6 +1826,77 @@ class TestSixtyFourBitMode:
             assert state.prate.dtype == atm['temperature'].dtype
 
 
+class TestCevapcuReachesTheScheme:
+    """``ConvectionParameters.cevapcu`` is read by the scheme, not just stored.
+
+    The coefficient scales ECHAM's sub-cloud rain-evaporation profile in
+    ``cuflx``. On this deep-convecting column the evaporation at ECHAM's value
+    is bounded by ``cuflx``'s own cap (no layer is moistened beyond 80 % of
+    saturation in one step), so the response is one-sided: a *smaller*
+    coefficient lets the Kessler chain bind and changes the tendencies, while
+    a larger one is absorbed by the cap. The checks therefore run at a
+    hundredth of ECHAM's value, where the chain is the limit.
+    """
+
+    WEAK = 0.01
+
+    def _run(self, config):
+        atm = create_test_atmosphere(nlev=40, unstable=True)
+        nlev = atm['temperature'].shape[0]
+        return tiedtke_nordeng_convection(
+            atm['temperature'], atm['humidity'], atm['pressure'],
+            atm['layer_thickness'], atm['rho'], atm['u_wind'], atm['v_wind'],
+            jnp.zeros(nlev), jnp.zeros(nlev), dt=3600.0, config=config,
+            **deep_convection_drivers(atm),
+        )[0]
+
+    def _config(self, factor):
+        from jcm.physics.convection.tiedtke_nordeng.types import (
+            ECHAM_CEVAPCU_COEFFICIENT,
+        )
+        return ConvectionParameters.default(
+            cevapcu=factor * ECHAM_CEVAPCU_COEFFICIENT)
+
+    def test_the_default_gives_the_regression_tendencies(self):
+        # Regression values (float32) of the default configuration, taken with
+        # the profile's ``1.93E-6`` as the literal of iniphy.f90:87-89. This
+        # column is cap-bound, so the profile itself is pinned exactly at the
+        # ``cuflx`` level (``TestCevapcuProfile``,
+        # ``TestSubCloudEvaporationCoefficient``); this pins what the whole
+        # scheme does with it.
+        tendencies = self._run(ConvectionParameters.default())
+        dtedt = np.asarray(tendencies.dtedt, dtype=np.float64)
+        dqdt = np.asarray(tendencies.dqdt, dtype=np.float64)
+        np.testing.assert_allclose(
+            float(tendencies.precip_conv), 0.003910021856427193, rtol=1e-5)
+        np.testing.assert_allclose(dtedt.sum(), 0.04832661464934063, rtol=1e-5)
+        np.testing.assert_allclose(
+            np.abs(dtedt).sum(), 0.048944069725621375, rtol=1e-5)
+        np.testing.assert_allclose(dqdt.sum(), -2.3641751378811193e-06, rtol=1e-5)
+        np.testing.assert_allclose(
+            np.abs(dqdt).sum(), 7.475658400313279e-06, rtol=1e-5)
+
+    def test_a_weaker_coefficient_evaporates_less_and_changes_the_tendencies(self):
+        default = self._run(ConvectionParameters.default())
+        weak = self._run(self._config(self.WEAK))
+        # Less evaporation below cloud base: more rain reaches the surface,
+        # and the temperature tendency (the evaporative cooling) moves with it.
+        assert float(weak.precip_conv) > float(default.precip_conv)
+        assert float(jnp.max(jnp.abs(weak.dtedt - default.dtedt))) > 1.0e-6
+        assert float(jnp.max(jnp.abs(weak.dqdt - default.dqdt))) > 1.0e-9
+
+    def test_the_parameter_carries_a_gradient(self):
+        weak = self._config(self.WEAK)
+
+        def surface_rain(cevapcu):
+            return self._run(weak.replace(cevapcu=cevapcu)).precip_conv
+
+        slope = jax.grad(surface_rain)(weak.cevapcu)
+        assert bool(jnp.isfinite(slope))
+        # More coefficient, more evaporation, less surface rain.
+        assert float(slope) < 0.0
+
+
 class TestConvectionNumericalStability:
     """Regression tests for numerical stability fixes.
 

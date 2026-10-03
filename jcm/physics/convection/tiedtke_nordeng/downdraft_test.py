@@ -95,7 +95,7 @@ def _default_config():
     return ConvectionParameters.default(
         entrpen=1.0e-4, entrscv=3.0e-3, entrmid=1.0e-4,
         entrdd=2.0e-4, tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10,
-        cprcon=2.5e-4, cevapcu=2.0e-5, cmfdeps=0.30,
+        cprcon=2.5e-4, cmfdeps=0.30,
     )
 
 

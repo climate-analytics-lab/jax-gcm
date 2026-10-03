@@ -14,6 +14,14 @@ from flax import struct
 import tree_math
 
 
+#: Leading coefficient of ECHAM's sub-cloud rain-evaporation profile,
+#: ``cevapcu(jk) = 1.93E-6·261·√(10³/(38.3·0.293)·√ceta(jk))·0.5/g``
+#: (``iniphy.f90:87-89``). It is the default of
+#: ``ConvectionParameters.cevapcu`` and of ``convective_precip_fluxes``'s
+#: ``cevapcu_coefficient``, so the two cannot drift apart.
+ECHAM_CEVAPCU_COEFFICIENT = 1.93e-6
+
+
 #: Fields of :class:`ConvectionParameters` that are static
 #: (``pytree_node=False``): the widths of the surrogates that define the
 #: derivatives of ECHAM's convective decisions (:mod:`.switches`). The value
@@ -82,7 +90,15 @@ class ConvectionParameters:
                              # cloud-base layer)
 
     # Evaporation parameters
-    cevapcu: float           # Coefficient for rain evaporation
+    cevapcu: float           # Leading coefficient of ECHAM's sub-cloud
+                             # rain-evaporation profile ``cevapcu(jk) =
+                             # cevapcu·261·√(10³/(38.3·0.293)·√eta)·0.5/g``
+                             # (iniphy.f90:87-89), which ``cuflx`` applies as
+                             # ``√(rain/cover) − cevapcu(jk)·Δp·(qs − q)``
+                             # (mo_cufluxdts.f90:428-430). It scales the whole
+                             # level-dependent profile. ECHAM hard-codes
+                             # ``1.93E-6`` (``ECHAM_CEVAPCU_COEFFICIENT``,
+                             # the default).
     cu_updraft_velocity: float  # Assumed in-cloud updraft speed ``zwu``
                              # (m/s) used to turn the updraft mass flux into
                              # the updraft AREA ``pmfu/(zwu*rhou)`` — ECHAM
@@ -178,7 +194,7 @@ class ConvectionParameters:
                  cu_centrmax=3.0e-4,
                  tau=7200.0, cmfcmax=1.0, cmfcmin=1.0e-10, cprcon=2.5e-4,
                  cu_dnoprc_ocean=1.5e4, cu_dnoprc_land=3.0e4,
-                 cevapcu=2.0e-5, cu_updraft_velocity=2.0,
+                 cevapcu=ECHAM_CEVAPCU_COEFFICIENT, cu_updraft_velocity=2.0,
                  cu_cmfctop=0.2, cu_mfub1_min=1.0e-3,
                  cmfdeps=0.3, entrdd=2.0e-4,
                  cu_cminbuoy=0.2, cu_cmaxbuoy=1.0, cu_cbfac=1.0,
