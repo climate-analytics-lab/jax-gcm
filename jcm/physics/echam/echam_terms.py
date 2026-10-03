@@ -90,6 +90,7 @@ if TYPE_CHECKING:
     from jcm.physics.aerosol.jam.emissions.seasalt import SeaSaltParameters
     from jcm.physics.aerosol.jam.sedimentation.sedi_term import SedParameters
     from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetDepParameters
+    from jcm.physics.convection.tracer_transport import ConvTransportParameters
     from jcm.physics.vertical_diffusion.tracer_diffusion import (
         TracerDiffusionParameters)
 
@@ -193,6 +194,7 @@ def echam_physics(
     wetdep: WetDepParameters | Mapping[str, Any] | None = None,
     tracer_diffusion: (
         TracerDiffusionParameters | Mapping[str, Any] | None) = None,
+    conv_transport: ConvTransportParameters | Mapping[str, Any] | None = None,
     gw_scheme: str = "hines",
     checkpoint_terms: bool = True,
     radiation_scheme: str | PhysicsTerm = "rrtmgp",
@@ -248,11 +250,12 @@ def echam_physics(
     with ``cloud_scheme="2m"``, ``hines`` with ``gw_scheme`` ``"frontal"`` or
     ``"none"``, ``aerosol`` with ``aerosol_module="jam"``, the JAM schemes
     below without it, ``anthropogenic_params`` without ``jam_anthropogenic``,
-    ``cloud_borne_exchange`` without ``jam_cloud_borne``, ``radiation`` with a
-    radiation term instance) and a mapping that sets ``cu_lmfmid`` alongside
-    the scalar ``cu_lmfmid`` flag are rejected rather than ignored. The JAM dust
-    (beyond the ``jam_dust_*`` flags) and convective-tracer-transport
-    parameters have no argument here yet (jax-gcm#995).
+    ``cloud_borne_exchange`` without ``jam_cloud_borne``, ``conv_transport``
+    without ``jam_convective_transport``, ``radiation`` with a radiation term
+    instance) and a mapping that sets ``cu_lmfmid`` alongside the scalar
+    ``cu_lmfmid`` flag are rejected rather than ignored. The JAM dust
+    parameters have no argument here beyond the ``jam_dust_*`` flags yet
+    (jax-gcm#995).
 
     Args:
         convection: Override for ``ConvectionParameters``.
@@ -335,15 +338,23 @@ def echam_physics(
             ``conv_scav_ratio`` and ``conv_updraft_velocity``). JAM only.
             ``incloud_scale`` does not reach the convective in-plume removal,
             which the convective tracer transport owns
-            (``jam_convective_transport=True``, the default: its per-mode
-            ``csr_conv``, which has no argument here yet, jax-gcm#995), and
-            ``conv_scav_ratio`` is read only without it (a mapping that sets
-            it with convective transport on warns).
+            (``jam_convective_transport=True``, the default): scale that with
+            ``conv_transport``'s ``conv_scav_scale``. ``conv_scav_ratio`` is
+            read only without convective transport (a mapping that sets it
+            with convective transport on warns).
         tracer_diffusion: Override for the JAM tracers' turbulent vertical
             mixing
             :class:`~jcm.physics.vertical_diffusion.tracer_diffusion.TracerDiffusionParameters`
             (``diffusion_scale``), for the advected tracers and the
             cloud-borne carry alike. JAM only.
+        conv_transport: Override for the JAM tracers' convective transport
+            :class:`~jcm.physics.convection.tracer_transport.ConvTransportParameters`
+            (``transport_scale``, the multiplier on the mass-flux ledger every
+            tracer is moved by, and ``conv_scav_scale``, the multiplier on the
+            in-plume scavenging fractions ``csr_conv``, clipped so a fraction
+            stays at most one). The per-tracer ``csr_conv`` array itself is
+            the mode layout's and is not overridable. JAM with
+            ``jam_convective_transport=True`` only.
         gw_scheme: Non-orographic gravity-wave scheme: ``"hines"`` (ECHAM's
             Doppler-spread scheme, the default), ``"frontal"`` (CAM's
             frontogenesis-triggered spectral scheme — requires a
@@ -622,10 +633,11 @@ def echam_physics(
         oxidants=oxidants, sulfur_gas=sulfur_gas, aqueous=aqueous,
         activation=activation, cloud_borne_exchange=cloud_borne_exchange,
         sedimentation=sedimentation, drydep=drydep, wetdep=wetdep,
-        tracer_diffusion=tracer_diffusion)
+        tracer_diffusion=tracer_diffusion, conv_transport=conv_transport)
     _jam_not_composed = {
         "anthropogenic_params": not jam_anthropogenic,
         "cloud_borne_exchange": not jam_cloud_borne,
+        "conv_transport": not jam_convective_transport,
     }
     _jam_unused = [
         name for name, value in _jam_args.items() if value is not None
@@ -635,9 +647,10 @@ def echam_physics(
             f"{_jam_unused} would be ignored: that scheme is not composed. "
             "The JAM scheme parameters need aerosol_module='jam' (got "
             f"{aerosol_module!r}); anthropogenic_params also needs "
-            f"jam_anthropogenic=True (got {jam_anthropogenic}) and "
+            f"jam_anthropogenic=True (got {jam_anthropogenic}), "
             "cloud_borne_exchange jam_cloud_borne=True (got "
-            f"{jam_cloud_borne}).")
+            f"{jam_cloud_borne}) and conv_transport "
+            f"jam_convective_transport=True (got {jam_convective_transport}).")
     if cu_lmfmid is not None and "cu_lmfmid" in field_overrides.get(
             "convection", {}):
         raise ValueError(
@@ -718,8 +731,8 @@ def echam_physics(
         ("wetdep", "conv_scav_ratio"): (
             jam_convective_transport,
             "the convective in-cloud scavenging is then the transport term's "
-            "per-mode csr_conv; this ratio is read only with "
-            "jam_convective_transport=False"),
+            "per-mode csr_conv (scaled by conv_transport.conv_scav_scale); "
+            "this ratio is read only with jam_convective_transport=False"),
         ("oxidants", "o3_fallback_vmr"): (
             True,
             "EchamBoundaryConditions supplies the ozone before the oxidants "

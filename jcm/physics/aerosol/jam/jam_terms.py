@@ -84,19 +84,19 @@ from jcm.physics.vertical_diffusion.tracer_diffusion import (
 )
 
 #: ``jam_aerosol_physics`` keyword -> the ``Parameters`` class of that scheme,
-#: for every scheme whose default is the class's own ``.default()``. It is the
-#: one list the factory door of ``echam_physics`` builds on: a field-override
-#: mapping (``wetdep={"incloud_scale": 0.5}``, Hydra's
-#: ``+physics.wetdep.incloud_scale=0.5``) is applied on top of that default,
-#: and an object is forwarded as given.
+#: for every scheme a field-override mapping can be applied to. It is the one
+#: list the factory door of ``echam_physics`` builds on: a mapping
+#: (``wetdep={"incloud_scale": 0.5}``, Hydra's
+#: ``+physics.wetdep.incloud_scale=0.5``) is applied on top of the class's
+#: ``.default()``, and an object is forwarded as given.
+#: ``ConvTransportParameters.default()`` leaves the per-tracer ``csr_conv``
+#: empty, which the transport term fills from the mode layout below.
 #:
-#: ``dust`` and ``conv_transport`` are not here because their default depends
-#: on the composition rather than on the class: the dust preset is rebuilt at
-#: the model's own truncation in ``DustEmissions.cache_coords`` (an explicit
-#: object is never rebuilt), and ``ConvTransportParameters.csr_conv`` holds one
-#: fraction per transported tracer, set from the population's mode layout
-#: below. A mapping for either has to be applied where that base exists, so
-#: ``echam_physics`` has no mapping door for them yet (jax-gcm#995).
+#: ``dust`` is not here because its default depends on the composition rather
+#: than on the class: the dust preset is rebuilt at the model's own truncation
+#: in ``DustEmissions.cache_coords`` (an explicit object is never rebuilt). A
+#: mapping for it has to be applied there, so ``echam_physics`` has no mapping
+#: door for it beyond the ``jam_dust_*`` flags yet (jax-gcm#995).
 JAM_PARAMETER_CLASSES = {
     "seasalt": SeaSaltParameters,
     "dms": DmsParameters,
@@ -110,6 +110,7 @@ JAM_PARAMETER_CLASSES = {
     "drydep": DryDepParameters,
     "wetdep": WetDepParameters,
     "tracer_diffusion": TracerDiffusionParameters,
+    "conv_transport": ConvTransportParameters,
 }
 
 
