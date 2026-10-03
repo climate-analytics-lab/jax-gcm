@@ -12,9 +12,12 @@ See docs/source/design/composable_physics.md for the full design.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from typing import Any, ClassVar, Mapping
 
+import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 
 from jcm.physics_interface import PhysicsState, PhysicsTendency
@@ -413,24 +416,127 @@ class PhysicsTerm(nnx.Module):
         return NotImplemented
 
 
+def _is_numeric_override(value) -> bool:
+    """Whether ``value`` is a number or a (nested) sequence/array of numbers.
+
+    A string, ``None`` or mapping is not: those spell a field the class itself
+    interprets (the enum-like aliases its ``__post_init__`` normalizes), so
+    :func:`with_field_overrides` hands them to the constructor untouched.
+    """
+    if isinstance(value, (str, bytes, Mapping)) or value is None:
+        return False
+    return isinstance(value, (bool, int, float, complex, np.number, np.bool_,
+                              np.ndarray, jax.Array, Sequence))
+
+
+def _like_base_leaf(base_leaf, value, where: str):
+    """Return ``value`` as the same kind of leaf as ``base_leaf``.
+
+    A scheme's defaults hold its numeric tunables as arrays (``jnp.array(15.0)``)
+    and the schemes use them as such: the 1M cloud scheme casts every floating
+    leaf to the state's precision (``leaf.astype(dtype)``), which a Python
+    float cannot do. So an override of an array leaf is converted to an array
+    of the base leaf's dtype and shape, and the leaf stays a differentiable
+    pytree leaf like the one it replaces.
+
+    - **Array leaf** (jax or numpy): a number, or a (nested) sequence or array
+      of numbers, becomes an array of ``base_leaf.dtype`` and ``base_leaf.shape``.
+      A different shape (a scalar for a profile, a list of the wrong length) is
+      an error rather than a broadcast: a silently broadcast value would
+      overwrite a per-level or per-plume profile. A Python scalar override of
+      a weakly typed leaf (every default built from a Python number) is built
+      the same way, so it is weakly typed too and keeps the value from
+      promoting a float32 state to float64 under ``jax_enable_x64``.
+    - **Python scalar leaf** (``float``, ``int``, ``bool``): a real scalar
+      becomes a value of that type (a Hydra ``3600`` for a float field becomes
+      ``3600.0``); a sequence is an error.
+    - **Integer or boolean leaf**, array or Python scalar: the value must be
+      exactly representable. ``2.5`` for an integer selector and ``2`` for a
+      flag are errors, not a truncation and a silently true flag.
+    - **Anything else** (strings, ``None``, mappings: spellings the class's
+      ``__post_init__`` interprets) and any non-numeric value: returned
+      unchanged.
+
+    The conversion also works on a tracer (the dtype and shape checks use only
+    static information; the representability check needs a concrete value and is
+    skipped for one).
+    """
+    python_type = type(base_leaf) if type(base_leaf) in (float, int, bool) else None
+    is_array_leaf = isinstance(base_leaf, (jax.Array, np.ndarray, np.generic))
+    if not (is_array_leaf or python_type) or not _is_numeric_override(value):
+        return value
+
+    traced = isinstance(value, jax.core.Tracer)
+    if traced:
+        arr = value
+    else:
+        try:
+            arr = np.asarray(value)
+        except (TypeError, ValueError) as err:
+            raise ValueError(
+                f"{where}: {value!r} is not a numeric value or a regular "
+                "sequence of numbers.") from err
+        if arr.dtype.kind not in "biuf":
+            raise ValueError(
+                f"{where}: {value!r} is not a real numeric value (got dtype "
+                f"{arr.dtype}).")
+
+    shape = tuple(base_leaf.shape) if is_array_leaf else ()
+    if tuple(arr.shape) != shape:
+        what = ("a scalar" if not shape
+                else f"an array of shape {shape}")
+        raise ValueError(
+            f"{where}: this field is {what} but the override has shape "
+            f"{tuple(arr.shape)} ({value!r}); a value is not broadcast over a "
+            "field of another shape.")
+
+    dtype = (base_leaf.dtype if is_array_leaf
+             else np.dtype({float: "f8", int: "i8", bool: "?"}[python_type]))
+    if not traced and dtype.kind != "f":
+        # numpy's cast truncates a float and wraps an overflowing integer.
+        if not np.array_equal(arr.astype(dtype), arr):
+            raise ValueError(
+                f"{where}: {value!r} is not representable as {dtype} (the "
+                "field is an integer or boolean selector).")
+    if python_type:
+        return value if traced else python_type(arr.item())
+    if traced:
+        new = jnp.asarray(arr)
+    elif getattr(base_leaf, "weak_type", False) and arr.ndim == 0:
+        scalar = arr.item()
+        new = jnp.asarray({"f": float, "i": int, "u": int}.get(
+            dtype.kind, bool)(scalar))
+    else:
+        new = jnp.asarray(arr, dtype=dtype)
+    return new if new.dtype == dtype else new.astype(dtype)
+
+
 def with_field_overrides(base, overrides: Mapping[str, Any] | None, *,
                          scheme: str):
     """Return ``base`` (a scheme ``Parameters`` object) with fields replaced.
 
     The one conversion from a config mapping to a ``Parameters`` object, used
     by both Hydra doors: ``runners._build_term`` (term-list presets, ``base``
-    is ``ParamsCls.default()``) and ``echam_physics`` (factory-built presets,
-    ``base`` is the object the factory would otherwise have used, so an
-    override of one field keeps the factory's own choices for the others).
+    is the scheme's defaults for the run's grid) and ``echam_physics``
+    (factory-built presets, ``base`` is the object the factory would otherwise
+    have used, so an override of one field keeps the factory's own choices for
+    the others).
 
-    Values are passed to the class constructor as given, so numeric fields
-    stay ordinary pytree leaves (differentiable, never static), and a class's
-    ``__post_init__`` normalizes its documented spellings (the string aliases
-    of enum-like fields). The constructor bypasses the cross-field checks in
-    ``default()``, so the opt-in ``validate`` hook is re-run on the result:
-    an override could otherwise re-create an illegal field combination (e.g.
-    echam_1m's legacy ccraut-as-KK2000-threshold, #674) that the defaults
-    alone never trip. Config-time, concrete values only; never under a trace.
+    A numeric value takes the kind of the field it replaces: the array fields
+    of a scheme's defaults are replaced by arrays of the same dtype and shape
+    (a Python float, int or bool field by a value of that type), so numeric
+    fields stay ordinary pytree leaves (differentiable, never static) that
+    behave exactly like the defaults wherever a scheme reads them, whichever
+    door built them. A value whose shape is not the field's is an error, not a
+    broadcast, and an integer or boolean field takes only a value it can
+    represent.
+    A class's ``__post_init__`` normalizes its documented spellings (the
+    string aliases of enum-like fields), which are passed to it as given. The
+    constructor bypasses the cross-field checks in ``default()``, so the
+    opt-in ``validate`` hook is re-run on the result: an override could
+    otherwise re-create an illegal field combination (e.g. echam_1m's legacy
+    ccraut-as-KK2000-threshold, #674) that the defaults alone never trip.
+    Config-time, concrete values only; never under a trace.
 
     Args:
         base: The ``Parameters`` object whose unspecified fields are kept.
@@ -439,9 +545,11 @@ def with_field_overrides(base, overrides: Mapping[str, Any] | None, *,
         scheme: Name used in the error message (the config key or term name).
 
     Raises:
-        ValueError: A key is not a field of ``base``'s class; the message
+        ValueError: A key is not a field of ``base``'s class (the message
             lists the valid fields, since a typo silently dropped would
-            invalidate the experiment that set it.
+            invalidate the experiment that set it), or a numeric value does
+            not fit the field it replaces: a different shape, or a non-integral
+            value for an integer or boolean field.
 
     """
     overrides = dict(overrides or {})
@@ -451,6 +559,9 @@ def with_field_overrides(base, overrides: Mapping[str, Any] | None, *,
         raise ValueError(
             f"{scheme}: unknown {type(base).__name__} field(s) {unknown}. "
             f"Valid fields: {sorted(valid)}.")
+    overrides = {name: _like_base_leaf(getattr(base, name), value,
+                                       f"{scheme}.{name}")
+                 for name, value in overrides.items()}
     params = base.__class__(**{**base.__dict__, **overrides})
     validate = getattr(params, "validate", None)
     if callable(validate):

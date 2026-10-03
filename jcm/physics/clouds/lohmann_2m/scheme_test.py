@@ -199,8 +199,11 @@ CLOUD_LEVEL = 5
 TERM_NLEV = 8
 
 
-def _composition(cooling_rate):
-    """Compose [column diagnostics stub, a 'radiation' term that only cools, 2M]."""
+def _composition(cooling_rate, params=None):
+    """Compose [column diagnostics stub, a 'radiation' term that only cools, 2M].
+
+    ``params`` are the 2M term's ``CloudParams2M`` (the defaults if omitted).
+    """
     from jcm.physics.clouds.cloud_data import CloudData
     from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
     from jcm.physics.composable_physics import ComposablePhysics
@@ -246,7 +249,7 @@ def _composition(cooling_rate):
             return tend.copy(temperature=jnp.broadcast_to(
                 rate[:, None], state.temperature.shape)), diagnostics
 
-    return ComposablePhysics([_Column(), _Cooling(), Lohmann2MMicrophysics()],
+    return ComposablePhysics([_Column(), _Cooling(), Lohmann2MMicrophysics(params)],
                              vectorize_columns=True, dt_seconds=DT)
 
 
@@ -307,6 +310,48 @@ def test_upstream_radiative_cooling_condenses_in_the_same_step():
     zqcdif = -zdqsat * cf
     assert zqcdif > 0.0
     np.testing.assert_allclose(condensed, zqcdif, rtol=1e-3)
+
+
+@pytest.mark.parametrize("field,value,reaches", [
+    ("ccraut", 40.0, True), ("ccsaut", 20.0, False), ("cvtfall", 2.0, False)])
+def test_config_override_runs_the_term_like_the_array_built_parameters(
+        field, value, reaches):
+    """``++physics.terms.lohmann_2m_microphysics.params.<field>=`` runs the term.
+
+    A mapping override goes through ``with_field_overrides``, as the Hydra
+    runner's term-list door does. The result must be exactly that of the
+    parameters built with the value as the defaults are (array leaves).
+    ``ccraut`` acts in this warm cloud; the other two do not change this
+    state's tendencies, so for them the check is that the term runs and
+    agrees with the array-built parameters.
+    """
+    from jcm.forcing import ForcingData
+    from jcm.physics.physics_term import with_field_overrides
+
+    base = CloudParams2M.default()
+    over = with_field_overrides(base, {field: value}, scheme="test")
+    leaf = getattr(over, field)
+    assert isinstance(leaf, jax.Array)
+    assert leaf.dtype == getattr(base, field).dtype and leaf.shape == ()
+
+    state, *_ = _cloudy_state()
+    forcing = ForcingData.zeros(state.normalized_surface_pressure.shape)
+    terrain = _aquaplanet_like(state)
+
+    def tendencies(params):
+        tend, _ = _composition(-3.0e-4, params).compute_tendencies(
+            state, forcing, terrain)
+        return tend
+
+    got = tendencies(over)
+    want = tendencies(CloudParams2M.default(**{field: value}))
+    leaves = jax.tree.leaves(got)
+    assert all(np.all(np.isfinite(np.asarray(x))) for x in leaves)
+    for a, b in zip(leaves, jax.tree.leaves(want)):
+        np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+    if reaches:
+        assert any(np.any(np.asarray(a) != np.asarray(b)) for a, b in zip(
+            leaves, jax.tree.leaves(tendencies(base))))
 
 
 def _aquaplanet_like(state):

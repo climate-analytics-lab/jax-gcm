@@ -3403,6 +3403,107 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
                                2 * 4e-4 * float(conv.tau), places=3)
 
 
+class TestTermListNumericOverrides(unittest.TestCase):
+    """A numeric ``++physics.terms.<term>.params.<field>=`` is an array leaf.
+
+    The term-list door converts the override through ``with_field_overrides``,
+    which gives it the dtype and shape of the default it replaces; the 1M
+    scheme's ``cloud_microphysics_column_sweep`` casts each floating parameter
+    leaf with ``leaf.astype``, which a Python float does not have.
+    """
+
+    _ECHAM = ("physics=echam", "grid=echam_t42_l8_sigma")
+    _ECHAM_2M = ("physics=echam-rrtmgp-2m", "grid=echam_t42_l8_sigma")
+
+    @staticmethod
+    def _term_params(physics, name):
+        return next(t for t in physics.terms if t.name == name).params.get_value()
+
+    @staticmethod
+    def _tiny_column_sweep(params):
+        """One 1M column sweep (4 levels, a liquid cloud) with ``params``."""
+        import jax.numpy as jnp
+
+        import jcm.constants as c
+        from jcm.physics.clouds.echam_1m import cloud_microphysics_column_sweep
+
+        nlev = 4
+        p = np.linspace(60000.0, 95000.0, nlev)
+        t = np.linspace(272.0, 288.0, nlev)
+        dp = np.full(nlev, 5000.0)
+        rho = p / (c.rd * t)
+        zeros = jnp.zeros(nlev)
+        args = [jnp.asarray(a) for a in (
+            t, np.full(nlev, 4e-3), np.full(nlev, 3e-4), np.zeros(nlev),
+            zeros, zeros, zeros, zeros, np.full(nlev, 0.6), p, dp, rho,
+            dp / (rho * c.grav), np.full(nlev, 8e7))]
+        return cloud_microphysics_column_sweep(*args, 1200.0, params)
+
+    def test_1m_override_strings_build_array_leaves_and_run_the_sweep(self):
+        from jcm.physics.clouds.echam_1m import MicrophysicsParameters
+
+        cfg = _compose([
+            *self._ECHAM,
+            "++physics.terms.echam_1m_microphysics.params.ccraut=20.0",
+            "++physics.terms.echam_1m_microphysics.params.ccsaut=60.0",
+            # A whole number is an int on the command line; it must still
+            # become the float array the field holds.
+            "++physics.terms.echam_1m_microphysics.params.ccsacl=1",
+        ])
+        params = self._term_params(build_physics(cfg), "echam_1m_microphysics")
+        base = MicrophysicsParameters.default()
+        for field, value in (("ccraut", 20.0), ("ccsaut", 60.0), ("ccsacl", 1.0)):
+            with self.subTest(field=field):
+                leaf = getattr(params, field)
+                self.assertIsInstance(leaf, jax.Array)
+                self.assertEqual(leaf.dtype, getattr(base, field).dtype)
+                self.assertEqual(leaf.shape, ())
+                self.assertEqual(float(leaf), value)
+        tendencies, state = self._tiny_column_sweep(params)
+        self.assertTrue(all(np.all(np.isfinite(np.asarray(x)))
+                            for x in jax.tree_util.tree_leaves((tendencies, state))))
+
+    def test_2m_override_string_builds_an_array_leaf(self):
+        from jcm.physics.clouds.lohmann_2m_params import CloudParams2M
+
+        cfg = _compose([
+            *self._ECHAM_2M,
+            "++physics.terms.lohmann_2m_microphysics.params.ccraut=5.0"])
+        params = self._term_params(build_physics(cfg), "lohmann_2m_microphysics")
+        leaf, base = params.ccraut, CloudParams2M.default().ccraut
+        self.assertIsInstance(leaf, jax.Array)
+        self.assertEqual((leaf.dtype, leaf.shape), (base.dtype, base.shape))
+        self.assertEqual(float(leaf), 5.0)
+        # The preset's own YAML values (ccsaut: 95.0) are array leaves too.
+        self.assertIsInstance(params.ccsaut, jax.Array)
+
+    def test_a_flag_set_to_two_is_an_error_not_a_true_flag(self):
+        cfg = _compose([
+            *self._ECHAM,
+            "++physics.terms.echam_1m_microphysics.params."
+            "autoconversion_twomey=2"])
+        with self.assertRaisesRegex(
+                ValueError, r"physics\.terms\.echam_1m_microphysics\.params"
+                r"\.autoconversion_twomey: 2 is not representable as bool"):
+            build_physics(cfg)
+        # A Hydra boolean sets it.
+        off = build_physics(_compose([
+            *self._ECHAM,
+            "++physics.terms.echam_1m_microphysics.params."
+            "autoconversion_twomey=false"]))
+        self.assertIs(self._term_params(
+            off, "echam_1m_microphysics").autoconversion_twomey, False)
+
+    def test_a_list_for_a_scalar_field_names_the_config_key(self):
+        cfg = _compose([
+            *self._ECHAM,
+            "++physics.terms.echam_1m_microphysics.params.ccraut=[1.0,2.0]"])
+        with self.assertRaisesRegex(
+                ValueError, r"physics\.terms\.echam_1m_microphysics\.params"
+                r"\.ccraut: this field is a scalar"):
+            build_physics(cfg)
+
+
 class TestEmulatorGhgGuard(unittest.TestCase):
     """The emulator must refuse CH4/N2O forcing it cannot represent.
 
