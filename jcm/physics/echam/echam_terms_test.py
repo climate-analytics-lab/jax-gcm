@@ -339,6 +339,9 @@ class TestEchamComposablePhysics(unittest.TestCase):
         "tracer_diffusion": ("tracer_vertical_diffusion", "diffusion_scale",
                              0.7),
     }
+    #: Doors whose parameters are held by more than one term: argument ->
+    #: the other terms that must carry the same value.
+    _JAM_ALSO = {"tracer_diffusion": ("jam_cloud_borne_store",)}
     _JAM_KWARGS = dict(checkpoint_terms=False, aerosol_module="jam",
                        cloud_scheme="2m", jam_microphysics="placeholder",
                        jam_anthropogenic=True)
@@ -406,14 +409,35 @@ class TestEchamComposablePhysics(unittest.TestCase):
                             np.asarray(getattr(default, f.name)), err_msg=f.name)
                 self.assertEqual([t.name for t in baseline.terms],
                                  [t.name for t in tuned.terms])
+                for other in self._JAM_ALSO.get(arg, ()):
+                    shared = self._jam_term_params(tuned, other)
+                    self.assertAlmostEqual(
+                        float(getattr(shared, field)) / value, 1.0, places=5,
+                        msg=other)
                 for before, after in zip(baseline.terms, tuned.terms):
-                    if after.name == term or not hasattr(after, "params"):
+                    if (after.name == term
+                            or after.name in self._JAM_ALSO.get(arg, ())
+                            or not hasattr(after, "params")):
                         continue
                     for a, b in zip(
                             jax.tree_util.tree_leaves(before.params.get_value()),
                             jax.tree_util.tree_leaves(after.params.get_value())):
                         np.testing.assert_array_equal(
                             np.asarray(a), np.asarray(b), err_msg=after.name)
+
+    def test_tracer_diffusion_without_the_cloud_borne_phase(self):
+        """With ``jam_cloud_borne=False`` there is no carry store to set.
+
+        The advected tracers' mixing term takes the override alone.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        physics = echam_physics(**{**self._JAM_KWARGS, "jam_cloud_borne": False},
+                                tracer_diffusion={"diffusion_scale": 0.7})
+        self.assertNotIn("jam_cloud_borne_store",
+                         [t.name for t in physics.terms])
+        mixing = self._jam_term_params(physics, "tracer_vertical_diffusion")
+        self.assertAlmostEqual(float(mixing.diffusion_scale), 0.7)
 
     def test_wetdep_mapping_and_object_forms(self):
         """The wet-removal levers: mapping on the default, object as given."""

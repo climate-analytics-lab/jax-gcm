@@ -3357,6 +3357,10 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
          "diffusion_scale", 0.7),
     )
 
+    #: Doors whose parameter is held by more than one term, so the provenance
+    #: record changes in each: argument -> the other terms.
+    _JAM_ALSO_RECORDED = {"tracer_diffusion": ("jam_cloud_borne_store",)}
+
     def test_wetdep_scales_reach_every_jam_configuration(self):
         # The wet-removal levers of the #682 retune: both CLI strings, on the
         # factory preset itself and on the two validated configurations that
@@ -3404,7 +3408,8 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
                 self.assertEqual(base_p.keys(), tuned_p.keys())
                 self.assertEqual(
                     sorted(k for k in base_p if base_p[k] != tuned_p[k]),
-                    [f"{term}.params.{field}"])
+                    sorted(f"{t}.params.{field}" for t in
+                           (term, *self._JAM_ALSO_RECORDED.get(arg, ()))))
                 self.assertEqual([t.name for t in base.terms],
                                  [t.name for t in tuned.terms])
                 self.assertEqual(

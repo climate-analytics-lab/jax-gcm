@@ -352,8 +352,12 @@ def jam_aerosol_physics(
     # consumer this step sees a well-formed store, and applies the
     # carry's turbulent vertical mixing (its fields are not in
     # state.tracers, so TracerVerticalDiffusion never sees them).
+    # The carry's mixing uses the same exchange-coefficient scale as the
+    # advected tracers' (``TracerDiffusionParameters``), so one setting must
+    # reach both phases; each term holds its own copy of the object.
     store_terms = (
-        [CloudBorneCarryStore(spec=spec, vertical_mixing=vertical_mixing)]
+        [CloudBorneCarryStore(params=tracer_diffusion, spec=spec,
+                              vertical_mixing=vertical_mixing)]
         if carry_mode(spec) else []
     )
     pre_core = [

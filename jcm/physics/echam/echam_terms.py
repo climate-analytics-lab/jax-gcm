@@ -335,7 +335,8 @@ def echam_physics(
         tracer_diffusion: Override for the JAM tracers' turbulent vertical
             mixing
             :class:`~jcm.physics.vertical_diffusion.tracer_diffusion.TracerDiffusionParameters`
-            (``diffusion_scale``). JAM only.
+            (``diffusion_scale``), for the advected tracers and the
+            cloud-borne carry alike. JAM only.
         gw_scheme: Non-orographic gravity-wave scheme: ``"hines"`` (ECHAM's
             Doppler-spread scheme, the default), ``"frontal"`` (CAM's
             frontogenesis-triggered spectral scheme — requires a
