@@ -705,6 +705,14 @@ selects the reference derivative, which is zero across each decision.
 ``ConvectionParameters`` is a ``flax.struct`` dataclass: ``.replace`` works
 as before, while ``tree_math`` arithmetic on it (``params * 2``) does not.
 
+``ConvectionParameters.cevapcu`` changes meaning. In v2 it was a linear rate
+in the downdraft's pseudo-evaporation (default ``2.0e-5``); the v3 downdraft
+evaporates by ECHAM's ``cuadjtq``, and ``cevapcu`` is the leading coefficient
+of ECHAM's sub-cloud rain-evaporation profile (``iniphy.f90:87-89``), with
+ECHAM's ``1.93e-6`` as the default. A v2 override does not carry over:
+**a value on the old 2.0e-5 scale is 10.4 times ECHAM's profile**, so express
+a scaling as the factor times ``1.93e-6``.
+
 .. _v3-echam-radiation:
 
 ECHAM composes RRTMGP from both doors; ``"grey"`` is rejected

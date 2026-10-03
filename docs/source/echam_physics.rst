@@ -245,6 +245,10 @@ logistic surrogate (:doc:`science/convection`).
      - Precipitation conversion coefficient (s²/m²), applied per unit of
        geopotential depth
      - 2.5e-4
+   * - ``cevapcu``
+     - Leading coefficient of ECHAM's sub-cloud rain-evaporation profile
+       ``cevapcu(jk)``; scales the whole level-dependent profile
+     - 1.93e-6
    * - ``ascent_buoyancy_width``, ``ascent_mass_flux_width``,
        ``ascent_condensate_width``
      - Widths of the surrogates of the ascent test's buoyancy (K), 1 %
