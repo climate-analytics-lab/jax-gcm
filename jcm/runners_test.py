@@ -3248,7 +3248,7 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         rad = self._params(physics, "radiation")
         self.assertAlmostEqual(float(rad.cloud_inhomogeneity_ice), 0.7)
 
-    def _emission_term(self, physics, name):
+    def _term_params(self, physics, name):
         return next(t for t in physics.terms if t.name == name).params.get_value()
 
     def test_seasalt_scale_reaches_the_jam_preset(self):
@@ -3256,18 +3256,18 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         # string reaches the Gong term; the other field keeps its default.
         physics = build_physics(_compose(
             [*self._JAM, "+physics.seasalt.scale=1.7"]))
-        ss = self._emission_term(physics, "jam_seasalt_emissions")
+        ss = self._term_params(physics, "jam_seasalt_emissions")
         self.assertAlmostEqual(float(ss.scale), 1.7)
         self.assertAlmostEqual(float(ss.wind_exponent), 3.41, places=5)
-        dms = self._emission_term(physics, "jam_dms_emissions")
+        dms = self._term_params(physics, "jam_dms_emissions")
         self.assertEqual(float(dms.flux_scale), 1.0)
 
     def test_dms_flux_scale_reaches_the_jam_preset(self):
         physics = build_physics(_compose(
             [*self._JAM, "+physics.dms.flux_scale=0.6"]))
-        dms = self._emission_term(physics, "jam_dms_emissions")
+        dms = self._term_params(physics, "jam_dms_emissions")
         self.assertAlmostEqual(float(dms.flux_scale), 0.6)
-        ss = self._emission_term(physics, "jam_seasalt_emissions")
+        ss = self._term_params(physics, "jam_seasalt_emissions")
         self.assertEqual(float(ss.scale), 1.0)
 
     def test_emission_override_changes_exactly_one_recorded_parameter(self):
@@ -3305,7 +3305,7 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         for term, field, value in (("jam_seasalt_emissions", "scale", 1.7),
                                    ("jam_dms_emissions", "flux_scale", 0.6)):
             with self.subTest(field=field):
-                params = self._emission_term(physics, term)
+                params = self._term_params(physics, term)
                 leaf = getattr(params, field)
                 self.assertTrue(any(x is leaf for x
                                     in jax.tree_util.tree_leaves(params)))
@@ -3335,6 +3335,137 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
             with self.subTest(override=override):
                 with self.assertRaisesRegex(ValueError, pattern):
                     build_physics(_compose([*self._JAM, override]))
+
+    # The JAM process schemes behind the door of #995, each with one field
+    # and a CLI value: (echam_physics argument, term name, field, value).
+    # ``seasalt`` and ``dms`` (#990) are covered above. ``dust`` and
+    # ``conv_transport`` have no mapping door (their base object is
+    # composition-derived), which ``echam_terms_test`` pins against the
+    # factory's argument list.
+    _JAM_DOORS = (
+        ("anthropogenic_params", "jam_anthropogenic_emissions", "scale", 1.2),
+        ("oxidants", "jam_prescribed_oxidants", "oh_ref", 3.0e6),
+        ("sulfur_gas", "jam_sulfur_gas_chemistry", "soag_production", 1.0e-16),
+        ("aqueous", "jam_aqueous_sulfur", "rate_scale", 0.8),
+        ("activation", "arg_activation", "w_min", 0.2),
+        ("cloud_borne_exchange", "jam_cloud_borne_exchange",
+         "activation_timescale", 600.0),
+        ("sedimentation", "jam_sedimentation", "velocity_scale", 0.9),
+        ("drydep", "jam_dry_deposition", "z0", 2.0e-4),
+        ("wetdep", "jam_wet_deposition", "incloud_scale", 0.5),
+        ("tracer_diffusion", "tracer_vertical_diffusion",
+         "diffusion_scale", 0.7),
+    )
+
+    #: Doors whose parameter is held by more than one term, so the provenance
+    #: record changes in each: argument -> the other terms.
+    _JAM_ALSO_RECORDED = {"tracer_diffusion": ("jam_cloud_borne_store",)}
+
+    def test_wetdep_scales_reach_every_jam_configuration(self):
+        # The wet-removal levers of the #682 retune: both CLI strings, on the
+        # factory preset itself and on the two validated configurations that
+        # select it. The other four wetdep fields keep their defaults.
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetDepParameters
+
+        default = WetDepParameters.default()
+        strings = ["+physics.wetdep.incloud_scale=0.5",
+                   "+physics.wetdep.impact_scale=0.25"]
+        for label, base in (
+                ("echam-jam", self._JAM),
+                ("ma-t63-l47", ("+configuration=ma-t63-l47",
+                                "physics.jam_microphysics=placeholder")),
+                ("t63-echam-jam", ("+configuration=t63-echam-jam",
+                                   "physics.jam_microphysics=placeholder"))):
+            with self.subTest(preset=label):
+                wet = self._term_params(
+                    build_physics(_compose([*base, *strings])),
+                    "jam_wet_deposition")
+                self.assertAlmostEqual(float(wet.incloud_scale), 0.5)
+                self.assertAlmostEqual(float(wet.impact_scale), 0.25)
+                for field in ("sol_factb", "mu_water_air", "conv_scav_ratio",
+                              "conv_updraft_velocity"):
+                    self.assertEqual(float(getattr(wet, field)),
+                                     float(getattr(default, field)), field)
+
+    def test_each_jam_door_changes_exactly_one_recorded_parameter(self):
+        # The override lands on its own scheme's term only: the provenance
+        # record differs from the un-overridden preset by that one value, and
+        # the term list and the pytree structure (leaves vs static aux) are
+        # unchanged.
+        from flax import nnx
+
+        from jcm.provenance import describe_params
+
+        base = build_physics(_compose([*self._JAM]))
+        base_p = describe_params(base)
+        for arg, term, field, value in self._JAM_DOORS:
+            with self.subTest(door=arg):
+                tuned = build_physics(_compose(
+                    [*self._JAM, f"+physics.{arg}.{field}={value}"]))
+                got = float(getattr(self._term_params(tuned, term), field))
+                self.assertAlmostEqual(got / value, 1.0, places=5)
+                tuned_p = describe_params(tuned)
+                self.assertEqual(base_p.keys(), tuned_p.keys())
+                self.assertEqual(
+                    sorted(k for k in base_p if base_p[k] != tuned_p[k]),
+                    sorted(f"{t}.params.{field}" for t in
+                           (term, *self._JAM_ALSO_RECORDED.get(arg, ()))))
+                self.assertEqual([t.name for t in base.terms],
+                                 [t.name for t in tuned.terms])
+                self.assertEqual(
+                    jax.tree_util.tree_structure(nnx.state(base, nnx.Param)),
+                    jax.tree_util.tree_structure(nnx.state(tuned, nnx.Param)))
+
+    def test_jam_door_overrides_stay_differentiable_leaves(self):
+        for arg, term, field, value in self._JAM_DOORS:
+            with self.subTest(door=arg):
+                physics = build_physics(_compose(
+                    [*self._JAM, f"+physics.{arg}.{field}={value}"]))
+                params = self._term_params(physics, term)
+                leaf = getattr(params, field)
+                self.assertTrue(any(x is leaf for x
+                                    in jax.tree_util.tree_leaves(params)))
+                grads = jax.grad(lambda p: getattr(p, field) ** 2,
+                                 allow_int=True)(params)
+                self.assertAlmostEqual(
+                    float(getattr(grads, field)) / (2 * value), 1.0, places=5)
+
+    def test_jam_door_on_a_preset_without_jam_is_rejected(self):
+        # echam-forced-flux composes MACv2-SP: none of the JAM schemes exist,
+        # so every one of these would be dropped without a trace.
+        for arg, _, field, value in self._JAM_DOORS:
+            with self.subTest(door=arg):
+                with self.assertRaisesRegex(
+                        ValueError, rf"\['{arg}'\] would be ignored"):
+                    build_physics(_compose(
+                        [*self._FORCED, f"+physics.{arg}.{field}={value}"]))
+
+    def test_jam_door_unknown_field_is_rejected_with_the_valid_names(self):
+        from jcm.physics.aerosol.jam.jam_terms import JAM_PARAMETER_CLASSES
+
+        for arg, _, field, value in self._JAM_DOORS:
+            with self.subTest(door=arg):
+                cls = JAM_PARAMETER_CLASSES[arg].__name__
+                with self.assertRaisesRegex(
+                        ValueError,
+                        rf"{arg}: unknown {cls} field\(s\) \['{field}_typo'\]"
+                        rf".*Valid fields: .*'{field}'"):
+                    build_physics(_compose(
+                        [*self._JAM, f"+physics.{arg}.{field}_typo={value}"]))
+
+    def test_flag_gated_jam_doors_need_their_flag(self):
+        # The anthropogenic emission and the cloud-borne exchange are composed
+        # only with ``jam_anthropogenic`` / ``jam_cloud_borne``.
+        for flag, arg, field in (
+                ("jam_anthropogenic", "anthropogenic_params", "scale"),
+                ("jam_cloud_borne", "cloud_borne_exchange",
+                 "activation_timescale")):
+            with self.subTest(door=arg):
+                with self.assertRaisesRegex(
+                        ValueError, rf"\['{arg}'\] would be ignored"):
+                    build_physics(_compose(
+                        [*self._JAM, f"physics.{flag}=false",
+                         f"+physics.{arg}.{field}=1.5"]))
 
     def test_unknown_field_is_rejected_with_the_valid_names(self):
         cfg = _compose([*self._JAM, "+physics.convection.entrpn=4e-4"])
