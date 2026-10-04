@@ -203,7 +203,9 @@ jointly with the annual harmonic because the sources are seasonal),
 lifetimes, the mass-budget residual, sulfate's upper-level and hemispheric
 distribution, AOD/Ångström, near-surface CDNC and N100, and the modal dry
 radii. Three of those are **absolute gates**, not climatological ranges:
-`|d ln B/dt| < 0.002 /day`, `|budget residual| < 5 %`, and the per-step
+`|d ln B/dt| < 0.002 /day` (a record shorter than a year) or `< 0.003 /day`
+(a year or more: 3 sigma of the annual-harmonic fit's scatter on stationary
+years), `|budget residual| < 5 %`, and the per-step
 dynamics residual `budget_dyn/mass < 0.1 %/step` from the #713 in-step gauge.
 They exist
 because an aerosol runaway (#658) stays inside a ×3-slack range gate until

@@ -152,7 +152,7 @@ class TestDrift:
         rng = np.random.default_rng(0)
         days = np.arange(5, 370, 5, dtype=float)
         values = 3.0 + 0.1 * rng.standard_normal(days.size)
-        assert abs(A.log_drift(days, values)) < A.DRIFT_LIMIT_PER_DAY
+        assert abs(A.log_drift(days, values)) < A.SHORT_RECORD_DRIFT_LIMIT_PER_DAY
 
     def test_super_exponential_tail_is_caught(self):
         """A #658-class runaway: flat for most of the year, then blows up."""
@@ -161,13 +161,13 @@ class TestDrift:
         tail = days >= 320
         values[tail] = 3.0 * np.exp(0.12 * (days[tail] - 320.0))
         drift = A.log_drift(days, values)
-        assert drift > A.DRIFT_LIMIT_PER_DAY
+        assert drift > A.SHORT_RECORD_DRIFT_LIMIT_PER_DAY
 
     def test_drift_uses_only_the_final_window(self):
         """A spin-up ramp in the first half must not count as drift."""
         days = np.arange(5, 370, 5, dtype=float)
         values = np.where(days < 180, np.exp(0.02 * days), np.exp(0.02 * 180))
-        assert abs(A.log_drift(days, values)) < A.DRIFT_LIMIT_PER_DAY
+        assert abs(A.log_drift(days, values)) < A.SHORT_RECORD_DRIFT_LIMIT_PER_DAY
 
 
 class TestWholeYearDrift:
@@ -185,7 +185,8 @@ class TestWholeYearDrift:
 
     def test_the_old_window_reads_the_seasonal_cycle_as_drift(self):
         values = self._seasonal(self.DAYS)
-        assert A.log_drift(self.DAYS, values) > 1.5 * A.DRIFT_LIMIT_PER_DAY
+        assert A.log_drift(self.DAYS, values) \
+            > 1.5 * A.SHORT_RECORD_DRIFT_LIMIT_PER_DAY
 
     def test_a_year_of_seasonal_cycle_passes_the_drift_gate(self):
         values = self._seasonal(self.DAYS)
@@ -197,11 +198,12 @@ class TestWholeYearDrift:
     def test_a_stationary_seasonal_cycle_of_any_phase_passes(self):
         """A straight line over one cycle cancels the swing only at some phases.
 
-        Amplitude 0.5 in ln B at the worst phase fits 0.0026 /day, over the
-        limit; the annual harmonic fitted jointly absorbs it at every phase.
+        Amplitude 0.7 in ln B (a factor-two seasonal swing) at the worst phase
+        fits 0.0037 /day, over the whole-year limit; the annual harmonic fitted
+        jointly absorbs it at every phase.
         """
         for phase in (0.0, 0.5 * np.pi, np.pi, 1.5 * np.pi, 0.9):
-            values = 3.0 * np.exp(0.5 * np.cos(2 * np.pi * self.DAYS / 365.0
+            values = 3.0 * np.exp(0.7 * np.cos(2 * np.pi * self.DAYS / 365.0
                                                + phase))
             plain = np.polyfit(self.DAYS, np.log(values), 1)[0]
             days, series = _series(self.DAYS, values)
@@ -224,8 +226,9 @@ class TestWholeYearDrift:
         of an otherwise seasonal year.
 
         The whole-year fit dilutes a late runaway (0.0082 /day here, against
-        0.018 over the last six months), so it clears the limit by a factor ~4
-        rather than ~9; it must still clear it.
+        0.018 over the last six months), so it clears the whole-year limit by a
+        factor ~2.7 where the six-month fit clears the short-record limit by
+        ~9; it must still clear it.
         """
         values = self._seasonal(self.DAYS)
         tail = self.DAYS > self.DAYS[-1] - 40.0
@@ -262,6 +265,114 @@ class TestWholeYearDrift:
         one_year = A.summarize(*_series(self.DAYS, self._seasonal(self.DAYS)))
         assert "yoy_burden_ratio_so4" not in one_year
         assert np.isnan(A.yoy_burden_ratio(self.DAYS, np.ones(self.DAYS.size)))
+
+
+class TestDriftLimit:
+    """The limit that applies to a slope is set by the fit that produced it."""
+
+    DAYS = np.arange(5, 370, 5, dtype=float)       # one year of 5-day means
+
+    #: RMS of the harmonic-fit slope of stationary burdens [1/day], and the
+    #: extremes, over the 30 species-years of equilibrated runs that
+    #: ``DRIFT_LIMIT_PER_DAY`` is set from.
+    STATIONARY_SLOPE_RMS = 0.00098
+    STATIONARY_SLOPE_RANGE = (-0.0023, 0.0015)
+
+    def _stationary_year(self, fitted_slope):
+        """Build a stationary year whose harmonic-fit slope is exactly ``fitted_slope``.
+
+        Built from the fit's own model, ``ln B = a + b t + c cos + d sin``: the
+        row of its pseudo-inverse that returns ``b`` is zero on a constant and
+        on the annual cycle (they are columns of the design), so neither moves
+        the slope, and it is what the burden's non-sinusoidal part and noise
+        act through. The scatter that the measured RMS describes is that
+        non-sinusoidal part, which no annual harmonic can absorb, so it is
+        built as a semi-annual swing sized to land on ``fitted_slope`` (about
+        0.35 in ln B for the measured extreme, the size of an event-driven
+        dust season); the 0.07 log-burden scatter of a settled species is
+        added with its own projection on ``b`` removed, which pins the fitted
+        slope without a tolerance. No trend enters ``B``'s construction, so the
+        burden is stationary by construction.
+        """
+        t = self.DAYS - self.DAYS.mean()
+        w = 2.0 * np.pi * self.DAYS / 365.0
+        design = np.column_stack([np.ones_like(t), t, np.cos(w), np.sin(w)])
+        row = np.linalg.pinv(design)[1]
+        semi_annual = np.sin(2.0 * w)
+        noise = 0.07 * np.random.default_rng(11).standard_normal(t.size)
+        noise -= (row @ noise) / (row @ row) * row
+        ln_b = (np.log(3.0) + 0.5 * np.cos(w + 0.9)
+                + fitted_slope / (row @ semi_annual) * semi_annual + noise)
+        return np.exp(ln_b)
+
+    def test_the_limit_follows_the_fit(self):
+        assert A.drift_limit_per_day(A.YEAR_DAYS) == A.DRIFT_LIMIT_PER_DAY
+        assert A.drift_limit_per_day(2 * A.YEAR_DAYS) == A.DRIFT_LIMIT_PER_DAY
+        assert A.drift_limit_per_day(A.SHORT_RECORD_WINDOW_DAYS) \
+            == A.SHORT_RECORD_DRIFT_LIMIT_PER_DAY
+        assert A.SHORT_RECORD_DRIFT_LIMIT_PER_DAY < A.DRIFT_LIMIT_PER_DAY
+
+    def test_the_whole_year_limit_is_three_sigma_of_the_stationary_scatter(self):
+        assert A.DRIFT_LIMIT_PER_DAY / self.STATIONARY_SLOPE_RMS \
+            == pytest.approx(3.0, abs=0.1)
+        lo, hi = self.STATIONARY_SLOPE_RANGE
+        assert max(abs(lo), abs(hi)) < A.DRIFT_LIMIT_PER_DAY
+
+    def test_a_stationary_year_at_the_measured_extremes_passes(self):
+        """The scatter seen on stationary years must not fail the gate.
+
+        At 2 sigma it would: the extreme, -0.0023 /day, is 2.3 sigma.
+        """
+        for slope in self.STATIONARY_SLOPE_RANGE:
+            days, series = _series(self.DAYS, self._stationary_year(slope))
+            stats = A.summarize(days, series)
+            assert stats["drift_window_days"] == A.YEAR_DAYS
+            assert stats["dlnB_dt_so4_per_day"] == pytest.approx(slope, abs=1e-9)
+            rows = {name: (limit, ok) for name, _v, limit, ok
+                    in A.physics_gates(stats)}
+            limit, ok = rows["dlnB_dt_so4_per_day"]
+            assert ok and limit == f"|x| < {A.DRIFT_LIMIT_PER_DAY:g} /day"
+        worst = min(self.STATIONARY_SLOPE_RANGE)
+        assert abs(worst) > 2.0 * self.STATIONARY_SLOPE_RMS
+        assert abs(worst) > A.SHORT_RECORD_DRIFT_LIMIT_PER_DAY
+
+    def test_the_same_slope_on_a_record_shorter_than_a_year_still_fails(self):
+        """A straight line over the final six months keeps its own limit."""
+        slope = 0.0023
+        days = np.arange(5, 205, 5, dtype=float)    # 40 saves, 200 days
+        values = 3.0 * np.exp(slope * days)
+        stats = A.summarize(*_series(days, values))
+        assert stats["drift_window_days"] == A.SHORT_RECORD_WINDOW_DAYS
+        assert stats["dlnB_dt_so4_per_day"] == pytest.approx(slope, rel=1e-9)
+        (name, _v, limit, ok), = [r for r in A.physics_gates(stats)
+                                  if r[0].startswith("dlnB_dt_")]
+        assert not ok and limit == f"|x| < {A.SHORT_RECORD_DRIFT_LIMIT_PER_DAY:g} /day"
+        # the same slope as a whole-year line is inside the whole-year limit
+        year = A.summarize(*_series(self.DAYS, 3.0 * np.exp(slope * self.DAYS)))
+        assert year["dlnB_dt_so4_per_day"] == pytest.approx(slope, rel=1e-6)
+        assert all(ok for *_rest, ok in A.physics_gates(year))
+
+    def test_a_year_of_real_growth_still_fails_the_whole_year_gate(self):
+        values = 3.0 * np.exp(1.5 * A.DRIFT_LIMIT_PER_DAY * self.DAYS)
+        stats = A.summarize(*_series(self.DAYS, values))
+        assert not all(ok for *_rest, ok in A.physics_gates(stats))
+
+    def test_a_statistic_set_that_does_not_name_its_fit_gets_the_stricter_limit(self):
+        slope = 0.5 * (A.SHORT_RECORD_DRIFT_LIMIT_PER_DAY
+                       + A.DRIFT_LIMIT_PER_DAY)
+        (_n, _v, _l, ok), = A.physics_gates({"dlnB_dt_so4_per_day": slope})
+        assert not ok
+        (_n, _v, _l, ok), = A.physics_gates(
+            {"dlnB_dt_so4_per_day": slope, "drift_window_days": A.YEAR_DAYS})
+        assert ok
+
+    def test_the_fit_window_is_not_a_regression_target(self):
+        """A reference scored over another window is not a regression."""
+        year = A.summarize(*_series(self.DAYS, np.full(self.DAYS.size, 3.0)))
+        short = A.summarize(*_series(self.DAYS[:40], np.full(40, 3.0)))
+        assert year["drift_window_days"] != short["drift_window_days"]
+        names = [n for n, *_ in A.compare_to_reference(short, year)]
+        assert "drift_window_days" not in names and "record_days" not in names
 
 
 class TestUncertainty:
