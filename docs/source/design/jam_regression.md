@@ -65,7 +65,7 @@ so they are the same number for every member and every release.
 
 | gate | limit |
 |---|---|
-| `\|d ln B/dt\|` per species, a straight line over the final six months of a record shorter than a year | `< 0.002 /day` |
+| `\|d ln B/dt\|` per species, a straight line (over the final six months of a record shorter than a year) | `< 0.002 /day` |
 | `\|d ln B/dt\|` per species, the final year with the annual harmonic fitted jointly, for a record of a year or more | `< 0.003 /day` |
 | `\|budget residual\|`, max over species | `< 5 %` |
 | `dyn_frac_per_step_<sp>` | `< 0.1 % per step` |
@@ -169,13 +169,16 @@ stationary year, not a 0.003 /day creep; a two-year record gets the cycle-free
 comparison for free, which is why `yoy_burden_ratio_<sp>` (the final year's mean
 over the previous year's) is reported for one.
 
-The six-month straight line on a shorter record keeps its own limit, 0.002 /day:
-the two fits scatter differently on a stationary burden, and the six-month limit
-is set against the noise floor described below rather than against the
-whole-year scatter. `summarize` records which fit produced the slopes
-(`drift_window_days`: 365 or 182.5) so that the gate applies the matching limit
-whichever tool scores the statistic set; a set that does not say is held to the
-stricter one.
+A straight line keeps its own limit, 0.002 /day: the two fits scatter
+differently on a stationary burden, and the six-month limit is set against the
+noise floor described below rather than against the whole-year scatter. The limit
+follows the fit that actually produced each slope, not the window it was asked
+for: a year-long window whose finite samples are too few (under eight) or do not
+span a year cannot identify the harmonic, is fit by a line, and is held to
+0.002. `summarize` records which fit produced each species' slope
+(`drift_harmonic_<sp>`: 1 for the annual-harmonic fit, 0 for a line), so the
+gate applies the matching limit whichever tool scores the statistic set; a slope
+whose fit is not named is held to the stricter limit.
 
 The longer window is less sensitive to a late runaway, and that is the price. A
 ×60 growth over the last 40 days of an otherwise seasonal year fits a slope of

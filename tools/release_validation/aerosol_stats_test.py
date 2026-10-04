@@ -306,11 +306,19 @@ class TestDriftLimit:
         return np.exp(ln_b)
 
     def test_the_limit_follows_the_fit(self):
-        assert A.drift_limit_per_day(A.YEAR_DAYS) == A.DRIFT_LIMIT_PER_DAY
-        assert A.drift_limit_per_day(2 * A.YEAR_DAYS) == A.DRIFT_LIMIT_PER_DAY
-        assert A.drift_limit_per_day(A.SHORT_RECORD_WINDOW_DAYS) \
-            == A.SHORT_RECORD_DRIFT_LIMIT_PER_DAY
+        assert A.drift_limit_per_day(True) == A.DRIFT_LIMIT_PER_DAY
+        assert A.drift_limit_per_day(False) == A.SHORT_RECORD_DRIFT_LIMIT_PER_DAY
         assert A.SHORT_RECORD_DRIFT_LIMIT_PER_DAY < A.DRIFT_LIMIT_PER_DAY
+
+    def test_fit_log_drift_says_which_fit_it_made(self):
+        values = 3.0 * np.exp(0.002 * self.DAYS)
+        slope, harmonic = A.fit_log_drift(self.DAYS, values, A.YEAR_DAYS)
+        assert harmonic and slope == pytest.approx(0.002, rel=1e-6)
+        slope, harmonic = A.fit_log_drift(self.DAYS, values)
+        assert not harmonic and slope == pytest.approx(0.002, rel=1e-6)
+        assert A.log_drift(self.DAYS, values, A.YEAR_DAYS) == pytest.approx(slope)
+        assert A.fit_log_drift(self.DAYS, np.zeros(self.DAYS.size)) \
+            == (pytest.approx(float("nan"), nan_ok=True), False)
 
     def test_the_whole_year_limit_is_three_sigma_of_the_stationary_scatter(self):
         assert A.DRIFT_LIMIT_PER_DAY / self.STATIONARY_SLOPE_RMS \
@@ -326,7 +334,7 @@ class TestDriftLimit:
         for slope in self.STATIONARY_SLOPE_RANGE:
             days, series = _series(self.DAYS, self._stationary_year(slope))
             stats = A.summarize(days, series)
-            assert stats["drift_window_days"] == A.YEAR_DAYS
+            assert stats["drift_harmonic_so4"] == 1.0
             assert stats["dlnB_dt_so4_per_day"] == pytest.approx(slope, abs=1e-9)
             rows = {name: (limit, ok) for name, _v, limit, ok
                     in A.physics_gates(stats)}
@@ -342,7 +350,7 @@ class TestDriftLimit:
         days = np.arange(5, 205, 5, dtype=float)    # 40 saves, 200 days
         values = 3.0 * np.exp(slope * days)
         stats = A.summarize(*_series(days, values))
-        assert stats["drift_window_days"] == A.SHORT_RECORD_WINDOW_DAYS
+        assert stats["drift_harmonic_so4"] == 0.0
         assert stats["dlnB_dt_so4_per_day"] == pytest.approx(slope, rel=1e-9)
         (name, _v, limit, ok), = [r for r in A.physics_gates(stats)
                                   if r[0].startswith("dlnB_dt_")]
@@ -363,16 +371,56 @@ class TestDriftLimit:
         (_n, _v, _l, ok), = A.physics_gates({"dlnB_dt_so4_per_day": slope})
         assert not ok
         (_n, _v, _l, ok), = A.physics_gates(
-            {"dlnB_dt_so4_per_day": slope, "drift_window_days": A.YEAR_DAYS})
+            {"dlnB_dt_so4_per_day": slope, "drift_harmonic_so4": 1.0})
         assert ok
 
-    def test_the_fit_window_is_not_a_regression_target(self):
-        """A reference scored over another window is not a regression."""
+    def test_a_year_window_the_samples_do_not_span_is_a_line_with_the_line_limit(self):
+        """The harmonic needs a year of finite samples.
+
+        Without one the slope is a straight line, and it is held to the
+        straight-line limit.
+        """
+        slope = 0.5 * (A.SHORT_RECORD_DRIFT_LIMIT_PER_DAY
+                       + A.DRIFT_LIMIT_PER_DAY)           # 0.0025 /day
+        full = 3.0 * np.exp(slope * self.DAYS)
+        ok_year = A.summarize(*_series(self.DAYS, full))
+        assert ok_year["drift_harmonic_so4"] == 1.0
+        assert all(ok for *_rest, ok in A.physics_gates(ok_year))
+
+        sparse = full.copy()
+        sparse[:-6] = np.nan                  # six finite samples: no harmonic
+        gap = full.copy()
+        gap[:20] = np.nan                     # finite samples span 260 days
+        for values in (sparse, gap):
+            stats = A.summarize(*_series(self.DAYS, values))
+            assert stats["drift_harmonic_so4"] == 0.0
+            assert stats["dlnB_dt_so4_per_day"] == pytest.approx(slope, rel=1e-6)
+            failed = [n for n, _v, _l, ok in A.physics_gates(stats) if not ok]
+            assert failed == ["dlnB_dt_so4_per_day"]
+
+    def test_the_limit_is_per_species(self):
+        """One species' sparse series must not change another's limit."""
+        slope = 0.0025
+        full = 3.0 * np.exp(slope * self.DAYS)
+        sparse = full.copy()
+        sparse[:-6] = np.nan
+        days, series = _series(self.DAYS, full, burden_bc=sparse)
+        stats = A.summarize(days, series)
+        assert stats["drift_harmonic_so4"] == 1.0
+        assert stats["drift_harmonic_bc"] == 0.0
+        verdict = {n: ok for n, _v, _l, ok in A.physics_gates(stats)
+                   if n.startswith("dlnB_dt_")}
+        assert verdict == {"dlnB_dt_so4_per_day": True,
+                           "dlnB_dt_bc_per_day": False}
+
+    def test_the_fit_kind_is_not_a_regression_target(self):
+        """A reference scored by another fit is not a regression."""
         year = A.summarize(*_series(self.DAYS, np.full(self.DAYS.size, 3.0)))
         short = A.summarize(*_series(self.DAYS[:40], np.full(40, 3.0)))
-        assert year["drift_window_days"] != short["drift_window_days"]
+        assert year["drift_harmonic_so4"] != short["drift_harmonic_so4"]
         names = [n for n, *_ in A.compare_to_reference(short, year)]
-        assert "drift_window_days" not in names and "record_days" not in names
+        assert not any(n.startswith(("drift_harmonic_", "record_days"))
+                       for n in names)
 
 
 class TestUncertainty:

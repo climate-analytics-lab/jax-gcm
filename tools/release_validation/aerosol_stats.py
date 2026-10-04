@@ -106,8 +106,8 @@ DYN_RESIDUAL_PER_STEP = 1.0e-3
 #: (:func:`drift_limit_per_day`), because the two fits scatter differently on a
 #: stationary burden.
 #:
-#: ``DRIFT_LIMIT_PER_DAY`` is the limit for a record of a year or more, scored
-#: over its final 365 days with the annual harmonic fitted jointly. Over exactly
+#: ``DRIFT_LIMIT_PER_DAY`` is the limit for a slope fit over a year of record
+#: with the annual harmonic fitted jointly (:func:`fit_log_drift`). Over exactly
 #: one cycle a trend cannot be told apart from the cycle's non-sinusoidal part
 #: and its interannual variability, so the slope of a stationary burden
 #: scatters even with the harmonic removed: over 30 species-years of
@@ -121,10 +121,13 @@ DYN_RESIDUAL_PER_STEP = 1.0e-3
 #: harmonic) is -0.00007 /day, so the scatter is the fit's, not the burden's.
 DRIFT_LIMIT_PER_DAY = 0.003
 
-#: The limit for a record shorter than a year, scored by a straight line over
-#: its final six months. It admits a factor e over ~500 days — slower than any
-#: runaway, faster than a burden that has genuinely settled — and 3 sigma of that
-#: line's own fit noise falls below it only past ~90 days (``MIN_WINDOW_DAYS``).
+#: The limit for a straight-line slope: a record shorter than a year, scored over
+#: its final six months, and a year-long window with too few finite samples to
+#: identify the harmonic (:func:`fit_log_drift` falls back to the line there, and
+#: the 3-sigma basis above is the harmonic fit's). It admits a factor e over ~500
+#: days — slower than any runaway, faster than a burden that has genuinely
+#: settled — and 3 sigma of the line's own fit noise falls below it only past ~90
+#: days (``MIN_WINDOW_DAYS``).
 SHORT_RECORD_DRIFT_LIMIT_PER_DAY = 0.002
 BUDGET_RESIDUAL_LIMIT = 0.05
 
@@ -197,9 +200,9 @@ _GATED_PREFIXES = ("dlnB_dt_", "budget_residual", "dyn_frac_per_step_",
                    "dust_emission_tg_per_yr")
 
 #: Bookkeeping entries of the statistic set that describe the record rather than
-#: measure the model: a run scored over a different window than its reference is
-#: not a regression.
-_RECORD_METADATA = ("record_days", "drift_window_days")
+#: measure the model (matched by prefix): a run scored over a different window
+#: than its reference, or by a different fit, is not a regression.
+_RECORD_METADATA = ("record_days", "drift_harmonic_")
 
 #: Absolute tolerance floors [statistic units], so a reference that is legibly
 #: zero (an unused species' burden) does not collapse the tolerance to zero and
@@ -567,16 +570,17 @@ def drift_window_days(days: np.ndarray,
         else SHORT_RECORD_WINDOW_DAYS
 
 
-def drift_limit_per_day(window_days: float) -> float:
-    """Return the drift limit [1/day] that applies to a fit over ``window_days``.
+def drift_limit_per_day(harmonic_fit: bool) -> float:
+    """Return the drift limit [1/day] for a slope from the given kind of fit.
 
-    The whole-year fit (annual harmonic, ``window_days >= YEAR_DAYS``) is held
-    to :data:`DRIFT_LIMIT_PER_DAY`; the straight line over the final six months
-    of a shorter record keeps :data:`SHORT_RECORD_DRIFT_LIMIT_PER_DAY`. Keyed
-    on the window rather than the record length so the limit follows the fit
-    that :func:`drift_window_days` chose, whatever the caller sliced.
+    A slope from the annual-harmonic fit is held to :data:`DRIFT_LIMIT_PER_DAY`;
+    a straight-line slope keeps :data:`SHORT_RECORD_DRIFT_LIMIT_PER_DAY`. Keyed
+    on the fit that actually produced the slope (:func:`fit_log_drift`), not on
+    the window it was asked for, because the 3-sigma basis of the whole-year
+    limit is the harmonic fit's scatter and a year-long window with too few
+    samples is fit by a line.
     """
-    return DRIFT_LIMIT_PER_DAY if window_days >= YEAR_DAYS \
+    return DRIFT_LIMIT_PER_DAY if harmonic_fit \
         else SHORT_RECORD_DRIFT_LIMIT_PER_DAY
 
 
@@ -602,6 +606,19 @@ def log_drift(days: np.ndarray, values: np.ndarray,
               window_days: float = SHORT_RECORD_WINDOW_DAYS) -> float:
     """``d ln B / dt`` [1/day] from a least-squares fit over the last window.
 
+    The slope of :func:`fit_log_drift`, which documents the fit.
+    """
+    return fit_log_drift(days, values, window_days)[0]
+
+
+def fit_log_drift(days: np.ndarray, values: np.ndarray,
+                  window_days: float = SHORT_RECORD_WINDOW_DAYS
+                  ) -> tuple[float, bool]:
+    """Return ``(d ln B / dt [1/day], harmonic)`` from a fit over the last window.
+
+    ``harmonic`` says which fit produced the slope, because the drift limit
+    depends on it (:func:`drift_limit_per_day`).
+
     A logarithmic slope is the right statistic for an aerosol burden because
     the failure mode is multiplicative: a runaway grows by a fixed factor per
     unit time, so it shows up as a slope that is large regardless of the
@@ -619,22 +636,25 @@ def log_drift(days: np.ndarray, values: np.ndarray,
     burden still scatters by ~0.001 /day (``jam_regression.md``, "What a
     one-year record resolves"); :func:`yoy_burden_ratio` is the cycle-free
     comparison. A shorter window is a straight line: it cannot hold a cycle, so
-    the harmonic is not identifiable there.
+    the harmonic is not identifiable there. A window of a year that the finite
+    samples do not span (fewer than eight, or a gap that leaves under a year
+    between the first and last) is a straight line for the same reason, and is
+    reported as one.
     """
     good = np.isfinite(values) & (values > 0)
     if good.sum() < 3:
-        return float("nan")
+        return float("nan"), False
     d, v = days[good], values[good]
     sel = d >= (d[-1] - window_days)
     if sel.sum() < 3:
         sel = np.ones_like(d, dtype=bool)
     t, y = d[sel], np.log(v[sel])
-    if window_days >= YEAR_DAYS and t[-1] - t[0] >= YEAR_DAYS - 2 * float(np.median(np.diff(t))) \
-            and t.size >= 8:
+    if window_days >= YEAR_DAYS and t.size >= 8 \
+            and t[-1] - t[0] >= YEAR_DAYS - 2 * float(np.median(np.diff(t))):
         w = 2.0 * np.pi * t / YEAR_DAYS
         design = np.column_stack([np.ones_like(t), t - t.mean(), np.cos(w), np.sin(w)])
-        return float(np.linalg.lstsq(design, y, rcond=None)[0][1])
-    return float(np.polyfit(t, y, 1)[0])
+        return float(np.linalg.lstsq(design, y, rcond=None)[0][1]), True
+    return float(np.polyfit(t, y, 1)[0]), False
 
 
 def standard_error(values: np.ndarray) -> float:
@@ -786,9 +806,14 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
         # yields a slope dominated by its own noise. Both are reported
         # unscored (see :func:`unscored_gates`) rather than gated, because a
         # gate FAIL for something never measured is worse than no number.
-        drift = log_drift(days, b, fit_window)
+        drift, harmonic = fit_log_drift(days, b, fit_window)
         if np.isfinite(drift) and span_days >= MIN_WINDOW_DAYS:
             stats[f"dlnB_dt_{species}_per_day"] = drift
+            # Which fit produced this slope, because the gate's limit depends
+            # on it and the slope alone cannot say. Per species: whether a
+            # year-long window held enough finite samples for the harmonic is
+            # a property of that species' series.
+            stats[f"drift_harmonic_{species}"] = float(harmonic)
         if covered_days(days, window_start) >= 2 * YEAR_DAYS - 1e-6:
             yoy = yoy_burden_ratio(days, b)
             if np.isfinite(yoy):
@@ -887,10 +912,6 @@ def summarize(days: np.ndarray, series: dict[str, np.ndarray],
                     / mean_mass)
 
     stats["record_days"] = span_days
-    # The gate's limit depends on which fit produced the slope, and the slope
-    # alone cannot say; carrying the window keeps :func:`physics_gates` a
-    # function of the statistic set, whichever caller scores it.
-    stats["drift_window_days"] = fit_window
     return stats
 
 
@@ -924,7 +945,7 @@ def compare_to_reference(stats: dict[str, float],
     """
     rows = []
     for key in sorted(reference):
-        if key in _RECORD_METADATA:
+        if key.startswith(_RECORD_METADATA):
             continue
         # The exemption comes FIRST. These carry their own absolute gates, and
         # ``summarize`` omits them precisely when they could not be measured —
@@ -1143,15 +1164,18 @@ def physics_gates(stats: dict[str, float]) -> list[tuple[str, float, str, bool]]
     species whose mass ledger does not close, is a defect at any loading.
     """
     rows = []
-    # A statistic set that does not say which fit produced its slopes was not
-    # built by :func:`summarize`; it is held to the stricter straight-line limit
-    # rather than credited with a harmonic fit nobody recorded.
-    drift_limit = drift_limit_per_day(
-        stats.get("drift_window_days", SHORT_RECORD_WINDOW_DAYS))
     for key, value in sorted(stats.items()):
         if key.startswith("dlnB_dt_"):
-            ok = np.isfinite(value) and abs(value) < drift_limit
-            rows.append((key, value, f"|x| < {drift_limit:g} /day", bool(ok)))
+            # The limit follows the fit that produced the slope, which
+            # :func:`summarize` records beside it. A slope whose fit is not
+            # named was not built by ``summarize``; it is held to the stricter
+            # straight-line limit rather than credited with a harmonic fit
+            # nobody recorded.
+            species = key.removeprefix("dlnB_dt_").removesuffix("_per_day")
+            limit = drift_limit_per_day(
+                bool(stats.get(f"drift_harmonic_{species}", 0.0)))
+            ok = np.isfinite(value) and abs(value) < limit
+            rows.append((key, value, f"|x| < {limit:g} /day", bool(ok)))
     for key, value in sorted(stats.items()):
         if key.startswith("dyn_frac_per_step_"):
             ok = np.isfinite(value) and value < DYN_RESIDUAL_PER_STEP
