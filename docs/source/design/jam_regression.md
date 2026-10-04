@@ -65,7 +65,8 @@ so they are the same number for every member and every release.
 
 | gate | limit |
 |---|---|
-| `\|d ln B/dt\|` per species, final six months (final year, annual harmonic removed, for a record of a year or more) | `< 0.002 /day` |
+| `\|d ln B/dt\|` per species, a straight line (over the final six months of a record shorter than a year) | `< 0.002 /day` |
+| `\|d ln B/dt\|` per species, the final year with the annual harmonic fitted jointly, for a record of a year or more | `< 0.003 /day` |
 | `\|budget residual\|`, max over species | `< 5 %` |
 | `dyn_frac_per_step_<sp>` | `< 0.1 % per step` |
 
@@ -129,10 +130,11 @@ B_year1) / 365` over days 150 to 365 of the two years):
 | dust | −0.0021 | −0.0011 | −0.0021 | −0.0011 | −0.00015 |
 | sea salt | +0.0003 | −0.0003 | −0.0011 | +0.0001 | −0.00012 |
 
-(slopes of `ln B`, per day; the limit is 0.002.) The six-month slopes repeat from
+(slopes of `ln B`, per day; the six-month limit is 0.002 and the whole-year limit
+0.003.) The six-month slopes repeat from
 year to year with the same sign and size, which a spin-up drift would not, and
-BC exceeds the limit in both; the whole-year slopes are inside the limit for all
-five species, and the year-over-year drift is below 0.0002 /day. On JAM T63 L95,
+BC exceeds the six-month limit in both; the whole-year slopes are inside the
+whole-year limit for all five species, and the year-over-year drift is below 0.0002 /day. On JAM T63 L95,
 measured the same way, the year-2 six-month slopes of BC (+0.0022) and POA
 (−0.0026) exceed the limit while the five whole-year slopes with the harmonic are
 at most 0.0016 /day (SO4 −0.0001, BC −0.0008, dust +0.0007, sea salt −0.0004,
@@ -142,36 +144,56 @@ POA −0.0016) and the year-over-year drift is below 0.00015 /day.
 estimate of the true drift, and it is small everywhere it can be formed (at most
 0.0004 /day over the whole of year 2 against year 1, in the L47 and L95 pairs of
 years before the land-surface change and the L47 pair after it), while the whole-year slope of a stationary
-year scatters by about ±0.001 /day. Over the five warm years measured (L47 and
-L95, before and after the land-surface change) × five species it lies in −0.0019
-to +0.0010 /day with the annual harmonic (RMS 0.0009), −0.0021 to +0.0008 with a
-plain line (RMS 0.0007) and −0.0029 to +0.0008 with the semi-annual harmonic as
-well (RMS 0.00075; dust, whose cycle is event-driven, gets worse). The scatter is
+year scatters by about ±0.001 /day. Over 30 species-years of equilibrated runs it
+lies in −0.0023 to +0.0015 /day with the annual harmonic (RMS 0.00098) and
+−0.0021 to +0.0008 with a plain line (RMS 0.00069). Adding the semi-annual
+harmonic as well gives −0.0029 to +0.0008 (RMS 0.00075) on the 25 species-years
+of the five warm years above that it was evaluated on, and dust, whose cycle is
+event-driven, gets worse. The scatter is
 the cycle's non-sinusoidal part and its interannual variability: over exactly one
 period a trend and an arbitrary periodic function cannot be told apart, so no
 choice of harmonics removes it. The annual harmonic is kept because it removes
 the phase-dependent 0.0026 /day above without the extra noise of the higher
-ones. The consequence is that on a one-year record the
-`0.002 /day` limit sits at the resolution floor: the gate separates a runaway
-from a stationary year, not a 0.002 /day creep, and POA (−0.0012 to −0.0019 in
-every warm year, true drift about zero) is the species that reads closest to the
-limit. A two-year record gets the cycle-free comparison for free, which is why
-`yoy_burden_ratio_<sp>` (the final year's mean over the previous year's) is
-reported for one.
+ones.
+
+The whole-year limit is set from that scatter: **0.003 /day, 3σ of the
+harmonic-fit slope over the 30 stationary species-years** (σ taken as the RMS about
+zero, 0.00098, so 0.003 is 3.06σ). A limit of 0.002 is 2σ, which noise alone
+exceeds in about one stationary species-year in 24 under a Gaussian; 3σ is about
+one in 450, and the most extreme year measured (POA, −0.0023 /day) sits at 2.3σ.
+POA is the species that reads closest to the limit (−0.0012 to −0.0019 in every
+one of the five warm years above, −0.0023 in another equilibrated year) with a
+true drift of about zero: its year-over-year drift in that year is −0.00007 /day.
+The consequence is that on a one-year record the gate separates a runaway from a
+stationary year, not a 0.003 /day creep; a two-year record gets the cycle-free
+comparison for free, which is why `yoy_burden_ratio_<sp>` (the final year's mean
+over the previous year's) is reported for one.
+
+A straight line keeps its own limit, 0.002 /day: the two fits scatter
+differently on a stationary burden, and the six-month limit is set against the
+noise floor described below rather than against the whole-year scatter. The limit
+follows the fit that actually produced each slope, not the window it was asked
+for: a year-long window whose finite samples are too few (under eight) or do not
+span a year (within two chunk cadences, read from the record's chunk labels)
+cannot identify the harmonic, is fit by a line, and is held to 0.002. `summarize` records which fit produced each species' slope
+(`drift_harmonic_<sp>`: 1 for the annual-harmonic fit, 0 for a line), so the
+gate applies the matching limit whichever tool scores the statistic set; a slope
+whose fit is not named is held to the stricter limit.
 
 The longer window is less sensitive to a late runaway, and that is the price. A
 ×60 growth over the last 40 days of an otherwise seasonal year fits a slope of
-0.014–0.019 /day over the final six months (7–9× the limit, depending on the
-phase and amplitude of the seasonal cycle underneath) and 0.0082 /day over the
-final year (4×); a 0.03 /day growth over the last 120 days fits 0.022–0.027 and
-0.011. It still fails, but with a smaller margin, and the budget-closure and per-step
+0.014–0.019 /day over the final six months (7–9× the six-month limit, depending
+on the phase and amplitude of the seasonal cycle underneath) and 0.0082 /day over
+the final year (2.7× the whole-year limit); a 0.03 /day growth over the last 120
+days fits 0.022–0.027 and 0.011 (3.7×). It still fails, but with a smaller margin, and the budget-closure and per-step
 dynamics gates below do not depend on this window.
 
-`0.002 /day` is a factor e over ~500 days: a burden that genuinely has not
+The six-month limit `0.002 /day` is a factor e over ~500 days, and the whole-year
+limit `0.003 /day` a factor e over ~330 days: a burden that genuinely has not
 settled may still move that much over a validation year, but the ×60-in-40-days
-growth of a #658-class runaway exceeds it by an order of magnitude over the
-six-month window — and so does the much gentler growth those runaways show for
-months *before* they become visible. On the August-2026 year the gate fails on
+growth of a #658-class runaway exceeds the six-month limit by an order of
+magnitude and the whole-year limit by a factor ~3 — and so does the much gentler
+growth those runaways show for months *before* they become visible. On the August-2026 year the gate fails on
 sulfate at day 300, on a window that ends before the burden leaves its anchor
 range at all.
 
@@ -184,7 +206,7 @@ lines of one report.
 The window itself has a floor. A least-squares slope carries noise
 `σ_resid / (Δt·√(N(N²−1)/12))`; at the 5-day output cadence and the ~0.07
 log-burden scatter of a settled species, three of those falls below the
-0.002/day limit only past **90 days**. `health.py --last-n` is the documented
+0.002/day short-record limit only past **90 days**. `health.py --last-n` is the documented
 way to score the settled months (the slice carries the label of the chunk
 before it, so the first retained window is centred where it really sits; a
 record whose uniformly spaced chunks evidently start mid-run, such as a resumed
