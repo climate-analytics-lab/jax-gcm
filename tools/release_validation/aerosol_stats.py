@@ -639,9 +639,12 @@ def fit_log_drift(days: np.ndarray, values: np.ndarray,
     the harmonic is not identifiable there. A window of a year that the finite
     samples do not span is a straight line for the same reason, and is reported
     as one: fewer than eight finite samples, or a first-to-last span of less than
-    a year minus two chunk cadences. The cadence is the record's own (every
-    chunk, finite or not), so that dropping samples does not widen the
-    allowance and let a sparse series pass as a year.
+    a year minus two chunk cadences. The cadence is read from the record's chunk
+    labels (finite or not), so a sample that is NaN or non-positive does not
+    widen the allowance and let a sparse series pass as a year. The labels are all
+    the record says about its cadence: a chunk file deleted from the run directory
+    is indistinguishable from a coarser output interval, and a record of eight
+    45-day means that covers a year is scored as one.
     """
     good = np.isfinite(values) & (values > 0)
     if good.sum() < 3:

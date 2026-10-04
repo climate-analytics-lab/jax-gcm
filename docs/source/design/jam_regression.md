@@ -174,8 +174,8 @@ differently on a stationary burden, and the six-month limit is set against the
 noise floor described below rather than against the whole-year scatter. The limit
 follows the fit that actually produced each slope, not the window it was asked
 for: a year-long window whose finite samples are too few (under eight) or do not
-span a year cannot identify the harmonic, is fit by a line, and is held to
-0.002. `summarize` records which fit produced each species' slope
+span a year (within two chunk cadences, read from the record's chunk labels)
+cannot identify the harmonic, is fit by a line, and is held to 0.002. `summarize` records which fit produced each species' slope
 (`drift_harmonic_<sp>`: 1 for the annual-harmonic fit, 0 for a line), so the
 gate applies the matching limit whichever tool scores the statistic set; a slope
 whose fit is not named is held to the stricter limit.
