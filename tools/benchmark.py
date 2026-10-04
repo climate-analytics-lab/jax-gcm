@@ -129,7 +129,8 @@ PRESETS: dict[str, list[str]] = {
         f"terrain.file={_BC}/T119_terrain.nc",
         f"forcing.ozone_file={_BC}/t119_ozone_l{lv}.nc") for lv in (47, 95)},
     # pySES CAM-SE ne30 (dycore comparison); run=pyses_year drops a relative
-    # checkpoint into cwd, so redirect it to the disposable scratch dir.
+    # checkpoint into cwd, so name one here; ``main`` moves it into the run's
+    # own disposable data dir.
     **{f"ma-ne30-l{lv}": _cfg(
         f"ma-ne30-l{lv}",
         f"run.checkpoint_path={DEFAULT_SCRATCH_ROOT}/pyses.ckpt")
@@ -739,8 +740,15 @@ def run(args) -> dict:
             shutil.rmtree(data_dir, ignore_errors=True)
         data_dir.mkdir(parents=True, exist_ok=True)
 
+    # A preset names a checkpoint only because its run group would otherwise
+    # drop one into the cwd. Placing it in this run's ``data_dir`` (emptied
+    # above) makes it per-run: a path shared between runs would be resumed by
+    # the next benchmark, which would then time a stale or finished state.
+    run_preset = [f"run.checkpoint_path={data_dir}/pyses.ckpt"
+                  if o.startswith("run.checkpoint_path=") else o
+                  for o in preset]
     overrides = [
-        *preset,
+        *run_preset,
         f"run.total_time={days}",
         f"run.chunk_days={chunk}",
         # save_interval must be <= chunk_days or the chunk write dies with an

@@ -67,6 +67,8 @@ def test_warns_that_the_job_will_delete_the_checkpoint(tmp):
     assert ckpt in err and "DELETE it at startup" in err, err
     # The glob also removes ``.prev``, which jcm would otherwise resume from.
     assert 'rm -f "$RUNDIR"/checkpoint.msgpack*' in out
+    # Once per PBS job id: a requeued job keeps the checkpoints it wrote.
+    assert '.cleared.$PBS_JOBID' in out and 'touch "$MARK"' in out
 
 
 def test_a_prev_alone_counts_as_an_existing_checkpoint(tmp):

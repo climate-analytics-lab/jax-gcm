@@ -224,20 +224,24 @@ because `.prev` is the same run's one-chunk-older state and would be refused
 alike; falling back would only resume an older state under a jcm that had just
 said it could not read the newer one. If both files exist and neither decodes,
 the run stops and names them. The monthly stream follows the clock the
-restored file records: `.monthly` pairs with the live checkpoint, `.monthly.prev`
-with `.prev`.
+restored file records: the resume takes whichever of `.monthly`,
+`.monthly.new` and `.monthly.prev` is stamped with that clock. A save killed
+between its two renames leaves `.prev` beside the `.monthly` that still
+describes it (the new state is only staged, as `.monthly.new`); a live file
+lost or undecodable after the monthly state was committed leaves `.monthly.prev`
+as the match. No match is refused rather than guessed.
 
 **No silent re-initialisation.** When nothing can be resumed, the loop
 starts from `init`, which writes `{output_prefix}_day*.nc` over whatever is
 there and rotates the next checkpoint over any remnant. In an empty directory
 that is a first start. Next to this run's chunk files, monthly files,
-`archive_ckpt_every` archives, or checkpoint remnants (`.prev`, `.bad`,
-`.tmp`, the `.monthly*` companions) it is a restart whose checkpoint is gone,
+`archive_ckpt_every` archives, or checkpoint remnants (`.bad`, `.tmp`, the
+`.monthly*` companions; a readable `.prev` would have been resumed) it is a
+restart whose checkpoint is gone,
 and a scheduler that re-runs the same command on failure (a Kubernetes Job
 with `restartPolicy: OnFailure`) would repeat it on every retry. The loop
 therefore raises `RuntimeError` before integrating, listing what it found and
-the two ways forward: put a checkpoint back (rename `.prev`, copy an archive),
-or point `run.output_prefix` and `run.checkpoint_path` at an empty directory.
+the two ways forward: put a checkpoint back (copy an archive), or point `run.output_prefix` and `run.checkpoint_path` at an empty directory.
 There is no override flag; deleting the files is the explicit act. Without
 `run.checkpoint_path` nothing could have been resumed and a re-run into the
 same prefix remains an ordinary overwrite. A run killed after writing chunk 0

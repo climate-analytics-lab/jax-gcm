@@ -376,9 +376,9 @@ missing or unreadable, with a warning) and only steps the remaining chunks::
        run.checkpoint_path=/scratch/$USER/echam_t63.ckpt
 
 A run with a ``run.checkpoint_path`` that finds no checkpoint to resume but
-finds its own chunk files or checkpoint leftovers (``.prev``, ``.bad``,
-``.tmp``) in the directory stops with an error instead of starting over them:
-restore the checkpoint, or give the run an empty directory. See
+finds its own chunk files or checkpoint leftovers (``.bad``, ``.tmp``) in the
+directory stops with an error instead of starting over them: restore a
+checkpoint, or give the run an empty directory. See
 :doc:`design/checkpoint_compatibility`.
 
 Set ``run.archive_ckpt_every`` (sim-days; 0 = off) to also copy the rotating

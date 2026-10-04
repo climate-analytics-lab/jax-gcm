@@ -5462,18 +5462,57 @@ class TestMonthlyMeansStream(unittest.TestCase):
         run(_monthly_cfg(prefix, 5, extra=extra))
         _assert_same_months(self, _monthly_files(prefix), self.ref)
 
-    def test_a_missing_live_checkpoint_resumes_from_prev_and_monthly_prev(self):
-        """``.prev`` pairs with ``.monthly.prev``, not with the newer ``.monthly``.
+    def test_a_lost_live_checkpoint_resumes_from_prev_and_monthly_prev(self):
+        """The live file is gone after the monthly state was committed.
 
-        A save killed between the two renames, or a lost live file, leaves
-        ``.prev`` (day 5) next to a ``.monthly`` that already holds day 10.
+        ``.monthly`` (day 10) has moved on, so ``.prev`` (day 5) pairs with
+        ``.monthly.prev``. The run must say it resumed from ``.prev``: a fresh
+        start would also reproduce the reference months.
         """
-        prefix = str(self.tmp / "no_live")
+        prefix = str(self.tmp / "lost_live")
         ckpt = f"{prefix}.ckpt"
         extra = [f"run.checkpoint_path={ckpt}"]
         run(_monthly_cfg(prefix, 5, total=10, extra=extra))
         Path(ckpt).unlink()
-        run(_monthly_cfg(prefix, 5, extra=extra))
+        with self.assertLogs("jcm.runners", "WARNING") as logs:
+            run(_monthly_cfg(prefix, 5, extra=extra))
+        self.assertTrue(any(f"resuming from {ckpt}.prev" in line
+                            for line in logs.output), logs.output)
+        _assert_same_months(self, _monthly_files(prefix), self.ref)
+
+    def test_a_save_killed_between_its_renames_resumes_from_prev_and_monthly(self):
+        """Kill after ``live -> .prev`` but before ``.tmp -> live``.
+
+        The monthly state is promoted only after the checkpoint is committed,
+        so ``.monthly`` still describes ``.prev`` (day 5) while the day-10
+        state sits staged as ``.monthly.new``.
+        """
+        from jcm import checkpoint as ck
+
+        prefix = str(self.tmp / "between_renames")
+        ckpt = f"{prefix}.ckpt"
+        extra = [f"run.checkpoint_path={ckpt}"]
+        real_replace, saves = os.replace, []
+
+        def killed_at_the_day10_commit(src, dst):
+            if str(src) == f"{ckpt}.tmp":
+                saves.append(src)
+                if len(saves) == 2:
+                    raise RuntimeError("killed")
+            return real_replace(src, dst)
+
+        with mock.patch.object(ck.os, "replace", killed_at_the_day10_commit):
+            with self.assertRaisesRegex(RuntimeError, "killed"):
+                run(_monthly_cfg(prefix, 5, extra=extra))
+        self.assertFalse(Path(ckpt).exists())
+        self.assertTrue(Path(f"{ckpt}.prev").exists())
+        self.assertTrue(Path(f"{ckpt}.monthly.new").exists())
+        self.assertFalse(Path(f"{ckpt}.monthly.prev").exists())
+
+        with self.assertLogs("jcm.runners", "WARNING") as logs:
+            run(_monthly_cfg(prefix, 5, extra=extra))
+        self.assertTrue(any(f"resuming from {ckpt}.prev" in line
+                            for line in logs.output), logs.output)
         _assert_same_months(self, _monthly_files(prefix), self.ref)
 
     def test_repeated_kills_after_the_state_write_still_resume(self):
@@ -5862,6 +5901,17 @@ class TestCheckpointRotationAndResume(unittest.TestCase):
                 self.assertIn("empty directory", message)
                 self.assertEqual((directory / name).read_bytes(), b"evidence")
                 self.assertEqual(os.listdir(directory), [name])
+
+    def test_a_directory_prefix_is_checked_as_written(self):
+        """``output_prefix=<dir>/`` writes ``<dir>/_day5.nc``; so must the check read it."""
+        from jcm.runners import run_chunked
+
+        directory = self._rundir(populated=False)
+        (directory / "_day5.nc").write_bytes(b"evidence")
+        cfg = self._cfg(directory, total=1)
+        with self.assertRaisesRegex(RuntimeError, "_day5.nc"):
+            run_chunked(cfg, chunk_days=1, output_prefix=f"{directory}/",
+                        model=build_model(cfg), forcing=object())
 
     def test_first_start_and_unchecked_runs_are_not_refused(self):
         # An empty directory holding only unrelated files is a first start.

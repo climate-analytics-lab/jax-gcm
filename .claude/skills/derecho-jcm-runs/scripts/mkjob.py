@@ -281,8 +281,15 @@ echo "jcm: $(git -C $REPO rev-parse --short HEAD)"
 """
     if not a.resume:
         # Everything jcm would resume from: the live file, ``.prev`` and the
-        # monthly-stream companions.
-        head += 'rm -f "$RUNDIR"/checkpoint.msgpack*\n'
+        # monthly-stream companions. Once per PBS job id, which a requeue
+        # keeps: the requeued job must resume the checkpoints it has written
+        # since, not delete them and start over.
+        head += (
+            'MARK="$RUNDIR/.cleared.$PBS_JOBID"\n'
+            'if [ ! -e "$MARK" ]; then\n'
+            '  rm -f "$RUNDIR"/checkpoint.msgpack*\n'
+            '  touch "$MARK"\n'
+            'fi\n')
 
     if not a.bench:
         body = f"""

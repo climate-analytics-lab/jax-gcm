@@ -2352,10 +2352,11 @@ def _load_resume_checkpoint(model, ckpt_path: str, metadata: dict) -> str | None
 def _refuse_silent_reinitialisation(ckpt_path: str, output_prefix: str) -> None:
     """Refuse to start from the initial state over this run's own outputs.
 
-    Reached when a checkpointed run found nothing to resume. In an empty
-    directory that is a first start. Next to chunk files, permanent archives
-    or checkpoint remnants (``.prev`` / ``.bad`` / ``.tmp`` and the
-    monthly-stream companions) it is a restart whose checkpoint is gone, and
+    Reached when a checkpointed run found nothing to resume (a readable
+    ``.prev`` would have been resumed). In an empty directory that is a first
+    start. Next to chunk files, permanent archives or checkpoint remnants
+    (``.bad`` / ``.tmp`` and the monthly-stream companions) it is a restart
+    whose checkpoint is gone, and
     starting over would integrate the same days again, overwrite the chunk
     files and rotate away whatever remnant could still recover the run. A
     scheduler that re-runs the same command on failure (a Kubernetes Job with
@@ -2369,11 +2370,12 @@ def _refuse_silent_reinitialisation(ckpt_path: str, output_prefix: str) -> None:
     """
     import glob
 
-    ckpt, prefix = Path(ckpt_path), Path(output_prefix)
+    # The raw strings, as the writers format them: ``Path`` would drop a
+    # trailing slash from an ``output_prefix`` that is a directory.
     found = sorted({
-        *glob.glob(f"{glob.escape(str(ckpt))}.*"),
-        *glob.glob(f"{glob.escape(str(prefix))}_day*"),
-        *glob.glob(f"{glob.escape(str(prefix))}_monthly_*"),
+        *glob.glob(f"{glob.escape(str(ckpt_path))}.*"),
+        *glob.glob(f"{glob.escape(str(output_prefix))}_day*"),
+        *glob.glob(f"{glob.escape(str(output_prefix))}_monthly_*"),
     })
     if not found:
         return
@@ -2382,9 +2384,9 @@ def _refuse_silent_reinitialisation(ckpt_path: str, output_prefix: str) -> None:
     raise RuntimeError(
         f"no checkpoint at {ckpt_path}, but the earlier attempt's files are "
         f"there: {shown}. Starting from the initial state would overwrite "
-        "them. To continue that run, put its checkpoint back at "
-        f"{ckpt_path} (rename {ckpt_path}.prev, or copy an archive "
-        "*.ckpt); to start a new run, point run.output_prefix and "
+        "them. To continue that run, put a checkpoint back at "
+        f"{ckpt_path} (an archive *.ckpt, if run.archive_ckpt_every was "
+        "set); to start a new run, point run.output_prefix and "
         "run.checkpoint_path at an empty directory, or delete these files.")
 
 
