@@ -126,7 +126,8 @@ Every artefact of a launch — rundir, PBS job name, outputs, log — is
 namespaced by a run tag, which defaults to the launched repo's HEAD short
 SHA (`--tag` overrides it; outside a git checkout it falls back to the UTC
 date). A member is a *fresh* year, so `launch.py` refuses to write a job
-whose rundir already holds a `checkpoint.msgpack`: continue that
+whose rundir already holds a `checkpoint.msgpack` (or its `.prev`, which
+`run_chunked` resumes from when the live file is missing): continue that
 integration with `--resume`, or launch under a new `--tag`. The tag is what
 keeps two branches' validation runs of the same member apart: sharing a
 rundir lets `run_chunked` silently resume the other branch's checkpoint

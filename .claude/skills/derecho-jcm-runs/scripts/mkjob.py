@@ -166,9 +166,12 @@ def check_rundir(rundir: str, resume: bool, fresh: bool) -> None:
     without it the script deletes the checkpoint and starts over. Both are
     intended, neither is obvious at generation time (cf. #701).
     """
-    ckpt = os.path.join(rundir, "checkpoint.msgpack")
-    if not os.path.exists(ckpt):
+    live = os.path.join(rundir, "checkpoint.msgpack")
+    # jcm resumes from ``.prev`` when the live file is missing, so it counts.
+    held = [c for c in (live, live + ".prev") if os.path.exists(c)]
+    if not held:
         return
+    ckpt = held[0]
     if fresh:
         sys.exit(f"{ckpt} already exists and --fresh was passed: refusing to "
                  "generate a job that would resume or delete it. Pick a new "
@@ -176,7 +179,10 @@ def check_rundir(rundir: str, resume: bool, fresh: bool) -> None:
                  "run, without it to overwrite it).")
     what = ("RESUME FROM it -- this job continues that integration, not a new "
             "one" if resume else
-            "DELETE it at startup and integrate from scratch")
+            "DELETE it at startup (with its .prev) and integrate from "
+            "scratch; jcm then refuses to overwrite this run's chunk files "
+            "if they are still in the run dir, so clear them or pick a new "
+            "--name")
     print("\n".join([
         "!" * 72,
         f"!! {ckpt}",
@@ -274,7 +280,16 @@ echo "host: $(hostname -f)"; nvidia-smi -L | head -{a.gpus}
 echo "jcm: $(git -C $REPO rev-parse --short HEAD)"
 """
     if not a.resume:
-        head += 'rm -f "$RUNDIR"/checkpoint.msgpack\n'
+        # Everything jcm would resume from: the live file, ``.prev`` and the
+        # monthly-stream companions. Once per PBS job id, which a requeue
+        # keeps: the requeued job must resume the checkpoints it has written
+        # since, not delete them and start over.
+        head += (
+            'MARK="$RUNDIR/.cleared.$PBS_JOBID"\n'
+            'if [ ! -e "$MARK" ]; then\n'
+            '  rm -f "$RUNDIR"/checkpoint.msgpack*\n'
+            '  touch "$MARK"\n'
+            'fi\n')
 
     if not a.bench:
         body = f"""

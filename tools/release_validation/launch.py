@@ -196,13 +196,17 @@ def repo_tag(repo: str | Path) -> str:
 def check_fresh(rundir: str, resume: bool) -> None:
     """Refuse to (re)launch into a rundir that already holds a checkpoint.
 
-    ``run_chunked`` resumes from ``checkpoint_path`` when it exists, so a
-    second launch into a populated directory continues someone else's
-    integration and reports a healthy year for a run that never happened
-    (#701). Crashing on a mismatched physics composition is the lucky case.
+    ``run_chunked`` resumes from ``checkpoint_path`` when it exists, and from
+    its ``.prev`` when only that does, so a second launch into a populated
+    directory continues someone else's integration and reports a healthy year
+    for a run that never happened (#701). Crashing on a mismatched physics
+    composition is the lucky case.
     """
-    ckpt = Path(rundir) / "checkpoint.msgpack"
-    if ckpt.exists() and not resume:
+    live = Path(rundir) / "checkpoint.msgpack"
+    held = [c for c in (live, live.with_name(live.name + ".prev"))
+            if c.exists()]
+    if held and not resume:
+        ckpt = held[0]
         raise SystemExit(
             f"{ckpt} already exists — this member has been launched under "
             "this tag before, and starting here would resume that run "
@@ -760,6 +764,9 @@ def rundir_guard(rundir: str, checkpoint: str, defn: dict,
     """
     state = init_file(defn.get("overrides", []))
     ckpt = shlex.quote(checkpoint)
+    # ``run_chunked`` resumes from ``.prev`` when the live file is missing, so
+    # either one is a checkpoint some Job wrote.
+    held = f"{{ [ -f {ckpt} ] || [ -f {shlex.quote(checkpoint + '.prev')} ]; }}"
     check_state = (f"""if [ ! -f {shlex.quote(state)} ]; then
   echo "FATAL: the warm-start state {state} does not exist on the volume."
   exit 1
@@ -777,8 +784,8 @@ if [ -f {rundir}/{LAUNCH_RECORD} ]; then
     echo "       recorded, or launch this one under a new --tag or --suffix."
     exit 1
   fi
-elif [ -f {ckpt} ]; then
-  echo "FATAL: {checkpoint} exists but no {LAUNCH_RECORD} records which launch"
+elif {held}; then
+  echo "FATAL: {checkpoint} (or its .prev) exists but no {LAUNCH_RECORD} records which launch"
   echo "       wrote it; refusing to resume an integration of unknown origin."
   exit 1
 else
@@ -787,9 +794,9 @@ else
 LAUNCH
   mv {rundir}/.{LAUNCH_RECORD}.tmp {rundir}/{LAUNCH_RECORD}
 fi
-if [ -f {ckpt} ] && [ {int(resume)} -eq 0 ] \\
+if {held} && [ {int(resume)} -eq 0 ] \\
     && ! grep -qxF "$JOB_UID" {rundir}/JOBS 2>/dev/null; then
-  echo "FATAL: {checkpoint} exists, written by another Job: this launch is"
+  echo "FATAL: {checkpoint} (or its .prev) exists, written by another Job: this launch is"
   echo "       fresh, and a member is a fresh year. --resume continues that"
   echo "       run; a fresh one needs a new --tag or --suffix."
   exit 1

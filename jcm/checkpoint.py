@@ -21,12 +21,15 @@ checkpoint (issue #731).
 
 What migrates automatically, what is refused, and how to bump the schema
 for a future change are the checkpoint compatibility policy:
-``docs/source/design/checkpoint_compatibility.md``.
+``docs/source/design/checkpoint_compatibility.md``, which also describes how
+the file is written (write-then-rename with a ``.prev`` copy) and how a resume
+chooses between the live file and ``.prev``.
 """
 
 from __future__ import annotations
 
 import collections
+import contextlib
 import dataclasses
 import functools
 import logging
@@ -59,6 +62,51 @@ SCHEMA_VERSION = 2
 _UNSTAMPED_SCHEMA = 0
 
 _POLICY_DOC = "docs/source/design/checkpoint_compatibility.md"
+
+
+class CheckpointUnreadableError(ValueError):
+    """The file is not a decodable jcm checkpoint (truncated, empty, foreign).
+
+    Distinct from the other ``ValueError`` refusals of :func:`load_checkpoint`,
+    which say a *readable* file does not fit this model (wrong grid, physics,
+    precision, schema): every checkpoint of one run fails those alike, so
+    trying an older file of the run cannot help. A file that cannot be decoded
+    says nothing about its siblings, which is what lets a resume fall back to
+    ``.prev`` (see :func:`jcm.runners.run_chunked`).
+    """
+
+
+@contextlib.contextmanager
+def atomic_open(path, *, keep_previous: bool = False):
+    """Yield a binary file whose content replaces ``path`` only once complete.
+
+    The bytes go to ``<path>.tmp`` in the same directory (so the final
+    ``os.replace`` is a same-filesystem rename), are flushed and ``fsync``-ed,
+    and only then does ``path`` change. Any failure, including a quota or
+    disk-full error raised by the write or the ``fsync``, leaves the existing
+    ``path`` untouched and removes the partial ``.tmp``, which would otherwise
+    keep holding the space whose absence caused the failure.
+
+    With ``keep_previous`` the file being replaced is first renamed to
+    ``<path>.prev``, immediately before the final rename, so a checkpoint is
+    never renamed away until its successor is complete. At every instant at
+    least one of ``path`` and ``<path>.prev`` is a whole checkpoint; between
+    the two renames only ``.prev`` is, which is why a resume falls back to it.
+    """
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with open(tmp, "wb") as handle:
+            yield handle
+            handle.flush()
+            os.fsync(handle.fileno())
+        if keep_previous and path.exists():
+            os.replace(path, path.with_name(path.name + ".prev"))
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def _jcm_version() -> str:
@@ -267,7 +315,8 @@ def _mirror_revision() -> str:
         return "invalid: " + os.environ.get(remote.REVISION_ENV, "")
 
 
-def save_checkpoint(model, path, *, elapsed_days: float | None = None) -> Path:
+def save_checkpoint(model, path, *, elapsed_days: float | None = None,
+                    keep_previous: bool = False) -> Path:
     """Persist the model's current dycore + physics state to ``path``.
 
     Writes schema ``SCHEMA_VERSION``: every state array under its pytree
@@ -282,6 +331,11 @@ def save_checkpoint(model, path, *, elapsed_days: float | None = None) -> Path:
         path: Output file path (parent directories are created).
         elapsed_days: Optional consistency assertion; the saved count is
             derived from the exact model clock, in elapsed days.
+        keep_previous: Keep the file this save replaces as ``<path>.prev``.
+            The rename happens only after the new file is completely
+            written, so a failed save (full disk, quota, a kill mid-write)
+            leaves ``path`` and ``.prev`` as they were. See
+            :func:`atomic_open`.
 
     Returns:
         ``Path(path)`` for chaining.
@@ -327,13 +381,13 @@ def save_checkpoint(model, path, *, elapsed_days: float | None = None) -> Path:
         # refuses to drop it rather than migrating it away.
         "prognostic_carry_slots": _prognostic_carry_slots(model),
     }
-    # Write to a sibling tmp file then rename atomically. If the run is
-    # killed mid-write (the whole point of checkpointing for preemptible
-    # workloads), the previous checkpoint is left intact rather than
-    # truncated to a half-serialized blob that would fail to load.
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_bytes(flax.serialization.to_bytes(payload))
-    tmp_path.replace(path)
+    # Serialise before touching the disk, then hand the bytes to the atomic
+    # writer: a run killed (or a quota hit) mid-write must leave the previous
+    # checkpoint loadable, which is the point of checkpointing preemptible
+    # work.
+    data = flax.serialization.to_bytes(payload)
+    with atomic_open(path, keep_previous=keep_previous) as handle:
+        handle.write(data)
     return path
 
 
@@ -710,12 +764,12 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
     try:
         raw = flax.serialization.msgpack_restore(path.read_bytes())
     except Exception as exc:
-        raise ValueError(
+        raise CheckpointUnreadableError(
             f"Checkpoint {path} could not be decoded as a flax msgpack "
             f"payload: {exc}"
         ) from exc
     if not isinstance(raw, Mapping):
-        raise ValueError(
+        raise CheckpointUnreadableError(
             f"Checkpoint {path} is not a jcm checkpoint (decoded as "
             f"{type(raw).__name__}, expected a mapping)."
         )
@@ -724,7 +778,7 @@ def load_checkpoint(model, path, *, unstamped_scale=None,
         rev = raw.get("data_mirror_revision")
         metadata["data_mirror_revision"] = None if rev is None else str(rev)
     if "elapsed_days" not in raw:
-        raise ValueError(
+        raise CheckpointUnreadableError(
             f"Checkpoint {path} is not a jcm checkpoint: it records no "
             "'elapsed_days'."
         )

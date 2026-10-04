@@ -5462,6 +5462,59 @@ class TestMonthlyMeansStream(unittest.TestCase):
         run(_monthly_cfg(prefix, 5, extra=extra))
         _assert_same_months(self, _monthly_files(prefix), self.ref)
 
+    def test_a_lost_live_checkpoint_resumes_from_prev_and_monthly_prev(self):
+        """The live file is gone after the monthly state was committed.
+
+        ``.monthly`` (day 10) has moved on, so ``.prev`` (day 5) pairs with
+        ``.monthly.prev``. The run must say it resumed from ``.prev``: a fresh
+        start would also reproduce the reference months.
+        """
+        prefix = str(self.tmp / "lost_live")
+        ckpt = f"{prefix}.ckpt"
+        extra = [f"run.checkpoint_path={ckpt}"]
+        run(_monthly_cfg(prefix, 5, total=10, extra=extra))
+        Path(ckpt).unlink()
+        with self.assertLogs("jcm.runners", "WARNING") as logs:
+            run(_monthly_cfg(prefix, 5, extra=extra))
+        self.assertTrue(any(f"resuming from {ckpt}.prev" in line
+                            for line in logs.output), logs.output)
+        _assert_same_months(self, _monthly_files(prefix), self.ref)
+
+    def test_a_save_killed_between_its_renames_resumes_from_prev_and_monthly(self):
+        """Kill after ``live -> .prev`` but before ``.tmp -> live``.
+
+        The monthly state is promoted only after the checkpoint is committed,
+        so ``.monthly`` still describes ``.prev`` (day 5) while the day-10
+        state sits staged as ``.monthly.new``.
+        """
+        from jcm import checkpoint as ck
+
+        prefix = str(self.tmp / "between_renames")
+        ckpt = f"{prefix}.ckpt"
+        extra = [f"run.checkpoint_path={ckpt}"]
+        real_replace, saves = os.replace, []
+
+        def killed_at_the_day10_commit(src, dst):
+            if str(src) == f"{ckpt}.tmp":
+                saves.append(src)
+                if len(saves) == 2:
+                    raise RuntimeError("killed")
+            return real_replace(src, dst)
+
+        with mock.patch.object(ck.os, "replace", killed_at_the_day10_commit):
+            with self.assertRaisesRegex(RuntimeError, "killed"):
+                run(_monthly_cfg(prefix, 5, extra=extra))
+        self.assertFalse(Path(ckpt).exists())
+        self.assertTrue(Path(f"{ckpt}.prev").exists())
+        self.assertTrue(Path(f"{ckpt}.monthly.new").exists())
+        self.assertFalse(Path(f"{ckpt}.monthly.prev").exists())
+
+        with self.assertLogs("jcm.runners", "WARNING") as logs:
+            run(_monthly_cfg(prefix, 5, extra=extra))
+        self.assertTrue(any(f"resuming from {ckpt}.prev" in line
+                            for line in logs.output), logs.output)
+        _assert_same_months(self, _monthly_files(prefix), self.ref)
+
     def test_repeated_kills_after_the_state_write_still_resume(self):
         """Kill after staging the monthly state, before the checkpoint — twice.
 
@@ -5676,3 +5729,225 @@ class ResumeMirrorRevisionTest(unittest.TestCase):
         with self.assertLogs("jcm.runners", "WARNING"):
             self._check("a" * 40, "b" * 40, allow=True)
 
+
+
+class TestCheckpointRotationAndResume(unittest.TestCase):
+    """A failed save leaves a resumable run, and a lost checkpoint is not
+    silently re-initialised over the run's own files (#1006).
+    """
+
+    @staticmethod
+    def _cfg(directory, total):
+        return _compose([
+            "physics=held_suarez", "grid=held_suarez_t31_l8",
+            "run.time_step=180", f"run.total_time={total}",
+            "run.save_interval=1", "run.chunk_days=1",
+            f"run.output_prefix={directory}/chunk",
+            f"run.checkpoint_path={directory}/run.ckpt"])
+
+    @staticmethod
+    def _elapsed(path) -> float:
+        import flax.serialization
+        return float(flax.serialization.msgpack_restore(
+            Path(path).read_bytes())["elapsed_days"])
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls._tmp.name)
+        # Two chunks: the live checkpoint is at day 2, ``.prev`` at day 1.
+        cls.template = cls.root / "template"
+        cls.template.mkdir()
+        run(cls._cfg(cls.template, total=2))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._tmp.cleanup()
+
+    def _rundir(self, populated=True) -> Path:
+        import shutil
+        import tempfile
+        directory = Path(tempfile.mkdtemp(dir=self.root))
+        if populated:
+            shutil.copytree(self.template, directory, dirs_exist_ok=True)
+        return directory
+
+    def test_template_has_a_live_checkpoint_and_a_prev(self):
+        self.assertAlmostEqual(self._elapsed(self.template / "run.ckpt"), 2.0)
+        self.assertAlmostEqual(
+            self._elapsed(self.template / "run.ckpt.prev"), 1.0)
+
+    def test_failed_save_leaves_the_previous_checkpoint_and_the_run_resumes(self):
+        """The Nautilus failure: the volume fills as the day-2 save flushes.
+
+        The day-2 chunk file is already written, the run dies, and the Job's
+        retry runs the same command. The retry must continue from the day-1
+        checkpoint, not from the initial state.
+        """
+        import contextlib
+        import errno
+        import io
+
+        directory = self._rundir(populated=False)
+        run(self._cfg(directory, total=1))
+        ckpt = directory / "run.ckpt"
+        self.assertAlmostEqual(self._elapsed(ckpt), 1.0)
+
+        def quota(_fd):
+            raise OSError(errno.EDQUOT, "Disk quota exceeded")
+
+        with mock.patch("jcm.checkpoint.os.fsync", quota):
+            with self.assertRaises(OSError):
+                run(self._cfg(directory, total=2))
+        self.assertAlmostEqual(self._elapsed(ckpt), 1.0)
+        self.assertFalse((directory / "run.ckpt.tmp").exists())
+        self.assertTrue((directory / "chunk_day2.nc").exists())
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            reports = run(self._cfg(directory, total=2))
+        self.assertIn(f"Resumed from checkpoint {ckpt} at sim-day 1.0",
+                      out.getvalue())
+        self.assertEqual([r["elapsed_days"] for r in reports], [2.0])
+        self.assertAlmostEqual(self._elapsed(ckpt), 2.0)
+        self.assertAlmostEqual(self._elapsed(f"{ckpt}.prev"), 1.0)
+
+    def test_resume_falls_back_to_prev_when_the_live_file_is_missing(self):
+        """A kill between the two renames leaves only ``.prev``."""
+        directory = self._rundir()
+        (directory / "run.ckpt").unlink()
+        with self.assertLogs("jcm.runners", "WARNING") as logs:
+            reports = run(self._cfg(directory, total=2))
+        self.assertTrue(
+            any("run.ckpt.prev" in line and "missing" in line
+                for line in logs.output), logs.output)
+        self.assertEqual([r["elapsed_days"] for r in reports], [2.0])
+        self.assertAlmostEqual(self._elapsed(directory / "run.ckpt"), 2.0)
+
+    def test_resume_falls_back_to_prev_when_the_live_file_is_corrupt(self):
+        """An undecodable live file is kept as ``.bad``, not rotated over ``.prev``."""
+        directory = self._rundir()
+        live = directory / "run.ckpt"
+        live.write_bytes(live.read_bytes()[:1000])
+        with self.assertLogs("jcm.runners", "WARNING") as logs:
+            reports = run(self._cfg(directory, total=2))
+        self.assertTrue(
+            any("unreadable" in line and "run.ckpt.prev" in line
+                for line in logs.output), logs.output)
+        self.assertEqual([r["elapsed_days"] for r in reports], [2.0])
+        self.assertTrue((directory / "run.ckpt.bad").exists())
+        self.assertAlmostEqual(self._elapsed(live), 2.0)
+        self.assertAlmostEqual(self._elapsed(f"{live}.prev"), 1.0)
+
+    def test_nothing_readable_refuses_and_overwrites_nothing(self):
+        directory = self._rundir()
+        for name in ("run.ckpt", "run.ckpt.prev"):
+            path = directory / name
+            path.write_bytes(path.read_bytes()[:1000])
+        chunk = directory / "chunk_day2.nc"
+        before = chunk.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "no readable checkpoint"):
+            run(self._cfg(directory, total=3))
+        self.assertEqual(chunk.read_bytes(), before)
+        self.assertTrue((directory / "run.ckpt.prev").exists())
+        self.assertTrue((directory / "run.ckpt.bad").exists())
+
+    def test_an_incompatible_live_checkpoint_is_not_masked_by_prev(self):
+        """A readable file this build refuses says nothing is wrong with ``.prev``.
+
+        Falling back would silently resume an older state under a jcm that
+        just refused the newer one; the refusal must reach the user and the
+        files must stay as they are.
+        """
+        import flax.serialization
+
+        directory = self._rundir()
+        live = directory / "run.ckpt"
+        payload = flax.serialization.msgpack_restore(live.read_bytes())
+        payload["schema_version"] = 99
+        live.write_bytes(flax.serialization.msgpack_serialize(payload))
+        with self.assertRaisesRegex(ValueError, "schema 99"):
+            run(self._cfg(directory, total=3))
+        self.assertTrue(live.exists())
+        self.assertFalse((directory / "run.ckpt.bad").exists())
+        self.assertAlmostEqual(self._elapsed(f"{live}.prev"), 1.0)
+
+    def test_refuses_to_reinitialise_over_the_runs_own_files(self):
+        """No checkpoint, but files of an earlier attempt: stop and say which."""
+        from jcm.runners import run_chunked
+
+        cfg = self._cfg("unused", total=1)
+        model = build_model(cfg)
+        leftovers = {
+            "a chunk file": "chunk_day5.nc",
+            "a permanent archive": "chunk_day30.ckpt",
+            "an interrupted save": "run.ckpt.tmp",
+            "a quarantined checkpoint": "run.ckpt.bad",
+            "a monthly-stream state": "run.ckpt.monthly",
+            "a monthly file": "chunk_monthly_2000-01.nc",
+        }
+        for label, name in leftovers.items():
+            with self.subTest(label):
+                directory = self._rundir(populated=False)
+                (directory / name).write_bytes(b"evidence")
+                cfg = self._cfg(directory, total=1)
+                with self.assertRaises(RuntimeError) as ctx:
+                    run_chunked(cfg, chunk_days=1,
+                                output_prefix=f"{directory}/chunk",
+                                model=model, forcing=object())
+                message = str(ctx.exception)
+                self.assertIn(str(directory / name), message)
+                self.assertIn("empty directory", message)
+                self.assertEqual((directory / name).read_bytes(), b"evidence")
+                self.assertEqual(os.listdir(directory), [name])
+
+    def test_a_directory_prefix_is_checked_as_written(self):
+        """``output_prefix=<dir>/`` writes ``<dir>/_day5.nc``; so must the check read it."""
+        from jcm.runners import run_chunked
+
+        directory = self._rundir(populated=False)
+        (directory / "_day5.nc").write_bytes(b"evidence")
+        cfg = self._cfg(directory, total=1)
+        with self.assertRaisesRegex(RuntimeError, "_day5.nc"):
+            run_chunked(cfg, chunk_days=1, output_prefix=f"{directory}/",
+                        model=build_model(cfg), forcing=object())
+
+    def test_first_start_and_unchecked_runs_are_not_refused(self):
+        # An empty directory holding only unrelated files is a first start.
+        directory = self._rundir(populated=False)
+        (directory / "run.log").write_text("hydra output")
+        (directory / "launch.json").write_text("{}")
+        reports = run(self._cfg(directory, total=1))
+        self.assertEqual([r["elapsed_days"] for r in reports], [1.0])
+        self.assertTrue((directory / "run.ckpt").exists())
+
+        # Without ``run.checkpoint_path`` nothing could be resumed, so a second
+        # run into the same prefix is an ordinary overwrite.
+        plain = self._rundir(populated=False)
+        cfg = self._cfg(plain, total=1)
+        cfg.run.checkpoint_path = None
+        run(cfg)
+        self.assertTrue((plain / "chunk_day1.nc").exists())
+        self.assertEqual(len(run(cfg)), 1)
+
+    def test_archive_copy_leaves_no_partial_file(self):
+        import errno
+
+        from jcm.runners import _copy_atomically
+
+        directory = self._rundir(populated=False)
+        src, dst = directory / "src", directory / "chunk_day5.ckpt"
+        src.write_bytes(b"x" * 4096)
+        _copy_atomically(str(src), str(dst))
+        self.assertEqual(dst.read_bytes(), src.read_bytes())
+
+        def quota(_fd):
+            raise OSError(errno.EDQUOT, "Disk quota exceeded")
+
+        dst2 = directory / "chunk_day10.ckpt"
+        with mock.patch("jcm.checkpoint.os.fsync", quota):
+            with self.assertRaises(OSError):
+                _copy_atomically(str(src), str(dst2))
+        self.assertFalse(dst2.exists())
+        self.assertFalse((directory / "chunk_day10.ckpt.tmp").exists())

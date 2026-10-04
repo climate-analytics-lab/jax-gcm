@@ -777,6 +777,27 @@ def test_submit_never_touches_a_running_job(scratch, gitrepo, remote, capsys,
     assert [a for a, _ in cluster["calls"] if a[0] in ("apply", "delete")] == []
 
 
+def test_a_prev_alone_is_a_checkpoint_to_the_fresh_launch_guards(
+        tmp_path, scratch, repo):
+    """``run_chunked`` resumes from ``.prev`` when the live file is missing, so
+    a rundir holding only that is as populated as one holding both.
+    """
+    rundir = _seed_checkpoint(scratch, "bbb2222")
+    (rundir / "checkpoint.msgpack").rename(rundir / "checkpoint.msgpack.prev")
+    with pytest.raises(SystemExit) as e:
+        _launch(repo, "--tag", "bbb2222")
+    assert str(rundir / "checkpoint.msgpack.prev") in str(e.value)
+
+    pod, fresh = _guard(tmp_path, "aaaa")
+    assert _bash(fresh, JOB_UID="u1").returncode == 0      # first attempt
+    (pod / "ckpt.prev").write_bytes(b"x")                  # only the .prev
+    other = _bash(fresh, JOB_UID="u2")
+    assert other.returncode == 1 and "written by another Job" in other.stdout
+    (pod / "launch.json").unlink()
+    orphan = _bash(_guard(tmp_path, "aaaa", resume=True)[1], JOB_UID="u1")
+    assert orphan.returncode == 1 and "unknown origin" in orphan.stdout
+
+
 def test_resume_replaces_the_finished_job_and_fresh_refuses(
         scratch, gitrepo, remote, capsys, cluster):
     """Jobs are immutable: a resume replaces the finished one; a fresh launch never does."""

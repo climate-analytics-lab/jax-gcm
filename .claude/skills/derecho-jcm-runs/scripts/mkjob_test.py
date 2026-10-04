@@ -65,7 +65,22 @@ def test_warns_that_the_job_will_delete_the_checkpoint(tmp):
     out, err, code = _run(tmp, "old_run")
     assert code == 0, code
     assert ckpt in err and "DELETE it at startup" in err, err
-    assert 'rm -f "$RUNDIR"/checkpoint.msgpack' in out
+    # The glob also removes ``.prev``, which jcm would otherwise resume from.
+    assert 'rm -f "$RUNDIR"/checkpoint.msgpack*' in out
+    # Once per PBS job id: a requeued job keeps the checkpoints it wrote.
+    assert '.cleared.$PBS_JOBID' in out and 'touch "$MARK"' in out
+
+
+def test_a_prev_alone_counts_as_an_existing_checkpoint(tmp):
+    d = os.path.join(tmp, "jam_runs", "prev_only")
+    os.makedirs(d)
+    prev = os.path.join(d, "checkpoint.msgpack.prev")
+    open(prev, "wb").write(b"stale")
+    _, err, code = _run(tmp, "prev_only", "--resume")
+    assert code == 0, code
+    assert prev in err and "RESUME FROM it" in err, err
+    _, _, code = _run(tmp, "prev_only", "--fresh")
+    assert isinstance(code, str) and prev in code, code
 
 
 def test_fresh_refuses_and_emits_no_script(tmp):

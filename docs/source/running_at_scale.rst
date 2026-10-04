@@ -366,13 +366,20 @@ Multi-day integrations on preemptible compute (spot instances, Slurm
 ``--requeue`` queues, NRP Nautilus) can be killed at short notice. Set
 ``run.checkpoint_path`` to make a chunked run resumable: after each chunk the
 runner persists the modal + physics state and the elapsed sim-day count to that
-file (atomic write via tmpfile + rename, so a kill mid-write leaves the previous
-checkpoint intact). When the same command is launched again with the file
-already in place, the run restores from the checkpoint and only steps the
-remaining chunks::
+file. The new file is written and flushed beside the old one and renamed over
+it, the old one kept as ``<path>.prev``, so a kill or a full disk mid-write
+leaves a checkpoint to resume from. When the same command is launched again,
+the run restores from the checkpoint (from ``.prev`` if the live file is
+missing or unreadable, with a warning) and only steps the remaining chunks::
 
    python -m jcm.main +configuration=t63-echam-rrtmgp \
        run.checkpoint_path=/scratch/$USER/echam_t63.ckpt
+
+A run with a ``run.checkpoint_path`` that finds no checkpoint to resume but
+finds its own chunk files or checkpoint leftovers (``.bad``, ``.tmp``) in the
+directory stops with an error instead of starting over them: restore a
+checkpoint, or give the run an empty directory. See
+:doc:`design/checkpoint_compatibility`.
 
 Set ``run.archive_ckpt_every`` (sim-days; 0 = off) to also copy the rotating
 checkpoint to a dated, never-overwritten archive at the first chunk boundary
