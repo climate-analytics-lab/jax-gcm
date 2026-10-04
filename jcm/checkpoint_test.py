@@ -15,16 +15,21 @@ Covers four contracts:
 4. An unstamped (pre-policy) file is refused unless the caller asserts
    its unit convention, because PR #824 changed what the dycore state's
    mass mixing ratios mean.
+5. A save that fails part-way (quota, full disk) leaves the previous
+   checkpoint and its ``.prev`` exactly as they were (#1006), and a file
+   that cannot be decoded is told apart from one that does not fit.
 
 Uses Held-Suarez physics for speed: no moisture, no radiation, deterministic
 forcing. The composition-coverage tests build one SPEEDY and one ECHAM model
 (bootstrap only, no integration) to exercise a moist tracer set.
 """
 
+import errno
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import flax.serialization
 import jax
@@ -34,8 +39,8 @@ import pytest
 import tree_math
 
 from jcm.checkpoint import (
-    SCHEMA_VERSION, _named_leaves, load_checkpoint, parse_unstamped_scale,
-    save_checkpoint,
+    SCHEMA_VERSION, CheckpointUnreadableError, _named_leaves, atomic_open,
+    load_checkpoint, parse_unstamped_scale, save_checkpoint,
 )
 from jcm.model import Model
 from jcm.physics.held_suarez.held_suarez_physics import held_suarez_physics
@@ -1005,3 +1010,127 @@ class TestLandSkinTemperatureMigration(unittest.TestCase):
             load_checkpoint(target, path)
         np.testing.assert_allclose(
             np.asarray(target.physics_carry["surface"].land_albedo_at_solve), 0.63)
+
+
+def _quota_exceeded(*_args, **_kwargs):
+    raise OSError(errno.EDQUOT, "Disk quota exceeded")
+
+
+class TestAtomicOpen(unittest.TestCase):
+    """``atomic_open`` changes ``path`` only once the new content is whole."""
+
+    def test_success_replaces_and_leaves_no_tmp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "f"
+            with atomic_open(path) as handle:
+                handle.write(b"one")
+            with atomic_open(path) as handle:
+                handle.write(b"two")
+            self.assertEqual(path.read_bytes(), b"two")
+            self.assertEqual(sorted(os.listdir(tmp)), ["f"])
+
+    def test_keep_previous_rotates_only_after_the_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "f"
+            prev = Path(f"{path}.prev")
+            with atomic_open(path, keep_previous=True) as handle:
+                handle.write(b"one")
+            self.assertFalse(prev.exists())     # nothing to rotate yet
+            with atomic_open(path, keep_previous=True) as handle:
+                handle.write(b"two")
+                # Mid-write the live file is still the old one.
+                self.assertEqual(path.read_bytes(), b"one")
+                self.assertFalse(prev.exists())
+            self.assertEqual((path.read_bytes(), prev.read_bytes()),
+                             (b"two", b"one"))
+
+    def test_a_failure_in_the_body_leaves_live_and_prev_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "f"
+            prev = Path(f"{path}.prev")
+            path.write_bytes(b"live")
+            prev.write_bytes(b"older")
+            with self.assertRaises(RuntimeError):
+                with atomic_open(path, keep_previous=True) as handle:
+                    handle.write(b"half a checkpoin")
+                    raise RuntimeError("killed mid-write")
+            self.assertEqual((path.read_bytes(), prev.read_bytes()),
+                             (b"live", b"older"))
+            self.assertEqual(sorted(os.listdir(tmp)), ["f", "f.prev"])
+
+    def test_a_quota_error_at_fsync_leaves_live_and_prev_untouched(self):
+        """The Nautilus failure: the volume fills as the new file is flushed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "f"
+            path.write_bytes(b"live")
+            with mock.patch("jcm.checkpoint.os.fsync", _quota_exceeded):
+                with self.assertRaises(OSError) as ctx:
+                    with atomic_open(path, keep_previous=True) as handle:
+                        handle.write(b"new")
+            self.assertEqual(ctx.exception.errno, errno.EDQUOT)
+            self.assertEqual(path.read_bytes(), b"live")
+            self.assertEqual(sorted(os.listdir(tmp)), ["f"])
+
+
+class TestFailedSaveKeepsThePreviousCheckpoint(unittest.TestCase):
+    """``save_checkpoint(keep_previous=True)`` never leaves a run without one."""
+
+    def test_failed_save_leaves_the_loadable_live_checkpoint_and_prev(self):
+        model = _build_model()
+        model.run(save_interval=1, total_time=1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(model, path, keep_previous=True)       # day 1
+            model.resume(save_interval=1, total_time=1)
+            save_checkpoint(model, path, keep_previous=True)       # day 2
+            model.resume(save_interval=1, total_time=1)
+            with mock.patch("jcm.checkpoint.os.fsync", _quota_exceeded):
+                with self.assertRaises(OSError):
+                    save_checkpoint(model, path, keep_previous=True)  # day 3
+
+            self.assertEqual(sorted(os.listdir(tmp)),
+                             ["ckpt.msgpack", "ckpt.msgpack.prev"])
+            elapsed = {}
+            for name in ("ckpt.msgpack", "ckpt.msgpack.prev"):
+                target = _build_model()
+                target.bootstrap_state()
+                elapsed[name] = load_checkpoint(target, Path(tmp) / name)
+            self.assertAlmostEqual(elapsed["ckpt.msgpack"], 2.0)
+            self.assertAlmostEqual(elapsed["ckpt.msgpack.prev"], 1.0)
+
+
+class TestUnreadableVersusIncompatible(unittest.TestCase):
+    """Only an undecodable file is "unreadable"; a mismatch is not."""
+
+    def _load(self, data: bytes):
+        target = _build_model()
+        target.bootstrap_state()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            path.write_bytes(data)
+            load_checkpoint(target, path)
+
+    def test_empty_truncated_and_foreign_files_are_unreadable(self):
+        donor = _build_model()
+        donor.bootstrap_state()
+        with tempfile.TemporaryDirectory() as tmp:
+            good = Path(tmp) / "good.msgpack"
+            save_checkpoint(donor, good, elapsed_days=0.0)
+            blob = good.read_bytes()
+        foreign = flax.serialization.msgpack_serialize({"hello": np.zeros(2)})
+        for label, data in (("empty", b""), ("truncated", blob[: len(blob) // 2]),
+                            ("foreign", foreign)):
+            with self.subTest(label), self.assertRaises(CheckpointUnreadableError):
+                self._load(data)
+
+    def test_a_readable_mismatch_is_a_plain_value_error(self):
+        donor = _build_model(spectral_truncation=31)
+        donor.bootstrap_state()
+        other_grid = _build_model(spectral_truncation=21)
+        other_grid.bootstrap_state()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ckpt.msgpack"
+            save_checkpoint(donor, path, elapsed_days=0.0)
+            with self.assertRaises(ValueError) as ctx:
+                load_checkpoint(other_grid, path)
+        self.assertNotIsInstance(ctx.exception, CheckpointUnreadableError)

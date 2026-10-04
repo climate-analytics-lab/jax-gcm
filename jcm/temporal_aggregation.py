@@ -458,11 +458,13 @@ class MonthlyMeanAccumulator:
             "valid": valid,
             "static": static if static is not None else {},
         }
-        path = Path(path)
-        tmp = path.with_name(path.name + ".tmp")
-        tmp.write_bytes(flax.serialization.msgpack_serialize(payload))
-        tmp.replace(path)
-        return path
+        # The restart state is written like the checkpoint it pairs with: a
+        # failed or killed write must not leave a truncated file at ``path``.
+        from jcm.checkpoint import atomic_open
+
+        with atomic_open(path) as handle:
+            handle.write(flax.serialization.msgpack_serialize(payload))
+        return Path(path)
 
     @classmethod
     def load(cls, path) -> tuple["MonthlyMeanAccumulator", dict]:

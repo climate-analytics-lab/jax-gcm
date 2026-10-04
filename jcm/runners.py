@@ -2300,6 +2300,108 @@ def _check_resume_mirror_revision(ckpt_path, recorded) -> None:
         "deliberately.")
 
 
+def _load_resume_checkpoint(model, ckpt_path: str, metadata: dict) -> str | None:
+    """Restore ``model`` from the newest readable checkpoint; return its path.
+
+    The live file is tried first, then ``<ckpt_path>.prev``. ``.prev`` is a
+    whole checkpoint one chunk older (or the only one, when a save was killed
+    between rotating the live file away and renaming the new one in), so
+    resuming from it costs one chunk of integration, not the run. Which file
+    was used is logged as a WARNING, because it is not the usual case.
+
+    A live file that cannot be *decoded* is moved to ``<ckpt_path>.bad``: the
+    next save would otherwise rotate it over the good ``.prev``, and the file
+    is evidence. A readable file that does not fit this model (grid, physics,
+    precision, schema) raises from :func:`jcm.checkpoint.load_checkpoint`
+    unchanged — ``.prev`` comes from the same run and would be refused alike.
+
+    Returns ``None`` when neither file exists. Raises when files exist but none
+    can be decoded, since starting fresh would overwrite the run they hold.
+    """
+    from jcm.checkpoint import CheckpointUnreadableError, load_checkpoint
+
+    prev_path = f"{ckpt_path}.prev"
+    unreadable: list[str] = []
+    for candidate in (ckpt_path, prev_path):
+        if not Path(candidate).exists():
+            continue
+        try:
+            load_checkpoint(model, candidate, metadata=metadata)
+        except CheckpointUnreadableError as exc:
+            logger.warning("checkpoint %s is unreadable (%s)", candidate, exc)
+            unreadable.append(f"{candidate}: {exc}")
+            if candidate == ckpt_path:
+                os.replace(ckpt_path, f"{ckpt_path}.bad")
+            continue
+        if candidate != ckpt_path:
+            logger.warning(
+                "checkpoint %s is %s; resuming from %s, one chunk older. A "
+                "previous save did not complete.", ckpt_path,
+                "unreadable" if unreadable else "missing", candidate)
+        return candidate
+    if unreadable:
+        raise RuntimeError(
+            f"no readable checkpoint to resume {ckpt_path}: "
+            + "; ".join(unreadable) + ". Starting from the initial state "
+            "would overwrite this run's outputs. Restore a good checkpoint "
+            "there (an archive copy, if run.archive_ckpt_every was set), or "
+            "start the run in a new directory.")
+    return None
+
+
+def _refuse_silent_reinitialisation(ckpt_path: str, output_prefix: str) -> None:
+    """Refuse to start from the initial state over this run's own outputs.
+
+    Reached when a checkpointed run found nothing to resume. In an empty
+    directory that is a first start. Next to chunk files, permanent archives
+    or checkpoint remnants (``.prev`` / ``.bad`` / ``.tmp`` and the
+    monthly-stream companions) it is a restart whose checkpoint is gone, and
+    starting over would integrate the same days again, overwrite the chunk
+    files and rotate away whatever remnant could still recover the run. A
+    scheduler that re-runs the same command on failure (a Kubernetes Job with
+    ``restartPolicy: OnFailure``) would repeat that silently on every retry, so
+    the run stops here and names what it found.
+
+    The remedy is the user's: put a checkpoint back, or use a new directory.
+    Only a run with ``run.checkpoint_path`` is checked: without one nothing
+    could have been resumed, and re-running into the same prefix is an
+    ordinary overwrite.
+    """
+    import glob
+
+    ckpt, prefix = Path(ckpt_path), Path(output_prefix)
+    found = sorted({
+        *glob.glob(f"{glob.escape(str(ckpt))}.*"),
+        *glob.glob(f"{glob.escape(str(prefix))}_day*"),
+        *glob.glob(f"{glob.escape(str(prefix))}_monthly_*"),
+    })
+    if not found:
+        return
+    shown = ", ".join(found[:6]) + (
+        f", ... ({len(found)} in total)" if len(found) > 6 else "")
+    raise RuntimeError(
+        f"no checkpoint at {ckpt_path}, but the earlier attempt's files are "
+        f"there: {shown}. Starting from the initial state would overwrite "
+        "them. To continue that run, put its checkpoint back at "
+        f"{ckpt_path} (rename {ckpt_path}.prev, or copy an archive "
+        "*.ckpt); to start a new run, point run.output_prefix and "
+        "run.checkpoint_path at an empty directory, or delete these files.")
+
+
+def _copy_atomically(src: str, dst: str) -> None:
+    """Copy ``src`` to ``dst`` so ``dst`` is never a partial archive.
+
+    An archive is the one checkpoint nothing rotates away, so a copy cut short
+    by a full disk must not leave a truncated ``.ckpt`` that looks permanent.
+    """
+    import shutil
+
+    from jcm.checkpoint import atomic_open
+
+    with open(src, "rb") as source, atomic_open(dst) as handle:
+        shutil.copyfileobj(source, handle)
+
+
 def run_chunked(
     cfg: DictConfig,
     chunk_days: float,
@@ -2314,10 +2416,16 @@ def run_chunked(
     failed health check. Returns the per-chunk reports.
 
     When ``cfg.run.checkpoint_path`` is set, the model state and elapsed
-    sim-day count are persisted after each chunk and (if the file
-    already exists at startup) restored before the loop begins, so a
-    preempted run resumes at the chunk boundary it last reached without
-    redoing the integration. See :mod:`jcm.checkpoint` and issue #128.
+    sim-day count are persisted after each chunk and (if a checkpoint
+    exists at startup) restored before the loop begins, so a preempted run
+    resumes at the chunk boundary it last reached without redoing the
+    integration. A new checkpoint is written beside the old one and renamed
+    over it, the old one kept as ``<checkpoint_path>.prev``; a resume falls
+    back to ``.prev`` when the live file is missing or undecodable. When no
+    checkpoint can be resumed but the directory already holds the run's chunk
+    files or checkpoint remnants, the run raises ``RuntimeError`` rather than
+    overwrite them. See :mod:`jcm.checkpoint`,
+    ``docs/source/design/checkpoint_rotation.md`` and issues #128, #1006.
     """
     import time
 
@@ -2373,9 +2481,10 @@ def run_chunked(
     total_wall = 0.0
     resumed_from_ckpt = False
 
-    if ckpt_path and Path(ckpt_path).exists():
-        from jcm.checkpoint import load_checkpoint
-
+    ckpt_meta: dict = {}
+    restored_from = None
+    if ckpt_path and any(Path(f).exists()
+                         for f in (ckpt_path, f"{ckpt_path}.prev")):
         # Build state templates without integrating so flax.serialization
         # has pytrees of the right shape and dtype to deserialize against.
         # Mirrors the init-kind branching of the fresh-start path below;
@@ -2393,13 +2502,15 @@ def run_chunked(
         else:
             model.bootstrap_state()
 
-        ckpt_meta: dict = {}
-        load_checkpoint(model, ckpt_path, metadata=ckpt_meta)
+        restored_from = _load_resume_checkpoint(model, ckpt_path, ckpt_meta)
+    if ckpt_path and restored_from is None:
+        _refuse_silent_reinitialisation(ckpt_path, output_prefix)
+    if restored_from is not None:
         # Refuse a mirror-revision switch before touching the monthly state:
         # a resume that is refused must not complete a ``.monthly.new``
         # promotion on its way out.
         _check_resume_mirror_revision(
-            ckpt_path, ckpt_meta.get("data_mirror_revision"))
+            restored_from, ckpt_meta.get("data_mirror_revision"))
         if accumulator is not None:
             accumulator = _restore_monthly_stream(ckpt_path, model)
         # The restored exact clock, not the float elapsed_days record.
@@ -2407,7 +2518,7 @@ def run_chunked(
         elapsed_sim_days = elapsed_seconds / 86400.0
         resumed_from_ckpt = True
         print(
-            f"Resumed from checkpoint {ckpt_path} at sim-day "
+            f"Resumed from checkpoint {restored_from} at sim-day "
             f"{elapsed_sim_days:.1f}"
         )
 
@@ -2531,10 +2642,10 @@ def run_chunked(
                 # number of kills leaves one of ``.monthly`` / ``.monthly.new``
                 # at the checkpoint's instant.
                 _save_monthly_stream(accumulator, ckpt_path, model)
-            cp = Path(ckpt_path)
-            if cp.exists():
-                cp.replace(f"{ckpt_path}.prev")
-            save_checkpoint(model, ckpt_path)
+            # The previous checkpoint becomes ``.prev`` only once the new one
+            # is completely written, so a failed save (quota, full disk, a
+            # kill) leaves a resumable run; see ``atomic_open``.
+            save_checkpoint(model, ckpt_path, keep_previous=True)
             if accumulator is not None:
                 _commit_monthly_stream(ckpt_path)
             print(f"  Saved checkpoint to {ckpt_path}")
@@ -2551,17 +2662,15 @@ def run_chunked(
                 int((elapsed_sim_days + tol) // archive_every)
                 > int((previous_days + tol) // archive_every)
             ):
-                import shutil
-
                 # ``:g`` keeps whole-day archives named ``_day30`` while giving
                 # sub-day cadences a distinct name instead of colliding on the
                 # truncated integer day.
                 day = f"{elapsed_sim_days:g}".replace(".", "p")
                 archive = f"{output_prefix}_day{day}.ckpt"
-                shutil.copyfile(ckpt_path, archive)
+                _copy_atomically(ckpt_path, archive)
                 if accumulator is not None:
-                    shutil.copyfile(f"{ckpt_path}.monthly",
-                                    f"{archive}.monthly")
+                    _copy_atomically(f"{ckpt_path}.monthly",
+                                     f"{archive}.monthly")
                 print(f"  Archived checkpoint {archive}")
         elif ckpt_path:
             print("  Checkpoint NOT updated (unhealthy chunk) — restart from "
