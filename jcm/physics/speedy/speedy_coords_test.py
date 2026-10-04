@@ -39,13 +39,18 @@ class InterpToSigmaTest(unittest.TestCase):
             ):
                 np.testing.assert_array_equal(getattr(actual, name), value)
 
-    def test_hybrid_coordinates_are_rejected(self):
+    def test_hybrid_coordinates_preserve_legacy_approximation(self):
         from jcm.physics.echam.echam_levels import get_echam_levels
         from jcm.utils import get_coords
 
         coords = get_coords(get_echam_levels(47), spectral_truncation=21)
-        with self.assertRaisesRegex(TypeError, "requires sigma coordinates"):
-            SpeedyCoords.from_coordinate_system(coords)
+        actual = SpeedyCoords.from_coordinate_system(coords)
+        expected = compute_speedy_vertical_coords(47)
+        for name, value in zip(
+            ("hsg", "fsg", "dhs", "sigl", "grdsig", "grdscp", "wvi"),
+            expected,
+        ):
+            np.testing.assert_array_equal(getattr(actual, name), value)
 
     def test_reproduces_level_indexing_on_8_level_grid(self):
         # The 8-level sigma table has layer centres at exactly the reference

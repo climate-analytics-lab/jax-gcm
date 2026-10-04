@@ -270,18 +270,31 @@ class SpeedyCoords:
         Returns:
             SpeedyCoords struct containing all coordinate transformations
 
+        Sigma grids use the actual model boundaries. Hybrid grids retain
+        SPEEDY's legacy native-sigma approximation (used by the pySES adapter);
+        this does not provide exact water-budget closure on hybrid layer masses.
+
         """
         # Compute vertical coordinates
         kx = coords.nodal_shape[0]
+        from dinosaur.hybrid_coordinates import HybridCoordinates
         from dinosaur.sigma_coordinates import SigmaCoordinates
 
-        if not isinstance(coords.vertical, SigmaCoordinates):
-            raise TypeError("SPEEDY physics requires sigma coordinates")
+        if isinstance(coords.vertical, SigmaCoordinates):
+            boundaries = coords.vertical.boundaries
+        elif isinstance(coords.vertical, HybridCoordinates):
+            # Preserve the existing SPEEDY/pySES coupling. Its hybrid-grid
+            # physics uses a native-sigma approximation; making that coupling
+            # mass-consistent requires pressure-dependent metrics, beyond the
+            # sigma-grid correction here.
+            boundaries = None
+        else:
+            raise TypeError("SPEEDY physics requires sigma or hybrid coordinates")
         # Flux divergences must use the same layer masses as the dycore.
         # Rebuilding the native SPEEDY table from kx silently breaks budgets
         # on equidistant (CLI) or custom sigma grids (#1004).
         hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = compute_speedy_vertical_coords(
-            kx, boundaries=coords.vertical.boundaries)
+            kx, boundaries=boundaries)
 
         # Compute horizontal coordinates
         radang = coords.horizontal.latitudes
