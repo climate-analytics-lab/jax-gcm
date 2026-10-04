@@ -637,20 +637,23 @@ def fit_log_drift(days: np.ndarray, values: np.ndarray,
     one-year record resolves"); :func:`yoy_burden_ratio` is the cycle-free
     comparison. A shorter window is a straight line: it cannot hold a cycle, so
     the harmonic is not identifiable there. A window of a year that the finite
-    samples do not span (fewer than eight, or a gap that leaves under a year
-    between the first and last) is a straight line for the same reason, and is
-    reported as one.
+    samples do not span is a straight line for the same reason, and is reported
+    as one: fewer than eight finite samples, or a first-to-last span of less than
+    a year minus two chunk cadences. The cadence is the record's own (every
+    chunk, finite or not), so that dropping samples does not widen the
+    allowance and let a sparse series pass as a year.
     """
     good = np.isfinite(values) & (values > 0)
     if good.sum() < 3:
         return float("nan"), False
+    cadence = float(np.median(np.diff(days)))
     d, v = days[good], values[good]
     sel = d >= (d[-1] - window_days)
     if sel.sum() < 3:
         sel = np.ones_like(d, dtype=bool)
     t, y = d[sel], np.log(v[sel])
     if window_days >= YEAR_DAYS and t.size >= 8 \
-            and t[-1] - t[0] >= YEAR_DAYS - 2 * float(np.median(np.diff(t))):
+            and t[-1] - t[0] >= YEAR_DAYS - 2 * cadence:
         w = 2.0 * np.pi * t / YEAR_DAYS
         design = np.column_stack([np.ones_like(t), t - t.mean(), np.cos(w), np.sin(w)])
         return float(np.linalg.lstsq(design, y, rcond=None)[0][1]), True

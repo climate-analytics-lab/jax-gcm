@@ -391,7 +391,12 @@ class TestDriftLimit:
         sparse[:-6] = np.nan                  # six finite samples: no harmonic
         gap = full.copy()
         gap[:20] = np.nan                     # finite samples span 260 days
-        for values in (sparse, gap):
+        # Eight finite samples 45 days apart span 315 days. Their own median
+        # spacing would be allowed 90 days of slack and read as a year; the
+        # record's cadence (5 days) allows 10, so they do not.
+        spread = np.full_like(full, np.nan)
+        spread[::9][:8] = full[::9][:8]
+        for values in (sparse, gap, spread):
             stats = A.summarize(*_series(self.DAYS, values))
             assert stats["drift_harmonic_so4"] == 0.0
             assert stats["dlnB_dt_so4_per_day"] == pytest.approx(slope, rel=1e-6)
