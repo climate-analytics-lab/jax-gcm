@@ -1044,6 +1044,38 @@ Fixes that change the climate of a configuration you did not otherwise touch.
 :doc:`v2_to_v3` quotes the measured direction and magnitude for each, where one
 was measured.
 
+The semi-Lagrangian step conserves water
+""""""""""""""""""""""""""""""""""""""""
+
+Every semi-Lagrangian run created water in its dynamics. The global budget of
+the ECHAM packages (1M, 2M, JAM) had ``P − E + dPW/dt = +0.22`` to
+``+0.24`` mm/day, about 9 % of precipitation, with the physics applying
+exactly the evaporation and precipitation it reports. The source was the
+transport of ``specific_humidity``:
+
+- Its vertical interpolation at the departure points was linear, which
+  over-reads a convex profile whatever the direction of the motion.
+- Unlike the nodal tracers, humidity had no mass fixer.
+
+The Dinosaur backend now does two things under semi-Lagrangian transport:
+
+- **Cubic vertical interpolation.** It interpolates in the vertical with
+  4-point cubic Lagrange, linear in the first and last cells (the IFS rule;
+  ``dycore.sl_vertical_interpolation``, default ``null`` = cubic, linear on
+  grids with fewer than four levels).
+- **A humidity mass fixer.** It restores the global mass of humidity to its
+  post-physics, pre-transport value every step with the proportional fixer
+  the nodal tracers already had (``dycore.humidity_mass_fixer``, default
+  ``true``).
+
+The water source at T63L47 falls from +0.236 to 0 mm/day (+0.001 from the
+cubic interpolation alone). The same interpolation transports temperature;
+with linear interpolation the dynamics alone lost about 11 W/m² of energy,
+which cubic removes, so expect a warmer atmosphere. Expect precipitation that
+no longer exceeds evaporation, and a retune of anything calibrated against
+the old balance. The Eulerian core (SPEEDY) is unchanged and bit-identical.
+See :doc:`design/tracer_mass_conservation`.
+
 ECHAM surface albedo and frozen-surface saturation
 """"""""""""""""""""""""""""""""""""""""""""""""""
 

@@ -21,3 +21,21 @@ compute_omega: null
 # microphysics (#521). An explicit ``eulerian`` with tracer-carrying
 # physics runs but logs a warning.
 advection: null
+
+# Vertical order of the semi-Lagrangian departure-point interpolation:
+# cubic | linear | null (= the dycore default, cubic; linear on grids with
+# fewer than four levels). Cubic is 4-point Lagrange in the reference sigma,
+# linear in the first and last cells (the IFS rule). Linear interpolation
+# overestimates a convex profile at every departure point whatever the
+# direction of the vertical motion; specific humidity is convex in sigma, so
+# linear vertical interpolation creates ~0.24 mm/day of water at T63L47 (about
+# 9% of precipitation) and drains ~11 W/m2 of energy. Ignored by the Eulerian
+# core. See docs/source/design/tracer_mass_conservation.md.
+sl_vertical_interpolation: null
+
+# Global mass fixer for the modal specific humidity under semi-Lagrangian
+# transport: after the step, scale q so that its global mass equals the
+# post-physics, pre-transport value, as the nodal tracers' fixer does for
+# theirs. Keeps the water budget closed to round-off (P - E = -dPW/dt).
+# Ignored by the Eulerian core, which needs none.
+humidity_mass_fixer: true

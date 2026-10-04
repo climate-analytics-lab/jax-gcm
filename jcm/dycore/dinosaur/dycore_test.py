@@ -373,6 +373,241 @@ class TracerMassFixerTest(unittest.TestCase):
         self.assertAlmostEqual(m5 / m0, 1.0, places=6)
 
 
+def _moist_l47_dycore(**sl_options):
+    """T21, ECHAM L47 hybrid SL dycore with explicit ``sl_options``."""
+    from jcm.dycore.dinosaur.dycore import DinosaurDycore
+    from jcm.physics.echam.echam_levels import get_echam_levels
+    from jcm.terrain import TerrainData
+    from jcm.utils import get_coords
+
+    coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+    return DinosaurDycore(
+        coords=coords, terrain=TerrainData.aquaplanet(coords),
+        dt_seconds=2400.0, advection="semi_lagrangian",
+        sl_options=sl_options,
+    )
+
+
+def _moist_divergent_state(dycore, divergence=2e-5):
+    """Build a humid, vertically moving state: the regime where SL leaks water.
+
+    Humidity is convex in σ (``q ∝ σ³``, as the real profile is in the
+    troposphere), and a resolved first-baroclinic-mode divergence
+    (convergence below, divergence aloft, ``cos(πσ)``) drives the vertical
+    displacements at which linear interpolation over-reads a convex profile.
+    """
+    import jax
+    import jax.numpy as jnp
+
+    import jcm.constants as c
+
+    state = dycore.initial_state(None, random_seed=0)
+    grid = dycore.coords.horizontal
+    sig_half = (np.asarray(dycore._a_half) / c.p0
+                + np.asarray(dycore._b_half))
+    sig = jnp.asarray(0.5 * (sig_half[1:] + sig_half[:-1]))[:, None, None]
+    lat = jnp.asarray(grid.latitudes)[None, None, :]
+    q = 0.018 * sig ** 3 * (0.3 + 0.7 * jnp.cos(lat) ** 2) * jnp.ones(
+        (1,) + grid.nodal_shape)
+    noise = jax.random.normal(jax.random.PRNGKey(1), (1,) + grid.nodal_shape)
+    div = grid.clip_wavenumbers(grid.to_modal(
+        divergence * noise * jnp.cos(jnp.pi * sig)))
+    m = jnp.arange(div.shape[-2])[None, :, None]
+    total = jnp.arange(div.shape[-1])[None, None, :]
+    div = div * (m < 8) * (total < 8)
+    return state.replace(
+        divergence=div,
+        tracers={**state.tracers, "specific_humidity": grid.to_modal(q)},
+    )
+
+
+def _global_water(dycore, state):
+    """Global-mean column water vapour [kg/m²] of a hybrid dycore state."""
+    import jax.numpy as jnp
+
+    import jcm.constants as c
+
+    grid = dycore.coords.horizontal
+    w = jnp.asarray(grid.quadrature_weights)
+    q = grid.to_nodal(state.tracers["specific_humidity"])
+    dp = dycore._nodal_tracer_column_weight(state)
+    total = jnp.sum(q * dp * w) / jnp.sum(w * jnp.ones(grid.nodal_shape))
+    return float(total) / c.grav
+
+
+@unittest.skipUnless(_sl_available(), "needs the semi-Lagrangian dinosaur")
+class HumidityMassConservationTest(unittest.TestCase):
+    """The SL step's global water budget closes.
+
+    ``specific_humidity`` rides the SL core modally. Dinosaur's SL transport
+    does not conserve ``∫ q·dp``, and with linear vertical interpolation the
+    error is a one-signed SOURCE, because linear interpolation over-reads a
+    convex profile whatever the direction of the vertical motion: at T63L47
+    it was +0.24 mm/day, ~9 % of precipitation. Cubic vertical interpolation
+    removes the systematic error and the humidity mass fixer closes what is
+    left to round-off.
+
+    One simulated day at T21 on the ECHAM L47 grid, from a humid state with
+    resolved vertical motion, and a gridpoint moistening tendency so the
+    physics term and its spectral projection are in the budget too. The
+    budget residual is ``S = ΔW/Δt − ∫P dp/g`` [mm/day].
+    """
+
+    _STEPS = 36
+
+    @classmethod
+    def setUpClass(cls):
+        cls.residual = {}
+        for name, opts in {
+            "linear": dict(vertical_interpolation_order="linear",
+                           humidity_mass_fixer=False),
+            "cubic": dict(vertical_interpolation_order="cubic",
+                          humidity_mass_fixer=False),
+            "cubic+fixer": dict(vertical_interpolation_order="cubic",
+                                humidity_mass_fixer=True),
+        }.items():
+            cls.residual[name] = cls._budget_residual(_moist_l47_dycore(**opts))
+
+    @classmethod
+    def _budget_residual(cls, dycore):
+        import jax
+        import jax.numpy as jnp
+
+        import jcm.constants as c
+        from jcm.physics_interface import PhysicsTendency
+
+        state = _moist_divergent_state(dycore)
+        grid_state = dycore.to_physics_state(state)
+        shape = grid_state.temperature.shape
+        # A grid-scale-noisy moistening, so part of it lies beyond the
+        # truncation and the projection is exercised.
+        noise = jax.random.uniform(jax.random.PRNGKey(2), shape)
+        dqdt = 1e-9 * (1.0 + noise)
+        tendency = PhysicsTendency(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=jnp.zeros(shape), specific_humidity=dqdt,
+        )
+        ps = grid_state.normalized_surface_pressure * c.p0
+        a = jnp.asarray(dycore._a_half)[:, None, None]
+        b = jnp.asarray(dycore._b_half)[:, None, None]
+        dp_phys = jnp.diff(a + b * ps[None], axis=0)
+        w = np.asarray(dycore.coords.horizontal.quadrature_weights)
+        column = np.asarray(jnp.sum(dqdt * dp_phys, 0))
+        source = float(np.sum(column * w) / np.sum(w * np.ones(ps.shape))) / c.grav
+        step = jax.jit(lambda s: dycore.step(s, tendency))
+        w0 = _global_water(dycore, state)
+        for _ in range(cls._STEPS):
+            state = step(state)
+        seconds = cls._STEPS * dycore.dt_seconds
+        dwdt = (_global_water(dycore, state) - w0) / seconds
+        return (dwdt - source) * 86400.0
+
+    def test_linear_vertical_interpolation_is_a_water_source(self):
+        # The case is sensitive: without either remedy the budget is open.
+        self.assertGreater(self.residual["linear"], 0.1)
+
+    def test_cubic_alone_closes_within_two_hundredths_of_a_mm_per_day(self):
+        self.assertLess(abs(self.residual["cubic"]), 0.02)
+
+    def test_the_humidity_fixer_closes_to_round_off(self):
+        # float32 global sums: ~1e-5 mm/day is the precision of the
+        # integral itself, not a transport leak.
+        self.assertLess(abs(self.residual["cubic+fixer"]), 1e-3)
+
+
+@unittest.skipUnless(_sl_available(), "needs the semi-Lagrangian dinosaur")
+class HumidityMassFixerTest(unittest.TestCase):
+    """``_fix_humidity_mass`` restores ``∫ q·dp`` exactly, and only under SL."""
+
+    def setUp(self):
+        import jax
+
+        prior = jax.config.read("jax_enable_x64")
+        jax.config.update("jax_enable_x64", True)
+        self.addCleanup(jax.config.update, "jax_enable_x64", prior)
+
+    def _mass(self, dycore, state):
+        import jax.numpy as jnp
+
+        grid = dycore.coords.horizontal
+        w = jnp.asarray(grid.quadrature_weights)
+        q = grid.to_nodal(state.tracers["specific_humidity"])
+        return float(jnp.sum(q * dycore._nodal_tracer_column_weight(state) * w))
+
+    def test_restores_a_transport_gain(self):
+        dycore = _moist_l47_dycore()
+        state = _moist_divergent_state(dycore)
+        q = state.tracers["specific_humidity"]
+        gained = state.replace(
+            tracers={**state.tracers, "specific_humidity": 1.01 * q})
+        fixed = dycore._fix_humidity_mass(state, gained)
+        self.assertAlmostEqual(
+            self._mass(dycore, fixed) / self._mass(dycore, state), 1.0,
+            places=10)
+
+    def test_a_dry_state_passes_through_bit_for_bit(self):
+        dycore = _small_dycore()
+        state = dycore.initial_state(None, random_seed=0)
+        out = dycore._fix_humidity_mass(state, state)
+        np.testing.assert_array_equal(
+            np.asarray(out.tracers["specific_humidity"]),
+            np.asarray(state.tracers["specific_humidity"]))
+
+    def test_defaults(self):
+        dycore = _small_dycore()
+        self.assertEqual(dycore.vertical_interpolation_order, "cubic")
+        self.assertEqual(dycore.primitive.vertical_interpolation_order, "cubic")
+        self.assertTrue(dycore.humidity_mass_fixer)
+        # ``mass_fixer=False`` switches every fixer off, humidity included.
+        self.assertFalse(
+            _small_dycore(sl_options={"mass_fixer": False}).humidity_mass_fixer)
+
+    def test_grids_below_four_levels_default_to_linear(self):
+        from jcm.dycore.dinosaur.dycore import DinosaurDycore
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.terrain import TerrainData
+
+        coords = get_speedy_coords(layers=3, spectral_truncation=21)
+        dycore = DinosaurDycore(coords=coords,
+                                terrain=TerrainData.aquaplanet(coords),
+                                dt_seconds=2400.0)
+        self.assertEqual(dycore.vertical_interpolation_order, "linear")
+
+    def test_an_unknown_order_is_rejected(self):
+        with self.assertRaises(ValueError):
+            _small_dycore(sl_options={"vertical_interpolation_order": "quintic"})
+
+    def test_the_eulerian_step_runs_no_fixer(self):
+        # Eulerian transport is flux-consistent: its step stays exactly the
+        # tendency add, the dynamics and the filters, so tracer-free SPEEDY on
+        # the Eulerian core is bit-identical to a build without the fixer.
+        import jax
+        import jax.numpy as jnp
+
+        from jcm.physics_interface import PhysicsTendency
+
+        dycore = _small_dycore(advection="eulerian")
+        state = dycore.initial_state(None, random_seed=0)
+        grid = dycore.coords.horizontal
+        q = 0.01 * jnp.ones((dycore.coords.vertical.layers,) + grid.nodal_shape)
+        state = state.replace(
+            tracers={**state.tracers, "specific_humidity": grid.to_modal(q)})
+        shape = q.shape
+        tendency = PhysicsTendency(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=jnp.zeros(shape),
+            specific_humidity=1e-9 * jax.random.uniform(
+                jax.random.PRNGKey(0), shape))
+        got = dycore.step(state, tendency)
+        expected = dycore._dynamics_step_fn(
+            dycore._apply_physics_tendency(state, tendency))
+        for f in dycore._filters:
+            expected = f(state, expected)
+        for a, b in zip(jax.tree_util.tree_leaves(got),
+                        jax.tree_util.tree_leaves(expected)):
+            np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+
 class AfterPhysicsStateTest(unittest.TestCase):
     """``after_physics_state`` is the state the dynamics really starts from.
 

@@ -991,8 +991,15 @@ def build_model(cfg: DictConfig) -> Model:
     time_step_seconds = resolve_effective_time_step_seconds(cfg)
     time_step = time_step_seconds / 60.0
     tracer_specs = {spec.name: spec for spec in physics.required_tracers()}
-    sl_options = {"off_centering": float(
-        cfg.get("sl_off_centering", DEFAULT_OFF_CENTERING))}
+    dycore_cfg = cfg.get("dycore", {})
+    sl_options = {
+        "off_centering": float(
+            cfg.get("sl_off_centering", DEFAULT_OFF_CENTERING)),
+        # null -> the dycore default (cubic; linear below four levels).
+        "vertical_interpolation_order": dycore_cfg.get(
+            "sl_vertical_interpolation", None),
+        "humidity_mass_fixer": bool(dycore_cfg.get("humidity_mass_fixer", True)),
+    }
     dycore = DinosaurDycore(
         coords=coords,
         terrain=terrain,
@@ -1002,7 +1009,7 @@ def build_model(cfg: DictConfig) -> Model:
         tracer_filter=tracer_filter,
         compute_omega=_want_omega(cfg, physics),
         # null -> Model resolves it from physics.preferred_advection().
-        advection=cfg.get("dycore", {}).get("advection", None),
+        advection=dycore_cfg.get("advection", None),
         sl_options=sl_options,
     )
     return Model(

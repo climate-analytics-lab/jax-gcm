@@ -96,6 +96,23 @@ def semi_lagrangian_available() -> bool:
 DEFAULT_OFF_CENTERING = 0.2
 
 
+#: Vertical interpolation orders dinosaur's semi-Lagrangian departure-point
+#: interpolation offers (``semi_lagrangian.interpolate_3d``).
+VERTICAL_INTERPOLATION_ORDERS = ("linear", "cubic")
+
+#: Default vertical interpolation order of the semi-Lagrangian transport:
+#: 4-point Lagrange cubic in the reference σ, degraded to linear in the first
+#: and last cells — dinosaur's ``vertical_order="cubic"``, the IFS rule.
+#: Linear interpolation overestimates every convex profile at the departure
+#: points whatever the sign of the vertical displacement, and specific humidity
+#: is convex in σ, so linear vertical interpolation is a one-signed water
+#: source (~+0.24 mm/day at T63L47) as well as an energy sink. Cubic needs four
+#: levels; coarser grids fall back to linear. Single source of truth for direct
+#: construction and the Hydra runner; see
+#: docs/source/design/tracer_mass_conservation.md.
+DEFAULT_VERTICAL_INTERPOLATION = "cubic"
+
+
 #: Transport schemes the dinosaur backend offers (see ``DinosaurDycore``'s
 #: ``advection`` argument). Semi-Lagrangian is the default and what the
 #: physics-decided mode always picks for tracer-carrying physics; Eulerian is
@@ -129,6 +146,49 @@ def _require_semi_lagrangian() -> None:
         "Install a current release:\n"
         "    pip install 'dinosaur>=1.5.0'\n"
         "and remove any older dinosaur checkout from PYTHONPATH."
+    )
+
+
+def _proportional_mass_scale(target, current, dtype):
+    """Global factor ``target / current`` of the proportional mass fixers.
+
+    Shared by :meth:`DinosaurDycore._fix_nodal_tracer_mass` and
+    :meth:`DinosaurDycore._fix_humidity_mass`. Clipped to [2/3, 1.5]:
+    per-step transport error is O(1e-3); a factor outside that band means
+    something other than transport error (a genuinely empty field spinning
+    up, a physics bug) and must surface in the budget diagnostics rather
+    than be silently absorbed here.
+    """
+    # A fixer must never manufacture sign: only rescale when both
+    # totals are meaningfully positive (mixing ratios; a cold-start
+    # zero field or a ringing near-zero total passes through).
+    tiny = jnp.asarray(1e-300, dtype=dtype) if \
+        dtype == jnp.float64 else jnp.asarray(1e-30, dtype)
+    ok = (current > tiny) & (target > tiny)
+    # Double-where guard (#558): the masked branch's division must
+    # see benign inputs, or its cotangent (∝ target/current²) blows
+    # up through empty fields — qc/qi start at zero in every
+    # cold-start run and this NaN'd the two-step gradient gate.
+    #
+    # ``tiny`` only keeps the totals positive; it is no bound on the
+    # derivative. A bare ``target / current`` differentiates through
+    # ``current**-2``, which is ``inf`` in float32 for every
+    # ``current`` below 2**-63 ≈ 1.08e-19, far above ``tiny``. A total
+    # in that band is not hypothetical: the ice tendency of clear
+    # cells in the ECHAM 1M composition is exactly zero when evaluated
+    # op by op and a ~1e-29 kg/kg/s rounding residue in a fused XLA
+    # program; its global total, ~3e-21, passes the mask, and through
+    # a bare quotient a zero cotangent times the ``inf`` is a NaN over
+    # the whole dynamical state. :func:`jcm.filters.stable_quotient`
+    # has the plain quotient's value and its exact derivative without
+    # the square.
+    safe_current = jnp.where(ok, current, 1.0)
+    safe_target = jnp.where(ok, target, 1.0)
+    return jnp.where(
+        ok,
+        jnp.clip(stable_quotient(safe_target, safe_current),
+                 2.0 / 3.0, 1.5),
+        1.0,
     )
 
 
@@ -206,7 +266,11 @@ class DinosaurDycore(DynamicalCore):
         the Eulerian step): ``interpolation_order``
         ('cubic'), ``monotone_tracers`` (True), ``departure_iterations``
         (1), ``off_centering`` (:data:`DEFAULT_OFF_CENTERING`),
-        ``vertical_interpolation_order`` ('linear').
+        ``vertical_interpolation_order``
+        (:data:`DEFAULT_VERTICAL_INTERPOLATION`, or linear below four
+        levels), ``mass_fixer`` (True: every global mass fixer below) and
+        ``humidity_mass_fixer`` (True: the fixer for the modal
+        ``specific_humidity``; see :meth:`step`).
         """
         _require_semi_lagrangian()
         if advection is not None and advection not in ADVECTION_SCHEMES:
@@ -220,6 +284,13 @@ class DinosaurDycore(DynamicalCore):
         self._advection_request = advection
         self._advection = advection or SEMI_LAGRANGIAN
         self._sl_options = dict(sl_options or {})
+        vorder = self._sl_options.get("vertical_interpolation_order")
+        if vorder is not None and vorder not in VERTICAL_INTERPOLATION_ORDERS:
+            raise ValueError(
+                "sl_options['vertical_interpolation_order'] must be one of "
+                f"{VERTICAL_INTERPOLATION_ORDERS} or None (the default), got "
+                f"{vorder!r}"
+            )
         self.coords = coords
         self.terrain = terrain
         self.dt_seconds = float(dt_seconds)
@@ -354,8 +425,7 @@ class DinosaurDycore(DynamicalCore):
             monotone_tracers=self._sl_options.get("monotone_tracers", True),
             nodal_tracers=self._nodal_tracers,
             departure_iterations=self._sl_options.get("departure_iterations", 1),
-            vertical_interpolation_order=self._sl_options.get(
-                "vertical_interpolation_order", "linear"),
+            vertical_interpolation_order=self.vertical_interpolation_order,
         )
         if isinstance(self.coords.vertical, HybridCoordinates):
             self._primitive = primitive_equations.SemiLagrangianPrimitiveEquationsHybrid(
@@ -457,6 +527,27 @@ class DinosaurDycore(DynamicalCore):
     def off_centering(self) -> float:
         """Off-centering of the SL step (``sl_options`` override or the default)."""
         return float(self._sl_options.get("off_centering", DEFAULT_OFF_CENTERING))
+
+    @property
+    def vertical_interpolation_order(self) -> str:
+        """Vertical order of the SL departure-point interpolation.
+
+        The ``sl_options`` override, else :data:`DEFAULT_VERTICAL_INTERPOLATION`
+        — except that a grid with fewer than four levels, which cannot carry a
+        four-point stencil, defaults to linear.
+        """
+        order = self._sl_options.get("vertical_interpolation_order")
+        if order is not None:
+            return order
+        if self.coords.vertical.layers < 4:
+            return "linear"
+        return DEFAULT_VERTICAL_INTERPOLATION
+
+    @property
+    def humidity_mass_fixer(self) -> bool:
+        """Whether the SL step restores the global mass of ``specific_humidity``."""
+        return bool(self._sl_options.get("mass_fixer", True)
+                    and self._sl_options.get("humidity_mass_fixer", True))
 
     @property
     def tracer_specs(self) -> dict:
@@ -885,28 +976,43 @@ class DinosaurDycore(DynamicalCore):
         """Advance ``state`` by one ``dt``.
 
         Order: forward-Euler add of the physics dynamics-tendency →
-        semi-Lagrangian Crank-Nicolson RK2 dynamics step → spectral filters.
+        semi-Lagrangian Crank-Nicolson RK2 dynamics step → spectral filters
+        → (semi-Lagrangian only) the global mass fixers.
+
+        SL transport does not conserve ``∫ q·dp`` (dinosaur's own validation
+        test says so), so after the filters every SL-transported water and
+        tracer species gets its global mass restored to the post-physics,
+        pre-transport value: the nodal tracers through
+        :meth:`_fix_nodal_tracer_mass`, the modal ``specific_humidity``
+        through :meth:`_fix_humidity_mass`. Without the latter the transport
+        error of humidity is never removed, and the global water budget
+        carries it as a source the physics never sees (P − E ≠ −dPW/dt).
+        The Eulerian step is flux-consistent and runs no fixer. See
+        docs/source/design/tracer_mass_conservation.md.
         """
         state_after_physics = self._apply_physics_tendency(state, physics_tendency)
         state_after_dyn = self._dynamics_step_fn(state_after_physics)
         state_next = state_after_dyn
         for f in self._filters:
             state_next = f(state, state_next)
+        if self._advection != SEMI_LAGRANGIAN:
+            return state_next
         if self._nodal_tracers and self._sl_options.get("mass_fixer", True):
-            # SL transport is not mass-conserving (its own validation test
-            # says so) and its quasi-monotone limiter rectifies the error
-            # into systematic CREATION where removal digs sharp minima —
-            # the #713 budget gauge measured it at >10% of the dust
-            # emission rate on dev and unbounded once stronger sinks
-            # sharpened the fields. Restore each nodal tracer's global
-            # mass to its pre-transport value.
+            # The quasi-monotone limiter rectifies the SL error into
+            # systematic CREATION where removal digs sharp minima — the #713
+            # budget gauge measured it at >10% of the dust emission rate on
+            # dev and unbounded once stronger sinks sharpened the fields.
             state_next = self._fix_nodal_tracer_mass(
+                state_after_physics, state_next,
+            )
+        if self.humidity_mass_fixer:
+            state_next = self._fix_humidity_mass(
                 state_after_physics, state_next,
             )
         return state_next
 
     def _nodal_tracer_column_weight(self, state) -> jnp.ndarray:
-        """Per-cell air-mass weight ``dp`` [nondim] for nodal-tracer integrals."""
+        """Per-cell air-mass weight ``dp`` [nondim] for the mass-fixer integrals."""
         ps = jnp.exp(
             self.coords.horizontal.to_nodal(state.log_surface_pressure)
         )  # (1, lon, lat)
@@ -949,39 +1055,41 @@ class DinosaurDycore(DynamicalCore):
             q_new = tracers[name]
             target = jnp.sum(q_ref * dp_ref * w)
             current = jnp.sum(q_new * dp_new * w)
-            # A fixer must never manufacture sign: only rescale when both
-            # totals are meaningfully positive (mixing ratios; a cold-start
-            # zero field or a ringing near-zero total passes through).
-            tiny = jnp.asarray(1e-300, dtype=q_new.dtype) if \
-                q_new.dtype == jnp.float64 else jnp.asarray(1e-30, q_new.dtype)
-            ok = (current > tiny) & (target > tiny)
-            # Double-where guard (#558): the masked branch's division must
-            # see benign inputs, or its cotangent (∝ target/current²) blows
-            # up through empty fields — qc/qi start at zero in every
-            # cold-start run and this NaN'd the two-step gradient gate.
-            #
-            # ``tiny`` only keeps the totals positive; it is no bound on the
-            # derivative. A bare ``target / current`` differentiates through
-            # ``current**-2``, which is ``inf`` in float32 for every
-            # ``current`` below 2**-63 ≈ 1.08e-19, far above ``tiny``. A total
-            # in that band is not hypothetical: the ice tendency of clear
-            # cells in the ECHAM 1M composition is exactly zero when evaluated
-            # op by op and a ~1e-29 kg/kg/s rounding residue in a fused XLA
-            # program; its global total, ~3e-21, passes the mask, and through
-            # a bare quotient a zero cotangent times the ``inf`` is a NaN over
-            # the whole dynamical state. :func:`jcm.filters.stable_quotient`
-            # has the plain quotient's value and its exact derivative without
-            # the square.
-            safe_current = jnp.where(ok, current, 1.0)
-            safe_target = jnp.where(ok, target, 1.0)
-            scale = jnp.where(
-                ok,
-                jnp.clip(stable_quotient(safe_target, safe_current),
-                         2.0 / 3.0, 1.5),
-                1.0,
-            )
-            tracers[name] = q_new * scale
+            tracers[name] = q_new * _proportional_mass_scale(
+                target, current, q_new.dtype)
         return state_new.replace(tracers=tracers)
+
+    def _fix_humidity_mass(self, state_ref, state_new):
+        """Proportional global mass fixer for the modal ``specific_humidity``.
+
+        The same fixer as :meth:`_fix_nodal_tracer_mass` (one global factor,
+        restoring ``∫ q·dp`` to its post-physics, pre-transport value),
+        applied to humidity, which the SL core keeps modal for the implicit
+        q↔Tv coupling. The integral is taken over the gridpoint field
+        (``to_nodal`` of the modal coefficients, the same Gaussian
+        quadrature and ``dp`` as the nodal tracers), and the factor scales
+        the modal coefficients: the transform is linear, so the gridpoint
+        field — and its integral — scale exactly.
+
+        The fixer's job is the residual of a transport that is already
+        accurate (cubic vertical interpolation leaves ~1e-3 of the linear
+        error); it is not a substitute for that accuracy, because one global
+        factor cannot undo an error that is spatially structured. A no-op
+        (factor exactly 1) on a dry or cold-start-empty humidity field.
+        """
+        name = "specific_humidity"
+        if name not in state_new.tracers:
+            return state_new
+        to_nodal = self.coords.horizontal.to_nodal
+        w = jnp.asarray(self.coords.horizontal.quadrature_weights)
+        q_new = state_new.tracers[name]
+        target = jnp.sum(to_nodal(state_ref.tracers[name])
+                         * self._nodal_tracer_column_weight(state_ref) * w)
+        current = jnp.sum(to_nodal(q_new)
+                          * self._nodal_tracer_column_weight(state_new) * w)
+        scale = _proportional_mass_scale(target, current, q_new.dtype)
+        return state_new.replace(
+            tracers={**state_new.tracers, name: q_new * scale})
 
     def sim_time(self, state: State) -> jnp.ndarray:
         return state.sim_time
