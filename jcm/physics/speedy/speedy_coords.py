@@ -1,6 +1,7 @@
 import jax.numpy as jnp
 import tree_math
 from dinosaur.coordinate_systems import CoordinateSystem
+
 import jcm.constants as c
 from jcm.physics.speedy.physical_constants import compute_sigma_boundaries
 from jcm.utils import get_coords
@@ -116,13 +117,13 @@ def get_speedy_coords(layers=8, spectral_truncation=31, nodal_shape=None, spmd_m
         spmd_mesh=spmd_mesh
     )
 
-def compute_speedy_vertical_coords(kx: int):
+def compute_speedy_vertical_coords(kx: int, boundaries=None):
         """Compute SPEEDY vertical coordinate transformations.
 
-        The sigma half-level boundaries come from
+        Use the model's sigma half-level boundaries when supplied, otherwise
         :func:`compute_sigma_boundaries` (7/8 reproduce the original SPEEDY
-        tables exactly); everything below is derived generically from those
-        boundaries. SPEEDY *physics* additionally needs ``kx >= 5``: the
+        tables exactly). All metrics are derived from those boundaries.
+        SPEEDY *physics* additionally needs ``kx >= 5``: the
         convective cloud-top search runs over interior levels
         ``1 .. kx-4`` and is empty below that (``jnp.argmax`` over an empty
         axis fails at trace time with an opaque error, so reject early and
@@ -132,6 +133,8 @@ def compute_speedy_vertical_coords(kx: int):
 
         Args:
             kx: Number of vertical levels (>= 5)
+            boundaries: Actual model sigma boundaries; defaults to SPEEDY's
+                native grid for standalone columns.
 
         Returns:
             Tuple of (hsg, fsg, dhs, sigl, grdsig, grdscp, wvi)
@@ -150,7 +153,8 @@ def compute_speedy_vertical_coords(kx: int):
                 "other physics packages."
             )
         # Layer boundaries and midpoints
-        hsg = compute_sigma_boundaries(kx)
+        hsg = (compute_sigma_boundaries(kx) if boundaries is None
+               else jnp.asarray(boundaries))
         fsg = (hsg[1:] + hsg[:-1]) / 2.
         dhs = jnp.diff(hsg)
         sigl = jnp.log(fsg)
@@ -269,7 +273,15 @@ class SpeedyCoords:
         """
         # Compute vertical coordinates
         kx = coords.nodal_shape[0]
-        hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = compute_speedy_vertical_coords(kx)
+        from dinosaur.sigma_coordinates import SigmaCoordinates
+
+        if not isinstance(coords.vertical, SigmaCoordinates):
+            raise TypeError("SPEEDY physics requires sigma coordinates")
+        # Flux divergences must use the same layer masses as the dycore.
+        # Rebuilding the native SPEEDY table from kx silently breaks budgets
+        # on equidistant (CLI) or custom sigma grids (#1004).
+        hsg, fsg, dhs, sigl, grdsig, grdscp, wvi = compute_speedy_vertical_coords(
+            kx, boundaries=coords.vertical.boundaries)
 
         # Compute horizontal coordinates
         radang = coords.horizontal.latitudes
