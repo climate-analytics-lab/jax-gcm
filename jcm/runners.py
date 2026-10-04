@@ -2425,7 +2425,7 @@ def run_chunked(
     checkpoint can be resumed but the directory already holds the run's chunk
     files or checkpoint remnants, the run raises ``RuntimeError`` rather than
     overwrite them. See :mod:`jcm.checkpoint`,
-    ``docs/source/design/checkpoint_rotation.md`` and issues #128, #1006.
+    ``docs/source/design/checkpoint_compatibility.md`` and issues #128, #1006.
     """
     import time
 

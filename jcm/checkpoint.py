@@ -21,9 +21,9 @@ checkpoint (issue #731).
 
 What migrates automatically, what is refused, and how to bump the schema
 for a future change are the checkpoint compatibility policy:
-``docs/source/design/checkpoint_compatibility.md``. How the file is written
-(write-then-rename with a ``.prev`` copy) and how a resume chooses between the
-live file and ``.prev`` is ``docs/source/design/checkpoint_rotation.md``.
+``docs/source/design/checkpoint_compatibility.md``, which also describes how
+the file is written (write-then-rename with a ``.prev`` copy) and how a resume
+chooses between the live file and ``.prev``.
 """
 
 from __future__ import annotations

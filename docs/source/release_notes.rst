@@ -495,6 +495,15 @@ SPEEDY output flattening, hyperdiffusion coverage, and backlog fixes
   entries now say what each channel is (#238); ``Model`` has a
   ``__repr__`` (#322); the JAX-gotchas guide is part of the Sphinx docs
   (#157).
+- **A failed checkpoint save leaves the run resumable** (#1006). The chunked
+  loop writes the new checkpoint beside the old one and renames it over
+  ``run.checkpoint_path``, keeping the old as ``.prev`` only once the new is
+  whole; a resume falls back to ``.prev`` (with a warning) when the live file
+  is missing or undecodable. **Behaviour change:** a run with
+  ``run.checkpoint_path`` that finds nothing to resume but finds its own chunk
+  files, archives or checkpoint remnants in the directory now raises instead of
+  re-initialising over them; restore a checkpoint or use an empty directory
+  (:doc:`design/checkpoint_compatibility`).
 
 
 New capabilities

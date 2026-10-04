@@ -190,6 +190,65 @@ whose own physics has changed underneath it is not something to make a
 one-flag operation, and migrating the file once is explicit about what was
 assumed.
 
+## Writing, rotating and resuming a run's checkpoint
+
+`run.checkpoint_path` makes the chunked loop (`jcm.runners.run_chunked`)
+restartable: after every chunk that passes its health check the loop saves,
+and a later launch of the same command continues from the file. The rules
+below are what make a failed or killed save harmless and a lost checkpoint
+loud.
+
+**Write protocol.** `jcm.checkpoint.atomic_open` serialises to
+`<path>.tmp` in the same directory, flushes and `fsync`s it, and only then
+renames. With `keep_previous` (what the loop passes) the old file is renamed
+to `<path>.prev` immediately before the final rename, never earlier. Every
+writer of restart state goes through it: the checkpoint, the monthly
+accumulator's `.monthly.new`, and the permanent `archive_ckpt_every` copies
+(which nothing rotates away, so a copy cut short would otherwise sit there
+looking permanent). A failure at any point, including a quota or disk-full
+error from the write or the `fsync`, leaves `<path>` and `<path>.prev` as
+they were and removes the partial `.tmp`, which would otherwise keep holding
+the space whose absence caused the failure. Between the two renames only
+`.prev` is a whole checkpoint; that two-syscall window is why the resume
+reads it. A complete `.tmp` found after a kill is not trusted: nothing
+validated it, and `.prev` costs one chunk.
+
+**Resume order.** The live file, then `.prev`. A WARNING from
+`jcm.runners` names the file used and why the other was passed over. Only a
+file that cannot be *decoded* (`jcm.checkpoint.CheckpointUnreadableError`:
+empty, truncated, not a jcm payload) falls through, and an unreadable live
+file is moved to `<path>.bad` so the next rotation cannot overwrite the good
+`.prev` with it. A *readable* file this build refuses (another grid, physics
+composition, precision or a newer schema, see above) raises as it always did,
+because `.prev` is the same run's one-chunk-older state and would be refused
+alike; falling back would only resume an older state under a jcm that had just
+said it could not read the newer one. If both files exist and neither decodes,
+the run stops and names them. The monthly stream follows the clock the
+restored file records: `.monthly` pairs with the live checkpoint, `.monthly.prev`
+with `.prev`.
+
+**No silent re-initialisation.** When nothing can be resumed, the loop
+starts from `init`, which writes `{output_prefix}_day*.nc` over whatever is
+there and rotates the next checkpoint over any remnant. In an empty directory
+that is a first start. Next to this run's chunk files, monthly files,
+`archive_ckpt_every` archives, or checkpoint remnants (`.prev`, `.bad`,
+`.tmp`, the `.monthly*` companions) it is a restart whose checkpoint is gone,
+and a scheduler that re-runs the same command on failure (a Kubernetes Job
+with `restartPolicy: OnFailure`) would repeat it on every retry. The loop
+therefore raises `RuntimeError` before integrating, listing what it found and
+the two ways forward: put a checkpoint back (rename `.prev`, copy an archive),
+or point `run.output_prefix` and `run.checkpoint_path` at an empty directory.
+There is no override flag; deleting the files is the explicit act. Without
+`run.checkpoint_path` nothing could have been resumed and a re-run into the
+same prefix remains an ordinary overwrite. A run killed after writing chunk 0
+but before its first checkpoint completed is refused too, since nothing
+distinguishes it from a lost checkpoint and clearing the directory is cheap
+next to the alternative.
+
+The launchers that decide whether a directory is "fresh" read the same
+files: `tools/release_validation` and the Derecho job generator treat `.prev`
+as a checkpoint, because the resume now uses it.
+
 ## Bumping the schema
 
 Bump `SCHEMA_VERSION` when a change alters what a stored value *means* —
@@ -218,6 +277,6 @@ For a bump:
 * `jcm.initial_states.checkpoint_state` — the same file read as a warm
   start with the clock reset, rather than as a resume.
 * `docs/source/running_at_scale.rst` — the chunked/preemptible run loop
-  that writes these files, including the `.prev` rotation.
+  that writes these files.
 * `docs/source/science/dynamical_core.md` — the tracer contract at the
   Dinosaur boundary that the unit discussion above rests on.
