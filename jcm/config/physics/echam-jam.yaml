@@ -12,9 +12,18 @@
 #         +physics.convection.entrpen=4e-4 +physics.convection.tau=3600
 #
 # (``convection``, ``clouds``, ``microphysics_2m``, ``radiation``,
-# ``vertical_diffusion``, ``surface``, ``hines``, ``sso``, and the JAM emission
-# schemes ``seasalt`` and ``dms``; see ``echam_physics``.) Unset fields keep
-# their defaults.
+# ``vertical_diffusion``, ``surface``, ``hines``, ``sso``, and the JAM schemes
+# ``seasalt``, ``dms``, ``anthropogenic_params``, ``oxidants``, ``sulfur_gas``,
+# ``aqueous``, ``activation``, ``cloud_borne_exchange``, ``sedimentation``,
+# ``drydep``, ``wetdep`` and ``tracer_diffusion``; see ``echam_physics``.)
+# Unset fields keep their defaults. The wet-removal scalings, for example:
+#
+#     python -m jcm.main physics=echam-jam \
+#         +physics.wetdep.incloud_scale=0.5 +physics.wetdep.impact_scale=0.5
+#
+# (a scheme's block is rejected when that scheme is not composed:
+# ``anthropogenic_params`` needs ``jam_anthropogenic`` and
+# ``cloud_borne_exchange`` needs ``jam_cloud_borne``.)
 #
 # End-to-end usage (supply emissions on the model grid; auto-routes by content):
 #

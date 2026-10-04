@@ -83,6 +83,36 @@ from jcm.physics.vertical_diffusion.tracer_diffusion import (
     TracerVerticalDiffusion,
 )
 
+#: ``jam_aerosol_physics`` keyword -> the ``Parameters`` class of that scheme,
+#: for every scheme whose default is the class's own ``.default()``. It is the
+#: one list the factory door of ``echam_physics`` builds on: a field-override
+#: mapping (``wetdep={"incloud_scale": 0.5}``, Hydra's
+#: ``+physics.wetdep.incloud_scale=0.5``) is applied on top of that default,
+#: and an object is forwarded as given.
+#:
+#: ``dust`` and ``conv_transport`` are not here because their default depends
+#: on the composition rather than on the class: the dust preset is rebuilt at
+#: the model's own truncation in ``DustEmissions.cache_coords`` (an explicit
+#: object is never rebuilt), and ``ConvTransportParameters.csr_conv`` holds one
+#: fraction per transported tracer, set from the population's mode layout
+#: below. A mapping for either has to be applied where that base exists, so
+#: ``echam_physics`` has no mapping door for them yet (jax-gcm#995).
+JAM_PARAMETER_CLASSES = {
+    "seasalt": SeaSaltParameters,
+    "dms": DmsParameters,
+    "anthropogenic_params": EmissionParameters,
+    "oxidants": OxidantParameters,
+    "sulfur_gas": SulfurGasParameters,
+    "aqueous": AqueousSulfurParameters,
+    "activation": ArgParameters,
+    "cloud_borne_exchange": CloudBorneExchangeParameters,
+    "sedimentation": SedParameters,
+    "drydep": DryDepParameters,
+    "wetdep": WetDepParameters,
+    "tracer_diffusion": TracerDiffusionParameters,
+}
+
+
 def _load_mam4_jax() -> type[ModalMicrophysicsTerm]:
     """Import the MAM4-JAX core lazily (optional GPL-3.0 dependency)."""
     from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
@@ -322,8 +352,12 @@ def jam_aerosol_physics(
     # consumer this step sees a well-formed store, and applies the
     # carry's turbulent vertical mixing (its fields are not in
     # state.tracers, so TracerVerticalDiffusion never sees them).
+    # The carry's mixing uses the same exchange-coefficient scale as the
+    # advected tracers' (``TracerDiffusionParameters``), so one setting must
+    # reach both phases; each term holds its own copy of the object.
     store_terms = (
-        [CloudBorneCarryStore(spec=spec, vertical_mixing=vertical_mixing)]
+        [CloudBorneCarryStore(params=tracer_diffusion, spec=spec,
+                              vertical_mixing=vertical_mixing)]
         if carry_mode(spec) else []
     )
     pre_core = [
