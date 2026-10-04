@@ -687,6 +687,74 @@ class ConvectiveTracerTransportTermTest(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(term.params.get_value().csr_conv), [0.6, 0.2])
 
+    def _scav_flux(self, scale, csr, state, diagnostics):
+        term = ConvectiveTracerTransport(
+            ("m_so4_acc",),
+            params=ConvTransportParameters(
+                transport_scale=jnp.asarray(1.0), csr_conv=jnp.asarray([csr]),
+                conv_scav_scale=jnp.asarray(scale)),
+            csr_conv=(csr,))
+        _, out = term(state, diagnostics, None, None)
+        return float(out["_conv_scav_flux"]["m_so4_acc"][0])
+
+    def test_conv_scav_scale_multiplies_the_fractions_and_clips_at_one(self):
+        # The plume removes ``clip(csr_conv * conv_scav_scale, 0, 1)``: a
+        # scale of zero removes nothing (the key is still published, the
+        # carry's structure cannot depend on it), a scale that takes the
+        # fraction past one is the fraction one, and below that the removal
+        # grows with the scale.
+        state, diagnostics = self._setup(with_scav=True)
+        full = self._scav_flux(1.0, 0.5, state, diagnostics)
+        self.assertGreater(full, 0.0)
+        self.assertEqual(self._scav_flux(0.0, 0.5, state, diagnostics), 0.0)
+        half = self._scav_flux(0.5, 0.5, state, diagnostics)
+        self.assertTrue(0.0 < half < full)
+        # 0.5 * 2 = 1 exactly, and 0.99 * 2 clips to the same 1.
+        one = self._scav_flux(1.0, 1.0, state, diagnostics)
+        self.assertAlmostEqual(self._scav_flux(2.0, 0.5, state, diagnostics),
+                               one, delta=1e-6 * one)
+        self.assertAlmostEqual(self._scav_flux(2.0, 0.99, state, diagnostics),
+                               one, delta=1e-6 * one)
+        self.assertGreater(one, full)
+
+    def test_grad_through_conv_scav_scale(self):
+        # Inside the clip the removal moves with the scale, so the scale has
+        # a finite, non-zero gradient; past the clip it has none.
+        state, diagnostics = self._setup(with_scav=True)
+
+        def loss(scale, csr=0.5):
+            term = ConvectiveTracerTransport(
+                ("m_so4_acc",),
+                params=ConvTransportParameters(
+                    transport_scale=jnp.asarray(1.0),
+                    csr_conv=jnp.asarray([csr]), conv_scav_scale=scale),
+                csr_conv=(csr,))
+            tend, _ = term(state, diagnostics, None, None)
+            return jnp.sum(tend.tracers["m_so4_acc"] ** 2)
+
+        g = jax.grad(loss)(jnp.asarray(1.0))
+        self.assertTrue(np.isfinite(float(g)))
+        self.assertNotEqual(float(g), 0.0)
+        g_clipped = jax.grad(lambda x: loss(x, 0.99))(jnp.asarray(2.0))
+        self.assertEqual(float(g_clipped), 0.0)
+
+    def test_class_default_takes_the_layout_fractions(self):
+        # ``ConvTransportParameters.default()`` leaves the per-tracer
+        # fractions to the composition: the term fills them from its layout
+        # and keeps every other field as given.
+        import dataclasses
+
+        given = dataclasses.replace(
+            ConvTransportParameters.default(),
+            conv_scav_scale=jnp.asarray(0.4),
+            transport_scale=jnp.asarray(0.8))
+        term = ConvectiveTracerTransport(
+            ("a", "b"), params=given, csr_conv=(0.6, 0.2))
+        got = term.params.get_value()
+        np.testing.assert_allclose(np.asarray(got.csr_conv), [0.6, 0.2])
+        self.assertAlmostEqual(float(got.conv_scav_scale), 0.4)
+        self.assertAlmostEqual(float(got.transport_scale), 0.8)
+
     def test_misshapen_param_fractions_rejected(self):
         with self.assertRaises(ValueError):
             ConvectiveTracerTransport(

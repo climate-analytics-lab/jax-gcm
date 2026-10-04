@@ -3371,10 +3371,9 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
 
     # The JAM process schemes behind the door of #995, each with one field
     # and a CLI value: (echam_physics argument, term name, field, value).
-    # ``seasalt`` and ``dms`` (#990) are covered above. ``dust`` and
-    # ``conv_transport`` have no mapping door (their base object is
-    # composition-derived), which ``echam_terms_test`` pins against the
-    # factory's argument list.
+    # ``seasalt`` and ``dms`` (#990) are covered above. ``dust`` has no
+    # mapping door (its base object is composition-derived), which
+    # ``echam_terms_test`` pins against the factory's argument list.
     _JAM_DOORS = (
         ("anthropogenic_params", "jam_anthropogenic_emissions", "scale", 1.2),
         ("oxidants", "jam_prescribed_oxidants", "oh_ref", 3.0e6),
@@ -3388,6 +3387,8 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         ("wetdep", "jam_wet_deposition", "incloud_scale", 0.5),
         ("tracer_diffusion", "tracer_vertical_diffusion",
          "diffusion_scale", 0.7),
+        ("conv_transport", "convective_tracer_transport",
+         "conv_scav_scale", 0.5),
     )
 
     #: Doors whose parameter is held by more than one term, so the provenance
@@ -3492,7 +3493,9 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         for flag, arg, field in (
                 ("jam_anthropogenic", "anthropogenic_params", "scale"),
                 ("jam_cloud_borne", "cloud_borne_exchange",
-                 "activation_timescale")):
+                 "activation_timescale"),
+                ("jam_convective_transport", "conv_transport",
+                 "conv_scav_scale")):
             with self.subTest(door=arg):
                 with self.assertRaisesRegex(
                         ValueError, rf"\['{arg}'\] would be ignored"):
