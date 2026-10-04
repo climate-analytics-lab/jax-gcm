@@ -1272,6 +1272,11 @@ deliberate behaviour change, not a side effect. Opt out with:
        sl_options={"mass_fixer": False},
    )
 
+The same switch also turns off the fixer for the modal ``specific_humidity``.
+That fixer, together with cubic vertical interpolation, closes the global
+water budget: before them semi-Lagrangian transport created 0.22–0.24 mm/day of
+water, about 9 % of precipitation (see :doc:`design/tracer_mass_conservation`).
+
 Per-species ``budget_mass_<sp>`` / ``budget_ptend_<sp>`` / ``budget_dyn_<sp>``
 diagnostics and one greppable log line per species per chunk make the residual
 visible.

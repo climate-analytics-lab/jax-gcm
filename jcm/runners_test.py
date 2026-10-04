@@ -280,6 +280,39 @@ class TestAdvectionResolution(unittest.TestCase):
                 "eulerian")
 
 
+class TestSlTransportOptions(unittest.TestCase):
+    """The dycore group's SL transport options reach dinosaur through build_model.
+
+    ``dycore.sl_vertical_interpolation`` (null = the dycore default, cubic)
+    and ``dycore.humidity_mass_fixer`` (default on) govern the water budget of
+    the semi-Lagrangian step; see docs/source/design/tracer_mass_conservation.md.
+    Held–Suarez resolves semi-Lagrangian; aquaplanet/default forcing keeps the
+    builds offline.
+    """
+
+    _OFFLINE = ["terrain=aquaplanet", "forcing=default", "physics=held_suarez"]
+
+    def _dycore(self, overrides=()):
+        return build_model(_compose([*self._OFFLINE, *overrides])).dycore
+
+    def test_default_is_cubic_with_the_humidity_fixer(self):
+        dycore = self._dycore()
+        self.assertEqual(dycore.primitive.vertical_interpolation_order, "cubic")
+        self.assertTrue(dycore.humidity_mass_fixer)
+
+    def test_linear_reaches_the_primitive(self):
+        dycore = self._dycore(["dycore.sl_vertical_interpolation=linear"])
+        self.assertEqual(dycore.primitive.vertical_interpolation_order, "linear")
+
+    def test_the_humidity_fixer_can_be_switched_off(self):
+        dycore = self._dycore(["dycore.humidity_mass_fixer=false"])
+        self.assertFalse(dycore.humidity_mass_fixer)
+
+    def test_an_unknown_order_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self._dycore(["dycore.sl_vertical_interpolation=quintic"])
+
+
 class TestConfigComposition(unittest.TestCase):
     def test_default_compose(self):
         cfg = _compose()

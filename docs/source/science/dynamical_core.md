@@ -18,8 +18,11 @@ column physics through a pg2 finite-volume physics grid (see
 {doc}`../design/pyses_cam_se_dycore`).
 
 On the **dinosaur** backend tracer transport is **semi-Lagrangian** by default —
-departure-point transport with a Bermejo–Staniforth quasi-monotone limiter;
-the Eulerian core is meant for physics that carries no extra tracers.
+departure-point transport with a Bermejo–Staniforth quasi-monotone limiter,
+cubic Lagrange interpolation in the horizontal and **4-point cubic Lagrange
+interpolation in the vertical** (reference σ, degraded to linear in the first
+and last cells; ``dycore.sl_vertical_interpolation``); the Eulerian core is
+meant for physics that carries no extra tracers.
 Every jcm extra tracer (aerosol mass/number, gases, cloud condensate) rides as
 a *nodal* tracer while ``specific_humidity`` stays modal for the implicit
 q↔Tᵥ coupling; the condensate species additionally enter the dynamics through
@@ -29,6 +32,17 @@ transported. The **pySES** backend instead carries every declared tracer as a
 pySES passive tracer in physical units — advected and vertically remapped by
 the spectral-element dynamics itself (with sub-cycling for the tracer CFL) —
 so transport differs between the backends by construction.
+
+**Water and tracer mass.** Semi-Lagrangian transport is advective-form and
+does not conserve ``∫ q·dp``, so after every SL step each transported water and
+tracer species is rescaled by one global factor that restores its mass to the
+post-physics, pre-transport value (the proportional fixer of Diamantakis &
+Flemming 2014, ``jcm/dycore/dinosaur/dycore.py::DinosaurDycore.step``): the
+nodal tracers (cloud condensate, number, aerosol, gases) and the modal
+``specific_humidity`` alike (``dycore.humidity_mass_fixer``). The global water
+budget therefore closes, ``P − E = −dPW/dt``. The Eulerian core is
+flux-consistent and runs no fixer. What each fixer conserves, and the measured
+budgets, are in {doc}`../design/tracer_mass_conservation`.
 
 **The post-physics state.** ``DynamicalCore.after_physics_state`` returns the
 gridpoint state the dynamics starts from, after the physics tendency is
@@ -115,6 +129,21 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
   formulated on: semi-Lagrangian buys it nothing (``specific_humidity`` is
   modal under both schemes) and costs ~4x the step on CPU. See
   {doc}`../design/dinosaur_transport_selection`.
+- `science` — ECHAM6 transports humidity, cloud water/ice and tracers with
+  the flux-form semi-Lagrangian ``tpcore`` (Lin & Rood 1996;
+  ``mo_tpcore.f90::tpcore_tendencies``), which conserves their mass by
+  construction. Dinosaur's semi-Lagrangian transport is advective-form, so jcm
+  conserves water the way the IFS and ECHAM's own semi-Lagrangian option
+  (``mo_semi_lagrangian.f90::mass_fixer``) do: an accurate interpolation plus
+  a global mass fixer. The vertical interpolation is cubic (the IFS rule;
+  Ritchie et al. 1995, IFS Documentation Cy48r1 Part III) because linear
+  interpolation over-reads any convex profile at every departure point,
+  whatever the sign of the vertical displacement: humidity is convex in σ, so
+  linear vertical interpolation is a one-signed water source (+0.24 mm/day,
+  ~9 % of precipitation, at T63L47), and temperature is concave, so it is an
+  energy sink (~−11 W/m² in the dynamics alone). The fixer is proportional
+  rather than ECHAM-SL's Rasch & Williamson (1990) weighting; see
+  {doc}`../design/tracer_mass_conservation`.
 - `compute` — the dinosaur backend integrates with a two-time-level
   semi-Lagrangian semi-implicit Crank–Nicolson RK2 step rather than ECHAM's
   three-time-level leapfrog + semi-implicit (both are semi-implicit; the
@@ -141,7 +170,10 @@ rely on.
 - ``jcm/dycore/dinosaur/dycore.py`` — ``DinosaurDycore``,
   ``semi_lagrangian_available`` / ``_require_semi_lagrangian``,
   ``resolve_advection`` (transport selection), transport
-  build (nodal tracers), filter build.
+  build (nodal tracers, ``DEFAULT_VERTICAL_INTERPOLATION``), filter build,
+  the mass fixers ``_fix_nodal_tracer_mass`` / ``_fix_humidity_mass``.
+- ``jcm/config/dycore/dinosaur.yaml`` — ``advection``,
+  ``sl_vertical_interpolation``, ``humidity_mass_fixer``.
 - ``jcm/dycore/pyses/dycore.py`` — ``PysesCamSEDycore``.
 - ``jcm/diffusion.py`` — ``DiffusionFilter`` and its ``auto`` / ``echam_lmidatm``
   / ``default`` constructors; ``_ECHAM_LMIDATM_ORDERS``.
@@ -151,6 +183,7 @@ rely on.
 ``sharding_test.py``, ``state_bridge_test.py``;
 ``jcm/dycore/pyses/pyses_dycore_test.py``, ``physics_grid_test.py``,
 ``rrtmgp_x64_test.py``; ``jcm/dycore/base_test.py``; ``jcm/diffusion_test.py``.
-Design references: {doc}`../design/pyses_cam_se_dycore`,
+Design references: {doc}`../design/tracer_mass_conservation`,
+{doc}`../design/pyses_cam_se_dycore`,
 {doc}`../design/speedy_variable_levels`,
 {doc}`../design/dinosaur_sl_jam_configuration`.
