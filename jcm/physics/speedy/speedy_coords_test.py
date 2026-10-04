@@ -20,12 +20,38 @@ import numpy as np
 
 from jcm.physics.speedy.speedy_coords import (
     PBL_TOP_SIGMA,
+    SpeedyCoords,
     compute_speedy_vertical_coords,
+    get_speedy_coords,
     interp_to_sigma,
 )
 
 
 class InterpToSigmaTest(unittest.TestCase):
+    def test_native_coordinate_metrics_are_unchanged(self):
+        for nlev in (7, 8, 16):
+            coords = get_speedy_coords(layers=nlev, spectral_truncation=21)
+            actual = SpeedyCoords.from_coordinate_system(coords)
+            expected = compute_speedy_vertical_coords(nlev)
+            for name, value in zip(
+                ("hsg", "fsg", "dhs", "sigl", "grdsig", "grdscp", "wvi"),
+                expected,
+            ):
+                np.testing.assert_array_equal(getattr(actual, name), value)
+
+    def test_hybrid_coordinates_preserve_legacy_approximation(self):
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        actual = SpeedyCoords.from_coordinate_system(coords)
+        expected = compute_speedy_vertical_coords(47)
+        for name, value in zip(
+            ("hsg", "fsg", "dhs", "sigl", "grdsig", "grdscp", "wvi"),
+            expected,
+        ):
+            np.testing.assert_array_equal(getattr(actual, name), value)
+
     def test_reproduces_level_indexing_on_8_level_grid(self):
         # The 8-level sigma table has layer centres at exactly the reference
         # sigmas used by the physics (0.835 = second-lowest, 0.95 = lowest), so
