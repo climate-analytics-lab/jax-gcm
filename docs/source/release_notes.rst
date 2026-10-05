@@ -45,6 +45,12 @@ One exact Gregorian clock and real monthly output
   ``run=longrun`` and ``run=pyses_year`` now default to a calendar year
   (``12 months``) of daily means in 5-day chunks written only as monthly
   files — previously 365 days of 5-day means in 30-/10-day chunk files.
+  A chunk's host work (output conversion, health check, netCDF, monthly
+  and checkpoint writes) runs on a background thread while the next chunk
+  integrates, and the monthly accumulator works on NumPy buffers in place;
+  at T63L47 JAM this recipe runs at the integration's own speed (it was 22%
+  slower with the host work in series). A bailing run now stops one chunk
+  later; see :doc:`design/chunked_run_io_overlap`.
 - ``ModelPredictions.monthly_means()`` reduces bounded interval means by
   real month; save daily means with ``output_averages=True`` first. Observer
   sampling stays independent. Exact shared ``output_time_labels`` replaces

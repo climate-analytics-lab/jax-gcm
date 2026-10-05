@@ -5529,9 +5529,9 @@ class TestMonthlyMeansStream(unittest.TestCase):
         real = r._save_monthly_stream
         mar1 = np.datetime64("2000-03-01", "s")
 
-        def killed_at_mar1(accumulator, path, model):
-            real(accumulator, path, model)
-            if r._clock64(model) == mar1:
+        def killed_at_mar1(accumulator, path, run_state):
+            real(accumulator, path, run_state)
+            if r._state_clock64(run_state) == mar1:
                 raise RuntimeError("killed")
 
         with mock.patch.object(r, "_save_monthly_stream", killed_at_mar1):
@@ -5562,9 +5562,9 @@ class TestMonthlyMeansStream(unittest.TestCase):
                 raise RuntimeError("killed")
             real_commit(path)
 
-        def save_killed_at_mar6(accumulator, path, model):
-            real_save(accumulator, path, model)
-            if r._clock64(model) == np.datetime64("2000-03-06", "s"):
+        def save_killed_at_mar6(accumulator, path, run_state):
+            real_save(accumulator, path, run_state)
+            if r._state_clock64(run_state) == np.datetime64("2000-03-06", "s"):
                 raise RuntimeError("killed")
 
         with mock.patch.object(r, "_commit_monthly_stream",
@@ -5701,6 +5701,104 @@ class TestMonthlyMeansConfig(unittest.TestCase):
         self.assertTrue(cfg.run.monthly_means)
         self.assertFalse(cfg.run.save_chunks)
         self.assertEqual(float(cfg.run.save_interval), 1.0)
+
+
+@pytest.mark.slow
+class TestChunkHostWorkOverlap(unittest.TestCase):
+    """A chunk's host work runs on the I/O thread beside the next chunk.
+
+    Output identity under the overlap is what ``TestMonthlyMeansStream``
+    checks (one 15-day chunk, with nothing to overlap, against overlapped
+    5-day chunks and killed/resumed runs); these pin the ordering itself.
+    """
+
+    def setUp(self):
+        import tempfile
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_host_work_runs_while_the_next_chunk_integrates(self):
+        import threading
+        import time
+
+        from jcm import diagnostics
+        from jcm.model import Model
+
+        events, lock = [], threading.Lock()
+        real_health, real_resume = diagnostics.check_health, Model.resume
+
+        def slow_health(ds, chunk_idx, days):
+            with lock:
+                events.append(("health", chunk_idx,
+                               threading.current_thread().name))
+            # Long enough that the next chunk's integration is certainly
+            # dispatched first if the work is overlapped.
+            time.sleep(3.0)
+            with lock:
+                events.append(("health done", chunk_idx))
+            return real_health(ds, chunk_idx, days)
+
+        def resume(model, *args, **kwargs):
+            with lock:
+                events.append(("integrate",))
+            return real_resume(model, *args, **kwargs)
+
+        prefix = str(self.tmp / "overlap")
+        with mock.patch.object(diagnostics, "check_health", slow_health), \
+                mock.patch.object(Model, "resume", resume):
+            run(_monthly_cfg(prefix, 5, extra=[
+                f"run.checkpoint_path={prefix}.ckpt"]))
+
+        health = [e for e in events if e[0] == "health"]
+        self.assertEqual([e[1] for e in health], [0, 1, 2])
+        self.assertTrue(all(e[2].startswith("jcm-chunk-io") for e in health),
+                        health)
+        integrations = [i for i, e in enumerate(events) if e == ("integrate",)]
+        self.assertEqual(len(integrations), 3)
+        self.assertLess(integrations[1], events.index(("health done", 0)))
+        self.assertLess(integrations[2], events.index(("health done", 1)))
+        self.assertEqual(sorted(_monthly_files(prefix)), ["2000-02", "2000-03"])
+
+    def test_an_unhealthy_chunk_stops_the_run_and_nothing_after_it_is_written(self):
+        """The chunk integrated while the bad one was checked is discarded.
+
+        Chunk 1 (to Mar 1) is unhealthy: its netCDF is written (as it always
+        was, for the post-mortem) but the checkpoint stays at chunk 0, and
+        chunk 2, already integrated by the time the verdict arrives, leaves
+        no file — so no March sample closes February either.
+        """
+        from jcm import diagnostics
+        from jcm.checkpoint import load_checkpoint
+        from jcm.runners import build_model
+
+        real_health = diagnostics.check_health
+
+        def bad_chunk_one(ds, chunk_idx, days):
+            ok, report = real_health(ds, chunk_idx, days)
+            if chunk_idx == 1:
+                report = dict(report, reasons=["injected"])
+                ok = False
+            return ok, report
+
+        prefix = str(self.tmp / "bail")
+        ckpt = f"{prefix}.ckpt"
+        cfg = _monthly_cfg(prefix, 5, extra=[f"run.checkpoint_path={ckpt}",
+                                             "run.save_chunks=true"])
+        with mock.patch.object(diagnostics, "check_health", bad_chunk_one):
+            reports = run(cfg)
+
+        self.assertEqual(len(reports), 2)
+        self.assertTrue(Path(f"{prefix}_day5.nc").exists())
+        self.assertTrue(Path(f"{prefix}_day10.nc").exists())
+        self.assertFalse(Path(f"{prefix}_day15.nc").exists())
+        self.assertEqual(_monthly_files(prefix), {})
+
+        model = build_model(cfg)
+        model.bootstrap_state()
+        self.assertEqual(load_checkpoint(model, ckpt), 5.0)
 
 
 class ResumeMirrorRevisionTest(unittest.TestCase):

@@ -18,6 +18,7 @@ it from here, not by growing logic in the runner.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import types
@@ -2404,6 +2405,25 @@ def _copy_atomically(src: str, dst: str) -> None:
         shutil.copyfileobj(source, handle)
 
 
+@dataclasses.dataclass(frozen=True)
+class _ChunkJob:
+    """What one integrated chunk's host work needs, captured at its end.
+
+    ``run_state`` is the model's state at the chunk boundary: the checkpoint
+    and the monthly stream's clock are written from it, because the model
+    itself has moved on to the next chunk by the time the job runs.
+    """
+
+    preds: Any
+    run_state: Any
+    chunk_idx: int
+    elapsed_seconds: int
+    cur_chunk_seconds: int
+    chunk_wall: float
+    total_wall: float
+    days_this_invocation: float
+
+
 def run_chunked(
     cfg: DictConfig,
     chunk_days: float,
@@ -2528,70 +2548,26 @@ def run_chunked(
     started_at_days = elapsed_sim_days
     bailed = False
     last_params = None
-    while elapsed_seconds < total_seconds:
-        cur_chunk_seconds = min(chunk_seconds, total_seconds - elapsed_seconds)
-        cur_chunk = f"{cur_chunk_seconds} seconds"
 
-        t0 = time.perf_counter()
-        first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
-        if first_fresh_chunk:
-            # First fresh chunk: bootstrap from the configured initial state
-            # and integrate. ``model.run`` = bootstrap_state + resume, so the
-            # cross-step physics carry is built exactly as the plain
-            # (isothermal) path's ``model.run`` does. ``init=era5`` must be
-            # handled here too: the chunked dispatch returns before
-            # ``_run_full``'s init ladder runs.
-            # from_state warm starts thread the donor's physics carry into
-            # the first chunk's ``run``; all other inits build a fresh carry.
-            initial_physics_state = None
-            if cfg.init.kind == "jw":
-                initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
-            elif cfg.init.kind == "balanced_isothermal":
-                initial_state = balanced_isothermal_state(model)
-            elif cfg.init.kind == "era5":
-                initial_state = _state_from_era5(model, cfg)
-            elif cfg.init.kind == "from_state":
-                initial_state, initial_physics_state = _state_from_file(model, cfg)
-            else:
-                initial_state = None
-            preds = model.run(
-                initial_state=initial_state,
-                initial_physics_state=initial_physics_state,
-                forcing=forcing,
-                save_interval=save_interval,
-                total_time=cur_chunk,
-                output_averages=cfg.run.output_averages,
-                snapshot_interval=cfg.run.get("snapshot_interval"),
-                snapshot_variables=tuple(
-                    cfg.run.get("snapshot_variables") or ()),
-            )
-        else:
-            preds = model.resume(
-                forcing=forcing,
-                save_interval=save_interval,
-                total_time=cur_chunk,
-                output_averages=cfg.run.output_averages,
-                snapshot_interval=cfg.run.get("snapshot_interval"),
-                snapshot_variables=tuple(
-                    cfg.run.get("snapshot_variables") or ()),
-            )
+    def process_chunk(job: _ChunkJob) -> bool:
+        """Do one integrated chunk's host work; return True to stop the run.
 
-        jax.tree_util.tree_map(
-            lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
-            preds._predictions,
-        )
-        chunk_wall = time.perf_counter() - t0
-        total_wall += chunk_wall
-        elapsed_seconds = _elapsed_seconds()
-        elapsed_sim_days = elapsed_seconds / 86400.0
-
-        ds = preds.to_xarray()
+        Runs on the I/O thread, one chunk at a time and in chunk order, so
+        the monthly stream, the reports and the checkpoint sequence advance
+        exactly as in a serial loop. It reads only what ``job`` captured at
+        the chunk boundary (never the model's live state, which by then is
+        the next chunk's).
+        """
+        nonlocal last_params
+        host_t0 = time.perf_counter()
+        elapsed_sim_days = job.elapsed_seconds / 86400.0
+        ds = job.preds.to_xarray()
         # Feed the monthly stream before provenance attrs (which carry the
         # per-chunk wall time) are stamped on the chunk dataset.
         closed_months = (accumulator.update(_monthly_input(ds))
                          if accumulator is not None else None)
-        ok, report = check_health(ds, chunk_idx, elapsed_sim_days)
-        report["wall_seconds"] = chunk_wall
+        ok, report = check_health(ds, job.chunk_idx, elapsed_sim_days)
+        report["wall_seconds"] = job.chunk_wall
         reports.append(report)
         print_report(report)
 
@@ -2610,15 +2586,15 @@ def run_chunked(
         # registry, so the record belongs to the model that produced THIS
         # chunk; pass them to both calls or the sidecar's run_hash will not
         # match the one in the attributes.
-        params = last_params = getattr(preds, "params", None)
+        params = last_params = getattr(job.preds, "params", None)
         if save_chunks:
             ds.attrs.update(provenance.attrs(params))
-            ds.attrs["jcm_prov_chunk_wall_seconds"] = round(chunk_wall, 1)
+            ds.attrs["jcm_prov_chunk_wall_seconds"] = round(job.chunk_wall, 1)
             ds.to_netcdf(nc_path)
             provenance.write_sidecar(nc_path, params)
             print(f"  Saved {nc_path}")
         _write_monthly(closed_months, output_prefix, params)
-        snap_ds = getattr(preds, "snapshot_dataset", lambda: None)()
+        snap_ds = getattr(job.preds, "snapshot_dataset", lambda: None)()
         if snap_ds is not None:
             snap_path = (f"{output_prefix}_day{elapsed_sim_days:g}"
                          "_snapshots.nc")
@@ -2643,11 +2619,12 @@ def run_chunked(
                 # state matching the old one is never overwritten, so any
                 # number of kills leaves one of ``.monthly`` / ``.monthly.new``
                 # at the checkpoint's instant.
-                _save_monthly_stream(accumulator, ckpt_path, model)
+                _save_monthly_stream(accumulator, ckpt_path, job.run_state)
             # The previous checkpoint becomes ``.prev`` only once the new one
             # is completely written, so a failed save (quota, full disk, a
             # kill) leaves a resumable run; see ``atomic_open``.
-            save_checkpoint(model, ckpt_path, keep_previous=True)
+            save_checkpoint(model, ckpt_path, keep_previous=True,
+                            run_state=job.run_state)
             if accumulator is not None:
                 _commit_monthly_stream(ckpt_path)
             print(f"  Saved checkpoint to {ckpt_path}")
@@ -2659,7 +2636,8 @@ def run_chunked(
             # elapsed accumulates by summing chunks, so a nominal 0.9 arrives
             # as 0.8999999999999999 and would otherwise slip a whole chunk.
             tol = 1e-6 * archive_every
-            previous_days = (elapsed_seconds - cur_chunk_seconds) / 86400.0
+            previous_days = (job.elapsed_seconds
+                             - job.cur_chunk_seconds) / 86400.0
             if archive_every > 0 and (
                 int((elapsed_sim_days + tol) // archive_every)
                 > int((previous_days + tol) // archive_every)
@@ -2692,21 +2670,117 @@ def run_chunked(
             )
             if bail:
                 print(msg + "\nSTOPPING.")
-                bailed = True
-                break
+                return True
             print(msg + "\nContinuing (bail_on_unhealthy=False).")
 
         # Throughput is reported over the post-resume window so the
-        # number reflects the run actually happening on this host.
-        days_this_invocation = elapsed_sim_days - started_at_days
-        if total_wall > 0:
-            sdph = days_this_invocation / (total_wall / 3600)
+        # number reflects the run actually happening on this host. The
+        # walls are the integration's alone; this host work overlaps the
+        # next chunk's integration and is reported on its own line.
+        if job.total_wall > 0:
+            sdph = job.days_this_invocation / (job.total_wall / 3600)
             print(
-                f"  Wall: {chunk_wall:.1f}s this chunk, {total_wall:.0f}s total "
-                f"({sdph:.0f} sim days/hr)"
+                f"  Wall: {job.chunk_wall:.1f}s this chunk, "
+                f"{job.total_wall:.0f}s total ({sdph:.0f} sim days/hr)"
             )
+        print(f"  Host: {time.perf_counter() - host_t0:.1f}s output and "
+              "checkpoint work for this chunk")
+        return False
 
-        chunk_idx += 1
+    # One worker: chunks' host work must stay in order (the monthly stream
+    # and the checkpoint sequence are sequential), and it is the overlap
+    # with the device, not parallelism among chunks, that removes it from
+    # the critical path. See ``docs/source/design/chunked_run_io_overlap.md``.
+    from concurrent.futures import ThreadPoolExecutor
+
+    io_pool = ThreadPoolExecutor(max_workers=1,
+                                 thread_name_prefix="jcm-chunk-io")
+    pending = None
+    try:
+        while elapsed_seconds < total_seconds:
+            cur_chunk_seconds = min(chunk_seconds, total_seconds - elapsed_seconds)
+            cur_chunk = f"{cur_chunk_seconds} seconds"
+
+            t0 = time.perf_counter()
+            first_fresh_chunk = chunk_idx == 0 and not resumed_from_ckpt
+            if first_fresh_chunk:
+                # First fresh chunk: bootstrap from the configured initial state
+                # and integrate. ``model.run`` = bootstrap_state + resume, so the
+                # cross-step physics carry is built exactly as the plain
+                # (isothermal) path's ``model.run`` does. ``init=era5`` must be
+                # handled here too: the chunked dispatch returns before
+                # ``_run_full``'s init ladder runs.
+                # from_state warm starts thread the donor's physics carry into
+                # the first chunk's ``run``; all other inits build a fresh carry.
+                initial_physics_state = None
+                if cfg.init.kind == "jw":
+                    initial_state = jw_state(model, rh=float(cfg.init.get("rh", 0.6)))
+                elif cfg.init.kind == "balanced_isothermal":
+                    initial_state = balanced_isothermal_state(model)
+                elif cfg.init.kind == "era5":
+                    initial_state = _state_from_era5(model, cfg)
+                elif cfg.init.kind == "from_state":
+                    initial_state, initial_physics_state = _state_from_file(model, cfg)
+                else:
+                    initial_state = None
+                preds = model.run(
+                    initial_state=initial_state,
+                    initial_physics_state=initial_physics_state,
+                    forcing=forcing,
+                    save_interval=save_interval,
+                    total_time=cur_chunk,
+                    output_averages=cfg.run.output_averages,
+                    snapshot_interval=cfg.run.get("snapshot_interval"),
+                    snapshot_variables=tuple(
+                        cfg.run.get("snapshot_variables") or ()),
+                )
+            else:
+                preds = model.resume(
+                    forcing=forcing,
+                    save_interval=save_interval,
+                    total_time=cur_chunk,
+                    output_averages=cfg.run.output_averages,
+                    snapshot_interval=cfg.run.get("snapshot_interval"),
+                    snapshot_variables=tuple(
+                        cfg.run.get("snapshot_variables") or ()),
+                )
+
+            jax.tree_util.tree_map(
+                lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
+                preds._predictions,
+            )
+            chunk_wall = time.perf_counter() - t0
+            total_wall += chunk_wall
+            elapsed_seconds = _elapsed_seconds()
+            elapsed_sim_days = elapsed_seconds / 86400.0
+            job = _ChunkJob(
+                preds=preds, run_state=model.run_state, chunk_idx=chunk_idx,
+                elapsed_seconds=elapsed_seconds,
+                cur_chunk_seconds=cur_chunk_seconds, chunk_wall=chunk_wall,
+                total_wall=total_wall,
+                days_this_invocation=elapsed_sim_days - started_at_days)
+            del preds
+
+            # This chunk's host work (output conversion, health check, netCDF and
+            # checkpoint writes) runs on the I/O thread while the next chunk
+            # integrates; only the previous chunk's job is waited for here, so it
+            # finishes, in order, before this one is queued. An unhealthy previous
+            # chunk with ``bail_on_unhealthy`` therefore stops the run one chunk
+            # later than a serial loop would, and the chunk integrated meanwhile
+            # is discarded unwritten — its checkpoint and outputs never exist.
+            if pending is not None and pending.result():
+                bailed = True
+                pending = None
+                break
+            pending = io_pool.submit(process_chunk, job)
+            chunk_idx += 1
+
+        if pending is not None and pending.result():
+            bailed = True
+    finally:
+        # A failure in the integration still lets the queued job (a healthy
+        # chunk's outputs and checkpoint) finish before the error propagates.
+        io_pool.shutdown(wait=True)
 
     # The run reached its end: flush the pending (possibly partial) month.
     # Not after a bail — that month's remainder was never integrated.
@@ -2872,15 +2946,23 @@ def _built_params(model) -> dict:
 
 
 def _clock64(model):
+    return _state_clock64(model.run_state)
+
+
+def _state_clock64(run_state):
     import numpy as np
 
-    return np.datetime64(model.run_state.time.to_datetime64(), "s")
+    return np.datetime64(run_state.time.to_datetime64(), "s")
 
 
-def _save_monthly_stream(accumulator, ckpt_path: str, model) -> None:
-    """Stage the pending month as ``.monthly.new`` for the next checkpoint."""
+def _save_monthly_stream(accumulator, ckpt_path: str, run_state) -> None:
+    """Stage the pending month as ``.monthly.new`` for the next checkpoint.
+
+    Stamped with ``run_state``'s clock: the state the checkpoint it pairs
+    with is written from.
+    """
     accumulator.save(Path(f"{ckpt_path}.monthly.new"),
-                     clock=str(_clock64(model)))
+                     clock=str(_state_clock64(run_state)))
 
 
 def _commit_monthly_stream(ckpt_path: str) -> None:
