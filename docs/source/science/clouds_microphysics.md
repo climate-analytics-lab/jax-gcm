@@ -385,6 +385,10 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   tending to ``crt`` aloft. The 1M, the 2M and the JAM-2M hosts read these
   values through the same cover; they were calibrated on the 2M host, and the
   1M host, T106 and the cubed sphere have no calibration of their own (#1014).
+  The JAM-2M year with these values passes the cover gate, and its larger cloud
+  fraction increases wet removal, so the aerosol burdens fall (sea salt 9.2
+  mg/m², total AOD 0.049): the aerosol emission scales were fitted on ECHAM's
+  cover (design page).
   ECHAM's own row stays in ``ECHAM_CLOUD_DEFAULTS``, and the Fortran comparison
   runs on the constants its reference data recorded. Evidence and the year
   tables: {doc}`../design/jam_aerosol_retune` ("Stage 2b: cloud fraction").

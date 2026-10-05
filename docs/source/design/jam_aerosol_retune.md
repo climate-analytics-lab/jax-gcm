@@ -178,7 +178,8 @@ emission is the mean over all 73 saves.
 | `jam_b` | dust 0.379, sea salt x2, DMS x0.77, wet removal x0.5 | 304.8 (-35 %) | 0.110 | 0.0100 | 6.4 (out) | 20.8 (42 % over the mean) | 18.7 | 1602 | +5.6 |
 | `jam_bw1` | dust 0.379, sea salt x2, DMS x0.77 | 353.0 (-25 %) | 0.086 | 0.0098 | 4.9 | 12.5 | 16.3 | 1667 | +6.1 |
 | `jam_amean` | dust 0.45, sea salt x1.96, DMS x0.95, wet removal x1.88 | 407.2 (-13 %) | 0.075 | 0.0050 | 4.6 | 12.0 | 8.5 | 858 | +6.3 |
-| **`jam_rc`** | **release configuration: dust 0.379095663, sea salt x2, every other default** | **377.6 (-20 %)** | **0.082** | **0.0092** | **5.16** | **13.3** | **15.7** | **1629** | **+6.2** |
+| **`jam_rc`** | **release aerosol defaults: dust 0.379095663, sea salt x2, every other default** | **377.6 (-20 %)** | **0.082** | **0.0092** | **5.16** | **13.3** | **15.7** | **1629** | **+6.2** |
+| `jam_rc_cloud` | `jam_rc` with the Stage-2b cover set (see Stage 2b) | pending | 0.049 (gate basis; `jam_rc` 0.077) | pending | 4.15 | 9.2 | 14.6 | pending | +2.1 |
 
 `jam_amean` is the best arm whose two-window mean sulphate lies in the band: an
 informational alternative that reaches the band with wet removal at 1.88 times
@@ -353,7 +354,7 @@ the Stage-2 windows of the year output):
 | **`2m_cloudi`** | **adopted** | all pass | **100.3 (-24 %)** | **0.51 / 0.65** | **+5.6** | **-48.3** | **28.2** | **96.9** | **49.6** | **2.40** | **0.97** |
 | `2m_cloud` | corner optimum | all pass | 93.0 (-29 %) | 0.50 / 0.64 | +6.1 | -45.9 | 26.0 | 94.5 | 47.3 | 2.42 | 0.97 |
 | `2m_a` | ECHAM T63 cover; the Stage-2 convection and microphysics corner, not adopted | `cloud_cover` fails | 113.0 | 0.46 / 0.59 | +8.1 | -45.6 | 27.8 | 94.1 | 51.3 | 2.38 | 0.88 |
-| `jam_rc_cloud` | **PENDING:** release aerosol defaults plus the adopted cover set, JAM host | | | | | | | | | | |
+| `jam_rc_cloud` | release aerosol defaults plus the adopted cover set, JAM host (coupling below) | `cloud_cover` passes; BC and SO4 drift fail | pending | 0.52 / 0.65 | +2.1 | - | - | - | - | 2.44 | - |
 
 The adopted set raises the radiation cover by 0.07 and the cover the gate
 measures from 0.46 to 0.51 (the gate's floor is 0.5, so it passes by 0.01; see
@@ -373,9 +374,26 @@ parameters sit on three bounds.
 control), the clear-sky OLR bias (-7.5 / -9.2 W/m² against -7.6 / -9.2 in the
 January / July windows), the tropical precipitation extremes (the 99.9th
 percentile of 5-day means is 0.97 times the control's), and every convection
-and microphysics default, which stay ECHAM's. The combined JAM year
-`jam_rc_cloud` (the release aerosol defaults together with this set) tests the
-JAM-2M host; its row above is pending and is filled when the year is scored.
+and microphysics default, which stay ECHAM's. A dash in the `jam_rc_cloud` row
+is a quantity the gate summary does not carry, and its loss on the Stage-2
+windows is pending.
+
+**The cover set and the aerosol defaults are coupled.** `jam_rc_cloud` is the
+JAM-2M host with the release aerosol defaults and the adopted cover set (365
+days, from the fixed January state). It passes the cover gate (0.52 on the
+offline overlap, 0.65 as the radiation sees it; observed 0.63), the net TOA flux
+is +2.1 W/m² (+6.2 for the aerosol-only year `jam_rc`, +6.3 for the control) and
+precipitation is 2.44 mm/day. The larger cloud fraction increases wet removal, so
+the aerosol burdens that were tuned on ECHAM's cover fall back: the sea-salt
+burden from 13.3 to 9.2 mg/m² (-30 %), the total AOD to the control's level
+(0.049 against 0.077 for `jam_rc` and 0.059 for the control, on the gate's
+basis), the dust burden from 15.7 to 14.6 mg/m²; sulphate stays in the band
+(4.97 mg/m² on the tracer basis, 4.15 on the AeroCom ion basis). The drifts of
+the record are +0.0032 /day for black carbon and +0.0026 /day for sulphate: both
+fail the 0.002 /day limit of the documented recipe, and black carbon is also
+above the 0.003 /day limit for whole-year records, while dust and POA pass. The
+dust threshold scale and the sea-salt scale were fitted on ECHAM's cover, so they
+may need re-fitting on this baseline; that is not part of this change.
 
 ## What the calibration cannot reach
 
@@ -435,8 +453,9 @@ earlier-tree sweeps.
   member inherits both L47 values: the dust scale because it is a T63 value, and
   the sea-salt scale because it has no switch.
 - The cover set applies at T63. It was swept on the 2M host at L47 and
-  confirmed there in a 365-day year; the JAM-2M host's year, `jam_rc_cloud`, is
-  pending (above), and the 1M host reads the set with no calibration or year of
+  confirmed there in a 365-day year; the JAM-2M host's year, `jam_rc_cloud`,
+  passes the cover gate and shows the coupling with the aerosol defaults
+  described above, and the 1M host reads the set with no calibration or year of
   its own (#1014). T106 interpolates linearly in the truncation number between the T63 row
   and ECHAM's T127 row (an untuned blend: `crs` 0.963, `crt` 0.727, `csatsc`
   0.781, `cinv` 0.238, and `nex` 2, the nearer truncation's integer), and a
@@ -462,8 +481,8 @@ observations from jcm-monitor); the years are the five 365-day T63 L47 runs
 named in the JAM table, scored with `tools/release_validation/health.py` and the
 monitor's release recipe. Stage 2b is the 25-arm ledger of the 2M host on the
 same tree with the five `cloud.*` levers, and the years `2m_control`,
-`2m_cloudi`, `2m_cloud` and `2m_a`, on the same tree and recipe (`jam_rc_cloud`
-is added when it is scored).
+`2m_cloudi`, `2m_cloud`, `2m_a` and `jam_rc_cloud`, on the same tree and recipe
+(the window loss of `jam_rc_cloud` is pending).
 Shipped values are pinned by `dust_test.py`, `seasalt_test.py`,
 `echam_terms_test.py` and `runners_test.py`, and the cover set by
 `echam_cloud_defaults_test.py`, `parameters_test.py` and `runners_test.py`.
