@@ -157,7 +157,8 @@ online value is a deterministic function of the model's own fraction. Output
 written before the field existed is still scored, from the offline overlap of
 the saved `clouds.cloud_fraction` (`jcm.analysis.total_cloud_cover`), with a
 `NOTE` saying so: that is an overlap of a time-mean profile, and it reads
-**low** against the online cover, so a verdict from it is a lower bound. The
+**low** against the online cover (usually), so a verdict from it is read as a
+lower bound. The
 gate's JSON record carries `basis` (`online`, `offline_mean_profile`, or
 `speedy_cloudc`) so a table can say which it scored.
 
@@ -166,10 +167,12 @@ The observed total cover is printed beside the gate as `cloud_cover_obs`
 to the JSON under `references`. It is a reference, not a band.
 
 The ECHAM band is **0.5–0.9**, placed on the maximum-random definition:
-max-random reads +0.11 to +0.15 above the column max the gate used to score,
-so a band carried over from column-max experience would fail correct members
-on the ceiling for a purely definitional reason. The online cover reads above
-the offline overlap of the same run, which moves a member toward the ceiling.
+max-random reads +0.06 to +0.15 above a column max (+0.11 to +0.15 on the
+pre-#690 years and a spin-up arm, +0.06 on the settled post-#707 control
+years), so a band carried over from column-max experience would fail correct
+members on the ceiling for a purely definitional reason. The online cover reads
+above the offline overlap of the same run, which moves a member toward the
+ceiling.
 
 SPEEDY scores its own `shortwave_rad.cloudc` — an RH-based column cover with
 no profile to overlap, and untouched by this work — so it gates on its own
@@ -185,8 +188,7 @@ an all-zero field under grey radiation; the NOTE says which). The McICA
 cover is a **different measurement, not a cross-check**: it is the cover of
 the RH-diagnosed fraction radiation sees before the microphysics' write-back,
 masked by condensate, with its own thin-cloud threshold and a finite sample
-of sub-columns. It reads a few hundredths above the online cover on a measured
-warm-start arm, which is expected.
+of sub-columns, so a gap between it and the gated cover is expected.
 
 **Cover numbers from before #707 are not comparable with these** — that PR
 gave the 1M scheme ECHAM's `ccwmin` cover write-back, which redefined what

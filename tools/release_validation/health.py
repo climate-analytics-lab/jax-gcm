@@ -38,8 +38,8 @@ Output that does not carry the field (written before it existed) is still
 scored, from the offline overlap of the saved ``clouds.cloud_fraction``
 (:func:`jcm.analysis.total_cloud_cover`), with a printed NOTE saying so. That
 number is an overlap of a *time-mean* profile when the run saved interval
-means, and the overlap product is non-linear, so it reads **low** against the
-online cover: smoothing over the output interval moves each layer toward its
+means, and the overlap product is non-linear, so it usually reads **low**
+against the online cover: smoothing over the output interval moves each layer toward its
 mean fraction and, where cloud moved between layers, lowers the overlap-derived
 cover. It is a fallback for archived output, not an equal alternative, and a
 gate verdict from it should be read as a lower bound.
@@ -54,17 +54,16 @@ apply to it.
 Two further covers are **printed and not gated**, because they answer
 different questions and have no agreed band of their own:
 ``cloud_cover_colmax`` is a column maximum (hence only a lower bound on cover)
-of the saved ``clouds.cloud_fraction`` — the quantity the gate scored before
-the overlap definition — kept so the earlier release-validation tables stay
-readable; ``cloud_cover_radiation`` is the McICA sub-column cover the RRTMGP
+of the saved ``clouds.cloud_fraction``, kept so the #638 and #782
+release-validation tables stay readable; ``cloud_cover_radiation`` is the McICA sub-column cover the RRTMGP
 flux solve integrates, under the configured overlap and decorrelation length.
 
 ``cloud_cover_radiation`` is a **different measurement, not a consistency
 check** on the gate: it is built from ``effective_cloud_fraction`` (which
 zeroes cells with ``cloud_fraction <= 2*cld_frac_min``) and is a finite
 stochastic draw of its overlap, whereas the gate is the deterministic overlap
-of the full fraction. Both are time means of an instantaneous cover, so they
-are expected to be close; a persistent large gap is worth a look.
+of the full fraction, on the fraction radiation sees before the microphysics'
+write-back; a gap between the two is expected.
 
 **Cover numbers from before #707 are not comparable with these.** #707 gave
 the 1M scheme ECHAM's post-microphysics cover write-back (``mo_cloud.f90``:
@@ -111,11 +110,13 @@ RANGES = {
     # ECHAM total cloud cover ``aclcov`` (see the module docstring). Deliberately
     # wide: this is a "did the model produce a climate" gate, not a tuning
     # target. The band was placed on the maximum-random definition, which reads
-    # 0.11-0.15 above a column maximum of the same field, so a band taken from
-    # column-max experience sits ~0.1 low here and fails correct members on the
-    # ceiling. The scored field is the online cover (the overlap of the
-    # instantaneous fraction, time-averaged); the offline overlap of a saved
-    # mean profile, which older output falls back to, reads lower than it.
+    # 0.06-0.15 above a column maximum of the same field (0.11-0.15 on the
+    # pre-#690 years and a spin-up arm, 0.06 on the settled post-#707 control
+    # years), so a band taken from column-max experience sits ~0.1 low here and
+    # can fail correct members on the ceiling. The scored field is the online
+    # cover (the overlap of the instantaneous fraction, time-averaged); the
+    # offline overlap of a saved mean profile, which older output falls back
+    # to, usually reads lower than it.
     #
     # Both anchors sit inside it. Observations: a global cloud amount of
     # 0.68 +/- 0.03 for clouds of optical depth > 0.1, itself running from
@@ -123,7 +124,7 @@ RANGES = {
     # Cloud Assessment, Stubenrauch et al. 2013, BAMS 94, 1031-1049,
     # doi:10.1175/BAMS-D-12-00117.1); the single product printed beside the
     # gate (OBS_CLOUD_COVER) is 0.63. Model: every ECHAM member recorded in
-    # the #638/#782 matrix maps into 0.59-0.83 on the offline max-random
+    # the #638/#782 matrix maps into 0.54-0.83 on the offline max-random
     # definition. Derivation and the measured tables:
     # docs/source/design/cloud_cover_gate.md.
     "cloud_cover": (0.5, 0.9),
@@ -162,6 +163,15 @@ def wmean(da, weights):
     if "time" in da.dims:
         da = da.mean("time")
     return float(global_mean(da, weights))
+
+
+def count_online_cover_files(files):
+    """How many of ``files`` carry :data:`ONLINE_COVER` (headers only)."""
+    n = 0
+    for f in files:
+        with xr.open_dataset(f) as one:
+            n += ONLINE_COVER in one.variables
+    return n
 
 
 def cloud_cover_basis(ds, speedy):
@@ -264,6 +274,15 @@ def main():
             window_start = chunk_day(files[-a.last_n - 1])
         files = files[-a.last_n:]
     ds = xr.open_mfdataset(files, combine="by_coords")
+    # A run resumed across the introduction of ``clouds.total_cloud_cover`` has
+    # chunks with and without it, and ``open_mfdataset`` fills the missing
+    # frames with NaN, which would fail the NaN scan of a healthy run and score
+    # the cover of only the later frames. A window that is not wholly online is
+    # scored wholly offline, and says so.
+    n_online = count_online_cover_files(files)
+    mixed_window = 0 < n_online < len(files)
+    if mixed_window:
+        ds = ds.drop_vars(ONLINE_COVER)
     weights = area_weights(ds)
 
     ok = True
@@ -322,9 +341,11 @@ def main():
           *RANGES["cloud_cover_speedy" if speedy else "cloud_cover"],
           basis=basis)
     if basis == "offline_mean_profile":
+        why = (f"only {n_online} of {len(files)} chunks save {ONLINE_COVER}"
+               if mixed_window else f"the window saves no {ONLINE_COVER}")
         print(f"NOTE  cloud_cover is the max-random overlap of the saved "
               f"clouds.cloud_fraction (offline overlap of the saved mean "
-              f"profile; biased low): the window saves no {ONLINE_COVER}")
+              f"profile; biased low): {why}")
     obs_value, obs_source = OBS_CLOUD_COVER
     print(f"INFO  cloud_cover_obs = {obs_value:.2f} ({obs_source}; "
           "reference, not gated)")

@@ -47,8 +47,8 @@ class CloudData:
     # ``output_averages`` the saved frame is the mean over the output interval
     # of this per-step value, which is ECHAM's accumulation
     # (``paclcov + zdtime * zclcov``); the overlap of the saved MEAN profile
-    # is a different, lower number (the product is non-linear), which is why
-    # the release-validation gate scores this field and not that overlap.
+    # is a different number, usually lower (the product is non-linear), which
+    # is why the release-validation gate scores this field and not that overlap.
     total_cloud_cover: jnp.ndarray   # Total cloud cover [1] (ncols,)
 
     # Cloud condensate (updated by condensation within the cloud scheme)
