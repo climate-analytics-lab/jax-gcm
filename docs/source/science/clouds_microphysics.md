@@ -389,13 +389,24 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   tending to ``crt`` aloft. The 1M, the 2M and the JAM-2M hosts read these
   values through the same cover; they were calibrated on the 2M host, and the
   1M host, T106 and the cubed sphere have no calibration of their own (#1014).
-  The values do not transfer cleanly to the JAM-2M host, whose droplet number
-  comes from the interactive aerosol: its year passes the cover gate (0.52) but
-  has a SW CRE 3.3 W/m² too strong, 57 g/m² of liquid water path and, through
-  more wet removal, a sea-salt burden of 9.2 mg/m² and a total AOD of 0.052, and
-  its loss on the Stage-2 windows (461.1) is worse than that of the same host
-  with ECHAM's cover parameters (377.6); the aerosol emission scales were fitted
-  on ECHAM's cover (design page).
+  The 1M host's 365-day year with the set reads a cover of 0.48 offline and 0.60
+  radiation (0.42 and 0.52 with ECHAM's values), a SW CRE of -45.8 W/m² (-35.5;
+  observed -45.7), a reflected SW of 94.7 W/m² (84.2; 99.0), an annual TOA flux
+  of -2.7 W/m² (+5.8; CERES +1.0) and a liquid water path of 82 g/m² (61; ESA-CCI
+  36); the LW CRE (16.9 against 27.9 observed) and the thin ice are
+  microphysics, not cover.
+  The JAM-2M host's droplet number comes from the interactive aerosol, so the
+  cover and the aerosol scales are one calibration there: with the aerosol
+  emission scales fitted on ECHAM's cover parameters (dust 0.379095663, sea salt
+  2) the extra cloud adds wet removal (a sea-salt burden of 9.2 mg/m², a total
+  AOD of 0.052) and the loss on the Stage-2 windows (461.1) is worse than that of
+  the same host on ECHAM's cover (377.6). The shipped aerosol scales (dust 0.344,
+  sea salt 4) are fitted with this cover set in place (Stage 2c of the design
+  page): the JAM-2M year passes the cover gate (0.52), reads a reflected SW of
+  99.3 W/m² and a LW CRE of 27.4 (observed 99.0, 27.9), a net TOA flux of
+  +2.7 W/m², a SW CRE 3.1 W/m² too strong, 57 g/m² of liquid water path and a
+  total AOD of 0.074 (observed 0.145), and its loss (325.8) is below the
+  aerosol-only configuration's (377.6).
   ECHAM's own row stays in ``ECHAM_CLOUD_DEFAULTS``, and the Fortran comparison
   runs on the constants its reference data recorded. Evidence and the year
   tables: {doc}`../design/jam_aerosol_retune` ("Stage 2b: cloud fraction").

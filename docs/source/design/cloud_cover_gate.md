@@ -361,7 +361,8 @@ the new band comes from two pre-#690 year runs and one 90-day post-#707 arm. The
 retune's 365-day years ([jam_aerosol_retune](jam_aerosol_retune.md)) are the
 first measurements: the `echam-2m-t63` control year scores 0.46 on the gate and
 0.58 as the radiation sees it, and the year with the Stage-2b cover parameters
-0.51 and 0.65. The mapping above has not been re-derived from them, and the band
+0.51 and 0.65; the `echam-1m-t63` control year scores 0.42 and 0.52, and with the
+same parameters 0.48 and 0.60, which still fails the gate. The mapping above has not been re-derived from them, and the band
 is worth revisiting with those numbers rather than a rounded offset.
 
 Whether the new cloud state is *right* was the retune's question: the

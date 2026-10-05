@@ -530,35 +530,56 @@ Interactive aerosol (JAM)
   carry it (#787). Because the flux lives in the far tail of the 10 m wind
   distribution, HAM's threshold vector is scaled for jcm's own winds by a
   single global multiplier, ``NDUSCALE_JCM_T63_SCALE`` (per run,
-  ``physics.jam_dust_nduscale_scale``), set to **0.379095663** at T63 (fitted
-  to the observed dust optical depth by the aerosol retune, below); the
+  ``physics.jam_dust_nduscale_scale``), set to **0.344** at T63 (fitted
+  to the observed dust optical depth by the aerosol retune, below, with the T63
+  cloud-cover set in place); the
   regional ratios stay HAM's, and T106 and ne30 take the Fortran's uniform
   default since their inputs are interpolated from T63. A full
-  ``echam-jam-t63-l47`` year emits 1629 Tg/yr of D < 10 µm dust, 2.5 times
+  ``echam-jam-t63-l47`` year emits 2351 Tg/yr of D < 10 µm dust, 3.7 times
   the 642 Tg/yr that the parent model's published budget becomes once
-  converted to this window and of the order of the AeroCom medians (1640; 1123
+  converted to this window and above the AeroCom medians (1640; 1123
   in the 15-model dust intercomparison); the annual
   budget is a release-validation gate on any T63 run of 300 days or more
-  (``DUST_EMISSION_TG_PER_YR``, 400-2600 Tg/yr) (#808).
-- **The aerosol defaults are calibrated against observed AOD** (#682). Two
-  defaults are scaled from HAM's: the Gong sea-salt source by **2**
-  (``physics.seasalt.scale``, from 1) and the dust threshold multiplier to
-  **0.379095663** (``physics.jam_dust_nduscale_scale``, from 0.5). They are the
-  best observed arm of a 40-arm Sobol sweep (14-day windows) and a 25-arm
-  Gaussian-process sweep (30-day windows) of a loss over cloud radiative
-  effects, cloud cover, precipitation, liquid water path and the ESA-CCI total
-  and dust AOD, each against its inter-annual spread, and were confirmed in a
-  365-day T63 L47 year of the release configuration. Against the same year at
-  the previous values, global AOD at 550 nm rises from 0.059 to 0.082 (observed
-  0.145), dust AOD from 0.0032 to 0.0092 (0.0213), the dust burden from 5.3 to
-  15.7 mg/m² (AeroCom mean 37.6) and the sea-salt burden from 6.6 to 13.3 mg/m²
-  (AeroCom mean 14.7, median 12.5); sulphate stays inside the AeroCom band (5.3
-  to 5.2 mg SO4/m², ion basis, against a band of 1.95-5.85) and the net TOA flux
-  is unchanged within 0.3 W/m² (annual mean +7.4 to +7.1; CERES +1.0). The
-  year's results are tabulated in :doc:`design/jam_aerosol_retune`. The DMS, wet-removal,
-  convection and microphysics defaults are unchanged (the T63 cloud-cover
-  parameters are calibrated separately, in *The cloud-cover defaults at T63 are
-  calibrated* below): the 1M and 2M levers were swept as well: the 2M's optimum
+  (``DUST_EMISSION_TG_PER_YR``, 400-2600 Tg/yr; the calibrated year is 10 %
+  below the upper edge) (#808).
+- **The release configuration is the T63 cloud-cover set and two aerosol scales
+  calibrated with it** (#682). The scales are the Gong sea-salt source, **4**
+  (``physics.seasalt.scale``, from 1), and the dust threshold multiplier,
+  **0.344** (``physics.jam_dust_nduscale_scale``, from 0.5). They are the best arm
+  of a 20-arm Gaussian-process sweep over exactly these two (30-day January and
+  July windows) with the cover set of *The cloud-cover defaults at T63 are
+  calibrated*, below, held fixed, on a loss over cloud radiative effects, cloud
+  cover, precipitation, liquid water path and the ESA-CCI total and dust AOD,
+  each against its inter-annual spread. An earlier 40-arm Sobol sweep and a
+  25-arm Gaussian-process sweep of four aerosol levers on ECHAM's cover
+  parameters had put the same two scales at 0.379095663 and 2; the cover set's
+  larger cloud fraction raises wet removal and strips the aerosol those values
+  delivered, so the scales are fitted again with it in place. A 365-day T63 L47
+  year of the release configuration confirms them. Against the control year
+  (ECHAM's cover parameters, dust 0.5, sea salt 1), global AOD at 550 nm rises
+  from 0.059 to 0.074 (observed 0.145), dust AOD from 0.0032 to 0.0109 (0.0213),
+  the dust burden from 5.3 to 20.9 mg/m² (AeroCom mean 37.6) and the sea-salt
+  burden from 6.6 to 16.4 mg/m² (AeroCom mean 14.7, median 12.5); sulphate
+  stays inside the AeroCom band (5.3 to 4.1 mg SO4/m², ion basis, against a band
+  of 1.95-5.85). **What it gains** on the JAM host: the annual net TOA flux falls
+  from +7.4 to +2.7 W/m² (CERES +1.0), the ``cloud_cover`` release gate passes
+  (0.52 on the offline overlap, 0.65 as the radiation sees it, against 0.46 and
+  0.58), the reflected SW rises from 92.6 to 99.3 W/m² (observed 99.0) and the
+  LW CRE from 25.5 to 27.4 (27.9), and the loss on the Stage-2 windows falls from
+  469.6 to 325.8. On the 2M host the cover set takes the TOA bias from +9.8 to
+  +5.6 W/m² and passes the same gate (0.51). **What it costs:** on the JAM host
+  the liquid water path is 57 g/m² against 36 observed (49 for the control) and
+  the SW CRE is 3.1 W/m² too strong (-48.8 against -45.7; the control's is 2.9
+  too weak); the sea-salt source is four times HAM's (8475 Tg/yr, AeroCom median
+  6280) and its burden is 12 % above the AeroCom mean; the total AOD is below
+  that of an aerosol-only configuration on ECHAM's cover parameters (0.074
+  against 0.082); and the year's POA drift is -0.0039 /day on the six-month line
+  of the 40-save recipe (limit 0.002; the whole-year fit with the annual harmonic
+  gives -0.0025 against its limit of 0.003, and every aerosol gate passes under
+  it). The year's results are tabulated in
+  :doc:`design/jam_aerosol_retune`. The DMS, wet-removal,
+  convection and microphysics defaults are unchanged: the 1M and 2M levers
+  were swept as well: the 2M's optimum
   sat on the lower edge of four of its five levers, the 1M's best arm took
   `cprcon` to the edge of its range, and both bought cloud radiative effect
   with liquid water path. What the calibration cannot fix is
@@ -1868,14 +1889,19 @@ The cloud-cover defaults at T63 are calibrated
   its box (``nex`` 3.96 of 4, ``cinv`` 0.5 of 0.5, ``crs`` 0.9) and was not
   adopted; the adopted ``crs`` is itself on its lower bound of 0.9, below every
   ECHAM value. The non-integer ``nex`` is admissible: the critical-humidity
-  profile is continuous in it. The 1M host, T106 and the cubed sphere read the
-  set without a calibration or year of their own (#1014).
-- **The set does not transfer cleanly to the JAM-2M host.** On the 2M host it
-  passes every gate; on the JAM-2M host, whose droplet number comes from the
-  interactive aerosol, the same set over-brightens and strips aerosol. The JAM-2M
-  year with the release aerosol defaults and this set passes the cover gate
+  profile is continuous in it. The 1M host reads the set without a calibration
+  of its own; its 365-day year gains cover (offline 0.42 to 0.48, radiation 0.52
+  to 0.60), takes the SW CRE from -35.5 to -45.8 W/m² (observed -45.7) and the
+  annual TOA flux from +5.8 to -2.7 W/m² (CERES +1.0), and pays with liquid water
+  path (61 to 82 g/m², ESA-CCI 36). T106 and the cubed sphere read the set
+  without a calibration or year of their own (#1014).
+- **On the JAM-2M host the cover set and the aerosol scales are one
+  calibration.** On the 2M host the set passes every gate; on the JAM-2M host,
+  whose droplet number comes from the interactive aerosol, the same set with the
+  aerosol scales fitted on ECHAM's cover parameters (dust 0.379095663, sea salt 2)
+  over-brightens and strips aerosol. That year passes the cover gate
   (0.52 offline, 0.65 radiation) and its annual TOA flux is +3.2 W/m² (+7.1
-  without it), but its SW CRE is 3.3 W/m² too strong (-49.0), its liquid water
+  without the set), but its SW CRE is 3.3 W/m² too strong (-49.0), its liquid water
   path is 57 g/m² (48 without it; ESA-CCI 36), and the larger cloud fraction
   increases wet removal: the sea-salt burden falls from 13.3 to 9.2 mg/m²
   (lifetime 0.65 to 0.40 d), the total AOD from 0.082 to 0.052 (the control's
@@ -1884,9 +1910,10 @@ The cloud-cover defaults at T63 are calibrated
   461.1, worse than the aerosol-only configuration's 377.6 (January better, July
   much worse), and the black-carbon (+0.0032 /day) and sulphate (+0.0026 /day)
   drifts of the year fail the recipe's 0.002 /day limit, black carbon also the
-  0.003 /day limit for whole-year records. The aerosol figures quoted for the
-  aerosol defaults above are for ECHAM's cover parameters; adopting the cover set
-  on the JAM host needs a joint cloud-and-aerosol calibration.
+  0.003 /day limit for whole-year records. The shipped aerosol scales are the
+  ones fitted with this set in place (dust 0.344, sea salt 4, in the entry on the
+  aerosol defaults above); the cover parameters themselves were not re-fitted on
+  the JAM host.
 - **Changes results** on every ECHAM host at T63 (cloud cover, cloud radiative
   effect, TOA balance, surface temperature), and at T106 and on the cubed
   sphere, which take the T63 row or interpolate from it. ECHAM's constants are
@@ -2502,13 +2529,15 @@ Calibration and capability gaps
   as the radiation sees it and 0.46 on the offline maximum-random overlap,
   against 0.63 observed (the calibrated T63 cover set brings the 2M host to 0.65
   and 0.51, with liquid water path 7.5 g/m² higher, and the JAM-2M host to 0.65
-  and 0.52 with a SW CRE 3.3 W/m² too strong), and the 1M and 2M
+  and 0.52 with a SW CRE 3.1 W/m² too strong and 57 g/m² of liquid water path),
+  and the 1M and 2M
   convection and microphysics optima buy cloud radiative effect with liquid
-  water path instead of cover; dust lifetime is 1.8 d against AeroCom's 4.1 and the regional dust
-  source balance is wrong, so dust AOD stays under half of the observed;
-  the sea-salt burden lies between the AeroCom median and mean but its
-  coarse-mode extinction per unit mass is low, and total AOD is 0.082 against
-  0.145; sulphate
+  water path instead of cover; dust lifetime is 1.6 d against AeroCom's 4.1 and the regional dust
+  source balance is wrong, so dust AOD stays at about half of the observed
+  (0.0109 against 0.0213);
+  the sea-salt burden is 12 % above the AeroCom mean (from a source four times
+  HAM's) yet its coarse-mode extinction per unit mass is low, and total AOD is
+  0.074 against 0.145 (0.072 over the last 195 days of the year); sulphate
   is governed by wet removal and its DMS source, and there is no SO2
   deposition; and global-mean precipitation is 0.7 mm/day below GPCP (0.9 to
   1.1 over the ocean).
