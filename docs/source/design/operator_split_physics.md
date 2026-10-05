@@ -262,8 +262,8 @@ reordering coupled terms is a known-unstable configuration.
 | `_tendency_run` | the sum of the tendencies of the terms already run (winds, T, q, every tracer) | the host, before each term, on both hosts | the cloud schemes (their increments), the JAM removal split, AeroCom |
 | `thermo_run` | a running (T, q, qc, qi), seeded to `x_n` | the terms that call `advance_thermo_run`: vertical diffusion, the prescribed surface flux, Tiedtke, and the cloud scheme after its own tendency. Radiation does not | Tiedtke (its provisional state), Sundqvist (its condensate), COSP, AeroCom |
 | `clouds` | the cover, its total over the column (`total_cloud_cover`, ECHAM's `aclcov`, recomputed by `CloudData.copy` whenever the cover is replaced), a condensate view, and this step's detrained qc/qi rate (`conv_detrainment_qc`/`_qi`) | Sundqvist (cover; condensate from `thermo_run`; resets the detrainment to zero), Tiedtke (adds its detrainment to the condensate and writes it as the detrainment rate), the cloud scheme | radiation, aerosol, COSP; the cloud schemes (the detrainment) |
-| `_prev_step` (carry) | the previous step's q and applied q tendency | the host, after the physics | Tiedtke's deep/shallow test |
-| `_post_physics_state` (carry) | the previous step's post-physics state and a validity flag | `Model`, after the physics, from `after_physics_state`; present only when a term declares `requires_post_physics_fields` | the cloud schemes (their anchor) |
+| `_prev_step` (carry) | the previous step's q and applied q tendency | the host, after the physics | Tiedtke's lagged dynamics moisture tendency where no valid `_post_physics_state` exists (single column, RCE, first step) |
+| `_post_physics_state` (carry) | the previous step's post-physics state and a validity flag | `Model`, after the physics, from `after_physics_state`; present only when a term declares `requires_post_physics_fields` | the cloud schemes (their anchor); Tiedtke (the dynamics part of `pqte`, `(q_n − q_ap)/dt`) |
 
 **What the cloud schemes receive.** ECHAM's `cloud` and
 `cloud_micro_interface` take the previous time level (`ptm1`, `pqm1`,

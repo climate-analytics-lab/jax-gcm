@@ -1427,7 +1427,9 @@ from flax import nnx  # noqa: E402
 
 from jcm.forcing import ForcingData  # noqa: E402
 from jcm.physics.physics_term import PhysicsTerm, TracerSpec  # noqa: E402
-from jcm.physics_interface import PhysicsState, PhysicsTendency  # noqa: E402
+from jcm.physics_interface import (  # noqa: E402
+    POST_PHYSICS_STATE_KEY, PhysicsState, PhysicsTendency,
+)
 from jcm.terrain import TerrainData  # noqa: E402
 from jcm.physics.diagnostics.moist_air_state import advance_thermo_run  # noqa: E402
 
@@ -1504,6 +1506,12 @@ class TiedtkeConvection(PhysicsTerm):
     output_attrs: ClassVar[dict[str, dict[str, str]]] = CONVECTION_OUTPUT_ATTRS
 
     requires_dycore_fields: ClassVar[tuple[str, ...]] = ()
+    # The previous step's post-physics humidity: the state the dynamics
+    # advanced from, so that the received humidity minus it is the dynamics
+    # of the last step alone, ECHAM's dynamics part of ``pqte`` (see the
+    # ``qte_dynamics`` block in ``compute_tendencies``).
+    requires_post_physics_fields: ClassVar[tuple[str, ...]] = (
+        "specific_humidity",)
 
     def __init__(self, params: ConvectionParameters | None = None,
                  updraft_precip_cover: bool = False):
@@ -1668,16 +1676,34 @@ class TiedtkeConvection(PhysicsTerm):
         omega = jnp.reshape(omega, (nlev, ncols))
 
         # The DYNAMICS moisture tendency of the just-completed dycore step,
-        # reconstructed from the ``_prev_step`` carry that ComposablePhysics
-        # publishes: q advanced from q_prev by dt*(physics_prev + dynamics),
-        # so dynamics = (q_now - q_prev)/dt - q_tend_physics_prev. It is one
-        # step lagged — the SAME provenance as ECHAM's leapfrog ``pqte``
-        # dynamics contribution, so this is the reference's information
-        # structure, not an approximation of it. It enters both of
-        # cumastr's integrals of ``pqte``: the deep/shallow test ``zdqcv``
-        # and the sub-cloud supply ``zdqpbl`` of the ``zlo1`` gate and the
-        # first-guess cloud-base flux. Absent carry (step 1, column tests):
-        # zeros, i.e. no known convergence.
+        # ECHAM's dynamics part of ``pqte``. It enters both of cumastr's
+        # integrals of ``pqte``: the deep/shallow test ``zdqcv`` and the
+        # sub-cloud supply ``zdqpbl`` of the ``zlo1`` gate and the first-guess
+        # cloud-base flux. It is one step lagged, the same provenance as
+        # ECHAM's leapfrog ``pqte`` dynamics contribution.
+        #
+        # Under a dynamical core it is the received humidity minus the
+        # carried post-physics humidity (``_post_physics_state``, the state
+        # the dynamics actually advanced from), divided by dt. It must NOT be
+        # formed as ``(q_now − q_prev)/dt − P_prev`` there: the dinosaur core
+        # carries humidity modally and adds the spectral projection T(P) of
+        # the gridpoint physics tendency, discarding what the truncation
+        # cannot hold (about 22 % of a convective increment, #954, and all of
+        # its 2Δx part). That form counts the discarded part,
+        # ``−(P − T(P))``, as dynamics: a column that convection dried reads
+        # as converging moisture where the drying was strongest, the
+        # ``zdqpbl`` supply and the cloud-base flux rise there next step, and
+        # its neighbours read as diverging. The feedback is positive at the
+        # grid scale, which the dynamics cannot see, and paints a
+        # checkerboard into the convective precipitation. ECHAM's ``pqte``
+        # is the gridpoint dynamics tendency and contains no such term.
+        #
+        # Without a valid carried post-physics state (a host with no
+        # dynamical core — single column, RCE — the first step of a run, a
+        # checkpoint that predates the slot) the ``_prev_step`` form is used:
+        # such hosts apply the physics tendency on the grid itself, so there
+        # it is exact. Absent both (column tests): zeros, i.e. no known
+        # convergence.
         prev = diagnostics.get("_prev_step")
         if prev is not None:
             q_prev = jnp.reshape(prev["specific_humidity"], (nlev, ncols))
@@ -1694,6 +1720,18 @@ class TiedtkeConvection(PhysicsTerm):
             )
         else:
             qte_dynamics = jnp.zeros_like(state.specific_humidity)
+        post = diagnostics.get(POST_PHYSICS_STATE_KEY)
+        if post is not None:
+            # The slot's validity is the carried flag (0 in the
+            # construction-time template and on hosts that never write it),
+            # never an inspection of field values.
+            q_after_physics = jnp.reshape(
+                post["specific_humidity"], (nlev, ncols))
+            qte_dynamics = jnp.where(
+                jnp.asarray(post["valid"]) > 0.5,
+                (state.specific_humidity - q_after_physics) / dt,
+                qte_dynamics,
+            )
 
         # The scheme is a finite-volume ledger on the model's half levels
         # (ECHAM ``paphp1``), so it takes the host's interface pressures —

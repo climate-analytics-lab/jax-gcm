@@ -44,7 +44,8 @@ PhysicsCarryState: TypeAlias = Dict[str, Any]
 #: scalar, 1 once ``Model`` has written the slot and 0 in the construction
 #: template, so a first step, a checkpoint that predates the slot and a host
 #: without a dynamical core all read as "no anchor". Consumers:
-#: :func:`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs`.
+#: :func:`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs` and the Tiedtke
+#: convection (the dynamics part of its ``pqte``).
 POST_PHYSICS_STATE_KEY = "_post_physics_state"
 
 logger = logging.getLogger(__name__)

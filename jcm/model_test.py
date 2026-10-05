@@ -3043,12 +3043,14 @@ class TestPostPhysicsAnchor(unittest.TestCase):
             model = Model(coords=coords, physics=physics)
             self.assertNotIn("_post_physics_state", model.initial_physics_carry())
             self.assertEqual(model._post_physics_fields, ())
+        # First-declared order: Tiedtke (its lagged dynamics humidity
+        # tendency) runs before the cloud scheme (its anchor).
         self.assertEqual(echam_physics().post_physics_fields(),
-                         ("temperature", "specific_humidity", "qc", "qi"))
+                         ("specific_humidity", "temperature", "qc", "qi"))
         two_moment = echam_physics(cloud_scheme="2m")
         self.assertEqual(
             two_moment.post_physics_fields(),
-            ("temperature", "specific_humidity", "qc", "qi", "qnc", "qni"))
+            ("specific_humidity", "temperature", "qc", "qi", "qnc", "qni"))
 
     # -- the 2M condenses the dynamics' forcing in a partly cloudy layer --------
 
