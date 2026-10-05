@@ -328,9 +328,13 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   (``cloud_overlap.max_random_cover``), so the two cannot differ. The
   Fortran's denominator ``1 − min(c, 1 − 10⁻¹²)`` is written as the equal
   ``max(1 − c, 10⁻¹²)``: ``1 − 10⁻¹²`` is exactly 1 in float32, where an overcast
-  layer's ``0 / 10⁻¹²`` would become ``0 / 0`` and poison every reverse-mode
-  gradient through the carry, even with nothing reading the cover. Every local
-  derivative of the recurrence is finite.
+  layer's ``0 / 10⁻¹²`` would become ``0 / 0``: a NaN in the saved value and a NaN gradient wherever a
+  gradient path reaches the cover (a zero cotangent into it still gives
+  ``0·NaN``). Every local
+  derivative of the recurrence is finite, and the true one wherever adjacent layers
+  differ; at exactly tied layers (an exactly clear column) it is a subgradient
+  that leaves a cloud-free interior layer with zero sensitivity where the
+  one-sided derivative is +1 (#1013).
 - Radiation's cover, `science` — ECHAM's radiation uses the cover only where
   the step-start grid-mean condensate it radiates is positive
   (``mo_radiation.f90`` l.428-434, ``xq = MAX(xlm1, 0)``,

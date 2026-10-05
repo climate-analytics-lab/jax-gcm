@@ -31,11 +31,21 @@ diagnostic and the offline scorer from drifting apart.
 identical ``MAX(1 - c, zepsec)``. The two are equal in real arithmetic, but
 ``zxsec = 1 - 1e-12`` rounds to exactly 1.0 in float32, where the Fortran form
 turns an overcast layer's guarded ``0 / 1e-12`` into ``0 / 0``: a NaN in the
-value, and a ``0 * NaN`` in the reverse pass of every gradient through the
-carry even when nothing reads the cover. ``zepsec`` itself is representable in
+value, and a NaN gradient wherever a gradient path reaches the cover (a zero
+cotangent into the Fortran form still gives ``0 * NaN``). ``zepsec`` itself is
+representable in
 float32, so this form is safe at either precision, and every local derivative
 of the recurrence is finite (at most ``1 / zepsec``, in a layer within
 ``zepsec`` of overcast).
+
+**Derivative at ties.** Every local derivative is finite, and the derivative
+is the true one wherever adjacent layers differ. Where two adjacent layers hold
+exactly equal fractions (an exactly clear column is the common case: Sundqvist's
+cover is exactly zero at or below the critical humidity) the overlap has a kink,
+and ``jnp.maximum`` splits the derivative between its arguments; at an
+exactly-clear interior layer that cancels against the denominator and the layer
+gets zero sensitivity where the one-sided (increase-only) derivative is +1. No
+fixed tie rule is right in every direction; the choice is #1013.
 
 **Orientation.** The result does not depend on which end of the column is the
 surface: the adjacent-pair factors ``1 - max(c_k, c_{k-1})`` and the interior
