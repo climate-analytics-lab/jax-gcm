@@ -355,12 +355,14 @@ compensating the old cloud-base error.
 
 ## What is not settled here
 
-**No post-#707 year run has been scored on this definition**, because none is
-archived — the offset that maps the #638/#782 matrix onto the new band comes
-from two pre-#690 year runs and one 90-day post-#707 arm. The next validation
-sweep prints all three covers on every member and should replace that mapping
-with measurements; if it does, the band is worth revisiting with real numbers
-rather than a rounded offset.
+**No post-#707 year run had been scored on this definition when the band was
+set**, because none was archived — the offset that maps the #638/#782 matrix onto
+the new band comes from two pre-#690 year runs and one 90-day post-#707 arm. The
+retune's 365-day years ([jam_aerosol_retune](jam_aerosol_retune.md)) are the
+first measurements: the `echam-2m-t63` control year scores 0.46 on the gate and
+0.58 as the radiation sees it, and the year with the Stage-2b cover parameters
+0.51 and 0.65. The mapping above has not been re-derived from them, and the band
+is worth revisiting with those numbers rather than a rounded offset.
 
 Whether the new cloud state is *right* was the retune's question: the
 convective trigger and closure, and the 1M and 2M microphysics, were swept
@@ -368,6 +370,9 @@ against CERES and the ESA-CCI cloud products
 ([jam_aerosol_retune](jam_aerosol_retune.md)). It found a structural
 cloud-cover deficit (0.58 radiation cover and 0.46 on this document's overlap
 against 0.63 observed) that no lever of the retune closed without raising liquid
-water path, and left the 1M and 2M defaults unchanged. The Sundqvist
-cloud-fraction parameters, which set the cover, were not among its levers. This document fixes the
-measuring stick; it does not answer whether the cloud state is right.
+water path, and left the 1M and 2M convection and microphysics defaults
+unchanged. The Sundqvist cloud-fraction parameters, which set the cover, were
+the levers of its Stage 2b ("Stage 2b: cloud fraction" in the same page): the
+set it adopted at T63 raises the 2M year's cover on this document's overlap from
+0.46 to 0.51, which passes the gate by 0.01. This document fixes the measuring
+stick; it does not answer whether the cloud state is right.

@@ -2,20 +2,24 @@
 
 The v3 release was calibrated against observations once, on the ECHAM hosts
 (`echam-1m-t63`, `echam-2m-t63`, `echam-jam-t63-l47`; SPEEDY is out of scope
-and T106 and L95 were not swept). The outcome is **two changed defaults, both
-on the JAM host**: the dust threshold scale and the Gong sea-salt scale. Every other
-default, including every cloud, convection, DMS and wet-removal field, stays at
+and T106 and L95 were not swept). The outcome is **two changed aerosol defaults,
+both on the JAM host** (the dust threshold scale and the Gong sea-salt scale) and
+**one changed set of cloud-cover defaults at T63, read by all three hosts** (the
+five parameters of the Sundqvist cover, Stage 2b). Every other default,
+including every convection, microphysics, DMS and wet-removal field, stays at
 its ECHAM / ECHAM-HAM value. This page records the targets, the levers, the
-stages, the evidence for the two values, why the 1M and 2M defaults were not
-touched, and what the calibration cannot reach.
+stages, the evidence for the values, why the 1M and 2M convection and
+microphysics defaults were not touched, and what the calibration cannot reach.
 
 | default | value | where | basis |
 |---|---|---|---|
 | dust threshold scale | **0.379095663** | `NDUSCALE_JCM_T63_SCALE` in `jcm/physics/aerosol/jam/emissions/dust.py`; `physics.jam_dust_nduscale_scale` | best observed arm of Stage 2 (the surrogate's optimum is 0.3779); acts through the dust AOD |
 | sea-salt emission scale | **2** | `SEASALT_SCALE_DEFAULT` in `jcm/physics/aerosol/jam/emissions/seasalt.py`; `physics.seasalt.scale` | upper edge of the swept range in both stages |
-| DMS flux scale, wet-removal scales, every cloud and convection field | unchanged | | a weak lever (DMS); a burden guard (wet removal); structural, not parametric (cloud, convection) |
+| Sundqvist cover at T63: `crt`, `crs`, `nex`, `csatsc`, `cinv` | **0.679016061, 0.9, 1.84856084, 0.948216414, 0.213005383** (ECHAM's T63 row: 0.75, 0.975, 2, 0.7, 0.25) | `JCM_CALIBRATED_COVER_T63` in `jcm/physics/clouds/echam_cloud_defaults.py`; all three hosts | interior arm of the Stage-2b sweep on the 2M host (below); acts through the cloud fraction |
+| DMS flux scale, wet-removal scales, every convection and microphysics field | unchanged | | a weak lever (DMS); a burden guard (wet removal); structural, not parametric (convection, microphysics) |
 
-The science statement of each value is in {doc}`../science/aerosol`.
+The science statement of each aerosol value is in {doc}`../science/aerosol` and
+of the cover values in {doc}`../science/clouds_microphysics`.
 
 ## Targets and the loss
 
@@ -95,11 +99,11 @@ and the median differ markedly for sea-salt emission):
 | wet-removal scale: one lever over the stratiform in-cloud scale, the below-cloud scale and the convective in-plume scavenging scale together | JAM | 0.5-2 |
 
 `cevapcu` is not a lever: it was inert in the trees of the early sweeps, and
-once made live it was left out of the lever sets. The cloud-cover critical
-relative humidity and the other Sundqvist cloud-fraction parameters, radiation,
-the land tile and the surface emissivity are not levers of this retune: ECHAM's
-per-truncation values are fidelity, not tuning. The Sundqvist parameters are the
-subject of a separate study (Stage 2b) that this page does not report.
+once made live it was left out of the lever sets. Radiation, the land tile and
+the surface emissivity are not levers of this retune, and neither are the
+Sundqvist cloud-fraction parameters in Stages 1 to 3: ECHAM's per-truncation
+values are fidelity, not tuning. The Sundqvist parameters are the levers of
+Stage 2b, which has its own section below.
 
 1. **Stage 1.** A 40-arm Sobol design over every lever of a host, 14-day arms
    scored on days 4-14, January and July. Output: a regression of each loss term
@@ -115,6 +119,9 @@ subject of a separate study (Stage 2b) that this page does not report.
 3. **Stage 3.** A 365-day year, from the fixed-tree January state, of the
    selected configuration and of the control, scored on the Stage-2 windows of
    the year output and against the release gates.
+
+Stage 2b is Stage 2 on the 2M host with the five Sundqvist cover parameters as
+the only levers, and its own Stage-3 years.
 
 The sweeps and years reported here ran on dev 519f18e8, which carries the
 semi-Lagrangian specific-humidity conservation fix (cubic vertical
@@ -222,7 +229,9 @@ range was not extended for this release, and nothing above 2 was run.
 
 ## The 1M and 2M defaults
 
-Both were swept and both are left unchanged.
+Both were swept over the convection and microphysics levers and both are left
+unchanged at those levers. (The Sundqvist cover that both read changes in
+Stage 2b, below.)
 
 **2M** (`echam-2m-t63`; Tiedtke `entrpen`, `cprcon`, `tau`, `ccraut`,
 `ccsaut`). Stage 1: control 135.1, best 126.1 (-6.7 %). Stage 2: control 131.4,
@@ -232,7 +241,9 @@ of that arm the SW CRE goes from -43.2 / -41.4 to -46.8 / -45.0 W/m² (observed
 -50.3 / -44.0), the liquid water path from 33.7 / 37.5 to 41.9 / 46.9 g/m², and
 the total cover from 0.562 / 0.566 to 0.565 / 0.571 (observed 0.64 / 0.63):
 brighter clouds from more water, not more cloud. Four of five levers on a bound
-is a gradient that has not been bracketed, not an optimum.
+is a gradient that has not been bracketed, not an optimum. The cloud fraction is
+set by the Sundqvist cover, which none of these levers touches, and that is the
+case for Stage 2b.
 
 **1M** (`echam-1m-t63`; the same Tiedtke levers, `ccraut`, `ccsaut`,
 `ccsacl`). Stage 1 on the fixed tree: control 195.2, best 134.3 (-31.2 %) with
@@ -252,6 +263,111 @@ The loss carries a liquid-water-path term (ocean zonal) as a guard against this
 compensation, and the optima still raise the global mean; the defaults stay
 ECHAM's.
 
+## Stage 2b: cloud fraction
+
+Stages 1 and 2 showed that the cloud problem of the ECHAM hosts is the cloud
+**fraction**, not its brightness: the 2M's radiation cover is 0.58 against 0.63
+observed while its liquid water path is already above ESA-CCI, and the
+convection and microphysics levers can only trade fraction against brightness
+(above). The scheme that sets the fraction is the Sundqvist cover
+(`SundqvistCloudFraction`), whose five parameters are ECHAM's own cover-tuning
+knobs. They are read by the cover of the 1M, the 2M and the JAM-2M hosts alike.
+
+**Levers.** Absolute ranges, because they are humidity thresholds and an
+exponent, not scale factors. ECHAM's T63 row is the control.
+
+| parameter | meaning | ECHAM T63 | swept range | adopted |
+|---|---|---|---|---|
+| `crt` | critical relative humidity aloft | 0.75 | 0.60-0.90 | **0.679016061** |
+| `crs` | critical relative humidity at the surface | 0.975 | 0.90-0.995 | **0.9** (lower bound) |
+| `nex` | exponent of the critical-RH profile | 2 | 1-4 | **1.84856084** |
+| `csatsc` | stratocumulus saturation factor at an inversion | 0.7 | 0.50-1.00 | **0.948216414** |
+| `cinv` | inversion stability threshold, fraction of g/cp | 0.25 | 0.10-0.50 | **0.213005383** |
+
+`csecfrl` and `ccwmin` are not levers: they switch the ice phase and the
+condensate threshold, they do not set the cover. ECHAM declares `nex` an
+integer; the closure needs none (the profile
+`crt + (crs - crt)·exp(1 - (p_s/p)^nex)` has a base of at least 1, so a real
+exponent is continuous and differentiable, equals `crs` at the surface and
+tends to `crt` aloft), and the sweep treated it as real.
+
+**Sweep.** The 2M host (`echam-2m-t63`), Stage-2 recipe: 25 arms chosen by
+Gaussian-process expected improvement, 30-day windows from 2000-12-31 and
+2001-06-29 with the first three days skipped, the loss of the other stages
+restricted to the fields a 2M host has (cloud cover, SW and LW CRE, liquid water
+path, precipitation: 9 terms per window including the TOA gate; no AOD
+terms). Control loss 130.9 (January 62.1, July 68.9); no arm failed. The
+standardised effect on the loss across each range is +2.90 for `crs`, -0.98 for
+`cinv`, +0.37 for `nex`, -0.18 for `csatsc` and +0.13 for `crt`; on the global
+cover the two critical humidities are the levers (`crt` -3.0 / -2.6 and `crs`
+-1.8 / -2.2 in January / July: lower is more cloud).
+
+**The unconstrained optimum is on the edge of the box and is not adopted.** The
+best of the 25 arms (loss 93.6, -28.5 %) and the surrogate's posterior-mean
+optimum (predicted 93.3) sit at the same corner: `crs` 0.9 on its lower bound,
+`nex` 3.96 against an upper bound of 4, `cinv` 0.5 on its upper bound (with
+`crt` 0.80 and `csatsc` 0.60). Four arms lie within 3 % of that loss, all near
+the same corner, and an optimum on a bound is where the search ran out of room,
+not a value the data have located. The release rule is the one that
+left the convection and microphysics defaults alone: a value on the edge of its
+box is not adopted as a default. The adopted set is arm 9, the best of the
+sweep's first 13 arms. Every one of the 25 arms with a lower loss has at least
+two parameters within 5 % of their range of a bound; arm 9 has one (`crs`), so it
+is the best arm that is interior in `crt`, `nex`, `csatsc` and `cinv`:
+
+| window mean (30 days) | observed | control | adopted | corner optimum |
+|---|---|---|---|---|
+| loss (January / July) | | 62.1 / 68.9 | 41.6 / 60.2 (101.8, -22.2 %) | 40.9 / 52.7 (93.6, -28.5 %) |
+| total cover, radiation definition, January / July | 0.64 / 0.63 | 0.56 / 0.57 | 0.62 / 0.64 | 0.60 / 0.63 |
+| SW CRE, W/m², January / July | -50.3 / -44.0 | -43.5 / -41.6 | -49.2 / -47.7 | -46.9 / -45.6 |
+| LW CRE, W/m², January / July | 27.8 / 27.7 | 24.4 / 27.1 | 26.1 / 29.1 | 23.9 / 26.9 |
+| liquid water path, g/m², January / July | | 34.1 / 37.7 | 41.4 / 47.1 | 39.1 / 44.4 |
+| net TOA flux minus CERES, W/m², January / July | | 9.0 / 9.4 | 5.0 / 5.2 | 5.3 / 5.3 |
+
+The monitors do not move: the precipitation bias is -0.72 / -0.65 mm/day
+against -0.71 / -0.67 for the control, the clear-sky OLR bias -7.6 / -9.2 W/m²
+against -7.6 / -9.2, and the tropical 99.9th percentile of precipitation is
+1.03 times the control's.
+
+**One edge remains in the adopted set.** `crs` sits on its lower
+bound of 0.90, below every value ECHAM6.3 uses (0.95 at T31 to 0.994 at T127),
+so the data say it should be at least this low and do not locate it. Ranges below
+0.90 were not run.
+
+**Stage 3 years** (365 days, 2M host, T63 L47, from the fixed-tree January
+state; annual means against the jcm-monitor climatologies; the loss is read on
+the Stage-2 windows of the year output):
+
+| year | cover parameters | gates | loss (control 131.9) | cover: gate / radiation (obs 0.63) | net TOA W/m² (CERES +1.0) | SW CRE (-45.7) | LW CRE (27.9) | reflected SW (99.0) | LWP g/m² (36.4) | precipitation mm/day (3.07) | p99.9 / control |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `2m_control` | ECHAM T63 | `cloud_cover` fails | 131.9 | 0.46 / 0.58 | +9.8 | -42.3 | 26.1 | 90.8 | 42.1 | 2.38 | 1.00 |
+| **`2m_cloudi`** | **adopted** | all pass | **100.3 (-24 %)** | **0.51 / 0.65** | **+5.6** | **-48.3** | **28.2** | **96.9** | **49.6** | **2.40** | **0.97** |
+| `2m_cloud` | corner optimum | all pass | 93.0 (-29 %) | 0.50 / 0.64 | +6.1 | -45.9 | 26.0 | 94.5 | 47.3 | 2.42 | 0.97 |
+| `2m_a` | ECHAM T63 cover; the Stage-2 convection and microphysics corner, not adopted | `cloud_cover` fails | 113.0 | 0.46 / 0.59 | +8.1 | -45.6 | 27.8 | 94.1 | 51.3 | 2.38 | 0.88 |
+| `jam_rc_cloud` | **PENDING:** release aerosol defaults plus the adopted cover set, JAM host | | | | | | | | | | |
+
+The adopted set raises the radiation cover by 0.07 and the cover the gate
+measures from 0.46 to 0.51 (the gate's floor is 0.5, so it passes by 0.01; see
+{doc}`cloud_cover_gate` for the two definitions), halves the TOA bias (+9.8 to
++5.6 W/m², CERES +1.0), brings the reflected SW to within 2.1 W/m² of CERES and
+the LW CRE to within 0.3 W/m². What it costs: the SW CRE is 2.6 W/m² too strong
+(-48.3 against -45.7, from 3.5 too weak), the liquid water path rises by 7.5 g/m²
+over a control that is already above ESA-CCI, the near-surface temperature falls
+by 0.2 K, and the all-sky OLR bias grows from -6.7 to -8.7 W/m² because the LW
+CRE rises onto its observation while the clear-sky OLR, which is 8 to 10 W/m²
+low on every host, does not move. The corner optimum is the better fit by the
+loss (93.0 against 100.3) and has the better SW CRE (-45.9) but a LW CRE 1.9
+W/m² low, and its cover passes the gate by 0.003; it is not adopted because its
+parameters sit on three bounds.
+
+**What did not change:** precipitation (-0.67 mm/day against -0.69 for the
+control), the clear-sky OLR bias (-7.5 / -9.2 W/m² against -7.6 / -9.2 in the
+January / July windows), the tropical precipitation extremes (the 99.9th
+percentile of 5-day means is 0.97 times the control's), and every convection
+and microphysics default, which stay ECHAM's. The combined JAM year
+`jam_rc_cloud` (the release aerosol defaults together with this set) tests the
+JAM-2M host; its row above is filled when it is scored.
+
 ## What the calibration cannot reach
 
 The remainder is structural: no lever of this retune closes it, and several of
@@ -264,16 +380,20 @@ earlier-tree sweeps.
   on the 1M control) and no lever moves it by more than 1 W/m². Part of the gap
   is CERES's clear-sky sampling; the split between sampling and model was not
   made.
-- **Cloud cover.** 0.58-0.59 as the radiation sees it (the mean of
-  `radiation.total_cloud_cover`) and 0.46 on the offline maximum-random overlap
-  of the daily-mean profile (the `cloud_cover` release gate, whose band is
-  0.5-0.9: it fails on the control year as on the calibrated one), against 0.63
-  observed. The Southern Ocean (45-65S) is too clear on every host (0.58-0.69
-  against 0.85-0.88; earlier tree). See {doc}`cloud_cover_gate` for the definitions.
+- **Cloud cover.** With ECHAM's cover parameters, 0.58-0.59 as the radiation
+  sees it (the mean of `radiation.total_cloud_cover`) and 0.46 on the offline
+  maximum-random overlap of the daily-mean profile (the `cloud_cover` release
+  gate, whose band is 0.5-0.9: it fails on the control year as on the JAM
+  aerosol-only year), against 0.63 observed; Stage 2b's set closes this on the
+  2M host (0.65 and 0.51). The Southern Ocean (45-65S) is too clear on every host
+  (0.58-0.69 against 0.85-0.88; earlier tree, ECHAM's cover parameters; not
+  re-measured with the Stage-2b set). See {doc}`cloud_cover_gate` for the
+  definitions.
 - **Liquid water path compensates for the missing cover** on the 1M and 2M, as
-  above; the liquid fraction reaches one half at -6 to -11 °C on every host,
-  where CALIPSO-type estimates put it near -20 °C, and no lever moves that by
-  more than 1-2 K (earlier tree).
+  above, and is still high with Stage 2b's set (49.6 g/m² against 42.1 for the
+  2M control and 36.4 observed); the liquid fraction reaches one half at -6 to
+  -11 °C on every host, where CALIPSO-type estimates put it near -20 °C, and no
+  lever moves that by more than 1-2 K (earlier tree).
 - **Dust.** The lifetime is 1.8 d against AeroCom's 4.1, which is deposition and
   size, and the regional source balance is wrong: in the best arm of the
   earlier-tree sweeps the modelled-to-observed regional dust AOD was 0.84
@@ -305,8 +425,16 @@ earlier-tree sweeps.
   the JAM chain is composed at. It was calibrated at T63 L47 only. The L95 JAM
   member inherits both L47 values: the dust scale because it is a T63 value, and
   the sea-salt scale because it has no switch.
-- The release-matrix regression bands of the JAM members describe the aerosol
-  climate of the previous defaults and are regenerated against the release
+- The cover set applies at T63. It was swept on the 2M host at L47 and
+  confirmed there in a 365-day year; the JAM-2M host's year is `jam_rc_cloud`
+  (above), and the 1M host reads the set with no calibration or year of its
+  own. T106 interpolates linearly in the truncation number between the T63 row
+  and ECHAM's T127 row (an untuned blend: `crs` 0.963, `crt` 0.727, `csatsc`
+  0.781, `cinv` 0.238, and `nex` 2, the nearer truncation's integer), and a
+  grid with no spectral truncation (the cubed sphere) takes the T63 row; neither
+  was swept. See {doc}`resolution_defaults`.
+- The release-matrix regression bands of the ECHAM members describe the cloud and
+  aerosol climate of the previous defaults and are regenerated against the release
   candidate, together with their init states.
 - The release gate on the annual dust emission, `DUST_EMISSION_TG_PER_YR`, is
   400-2600 Tg/yr: the calibrated year emits 1629, 2.5 times the converted
@@ -322,6 +450,10 @@ earlier-tree sweeps.
 Each number above is tied to a run label. The sweeps are the 40-arm Stage-1
 and 25-arm Stage-2 ledgers of each host on dev 519f18e8 (JEM-Cal recipe v3.1;
 observations from jcm-monitor); the years are the five 365-day T63 L47 runs
-named in the table, scored with `tools/release_validation/health.py` and the
-monitor's release recipe. Shipped values are pinned by `dust_test.py`,
-`seasalt_test.py`, `echam_terms_test.py` and `runners_test.py`.
+named in the JAM table, scored with `tools/release_validation/health.py` and the
+monitor's release recipe. Stage 2b is the 25-arm ledger of the 2M host on the
+same tree with the five `cloud.*` levers, and the years `2m_control`,
+`2m_cloudi`, `2m_cloud`, `2m_a` and `jam_rc_cloud`, on the same tree and recipe.
+Shipped values are pinned by `dust_test.py`, `seasalt_test.py`,
+`echam_terms_test.py` and `runners_test.py`, and the cover set by
+`echam_cloud_defaults_test.py`, `parameters_test.py` and `runners_test.py`.

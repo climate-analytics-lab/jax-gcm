@@ -555,11 +555,13 @@ Interactive aerosol (JAM)
   (AeroCom mean 14.7, median 12.5); sulphate stays inside the AeroCom band (5.3
   to 5.2 mg SO4/m², ion basis, against a band of 1.95-5.85) and the net TOA flux
   is unchanged within 0.3 W/m² (annual mean +7.4 to +7.1; CERES +1.0). The
-  year's results are tabulated in :doc:`design/jam_aerosol_retune`. The DMS, wet-removal, cloud
-  and convection defaults are unchanged: the 1M and 2M levers were swept as
-  well: the 2M's optimum sat on the lower edge of four of its five levers, the
-  1M's best arm took `cprcon` to the edge of its range, and both bought cloud
-  radiative effect with liquid water path. What the calibration cannot fix is
+  year's results are tabulated in :doc:`design/jam_aerosol_retune`. The DMS, wet-removal,
+  convection and microphysics defaults are unchanged (the T63 cloud-cover
+  parameters are calibrated separately, in *The cloud-cover defaults at T63 are
+  calibrated* below): the 1M and 2M levers were swept as well: the 2M's optimum
+  sat on the lower edge of four of its five levers, the 1M's best arm took
+  `cprcon` to the edge of its range, and both bought cloud radiative effect
+  with liquid water path. What the calibration cannot fix is
   structural and is listed under *Known limitations*; the design page records
   the targets, the stages and the evidence.
 - **Aerosol direct radiative effect from the modal population**: per-band Mie
@@ -1816,26 +1818,66 @@ ECHAM cloud parameters default to their truncation's values
 - The cloud cover's ``crs``, ``crt``, ``nex``, ``csatsc``, ``cinv``,
   ``csecfrl`` and ``nadd``, the 1M's ``cvtfall``, ``csecfrl`` and
   ``clwprat`` and the 2M's ``cvtfall`` take ECHAM6.3's per-truncation values
-  (``mo_echam_cloud_params.f90::sucloud`` l.198-237) for the run's grid,
+  (``mo_echam_cloud_params.f90::sucloud`` l.198-237; at T63 the cover's ``crs``,
+  ``crt``, ``nex``, ``csatsc`` and ``cinv`` are jcm's calibrated values, next
+  entry) for the run's grid,
   chosen when the physics is built: by ``echam_physics(coords=...)``, and by
   both Hydra doors, which give the physics the grid (the factory presets
   receive ``coords``; the term-list presets build each term's parameters with
   ``jcm.physics.resolution_defaults.default_parameters``; the pySES door
   builds the physics the model runs with its dycore's grid). Without a grid the
-  defaults are ECHAM's T63 values. They remain differentiable parameters: an
+  defaults are the T63 values. They remain differentiable parameters: an
   explicit ``Parameters`` object is used as given, and a field override
   replaces its field on top of the grid's defaults.
 - Between ECHAM's truncations (T31, T63, T127, T255) the values are
   interpolated linearly in the truncation number, and integer fields take the
-  nearer truncation's value. T106, which ECHAM does not support, gets
-  ``crs = 0.987765625``, ``cvtfall = 2.8359375``, ``csecfrl = 8.359375e-6``
-  and T63's value of every other field. Outside T31-T255 the end row is held,
+  nearer truncation's value. T106, which ECHAM does not support, gets the
+  untuned blend of the T63 row (with the calibrated cover values) and ECHAM's
+  T127 row: ``crs = 0.963156``, ``crt = 0.726708``, ``csatsc = 0.781446``,
+  ``cinv = 0.237861``, ``cvtfall = 2.8359375``, ``csecfrl = 8.359375e-6``,
+  ECHAM's ``nex = 2`` and T63's ``nadd`` and ``clwprat``. Outside T31-T255 the
+  end row is held,
   and a grid without a spectral truncation (pySES) takes the T63 row; both
   warn once. A term whose factory-built defaults were made for another grid
   than the one it runs on warns once, naming both.
-- **Changes results** at every truncation but T63, including the
-  ``t106-echam-1m`` and ``t106-echam-2m`` members. See
-  :doc:`design/resolution_defaults`.
+- **Changes results** at every truncation but T63 (T63 changes through the
+  calibration in the next entry), including the ``t106-echam-1m`` and
+  ``t106-echam-2m`` members. See :doc:`design/resolution_defaults`.
+
+The cloud-cover defaults at T63 are calibrated
+""""""""""""""""""""""""""""""""""""""""""""""
+
+- The Sundqvist cover's ``crt``, ``crs``, ``nex``, ``csatsc`` and ``cinv`` are
+  **0.679016061, 0.9, 1.84856084, 0.948216414 and 0.213005383** at T63
+  (ECHAM6.3: 0.75, 0.975, 2, 0.7 and 0.25), for the 1M, 2M and JAM-2M hosts
+  alike. They are the interior arm of a 25-arm Gaussian-process search over
+  exactly these five parameters on the 2M host (30-day windows against the
+  jcm-monitor climatologies), confirmed in a 365-day T63 L47 year. Against the
+  same year with ECHAM's values, the radiation cover rises from 0.58 to 0.65
+  (observed 0.63), the cover the ``cloud_cover`` release gate measures from 0.46
+  (a failure) to 0.51 (a pass; the floor is 0.5), the net TOA flux falls from
+  +9.8 to +5.6 W/m² (CERES +1.0), the reflected SW rises from 90.8 to
+  96.9 W/m² (99.0) and the LW CRE from 26.1 to 28.2 (27.9). The cost is a SW
+  CRE 2.6 W/m² too strong (-48.3 against -45.7), 7.5 g/m² more liquid water
+  path (49.6, ESA-CCI 36.4), a near-surface temperature 0.2 K lower and an
+  all-sky OLR bias of -8.7 against -6.7 W/m² (the clear-sky OLR bias, -8 to
+  -10 W/m², does not move). Precipitation and the tropical precipitation
+  extremes are unchanged. The sweep's unconstrained optimum sat on the edges of
+  its box (``nex`` 3.96 of 4, ``cinv`` 0.5 of 0.5, ``crs`` 0.9) and was not
+  adopted; the adopted ``crs`` is itself on its lower bound of 0.9, below every
+  ECHAM value. The non-integer ``nex`` is admissible: the critical-humidity
+  profile is continuous in it. The 1M host reads the set without a calibration
+  or year of its own. The evidence is in :doc:`design/jam_aerosol_retune`
+  ("Stage 2b: cloud fraction") and the statement of the values in
+  :doc:`science/clouds_microphysics`.
+- **Changes results** on every ECHAM host at T63 (cloud cover, cloud radiative
+  effect, TOA balance, surface temperature), and at T106 and on the cubed
+  sphere, which take the T63 row or interpolate from it. ECHAM's constants are
+  one override away: ``+physics.clouds.crt=0.75`` (and ``crs``, ``nex``,
+  ``csatsc``, ``cinv``) on the factory-built presets, or
+  ``++physics.terms.sundqvist_cloud_fraction.params.crt=0.75`` on the
+  term-list presets. The release-matrix bands of the ECHAM members shift
+  accordingly and are regenerated with the release candidate.
 
 JAM mixed-phase freezing follows ECHAM-HAM
 """"""""""""""""""""""""""""""""""""""""""
@@ -2433,16 +2475,18 @@ Regression fixtures follow the supported matrix
 Calibration and capability gaps
 """""""""""""""""""""""""""""""
 
-- **The aerosol and cloud calibration is two emission scales; what is left is
-  structural.** Measured in the retune's 365-day T63 L47 JAM year and, for the
+- **The calibration is two emission scales and one cloud-cover set; what is left
+  is structural.** Measured in the retune's 365-day T63 L47 JAM year and, for the
   1M and 2M, its control windows (:doc:`design/jam_aerosol_retune` has the
   evidence; the dust regional balance and the sulphur budget are from the
   review of its earlier-tree sweeps): clear-sky OLR is 8 to
   10 W/m² below CERES on every ECHAM host and no swept lever moves it by more
-  than 1 W/m²; total cloud cover is 0.58 to 0.59 as the radiation sees it and
-  0.46 on the offline maximum-random overlap, against 0.63 observed, and the 1M and
-  2M optima buy cloud radiative effect with liquid water path instead of
-  cover; dust lifetime is 1.8 d against AeroCom's 4.1 and the regional dust
+  than 1 W/m²; with ECHAM's cover parameters total cloud cover is 0.58 to 0.59
+  as the radiation sees it and 0.46 on the offline maximum-random overlap,
+  against 0.63 observed (the calibrated T63 cover set brings the 2M host to 0.65
+  and 0.51, with liquid water path 7.5 g/m² higher), and the 1M and 2M
+  convection and microphysics optima buy cloud radiative effect with liquid
+  water path instead of cover; dust lifetime is 1.8 d against AeroCom's 4.1 and the regional dust
   source balance is wrong, so dust AOD stays under half of the observed;
   the sea-salt burden lies between the AeroCom median and mean but its
   coarse-mode extinction per unit mass is low, and total AOD is 0.082 against

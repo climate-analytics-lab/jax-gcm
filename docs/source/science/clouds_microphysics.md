@@ -6,7 +6,9 @@
 - **Cloud cover** (``jcm/physics/clouds/sundqvist.py::SundqvistCloudFraction``)
   — ECHAM6.3's ``mo_cover.f90::cover``, the Sundqvist (1989) / Lohmann and
   Roeckner (1996) relative-humidity closure, used by the 1M, the 2M and the
-  JAM configurations alike. The value is ECHAM's at every level:
+  JAM configurations alike. The formulation is ECHAM's at every level (the T63
+  values of ``crt``, ``crs``, ``nex``, ``csatsc`` and ``cinv`` are jcm's
+  calibrated set, below):
   ``q_s`` in ECHAM's form over ice or water by ECHAM's ``lo2`` switch; the
   critical relative humidity ``crt + (crs − crt)·exp(1 − (p_s/p)^nex)``;
   over ice-free ocean without convection (previous step's ``ktype``, as in
@@ -25,7 +27,8 @@
   own levels, 40/45 at L47 and 88/93 at L95, and ``dT/dz`` uses the model
   geopotential, as ECHAM's uses ``pgeo``. Every column of the ECHAM Fortran
   reference (``jcm/data/test/echam_cloud_reference/``) is reproduced at the
-  reference tolerance, at T31, T63, T127 and T255. It is a **pure diagnostic**
+  reference tolerance, at T31, T63, T127 and T255, with ECHAM's own constants
+  for each. It is a **pure diagnostic**
   — the term emits zero T/q/qc/qi tendencies; condensation lives in each
   microphysics scheme, as in ECHAM's ``cloud``. The humidity the closure sees,
   ``q/q_s`` with ``q_s`` over ice where ``lo2`` selects it, is published as
@@ -345,16 +348,47 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   defines them for T31, T63, T127 and T255 only; it has no T106
   configuration. jcm builds these defaults for the run's truncation at physics
   construction (``echam_physics(coords=...)``; the Hydra runner passes the
-  grid): ECHAM's values at its four truncations, linear interpolation in the
-  truncation number between them for the real-valued ones, and the nearer
-  truncation's value for the integers ``nex`` and ``nadd``. T106 therefore
-  gets ``crs = 0.9878``, ``cvtfall = 2.836``, ``csecfrl = 8.36e-6`` and T63's
-  (= T127's) other values. The interpolated values are jcm's choice, made so
-  that the resolution trend ECHAM encodes is continued rather than switched,
-  and they are **untuned**. Outside T31–T255, and on a grid with no spectral
-  truncation, the nearest (or T63) values are used with a warning. An explicit
-  parameter object or a field override always wins
+  grid): the table's values at its four truncations (ECHAM's, with jcm's
+  calibrated T63 cover values below), linear interpolation in the truncation
+  number between them for the real-valued ones, and the nearer truncation's
+  value for the integers ``nex`` and ``nadd``. T106 therefore gets
+  ``crs = 0.9632``, ``crt = 0.7267``, ``csatsc = 0.7814``, ``cinv = 0.2379``,
+  ``cvtfall = 2.836``, ``csecfrl = 8.36e-6``, ECHAM's ``nex = 2`` and
+  T63's (= T127's) ``nadd``, ``clwprat``. The interpolated values are jcm's
+  choice, made so that the resolution trend the table encodes is continued
+  rather than switched, and they are **untuned**. Outside T31–T255, and on a
+  grid with no spectral truncation, the nearest (or T63) values are used with
+  a warning. An explicit parameter object or a field override always wins
   (``jcm/physics/resolution_defaults.py``).
+- Cover parameters at T63, `science` — the T63 values of ``crt``, ``crs``,
+  ``nex``, ``csatsc`` and ``cinv`` are **0.679016061, 0.9, 1.84856084,
+  0.948216414 and 0.213005383**, not ECHAM's 0.75, 0.975, 2, 0.7 and 0.25.
+  ECHAM's cover leaves the 2M host with a radiation cover of 0.58 against
+  0.63 observed while its liquid water path is already above ESA-CCI, and no
+  convection or microphysics lever closes that without adding water. The
+  adopted set is the interior arm of a 25-arm Gaussian-process search over
+  exactly these five parameters on the 2M host (30-day January and July
+  windows, a loss over cloud cover, SW and LW cloud radiative effect, liquid
+  water path and precipitation against the jcm-monitor climatologies), and was
+  confirmed in a 365-day T63 L47 year: the radiation cover rises from 0.58 to
+  0.65, the net TOA flux falls from +9.8 to +5.6 W/m² (CERES +1.0), the
+  reflected SW rises from 90.8 to 96.9 W/m² (99.0) and the LW CRE from 26.1 to
+  28.2 (27.9). The cost is a SW CRE 2.6 W/m² too strong and 7.5 g/m² more
+  liquid water path; precipitation, the clear-sky OLR and the tropical
+  precipitation extremes do not move. The search's own optimum lay on the
+  edges of its box (``nex`` 3.96 of an upper bound 4, ``cinv`` 0.5 of 0.5,
+  ``crs`` 0.9 of a lower bound 0.9) and was not adopted; the adopted ``crs`` is
+  itself on that lower bound, below every ECHAM value (0.95 at T31 to 0.994 at
+  T127), so the data do not locate it from below. ``nex`` is an INTEGER in
+  ECHAM, but the closure needs none: the profile ``rhc`` has a base
+  ``p_s/p >= 1`` and so is continuous and differentiable in a real exponent,
+  equal to ``crs`` at the surface and tending to ``crt`` aloft. The 1M, the 2M
+  and the JAM-2M hosts read these values through the same cover; they were
+  calibrated on the 2M host, and the 1M host has no calibration of its own.
+  ECHAM's own row stays in ``ECHAM_CLOUD_DEFAULTS``, and the Fortran comparison
+  runs on the constants its reference data recorded. Evidence and the year
+  tables:
+  {doc}`../design/jam_aerosol_retune` ("Stage 2b: cloud fraction").
 - ``csecfrl`` and ``cthomi``, two copies — ECHAM has one ``csecfrl``
   (``mo_echam_cloud_params.f90`` l.76, set per truncation) and one
   ``cthomi`` (l.54), which its cover and its ``cloud`` both read. jcm holds
@@ -577,7 +611,8 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
 - ``jcm/physics/clouds/cloud_data.py`` — ``radiation_cloud_fields``,
   ``condensate_masked_cover``.
 - ``jcm/physics/clouds/echam_cloud_defaults.py`` — ``echam_cloud_defaults``,
-  ``inversion_levels``.
+  ``ECHAM_CLOUD_DEFAULTS``, ``JCM_CALIBRATED_COVER_T63``,
+  ``JCM_CLOUD_DEFAULTS``, ``inversion_levels``.
 - ``jcm/physics/resolution_defaults.py`` — ``resolution_defaults``.
 - ``jcm/physics/clouds/echam_1m.py`` — ``Echam1MMicrophysics``,
   ``cloud_microphysics_column_sweep``.
