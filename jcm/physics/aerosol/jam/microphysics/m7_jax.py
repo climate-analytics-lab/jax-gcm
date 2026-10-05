@@ -85,7 +85,10 @@ from jcm.physics_interface import PhysicsTendency
 # ``jam_terms``), so a plain jcm import never needs it.
 from m7_jax import interface as m7_interface  # noqa: E402
 from m7_jax.model import FullState, step_all  # noqa: E402
-from m7_jax.properties import load_kappa_table  # noqa: E402
+from m7_jax.properties import (  # noqa: E402
+    default_kappa_table_path,
+    load_kappa_table,
+)
 
 #: HAM ``aerocomp`` order (``mo_ham_m7_trac.f90``): the 18 (species, class)
 #: components of the M7 state, the layout ``m7_jax`` expects.
@@ -139,18 +142,9 @@ def pbl_top_level(dry_static_energy, height, ustar, coriolis):
 
 
 def _default_kappa_table_path() -> Path:
+    """``M7_JAX_KAPPA_TABLE`` if set, else the table ``m7-jax`` ships as package data."""
     env = os.environ.get("M7_JAX_KAPPA_TABLE")
-    if env:
-        return Path(env)
-    import m7_jax
-    package = Path(m7_jax.__file__).resolve().parent
-    for candidate in (package / "data" / "lut_kappa.nc",
-                      package.parents[1] / "reference" / "input" / "lut_kappa.nc"):
-        if candidate.exists():
-            return candidate
-    raise FileNotFoundError(
-        "m7-jax's kappa lookup table lut_kappa.nc was not found; set "
-        "M7_JAX_KAPPA_TABLE to its path.")
+    return Path(env) if env else Path(default_kappa_table_path())
 
 
 class M7JaxMicrophysics(ModalMicrophysicsTerm):
