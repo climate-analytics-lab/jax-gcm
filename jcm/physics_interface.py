@@ -37,7 +37,10 @@ PhysicsCarryState: TypeAlias = Dict[str, Any]
 #: Cross-step carry key for the previous step's POST-PHYSICS state: the
 #: gridpoint state after the physics tendency was applied and before the
 #: dynamics ran, as the dynamical core actually advanced from it
-#: (:meth:`jcm.dycore.base.DynamicalCore.after_physics_state`). The slot is a
+#: (:meth:`jcm.dycore.base.DynamicalCore.after_physics_state`), passed through
+#: :func:`verify_state` so it is in the representation the physics receives
+#: (a consumer differencing it against the next received state must not read
+#: the entry clamp of a small negative as dynamics). The slot is a
 #: dict ``{"temperature", "specific_humidity", "tracers": {name: ...},
 #: "valid"}`` in the physics package's own layout, present only when a
 #: composed term declares ``requires_post_physics_fields``. ``valid`` is a

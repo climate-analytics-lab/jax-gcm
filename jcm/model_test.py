@@ -2954,6 +2954,59 @@ class TestPostPhysicsAnchor(unittest.TestCase):
         self.assertEqual(float(slot["valid"]), 1.0)
         self.assertEqual(set(slot["tracers"]), {"qc", "qi"})
 
+    def test_entry_clamp_is_not_read_as_dynamics(self):
+        """The anchor is in the representation the physics receives.
+
+        The physics sees ``verify_state``'s ``max(q, 0)``. A dycore state
+        holding a small negative humidity (spectral ringing) with no dynamics
+        must give a zero dynamics increment, not ``−q_ap`` of spurious
+        convergence from comparing the clamped state with an unclamped anchor
+        (Tiedtke would read it as moisture supply).
+        """
+        from typing import ClassVar
+
+        from jcm.physics.clouds.cloud_inputs import cloud_scheme_inputs
+        from jcm.physics.composable_physics import ComposablePhysics
+        from jcm.physics.physics_term import PhysicsTerm
+        from jcm.physics_interface import PhysicsState, PhysicsTendency
+
+        class _Probe(PhysicsTerm):
+            name: ClassVar[str] = "probe"
+            category: ClassVar[str] = "probe"
+            requires: ClassVar[tuple[str, ...]] = ()
+            provides: ClassVar[tuple[str, ...]] = ("probe",)
+            requires_post_physics_fields: ClassVar[tuple[str, ...]] = (
+                "specific_humidity",)
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                inputs = cloud_scheme_inputs(state, diagnostics)
+                return PhysicsTendency.zeros(state.temperature.shape), {
+                    **diagnostics,
+                    "probe": {
+                        "d_humidity": inputs.increment.specific_humidity,
+                        "valid": inputs.dynamics_valid,
+                    },
+                }
+
+        physics = ComposablePhysics([_Probe()], vectorize_columns=True,
+                                    dt_seconds=self.DT)
+        shape = (self.NLEV, 3, 2)
+        q0 = jnp.full(shape, 2e-3).at[0].set(-1e-6)     # ringing at the top
+        initial = PhysicsState(
+            u_wind=jnp.zeros(shape), v_wind=jnp.zeros(shape),
+            temperature=jnp.full(shape, 270.0), specific_humidity=q0,
+            geopotential=jnp.zeros(shape),
+            normalized_surface_pressure=jnp.ones(shape[1:]))
+        model, preds = self._run(physics, jnp.zeros(self.NLEV), 0.0, steps=3,
+                                 initial=initial)
+        probe = preds.physics["probe"]
+        np.testing.assert_array_equal(np.asarray(probe["valid"]), [0.0, 1.0, 1.0])
+        for k in (1, 2):
+            np.testing.assert_allclose(np.asarray(probe["d_humidity"][k]), 0.0,
+                                       atol=1e-12)
+        slot = model.physics_carry["_post_physics_state"]
+        self.assertGreaterEqual(float(jnp.min(slot["specific_humidity"])), 0.0)
+
     def test_anchor_carries_this_steps_physics_tendency(self):
         """The anchor is the post-physics state, not the pre-physics one.
 

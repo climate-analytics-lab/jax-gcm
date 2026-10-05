@@ -23,7 +23,8 @@ next received state minus the anchor is the dynamics of the last step alone
 
 * anchor := the previous step's ``x_ap``, carried by the model
   (``_post_physics_state``, written from
-  :meth:`jcm.dycore.base.DynamicalCore.after_physics_state`);
+  :meth:`jcm.dycore.base.DynamicalCore.after_physics_state` through the same
+  ``verify_state`` clamp as ``x_n``, so the clamp is not an increment);
 * increment := ``(x_n − x_ap) + dt·P_upstream − detrainment``, where
   ``x_n − x_ap`` is the dynamics of the last step and ``P_upstream`` is the
   running sum of the tendencies of the terms upstream of the cloud scheme
