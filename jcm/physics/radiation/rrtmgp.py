@@ -765,14 +765,18 @@ def radiation_scheme_rrtmgp(
     # scales (``cloud_tau_scale_liq``/``_ice``) that weight by the unscaled
     # τ; passing them instead of scaling the paths is #958.
     zinhoml = liquid_inhomogeneity(convection_type, parameters)
-    in_cloud_lwp_lib = zinhoml * lax.cond(
+    # The floor applies to the path the library receives, factor included: a
+    # path above it scaled by a small factor must not re-enter the band whose
+    # derivative overflows (``mcica.NEGLIGIBLE_CLOUD_PATH_KG_M2``).
+    in_cloud_lwp_lib = resolvable_path(zinhoml * lax.cond(
         needs_reversal, lambda a: a[::-1], identity,
-        resolvable_path(icon_state.cloud_water_path),
-    )
-    in_cloud_ipath_lib = parameters.cloud_inhomogeneity_ice * lax.cond(
-        needs_reversal, lambda a: a[::-1], identity,
-        resolvable_path(icon_state.cloud_ice_path),
-    )
+        icon_state.cloud_water_path,
+    ))
+    in_cloud_ipath_lib = resolvable_path(
+        parameters.cloud_inhomogeneity_ice * lax.cond(
+            needs_reversal, lambda a: a[::-1], identity,
+            icon_state.cloud_ice_path,
+        ))
 
     nlev = icon_state.temperature.shape[0]
     halo = 1

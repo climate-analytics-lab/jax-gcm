@@ -268,7 +268,8 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
   ``where`` safe-denominator guards so backward-mode cloud-parameter gradients do
   not form ``0·inf`` on clear columns.
 - `differentiability` — both schemes pass no cloud to the radiative transfer
-  below an in-cloud path of ``1e-11 kg/m²`` (``mcica.py::resolvable_path``), and
+  below an in-cloud path of ``1e-11 kg/m²`` (``mcica.py::resolvable_path``; for
+  jax-rrtmgp the path it receives, sub-grid inhomogeneity factor included), and
   the cloud paths handed to the jax-rrtmgp library are cloud-free in its halo
   cells (``rrtmgp.py::_to_4d_per_gpoint``). The library discards the halos but
   computes them, and a halo that repeated a cloudy surface layer makes the
