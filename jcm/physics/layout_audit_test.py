@@ -195,10 +195,29 @@ def _attach_nudging_target(state, diagnostics, forcing, horiz):
     return state, diagnostics, forcing.copy(nudging_target=target)
 
 
+def _add_zonal_waves(state, diagnostics, forcing, horiz):
+    """Give ``UpperSponge`` zonal anomalies, else it has nothing to damp.
+
+    The sponge (ECHAM ``uspnge``) damps only the m != 0 part of u, v and T,
+    and ``_build_env``'s fields are zonally uniform. The waves are built on
+    the NODAL grid and flattened lon-major for the column host, the layout
+    the host itself uses, so both hosts see the same field.
+    """
+    rng = np.random.default_rng(1)
+    waves = lambda: rng.normal(size=(_NLEV, _NLON, _NLAT))  # noqa: E731
+    shape = (_NLEV,) + horiz
+    state = state.copy(
+        u_wind=state.u_wind + jnp.asarray(waves()).reshape(shape),
+        v_wind=state.v_wind + jnp.asarray(waves()).reshape(shape),
+        temperature=state.temperature + jnp.asarray(waves()).reshape(shape))
+    return state, diagnostics, forcing
+
+
 #: Per-term environment tweaks that put a term on its ACTIVE path. A term
 #: guarded by "no input -> zero tendency" would otherwise be compared on a
 #: branch that exercises none of its arithmetic.
-ENV_HOOKS = {"NudgingTerm": _attach_nudging_target}
+ENV_HOOKS = {"NudgingTerm": _attach_nudging_target,
+             "UpperSponge": _add_zonal_waves}
 
 
 _COORDS = get_speedy_coords(layers=8, spectral_truncation=21)

@@ -2344,7 +2344,11 @@ class TestBuilderErrorAndSelectorPaths(unittest.TestCase):
         )
         from jcm.runners import maybe_add_sponge
 
-        # run=longrun carries the production sponge block (10 levels).
+        from jcm.physics.dissipation.upper_sponge import (
+            ECHAM_ENSPODI, ECHAM_SPONGE_TIMESCALE_S,
+        )
+
+        # run=longrun carries ECHAM's sponge: one level, spdrag, enspodi = 1.
         cfg = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8",
                         "run=longrun"])
         physics = held_suarez_physics()
@@ -2353,10 +2357,34 @@ class TestBuilderErrorAndSelectorPaths(unittest.TestCase):
         self.assertEqual(len(with_sponge.terms), n_before + 1)
         sponge_term = with_sponge.terms[-1]
         self.assertIsInstance(sponge_term, UpperSponge)
+        self.assertEqual(sponge_term.n_sponge_levels, 1)
+        self.assertEqual(sponge_term.sponge_timescale_s,
+                         ECHAM_SPONGE_TIMESCALE_S)
+        self.assertEqual(sponge_term.enspodi, ECHAM_ENSPODI)
+
+        # Explicit timescale/enspodi overrides reach the term.
+        cfg_custom = _compose(["physics=held_suarez",
+                               "grid=held_suarez_t31_l8", "run=longrun",
+                               "run.sponge.levels=3",
+                               "run.sponge.timescale_h=2.0",
+                               "run.sponge.enspodi=2.0"])
+        custom = maybe_add_sponge(physics, cfg_custom).terms[-1]
+        self.assertEqual(custom.n_sponge_levels, 3)
+        self.assertEqual(custom.sponge_timescale_s, 7200.0)
+        self.assertEqual(custom.enspodi, 2.0)
 
         # Default config has sponge disabled -> pass-through, same object.
         cfg_off = _compose(["physics=held_suarez", "grid=held_suarez_t31_l8"])
         self.assertIs(maybe_add_sponge(physics, cfg_off), physics)
+
+    def test_pyses_refuses_the_run_group_sponge(self):
+        """The lon-lat upper sponge cannot run on pySES columns: refused, not
+        silently dropped.
+        """
+        from jcm.runners import build_model
+        cfg = _compose(["dycore=pyses_ne30l47", "run.sponge.levels=1"])
+        with self.assertRaisesRegex(ValueError, "lid_sponge"):
+            build_model(cfg)
 
 
 class TestRunDispatchErrorPaths(unittest.TestCase):
