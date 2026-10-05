@@ -642,9 +642,19 @@ Radiation, clouds and gravity waves
   column's largest cover under maximum-random and exponential overlap), and
   the NN emulator publishes the analytic expectation of the McICA draw
   rather than sampling it.
-  This is *not* the same number as ``jcm.analysis.total_cloud_cover``, the
-  maximum-random-overlap post-processing function the release-validation gate
-  scores — see :doc:`design/cloud_cover_gate`.
+  This is *not* the same number as ``clouds.total_cloud_cover`` below, which
+  the release-validation gate scores — see :doc:`design/cloud_cover_gate`.
+- **New** ``clouds.total_cloud_cover`` **diagnostic**: ECHAM's total cloud cover
+  ``aclcov`` (``mo_cloud.f90`` section 10.2), the maximum-random overlap of the
+  step's final cloud fraction, computed in the model every step. Under
+  ``run.output_averages`` the saved frame is its time mean over the output
+  interval, which is ECHAM's accumulation; the overlap of a saved *mean* profile
+  (``jcm.analysis.total_cloud_cover``) is the lower offline approximation for
+  output that lacks the field. The release-validation ``cloud_cover`` gate
+  scores the online field when the file has it (and prints the observed
+  reference beside it), and falls back to the offline overlap with a note when
+  it does not. Checkpoints written before the field existed resume with it
+  seeded to zero until the first step.
 - **CAM spectral frontal gravity-wave drag**, selectable with
   ``gw_scheme="frontal"`` or ``gw_scheme="both"`` to run it alongside Hines.
 - **Per-level precipitation flux profiles** and a CloudSat COSP warm-rain
