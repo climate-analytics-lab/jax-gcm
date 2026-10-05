@@ -75,6 +75,7 @@ import pytest
 EXTRAS = {
     "cosp": "jcosp",
     "era5": "gcsfs",
+    "m7": "m7_jax",
     "mam4": "mam4_jax",
     "pyses": "pyses",
 }
@@ -85,6 +86,7 @@ EXTRAS = {
 PACKAGE_NAMES = {
     "cosp": ("jcosp", "jax-cosp", "jax_cosp"),
     "era5": ("gcsfs",),
+    "m7": ("m7_jax", "m7-jax"),
     "mam4": ("mam4_jax", "mam4-jax"),
     "pyses": ("pyses",),
 }

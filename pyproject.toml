@@ -44,6 +44,13 @@ mam4 = [
     # excludes from its semver contract (#737).
     "mam4-jax==0.4.0",
 ]
+# M7-JAX: the ECHAM-HAM M7 aerosol microphysics core (jax-gcm#1017), BSD-3.
+# An opt-in extra like mam4 (the echam-ham-m7 preset needs it). Exact pin, as
+# for mam4: the adapter imports the core's process modules directly.
+# Install with `pip install jcm[m7]`.
+m7 = [
+    "m7-jax==0.2.0",
+]
 # jax-cosp satellite simulators (COSP v2 in JAX): CloudSat radar + warm-rain
 # diagnostics via the CloudsatCosp physics term. Apache-2.0.
 # Install with `pip install jcm[cosp]`.

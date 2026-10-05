@@ -124,6 +124,13 @@ def _load_mam4_jax() -> type[ModalMicrophysicsTerm]:
     return Mam4JaxMicrophysics
 
 
+def _load_m7_jax() -> type[ModalMicrophysicsTerm]:
+    """Import the M7-JAX core lazily (optional ``jcm[m7]`` dependency)."""
+    from jcm.physics.aerosol.jam.microphysics.m7_jax import M7JaxMicrophysics
+
+    return M7JaxMicrophysics
+
+
 # Core resolvers (each takes a spec override, ``None`` for the core default).
 # ``placeholder``/``m7_placeholder`` are built-in; ``mam4_jax`` is loaded
 # lazily so the optional GPL-3.0 ``mam4-jax`` dependency is only imported
@@ -137,6 +144,9 @@ _MICROPHYSICS = {
     # PlaceholderMicrophysics's own MAM4_SPEC default.
     "m7_placeholder": lambda spec: PlaceholderMicrophysics(
         spec=spec or M7_SPEC),
+    # The ECHAM-HAM M7 core over m7-jax (jax-gcm#1017), the optional
+    # ``jcm[m7]`` extra; loaded lazily like mam4_jax.
+    "m7_jax": lambda spec: _load_m7_jax()(spec=spec),
 }
 
 
