@@ -290,6 +290,17 @@ class MonthlyMeanAccumulator:
                     "Non-time variables and spatial coordinates must be "
                     "identical across streaming chunks."
                 ) from error
+        # Everything below works on the raw NumPy buffers. The checks above
+        # already established that every variable's non-time dimensions and
+        # coordinates match the pending sums, so per-frame xarray alignment
+        # would only repeat them — and at T63L47 JAM output (~360 fields,
+        # ~0.9 GB per daily frame) that xarray overhead was most of the
+        # chunked runner's per-chunk host time.
+        frames = {}
+        for name in variables:
+            var = ds[name]
+            axis = var.dims.index("time")
+            frames[name] = (var, axis, np.asarray(var.data))
         emitted = []
         for i, month in enumerate(months):
             month_text = str(month)
@@ -303,38 +314,82 @@ class MonthlyMeanAccumulator:
             self._end = bounds[i, 1]
             self._coverage_ms += duration_ms
             for name in variables:
-                value = ds[name].isel(time=i, drop=True)
-                valid = value.notnull()
-                # Accumulate in float64 whatever the field's dtype: a float32
-                # running sum drifts with the number of intervals (~2e-4 K
-                # over a month of 10-minute means), and ``state_dict`` stores
-                # the sums as Python floats, so float64 is also the only
-                # dtype in which a resumed stream is bit-identical to an
-                # uninterrupted one. The batch ``monthly_means`` reduces in
-                # float64 too.
-                contribution = value.fillna(0).astype(np.float64) * duration_ms
-                valid_duration = valid.astype(np.int64) * duration_ms
-                if name not in self._sums:
-                    self._sums[name] = contribution
-                    self._valid_duration_ms[name] = valid_duration
-                    self._templates[name] = dict(value.attrs)
-                else:
-                    try:
-                        total, contribution = xr.align(
-                            self._sums[name], contribution, join="exact")
-                        valid_total, valid_duration = xr.align(
-                            self._valid_duration_ms[name], valid_duration,
-                            join="exact")
-                    except ValueError as error:
-                        raise ValueError(
-                            f"Variable {name!r} changed dimensions or spatial "
-                            "coordinates across streaming chunks."
-                        ) from error
-                    self._sums[name] = total + contribution
-                    self._valid_duration_ms[name] = valid_total + valid_duration
+                var, axis, data = frames[name]
+                # The trailing Ellipsis keeps a 0-d frame an array (a view),
+                # not a NumPy scalar.
+                self._accumulate(name, var, i,
+                                 data[(slice(None),) * axis + (i, ...)],
+                                 duration_ms)
         if len(emitted) == 1:
             return emitted[0]
         return xr.concat(emitted, dim="time") if emitted else None
+
+    def _accumulate(self, name, var, i, frame, duration_ms):
+        """Add one interval's ``frame`` of ``name``, weighted by its duration.
+
+        Accumulate in float64 whatever the field's dtype: a float32 running
+        sum drifts with the number of intervals (~2e-4 K over a month of
+        10-minute means), and ``state_dict`` stores the sums as Python floats,
+        so float64 is also the only dtype in which a resumed stream is
+        bit-identical to an uninterrupted one. The batch ``monthly_means``
+        reduces in float64 too. A missing value contributes nothing to the
+        sum and nothing to that point's valid duration.
+
+        The operations are the elementwise ones of ``fillna(0)``,
+        ``astype(float64)``, ``* duration`` and ``+``, in the same order, so the
+        sums are bit-identical to accumulating the same frames through
+        xarray; only the bookkeeping is cheaper. The running sum is updated
+        in place, and the valid duration stays one integer while no value
+        has been missing (the usual case; see ``_valid_array``).
+        """
+        contribution = np.array(frame, dtype=np.float64)
+        missing = None
+        if frame.dtype.kind in "fc":
+            missing = np.isnan(frame)
+            if missing.any():
+                contribution[missing] = 0.0
+            else:
+                missing = None
+        contribution *= duration_ms
+        if name not in self._sums:
+            template = var.isel(time=i, drop=True)
+            # Labelled as xarray arithmetic on ``template`` labels it (attrs
+            # kept), so the restart file is byte-for-byte what it would be.
+            self._sums[name] = xr.DataArray(
+                contribution, dims=template.dims, coords=template.coords,
+                name=template.name, attrs=dict(template.attrs))
+            self._templates[name] = dict(template.attrs)
+            self._valid_duration_ms[name] = duration_ms
+            if missing is not None:
+                self._valid_duration_ms[name] = self._valid_array(name)
+                self._valid_duration_ms[name].data[missing] = 0
+            return
+        total = _writable(self._sums[name])
+        np.add(total.data, contribution, out=total.data)
+        self._sums[name] = total
+        valid = self._valid_duration_ms[name]
+        if missing is None and isinstance(valid, int):
+            self._valid_duration_ms[name] = valid + duration_ms
+            return
+        valid = _writable(self._valid_array(name))
+        increment = np.full(frame.shape, duration_ms, dtype=np.int64)
+        if missing is not None:
+            increment[missing] = 0
+        np.add(valid.data, increment, out=valid.data)
+        self._valid_duration_ms[name] = valid
+
+    def _valid_array(self, name) -> xr.DataArray:
+        """Return ``name``'s valid duration as a full int64 array.
+
+        While a variable's valid duration is the same at every point (no
+        value of it has been missing this month, the usual case) it is held
+        as one Python ``int``, which saves a full int64 array pass per
+        interval; this materialises it, shaped and labelled like the sum.
+        """
+        valid = self._valid_duration_ms[name]
+        if isinstance(valid, int):
+            return xr.full_like(self._sums[name], valid, dtype=np.int64)
+        return valid
 
     def finish(self) -> xr.Dataset | None:
         """Emit and clear the pending, possibly partial, final month."""
@@ -348,7 +403,11 @@ class MonthlyMeanAccumulator:
         variables = {}
         for name, total in self._sums.items():
             valid = self._valid_duration_ms[name]
-            mean = total / valid.where(valid != 0)
+            if isinstance(valid, int) and valid != 0:
+                mean = total / valid
+            else:
+                valid = self._valid_array(name)
+                mean = total / valid.where(valid != 0)
             mean.attrs = self._templates[name]
             variables[name] = mean
         midpoint = self._start + (self._end - self._start) // 2
@@ -389,8 +448,8 @@ class MonthlyMeanAccumulator:
             "end": None if self._end is None else str(self._end),
             "coverage_ms": self._coverage_ms,
             "sums": {name: value.to_dict() for name, value in self._sums.items()},
-            "valid_duration_ms": {name: value.to_dict()
-                                  for name, value in self._valid_duration_ms.items()},
+            "valid_duration_ms": {name: self._valid_array(name).to_dict()
+                                  for name in self._valid_duration_ms},
             "templates": self._templates,
             "static": None if self._static is None else self._static.to_dict(),
             "attrs": self._attrs,
@@ -422,6 +481,9 @@ class MonthlyMeanAccumulator:
                 for name, value in self._sums.items()}
         valid = {}
         for name, value in self._valid_duration_ms.items():
+            if isinstance(value, int):
+                valid[name] = {"uniform": value, "like": json.dumps(name)}
+                continue
             flat = np.asarray(value.values)
             if flat.size and np.all(flat == flat.flat[0]):
                 valid[name] = {"uniform": int(flat.flat[0]),
@@ -493,9 +555,9 @@ class MonthlyMeanAccumulator:
                      for name, enc in payload["sums"].items()}
         for name, enc in payload["valid"].items():
             if "uniform" in enc:
-                like = obj._sums[json.loads(enc["like"])]
-                obj._valid_duration_ms[name] = xr.full_like(
-                    like, int(enc["uniform"]), dtype=np.int64)
+                # Held as one integer, as ``update`` holds a uniform duration
+                # (``_valid_array`` expands it shaped like the sum on demand).
+                obj._valid_duration_ms[name] = int(enc["uniform"])
             else:
                 obj._valid_duration_ms[name] = _decode_array(enc, registry)
         static = payload.get("static") or {}
@@ -597,6 +659,17 @@ def _decode_coord(name, registry):
     enc = registry[name]
     return xr.Variable(json.loads(enc["dims"]), _unraw(enc),
                        json.loads(enc["attrs"]))
+
+
+def _writable(da: xr.DataArray) -> xr.DataArray:
+    """Return ``da`` backed by a writable NumPy buffer, for in-place sums.
+
+    Arrays restored from a restart file are read-only views of the file's
+    bytes; they are copied once, on the first in-place update.
+    """
+    if isinstance(da.data, np.ndarray) and da.data.flags.writeable:
+        return da
+    return da.copy(data=np.array(da.data))
 
 
 def _decode_array(enc: dict, registry: dict) -> xr.DataArray:
