@@ -31,6 +31,9 @@ licence — ported as NUMBERS here, never as committed Fortran text):
   ``caccso4``): ``mo_ham_m7ctl.f90:213`` (``caccso4``) and ``515-526``
   (the rest) — carried here for the ``nwetdep`` variants a later task wires
   up; the M7 preset does not read them yet.
+* **Per-sector primary emission targets** (``sector_emission``):
+  ``mo_ham_m7_emissions.f90`` — see ``emissions/ham_sectors.py``'s module
+  docstring for the full file:line provenance (lines 90-262, 564-646).
 
 Mode order and short tokens follow HAM's own two-letter class names in
 lower case (``ns ks as cs ki ai ci``: nucleation/Aitken/accumulation/coarse
@@ -44,6 +47,8 @@ from __future__ import annotations
 import math
 
 from jcm.physics.aerosol.jam.emissions.dust import m7_dust_emission_policy
+from jcm.physics.aerosol.jam.emissions.ham_sectors import m7_sector_policy
+from jcm.physics.aerosol.jam.emissions.sectors import OM_OC_RATIO
 from jcm.physics.aerosol.jam.ice_nucleation.ham_freezing import HamFreezingClasses
 from jcm.physics.aerosol.jam.population import (
     AerosolMode,
@@ -226,4 +231,5 @@ M7_SPEC = ModalAerosolSpec(
     aqueous_sulfate_modes=("as", "cs"),
     dust_emission=m7_dust_emission_policy(
         M7_SPECIES_BY_NAME["du"].density),
+    sector_emission=m7_sector_policy(OM_OC_RATIO),
 )

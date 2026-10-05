@@ -193,6 +193,13 @@ class ModalAerosolSpec:
     #: (every MAM4 population) keeps :class:`~...dust.DustEmissions`'s
     #: existing MAM4-window, number-conserving-diameter behaviour.
     dust_emission: object | None = None
+    #: Population-specific per-sector primary-emission mode/size targets (a
+    #: :class:`~jcm.physics.aerosol.jam.emissions.ham_sectors.HamSectorPolicy`,
+    #: typed loosely for the same reason as ``freezing_roles``). ``None``
+    #: (every MAM4 population) keeps :class:`~...anthropogenic.AnthropogenicEmissions`'s
+    #: existing ``primary_split``-based mode targets and class-geometry
+    #: number factor.
+    sector_emission: object | None = None
 
     def __post_init__(self) -> None:
         """Validate the family tag and species references."""
