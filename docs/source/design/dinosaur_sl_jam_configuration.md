@@ -35,9 +35,8 @@ Load-bearing pieces:
   the default everywhere (`DEFAULT_OFF_CENTERING` in the dinosaur dycore,
   shared by direct construction and the runner), so the explicit override
   above is documentation rather than a requirement.
-- **`run=longrun`** — carries the calibrated upper sponge (10 levels,
-  1.5 h, `target_T_K=250`). Without it the model top refrigerates
-  (T_min < 100 K by day ~135).
+- **`run=longrun`** — carries ECHAM's upper sponge (`uspnge`: the zonal
+  anomalies of u, v and T at the top level damped on 3 h).
 - **`forcing.ozone_file: auto`** (default) — the packaged or mirrored
   climatological ozone. `auto` now raises on a hybrid grid it cannot
   resolve; the analytic profile biases clear-sky OLR ~12 W/m² low and is

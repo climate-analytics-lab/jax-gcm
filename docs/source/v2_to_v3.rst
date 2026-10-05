@@ -1429,7 +1429,23 @@ surface friction supplied. Every ``echam_physics`` package is affected.
 Measured from the ``ma-t63-l47`` warm state, days 20-30 against ERA5 January:
 200 hPa zonal wind bias −7.8 → −1.8 m/s, 850 hPa −4.3 → −0.6 m/s, 500 hPa
 height RMSE 180 → 73 m. ``sso_drag`` no longer has a default ``nktopg``;
-callers pass ``echam_nktopg(a_half, b_half)`` for their grid.
+callers pass ``echam_nktopg(a_half, b_half)`` for their grid. It also no longer
+takes ``land_fraction``: like ECHAM's ``ssodrag`` it does not scale the drag by
+the land fraction, which the whole-cell descriptors already carry.
+
+.. _v3-upper-sponge:
+
+The upper sponge is ECHAM's ``uspnge``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``UpperSponge`` damps only the zonal anomalies (m ≠ 0) of u, v and T, with
+ECHAM's implicit factor, and ``run=longrun`` uses ECHAM's profile: the top
+level only, 3 h. The v2 sponge damped the full wind over ten levels and
+relaxed T to 250 K; that absolute target is gone, so
+``run.sponge.target_T_K=...`` overrides now fail, and the constructor no
+longer accepts ``target_T_K``. Its defaults are ECHAM's
+(``UpperSponge()`` is the ECHAM sponge). The stratospheric and mesospheric
+zonal-mean winds strengthen; the troposphere is unchanged within noise.
 
 SPEEDY shortwave heating is applied every step
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

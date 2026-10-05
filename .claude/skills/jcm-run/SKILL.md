@@ -93,16 +93,11 @@ A T63L47 ECHAM run started from an isothermal cold start with no sponge
   in 5-day chunks; no per-chunk `_dayN.nc` unless `run.save_chunks=true`.
   `forcing_pd.nc` + the `auto` emission/ozone/oxidant bundles are the
   present-day (2005–2014) climatological AMIP forcing.
-- `run=longrun` — this already carries the **settled production sponge**
-  (`levels=10, timescale_h=1.5, enspodi=2.0, damp_temperature=true,
-  target_T_K=250`, rationale in `run/longrun.yaml`). Do **not** re-specify
-  those on the command line: duplicating them invites drift from the
-  validated values, and `+run.sponge.target_T_K=...` now fails outright with
-  `An item is already at 'run.sponge.target_T_K'` because the key exists.
-  The sponge is what arrests the cold-cap runaway at L47 — the absolute
-  target catches the m=0 zonal mean that pure zonal-mean damping cannot
-  touch, without which the top level drifts ~4 K/hr to NaN before the first
-  save. Level-dependent diffusion alone does **not** do this.
+- `run=longrun` — this already carries **ECHAM's upper sponge** (`uspnge`:
+  the zonal anomalies of u, v and T at the top level damped on 3 h, the zonal
+  mean untouched; rationale in `run/longrun.yaml`). Do **not** re-specify it
+  on the command line. There is no absolute temperature target any more:
+  `run.sponge.target_T_K` is not a key and an override of it fails.
 
 ## Hydra gotchas
 

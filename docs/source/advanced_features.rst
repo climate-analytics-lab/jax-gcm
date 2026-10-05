@@ -299,17 +299,16 @@ near the model lid, which is common on the high-top L47/L95 grids.
 
 Because physics is *composable*, adding a scheme is just ``+``-ing a
 :class:`~jcm.physics.physics_term.PhysicsTerm` onto the package. An
-:class:`~jcm.physics.dissipation.UpperSponge` — Rayleigh drag on the winds
-plus zonal-mean relaxation of temperature at the top few levels — damps
-spectral ringing near a rigid model lid:
+:class:`~jcm.physics.dissipation.UpperSponge` — ECHAM's ``uspnge``, which damps
+the zonal anomalies of the winds and temperature at the top levels — absorbs
+waves near a rigid model lid:
 
 .. code-block:: python
 
    from jcm.physics.dissipation import UpperSponge
    from jcm.physics.echam.echam_terms import echam_physics
 
-   physics = echam_physics() + UpperSponge(n_sponge_levels=5,
-                                           sponge_timescale_s=3 * 3600.0)
+   physics = echam_physics() + UpperSponge()   # ECHAM: top level, 3 h
    model = Model(coords=coords, terrain=terrain, physics=physics)
 
 The relaxation timescales that both the sponge and the nudging term use follow

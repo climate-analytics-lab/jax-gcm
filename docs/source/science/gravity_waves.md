@@ -54,14 +54,17 @@ plus two upper-boundary dissipation terms:
   wind component — back to the pre-step speed, and takes the heating from the
   discrete KE loss so it is never negative.
 
-Upper-boundary dissipation is two terms: the ECHAM-style **upper sponge**
-(``jcm/physics/dissipation/upper_sponge.py::UpperSponge``) — Rayleigh drag on
-(u, v) and relaxation of T toward its zonal mean over the top N levels, plus an
-optional relaxation toward an **absolute** target that the production
-``run=longrun`` sponge switches on (``target_T_K: 250``), adding
-``-(T − 250)/τ``. The absolute branch has no ECHAM analogue: ``uspnge`` damps
-only the m≠0 anomaly, so the m=0 term here is a deliberate deviation that holds
-the JW-dry lid's energy budget. Alongside it is
+Upper-boundary dissipation is two terms: ECHAM's **upper sponge**
+(``jcm/physics/dissipation/upper_sponge.py::UpperSponge``), which damps the
+zonal anomalies — the m ≠ 0 part — of u, v and T at the top model levels with
+ECHAM's implicit factor ``1/(1 + zlf·Δt)`` and never touches the zonal mean.
+``uspnge`` scales the m ≠ 0 spectral coefficients of vorticity, divergence and
+temperature; the spectral-to-grid maps are linear and keep each zonal
+wavenumber separate, so damping the grid-point zonal anomalies is the same
+operation. The production ``run=longrun`` sponge is ECHAM's lmidatm default:
+the top level only, ``spdrag = 0.926e-4 s⁻¹`` (3.0 h), ``enspodi = 1``.
+Because the zonal mean is untouched, the sponge exerts no torque on the
+atmosphere and does not set the lid temperature. Alongside it is
 ``jcm/physics/dissipation/upper_temperature_relaxation.py::UpperTemperatureRelaxation``,
 a Newtonian relaxation of the top-level *temperatures* toward a reference profile
 (e.g. USSA-1976) purpose-built for finite mesospheric lids, with an *optional*
@@ -96,9 +99,11 @@ frontogenesis source (ESCOMP/CAM ``cam_cesm2_2_rel``: ``gw_common.F90`` +
   never operate this scheme with a lid layer as thin as ECHAM L47 (``ρ→0`` drives
   ~123 K/day heating there); every masked division/sqrt keeps its safe operand
   inside ``jnp.where`` for finite reverse-mode gradients.
-- `compute` — the upper sponge damps the full (u, v) field rather than only
-  ECHAM's m≠0 spectral modes; ``enspodi`` defaults to 2.0 (softening downward)
-  rather than ECHAM's uniform 1.0.
+- `compute` — the upper sponge is applied as a physics tendency in grid-point
+  space on the zonal anomalies, after the physics rather than after the
+  dynamics as ``uspnge`` is; the tendency is chosen so that one step reproduces
+  ECHAM's implicit factor exactly. It runs on lon-lat (dinosaur) grids only;
+  the pySES backend uses its own ``dycore.lid_sponge``.
 
 **Status & known limitations.** ``echam_physics(gw_scheme=...)`` selects
 ``"hines"`` (default), ``"frontal"``, ``"both"`` (Hines broad-spectrum

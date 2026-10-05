@@ -15,12 +15,11 @@ slot" index; follow the links into the process sections for the science of each
 choice.
 
 Every ECHAM spectral configuration shares the same validated stability recipe:
-dry Jablonowski–Williamson init (``init=jw``, ``init.rh=0.0``), the production
-upper sponge (``run=longrun`` → sponge ``levels=10``, ``target_T_K=250`` — see
+dry Jablonowski–Williamson init (``init=jw``, ``init.rh=0.0``), ECHAM's upper
+sponge (``run=longrun`` → the zonal anomalies at the top level damped on 3 h — see
 {doc}`dynamical_core` and {doc}`gravity_waves`), semi-Lagrangian off-centring 0.2,
-and ``run.time_step=12`` min. An isothermal cold start or a shallower sponge NaNs
-within days at L47, so these are not interchangeable with a bare ``grid=``
-override.
+and ``run.time_step=12`` min. An isothermal cold start NaNs within days at L47,
+so these are not interchangeable with a bare ``grid=`` override.
 
 ## Which scheme fills each slot
 
@@ -62,9 +61,9 @@ with 5-day means and checked by ``health.py``.
 | ``ma-t63-l95`` | echam-jam | T63 L95 hybrid | dinosaur | 12 min | T63 present-day + level-matched ozone |
 
 The ``speedy-t31`` row is the deliberate outlier: SPEEDY takes the default
-``run`` group and ``init=isothermal`` and ``run.time_step=15``, because the ECHAM
-longrun sponge spans its entire L8 atmosphere and the dry-JW init is an ECHAM
-spin-up device — both NaN SPEEDY within a chunk.
+``run`` group and ``init=isothermal`` and ``run.time_step=15``, because the dry-JW
+init is an ECHAM spin-up device that NaNs SPEEDY within a chunk, and the ECHAM
+upper sponge is not part of SPEEDY.
 
 ## Tier 1b — configuration-group, benchmark-validated
 
