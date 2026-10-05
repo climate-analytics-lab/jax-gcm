@@ -205,6 +205,7 @@ def echam_physics(
     jam_microphysics: str = "placeholder",
     jam_cloud_borne: bool = True,
     jam_optics: bool = True,
+    jam_seasalt_scheme: str = "gong",
     jam_arg_variant: str = "arg2000",
     jam_aqueous_scheme: str = "full",
     jam_dust_preset: int = 4,
@@ -419,6 +420,16 @@ def echam_physics(
             reads. ``False`` keeps MACv2-SP optics (cheaper; also makes
             the JAM aerosol radiatively passive, which controlled A/B
             experiments rely on).
+        jam_seasalt_scheme: ``"gong"`` (default, unchanged) or ``"long"``
+            (Long et al. 2011 + the Sofiev et al. 2011 SST correction, HAM
+            ``nseasalt=7``; #1017) — passed through to
+            :func:`~jcm.physics.aerosol.jam.jam_terms.jam_aerosol_physics`'s
+            ``seasalt_scheme``. ``"long"`` requires ``jam_microphysics``'s
+            population to carry exactly two ``ss`` classes (HAM's own
+            accumulation-then-coarse split); the default MAM4 population
+            carries three (it also has an Aitken-mode sea salt tracer, which
+            HAM's M7 configuration does not) and so is rejected with
+            ``"long"``.
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         jam_dust_preset: HAMMOZ ``ndust`` preset for the Tegen dust scheme —
             4 (default, HAM2: Stier 2005 + East-Asian soils), 3 (Stier 2005)
@@ -900,6 +911,7 @@ def echam_physics(
         jam_terms = jam_aerosol_physics(
             microphysics=jam_microphysics, cloud_borne=jam_cloud_borne,
             optics=jam_optics,
+            seasalt_scheme=jam_seasalt_scheme,
             arg_variant=jam_arg_variant,
             aqueous_scheme=jam_aqueous_scheme,
             dust_preset=jam_dust_preset,
