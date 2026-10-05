@@ -1868,19 +1868,23 @@ The cloud-cover defaults at T63 are calibrated
   ECHAM value. The non-integer ``nex`` is admissible: the critical-humidity
   profile is continuous in it. The 1M host, T106 and the cubed sphere read the
   set without a calibration or year of their own (#1014).
-- **The cover set and the JAM aerosol defaults are coupled.** The JAM-2M year
-  with both the release aerosol defaults and this set passes the cover gate
-  (0.52 offline, 0.65 radiation) with a net TOA flux of +2.1 W/m², but the larger
-  cloud fraction increases wet removal: the sea-salt burden falls from 13.3 to
-  9.2 mg/m², the total AOD from 0.077 to 0.049 (the control's 0.059) and the dust
-  burden from 15.7 to 14.6 mg/m², while sulphate stays in the AeroCom band (4.15
-  mg/m², ion basis). The black-carbon (+0.0032 /day) and sulphate (+0.0026 /day)
+- **The set does not transfer cleanly to the JAM-2M host.** On the 2M host it
+  passes every gate; on the JAM-2M host, whose droplet number comes from the
+  interactive aerosol, the same set over-brightens and strips aerosol. The JAM-2M
+  year with the release aerosol defaults and this set passes the cover gate
+  (0.52 offline, 0.65 radiation) and its annual TOA flux is +3.2 W/m² (+7.1
+  without it), but its SW CRE is 3.3 W/m² too strong (-49.0), its liquid water
+  path is 57 g/m² (48 without it; ESA-CCI 36), and the larger cloud fraction
+  increases wet removal: the sea-salt burden falls from 13.3 to 9.2 mg/m²
+  (lifetime 0.65 to 0.40 d), the total AOD from 0.082 to 0.052 (the control's
+  0.059) and the dust burden from 15.7 to 14.6 mg/m², while sulphate stays in the
+  AeroCom band (4.15 mg/m², ion basis). The loss of the eight-target recipe is
+  461.1, worse than the aerosol-only configuration's 377.6 (January better, July
+  much worse), and the black-carbon (+0.0032 /day) and sulphate (+0.0026 /day)
   drifts of the year fail the recipe's 0.002 /day limit, black carbon also the
   0.003 /day limit for whole-year records. The aerosol figures quoted for the
-  aerosol defaults above are for ECHAM's cover parameters, and the emission scales
-  may need re-fitting on the new cloud baseline. The evidence is in :doc:`design/jam_aerosol_retune`
-  ("Stage 2b: cloud fraction") and the statement of the values in
-  :doc:`science/clouds_microphysics`.
+  aerosol defaults above are for ECHAM's cover parameters; adopting the cover set
+  on the JAM host needs a joint cloud-and-aerosol calibration.
 - **Changes results** on every ECHAM host at T63 (cloud cover, cloud radiative
   effect, TOA balance, surface temperature), and at T106 and on the cubed
   sphere, which take the T63 row or interpolate from it. ECHAM's constants are
@@ -2495,7 +2499,8 @@ Calibration and capability gaps
   than 1 W/m²; with ECHAM's cover parameters total cloud cover is 0.58 to 0.59
   as the radiation sees it and 0.46 on the offline maximum-random overlap,
   against 0.63 observed (the calibrated T63 cover set brings the 2M host to 0.65
-  and 0.51, with liquid water path 7.5 g/m² higher), and the 1M and 2M
+  and 0.51, with liquid water path 7.5 g/m² higher, and the JAM-2M host to 0.65
+  and 0.52 with a SW CRE 3.3 W/m² too strong), and the 1M and 2M
   convection and microphysics optima buy cloud radiative effect with liquid
   water path instead of cover; dust lifetime is 1.8 d against AeroCom's 4.1 and the regional dust
   source balance is wrong, so dust AOD stays under half of the observed;

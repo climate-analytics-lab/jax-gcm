@@ -110,9 +110,11 @@ ECHAM_CLOUD_DEFAULTS: dict[int, dict[str, float | int]] = {
 #: leaf (:class:`jcm.physics.clouds.sundqvist.CloudParameters`).
 #:
 #: The same five fields are read by the cover of the 1M, the 2M and the JAM-2M
-#: hosts (``SundqvistCloudFraction``), so one set serves all three. It was
-#: calibrated and confirmed on the 2M host; the 1M host, T106 and the cubed
-#: sphere read it without a calibration of their own (#1014).
+#: hosts (``SundqvistCloudFraction``). The set was calibrated and confirmed on
+#: the 2M host. On the JAM-2M host, whose droplet number comes from the
+#: interactive aerosol, it over-brightens (SW CRE, liquid water path) and
+#: strips aerosol (design page, "Stage 2b: cloud fraction"); the 1M host, T106
+#: and the cubed sphere read it without a calibration of their own (#1014).
 JCM_CALIBRATED_COVER_T63: dict[str, float] = dict(
     crt=0.679016061, crs=0.9, nex=1.84856084, csatsc=0.948216414,
     cinv=0.213005383)
