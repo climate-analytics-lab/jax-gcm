@@ -38,11 +38,11 @@ Output that does not carry the field (written before it existed) is still
 scored, from the offline overlap of the saved ``clouds.cloud_fraction``
 (:func:`jcm.analysis.total_cloud_cover`), with a printed NOTE saying so. That
 number is an overlap of a *time-mean* profile when the run saved interval
-means, and the overlap product is non-linear, so it usually reads **low**
-against the online cover: smoothing over the output interval moves each layer toward its
+means, and the overlap product is non-linear, so it is a different number from
+the online cover, usually a lower one: smoothing over the output interval moves each layer toward its
 mean fraction and, where cloud moved between layers, lowers the overlap-derived
-cover. It is a fallback for archived output, not an equal alternative, and a
-gate verdict from it should be read as a lower bound.
+cover. It is a fallback for archived output, not an equal alternative: an
+estimate whose bias is usually low but can have either sign, never a bound.
 
 A SPEEDY run instead scores its own ``shortwave_rad.cloudc``, which is already
 a column cover and has no profile to overlap — so it is a **different
@@ -165,13 +165,14 @@ def wmean(da, weights):
     return float(global_mean(da, weights))
 
 
-def count_online_cover_files(files):
-    """How many of ``files`` carry :data:`ONLINE_COVER` (headers only)."""
-    n = 0
+def files_with_online_cover(files):
+    """Return the subset of ``files`` that carry :data:`ONLINE_COVER` (headers only)."""
+    carriers = []
     for f in files:
         with xr.open_dataset(f) as one:
-            n += ONLINE_COVER in one.variables
-    return n
+            if ONLINE_COVER in one.variables:
+                carriers.append(f)
+    return carriers
 
 
 def cloud_cover_basis(ds, speedy):
@@ -278,10 +279,15 @@ def main():
     # chunks with and without it, and ``open_mfdataset`` fills the missing
     # frames with NaN, which would fail the NaN scan of a healthy run and score
     # the cover of only the later frames. A window that is not wholly online is
-    # scored wholly offline, and says so.
-    n_online = count_online_cover_files(files)
+    # scored wholly offline, and says so; the field's real values in the chunks
+    # that carry it are still scanned for NaN/Inf below, from those chunks alone.
+    carriers = files_with_online_cover(files)
+    n_online = len(carriers)
     mixed_window = 0 < n_online < len(files)
+    online_in_carriers = None
     if mixed_window:
+        online_in_carriers = xr.open_mfdataset(
+            carriers, combine="by_coords")[ONLINE_COVER]
         ds = ds.drop_vars(ONLINE_COVER)
     weights = area_weights(ds)
 
@@ -302,12 +308,15 @@ def main():
     # ``np.isfinite(ds[v])`` rather than ``np.isfinite(ds[v].values)``: on the
     # dask-backed window the former reduces chunk by chunk, the latter pulls
     # every variable of the whole window into memory one at a time.
+    scanned = {v: ds[v] for v in ds.data_vars}
+    if online_in_carriers is not None:
+        scanned[ONLINE_COVER] = online_in_carriers
     bad = []
-    for v in ds.data_vars:
-        if not bool(np.isfinite(ds[v]).all()):
+    for v, da in scanned.items():
+        if not bool(np.isfinite(da).all()):
             bad.append(v)
     print(f"{'PASS' if not bad else 'FAIL'}  NaN scan: "
-          f"{len(bad)}/{len(ds.data_vars)} variables non-finite "
+          f"{len(bad)}/{len(scanned)} variables non-finite "
           f"{bad[:5] if bad else ''}")
     report["gates"].append({"name": "nan_scan", "value": len(bad), "lo": 0,
                             "hi": 0, "pass": not bad, "bad": bad})
@@ -345,7 +354,7 @@ def main():
                if mixed_window else f"the window saves no {ONLINE_COVER}")
         print(f"NOTE  cloud_cover is the max-random overlap of the saved "
               f"clouds.cloud_fraction (offline overlap of the saved mean "
-              f"profile; biased low): {why}")
+              f"profile; usually biased low, not a bound): {why}")
     obs_value, obs_source = OBS_CLOUD_COVER
     print(f"INFO  cloud_cover_obs = {obs_value:.2f} ({obs_source}; "
           "reference, not gated)")

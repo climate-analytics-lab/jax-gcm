@@ -110,8 +110,8 @@ and so 0.5 on average, while its mean profile (0.25 in each outer layer, clear
 between) overlaps to 0.4375. The inequality is not general — clouds that fill
 several layers together, at the same times, push it the other way, and a column
 that is overcast half the time and clear the other half gives the same answer
-either way — but it is the usual direction, and a gate verdict from the
-fallback is read as a lower bound.
+either way — but it is the usual direction. The fallback is an estimate whose
+bias is usually low and can have either sign; it is not a bound.
 
 ### The covers side by side
 

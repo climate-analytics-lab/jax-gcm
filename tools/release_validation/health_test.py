@@ -309,7 +309,7 @@ class TestOnlineCover:
         assert f"PASS  cloud_cover = {_MAXRANDOM:.2f}" in out
         assert ("NOTE  cloud_cover is the max-random overlap of the saved "
                 "clouds.cloud_fraction (offline overlap of the saved mean "
-                "profile; biased low)") in out
+                "profile; usually biased low, not a bound)") in out
         assert "clouds.total_cloud_cover" in out.split("NOTE  cloud_cover")[1]
         assert status == 0
 
@@ -340,6 +340,31 @@ class TestOnlineCover:
         assert f"PASS  cloud_cover = {_MAXRANDOM:.2f}" in out
         assert "only 1 of 2 chunks save clouds.total_cloud_cover" in out
         assert status == 0
+
+    def test_a_mixed_window_still_scans_the_real_online_values_for_nan(
+            self, tmp_path, monkeypatch, capsys):
+        # The synthetic NaNs of chunks lacking the field are ignored, but a
+        # NaN that a chunk carrying it really stores must still fail the scan.
+        run = _write_run(tmp_path, days=(30,))
+        ds = echam_chunk(online_cover=0.4).assign_coords(
+            time=[np.datetime64("2000-01-31")])
+        ds["clouds.total_cloud_cover"][dict(lat=0)] = np.nan
+        for name, value in (("radiation.toa_sw_down", 340.0),
+                            ("radiation.toa_sw_up", 100.0),
+                            ("radiation.toa_lw_up", 240.0),
+                            ("clouds.precip_rain", 3.0 / 86400.0),
+                            ("clouds.precip_snow", 0.0),
+                            ("convection.precip_conv", 0.0)):
+            ds[name] = (("time", "lat", "lon"),
+                        np.full((1, len(_LAT), len(_LON)), value))
+        ds["temperature"] = (("time", "level", "lat", "lon"),
+                             _levels(np.linspace(288.0, 220.0, len(_PROFILE))))
+        ds.to_netcdf(tmp_path / "run_day60.nc")
+        monkeypatch.setattr(sys, "argv", ["health.py", run])
+        status = H.main()
+        out = capsys.readouterr().out
+        assert "FAIL  NaN scan: 1/" in out and "clouds.total_cloud_cover" in out
+        assert status == 1
 
     def test_the_observed_reference_is_printed_beside_the_gate(
             self, tmp_path, monkeypatch, capsys):

@@ -157,9 +157,8 @@ online value is a deterministic function of the model's own fraction. Output
 written before the field existed is still scored, from the offline overlap of
 the saved `clouds.cloud_fraction` (`jcm.analysis.total_cloud_cover`), with a
 `NOTE` saying so: that is an overlap of a time-mean profile, and it reads
-**low** against the online cover (usually), so a verdict from it is read as a
-lower bound. The
-gate's JSON record carries `basis` (`online`, `offline_mean_profile`, or
+**low** against the online cover (usually; the bias can have either sign, so it
+is an estimate and not a bound). The gate's JSON record carries `basis` (`online`, `offline_mean_profile`, or
 `speedy_cloudc`) so a table can say which it scored.
 
 The observed total cover is printed beside the gate as `cloud_cover_obs`
