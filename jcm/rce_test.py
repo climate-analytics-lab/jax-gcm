@@ -31,6 +31,7 @@ from jcm.rce import (
     run_rce,
     steady_insolation,
 )
+from jcm.physics.clouds.sundqvist import CloudParameters
 from jcm.physics.radiation.grey_two_stream import GreyTwoStreamRadiation
 from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.single_column_model import SingleColumnModel
@@ -534,8 +535,18 @@ class TestRceWholeModelTiedtke(unittest.TestCase):
         from jcm.physics.echam.echam_terms import echam_physics
 
         nlev = 47
+        # Every bound below was measured with ECHAM's own T63 cover constants,
+        # so the testbed states them rather than reading the shipped defaults,
+        # which are jcm's calibrated set (jcm/physics/clouds/
+        # echam_cloud_defaults.py). With the calibrated set the same column
+        # holds cloud at its lowest level (time-mean cover 0.275 against the
+        # < 0.01 pinned) and rains 0.926 of what it evaporates against the
+        # > 0.93 pinned (docs/source/design/rce_testbed.md).
         physics = echam_physics(
             radiation=RadiationParameters.default(solar_constant=420.0),
+            clouds=CloudParameters.default(
+                truncation=63, crt=0.75, crs=0.975, nex=2.0, csatsc=0.7,
+                cinv=0.25),
             radiation_compute_cre=False,
         ).replace("aerosol", AerosolFree())
         scm = rce_column(
