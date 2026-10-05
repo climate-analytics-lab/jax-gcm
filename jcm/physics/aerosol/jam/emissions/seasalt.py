@@ -66,6 +66,14 @@ _PPWW = 3.41            # default wind-speed exponent
 # Long-scheme constants (seasalt_emissions_long, mo_ham_m7_emi_seasalt.f90:865-1079).
 _DMTB_LONG = 0.551e-6   # Long small/large particle split, dry diameter [m]
 _PPWW_LONG = 3.74       # default wind-speed exponent
+# p0 and the two size-formula polynomials stay fixed module constants, not
+# SeaSaltParameters leaves: like Gong's own p0/p1/p2/p3 bin-shape
+# coefficients (never exposed either), they parameterize the SHAPE of the
+# fitted size spectrum rather than an overall calibration knob, and making
+# them differentiable would let gradient descent warp that shape into one
+# the Long et al. (2011)/Keene et al. (2007) lab fit no longer represents.
+# wind_exponent_long is the one Long-specific constant exposed, matching
+# Gong's own wind_exponent.
 _LONG_P0 = 2.0e-8
 # Log10(wet diameter [µm])**{3,2,1,0} polynomial coefficients for the
 # small-particle (p1*) and large-particle (p2*) branches.
