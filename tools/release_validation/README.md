@@ -187,7 +187,8 @@ an all-zero field under grey radiation; the NOTE says which). The McICA
 cover is a **different measurement, not a cross-check**: it is the cover of
 the RH-diagnosed fraction radiation sees before the microphysics' write-back,
 masked by condensate, with its own thin-cloud threshold and a finite sample
-of sub-columns, so a gap between it and the gated cover is expected.
+of sub-columns, so a gap between it and the gated cover is expected (+0.04 on a
+measured warm-start arm).
 
 **Cover numbers from before #707 are not comparable with these** — that PR
 gave the 1M scheme ECHAM's `ccwmin` cover write-back, which redefined what

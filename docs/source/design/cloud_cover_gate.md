@@ -116,27 +116,51 @@ bias is usually low and can have either sign; it is not a bound.
 ### The covers side by side
 
 All covers are area-weighted, and time-averaged **after** the overlap product
-(it is non-linear). Both rows are archived year runs scored with `--last-n 40`
-(the settled ~200 days of 5-day means). They predate the online field, so the
+(it is non-linear). Rows 1-2 are archived year runs scored with `--last-n 40`
+(the settled ~200 days of 5-day means); they predate the online field, so the
 gate read them through the fallback, and both FAIL the 0.5 floor at **0.46**.
+Rows 3-4 are one T63 L47 ECHAM+RRTMGP+2M run that carries the online field,
+started from a warm state, on CPU.
 
 | run | saved means | offline overlap of the saved profile | column max | `radiation.total_cloud_cover` | **online** `clouds.total_cloud_cover` |
 |---|---|---|---|---|---|
 | JAM control year (2M + JAM), jcm `519f18e8`, days ~170-365 | 5-day | 0.462 | 0.402 | 0.582 | not saved |
 | 2M control year (2M + MACv2-SP), jcm `49c0724c`, days ~170-365 | 5-day | 0.459 | 0.395 | 0.584 | not saved |
+| 2M warm start, jcm `766570bc` + the online field: five daily-mean frames, each overlapped on its own, then averaged | 1-day | 0.529 | 0.487 | 0.604 | **0.562** |
+| the same trajectory as one 5-day mean (online and radiation: the mean of the frames; offline and column max: of the mean profile) | 5-day | 0.480 | 0.411 | 0.604 | **0.562** |
 
 Provenance, because it bounds what the table can be used for:
 
-* Both rows are T63 L47 `ECHAM+RRTMGP` years from the January end state of the
+* Rows 1-2 are T63 L47 `ECHAM+RRTMGP` years from the January end state of the
   host's warm-state set (`echam-jam-t63-l47_jan_fixed_49c0724c`,
   `echam-2m-t63_jan_fixed_49c0724c`), `run.start_time=2000-12-31`, 12-minute
   time step, 5-day means, scored by the `health.py` of the tree that ran them.
   The JAM year ran on Nautilus, the 2M year on the dev workstation.
+* Rows 3-4 are one 5-day run from `echam-2m-t63_jul_0e1d57f1` (the end of a
+  180-day July run, day 545 after a cold start) with `run.start_time=2000-07-01`,
+  12-minute time step, `run.output_averages=true`, daily-mean frames, on CPU
+  (`jcm.main` with the release recipe's overrides; global area-weighted means of
+  the saved fields). Rows 3 and 4 are the same five daily frames reduced two
+  ways, so they share the online and radiation covers (a mean of per-frame
+  means) and differ in the profile-based columns. They measure the definitions
+  on one 2000-07-01 state; they are not a climatology, and the first days of a
+  warm start still carry the donor's cloud.
+* The two kinds of row differ by code point as well as by interval, so read
+  across a row group, not down a column.
 
-Reading it: the offline overlap of the saved profile is the only cover these
-files give the gate, and the 0.12 by which it sits below the McICA 0.58 is
-context, not a measurement of the averaging bias, because that cover differs
-from the online one in its fraction and its thresholds too (see below).
+Reading it: on the warm-start run the offline overlap of the saved profile sits
+**below** the cover of the same run's instantaneous fraction, and the gap grows
+with the averaging interval: **+0.033** at one day and **+0.082** at five, with
+the online cover the larger in 85 % of the area at five days. That comparison
+(online against offline, one trajectory) isolates the averaging effect, and it
+is the evidence that the offline overlap of a saved mean is biased low and the
+reason the gate scores the online field. At five days, the release-validation
+interval, the offline overlap (0.480) sits below the 0.5 floor on this state
+while the online cover (0.562) is above it. The control years cannot isolate
+the effect: their offline 0.46 sits 0.12 below the McICA 0.58, but that cover
+differs from the online one in its fraction and its thresholds too (below), so
+the pair is context, not a measurement of the bias. (One run, one state, one
+season; the size of the effect is not a constant.)
 
 ### Printed and not gated
 
@@ -174,7 +198,9 @@ kind, but they are not the same field, and they are not expected to agree:
   which cells are empty, and under RRTMGP it counts a finite set of sampled
   sub-columns. The online cover has neither.
 
-Treat a gap between them as expected, and read neither as a check on the other.
+On the warm-start run the McICA cover reads **0.604 against 0.562** online, the
+larger of the two by 0.042 at both intervals. Treat a gap of that order as
+expected, and read neither as a check on the other.
 
 ### Measured magnitudes
 
@@ -227,7 +253,8 @@ Two readings come out of this. First, the spread across definitions is
 judge — which is the whole reason the definition has to be pinned down.
 Second, the column max is low against max-random by an offset that is not a
 constant: **0.11 to 0.15** on the pre-#690 year runs and on the 90-day
-post-#707 spin-up arm, but **0.06** on the two settled post-#707 control years.
+post-#707 spin-up arm, but **0.06** on the two settled post-#707 control years
+(and 0.07 on the 5-day mean of the warm-start run).
 It is the artefact a column-maximum score carries, and its size depends on the
 cloud state, so a band placed by this offset has to be read with that spread in mind.
 
@@ -324,9 +351,10 @@ a tuning target) and brackets both anchors:
   0.58.
 
 The mapped values are offline overlaps of a saved mean profile; the online
-cover the gate scores usually reads above them, which moves a member toward the
-ceiling and away from the floor; no post-#707 year has been measured online, so
-the size of that shift is open. The band stays at 0.5-0.9 by the maintainer's decision; the members
+cover the gate scores usually reads above them (+0.08 at the 5-day interval on
+the warm-start run above), which moves a member toward the ceiling and away from
+the floor; no post-#707 year has been measured online, so the size of that shift
+is open. The band stays at 0.5-0.9 by the maintainer's decision; the members
 to watch against the 0.9 ceiling are the 1M ones, whose mapped values are the
 highest.
 
