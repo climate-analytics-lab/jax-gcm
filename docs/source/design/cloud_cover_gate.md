@@ -1,7 +1,8 @@
 # The cloud-cover gate: definition and provenance
 
 *Issue #782, "re-derive the `cloud_cover` gate" half. The physics question that
-issue also raised — whether the post-#690 cloud state is right — is #682's.*
+issue also raised — whether the post-#690 cloud state is right — was taken up by
+the retune ([jam_aerosol_retune](jam_aerosol_retune.md)).*
 
 Total cloud cover is not a property of a cloud-fraction profile on its own: it
 is a profile plus an **overlap assumption**, and the three assumptions in
@@ -361,10 +362,12 @@ sweep prints all three covers on every member and should replace that mapping
 with measurements; if it does, the band is worth revisiting with real numbers
 rather than a rounded offset.
 
-Whether the new cloud state is *right* is #682: retune the convective
-trigger and closure against the corrected, no-longer-inflated CAPE, then
-re-measure low cloud, LWP and SW CRE against CERES (CERES SW CRE ≈ −47 W/m²;
-the #638 sweep recorded jcm 1M ≈ −98 and 2M ≈ −58). The open question is
-whether −0.11 of low cloud moves 1M toward CERES and 2M away from it, which
-would mean the real defect is the 1M microphysics. This document fixes the
-measuring stick; it does not answer that.
+Whether the new cloud state is *right* was the retune's question: the
+convective trigger and closure, and the 1M and 2M microphysics, were swept
+against CERES and the ESA-CCI cloud products
+([jam_aerosol_retune](jam_aerosol_retune.md)). It found a structural
+cloud-cover deficit (0.58 radiation cover and 0.46 on this document's overlap
+against 0.63 observed) that no lever of the retune closed without raising liquid
+water path, and left the 1M and 2M defaults unchanged. The Sundqvist
+cloud-fraction parameters, which set the cover, were not among its levers. This document fixes the
+measuring stick; it does not answer whether the cloud state is right.

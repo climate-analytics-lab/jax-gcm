@@ -64,8 +64,9 @@ exchange coefficients are stored on full levels. ECHAM's differs on each count:
 Louis stability functions of ``Ri``, the Blackadar mixing length with the
 Holtslag-Boville asymptote and a diagnosed boundary-layer extension, and TKE and
 the coefficients on the interfaces (*Interior stability*, below); see #996. That
-port is post-v3 work, to be done with the land fixes (#672), and the #682 retune
-is done against the current closure.
+port is post-v3 work, to be done with the land fixes (#672), and the retune of
+the shipped defaults ({doc}`../design/jam_aerosol_retune`) was made against the
+current closure.
 
 **Code pointers.**
 - ``jcm/physics/vertical_diffusion/tte_tke/`` — ``vertical_diffusion.py``

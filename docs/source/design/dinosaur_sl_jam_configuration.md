@@ -103,3 +103,7 @@ fit T106L95 on one or two GPUs.
   the emission flux was audited faithful against HAMMOZ Gong and the 10 m wind
   was corrected (#722, #723, both closed), which left the burden gap on the
   removal side.
+
+The numbers in this section are the baseline's. The shipped configuration's
+current ones, including the calibrated dust and sea-salt emission scales (the
+Gong source is scaled by 2), are in {doc}`jam_aerosol_retune`.

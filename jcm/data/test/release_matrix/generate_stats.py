@@ -86,7 +86,10 @@ changed", not as "the physics is wrong".
 The JAM members' bands describe the aerosol climate on the dust retune
 (#787/#808/#840): the ECHAM-like relative-soil-wetness saltation gate and the
 ``nduscale_reg`` recalibration for jcm's wind climate, so a failure is a
-regression, not a known-provisional state.
+regression, not a known-provisional state. Bands drawn before the JAM aerosol
+retune's two defaults (dust threshold scale 0.379095663, sea-salt scale 2)
+describe the previous aerosol climate: regenerate them before reading a JAM
+member's dust, sea-salt or AOD failure as a regression.
 """
 
 from __future__ import annotations

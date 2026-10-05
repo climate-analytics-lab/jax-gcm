@@ -499,8 +499,11 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   - the large-scale ``ω`` in the updraft ``zvervx`` (``−100·ω/(g·ρ)``, line
     816) and in the immersion cooling rate (line 2800; #705).
 - **Known biases of the 2M ice.** Four biases remain, measured in 10-day T63
-  January runs from a spun-up state. No parameter has been tuned to them. A
-  retune follows together with the convection retune (#682).
+  January runs from a spun-up state. No parameter has been tuned to them: the
+  retune swept the 2M levers (``ccraut``, ``ccsaut`` and the three Tiedtke
+  levers) and kept the defaults, because its best arm sat on the lower edge of
+  four of its five levers and bought SW cloud effect with liquid water path
+  (see {doc}`../design/jam_aerosol_retune`).
   - Glaciation is too warm. The supercooled share of the condensate mass
     falls to one half near −7 °C. CALIOP places the crossing near −20 °C, but
     CALIOP's quantity is a cloud-top phase frequency, not a mass fraction, and
@@ -520,8 +523,10 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     ``mo_activ.f90`` at T63 L47 with prognostic CDNC, AR&G activation and
     ``cdnc_min_fixed = 40`` (lines 392–408). That retune belongs with HAM's own
     aerosol and its insoluble dust mode, which jcm's MAM4-based JAM does not
-    reproduce, so JAM keeps the generic value. ``ccsaut`` for JAM is a tuning
-    target of the #682 retune. In 10-day T63 January runs from a JAM state 10
+    reproduce, so JAM keeps the generic value. ``ccsaut`` for JAM was one of the
+    retune's eight Stage-1 levers (0.5-2 times 95) and keeps 95: its
+    standardised effect on the loss was +0.05, against +3.21 for the dust scale.
+    In 10-day T63 January runs from a JAM state 10
     days past a cold start, 95 gives an ice water path of 22.3 g m⁻² against
     7.0 with 900. The supercooled mass fraction at 253–258 K is 0.48 against
     0.83. The non-JAM member had 27.8 g m⁻² and 0.28, measured before the
