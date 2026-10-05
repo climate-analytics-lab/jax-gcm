@@ -89,16 +89,17 @@ ECHAM_CLOUD_DEFAULTS: dict[int, dict[str, float | int]] = {
 #: Provenance: Stage 2b of the v3 release calibration
 #: (``docs/source/design/jam_aerosol_retune.md``, "Stage 2b: cloud fraction").
 #: A 25-arm Gaussian-process expected-improvement search over exactly these
-#: five fields on the 2M host (30-day January and July windows, the eight-target
-#: loss against the jcm-monitor climatologies), then 365-day confirmation years.
+#: five fields on the 2M host (30-day January and July windows, a loss over
+#: cloud cover, cloud radiative effects, liquid water path and precipitation
+#: against the jcm-monitor climatologies), then 365-day confirmation years.
 #: The set is the best of the 25 arms among those with at most one parameter
 #: within 5 % of its range of a bound of the searched box (every lower-loss arm
 #: has two or more): interior in ``crt``, ``nex``, ``csatsc`` and ``cinv``,
 #: while ``crs`` sits on the box's lower bound (0.90) and is the one field the
-#: data do not bound from below. The sweep's final best arm sat on the box edges (``nex`` 3.96 of 4,
-#: ``cinv`` 0.5 of 0.5, ``crs`` 0.9) and was not adopted: an optimum on the
-#: edge of the searched box is where the search ran out of room, not a value
-#: the data have located.
+#: data do not bound from below. The sweep's final best arm sat on the box
+#: edges (``nex`` 3.96 of 4, ``cinv`` 0.5 of 0.5, ``crs`` 0.9) and was not
+#: adopted: an optimum on the edge of the searched box is where the search ran
+#: out of room, not a value the data have located.
 #:
 #: ``nex`` is declared INTEGER in ECHAM, but nothing in the cover needs an
 #: integer. ``mo_cover.f90`` l.233 evaluates the critical relative humidity
@@ -160,7 +161,7 @@ def echam_cloud_defaults(truncation: int | None) -> dict[str, float | int]:
     return resolution_defaults(
         JCM_CLOUD_DEFAULTS, truncation,
         nearest=ECHAM_CLOUD_NEAREST_FIELDS, fallback=63,
-        table_name="cloud defaults (mo_echam_cloud_params.f90 and jcm's T63 calibration)")
+        table_name="cloud defaults (mo_echam_cloud_params.f90, jcm's T63 cover)")
 
 
 def inversion_levels_from_interfaces(a_half, b_half) -> tuple[int, int]:
