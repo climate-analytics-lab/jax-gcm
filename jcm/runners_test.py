@@ -3335,6 +3335,29 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
                 tuned, "jam_dust_emissions").nduscale_reg),
             np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05]) * 0.5)
 
+    def test_release_hosts_ship_the_calibrated_cloud_cover(self):
+        # The 1M, 2M and JAM-2M release hosts (T63 L47) read one cloud-cover
+        # parameter set: the Stage-2b calibration of the T63 row of the
+        # Sundqvist defaults (jcm/physics/clouds/echam_cloud_defaults.py).
+        # The other T63 cloud fields (nadd, csecfrl) are ECHAM's.
+        calibrated = dict(crt=0.679016061, crs=0.9, nex=1.84856084,
+                          csatsc=0.948216414, cinv=0.213005383)
+        for name in ("t63-echam-1m", "t63-echam-2m", "t63-echam-jam"):
+            overrides = [*_NULL_EMISSIONS, f"+configuration={name}"]
+            if name.endswith("jam"):
+                overrides.append("physics.jam_microphysics=placeholder")
+            cfg = _compose(overrides)
+            physics = build_physics(cfg, build_coords(cfg))
+            params = self._params(physics, "cloud_fraction")
+            with self.subTest(configuration=name):
+                for field, value in calibrated.items():
+                    self.assertAlmostEqual(
+                        float(getattr(params, field)), value, places=6,
+                        msg=field)
+                self.assertEqual(params.defaults_truncation, 63)
+                self.assertEqual(int(params.nadd), 0)
+                self.assertAlmostEqual(float(params.csecfrl), 5.0e-6)
+
     def test_emission_override_changes_exactly_one_recorded_parameter(self):
         # The override is applied to the object the factory resolved, so the
         # provenance record differs from the un-overridden preset by that one

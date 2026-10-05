@@ -43,6 +43,20 @@ from jcm.testing import check_gradients, check_surrogate_gradient
 
 L47_RANGE = (39, 44)   # ECHAM's jbmin/jbmax = 40/45, 0-based
 
+#: ECHAM6.3's own T63 cover constants (``mo_echam_cloud_params.f90`` l.209-216).
+#: The designed points below (a column at 0.9 of saturation, the inversion at
+#: level 42, the ramp of ``csatsc``) are built around these numbers and test
+#: the formulation, so they use ECHAM's row rather than the shipped T63
+#: defaults, which are jcm's calibrated set and are pinned in
+#: ``echam_cloud_defaults_test.py``.
+ECHAM_T63_COVER = dict(crt=0.75, crs=0.975, nex=2.0, csatsc=0.7, cinv=0.25)
+
+
+def _echam_t63(**overrides):
+    """``CloudParameters`` at ECHAM's T63 constants, with field overrides."""
+    return CloudParameters.default(
+        truncation=63, **{**ECHAM_T63_COVER, **overrides})
+
 
 # ---------------------------------------------------------------------------
 # Column construction and the NumPy transcription of mo_cover.f90
@@ -179,7 +193,7 @@ class TestClosure:
     """``rhc`` and ``cover = 1 - sqrt(1 - clip(b0, 0, 1))`` (l.233, 248-251)."""
 
     def test_critical_rh_profile(self):
-        params = CloudParameters.default()
+        params = _echam_t63()
         p = jnp.array([100000.0, 95000.0, 70000.0, 50000.0, 20000.0])
         rhc = critical_relative_humidity(p, jnp.asarray(100000.0), params)
         expected = 0.75 + (0.975 - 0.75) * np.exp(
@@ -189,7 +203,7 @@ class TestClosure:
 
     def test_rh_below_critical_is_exactly_clear(self):
         """``b0 < 0`` gives a cover of exactly 0, not a small positive one."""
-        params = CloudParameters.default()
+        params = _echam_t63()
         t, ph, pf, geo = _l47_column()
         qi = np.zeros_like(t)
         qs = _qs_numpy(t, qi, pf)
@@ -202,7 +216,7 @@ class TestClosure:
     def test_rh_at_critical(self):
         """``b0 = 0``: exactly 0; ``q = rhc·qs`` lands within rounding of it."""
         assert float(cover_from_b0(jnp.array(0.0), 0.02)) == 0.0
-        params = CloudParameters.default()
+        params = _echam_t63()
         t, ph, pf, geo = _l47_column()
         qi = np.zeros_like(t)
         rhc = np.asarray(critical_relative_humidity(
@@ -212,7 +226,7 @@ class TestClosure:
         assert np.all(cf < 1e-13), cf
 
     def test_rh_above_critical_follows_the_closure(self):
-        params = CloudParameters.default()
+        params = _echam_t63()
         t, ph, pf, geo = _l47_column()
         qi = np.zeros_like(t)
         q = 0.9 * _qs_numpy(t, qi, pf)
@@ -228,7 +242,7 @@ class TestClosure:
     @pytest.mark.parametrize("rh", [1.0 + 1e-9, 1.3])
     def test_saturation_is_exactly_overcast(self, rh):
         """``b0 >= 1`` gives exactly 1 (``b0 = 1`` itself: next test)."""
-        params = CloudParameters.default()
+        params = _echam_t63()
         t, ph, pf, geo = _l47_column()
         qi = np.zeros_like(t)
         cf, _ = _jcm_cover(t, rh * _qs_numpy(t, qi, pf), qi, pf, ph[-1], geo,
@@ -248,7 +262,7 @@ class TestClosure:
         A supersaturated layer at 5 hPa is overcast, as in ECHAM; nothing
         forces the cover to zero above a pressure.
         """
-        params = CloudParameters.default()
+        params = _echam_t63()
         t = np.array([200.0, 205.0, 250.0, 280.0])
         pf = np.array([500.0, 5000.0, 50000.0, 90000.0])
         geo = np.array([3.5e5, 2.0e5, 5.5e4, 9.0e3])
@@ -265,7 +279,7 @@ class TestPhase:
 
     def _cover_and_rh(self, t, qi, rh_water, params=None):
         """Return the cover's ``q/qs`` for ``q = rh_water·qs_water``."""
-        params = params or CloudParameters.default()
+        params = params or _echam_t63()
         pf = np.full(3, 50000.0)
         geo = np.array([2e4, 1e4, 0.0])
         q = rh_water * np.asarray(es.qsat_from_es(
@@ -319,7 +333,7 @@ class TestInversion:
     """ECHAM's inversion search and ``zsat`` (l.179-207, 234-247)."""
 
     def _case(self, t, ph, pf, geo, params=None, enhance=True, rh=0.8):
-        params = params or CloudParameters.default()
+        params = params or _echam_t63()
         qi = np.zeros_like(t)
         q = rh * _qs_numpy(t, qi, pf)
         cf, _ = _jcm_cover(t, q, qi, pf, ph[-1], geo, params, enhance=enhance)
@@ -338,7 +352,7 @@ class TestInversion:
         changed = np.nonzero(cf != cf_plain)[0]
         assert list(changed) == [42]
         zsat = np.asarray(stratocumulus_saturation_factor(
-            jnp.asarray(t), jnp.asarray(geo), CloudParameters.default(),
+            jnp.asarray(t), jnp.asarray(geo), _echam_t63(),
             L47_RANGE))
         assert zsat[42] == pytest.approx(0.7)          # zgam = 0 at an inversion
         assert np.all(np.delete(zsat, 42) == 1.0)
@@ -380,7 +394,7 @@ class TestInversion:
         cf, cf_plain, knvb = self._case(t, ph, pf, geo)
         lapse = (t[41] - t[42]) * c.grav / (geo[41] - geo[42])
         zsat = np.asarray(stratocumulus_saturation_factor(
-            jnp.asarray(t), jnp.asarray(geo), CloudParameters.default(),
+            jnp.asarray(t), jnp.asarray(geo), _echam_t63(),
             L47_RANGE))
         assert knvb == 42
         assert zsat[42] == pytest.approx(0.7 - lapse * c.cpd / c.grav,
@@ -435,7 +449,7 @@ def _term_inputs(ncols, inversion=True):
 
 def _cached_term(params=None, **kw):
     from jcm.utils import get_coords
-    term = SundqvistCloudFraction(params, **kw)
+    term = SundqvistCloudFraction(params or _echam_t63(), **kw)
     term.cache_coords(get_coords(get_echam_levels(47), spectral_truncation=63))
     return term
 
@@ -471,7 +485,7 @@ class TestTerm:
         t, ph, pf, geo = _l47_column(inversion_level=42)
         qi = np.zeros_like(t)
         q = 0.8 * _qs_numpy(t, qi, pf)
-        params = CloudParameters.default()
+        params = _echam_t63()
         col, _ = _jcm_cover(t, q, qi, pf, ph[-1], geo, params)
         scale = np.array([1.0, 0.95, 1.05])
         block_args = [np.stack([a * s for s in scale], axis=1)
@@ -595,7 +609,7 @@ class TestInversionSurrogate:
 class TestJaxTransformations:
 
     def test_jit_and_grad_through_the_cover(self):
-        params = CloudParameters.default()
+        params = _echam_t63()
         t, ph, pf, geo = _l47_column(inversion_level=42)
         qi = np.zeros_like(t)
         q = jnp.asarray(0.95 * _qs_numpy(t, qi, pf))
@@ -615,7 +629,7 @@ class TestJaxTransformations:
         """A surrogate width of 0 selects the reference derivative, never a NaN."""
         fields = ({"smooth_b0": 0.0, "smooth_inv_thr": 0.0} if zero == "both"
                   else {zero: 0.0})
-        params = CloudParameters.default(**fields)
+        params = _echam_t63(**fields)
         t, ph, pf, geo = _l47_column(inversion_level=42)
         qi = np.zeros_like(t)
         q = jnp.asarray(0.95 * _qs_numpy(t, qi, pf))
@@ -635,7 +649,7 @@ class TestJaxTransformations:
         qi = np.zeros_like(t)
         # 0.672 = 0.96·csatsc: inside the ramp at the enhanced level 42
         q = jnp.asarray(0.672 * _qs_numpy(t, qi, pf))
-        base = CloudParameters.default()
+        base = _echam_t63()
 
         def total(params):
             return calculate_cloud_fraction(
@@ -677,7 +691,7 @@ class TestMixedPhaseHelper:
 
 def test_cover_qs_is_echams_form():
     """``x/(1 - vtmpc1·x)`` with ``x = min(es·rd/rv/p, 0.5)`` (l.221-223)."""
-    params = CloudParameters.default()
+    params = _echam_t63()
     t = jnp.array([230.0, 260.0, 300.0])
     p = jnp.array([30000.0, 60000.0, 100000.0])
     qs = cover_saturation_specific_humidity(t, jnp.zeros(3), p, params)
