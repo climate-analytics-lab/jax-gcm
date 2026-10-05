@@ -374,7 +374,11 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   +9.8), a reflected SW of 96.9 W/m² (99.0; 90.8) and a LW CRE of 28.2 (27.9;
   26.1), with a SW CRE 2.6 W/m² too strong and 49.6 g/m² of liquid water path
   (ESA-CCI 36.4; 42.1); precipitation, the clear-sky OLR and the tropical
-  precipitation extremes are those of ECHAM's values. The search's own optimum
+  precipitation extremes are those of ECHAM's values. About half of the added
+  cloud lies in the lowest five model levels (the lowest level's mean cover is
+  0.17, ECHAM's values give 0.10), because ``crs`` 0.9 is below the humidity of
+  a moist surface layer; the sweep's loss does not weigh the vertical placement
+  of cloud. The search's own optimum
   lay on the edges of its box (``nex`` 3.96 of an upper bound 4, ``cinv`` 0.5
   of 0.5, ``crs`` 0.9 of a lower bound 0.9) and is not the default. The adopted
   ``crs`` is itself on that lower bound, below every ECHAM value (0.95 at T31 to

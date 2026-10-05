@@ -378,6 +378,23 @@ percentile of 5-day means is 0.97 times the control's), and every convection
 and microphysics default, which stay ECHAM's. The `jam_rc_cloud` row is the
 JAM host and is discussed below.
 
+**Part of the added cover is near-surface cloud, which the sweep's loss does not
+see.** In 14 five-day means of the 2M years spaced 20 days apart over days
+100-360 (area-weighted; the lowest model level selected by its coordinate,
+`pressure_full / surface_pressure` = 0.996), the mean cloud fraction at the
+lowest model level is 0.098 for `2m_control` and 0.172 for `2m_cloudi`
+(0.158 for `2m_cloud`); at the second level 0.057 and 0.114; the area where the
+lowest-level cover exceeds 0.5 doubles, from 5.8 % to 11.7 %. About half of the
+change in the sum of the level-mean cloud fractions (0.21 of 0.45) lies in the
+lowest five levels (sigma above 0.89), and the lowest-level cover rises in every
+latitude band (tropics 0.02 to 0.07, mid-latitudes 0.15-0.18 to 0.23-0.29,
+poles 0.18-0.26 to 0.26-0.34). The cause is the surface critical humidity: `crs`
+0.9 against ECHAM's 0.975 lets a layer at a relative humidity between the two
+carry cover. In the RCE testbed the lowest-level time-mean cover is 0.275
+(ECHAM's constants: below 0.01) and the precipitation-to-evaporation ratio 0.926
+(pinned above 0.93; {doc}`rce_testbed`). The loss of the sweep has no term on the
+vertical placement of cloud, so this is not a quantity the calibration weighed.
+
 **The set does not transfer cleanly to the JAM-2M host.** `jam_rc_cloud` is the
 JAM-2M host with the release aerosol defaults and the adopted cover set (365
 days, from the fixed January state), against `jam_rc`, the same host with the

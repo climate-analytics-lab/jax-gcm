@@ -1859,7 +1859,9 @@ The cloud-cover defaults at T63 are calibrated
   +9.8 to +5.6 W/m² (CERES +1.0), the reflected SW rises from 90.8 to
   96.9 W/m² (99.0) and the LW CRE from 26.1 to 28.2 (27.9). The cost is a SW
   CRE 2.6 W/m² too strong (-48.3 against -45.7), 7.5 g/m² more liquid water
-  path (49.6, ESA-CCI 36.4), a near-surface temperature 0.2 K lower and an
+  path (49.6, ESA-CCI 36.4), cloud at the lowest model level that rises from a
+  mean cover of 0.10 to 0.17 (about half of the added cloud lies in the lowest
+  five levels), a near-surface temperature 0.2 K lower and an
   all-sky OLR bias of -8.7 against -6.7 W/m² (the clear-sky OLR bias, -7.5 to
   -9.5 W/m², does not move). Precipitation and the tropical precipitation
   extremes are unchanged. The sweep's unconstrained optimum sat on the edges of
