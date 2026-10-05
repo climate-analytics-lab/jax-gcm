@@ -649,7 +649,7 @@ Radiation, clouds and gravity waves
   step's final cloud fraction, computed in the model every step. Under
   ``run.output_averages`` the saved frame is its time mean over the output
   interval, which is ECHAM's accumulation; the overlap of a saved *mean* profile
-  (``jcm.analysis.total_cloud_cover``) is the lower offline approximation for
+  (``jcm.analysis.total_cloud_cover``) is the offline approximation, usually lower, for
   output that lacks the field. The release-validation ``cloud_cover`` gate
   scores the online field when the file has it (and prints the observed
   reference beside it), and falls back to the offline overlap with a note when

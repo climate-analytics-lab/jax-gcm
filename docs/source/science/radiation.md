@@ -74,7 +74,7 @@ cloud fraction and saved as ``clouds.total_cloud_cover`` (time-averaged under
 ``run.output_averages``, which is ECHAM's accumulation); it is what the
 release-validation ``cloud_cover`` gate scores. For output that carries no such
 field, :func:`jcm.analysis.total_cloud_cover` applies the same recurrence to a
-saved profile, which reads lower when that profile is a time mean. That choice
+saved profile, which usually reads lower when that profile is a time mean. That choice
 defers to ECHAM and is deliberate: overlap is a definition, the three in common
 use differ by ~0.3 in the global mean, and a total cover is the basis the
 satellite climatologies are quoted on. It is a different number from the McICA

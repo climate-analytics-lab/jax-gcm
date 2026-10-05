@@ -100,7 +100,7 @@ Three properties make this the right quantity for a gate:
 `clouds.cloud_fraction`, and `health.py` falls back to it, with a NOTE, when
 the window carries no `clouds.total_cloud_cover` (output written before the
 field existed). That keeps archived output scoreable, but it is a **different
-and lower number**. Under `run.output_averages` the saved fraction is already a
+number, usually a lower one**. Under `run.output_averages` the saved fraction is already a
 time mean over the output interval, and the overlap product is non-linear in
 it. Smoothing over the interval moves each layer toward its mean fraction, and
 where cloud moved between layers during the interval that breaks the maximum
@@ -185,8 +185,9 @@ the shared dev workstation. Area-weighted, and the reduction is taken
 **after** the overlap product in every row (the product is non-linear). The
 runs save 5-day means, so "last 40 saved frames" is the window
 `--last-n 40` picks out of a 5-day-chunked run — the settled ~200 days. The
-online cover is not in this table because these runs predate it; it sits above
-the max-random column by the averaging bias set out above.
+online cover is not in this table because these runs predate it; it differs
+from the max-random column by the averaging effect set out above, usually
+upward.
 
 | run | code point | window | column max | **max-random** | random | offset |
 |---|---|---|---|---|---|---|
@@ -255,8 +256,9 @@ using the offset measured on the matching scheme for the #638 column (1M
 for the current one. The two JAM members were scrapped in the #782 sweep
 pending the dust/sea-salt emissions investigation, so they have a #638 column
 only. These are *mapped* values on the offline max-random definition, not
-measurements, and the online cover of the same member reads higher than them
-(see the side-by-side table). The post-#707 column is also an upper estimate:
+measurements, and the online cover of the same member usually reads higher than
+them (see the side-by-side table; a member whose clouds fill several layers
+together can read the other way). The post-#707 column is also an upper estimate:
 the settled control years measure the offset directly at +0.06, not +0.11, which
 would map the post-#707 members to ~0.69 and ~0.72 (1M, T63 and T106) and ~0.54
 and ~0.55 (2M). The next validation sweep saves the online cover and replaces
@@ -322,8 +324,9 @@ a tuning target) and brackets both anchors:
   0.58.
 
 The mapped values are offline overlaps of a saved mean profile; the online
-cover the gate scores reads above them, which moves a member toward the ceiling and away from
-the floor. The band stays at 0.5-0.9 by the maintainer's decision; the members
+cover the gate scores usually reads above them, which moves a member toward the
+ceiling and away from the floor; no post-#707 year has been measured online, so
+the size of that shift is open. The band stays at 0.5-0.9 by the maintainer's decision; the members
 to watch against the 0.9 ceiling are the 1M ones, whose mapped values are the
 highest.
 

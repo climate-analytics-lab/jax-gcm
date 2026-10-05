@@ -315,8 +315,9 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
 - Total cloud cover, `science` — ECHAM's, accumulated online. The cover is
   computed from the instantaneous fraction each step and averaged in time, as
   ECHAM does, rather than reconstructed from a saved mean profile: the overlap
-  product is non-linear, so the overlap of a mean reads lower than the mean of
-  the overlaps wherever cloud moves between layers within the interval. It is
+  product is non-linear, so the overlap of a mean usually reads lower than the
+  mean of the overlaps (wherever cloud moves between layers within the
+  interval), though not always. It is
   deterministic and uses the full fraction with no optical-depth threshold, so
   it is neither the McICA sub-column cover the flux solve integrates
   (``radiation.total_cloud_cover``, sampled, and built from the fraction zeroed
