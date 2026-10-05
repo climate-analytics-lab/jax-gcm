@@ -116,11 +116,19 @@ correct, roughly 8x the optics cost, and completely silent. A backend that
 holds extra post-compose state of its own overrides the same hook.
 
 There is deliberately **no config key, registry or entry point** for
-selecting a backend. Nothing in this repository implements one, so a string
-selector would have nothing to resolve to; and a user who has installed and
-imported a third-party optics package is already writing Python. If a backend
-is ever vendored in-tree, it gets a config group entry then, like any other
-in-repo scheme.
+selecting a *third-party* backend. A third-party package has no name this
+repository could resolve a string against, and a user who has installed and
+imported one is already writing Python.
+
+**One in-tree exception**: `jam_aerosol_physics(optics_backend=...)` (and
+`echam_physics(jam_optics_backend=...)`) selects between `"jcm"` (default,
+`JamOpticsTerm` itself) and `"ham_lut"` (`HamLutOpticsTerm`, ECHAM-HAM M7's
+own nearest-neighbour Mie-table lookup, #1017) — a plain Python string
+kwarg, not a Hydra config group, because the only two choices today are both
+`JamOpticsTerm` subclasses already imported by `jam_terms.py`; a Hydra group
+would be a config file per choice resolving to the identical two classes.
+Still no manual `physics.replace(...)` needed for these two, unlike a
+genuinely external backend — that is what "vendored in-tree" buys it.
 
 ## Notes for backend authors
 

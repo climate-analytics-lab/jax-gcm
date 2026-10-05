@@ -145,11 +145,32 @@ number field carries.
 in-repo pathway has no core–shell treatment of black carbon, so BC's imaginary
 index is smeared over the whole particle by the volume mixing rule above. An
 alternative bulk-optics pathway — a core–shell treatment, or a neural emulator
-of the mode integral — is supplied out-of-tree against the per-mode seam in
-{doc}`../design/jam_optics_mode_seam`, which is why no second Mie pathway is
-carried here. Per-species optics are an apportionment of the mixed mode's
-extinction, not a decomposition — see
-{doc}`../design/aerosol_optics_diagnostics`.
+of the mode integral — can be supplied out-of-tree against the per-mode seam
+in {doc}`../design/jam_optics_mode_seam`; the volume mixing, size integral and
+AeroCom apportionment above apply to any such pathway unchanged, since the
+seam delegates only the mode-integrated optical question itself. Per-species
+optics are an apportionment of the mixed mode's extinction, not a
+decomposition — see {doc}`../design/aerosol_optics_diagnostics`.
+
+**HAM's own Mie-table pathway (`HamLutOpticsTerm`, #1017).** A second,
+in-tree backend against the same seam: rather than the 8-node Gauss–Hermite
+quadrature above, it reproduces ECHAM-HAM's own `ham_rad_fitplus`
+(`mo_ham_rad.f90:1264-1419`) — a **nearest-neighbour** read (no
+interpolation; HAM's own `loint=.FALSE.`) of a table of
+Qext·x²/(4π) pre-integrated over the lognormal at HAM's own σ_g (1.59 fine,
+2.0 coarse), real refractive index and imaginary refractive index, selected
+by whichever of HAM's two σ_g a mode's own `geom_std_dev` is nearer to. The
+authentic HAM LUT files are not available (SALSA's copies in this tree are
+header-only stubs), so `ham_mie_tables.py` builds the table itself from this
+same repository's Bohren–Huffman kernel (`optics/mie.py`) on HAM's own axes
+(`mo_ham_rad_data.f90:95-102,420-433`) rather than go without one — the one
+respect in which it is not a literal port, recorded with its measured
+accuracy in that module's own docstring. The nucleation mode carries no
+optics (HAM's `nrad(1)=0`, `mo_ham.f90:583-585`). Selected via
+`jam_aerosol_physics(optics_backend="ham_lut")` /
+`echam_physics(jam_optics_backend="ham_lut")` — the one in-tree exception to
+the seam's "no registry" design, see
+{doc}`../design/jam_optics_mode_seam`.
 
 Because the water volume is number-free, the mixed refractive index is
 scale-free in the mode's masses, so **the core's ``dg`` diagnosis is the only
