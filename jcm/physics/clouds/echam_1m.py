@@ -223,9 +223,10 @@ class MicrophysicsParameters:
         lines 197-240). A value passed here is used as given. A value left
         ``None`` is the resolution default for the spectral ``truncation``:
         ECHAM's T63 values for 63 (the default, also used without a grid),
-        otherwise the ECHAM table interpolated in truncation between ECHAM's
-        rows (``echam_cloud_defaults``); ``None`` is a non-spectral grid, for
-        which that table returns the T63 row with a warning. ``nlev`` is
+        otherwise ``echam_cloud_defaults`` (ECHAM's values for these three
+        fields at every tabulated truncation) interpolated in truncation
+        between its rows; ``None`` is a non-spectral grid, for which that
+        table returns the T63 row with a warning. ``nlev`` is
         accepted for a uniform grid signature; no 1M value depends on it.
         ``cthomi`` defaults to ``tmelt - 35`` with the live ``tmelt``. Keyword
         arguments naming a static field set it.

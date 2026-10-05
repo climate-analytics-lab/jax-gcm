@@ -295,8 +295,8 @@ tends to `crt` aloft), and the sweep treated it as real.
 Gaussian-process expected improvement, 30-day windows from 2000-12-31 and
 2001-06-29 with the first three days skipped, the loss of the other stages
 restricted to the fields a 2M host has (cloud cover, SW and LW CRE, liquid water
-path, precipitation: 9 terms per window including the TOA gate; no AOD
-terms). Control loss 130.9 (January 62.1, July 68.9); no arm failed. The
+path, precipitation: 9 terms per window including the TOA gate; no AOD terms;
+the clear-sky OLR is a zero-weight monitor). Control loss 130.9 (January 62.1, July 68.9); no arm failed. The
 standardised effect on the loss across each range is +2.90 for `crs`, -0.98 for
 `cinv`, +0.37 for `nex`, -0.18 for `csatsc` and +0.13 for `crt`; on the global
 cover the two critical humidities are the levers (`crt` -3.0 / -2.6 and `crs`
@@ -305,15 +305,18 @@ cover the two critical humidities are the levers (`crt` -3.0 / -2.6 and `crs`
 **The unconstrained optimum is on the edge of the box and is not adopted.** The
 best of the 25 arms (loss 93.6, -28.5 %) and the surrogate's posterior-mean
 optimum (predicted 93.3) sit at the same corner: `crs` 0.9 on its lower bound,
-`nex` 3.96 against an upper bound of 4, `cinv` 0.5 on its upper bound (with
-`crt` 0.80 and `csatsc` 0.60). Four arms lie within 3 % of that loss, all near
+`nex` 3.96 (surrogate: 4) against an upper bound of 4, `cinv` 0.5 on its upper
+bound (with `crt` 0.80 / 0.81 and `csatsc` 0.60 / 0.55 for the arm / the
+surrogate). Four arms, the best included, lie within 3 % of that loss, all near
 the same corner, and an optimum on a bound is where the search ran out of room,
 not a value the data have located. The release rule is the one that
 left the convection and microphysics defaults alone: a value on the edge of its
 box is not adopted as a default. The adopted set is arm 9, the best of the
 sweep's first 13 arms. Every one of the 25 arms with a lower loss has at least
 two parameters within 5 % of their range of a bound; arm 9 has one (`crs`), so it
-is the best arm that is interior in `crt`, `nex`, `csatsc` and `cinv`:
+is the best arm that is interior in `crt`, `nex`, `csatsc` and `cinv` (arm 4,
+loss 102.0, is interior in all five and within 0.2 of arm 9's loss; the
+confirmation year was run on arm 9 and arm 4 has none):
 
 | window mean (30 days) | observed | control | adopted | corner optimum |
 |---|---|---|---|---|
@@ -323,6 +326,12 @@ is the best arm that is interior in `crt`, `nex`, `csatsc` and `cinv`:
 | LW CRE, W/m², January / July | 27.8 / 27.7 | 24.4 / 27.1 | 26.1 / 29.1 | 23.9 / 26.9 |
 | liquid water path, g/m², January / July | | 34.1 / 37.7 | 41.4 / 47.1 | 39.1 / 44.4 |
 | net TOA flux minus CERES, W/m², January / July | | 9.0 / 9.4 | 5.0 / 5.2 | 5.3 / 5.3 |
+
+The sweep locates `crs`, `crt` and `nex` best (surrogate length scales 0.88,
+0.77 and 0.98 of the unit cube) and `csatsc` and `cinv` weakly (length scales at
+their bound of 3, standardised effects -0.18 and -0.98), so the adopted values of
+those two are an arm's, not located optima; the adopted `csatsc` of 0.948 sits
+close to 1, where the inversion enhancement vanishes.
 
 The monitors do not move: the precipitation bias is -0.72 / -0.65 mm/day
 against -0.71 / -0.67 for the control, the clear-sky OLR bias -7.6 / -9.2 W/m²
@@ -354,8 +363,8 @@ the LW CRE to within 0.3 W/m². What it costs: the SW CRE is 2.6 W/m² too stron
 (-48.3 against -45.7, from 3.5 too weak), the liquid water path rises by 7.5 g/m²
 over a control that is already above ESA-CCI, the near-surface temperature falls
 by 0.2 K, and the all-sky OLR bias grows from -6.7 to -8.7 W/m² because the LW
-CRE rises onto its observation while the clear-sky OLR, which is 8 to 10 W/m²
-low on every host, does not move. The corner optimum is the better fit by the
+CRE rises onto its observation while the clear-sky OLR, which is 7.5 to 9.5 W/m²
+low (January / July) on every host, does not move. The corner optimum is the better fit by the
 loss (93.0 against 100.3) and has the better SW CRE (-45.9) but a LW CRE 1.9
 W/m² low, and its cover passes the gate by 0.003; it is not adopted because its
 parameters sit on three bounds.
@@ -366,7 +375,7 @@ January / July windows), the tropical precipitation extremes (the 99.9th
 percentile of 5-day means is 0.97 times the control's), and every convection
 and microphysics default, which stay ECHAM's. The combined JAM year
 `jam_rc_cloud` (the release aerosol defaults together with this set) tests the
-JAM-2M host; its row above is filled when it is scored.
+JAM-2M host; its row above is pending and is filled when the year is scored.
 
 ## What the calibration cannot reach
 
@@ -426,13 +435,13 @@ earlier-tree sweeps.
   member inherits both L47 values: the dust scale because it is a T63 value, and
   the sea-salt scale because it has no switch.
 - The cover set applies at T63. It was swept on the 2M host at L47 and
-  confirmed there in a 365-day year; the JAM-2M host's year is `jam_rc_cloud`
-  (above), and the 1M host reads the set with no calibration or year of its
-  own. T106 interpolates linearly in the truncation number between the T63 row
+  confirmed there in a 365-day year; the JAM-2M host's year, `jam_rc_cloud`, is
+  pending (above), and the 1M host reads the set with no calibration or year of
+  its own (#1014). T106 interpolates linearly in the truncation number between the T63 row
   and ECHAM's T127 row (an untuned blend: `crs` 0.963, `crt` 0.727, `csatsc`
   0.781, `cinv` 0.238, and `nex` 2, the nearer truncation's integer), and a
   grid with no spectral truncation (the cubed sphere) takes the T63 row; neither
-  was swept. See {doc}`resolution_defaults`.
+  was swept (#1014). See {doc}`resolution_defaults`.
 - The release-matrix regression bands of the ECHAM members describe the cloud and
   aerosol climate of the previous defaults and are regenerated against the release
   candidate, together with their init states.
@@ -453,7 +462,8 @@ observations from jcm-monitor); the years are the five 365-day T63 L47 runs
 named in the JAM table, scored with `tools/release_validation/health.py` and the
 monitor's release recipe. Stage 2b is the 25-arm ledger of the 2M host on the
 same tree with the five `cloud.*` levers, and the years `2m_control`,
-`2m_cloudi`, `2m_cloud`, `2m_a` and `jam_rc_cloud`, on the same tree and recipe.
+`2m_cloudi`, `2m_cloud` and `2m_a`, on the same tree and recipe (`jam_rc_cloud`
+is added when it is scored).
 Shipped values are pinned by `dust_test.py`, `seasalt_test.py`,
 `echam_terms_test.py` and `runners_test.py`, and the cover set by
 `echam_cloud_defaults_test.py`, `parameters_test.py` and `runners_test.py`.

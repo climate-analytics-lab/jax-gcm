@@ -224,7 +224,7 @@ def echam_cover_parameters(nn: int = 63):
     z = load("cover") if nn == 63 else load_resolution()
     prefix = "param/sonntag/" if nn == 63 else f"T{nn}/param/"
     fields = {k: float(z[prefix + k])
-              for k in ("crt", "crs", "nex", "csatsc", "cinv")}
+              for k in ("crt", "crs", "nex", "csatsc", "cinv", "csecfrl")}
     return CloudParameters.default(
         truncation=nn, nadd=int(z[prefix + "nadd"]), **fields)
 

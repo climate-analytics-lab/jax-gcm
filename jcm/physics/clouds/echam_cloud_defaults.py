@@ -110,8 +110,8 @@ ECHAM_CLOUD_DEFAULTS: dict[int, dict[str, float | int]] = {
 #:
 #: The same five fields are read by the cover of the 1M, the 2M and the JAM-2M
 #: hosts (``SundqvistCloudFraction``), so one set serves all three. It was
-#: calibrated and confirmed on the 2M host; the 1M host inherits it without a
-#: calibration of its own.
+#: calibrated and confirmed on the 2M host; the 1M host, T106 and the cubed
+#: sphere read it without a calibration of their own (#1014).
 JCM_CALIBRATED_COVER_T63: dict[str, float] = dict(
     crt=0.679016061, crs=0.9, nex=1.84856084, csatsc=0.948216414,
     cinv=0.213005383)
@@ -126,8 +126,9 @@ JCM_CLOUD_DEFAULTS[63].update(JCM_CALIBRATED_COVER_T63)
 
 #: Fields that are integers in ECHAM and are therefore never interpolated:
 #: between two tabulated truncations they take the nearer one's value. ``nex``
-#: stays here although the calibrated T63 value is real: T64 to T94 take the
-#: calibrated T63 ``nex`` and T95 to T126 take ECHAM's T127 value.
+#: is one of them although the calibrated T63 value is real, because ECHAM
+#: defines it only at its own truncations: T64 to T94 take the calibrated T63
+#: ``nex`` and T95 to T126 take ECHAM's T127 value.
 ECHAM_CLOUD_NEAREST_FIELDS = ("nex", "nadd")
 
 #: ``cthomi = tmelt - 35`` (``mo_echam_cloud_params.f90`` l.54), the

@@ -1860,14 +1860,14 @@ The cloud-cover defaults at T63 are calibrated
   96.9 W/m² (99.0) and the LW CRE from 26.1 to 28.2 (27.9). The cost is a SW
   CRE 2.6 W/m² too strong (-48.3 against -45.7), 7.5 g/m² more liquid water
   path (49.6, ESA-CCI 36.4), a near-surface temperature 0.2 K lower and an
-  all-sky OLR bias of -8.7 against -6.7 W/m² (the clear-sky OLR bias, -8 to
-  -10 W/m², does not move). Precipitation and the tropical precipitation
+  all-sky OLR bias of -8.7 against -6.7 W/m² (the clear-sky OLR bias, -7.5 to
+  -9.5 W/m², does not move). Precipitation and the tropical precipitation
   extremes are unchanged. The sweep's unconstrained optimum sat on the edges of
   its box (``nex`` 3.96 of 4, ``cinv`` 0.5 of 0.5, ``crs`` 0.9) and was not
   adopted; the adopted ``crs`` is itself on its lower bound of 0.9, below every
   ECHAM value. The non-integer ``nex`` is admissible: the critical-humidity
-  profile is continuous in it. The 1M host reads the set without a calibration
-  or year of its own. The evidence is in :doc:`design/jam_aerosol_retune`
+  profile is continuous in it. The 1M host, T106 and the cubed sphere read the
+  set without a calibration or year of their own (#1014). The evidence is in :doc:`design/jam_aerosol_retune`
   ("Stage 2b: cloud fraction") and the statement of the values in
   :doc:`science/clouds_microphysics`.
 - **Changes results** on every ECHAM host at T63 (cloud cover, cloud radiative
