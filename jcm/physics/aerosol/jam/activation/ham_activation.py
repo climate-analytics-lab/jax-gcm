@@ -6,9 +6,11 @@ ham_activ_{README.md,provenance.json}``):
 
 * :func:`koehler_ab` -- ``mo_ham_activ.f90::ham_activ_koehler_ab`` (463-594)
 * :func:`ham_arg` -- ``mo_ham_activ.f90::ham_activ_abdulrazzak_ghan`` (65-375)
-* :func:`ham_logtail` -- ``mo_ham_tools.f90::ham_m7_logtail`` (203-320) with
-  ``mo_ham_m7.f90::m7_cumulative_normal`` (75-326) as the closed-form normal
-  tail (``erf``)
+* :func:`ham_logtail` -- ``mo_ham_tools.f90::ham_m7_logtail`` (203-320),
+  itself calling :func:`_m7_cumulative_normal`, a port of
+  ``mo_ham_m7.f90::m7_cumulative_normal`` (75-326) -- HAM's own Cody/DCDFLIB
+  rational-Chebyshev normal CDF, not ``jax.scipy.special.erf`` (see that
+  function's docstring for why)
 * :func:`ham_updraft` -- ``mo_activ.f90::activ_updraft`` (75-152) with
   ``aero_activ_updraft_sigma``/``aero_activ_updraft_pdf`` (154-238)
 * :func:`lin_leaitch` -- ``mo_ham_activ.f90::ham_avail_activ_lin_leaitch``
@@ -46,7 +48,6 @@ horizontal shape, so the identical code runs on a single column or a whole
 from __future__ import annotations
 
 import jax.numpy as jnp
-from jax.scipy.special import erf
 
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 
@@ -89,15 +90,143 @@ HAM_ELECTROLYTE = {
 _LL_C2 = 2.3e-10   # [m4 s-1]
 _LL_C3 = 1.27      # [1]
 # Lower size cut-offs of the instrument used by ham_avail_activ_lin_leaitch
-# (mo_ham_activ.f90:622,626): stratiform 0.03 um, convective 0.02 um radius.
-LL_CRCUT_STRAT = 0.03e-6
-LL_CRCUT_CONV = 0.02e-6
+# (mo_ham_activ.f90:622,626): ``REAL(dp), PARAMETER :: crcut=0.03*1E-6_dp``
+# and ``crcut_cv=0.02*1E-6_dp``. The undecorated literals ``0.03``/``0.02``
+# (no ``_dp`` kind suffix) are DEFAULT (single) precision in Fortran, so the
+# compiler widens the single-precision-rounded value to double *before*
+# multiplying by ``1E-6_dp`` -- the compiled constant is measurably not
+# 3.0e-8/2.0e-8 (confirmed against a standalone probe of the real PARAMETER
+# declarations): it carries single precision's ~1e-7 relative rounding of
+# 0.03/0.02 into an otherwise double-precision quantity. This is a genuine
+# quirk of the reference source, not a typo to "correct": reproducing it is
+# what let ``lin_leaitch`` reach the float64 round-off this module's other
+# functions already hit (see ``ham_activation_reference_test.py``'s
+# "Precision" note -- before this fix the gap looked like an erf-vs-Cody
+# difference; it was this literal instead).
+# Values: REAL(4)(0.03) and REAL(4)(0.02), each widened to double and then
+# multiplied by 1e-6 -- read off a standalone probe of the real PARAMETER
+# declarations (gfortran, same flags as the harness).
+LL_CRCUT_STRAT = 2.999999932944775e-08
+LL_CRCUT_CONV = 1.9999999552965164e-08
 
 # West et al. (2013) updraft PDF: mo_activ.f90 activ_initialize's
 # ``SELECT CASE(ABS(nactivpdf)) CASE(1): nw = 20`` -- the default bin count
 # when the PDF option is switched on (nactivpdf /= 0).
 PDF_DEFAULT_BINS = 20
 _W_SIGMA_MIN = 0.1   # [m/s] mo_activ.f90:69
+
+# ---------------------------------------------------------------------------
+# m7_cumulative_normal (mo_ham_m7.f90:75-326): Cody/DCDFLIB rational-
+# Chebyshev coefficients, the SAME double-precision literals as the Fortran
+# PARAMETER arrays (mo_ham_m7.f90:112-161). This is HAM's own normal CDF, not
+# ``jax.scipy.special.erf``: the two are different, both highly accurate,
+# approximations of the same function, and HAM's additionally has the
+# EPSILON(1) tail cutoff below (mo_ham_m7.f90:261-267) that erf has no
+# analogue of. ``ham_logtail`` is held to this routine at rtol<=1e-12
+# (``ham_activation_reference_test.py``), which erf cannot reach.
+# ---------------------------------------------------------------------------
+_CN_A = (2.2352520354606839287e0, 1.6102823106855587881e2, 1.0676894854603709582e3,
+         1.8154981253343561249e4, 6.5682337918207449113e-2)
+_CN_B = (4.7202581904688241870e1, 9.7609855173777669322e2, 1.0260932208618978205e4,
+         4.5507789335026729956e4)
+_CN_C = (3.9894151208813466764e-1, 8.8831497943883759412e0, 9.3506656132177855979e1,
+         5.9727027639480026226e2, 2.4945375852903726711e3, 6.8481904505362823326e3,
+         1.1602651437647350124e4, 9.8427148383839780218e3, 1.0765576773720192317e-8)
+_CN_D = (2.2266688044328115691e1, 2.3538790178262499861e2, 1.5193775994075548050e3,
+         6.4855582982667607550e3, 1.8615571640885098091e4, 3.4900952721145977266e4,
+         3.8912003286093271411e4, 1.9685429676859990727e4)
+_CN_P = (2.1589853405795699e-1, 1.274011611602473639e-1, 2.2235277870649807e-2,
+         1.421619193227893466e-3, 2.9112874951168792e-5, 2.307344176494017303e-2)
+_CN_Q = (1.28426009614491121e0, 4.68238212480865118e-1, 6.59881378689285515e-2,
+         3.78239633202758244e-3, 7.29751555083966205e-5)
+_CN_ROOT32 = 5.656854248
+_CN_SQRPI = 3.9894228040143267794e-1
+_CN_THRSH = 0.66291
+# mo_ham_m7.f90:176: eps = EPSILON(1._dp)*0.5 -- distinct from ZEPS
+# (mo_ham_m7.f90:183's zmin = EPSILON(1._dp), used only for the final tail
+# cutoff below).
+_CN_EPS = ZEPS * 0.5
+
+
+def _m7_cumulative_normal(x):
+    """Evaluate HAM's own normal CDF and complementary CDF at ``x``.
+
+    Faithful port of ``m7_cumulative_normal`` (mo_ham_m7.f90:75-326): the
+    three branches on ``|x|`` (<= 0.66291; <= sqrt(32); > sqrt(32), each a
+    Cody rational-function fit) plus the final EPSILON(1) cutoff that snaps
+    a sufficiently small result to exactly 0. Every branch below computes
+    on a *substituted* safe operand (``xs``/``ym``/``xl``) wherever that
+    branch is not the one selected, so reverse-mode AD never differentiates
+    a division or reciprocal at an unguarded zero even though
+    ``jnp.where``'s VJP evaluates all three branches' forward *and*
+    backward passes.
+
+    Returns:
+        ``(presult, ccum)`` = (CDF, complementary CDF) at ``x``, each the
+        shape of ``x``. ``ham_logtail`` uses ``ccum`` (HAM's ``pfrac``);
+        ``presult`` is returned too so the port is complete, matching the
+        Fortran subroutine's own two outputs.
+
+    """
+    x = jnp.asarray(x)
+    y = jnp.abs(x)
+    small = y <= _CN_THRSH
+    mid = (~small) & (y <= _CN_ROOT32)
+    far = ~(small | mid)
+
+    # Branch 1: |x| <= 0.66291 (mo_ham_m7.f90:188-207).
+    xs = jnp.where(small, x, 0.0)
+    xsq = jnp.where(jnp.abs(xs) > _CN_EPS, xs * xs, 0.0)
+    xnum = _CN_A[4] * xsq
+    xden = xsq
+    for i in range(3):
+        xnum = (xnum + _CN_A[i]) * xsq
+        xden = (xden + _CN_B[i]) * xsq
+    central = xs * (xnum + _CN_A[3]) / (xden + _CN_B[3])
+    presult_small = 0.5 + central
+    ccum_small = 0.5 - central
+
+    # Branch 2: 0.66291 < |x| <= sqrt(32) (mo_ham_m7.f90:211-231).
+    ym = jnp.where(mid, y, 1.0)
+    xnum = _CN_C[8] * ym
+    xden = ym
+    for i in range(7):
+        xnum = (xnum + _CN_C[i]) * ym
+        xden = (xden + _CN_D[i]) * ym
+    fraction = (xnum + _CN_C[7]) / (xden + _CN_D[7])
+    truncated = jnp.trunc(ym * 16.0) / 16.0
+    delta = (ym - truncated) * (ym + truncated)
+    tail = jnp.exp(-truncated * truncated * 0.5) * jnp.exp(-delta * 0.5) * fraction
+    # mo_ham_m7.f90:227-231: swap on the sign of the ORIGINAL x, not ym
+    # (= |x|, sign-less) -- ``presult``/``ccum`` before the swap are both
+    # "the tail probability"/"1 - that", in that order.
+    presult_mid = jnp.where(x > 0.0, 1.0 - tail, tail)
+    ccum_mid = jnp.where(x > 0.0, tail, 1.0 - tail)
+
+    # Branch 3: |x| > sqrt(32) (mo_ham_m7.f90:235-257).
+    xl = jnp.where(far, x, 8.0)
+    xsq = 1.0 / (xl * xl)
+    xnum = _CN_P[5] * xsq
+    xden = xsq
+    for i in range(4):
+        xnum = (xnum + _CN_P[i]) * xsq
+        xden = (xden + _CN_Q[i]) * xsq
+    fraction = xsq * (xnum + _CN_P[4]) / (xden + _CN_Q[4])
+    fraction = (_CN_SQRPI - fraction) / jnp.abs(xl)
+    truncated = jnp.trunc(xl * 16.0) / 16.0
+    delta = (xl - truncated) * (xl + truncated)
+    tail = jnp.exp(-truncated * truncated * 0.5) * jnp.exp(-delta * 0.5) * fraction
+    presult_far = jnp.where(x > 0.0, 1.0 - tail, tail)
+    ccum_far = jnp.where(x > 0.0, tail, 1.0 - tail)
+
+    presult = jnp.where(small, presult_small, jnp.where(mid, presult_mid, presult_far))
+    ccum = jnp.where(small, ccum_small, jnp.where(mid, ccum_mid, ccum_far))
+
+    # mo_ham_m7.f90:261-267: the EPSILON(1) tail cutoff -- this, not any
+    # branch formula, is what makes HAM's normal CDF differ from erf's.
+    presult = jnp.where(presult < ZEPS, 0.0, presult)
+    ccum = jnp.where(ccum < ZEPS, 0.0, ccum)
+    return presult, ccum
 
 
 def mode_col(x, ndim_cell):
@@ -177,13 +306,17 @@ def koehler_ab(spec: ModalAerosolSpec, mass: dict, temperature: jnp.ndarray):
 def ham_logtail(count_median_radius, cutoff_radius, sigmaln, mass_factor=1.0):
     """Compute the number (or mass) fraction of a log-normal class above ``cutoff_radius``.
 
-    Port of ``ham_m7_logtail`` (mo_ham_tools.f90:203-320) with
-    ``m7_cumulative_normal`` (mo_ham_m7.f90:75-326) as the closed-form
-    complementary normal CDF, ``0.5*(1-erf(z/sqrt(2)))``. ``mass_factor`` is
-    HAM's ``cmedr2mmedr`` (count-to-mass-median-radius ratio), 1.0 for the
-    number fraction every caller in this module needs; kept as a parameter
-    so the function is a complete port of the (``ld_numb`` False) mass
-    branch too, not because any current caller uses it.
+    Port of ``ham_m7_logtail`` (mo_ham_tools.f90:203-320), calling
+    :func:`_m7_cumulative_normal` (HAM's OWN normal CDF, mo_ham_m7.f90:
+    75-326 -- not ``jax.scipy.special.erf``, whose lack of HAM's EPSILON(1)
+    tail cutoff is exactly what the reference comparison measures;
+    see :func:`_m7_cumulative_normal`'s docstring) for ``pfrac`` =
+    ``ccum(zt)``. ``mass_factor`` is HAM's ``cmedr2mmedr``
+    (count-to-mass-median-radius ratio), 1.0 for the number fraction most
+    callers need; the ARG activation term also uses a non-1 ``mass_factor``
+    to derive a mass-activated fraction, the same technique HAM's own
+    ``ic_scav_nuc`` (mo_ham_wetdep.f90:684-795) uses for in-cloud nucleation
+    scavenging of mass versus number (``ll_trac_phase`` there).
 
     All three branches of mo_ham_tools.f90:295-315 are reproduced:
     ``cutoff_radius`` and ``count_median_radius`` both above EPSILON gives
@@ -199,7 +332,7 @@ def ham_logtail(count_median_radius, cutoff_radius, sigmaln, mass_factor=1.0):
     safe_cmr = jnp.where(normal_branch, cmr, 1.0)
     safe_r = jnp.where(normal_branch, cutoff_radius, 1.0)
     zt = (jnp.log(safe_r) - jnp.log(safe_cmr)) / sigmaln
-    tail = 0.5 * (1.0 - erf(zt / jnp.sqrt(2.0)))
+    _, tail = _m7_cumulative_normal(zt)
     # has_class & ~above_cutoff -> 1.0 (mo_ham_tools.f90:307-309);
     # ~has_class -> 0.0 (mo_ham_tools.f90:311-313, the empty-class default).
     return jnp.where(normal_branch, tail, jnp.where(has_class, 1.0, 0.0))

@@ -236,13 +236,15 @@ class HamActivation(PhysicsTerm):
             )
             n_total = jnp.sum(jnp.where(can_activate_col, number_vol, 0.0), axis=0)
             # ham_activ_abdulrazzak_ghan never computes a mass-activated
-            # fraction (ll_numb = .TRUE. throughout); giving the term the
-            # same MASS fraction ArgActivation publishes re-runs
+            # fraction itself (ll_numb = .TRUE. throughout), but giving the
+            # term the same MASS fraction ArgActivation publishes re-runs
             # ham_logtail's MASS branch (mass_factor = cmedr2mmedr) at the
-            # SAME critical radius rc -- HAM's own, documented way to turn a
-            # number-tail fraction into a mass-tail one
-            # (mo_ham_tools.f90:284-289), applied here for the first time to
-            # activation rather than to a size-cut diagnostic.
+            # SAME critical radius rc -- HAM's own technique for turning a
+            # number-tail fraction into a mass-tail one at a critical
+            # radius, exactly as ``ic_scav_nuc`` (mo_ham_wetdep.f90:684-795)
+            # already does for in-cloud nucleation scavenging: it calls
+            # ham_m7_logtail twice at the SAME rcritrad, once with
+            # ll_trac_phase = .TRUE. (number) and once .FALSE. (mass).
             cmedr2mmedr = mode_col(jnp.asarray(self._cmedr2mmedr), ndim_cell)[
                 :, jnp.newaxis, ...]
             ln_sigma = mode_col(jnp.log(sigma_g), ndim_cell)[:, jnp.newaxis, ...]

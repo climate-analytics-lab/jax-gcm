@@ -14,6 +14,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from jcm.physics.aerosol.jam.activation.ham_activation import (
+    _CN_ROOT32,
+    _CN_THRSH,
+    _m7_cumulative_normal,
     ham_arg,
     ham_logtail,
     ham_updraft,
@@ -100,6 +103,75 @@ class HamLogtailTest(unittest.TestCase):
             return jnp.sum(ham_logtail(jnp.full((3,), 1.0e-7), r, jnp.log(1.59)))
 
         g = jax.grad(loss)(jnp.asarray([1.0e-7, 0.0, 1.0e-30]))
+        self.assertTrue(np.all(np.isfinite(np.asarray(g))))
+
+
+class M7CumulativeNormalTest(unittest.TestCase):
+    """``_m7_cumulative_normal`` -- HAM's own normal CDF (mo_ham_m7.f90:
+    75-326), exercised across all three Cody rational-function branches
+    (``|x| <= thrsh``, ``thrsh < |x| <= root32``, ``|x| > root32``) and
+    both signs. Byte-for-byte fidelity against the compiled Fortran is
+    ``ham_activation_reference_test.py``'s job (reached only through this
+    function, since every reference field is closed-form through it); this
+    file covers math sanity, the EPSILON(1) tail cutoff, and gradients.
+    """
+
+    def test_matches_scipy_normal_cdf_away_from_the_tail_cutoff(self):
+        from scipy.stats import norm
+
+        xs = np.array([-6.0, -3.0, -_CN_THRSH - 0.1, -0.3, 0.0, 0.3,
+                        _CN_THRSH + 0.1, 3.0, 6.0])
+        with jax.enable_x64(True):
+            presult, ccum = _m7_cumulative_normal(jnp.asarray(xs, dtype=jnp.float64))
+        np.testing.assert_allclose(np.asarray(presult), norm.cdf(xs), atol=1e-9)
+        np.testing.assert_allclose(np.asarray(ccum), norm.sf(xs), atol=1e-9)
+        # presult + ccum == 1 identically (both come from the same ``tail``
+        # in the branch, mo_ham_m7.f90:206-207,225,251).
+        np.testing.assert_allclose(np.asarray(presult) + np.asarray(ccum), 1.0)
+
+    def test_epsilon_tail_cutoff_snaps_the_far_branch_to_zero(self):
+        """mo_ham_m7.f90:261-267: a sufficiently small result is exactly 0,
+        not merely tiny -- the one behaviour erf has no analogue of.
+        """
+        presult, ccum = _m7_cumulative_normal(jnp.asarray([-40.0, 40.0]))
+        self.assertEqual(float(ccum[0]), 1.0)
+        self.assertEqual(float(presult[0]), 0.0)   # snapped to exactly 0
+        self.assertEqual(float(presult[1]), 1.0)
+        self.assertEqual(float(ccum[1]), 0.0)      # snapped to exactly 0
+
+    def test_continuous_and_monotonic_across_branch_boundaries(self):
+        xs = jnp.linspace(-10.0, 10.0, 4001)
+        presult, _ = _m7_cumulative_normal(xs)
+        diffs = np.diff(np.asarray(presult))
+        self.assertTrue(np.all(diffs >= -1e-12))   # monotonically non-decreasing
+        # No jump at thrsh/root32 bigger than a few adjacent-sample steps.
+        self.assertLess(float(np.max(np.abs(diffs))), 1.0e-2)
+
+    def test_grad_finite_in_every_branch_both_signs(self):
+        """One representative point per (branch, sign): small, mid, far."""
+        probe = jnp.asarray(
+            [0.0, 0.3, -0.3, (_CN_THRSH + _CN_ROOT32) / 2,
+             -(_CN_THRSH + _CN_ROOT32) / 2, _CN_ROOT32 + 2.0, -(_CN_ROOT32 + 2.0)]
+        )
+
+        def loss(x):
+            presult, ccum = _m7_cumulative_normal(x)
+            return jnp.sum(presult) + jnp.sum(ccum)
+
+        g = jax.grad(lambda x: jnp.sum(loss(x)))(probe)
+        self.assertTrue(np.all(np.isfinite(np.asarray(g))))
+
+    def test_grad_finite_at_exact_branch_boundaries(self):
+        """The boundaries themselves (thrsh, root32, 0) -- the double-where
+        guards must not poison the gradient exactly where a branch switches.
+        """
+        probe = jnp.asarray([0.0, _CN_THRSH, -_CN_THRSH, _CN_ROOT32, -_CN_ROOT32])
+
+        def loss(x):
+            presult, ccum = _m7_cumulative_normal(x)
+            return jnp.sum(presult) + jnp.sum(ccum)
+
+        g = jax.grad(loss)(probe)
         self.assertTrue(np.all(np.isfinite(np.asarray(g))))
 
 

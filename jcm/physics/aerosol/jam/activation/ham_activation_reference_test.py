@@ -104,11 +104,25 @@ def _inputs(prec):
     )
 
 
-# Achieved tolerances (see the "Precision" section at the bottom of this
-# file for the measured max relative error each field reaches and why ARG's
-# fields hit float64 round-off while Lin & Leaitch's land at ~1e-8).
-RTOL_CLOSED_FORM = {"float64": 1e-12, "float32": 2e-6}
-RTOL_LOGTAIL_SUM = {"float64": 2e-8, "float32": 2e-6}
+# Every field here is closed-form against the harness once ``ham_logtail``
+# calls HAM's own m7_cumulative_normal (not erf) and Lin & Leaitch's crcut
+# constants carry the reference source's single-precision-literal rounding
+# (see ham_activation.py's LL_CRCUT_STRAT/_CONV and
+# _m7_cumulative_normal docstrings) -- every field below is measured at
+# float64 round-off (see the "Precision" section at the bottom of this
+# file for the achieved max per field).
+# float32's own eps is ~1.19e-7; the deepest chain here (ham_arg's Cody
+# rational-fraction evaluation inside ham_logtail, several multiply-adds
+# then a power) measures up to ~4.8e-6 relative on one mode/cell -- 2e-6 was
+# too tight for that specific chain once it was no longer masking a real
+# (f64) discrepancy; 1e-5 clears the measured max with headroom.
+RTOL = {"float64": 1e-12, "float32": 1e-5}
+# atol=0 throughout except where the harness's own reference value is
+# exactly 0 (a masked/non-activating mode, a gated-off cell): there a tiny
+# floor (not a precision concession -- the compared values are themselves
+# exact zeros) avoids a spurious "0 != 1e-300"-style failure from a
+# subnormal residual.
+ATOL_ZERO = 1e-30
 
 
 @pytest.mark.parametrize("prec", ("float64", "float32"))
@@ -119,10 +133,10 @@ def test_koehler_ab_matches_reference(prec):
         for i, m in enumerate(MODES):
             np.testing.assert_allclose(
                 np.asarray(a[i], np.float64), d["z"][f"out/a/{m}"],
-                rtol=RTOL_CLOSED_FORM[prec], atol=1e-30, err_msg=f"A[{m}]")
+                rtol=RTOL[prec], atol=ATOL_ZERO, err_msg=f"A[{m}]")
             np.testing.assert_allclose(
                 np.asarray(b[i], np.float64), d["z"][f"out/b/{m}"],
-                rtol=RTOL_CLOSED_FORM[prec], atol=1e-30, err_msg=f"B[{m}]")
+                rtol=RTOL[prec], atol=ATOL_ZERO, err_msg=f"B[{m}]")
 
 
 @pytest.mark.parametrize("prec", ("float64", "float32"))
@@ -132,7 +146,7 @@ def test_ham_updraft_nactivpdf0_matches_reference(prec):
         w, pwpdf = ham_updraft(d["tke"], d["omega"], d["rho"], 0.0, 0.7, n_pdf_bins=None)
         np.testing.assert_allclose(
             np.asarray(w[0], np.float64), d["z"]["out/w0"],
-            rtol=RTOL_CLOSED_FORM[prec], atol=1e-30)
+            rtol=RTOL[prec], atol=ATOL_ZERO)
         assert bool(jnp.all(pwpdf == 1.0))
 
 
@@ -148,34 +162,23 @@ def test_ham_arg_nactivpdf0_matches_reference(prec):
         )
         np.testing.assert_allclose(
             np.asarray(cdncact, np.float64), d["z"]["out/cdncact0"],
-            rtol=RTOL_CLOSED_FORM[prec], atol=1e-30, err_msg="cdncact0")
+            rtol=RTOL[prec], atol=ATOL_ZERO, err_msg="cdncact0")
         for i, m in enumerate(MODES):
             np.testing.assert_allclose(
                 np.asarray(sm[i], np.float64), d["z"][f"out/sc/{m}"],
-                rtol=RTOL_CLOSED_FORM[prec], atol=1e-30, err_msg=f"sc[{m}]")
-            # nact/fracn's atol floors are physically negligible (< 1e-2
-            # particles/m3 out of populations of 1e6-1e10 m^-3): the ONE
-            # cell they bite (high_number_polluted_ks_as_cs, where a mode's
-            # activated fraction is itself ~1e-10) is in erf's deep tail,
-            # where jax.scipy.special.erf and HAM's m7_cumulative_normal
-            # (a different, also highly accurate, Cody/DCDFLIB
-            # rational-Chebyshev approximation -- see the module docstring's
-            # "Precision" note) can disagree by an O(1) RELATIVE amount
-            # while the absolute values stay negligible.
+                rtol=RTOL[prec], atol=ATOL_ZERO, err_msg=f"sc[{m}]")
             np.testing.assert_allclose(
                 np.asarray(nact[i], np.float64), d["z"][f"out/nact0/{m}"],
-                rtol=RTOL_CLOSED_FORM[prec], atol={"float64": 1e-2, "float32": 1e3}[prec],
-                err_msg=f"nact0[{m}]")
+                rtol=RTOL[prec], atol=ATOL_ZERO, err_msg=f"nact0[{m}]")
             np.testing.assert_allclose(
                 np.asarray(nfrac[i], np.float64), d["z"][f"out/fracn0/{m}"],
-                rtol=RTOL_CLOSED_FORM[prec], atol={"float64": 1e-9, "float32": 1e-6}[prec],
-                err_msg=f"fracn0[{m}]")
+                rtol=RTOL[prec], atol=ATOL_ZERO, err_msg=f"fracn0[{m}]")
             np.testing.assert_allclose(
                 np.asarray(rc[i, 0], np.float64), d["z"][f"out/rc0/{m}"],
-                rtol=RTOL_CLOSED_FORM[prec], atol=1e-30, err_msg=f"rc0[{m}]")
+                rtol=RTOL[prec], atol=ATOL_ZERO, err_msg=f"rc0[{m}]")
         np.testing.assert_allclose(
             np.asarray(smax[0], np.float64), d["z"]["out/smax0"],
-            rtol=RTOL_CLOSED_FORM[prec], atol=1e-30, err_msg="smax0")
+            rtol=RTOL[prec], atol=ATOL_ZERO, err_msg="smax0")
 
 
 @pytest.mark.parametrize("prec", ("float64", "float32"))
@@ -192,25 +195,23 @@ def test_ham_arg_pdf_matches_reference(prec):
         )
         np.testing.assert_allclose(
             np.asarray(cdncact, np.float64), d["z"]["out/cdncact1"],
-            rtol=RTOL_CLOSED_FORM[prec], atol=1e-30, err_msg="cdncact1")
+            rtol=RTOL[prec], atol=ATOL_ZERO, err_msg="cdncact1")
         # smax/rc carry the bin axis FIRST (n_w, ncol); the harness npz
         # records it last (ncol, n_w) -- transpose before comparing.
         np.testing.assert_allclose(
             np.asarray(smax, np.float64).T, d["z"]["out/smax1"],
-            rtol=RTOL_CLOSED_FORM[prec], atol=1e-30, err_msg="smax1")
+            rtol=RTOL[prec], atol=ATOL_ZERO, err_msg="smax1")
         for i, m in enumerate(MODES):
             np.testing.assert_allclose(
                 np.asarray(rc[i], np.float64).T, d["z"][f"out/rc1/{m}"],
-                rtol=RTOL_CLOSED_FORM[prec], atol=1e-30, err_msg=f"rc1[{m}]")
+                rtol=RTOL[prec], atol=ATOL_ZERO, err_msg=f"rc1[{m}]")
 
 
 @pytest.mark.parametrize("prec", ("float64", "float32"))
 def test_lin_leaitch_matches_reference(prec):
-    """Closed-form up to the normal-CDF evaluation: HAM's ``m7_cumulative_normal``
-    (a Cody rational-Chebyshev approximation) and JAX's ``erf`` are two
-    different, both highly accurate, implementations of the same
-    mathematical function -- they agree to ~1e-9, not float64 round-off
-    (measured below); see the module docstring's "Precision" note.
+    """Closed-form: HAM's own ``m7_cumulative_normal`` and its crcut
+    constants' single-precision-literal rounding, both ported exactly
+    (see ``ham_activation.py``), reach float64 round-off here.
     """
     with jax.enable_x64(prec == "float64"):
         d = _inputs(prec)
@@ -224,7 +225,7 @@ def test_lin_leaitch_matches_reference(prec):
         ):
             np.testing.assert_allclose(
                 np.asarray(val, np.float64), d["z"][key],
-                rtol=RTOL_LOGTAIL_SUM[prec], atol=1e-30, err_msg=name)
+                rtol=RTOL[prec], atol=ATOL_ZERO, err_msg=name)
 
 
 def test_ham_logtail_branches():
@@ -277,7 +278,7 @@ class TestHamActivationTerm:
             tend, out = term(state, diag, None, None)
             np.testing.assert_allclose(
                 np.asarray(out["activated_cdnc"], np.float64), d["z"]["out/cdncact0"],
-                rtol=1e-8, atol=1e-30)
+                rtol=RTOL["float64"], atol=ATOL_ZERO)
             assert bool(jnp.all(tend.temperature == 0.0))
             assert jnp.all(out["activated_fraction"] <= 1.0 + 1e-6)
 
@@ -290,7 +291,7 @@ class TestHamActivationTerm:
             _, out = term(state, diag, None, None)
             np.testing.assert_allclose(
                 np.asarray(out["activated_cdnc"], np.float64), d["z"]["out/cdncact_ll"],
-                rtol=2e-8, atol=1e-30)
+                rtol=RTOL["float64"], atol=ATOL_ZERO)
 
     def test_grad_through_number_and_updraft_finite(self):
         with jax.enable_x64(True):
@@ -367,31 +368,38 @@ def test_reference_cells_exercise_every_branch():
 
 
 # -----------------------------------------------------------------------
-# Precision (measured, from this test file's run against ham_activ_M7.npz):
+# Precision (measured, from this test file's run against ham_activ_M7.npz,
+# float64; all at RTOL["float64"] = 1e-12 with no atol floor beyond
+# ATOL_ZERO's protection of exact-zero reference entries):
 #
-#   koehler_ab (A, B):             max rel err  ~3.3e-16  (float64 round-off)
-#   ham_updraft (nactivpdf=0, w):   max rel err  0.0       (identical formula)
-#   ham_arg (nactivpdf=0: cdncact,
-#            sc, nact, fracn, rc,
-#            smax):                 max rel err  ~2.1e-16  (float64 round-off)
-#   ham_arg (nactivpdf=1, PDF):     max abs err  4.8e-7 on O(1e9) values
-#                                    (rel ~5e-16; float64 round-off)
+#   koehler_ab (A, B):                      max rel err 3.3e-16 (round-off)
+#   ham_updraft (nactivpdf=0, w):            max rel err 0.0    (identical formula)
+#   ham_arg (nactivpdf=0: cdncact, sc,
+#            nact, fracn, rc, smax):         max rel err 5.3e-15 (round-off)
+#   ham_arg (nactivpdf=1, PDF):              max rel err 6.3e-16 (round-off)
 #   lin_leaitch (na, na_cv,
-#                cdncact, cdncact_cv): max rel err ~1.2e-8
+#                cdncact, cdncact_cv):       EXACT (0.0 max abs/rel diff)
 #
-# The Lin & Leaitch fields are the only ones that do not reach float64
-# round-off: they are the only outputs built from SEVERAL ham_logtail calls
-# summed together (one per activatable mode), each evaluating HAM's own
-# m7_cumulative_normal (a Cody/DCDFLIB rational-Chebyshev normal-CDF
-# approximation) where this port evaluates jax.scipy.special.erf -- two
-# independent, both highly accurate (claimed/measured to beyond 1e-15 at a
-# single point), but DIFFERENT implementations of the same function. Their
-# few-ULP per-call disagreement does not cancel across the mode sum, and
-# empirically lands at ~1e-8, not 1e-12. ARG's per-mode fractions go through
-# the identical ham_logtail call but are dominated by near-0/near-1 modes in
-# these cells, which is far less sensitive to the evaluator's choice --
-# coincidence of the test cells, not evidence the two implementations differ
-# less there. RTOL_LOGTAIL_SUM documents this measured floor; a future cell
-# design hitting ARG with several comparably-weighted mid-range fractions
-# could plausibly need the same floor there too.
+# Every field reaches float64 round-off (or exact equality). Getting there
+# needed two fixes to this module beyond the obvious "port the formula":
+#
+# 1. ham_logtail must call HAM's OWN normal CDF (_m7_cumulative_normal,
+#    a port of m7_cumulative_normal, mo_ham_m7.f90:75-326 -- the Cody/
+#    DCDFLIB rational-Chebyshev approximation PLUS its EPSILON(1) tail
+#    cutoff), not jax.scipy.special.erf. erf is a different, also highly
+#    accurate, approximation of the same mathematical function; before this
+#    fix ARG's fields still matched (dominated by near-0/near-1 fractions,
+#    where erf and the Cody fit agree to many more digits) but ONE cell's
+#    deep-tail mode (high_number_polluted_ks_as_cs) and ALL of Lin & Leaitch
+#    (summing several mid-range, evaluator-sensitive fractions) sat at
+#    ~1e-8-1e-9, not 1e-12 -- erroneously attributed, in an earlier version
+#    of this module, to "two independent accurate implementations of the
+#    same function" rather than tracked down further.
+# 2. LL_CRCUT_STRAT/LL_CRCUT_CONV must reproduce
+#    mo_ham_activ.f90:622,626's ``crcut=0.03*1E-6_dp`` /
+#    ``crcut_cv=0.02*1E-6_dp`` bit-for-bit: the undecorated ``0.03``/
+#    ``0.02`` literals are DEFAULT (single) precision in Fortran, so the
+#    compiled constants are measurably not 3.0e-8/2.0e-8 -- fixing #1 above
+#    and STILL comparing against the "intended" 0.03e-6/0.02e-6 left
+#    Lin & Leaitch's own fields at ~1e-8, which is what exposed this one.
 # -----------------------------------------------------------------------
