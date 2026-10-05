@@ -3,8 +3,11 @@
 Port of the MPI-BGC dust scheme ``mo_ham_dust.f90`` (``bgc_dust_initialize``,
 ``bgc_dust_calc_emis``) as configured by HAM2 (``ndust = 4``): a size-resolved
 Marticorena-Bergametti (1995) saltation flux over a 191-class soil size grid
-and a per-cell mixture of prescribed soil textures, sandblasted into an emitted
-spectrum and integrated onto MAM4's accumulation and coarse emission windows.
+and a per-cell mixture of prescribed soil textures, sandblasted into an
+emitted spectrum and integrated onto the population's own emission windows —
+MAM4's accumulation/coarse by default, or M7's insoluble accumulation/coarse
+with HAM's own fixed-radius number conversion when ``spec.dust_emission`` is
+set (:class:`DustEmissionPolicy`, :func:`m7_dust_emission_policy`).
 
 The chain, in CGS as the Fortran is (cm, cm/s, g, g cm⁻² s⁻¹):
 
