@@ -971,6 +971,76 @@ class TestRRTMGPThinCloudInflation:
         assert float(diag.toa_sw_up) > float(diag.toa_sw_up_clear) - 1e-3
 
 
+class TestRRTMGPCloudInputsToTheLibrary:
+    """What the library is handed for a cloud, and that its derivative is finite.
+
+    The library divides by the optical depth, so a cloud whose optical depth is a
+    nonzero float32 far below ``1e-19`` has a derivative that overflows, and its
+    halo cells are discarded but computed: a cloudy halo repeating a cloudy
+    surface layer makes the derivative non-finite although the fluxes are
+    unchanged (found with ``crs = 0.9``, which puts cloud in the lowest layer).
+    """
+
+    def test_halo_cells_of_the_cloud_paths_are_cloud_free(self):
+        from jcm.physics.radiation.rrtmgp import _to_4d_per_gpoint
+
+        paths = jnp.arange(1.0, 7.0).reshape(2, 3)
+        padded = _to_4d_per_gpoint(paths, 3, 1)
+        assert padded.shape == (2, 1, 1, 5)
+        np.testing.assert_array_equal(padded[:, 0, 0, 0], 0.0)
+        np.testing.assert_array_equal(padded[:, 0, 0, -1], 0.0)
+        np.testing.assert_array_equal(padded[:, 0, 0, 1:-1], paths)
+
+    def test_negligible_paths_are_zeroed_and_real_ones_kept(self):
+        from jcm.physics.radiation.mcica import (
+            NEGLIGIBLE_CLOUD_PATH_KG_M2,
+            resolvable_path,
+        )
+
+        floor = NEGLIGIBLE_CLOUD_PATH_KG_M2
+        paths = jnp.array([0.0, 1e-30, floor, 2 * floor, 1e-6, 0.3])
+        np.testing.assert_allclose(
+            resolvable_path(paths), [0.0, 0.0, 0.0, 2 * floor, 1e-6, 0.3],
+            rtol=1e-6, atol=0.0)
+        grad = jax.grad(lambda p: resolvable_path(p).sum())(paths)
+        np.testing.assert_array_equal(grad, [0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+
+    @staticmethod
+    def _derivatives(inputs):
+        keys = ("temperature", "specific_humidity", "cloud_water", "cloud_ice")
+
+        def f(*values):
+            tend, diag = radiation_scheme_rrtmgp(**{**inputs, **dict(zip(keys, values))})
+            return tend.temperature_tendency, diag.toa_sw_up, diag.toa_lw_up
+
+        primals = tuple(inputs[k] for k in keys)
+        out, forward = jax.jvp(f, primals, tuple(jnp.ones_like(p) for p in primals))
+        _, vjp = jax.vjp(f, *primals)
+        reverse = vjp(jax.tree.map(jnp.ones_like, out))
+        return jax.tree.leaves(forward) + jax.tree.leaves(reverse)
+
+    def _column(self, **cloud):
+        inputs = _make_inputs(nlev=10)
+        nlev = inputs["temperature"].shape[0]
+        fields = {k: jnp.zeros((nlev,)) for k in ("cloud_fraction", "cloud_water", "cloud_ice")}
+        for name, (level, value) in cloud.items():
+            fields[name] = fields[name].at[level].set(value)
+        atm = dict(temperature=inputs["temperature"],
+                   pressure_levels=inputs["pressure_levels"], **fields)
+        return {**inputs, **fields, **_column_radii(atm, inputs["air_density"])}
+
+    @pytest.mark.slow
+    def test_cloud_in_the_lowest_layer_has_a_finite_derivative(self):
+        inputs = self._column(cloud_fraction=(-1, 0.3), cloud_water=(-1, 2.4e-4))
+        assert all(bool(jnp.all(jnp.isfinite(x))) for x in self._derivatives(inputs))
+
+    @pytest.mark.slow
+    @pytest.mark.parametrize("ice", [1e-20, 1e-18])
+    def test_negligible_condensate_has_a_finite_derivative(self, ice):
+        inputs = self._column(cloud_fraction=(3, 0.0333), cloud_ice=(3, ice))
+        assert all(bool(jnp.all(jnp.isfinite(x))) for x in self._derivatives(inputs))
+
+
 class TestRRTMGPRadiationQuickWins:
     """Regression pins for the radiation-glue fixes (fix-plan PR 3).
 
