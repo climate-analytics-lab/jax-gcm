@@ -32,22 +32,28 @@
 #                                 HAM's own Koehler-A/B activation variant
 #                                 (ham_arg) is not ported yet (owned by
 #                                 another worker, #1017).
-#   jam_anthropogenic: false  -- the M7 per-sector emission policy
-#                                 (mo_ham_m7_emissions.f90's sector-dependent
-#                                 sizes/modes) is a later task; today's
-#                                 bulk-speciation path assumes MAM4 modes.
+#   jam_anthropogenic: true   -- M7_SPEC.sector_emission now carries HAM's own
+#                                 per-sector-class mode/size targets
+#                                 (mo_ham_m7_emissions.f90, emissions/
+#                                 ham_sectors.py), so AnthropogenicEmissions
+#                                 sizes BC/OC/primary-SO4 the way HAM does
+#                                 (fossil/energy_ships/biomass_like, with the
+#                                 residential/energy subset channels) rather
+#                                 than falling back to MAM4's primary_split
+#                                 assumption. Still inert without a CEDS
+#                                 forcing bundle (#498 Phases B-D).
 #   jam_prescribed_speciated: false
-#                              -- same reason: the already-speciated path is
-#                                 CAM6/MAM4-faithful per-tracer injection,
-#                                 not yet ported to M7's tracer names.
+#                              -- the already-speciated path is CAM6/MAM4-
+#                                 faithful per-tracer injection, not yet
+#                                 ported to M7's tracer names -- a later task.
 #
 # What IS already M7-faithful through this preset: the population itself
 # (M7_SPEC -- modes, species, csr_conv, the HAM freezing-class mapping, the
-# HAM aqueous-sulfate split, the M7 dust-emission policy); every OTHER
-# HAM-faithful variant in the design note's table (optics, wet deposition,
-# sea salt, cirrus, per-sector emissions, and the real microphysics core)
-# remains to be wired in by later #1017 tasks -- this preset composes
-# correctly today but is not yet validated against ECHAM-HAM.
+# HAM aqueous-sulfate split, the M7 dust-emission policy, the per-sector
+# primary-emission policy); every OTHER HAM-faithful variant in the design
+# note's table (optics, wet deposition, sea salt, cirrus, and the real
+# microphysics core) remains to be wired in by later #1017 tasks -- this
+# preset composes correctly today but is not yet validated against ECHAM-HAM.
 #
 # Usage:
 #
@@ -61,5 +67,5 @@ radiation_scheme: rrtmgp
 jam_microphysics: m7_placeholder
 jam_cloud_borne: false
 jam_arg_variant: arg2000
-jam_anthropogenic: false
+jam_anthropogenic: true
 jam_prescribed_speciated: false

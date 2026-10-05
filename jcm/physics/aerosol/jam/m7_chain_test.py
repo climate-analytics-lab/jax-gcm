@@ -143,6 +143,80 @@ class M7ChainTest(unittest.TestCase):
         for short in ("ns", "ks", "ki", "ai", "ci"):
             self.assertNotIn(mass_name("ss", short), tracers)
 
+    def test_sector_emissions_on_all_sectors_and_subsets_land_in_ham_modes(self):
+        """End-to-end smoke test of jax-gcm#1017 task 2 on the full model.
+
+        Synthetic SO2/BC/OC emissions on all four super-sectors plus both
+        subset channels (residential, energy) exercise every branch of
+        ``AnthropogenicEmissions``'s HAM-sector-policy path inside a real
+        dynamical-core integration. The EXACT per-sector mass-fraction/
+        number-vs-zm2n arithmetic is checked term-level, in isolation, in
+        ``emissions/anthropogenic_test.py``'s ``M7SectorEmissionTest`` (the
+        right place to verify closed-form numbers, since after transport and
+        deposition have acted the simple flux*fraction algebra no longer
+        holds). This test instead confirms the chain runs finite end-to-end
+        and that the classes HAM's policy actually targets (KI for BC, KI/KS
+        for OC, KS/AS/CS for primary SO4) pick up finite, non-trivial mass. It does
+        NOT assert on classes a species structurally CAN carry but HAM's
+        primary emission never targets (e.g. BC in AS/CS, which M7 carries
+        for aged/internally-mixed mass via HAM's own chemistry, not
+        emission) — those are a near-zero (not exactly-zero) signal here
+        since the placeholder core does no ageing, and the fast term-level
+        test above already isolates exactly what the emission term itself
+        produces.
+        """
+        from jcm.forcing import default_forcing
+        from jcm.physics.aerosol.jam.tracer_layout import mass_name
+
+        model = self._build(jam_anthropogenic=True)
+        shape = model.coords.horizontal.nodal_shape
+        channels = {}
+        for sector, (so2, bc, oc) in {
+            "surface_combustion": (2.0e-9, 1.0e-9, 3.0e-9),
+            "elevated_industrial": (3.0e-9, 0.5e-9, 1.0e-9),
+            "shipping": (1.0e-9, 0.2e-9, 0.3e-9),
+            "biomass_burning": (0.5e-9, 2.0e-9, 4.0e-9),
+        }.items():
+            channels[f"emis_{sector}_so2"] = jnp.full(shape, so2)
+            channels[f"emis_{sector}_bc"] = jnp.full(shape, bc)
+            channels[f"emis_{sector}_oc"] = jnp.full(shape, oc)
+        # Subsets: a fraction of their parent super-sector's own flux.
+        for subset, parent, fraction in (
+            ("residential", "surface_combustion", 0.3),
+            ("energy", "elevated_industrial", 0.4),
+        ):
+            for sp in ("so2", "bc", "oc"):
+                channels[f"emis_{subset}_{sp}"] = (
+                    fraction * channels[f"emis_{parent}_{sp}"])
+        forcing = default_forcing(model.coords.horizontal).copy(
+            anthropogenic_emissions=channels)
+
+        predictions = model.run(
+            forcing=forcing, save_interval=0.125, total_time=0.125)
+        dyn = predictions.dynamics
+        self.assertFalse(bool(jnp.any(jnp.isnan(dyn.temperature))))
+
+        tracers = dyn.tracers
+        # BC's primary emission targets ONLY KI, in every HAM class
+        # (fossil/energy_ships/biomass_like all give it mass_fraction=1.0
+        # at KI — see ham_sectors.m7_sector_policy); it never splits to KS.
+        arr = np.asarray(tracers[mass_name("bc", "ki")])
+        self.assertTrue(np.all(np.isfinite(arr)))
+        self.assertGreater(float(np.max(np.abs(arr))), 0.0)
+        # OC targets KI in every class, and ALSO KS for biomass_like (the
+        # biomass_burning sector, and the residential subset of
+        # surface_combustion routed to biomass_like here).
+        for short in ("ki", "ks"):
+            arr = np.asarray(tracers[mass_name("oc", short)])
+            self.assertTrue(np.all(np.isfinite(arr)), short)
+            self.assertGreater(float(np.max(np.abs(arr))), 0.0, short)
+        # Primary SO4 targets only KS/AS (fossil/biomass_like) and AS/CS
+        # (energy_ships) — never the pure-nucleation NS.
+        for short in ("ks", "as", "cs"):
+            arr = np.asarray(tracers[mass_name("so4", short)])
+            self.assertTrue(np.all(np.isfinite(arr)), short)
+            self.assertGreater(float(np.max(np.abs(arr))), 0.0, short)
+
 
 if __name__ == "__main__":
     unittest.main()
