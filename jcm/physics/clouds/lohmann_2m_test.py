@@ -2826,6 +2826,68 @@ class TestScavengingLedger2M:
             assert getattr(zeros, f).shape == (nlev, ncols)
 
 
+class TestTotalCoverFollowsTheWriteBack2M:
+    """``clouds.total_cloud_cover`` is the cover of the 2M term's FINAL fraction.
+
+    The term writes ECHAM's post-microphysics ``paclc`` back to
+    ``clouds.cloud_fraction``; ECHAM computes ``aclcov`` after that write-back
+    (``mo_cloud.f90`` section 10.2), so the saved cover has to follow it rather
+    than keep the Sundqvist fraction's.
+    """
+
+    NLEV, NCOLS = 8, 2
+
+    def _inputs(self):
+        from types import SimpleNamespace
+
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = self.NLEV, self.NCOLS
+        shape = (nlev, ncols)
+        col = lambda v: jnp.asarray(v)[:, None] * jnp.ones((1, ncols))  # noqa: E731
+        pressure = col(np.linspace(6.0e4, 9.0e4, nlev))
+        temperature = col(np.linspace(275.0, 288.0, nlev))
+        from jcm.physics.convection.saturation import saturation_specific_humidity
+        humidity = 0.6 * saturation_specific_humidity(
+            temperature, pressure, phase="water")
+        rho = pressure / (287.05 * temperature)
+        zeros = jnp.zeros(shape)
+        # Cover 0.6 in a mid-column cell that holds no condensate in a
+        # subsaturated column: the write-back has to clear it.
+        cover = zeros.at[3].set(0.6)
+        clouds = CloudData.zeros((ncols,), nlev).copy(cloud_fraction=cover)
+        state = PhysicsState.zeros(
+            shape, temperature=temperature, specific_humidity=humidity,
+            tracers={"qc": zeros, "qi": zeros, "qnc": zeros, "qni": zeros})
+        diagnostics = {
+            "_dt_seconds": 900.0, "pressure_full": pressure, "air_density": rho,
+            "layer_thickness": jnp.full(shape, 500.0), "clouds": clouds,
+            "aerosol": AerosolData.zeros((ncols,), nlev),
+            "vertical_diffusion": SimpleNamespace(tke=jnp.full(shape, 0.1)),
+            "activated_cdnc": jnp.full(shape, 5e7),
+        }
+        return state, diagnostics
+
+    def test_cover_is_that_of_the_written_back_fraction(self):
+        from jcm.physics.clouds.cloud_overlap import column_max_random_cover
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+
+        state, diagnostics = self._inputs()
+        before = np.asarray(diagnostics["clouds"].total_cloud_cover)
+        np.testing.assert_allclose(before, 0.6, atol=1e-6)
+        _, out = Lohmann2MMicrophysics()(state, diagnostics, None, None)
+        clouds = out["clouds"]
+        # The write-back cleared the empty cell, so the cover it leaves is the
+        # cover of what is left, not the diagnosed fraction's.
+        assert float(jnp.max(clouds.cloud_fraction)) < 0.6
+        np.testing.assert_array_equal(
+            np.asarray(clouds.total_cloud_cover),
+            np.asarray(column_max_random_cover(clouds.cloud_fraction)))
+        assert np.all(np.asarray(clouds.total_cloud_cover) < before)
+
+
 class TestSpaConfigurationHandover:
     """SPA tuning is applied post-compose, so ``replace`` must carry it."""
 

@@ -43,6 +43,13 @@ class JamIntegrationTest(unittest.TestCase):
         model, predictions = self._run()
         dyn = predictions.dynamics
 
+        # The JAM terms read the post-microphysics cover; the saved total
+        # cover is that fraction's ``aclcov`` on this stack as well.
+        from jcm.physics.composable_physics_slow_test import (
+            assert_total_cover_is_aclcov_of_the_saved_fraction)
+        assert_total_cover_is_aclcov_of_the_saved_fraction(
+            self, predictions, "echam-jam-2m")
+
         # Core dynamics stay finite and physical.
         self.assertFalse(bool(jnp.any(jnp.isnan(dyn.temperature))))
         self.assertFalse(bool(jnp.any(jnp.isnan(dyn.specific_humidity))))
