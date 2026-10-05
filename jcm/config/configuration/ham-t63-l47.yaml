@@ -1,0 +1,25 @@
+# @package _global_
+#
+# ECHAM physics + the M7 (ECHAM-HAM) aerosol population at T63L47 (jax-gcm#1017).
+#
+# A SKELETON configuration -- see physics/echam-ham-m7.yaml's header for what
+# is and is not yet M7-faithful. Mirrors t63-echam-jam.yaml's settings (same
+# grid, init, terrain, forcing and run recipe; only the physics preset
+# differs), so it composes and validates the same way:
+#
+#   python -m jcm.main +configuration=ham-t63-l47
+
+defaults:
+  - override /physics: echam-ham-m7
+  - override /grid: echam_t63_l47_hybrid
+  - override /init: jw
+  - override /terrain: auto
+  - override /forcing: from_file
+  - override /run: longrun
+
+init:
+  rh: 0.0
+forcing:
+  align: wrap_year
+  file: hf://bundles/t63/forcing_pd.nc
+sl_off_centering: 0.2
