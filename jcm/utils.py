@@ -420,17 +420,21 @@ def data_to_xarray(
   """
   XR_SURFACE_NAME = 'surface'
   # check that prognostic and tracer names do not collide;
-  prognostic_keys = set(data.keys()) - {'tracers'} - {'diagnostics'}
+  # A list in the input's order, not a set: a set iterates in hash order,
+  # which changes with PYTHONHASHSEED, so every process would write the
+  # variables of the same output (and the monthly restart state) in a
+  # different order.
+  prognostic_keys = [k for k in data if k not in ('tracers', 'diagnostics')]
   tracer_keys = data['tracers'].keys() if 'tracers' in data else set()
   diagnostic_keys = (
       data['diagnostics'].keys() if 'diagnostics' in data else set()
   )
-  if not prognostic_keys.isdisjoint(tracer_keys):
+  if not set(prognostic_keys).isdisjoint(tracer_keys):
     raise ValueError(
         'Tracer names collide with prognostic variables',
         f'Tracers: {tracer_keys}; prognostics: {prognostic_keys}',
     )
-  if not prognostic_keys.isdisjoint(diagnostic_keys):
+  if not set(prognostic_keys).isdisjoint(diagnostic_keys):
     raise ValueError(
         'Diagnostic names collide with prognostic variables',
         f'Diagnostic: {diagnostic_keys}; ',
