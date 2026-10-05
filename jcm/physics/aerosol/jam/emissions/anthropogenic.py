@@ -39,10 +39,10 @@ from jcm.physics.aerosol.jam.emissions.injection import (
 from jcm.physics.aerosol.jam.emissions.sectors import (
     OM_OC_RATIO,
     SECTOR_DEFAULTS,
-    SO2_TO_SO4_MASS,
     SO4_PRIMARY_FRACTION,
     SUPER_SECTORS,
 )
+from jcm.physics.aerosol.jam.gas_species import GAS_SPECIES
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import (
@@ -105,6 +105,14 @@ class AnthropogenicEmissions(PhysicsTerm):
         """Hold the (differentiable) emission params and the population."""
         self.params = nnx.Param(params or EmissionParameters.default())
         self._spec = spec or MAM4_SPEC
+        # SO2->SO4 mass factor from the POPULATION's own so4 (same expression
+        # as sectors.SO2_TO_SO4_MASS, so bit-identical for MAM4; diverges only
+        # where the population's so4 molar mass differs, e.g. M7's 96.0631
+        # g/mol vs MAM4-MOM's 115 g/mol ammonium bisulfate).
+        self._so2_to_so4_mass = (
+            self._spec.species_props("so4").molar_mass
+            / GAS_SPECIES["so2"].molar_mass
+        )
 
     @staticmethod
     def _flux(forcing, name, ncols):
@@ -163,7 +171,7 @@ class AnthropogenicEmissions(PhysicsTerm):
             # population owns which classes receive primary sulfate and in what
             # proportion (``primary_split``) — no Aitken/accum assumption here.
             frac = p.so4_primary_fraction[i]
-            so4_mass = frac * so2 * SO2_TO_SO4_MASS
+            so4_mass = frac * so2 * self._so2_to_so4_mass
             for mode, mode_frac in self._spec.primary_split("so4"):
                 add_aerosol("so4", mode, so4_mass * mode_frac, weights)
             add_mass(gas_name("so2"), (1.0 - frac) * so2, weights)
