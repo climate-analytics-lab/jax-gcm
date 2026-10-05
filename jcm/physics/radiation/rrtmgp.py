@@ -43,6 +43,7 @@ from jcm.physics.radiation.mcica import (
     effective_cloud_fraction,
     generate_subcolumns,
     in_cloud_condensate,
+    resolvable_path,
 )
 from jcm.physics.radiation.radiation_types import (
     cloud_overlap_name,
@@ -213,17 +214,18 @@ def _to_4d_per_gpoint(
     """Halo-pad ``[n_gpt, nlev]`` → ``[n_gpt, 1, 1, nlev + 2*halo]``.
 
     Per-gpoint analogue of :func:`_to_3d_with_filled_halo` for the McICA
-    cloud-path inputs to the rrtmgp library: edge-fill the halo by
-    repeating the closest interior value. The library indexes into the
-    leading g-point axis inside its g-point loop.
+    cloud-path inputs to the rrtmgp library, which indexes into the leading
+    g-point axis inside its g-point loop. The halo cells hold no cloud: the
+    library discards them, and a halo cell that repeated a cloudy surface or
+    top layer carries the library's extrapolated halo temperature into a
+    cloudy optical-depth computation whose derivative is not finite, although
+    the fluxes are identical (measured: the lowest layer cloudy, the fluxes
+    equal and the 19 non-finite derivative leaves of the term gone).
     """
     n_gpt = per_gpt_2d.shape[0]
     nzh = nlev + 2 * halo
     out = jnp.zeros((n_gpt, 1, 1, nzh), dtype=per_gpt_2d.dtype)
-    out = out.at[:, 0, 0, halo : halo + nlev].set(per_gpt_2d)
-    out = out.at[:, 0, 0, 0].set(per_gpt_2d[:, 0])
-    out = out.at[:, 0, 0, -1].set(per_gpt_2d[:, -1])
-    return out
+    return out.at[:, 0, 0, halo : halo + nlev].set(per_gpt_2d)
 
 
 def _reverse_if_needed(pressure: jnp.ndarray) -> jnp.ndarray:
@@ -765,11 +767,11 @@ def radiation_scheme_rrtmgp(
     zinhoml = liquid_inhomogeneity(convection_type, parameters)
     in_cloud_lwp_lib = zinhoml * lax.cond(
         needs_reversal, lambda a: a[::-1], identity,
-        icon_state.cloud_water_path,
+        resolvable_path(icon_state.cloud_water_path),
     )
     in_cloud_ipath_lib = parameters.cloud_inhomogeneity_ice * lax.cond(
         needs_reversal, lambda a: a[::-1], identity,
-        icon_state.cloud_ice_path,
+        resolvable_path(icon_state.cloud_ice_path),
     )
 
     nlev = icon_state.temperature.shape[0]

@@ -267,6 +267,20 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
 - `differentiability` — cloud-optics SSA/asymmetry combination uses double-
   ``where`` safe-denominator guards so backward-mode cloud-parameter gradients do
   not form ``0·inf`` on clear columns.
+- `differentiability` — both schemes pass no cloud to the radiative transfer
+  below an in-cloud path of ``1e-11 kg/m²`` (``mcica.py::resolvable_path``), and
+  the cloud paths handed to the jax-rrtmgp library are cloud-free in its halo
+  cells (``rrtmgp.py::_to_4d_per_gpoint``). The library discards the halos but
+  computes them, and a halo that repeated a cloudy surface layer makes the
+  derivative of the fluxes non-finite (a below-surface cell at the extrapolated
+  halo temperature). Both schemes divide the scattering optical depth by the
+  optical depth, so a cloud whose optical depth is a nonzero float32 below about
+  ``1e-19`` (the library: a path between about ``1e-16`` and ``1e-8 g/m²``,
+  under its own smooth presence gate; the grey scheme: condensate near
+  ``1e-34``) has a derivative that overflows. ECHAM tests ``xq > 0``; the floor
+  is far below any radiatively relevant path and the fluxes are those of the
+  unfloored scheme (identical in the replayed single columns of
+  ``term_gradients_test.py``).
 - `differentiability` — the effective radius is a function of the current
   state only (condensate, cloud fraction, droplet/crystal number, temperature,
   pressure); no radius is carried between steps and no float value doubles as

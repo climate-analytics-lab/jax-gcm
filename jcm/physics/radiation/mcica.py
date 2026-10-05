@@ -91,6 +91,30 @@ def in_cloud_path(
     return jnp.where(cloud_fraction > 2.0 * eps, in_cloud, 0.0)
 
 
+#: In-cloud condensate path [kg/m²] below which a cell passes no cloud to the
+#: radiative transfer. Both schemes combine the single-scattering albedo and the
+#: asymmetry by dividing by the optical depth, and a cloud whose optical depth is
+#: a nonzero float32 far below ``1e-19`` has a derivative whose reciprocal square
+#: overflows (``inf·0 = NaN``) while its value is a negligible ``1e-12`` or less
+#: of an optical depth. The jax-rrtmgp library's optical depth is the extinction
+#: times the path times a presence gate that is a cubic of the path below
+#: ``2e-6 g/m²``, so it sits in that band for paths between about ``1e-16`` and
+#: ``1e-8 g/m²``; the grey scheme's reaches it with condensate near ``1e-34``. The
+#: floor, ``1e-8 g/m²``, is far under any radiatively relevant path and far above
+#: both bands. ECHAM tests ``xq > 0``; below the floor the cloud has no radiative
+#: effect at float32 precision, so the fluxes are those of ``xq > 0``.
+NEGLIGIBLE_CLOUD_PATH_KG_M2 = 1.0e-11
+
+
+def resolvable_path(path: jnp.ndarray) -> jnp.ndarray:
+    """Zero the in-cloud paths below :data:`NEGLIGIBLE_CLOUD_PATH_KG_M2`.
+
+    A hard test with the reference derivative (zero below the floor, the path's
+    own above), like ECHAM's ``xq > 0`` mask it refines.
+    """
+    return jnp.where(path > NEGLIGIBLE_CLOUD_PATH_KG_M2, path, 0.0)
+
+
 # NaN guard on the PHYSICAL in-cloud condensate (kg/kg) that sets the effective
 # radii and the cloud optical depth. A thin but resolved cloud carrying large
 # grid-mean condensate gives a huge in-cloud water (grid_mean / cf), and the
