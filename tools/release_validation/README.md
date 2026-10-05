@@ -95,7 +95,7 @@ Two things to know before reading a failure:
   the JAM aerosol retune's two defaults (dust threshold scale 0.344, sea-salt
   scale 4), or before the Sundqvist T63 cover set they were calibrated with,
   describe the previous aerosol and cloud climate and must be regenerated
-  before a JAM dust, sea-salt, AOD or cloud failure is read as one.
+  before a JAM dust, sea-salt, AOD or cloud failure is read as one (#943).
 
 ## Workflow
 

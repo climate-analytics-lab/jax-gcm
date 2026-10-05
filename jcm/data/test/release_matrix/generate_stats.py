@@ -90,7 +90,9 @@ regression, not a known-provisional state. Bands drawn before the JAM aerosol
 retune's two defaults (dust threshold scale 0.344, sea-salt scale 4), or before
 the Sundqvist T63 cover set they were calibrated with, describe the previous
 aerosol and cloud climate: regenerate them before reading a JAM member's dust,
-sea-salt, AOD or cloud failure as a regression.
+sea-salt, AOD or cloud failure as a regression. The shipped band files predate
+these defaults and the matrix test already fails on them (#943); they are drawn
+once, on the release-candidate tree.
 """
 
 from __future__ import annotations

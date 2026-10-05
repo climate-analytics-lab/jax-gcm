@@ -628,7 +628,8 @@ earlier-tree sweeps.
   was swept (#1014). See {doc}`resolution_defaults`.
 - The release-matrix regression bands of the ECHAM members describe the cloud and
   aerosol climate of the previous defaults and are regenerated against the release
-  candidate, together with their init states.
+  candidate, together with their init states (#943; the GPU-gated matrix test
+  already fails on the shipped bands, which are drawn once on the final tree).
 - The release gate on the annual dust emission, `DUST_EMISSION_TG_PER_YR`, is
   400-2600 Tg/yr: the calibrated year emits 2351, 3.7 times the converted
   parent budget (642) and above the AeroCom means and medians (1840 and 1640 in
