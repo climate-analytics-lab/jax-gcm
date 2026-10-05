@@ -26,6 +26,14 @@ Three overridable methods, all on `jcm/physics/aerosol/jam/optics/optics_term.py
 `_mode_optics` receives a `ModeOpticsInputs` record and returns
 `(tau, tau_scat, tau_scat_g)` — extinction, scattering, and
 scattering-weighted-asymmetry optical depths for that mode alone, **ungated**.
+The record's `is_sw` field is `True` for every call except the one over
+`cache_band_config`'s LW band set (static, so branching on it is the same
+allowance as branching on `mode`) — for a backend that is wavelength-general
+this is never read; it exists for one that keeps genuinely separate SW/LW
+tables or networks (`HamLutOpticsTerm`, #1017, is exactly that) and has no
+other way to tell the two calls apart, since `wavelength_m` alone does not:
+RRTM-SW's reddest band already reaches ~8 μm, inside what LW tables also
+cover.
 
 ### Why optical depths and not `(k_ext, ssa, g)`
 
