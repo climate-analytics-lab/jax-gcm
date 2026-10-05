@@ -286,6 +286,47 @@ class TestEchamComposablePhysics(unittest.TestCase):
         self.assertAlmostEqual(float(ss.wind_exponent), 3.0)
         self.assertAlmostEqual(float(dms.flux_scale), 0.4)
 
+    def test_jam_factory_ships_the_retuned_aerosol_defaults(self):
+        """The JAM preset carries the JAM aerosol retune's two defaults (#682).
+
+        Sea-salt scale 2 and the dust threshold scale 0.379095663 on HAM's T63
+        regional vector; DMS and the three wet-removal scales stay at 1. A
+        mapping or an explicit scale wins over the shipped value.
+        """
+        import numpy as np
+
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", jam_microphysics="placeholder")
+        ham_t63 = np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+
+        def params(physics, name):
+            return next(t for t in physics.terms
+                        if t.name == name).params.get_value()
+
+        physics = echam_physics(**jam)
+        self.assertEqual(float(params(physics, "jam_seasalt_emissions").scale),
+                         2.0)
+        np.testing.assert_allclose(
+            np.asarray(params(physics, "jam_dust_emissions").nduscale_reg),
+            ham_t63 * 0.379095663)
+        self.assertEqual(
+            float(params(physics, "jam_dms_emissions").flux_scale), 1.0)
+        wet = params(physics, "jam_wet_deposition")
+        self.assertEqual((float(wet.incloud_scale), float(wet.impact_scale)),
+                         (1.0, 1.0))
+        self.assertEqual(float(params(
+            physics, "convective_tracer_transport").conv_scav_scale), 1.0)
+
+        tuned = echam_physics(**jam, seasalt={"scale": 1.0},
+                              jam_dust_nduscale_scale=0.5)
+        self.assertEqual(float(params(tuned, "jam_seasalt_emissions").scale),
+                         1.0)
+        np.testing.assert_allclose(
+            np.asarray(params(tuned, "jam_dust_emissions").nduscale_reg),
+            ham_t63 * 0.5)
+
     def test_jam_natural_emission_override_rejects_unknown_fields(self):
         """A typo'd field is an error naming the scheme and the valid fields."""
         from jcm.physics.echam.echam_terms import echam_physics

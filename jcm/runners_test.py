@@ -22,6 +22,7 @@ from hydra import compose, initialize_config_dir
 # Path/auto resolution lives in the forcing-side engine; tests stub it THERE
 # so the stub reaches every caller (both doors + the pySES branch internals).
 from jcm import forcing_assembly
+from jcm.physics.aerosol.jam.emissions.seasalt import SEASALT_SCALE_DEFAULT
 from jcm.runners import (
     build_coords,
     build_diffusion,
@@ -3301,7 +3302,38 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         dms = self._term_params(physics, "jam_dms_emissions")
         self.assertAlmostEqual(float(dms.flux_scale), 0.6)
         ss = self._term_params(physics, "jam_seasalt_emissions")
-        self.assertEqual(float(ss.scale), 1.0)
+        self.assertEqual(float(ss.scale), SEASALT_SCALE_DEFAULT)
+
+    def test_jam_preset_ships_the_retuned_aerosol_defaults(self):
+        # A plain ``physics=echam-jam`` build carries the two defaults of the
+        # JAM aerosol retune (#682): dust threshold scale and sea-salt scale.
+        # DMS, wet removal and the cloud/convection fields are the ECHAM/jcm
+        # defaults: the retune left them where they were.
+        physics = build_physics(_compose([*self._JAM]))
+        ss = self._term_params(physics, "jam_seasalt_emissions")
+        self.assertEqual(float(ss.scale), 2.0)
+        du = self._term_params(physics, "jam_dust_emissions")
+        np.testing.assert_allclose(
+            np.asarray(du.nduscale_reg),
+            np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+            * 0.379095663)
+        self.assertEqual(float(self._term_params(
+            physics, "jam_dms_emissions").flux_scale), 1.0)
+        wet = self._term_params(physics, "jam_wet_deposition")
+        self.assertEqual((float(wet.incloud_scale), float(wet.impact_scale)),
+                         (1.0, 1.0))
+        self.assertEqual(float(self._term_params(
+            physics, "convective_tracer_transport").conv_scav_scale), 1.0)
+        # The Hydra doors still win over the shipped values.
+        tuned = build_physics(_compose(
+            [*self._JAM, "+physics.seasalt.scale=1.0",
+             "physics.jam_dust_nduscale_scale=0.5"]))
+        self.assertEqual(float(self._term_params(
+            tuned, "jam_seasalt_emissions").scale), 1.0)
+        np.testing.assert_allclose(
+            np.asarray(self._term_params(
+                tuned, "jam_dust_emissions").nduscale_reg),
+            np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05]) * 0.5)
 
     def test_emission_override_changes_exactly_one_recorded_parameter(self):
         # The override is applied to the object the factory resolved, so the

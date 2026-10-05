@@ -165,20 +165,32 @@ _N_EAST_ASIA_ROWS = len(EAST_ASIA_INDEX)
 #: saltation THRESHOLD and emission lives in the far tail of the wind
 #: distribution, so this is exactly the parameter that absorbs a difference in
 #: host-model wind climate — a *smaller* value emits MORE. One scalar, because
-#: HAM's eight regional parameters cannot be identified against a single global
-#: budget: the regional RATIOS stay HAM's and only the level moves. It applies
+#: HAM's eight regional parameters cannot be identified from a global-mean and a
+#: zonal-mean dust AOD: the regional RATIOS stay HAM's and only the level moves. It applies
 #: to the ``ndust = 4`` T63 vector alone, since that is the only grid carrying
 #: native HAMMOZ source fields (#810).
 #:
-#: 0.5 is calibrated from 30-day T63L47 April members driven by jcm's own
-#: winds — HAM's published vector emits 5.7 Tg/yr there, 0.65 gives 295 and
-#: 0.45 gives 1839 — and confirmed by a full year at this value, which emits
-#: 829 Tg/yr of D < 10 µm dust — 29 % above the 642 Tg/yr that the parent
-#: model's own budget becomes in this port's size window, and inside the
-#: release band; the derivation is in ``docs/source/science/aerosol.md``. The sensitivity is steep: a factor 2 in
-#: the threshold is a factor ~300 in emission on this wind distribution, which
-#: is why the number is measured rather than inherited.
-NDUSCALE_JCM_T63_SCALE = 0.5
+#: 0.379095663 is the best observed arm of the Stage-2 sweep of the JAM aerosol
+#: retune (the surrogate's own optimum is 0.3779; see
+#: ``docs/source/design/jam_aerosol_retune.md``). The retune loss (cloud
+#: radiative effects, cloud cover, precipitation, liquid water path, and the
+#: total and dust AOD against ESA-CCI SU v4.21 and SLSTR SU v1.12) was minimised
+#: by a 40-arm Sobol sweep (14-day windows) and a 25-arm Gaussian-process
+#: expected-improvement sweep (30-day windows), January and July, on dev
+#: 519f18e8; the dust scale acts through the dust AOD, and the AeroCom burden
+#: and lifetime are monitors that never enter the loss. A 365-day
+#: ``echam-jam-t63-l47`` year at this value (with the DMS flux at 0.77 of its
+#: default, which does not enter dust) gives dust AOD 0.0098 (observed 0.0213),
+#: a dust burden of 16.3 mg/m2 (AeroCom mean 37.6, median 40.2), D < 10 um
+#: emission of 1667 Tg/yr (AeroCom median 1640 at mixed size cut-offs; the
+#: parent model's budget in this window is 642, see the science page) and a
+#: dust lifetime of 1.8 d (AeroCom 4.1). The year at scale 0.5 emits 563 Tg/yr:
+#: a 24 % lower threshold triples the emission, which is why the number is
+#: measured rather than inherited. What remains of the dust-AOD deficit is
+#: lifetime and regional source balance, which a global scalar cannot move.
+#: The digits stored are the ones the confirmation year ran. The derivation is
+#: in ``docs/source/science/aerosol.md``.
+NDUSCALE_JCM_T63_SCALE = 0.379095663
 
 #: Number of regions in ``dust_regions.nc`` (1 = everywhere else, 2 = N America,
 #: 3 = S America, 4 = N Africa, 5 = S Africa, 6 = Middle East, 7 = Asia,
@@ -330,7 +342,7 @@ class DustParameters:
         ``nduscale_scale`` multiplies the whole regional vector, preserving
         HAM's *ratios* between regions while moving the global emission — the
         single degree of freedom jcm calibrates (eight regional parameters
-        against one global budget would be unidentifiable). ``None`` means
+        cannot be identified from a global-mean and a zonal-mean dust AOD). ``None`` means
         "the calibrated default where jcm has one", which is
         :data:`NDUSCALE_JCM_T63_SCALE` on the ``ndust = 4`` T63 vector and 1
         everywhere else; an explicit value applies to whichever vector the

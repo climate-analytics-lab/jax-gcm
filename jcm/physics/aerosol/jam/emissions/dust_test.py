@@ -484,6 +484,25 @@ class RegionTuningTest(unittest.TestCase):
         np.testing.assert_allclose(
             float(DustParameters.preset(2).nduscale_reg[0]), 0.68)
 
+    def test_the_shipped_calibration_is_the_retune_optimum(self):
+        # The JAM aerosol retune (#682, docs/source/design/jam_aerosol_retune.md)
+        # fitted this scalar to the observed dust AOD in a 40-arm Sobol and a
+        # 25-arm GP expected-improvement sweep and confirmed it with a 365-day
+        # T63 L47 year. The digits are the ones that year ran, so the value is
+        # pinned to them: a change here moves the dust climate the release
+        # candidate was validated on, and the design page's table with it.
+        self.assertEqual(NDUSCALE_JCM_T63_SCALE, 0.379095663)
+        np.testing.assert_allclose(
+            np.asarray(DustParameters.preset(4, 63).nduscale_reg),
+            np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
+            * 0.379095663, rtol=1e-6)
+        # HAM's ratios between regions are untouched: only the level moved.
+        np.testing.assert_allclose(
+            np.asarray(DustParameters.preset(4, 63).nduscale_reg)
+            / np.asarray(DustParameters.preset(4, 63, nduscale_scale=1.0)
+                         .nduscale_reg),
+            0.379095663, rtol=1e-6)
+
     def test_cache_coords_rebuilds_the_preset_at_the_model_truncation(self):
         # nduscale_reg's ndust=4 vector is defined only at T63; every other
         # truncation takes 0.86. The term cannot know the grid at construction.
@@ -648,7 +667,10 @@ class EmittedSizeTest(unittest.TestCase):
                                    "diameter is not being used")
 
     def test_supercoarse_mass_is_reported_and_discarded(self):
-        term = DustEmissions()
+        # HAM's own threshold vector (scale 1), so the discarded share, which
+        # falls as the threshold is lowered (0.40 here, 0.16 at the shipped
+        # calibration), does not depend on the calibration.
+        term = DustEmissions(nduscale_scale=1.0)
         tend, diag = term(*_inputs(soil={"type2": 1.0}, u10=13.8))
         rho_dz = 1.2 * 100.0
         emitted = _total_mass(tend)

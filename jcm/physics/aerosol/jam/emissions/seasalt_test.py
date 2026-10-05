@@ -9,6 +9,7 @@ import numpy as np
 
 from jcm.physics.aerosol.jam import mass_name, number_name
 from jcm.physics.aerosol.jam.emissions.seasalt import (
+    SEASALT_SCALE_DEFAULT,
     SeaSaltEmissions,
     SeaSaltParameters,
     gong_class_factors,
@@ -103,6 +104,23 @@ class SeaSaltTermTest(unittest.TestCase):
         dq = float(tend.tracers[mass_name("ss", "cor")][-1, 0])
         flux = dq * 1.2 * 100.0
         self.assertTrue(1e-11 < flux < 1e-7)
+
+    def test_default_scale_is_the_retune_optimum(self):
+        # The JAM aerosol retune (#682, docs/source/design/jam_aerosol_retune.md)
+        # put the sea-salt scale at 2, the upper edge of the swept range, to
+        # reach the observed total AOD; HAM's unscaled Gong source gives 2057
+        # Tg/yr against the AeroCom median of 6280. The default is the scale,
+        # so an unconfigured term emits exactly twice the unscaled source.
+        self.assertEqual(SEASALT_SCALE_DEFAULT, 2.0)
+        self.assertEqual(float(SeaSaltParameters.default().scale), 2.0)
+        key = mass_name("ss", "cor")
+        default, _ = SeaSaltEmissions()(*_inputs(wind=10.0))
+        unscaled, _ = SeaSaltEmissions(params=SeaSaltParameters(
+            scale=jnp.asarray(1.0), wind_exponent=jnp.asarray(3.41))
+        )(*_inputs(wind=10.0))
+        np.testing.assert_allclose(
+            np.asarray(default.tracers[key]),
+            2.0 * np.asarray(unscaled.tracers[key]), rtol=1e-6)
 
     def test_grad_through_scale(self):
         state, diagnostics, forcing, terrain = _inputs()
