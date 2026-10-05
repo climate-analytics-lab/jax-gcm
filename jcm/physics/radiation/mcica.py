@@ -101,7 +101,8 @@ def in_cloud_path(
 #: ``2e-6 g/m²``, so it sits in that band for paths between about ``1e-16`` and
 #: ``1e-8 g/m²``; the grey scheme's reaches it with condensate near ``1e-34``. The
 #: floor, ``1e-8 g/m²``, is far under any radiatively relevant path and far above
-#: both bands. ECHAM tests ``xq > 0``; below the floor the cloud has no radiative
+#: both bands; it applies to the path the radiative transfer receives, so for the
+#: library to the path after the sub-grid inhomogeneity factor. ECHAM tests ``xq > 0``; below the floor the cloud has no radiative
 #: effect at float32 precision, so the fluxes are those of ``xq > 0``.
 NEGLIGIBLE_CLOUD_PATH_KG_M2 = 1.0e-11
 

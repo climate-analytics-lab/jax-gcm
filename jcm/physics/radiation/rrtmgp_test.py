@@ -1035,6 +1035,22 @@ class TestRRTMGPCloudInputsToTheLibrary:
         assert all(bool(jnp.all(jnp.isfinite(x))) for x in self._derivatives(inputs))
 
     @pytest.mark.slow
+    def test_a_small_inhomogeneity_factor_cannot_scale_a_path_back_into_the_band(self):
+        """The floor applies to the path the library receives, factor included.
+
+        An in-cloud ice path of 1.1e-11 kg/m² clears the floor, but scaled by an
+        inhomogeneity factor of 1e-3 it is 1.1e-14 kg/m², in the band whose
+        derivative overflows.
+        """
+        inputs = self._column(cloud_fraction=(3, 0.5))
+        mass = inputs["air_density"][3] * inputs["layer_thickness"][3]
+        grid_mean_ice = 0.5 * 1.1e-11 / mass
+        inputs["cloud_ice"] = inputs["cloud_ice"].at[3].set(grid_mean_ice)
+        inputs["parameters"] = RadiationParameters.default(
+            cloud_inhomogeneity_ice=1.0e-3)
+        assert all(bool(jnp.all(jnp.isfinite(x))) for x in self._derivatives(inputs))
+
+    @pytest.mark.slow
     @pytest.mark.parametrize("ice", [1e-20, 1e-18])
     def test_negligible_condensate_has_a_finite_derivative(self, ice):
         inputs = self._column(cloud_fraction=(3, 0.0333), cloud_ice=(3, ice))
