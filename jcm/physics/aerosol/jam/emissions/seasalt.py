@@ -91,11 +91,31 @@ _DEND = (0.100e-6, 1.000e-6, 1.000e-5)
 # per anchor. Band 3 is NOT clamped above 298.15 K (the source's own
 # "limit T dependence to <25 Deg C" guard is commented out), so it
 # extrapolates linearly beyond its fitted range.
-_LONG_SST_ANCHORS = (271.15, 278.15, 288.15, 298.15)
+#
+# Literal-kind audit (mo_ham_m7_emi_seasalt.f90:1000-1046): every coefficient,
+# exponent and anchor below is written as e.g. `0.13e0` or bare `278.15` --
+# an "e" exponent letter (or none) without a `_dp`/kind suffix is Fortran's
+# DEFAULT REAL (single precision), not double, regardless of the "e0". gfortran
+# therefore rounds each to its nearest float32 bit pattern FIRST, then widens
+# that rounded value to double for the arithmetic -- exactly the
+# `float(np.float32(x))` promotion properties.py documents for M7's native
+# `1.E-2` literal. None of 0.13/0.78/0.22/0.70/0.18/1.45/271.15/278.15/288.15/
+# 298.15 are exactly representable in binary (float32 or float64), so this is
+# a real ~3e-8 relative rounding on each, not a no-op; used naively as exact
+# Python floats this under-corrected the AS/CS split by up to ~2.6e-6
+# relative before this fix (#1017 W1 task 2 review). The window divisors
+# (7./10./10.) and the dmt->µm factor (1.e06) are also bare/"e0" literals but
+# ARE exactly representable in float32 (7, 10, 1e6 are small integers), so
+# promoting them changes nothing and they are left as plain floats below.
+def _f32(x):
+    return float(np.float32(x))
+
+
+_LONG_SST_ANCHORS = (_f32(271.15), _f32(278.15), _f32(288.15), _f32(298.15))
 _LONG_SST_BAND_COEFFS = (
-    ((0.13, -0.78), (0.22, -0.70)),   # band 1: 271.15-278.15 K
-    ((0.22, -0.70), (0.70, -0.18)),   # band 2: 278.15-288.15 K
-    ((0.70, -0.18), (1.45, 0.18)),    # band 3: >288.15 K, unclamped above
+    ((_f32(0.13), _f32(-0.78)), (_f32(0.22), _f32(-0.70))),   # band 1: 271.15-278.15 K
+    ((_f32(0.22), _f32(-0.70)), (_f32(0.70), _f32(-0.18))),   # band 2: 278.15-288.15 K
+    ((_f32(0.70), _f32(-0.18)), (_f32(1.45), _f32(0.18))),    # band 3: >288.15 K, unclamped above
 )
 
 
@@ -383,9 +403,14 @@ class SeaSaltEmissions(PhysicsTerm):
         corr1_a, corr2_a = g.band_coeffs[0, 0][:, None], g.band_coeffs[0, 1][:, None]
         corr1_b, corr2_b = g.band_coeffs[1, 0][:, None], g.band_coeffs[1, 1][:, None]
         corr1_c, corr2_c = g.band_coeffs[2, 0][:, None], g.band_coeffs[2, 1][:, None]
-        band1 = (corr1_a * (t2 - sst_b) + corr2_a * (sst_b - t1)) / (t2 - t1)
-        band2 = (corr1_b * (t3 - sst_b) + corr2_b * (sst_b - t2)) / (t3 - t2)
-        band3 = (corr1_c * (t4 - sst_b) + corr2_c * (sst_b - t3)) / (t4 - t3)
+        # The native divisors are the independent literals 7./1.e1/1.e1 (both
+        # exact in float32, mo_ham_m7_emi_seasalt.f90:1009/1025/1042), NOT
+        # (t2-t1) etc. computed from the now-float32-rounded anchors above --
+        # those two differ by ~1e-8 relative, since e.g. float32(278.15) -
+        # float32(271.15) is not exactly 7.0.
+        band1 = (corr1_a * (t2 - sst_b) + corr2_a * (sst_b - t1)) / 7.0
+        band2 = (corr1_b * (t3 - sst_b) + corr2_b * (sst_b - t2)) / 10.0
+        band3 = (corr1_c * (t4 - sst_b) + corr2_c * (sst_b - t3)) / 10.0
         # Exactly one band applies per column (its own MERGE in the Fortran);
         # summing the three masked terms reproduces that selection.
         sst_corr = (jnp.where(sst_b <= t2, band1, 0.0)

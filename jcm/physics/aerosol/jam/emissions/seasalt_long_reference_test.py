@@ -43,22 +43,29 @@ ROOT = Path(__file__).resolve().parents[5]
 REFERENCE = ROOT / "jcm" / "data" / "test" / "echam_cloud_reference" / "hamseasalt_long.npz"
 
 # Achieved max relative error over the harness's 720-case grid (full cross
-# product of 10 m wind, SST, sea-ice fraction, land/lake fraction). It is
-# the SAME order (~1e-6) in float32 and float64 -- which rules out finite-
-# precision rounding as the cause, since halving the mantissa would move a
-# rounding-dominated error by many orders of magnitude, not leave it
-# unchanged. What IS float-width-independent is a cross-implementation
-# difference in a transcendental intrinsic (log10/pow: Python/numpy's libm
-# vs. gfortran's), and the Long size formula amplifies exactly that: it is
-# `10**(cubic polynomial in log10(wet diameter))`, so a ~1 ULP disagreement
-# in log10 gets multiplied by the polynomial's local slope and then
-# exponentiated. That reproduces a few-ULP-of-log10 -> ~1e-6-of-flux
-# amplification without needing any other explanation, and all 720 cases
-# spanning the full input grid show the same order of error -- no localized
-# outlier of the kind a boundary bin landing on the wrong side of a class
-# cut would produce (that failure mode was real and is fixed separately;
-# see `_long_bin_grid`'s docstring).
-_MAX_RELATIVE_ERROR = 5e-6
+# product of 10 m wind, SST, sea-ice fraction, land/lake fraction):
+#   f64: ~1.7e-15 (ordinary double round-off; well under the 1e-12 target)
+#   f32: ~2.6e-6  (float32 mantissa noise through ~150 summed bins and the
+#                  nonlinear 10**(cubic polynomial) size formula + the SST
+#                  correction's power laws; the required tolerance is f64
+#                  only, f32 just needs a documented bound)
+# Root cause of what used to be a ~2.6e-6 f64 mismatch (#1017 W1 task 2
+# review): seasalt_emissions_long's Sofiev SST-correction coefficients,
+# exponents and anchor temperatures (0.13/0.78/0.22/0.70/0.18/1.45/271.15/
+# 278.15/288.15/298.15) are written as Fortran literals like `0.13e0` or
+# bare `278.15` -- an "e" exponent letter or none, with NO `_dp` kind suffix,
+# is Fortran's DEFAULT REAL (single precision), so gfortran rounds each to
+# float32 before widening it to double. None of those values are exactly
+# representable in binary, so this is a genuine ~3e-8 relative rounding per
+# literal (see `_f32` / the literal-kind audit comment above
+# `_LONG_SST_ANCHORS`), not libm noise -- a ~1e-16-level effect could not
+# explain a ~1e-6 mismatch, and the size/SST formulas' local amplification
+# through log/pow is nowhere near 1e10x. Fixed by rounding each affected
+# literal through `float(np.float32(x))` before use, matching the precedent
+# `properties.py` documents for M7's native `1.E-2`. f64 relative error
+# dropped from ~2.6e-6 to ~1.7e-15 (3 orders tighter than required) once this
+# was in place.
+_MAX_RELATIVE_ERROR = {"f32": 5e-6, "f64": 1e-12}
 
 
 def _two_class_ss_spec(density: float) -> ModalAerosolSpec:
@@ -121,10 +128,11 @@ def test_long_scheme_matches_native_reference(reference, enable_x64):
             "numf_as": relerr(number_as, reference["long_numf_as"]),
             "numf_cs": relerr(number_cs, reference["long_numf_cs"]),
         }
-        print(f"Long scheme max relative error vs. native ({'f64' if enable_x64 else 'f32'}):",
-              errors)
+        dtype_id = "f64" if enable_x64 else "f32"
+        print(f"Long scheme max relative error vs. native ({dtype_id}):", errors)
+        bound = _MAX_RELATIVE_ERROR[dtype_id]
         for key, value in errors.items():
-            assert value < _MAX_RELATIVE_ERROR, (key, value)
+            assert value < bound, (key, value, bound)
     finally:
         jax.config.update("jax_enable_x64", previous)
 
