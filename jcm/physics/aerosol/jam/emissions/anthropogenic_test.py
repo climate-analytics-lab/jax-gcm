@@ -188,6 +188,146 @@ class BiomassBurningTest(unittest.TestCase):
         self.assertGreater(abs(g), 0.0)
 
 
+class M7SectorEmissionTest(unittest.TestCase):
+    """``AnthropogenicEmissions`` on the M7 population (jax-gcm#1017)."""
+
+    def _run(self, **fluxes):
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+
+        state, diagnostics, forcing = _setup(**fluxes)
+        tend, _ = AnthropogenicEmissions(spec=M7_SPEC)(
+            state, diagnostics, forcing, None)
+        rho, dz = diagnostics["air_density"], diagnostics["layer_thickness"]
+        return tend, rho, dz
+
+    def _zm2n(self, mode_short, species, cmr_m):
+        from jcm.physics.aerosol.jam.emissions.distributors import particle_mean_mass
+        from jcm.physics.aerosol.jam.emissions.ham_sectors import cmr_to_emission_diameter
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+
+        mode = M7_SPEC.mode(mode_short)
+        d = cmr_to_emission_diameter(cmr_m, mode.geom_std_dev)
+        density = M7_SPEC.species_props(species).density
+        return 1.0 / particle_mean_mass(mode, density, emission_diameter=d)
+
+    def test_fossil_so2_splits_ks_as_sulfur_closes_number_matches_zm2n(self):
+        from jcm.physics.aerosol.jam.emissions.ham_sectors import CMR_SA, CMR_SK
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+        from jcm.physics.aerosol.jam.tracer_layout import (
+            gas_name, mass_name, number_name,
+        )
+
+        tend, rho, dz = self._run(emis_surface_combustion_so2=_F_SO2)
+        so2_to_so4 = (M7_SPEC.species_props("so4").molar_mass
+                      / GAS_SPECIES["so2"].molar_mass)
+        total_so4 = SO4_PRIMARY_FRACTION * _F_SO2 * so2_to_so4
+
+        m_ks = _column_integral(tend.tracers[mass_name("so4", "ks")], rho, dz)
+        m_as = _column_integral(tend.tracers[mass_name("so4", "as")], rho, dz)
+        np.testing.assert_allclose(m_ks, 0.5 * total_so4, rtol=1e-5)
+        np.testing.assert_allclose(m_as, 0.5 * total_so4, rtol=1e-5)
+
+        gso2 = _column_integral(tend.tracers[gas_name("so2")], rho, dz)
+        np.testing.assert_allclose(
+            gso2 + total_so4 / so2_to_so4, _F_SO2, rtol=1e-5,
+            err_msg="SO2 -> SO4 sulfur mass must close")
+
+        n_ks = _column_integral(tend.tracers[number_name("ks")], rho, dz)
+        np.testing.assert_allclose(
+            n_ks, 0.5 * total_so4 * self._zm2n("ks", "so4", CMR_SK), rtol=1e-5)
+        n_as = _column_integral(tend.tracers[number_name("as")], rho, dz)
+        np.testing.assert_allclose(
+            n_as, 0.5 * total_so4 * self._zm2n("as", "so4", CMR_SA), rtol=1e-5)
+
+        # No mass lands anywhere else that could carry so4 (ns, cs).
+        for short in ("ns", "cs"):
+            self.assertTrue(
+                mass_name("so4", short) not in tend.tracers
+                or np.all(np.asarray(tend.tracers[mass_name("so4", short)]) == 0.0))
+
+    def test_shipping_so4_splits_as_cs_not_ks(self):
+        from jcm.physics.aerosol.jam.emissions.ham_sectors import CMR_SC
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+        from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
+
+        tend, rho, dz = self._run(emis_shipping_so2=_F_SO2)
+        so2_to_so4 = (M7_SPEC.species_props("so4").molar_mass
+                      / GAS_SPECIES["so2"].molar_mass)
+        total_so4 = SO4_PRIMARY_FRACTION * _F_SO2 * so2_to_so4
+
+        m_as = _column_integral(tend.tracers[mass_name("so4", "as")], rho, dz)
+        m_cs = _column_integral(tend.tracers[mass_name("so4", "cs")], rho, dz)
+        np.testing.assert_allclose(m_as, 0.5 * total_so4, rtol=1e-5)
+        np.testing.assert_allclose(m_cs, 0.5 * total_so4, rtol=1e-5)
+        self.assertTrue(
+            mass_name("so4", "ks") not in tend.tracers
+            or np.all(np.asarray(tend.tracers[mass_name("so4", "ks")]) == 0.0))
+
+        n_cs = _column_integral(tend.tracers[number_name("cs")], rho, dz)
+        np.testing.assert_allclose(
+            n_cs, 0.5 * total_so4 * self._zm2n("cs", "so4", CMR_SC), rtol=1e-5)
+
+    def test_biomass_burning_oc_splits_ki_ks_at_cmr_bb(self):
+        from jcm.physics.aerosol.jam.emissions.ham_sectors import BB_WSOC_FRACTION, CMR_BB
+        from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
+
+        tend, rho, dz = self._run(emis_biomass_burning_oc=_F_OC)
+        om = _F_OC * OM_OC_RATIO
+
+        m_ki = _column_integral(tend.tracers[mass_name("oc", "ki")], rho, dz)
+        m_ks = _column_integral(tend.tracers[mass_name("oc", "ks")], rho, dz)
+        np.testing.assert_allclose(m_ki, (1.0 - BB_WSOC_FRACTION) * om, rtol=1e-5)
+        np.testing.assert_allclose(m_ks, BB_WSOC_FRACTION * om, rtol=1e-5)
+
+        n_ki = _column_integral(tend.tracers[number_name("ki")], rho, dz)
+        np.testing.assert_allclose(
+            n_ki, (1.0 - BB_WSOC_FRACTION) * om * self._zm2n("ki", "oc", CMR_BB),
+            rtol=1e-5)
+
+    def test_residential_subset_channel_is_sized_as_biomass_cmr_bb(self):
+        """The residential share of surface_combustion BC gets cmr_bb, not cmr_ff."""
+        from jcm.physics.aerosol.jam.emissions.ham_sectors import CMR_BB, CMR_FF
+        from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
+
+        f_main, f_residential = 4.0e-9, 1.5e-9
+        tend, rho, dz = self._run(
+            emis_surface_combustion_bc=f_main, emis_residential_bc=f_residential)
+
+        m_ki = _column_integral(tend.tracers[mass_name("bc", "ki")], rho, dz)
+        np.testing.assert_allclose(m_ki, f_main, rtol=1e-5,
+                                   err_msg="mass is unaffected by the size split")
+
+        n_ki = _column_integral(tend.tracers[number_name("ki")], rho, dz)
+        expected = ((f_main - f_residential) * self._zm2n("ki", "bc", CMR_FF)
+                    + f_residential * self._zm2n("ki", "bc", CMR_BB))
+        np.testing.assert_allclose(n_ki, expected, rtol=1e-5)
+
+    def test_missing_residential_channel_falls_back_to_fossil_size_and_warns(self):
+        from jcm.physics.aerosol.jam.emissions.ham_sectors import CMR_FF
+        from jcm.physics.aerosol.jam.tracer_layout import number_name
+
+        with self.assertLogs(
+                "jcm.physics.aerosol.jam.emissions.anthropogenic",
+                level="WARNING") as cm:
+            tend, rho, dz = self._run(emis_surface_combustion_bc=_F_BC)
+        self.assertTrue(any("emis_residential_bc" in m for m in cm.output))
+
+        n_ki = _column_integral(tend.tracers[number_name("ki")], rho, dz)
+        np.testing.assert_allclose(n_ki, _F_BC * self._zm2n("ki", "bc", CMR_FF),
+                                   rtol=1e-5)
+
+    def test_mam4_unaffected_by_m7_sector_policy_path(self):
+        # The default (no spec override) path is bit-for-bit the one
+        # exercised throughout the rest of this file.
+        state, diagnostics, forcing = _setup(emis_surface_combustion_so2=_F_SO2)
+        tend, _ = AnthropogenicEmissions()(state, diagnostics, forcing, None)
+        rho, dz = diagnostics["air_density"], diagnostics["layer_thickness"]
+        so4 = (_column_integral(tend.tracers[mass_name("so4", "ait")], rho, dz)
+               + _column_integral(tend.tracers[mass_name("so4", "acc")], rho, dz))
+        np.testing.assert_allclose(
+            so4, SO4_PRIMARY_FRACTION * _F_SO2 * SO2_TO_SO4_MASS, rtol=1e-5)
+
+
 class FactoryWiringTest(unittest.TestCase):
     def test_default_excludes_anthropogenic(self):
         from jcm.physics.aerosol.jam import jam_aerosol_physics

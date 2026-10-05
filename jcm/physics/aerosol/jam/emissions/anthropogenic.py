@@ -20,10 +20,23 @@ The injection height/thickness and the primary-SO₄ fraction are differentiable
 ``EmissionParameters`` (per super-sector). With no CEDS forcing supplied the
 flux fields default to zero, so the term is inert until the data pipeline
 (Phases B–D) is wired.
+
+When ``spec.sector_emission`` is set (M7, jax-gcm#1017), the species->mode
+split above is replaced by HAM's own per-sector-CLASS mode/size targets
+(:mod:`ham_sectors`): the organic species' token comes from the policy (M7's
+``"oc"``, never hard-coded), and each target carries its own emitted size, so
+the implied number comes from HAM's ``cmr``-based factor rather than the
+mode's equilibrium geometry. ``surface_combustion``/``elevated_industrial``
+each carry an optional subset channel (``emis_residential_*``/
+``emis_energy_*``) splitting out their RCO/ENE share, which HAM sizes
+differently from the rest of the super-sector; absent, the whole super-sector
+takes its parent class's size (a declared, logged approximation — jax-gcm#1017
+tracked gap F6). MAM4 (``spec.sector_emission is None``) is unaffected.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import ClassVar
 
 import jax.numpy as jnp
@@ -32,6 +45,11 @@ from flax import nnx
 
 from jcm.physics.aerosol.jam.emissions.distributors import (
     emit_over_profile,
+    particle_mean_mass,
+)
+from jcm.physics.aerosol.jam.emissions.ham_sectors import (
+    SECTOR_ROUTING,
+    cmr_to_emission_diameter,
 )
 from jcm.physics.aerosol.jam.emissions.injection import (
     gaussian_injection_weights,
@@ -53,6 +71,8 @@ from jcm.physics.aerosol.jam.tracer_layout import (
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 from jcm.physics.aerosol.jam.emissions.flux_diagnostic import (
     accumulate_emission_fluxes, emission_flux_keys)
+
+logger = logging.getLogger(__name__)
 
 
 @tree_math.struct
@@ -113,6 +133,10 @@ class AnthropogenicEmissions(PhysicsTerm):
             self._spec.species_props("so4").molar_mass
             / GAS_SPECIES["so2"].molar_mass
         )
+        # HAM's per-sector-class mode/size targets (jax-gcm#1017): None for
+        # every MAM4-family population, which keeps the primary_split-based
+        # path below untouched.
+        self._sector_policy = self._spec.sector_emission
 
     @staticmethod
     def _flux(forcing, name, ncols):
@@ -132,6 +156,33 @@ class AnthropogenicEmissions(PhysicsTerm):
         if v is not None and jnp.size(v) == ncols:
             return jnp.ravel(v)
         return jnp.zeros((ncols,))
+
+    @staticmethod
+    def _has_channel(forcing, name, ncols):
+        """Check a channel's presence — a compose-time Python bool, never traced."""
+        emis = getattr(forcing, "anthropogenic_emissions", None) if forcing is not None else None
+        v = emis.get(name) if emis is not None else None
+        return v is not None and jnp.size(v) == ncols
+
+    def _emit_sector_species(self, add_mass, weights, species, flux, ham_class):
+        """Emit ``species``'s flux into HAM class ``ham_class``'s own targets.
+
+        Mass goes to ``mass_name(species, mode.short)``; number uses HAM's
+        own ``cmr``-based mass->number factor (:func:`cmr_to_emission_diameter`
+        through :func:`particle_mean_mass`'s monodisperse-diameter path),
+        NOT the mode's own equilibrium ``number_factor`` -- HAM assumes the
+        freshly emitted particles sit at its own prescribed size, which
+        differs from the mode's steady-state geometry (see
+        ``emissions/ham_sectors.py``).
+        """
+        density = self._spec.species_props(species).density
+        for target in self._sector_policy.targets[ham_class].get(species, ()):
+            mode = self._spec.mode(target.mode)
+            mass_flux = flux * target.mass_fraction
+            diameter = cmr_to_emission_diameter(target.cmr_m, mode.geom_std_dev)
+            m_p = particle_mean_mass(mode, density, emission_diameter=diameter)
+            add_mass(mass_name(species, mode.short), mass_flux, weights)
+            add_mass(number_name(mode.short), mass_flux / m_p, weights)
 
     def __call__(self, state, diagnostics, forcing, terrain):
         p = self.params.get_value()
@@ -167,25 +218,65 @@ class AnthropogenicEmissions(PhysicsTerm):
             bc = p.scale * self._flux(forcing, f"emis_{sector}_bc", ncols)
             oc = p.scale * self._flux(forcing, f"emis_{sector}_oc", ncols)
 
-            # SO2 → primary SO4 + g_so2 gas remainder (S-conserving). The
-            # population owns which classes receive primary sulfate and in what
-            # proportion (``primary_split``) — no Aitken/accum assumption here.
+            # SO2 → primary SO4 + g_so2 gas remainder (S-conserving); the gas
+            # remainder is independent of mode targets, so this is unchanged
+            # by the sector-class policy below.
             frac = p.so4_primary_fraction[i]
             so4_mass = frac * so2 * self._so2_to_so4_mass
-            for mode, mode_frac in self._spec.primary_split("so4"):
-                add_aerosol("so4", mode, so4_mass * mode_frac, weights)
             add_mass(gas_name("so2"), (1.0 - frac) * so2, weights)
 
-            # Primary carbonaceous mass → the population's primary-carbon
-            # class(es); OC scaled to POA by OM:OC.
             if sector == "biomass_burning":
                 # MMPPE emi_bb_*: the open-burning fluxes as emitted
                 # (SO2 as SO2, OC as OC), before speciation/OM scaling.
                 emi_bb = {"so2": so2, "bc": bc, "oc": oc}
-            for mode, mode_frac in self._spec.primary_split("bc"):
-                add_aerosol("bc", mode, bc * mode_frac, weights)
-            for mode, mode_frac in self._spec.primary_split("poa"):
-                add_aerosol("poa", mode, oc * OM_OC_RATIO * mode_frac, weights)
+
+            if self._sector_policy is None:
+                # MAM4 default, unchanged: the population owns which classes
+                # receive primary sulfate/BC/POA and in what proportion
+                # (``primary_split``) — no Aitken/accum assumption here.
+                for mode, mode_frac in self._spec.primary_split("so4"):
+                    add_aerosol("so4", mode, so4_mass * mode_frac, weights)
+                for mode, mode_frac in self._spec.primary_split("bc"):
+                    add_aerosol("bc", mode, bc * mode_frac, weights)
+                for mode, mode_frac in self._spec.primary_split("poa"):
+                    add_aerosol("poa", mode, oc * OM_OC_RATIO * mode_frac, weights)
+                continue
+
+            # HAM's own per-sector-class mode/size targets (jax-gcm#1017).
+            # jcm's four super-sectors each resolve to one HAM class, with
+            # two of them (surface_combustion, elevated_industrial) carrying
+            # an optional SUBSET channel (residential/energy) whose flux is
+            # INCLUDED in the super-sector total, not additional to it.
+            main_class, subset = SECTOR_ROUTING[sector]
+            om_oc = self._sector_policy.om_oc
+            for species, flux, scale in (
+                ("so4", so4_mass, 1.0), ("bc", bc, 1.0), ("oc", oc, om_oc),
+            ):
+                main_flux, subset_flux, subset_class = flux * scale, None, None
+                if subset is not None:
+                    subset_name, subset_class = subset
+                    channel = f"emis_{subset_name}_{species if species != 'so4' else 'so2'}"
+                    if self._has_channel(forcing, channel, ncols):
+                        # The subset channel carries the pre-speciation
+                        # quantity (SO2 for so4, matching the main channels'
+                        # own convention); scale it the same way as the
+                        # parent flux before splitting mass.
+                        raw = p.scale * self._flux(forcing, channel, ncols)
+                        subset_raw = raw if species != "so4" else frac * raw * self._so2_to_so4_mass
+                        subset_flux = subset_raw * scale
+                        main_flux = main_flux - subset_flux
+                    else:
+                        logger.warning(
+                            "AnthropogenicEmissions: forcing.anthropogenic_emissions "
+                            "has no %r channel, so the whole %r super-sector's %s "
+                            "is sized as %r (jax-gcm#1017, tracked gap F6) rather "
+                            "than split out its %r share at %r's own HAM size.",
+                            channel, sector, species, main_class, subset_name,
+                            subset_class)
+                self._emit_sector_species(add_mass, weights, species, main_flux, main_class)
+                if subset_flux is not None:
+                    self._emit_sector_species(
+                        add_mass, weights, species, subset_flux, subset_class)
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),
