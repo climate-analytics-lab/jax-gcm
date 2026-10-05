@@ -1078,6 +1078,34 @@ Fixes that change the climate of a configuration you did not otherwise touch.
 :doc:`v2_to_v3` quotes the measured direction and magnitude for each, where one
 was measured.
 
+Sub-grid orographic drag acts on the low-level flow, not the whole column
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The ECHAM configurations had jets about half their observed strength and
+  net easterly low-level flow (measured in the 1M and JAM T63L47 years alike):
+  a year had zonal wind 9 m/s at 200 hPa
+  and −3.3 m/s at 850 hPa in the global mean (ERA5 15.6 and +1.0), the
+  equator-to-60° 500 hPa height drop a quarter (NH) to a half (SH) of ERA5's,
+  and no Southern Ocean trough. The Lott-Miller SSO drag ran with
+  ``nktopg = 1``. In ECHAM ``nktopg`` is a grid level that ``sugwd`` sets
+  (level 45 of L47) and ``orosetup`` applies as ``kknu = MIN(kknu, nktopg)``,
+  a floor on the depth of the low-level layer; at 1 every such layer reached
+  the model top, so the "incident" wind, stability and density were column
+  means. The scheme then removed 0.052 N/m² of westerly momentum (area mean of
+  the column force × cos φ; the surface friction torque was 0.026), with
+  column forces up to 10 N/m² and drag of −12 m/s/day at 300 hPa over the
+  mountains, and the atmosphere settled into net surface easterlies to balance
+  it. ``LottMillerSso`` now takes ``nktopg`` from the model grid
+  (``echam_nktopg``), and ``sso_drag`` requires it. The port then reproduces
+  the compiled ECHAM ``ssodrag`` on real T63L47 columns to round-off.
+- **Changes results** in every configuration that composes ``LottMillerSso``
+  (all ``echam_physics`` packages). From the ``ma-t63-l47`` warm state, days
+  20-30 against ERA5 January: 200 hPa wind bias −7.8 → −1.8 m/s (RMSE 16.4 →
+  9.5), 850 hPa −4.3 → −0.6 m/s (RMSE 6.9 → 4.4), 500 hPa height RMSE 180 →
+  73 m; the NH subtropical jet reaches 46 m/s at 30°N (ERA5 44). Warm states
+  spun up before this change are out of angular-momentum balance and adjust
+  over about four weeks.
+
 The semi-Lagrangian step conserves water
 """"""""""""""""""""""""""""""""""""""""
 

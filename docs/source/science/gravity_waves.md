@@ -19,7 +19,14 @@ plus two upper-boundary dissipation terms:
   and a native-grid file with only ``orog``/``lsm`` falls back to
   ``terrain.py::get_simplified_sso_descriptors``, whose **hard-coded
   approximations** (``orostd = 0.25·orog``, slope 0.1 over land, anisotropy 0.5)
-  are a placeholder rather than a measurement. Its energy-conserving cap
+  are a placeholder rather than a measurement. The scheme's level constant
+  ``nktopg`` is ECHAM's ``mo_ssodrag.f90::sugwd`` value for the model grid
+  (``echam_nktopg``: the highest level with sigma ≥ 0.94 at an 800 hPa
+  reference surface pressure, level 45 of L47), applied as in ``orosetup``
+  (``kknu = MIN(kknu, nktopg)``): a floor on the depth of the low-level layer
+  over which the incident wind, stability and density are averaged, so that
+  layer stays near the surface. With it the port reproduces the compiled ECHAM
+  ``ssodrag`` on real T63L47 columns to round-off. Its energy-conserving cap
   (``mo_ssortns.f90::orodrag`` lines 442-452) is ECHAM's ``IF (zdis < 0)``
   rescale written as ``u*·min(1, |u|/|u*|)``, branch-free, with the kinetic
   energy change formed from the wind increment: the heating is never negative
@@ -121,7 +128,9 @@ inert.
   ``upper_temperature_relaxation.py`` (``UpperTemperatureRelaxation``).
 
 **Validation evidence.** ``jcm/physics/gravity_waves/hines/hines_test.py``;
-``sso/lott_miller_test.py``, ``lott_miller_host_test.py``;
+``sso/lott_miller_test.py`` (including tendencies against the compiled
+ECHAM ``ssodrag``, ``jcm/data/test/echam_ssodrag_reference``),
+``lott_miller_host_test.py``;
 ``spectral/solver_test.py`` (NumPy float64 reference), ``frontal_test.py``,
 ``frontogenesis_test.py``, ``term_test.py``; ``simple/simple_gwd_test.py``;
 ``dissipation/upper_temperature_relaxation_test.py``. Design reference:

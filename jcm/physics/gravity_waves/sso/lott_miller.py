@@ -64,11 +64,14 @@ Algorithm (column-mode, executed at each grid column):
   (``[0..nlev]``); full levels are length ``nlev`` (``[0..nlev-1]``).
   Index 0 = top of the model, index ``nlev`` = surface half level.
 
-- A few internal level-index quantities (``nktopg`` for the top-most
-  level orography may "see"; ``ntop`` for the stress-profile model
-  top) are passed as Python integer kwargs to :func:`sso_drag` rather
-  than living on the parameters tree, because they index into level
-  arrays and must be static at JIT trace time.
+- A few internal level-index quantities (``nktopg``, the security level
+  that bounds the blocked-flow layer from *below*; ``ntop`` for the
+  stress-profile model top) are passed as Python integer kwargs to
+  :func:`sso_drag` rather than living on the parameters tree, because
+  they index into level arrays and must be static at JIT trace time.
+  ``nktopg`` is a property of the vertical grid, computed exactly as
+  ECHAM's ``mo_ssodrag.f90::sugwd`` does by :func:`echam_nktopg`; the
+  host term derives it in ``cache_coords``.
 
 - The seven sub-grid orography descriptors required by the scheme
   (mean elevation, std-dev, slope, anisotropy, orientation, peak,
@@ -118,6 +121,55 @@ _MIN_OROG_STD = 1.0e-6      # [m]
 _MIN_SPEED2 = 1.0e-18
 
 
+# ``mo_ssodrag.f90::sugwd``: the reference surface pressure [Pa] and the
+# sigma at or below which a level counts as "near the surface" when locating
+# ``nktopg``.
+_NKTOPG_REFERENCE_PRESSURE = 80000.0   # zpr
+_NKTOPG_SIGMA = 0.94                   # zsigt
+
+
+def echam_nktopg(a_half, b_half) -> int:
+    """ECHAM's ``nktopg`` for a hybrid grid (``mo_ssodrag.f90::sugwd``).
+
+    ``nktopg`` is the 1-based index (top = 1) of the highest full level whose
+    mid-level sigma, evaluated at a reference surface pressure of 800 hPa, is
+    at least 0.94 — i.e. the top of the lowest few model levels. ``orosetup``
+    applies it as ``kknu = MIN(kknu, nktopg)`` (and likewise ``kknu2``,
+    ``kknub``): with the level index counting down from the model top, that
+    *raises* the top of the blocked-flow / low-level averaging layer to at
+    least ``nktopg``, so the layer is never thinner than the near-surface
+    levels. It is a floor on the layer depth, not a ceiling, which is why the
+    value must be this grid-derived level and not the model top: with
+    ``nktopg = 1`` every ``kknu`` collapses to the model top and the "low-level"
+    wind, stability and density are averaged over the whole column (jet and
+    stratosphere included), giving surface stresses of O(10 N/m²) and an
+    orographic momentum sink several times the surface friction.
+
+    Args:
+        a_half: hybrid ``A`` coefficients on the ``nlev + 1`` half levels, in
+            Pa, top-first (``0`` for a pure sigma grid).
+        b_half: hybrid ``B`` coefficients on the half levels, top-first.
+
+    Returns:
+        ``nktopg`` as a 1-based Python ``int`` in ``[1, nlev]``. On a grid
+        whose lowest full level already sits above sigma 0.94 the Fortran loop
+        never assigns ``nktopg``; the lowest full level (``nlev``) is returned
+        there, the shallowest layer the scheme can represent.
+
+    """
+    import numpy as np
+
+    a = np.asarray(a_half, dtype=np.float64)
+    b = np.asarray(b_half, dtype=np.float64)
+    nlev = a.shape[0] - 1
+    zpr = _NKTOPG_REFERENCE_PRESSURE
+    sigma_full = 0.5 * (a[:-1] + a[1:] + zpr * (b[:-1] + b[1:])) / zpr
+    near_surface = np.nonzero(sigma_full >= _NKTOPG_SIGMA)[0]
+    if near_surface.size == 0:
+        return nlev
+    return int(near_surface.min()) + 1
+
+
 def _safe_denom(x, floor):
     """Floor ``|x|`` at ``floor`` (sign-preserving) for use as a divisor.
 
@@ -137,10 +189,11 @@ def _safe_denom(x, floor):
 class SSOParameters:
     """Tunable parameters for the Lott & Miller (1997) SSO drag scheme.
 
-    Static loop / level-index knobs (``nktopg`` for the top model level
-    that orography may "see"; ``ntop`` for the stress-profile model
-    top) are passed as Python kwargs to :func:`sso_drag` because they
-    index into level arrays at JIT trace time.
+    Static loop / level-index knobs (``nktopg``, the grid-derived floor
+    on the blocked-layer depth — see :func:`echam_nktopg`; ``ntop`` for
+    the stress-profile model top) are passed as Python kwargs to
+    :func:`sso_drag` because they index into level arrays at JIT trace
+    time.
 
     Attributes:
         min_peak_minus_mean_elevation: Activation threshold (m). The
@@ -840,7 +893,7 @@ def sso_drag(
     land_fraction: jnp.ndarray,
     config: SSOParameters,
     *,
-    nktopg: int = 1,
+    nktopg: int,
     ntop: int = 1,
 ) -> Tuple[SSOTendencies, SSOState]:
     """Compute Lott-Miller SSO drag tendencies for a single column.
@@ -881,9 +934,12 @@ def sso_drag(
             scalar. Tendencies are scaled by this since SSO descriptors
             are valid only over land.
         config: tunable :class:`SSOParameters`.
-        nktopg: top-most 1-based level index that orography is allowed
-            to "see" (Python int, static at trace time). Default 1
-            (orography may extend up to the model top).
+        nktopg: 1-based level index (top = 1) that the tops of the
+            blocked-flow and low-level averaging layers are raised to at
+            least (Python int, static at trace time). A property of the
+            vertical grid — compute it with :func:`echam_nktopg`; there is
+            no grid-free default (``1`` would stretch the "low-level" layer
+            over the whole column).
         ntop: 1-based level index above which the wave-stress profile
             is held constant (Python int, static at trace time).
             Default 1.
@@ -971,6 +1027,23 @@ class LottMillerSso(PhysicsTerm):
     def __init__(self, params: SSOParameters | None = None):
         """Hold the scheme-native :class:`SSOParameters`."""
         self.params = nnx.Param(params or SSOParameters.default())
+        self._nktopg: int | None = None
+
+    def cache_coords(self, coords) -> None:
+        """Derive ``nktopg`` from the vertical grid (``sugwd``).
+
+        Handles ``HybridCoordinates`` (``a`` in Pa, ``b``) and
+        ``SigmaCoordinates`` (``a = 0``, ``b = sigma``), both top-first.
+        """
+        from dinosaur.hybrid_coordinates import HybridCoordinates
+
+        vertical = coords.vertical
+        if isinstance(vertical, HybridCoordinates):
+            a_half, b_half = vertical.a_boundaries, vertical.b_boundaries
+        else:
+            b_half = jnp.asarray(vertical.boundaries)
+            a_half = jnp.zeros_like(b_half)
+        self._nktopg = echam_nktopg(a_half, b_half)
 
     def __call__(
         self,
@@ -980,6 +1053,11 @@ class LottMillerSso(PhysicsTerm):
         terrain: TerrainData,
     ) -> tuple[PhysicsTendency, dict]:
         """Compute u/v/T tendencies from Lott-Miller SSO."""
+        if self._nktopg is None:
+            raise RuntimeError(
+                "LottMillerSso needs cache_coords(coords) before it is "
+                "called: nktopg is derived from the vertical grid.")
+        nktopg = self._nktopg
         # The drag is a per-column scheme, vmapped over columns below, so it
         # does not care how the host lays the horizontal out. Flatten whatever
         # trailing axes it uses into a single column axis and restore the
@@ -1030,7 +1108,7 @@ class LottMillerSso(PhysicsTerm):
                 orography_anisotropy_c, orography_orientation_c,
                 peak_elevation_c, valley_elevation_c,
                 land_fraction_c, params,
-                nktopg=1, ntop=1,
+                nktopg=nktopg, ntop=1,
             )
 
         tend, _state = jax.vmap(
