@@ -534,7 +534,7 @@ Interactive aerosol (JAM)
   to the observed dust optical depth by the aerosol retune, below); the
   regional ratios stay HAM's, and T106 and ne30 take the Fortran's uniform
   default since their inputs are interpolated from T63. A full
-  ``echam-jam-t63-l47`` year emits 1667 Tg/yr of D < 10 µm dust, 2.6 times
+  ``echam-jam-t63-l47`` year emits 1629 Tg/yr of D < 10 µm dust, 2.5 times
   the 642 Tg/yr that the parent model's published budget becomes once
   converted to this window and of the order of the AeroCom medians (1640; 1123
   in the 15-model dust intercomparison); the annual
@@ -548,15 +548,14 @@ Interactive aerosol (JAM)
   Gaussian-process sweep (30-day windows) of a loss over cloud radiative
   effects, cloud cover, precipitation, liquid water path and the ESA-CCI total
   and dust AOD, each against its inter-annual spread, and were confirmed in a
-  365-day T63 L47 year. Against the same year at the previous values, global AOD at 550 nm
-  rises from 0.059 to 0.086 (observed 0.145), dust AOD from 0.0032 to 0.0098
-  (0.0213), the dust burden from 5.3 to 16.3 mg/m² (AeroCom mean 37.6) and the
-  sea-salt burden from 6.6 to 12.5 mg/m² (AeroCom mean 14.7, median 12.5);
-  sulphate stays inside the
-  AeroCom band (5.3 to 4.9 mg SO4/m², ion basis) and the net TOA flux is
-  unchanged within 0.3 W/m² (+6.3 to +6.1). That year also carried the DMS
-  flux at 0.77 of its default; the year at the shipped DMS default is
-  tabulated in :doc:`design/jam_aerosol_retune`. The DMS, wet-removal, cloud
+  365-day T63 L47 year of the release configuration. Against the same year at
+  the previous values, global AOD at 550 nm rises from 0.059 to 0.082 (observed
+  0.145), dust AOD from 0.0032 to 0.0092 (0.0213), the dust burden from 5.3 to
+  15.7 mg/m² (AeroCom mean 37.6) and the sea-salt burden from 6.6 to 13.3 mg/m²
+  (AeroCom mean 14.7, median 12.5); sulphate stays inside the AeroCom band (5.3
+  to 5.2 mg SO4/m², ion basis, against a band of 1.95-5.85) and the net TOA flux
+  is unchanged within 0.3 W/m² (annual mean +7.4 to +7.1; CERES +1.0). The
+  year's results are tabulated in :doc:`design/jam_aerosol_retune`. The DMS, wet-removal, cloud
   and convection defaults are unchanged: the 1M and 2M levers were swept as
   well: the 2M's optimum sat on the lower edge of four of its five levers, the
   1M's best arm took `cprcon` to the edge of its range, and both bought cloud
@@ -2428,8 +2427,9 @@ Calibration and capability gaps
   2M optima buy cloud radiative effect with liquid water path instead of
   cover; dust lifetime is 1.8 d against AeroCom's 4.1 and the regional dust
   source balance is wrong, so dust AOD stays under half of the observed;
-  the sea-salt burden matches the AeroCom median but its coarse-mode extinction
-  per unit mass is low, and total AOD is 0.086 against 0.145; sulphate
+  the sea-salt burden lies between the AeroCom median and mean but its
+  coarse-mode extinction per unit mass is low, and total AOD is 0.082 against
+  0.145; sulphate
   is governed by wet removal and its DMS source, and there is no SO2
   deposition; and global-mean precipitation is 0.7 mm/day below GPCP (0.9 to
   1.1 over the ocean).

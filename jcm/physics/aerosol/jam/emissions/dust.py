@@ -179,12 +179,11 @@ _N_EAST_ASIA_ROWS = len(EAST_ASIA_INDEX)
 #: expected-improvement sweep (30-day windows), January and July, on dev
 #: 519f18e8; the dust scale acts through the dust AOD, and the AeroCom burden
 #: and lifetime are monitors that never enter the loss. A 365-day
-#: ``echam-jam-t63-l47`` year at this value (with the DMS flux at 0.77 of its
-#: default, which does not enter dust) gives dust AOD 0.0098 (observed 0.0213),
-#: a dust burden of 16.3 mg/m2 (AeroCom mean 37.6, median 40.2), D < 10 um
-#: emission of 1667 Tg/yr (AeroCom median 1640 at mixed size cut-offs; the
-#: parent model's budget in this window is 642, see the science page) and a
-#: dust lifetime of 1.8 d (AeroCom 4.1). The year at scale 0.5 emits 563 Tg/yr:
+#: ``echam-jam-t63-l47`` year of the release configuration gives dust AOD 0.0092
+#: (observed 0.0213), a dust burden of 15.7 mg/m2 (AeroCom mean 37.6, median
+#: 40.2), D < 10 um emission of 1629 Tg/yr (AeroCom median 1640 at mixed size
+#: cut-offs; the parent model's budget in this window is 642, see the science
+#: page) and a dust lifetime of 1.8 d (AeroCom 4.1). The year at scale 0.5 emits 563 Tg/yr:
 #: a 24 % lower threshold triples the emission, which is why the number is
 #: measured rather than inherited. What remains of the dust-AOD deficit is
 #: lifetime and regional source balance, which a global scalar cannot move.

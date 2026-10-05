@@ -111,7 +111,7 @@ def gong_class_factors(
 #: shipped. The scale acts mainly through the total AOD (ESA-CCI SU v4.21): a
 #: doubling adds about 0.02 to the global AOD, the largest of the non-dust
 #: levers, and it also moves the cloud radiative terms of the loss. A 365-day
-#: ``echam-jam-t63-l47`` year at 2 emits 4042 Tg/yr, with a burden of 12.5
+#: ``echam-jam-t63-l47`` year at 2 emits 4148 Tg/yr, with a burden of 13.3
 #: mg/m2 and an unchanged lifetime (0.6 d, AeroCom 0.48), so the burden follows
 #: the scale. The value is a T63 L47 calibration against the 10 m wind this host
 #: produces; the default applies at every resolution because no other has been

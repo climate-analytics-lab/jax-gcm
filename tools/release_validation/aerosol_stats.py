@@ -171,7 +171,7 @@ EARTH_AREA_M2 = 4.0 * np.pi * 6.371e6 ** 2
 #: present-day and 485 pre-industrial. The shipped dust threshold scale is
 #: fitted to the observed dust AOD rather than to that budget (JAM aerosol
 #: retune, ``docs/source/design/jam_aerosol_retune.md``) and a T63 year emits
-#: 1667 Tg/yr, of the order of the AeroCom phase-I median of 1640 (Textor et
+#: 1629 Tg/yr, of the order of the AeroCom phase-I median of 1640 (Textor et
 #: al. 2006; Huneeus et al. 2011 give 1123 for their 15 models, at different
 #: size cut-offs). The band spans the converted budget and that year, with a
 #: factor of ~1.6 above the calibrated year, and is far wider than the 6 %

@@ -70,13 +70,11 @@ zero-tendency κ-Köhler placeholder is the bare-factory default and the
 documented fallback when the GPL extra is unavailable. The core's cloudy ``amicphys``
 sub-area is not ported upstream, so cloud-borne activation is the harness's job
 (``ArgActivation`` / ``CloudBorneExchange``) and the core runs clear-sky. Aerosol
-burdens and lifetimes at the shipped dust and sea-salt scales, from a 365-day
-T63 L47 year (``jam_bw1`` of {doc}`../design/jam_aerosol_retune`, which also
-carries DMS at 0.77 of its default; the year at the shipped DMS is tabulated
-there as ``jam_rc``): sulphate 4.9 mg SO4/m²
-(ion basis; AeroCom mean 3.9, sanity band 1.95-5.85) with a 4.3 d lifetime (4.1),
-sea salt 12.5 mg/m² (AeroCom mean 14.7, median 12.5) and 0.6 d (0.48), BC a
-5.0 d lifetime (7.1), dust 16.3 mg/m² (mean 37.6, median 40.2) and 1.8 d (4.1).
+burdens and lifetimes of the shipped configuration, from a 365-day T63 L47 year
+(``jam_rc`` of {doc}`../design/jam_aerosol_retune`): sulphate 5.2 mg SO4/m²
+(ion basis; AeroCom mean 3.9, sanity band 1.95-5.85) with a 4.2 d lifetime (4.1),
+sea salt 13.3 mg/m² (AeroCom mean 14.7, median 12.5) and 0.6 d (0.48), BC a
+4.6 d lifetime (7.1), dust 15.7 mg/m² (mean 37.6, median 40.2) and 1.8 d (4.1).
 Dust is the species that stays far from AeroCom. See {doc}`../design/dinosaur_sl_jam_configuration`.
 
 ### Online aerosol optics
@@ -571,8 +569,9 @@ re-evaporation ledger).
   radiative terms, with the burden as a monitor. Its optimum sat on the upper
   edge of the swept range, [0.5, 2], in both stages, so 2 is the edge of the
   range and not an interior optimum; a doubling adds about 0.02 to the global
-  AOD. A 365-day T63 L47 year at 2 emits 4042 Tg/yr with a burden of 12.5 mg/m²
-  (the AeroCom median) and an unchanged lifetime of 0.6 d (AeroCom 0.48). The
+  AOD. A 365-day T63 L47 year at 2 emits 4148 Tg/yr with a burden of 13.3 mg/m²
+  (between the AeroCom median and mean) and an unchanged lifetime of 0.6 d
+  (AeroCom 0.48). The
   scale is a T63 L47 calibration against this host's 10 m wind and is applied
   at every resolution, since no other has been validated.
 - `science` (decision) — the DMS flux scale (``physics.dms.flux_scale``), the
@@ -834,7 +833,7 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
 
   The release gate ``DUST_EMISSION_TG_PER_YR`` is **400-2600 Tg/yr**. It
   spans the parent model's converted values (485 pre-industrial, 642
-  present-day) and the shipped calibration's 1667 Tg/yr year, with a factor of
+  present-day) and the shipped calibration's 1629 Tg/yr year, with a factor of
   about 1.6 above that year, and is far wider than the 6 % run-to-run spread,
   so it cannot function as a tuning target — which is also why it is exempt
   from the regression tier. It is the check that dust has neither vanished
@@ -856,15 +855,15 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   Stage-1 sweep, against at most 0.3 for any of the seven other levers. The
   AeroCom burden, lifetime and emission are monitors and never enter the loss.
   Two 365-day ``echam-jam-t63-l47`` years that differ in the threshold scale
-  (the second also carries the shipped sea-salt scale and DMS at 0.77 of its
-  default, neither of which enters dust) give
+  (the second is the release configuration, which also carries the shipped
+  sea-salt scale; neither enters dust) give
 
   | | year at scale 0.5 | year at 0.379095663 | reference |
   |---|---|---|---|
-  | dust AOD 550 nm | 0.0032 | 0.0098 | 0.0213 (ESA-CCI SLSTR) |
-  | dust burden, mg/m² | 5.3 | 16.3 | 37.6 (AeroCom mean), 40.2 (median) |
-  | D < 10 µm emission, Tg/yr | 563 | 1667 | 642 (parent model, converted); 1640 (AeroCom median, mixed cut-offs) |
-  | dust lifetime, d | 1.78 | 1.81 | 4.1 (AeroCom) |
+  | dust AOD 550 nm | 0.0032 | 0.0092 | 0.0213 (ESA-CCI SLSTR) |
+  | dust burden, mg/m² | 5.3 | 15.7 | 37.6 (AeroCom mean), 40.2 (median) |
+  | D < 10 µm emission, Tg/yr | 563 | 1629 | 642 (parent model, converted); 1640 (AeroCom median, mixed cut-offs) |
+  | dust lifetime, d | 1.78 | 1.80 | 4.1 (AeroCom) |
 
   The emission rises threefold for a 24 % lower threshold, because saltation
   samples the far tail of the wind distribution and jcm's tail is thin; that
@@ -875,8 +874,8 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   AOD of the best arm was 0.84 in January and 0.51 in July over the
   Sahara/Sahel, 1.65 and 1.88 over Arabia, 3.9 and 1.1 over Asia and 4.1 and
   0.38 over Australia), neither of which a global scalar can move. The shipped
-  emission is 2.6 times the parent model's converted budget and of the order of
-  the AeroCom medians, and still gives under half (0.46) of the observed dust
+  emission is 2.5 times the parent model's converted budget and of the order of
+  the AeroCom medians, and still gives under half (0.43) of the observed dust
   AOD: at this lifetime the emission that would match it is larger again, which
   is what the lower threshold encodes.
 

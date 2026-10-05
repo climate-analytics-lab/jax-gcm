@@ -171,11 +171,31 @@ emission is the mean over all 73 saves.
 | `jam_b` | dust 0.379, sea salt x2, DMS x0.77, wet removal x0.5 | 304.8 (-35 %) | 0.110 | 0.0100 | 6.4 (out) | 20.8 (42 % over the mean) | 18.7 | 1602 | +5.6 |
 | `jam_bw1` | dust 0.379, sea salt x2, DMS x0.77 | 353.0 (-25 %) | 0.086 | 0.0098 | 4.9 | 12.5 | 16.3 | 1667 | +6.1 |
 | `jam_amean` | dust 0.45, sea salt x1.96, DMS x0.95, wet removal x1.88 | 407.2 (-13 %) | 0.075 | 0.0050 | 4.6 | 12.0 | 8.5 | 858 | +6.3 |
-| **`jam_rc`** | **release configuration: dust 0.379095663, sea salt x2, every other default** | **PENDING: filled by the release coordinator from the finished year** | | | | | | | |
+| **`jam_rc`** | **release configuration: dust 0.379095663, sea salt x2, every other default** | **377.6 (-20 %)** | **0.082** | **0.0092** | **5.16** | **13.3** | **15.7** | **1629** | **+6.2** |
 
 `jam_amean` is the best arm whose two-window mean sulphate lies in the band: an
 informational alternative that reaches the band with wet removal at 1.88 times
-its default, near the upper bound of its range.
+its default, near the upper bound of its range. `jam_bw1` is the DMS x0.77
+neighbour of the release configuration `jam_rc`: the two differ only in DMS.
+
+**The release configuration year.** `jam_rc` lowers the loss by 92 against the
+control (377.6 against 469.6), 79 % of the 117 that `jam_bw1` gains (353.0),
+because DMS at its default gives back a little of the AOD; the annual mean net
+TOA flux is
++7.14 W/m² against the control's 7.41 (CERES +0.99), and the 40-save gate value
++6.22. Sulphate stays inside the sanity band, at 5.16 mg SO4/m² against 4.93
+with DMS x0.77 and 5.26 for the control (6.175 on the tracer basis, which is
+ammonium bisulphate; the band is on the ion basis). The window monitors read
+sea salt 14.7 mg/m², dust 16.0 mg/m², sulphate 5.37 (ion basis) and a tropical
+99.9th percentile of precipitation at 0.954 of the control's. The cloud and
+radiation fields do not move from the control (total cloud cover 0.461 offline,
+SW CRE -42.3, LW CRE 25.3, outgoing SW 92.9 W/m², precipitation 2.40 mm/day).
+Against the drift limit of 0.002 /day that the health recipe applies, dust
+(+0.00018), POA (-0.00184) and sea salt (+0.0002) pass, and BC (+0.00267) and
+sulphate (+0.00250) fail; both of those are inside the 0.003 /day limit for
+whole-year records, and the budget residual is 0.0005 against 5 %. The
+`cloud_cover` gate fails at 0.46 against a band of 0.5-0.9, as it does for the
+control.
 
 **Why not `jam_b`.** Its extra AOD is bought with the wet-removal scale on its
 lower bound. That raises sulphate above the sanity band (6.4 against 5.85 mg
@@ -184,19 +204,20 @@ lifetime from 0.6 to 1.0 d, which is the burden guard working as intended: the
 loss does not see burdens, so a lever that moves a burden the loss ignores is
 accepted only where the burden stays plausible. `jam_bw1` returns the
 wet-removal scale to 1 and keeps the other three aerosol levers at their
-Stage-2 optimum.
+Stage-2 optimum; `jam_rc` then returns DMS to its default as well.
 
 **Why DMS stays at its default.** DMS at 0.77 is a weak lever on the loss
 (standardised effect +0.02 in Stage 1 and +0.23 in Stage 2, flat in the
 surrogate), and
 the decision rule for this release is fewer changes, each with a strong
-reason. `jam_rc` is `jam_bw1` with DMS returned to its default.
+reason. `jam_rc` is `jam_bw1` with DMS returned to its default, and its sulphate
+stays in the band.
 
 **The sea-salt value is the edge of the range.** The optimum sat on the upper
 bound of [0.5, 2] in Stage 1 (best arm 1.94) and in Stage 2, so the data
-constrain the scale from below only. At 2 the burden is 12.5 mg/m², the AeroCom
-median (mean 14.7), and the emission, 4042 Tg/yr, is below the AeroCom median
-(6280). The lifetime does not change, so the burden is linear in the scale. The
+constrain the scale from below only. At 2 the burden is 13.3 mg/m², between the
+AeroCom median (12.5) and mean (14.7), and the emission, 4148 Tg/yr, is below
+the AeroCom median (6280). The lifetime does not change, so the burden is linear in the scale. The
 range was not extended for this release, and nothing above 2 was run.
 
 ## The 1M and 2M defaults
@@ -238,8 +259,8 @@ the structural findings stand in the way of reading any further parametric gain
 as real. Items marked "earlier tree" come from the structural review of the
 earlier-tree sweeps.
 
-- **Clear-sky OLR is 8-10 W/m² below CERES on every host** (January -8.0,
-  July -9.7 W/m² in `jam_bw1`; -7.6 and -9.3 on the 2M control, -8.6 and -9.6
+- **Clear-sky OLR is 8-10 W/m² below CERES on every host** (January -7.9,
+  July -9.6 W/m² in `jam_rc`; -7.6 and -9.3 on the 2M control, -8.6 and -9.6
   on the 1M control) and no lever moves it by more than 1 W/m². Part of the gap
   is CERES's clear-sky sampling; the split between sampling and model was not
   made.
@@ -258,12 +279,12 @@ earlier-tree sweeps.
   earlier-tree sweeps the modelled-to-observed regional dust AOD was 0.84
   (January) and 0.51 (July) over the Sahara and Sahel and 1.65 / 1.88 over
   Arabia, 3.9 / 1.1 over Asia and 4.1 / 0.38 over Australia. The shipped dust
-  AOD is 0.46 of the observed; the threshold scale cannot repair a lifetime or a
+  AOD is 0.43 of the observed; the threshold scale cannot repair a lifetime or a
   regional ratio.
-- **Sea salt.** The burden (12.5 mg/m²) is the AeroCom median, though the
-  emission (4042 Tg/yr) is below the AeroCom median (6280); the coarse-mode
-  extinction per unit mass is at the low end (about 1.7 m²/g), so the AOD
-  deficit (0.086 against 0.145) is not sea salt's alone.
+- **Sea salt.** The burden (13.3 mg/m²) lies between the AeroCom median (12.5)
+  and mean (14.7), though the emission (4148 Tg/yr) is below the AeroCom median
+  (6280); the coarse-mode extinction per unit mass is at the low end (about
+  1.7 m²/g), so the AOD deficit (0.082 against 0.145) is not sea salt's alone.
 - **Sulphate** is set by its removal and its DMS source: the standardised
   effects on the January / July burden are -2.3 / -2.6 for the wet-removal
   scale and +1.8 / +0.9 for DMS in Stage 2, against -0.95 / -0.65 for dust and
@@ -288,7 +309,7 @@ earlier-tree sweeps.
   climate of the previous defaults and are regenerated against the release
   candidate, together with their init states.
 - The release gate on the annual dust emission, `DUST_EMISSION_TG_PER_YR`, is
-  400-2600 Tg/yr: the calibrated year emits 1667, 2.6 times the converted
+  400-2600 Tg/yr: the calibrated year emits 1629, 2.5 times the converted
   parent budget (642) and of the order of the AeroCom medians (1640; 1123 in the
   15-model dust intercomparison). The parent model's last-glacial-maximum run
   (5159 Tg/yr in HAM's size window) is about 2700 in this one, only 4 % above
