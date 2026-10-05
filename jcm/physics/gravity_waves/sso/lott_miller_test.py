@@ -70,7 +70,6 @@ def _make_alps_column(nlev: int = 47, **overrides):
         orography_orientation=jnp.asarray(30.0),
         peak_elevation=jnp.asarray(2500.0),
         valley_elevation=jnp.asarray(900.0),
-        land_fraction=jnp.asarray(1.0),
     )
     inputs.update({k: jnp.asarray(v) for k, v in overrides.items()})
     return inputs
@@ -126,18 +125,12 @@ class TestSSOBasic:
         peak_dissip = float(jnp.max(jnp.abs(tend.dissip)))
         assert jnp.all(tend.dissip >= -1e-4 * peak_dissip)
 
-    def test_land_fraction_scaling(self):
-        """Halving land_fraction halves the tendencies."""
-        config = SSOParameters.default()
-        col_full = _make_alps_column()
-        tend_full, _ = sso_drag(**col_full, config=config,
-                                nktopg=_nktopg(col_full))
-        col_half = _make_alps_column(land_fraction=0.5)
-        tend_half, _ = sso_drag(**col_half, config=config,
-                                nktopg=_nktopg(col_half))
-        np.testing.assert_allclose(np.asarray(tend_half.dudt),
-                                   0.5 * np.asarray(tend_full.dudt),
-                                   rtol=1e-6, atol=1e-12)
+    def test_takes_no_land_fraction(self):
+        """``mo_ssortns.f90::ssodrag`` takes no land mask: the descriptors,
+        whole-cell statistics, already carry a coastal cell's ocean part.
+        """
+        import inspect
+        assert "land_fraction" not in inspect.signature(sso_drag).parameters
 
 
 def _captured_blowup_columns():
@@ -173,18 +166,18 @@ def _run_captured_columns(cols):
     levels = get_echam_levels(np.asarray(cols["pressure_full"]).shape[-1])
     nktopg = echam_nktopg(levels.a_boundaries, levels.b_boundaries)
 
-    def one(pf, ph, hf, T, u, v, orog, std, sig, gam, the, pic, val, fmask):
+    def one(pf, ph, hf, T, u, v, orog, std, sig, gam, the, pic, val):
         mass = (ph[1:] - ph[:-1]) / grav
         t, _ = sso_drag(
             jnp.asarray(cols["dt"]), jnp.zeros((), jnp.float32), hf, orog,
-            ph, pf, mass, T, u, v, orog, std, sig, gam, the, pic, val, fmask,
+            ph, pf, mass, T, u, v, orog, std, sig, gam, the, pic, val,
             config, nktopg=nktopg, ntop=1)
         return t
 
     args = [jnp.asarray(cols[k], jnp.float32) for k in (
         "pressure_full", "pressure_half", "height_full", "temperature",
         "u_wind", "v_wind", "orog", "orostd", "orosig", "orogam", "orothe",
-        "oropic", "oroval", "fmask")]
+        "oropic", "oroval")]
     return jax.jit(jax.vmap(one))(*args)
 
 
@@ -352,7 +345,7 @@ class TestSSOGradients:
     AQUAPLANET = dict(
         orography_std=0.0, orography_slope=0.0, orography_anisotropy=0.0,
         peak_elevation=0.0, valley_elevation=0.0, mean_orography=0.0,
-        surface_height=0.0, land_fraction=0.0,
+        surface_height=0.0,
     )
 
     def _scheme_fn(self, column, config):
@@ -494,7 +487,7 @@ class TestAgainstEchamFortran:
             *[jnp.asarray(ref[k][n]) for k in (
                 "orog", "orostd", "orosig", "orogam", "orothe", "oropic",
                 "oroval")],
-            jnp.asarray(1.0), cfg, nktopg=nktopg, ntop=1)
+            cfg, nktopg=nktopg, ntop=1)
         return tend, state
 
     def test_tendencies_match_echam(self):

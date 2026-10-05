@@ -890,7 +890,6 @@ def sso_drag(
     orography_orientation: jnp.ndarray,
     peak_elevation: jnp.ndarray,
     valley_elevation: jnp.ndarray,
-    land_fraction: jnp.ndarray,
     config: SSOParameters,
     *,
     nktopg: int,
@@ -930,9 +929,6 @@ def sso_drag(
             (m, above sea level), scalar.
         valley_elevation: characteristic valley elevation in the column
             (m, above sea level), scalar.
-        land_fraction: fraction of the column over land+lakes (0-1),
-            scalar. Tendencies are scaled by this since SSO descriptors
-            are valid only over land.
         config: tunable :class:`SSOParameters`.
         nktopg: 1-based level index (top = 1) that the tops of the
             blocked-flow and low-level averaging layers are raised to at
@@ -968,12 +964,17 @@ def sso_drag(
         nktopg, ntop,
     )
 
-    # Apply activation mask and scale by land fraction (the descriptors
-    # are valid only over the land portion of the cell).
+    # Activation mask (ssodrag's ``itest``). No land-fraction factor, as in
+    # ``mo_ssortns.f90::ssodrag``, which takes no land mask: the descriptors
+    # are statistics over the whole grid cell with its ocean part entering as
+    # zero elevation (``jcm.data.mirror.sso``, as in ECHAM's boundary files),
+    # so a coastal cell's smaller ocean-diluted ``orostd``/``orosig``/peak
+    # already carry its land fraction. Scaling the drag by it again would
+    # count the ocean part twice.
     zero = jnp.zeros_like(drag_u)
-    drag_u = jnp.where(active, drag_u, zero) * land_fraction
-    drag_v = jnp.where(active, drag_v, zero) * land_fraction
-    dissipation = jnp.where(active, dissipation, zero) * land_fraction
+    drag_u = jnp.where(active, drag_u, zero)
+    drag_v = jnp.where(active, drag_v, zero)
+    dissipation = jnp.where(active, dissipation, zero)
 
     u_stress = jnp.sum(drag_u * layer_mass)
     v_stress = jnp.sum(drag_v * layer_mass)
@@ -1008,7 +1009,7 @@ class LottMillerSso(PhysicsTerm):
     Wraps :func:`sso_drag` over columns. Reads ``pressure_full``,
     ``pressure_half``, ``height_full`` from the moist-air diagnostics
     dict; reads orography descriptors (``orog``, ``orostd``, ``orosig``,
-    ``orogam``, ``orothe``, ``oropic``, ``oroval``, ``fmask``) from
+    ``orogam``, ``orothe``, ``oropic``, ``oroval``) from
     :class:`TerrainData`. Writes only u/v/T tendencies — no Data
     sub-struct.
 
@@ -1097,7 +1098,7 @@ class LottMillerSso(PhysicsTerm):
             surface_height_c, mean_orography_c, orography_std_c,
             orography_slope_c, orography_anisotropy_c,
             orography_orientation_c, peak_elevation_c,
-            valley_elevation_c, coriolis_c, land_fraction_c,
+            valley_elevation_c, coriolis_c,
         ):
             return sso_drag(
                 jnp.asarray(dt), coriolis_c, height_full_c,
@@ -1106,14 +1107,13 @@ class LottMillerSso(PhysicsTerm):
                 temperature_c, u_wind_c, v_wind_c,
                 mean_orography_c, orography_std_c, orography_slope_c,
                 orography_anisotropy_c, orography_orientation_c,
-                peak_elevation_c, valley_elevation_c,
-                land_fraction_c, params,
+                peak_elevation_c, valley_elevation_c, params,
                 nktopg=nktopg, ntop=1,
             )
 
         tend, _state = jax.vmap(
             _sso_one_col,
-            in_axes=(1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            in_axes=(1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             out_axes=(0, 0),
         )(
             pressure_full, pressure_half, layer_mass,
@@ -1122,7 +1122,7 @@ class LottMillerSso(PhysicsTerm):
             terrain.orostd.reshape(-1), terrain.orosig.reshape(-1),
             terrain.orogam.reshape(-1), terrain.orothe.reshape(-1),
             terrain.oropic.reshape(-1), terrain.oroval.reshape(-1),
-            coriolis, terrain.fmask.reshape(-1),
+            coriolis,
         )
 
         dt_temperature = tend.dissip / _physical_constants.cpd
