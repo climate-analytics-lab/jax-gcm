@@ -7,7 +7,7 @@ size-only factor is wind-independent, so the per-mode mass and number fluxes
 collapse to **two precomputed constants per mode** (accumulation, coarse)
 times ``u10**3.41`` times the open-water fraction. That makes the term cheap,
 jittable and differentiable. The source function is HAM's; the shipped overall
-scale (:data:`SEASALT_SCALE_DEFAULT`) is a calibration of 2 on top of it.
+scale (:data:`SEASALT_SCALE_DEFAULT`) is a calibration of 4 on top of it.
 
 References:
   Gong, S. L. (2003), A parameterization of sea-salt aerosol source function
@@ -104,20 +104,25 @@ def gong_class_factors(
 #: Overall emission scale on the Gong (2003) source function. The function
 #: itself is HAM's, unscaled (scale 1), and at T63 L47 it emits 2057 Tg/yr
 #: (dry diameter 0.1-10 um) against the AeroCom median of 6280 (mean 16 600),
-#: leaving a sea-salt burden of 6.6 mg/m2 (AeroCom mean 14.7, median 12.5). In
-#: both stages of the JAM aerosol retune
-#: (``docs/source/design/jam_aerosol_retune.md``) the optimum of the retune loss
-#: sat on the upper edge of the swept range, [0.5, 2], and 2 is the value
-#: shipped. The scale acts mainly through the total AOD (ESA-CCI SU v4.21): a
-#: doubling adds about 0.02 to the global AOD, the largest of the non-dust
-#: levers, and it also moves the cloud radiative terms of the loss. A 365-day
-#: ``echam-jam-t63-l47`` year at 2 emits 4148 Tg/yr, with a burden of 13.3
-#: mg/m2 and an unchanged lifetime (0.6 d, AeroCom 0.48), so the burden follows
-#: the scale. The value is a T63 L47 calibration against the 10 m wind this host
-#: produces; the default applies at every resolution because no other has been
+#: leaving a sea-salt burden of 6.6 mg/m2 (AeroCom mean 14.7, median 12.5). 4 is
+#: the upper edge of the range [1, 4] that Stage 2c of the JAM aerosol retune
+#: swept (``docs/source/design/jam_aerosol_retune.md``), with the Sundqvist T63
+#: cloud-fraction set in place and the dust threshold scale as the other lever:
+#: the 13 best of its 20 arms all sit at 3.996 or above, so the data constrain
+#: the scale from below only, and 4 is the edge of the range rather than an
+#: interior optimum. The scale acts mainly through the total AOD (ESA-CCI SU
+#: v4.21), the largest of the non-dust levers, and it also moves the cloud
+#: radiative terms of the loss. The cover set's larger cloud fraction removes
+#: sea salt faster (a lifetime of 0.37 d, against 0.60 d with ECHAM's cover
+#: parameters), which is why the scale that restores the AOD is large. A
+#: 365-day ``echam-jam-t63-l47`` year at 4 emits 8475 Tg/yr (between the AeroCom
+#: median and mean), with a burden of 16.4 mg/m2 (12 % above the AeroCom mean)
+#: and a lifetime of 0.37 d (AeroCom 0.48). The value is a T63 L47 calibration
+#: against the 10 m wind this host produces and the wet removal the cover set
+#: implies; the default applies at every resolution because no other has been
 #: validated. ``+physics.seasalt.scale=`` (or ``seasalt={"scale": ...}`` of
 #: ``echam_physics``) overrides it.
-SEASALT_SCALE_DEFAULT = 2.0
+SEASALT_SCALE_DEFAULT = 4.0
 
 
 @tree_math.struct
