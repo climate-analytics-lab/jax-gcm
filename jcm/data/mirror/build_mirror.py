@@ -567,7 +567,30 @@ def stage_ozone() -> None:
 
 
 def stage_emissions() -> None:
-    """Multi-GB streaming — run inside a PBS job, not a login node."""
+    """Multi-GB streaming — run inside a PBS job, not a login node.
+
+    Rebuild (Tier A + every grid's bundle) after a change to
+    ``jcm.data.mirror.emissions``/``jcm.data.mirror.bundles`` (e.g. the
+    ``residential``/``energy`` HAM-sizing subset channels, jax-gcm#1017
+    F6), on a site whose ``sites.input4mips`` resolves (Derecho/glade;
+    CEDS is not on Levante, see the module docstring above)::
+
+        python -m jcm.data.mirror.build_mirror --stage emissions,bundles \
+            --products emissions
+
+    ``--stage emissions`` rewrites ``build/ceds_anthro.zarr`` and
+    ``build/bb4cmip7.zarr`` (every species, since ``build_store`` skips a
+    species already present — delete the stale store first to force a
+    full rebuild of an existing one); ``--stage bundles --products
+    emissions`` then rewrites every grid's ``upload/bundles/<grid>/
+    emissions_{pd,pi}.nc`` from those stores. What to upload afterwards
+    (not run here): the two Tier A zarr stores under ``build/`` and every
+    rewritten ``emissions_{pd,pi}.nc`` under ``upload/bundles/<grid>/`` —
+    ``--stage registry`` then ``--stage upload`` (the published HF
+    dataset; needs ``hf auth login`` with write access). The #1017
+    coordinator stages this data; do not run ``--stage upload`` from an
+    agent session.
+    """
     from jcm.data.mirror.emissions import (SPECIES, build_store,
                                            load_bb_species,
                                            load_ceds_species)
