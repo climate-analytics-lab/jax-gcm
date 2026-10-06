@@ -331,6 +331,11 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         # default jobs, which install none.
         self._assert_door_matches_cli("t63-echam-jam")
 
+    @pytest.mark.requires_extra("m7")
+    def test_ham_m7_load_equivalent_to_cli_composition(self):
+        # The ECHAM-HAM M7 preset composes the optional m7-jax core (#1017).
+        self._assert_door_matches_cli("ham-t63-l47")
+
 
 @pytest.mark.slow
 class TestConfigurationsSmoke(unittest.TestCase):
