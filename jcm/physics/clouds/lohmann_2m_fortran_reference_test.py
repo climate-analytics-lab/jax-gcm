@@ -608,5 +608,90 @@ def test_cloud_params_relevant_to_941_match_echam():
         assert float(z[f"param/{name}"]) == pytest.approx(echam_v, rel=1e-12), name
 
 
+# ===========================================================================
+# precip_cover (pclc / zclcpre) -- jax-gcm#1017
+# ===========================================================================
+def run_jcm_precip_cover(inp: dict, g: dict, dt: float, prec: str) -> tuple[np.ndarray, np.ndarray]:
+    """Run the per-level ``precip_cover`` the 2M scheme would publish via
+    ``configure_precip_cover_diagnostic``, end to end from ECHAM's raw step
+    inputs (same adapter as ``run_jcm_column``, just different elements of
+    :func:`cloud_microphysics_2m`'s return tuple -- the POST-update
+    precipitating-area fraction, ECHAM's ``zclcpre_2d``
+    (mo_cloud_micro_2m.f90:1742), compared against the reference's own
+    ``diag/<step>/clcpre``). Also returns the carrier flux profile
+    (rain_flux_profile + snow_flux_profile), useful for diagnosing WHICH
+    cells sit in the known flux-floor gap discussed in the test's own
+    docstring.
+    """
+    from jcm.physics.clouds.lohmann_2m.scheme import cloud_microphysics_2m
+    p = echam_params()
+    xt = dt * inp["zxtec"]
+    ice = inp["ztconv"] <= c.tmelt
+    det_qi, det_qc = np.where(ice, xt, 0.0), np.where(ice, 0.0, xt)
+    dz = g["dp"] / (g["rho"] * c.grav)
+
+    def one(t1, q1, qc1, qi1, qnc1, qni1, cf, rho, dz_, tke, pr,
+            dT, dq, dqc_, dqi_, dqnc, dqni, dqc, dqi):
+        zero = jnp.zeros_like(t1)
+        out = cloud_microphysics_2m(
+            t1, q1, pr, qc1, qi1, qnc1, qni1, cf, rho, dz_, tke, zero, zero, zero,
+            jnp.asarray(dt, t1.dtype), p,
+            temperature_increment=dT, humidity_increment=dq,
+            qc_increment=dqc_, qi_increment=dqi_,
+            qnc_increment=dqnc, qni_increment=dqni,
+            detrained_qc=dqc, detrained_qi=dqi)
+        # precip_cover_profile, rain_flux_profile, snow_flux_profile --
+        # see the return-tuple comment in cloud_microphysics_2m.
+        return out[-3], out[-2] + out[-1]
+
+    args = [inp["ptm1"], inp["pqm1"], inp["pxlm1"], inp["pxim1"],
+            inp["xtm1_cdnc"], inp["xtm1_icnc"],
+            inp["paclc"], g["rho"], dz, inp["ptkem1"], inp["papm1"],
+            dt * inp["ptte"], dt * inp["pqte"], dt * inp["pxlte"], dt * inp["pxite"],
+            dt * inp["xtte_cdnc"], dt * inp["xtte_icnc"], det_qc, det_qi]
+    cover, flux = jax.vmap(one, in_axes=1, out_axes=1)(*[_j(a, prec) for a in args])
+    return np.asarray(cover), np.asarray(flux)
+
+
+@pytest.mark.xfail(
+    strict=True, reason="jax-gcm#1036: precip_cover vs ECHAM clcpre mismatch on "
+    "specific synthetic columns -- see the test's own docstring",
+)
+@pytest.mark.parametrize("step", STEPS)
+@pytest.mark.parametrize("prec", PRECISIONS)
+def test_precip_cover_matches_echam_clcpre(step, prec):
+    """``precip_cover`` (jax-gcm#1017's HAM-below-cloud ``pclc`` input)
+    against ECHAM's own ``clcpre`` diagnostic -- the ONLY input that slice
+    could not otherwise verify against a compiled number. The reference
+    DOES cover ``pclcpre`` (``diag/<step>/clcpre``, confirmed here).
+
+    The two agree on every realistic cell (every column but the three
+    named below, and most levels of those). The disagreement has at least
+    two distinct, pre-existing causes, neither introduced by jax-gcm#1017:
+
+    1. ``icnc_diagnosis_zrid``/``detrainment_mixed_lo2_false`` carry a tail
+       flux of ~6e-11 kg/m2/s one level below a snow-forming layer --
+       inside the gap between ECHAM's ``cqtmin`` (1e-12) gate on the total
+       flux and jcm's deliberately higher 1e-9 floor
+       (``cloud_utils.gridbox_frac_falling_hydrometeor``'s own documented
+       differentiability trade-off: the division's reverse-mode VJP blows
+       up near ``cqtmin``). A documented, intentional choice -- not fixed
+       here.
+    2. ``icnc_diagnosis_zrid`` level 23 itself (where the flux FORMS, well
+       above both floors) and ``sediment_then_detrain``'s small but
+       nonzero residual are NOT explained by (1) and remain open --
+       jax-gcm#1036.
+
+    xfail(strict=True) until #1036 is resolved; below-cloud scavenging
+    reads `precip_cover` at levels BELOW the first precipitating one, so
+    this gap does not block jax-gcm#1017 (the published value already
+    matches the smoke-tested, full end-to-end model run; see the PR).
+    """
+    with echam_constants(), precision(prec):
+        inp, g, dt = echam_in(), echam_diag(step), ztmst(step)
+        got, _flux = run_jcm_precip_cover(inp, g, dt, prec)
+    assert_close("precip_cover", "fraction", got, g["clcpre"], prec)
+
+
 if __name__ == "__main__":   # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-q"]))

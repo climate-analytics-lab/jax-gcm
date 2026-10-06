@@ -1004,6 +1004,16 @@ def cloud_microphysics_2m(
             rain_flux, frozen_flux_k,
             wbf_transfer_k, ll_liqcl_k, ll_icecl_k,
             move, split_dT,
+            # The POST-update precipitating-area fraction (the same value
+            # that becomes this level's share of ``carry_out``, i.e. AFTER
+            # ``update_precip_fluxes`` above) -- ECHAM's own per-level
+            # ``zclcpre_2d(:,jk)`` (mo_cloud_micro_2m.f90:1742, written right
+            # after its own ``update_precip_fluxes`` call at 1719-1733, and
+            # consumed as ``pclc`` by ``cloud_subm_2``/``ham_wetdep`` for
+            # HAM's below-cloud scavenging). Threaded out here, not added to
+            # the carry tuple above (that one is unchanged) or to
+            # ``CloudData`` -- see ``configure_precip_cover_diagnostic``.
+            precip_cover,
         )
         return carry_out, level_out
 
@@ -1041,7 +1051,8 @@ def cloud_microphysics_2m(
      autoconv_only, accretion_only,
      rain_flux_profile, snow_flux_profile,
      wbf_transfer, ll_liqcl, ll_icecl,
-     detrainment_move, detrainment_split_dT) = scan_outs
+     detrainment_move, detrainment_split_dT,
+     precip_cover_profile) = scan_outs
 
     # Surface precipitation fluxes: the carry at the bottom of the column.
     (surface_rain_flux, surface_snow_flux, _, _, _, _) = _final_carry
@@ -1238,7 +1249,7 @@ def cloud_microphysics_2m(
         liq_eff_radius, ice_eff_radius, rain_formation_warm, rain_from_melt, \
         autoconv_rate_col, accretion_rate_col, wbf_rate_col, \
         precip_formation_rate, precip_evaporation_rate, cloud_fraction_final, \
-        negative_mass_repair, scav_ledger, \
+        negative_mass_repair, scav_ledger, precip_cover_profile, \
         rain_flux_profile, snow_flux_profile
 
 
@@ -1321,6 +1332,16 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         self._spa_prefactor = nnx.Param(jnp.array(1.0))
         self._spa_exponent = nnx.Param(jnp.array(0.5))
         self._spa_cap_smoothing = nnx.Param(jnp.array(0.0))
+        # Off by default: the ``"precip_cover"`` diagnostics key this scheme
+        # can publish (see ``configure_precip_cover_diagnostic``) would
+        # otherwise change the diagnostics dict's key set on every existing
+        # composition, a default-path change. Deliberately NOT a field on
+        # ``CloudData``/``"clouds"``: that struct rides the physics carry, so
+        # a new field there would change the checkpoint pytree of every 2M
+        # preset and break restart from already-stamped checkpoints. A plain
+        # Python bool, not an ``nnx.Param``: it selects which diagnostics
+        # key this term writes, not a differentiable quantity.
+        self._publish_precip_cover = False
 
     def cache_coords(self, coords) -> None:
         """Warn if default parameters were built for another grid.
@@ -1340,18 +1361,47 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         self._spa_exponent = nnx.Param(jnp.asarray(exponent))
         self._spa_cap_smoothing = nnx.Param(jnp.asarray(cap_smoothing))
 
+    def configure_precip_cover_diagnostic(self, enabled: bool) -> None:
+        """Publish the per-level precipitating-area fraction as ``"precip_cover"``.
+
+        ``echam_physics`` turns this on exactly when ``jam_wetdep_scheme``
+        selects the HAM below-cloud pathway (jax-gcm#1017), which needs
+        ECHAM's ``pclc`` (``mo_ham_wetdep.f90:147``) and has no other way to
+        read it: this scheme already computes the identical quantity (its
+        own ``precip_cover`` scan carry, ECHAM's ``zclcpre``) but, until this
+        is enabled, never publishes it. See the ``level_out``/``carry_out``
+        comment in ``_column_level_step`` for exactly which point in the
+        recurrence is published. Off by default, matching every other
+        diagnostics-key toggle in this term.
+
+        Also extends ``self.provides`` with ``"precip_cover"`` (instance
+        override of the class-level tuple) when enabled: ``WetScavenging``
+        declares it in ``requires``, and ``ComposablePhysics._validate_ordering``
+        checks that against every upstream term's ``provides`` at COMPOSE
+        time, not by actually running the term -- so the key must be
+        declared here, not only emitted at call time.
+        """
+        self._publish_precip_cover = bool(enabled)
+        base = tuple(t for t in type(self).provides if t != "precip_cover")
+        self.provides = (*base, "precip_cover") if enabled else base
+
     def adopt_runtime_configuration(self, previous) -> None:
-        """Inherit the SPA activation tuning from a displaced 2M term.
+        """Inherit the SPA tuning and the precip-cover toggle from a displaced 2M term.
 
         Set by ``echam_physics`` after composition, from the aerosol module's
         parameters, so a term swapped in afterwards would otherwise silently
         fall back to the (1.0, 0.5, 0.0) constructor defaults and change the
-        droplet number the whole cloud scheme keys off.
+        droplet number the whole cloud scheme keys off -- and, for the
+        precip-cover flag, would silently stop publishing a key a
+        downstream HAM wet-deposition term requires.
         """
         for name in ("_spa_prefactor", "_spa_exponent", "_spa_cap_smoothing"):
             param = getattr(previous, name, None)
             if param is not None:
                 setattr(self, name, nnx.Param(jnp.asarray(param.get_value())))
+        publish = getattr(previous, "_publish_precip_cover", None)
+        if publish is not None:
+            self.configure_precip_cover_diagnostic(bool(publish))
 
     @classmethod
     def required_tracers(cls) -> tuple[TracerSpec, ...]:
@@ -1496,13 +1546,13 @@ class Lohmann2MMicrophysics(PhysicsTerm):
          _preffl, _preffi, rain_formation_warm, rain_from_melt,
          autoconv_all, accretion_all, wbf_all,
          precip_form_all, precip_evap_all, cloud_fraction_all,
-         negative_mass_repair_all, scav_ledger_all,
+         negative_mass_repair_all, scav_ledger_all, precip_cover_all,
          rain_flux_all, snow_flux_all) = jax.vmap(
             cloud_microphysics_2m,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
                      None, None, 1, 1, 1, 1, 1, 1, 1, 1,
                      None if freezing_aerosol is None else 1),
-            out_axes=(0,) * 17,
+            out_axes=(0,) * 18,
         )(
             anchor.temperature, anchor.specific_humidity, pressure_full,
             anchor.tracers["qc"], anchor.tracers["qi"],
@@ -1588,6 +1638,15 @@ class Lohmann2MMicrophysics(PhysicsTerm):
                        "autoconv": autoconv_all,
                        "accretn": accretion_all,
                        "wbf": wbf_all}
+        if self._publish_precip_cover:
+            # Static flag, so this branch is the same for every trace of a
+            # given composition -- the diagnostics key set stays fixed
+            # across steps, as the scan carry requires; it only differs
+            # between a HAM-below-cloud-wetdep composition and every other
+            # one, exactly like ``optics_diagnostics`` in JamOpticsTerm.
+            # The vmap puts the column axis first -- transpose like the
+            # other per-level profiles above.
+            diagnostics = {**diagnostics, "precip_cover": precip_cover_all.T}
         diagnostics = advance_thermo_run(
             diagnostics, dt,
             d_temperature=tendency.temperature,
