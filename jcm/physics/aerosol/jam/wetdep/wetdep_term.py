@@ -82,6 +82,12 @@ from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.removal_split import split_view
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
+from jcm.physics.aerosol.jam.wetdep.ham_below_cloud import (
+    bc_rain_rate,
+    bc_snow_rate,
+    cmedr2mmedr,
+    load_croft_tables,
+)
 from jcm.physics.aerosol.jam.wetdep.impaction import (
     IMPACT_SCALE_DEFAULT,
     MU_WATER_AIR_DEFAULT,
@@ -431,6 +437,7 @@ class WetScavenging(PhysicsTerm):
         *,
         spec: ModalAerosolSpec | None = None,
         in_plume_convective: bool = False,
+        scheme: str = "jcm",
     ):
         """Hold params and the population.
 
@@ -447,7 +454,43 @@ class WetScavenging(PhysicsTerm):
         (``incloud_scavenged_fractions`` — the HAMMOZ ``cloud_subm``
         interface), so this term requires a cloud scheme that publishes
         it; the physics factory enforces that at compose time.
+
+        ``scheme``: ``"jcm"`` (default) keeps the CAM/Slinn below-cloud
+        impaction pathway (``impaction.py``) for the STRATIFORM carrier.
+        ``"ham_below_cloud"`` replaces only that one pathway with ECHAM-
+        HAM's own ``nwetdep=3`` Croft size-dependent scheme
+        (``jcm.physics.aerosol.jam.wetdep.ham_below_cloud``, #1017)  —
+        named "ham_below_cloud", not "ham", because the in-cloud pathways
+        (nucleation, impaction) still run exactly as the ``"jcm"`` scheme's
+        machinery does today under EITHER setting; see the module
+        docstring and jax-gcm#1017's follow-ups A/B for the remaining
+        in-cloud pathways. The convective below-cloud pathway
+        (``conv_below_cloud_rate``) is unaffected by ``scheme`` — it
+        already mirrors HAMMOZ's own convective form (see its docstring)
+        with the shared CAM/Slinn coefficient, which the below-cloud-only
+        slice does not revisit.
+
+        ``"ham_below_cloud"`` requires the cloud scheme to publish a
+        ``"precip_cover"`` diagnostic (HAMMOZ's stratiform ``pclcpre`` —
+        the Lohmann 2M scheme's ``configure_precip_cover_diagnostic(True)``,
+        which ``echam_physics`` turns on exactly when it selects this
+        scheme): HAM's below-cloud removal acts only within the
+        precipitating fraction of the box, which CAM's form does not need
+        (its swept-volume cancellation makes the cloud weighting a no-op,
+        see ``below_cloud_rate``'s docstring).
         """
+        if scheme not in ("jcm", "ham_below_cloud"):
+            raise ValueError(f"scheme must be 'jcm' or 'ham_below_cloud', got {scheme!r}")
+        self.scheme = scheme
+        # Loaded once here, outside any jit trace -- NOT via the lazily-
+        # memoized ``default_croft_tables()`` global, whose first call
+        # inside a traced ``__call__`` would cache tracer-bound arrays in a
+        # module-level Python global and leak them into a later, unrelated
+        # trace (``jax.errors.UnexpectedTracerError``; the same hazard
+        # ``self._impaction_tables`` below avoids by building at __init__).
+        self._croft_tables = (
+            load_croft_tables() if scheme == "ham_below_cloud" else None
+        )
         self.params = nnx.Param(params or WetDepParameters.default())
         self._in_plume_convective = in_plume_convective
         self._spec = spec or MAM4_SPEC
@@ -455,6 +498,9 @@ class WetScavenging(PhysicsTerm):
         # builds them in ``modal_aero_bcscavcoef_init`` (the 50x51 double
         # integral is far too costly to evaluate per cell per step). CAM
         # tabulates against the mode's first-species material density.
+        # Still built (even under ``scheme="ham_below_cloud"``) because the
+        # convective below-cloud pathway keeps using the Slinn coefficient
+        # unconditionally (see the docstring above).
         self._impaction_tables = tuple(
             build_impaction_table(
                 mode.dgnum, mode.geom_std_dev,
@@ -468,6 +514,8 @@ class WetScavenging(PhysicsTerm):
             # _validate_ordering enforce that, instead of apply_updates
             # silently seeding an unmixed, unmanaged dict.
             self.requires = (*type(self).requires, CARRY_KEY)
+        if self.scheme == "ham_below_cloud":
+            self.requires = (*self.requires, "precip_cover")
 
     def __call__(self, state, diagnostics, forcing, terrain):
         params = self.params.get_value()
@@ -575,6 +623,29 @@ class WetScavenging(PhysicsTerm):
         rate_cb = params.incloud_scale * rate_ledger
         jam_act = diagnostics.get("_jam_activation")
 
+        if self.scheme == "ham_below_cloud":
+            # HAM's below-cloud scheme needs the carrier split into a rain
+            # and a snow flux (bc_rain/bc_snow read separate tables), but
+            # the clean carrier ledger this term builds (``flux_in``,
+            # above) is deliberately the SUM of the two -- jcm's cloud
+            # schemes do not publish a liquid/frozen split of the ENTERING
+            # flux free of the same ice-sedimentation contamination
+            # ``flux_in`` itself was built to avoid (see the ``flux_in``
+            # comment above). ``pice`` (the in-cloud condensate pool's ice
+            # fraction, already computed for the nucleation pathway above)
+            # is reused here as the best faithful proxy already in scope
+            # for the phase mix of precip FORMING at each level: this is a
+            # documented simplification flagged for lead/maintainer review
+            # (jax-gcm#1017), not a verified match to HAMMOZ's own
+            # prognostic pfrain/pfsnow fields.
+            pfsnow_in = flux_in * pice
+            pfrain_in = flux_in - pfsnow_in
+            # HAMMOZ's stratiform below-cloud removal acts only within the
+            # precipitating fraction of the box (mo_ham_wetdep.f90:434-437,
+            # ``pclc``); CAM's form does not need this (see
+            # ``below_cloud_rate``'s docstring) but HAM's does.
+            precip_cover = jnp.clip(diagnostics["precip_cover"], 0.0, 1.0)
+
         # Build per-tracer scavenging rates and stack with the matching
         # tracers, so the elementwise removal runs as one batched op (rather
         # than an unrolled tendency per mode×species). Stratiform and
@@ -623,8 +694,34 @@ class WetScavenging(PhysicsTerm):
                 table, params.mu_water_air, params.impact_scale)
             coef_num, coef_mass = bcscavcoef(
                 aer.r_wet[i], table.dgnum, ln_num, ln_vol)
-            below_strat_num = below_cloud_rate(flux_in, coef_num, params)
-            below_strat_mass = below_cloud_rate(flux_in, coef_mass, params)
+            if self.scheme == "ham_below_cloud":
+                # ECHAM-HAM's own Croft size-dependent below-cloud scheme
+                # (#1017) replaces the CAM/Slinn coefficient for the
+                # STRATIFORM carrier only; the convective pathway below is
+                # untouched (see __init__'s docstring). ``mr_m`` for the
+                # mass phase is mass-median-scaled exactly as
+                # ``mo_ham_wetdep.f90:218`` (``zrad_fac = cmedr2mmedr(imod)``).
+                mr_num = aer.r_wet[i]
+                mr_mass = aer.r_wet[i] * cmedr2mmedr(mode.geom_std_dev)
+                sfrain_num = bc_rain_rate(pfrain_in, mr_num, phase="number",
+                                         tables=self._croft_tables)
+                sfrain_mass = bc_rain_rate(pfrain_in, mr_mass, phase="mass",
+                                          tables=self._croft_tables)
+                sfsnow_num = bc_snow_rate(pfsnow_in, mr_num, tables=self._croft_tables)
+                sfsnow_mass = bc_snow_rate(pfsnow_in, mr_mass, tables=self._croft_tables)
+                # HAMMOZ removes ``pxtp10 * pclc * (1 - exp(-dt*(sfrain +
+                # sfsnow)))`` from the ambient tracer (mo_ham_wetdep.f90:
+                # 434-437): convert that cover-weighted fraction to the
+                # equivalent uncovered rate so it composes with the other
+                # additive rate families below (mirrors
+                # ``conv_below_cloud_rate``'s own derivation).
+                removed_num = -jnp.expm1(-(sfrain_num + sfsnow_num) * dt)
+                removed_mass = -jnp.expm1(-(sfrain_mass + sfsnow_mass) * dt)
+                below_strat_num = fraction_to_rate(precip_cover * removed_num, dt)
+                below_strat_mass = fraction_to_rate(precip_cover * removed_mass, dt)
+            else:
+                below_strat_num = below_cloud_rate(flux_in, coef_num, params)
+                below_strat_mass = below_cloud_rate(flux_in, coef_mass, params)
             below_conv_num = conv_below_cloud_rate(
                 conv_flux_in, conv_cover, coef_num, params, dt,
             )

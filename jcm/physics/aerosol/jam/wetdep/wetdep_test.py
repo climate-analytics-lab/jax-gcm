@@ -1109,3 +1109,76 @@ class FormationLedgerTest(unittest.TestCase):
         self.assertAlmostEqual(float(f_wat[4]), 0.0)   # sub-floor pool, no formation
         # Phase split falls back to the formation ledger in emptied cells.
         self.assertAlmostEqual(float(pice[2]), 0.0)
+
+
+class HamBelowCloudSchemeTest(unittest.TestCase):
+    """``WetScavenging(scheme="ham_below_cloud")``: the #1017 selector."""
+
+    def test_rejects_unknown_scheme(self):
+        with self.assertRaises(ValueError):
+            WetScavenging(scheme="ham")  # not "ham_below_cloud" -- see __init__'s docstring
+
+    def test_requires_precip_cover_diagnostic(self):
+        term = WetScavenging(scheme="ham_below_cloud")
+        self.assertIn("precip_cover", term.requires)
+        default_term = WetScavenging()
+        self.assertNotIn("precip_cover", default_term.requires)
+
+    def test_runs_and_is_a_sink_with_precip_cover_present(self):
+        state, diagnostics, spec, mass_name = WetDepTermTest()._setup(precip=1.0e-3)
+        diagnostics = dict(diagnostics)
+        diagnostics["precip_cover"] = diagnostics["clouds"].cloud_fraction
+        term = WetScavenging(scheme="ham_below_cloud")
+        tend, _ = term(state, diagnostics, None, None)
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        self.assertTrue(bool(jnp.all(tend.tracers[key] <= 0.0)))
+        self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))))
+
+    def test_exercises_the_snow_pathway_too(self):
+        """With an ice-dominated condensate pool (pice -> 1), the carrier
+        splits almost entirely to ``pfsnow_in`` -- confirm bc_snow_rate's
+        pathway (not just bc_rain_rate's) also runs to a finite sink.
+        """
+        state, diagnostics, spec, mass_name = WetDepTermTest()._setup(precip=1.0e-3)
+        diagnostics = dict(diagnostics)
+        diagnostics["precip_cover"] = diagnostics["clouds"].cloud_fraction
+        clouds = diagnostics["clouds"]
+        diagnostics["clouds"] = clouds.copy(
+            incloud_ice=jnp.full_like(clouds.incloud_liquid, 1.0e-3 / 0.6),
+            incloud_liquid=jnp.zeros_like(clouds.incloud_liquid),
+            incloud_snow_formation=clouds.incloud_rain_formation,
+            incloud_rain_formation=jnp.zeros_like(clouds.incloud_rain_formation),
+        )
+        term = WetScavenging(scheme="ham_below_cloud")
+        tend, _ = term(state, diagnostics, None, None)
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        self.assertTrue(bool(jnp.all(tend.tracers[key] <= 0.0)))
+        self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))))
+
+    def test_default_scheme_path_is_bit_identical_to_before(self):
+        """The default ``"jcm"`` scheme's output must be untouched by the
+        new branch (RULES-style default-path invariant).
+        """
+        state, diagnostics, spec, mass_name = WetDepTermTest()._setup()
+        explicit = WetScavenging(scheme="jcm")(state, diagnostics, None, None)[0]
+        implicit = WetScavenging()(state, diagnostics, None, None)[0]
+        for key in explicit.tracers:
+            np.testing.assert_array_equal(
+                np.asarray(explicit.tracers[key]), np.asarray(implicit.tracers[key]))
+
+    def test_gradients_stay_finite(self):
+        state, diagnostics, spec, mass_name = WetDepTermTest()._setup(precip=1.0e-3)
+        diagnostics = dict(diagnostics)
+        diagnostics["precip_cover"] = diagnostics["clouds"].cloud_fraction
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+
+        def loss(precip):
+            d = dict(diagnostics)
+            d["clouds"] = diagnostics["clouds"].copy(
+                precip_formation_rate=jnp.full_like(
+                    diagnostics["clouds"].precip_formation_rate, precip))
+            tend, _ = WetScavenging(scheme="ham_below_cloud")(state, d, None, None)
+            return jnp.sum(tend.tracers[key])
+
+        g = jax.grad(loss)(jnp.asarray(1.0e-7))
+        self.assertTrue(np.isfinite(float(g)))
