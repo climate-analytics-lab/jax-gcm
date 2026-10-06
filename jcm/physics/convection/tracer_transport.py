@@ -105,7 +105,7 @@ import tree_math
 from flax import nnx
 
 from jcm.physics.physics_term import PhysicsTerm
-from jcm.physics_interface import PhysicsTendency
+from jcm.physics_interface import PhysicsTendency, working_tracers
 
 #: Physical floor on plume mass flux [kg/m²/s] in divisions: below this
 #: the plume carries nothing worth budgeting (~1e-4 mm/day of air), and a
@@ -509,8 +509,11 @@ class ConvectiveTracerTransport(PhysicsTerm):
             )
         else:
             dt = diagnostics.get("_dt_seconds", 1800.0)
+            # Convection follows surface emissions and turbulent mixing;
+            # entrain the population they left, returning only plume changes.
+            view = working_tracers(state, diagnostics)
             q = jnp.stack([
-                state.tracers.get(nm, zeros) for nm in self._tracer_names
+                view.get(nm, zeros) for nm in self._tracer_names
             ])
             if self._csr_conv is not None:
                 scav_kwargs = dict(

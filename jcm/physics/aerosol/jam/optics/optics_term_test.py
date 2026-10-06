@@ -106,6 +106,25 @@ def _consistent_state(state, diagnostics, saturation=0.8, center_modes=False):
     return {**diagnostics, "_jam_state": aer}
 
 
+class SequentialOpticsTest(unittest.TestCase):
+    def test_optical_mass_includes_this_steps_microphysics(self):
+        state, diagnostics, band, *_ = _setup(nlev=1, ncols=1)
+        dt = 720.0
+        change = {k: q / dt for k, q in state.tracers.items()
+                  if k.startswith("m_")}
+        working = state.copy(tracers={
+            k: q + dt * change.get(k, 0.0) for k, q in state.tracers.items()})
+        # Match both calls' current geometry. Only the mass provenance differs.
+        diagnostics = _consistent_state(working, diagnostics)
+        term = JamOpticsTerm(optics_diagnostics=True)
+        term.cache_band_config(band)
+        _, expected = term(working, diagnostics, None, None)
+        _, actual = term(state, {**diagnostics, "_dt_seconds": dt,
+            "_tendency_run": {"tracers": change}}, None, None)
+        for key in ("od550aer", "od550dryaer", "od550_soa"):
+            np.testing.assert_allclose(actual[key], expected[key], rtol=2e-6)
+
+
 class JamOpticsTermTest(unittest.TestCase):
     def _term(self, band):
         term = JamOpticsTerm()

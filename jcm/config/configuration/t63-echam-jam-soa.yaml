@@ -1,0 +1,18 @@
+# @package _global_
+# Present-day T63L47 JAM with the published CAM6 SOAG climatology.
+# This inventory represents 1995–2005; use period-specific inputs for PI
+# or transient runs. Wet/dry loss and reversible partitioning are MAM4's.
+defaults:
+  - t63-echam-jam-aerocom-optics
+  - _self_
+
+physics:
+  # The CAM semi-implicit corrector conserves SOAG+SOA during evaporation.
+  # The fixed-substep backend can clip negative modal aerosol in warm cells.
+  jam_microphysics: mam4_jax_astem
+
+forcing:
+  emissions_file:
+    - hf://bundles/t63/emissions_pd.nc
+    - pkg://data/bc/t63/soag_cam6_2000.nc
+  emissions_align: [auto, wrap_year]

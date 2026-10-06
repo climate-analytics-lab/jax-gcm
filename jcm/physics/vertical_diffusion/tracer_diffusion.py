@@ -34,7 +34,7 @@ import tree_math
 from flax import nnx
 
 from jcm.physics.physics_term import PhysicsTerm
-from jcm.physics_interface import PhysicsTendency
+from jcm.physics_interface import PhysicsTendency, working_tracers
 
 #: Physical floor on the layer mass [kg/m²] in divisions (a 1e-3 kg/m²
 #: layer is far thinner than any real grid); keeps the guarded-division
@@ -151,8 +151,11 @@ class TracerVerticalDiffusion(PhysicsTerm):
             tracer_tends = {nm: zeros for nm in self._tracer_names}
         else:
             dt = diagnostics.get("_dt_seconds", 1800.0)
+            # Surface emissions precede mixing. Mix their current-step mass
+            # before removal, as ECHAM's vdiff surface-source RHS does.
+            view = working_tracers(state, diagnostics)
             q = jnp.stack([
-                state.tracers.get(nm, zeros) for nm in self._tracer_names
+                view.get(nm, zeros) for nm in self._tracer_names
             ])
             q_new = diffuse_tracers_implicit(
                 q,

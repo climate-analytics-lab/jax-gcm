@@ -20,7 +20,7 @@ from typing import ClassVar
 
 import jax.numpy as jnp
 
-from jcm.physics.aerosol.jam.cloud_borne_store import tracer_view
+from jcm.physics.aerosol.jam.removal_split import split_view
 from jcm.physics.aerosol.jam.ice_nucleation.ham_freezing import (
     MAM4_FREEZING_CLASSES,
     HamFreezingClasses,
@@ -99,7 +99,7 @@ class IceNucleation(PhysicsTerm):
         rho = diagnostics["air_density"]
         aer = diagnostics["_jam_state"]
         act = diagnostics["_jam_activation"]
-        view = tracer_view(spec, state, diagnostics)
+        view = split_view(spec, state, diagnostics)
         zeros = jnp.zeros_like(rho)
 
         def tracer(name):

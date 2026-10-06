@@ -82,8 +82,8 @@ from jcm.physics.aerosol.jam.cloud_borne_store import (
     CARRY_KEY,
     apply_updates,
     carry_mode,
-    tracer_view,
 )
+from jcm.physics.aerosol.jam.removal_split import split_view
 from jcm.physics.aerosol.jam.gas_species import MAM4_GAS
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
@@ -277,6 +277,12 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
                 "onto it is silently dropped at the state repack. Install "
                 "the pinned version (mam4-jax 0.4.0): pip install 'jcm[mam4]'."
             )
+        if "soa_uptake_mask" not in _amicphys.AmicphysParams._fields:
+            raise ImportError(
+                "The installed mam4-jax lacks per-call SOA mode selection. "
+                "Its MOM reference allows coarse SOA uptake, whereas CAM6 "
+                "SOA occupies the Aitken/accumulation modes. Install the "
+                "dependency pinned by this checkout: pip install -U '.[mam4]'.")
         # Monolayer threshold: 3.0 is what the MAM4 amicphys path
         # actually receives (via phys_control; the 8.0 in
         # modal_aero_gasaerexch.F90 belongs to the legacy
@@ -421,7 +427,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         zeros_c = jnp.zeros(shape, cdt)
         dt = jnp.asarray(diagnostics["_dt_seconds"], cdt)
 
-        view = tracer_view(self.spec, state, diagnostics)
+        view = split_view(self.spec, state, diagnostics)
 
         def fetch(name):
             # Floor gas/aerosol tracers at 0. Spectral advection of the JAM
@@ -496,7 +502,12 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         in_axes = ({k: (None if k == "deltat" else 0) for k in flat_state},)
         core_params = _amicphys.AmicphysParams(
             n_so4_monolayers=jnp.asarray(
-                self.n_so4_monolayers.get_value(), cdt))
+                self.n_so4_monolayers.get_value(), cdt),
+            # Jo et al. (2023), section 2.2: CAM6 SOA has fine-mode
+            # reservoirs. Keep transient primary-carbon coating, which
+            # aging transfers to accumulation, but exclude coarse uptake.
+            soa_uptake_mask=jnp.asarray(
+                [mode.short != "cor" for mode in self.spec.modes], dtype=bool))
         one_step = lambda s: amicphys(
             wateruptake(calcsize(s)), core_params)
         flat_out = jax.vmap(one_step, in_axes=in_axes)(flat_state)
@@ -528,6 +539,27 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             tracer_tends.update(passthrough)
         else:
             tracer_tends.update(cb_updates)
+
+        # Downstream optics/removal need the population AFTER condensation,
+        # ageing and coagulation. Repeating calcsize here would advance its
+        # number adjustment and mode transfer twice; diagnose only its size
+        # relation, then recompute equilibrium water for the updated mass.
+        diameters = []
+        for i, sp_list in enumerate(self._mode_species):
+            volume = sum(q_new[..., midx] / density
+                         for midx, density, _ in sp_list)
+            number = q_new[..., self._num_pcnst[i]]
+            live = (volume > _TINY_VOL) & (number > 0.0)
+            v = jnp.where(live, volume, 1.0)
+            n = jnp.where(live, number, 1.0)
+            mode = self.spec.modes[i]
+            diameter = (6.0 * v / (jnp.pi * n)) ** (1.0 / 3.0) * np.exp(
+                -1.5 * np.log(mode.geom_std_dev) ** 2)
+            diameters.append(jnp.where(
+                live, jnp.clip(diameter, mode.dgnum_lo, mode.dgnum_hi),
+                mode.dgnum))
+        out = wateruptake({**core_state, **out,
+                           "dgncur_a": jnp.stack(diameters, axis=-1)})
 
         jam_state = self._jam_state(
             q_new, out["dgncur_a"], out["dgncur_awet"], out["wetdens"],

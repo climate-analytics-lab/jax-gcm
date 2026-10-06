@@ -90,7 +90,8 @@ electroneutrality pH including NH₃/HNO₃/CO₂).
 
 **Status & known limitations.** Oxidants default to interim cos-zenith proxies
 until a climatology is supplied; H₂O₂ is not persisted across steps (a coupled
-prognostic budget is out of scope); the SOAG source is interim.
+prognostic budget is out of scope). SOAG production in sulfur chemistry
+defaults to zero; its source is supplied separately through prescribed emissions.
 
 **Code pointers.** ``jcm/physics/aerosol/jam/chemistry/`` — ``oxidants.py``
 (``PrescribedOxidants``), ``sulfur_gas.py`` (``SulfurGasChemistry``),
@@ -99,3 +100,33 @@ header).
 
 **Validation evidence.** ``chemistry/oxidants_test.py``,
 ``chemistry/sulfur_gas_test.py``, ``chemistry/aqueous_test.py``.
+
+## Prescribed CAM6 secondary organic aerosol
+
+**What we do.** The present-day `t63-echam-jam-soa` configuration supplies
+anthropogenic, biogenic and biomass-burning SOAG from the official CAM6
+1995–2005 climatology. The fixed VOC yields and 1.5 source multiplier are
+already included in the inventories. Carbon-equivalent fluxes are converted
+with the CAM destination-tracer molecular weight, 12.011 g/mol, conservatively
+remapped, and injected through the existing surface-emissions term.
+The MAM4 core provides reversible exchange with ΔHvap = 156 kJ/mol and
+reference vapour pressure 10⁻¹⁰ atm at 298 K. Aerosol SOA has the existing
+wet and dry removal; SOAG has no gas deposition or photolysis in this scheme.
+SOAG condenses into fine modes and transient primary-carbon coating, which
+ageing transfers to accumulation. The core's per-call uptake mask excludes
+coarse-mode SOA, matching CAM6 rather than the MOM box-model default.
+
+**Reference and motivation.** `science` — original CAM6 single-bin SOA,
+[Jo et al. (2023), section 2.2](https://gmd.copernicus.org/articles/16/3893/2023/),
+CAM `mo_srf_emissions::srf_emissions` and
+`modal_aero_amicphys::mam_soaexch_1subarea`. The prescribed source is a published
+alternative to explicitly evolving VOC chemistry. It implements this original
+CAM6 formulation, not the newer CAM6.3 SOAE oxidation-delay scheme or VBS.
+
+**Status and validation.** The inventory is explicitly period-specific; PI
+and transient simulations need matching emissions. Preparation tests verify
+carbon-equivalent conversion, conservative remapping and calendar preservation.
+The adapter tests close the exchange on the core's common molecular basis
+(SOAG and SOA conversion factors differ by 12.011/12), including the cloud-borne
+store. A five-day response from zero SOA does not establish equilibrium.
+See [SOA and dust design](../design/jam_soa_dust.md).

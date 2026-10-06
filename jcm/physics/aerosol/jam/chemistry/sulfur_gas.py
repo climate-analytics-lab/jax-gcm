@@ -19,9 +19,9 @@ Day/night is handled continuously through the oxidant fields themselves
 integrated over the physics step with a stable exponential decay. Sulfur is
 conserved atom-for-atom (DMS→SO₂→H₂SO₄ each carry one S).
 
-SOAG: jcm has no VOC precursor yet, so SOA gas is produced at a small
-boundary-layer-weighted prescribed rate (tunable, interim) so the core sees a
-nonzero condensable organic; replace with a real VOC+OH source later.
+SOAG production defaults to zero here. The CAM6 prescribed VOC-yield source
+is supplied through the emissions reader (``jcm.data.emissions.cam6_soa``),
+not through the historical uniform boundary-layer production stub.
 """
 
 from __future__ import annotations
@@ -187,14 +187,17 @@ class SulfurGasChemistry(PhysicsTerm):
         return gas_tracer_specs(SULFUR_GASES)
 
     def __call__(self, state, diagnostics, forcing, terrain):
+        from jcm.physics.aerosol.jam.removal_split import split_view
+
         params = self.params.get_value()
+        view = split_view(None, state, diagnostics)
         zeros = jnp.zeros_like(state.temperature)
         ox = diagnostics["oxidants"]
         dt = jnp.asarray(diagnostics["_dt_seconds"], state.temperature.dtype)
 
         tends = sulfur_gas_tendencies(
-            dms=state.tracers.get(gas_name("dms"), zeros),
-            so2=state.tracers.get(gas_name("so2"), zeros),
+            dms=view.get(gas_name("dms"), zeros),
+            so2=view.get(gas_name("so2"), zeros),
             temperature=state.temperature,
             pressure=diagnostics["pressure_full"],
             oh=ox.oh,

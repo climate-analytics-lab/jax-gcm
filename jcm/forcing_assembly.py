@@ -65,7 +65,8 @@ def _resolve_data_path(path):
 
     ``hf://<path-in-dataset>`` fetches (or reuses from the local HF cache)
     the file from the project data mirror via :mod:`jcm.data.remote`, e.g.
-    ``hf://bundles/t63/terrain.nc``. Anything else passes through
+    ``hf://bundles/t63/terrain.nc``. ``pkg://data/...`` resolves inside the
+    installed jcm package. Anything else passes through
     unchanged. Fetch on a login/head node first — compute nodes usually
     have no internet, but a warm cache needs none.
 
@@ -87,6 +88,8 @@ def _resolve_data_path(path):
         return resolved
 
     resolved = ir._fetch_path(path, _fetch)
+    if isinstance(path, str) and path.startswith("pkg://"):
+        provenance.record_input(path, resolved)
     if isinstance(resolved, str) and resolved == path:
         provenance.record_input(path)   # plain path; hf:// recorded in _fetch
     return resolved

@@ -2,8 +2,10 @@
 
 Molar masses [kg/mol] for the prognostic gas tracers the gas-phase chemistry
 carries: DMS, SO₂, sulfuric-acid vapour, and a single lumped SOA gas. Values
-match the MAM4-JAX gas table (``mam4_jax.data.MW_GAS`` / ``ADV_MASS``) so the
-adapter's hand-off is unit-consistent.
+match the physical compounds in MAM4-JAX's ``MW_GAS`` table. SOAG has a
+150 g/mol physical molecular weight for uptake kinetics; CAM's prescribed
+emissions and advected SOAG tracer use carbon equivalents (12.011 g/mol).
+The physical molecular weight must not be used to convert that inventory.
 
 Only :data:`MAM4_GAS` (``h2so4``, ``soag``) is passed into the MAM4-JAX core —
 its condensation/nucleation consume those two. ``dms``/``so2`` are jcm-side

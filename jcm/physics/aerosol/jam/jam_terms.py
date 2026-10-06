@@ -129,6 +129,8 @@ def _load_mam4_jax() -> type[ModalMicrophysicsTerm]:
 _MICROPHYSICS = {
     "placeholder": lambda spec: PlaceholderMicrophysics(spec=spec),
     "mam4_jax": lambda spec: _load_mam4_jax()(spec=spec),
+    "mam4_jax_astem": lambda spec: _load_mam4_jax()(
+        spec=spec, condensation_backend="astem"),
 }
 
 
@@ -201,8 +203,9 @@ def jam_aerosol_physics(
     """Build the ordered JAM harness term list.
 
     Args:
-        microphysics: the swappable core — ``"placeholder"`` or a
-            ``ModalMicrophysicsTerm`` instance.
+        microphysics: the swappable core — ``"placeholder"``,
+            ``"mam4_jax"`` (fixed substeps), ``"mam4_jax_astem"``
+            (CAM's adaptive semi-implicit solve), or a term instance.
         cloud_borne: prognose an explicit cloud-borne aerosol phase (#602).
             ``None`` (default) follows the core population's own
             ``spec.cloud_borne``; ``True``/``False`` override it for a
@@ -310,8 +313,9 @@ def jam_aerosol_physics(
     # gas precursors); ECHAM's vdiff diffuses all of them. Convection
     # moves the interstitial + gas tracers only (see the docstring).
     # Placed right after the emitters so the narrative order matches
-    # ECHAM's physc (vdiff -> convection -> chemistry); under operator
-    # splitting the tendencies sum regardless.
+    # ECHAM's physc (vdiff -> convection -> chemistry). Each transport term
+    # reads the running working population; source mass can mix before it
+    # reaches chemistry and deposition in the same step.
     transport_names: list[str] = []
     for _t in [core, *emissions, *chemistry]:
         for _s in _t.required_tracers():

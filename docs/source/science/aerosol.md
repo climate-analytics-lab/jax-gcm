@@ -1131,6 +1131,19 @@ a 32 % wet / 68 % dry+sedimentation pathway split against HAM's published ~30/70
 accumulation-mode sulfate and black carbon are unchanged, as expected for a mode
 sitting in the Greenfield gap.
 
+JAM microphysics, chemistry, removal, optics and ice nucleation consume the
+sequential working aerosol population: earlier tracer tendencies are folded
+into the step-start tracers, while cloud-borne updates are integrated once in
+their carry. After MAM4 condensation, ageing and coagulation, the adapter
+diagnoses the updated mass/number lognormal size relation and equilibrium water
+for downstream removal and optics. It does not repeat the time-dependent
+`calcsize` adjustment. `science` — mass, number and geometry must describe the
+same population at each process; the reference relation is CAM
+`modal_aero_calcsize`, with Köhler equilibrium from MAM4 `wateruptake`.
+Separate `sed_du` and `turb_dry_du` diagnostics attribute the combined `dry_du`
+loss to gravitational settling and turbulent surface collection. See
+[SOA and dust design](../design/jam_soa_dust.md).
+
 ## MACv2-SP simple plumes
 
 **What we do.** A faithful port of MACv2-SP (Stevens et al. 2017): nine

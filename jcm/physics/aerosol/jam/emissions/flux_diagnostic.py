@@ -31,7 +31,7 @@ from jcm.physics_interface import PhysicsTendency
 # Species published as emission fluxes. Fixed so the carry pytree is stable;
 # a species no term emits simply stays zero.
 EMITTED_SPECIES: tuple[str, ...] = (
-    "so2", "so4", "bc", "oc", "poa", "soa", "ss", "du", "moa", "dms",
+    "so2", "so4", "bc", "oc", "poa", "soa", "ss", "du", "moa", "dms", "soag",
 )
 
 # Biomass-burning splits (MMPPE ``emi_bb_*``): the raw open-burning
@@ -127,7 +127,7 @@ def all_flux_keys() -> tuple[str, ...]:
             + tuple(f"emi_bb_{s}" for s in BB_SPECIES)
             + tuple(f"dry_{s}" for s in DEPOSITED_SPECIES)
             + tuple(f"wet_{s}" for s in DEPOSITED_SPECIES)
-            + (MODEL_LEVEL_WIND_KEY,))
+            + ("sed_du", "turb_dry_du", MODEL_LEVEL_WIND_KEY,))
 
 
 def accumulate_deposition_fluxes(
@@ -192,11 +192,17 @@ class ResetEmissionFluxes(PhysicsTerm):
     category: ClassVar[str] = "aerosol_emissions"
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = all_flux_keys()
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "emi_soag": {"units": "kg m-2 s-1",
+                     "long_name": "SOAG surface emission flux on CAM carbon-equivalent basis"},
+        "sed_du": {"units": "kg m-2 s-1", "positive": "down",
+                   "long_name": "dust surface loss by gravitational settling"},
+        "turb_dry_du": {"units": "kg m-2 s-1", "positive": "down",
+                        "long_name": "dust surface loss by turbulent dry deposition"},
+    }
 
     def __call__(self, state, diagnostics, forcing, terrain):
         zero = jnp.zeros(state.temperature.shape[1:],
                          dtype=state.temperature.dtype)
         return (PhysicsTendency.zeros(state.temperature.shape),
                 {**diagnostics, **{k: zero for k in all_flux_keys()}})
-
-

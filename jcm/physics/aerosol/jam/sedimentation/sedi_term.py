@@ -253,4 +253,11 @@ class StokesSedimentation(PhysicsTerm):
             diagnostics, tracer_tends,
             diagnostics["air_density"], diagnostics["layer_thickness"],
             kind="dry")
+        # Separate the dust dry sinks so lifetime changes can be attributed
+        # to settling versus surface collection rather than to their sum.
+        diagnostics = {**diagnostics, "sed_du": -sum([
+            jnp.sum(tend * air_density * dz, axis=0)
+            for name, tend in tracer_tends.items()
+            if name.startswith(("m_du_", "mc_du_"))
+        ], jnp.zeros_like(air_density[0]))}
         return tendency, diagnostics

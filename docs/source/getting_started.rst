@@ -169,6 +169,12 @@ builds one for you:
    # Override any key with Hydra dotted syntax:
    exp = configurations.load("t63-echam-jam", **{"run.total_time": 30})
 
+For present-day SOA sensitivity tests, ``t63-echam-jam-soa`` adds the
+published CAM6 VOC-derived SOAG climatology and aerosol optical diagnostics.
+The inventory represents 1995–2005; PI and transient runs need matching
+emissions. See :doc:`design/jam_soa_dust` for the formulation, units and
+short-run validation limits.
+
 The recipes' own run length is a **calendar year of daily means**
 (``run.total_time: 12 months``). The CLI streams those into one file per
 calendar month (``run.monthly_means``, see :ref:`monthly-means-cli`); an
