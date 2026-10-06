@@ -263,14 +263,20 @@ def test_adapter_float32_core_conserves_species_and_sulfur():
     assert np.all(np.asarray(js.mass) >= 0) and np.all(np.asarray(js.number) >= 0)
 
 
-def test_adapter_kazil_scheme_runs_end_to_end():
+@pytest.mark.parametrize("core_dtype", ["float64", "float32"])
+def test_adapter_kazil_scheme_runs_end_to_end(core_dtype):
     """``nucleation_scheme=2`` (jax-gcm#1017 Kazil/GCR task) through the full
-    adapter: needs HAM_INPUT_DIR (both the PARNUC and O'Brien tables -- see
-    gcr_ionisation.py) AND an m7-jax release with load_kazil_lovejoy_table
-    (not yet in the jcm[m7] pin at time of writing -- the lazy-import site
-    in m7_jax.py's __init__ this exercises). Skips cleanly when either is
-    missing, which is the common case (CI's extras-tests job and a plain
-    checkout both lack one or the other right now).
+    adapter, at both the default float64 core and the forward-only float32
+    core (jax-gcm#1017 task 6 -- the two switches compose: the Kazil table
+    and the GCR ion-pair tables follow the exact same float64-numpy-storage
+    -plus-per-step-rebuild rule as the kappa table, see m7_jax.py's module
+    docstring). Needs HAM_INPUT_DIR (both the PARNUC and O'Brien tables --
+    see gcr_ionisation.py) AND an m7-jax release with
+    load_kazil_lovejoy_table (not yet in the jcm[m7] pin at time of writing
+    -- the lazy-import site in m7_jax.py's __init__ this exercises). Skips
+    cleanly when either is missing, which is the common case (CI's
+    extras-tests job and a plain checkout both lack one or the other right
+    now).
     """
     import os
 
@@ -288,7 +294,8 @@ def test_adapter_kazil_scheme_runs_end_to_end():
 
     from jcm.physics.aerosol.jam.microphysics.m7_jax import M7JaxMicrophysics
 
-    core = M7JaxMicrophysics(nucleation_scheme=2, organic_scheme=0)
+    core = M7JaxMicrophysics(
+        nucleation_scheme=2, organic_scheme=0, core_dtype=core_dtype)
     core._coriolis = jax.numpy.asarray(2 * 7.292e-5 * np.sin([-0.5, 0.0, 0.8]))
     core._lat = jax.numpy.asarray([-0.5, 0.0, 0.8])
     core._lon = jax.numpy.asarray([0.1, 1.5, -2.0])
@@ -306,6 +313,9 @@ def test_adapter_kazil_scheme_runs_end_to_end():
     tend, out = core(state, diag, _Forcing(), None)
     assert np.all(np.isfinite(np.asarray(tend.tracers["g_h2so4"])))
     assert np.all(np.isfinite(np.asarray(out["_jam_state"].r_wet)))
+    # The output cast (__call__, outside the scoped x64 context) always
+    # restores float64 regardless of the core's own working dtype.
+    assert tend.tracers["g_h2so4"].dtype == jax.numpy.float64
 
 
 def test_adapter_refuses_kazil_without_ham_input_dir_and_wrong_population(monkeypatch):
