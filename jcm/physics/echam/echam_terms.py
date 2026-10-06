@@ -487,9 +487,11 @@ def echam_physics(
         jam_nactivpdf: ``jam_aerosol_physics``'s ``nactivpdf`` (HAM's updraft
             PDF switch, ``"ham_arg"`` only; default 0).
         jam_dust_preset: HAMMOZ ``ndust`` preset for the Tegen dust scheme —
-            4 (default, HAM2: Stier 2005 + East-Asian soils), 3 (Stier 2005)
-            or 2 (Cheng 2008). The resolution-dependent regional tuning vector
-            is rebuilt at the model's own truncation.
+            5 (HAM2 + the MSG-SEVIRI Saharan source-activation map; needs
+            ``forcing.dust_msg_file`` set), 4 (HAM2: Stier 2005 + East-Asian
+            soils), 3 (Stier 2005) or 2 (Cheng 2008). The resolution-dependent
+            regional tuning vector is rebuilt at the model's own truncation
+            (shared bit-for-bit between 4 and 5).
         jam_dust_nudged: take HAM's *nudged* regional tuning vector
             (0.95/1.25 at T63) instead of the free-running one (1.05/1.45).
             The shipped config leaves this ``null``, which the runner fills
@@ -497,7 +499,7 @@ def echam_physics(
         jam_dust_nduscale_scale: global multiplier on that regional vector —
             jcm's single dust-emission calibration knob (#808). ``null``
             takes the calibrated default, which exists at T63 ``ndust = 4``
-            only.
+            or ``5`` only (the two share the same vector and calibration).
         jam_aqueous_scheme: ``"full"`` (default, HAM port) or ``"simple"``
             (H2O2-limited) in-cloud aqueous sulfur chemistry.
         jam_anthropogenic: include prescribed CEDS anthropogenic emissions

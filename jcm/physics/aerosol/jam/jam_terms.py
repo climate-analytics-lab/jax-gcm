@@ -400,13 +400,15 @@ def jam_aerosol_physics(
             own accumulation-then-coarse order — see
             :class:`~jcm.physics.aerosol.jam.emissions.seasalt.SeaSaltEmissions`.
         dust_preset: HAMMOZ ``ndust`` preset — 4 (default, Stier 2005 +
-            East-Asian soils = HAM2), 3 (Stier 2005) or 2 (Cheng 2008).
-            Ignored when an explicit ``dust`` parameter object is given.
+            East-Asian soils = HAM2), 5 (HAM2 + the MSG-SEVIRI Saharan
+            source-activation map; needs ``forcing.dust_msg``), 3
+            (Stier 2005) or 2 (Cheng 2008). Ignored when an explicit ``dust``
+            parameter object is given.
         dust_nudged: use HAM's nudged regional tuning vector (0.95/1.25 at
             T63) rather than the free-running one (1.05/1.45).
         dust_nduscale_scale: global multiplier on that regional vector, jcm's
             single dust calibration knob (#808). ``None`` takes the
-            calibrated default (T63 ndust=4 only; HAM's value elsewhere).
+            calibrated default (T63 ndust=4 or 5 only; HAM's value elsewhere).
         anthropogenic: include prescribed CEDS anthropogenic emissions (#498),
             the *bulk* path (in-model differentiable speciation + smooth
             injection); ``anthropogenic_params`` overrides the defaults.

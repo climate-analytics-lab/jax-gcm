@@ -274,6 +274,7 @@ def _patched_engine(shape):
                    return_value={"type2": jnp.ones(shape)}),
         mock.patch("jcm.forcing.read_dust_regions", return_value=jnp.ones(shape)),
         mock.patch("jcm.forcing.read_dust_roughness", return_value=jnp.ones(shape)),
+        mock.patch("jcm.forcing.read_dust_msg_source", return_value=jnp.ones(shape)),
         mock.patch("jcm.forcing.read_oxidant_vmr",
                    return_value={"oh": jnp.ones((1, *shape))}),
         mock.patch("jcm.forcing.validate_oxidant_levels"),
@@ -341,11 +342,18 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         # and this test stubs xarray.open_dataset for the whole engine, so it
         # composes the documented data-free variant (binary nucleation, jcm's
         # own Mie tables) - equivalence of the two doors is what is tested.
+        # forcing.dust_msg_file is pinned to an explicit path rather than left
+        # at the config's own "auto": the preset's ndust=5 needs it, but its
+        # mirror bundle is not staged yet (manifest "staged": False), so
+        # "auto" would raise a real "not yet published" error here that has
+        # nothing to do with the equivalence this test checks -- read_dust_
+        # msg_source is mocked above like its four dust-companion siblings.
         with mock.patch.dict(os.environ):
             os.environ.pop("HAM_INPUT_DIR", None)
             self._assert_door_matches_cli(
                 "ham-t63-l47",
-                {"physics.jam_microphysics_options.nucleation_scheme": 1})
+                {"physics.jam_microphysics_options.nucleation_scheme": 1,
+                 "forcing.dust_msg_file": "/dummy/dust_msg.nc"})
 
     @pytest.mark.requires_extra("m7")
     def test_ham_m7_preset_carries_hams_own_settings(self):
