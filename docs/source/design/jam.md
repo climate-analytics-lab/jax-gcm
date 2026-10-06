@@ -1,4 +1,4 @@
-# The Jax Aerosol Module (JAM)
+# The JCM Aerosol Module (JAM)
 
 The `jcm.physics.aerosol.jam` package is a HAMMOZ-style, microphysics-agnostic
 **process harness** for online aerosol, wrapping an interchangeable

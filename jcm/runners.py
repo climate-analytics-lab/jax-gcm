@@ -1100,6 +1100,16 @@ def build_model(cfg: DictConfig) -> Model:
         "vertical_coordinate": dycore_cfg.get("sl_vertical_coordinate", None),
         "humidity_mass_fixer": bool(dycore_cfg.get("humidity_mass_fixer", True)),
         "local_mass_fixer": bool(dycore_cfg.get("local_mass_fixer", True)),
+        # The nodal tracers' global proportional mass fixer
+        # (DinosaurDycore._fix_nodal_tracer_mass, #713), the quasi-monotone
+        # limiter and the horizontal interpolation order of the SL tracer
+        # transport. All three default to the dycore's own (on, on, cubic);
+        # exposed for budget bisection, see
+        # docs/source/design/jam_modal_microphysics.md section 9.
+        "mass_fixer": bool(dycore_cfg.get("tracer_mass_fixer", True)),
+        "monotone_tracers": bool(dycore_cfg.get("sl_monotone_tracers", True)),
+        "interpolation_order": str(
+            dycore_cfg.get("sl_horizontal_interpolation", None) or "cubic"),
     }
     dycore = DinosaurDycore(
         coords=coords,

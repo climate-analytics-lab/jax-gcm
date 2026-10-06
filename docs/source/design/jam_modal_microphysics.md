@@ -862,3 +862,45 @@ water (not prognosed by the core), nor the chemistry that converts DMS →
 SO₂ → H₂SO₄ (outside the core; it only has to keep the gas keys). A gate
 on the per-step closure (``_modal_ledger_step_sulfur``) is cheap enough
 to run in production; the per-process audit is for bisection.
+
+### The 30-day global runs (2026-10-03): the cores agree, and the float32 hot spot is the host's transport
+
+Four 30-day T63L47 `+configuration=t63-echam-jam` runs on one A100 (the
+first global runs of the in-tree core): modal and MAM4-JAX, each in
+float32 and float64. In float64 the two cores agree globally — sulfate
+3.53 vs 3.56, sea salt 4.27 vs 4.26 mg m⁻², the same three largest sulfate
+cells within 6 % — and differ where they should: BC and POA 13–19 % higher
+and the Aitken number 17 % lower in the modal core (eight ageing monolayers
+against the adapter's three; the coupled acid production condensed within
+the step). The float32 modal run alone carried a sulfate burden of
+956 mg m⁻² in its January mean at the Ilo smelter cell (288.75°E, 17.7°S),
+with BC and POA 50× too high in the same cell.
+
+That hot spot is **not the core's**. The single column at the cell (all
+three core/precision combinations) grows identically and linearly with no
+negative tracer; the physics applied offline to the saved column is the
+same in float32 and float64 to three digits and removes mass. The daily
+rerun shows an *event*: from day 23 the mixing ratio at one level grows
+2–6× per day, mass and number of every species together, while the
+column physics tendency is a sink and the ``budget_dyn`` residual — the
+transport machinery — is the source, peaking at 7 g m⁻² on day 28. The
+positivity projection is a bit-exact no-op for the aerosol tracers (the
+raw dycore state in a checkpoint has no negative aerosol value anywhere);
+the SL global mass fixer off still produces the event, and that run's
+global-mean sulfate is **50 % above** the baseline from day 2 — the
+semi-Lagrangian tracer step with the quasi-monotone limiter creates mass
+at sharp features, which the proportional global fixer (#713) normally
+removes by scaling the whole field down. Every one of the four runs shows
+the same signature in its monthly mean: a transport creation of 5–10 % of
+the local mass per step at its sharpest source cells and a gross
+``|dyn|/|ptend|`` of 0.94–0.97. A cell whose local creation exceeds the
+global mean grows at the difference, and the growth sharpens the feature.
+Which cell runs away is weather: a baseline with ``init.rh=0.001`` has no
+event in 30 days. The runs used dinosaur's linear vertical interpolation,
+the default at the time; dev's #1005 (cubic vertical interpolation and a
+humidity fixer, for the water budget) landed after them and does not touch
+the horizontal limiter the creation comes from. The switches used for the
+bisection are ``dycore.tracer_mass_fixer``, ``dycore.sl_monotone_tracers``
+and ``dycore.sl_horizontal_interpolation``. This is a dycore-transport finding, filed upstream with
+the evidence; it is independent of the microphysics core and of
+precision. For the core's own validation the float64 pair is the A/B.

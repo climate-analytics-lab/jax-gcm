@@ -64,3 +64,21 @@ humidity_mass_fixer: true
 # winter lower stratosphere with aerosol (#1062, #1066). Ignored by the
 # Eulerian core. See docs/source/design/tracer_mass_conservation.md.
 local_mass_fixer: true
+
+# Global mass fixer for the NODAL tracers (aerosol mass and number, gases,
+# condensate) under semi-Lagrangian transport: the proportional fixer of #713
+# that restores each tracer's global mass to its post-physics value every
+# step. Off only for budget bisection: the SL step with its quasi-monotone
+# limiter creates mass at sharp features (measured +50 % of the sulfate
+# burden over 30 days at T63L47 with the fixer off), and the fixer pays for
+# that creation with a uniform rescale, so a cell whose local creation
+# exceeds the global mean grows at the rest's expense. See
+# docs/source/design/jam_modal_microphysics.md, section 9.
+tracer_mass_fixer: true
+
+# Bermejo-Staniforth quasi-monotone limiter on the semi-Lagrangian tracer
+# interpolation (true, the default: no new extrema and exact non-negativity),
+# and the horizontal interpolation order: cubic | linear | null (= cubic).
+# Both for the same bisection; production runs keep the defaults.
+sl_monotone_tracers: true
+sl_horizontal_interpolation: null
