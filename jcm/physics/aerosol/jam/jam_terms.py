@@ -59,6 +59,7 @@ from jcm.physics.aerosol.jam.ice_nucleation.ham_freezing import (
 )
 from jcm.physics.aerosol.jam.ice_nucleation.ice_term import IceNucleation
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
+from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
 from jcm.physics.aerosol.jam.microphysics.placeholder import (
     PlaceholderMicrophysics,
 )
@@ -124,11 +125,18 @@ def _load_mam4_jax() -> type[ModalMicrophysicsTerm]:
 
 
 # Core resolvers (each takes a spec override, ``None`` for the core default).
-# ``placeholder`` is built-in; ``mam4_jax`` is loaded lazily so the optional
-# GPL-3.0 ``mam4-jax`` dependency is only imported when selected.
+# ``placeholder``/``m7_placeholder`` are built-in; ``mam4_jax`` is loaded
+# lazily so the optional GPL-3.0 ``mam4-jax`` dependency is only imported
+# when selected.
 _MICROPHYSICS = {
     "placeholder": lambda spec: PlaceholderMicrophysics(spec=spec),
     "mam4_jax": lambda spec: _load_mam4_jax()(spec=spec),
+    # The κ-Köhler zero-tendency core on the M7 population (jax-gcm#1017) —
+    # the chain-test vehicle for the echam-ham-m7 preset until the real M7
+    # core adapter lands. ``spec`` defaults to M7_SPEC rather than
+    # PlaceholderMicrophysics's own MAM4_SPEC default.
+    "m7_placeholder": lambda spec: PlaceholderMicrophysics(
+        spec=spec or M7_SPEC),
 }
 
 
@@ -337,7 +345,7 @@ def jam_aerosol_physics(
         # pathway in turn (``in_plume_convective`` below).
         csr_of: dict[str, float] = {}
         for mode in spec.modes:
-            csr = convective_csr(mode.name)
+            csr = convective_csr(mode)
             csr_of[number_name(mode.short)] = csr
             for sp in mode.species:
                 csr_of[mass_name(sp, mode.short)] = csr
