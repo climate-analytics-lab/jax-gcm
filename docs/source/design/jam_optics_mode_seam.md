@@ -26,6 +26,14 @@ Three overridable methods, all on `jcm/physics/aerosol/jam/optics/optics_term.py
 `_mode_optics` receives a `ModeOpticsInputs` record and returns
 `(tau, tau_scat, tau_scat_g)` — extinction, scattering, and
 scattering-weighted-asymmetry optical depths for that mode alone, **ungated**.
+The record's `is_sw` field is `True` for every call except the one over
+`cache_band_config`'s LW band set (static, so branching on it is the same
+allowance as branching on `mode`) — for a backend that is wavelength-general
+this is never read; it exists for one that keeps genuinely separate SW/LW
+tables or networks (`HamLutOpticsTerm`, #1017, is exactly that) and has no
+other way to tell the two calls apart, since `wavelength_m` alone does not:
+RRTM-SW's reddest band already reaches ~8 μm, inside what LW tables also
+cover.
 
 ### Why optical depths and not `(k_ext, ssa, g)`
 
@@ -108,11 +116,19 @@ correct, roughly 8x the optics cost, and completely silent. A backend that
 holds extra post-compose state of its own overrides the same hook.
 
 There is deliberately **no config key, registry or entry point** for
-selecting a backend. Nothing in this repository implements one, so a string
-selector would have nothing to resolve to; and a user who has installed and
-imported a third-party optics package is already writing Python. If a backend
-is ever vendored in-tree, it gets a config group entry then, like any other
-in-repo scheme.
+selecting a *third-party* backend. A third-party package has no name this
+repository could resolve a string against, and a user who has installed and
+imported one is already writing Python.
+
+**One in-tree exception**: `jam_aerosol_physics(optics_backend=...)` (and
+`echam_physics(jam_optics_backend=...)`) selects between `"jcm"` (default,
+`JamOpticsTerm` itself) and `"ham_lut"` (`HamLutOpticsTerm`, ECHAM-HAM M7's
+own nearest-neighbour Mie-table lookup, #1017) — a plain Python string
+kwarg, not a Hydra config group, because the only two choices today are both
+`JamOpticsTerm` subclasses already imported by `jam_terms.py`; a Hydra group
+would be a config file per choice resolving to the identical two classes.
+Still no manual `physics.replace(...)` needed for these two, unlike a
+genuinely external backend — that is what "vendored in-tree" buys it.
 
 ## Notes for backend authors
 

@@ -205,6 +205,7 @@ def echam_physics(
     jam_microphysics: str = "placeholder",
     jam_cloud_borne: bool = True,
     jam_optics: bool = True,
+    jam_optics_backend: str = "jcm",
     jam_arg_variant: str = "arg2000",
     jam_aqueous_scheme: str = "full",
     jam_dust_preset: int = 4,
@@ -423,6 +424,9 @@ def echam_physics(
             reads. ``False`` keeps MACv2-SP optics (cheaper; also makes
             the JAM aerosol radiatively passive, which controlled A/B
             experiments rely on).
+        jam_optics_backend: ``jam_aerosol_physics``'s ``optics_backend`` --
+            ``"jcm"`` (default) or ``"ham_lut"`` (ECHAM-HAM M7's own
+            Mie-table lookup, #1017). Ignored when ``jam_optics=False``.
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         jam_dust_preset: HAMMOZ ``ndust`` preset for the Tegen dust scheme —
             4 (default, HAM2: Stier 2005 + East-Asian soils), 3 (Stier 2005)
@@ -903,7 +907,7 @@ def echam_physics(
         from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
         jam_terms = jam_aerosol_physics(
             microphysics=jam_microphysics, cloud_borne=jam_cloud_borne,
-            optics=jam_optics,
+            optics=jam_optics, optics_backend=jam_optics_backend,
             arg_variant=jam_arg_variant,
             aqueous_scheme=jam_aqueous_scheme,
             dust_preset=jam_dust_preset,

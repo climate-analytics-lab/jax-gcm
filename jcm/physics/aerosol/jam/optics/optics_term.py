@@ -134,6 +134,17 @@ class ModeOpticsInputs(NamedTuple):
             floored at zero.
         col_factor: ``air_density * dz`` [kg m^-2] -- multiply a volume in
             ``m^3 kg^-1`` by this to get a volume per unit area.
+        is_sw: ``True`` for every ``_band_optics`` call this process makes
+            EXCEPT the one over ``cache_band_config``'s LW bands (static
+            Python bool, identical for every mode/level/column of one call,
+            so branching on it is the same "static config" allowance as
+            branching on ``mode``). Most backends are wavelength-general and
+            never read it; it exists for one that keeps genuinely separate
+            SW/LW tables or networks (HAM's own Mie tables,
+            ``ham_lut_optics_term.py``, are exactly that) and would
+            otherwise have no way to tell this call apart from the SW one --
+            ``wavelength_m`` alone does not: RRTM-SW's reddest band already
+            reaches ~8 um, inside what LW tables also cover.
 
     """
 
@@ -151,6 +162,7 @@ class ModeOpticsInputs(NamedTuple):
     vol_total: Any
     num_per_area: Any
     col_factor: Any
+    is_sw: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
@@ -461,6 +473,13 @@ class JamOpticsTerm(PhysicsTerm):
         lam_all = jnp.asarray(centers_nm, state.temperature.dtype) * 1.0e-9
         # ri: species -> (n[n_band], k[n_band]); vmap maps the band axis.
         ri_j = {sp: (jnp.asarray(n), jnp.asarray(k)) for sp, (n, k) in ri.items()}
+        # Static for this whole call: True for the SW-band call and the
+        # SW-ish AeroCom diagnostic-wavelength call, False only for the LW
+        # one (see ModeOpticsInputs.is_sw). ``ri``/``self._cache.ri_lw`` are
+        # plain dicts of NumPy arrays set once by ``cache_band_config``, so
+        # this identity check is a Python-level comparison, resolved before
+        # any band/mode tracing begins.
+        is_sw = ri is not self._cache.ri_lw
 
         def one_band(lam_m, ri_band):
             aod = jnp.zeros_like(state.temperature)
@@ -568,7 +587,7 @@ class JamOpticsTerm(PhysicsTerm):
                     r_dry=r_dry_i, m_n=m_n, m_k=m_k, ri_band=ri_band,
                     vol_species=vol_sp, vol_water=v_water, vol_dry=vol_dry,
                     vol_total=vol_tot, num_per_area=num_per_area[i],
-                    col_factor=col_factor,
+                    col_factor=col_factor, is_sw=is_sw,
                 ))
                 # Physical mass gate: tau is EXACTLY zero where the mode
                 # carries no material. The number floor above handles the
