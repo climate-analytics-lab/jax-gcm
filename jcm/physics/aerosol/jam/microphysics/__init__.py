@@ -38,6 +38,7 @@ from jcm.physics.aerosol.jam.microphysics.m7_data import (
 #: dependency we don't want on the plain-import path.
 _LAZY_CORES = {
     "Mam4JaxMicrophysics": "jcm.physics.aerosol.jam.microphysics.mam4_jax",
+    "M7JaxMicrophysics": "jcm.physics.aerosol.jam.microphysics.m7_jax",
 }
 
 __all__ = [
