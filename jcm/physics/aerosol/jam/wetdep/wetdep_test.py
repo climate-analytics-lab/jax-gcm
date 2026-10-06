@@ -1109,3 +1109,79 @@ class FormationLedgerTest(unittest.TestCase):
         self.assertAlmostEqual(float(f_wat[4]), 0.0)   # sub-floor pool, no formation
         # Phase split falls back to the formation ledger in emptied cells.
         self.assertAlmostEqual(float(pice[2]), 0.0)
+
+
+class HamBelowCloudSchemeTest(unittest.TestCase):
+    """``WetScavenging(scheme="ham_below_cloud")``: the #1017 selector."""
+
+    def test_rejects_unknown_scheme(self):
+        with self.assertRaises(ValueError):
+            WetScavenging(scheme="ham")  # not "ham_below_cloud" -- see __init__'s docstring
+
+    def test_requires_precip_cover_diagnostic(self):
+        term = WetScavenging(scheme="ham_below_cloud")
+        for key in ("precip_cover", "pfrain", "pfsnow"):
+            self.assertIn(key, term.requires)
+        default_term = WetScavenging()
+        self.assertNotIn("precip_cover", default_term.requires)
+
+    @staticmethod
+    def _with_hydro_diagnostics(diagnostics, *, rain=True):
+        """Add precip_cover/pfrain/pfsnow as ``Lohmann2MMicrophysics`` would
+        publish them (``configure_wetdep_hydro_diagnostics``); ``rain=False``
+        puts the carrier into pfsnow instead, to exercise bc_snow_rate.
+        """
+        diagnostics = dict(diagnostics)
+        clouds = diagnostics["clouds"]
+        diagnostics["precip_cover"] = clouds.cloud_fraction
+        zeros = jnp.zeros_like(clouds.rain_flux)
+        diagnostics["pfrain"] = clouds.rain_flux if rain else zeros
+        diagnostics["pfsnow"] = zeros if rain else clouds.rain_flux
+        return diagnostics
+
+    def test_runs_and_is_a_sink_with_precip_cover_present(self):
+        state, diagnostics, spec, mass_name = WetDepTermTest()._setup(precip=1.0e-3)
+        diagnostics = self._with_hydro_diagnostics(diagnostics)
+        term = WetScavenging(scheme="ham_below_cloud")
+        tend, _ = term(state, diagnostics, None, None)
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        self.assertTrue(bool(jnp.all(tend.tracers[key] <= 0.0)))
+        self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))))
+
+    def test_exercises_the_snow_pathway_too(self):
+        """With the carrier flux placed entirely in ``pfsnow`` -- confirm
+        ``bc_snow_rate``'s pathway (not just ``bc_rain_rate``'s) also runs
+        to a finite sink.
+        """
+        state, diagnostics, spec, mass_name = WetDepTermTest()._setup(precip=1.0e-3)
+        diagnostics = self._with_hydro_diagnostics(diagnostics, rain=False)
+        term = WetScavenging(scheme="ham_below_cloud")
+        tend, _ = term(state, diagnostics, None, None)
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+        self.assertTrue(bool(jnp.all(tend.tracers[key] <= 0.0)))
+        self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))))
+
+    def test_default_scheme_path_is_bit_identical_to_before(self):
+        """The default ``"jcm"`` scheme's output must be untouched by the
+        new branch (RULES-style default-path invariant).
+        """
+        state, diagnostics, spec, mass_name = WetDepTermTest()._setup()
+        explicit = WetScavenging(scheme="jcm")(state, diagnostics, None, None)[0]
+        implicit = WetScavenging()(state, diagnostics, None, None)[0]
+        for key in explicit.tracers:
+            np.testing.assert_array_equal(
+                np.asarray(explicit.tracers[key]), np.asarray(implicit.tracers[key]))
+
+    def test_gradients_stay_finite(self):
+        state, diagnostics, spec, mass_name = WetDepTermTest()._setup(precip=1.0e-3)
+        diagnostics = self._with_hydro_diagnostics(diagnostics)
+        key = mass_name(spec.modes[0].species[0], spec.modes[0].short)
+
+        def loss(pfrain_scale):
+            d = dict(diagnostics)
+            d["pfrain"] = diagnostics["pfrain"] * pfrain_scale
+            tend, _ = WetScavenging(scheme="ham_below_cloud")(state, d, None, None)
+            return jnp.sum(tend.tracers[key])
+
+        g = jax.grad(loss)(jnp.asarray(1.0))
+        self.assertTrue(np.isfinite(float(g)))

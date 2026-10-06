@@ -1009,6 +1009,18 @@ the cloud-borne tracers rather than the interstitial ones; the convective
 carrier acts in HAMMOZ's updraft-area footprint (see [convective tracer
 transport](#convective-tracer-transport--in-plume-scavenging)).
 
+`WetScavenging(scheme="ham_below_cloud")` is an alternative to the CAM/Slinn
+pathway above for the STRATIFORM carrier only: ECHAM-HAM r7492's own
+`nwetdep=3` scheme, a bilinear lookup against Betty Croft's aerosol
+size-dependent rain and snow collection tables (`mo_ham_wetdep.f90::bc_rain`/
+`bc_snow`, `mo_ham_wetdep_data.f90`), weighted by the stratiform
+precipitating-area fraction the cloud scheme publishes on request
+(`configure_precip_cover_diagnostic`). The convective below-cloud pathway and
+every in-cloud pathway are unaffected by this selector; see
+{ref}`below-cloud scavenging <ham-below-cloud-scheme>`
+for the scheme, its two reference-harness findings, and its one flagged
+approximation (the rain/snow carrier split).
+
 Stokes settling and the Slinn quasi-laminar resistance are evaluated at the
 **wet** particle's density, the mass-weighted mixture of dry material and
 condensed water ``ρ_wet = (ρ_dry + (g³ − 1)·ρ_w)/g³`` with ``g`` the κ-Köhler
