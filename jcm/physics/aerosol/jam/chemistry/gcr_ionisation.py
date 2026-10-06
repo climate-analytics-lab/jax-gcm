@@ -328,11 +328,24 @@ def gcr_ion_pair_rate(lat, lon, pressure, temperature, solar_activity, tables,
     ``_zrgas``/``_avo_xtoc`` for the precedent) is the mass-column-density
     conversion's gravitational acceleration. ``mo_physical_constants.f90``
     hardcodes ``grav = 9.80665``, which differs from jcm's own ``c.grav``
-    (9.81) at the ~3e-4 relative level -- utterly immaterial physically, but
-    enough to fail a literal Fortran-parity test at the task's 1e-12 gate.
-    An explicit ``grav=9.80665`` lets the (not yet written) reference test
-    reproduce the Fortran exactly without changing jcm's own global gravity
-    constant, which is used far outside this one aerosol diagnostic.
+    (9.81) at the ~3e-4 relative level. The two call sites deliberately
+    choose differently, per the lead's review of this exact question:
+
+    * The **model adapter** (``M7JaxMicrophysics``) leaves ``grav=None``,
+      i.e. jcm's own ``c.grav`` -- the O'Brien table is looked up by
+      physical column mass, and the model's own column mass is
+      ``pressure/c.grav`` (hydrostatic balance with jcm's own gravity),
+      so using any OTHER gravity here would make this one diagnostic's
+      column-mass inconsistent with the rest of the model's. This also
+      keeps the single-source-of-truth constants policy intact: a
+      ``set_constants(grav=...)`` override is honoured here like
+      everywhere else, instead of a frozen literal.
+    * The **reference test** (``gcr_ionisation_test.py``) passes
+      ``grav=9.80665`` explicitly -- parity with the compiled routine,
+      which is what that test exists to measure; using jcm's ``c.grav``
+      there would reintroduce the ~3e-4 mismatch into a test built to
+      catch fidelity bugs at 1e-12, for a reason that has nothing to do
+      with this function's correctness.
     """
     lat_deg = jnp.asarray(lat, jnp.float64) * (180.0 / jnp.pi)
     lon_deg = jnp.asarray(lon, jnp.float64) * (180.0 / jnp.pi)
