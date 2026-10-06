@@ -231,9 +231,6 @@ the state the term receives.
   `knvb`/`lonacc` inversion gate on `zauloc` is omitted; section 6.2 passes
   `pvervel = 0` to `het_mxphase_freezing`, so its immersion cooling is the TKE
   updraft's) (#705).
-- **`nic_cirrus = 2`** still expects the Kärcher–Lohmann `pnicex`/`zqinucl`
-  source jcm does not compute (#552); its section-5 deposition branch returns
-  zero, as in the reference with a missing external source.
 - **Three section-1 number sources are absent**: the cirrus nucleation
   `zninucl` (lines 986-999), whose cap is the soluble-aerosol number `zascs`
   the scheme does not receive; the droplet number of detrained liquid

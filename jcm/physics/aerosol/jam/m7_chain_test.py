@@ -290,12 +290,15 @@ class M7ChainTest(unittest.TestCase):
         HAM activation over the 20-bin updraft PDF, the HAM Mie-table optics
         (jcm-built tables when ``HAM_INPUT_DIR`` is unset), Long sea salt and
         the full ``nwetdep = 3`` wet deposition: the integration path the
-        ``echam-ham-m7`` preset runs, minus the extra-gated M7-JAX core.
+        ``echam-ham-m7`` preset runs, minus the extra-gated M7-JAX core,
+        including Kaercher-Lohmann cirrus (``nic_cirrus = 2``) fed by the M7
+        cirrus aerosol number.
         """
         model, predictions = self._run(
             jam_activation_scheme="ham_arg", jam_nactivpdf=1,
             jam_optics_backend="ham_lut", jam_seasalt_scheme="long",
-            jam_wetdep_scheme="ham", jam_anthropogenic=True)
+            jam_wetdep_scheme="ham", jam_anthropogenic=True,
+            microphysics_2m={"nic_cirrus": 2})
         dyn = predictions.dynamics
         self.assertTrue(bool(jnp.all(jnp.isfinite(dyn.temperature))))
         for key, arr in dyn.tracers.items():
@@ -305,6 +308,7 @@ class M7ChainTest(unittest.TestCase):
         wet = next(t for t in model.physics.terms
                    if t.name == "jam_wet_deposition")
         self.assertEqual(wet.scheme, "ham")
+        self.assertIn("cirrus_aerosol_number", predictions.physics)
 
 
 if __name__ == "__main__":

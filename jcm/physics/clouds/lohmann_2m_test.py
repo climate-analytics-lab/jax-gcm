@@ -1044,7 +1044,7 @@ class TestUpdateInCloudWater_2M:
         cloud_flag = jnp.tile(flag_pattern, (n + flag_pattern.size - 1) // flag_pattern.size)[:n]
         cloud_fraction = jnp.where(cloud_flag, _full(n, 0.2), _zeros(n))
         return dict(
-            pressure=_full(n, 8e4),
+            aerosol_number_available=_full(n, 8e4),
             activated_cdnc=_full(n, 1.0e6),
             condensation_rate=_zeros(n),
             deposition_rate=_zeros(n),
@@ -1072,7 +1072,7 @@ class TestUpdateInCloudWater_2M:
         outs = update_in_cloud_water(**inputs)
         assert isinstance(outs, tuple) and len(outs) == 8
         for out in outs:
-            assert out.shape == inputs["pressure"].shape
+            assert out.shape == inputs["aerosol_number_available"].shape
             assert jnp.all(jnp.isfinite(out))
 
     def test_cloud_creation_initializes_incloud_values(self):
@@ -1296,19 +1296,24 @@ class TestUpdateInCloudWaterCirrusBranches_2M:
         assert jnp.isclose(grad, expected, rtol=1e-4), (grad, expected)
         check_gradients(icnc_of_ref, (r0,), rtol=1e-2, seed=0)
 
-    def test_nic_cirrus_2_uses_external_source_capped_by_pressure(self):
+    def test_nic_cirrus_2_uses_external_source_capped_by_aerosol_number(self):
+        """The nic_cirrus=2 cap, fixed (jax-gcm#552): capped by the real
+        "total number of aerosols available" (mo_cloud_micro_2m.f90:2520),
+        not by pressure -- the Fortran's own ``pap`` at this call site is a
+        number, never ``papm1``. See ``assembly.py``'s nic_cirrus==2 branch.
+        """
         n = 3
         inputs = self._inputs_with_ice(n)
         inputs["params"] = _P.replace(nic_cirrus=2)
-        # One column below the pressure cap, one above it (cap = pap*1e6).
-        cap = float(inputs["pressure"][0]) * 1e6
+        # One column below the aerosol-number cap, one above it.
+        cap = float(inputs["aerosol_number_available"][0])
         inputs["newly_formed_ice"] = jnp.array(
             [5e4, cap * 10.0, 0.0], dtype=jnp.float32
         )
         _, icnc_o, *_ = update_in_cloud_water(**inputs)
         # Below cap: candidate passes through (already >= icemin).
         assert jnp.isclose(icnc_o[0], 5e4)
-        # Above cap: clipped to pressure * 1e6.
+        # Above cap: clipped to the aerosol number available.
         assert jnp.isclose(icnc_o[1], cap, rtol=1e-6)
         # Zero source: enforced up to the icemin floor.
         assert jnp.isclose(icnc_o[2], _P.icemin)
