@@ -1,4 +1,23 @@
-"""Tests for ``HamLutOpticsTerm`` on a locally built, M7-faithful population."""
+"""Tests for ``HamLutOpticsTerm`` on a locally built, M7-faithful population.
+
+Most of these tests exercise the TERM's own logic (mode selection,
+gradients, the nucleation-mode gate) and pass jcm's own built tables
+(``ham_mie_tables.default_ham_mie_tables``) directly via ``tables=``,
+rather than loading HAM's authentic files: none of them care about the
+table's physical CONTENT, and passing ``tables=`` keeps them deterministic
+regardless of ``HAM_INPUT_DIR``'s ambient state. See ``ham_mie_tables.py``'s
+module docstring for why jcm's build is a fine stand-in for THESE tests, and
+``ham_mie_tables_test.py`` for the tests that do need the real data (the
+authentic-vs-built lookup parity and content-comparison tests).
+
+A separate group below (``test_table_source_*``) tests the fallback/logging/
+``table_source`` behaviour the #1017 coordinator's revision added: HAM's
+authentic tables when ``HAM_INPUT_DIR`` holds them, jcm's built tables
+otherwise, logged once and recorded on the instance either way.
+"""
+
+import logging
+import os
 
 import jax
 import jax.numpy as jnp
@@ -7,6 +26,7 @@ import pytest
 
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.optics.ham_lut_optics_term import HamLutOpticsTerm
+from jcm.physics.aerosol.jam.optics.ham_mie_tables import default_ham_mie_tables
 from jcm.physics.aerosol.jam.optics.optics_term import JamOpticsTerm
 from jcm.physics.aerosol.jam.population import AerosolMode, AerosolSpecies, ModalAerosolSpec
 from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
@@ -65,14 +85,14 @@ def _setup(nlev=4, ncols=3, n_sw=4, n_lw=3):
 
 
 def _term(band, spec):
-    term = HamLutOpticsTerm(spec=spec)
+    term = HamLutOpticsTerm(spec=spec, tables=default_ham_mie_tables())
     term.cache_band_config(band)
     return term
 
 
 def test_build_mie_lut_is_skipped():
     """``HamLutOpticsTerm`` never reads the default Gauss-Hermite table."""
-    assert HamLutOpticsTerm()._lut is None
+    assert HamLutOpticsTerm(tables=default_ham_mie_tables())._lut is None
     assert JamOpticsTerm()._lut is not None
 
 
@@ -119,8 +139,6 @@ def test_fine_coarse_table_selection_by_nearest_sigma(sigma, expect_fine):
     geometry) -- directly inspecting which table was picked would require
     reaching into the hook's internals.
     """
-    from jcm.physics.aerosol.jam.optics.ham_mie_tables import default_ham_mie_tables
-
     tables = default_ham_mie_tables()
     fine = abs(sigma - 1.59) <= abs(sigma - 2.00)
     assert fine == expect_fine
@@ -184,14 +202,27 @@ def test_lw_tables_have_zero_ssa_and_asymmetry():
     np.testing.assert_array_equal(np.asarray(a.asy_lw_per_band), 0.0)
 
 
-def test_attaches_via_jam_aerosol_physics_backend_selector():
+def test_attaches_via_jam_aerosol_physics_backend_selector(monkeypatch):
+    """The selector wires up ``HamLutOpticsTerm``; the file load itself is
+
+    monkeypatched to always raise (forcing the jcm-built fallback, see the
+    ``test_table_source_*`` group below) so this test -- checking WIRING,
+    not table content -- needs no ``HAM_INPUT_DIR``/real data and stays
+    fast regardless of the ambient environment.
+    """
+    from jcm.physics.aerosol.jam.optics import ham_lut_optics_term
     from jcm.physics.echam.echam_terms import echam_physics
 
+    def _raise(directory):
+        raise FileNotFoundError("stubbed: no authentic tables in this test")
+
+    monkeypatch.setattr(ham_lut_optics_term, "load_ham_mie_tables", _raise)
     physics = echam_physics(aerosol_module="jam", cloud_scheme="2m",
                              jam_optics_backend="ham_lut")
     terms = [t for t in physics.terms if t.category == "aerosol_optics"]
     assert len(terms) == 1
     assert isinstance(terms[0], HamLutOpticsTerm)
+    assert terms[0].table_source == "jcm_built"
 
     default_physics = echam_physics(aerosol_module="jam", cloud_scheme="2m")
     default_terms = [t for t in default_physics.terms if t.category == "aerosol_optics"]
@@ -204,3 +235,50 @@ def test_unknown_optics_backend_rejected():
 
     with pytest.raises(ValueError, match="optics_backend"):
         jam_aerosol_physics(optics_backend="not_a_backend")
+
+
+def test_table_source_explicit_when_tables_passed():
+    term = HamLutOpticsTerm(tables=default_ham_mie_tables())
+    assert term.table_source == "explicit"
+
+
+def test_table_source_falls_back_to_jcm_built_without_authentic_files(monkeypatch):
+    """No ``HAM_INPUT_DIR``, no explicit ``tables_dir``: construction must
+
+    succeed (not raise) and fall back to jcm's own built tables -- the
+    #1017 coordinator's revision: the authentic files are a nice-to-have,
+    not a hard construction requirement.
+    """
+    monkeypatch.delenv("HAM_INPUT_DIR", raising=False)
+    term = HamLutOpticsTerm()
+    assert term.table_source == "jcm_built"
+    assert term._ham_tables["sw_fine"].q_ext is not None
+
+
+def test_table_source_falls_back_on_a_tables_dir_missing_one_file(tmp_path):
+    """A ``tables_dir`` that exists but does not hold both authentic files
+
+    (e.g. a typo, or a directory copied without the LW file) falls back
+    the same way an unset ``HAM_INPUT_DIR`` does -- ``load_ham_mie_tables``
+    raises ``FileNotFoundError`` either way, and that is the ONLY exception
+    this term's constructor catches to trigger the fallback (a different
+    error -- e.g. the authentic file present but with the wrong axes,
+    ``ValueError`` -- must still raise, not silently fall back to a
+    different table).
+    """
+    term = HamLutOpticsTerm(tables_dir=tmp_path)
+    assert term.table_source == "jcm_built"
+
+
+@pytest.mark.skipif(not os.environ.get("HAM_INPUT_DIR"), reason="HAM_INPUT_DIR not set")
+def test_table_source_is_authentic_when_ham_input_dir_set():
+    term = HamLutOpticsTerm()
+    assert term.table_source == "authentic"
+
+
+def test_table_source_logged_once_at_construction(caplog):
+    with caplog.at_level(logging.INFO, logger="jcm.physics.aerosol.jam.optics.ham_lut_optics_term"):
+        term = HamLutOpticsTerm(tables=default_ham_mie_tables())
+    records = [r for r in caplog.records if "HamLutOpticsTerm" in r.message]
+    assert len(records) == 1
+    assert term.table_source in records[0].message

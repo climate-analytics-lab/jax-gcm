@@ -17,11 +17,14 @@ import pytest
 # below uses the ``with jax.enable_x64(True):`` context manager instead
 # (the pattern aqueous_hamaqueous_reference_test.py/ham_freezing_reference_
 # test.py already use for the same reason). gcr_ionisation.py's own kernels
-# hardcode float64 casts internally (matching m7-jax's kazil_lovejoy, since
-# this module's only real caller, M7JaxMicrophysics, already runs in
-# float64 throughout); without x64 enabled those casts silently truncate to
-# float32 with a UserWarning rather than erroring, which is what the
-# solar_activity/dipole-axis tests below would otherwise fail on.
+# are dtype-generic (jax-gcm#1017 task 6: they anchor on their own
+# arguments' dtype, the same rule M7-JAX's kappa/Kazil tables follow) --
+# the Fortran-parity comparisons below need genuine float64 precision at
+# 1e-12, which is what the context manager is for, not truncation-avoidance.
+# (Earlier in this task, before the float32 forward core existed, these
+# kernels forced float64 internally on the premise that the only real
+# caller, M7JaxMicrophysics, always ran in float64; task 6 made that premise
+# stale by adding a float32-throughout core, so the force was removed.)
 from jcm.physics.aerosol.jam.chemistry.gcr_ionisation import (  # noqa: E402
     ObrienGcrTable,
     _VCR_N,

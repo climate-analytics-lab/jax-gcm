@@ -21,11 +21,17 @@ cloud_scheme: 2m
 radiation_scheme: rrtmgp
 
 # The microphysics core: m7-jax, the complete native m7 call on HAM's 18
-# components (nwater=1, lscond, lscoag). H2SO4/H2O nucleation runs Vehkamaeki
-# (nsnucl=1) until the Kazil-Lovejoy table and the GCR ion-pair rates are
-# staged (#1017 F5); the reference is nsnucl=2, which the core refuses until
-# then. Organic activation nucleation in the PBL is HAM's default nonucl=1.
+# components (nwater=1, lscond, lscoag, ageing), with the reference
+# H2SO4/H2O nucleation nsnucl=2 (Kazil and Lovejoy 2007, ion-mediated) driven
+# by host-side GCR ionisation, and organic activation nucleation in the PBL
+# (nonucl=1, HAM's default). nsnucl=2 needs $HAM_INPUT_DIR holding
+# parnuc.15H2SO4.A0.total.nc, solmin.txt and solmax.txt; construction fails,
+# naming what is missing, rather than silently running other physics. To run
+# without those files, choose binary nucleation explicitly:
+#     +physics.jam_microphysics_options.nucleation_scheme=1
 jam_microphysics: m7_jax
+jam_microphysics_options:
+  nucleation_scheme: 2
 
 # HAM has no explicit cloud-borne phase: interstitial aerosol is scavenged by
 # its activated fraction.

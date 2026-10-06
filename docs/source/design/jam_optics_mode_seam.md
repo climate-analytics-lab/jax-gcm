@@ -130,6 +130,25 @@ would be a config file per choice resolving to the identical two classes.
 Still no manual `physics.replace(...)` needed for these two, unlike a
 genuinely external backend — that is what "vendored in-tree" buys it.
 
+`HamLutOpticsTerm` prefers HAM's own authentic Mie LUT files
+(`lut_optical_properties_M7.nc` / `lut_optical_properties_lw_M7.nc`) at
+construction — `ham_optics_tables_dir`/`jam_optics_tables_dir`, or by
+default the `HAM_INPUT_DIR` environment variable, should point at a
+directory holding them (see `jcm.physics.aerosol.jam.optics.ham_mie_tables`'s
+module docstring for what's in them and how they're read) — and FALLS BACK
+to `ham_mie_tables.default_ham_mie_tables()` (jcm's own built approximation,
+with jcm's own Mie kernel on the same axes) when they are not reachable,
+rather than raising: the real files are a nice-to-have, not a hard
+construction requirement. Which source was used is logged once and recorded
+as `term.table_source` (`"authentic"`, `"jcm_built"`, or `"explicit"` when a
+test passes `tables=` directly). The built approximation's own LW tables
+compute absorption directly (an earlier version computed extinction
+instead, which overstated LW aerosol optical depth by orders of magnitude
+wherever scattering dominates) — even so, it is not a literal port of
+whatever offline tool built HAM's authentic tables, so it disagrees with
+them at a level measured and tolerance-checked in
+`ham_mie_tables_test.py::test_built_tables_vs_authentic_measured_tolerance`.
+
 ## Notes for backend authors
 
 Three properties are easy to assume and wrong, and none of them is the seam's
