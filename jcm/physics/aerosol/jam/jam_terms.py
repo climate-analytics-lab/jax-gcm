@@ -195,6 +195,7 @@ def jam_aerosol_physics(
     optics_backend: str = "jcm",
     optics_diagnostics: bool = False,
     seasalt: SeaSaltParameters | None = None,
+    seasalt_scheme: str = "gong",
     dms: DmsParameters | None = None,
     dust: DustParameters | None = None,
     dust_preset: int = 4,
@@ -245,7 +246,13 @@ def jam_aerosol_physics(
             Both settings are complete physics, one flag apart.
         arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         seasalt/dms/dust: optional ``Parameters`` overrides for the natural
-            emission schemes (Gong sea salt, Nightingale DMS, Tegen dust).
+            emission schemes (Gong/Long sea salt, Nightingale DMS, Tegen dust).
+        seasalt_scheme: ``"gong"`` (default, unchanged) or ``"long"`` (Long
+            et al. 2011 + the Sofiev et al. 2011 SST correction, HAM
+            ``nseasalt=7``; #1017). ``"long"`` requires the microphysics
+            core's population to carry exactly two ``ss`` classes, in HAM's
+            own accumulation-then-coarse order — see
+            :class:`~jcm.physics.aerosol.jam.emissions.seasalt.SeaSaltEmissions`.
         dust_preset: HAMMOZ ``ndust`` preset — 4 (default, Stier 2005 +
             East-Asian soils = HAM2), 3 (Stier 2005) or 2 (Cheng 2008).
             Ignored when an explicit ``dust`` parameter object is given.
@@ -306,7 +313,7 @@ def jam_aerosol_physics(
     core = _resolve_microphysics(microphysics, cloud_borne)
     spec = core.spec
     emissions = [
-        SeaSaltEmissions(params=seasalt, spec=spec),
+        SeaSaltEmissions(params=seasalt, spec=spec, scheme=seasalt_scheme),
         DmsEmissions(params=dms, spec=spec),
         DustEmissions(params=dust, ndust=dust_preset, nudged=dust_nudged,
                       nduscale_scale=dust_nduscale_scale, spec=spec),

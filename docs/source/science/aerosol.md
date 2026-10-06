@@ -558,7 +558,18 @@ cancels and its below-cloud term acts on the grid mean.
 differentiable jittable forms. Gong sea salt is computed **online** from the 10 m
 wind and open-water fraction, so it needs no input file; DMS reads a prescribed
 seawater-concentration field and dust the five prescribed soil/source fields
-below, and both are inert until those are supplied. Anthropogenic emissions are either bulk
+below, and both are inert until those are supplied. A second sea-salt scheme,
+Long et al. (2011) with the Sofiev et al. (2011) SST correction (HAM
+``nseasalt=7``), is selectable with ``jam_seasalt_scheme="long"``
+(``echam_physics``) / ``seasalt_scheme="long"`` (``jam_aerosol_physics``); unlike
+Gong, its source function does not factorise into wind-only per-class constants
+(the SST correction's shape varies with particle size), so it is evaluated per
+bin against the actual SST field (``forcing.sea_surface_temperature``) every
+call, and it ports HAM's own fixed two-class (accumulation, coarse) AS/CS split
+rather than Gong's population-size-range partition — it therefore requires the
+population's ``ss`` species to carry exactly two classes in that order (MAM4's
+three, including an Aitken-mode sea-salt tracer HAM's M7 configuration does not
+have, do not qualify). Anthropogenic emissions are either bulk
 super-sectors with in-model differentiable speciation or CAM6/MAM4-faithful
 already-speciated per-tracer fields. Dry deposition
 (``jcm/physics/aerosol/jam/drydep/``) is a resistance-in-series scheme with a

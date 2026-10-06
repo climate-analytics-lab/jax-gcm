@@ -1,0 +1,88 @@
+{
+  "source": "ECHAM6.3.0-HAM2.3-moz1.0 r7492 mo_ham_m7_emi_seasalt.f90 (start_emi_seasalt, seasalt_emissions_long, seasalt_emissions_gong), compiled UNMODIFIED; harness driver/stubs are own code",
+  "echam_md5": {
+    "mo_kind.f90": "f7db37634d715105ed356b1a260a85ac",
+    "mo_math_constants.f90": "243280e0c9c1d4835bb13d24797820a7",
+    "mo_ham_m7_emi_seasalt.f90": "b096bb60a2676e466150d62cd8a32c75"
+  },
+  "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+  "flags_o2": [
+    "-O2",
+    "-g",
+    "-fbacktrace",
+    "-cpp",
+    "-ffree-line-length-none",
+    "-ffp-contract=off",
+    "-fimplicit-none"
+  ],
+  "flags_o0": [
+    "-O0",
+    "-g",
+    "-fbacktrace",
+    "-cpp",
+    "-ffree-line-length-none",
+    "-ffp-contract=off",
+    "-fimplicit-none"
+  ],
+  "ss_density_kg_m3": 2165.0,
+  "grid": {
+    "wind_m_s": [
+      0.0,
+      1.0,
+      3.0,
+      5.0,
+      7.0,
+      10.0,
+      15.0,
+      20.0,
+      25.0,
+      30.0
+    ],
+    "sst_k": [
+      271.15,
+      275.0,
+      278.15,
+      290.0,
+      300.0,
+      305.0
+    ],
+    "seaice_frac": [
+      0.0,
+      0.5,
+      1.0
+    ],
+    "land_lake_frac": [
+      [
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.3
+      ],
+      [
+        0.3,
+        0.0
+      ],
+      [
+        0.3,
+        0.3
+      ]
+    ]
+  },
+  "n_cases": 720,
+  "max_abs_diff_o2_vs_o0": {
+    "long_massf_as": 0.0,
+    "long_massf_cs": 0.0,
+    "long_numf_as": 0.0,
+    "long_numf_cs": 0.0,
+    "gong_massf_as": 0.0,
+    "gong_massf_cs": 0.0,
+    "gong_numf_as": 0.0,
+    "gong_numf_cs": 0.0
+  },
+  "platform": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+  "built_at_unix": 1791231185.2622035,
+  "npz_sha256": "60e685c0a644d26cbf71cb44b27838207f0b689bc847e5f2fabfdfa5afae7f5c",
+  "run_seconds": 0.034149796701967716
+}
