@@ -15,40 +15,35 @@ ECHAM input -> jcm source
 ======================  =========================================  ==========================================================
 ECHAM (``mo_ham_wetdep.f90`` unless noted)                          jcm source
 ======================  =========================================  ==========================================================
-``pfrain``/``pfsnow``  rain/snow flux falling INTO this layer       ``WetScavenging``'s clean carrier ledger
-                       [kg/m2/s] (:147-148)                         (``flux_in``, built from ``CloudData``'s
-                                                                     ``precip_formation_rate``/``precip_evaporation_rate``)
-                                                                     split by ``pice`` -- the in-cloud condensate pool's
-                                                                     ice fraction, already computed for the nucleation
-                                                                     pathway -- into ``pfsnow_in = flux_in*pice``,
-                                                                     ``pfrain_in = flux_in*(1-pice)``. FLAGGED
-                                                                     SIMPLIFICATION: jcm's cloud schemes do not publish a
-                                                                     liquid/frozen split of the ENTERING flux free of the
-                                                                     ice-sedimentation contamination ``flux_in`` itself
-                                                                     was built to avoid (see ``wetdep_term.py``), so this
-                                                                     reuses the best faithful proxy already in scope
-                                                                     rather than a verified match to HAMMOZ's own
-                                                                     prognostic pfrain/pfsnow fields -- for lead/
-                                                                     maintainer review (jax-gcm#1017).
+``pfrain``/``pfsnow``  rain/snow flux falling INTO this layer       ``CloudData``-adjacent ``"pfrain"``/``"pfsnow"``
+                       [kg/m2/s] (:147-148) -- the in-cloud,         diagnostics, published by ``Lohmann2MMicrophysics``
+                       cover-normalised, pre-evaporation flux        only when ``configure_wetdep_hydro_diagnostics(True)``
+                       ``update_precip_fluxes`` computes every       is set -- the SAME call's own ``pfrain``/``pfsnow``
+                       level (mo_cloud_micro_2m.f90), threaded to    OUTPUTs threaded out, not a derived or approximated
+                       ``cloud_subm_2`` as ``zfrain``/``zfsnow``     quantity.
+                       (:1813); ``cloud_subm_2``'s own comment at
+                       mo_submodel_interface.f90:1676-1677 reads
+                       "rain/snow flux before evaporation", matching
+                       exactly.
 ``pclc``               fraction of grid box covered by precip,      ``CloudData``-adjacent ``"precip_cover"`` diagnostic,
                        STRATIFORM case (:147; traced to              published by ``Lohmann2MMicrophysics`` only when
-                       ``mo_submodel_interface.f90:1771``'s          ``configure_precip_cover_diagnostic(True)`` is set
+                       ``mo_submodel_interface.f90:1771``'s          ``configure_wetdep_hydro_diagnostics(True)`` is set
                        ``pclcpre``, itself an argument of            (``echam_physics`` turns this on exactly when
                        ``cloud_subm_2`` supplied by ECHAM's cloud    ``jam_wetdep_scheme="ham_below_cloud"``); the POST-
                        microphysics, outside this file)              update value (``mo_cloud_micro_2m.f90:1719-1742``)
 ``mr``                 wet radius, clipped to 50 um, converted to   ``aer.r_wet[i]`` (number tracers) or
                        um, mass-median-scaled for mass tracers      ``aer.r_wet[i]*cmedr2mmedr(mode.geom_std_dev)`` (mass
-                       (:272-273, ``zrad_fac``)                     tracers) -- ``cmedr2mmedr = exp(3 ln^2(sigma_g))``
-                                                                     (``mo_ham_m7ctl.f90:419``)
+                                                                     tracers) -- ``cmedr2mmedr = exp(3 ln^2(sigma_g))``
+                       (:272-273, ``zrad_fac``)                     (``mo_ham_m7ctl.f90:419``)
 ======================  =========================================  ==========================================================
 
-``pclc`` and the pfrain/pfsnow phase split are the two inputs this slice could
-not map to an existing jcm diagnostic outright; ``pclc`` is now wired exactly,
-the phase split is a documented, flagged approximation (above) pending
-maintainer input -- see ``docs/source/design/jam_aerosol_removal.md``'s
-"The HAM below-cloud scheme" section for both, plus the two
-reference-harness findings (the 50 um clip and the ``Q12``/``Q21`` corner
-swap) below.
+``pclc`` and ``pfrain``/``pfsnow`` are the inputs this slice could not map to
+an existing jcm diagnostic outright; all three are now wired exactly (jcm's
+2M scheme already computes each identically to ECHAM internally, it just
+discarded them before this PR) -- see
+``docs/source/design/jam_aerosol_removal.md``'s "The HAM below-cloud scheme"
+section, plus the two reference-harness findings (the 50 um clip and the
+``Q12``/``Q21`` corner swap) below.
 
 Croft tables, lookup and index formulas
 ----------------------------------------

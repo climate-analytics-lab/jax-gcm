@@ -470,14 +470,14 @@ class WetScavenging(PhysicsTerm):
         with the shared CAM/Slinn coefficient, which the below-cloud-only
         slice does not revisit.
 
-        ``"ham_below_cloud"`` requires the cloud scheme to publish a
-        ``"precip_cover"`` diagnostic (HAMMOZ's stratiform ``pclcpre`` —
-        the Lohmann 2M scheme's ``configure_precip_cover_diagnostic(True)``,
-        which ``echam_physics`` turns on exactly when it selects this
-        scheme): HAM's below-cloud removal acts only within the
-        precipitating fraction of the box, which CAM's form does not need
-        (its swept-volume cancellation makes the cloud weighting a no-op,
-        see ``below_cloud_rate``'s docstring).
+        ``"ham_below_cloud"`` requires the cloud scheme to publish
+        ``"precip_cover"``/``"pfrain"``/``"pfsnow"`` (HAMMOZ's stratiform
+        ``pclcpre``/``zfrain``/``zfsnow`` — the Lohmann 2M scheme's
+        ``configure_wetdep_hydro_diagnostics(True)``, which ``echam_physics``
+        turns on exactly when it selects this scheme): HAM's below-cloud
+        removal acts only within the precipitating fraction of the box,
+        which CAM's form does not need (its swept-volume cancellation makes
+        the cloud weighting a no-op, see ``below_cloud_rate``'s docstring).
         """
         if scheme not in ("jcm", "ham_below_cloud"):
             raise ValueError(f"scheme must be 'jcm' or 'ham_below_cloud', got {scheme!r}")
@@ -515,7 +515,7 @@ class WetScavenging(PhysicsTerm):
             # silently seeding an unmixed, unmanaged dict.
             self.requires = (*type(self).requires, CARRY_KEY)
         if self.scheme == "ham_below_cloud":
-            self.requires = (*self.requires, "precip_cover")
+            self.requires = (*self.requires, "precip_cover", "pfrain", "pfsnow")
 
     def __call__(self, state, diagnostics, forcing, terrain):
         params = self.params.get_value()
@@ -624,22 +624,24 @@ class WetScavenging(PhysicsTerm):
         jam_act = diagnostics.get("_jam_activation")
 
         if self.scheme == "ham_below_cloud":
-            # HAM's below-cloud scheme needs the carrier split into a rain
-            # and a snow flux (bc_rain/bc_snow read separate tables), but
-            # the clean carrier ledger this term builds (``flux_in``,
-            # above) is deliberately the SUM of the two -- jcm's cloud
-            # schemes do not publish a liquid/frozen split of the ENTERING
-            # flux free of the same ice-sedimentation contamination
-            # ``flux_in`` itself was built to avoid (see the ``flux_in``
-            # comment above). ``pice`` (the in-cloud condensate pool's ice
-            # fraction, already computed for the nucleation pathway above)
-            # is reused here as the best faithful proxy already in scope
-            # for the phase mix of precip FORMING at each level: this is a
-            # documented simplification flagged for lead/maintainer review
-            # (jax-gcm#1017), not a verified match to HAMMOZ's own
-            # prognostic pfrain/pfsnow fields.
-            pfsnow_in = flux_in * pice
-            pfrain_in = flux_in - pfsnow_in
+            # HAM's below-cloud scheme needs pfrain/pfsnow: the in-cloud,
+            # cover-normalised, pre-evaporation rain/snow flux
+            # ``update_precip_fluxes`` computes every level
+            # (mo_cloud_micro_2m.f90's own ``pfrain``/``pfsnow`` OUTPUTs,
+            # threaded to ``cloud_subm_2`` as ``zfrain``/``zfsnow`` at
+            # mo_cloud_micro_2m.f90:1813; ``cloud_subm_2``'s own dummy-
+            # argument comment at mo_submodel_interface.f90:1676-1677 reads
+            # "rain/snow flux before evaporation [kg/m2/s]", confirming the
+            # match). jcm's 2M scheme already computes this exact quantity
+            # internally every level and now publishes it on request
+            # (``configure_wetdep_hydro_diagnostics``) -- NOT the scan's raw
+            # carry (ECHAM's column ``prfl``/``psfl``, post-evaporation and
+            # not cover-normalised) and NOT an ice-fraction proxy split of
+            # the stratiform ledger (an earlier version of this wiring did
+            # that; it is no longer needed since the exact value is
+            # available).
+            pfrain_in = diagnostics["pfrain"]
+            pfsnow_in = diagnostics["pfsnow"]
             # HAMMOZ's stratiform below-cloud removal acts only within the
             # precipitating fraction of the box (mo_ham_wetdep.f90:434-437,
             # ``pclc``); CAM's form does not need this (see
