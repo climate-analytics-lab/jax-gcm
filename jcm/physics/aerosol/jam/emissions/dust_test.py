@@ -71,7 +71,7 @@ def _reference_spectrum(flux_type, size_type, u_star, nduscale=0.86, utsc=1.0,
 
 
 def _inputs(nlev=3, ncols=2, u10=9.0, source=1.0, soil=None, psrc=0.0,
-            regions=1, snow=0.0, wetness=0.0):
+            regions=1, snow=0.0, wetness=0.0, msg=None):
     from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
         VerticalDiffusionData,
     )
@@ -95,6 +95,8 @@ def _inputs(nlev=3, ncols=2, u10=9.0, source=1.0, soil=None, psrc=0.0,
         dust_source=bc(source), dust_preferential=bc(psrc),
         dust_soil_types=fractions, dust_regions=bc(regions),
         snowc_am=bc(snow), soilw_rel=bc(wetness))
+    if msg is not None:
+        forcing.dust_msg = bc(msg)
     return state, diagnostics, forcing, None
 
 
@@ -266,9 +268,10 @@ class SnowAndMoistureTest(unittest.TestCase):
         np.testing.assert_allclose(_total_mass(buried), 0.0)
 
     def test_saturated_soil_emits_nothing_in_every_preset(self):
-        for ndust in (2, 3, 4):
+        for ndust in (2, 3, 4, 5):
             term = DustEmissions(params=DustParameters.preset(ndust))
-            state, diagnostics, forcing, terrain = _inputs(wetness=1.0)
+            state, diagnostics, forcing, terrain = _inputs(wetness=1.0,
+                                                            msg=0.0)
             # ndust=2 runs the satellite roughness map, which is mandatory there.
             forcing.dust_roughness = jnp.full((2,), 0.001)
             wet, _ = term(state, diagnostics, forcing, terrain)
@@ -328,9 +331,9 @@ class SnowAndMoistureTest(unittest.TestCase):
             np.asarray(bare_diags[DUST_SALTATION_GATE_KEY]), 0.0)
 
     def test_damp_soil_still_emits_with_fecan_off(self):
-        for ndust in (3, 4):
+        for ndust in (3, 4, 5):
             term = DustEmissions(params=DustParameters.preset(ndust))
-            damp, _ = term(*_inputs(wetness=0.5))
+            damp, _ = term(*_inputs(wetness=0.5, msg=0.0))
             self.assertTrue(np.all(_total_mass(damp) > 0.0),
                             msg=f"ndust={ndust}")
 
@@ -464,6 +467,148 @@ class EastAsiaOverlapTest(unittest.TestCase):
         _, _, both, _ = _inputs(soil={"type13": 1.0, "type17": 1.0})
         np.testing.assert_allclose(
             np.asarray(term._threshold_scale(both, 2, params)), 1.0)
+
+
+class MSGSourceTest(unittest.TestCase):
+    """``ndust = 5``'s MSG-SEVIRI Saharan override (mo_ham_dust.f90:711-740)."""
+
+    def test_preset_5_shares_every_namelist_default_with_preset_4(self):
+        # CASE (4, 5) in get_dust_namelist_defaults is one shared block; only
+        # the post-read mat_msg override (use_msg_source) differs.
+        p4, p5 = DustParameters.preset(4), DustParameters.preset(5)
+        for field in ("soil_table", "nduscale_reg", "threshold_scale",
+                     "r_dust_umin", "r_dust_lai", "r_dust_z0s", "ndurough",
+                     "r_dust_scz0", "r_dust_z0min", "w0", "aeff", "xeff",
+                     "a_rnolds", "b_rnolds", "x_rnolds", "d_thrsld",
+                     "uth_coeff"):
+            np.testing.assert_allclose(
+                np.asarray(getattr(p4, field)), np.asarray(getattr(p5, field)),
+                err_msg=field)
+        self.assertEqual(p4.fecan_moisture, p5.fecan_moisture)
+        self.assertEqual(p4.east_asia, p5.east_asia)
+        self.assertFalse(p4.use_msg_source)
+        self.assertTrue(p5.use_msg_source)
+
+    def test_zero_msg_leaves_the_standard_mixture_unchanged(self):
+        # mat_msg == 0 everywhere skips the Fortran's `IF (mat_msg(i,j).gt.0)`
+        # block entirely, so ndust=5 must reproduce ndust=4's weights exactly.
+        p4, p5 = DustParameters.preset(4), DustParameters.preset(5)
+        soil = {"type2": 0.4, "type6": 0.1}
+        _, _, forcing, _ = _inputs(soil=soil, psrc=0.3, msg=0.0)
+        term4, term5 = DustEmissions(params=p4), DustEmissions(params=p5)
+        w4, psrc4 = term4._soil_weights(forcing, 2, p4)
+        w5, psrc5 = term5._soil_weights(forcing, 2, p5)
+        for row4, row5 in zip(w4, w5):
+            np.testing.assert_allclose(np.asarray(row4), np.asarray(row5))
+        np.testing.assert_allclose(np.asarray(psrc4), np.asarray(psrc5))
+
+    def test_msg_below_strong_threshold_zeroes_soil_and_preferential_source(self):
+        # 0 < mat_msg < 0.01: mat_s1..mat_s6 and mat_psrc all go to zero, even
+        # though the input had a positive preferential source and soil type 2.
+        params = DustParameters.preset(5)
+        term = DustEmissions(params=params)
+        _, _, forcing, _ = _inputs(soil={"type2": 1.0}, psrc=0.3, msg=0.005)
+        weights, psrc = term._soil_weights(forcing, 2, params)
+        for row in weights[:5]:   # residual + the four global Zobler rows
+            np.testing.assert_allclose(np.asarray(row), 0.0, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(psrc), 0.0)
+
+    def test_msg_at_or_above_threshold_forces_the_full_preferential_source(self):
+        # mat_msg >= 0.01 additionally sets mat_psrc = 1 (overriding the IF
+        # mat_msg > 0 branch's own mat_psrc = 0 immediately above it).
+        params = DustParameters.preset(5)
+        term = DustEmissions(params=params)
+        _, _, forcing, _ = _inputs(soil={"type2": 1.0}, psrc=0.0, msg=0.01)
+        weights, psrc = term._soil_weights(forcing, 2, params)
+        for row in weights[:5]:
+            np.testing.assert_allclose(np.asarray(row), 0.0, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(psrc), 1.0)
+
+    def test_per_column_msg_only_overrides_the_active_columns(self):
+        # mat_msg is per-cell: a column below the map's threshold must keep
+        # its ordinary soil mixture while its neighbour is overridden.
+        params = DustParameters.preset(5)
+        term = DustEmissions(params=params)
+        _, _, forcing, _ = _inputs(soil={"type2": 1.0}, psrc=0.0,
+                                   msg=(0.0, 0.02))
+        weights, psrc = term._soil_weights(forcing, 2, params)
+        residual = np.asarray(weights[0])
+        self.assertAlmostEqual(float(residual[0]), 0.0, places=12)   # 1 - type2
+        self.assertAlmostEqual(float(residual[1]), 0.0, places=12)   # MSG-zeroed
+        np.testing.assert_allclose(np.asarray(psrc), [0.0, 1.0])
+
+    def test_east_asian_textures_are_not_touched_by_the_msg_override(self):
+        # mo_ham_dust.f90:729-735 zeroes mat_s1..mat_s6 only; mat_s13..mat_s17
+        # are untouched, so with k_dust_easo=2 and an MSG-active-but-not-
+        # strong cell (psrc stays 0, so `land` does not mask the row) the
+        # residual can go negative exactly as the Fortran's literal
+        # `tmpc = mat_s1 - mat_s2 ... - mf17` does (the module docstring on
+        # ``_soil_weights`` calls this out as a faithfully-ported edge case,
+        # not a target to clip towards zero).
+        params = DustParameters.preset(5)
+        term = DustEmissions(params=params)
+        _, _, forcing, _ = _inputs(soil={"type15": 0.3}, psrc=0.0, msg=0.005)
+        weights, psrc = term._soil_weights(forcing, 2, params)
+        residual, east15 = np.asarray(weights[0]), np.asarray(weights[7])
+        np.testing.assert_allclose(residual, -0.3, atol=1e-12)
+        np.testing.assert_allclose(east15, 0.3, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(psrc), 0.0)
+
+    def test_missing_dust_msg_raises_for_ndust5_only(self):
+        state, diagnostics, forcing, terrain = _inputs()
+        DustEmissions()(state, diagnostics, forcing, terrain)   # ndust=4: fine
+        with self.assertRaisesRegex(ValueError, "dust_msg"):
+            DustEmissions(params=DustParameters.preset(5))(
+                state, diagnostics, forcing, terrain)
+
+    def test_end_to_end_flux_matches_the_soil_weight_override(self):
+        # Integration check: a fully MSG-active, strong cell emits the pure
+        # preferential-source spectrum (type 10/11) and nothing else.
+        params = DustParameters.preset(5)
+        term = DustEmissions(params=params)
+        zero_msg, _ = term(*_inputs(soil={"type2": 1.0}, psrc=0.0, msg=0.0))
+        active, _ = term(*_inputs(soil={"type2": 1.0}, psrc=0.0, msg=0.02))
+        # The ordinary type-2 mixture emits (umin pre-gate cleared at u10=9);
+        # forcing the cell onto the preferential spectrum changes the flux.
+        self.assertTrue(np.all(_total_mass(zero_msg) > 0.0))
+        self.assertTrue(np.all(_total_mass(active) > 0.0))
+        self.assertFalse(np.allclose(_total_mass(zero_msg), _total_mass(active)))
+
+    def test_matches_the_compiled_fortran_reference(self):
+        # jcm/data/test/echam_cloud_reference/hamdustmsg.npz: the UNMODIFIED
+        # mo_ham_dust.f90:685-747 block (jax-gcm#1017's harness at
+        # /scr/dwatsonparris/ham-m7/w7/dust-harness; see hamdustmsg_
+        # provenance.json), compiled with gfortran and run on these same 7
+        # cells. Needs no shared disk: the reference is committed data. The
+        # block is wind/moisture-independent (it runs once at annual-field
+        # read time), so this checks _soil_weights alone, at JAX x64 to
+        # match the Fortran's REAL(dp) (float32 introduces ~1e-8 relative
+        # dtype noise, not a logic difference -- see the provenance note).
+        from pathlib import Path
+        ref = np.load(Path(__file__).resolve().parents[4] / "data" / "test"
+                      / "echam_cloud_reference" / "hamdustmsg.npz")
+        ncols = ref["labels"].size
+        with jax.enable_x64(True):
+            fractions = {name: jnp.zeros((ncols,)) for name in SOIL_TYPE_VARS}
+            fractions["type2"] = jnp.asarray(ref["type2"])
+            fractions["type3"] = jnp.asarray(ref["type3"])
+            fractions["type4"] = jnp.asarray(ref["type4"])
+            fractions["type6"] = jnp.asarray(ref["type6"])
+            fractions["type15"] = jnp.asarray(ref["type15"])
+            forcing = types.SimpleNamespace(
+                dust_preferential=jnp.asarray(ref["dust_preferential_in"]),
+                dust_soil_types=fractions, dust_msg=jnp.asarray(ref["dust_msg"]))
+            params = DustParameters.preset(5)
+            term = DustEmissions(params=params)
+            weights, psrc = term._soil_weights(forcing, ncols, params)
+            residual = np.asarray(weights[0])
+            psrc = np.asarray(psrc)
+        np.testing.assert_allclose(
+            residual, ref["fortran_residual_weighted"], atol=1e-10,
+            err_msg=list(ref["labels"]))
+        np.testing.assert_allclose(
+            psrc, ref["fortran_mat_psrc"], atol=1e-10,
+            err_msg=list(ref["labels"]))
 
 
 class RegionTuningTest(unittest.TestCase):
@@ -808,7 +953,7 @@ class InertTest(unittest.TestCase):
             temperature=jnp.full((3, 2), 295.0))
         diagnostics = {"air_density": jnp.full((3, 2), 1.2),
                        "layer_thickness": jnp.full((3, 2), 100.0)}
-        for ndust in (2, 3, 4):
+        for ndust in (2, 3, 4, 5):
             term = DustEmissions(params=DustParameters.preset(ndust))
             for forcing in (None, types.SimpleNamespace()):
                 tend, diag = term(state, diagnostics, forcing, None)
@@ -824,9 +969,18 @@ class InertTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "dust_soil_types"):
             DustEmissions()(state, diagnostics, forcing, None)
 
+    def test_ndust5_without_msg_field_raises(self):
+        # ndust=5 needs forcing.dust_msg to run the Sahara-source override;
+        # without it the preset would silently fall back to ndust=4's
+        # standard mixture rather than HAM's MSG-gated one.
+        state, diagnostics, forcing, _ = _inputs()
+        with self.assertRaisesRegex(ValueError, "dust_msg"):
+            DustEmissions(params=DustParameters.preset(5))(
+                state, diagnostics, forcing, None)
+
     def test_unsupported_preset_raises(self):
-        with self.assertRaisesRegex(ValueError, "ndust=5"):
-            DustParameters.preset(5)
+        with self.assertRaisesRegex(ValueError, "ndust=6"):
+            DustParameters.preset(6)
 
 
 if __name__ == "__main__":

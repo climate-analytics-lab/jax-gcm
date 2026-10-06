@@ -28,7 +28,10 @@ the gate *and* a linear factor), ``dust_preferential`` (paleolake area fraction,
 a texture swap), ``dust_soil_types`` (nine texture area fractions),
 ``dust_regions`` (the 1-8 tuning index) and ``dust_roughness`` (the satellite
 map, live only on the ``ndurough = 0`` sensitivity path — the Fortran reads it
-every month and then overwrites it with the constant).
+every month and then overwrites it with the constant). A sixth,
+``dust_msg`` (the MSG-SEVIRI Saharan dust-source-activation frequency), drives
+the Sahara-source override live only on ``ndust = 5`` (:attr:`DustParameters.
+use_msg_source`).
 
 Two land fields gate the flux on top of those: ``snowc_am`` (snow cover) and
 ``soilw_rel``, the ECHAM-like relative soil wetness ``ws/wsmx`` the saturation
@@ -451,12 +454,17 @@ class DustParameters:
     #: ``ndurough = 0``: use the monthly satellite roughness map instead of the
     #: constant. The constant itself (``ndurough``) stays a differentiable leaf.
     use_roughness_map: bool = struct.field(pytree_node=False, default=False)
+    #: ``ndust = 5`` only: replace the standard soil mixture in cells covered
+    #: by the MSG-SEVIRI Saharan dust-source-activation map
+    #: (``mo_ham_dust.f90:711-740``) — see :meth:`DustEmissions._soil_weights`.
+    #: False (the Fortran skips this block entirely) for every other preset.
+    use_msg_source: bool = struct.field(pytree_node=False, default=False)
 
     @classmethod
     def preset(cls, ndust: int = 4, truncation: int | None = 63,
                nudged: bool = False,
                nduscale_scale: float | None = None) -> "DustParameters":
-        """``mo_ham_dust.f90::get_dust_namelist_defaults`` for ``ndust`` 2-4.
+        """``mo_ham_dust.f90::get_dust_namelist_defaults`` for ``ndust`` 2-5.
 
         ``truncation = None`` means a non-spectral grid (the pySES CAM-SE
         backend). HAM tunes ``nduscale_reg`` only at T63 and its ``ndust = 3``
@@ -486,7 +494,13 @@ class DustParameters:
             poly = (0.86 if truncation is None else
                     -7.9365e-5 * truncation ** 2 + 0.0095238 * truncation + 0.575)
             scale[:] = 0.86 if truncation is None or truncation > 63 else poly
-        elif ndust == 4:                     # Stier (2005) + East-Asia soils (HAM2)
+        elif ndust in (4, 5):
+            # Stier (2005) + East-Asia soils (HAM2); ndust=5 additionally
+            # swaps the Sahara to the MSG-SEVIRI source-activation map.
+            # ``get_dust_namelist_defaults``'s ``CASE (4, 5)`` shares every
+            # namelist default between the two -- only ``bgc_read_annual_
+            # fields``'s post-read override (mo_ham_dust.f90:711-740) differs,
+            # which is ``use_msg_source`` below, not a namelist parameter.
             rough, lai, smst, easo = 0.001, 0.1, False, 2
             table[13, ALPHA_COL] = 1.0e-6    # r_dust_af14: loess
             thresh[0] = 0.6                  # r_dust_sf13: Taklimakan
@@ -496,15 +510,23 @@ class DustParameters:
                 scale[:] = [low, high, high, low, low, low, high, low]
                 # The one grid/preset combination that carries a jcm
                 # calibration scalar at all (#808); every other resolution and
-                # preset keeps HAM's number untouched (#810).
+                # preset keeps HAM's number untouched (#810). ndust=5 shares
+                # ndust=4's T63 regional vector bit-for-bit (same CASE (4, 5)
+                # namelist block), and the scale itself corrects a mismatch
+                # between jcm's simulated 10 m wind climate and the one HAM's
+                # nduscale_reg was tuned against -- a property of the HOST
+                # model, not of which soil-source variant is active, so it
+                # applies to ndust=5 exactly as it does to ndust=4 (reported
+                # to the #1017 lead; not a STOP, since the reasoning carries
+                # over directly from #808/#810 and nothing here is unverified).
                 calibrated = NDUSCALE_JCM_T63_SCALE
             else:
                 scale[:] = 0.86
         else:
             raise ValueError(
-                f"ndust={ndust}: only the 2 (Cheng), 3 (Stier 2005) and 4 "
-                "(Stier + East-Asia soils, HAM2) presets are ported; ndust=5 "
-                "needs the MSG-SEVIRI activation map, which is not available.")
+                f"ndust={ndust}: only 2 (Cheng), 3 (Stier 2005), 4 (Stier + "
+                "East-Asia soils, HAM2) and 5 (Stier + East-Asia soils + MSG "
+                "Saharan source-activation map, HAM2) are ported.")
         scale = scale * (calibrated if nduscale_scale is None
                          else float(nduscale_scale))
         return cls(
@@ -528,6 +550,7 @@ class DustParameters:
             fecan_moisture=smst,
             east_asia=easo,
             use_roughness_map=(rough == 0.0),
+            use_msg_source=(ndust == 5),
         )
 
     @classmethod
@@ -582,13 +605,19 @@ def _soil_fractions(forcing, ncols):
             for name in SOIL_TYPE_VARS}
 
 
-def _require_companions(forcing, ncols):
+def _require_companions(forcing, ncols, params):
     """Fail rather than emit an untuned, all-coarse flux on missing companions.
 
     Unlike a missing ``dust_source`` (which disables the term), a missing
     texture / preferential / region field still emits: the residual becomes pure
     soil type 1 and every cell takes region 1. Both assembly doors already
     refuse this, so reaching it means the forcing was hand-assembled.
+
+    ``params.use_msg_source`` (``ndust = 5``) additionally requires
+    ``forcing.dust_msg`` — without it the Sahara-source override
+    (:meth:`DustEmissions._soil_weights`) could not run and the preset would
+    silently emit ndust=4's standard-mixture flux instead of HAM's
+    MSG-SEVIRI-gated one.
     """
     missing = [name for name in
                ("dust_preferential", "dust_soil_types", "dust_regions")
@@ -602,6 +631,10 @@ def _require_companions(forcing, ncols):
         field = getattr(forcing, name, None)
         if field is not None and jnp.size(field) != ncols:
             missing.append(f"{name} (wrong shape for {ncols} columns)")
+    if params.use_msg_source:
+        msg = getattr(forcing, "dust_msg", None)
+        if msg is None or jnp.size(msg) != ncols:
+            missing.append("dust_msg (ndust=5's MSG-SEVIRI Saharan map)")
     if missing:
         raise ValueError(
             f"DustEmissions has a dust_source but {sorted(set(missing))} are "
@@ -686,6 +719,27 @@ class DustEmissions(PhysicsTerm):
         file fields are two *overlapping* partitions (global Zobler textures and
         Cheng's Chinese textures, which overlap over China), so a naive nine-way
         sum drives the type-1 residual negative.
+
+        ``params.use_msg_source`` (``ndust = 5``) applies a THIRD override on
+        top, exactly as ``bgc_read_annual_fields`` runs it after the East-Asia
+        block (mo_ham_dust.f90:711-740): wherever ``forcing.dust_msg`` (HAM's
+        ``mat_msg``, the MSG-SEVIRI Saharan dust-source-activation frequency,
+        in [0, 1]) is positive, the residual and the four global Zobler
+        textures (``mat_s1..mat_s6``) are zeroed -- the East-Asian textures
+        are NOT touched by this block, so they are left to subtract out of
+        ``residual`` unchanged (zero in practice, since the map and the
+        East-Asian textures cover disjoint regions). The preferential source
+        is then forced to 0 for ``0 < dust_msg < 0.01`` and to 1 (pure silt/
+        clay spectrum, HAM's own ``fluxdiam_pf``) for ``dust_msg >= 0.01`` --
+        reproduced as two sequential ``jnp.where``s in ``mat_msg``'s own
+        order, since the second is a strict subset of the first and overrides
+        it. (The Fortran's companion ``Z01 = Z02 = r_dust_z0s`` roughness
+        override at ``dust_msg >= 0.01`` is a no-op here: ``ndust = 5``'s own
+        ``ndurough = r_dust_z0s = 0.001 cm`` already gives every cell that
+        constant roughness via :meth:`_roughness`, and every subsequent
+        monthly ``bgc_set_constant_surf_rough`` call overwrites the annual
+        override with the same global constant anyway, so there is no
+        separate z0 behaviour to port.)
         """
         frac = _soil_fractions(forcing, ncols)
         psrc = jnp.clip(_column_field(forcing, "dust_preferential", ncols), 0.0, 1.0)
@@ -700,6 +754,13 @@ class DustEmissions(PhysicsTerm):
             base = jnp.where(replaced, east_total, base)
             global_types = [jnp.where(replaced, 0.0, f) for f in global_types]
             psrc = jnp.where(replaced, 0.0, psrc)
+        if params.use_msg_source:
+            msg = jnp.clip(_column_field(forcing, "dust_msg", ncols), 0.0, 1.0)
+            active = msg > 0.0
+            strong = msg >= 0.01
+            base = jnp.where(active, 0.0, base)
+            global_types = [jnp.where(active, 0.0, f) for f in global_types]
+            psrc = jnp.where(strong, 1.0, jnp.where(active, 0.0, psrc))
         residual = base - sum(global_types) - sum(east)
         land = 1.0 - psrc
         return [land * residual] + [land * f for f in global_types] \
@@ -796,7 +857,7 @@ class DustEmissions(PhysicsTerm):
                       and getattr(forcing, "dust_source", None) is not None)
         if not has_source:
             return self._inert(state, diagnostics, from_model_level, ncols)
-        _require_companions(forcing, ncols)
+        _require_companions(forcing, ncols, p)
         pot = jnp.clip(_column_field(forcing, "dust_source", ncols), 0.0, 1.0)
         # Snow-covered share of the land, glaciers included (the
         # ``ForcingData`` snow convention; no glacier map reads as none).
