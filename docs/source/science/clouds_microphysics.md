@@ -205,6 +205,25 @@ The 2M scheme's utility fields are ECHAM's, shared through ``cloud_utils``:
   lines 3160–3166), as ECHAM does. The ICNC diagnosis uses the
   temperature-parameterised radius ``zrid`` described next.
 
+``precip_formation_cold``'s two safety-floor divisions — the ice-number
+self-collection/break-up guard (``zsprn1``, ``mo_cloud_micro_2m.f90`` lines
+3401–3406) and the riming droplet-number-loss guard (``psacln``, same
+subroutine) — read their floor from the call's own working dtype
+(``jnp.finfo(dtype).eps``), reproducing r7492's ``eps``
+(``mo_cloud_utils.f90:27``, ``EPSILON(1._dp)``) exactly at float64, jcm's
+own precision (jax-gcm#1039). A fixed float64 literal would not serve a
+float32-forward call: ``EPSILON(1._dp)`` (~2.22e-16) is far below
+float32's own representable precision and would be absorbed as a no-op
+there, so the dtype-generic form is the correct floor at both precisions,
+not merely the float64 one. The ice-number guard also now floors the
+pre-aggregation ice content (``zxibold``) at this same epsilon rather than
+at zero, matching r7492's own ``zxibold = MAX(pxib,eps)`` — previously
+computed but unused in jcm's port. Measured on a representative 6-column
+case at float64: the self-collection guard changes ``psprn`` by up to
+0.24% (median 0.09%); the riming guard changes ``psacln`` by up to 0.24%
+(median 0.12%). Neither guard's fix changes the float32 default path:
+jcm's previous floor was already float32's own machine epsilon there.
+
 **Ice mass and number from convective detrainment.** Detrainment supplies most
 of the 2M scheme's cloud-ice mass. ECHAM gives that ice a crystal number and a
 phase by rules that need no aerosol, in section 1 before the level loop and in
