@@ -126,11 +126,59 @@ def typical_scale(sp):
     return {"bc": 2e-10, "oc": 1e-9, "ss": 1e-9, "du": 5e-9}[sp] / DT
 
 
-def test_adapter_refuses_kazil_and_wrong_population():
+def test_adapter_kazil_scheme_runs_end_to_end():
+    """``nucleation_scheme=2`` (jax-gcm#1017 Kazil/GCR task) through the full
+    adapter: needs HAM_INPUT_DIR (both the PARNUC and O'Brien tables -- see
+    gcr_ionisation.py) AND an m7-jax release with load_kazil_lovejoy_table
+    (not yet in the jcm[m7] pin at time of writing -- the lazy-import site
+    in m7_jax.py's __init__ this exercises). Skips cleanly when either is
+    missing, which is the common case (CI's extras-tests job and a plain
+    checkout both lack one or the other right now).
+    """
+    import os
+
+    ham_input_dir = os.environ.get("HAM_INPUT_DIR")
+    if not ham_input_dir:
+        pytest.skip("HAM_INPUT_DIR not set")
+    try:
+        import m7_jax.nucleation  # noqa: F401
+        if not hasattr(m7_jax.nucleation, "load_kazil_lovejoy_table"):
+            pytest.skip("installed m7-jax lacks load_kazil_lovejoy_table")
+    except ImportError:
+        pytest.skip("m7-jax not installed")
+
+    import jax
+
+    from jcm.physics.aerosol.jam.microphysics.m7_jax import M7JaxMicrophysics
+
+    core = M7JaxMicrophysics(nucleation_scheme=2, organic_scheme=0)
+    core._coriolis = jax.numpy.asarray(2 * 7.292e-5 * np.sin([-0.5, 0.0, 0.8]))
+    core._lat = jax.numpy.asarray([-0.5, 0.0, 0.8])
+    core._lon = jax.numpy.asarray([0.1, 1.5, -2.0])
+    state, diag = _column()
+
+    class _Solar:
+        calendar_year = jax.numpy.asarray(2000.0)
+        day_of_year = jax.numpy.asarray(100.0)
+        tyear = jax.numpy.asarray(100.0 / 366.0)
+
+    class _Forcing:
+        solar = _Solar()
+        forest_fraction = None
+
+    tend, out = core(state, diag, _Forcing(), None)
+    assert np.all(np.isfinite(np.asarray(tend.tracers["g_h2so4"])))
+    assert np.all(np.isfinite(np.asarray(out["_jam_state"].r_wet)))
+
+
+def test_adapter_refuses_kazil_without_ham_input_dir_and_wrong_population(monkeypatch):
     from jcm.physics.aerosol.jam.microphysics.m7_jax import M7JaxMicrophysics
     from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 
-    with pytest.raises(NotImplementedError, match="Kazil"):
+    # nucleation_scheme=2 is supported (jax-gcm#1017 Kazil/GCR task) given
+    # HAM_INPUT_DIR; what is always refused is constructing it without one.
+    monkeypatch.delenv("HAM_INPUT_DIR", raising=False)
+    with pytest.raises(FileNotFoundError, match="HAM_INPUT_DIR"):
         M7JaxMicrophysics(nucleation_scheme=2)
     with pytest.raises(ValueError, match="M7 population"):
         M7JaxMicrophysics(spec=MAM4_SPEC)

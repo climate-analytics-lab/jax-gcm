@@ -1,0 +1,39 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "routines": "mo_ham_gcrion.f90::gcr_ionization/gcr_ionization_profile (verbatim-extracted); gcr_initialize/read_obrien_gcr_ipr/gcr_cleanup are pure NetCDF-era I/O boilerplate, NOT compiled -- bypassed by start_gcr reading a binary serialization of jcm's own (already-validated) read_obrien_gcr_ipr output; mo_geopack.f90 compiled WHOLE and UNMODIFIED (geo2mag/vertical_cutoff_rigidity/recalc share module-level state throughout the file); mo_physical_constants.f90 (grav) and mo_math_constants.f90/mo_kind.f90 compiled unmodified.",
+  "md5": {
+   "mo_ham_gcrion.f90": "77839bebc22a5dd26c8e6da4c0441e3e",
+   "mo_geopack.f90": "128d1db1ec32f2cd68b9594672655312",
+   "mo_physical_constants.f90": "564906f3c4d084a935584d64a5b0d7a3"
+  }
+ },
+ "ham_input_dir": "/data/climate-analytics-lab-shared/ECHAM_emissions_v0006/hammoz/T63/hammoz",
+ "stubs": "fortran_harness/echam_hamgcr/stubs/mo_hamgcr_stubs.f90: mo_geoloc (plain lat/lon arrays) and mo_time_control (current_date components + a standard proleptic-Gregorian get_year_day/get_year_len -- a calendar algorithm, not HAM science; matches jcm/date.py's own).",
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -ffp-contract=off -fimplicit-none",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "path": "/scr/dwatsonparris/ham-m7/w3/kazil_gcr/harness/fortran_harness/echam_hamgcr",
+  "commit": "HEAD",
+  "uncommitted_changes": true,
+  "repository": "private scratch harness (fortran_harness/echam_hamgcr), not pushed"
+ },
+ "checks": {
+  "O0_vs_O2_max_abs": 0.0
+ },
+ "cells": {
+  "columns": "7 latitudes x 4 longitudes = 28",
+  "levels": 10,
+  "scenarios": [
+   "solar_min_actual_date",
+   "solar_max_actual_date",
+   "intermediate_y2000",
+   "below_igrf_range_clamped",
+   "above_igrf_range_extrapolated",
+   "exact_2005_epoch_boundary",
+   "exact_1970_epoch_boundary",
+   "end_of_igrf_table_range"
+  ]
+ }
+}
