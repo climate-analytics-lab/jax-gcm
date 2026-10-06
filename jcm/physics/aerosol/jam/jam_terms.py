@@ -13,6 +13,7 @@ on mode/species layout.
 from __future__ import annotations
 
 import dataclasses
+import os
 
 from jcm.physics.aerosol.carry_seeder import AerosolCarrySeeder
 from jcm.physics.aerosol.jam.activation.arg_term import (
@@ -235,6 +236,7 @@ def jam_aerosol_physics(
     optics: bool = True,
     optics_backend: str = "jcm",
     optics_diagnostics: bool = False,
+    ham_optics_tables_dir: str | os.PathLike | None = None,
     seasalt: SeaSaltParameters | None = None,
     seasalt_scheme: str = "gong",
     dms: DmsParameters | None = None,
@@ -274,6 +276,11 @@ def jam_aerosol_physics(
             design — the implementation lives in this repository, so it
             gets a selector here rather than requiring an out-of-tree
             subclass and a manual ``physics.replace(...)``.
+        ham_optics_tables_dir: directory holding HAM's authentic Mie LUT
+            NetCDF files for ``optics_backend="ham_lut"`` (see
+            ``ham_mie_tables.load_ham_mie_tables``). ``None`` (default)
+            reads the ``HAM_INPUT_DIR`` environment variable; ignored for
+            ``optics_backend="jcm"``.
         cloud_borne: prognose an explicit cloud-borne aerosol phase (#602).
             ``None`` (default) follows the core population's own
             ``spec.cloud_borne``; ``True``/``False`` override it for a
@@ -465,8 +472,13 @@ def jam_aerosol_physics(
     # spectral optics pass (jax-gcm#584) — a second Mie sweep at the
     # observation wavelengths, off unless a run asks for it.
     if optics_backend == "jcm":
+        optics_extra_kwargs = {}
         optics_cls = JamOpticsTerm
     elif optics_backend == "ham_lut":
+        # HAM's own authentic Mie LUTs (#1017): loaded from HAM_INPUT_DIR
+        # (or this explicit override) at construction, never built by jcm
+        # itself -- see ham_mie_tables.py's module docstring for why.
+        optics_extra_kwargs = {"tables_dir": ham_optics_tables_dir}
         optics_cls = HamLutOpticsTerm
     else:
         raise ValueError(
@@ -474,7 +486,7 @@ def jam_aerosol_physics(
             "'ham_lut'."
         )
     optics_terms = [
-        optics_cls(spec=spec, optics_diagnostics=optics_diagnostics)
+        optics_cls(spec=spec, optics_diagnostics=optics_diagnostics, **optics_extra_kwargs)
     ] if optics else []
     post_core = [
         _activation_term(activation_scheme, activation, spec, arg_variant,

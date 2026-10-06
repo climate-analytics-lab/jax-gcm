@@ -19,6 +19,7 @@ otherwise use.
 
 from __future__ import annotations
 
+import os
 import warnings
 from typing import TYPE_CHECKING, Any, Mapping
 
@@ -207,6 +208,7 @@ def echam_physics(
     jam_optics: bool = True,
     jam_optics_backend: str = "jcm",
     jam_seasalt_scheme: str = "gong",
+    jam_optics_tables_dir: str | os.PathLike | None = None,
     jam_arg_variant: str = "arg2000",
     jam_activation_scheme: str = "arg",
     jam_nactivpdf: int = 0,
@@ -440,6 +442,11 @@ def echam_physics(
             carries three (it also has an Aitken-mode sea salt tracer, which
             HAM's M7 configuration does not) and so is rejected with
             ``"long"``.
+        jam_optics_tables_dir: directory holding HAM's authentic
+            ``lut_optical_properties_M7.nc``/``lut_optical_properties_lw_
+            M7.nc`` for ``jam_optics_backend="ham_lut"``. ``None`` (default)
+            reads the ``HAM_INPUT_DIR`` environment variable instead;
+            ignored for ``jam_optics_backend="jcm"``.
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         jam_activation_scheme: ``jam_aerosol_physics``'s ``activation_scheme``
             -- ``"arg"`` (default), ``"ham_arg"`` or ``"ham_lin_leaitch"``
@@ -932,6 +939,7 @@ def echam_physics(
             microphysics=jam_microphysics, cloud_borne=jam_cloud_borne,
             optics=jam_optics, optics_backend=jam_optics_backend,
             seasalt_scheme=jam_seasalt_scheme,
+            ham_optics_tables_dir=jam_optics_tables_dir,
             arg_variant=jam_arg_variant,
             activation_scheme=jam_activation_scheme,
             nactivpdf=jam_nactivpdf,
