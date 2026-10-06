@@ -210,6 +210,7 @@ def echam_physics(
     jam_optics_tables_dir: str | os.PathLike | None = None,
     jam_seasalt_scheme: str = "gong",
     jam_wetdep_scheme: str = "jcm",
+    jam_nucleation_activation: str = "ham_arg",
     jam_arg_variant: str = "arg2000",
     jam_activation_scheme: str = "arg",
     jam_nactivpdf: int = 0,
@@ -449,11 +450,18 @@ def echam_physics(
             HAM's M7 configuration does not) and so is rejected with
             ``"long"``.
         jam_wetdep_scheme: ``jam_aerosol_physics``'s ``wetdep_scheme`` --
-            ``"jcm"`` (default) or ``"ham_below_cloud"`` (ECHAM-HAM's own
-            below-cloud Croft tables, #1017; the in-cloud pathways are
-            unaffected). The latter requires ``cloud_scheme="2m"`` (enforced
-            below) and turns on the 2M scheme's ``"precip_cover"``
-            diagnostic it reads.
+            ``"jcm"`` (default), ``"ham_below_cloud"`` (ECHAM-HAM's own
+            below-cloud Croft tables, #1017) or ``"ham_nuc_bc"``
+            (additionally HAM's own aerosol-size-dependent stratiform
+            nucleation pathway, follow-up A). The latter two require
+            ``cloud_scheme="2m"`` (enforced below) and turn on the 2M
+            scheme's ``"precip_cover"``/``"pfrain"``/``"pfsnow"``
+            diagnostics they read.
+        jam_nucleation_activation: only consulted for ``jam_wetdep_scheme=
+            "ham_nuc_bc"`` -- ``"ham_arg"`` (default) or
+            ``"ham_lin_leaitch"``, forwarded to ``jam_aerosol_physics``'s
+            ``nucleation_activation``. Should match ``jam_activation_scheme``
+            below (see ``WetScavenging.__init__``'s docstring).
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         jam_activation_scheme: ``jam_aerosol_physics``'s ``activation_scheme``
             -- ``"arg"`` (default), ``"ham_arg"`` or ``"ham_lin_leaitch"``
@@ -875,11 +883,12 @@ def echam_physics(
     # 1-SW/0-LW aerosol layout fails its band-count check at first compute.
     band_config = RadiationBandConfig.for_terms([rad_term])
 
-    if jam_wetdep_scheme == "ham_below_cloud" and cloud_scheme != "2m":
+    if jam_wetdep_scheme in ("ham_below_cloud", "ham_nuc_bc") and cloud_scheme != "2m":
         raise ValueError(
-            "jam_wetdep_scheme='ham_below_cloud' requires cloud_scheme='2m' "
-            "(it reads the 2M scheme's 'precip_cover' diagnostic; the 1M "
-            f"scheme does not compute it), got cloud_scheme={cloud_scheme!r}."
+            f"jam_wetdep_scheme={jam_wetdep_scheme!r} requires cloud_scheme="
+            "'2m' (it reads the 2M scheme's 'precip_cover'/'pfrain'/'pfsnow' "
+            "diagnostics; the 1M scheme does not compute them), got "
+            f"cloud_scheme={cloud_scheme!r}."
         )
     if cloud_scheme == "1m":
         micro_term = Echam1MMicrophysics(
@@ -906,7 +915,7 @@ def echam_physics(
         # in-cloud pre-evaporation rain/snow flux (zfrain/zfsnow); see
         # WetScavenging's "ham_below_cloud" scheme and
         # Lohmann2MMicrophysics.configure_wetdep_hydro_diagnostics.
-        if jam_wetdep_scheme == "ham_below_cloud":
+        if jam_wetdep_scheme in ("ham_below_cloud", "ham_nuc_bc"):
             micro_term.configure_wetdep_hydro_diagnostics(True)
     else:
         raise ValueError(
@@ -962,6 +971,7 @@ def echam_physics(
             ham_optics_tables_dir=jam_optics_tables_dir,
             seasalt_scheme=jam_seasalt_scheme,
             wetdep_scheme=jam_wetdep_scheme,
+            nucleation_activation=jam_nucleation_activation,
             arg_variant=jam_arg_variant,
             activation_scheme=jam_activation_scheme,
             nactivpdf=jam_nactivpdf,

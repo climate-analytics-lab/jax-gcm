@@ -248,6 +248,7 @@ def jam_aerosol_physics(
     drydep: DryDepParameters | None = None,
     wetdep: WetDepParameters | None = None,
     wetdep_scheme: str = "jcm",
+    nucleation_activation: str = "ham_arg",
     vertical_mixing: bool = True,
     tracer_diffusion: TracerDiffusionParameters | None = None,
     convective_transport: bool = True,
@@ -272,16 +273,29 @@ def jam_aerosol_physics(
             ``ham_mie_tables.load_ham_mie_tables``). ``None`` (default)
             reads the ``HAM_INPUT_DIR`` environment variable; ignored for
             ``optics_backend="jcm"``.
-        wetdep_scheme: ``WetScavenging``'s below-cloud pathway (jax-gcm#1017):
-            ``"jcm"`` (default) is today's CAM-Slinn-table below-cloud
-            impaction; ``"ham_below_cloud"`` is ECHAM-HAM's own size-dependent
-            Croft below-cloud tables (``bc_rain``/``bc_snow``,
-            ``mo_ham_wetdep.f90:963-1146``). Named for exactly the pathway it
-            replaces: the in-cloud (nucleation + impaction) pathways still
-            run as ``"jcm"`` does today under either setting -- those are
-            separate follow-ups (#1017). Requires ``cloud_scheme="2m"`` (it
-            reads the ``"precip_cover"`` diagnostic only the 2M scheme can
-            publish, via ``echam_physics``'s wiring).
+        wetdep_scheme: ``WetScavenging``'s below-cloud/nucleation pathway
+            (jax-gcm#1017): ``"jcm"`` (default) is today's CAM-Slinn-table
+            below-cloud impaction with the implicit activated-fraction
+            in-cloud treatment; ``"ham_below_cloud"`` additionally replaces
+            the below-cloud pathway with ECHAM-HAM's own size-dependent
+            Croft tables (``bc_rain``/``bc_snow``,
+            ``mo_ham_wetdep.f90:963-1146``); ``"ham_nuc_bc"`` additionally
+            replaces the stratiform NUCLEATION pathway with HAM's own
+            aerosol-size-dependent ``ic_scav_nuc`` (follow-up A;
+            ``jcm.physics.aerosol.jam.wetdep.ham_nucleation``). Impaction
+            (``ic_scav_imp``) is follow-up B and still runs implicitly under
+            every setting; names will be reconsidered once all three land.
+            Requires ``cloud_scheme="2m"`` for ``"ham_below_cloud"``/
+            ``"ham_nuc_bc"`` (they read the ``"precip_cover"``/``"pfrain"``/
+            ``"pfsnow"`` diagnostics only the 2M scheme can publish, via
+            ``echam_physics``'s wiring).
+        nucleation_activation: only consulted for ``wetdep_scheme=
+            "ham_nuc_bc"`` -- ``"ham_arg"`` (default) or
+            ``"ham_lin_leaitch"``, HAM's own ``ncd_activ`` switch for which
+            activation scheme ``ic_scav_nuc`` reads its critical radius and
+            per-mode fraction from. See ``WetScavenging.__init__``'s
+            docstring for why this should match whichever activation scheme
+            ``echam_physics(jam_activation_scheme=...)`` actually composed.
         cloud_borne: prognose an explicit cloud-borne aerosol phase (#602).
             ``None`` (default) follows the core population's own
             ``spec.cloud_borne``; ``True``/``False`` override it for a
@@ -511,7 +525,8 @@ def jam_aerosol_physics(
         AqueousSulfur(params=aqueous, spec=spec, scheme=aqueous_scheme),
         WetScavenging(params=wetdep, spec=spec,
                       in_plume_convective=convective_transport,
-                      scheme=wetdep_scheme),
+                      scheme=wetdep_scheme,
+                      nucleation_activation=nucleation_activation),
     ]
     terms = [*pre_core, core, *optics_terms, *post_core]
     return terms

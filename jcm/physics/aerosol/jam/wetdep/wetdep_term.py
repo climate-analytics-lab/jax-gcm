@@ -88,6 +88,12 @@ from jcm.physics.aerosol.jam.wetdep.ham_below_cloud import (
     cmedr2mmedr,
     load_croft_tables,
 )
+from jcm.physics.aerosol.jam.wetdep.ham_nucleation import (
+    ice_phase_xie,
+    lin_leaitch_available_number,
+    nucleation_scavenged_fraction,
+    water_phase_xie,
+)
 from jcm.physics.aerosol.jam.wetdep.impaction import (
     IMPACT_SCALE_DEFAULT,
     MU_WATER_AIR_DEFAULT,
@@ -438,6 +444,7 @@ class WetScavenging(PhysicsTerm):
         spec: ModalAerosolSpec | None = None,
         in_plume_convective: bool = False,
         scheme: str = "jcm",
+        nucleation_activation: str = "ham_arg",
     ):
         """Hold params and the population.
 
@@ -478,10 +485,38 @@ class WetScavenging(PhysicsTerm):
         removal acts only within the precipitating fraction of the box,
         which CAM's form does not need (its swept-volume cancellation makes
         the cloud weighting a no-op, see ``below_cloud_rate``'s docstring).
+
+        ``"ham_nuc_bc"`` additionally replaces the STRATIFORM in-cloud
+        NUCLEATION pathway with ECHAM-HAM's own aerosol-size-dependent
+        ``ic_scav_nuc`` (jax-gcm#1017 follow-up A;
+        ``jcm.physics.aerosol.jam.wetdep.ham_nucleation``) for activatable
+        modes without an explicit cloud-borne phase; impaction
+        (``ic_scav_imp``) is follow-up B and still runs as the implicit
+        activated-fraction treatment does under every setting. Named for
+        exactly what has landed so far (below-cloud + nucleation), honest
+        that impaction has not; the final name lands once all three slices
+        have. ``nucleation_activation`` selects which of HAM's own two
+        activation schemes ``ic_scav_nuc`` reads its critical radius and
+        per-mode fraction from (HAM's ``ncd_activ`` switch,
+        mo_ham_wetdep.f90:710-714) — ``"ham_arg"`` (default, dry radius) or
+        ``"ham_lin_leaitch"`` (wet radius); only consulted for
+        ``scheme="ham_nuc_bc"``, and should match whichever activation
+        scheme ``echam_physics(jam_activation_scheme=...)`` actually
+        composed (not cross-checked here — see
+        ``jcm.physics.aerosol.jam.wetdep.ham_nucleation``'s module
+        docstring for why CAM's own, non-HAM ``"arg"`` has no ``ncd_activ``
+        analogue and so is not a valid pairing).
         """
-        if scheme not in ("jcm", "ham_below_cloud"):
-            raise ValueError(f"scheme must be 'jcm' or 'ham_below_cloud', got {scheme!r}")
+        if scheme not in ("jcm", "ham_below_cloud", "ham_nuc_bc"):
+            raise ValueError(
+                "scheme must be 'jcm', 'ham_below_cloud' or 'ham_nuc_bc', "
+                f"got {scheme!r}")
+        if nucleation_activation not in ("ham_arg", "ham_lin_leaitch"):
+            raise ValueError(
+                "nucleation_activation must be 'ham_arg' or 'ham_lin_leaitch', "
+                f"got {nucleation_activation!r}")
         self.scheme = scheme
+        self._nucleation_activation = nucleation_activation
         # Loaded once here, outside any jit trace -- NOT via the lazily-
         # memoized ``default_croft_tables()`` global, whose first call
         # inside a traced ``__call__`` would cache tracer-bound arrays in a
@@ -489,7 +524,7 @@ class WetScavenging(PhysicsTerm):
         # trace (``jax.errors.UnexpectedTracerError``; the same hazard
         # ``self._impaction_tables`` below avoids by building at __init__).
         self._croft_tables = (
-            load_croft_tables() if scheme == "ham_below_cloud" else None
+            load_croft_tables() if scheme in ("ham_below_cloud", "ham_nuc_bc") else None
         )
         self.params = nnx.Param(params or WetDepParameters.default())
         self._in_plume_convective = in_plume_convective
@@ -514,7 +549,7 @@ class WetScavenging(PhysicsTerm):
             # _validate_ordering enforce that, instead of apply_updates
             # silently seeding an unmixed, unmanaged dict.
             self.requires = (*type(self).requires, CARRY_KEY)
-        if self.scheme == "ham_below_cloud":
+        if self.scheme in ("ham_below_cloud", "ham_nuc_bc"):
             self.requires = (*self.requires, "precip_cover", "pfrain", "pfsnow")
 
     def __call__(self, state, diagnostics, forcing, terrain):
@@ -623,7 +658,50 @@ class WetScavenging(PhysicsTerm):
         rate_cb = params.incloud_scale * rate_ledger
         jam_act = diagnostics.get("_jam_activation")
 
-        if self.scheme == "ham_below_cloud":
+        if self.scheme == "ham_nuc_bc":
+            # ic_scav_nuc's two SEPARATE water/ice removal terms
+            # (mo_ham_wetdep.f90:300-320's zxtwat/zxtice, each driven by its
+            # OWN peffwat/peffice-style rate and its OWN activated fraction)
+            # rather than jcm's existing blended f_comb: HAM never mixes the
+            # two phases' efficiencies, only their resulting MASS changes,
+            # so blending here would be a new approximation this scheme
+            # does not need (the ledger already has f_wat/f_ice separately).
+            rate_water = params.incloud_scale * cf_proc * fraction_to_rate(f_wat, dt)
+            rate_ice = params.incloud_scale * cf_proc * fraction_to_rate(f_ice, dt)
+            cloud_fraction = clouds.cloud_fraction
+            # state.tracers is empty during Model.get_empty_data's structural
+            # probe (see the module docstring's note above), hence the zero
+            # fallback; a real 2M run always carries qnc/qni and every M7
+            # mode's own number tracer.
+            _zero_t = jnp.zeros_like(state.temperature)
+            cdnc_incloud = state.tracers.get("qnc", _zero_t) * cloud_fraction
+            icnc_incloud = state.tracers.get("qni", _zero_t) * cloud_fraction
+            n_ks_incloud = state.tracers.get(number_name("ks"), _zero_t) * cloud_fraction
+            n_as_incloud = state.tracers.get(number_name("as"), _zero_t) * cloud_fraction
+            n_cs_incloud = state.tracers.get(number_name("cs"), _zero_t) * cloud_fraction
+            if self._nucleation_activation == "ham_arg":
+                # na/frac(kmod) exactly as ham_activ_diag_abdulrazzak_ghan_
+                # strat publishes them (mo_ham_activ.f90:409-416) -- see
+                # ham_nucleation.py's module docstring.
+                nuc_na = diagnostics["activated_cdnc"]
+                nuc_radius = aer.r_dry
+                if jam_act is None:
+                    raise ValueError(
+                        "scheme='ham_nuc_bc' with nucleation_activation="
+                        "'ham_arg' requires an activation term that "
+                        "publishes '_jam_activation' (e.g. HamActivation "
+                        "with scheme='arg' or ArgActivation).")
+                nuc_frac = jam_act.number_frac
+            else:
+                nuc_na, nuc_cut_frac = lin_leaitch_available_number(
+                    aer.number * air_density[jnp.newaxis, ...],
+                    jnp.asarray([m.can_activate for m in self._spec.modes]),
+                    aer.r_wet, jnp.asarray([m.geom_std_dev for m in self._spec.modes]),
+                )
+                nuc_radius = aer.r_wet
+                nuc_frac = nuc_cut_frac
+
+        if self.scheme in ("ham_below_cloud", "ham_nuc_bc"):
             # HAM's below-cloud scheme needs pfrain/pfsnow: the in-cloud,
             # cover-normalised, pre-evaporation rain/snow flux
             # ``update_precip_fluxes`` computes every level
@@ -696,7 +774,7 @@ class WetScavenging(PhysicsTerm):
                 table, params.mu_water_air, params.impact_scale)
             coef_num, coef_mass = bcscavcoef(
                 aer.r_wet[i], table.dgnum, ln_num, ln_vol)
-            if self.scheme == "ham_below_cloud":
+            if self.scheme in ("ham_below_cloud", "ham_nuc_bc"):
                 # ECHAM-HAM's own Croft size-dependent below-cloud scheme
                 # (#1017) replaces the CAM/Slinn coefficient for the
                 # STRATIFORM carrier only; the convective pathway below is
@@ -734,7 +812,32 @@ class WetScavenging(PhysicsTerm):
             # only implicitly (via the activated fraction) when there is no
             # explicit cloud-borne phase to carry it. Convective processing
             # always acts on interstitial (updrafts ingest environment air).
-            if mode.can_activate and not explicit_cb:
+            if mode.can_activate and not explicit_cb and self.scheme == "ham_nuc_bc":
+                # ic_scav_nuc (mo_ham_wetdep.f90:684-795), water and ice
+                # SEPARATELY (see the comment at this scheme's rate_water/
+                # rate_ice setup above): only KS/AS/CS (jcm indices 1,2,3)
+                # are relevant -- ic_scav_nuc itself zeroes every other mode
+                # (mo_ham_wetdep.f90:707-710, "kmod < 2 .OR. kmod > 4").
+                ln_sigma_i = jnp.log(mode.geom_std_dev)
+                mass_factor_i = cmedr2mmedr(mode.geom_std_dev)
+                radius_i = nuc_radius[i]
+                if mode.short in ("ks", "as", "cs"):
+                    xie_water = water_phase_xie(
+                        cdnc_incloud, air_density, nuc_na, nuc_frac[i])
+                    xie_ice = ice_phase_xie(
+                        icnc_incloud, n_ks_incloud, n_as_incloud, n_cs_incloud,
+                        mode.short)
+                    fn_water, fm_water = nucleation_scavenged_fraction(
+                        xie_water, radius_i, ln_sigma_i, mass_factor_i)
+                    fn_ice, fm_ice = nucleation_scavenged_fraction(
+                        xie_ice, radius_i, ln_sigma_i, mass_factor_i)
+                    form_num = fn_water * rate_water + fn_ice * rate_ice
+                    form_mass = fm_water * rate_water + fm_ice * rate_ice
+                else:
+                    form_num = form_mass = zeros
+                conv_num = below_conv_num + rate_conv_incloud
+                conv_mass = below_conv_mass + rate_conv_incloud
+            elif mode.can_activate and not explicit_cb:
                 if jam_act is not None:
                     frac_num = jam_act.number_frac[i]
                     frac_mass = jam_act.mass_frac[i]

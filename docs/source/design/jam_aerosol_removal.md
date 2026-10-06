@@ -338,6 +338,77 @@ stratiform carrier ledger by the in-cloud ice fraction as a proxy, which
 review correctly flagged as unnecessary once the exact quantity was
 located.
 
+(ham-nucleation-scavenging)=
+## HAM in-cloud nucleation scavenging (`ham_nuc_bc`, #1017 follow-up A)
+
+`WetScavenging(scheme="ham_nuc_bc")` additionally replaces the STRATIFORM
+in-cloud nucleation pathway above (the implicit activated-fraction
+treatment) with ECHAM-HAM's own aerosol-size-dependent `ic_scav_nuc`
+(`mo_ham_wetdep.f90:684-795`, `jcm.physics.aerosol.jam.wetdep.ham_nucleation`)
+for the three M7 soluble activating modes (KS/AS/CS; `ic_scav_nuc` itself
+zeroes every other mode, `mo_ham_wetdep.f90:707-710` — it is M7-specific by
+construction, "made unuseable if an alternate aerosol microphysics scheme
+is used", per the reference's own comment). Impaction (`ic_scav_imp`) is
+follow-up B and still runs implicitly under every setting.
+
+**The formula.** `ic_scav_nuc` INVERTS the mode's own lognormal tail at a
+critical radius that reproduces the ACTUAL in-cloud droplet/crystal number
+this step (`ham_m7_invertlogtail`, a closed-form inverse-erf
+approximation — new code, since `ham_logtail`/the forward normal CDF it
+also needs are already ported in `ham_activation.py`), then reads the SAME
+tail forward for the tracer in question (number with `mass_factor=1`,
+mass with `mass_factor=cmedr2mmedr` — the identical `ham_logtail` two-call
+pattern `HamActivation`'s own ARG branch already uses to turn a number
+tail into a mass one). Unlike jcm's existing blended `f_comb`
+(`(1-pice)*f_wat + pice*f_ice`), this scheme keeps water and ice as two
+SEPARATE removal terms, each with its OWN rate and its OWN activated
+fraction (`zxtwat`/`zxtice`, mo_ham_wetdep.f90:300-320) — HAM never blends
+the two phases' efficiencies, only the resulting mass changes, so blending
+here would be a new approximation this scheme does not need (the ledger
+already carries `f_wat`/`f_ice` separately before `WetScavenging` blends
+them for the other schemes).
+
+**Water phase.** The critical-radius inversion's target is `1 -
+2·clip(cdnc_incloud·ρ·frac(kmod)/na, 0, 1)` (`mo_ham_wetdep.f90:749-755`):
+`na` and `frac(kmod)` are read EXACTLY as HAM's own `ham_activ_diag_
+abdulrazzak_ghan_strat` publishes them for ARG (`na` = the SAME sum over
+activating modes as `activated_cdnc`; `frac(kmod)` = the SAME per-mode
+fraction as `_jam_activation.number_frac[kmod]`, confirmed identical by
+tracing both to the one Fortran routine that sets them,
+`mo_ham_activ.f90:409-416`) — this scheme reads those two diagnostics
+directly for `nucleation_activation="ham_arg"`. Lin & Leaitch publishes a
+DIFFERENT `na`/`frac(kmod)` from the same routine family
+(`ham_avail_activ_lin_leaitch`, `mo_ham_activ.f90:606-732`) that
+`HamActivation`'s own published `number_frac` does NOT equal (that term's
+Lin & Leaitch `number_frac` additionally scales by `cdncact/na` for its
+OWN consumer, the cloud-borne exchange term — a different contract);
+`nucleation_activation="ham_lin_leaitch"` recomputes the raw `na`/`frac`
+instead, reusing `ham_logtail`/`LL_CRCUT_STRAT` (the shared primitives,
+not a re-port).
+
+**Ice phase.** No activation-term coupling at all — a pure M7 size-ordered
+depletion of ICNC against the three modes' own NUMBER tracers
+(`mo_ham_wetdep.f90:757-778`): CS (coarse) is assumed to use up ICNC
+first, then AS the remainder, then KS what is left — three literal
+`IF (kmod == ...)` branches in the reference, not a general recurrence,
+ported the same way.
+
+**Validation.** Two compiled references, not one. `ham_m7_invertlogtail` —
+the one genuinely new piece of math — is checked standalone against the
+compiled, unmodified routine on 33 designed cases spanning its small/mid/
+huge-tail branches and both M7 sigmas, exactly (float64 round-off, 1.6e-16;
+float32 1.8e-3 at the single most extreme case). The surrounding chain —
+the UNMODIFIED `ic_scav -> get_icscavfrac -> ic_scav_nuc` itself, plus
+`ham_m7_logtail` and the normal CDF it calls, all compiled together — is
+checked separately on 19 designed M7 columns (liquid-only/ice-only/mixed-
+phase; cdnc/icnc and na on both sides of their gates; KS/AS/CS emptied in
+turn; ARG and Lin & Leaitch radius selection; the huge-tail clip), matching
+jcm's `water_phase_xie`/`ice_phase_xie`/`nucleation_scavenged_fraction`
+exactly (float64, measured max relative error 0.0 — not merely within
+tolerance) in `ham_nucleation_test.py::test_full_chain_matches_compiled_
+icscavnuc_reference`, against `jcm/data/test/echam_cloud_reference/
+icscavnuc.npz`.
+
 ## Known gaps
 
 - Ice-sedimentation flux reaching the surface as snow carries no aerosol
@@ -350,3 +421,5 @@ located.
   follow-ups A and B.
 - The 2M scheme's `precip_cover` disagrees with ECHAM's `clcpre` on three
   synthetic test columns, for a reason not fully diagnosed (jax-gcm#1036).
+- `ham_nuc_bc` ports only the nucleation pathway; impaction under
+  `nwetdep=3` is jax-gcm#1017's follow-up B.
