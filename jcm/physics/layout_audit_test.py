@@ -100,7 +100,8 @@ LAYOUT_AGNOSTIC = frozenset({
 #: no generic environment supplies: SSO fields (``LottMillerSso`` — the
 #: harness runs aquaplanet terrain), a frontogenesis field
 #: (``FrontalGravityWaveDrag``), populated aerosol tracers
-#: (``Mam4JaxMicrophysics``, ``IceNucleation``), a dycore omega provider
+#: (``Mam4JaxMicrophysics``, ``M7JaxMicrophysics``, ``IceNucleation``), a
+#: dycore omega provider
 #: (``OmegaDiagnostic``), or are no-ops by design
 #: (``PlaceholderMicrophysics``).
 #:
@@ -120,6 +121,7 @@ INERT_IN_HARNESS = frozenset({
     "FrontalGravityWaveDrag",
     "IceNucleation",
     "LottMillerSso",
+    "M7JaxMicrophysics",
     "Mam4JaxMicrophysics",
     "OmegaDiagnostic",
     "PlaceholderMicrophysics",
@@ -435,9 +437,9 @@ class LayoutAgnosticTermsTest(unittest.TestCase):
             "(then this audit checks them), else to NOT_AUDITED.",
         )
 
-    # Needs every jcm module importable, which today only the MAM4 adapter
-    # (jcm.physics.aerosol.jam.microphysics.mam4_jax) is not without its
-    # extra. The default CI jobs install none, so they skip this and the
+    # Needs every jcm module importable, which the MAM4 and M7 adapters
+    # (jcm.physics.aerosol.jam.microphysics.mam4_jax / m7_jax) are not
+    # without their extras. The default CI jobs install none, so they skip this and the
     # extras-tests job, which installs them all, runs it.
     @pytest.mark.requires_extra("mam4")
     def test_every_shipped_term_is_audited_and_rosters_are_current(self):
