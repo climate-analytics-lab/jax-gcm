@@ -19,8 +19,11 @@ Adaptations for jcm/MAM4:
 * Product sulfate goes to the **cloud-borne** accumulation/coarse mass
   (``mc_so4_acc``/``mc_so4_cor``), split by their cloud-borne number fraction —
   HAM's ``ms4as``/``ms4cs`` distribution. SO₂ (``g_so2``) is consumed.
-* Sulfate molar mass uses jcm's ``so4`` species value (MAM4-MOM ammonium
-  bisulfate, 115 g/mol) consistently in both the pH and the produced mass.
+* Sulfate molar mass is read from the population at construction
+  (``spec.species_props("so4").molar_mass``), consistently in both the pH
+  and the produced mass — MAM4-MOM's ammonium bisulfate (115 g/mol) by
+  default, M7's SO₄ (96.0631 g/mol, ``mo_ham.f90:311``) when ``spec`` is
+  :data:`M7_SPEC`.
 * H₂O₂ is a prescribed oxidant. It is depleted *within* the ``niter``
   sub-stepping (so the within-step H₂O₂-limitation of SO₂ oxidation is
   respected) and reset to the prescribed field each step — this matches
@@ -96,6 +99,15 @@ _MW_SO2 = 64.0643          # mo_ham.f90:310 (r7492's own rounding, jax-gcm#1031;
 _MW_SO4 = SPECIES["so4"].molar_mass * 1000.0             # 115.0
 _CONV_SO2_SO4_MASS = _MW_SO4 / _MW_SO2
 
+# HAM's coarse-mode-SO4-particle mass and the molar mass of elemental sulfur,
+# both needed only by the ``aqueous_sulfate_modes`` empty-fallback below
+# (mo_ham_chemistry.f90:166, mo_ham.f90:309).
+_ZSO4_MASSC = 3.25e-15   # kg of SO4 per coarse-mode particle
+_MW_S = 32.0655          # g/mol (HAM works in grams here)
+# HAM's empty-both-modes number-mixing-ratio threshold (mo_ham_chemistry.f90:
+# 443 et seq.), in the same units as the interstitial number tracers (kg⁻¹).
+_ZEPS_NUMBER = 1.0e-3
+
 _TINY = 1.0e-30
 _NC_MIN = 1.0      # cloud-borne number [kg⁻¹] below which a mode hosts no droplets
 
@@ -120,12 +132,12 @@ def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt,
     throughout (jax-gcm#1031). ``so2``/``so4`` are in-cloud mass mixing
     ratios [kg/kg]; ``h2o2``/``o3`` number densities [molec cm⁻³]; ``lwc``
     the in-cloud liquid water [kg/kg]; ``rho`` air density [kg m⁻³].
-    ``mw_so4``/``conv_so2_so4`` are the SO₄ molar mass [g/mol] this call
-    should use and the SO₂->SO₄ mass-conversion factor derived from it —
-    defaulting to jcm's own MAM4 value (:data:`_MW_SO4`); the Fortran-
-    reference test passes M7's own 96.0631 g/mol instead, since that is
-    the species the compiled reference fixture was built against. Returns
-    the SO₄ mass produced (mmr); SO₂ consumed = that / ``conv_so2_so4``.
+    ``mw_so4``/``conv_so2_so4`` are the population's own SO₄ molar mass
+    [g/mol] and the SO₂->SO₄ mass-conversion factor derived from it
+    (:class:`AqueousSulfur` computes both from ``spec.species_props("so4")``
+    at construction; M7's is HAM's 96.0631 g/mol); the defaults reproduce
+    jcm's MAM4 value (:data:`_MW_SO4`). Returns the SO₄ mass produced
+    (mmr); SO₂ consumed = that / ``conv_so2_so4``.
     """
     qtp1 = 1.0 / temperature - _ZQ298
     lwcl = jnp.maximum(lwc * rho * 1.0e-6, _TINY)   # [l-water/cm^3-air]
@@ -199,7 +211,7 @@ def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt,
     return dso2tot * conv_so2_so4
 
 
-def _simple_aqueous_so4(so2, h2o2, rho):
+def _simple_aqueous_so4(so2, h2o2, rho, conv_so2_so4: float = _CONV_SO2_SO4_MASS):
     """H₂O₂-limited fast in-cloud oxidation — the simple scheme.
 
     Assumes ``SO₂(aq) + H₂O₂(aq) → S(VI)`` goes to completion within the step,
@@ -207,14 +219,15 @@ def _simple_aqueous_so4(so2, h2o2, rho):
     Henry's-law partitioning, no pH, no O₃ path. ``so2`` is a mass mixing ratio
     [kg/kg], ``h2o2`` a number density [molec cm⁻³], ``rho`` air density
     [kg m⁻³]. Returns the in-cloud SO₄ mass produced [kg/kg]; the term applies
-    the cloud-fraction weighting and the S-conserving SO₂ sink.
+    the cloud-fraction weighting and the S-conserving SO₂ sink. ``conv_so2_so4``
+    is the population's own SO₂->SO₄ mass factor (see :func:`_aqueous_so4`).
     """
     n_air = rho * _AVO_XTOC / _mw_air()               # molec/cm³
     h2o2_molefrac = h2o2 / jnp.maximum(n_air, _TINY)
     # SO₂ mass an equal number of moles of H₂O₂ can oxidise (1:1).
     h2o2_as_so2 = h2o2_molefrac * (_MW_SO2 / _mw_air())
     so2_oxidised = jnp.minimum(jnp.maximum(so2, 0.0), h2o2_as_so2)
-    return so2_oxidised * _CONV_SO2_SO4_MASS
+    return so2_oxidised * conv_so2_so4
 
 
 @tree_math.struct
@@ -236,6 +249,15 @@ class AqueousSulfur(PhysicsTerm):
     runs the lightweight H₂O₂-limited approximation (:func:`_simple_aqueous_so4`):
     stoichiometric SO₂+H₂O₂ with no Henry/pH/O₃ — cheaper and easier to reason
     about, capturing the dominant in-cloud pathway.
+
+    ``spec.aqueous_sulfate_modes`` (``None`` for every MAM4 population) turns
+    on HAM's own restricted sum/split: the pH-setting sulfate and the
+    produced-sulfate destination are both just the named two classes (M7's
+    AS/CS), by their INTERSTITIAL number fraction rather than a cloud-borne
+    one — faithful to ``ham_wet_chemistry`` for a population with no
+    cloud-borne phase (``spec.cloud_borne=False``). Otherwise the existing
+    cloud-borne-fraction split (``spec.cloud_borne=True``) or single-mode
+    interstitial fallback runs unchanged.
     """
 
     name: ClassVar[str] = "jam_aqueous_sulfur"
@@ -260,10 +282,38 @@ class AqueousSulfur(PhysicsTerm):
                 f"Unknown aqueous scheme {scheme!r}; choose 'full' or 'simple'."
             )
         self._scheme = scheme
+        # SO4's molar mass from the POPULATION (same expression as the
+        # module-level MAM4 default above, so the two are bit-identical for
+        # MAM4 and diverge only where the population's own so4 differs, e.g.
+        # M7's 96.0631 g/mol vs MAM4-MOM's 115 g/mol ammonium bisulfate).
+        self._mw_so4 = self._spec.species_props("so4").molar_mass * 1000.0
+        self._conv_so2_so4 = self._mw_so4 / _MW_SO2
+        # The S-conserving SO2 sink below divides the OTHER way round
+        # (``_MW_SO2/_MW_SO4``, not ``1/self._conv_so2_so4``): computed as
+        # its own ratio so the MAM4 default stays bit-identical (a reciprocal
+        # of a quotient is not bit-identical to the quotient computed
+        # directly, per CLAUDE.md's "no reordering arithmetic" rule).
+        self._conv_so4_so2 = _MW_SO2 / self._mw_so4
         # Modes carrying sulfate that can host cloud-borne SO4 (accum, coarse).
         self._so4_modes = tuple(
             m.short for m in self._spec.modes if "so4" in m.species
         )
+        # HAM restricts both the pH-setting sulfate sum and the product split
+        # to exactly these classes (``ham_wet_chemistry``'s AS/CS; see the
+        # module docstring); ``None`` (every MAM4 population) keeps today's
+        # single population-wide sum/cloud-borne-fraction split below.
+        self._aqueous_modes = self._spec.aqueous_sulfate_modes
+        if self._aqueous_modes is not None:
+            if len(self._aqueous_modes) != 2:
+                raise ValueError(
+                    "aqueous_sulfate_modes must name exactly two classes "
+                    "(HAM's AS/CS pair in ham_wet_chemistry's branch "
+                    f"structure); got {self._aqueous_modes!r}."
+                )
+        # The pH-setting sulfate sum (``zso4`` in ham_wet_chemistry, lines
+        # ~203/288): restricted to ``aqueous_sulfate_modes`` when set, else
+        # today's whole-population sum (``self._so4_modes``, unchanged).
+        self._ph_modes = self._aqueous_modes or self._so4_modes
         # Fallback destination for sulfate produced where no cloud-borne
         # number exists: the INTERSTITIAL accumulation mode. HAM assigns this
         # droplet sulfate to the cloud-borne coarse mode (Seinfeld & Pandis
@@ -308,13 +358,14 @@ class AqueousSulfur(PhysicsTerm):
         so2 = view.get("g_so2", zeros)
         so4_total = sum(
             view.get(mass_name("so4", m), zeros)
-            for m in self._so4_modes
+            for m in self._ph_modes
         )
 
         if self._scheme == "simple":
             dso4 = params.rate_scale * _simple_aqueous_so4(
                 so2=jnp.maximum(so2, 0.0),
                 h2o2=jnp.maximum(ox.h2o2, 0.0), rho=rho,
+                conv_so2_so4=self._conv_so2_so4,
             )
         else:
             # The chemistry is evaluated everywhere and kept only where
@@ -339,13 +390,15 @@ class AqueousSulfur(PhysicsTerm):
                 rho=rho,
                 temperature=state.temperature,
                 dt=dt,
+                mw_so4=self._mw_so4,
+                conv_so2_so4=self._conv_so2_so4,
             )
         dso4 = jnp.where(active, dso4, 0.0)
 
         # Grid-mean rates: produced sulfate is in-cloud, so weight by the
         # cloudy area fraction.
         so4_rate = cloud_fraction * dso4 / dt
-        so2_rate = -so4_rate * (_MW_SO2 / _MW_SO4)   # S-conserving SO2 sink
+        so2_rate = -so4_rate * self._conv_so4_so2   # S-conserving SO2 sink
 
         # Distribute the cloud-borne sulfate over the sulfate modes by their
         # cloud-borne number fraction (HAM ms4as/ms4cs split). Where a cell
@@ -359,7 +412,35 @@ class AqueousSulfur(PhysicsTerm):
         # production is interstitial by construction — the compose-time
         # branch below, so no dead ``mc_*`` tendencies are emitted.
         tracer_tends: dict[str, jnp.ndarray] = {"g_so2": so2_rate}
-        if self._spec.cloud_borne:
+        if self._aqueous_modes is not None:
+            # HAM's own split (``ham_wet_chemistry``, lines ~433-477): the
+            # produced sulfate is distributed over the population's two
+            # ``aqueous_sulfate_modes`` (AS/CS for M7) by their INTERSTITIAL
+            # number fraction — M7 has no cloud-borne phase, so this is the
+            # population's OWN number tracers, not a cloud-borne mirror.
+            # Four branches collapse to one ``frac0`` (AS's share): both
+            # classes "present" (number >= 1e-3 kg⁻¹, HAM's own threshold,
+            # lines 443/453/459/470) splits by number; only one present sends
+            # the whole production there; neither present ALSO sends it all
+            # to CS (lines 470-472) but additionally seeds new CS number from
+            # the mass (lines 476-477, the active, non-commented-out form):
+            # ``Δn_cs = Δm_so4 / (zso4massc[kg] * (M_SO4/M_S))``, HAM's
+            # coarse-mode-particle mass 3.25e-15 kg and M_S = 32.0655 g/mol
+            # converting a mass increment into a particle-count increment.
+            as_short, cs_short = self._aqueous_modes
+            n_as = jnp.maximum(view.get(number_name(as_short), zeros), 0.0)
+            n_cs = jnp.maximum(view.get(number_name(cs_short), zeros), 0.0)
+            has_as = n_as >= _ZEPS_NUMBER
+            has_cs = n_cs >= _ZEPS_NUMBER
+            both = has_as & has_cs
+            denom = jnp.where(both, n_as + n_cs, 1.0)
+            frac_as = jnp.where(both, n_as / denom, jnp.where(has_as, 1.0, 0.0))
+            tracer_tends[mass_name("so4", as_short)] = so4_rate * frac_as
+            tracer_tends[mass_name("so4", cs_short)] = so4_rate * (1.0 - frac_as)
+            neither = (~has_as) & (~has_cs)
+            new_n_cs = so4_rate / (_ZSO4_MASSC * (self._mw_so4 / _MW_S))
+            tracer_tends[number_name(cs_short)] = jnp.where(neither, new_n_cs, 0.0)
+        elif self._spec.cloud_borne:
             nc = {
                 m: jnp.maximum(
                     view.get(number_name(m, cloud_borne=True), zeros), 0.0,

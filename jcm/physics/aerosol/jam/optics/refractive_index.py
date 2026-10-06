@@ -47,6 +47,30 @@ _RI: dict[str, tuple[list[float], list[float]]] = {
     # primary / secondary / marine organics: weakly absorbing.
     "poa": ([1.55, 1.53, 1.52, 1.48, 1.55, 1.60],
             [3e-2, 6e-3, 5e-3, 2e-2, 0.10, 0.12]),
+    # HAM's "OC" token (M7's organic-carbon species, distinct from MAM4's
+    # poa/soa — see microphysics/m7_data.py): mo_ham_rad_data.f90's OC
+    # table (``iradoc``), evaluated at jcm's six anchor wavelengths by
+    # finding the RRTM SW/LW band whose wavelength interval CONTAINS each
+    # anchor. Band edges are the RRTM wavenumber tables (``wavenum1``/
+    # ``wavenum2``; SW: mo_srtm_setup.f90:93-97, LW: mo_lrtm_setup.f90:95-99
+    # — lambda[um] = 1e4/wavenumber[cm-1]):
+    #   0.30 um -> SW band 27 (wavenumber 29000-38000 -> 0.263-0.345 um,
+    #     the 12th SW array slot, mid-wavelength 0.30 um in the
+    #     mo_ham_rad_data.f90:194 comment): cnr/cni(1:14,iradoc) line
+    #     243/248, index 12 -> n=1.443, k=1.63e-2.
+    #   0.55 um -> the dedicated 550 nm optional-wavelength slot
+    #     (lambda_sw_opt(1), exact match rather than an interval pick):
+    #     cnr/cni(15:16,iradoc) line 255/258, index 1 -> n=1.53, k=5.50e-3.
+    #   1.0 um -> SW band 23 (8050-12850 -> 0.778-1.242 um, mid-wavelength
+    #     1.01 um, SW array index 8): n=1.420, k=2.01e-2.
+    #   3.0 um -> SW band 17 (3250-4000 -> 2.5-3.077 um, mid-wavelength
+    #     2.79 um, SW array index 2): n=1.510, k=7.33e-3.
+    #   10.0 um -> LW band 7 (980-1080 -> 9.259-10.204 um): cnr/cni
+    #     (17:32,iradoc) line 362/367, LW-array index 7 -> n=1.81, k=4.54e-2.
+    #   25.0 um -> LW band 2 (350-500 -> 20-28.57 um): LW-array index 2 ->
+    #     n=1.95, k=2.35e-1.
+    "oc": ([1.443, 1.53, 1.420, 1.510, 1.81, 1.95],
+           [1.63e-2, 5.50e-3, 2.01e-2, 7.33e-3, 4.54e-2, 2.35e-1]),
     "soa": ([1.50, 1.49, 1.48, 1.46, 1.52, 1.56],
             [5e-3, 2e-3, 2e-3, 1.5e-2, 0.09, 0.11]),
     "moa": ([1.53, 1.52, 1.51, 1.47, 1.53, 1.58],

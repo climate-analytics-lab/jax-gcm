@@ -407,7 +407,11 @@ def echam_physics(
             the SPA floor. The online aerosol *direct radiative* effect that
             would let JAM fully replace MACv2-SP optics is tracked in #495.
         jam_microphysics: JAM core when ``aerosol_module="jam"`` —
-            ``"placeholder"`` (κ-Köhler equilibrium) today; MAM4-JAX is #490.
+            ``"placeholder"`` (κ-Köhler equilibrium on the MAM4 population,
+            default) today; ``"mam4_jax"`` is #490 (optional ``jcm[mam4]``
+            extra). ``"m7_placeholder"`` is the same κ-Köhler core on the M7
+            population instead (the ``echam-ham-m7`` preset's chain-test
+            vehicle, #1017) — the real M7 core adapter is a later task.
         jam_cloud_borne: prognose the explicit cloud-borne aerosol phase
             (#602). ``True`` (default) cycles the ``mc_*``/``nc_*`` phase
             in the physics carry (activation transfer, resuspension,

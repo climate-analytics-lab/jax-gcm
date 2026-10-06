@@ -85,6 +85,15 @@ class AerosolMode:
     soluble: bool
     can_activate: bool
     sediments: bool
+    #: HAMMOZ's own convective in-droplet scavenging fraction for this class
+    #: (M7's ``csr_conv``, ``mo_ham_m7ctl.f90:518``), or ``None`` to fall back
+    #: to the harness's MAM4-mode lookup table (``HAM_CSR_CONV`` in
+    #: ``wetdep/convective_fractions.py``). MAM4 modes leave this unset so the
+    #: existing name-keyed table — a single population's worth of today's
+    #: behaviour — stays authoritative for them; a population that already
+    #: carries HAM's own per-class value (M7) sets it directly here instead
+    #: of needing an entry in that MAM4-specific table.
+    csr_conv: float | None = None
 
     # ------------------------------------------------------------------
     # Geometry: per-class conversions from mass to number / surface area.
@@ -156,6 +165,41 @@ class ModalAerosolSpec:
     primary_emission: dict[str, tuple[tuple[str, float], ...]] = (
         dataclasses.field(default_factory=dict)
     )
+    #: Name (or short) of the mode whose σ_g the class-``"accum"``-style ARG
+    #: variants read as the accumulation-mode width (``ArgActivation``'s
+    #: Ghosh (2025) variant). MAM4's accumulation mode is named ``"accum"``;
+    #: a population with other mode names (M7's ``"as"``) points this at its
+    #: own accumulation-sized soluble mode instead.
+    accumulation_mode: str = "accum"
+    #: Which classes play HAM's roles in the aerosol inputs to mixed-phase
+    #: freezing (a :class:`~jcm.physics.aerosol.jam.ice_nucleation.ham_freezing.HamFreezingClasses`,
+    #: typed loosely here — ``jam.ice_nucleation.ham_freezing`` imports this
+    #: module, so a strict type hint would cycle back). ``None`` leaves the
+    #: choice to the consumer's own default (:data:`MAM4_FREEZING_CLASSES` for
+    #: :class:`~jcm.physics.aerosol.jam.ice_nucleation.ice_term.IceNucleation`).
+    freezing_roles: object | None = None
+    #: Classes whose cloud-borne number the in-cloud aqueous-sulfate split
+    #: (``chemistry/aqueous.py``) draws the sulfate it produces from — HAM's
+    #: ``ham_wet_chemistry`` sums the pH-setting sulfate over, and splits its
+    #: product by the interstitial number fraction of, exactly these classes.
+    #: ``None`` keeps the harness's existing single-population pH/split
+    #: behaviour (every class carrying "so4"); setting this switches on HAM's
+    #: own restricted sum/split (M7: the soluble accumulation and coarse
+    #: modes only).
+    aqueous_sulfate_modes: tuple[str, ...] | None = None
+    #: Population-specific dust-emission window/number policy (a
+    #: :class:`~jcm.physics.aerosol.jam.emissions.dust.DustEmissionPolicy`,
+    #: typed loosely for the same reason as ``freezing_roles``). ``None``
+    #: (every MAM4 population) keeps :class:`~...dust.DustEmissions`'s
+    #: existing MAM4-window, number-conserving-diameter behaviour.
+    dust_emission: object | None = None
+    #: Population-specific per-sector primary-emission mode/size targets (a
+    #: :class:`~jcm.physics.aerosol.jam.emissions.ham_sectors.HamSectorPolicy`,
+    #: typed loosely for the same reason as ``freezing_roles``). ``None``
+    #: (every MAM4 population) keeps :class:`~...anthropogenic.AnthropogenicEmissions`'s
+    #: existing ``primary_split``-based mode targets and class-geometry
+    #: number factor.
+    sector_emission: object | None = None
 
     def __post_init__(self) -> None:
         """Validate the family tag and species references."""
