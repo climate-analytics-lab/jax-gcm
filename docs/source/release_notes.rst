@@ -581,8 +581,12 @@ Interactive aerosol (JAM)
   ionisation, Koehler A/B + ARG activation over the 20-bin updraft PDF, HAM's
   Mie-table optics, Long + Sofiev sea salt, per-sector emission sizing with
   the CEDS residential/energy channels and AeroCom-II biogenic OC, the full
-  ``nwetdep = 3`` wet deposition, M7 contact/immersion freezing and
-  Kaercher-Lohmann cirrus (``nic_cirrus = 2``). Every variant is a new
+  ``nwetdep = 3`` wet deposition, M7 contact/immersion freezing,
+  Kaercher-Lohmann cirrus (``nic_cirrus = 2``), and dust emission's
+  ``ndust = 5`` (HAM's own reference-run choice: ``ndust = 4``'s Zobler/
+  East-Asian mixture plus the MSG-SEVIRI Saharan dust-source-activation
+  override, ``forcing.dust_msg``; its mirror bundle is not yet staged).
+  Every variant is a new
   selector whose default leaves the MAM4 configurations bit for bit
   unchanged. Two settings deviate from the r7492 reference by maintainer
   decision: the updraft PDF (``nactivpdf = 1``) and the corrected
