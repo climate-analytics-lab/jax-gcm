@@ -34,14 +34,16 @@
  "harness": {
   "path": "/scr/dwatsonparris/ham-m7/w3/task3/harness/fortran_harness/echam_hamaqueous",
   "commit": "b2e388e7f32d568b2182a115bb2185d264ba6d38",
-  "uncommitted_changes": false,
+  "uncommitted_changes": true,
   "repository": "private scratch harness (fortran_harness/echam_hamaqueous), not pushed"
  },
  "checks": {
   "O0_vs_O2_max_abs": 0.0
  },
  "known_gaps": [
-  "H2O2 remaining after the niter sub-stepping is a purely local Fortran variable (zh2o2m), never exposed by ham_wet_chemistry's interface -- not recorded; see hamaqueous_README.md.",
-  "jcm's _aqueous_so4 (shared with MAM4) uses SO2 Henry's law (1.23, 3020.0) vs this reference's compiled (1.36, 4250.0) (mo_ham_species.f90 speclist(id_so2)%henry) -- -9% to -52% disagreement in produced sulfate (<2.3% once patched in a scratch copy); not fixed here (shared with MAM4, house rule); see hamaqueous_README.md."
+  "H2O2 remaining after the niter sub-stepping is a purely local Fortran variable (zh2o2m), never exposed by ham_wet_chemistry's interface -- not recorded; this is fine, because jcm resets H2O2 to the prescribed oxidant field every step (matching HAM's own offline-oxidant behaviour, so there is nothing to carry across steps either way); see hamaqueous_README.md."
+ ],
+ "resolved_gaps": [
+  "jcm's _aqueous_so4 (shared with MAM4) originally used SO2 Henry's law (1.23, 3020.0) vs this reference's compiled (1.36, 4250.0) (mo_ham_species.f90 speclist(id_so2)%henry) -- -9% to -52% disagreement in produced sulfate -- plus smaller rounding differences in zrgas/avo/avo_xtoc/mw_so2. Fixed (jax-gcm#1031) by parametrising all five as AqueousConstants (aqueous_constants.py), None by default (MAM4 unaffected, bitid-verified) and set to HAM_AQUEOUS_CONSTANTS on M7_SPEC; aqueous_hamaqueous_reference_test.py now passes at float64 rtol=1e-12 on every recorded field; see hamaqueous_README.md."
  ]
 }

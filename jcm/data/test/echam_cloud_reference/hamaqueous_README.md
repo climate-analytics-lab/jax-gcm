@@ -5,51 +5,53 @@ Outputs of the **unmodified** ECHAM6.3-HAM2.3 r7492 routine
 single-level M7 slices, compiled standalone in double precision with
 declaration-only stubs of the modules it USEs. They are the intended
 numerical reference for `jcm/physics/aerosol/jam/chemistry/aqueous.py`'s
-HAM path (`spec.aqueous_sulfate_modes` set) -- but see "Known gap: SO2
-Henry's law constant" below, which blocks the 1e-12 comparison test
-this data was built for. **Data only**: no ECHAM or HAM source is part
-of this repository.
+HAM path (`spec.aqueous_sulfate_modes` set), and
+`aqueous_hamaqueous_reference_test.py` compares the full M7 path against
+every array below at float64 rtol=1e-12. **Data only**: no ECHAM or HAM
+source is part of this repository.
 
 Integrity: -O0 vs -O2 max abs difference 0.0e+00 (`hamaqueous_provenance.json`).
 
-## Known gap: SO2 Henry's law constant mismatch (jax-gcm#1017 task 3, STOP)
+## Fixed: SO2 Henry's law constant mismatch (jax-gcm#1017 task 3; jax-gcm#1031)
 
-jcm's `_aqueous_so4` (`jcm/physics/aerosol/jam/chemistry/aqueous.py`,
-`_H_SO2_0, _H_SO2_ACT = 1.23, 3020.0`) disagrees with this reference's
-compiled `speclist(id_so2)%henry = (1.36, 4250.0)`
+jcm's `_aqueous_so4` (`jcm/physics/aerosol/jam/chemistry/aqueous.py`) originally
+hardcoded `_H_SO2_0, _H_SO2_ACT = 1.23, 3020.0`, which disagreed with this
+reference's compiled `speclist(id_so2)%henry = (1.36, 4250.0)`
 (`mo_ham_species.f90`'s SO2 registration, tagged `!csld(#275)` -- a later
-correction jcm's port predates). This is the dominant driver of a
-**-9% to -52%** relative disagreement in the produced-sulfate rate across
-the 16 cells below (measured against `out/pxtte_ms4as + out/pxtte_ms4cs`,
-grid-mean-weighted by `in/paclc` to match `pxtte`'s own convention) --
-worse at low temperature, consistent with an activation-energy mismatch.
-Patching `_H_SO2_0, _H_SO2_ACT` to `(1.36, 4250.0)` in a scratch copy drops
-the disagreement to <2.3% (the residual from smaller literal-rounding
-differences: HAM's `avo` 6.022e20 vs jcm's precise 6.02214179e20, HAM's
-`zrgas` 0.082 vs jcm's `r_universal/101.325` ~0.082057, `zmolgair` 28.84).
+correction jcm's port predates) -- the dominant driver of a **-9% to -52%**
+relative disagreement in the produced-sulfate rate across the 16 cells
+below. Three smaller literal-rounding differences (`zrgas`, `avo`, the
+`xtoc`/`ctox` `avo_xtoc` literal) and SO2's molar mass (`mw_so2`) made up
+the <2.3% residual once the Henry pair alone was patched in a scratch copy.
 
 `_aqueous_so4` is **shared with the MAM4 default path**, so per the house
-rule this reference does NOT change it (that would move MAM4's calibrated
-behaviour) -- reported to the lead instead. The
-`aqueous_hamaqueous_reference_test.py` comparison test this data was
-built for is therefore **not yet added**: it would either fail at 1e-12 as
-measured above, or need a tolerance that doesn't test anything meaningful.
-Options for the lead: (a) parametrize `_H_SO2_0`/`_H_SO2_ACT` the same way
-task 1 parametrized `mw_so4`/`conv_so2_so4` (new optional args defaulting
-to today's MAM4 values, M7's `AqueousSulfur` passing the HAM-correct ones),
-then add the comparison test; (b) accept the MAM4-shared constant as a
-known approximation and track it as a separate issue; (c) something else.
+rule none of these five literals could simply be changed (that would move
+MAM4's calibrated behaviour) -- reported to the lead as a STOP, which
+confirmed the Fortran line numbers and filed the MAM4-shared defect as
+jax-gcm#1031. Fix (this PR): every one of the five is now an optional
+`AqueousConstants` override (`aqueous_constants.py`) that `_aqueous_so4`
+reads only when given one; the default (`None`, every MAM4 population)
+reproduces today's values exactly (bitid-verified bit-identical), and
+`M7_SPEC` sets `aqueous_constants=HAM_AQUEOUS_CONSTANTS` -- r7492's own
+numbers. `aqueous_hamaqueous_reference_test.py` runs the full M7
+`AqueousSulfur` term (not just the bare kernel) against every array below
+and passes at float64 rtol=1e-12 with no loosening.
 
-## Known gap: H2O2 remaining is NOT recorded
+## Known gap: H2O2 remaining is NOT recorded (benign)
 
 `ham_wet_chemistry` depletes H2O2 in a purely LOCAL variable (`zh2o2m`)
 across its 5 sub-steps and discards it at the end of the loop -- it is
 never written to an `INTENT(out)`/`INTENT(inout)` argument or a stream,
 so there is no way to recover it from the compiled routine's own
 interface without editing the Fortran, which the house rule for this
-harness forbids. The produced sulfate, the SO2 consumed and the new CS
-number (all derived from `pxtte`, which IS exposed) are recorded; H2O2-
-remaining comparisons are out of scope for this reference.
+harness forbids. This is fine: jcm's `AqueousSulfur` likewise discards its
+own depleted H2O2 at the end of each step and resets it from the
+prescribed oxidant field on the next one, matching HAM's own offline-oxidant
+treatment of H2O2 (there is no coupled prognostic H2O2 budget on either
+side, so nothing is lost by not carrying it across steps). The produced
+sulfate, the SO2 consumed and the new CS number (all derived from `pxtte`,
+which IS exposed) are recorded; H2O2-remaining comparisons are out of scope
+for this reference.
 
 ## Arrays (one entry per cell, `meta/names` order)
 
