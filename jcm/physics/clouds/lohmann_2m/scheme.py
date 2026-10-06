@@ -35,6 +35,7 @@ from ..cloud_utils import (
     ice_fall_speed_air_density_factor,
     ice_volume_mean_radius_from_temperature,
     ice_volume_mean_radius_schumann,
+    karcher_lohmann_deposition_rate,
     latent_heat_over_cp,
     minimum_CDNC,
     sundqvist_condensation,
@@ -550,7 +551,7 @@ def cloud_microphysics_2m(
             # verv_k is ECHAM's zvervx, already [cm/s] (turbulent_updraft_
             # velocity's own docstring); xfrzmstr's own contract takes m/s
             # (matching its updraft argument's name), so convert back.
-            _cirrus_ri_k, cirrus_pnicex_k = xfrzmstr(
+            cirrus_ri_raw_k, cirrus_pnicex_k = xfrzmstr(
                 sice_k, verv_k / 100.0, apn_cm3_k, t_m1_k, p_k, dt, params)
             # The SAME depleted number, converted back to 1/m3, is HAM's
             # ``pap`` -- update_in_cloud_water's own cap on the candidate
@@ -567,6 +568,20 @@ def cloud_microphysics_2m(
             # at ``cirrus_aerosol_number_available_k`` remains to apply.
             zninucl_k = jnp.minimum(
                 cirrus_pnicex_k, cirrus_aerosol_number_available_k)
+            # The Kaercher-Lohmann deposition rate ``zqinucl``
+            # (mo_cloud_micro_2m.f90:1046-1102, #552/#1017 w6): the vapour
+            # deposited onto the crystals ``xfrzmstr`` just nucleated, with
+            # ventilation, computed here (step-start quantities only) and
+            # carried to section 5 below, matching ECHAM's own section-1
+            # placement -- entirely before sedimentation/melting/section 4.
+            # The ICNC ``icnc_before_floor`` is ECHAM's ``zicncq`` right
+            # after ``+= zninucl`` (:1058), the SAME pre-sedimentation sum
+            # ``icnc_sedi`` below adds (:982,1050-1058); this call floors
+            # it independently (it is read, not mutated, before that add).
+            _icncq_floored_k, zqinucl_k = karcher_lohmann_deposition_rate(
+                cirrus_ri_raw_k, zrid_k, zicncq_early_k + zninucl_k,
+                qi_m1_k, cf_k, rho_k, adc_k, visc_k, sice_k, t_m1_k, p_k,
+                esi_k, q_m1_k, qsi_k, dt, params)
         else:
             cirrus_pnicex_k = inp_dep_k
             cirrus_aerosol_number_available_k = zero_s
@@ -775,9 +790,24 @@ def cloud_microphysics_2m(
             dq_up_k, zdqsat, cf_k, zxib, zxlb, zqp1,
             lo2.astype(zqp1.dtype), params.xsec, params.epsec)
         if params.nic_cirrus == 2:
-            # ECHAM: zdep = zqinucl·zifrac — the Kärcher-Lohmann
-            # nucleated vapour, which jcm does not compute (#552).
-            zdep0 = zero_s
+            # ECHAM 1449-1458 (#552, closed by #1017 w6): at nic_cirrus=2
+            # the deposition leg is ``zqinucl`` (computed in section 1
+            # above) standing in for ``zqcdif`` -- zcnd is UNAFFECTED
+            # (always built from zqcdif, 1437-1441). The Fortran writes
+            # ``zdep = zqinucl*zifrac`` unconditionally and only zeroes it
+            # where ``ll2 = (NOT dissipation) & (NOT lo2)`` (1455-1458);
+            # since its own ``zifrac`` MERGEs to 1.0 outside dissipation
+            # (1443), recomputing the dissipation-branch fraction here and
+            # dispatching it exactly as ``sundqvist_condensation`` dispatches
+            # zqcdif's own zdep reproduces that MERGE: dissipation uses the
+            # clipped in-cloud ice fraction, growth uses the ice/liquid
+            # ``lo2`` weight, condensation (ll2) is zero either way.
+            dissipation = _zqcdif < 0.0
+            zifrac = jnp.clip(
+                zxib / jnp.maximum(zxib + zxlb, params.epsec), 0.0, 1.0)
+            zdep0 = jnp.where(
+                dissipation, zqinucl_k * zifrac,
+                lo2.astype(zqp1.dtype) * zqinucl_k)
 
         # --- 5.4 Supersaturation corrections ---------------------------
         (zcnd, zdep, ztp1tmp, zqp1tmp, zqsp1tmp,

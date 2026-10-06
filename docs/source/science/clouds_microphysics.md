@@ -613,6 +613,44 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   ``mo_cloud_micro_2m.f90:1507``), never ``papm1``. Renamed to
   ``aerosol_number_available``, fed from the same depleted quantity
   ``xfrzmstr`` itself consumes.
+
+  **Deposition onto the newly nucleated crystals (``zqinucl``).**
+  ``cloud_utils.karcher_lohmann_deposition_rate`` ports ECHAM's own
+  section-1 deposition-growth formula (``mo_cloud_micro_2m.f90:1046-1102``,
+  distinct from ``mo_cirrus.f90`` -- this is ``cloud_micro_interface``'s own
+  code, not ``XFRZMSTR``'s): a Fuchs-corrected diffusional growth rate
+  (thermodynamic term ``zastbsti``, molecular speed ``zvth``, transition
+  regime correction ``zfuchs``) times a Reynolds-number ventilation factor
+  (built from a mean-crystal-mass fall speed sharing ``sedimentation_ice``'s
+  size-regime piecewise fall-speed coefficients, evaluated on the
+  step-start ice rather than ``sedimentation_ice``'s own carried state),
+  clamped to the available vapour above and ice below. ``scheme.py`` calls
+  it immediately after ``xfrzmstr`` (same step-start inputs, before
+  sedimentation/melting/section 4, matching the Fortran's own placement)
+  and feeds its result into section 5 as the ``nic_cirrus = 2`` deposition
+  leg ``zdep`` (ECHAM 1449-1458: ``zqinucl`` stands in for ``zqcdif`` under
+  the SAME dissipation/ice-fraction/``lo2`` dispatch the condensation leg
+  ``zcnd`` already used, which is itself unaffected). ``zvth``'s molecular
+  constants (Boltzmann's constant, the mass of one H2O molecule) use
+  ECHAM's own 3-significant-figure literals (``mo_cloud_utils.f90``), not
+  jcm's higher-precision physical constants, since reproducing that
+  rounding -- not the CODATA value -- is what matches the compiled
+  reference. Checked directly against the end-to-end harness
+  (``cloud2m_cirrus_T63L47.npz``, extended with ``zqinucl``/``zri_cirrus``/
+  ``icncq_qd`` diagnostics for this fix): matches to float64 round-off on
+  4 of 5 designed columns, 9.3e-15 absolute on the 5th (a zero-aerosol
+  control cell with a near-cancelling subtraction); the ``zdep`` dispatch
+  formula matches the compiled ``zdep`` exactly. The end-to-end final
+  ICNC check is unaffected by this fix (``zqinucl`` is a vapour/mass
+  pathway feeding ``qi``, not the separate ``zninucl`` number pathway a
+  prior fix already wired); final ``q``/``qi`` are NOT independently
+  checked end-to-end against the compiled reference, because
+  ``deposition_freezing.py``'s Koop homogeneous-freezing floor (an
+  unrelated, pre-existing numerical safety net with no ``nic_cirrus``
+  gate at all, see its own docstring) dominates the two designed columns
+  with negligible nucleation and has no ECHAM equivalent to compare
+  against (see ``cirrus_end_to_end_reference_test.py`` for the measured
+  numbers).
 - Neither microphysics scheme publishes the radiative effective radii: as in
   ECHAM, the radiation forms them inside its own call from the step's
   condensate and droplet/crystal number (``mo_cloud_optics.f90::cloud_optics``;

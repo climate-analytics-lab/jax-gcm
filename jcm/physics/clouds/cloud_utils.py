@@ -94,6 +94,140 @@ def sundqvist_condensation(
     return zqcdif, zcnd, zdep
 
 
+# ECHAM's own literals for this formula (mo_cloud_utils.f90:57-60), not
+# jcm's higher-precision ``c.ak``/molar-mass constants: ECHAM rounds the
+# Boltzmann constant and the water-molecule mass to 3 significant figures
+# here, and reproducing that rounding (not the CODATA value) is what makes
+# ``karcher_lohmann_deposition_rate`` match the compiled reference to
+# float64 round-off (#1017 w6).
+_ZQINUCL_KB = 1.38e-23          # Boltzmann constant [J/K], mo_cloud_utils.f90:57
+_ZQINUCL_XMW = 2.992e-26        # mass of one H2O molecule [kg], mo_cloud_utils.f90:59
+_ZQINUCL_ALPHA = 0.5            # deposition coefficient, mo_cloud_utils.f90:58
+
+
+def karcher_lohmann_deposition_rate(
+    nucleation_radius_raw: jnp.ndarray,   # zri (xfrzmstr's own, unclamped) [m]
+    radius_fallback: jnp.ndarray,         # zrid, the section-1 temperature-
+                                           # parameterised radius [m]
+    icnc_before_floor: jnp.ndarray,       # zicncq + zninucl, pre-icemin [1/m3]
+    ice_mmr_previous: jnp.ndarray,        # pxim1 [kg/kg]
+    cloud_fraction: jnp.ndarray,          # paclc [0..1]
+    air_density: jnp.ndarray,             # zrho [kg/m3]
+    air_density_correction: jnp.ndarray,  # zaaa, ice fall-speed density factor
+    dynamic_viscosity: jnp.ndarray,       # zviscos [Pa s]
+    ice_supersaturation: jnp.ndarray,     # zsusatix = sice = max(q/qsi-1,0) [1]
+    temperature_previous: jnp.ndarray,    # ptm1 [K]
+    pressure: jnp.ndarray,                # papm1 [Pa]
+    sat_vap_pres_ice: jnp.ndarray,        # zesi [Pa]
+    humidity_previous: jnp.ndarray,       # pqm1 [kg/kg]
+    qsat_ice: jnp.ndarray,                # zqsi [kg/kg]
+    dt: jnp.ndarray,
+    params: CloudParams2M,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    """Kaercher-Lohmann deposition rate ``zqinucl`` (``nic_cirrus == 2``).
+
+    ECHAM ``mo_cloud_micro_2m.f90:1046-1102``: the vapour deposited onto the
+    newly homogeneously-frozen crystals (``xfrzmstr``'s own output, section
+    1) this step, with ventilation. This runs entirely on step-start
+    (``*m1``) quantities, before section 5's own humidity/temperature
+    adjustment -- the Fortran computes it in section 1's loop, well before
+    ``column_processes`` even starts, and ``scheme.py`` calls this
+    immediately after ``xfrzmstr`` for the same reason.
+
+    Three pieces, in the Fortran's own order:
+
+    1. ``zri`` clamp (1046-1047): fall back to ``radius_fallback`` when
+       ``xfrzmstr``'s own radius is below ``epsec``, then floor at 1 um.
+    2. The ICNC floor (1062-1066) and mean-crystal-mass fall speed
+       (1068-1085) gated on ``ll_ice = (pxim1 > 0) & (paclc > clc_min)`` --
+       the SAME mask the Fortran reuses for the ventilation factor below
+       (1097), reused here for the same reason.
+    3. The ventilation-corrected deposition rate itself (1089-1102):
+       Fuchs-corrected diffusional growth (``zgtp``/``zvth``/``zb2``/
+       ``zfuchs``) times a Reynolds-number ventilation factor (``zre``/
+       ``zfre``), clamped to the available vapour above/ice below.
+
+    Returns
+    -------
+    (icnc_floored, zqinucl) : the ICNC used by the deposition formula (zicncq
+        after its own icemin floor, the SAME quantity the caller's
+        ``icnc_sedi`` addition reads as ``zicncq_early_k + zninucl_k`` --
+        this function does not re-derive that sum, only floors it) and the
+        deposition rate itself [kg/kg].
+
+    """
+    epsec = params.epsec
+
+    # 1. zri clamp (1046-1047).
+    zri = jnp.where(nucleation_radius_raw >= epsec,
+                     nucleation_radius_raw, radius_fallback)
+    zri = jnp.maximum(zri, 1.0e-6)
+
+    # 2. ICNC floor + mean-crystal-mass fall speed (1062-1085), gated on the
+    # SAME mask the ventilation factor reuses at step 3.
+    ll_ice = (ice_mmr_previous > 0.0) & (cloud_fraction > params.clc_min)
+    icnc_floored = jnp.where(ll_ice,
+                              jnp.maximum(icnc_before_floor, params.icemin),
+                              icnc_before_floor)
+
+    # ``icnc_floored`` is only guaranteed >= icemin on the ll_ice branch
+    # (its own ``jnp.where`` leaves it at the caller's raw, possibly-zero
+    # ``icnc_before_floor`` otherwise); ``jnp.where`` still evaluates this
+    # division on every element, so an extra floor here (a no-op on the
+    # ll_ice branch, where it is already >= icemin) keeps a gated-out
+    # zero-ICNC cell from poisoning the gradient with 0/0 -> nan·0 (the
+    # double-``where`` convention, JAX_gotchas.md / #558).
+    zmmean = jnp.where(
+        ll_ice,
+        jnp.maximum(
+            air_density * ice_mmr_previous
+            / (jnp.maximum(icnc_floored, params.eps)
+               * jnp.maximum(cloud_fraction, params.clc_min)),
+            params.mi),
+        params.mi)
+    ll_small = zmmean < params.ri_vol_mean_1
+    ll_mid = (~ll_small) & (zmmean < params.ri_vol_mean_2)
+    zalfased = jnp.where(ll_small, params.alfased_1, params.alfased_2)
+    zalfased = jnp.where(ll_mid, params.alfased_3, zalfased)
+    zbetased = jnp.where(ll_small, params.betased_1, params.betased_2)
+    zbetased = jnp.where(ll_mid, params.betased_3, zbetased)
+    # NOT clamped to [0.001, 2.0] m/s: that clip belongs to the OTHER
+    # ``sedimentation_ice`` subroutine (mo_cloud_micro_2m.f90:2227-2228,
+    # ``sedimentation_melt.py``'s own fall speed); this formula's own copy
+    # (1084-1085) has no such clip.
+    zxifallmc = (params.fall * zalfased * zmmean ** zbetased
+                 * air_density_correction)
+
+    # 3. Ventilation-corrected deposition rate (1089-1102). ``zastbsti`` is
+    # ECHAM's own thermodynamic term for ICE deposition (``zast``/``zbst``
+    # for ice, mo_cloud_micro_2m.f90:717-721) -- the water-phase analogue
+    # already lives in ``scheme.py`` as ``thermo_term_water``; ``zkair``/
+    # ``zdv`` are recomputed here from the same literals ``scheme.py``'s
+    # ``thermo_term_water``/``bergeron_eta`` use, since neither reaches the
+    # scan as a standalone per-level array.
+    zkair = 4.1867e-3 * (5.69 + 0.017 * (temperature_previous - c.tmelt))
+    zdv = 2.21 / jnp.maximum(pressure, epsec)
+    zastbsti = (
+        c.alhs * (c.alhs / (c.rv * temperature_previous) - 1.0)
+        / (zkair * temperature_previous)
+        + c.rv * temperature_previous
+        / jnp.maximum(zdv * sat_vap_pres_ice, epsec))
+
+    zgtp = 1.0 / (air_density * zastbsti)
+    zvth = jnp.sqrt(8.0 * _ZQINUCL_KB * temperature_previous
+                    / (pi * _ZQINUCL_XMW))
+    zb2 = 0.25 * _ZQINUCL_ALPHA * zvth / zdv
+    zfuchs = 1.0 / (1.0 + zb2 * zri)
+    zre = 2.0 * air_density * zri * zxifallmc / dynamic_viscosity
+    zfre = jnp.where(ll_ice, 1.0 + 0.229 * jnp.sqrt(zre), 1.0)
+
+    zqinucl = (4.0 * pi * zri * ice_supersaturation * icnc_floored
+               * zfre * zgtp * zfuchs * _ZQINUCL_ALPHA * dt)
+    zqinucl = jnp.minimum(zqinucl, humidity_previous - qsat_ice)
+    zqinucl = jnp.maximum(zqinucl, -ice_mmr_previous)
+    return icnc_floored, zqinucl
+
+
 def eff_ice_crystal_radius(
     pxice: jnp.ndarray, picnc: jnp.ndarray, params: CloudParams2M,
 ) -> jnp.ndarray:
