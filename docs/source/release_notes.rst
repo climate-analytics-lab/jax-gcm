@@ -596,6 +596,21 @@ Interactive aerosol (JAM)
   RRTMGP, with a broadband 550 nm path so the grey two-stream scheme keeps a
   direct effect. ``jam_optics=False`` makes the aerosol radiatively passive,
   which is a clean A/B control rather than a disabled feature.
+- **ECHAM-HAM M7 aerosol** (#1017): ``+configuration=ham-t63-l47``
+  (``physics=echam-ham-m7``) runs the ECHAM6.3-HAM2.3 M7 population on the
+  same harness, with the M7-JAX microphysics core as the ``jcm[m7]`` extra
+  and HAM's own process variants, each validated against compiled HAM
+  numbers: Kazil-Lovejoy ion-mediated nucleation driven by host-side GCR
+  ionisation, Koehler A/B + ARG activation over the 20-bin updraft PDF, HAM's
+  Mie-table optics, Long + Sofiev sea salt, per-sector emission sizing with
+  the CEDS residential/energy channels and AeroCom-II biogenic OC, the full
+  ``nwetdep = 3`` wet deposition, M7 contact/immersion freezing and
+  Kaercher-Lohmann cirrus (``nic_cirrus = 2``). Every variant is a new
+  selector whose default leaves the MAM4 configurations bit for bit
+  unchanged. Two settings deviate from the r7492 reference by maintainer
+  decision: the updraft PDF (``nactivpdf = 1``) and the corrected
+  ``cdroprad(6) = 30`` µm in-cloud impaction axis. See
+  :doc:`design/ham_m7_configuration`.
 - **JAM is composed through** ``physics=echam-jam*``, which is factory-built
   (``builder: echam_physics``) because the aerosol chain splits around the
   cloud term. It requires the two-moment cloud scheme; JAM with the one-moment
