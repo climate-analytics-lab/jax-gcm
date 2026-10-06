@@ -179,10 +179,15 @@ class AnthropogenicEmissions(PhysicsTerm):
         for target in self._sector_policy.targets[ham_class].get(species, ()):
             mode = self._spec.mode(target.mode)
             mass_flux = flux * target.mass_fraction
-            diameter = cmr_to_emission_diameter(target.cmr_m, mode.geom_std_dev)
-            m_p = particle_mean_mass(mode, density, emission_diameter=diameter)
             add_mass(mass_name(species, mode.short), mass_flux, weights)
-            add_mass(number_name(mode.short), mass_flux / m_p, weights)
+            if target.has_number:
+                diameter = cmr_to_emission_diameter(target.cmr_m, mode.geom_std_dev)
+                m_p = particle_mean_mass(mode, density, emission_diameter=diameter)
+                add_mass(number_name(mode.short), mass_flux / m_p, weights)
+            # else: HAM gives this target (biogenic's soluble Aitken/
+            # accumulation) no explicit number tendency at all -- the
+            # soluble biogenic particles are assumed to condense onto
+            # existing particles rather than nucleate new ones.
 
     def __call__(self, state, diagnostics, forcing, terrain):
         p = self.params.get_value()
@@ -277,6 +282,17 @@ class AnthropogenicEmissions(PhysicsTerm):
                 if subset_flux is not None:
                     self._emit_sector_species(
                         add_mass, weights, species, subset_flux, subset_class)
+
+        if self._sector_policy is not None and "biogenic" in self._sector_policy.targets:
+            # Standalone channel, no super-sector: no OM:OC scaling at all
+            # (mo_ham_m7_emissions.f90:601-607's "no OM to OC conversion
+            # here"), surface injection (HAM's EM_SURFACE for this sector;
+            # the Gaussian collapses to a near-surface spike at its own
+            # thickness floor, injection.py's _MIN_THICKNESS).
+            bg_oc = p.scale * self._flux(forcing, "emis_biogenic_oc", ncols)
+            bg_weights = gaussian_injection_weights(
+                height_full, dz, jnp.asarray(0.0), jnp.asarray(0.0))
+            self._emit_sector_species(add_mass, bg_weights, "oc", bg_oc, "biogenic")
 
         tendency = PhysicsTendency(
             u_wind=jnp.zeros_like(state.u_wind),
