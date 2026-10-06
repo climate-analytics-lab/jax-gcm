@@ -11,7 +11,7 @@ checks loose climatological ranges (spin-up tolerant — this is a
     TOA net  = radiation.toa_sw_down - toa_sw_up - toa_lw_up   |net| <= 10 W/m2
     precip   = clouds.precip_rain + precip_snow + convection.precip_conv
                (kg/m2/s -> mm/day)                              2 - 4 mm/day
-    cloud    = max-random total cover of clouds.cloud_fraction  0.5 - 0.9
+    cloud    = ECHAM total cover aclcov (clouds.total_cloud_cover) 0.5 - 0.9
                (SPEEDY: its own shortwave_rad.cloudc)           0.4 - 0.8
     near-sfc T = temperature at the lowest level                278 - 295 K
 
@@ -24,14 +24,25 @@ score a run with exactly these definitions.
 Cloud cover
 -----------
 ``cloud_cover`` scores ECHAM's own total cover ``aclcov``
-(:func:`jcm.analysis.total_cloud_cover`, ``mo_cloud.f90`` section 10.2):
-maximum overlap within a vertically contiguous cloud, random overlap between
-clouds separated by clear air. That is the construction the reference model
-uses, and a *total* cover is the basis the satellite climatologies are quoted
-on; it is deterministic, and it needs nothing but ``clouds.cloud_fraction`` —
-so every saved output, at any radiation scheme, can be scored the same way.
-The gated number is still not identical to what either reports, because the
-saved cloud fraction is already a time mean (see below).
+(``mo_cloud.f90`` section 10.2): maximum overlap within a vertically
+contiguous cloud, random overlap between clouds separated by clear air, applied
+to the **instantaneous** cloud fraction every step and accumulated in time
+(``paclcov = paclcov + zdtime*zclcov``). The model does exactly that and saves
+the result as ``clouds.total_cloud_cover`` (its time mean over the output
+interval under ``run.output_averages``), and that is the field scored. A total
+cover is the basis the satellite climatologies are quoted on, and the
+observed reference printed beside the gate (``OBS_CLOUD_COVER``) is such a
+product.
+
+Output that does not carry the field (written before it existed) is still
+scored, from the offline overlap of the saved ``clouds.cloud_fraction``
+(:func:`jcm.analysis.total_cloud_cover`), with a printed NOTE saying so. That
+number is an overlap of a *time-mean* profile when the run saved interval
+means, and the overlap product is non-linear, so it is a different number from
+the online cover, usually a lower one: smoothing over the output interval moves each layer toward its
+mean fraction and, where cloud moved between layers, lowers the overlap-derived
+cover. It is a fallback for archived output, not an equal alternative: an
+estimate whose bias is usually low but can have either sign, never a bound.
 
 A SPEEDY run instead scores its own ``shortwave_rad.cloudc``, which is already
 a column cover and has no profile to overlap — so it is a **different
@@ -42,32 +53,24 @@ apply to it.
 
 Two further covers are **printed and not gated**, because they answer
 different questions and have no agreed band of their own:
-``cloud_cover_colmax`` is the previous gate quantity (a column maximum, hence
-only a lower bound on cover) and is kept so the earlier release-validation
-tables stay readable across this change; ``cloud_cover_radiation`` is the
-McICA sub-column cover the RRTMGP flux solve integrates, under the configured
-overlap and decorrelation length.
+``cloud_cover_colmax`` is a column maximum (hence only a lower bound on cover)
+of the saved ``clouds.cloud_fraction``, kept so the #638 and #782
+release-validation tables stay readable; ``cloud_cover_radiation`` is the McICA sub-column cover the RRTMGP
+flux solve integrates, under the configured overlap and decorrelation length.
 
 ``cloud_cover_radiation`` is a **different measurement, not a consistency
-check** on the gate, and the two are not expected to agree: it is a time mean
-of an *instantaneous* cover built from ``effective_cloud_fraction`` (which
-independently zeroes cells with ``cloud_fraction <= 2*cld_frac_min``), whereas
-``cloud_cover``/``cloud_cover_colmax`` are overlaps of the ``cloud_fraction``
-the file holds, which under ``run.output_averages`` is already a time mean
-over the output interval. On a 90-day T63 L47 2M arm the two read 0.53 and
-0.78. Treat a large gap as expected, not as a defect.
+check** on the gate: it is built from ``effective_cloud_fraction`` (which
+zeroes cells with ``cloud_fraction <= 2*cld_frac_min``) and is a finite
+stochastic draw of its overlap, whereas the gate is the deterministic overlap
+of the full fraction, on the fraction radiation sees before the microphysics'
+write-back; a gap between the two is expected.
 
 **Cover numbers from before #707 are not comparable with these.** #707 gave
 the 1M scheme ECHAM's post-microphysics cover write-back (``mo_cloud.f90``:
 ``paclc = FSEL(-(zxlp1_d*zxip1_d), paclc, 0)``), which clears a cell's cover
 when its end-of-step condensate is below ``ccwmin`` in *both* phases. That
 redefined what ``clouds.cloud_fraction`` counts, so every overlap of it
-shifts. The size of the shift is known only for the column max, where the
-#782 bisect measured that merge at -0.066 of low cloud for +0.15 W/m2 (the
-TOA column says the redefinition is bookkeeping rather than cloud); it was not
-measured on the max-random cover, and ``cloud_cover_radiation`` reduces a
-differently-preprocessed field, so that figure must not be carried across to
-either. Rationale, measured magnitudes and the #782 decomposition:
+shifts. Rationale, measured magnitudes and the #782 decomposition:
 ``docs/source/design/cloud_cover_gate.md``.
 """
 import argparse
@@ -104,20 +107,26 @@ from aerosol_stats import (  # noqa: E402
 RANGES = {
     "toa_net_wm2": (-10.0, 10.0),
     "precip_mm_day": (2.0, 4.0),
-    # ECHAM total cloud cover under maximum-random overlap (see the module
-    # docstring). Deliberately wide: this is a "did the model produce a
-    # climate" gate, not a tuning target. It is also calibrated on THIS
-    # definition, which matters because max-random reads 0.11-0.15 above a
-    # column maximum of the same field — a band taken from column-max
-    # experience sits ~0.1 low here and fails correct members on the ceiling.
+    # ECHAM total cloud cover ``aclcov`` (see the module docstring). Deliberately
+    # wide: this is a "did the model produce a climate" gate, not a tuning
+    # target. The band was placed on the maximum-random definition, which reads
+    # 0.06-0.15 above a column maximum of the same field (0.11-0.15 on the
+    # pre-#690 years and a spin-up arm, 0.06 on the settled post-#707 control
+    # years), so a band taken from column-max experience sits ~0.1 low here and
+    # can fail correct members on the ceiling. The scored field is the online
+    # cover (the overlap of the instantaneous fraction, time-averaged); the
+    # offline overlap of a saved mean profile, which older output falls back
+    # to, usually reads lower than it.
     #
     # Both anchors sit inside it. Observations: a global cloud amount of
     # 0.68 +/- 0.03 for clouds of optical depth > 0.1, itself running from
     # 0.56 (COD > 2) to 0.74 (COD > 0.01) with the detection threshold (GEWEX
     # Cloud Assessment, Stubenrauch et al. 2013, BAMS 94, 1031-1049,
-    # doi:10.1175/BAMS-D-12-00117.1). Model: every ECHAM member recorded in
-    # the #638/#782 matrix maps into 0.59-0.83 on this definition.
-    # Derivation and the measured table: docs/source/design/cloud_cover_gate.md.
+    # doi:10.1175/BAMS-D-12-00117.1); the single product printed beside the
+    # gate (OBS_CLOUD_COVER) is 0.63. Model: every ECHAM member recorded in
+    # the #638/#782 matrix maps into 0.54-0.83 on the offline max-random
+    # definition. Derivation and the measured tables:
+    # docs/source/design/cloud_cover_gate.md.
     "cloud_cover": (0.5, 0.9),
     # SPEEDY scores a different quantity and so gets its own band. Its
     # ``shortwave_rad.cloudc`` is the scheme's own RH-based column cover
@@ -134,11 +143,51 @@ RANGES = {
     "aod_550": (0.02, 0.35),
 }
 
+
+#: The saved field holding ECHAM's ``aclcov``, accumulated online from the
+#: instantaneous cloud fraction (``CloudData.total_cloud_cover``).
+ONLINE_COVER = "clouds.total_cloud_cover"
+
+#: Observed total cloud cover printed beside the gate, as ``(value, source)``:
+#: the area-weighted global mean of ESA-CCI CLOUD v3.0 AVHRR-AMPM ``clt``,
+#: 1997-2016, on the jcm-monitor T63 grid (``obs/t63/clt.nc``, variable
+#: ``annual``) — the product release validation and the calibration compare
+#: ``clt`` against. A reference, never a gate: the satellite products span
+#: 0.56-0.74 with their detection threshold (``cloud_cover_gate.md``).
+OBS_CLOUD_COVER = (0.63, "ESA-CCI CLOUD v3.0 AVHRR-AMPM clt, 1997-2016, "
+                         "global mean")
+
+
 def wmean(da, weights):
     """Time-mean, area-weighted global mean (over the horizontal dims)."""
     if "time" in da.dims:
         da = da.mean("time")
     return float(global_mean(da, weights))
+
+
+def files_with_online_cover(files):
+    """Return the subset of ``files`` that carry :data:`ONLINE_COVER` (headers only)."""
+    carriers = []
+    for f in files:
+        with xr.open_dataset(f) as one:
+            if ONLINE_COVER in one.variables:
+                carriers.append(f)
+    return carriers
+
+
+def cloud_cover_basis(ds, speedy):
+    """Which field the ``cloud_cover`` gate scores in this window.
+
+    ``"online"`` — ``clouds.total_cloud_cover``, ECHAM's ``aclcov`` accumulated
+    in the model; ``"offline_mean_profile"`` — the max-random overlap of the
+    saved ``clouds.cloud_fraction``, for output that carries no online cover;
+    ``"speedy_cloudc"`` — SPEEDY's own column cover. The one place that
+    decides, so the field :func:`cloud_cover_fields` scores and the label
+    :func:`main` prints cannot disagree.
+    """
+    if speedy:
+        return "speedy_cloudc"
+    return "online" if ONLINE_COVER in ds else "offline_mean_profile"
 
 
 def cloud_cover_fields(ds, speedy):
@@ -157,15 +206,17 @@ def cloud_cover_fields(ds, speedy):
     SPEEDY path, where no radiation-view cover is expected in the first place
     and a note would be noise.
 
-    ECHAM dialect: ``cloud_cover`` is the max-random total cover,
-    ``cloud_cover_colmax`` the column maximum kept for continuity with the
-    earlier tables, and ``cloud_cover_radiation`` the McICA sub-column cover
-    when the run saved a non-zero one. It is absent from output written before
-    the diagnostic existed (``b772ffec``, 2026-07-31) and identically zero
-    under grey two-stream radiation, which samples no sub-columns; both cases
-    drop the key rather than report a zero as if it were a measurement. The NN
-    emulator does publish it — the analytic expectation of the same McICA
-    draw.
+    ECHAM dialect: ``cloud_cover`` is the online ``clouds.total_cloud_cover``
+    when the window saves it, and otherwise the offline max-random overlap of
+    the saved ``clouds.cloud_fraction`` (:func:`cloud_cover_basis` decides, and
+    :func:`main` prints which), ``cloud_cover_colmax`` the column maximum kept for
+    continuity with the earlier tables, and ``cloud_cover_radiation`` the McICA
+    sub-column cover when the run saved a non-zero one. It is absent from
+    output written before the diagnostic existed (``b772ffec``, 2026-07-31) and
+    identically zero under grey two-stream radiation, which samples no
+    sub-columns; both cases drop the key rather than report a zero as if it
+    were a measurement. The NN emulator does publish it — the analytic
+    expectation of the same McICA draw.
 
     SPEEDY dialect: ``shortwave_rad.cloudc`` is already the scheme's own
     column cover, so there is nothing to overlap and nothing to cross-check.
@@ -175,7 +226,9 @@ def cloud_cover_fields(ds, speedy):
 
     cloud_fraction = ds["clouds.cloud_fraction"]
     fields = {
-        "cloud_cover": total_cloud_cover(cloud_fraction),
+        "cloud_cover": (ds[ONLINE_COVER]
+                        if cloud_cover_basis(ds, speedy) == "online"
+                        else total_cloud_cover(cloud_fraction)),
         "cloud_cover_colmax": cloud_fraction.max("level"),
     }
     radiation_cover = ds.get("radiation.total_cloud_cover")
@@ -203,7 +256,7 @@ def main():
     a = ap.parse_args()
     # Everything printed below, as records, for --json.
     report = {"run_dir": str(a.run_dir), "gates": [], "info": {},
-              "unscored": {}, "aerosol_stats": {}}
+              "references": {}, "unscored": {}, "aerosol_stats": {}}
 
     # Same discovery as aerosol_stats.run_files, so the two cannot disagree
     # about which files are chunks (``run.snapshot_interval`` writes a
@@ -222,17 +275,31 @@ def main():
             window_start = chunk_day(files[-a.last_n - 1])
         files = files[-a.last_n:]
     ds = xr.open_mfdataset(files, combine="by_coords")
+    # A run resumed across the introduction of ``clouds.total_cloud_cover`` has
+    # chunks with and without it, and ``open_mfdataset`` fills the missing
+    # frames with NaN, which would fail the NaN scan of a healthy run and score
+    # the cover of only the later frames. A window that is not wholly online is
+    # scored wholly offline, and says so; the field's real values in the chunks
+    # that carry it are still scanned for NaN/Inf below, from those chunks alone.
+    carriers = files_with_online_cover(files)
+    n_online = len(carriers)
+    mixed_window = 0 < n_online < len(files)
+    online_in_carriers = None
+    if mixed_window:
+        online_in_carriers = xr.open_mfdataset(
+            carriers, combine="by_coords")[ONLINE_COVER]
+        ds = ds.drop_vars(ONLINE_COVER)
     weights = area_weights(ds)
 
     ok = True
 
-    def check(name, value, lo, hi):
+    def check(name, value, lo, hi, **extra):
         nonlocal ok
         good = lo <= value <= hi
         print(f"{'PASS' if good else 'FAIL'}  {name} = {value:.2f} "
               f"(expected [{lo:g}, {hi:g}])")
         report["gates"].append({"name": name, "value": value, "lo": lo,
-                                "hi": hi, "pass": good})
+                                "hi": hi, "pass": good, **extra})
         ok = ok and good
 
     # NaN scan over everything saved, across the WHOLE opened window —
@@ -241,12 +308,15 @@ def main():
     # ``np.isfinite(ds[v])`` rather than ``np.isfinite(ds[v].values)``: on the
     # dask-backed window the former reduces chunk by chunk, the latter pulls
     # every variable of the whole window into memory one at a time.
+    scanned = {v: ds[v] for v in ds.data_vars}
+    if online_in_carriers is not None:
+        scanned[ONLINE_COVER] = online_in_carriers
     bad = []
-    for v in ds.data_vars:
-        if not bool(np.isfinite(ds[v]).all()):
+    for v, da in scanned.items():
+        if not bool(np.isfinite(da).all()):
             bad.append(v)
     print(f"{'PASS' if not bad else 'FAIL'}  NaN scan: "
-          f"{len(bad)}/{len(ds.data_vars)} variables non-finite "
+          f"{len(bad)}/{len(scanned)} variables non-finite "
           f"{bad[:5] if bad else ''}")
     report["gates"].append({"name": "nan_scan", "value": len(bad), "lo": 0,
                             "hi": 0, "pass": not bad, "bad": bad})
@@ -274,9 +344,22 @@ def main():
     check("precip_mm_day", wmean(precip, weights), *RANGES["precip_mm_day"])
 
     cover, radiation_note = cloud_cover_fields(ds, speedy)
+    basis = cloud_cover_basis(ds, speedy)
     # The band follows the dialect, because the quantity does: see RANGES.
     check("cloud_cover", wmean(cover["cloud_cover"], weights),
-          *RANGES["cloud_cover_speedy" if speedy else "cloud_cover"])
+          *RANGES["cloud_cover_speedy" if speedy else "cloud_cover"],
+          basis=basis)
+    if basis == "offline_mean_profile":
+        why = (f"only {n_online} of {len(files)} chunks save {ONLINE_COVER}"
+               if mixed_window else f"the window saves no {ONLINE_COVER}")
+        print(f"NOTE  cloud_cover is the max-random overlap of the saved "
+              f"clouds.cloud_fraction (offline overlap of the saved mean "
+              f"profile; usually biased low, not a bound): {why}")
+    obs_value, obs_source = OBS_CLOUD_COVER
+    print(f"INFO  cloud_cover_obs = {obs_value:.2f} ({obs_source}; "
+          "reference, not gated)")
+    report["references"]["cloud_cover_obs"] = {"value": obs_value,
+                                               "source": obs_source}
     # Reported, never gated: the column max carries the earlier
     # release-validation tables forward, the McICA cover says what the flux
     # solve saw (a different measurement, not a check on the gate — see the

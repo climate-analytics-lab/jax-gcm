@@ -151,17 +151,30 @@ scores the settled ~200 days of a from-zero spin-up year (full spin-up is
 dialects. Post the table to the release issue; compare settled sim-days/hr
 against the baselines in #638 (>15% drop = runtime regression).
 
-**Cloud cover** is ECHAM's own total cover `aclcov` — maximum-random
-overlap of `clouds.cloud_fraction`, `mo_cloud.f90` §10.2, via
-`jcm.analysis.total_cloud_cover` — because that is the construction the
-reference model uses and a total cover is the basis the satellite
-climatologies are quoted on, and because it is computable from any saved
-output.
+**Cloud cover** is ECHAM's own total cover `aclcov` — maximum-random overlap
+of the instantaneous cloud fraction, `mo_cloud.f90` §10.2 — **accumulated in
+the model** and saved as `clouds.total_cloud_cover` (the mean of the per-step
+cover over the output interval, which is ECHAM's `paclcov` accumulation). A
+total cover is the basis the satellite climatologies are quoted on, and the
+online value is a deterministic function of the model's own fraction. Output
+written before the field existed is still scored, from the offline overlap of
+the saved `clouds.cloud_fraction` (`jcm.analysis.total_cloud_cover`), with a
+`NOTE` saying so: that is an overlap of a time-mean profile, and it reads
+**low** against the online cover (usually; the bias can have either sign, so it
+is an estimate and not a bound). The gate's JSON record carries `basis` (`online`, `offline_mean_profile`, or
+`speedy_cloudc`) so a table can say which it scored.
 
-The ECHAM band is **0.5–0.9**, calibrated on this definition: max-random
-reads +0.11 to +0.15 above the column max the gate used to score, so a band
-carried over from column-max experience would fail correct members on the
-ceiling for a purely definitional reason.
+The observed total cover is printed beside the gate as `cloud_cover_obs`
+(0.63: ESA-CCI CLOUD v3.0 AVHRR-AMPM `clt`, 1997-2016, global mean) and written
+to the JSON under `references`. It is a reference, not a band.
+
+The ECHAM band is **0.5–0.9**, placed on the maximum-random definition:
+max-random reads +0.06 to +0.15 above a column max (+0.11 to +0.15 on the
+pre-#690 years and a spin-up arm, +0.06 on the settled post-#707 control
+years), so a band carried over from column-max experience would fail correct
+members on the ceiling for a purely definitional reason. The online cover reads
+above the offline overlap of the same run, which moves a member toward the
+ceiling.
 
 SPEEDY scores its own `shortwave_rad.cloudc` — an RH-based column cover with
 no profile to overlap, and untouched by this work — so it gates on its own
@@ -170,20 +183,21 @@ member that sits closest to it (recorded 0.57 and 0.58) for a reason that
 does not apply to it.
 
 Two more covers are **printed and not gated**: `cloud_cover_colmax`, the
-column maximum the gate used to score (a lower bound, kept so the #638/#782
+column maximum of the saved fraction (a lower bound, kept so the #638/#782
 tables stay readable), and `cloud_cover_radiation`, the McICA sub-column
 cover the RRTMGP flux solve integrates (dropped when the run saved none, or
 an all-zero field under grey radiation; the NOTE says which). The McICA
-cover is a **different measurement, not a cross-check** — a time mean of an
-instantaneous cover from a differently-preprocessed field, against an
-overlap of the output-averaged fraction — and the two differ by ~0.25 on a
-measured arm, which is expected.
+cover is a **different measurement, not a cross-check**: it is the cover of
+the RH-diagnosed fraction radiation sees before the microphysics' write-back,
+masked by condensate, with its own thin-cloud threshold and a finite sample
+of sub-columns, so a gap between it and the gated cover is expected (+0.04 on a
+measured warm-start arm).
 
 **Cover numbers from before #707 are not comparable with these** — that PR
 gave the 1M scheme ECHAM's `ccwmin` cover write-back, which redefined what
 `clouds.cloud_fraction` counts. Its measured size (−0.066 of low cloud for
 +0.15 W/m²: bookkeeping, not cloud) is a **column-max** figure and does not
-carry over to the other two definitions, where it is unmeasured. Rationale,
+carry over to the other definitions, where it is unmeasured. Rationale,
 the measured table and the #782 decomposition:
 `docs/source/design/cloud_cover_gate.md`.
 

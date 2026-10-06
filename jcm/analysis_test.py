@@ -228,8 +228,8 @@ def test_total_cloud_cover_is_orientation_independent():
     profile = np.array([0.1, 0.0, 0.85, 0.3, 0.3, 0.0, 0.55, 0.2])
     np.testing.assert_allclose(_cover(profile), _cover(profile[::-1]),
                                rtol=1e-12)
-    # The agreement is "to rounding", not exact: ``min(c_{k-1}, zxsec)`` is
-    # applied in loop order, so it caps a different denominator in the
+    # The agreement is "to rounding", not exact: the ``max(1 - c_{k-1}, zepsec)``
+    # floor is applied in loop order, so it caps a different denominator in the
     # reversed column. A cover within zepsec of 1 is where that shows, and it
     # shows at O(zepsec) — far below anything a gate or a climatology reads.
     near_one = np.array([0.2, 1.0 - 5e-13])
@@ -244,9 +244,10 @@ def test_total_cloud_cover_clips_out_of_range_values():
 
 
 def test_total_cloud_cover_handles_a_fully_cloudy_layer():
-    # c = 1 makes the Fortran's 1/(1-c) denominator singular; zxsec caps it at
-    # 1e-12 while the matching numerator is exactly zero, so the answer is 1
-    # wherever the overcast layer sits in the column (including the ends).
+    # c = 1 makes the Fortran's 1/(1-c) denominator singular; the zepsec floor
+    # holds it at 1e-12 while the matching numerator is exactly zero, so the
+    # answer is 1 wherever the overcast layer sits in the column (including
+    # the ends).
     for profile in ([1.0, 0.3, 0.2], [0.3, 1.0, 0.2], [0.3, 0.2, 1.0]):
         np.testing.assert_allclose(_cover(profile), 1.0)
     assert np.isfinite(_cover([1.0, 1.0, 1.0]))
@@ -289,10 +290,10 @@ def test_total_cloud_cover_rejects_a_missing_vertical_dim():
 
 def test_total_cloud_cover_handles_float32_input():
     # Production runs integrate in float32 (``physics_dtype``), so saved
-    # cloud_fraction is float32 and this is the realistic input. Without the
-    # float64 upcast, ``zxsec`` rounds to exactly 1.0 there and an overcast
-    # layer's guarded 0/1e-12 becomes 0/0 — the column scores NaN, silently,
-    # and only for the columns that are fully cloudy somewhere.
+    # cloud_fraction is float32 and this is the realistic input. An overcast
+    # layer must still score 1 rather than NaN (the Fortran's ``zxsec`` would
+    # round to exactly 1.0 here and turn its guarded 0/1e-12 into 0/0), and
+    # the float32 column must score what its float64 widening scores.
     profile = np.array([0.5, 1.0, 0.2], dtype=np.float32)
     cover = total_cloud_cover(xr.DataArray(profile, dims=("level",)))
     assert np.isfinite(float(cover))

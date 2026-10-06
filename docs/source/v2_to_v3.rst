@@ -1429,12 +1429,17 @@ Cloud cover is reported under maximum-random overlap
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Total cloud cover was scored as a column maximum, which is only a lower bound.
-v3 uses ECHAM's own maximum-random overlap (``aclcov``) through the new public
-``jcm.analysis.total_cloud_cover(cloud_fraction, dim="level")``. This is a
-change of **definition**, not of physics — the audit found no defect in the
+v3 uses ECHAM's own maximum-random overlap (``aclcov``): the model computes it
+every step from the final cloud fraction and saves it as
+``clouds.total_cloud_cover``, which the release-validation gate scores, and
+``jcm.analysis.total_cloud_cover(cloud_fraction, dim="level")`` applies the same
+recurrence to a saved profile for output that does not carry the field (the
+overlap of a saved *time-mean* profile usually reads lower than the online
+cover). This is a change of **definition**, not of physics — the audit found no defect in the
 cover itself. The offset measured between the two definitions is **+0.147 /
 +0.148** on a two-moment year, **+0.124 / +0.128** on a one-moment year and
-**+0.110 / +0.111** on a two-moment JAM 90-day segment; the spread across the
+**+0.110 / +0.111** on a two-moment JAM 90-day segment and **+0.06** on two
+settled post-#707 control years; the spread across the
 three available definitions is about **0.27 to 0.30**. The validation band
 moved with it, to 0.5-0.9 for ECHAM. SPEEDY keeps 0.4-0.8 under its own key,
 because its RH-based column cover has no profile to overlap.

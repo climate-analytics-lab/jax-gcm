@@ -1623,11 +1623,18 @@ class TestTerm:
         """F:1280: a cell left below ccwmin in both phases loses its cover."""
         from jcm.physics.clouds.echam_1m import Echam1MMicrophysics
         state, diag, forcing, terrain = _term_inputs(qc=5e-8, q_scale=0.9)
+        # The cover the term receives is that of the diagnosed fraction...
+        assert np.all(np.asarray(diag["clouds"].total_cloud_cover) == pytest.approx(0.6))
         _, out = Echam1MMicrophysics()(state, diag, forcing, terrain)
         assert np.all(np.asarray(out["clouds"].cloud_fraction) == 0.0)
+        # ...and the one it leaves is that of the written-back fraction: ECHAM's
+        # ``aclcov`` is computed after the write-back, so a cleared cell is no
+        # longer counted.
+        assert np.all(np.asarray(out["clouds"].total_cloud_cover) == 0.0)
         state, diag, forcing, terrain = _term_inputs(qc=1e-3, q_scale=0.9)
         _, out = Echam1MMicrophysics()(state, diag, forcing, terrain)
         assert np.all(np.asarray(out["clouds"].cloud_fraction)[3] == pytest.approx(0.6))
+        assert np.all(np.asarray(out["clouds"].total_cloud_cover) == pytest.approx(0.6))
 
     def test_heat_capacity_is_the_anchor_humidity(self):
         """Check ``pcair`` is built from ``pqm1`` (ECHAM physc.f90).

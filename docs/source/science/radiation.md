@@ -68,16 +68,20 @@ Swapping backends therefore changes the cloud-overlap treatment, not just the
 gas optics. The AeroCom total-cloud-cover diagnostic uses the maximum-random
 closure.
 
-**Offline**, the total cloud cover jcm reports from saved output is also
-maximum-random — ECHAM's own ``aclcov`` (``mo_cloud.f90`` §10.2), as
-:func:`jcm.analysis.total_cloud_cover`, and it is what the release-validation
-``cloud_cover`` gate scores. That choice defers to ECHAM and is deliberate:
-overlap is a definition, the three in common use differ by ~0.3 in the global
-mean, and a total cover is the basis the satellite climatologies are quoted
-on. It is a different number from the McICA ``radiation.total_cloud_cover``
-above — sampled quantity, different preprocessing, different time treatment —
-and {doc}`../design/cloud_cover_gate` sets out the provenance, the measured
-magnitudes and how far apart the two run.
+The total cloud cover jcm reports is also maximum-random: ECHAM's own ``aclcov``
+(``mo_cloud.f90`` §10.2), **computed in the model every step** from the final
+cloud fraction and saved as ``clouds.total_cloud_cover`` (time-averaged under
+``run.output_averages``, which is ECHAM's accumulation); it is what the
+release-validation ``cloud_cover`` gate scores. For output that carries no such
+field, :func:`jcm.analysis.total_cloud_cover` applies the same recurrence to a
+saved profile, which usually reads lower when that profile is a time mean. That choice
+defers to ECHAM and is deliberate: overlap is a definition, the three in common
+use differ by ~0.3 in the global mean, and a total cover is the basis the
+satellite climatologies are quoted on. It is a different number from the McICA
+``radiation.total_cloud_cover`` above — a sampled quantity from a
+differently-preprocessed fraction — and {doc}`../design/cloud_cover_gate` sets
+out the provenance, the measured magnitudes and how far apart the three run.
+
 Radiation **sub-steps** on the RRTMGP, NN emulator and grey backends: a gate
 (``radiation_should_compute``) skips the expensive solve and rescales cached
 heating on intermediate steps. SPEEDY has its own, different

@@ -207,6 +207,78 @@ def test_copy_round_trips_every_field():
                 getattr(changed, name), getattr(distinct, name)), name
 
 
+class TestTotalCloudCover:
+    """``clouds.total_cloud_cover`` is ECHAM's ``aclcov`` of the fraction it sits beside."""
+
+    # Top-first profile: a contiguous 0.6/0.5 deck, a clear layer, a 0.4 deck.
+    DECKS = jnp.asarray([[0.6], [0.5], [0.0], [0.4]])
+
+    def test_the_seed_is_cloudless(self):
+        clouds = CloudData.zeros((3,), 5)
+        assert clouds.total_cloud_cover.shape == (3,)
+        assert jnp.all(clouds.total_cloud_cover == 0.0)
+
+    def test_replacing_the_fraction_recomputes_the_cover(self):
+        clouds = CloudData.zeros((1,), 4).copy(cloud_fraction=self.DECKS)
+        np.testing.assert_allclose(np.asarray(clouds.total_cloud_cover), 0.76,
+                                   atol=1e-6)
+        # A later writer (the microphysics' write-back) clears the lower deck:
+        # the cover follows, so the saved cover is that of the FINAL fraction
+        # and no writer of ``cloud_fraction`` can leave it stale.
+        cleared = clouds.copy(cloud_fraction=self.DECKS.at[3].set(0.0))
+        np.testing.assert_allclose(np.asarray(cleared.total_cloud_cover), 0.6,
+                                   atol=1e-6)
+
+    def test_other_fields_leave_the_cover_alone(self):
+        clouds = CloudData.zeros((1,), 4).copy(cloud_fraction=self.DECKS)
+        moved = clouds.copy(qc=jnp.ones((4, 1)))
+        assert jnp.array_equal(moved.total_cloud_cover, clouds.total_cloud_cover)
+
+    def test_an_explicit_cover_wins_over_the_recomputed_one(self):
+        clouds = CloudData.zeros((1,), 4).copy(
+            cloud_fraction=self.DECKS, total_cloud_cover=jnp.asarray([0.123]))
+        np.testing.assert_allclose(np.asarray(clouds.total_cloud_cover), 0.123)
+
+    def test_the_cover_is_the_offline_overlap_of_the_same_fraction(self):
+        import xarray as xr
+
+        from jcm.analysis import total_cloud_cover
+        cf = jnp.asarray(np.random.default_rng(1).uniform(0, 1, (12, 6)))
+        online = CloudData.zeros((6,), 12).copy(cloud_fraction=cf)
+        offline = total_cloud_cover(
+            xr.DataArray(np.asarray(cf, dtype=np.float64), dims=("level", "col")))
+        np.testing.assert_allclose(np.asarray(online.total_cloud_cover),
+                                   np.asarray(offline), atol=1e-6)
+
+    def test_time_mean_of_the_cover_exceeds_the_overlap_of_the_mean_profile(self):
+        """Why the gate scores the online field, not the overlap of a saved mean.
+
+        A 0.5 cloud that alternates between the top and the bottom layer is
+        0.5 cover on every step, so 0.5 on average (what ECHAM accumulates).
+        Its mean profile is 0.25 in each layer, and the overlap of *that* is
+        1 - 0.75 * 0.75 = 0.4375: the clear layer between the two means breaks
+        the maximum-overlap chain that the instantaneous cloud never had to
+        cross. (The inequality is not a theorem: clouds that fill several
+        layers together at the same times push it the other way.)
+        """
+        import xarray as xr
+
+        from jcm.analysis import total_cloud_cover
+        up = jnp.asarray([[0.5], [0.0], [0.0]])
+        down = jnp.asarray([[0.0], [0.0], [0.5]])
+        steps = [CloudData.zeros((1,), 3).copy(cloud_fraction=cf)
+                 for cf in (up, down)]
+        online_mean = float(np.mean([float(s.total_cloud_cover[0])
+                                     for s in steps]))
+        mean_profile = (steps[0].cloud_fraction + steps[1].cloud_fraction) / 2.0
+        offline = float(total_cloud_cover(
+            xr.DataArray(np.asarray(mean_profile[:, 0], dtype=np.float64),
+                         dims=("level",))))
+        np.testing.assert_allclose(online_mean, 0.5, atol=1e-6)
+        np.testing.assert_allclose(offline, 0.4375, atol=1e-6)
+        assert online_mean > offline
+
+
 def test_every_field_has_output_attrs():
     """Every ``clouds.<field>`` written to output has units and a long name."""
     names = {f"clouds.{f.name}" for f in dataclasses.fields(CloudData)}

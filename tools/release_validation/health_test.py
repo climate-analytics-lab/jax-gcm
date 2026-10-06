@@ -1,7 +1,8 @@
 """Tests for the release-validation health gates (#782).
 
 The subject is *which* cover each field dialect scores and which it only
-reports, at two levels: ``cloud_cover_fields`` in isolation, and ``main()``
+reports (the online ``clouds.total_cloud_cover`` when the file carries it, the
+offline overlap of the saved mean profile otherwise), at two levels: ``cloud_cover_fields`` in isolation, and ``main()``
 driven over a directory of synthetic chunks. The second is not redundant —
 the helper can be perfectly correct while the call site gates on the column
 max, and only an end-to-end run of ``main()`` reads the line the release
@@ -48,17 +49,24 @@ def _levels(values):
                            (1, len(values), len(_LAT), len(_LON))).copy()
 
 
-def echam_chunk(radiation_cover=None, profile=_PROFILE) -> xr.Dataset:
+def echam_chunk(radiation_cover=None, profile=_PROFILE,
+                online_cover=None) -> xr.Dataset:
     """Build a minimal ECHAM-dialect output chunk.
 
     ``radiation_cover=None`` leaves ``radiation.total_cloud_cover`` out of the
     file entirely (output predating the diagnostic); a float writes it as a
     uniform field, including the 0.0 that grey two-stream publishes.
+    ``online_cover`` does the same for ``clouds.total_cloud_cover``, the
+    in-model ``aclcov``; ``None`` is output written before it existed.
     """
     data = {
         "clouds.cloud_fraction": (("time", "level", "lat", "lon"),
                                   _levels(profile)),
     }
+    if online_cover is not None:
+        data["clouds.total_cloud_cover"] = (
+            ("time", "lat", "lon"),
+            np.full((1, len(_LAT), len(_LON)), float(online_cover)))
     if radiation_cover is not None:
         data["radiation.total_cloud_cover"] = (
             ("time", "lat", "lon"),
@@ -155,14 +163,15 @@ class TestSpeedyDialect:
 
 
 def _write_run(tmp_path, radiation_cover=None, days=(30, 60),
-               profile=_PROFILE):
+               profile=_PROFILE, online_cover=None):
     """Write a minimal ECHAM-dialect run directory for ``health.main()``.
 
     Only the fields the gates touch — enough to reach the cloud block and to
     leave every other gate scoring a defined number.
     """
     for i, day in enumerate(days):
-        ds = echam_chunk(radiation_cover, profile=profile)
+        ds = echam_chunk(radiation_cover, profile=profile,
+                         online_cover=online_cover)
         ds = ds.assign_coords(time=[np.datetime64("2000-01-01") +
                                     np.timedelta64(30 * i, "D")])
         shape = (1, len(_LAT), len(_LON))
@@ -232,6 +241,187 @@ class TestGateWiring:
                                 profile=np.zeros(len(_PROFILE)))
         assert "FAIL  cloud_cover = 0.00" in out
         assert status == 1
+
+
+class TestOnlineCover:
+    """The gate scores ``clouds.total_cloud_cover`` when the file has it.
+
+    The two covers are built to differ (online 0.85, offline overlap of the
+    saved profile 0.76), so a gate wired to the wrong one reads a different
+    number, not the same one by coincidence.
+    """
+
+    ONLINE = 0.85
+
+    def test_the_online_field_is_the_gated_cover_when_present(self):
+        fields, _ = H.cloud_cover_fields(
+            echam_chunk(0.71, online_cover=self.ONLINE), speedy=False)
+        np.testing.assert_allclose(_scalar(fields["cloud_cover"]), self.ONLINE)
+        # The two INFO covers are unaffected.
+        np.testing.assert_allclose(_scalar(fields["cloud_cover_colmax"]), _COLMAX)
+        np.testing.assert_allclose(_scalar(fields["cloud_cover_radiation"]), 0.71)
+
+    def test_the_offline_overlap_is_the_fallback_when_absent(self):
+        fields, _ = H.cloud_cover_fields(echam_chunk(0.71), speedy=False)
+        np.testing.assert_allclose(_scalar(fields["cloud_cover"]), _MAXRANDOM)
+
+    def test_basis_names_the_field_scored(self):
+        assert H.cloud_cover_basis(echam_chunk(online_cover=0.5),
+                                   speedy=False) == "online"
+        assert H.cloud_cover_basis(echam_chunk(), speedy=False) == \
+            "offline_mean_profile"
+        assert H.cloud_cover_basis(speedy_chunk(), speedy=True) == \
+            "speedy_cloudc"
+
+    def test_the_time_mean_is_taken_of_the_per_step_cover(self):
+        # Two saved frames, online 0.9 and 0.5: the gate is their mean.
+        frames = []
+        for t, value in enumerate((0.9, 0.5)):
+            ds = echam_chunk(online_cover=value)
+            frames.append(ds.assign_coords(time=[np.datetime64("2000-01-01")
+                                                 + np.timedelta64(t, "D")]))
+        fields, _ = H.cloud_cover_fields(xr.concat(frames, "time"),
+                                         speedy=False)
+        assert "time" in fields["cloud_cover"].dims
+        np.testing.assert_allclose(_scalar(fields["cloud_cover"]), 0.7)
+
+    def test_main_gates_the_online_cover_and_prints_no_fallback_note(
+            self, tmp_path, monkeypatch, capsys):
+        status, out = _run_main(tmp_path, monkeypatch, capsys,
+                                online_cover=self.ONLINE)
+        assert f"PASS  cloud_cover = {self.ONLINE:.2f}" in out
+        assert f"cloud_cover = {_MAXRANDOM:.2f}" not in out
+        assert "offline overlap" not in out
+        assert status == 0
+
+    def test_main_fails_on_the_online_cover_not_on_the_profile(
+            self, tmp_path, monkeypatch, capsys):
+        # The saved profile alone would score 0.76 (PASS); the online field is
+        # below the floor, and it is the one that decides.
+        status, out = _run_main(tmp_path, monkeypatch, capsys,
+                                online_cover=0.3)
+        assert "FAIL  cloud_cover = 0.30" in out
+        assert status == 1
+
+    def test_main_falls_back_with_a_note_that_says_it_is_biased_low(
+            self, tmp_path, monkeypatch, capsys):
+        status, out = _run_main(tmp_path, monkeypatch, capsys)
+        assert f"PASS  cloud_cover = {_MAXRANDOM:.2f}" in out
+        assert ("NOTE  cloud_cover is the max-random overlap of the saved "
+                "clouds.cloud_fraction (offline overlap of the saved mean "
+                "profile; usually biased low, not a bound)") in out
+        assert "clouds.total_cloud_cover" in out.split("NOTE  cloud_cover")[1]
+        assert status == 0
+
+    def test_a_window_mixing_chunks_with_and_without_the_field_scores_offline(
+            self, tmp_path, monkeypatch, capsys):
+        # A run resumed across the field's introduction: day30 has no online
+        # cover, day60 does. The missing frames must not read as NaN (a false
+        # FAIL on the NaN scan of a healthy run) nor as a cover of the later
+        # frames alone; the whole window is scored offline, with the reason.
+        run = _write_run(tmp_path, days=(30,))
+        ds = echam_chunk(online_cover=0.4).assign_coords(
+            time=[np.datetime64("2000-01-31")])
+        for name, value in (("radiation.toa_sw_down", 340.0),
+                            ("radiation.toa_sw_up", 100.0),
+                            ("radiation.toa_lw_up", 240.0),
+                            ("clouds.precip_rain", 3.0 / 86400.0),
+                            ("clouds.precip_snow", 0.0),
+                            ("convection.precip_conv", 0.0)):
+            ds[name] = (("time", "lat", "lon"),
+                        np.full((1, len(_LAT), len(_LON)), value))
+        ds["temperature"] = (("time", "level", "lat", "lon"),
+                             _levels(np.linspace(288.0, 220.0, len(_PROFILE))))
+        ds.to_netcdf(tmp_path / "run_day60.nc")
+        monkeypatch.setattr(sys, "argv", ["health.py", run])
+        status = H.main()
+        out = capsys.readouterr().out
+        assert "PASS  NaN scan: 0/" in out
+        assert f"PASS  cloud_cover = {_MAXRANDOM:.2f}" in out
+        assert "only 1 of 2 chunks save clouds.total_cloud_cover" in out
+        assert status == 0
+
+    def test_a_mixed_window_still_scans_the_real_online_values_for_nan(
+            self, tmp_path, monkeypatch, capsys):
+        # The synthetic NaNs of chunks lacking the field are ignored, but a
+        # NaN that a chunk carrying it really stores must still fail the scan.
+        run = _write_run(tmp_path, days=(30,))
+        ds = echam_chunk(online_cover=0.4).assign_coords(
+            time=[np.datetime64("2000-01-31")])
+        ds["clouds.total_cloud_cover"][dict(lat=0)] = np.nan
+        for name, value in (("radiation.toa_sw_down", 340.0),
+                            ("radiation.toa_sw_up", 100.0),
+                            ("radiation.toa_lw_up", 240.0),
+                            ("clouds.precip_rain", 3.0 / 86400.0),
+                            ("clouds.precip_snow", 0.0),
+                            ("convection.precip_conv", 0.0)):
+            ds[name] = (("time", "lat", "lon"),
+                        np.full((1, len(_LAT), len(_LON)), value))
+        ds["temperature"] = (("time", "level", "lat", "lon"),
+                             _levels(np.linspace(288.0, 220.0, len(_PROFILE))))
+        ds.to_netcdf(tmp_path / "run_day60.nc")
+        monkeypatch.setattr(sys, "argv", ["health.py", run])
+        status = H.main()
+        out = capsys.readouterr().out
+        assert "FAIL  NaN scan: 1/" in out and "clouds.total_cloud_cover" in out
+        assert status == 1
+
+    def test_the_observed_reference_is_printed_beside_the_gate(
+            self, tmp_path, monkeypatch, capsys):
+        _status, out = _run_main(tmp_path, monkeypatch, capsys,
+                                 online_cover=self.ONLINE)
+        lines = out.splitlines()
+        gate = next(i for i, ln in enumerate(lines)
+                    if ln.startswith("PASS  cloud_cover ="))
+        assert lines[gate + 1] == (
+            "INFO  cloud_cover_obs = 0.63 (ESA-CCI CLOUD v3.0 AVHRR-AMPM clt, "
+            "1997-2016, global mean; reference, not gated)")
+
+    def test_json_records_the_basis_and_the_reference(
+            self, tmp_path, monkeypatch, capsys):
+        import json
+        out_json = tmp_path / "health.json"
+        (tmp_path / "run").mkdir()
+        run_dir = _write_run(tmp_path / "run", online_cover=self.ONLINE)
+        monkeypatch.setattr(sys, "argv",
+                            ["health.py", run_dir, "--json", str(out_json)])
+        H.main()
+        report = json.loads(out_json.read_text())
+        gate = next(g for g in report["gates"] if g["name"] == "cloud_cover")
+        assert gate["basis"] == "online"
+        assert gate["value"] == pytest.approx(self.ONLINE)
+        assert report["references"]["cloud_cover_obs"]["value"] == 0.63
+        # Offline fallback is labelled as such in the same record.
+        (tmp_path / "run2").mkdir()
+        run_dir = _write_run(tmp_path / "run2")
+        monkeypatch.setattr(sys, "argv",
+                            ["health.py", run_dir, "--json", str(out_json)])
+        H.main()
+        gate = next(g for g in json.loads(out_json.read_text())["gates"]
+                    if g["name"] == "cloud_cover")
+        assert gate["basis"] == "offline_mean_profile"
+
+    def test_speedy_prints_the_reference_too(self, tmp_path, monkeypatch,
+                                             capsys):
+        ds = xr.Dataset(
+            {"shortwave_rad.cloudc": (("time", "lat", "lon"),
+                                      np.full((1, len(_LAT), len(_LON)), 0.55)),
+             "shortwave_rad.ftop": (("time", "lat", "lon"),
+                                    np.full((1, len(_LAT), len(_LON)), 240.0)),
+             "longwave_rad.ftop": (("time", "lat", "lon"),
+                                   np.full((1, len(_LAT), len(_LON)), 240.0)),
+             "condensation.precls": (("time", "lat", "lon"),
+                                     np.full((1, len(_LAT), len(_LON)), 0.03)),
+             "temperature": (("time", "level", "lat", "lon"),
+                             _levels(np.linspace(288.0, 220.0, 4)))},
+            coords={"lat": _LAT, "lon": _LON,
+                    "time": [np.datetime64("2000-01-01")]})
+        ds.to_netcdf(tmp_path / "run_day30.nc")
+        monkeypatch.setattr(sys, "argv", ["health.py", str(tmp_path)])
+        H.main()
+        out = capsys.readouterr().out
+        assert "INFO  cloud_cover_obs = 0.63" in out
+        assert "offline overlap" not in out     # SPEEDY has no profile to overlap
 
 
 class TestBandPlacement:

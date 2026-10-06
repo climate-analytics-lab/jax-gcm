@@ -13,6 +13,7 @@ from __future__ import annotations
 import jax.numpy as jnp
 import tree_math
 
+from jcm.physics.clouds.cloud_overlap import column_max_random_cover
 from jcm.physics.surrogate_gradient import with_surrogate_gradient
 
 
@@ -31,6 +32,24 @@ class CloudData:
     # cloud-borne/aqueous/wetdep terms) therefore always see the cloud
     # the step actually left behind.
     cloud_fraction: jnp.ndarray      # Cloud fraction [1] (nlev, ncols)
+
+    # Total cloud cover [1] (ncols,): ECHAM's ``aclcov``, the maximum-random
+    # overlap of the INSTANTANEOUS ``cloud_fraction`` (``mo_cloud.f90`` section
+    # 10.2; :func:`~jcm.physics.clouds.cloud_overlap.column_max_random_cover`).
+    # It is a function of ``cloud_fraction`` and nothing else, so :meth:`copy`
+    # recomputes it whenever ``cloud_fraction`` is replaced: the value in the
+    # struct is the cover of the fraction beside it, and no term that writes a
+    # fraction can leave it stale. What the saved field holds is the cover of
+    # the step's FINAL fraction, because the term that settles the end-of-step
+    # fraction (the 1M or 2M microphysics, with ECHAM's write-back of
+    # ``paclc``) is the last to write it; ECHAM computes ``aclcov`` at the end
+    # of ``cloud`` for the same reason. It is deterministic. Under
+    # ``output_averages`` the saved frame is the mean over the output interval
+    # of this per-step value, which is ECHAM's accumulation
+    # (``paclcov + zdtime * zclcov``); the overlap of the saved MEAN profile
+    # is a different number, usually lower (the product is non-linear), which
+    # is why the release-validation gate scores this field and not that overlap.
+    total_cloud_cover: jnp.ndarray   # Total cloud cover [1] (ncols,)
 
     # Cloud condensate (updated by condensation within the cloud scheme)
     qc: jnp.ndarray                  # Cloud water [kg/kg] (nlev, ncols)
@@ -184,6 +203,7 @@ class CloudData:
     def zeros(cls, nodal_shape, nlev):
         return cls(
             cloud_fraction=jnp.zeros((nlev,) + nodal_shape),
+            total_cloud_cover=jnp.zeros(nodal_shape),
             qc=jnp.zeros((nlev,) + nodal_shape),
             qi=jnp.zeros((nlev,) + nodal_shape),
             conv_detrainment_qc=jnp.zeros((nlev,) + nodal_shape),
@@ -216,8 +236,15 @@ class CloudData:
         )
 
     def copy(self, **kwargs):
+        """Copy with the given fields replaced.
+
+        ``total_cloud_cover`` follows ``cloud_fraction``: replacing the
+        fraction recomputes the cover from it (the field's comment says why),
+        unless the caller passes the cover too, which then wins.
+        """
         new_data = {
             'cloud_fraction': self.cloud_fraction,
+            'total_cloud_cover': self.total_cloud_cover,
             'qc': self.qc,
             'qi': self.qi,
             'conv_detrainment_qc': self.conv_detrainment_qc,
@@ -249,6 +276,9 @@ class CloudData:
             'toa_lw_up_clear': self.toa_lw_up_clear,
         }
         new_data.update(kwargs)
+        if 'cloud_fraction' in kwargs and 'total_cloud_cover' not in kwargs:
+            new_data['total_cloud_cover'] = column_max_random_cover(
+                new_data['cloud_fraction'])
         return CloudData(**new_data)
 
 
@@ -262,6 +292,11 @@ CLOUD_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     "clouds.cloud_fraction": {
         "standard_name": "cloud_area_fraction_in_atmosphere_layer",
         "units": "1", "long_name": "cloud fraction"},
+    "clouds.total_cloud_cover": {
+        "standard_name": "cloud_area_fraction",
+        "units": "1",
+        "long_name": ("total cloud cover, maximum-random overlap of the "
+                      "instantaneous cloud fraction (ECHAM aclcov)")},
     "clouds.qc": {
         "standard_name": "mass_fraction_of_cloud_liquid_water_in_air",
         "units": "kg kg-1", "long_name": "cloud liquid water mixing ratio"},

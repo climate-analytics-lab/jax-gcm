@@ -35,6 +35,16 @@
   which ``MoistAirColumnState`` computes with respect to liquid water at every
   temperature (the WMO definition, written as CMIP ``hur``) and which no
   composition changes the meaning of.
+- **Total cloud cover** (``jcm/physics/clouds/cloud_overlap.py``, saved as
+  ``clouds.total_cloud_cover``) — ECHAM6.3's ``aclcov`` (``mo_cloud.f90`` section
+  10.2): the maximum-random overlap of the step's *final* cloud fraction (the
+  post-microphysics write-back, which is where ECHAM computes it), every step,
+  with maximum overlap inside a vertically contiguous cloud and random overlap
+  across clear air. Under ``run.output_averages`` the saved frame is the mean of
+  this per-step value over the output interval, which is ECHAM's accumulation
+  (``paclcov = paclcov + zdtime*zclcov``) and not the overlap of the mean
+  profile; the release-validation ``cloud_cover`` gate scores it
+  ({doc}`../design/cloud_cover_gate`).
 - **ECHAM 1-moment microphysics**
   (``jcm/physics/clouds/echam_1m.py::Echam1MMicrophysics``) — a transcription
   of ECHAM6.3's ``mo_cloud.f90::cloud`` (Lohmann & Roeckner 1996; Roeckner et
@@ -302,6 +312,30 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   from ``jcm/physics/thermodynamics.py`` through
   ``jcm/physics/clouds/echam_saturation.py``. With it the cover
   reproduces every column of ECHAM's own reference.
+- Total cloud cover, `science` — ECHAM's, accumulated online. The cover is
+  computed from the instantaneous fraction each step and averaged in time, as
+  ECHAM does, rather than reconstructed from a saved mean profile: the overlap
+  product is non-linear, so the overlap of a mean usually reads lower than the
+  mean of the overlaps (wherever cloud moves between layers within the
+  interval), though not always. It is
+  deterministic and uses the full fraction with no optical-depth threshold, so
+  it is neither the McICA sub-column cover the flux solve integrates
+  (``radiation.total_cloud_cover``, sampled, and built from the fraction zeroed
+  below ``2·cld_frac_min``) nor the AeroCom cloud-top ``aerocom_clt`` (optically
+  visible cloud only). ``CloudData.copy`` recomputes it whenever the fraction is
+  replaced, so it is always the cover of the fraction beside it.
+- Total cloud cover, `compute` / `differentiability` — one recurrence serves the
+  jitted step and the offline scorer
+  (``cloud_overlap.max_random_cover``), so the two cannot differ. The
+  Fortran's denominator ``1 − min(c, 1 − 10⁻¹²)`` is written as the equal
+  ``max(1 − c, 10⁻¹²)``: ``1 − 10⁻¹²`` is exactly 1 in float32, where an overcast
+  layer's ``0 / 10⁻¹²`` would become ``0 / 0``: a NaN in the saved value and a NaN gradient wherever a
+  gradient path reaches the cover (a zero cotangent into it still gives
+  ``0·NaN``). Every local
+  derivative of the recurrence is finite, and the true one wherever adjacent layers
+  differ; at exactly tied layers (an exactly clear column) it is a subgradient
+  that leaves a cloud-free interior layer with zero sensitivity where the
+  one-sided derivative is +1 (#1013).
 - Radiation's cover, `science` — ECHAM's radiation uses the cover only where
   the step-start grid-mean condensate it radiates is positive
   (``mo_radiation.f90`` l.428-434, ``xq = MAX(xlm1, 0)``,
