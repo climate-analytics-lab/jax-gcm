@@ -213,6 +213,8 @@ def echam_physics(
     jam_wetdep_scheme: str = "jcm",
     jam_nucleation_activation: str = "ham_arg",
     jam_arg_variant: str = "arg2000",
+    jam_activation_scheme: str = "arg",
+    jam_nactivpdf: int = 0,
     jam_aqueous_scheme: str = "full",
     jam_dust_preset: int = 4,
     jam_dust_nudged: bool = False,
@@ -478,6 +480,12 @@ def echam_physics(
             Should match ``jam_activation_scheme`` below (see
             ``WetScavenging.__init__``'s docstring).
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
+        jam_activation_scheme: ``jam_aerosol_physics``'s ``activation_scheme``
+            -- ``"arg"`` (default), ``"ham_arg"`` or ``"ham_lin_leaitch"``
+            (#1017). An ``activation`` mapping applies to the chosen scheme's
+            Parameters class.
+        jam_nactivpdf: ``jam_aerosol_physics``'s ``nactivpdf`` (HAM's updraft
+            PDF switch, ``"ham_arg"`` only; default 0).
         jam_dust_preset: HAMMOZ ``ndust`` preset for the Tegen dust scheme —
             4 (default, HAM2: Stier 2005 + East-Asian soils), 3 (Stier 2005)
             or 2 (Cheng 2008). The resolution-dependent regional tuning vector
@@ -771,13 +779,17 @@ def echam_physics(
     if aerosol_module == "jam":
         # Imported here, not at module scope: the JAM package is only worth
         # loading for a JAM composition (as ``jam_aerosol_physics`` below).
-        from jcm.physics.aerosol.jam.jam_terms import JAM_PARAMETER_CLASSES
+        from jcm.physics.aerosol.jam.jam_terms import (
+            JAM_PARAMETER_CLASSES, activation_parameter_class)
+        _jam_classes = {**JAM_PARAMETER_CLASSES,
+                        "activation": activation_parameter_class(
+                            jam_activation_scheme)}
         # A mapping is applied on the class default (the JAM schemes have no
         # factory choice of their own to keep); an object is used as given and
         # ``None`` leaves the scheme to build its default.
         jam_p = {
             name: (with_field_overrides(
-                       JAM_PARAMETER_CLASSES[name].default(), value,
+                       _jam_classes[name].default(), value,
                        scheme=name)
                    if isinstance(value, Mapping) else value)
             for name, value in _jam_args.items()}
@@ -980,6 +992,8 @@ def echam_physics(
             wetdep_scheme=jam_wetdep_scheme,
             nucleation_activation=jam_nucleation_activation,
             arg_variant=jam_arg_variant,
+            activation_scheme=jam_activation_scheme,
+            nactivpdf=jam_nactivpdf,
             aqueous_scheme=jam_aqueous_scheme,
             dust_preset=jam_dust_preset,
             dust_nudged=jam_dust_nudged,

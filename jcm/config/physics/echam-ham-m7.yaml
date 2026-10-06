@@ -1,0 +1,87 @@
+# ECHAM physics with the ECHAM-HAM M7 aerosol model on the JAM harness
+# (jax-gcm#1017). Reference: ECHAM6.3-HAM2.3 r7492's run_transient_echam6-hamm7
+# with the namelist defaults it leaves unset, except where a line below says a
+# maintainer decision differs. Design and provenance:
+# docs/source/design/ham_m7_configuration.md.
+#
+# Factory-built like echam-jam.yaml: `physics.builder` tells
+# `runners.build_physics` to call `echam_physics(**these_kwargs)`.
+#
+# Needs the m7-jax core: pip install jcm[m7]
+#
+#     python -m jcm.main +configuration=ham-t63-l47
+
+builder: echam_physics
+
+# M7 is a second population on the JAM harness (#461); the 2M scheme carries
+# the scavenging ledger and consumes HAM's activation and freezing inputs, as
+# ECHAM-HAM's lcdnc_progn=.true. 2M microphysics does.
+aerosol_module: jam
+cloud_scheme: 2m
+radiation_scheme: rrtmgp
+
+# The microphysics core: m7-jax, the complete native m7 call on HAM's 18
+# components (nwater=1, lscond, lscoag, ageing), with the reference
+# H2SO4/H2O nucleation nsnucl=2 (Kazil and Lovejoy 2007, ion-mediated) driven
+# by host-side GCR ionisation, and organic activation nucleation in the PBL
+# (nonucl=1, HAM's default). nsnucl=2 needs $HAM_INPUT_DIR holding
+# parnuc.15H2SO4.A0.total.nc, solmin.txt and solmax.txt; construction fails,
+# naming what is missing, rather than silently running other physics. To run
+# without those files, choose binary nucleation explicitly:
+#     +physics.jam_microphysics_options.nucleation_scheme=1
+jam_microphysics: m7_jax
+jam_microphysics_options:
+  nucleation_scheme: 2
+
+# HAM has no explicit cloud-borne phase: interstitial aerosol is scavenged by
+# its activated fraction.
+jam_cloud_borne: false
+
+# Activation: HAM's Koehler A/B (electrolyte species) + ARG, ncd_activ=2.
+# Updraft: the West et al. (2013) 20-bin PDF (nactivpdf=1). This DEVIATES from
+# the reference-run template, which leaves nactivpdf at its code default 0
+# (single updraft); the maintainer chose the PDF on 2026-10-05.
+# jam_nactivpdf: 0 selects the template's single updraft.
+jam_activation_scheme: ham_arg
+jam_nactivpdf: 1
+
+# Optics: HAM's four Mie tables (SW/LW x sigma 1.59/2.0) with ham_rad_fitplus
+# nearest-neighbour lookup, built with jcm's Mie kernel on HAM's axes.
+jam_optics_backend: ham_lut
+
+# Sea salt: the template's nseasalt=7, Long et al. (2011) with the Sofiev et
+# al. (2011) SST correction.
+jam_seasalt_scheme: long
+
+# Primary emissions sized by HAM's per-sector rules (M7_SPEC.sector_emission);
+# inert until an emissions bundle is supplied. The already-speciated path is
+# MAM4's per-tracer injection and does not apply to M7's tracers.
+jam_anthropogenic: true
+jam_prescribed_speciated: false
+
+# Sea-salt scale 1: HAM's Long scheme is used unscaled, as ECHAM-HAM runs it.
+# The harness default (seasalt.SEASALT_SCALE_DEFAULT = 2) is a T63L47
+# calibration of the Gong source for the MAM4 population and does not carry
+# over to a different source function and population.
+seasalt:
+  scale: 1.0
+
+# Dust: HAM2's ndust=4 source. The reference's ndust=5 (the MSG-SEVIRI
+# Saharan source map) is selected once ported. The threshold multiplier stays
+# the harness default (NDUSCALE_JCM_T63_SCALE at T63): it adapts HAM's
+# threshold vector to jcm's own 10 m winds, a property of the host rather than
+# of the aerosol population, so it applies to M7 as it does to MAM4.
+jam_dust_preset: 4
+
+# Wet deposition: the template's nwetdep=3, HAM's size-dependent in-cloud
+# nucleation (ic_scav_nuc, ARG critical radius to match ncd_activ=2) and
+# impaction (ic_scav_imp) scavenging plus the Croft below-cloud tables.
+# The impaction lookup uses the corrected cdroprad(6) = 30 um axis (maintainer
+# decision 2026-10-06; r7492 reads 0.0): wetdep.cdroprad_um overrides it.
+jam_wetdep_scheme: ham
+jam_nucleation_activation: ham_arg
+
+# Cirrus: nic_cirrus=2 (setphys.f90), Kaercher-Lohmann homogeneous
+# nucleation limited by the M7 soluble aerosol number available for freezing.
+microphysics_2m:
+  nic_cirrus: 2
