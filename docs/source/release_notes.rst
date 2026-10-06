@@ -2511,11 +2511,19 @@ The 2M cold-precipitation guards used float32 epsilon at every precision
   this epsilon rather than at zero, matching r7492's own
   ``zxibold = MAX(pxib,eps)`` (previously computed but unused in jcm's
   port). See :doc:`science/clouds_microphysics`.
-- **Changes results** only at float64: measured on a representative 6-column
-  case, the self-collection guard changes ``psprn`` by up to 0.24% (median
-  0.09%) and the riming guard changes ``psacln`` by up to 0.24% (median
-  0.12%). The float32 default path is bit-identical (``params.eps`` was
-  already float32's own epsilon there).
+- **Changes results** at float64 away from the cold-precipitation guards'
+  own low-ice regime: measured on a representative 6-column case, the
+  self-collection guard changes ``psprn`` by up to 0.24% (median 0.09%) and
+  the riming guard changes ``psacln`` by up to 0.24% (median 0.12%). It
+  ALSO changes float32 results, for ice/liquid content between ``cqtmin``
+  (1e-12, the gate both guards sit behind) and float32's own epsilon
+  (~1.19e-7) — a gap that only exists at float32, since ``cqtmin`` sits far
+  above float64's epsilon (~2.2e-16): flooring the pre-aggregation ice at
+  ``eps32`` there (rather than at zero, the pre-#1039 behaviour) moves
+  ``psprn``, e.g. ``in_cloud_ice = 1e-8`` by a factor of ``~0.54``. Caught
+  in review (an earlier draft of this entry claimed the float32 default
+  path was bit-identical); see
+  ``lohmann_2m_test.py::test_precip_formation_cold_eps_guards_track_working_dtype``.
 
 Known limitations
 ^^^^^^^^^^^^^^^^^

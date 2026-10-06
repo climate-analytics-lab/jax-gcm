@@ -218,11 +218,23 @@ there, so the dtype-generic form is the correct floor at both precisions,
 not merely the float64 one. The ice-number guard also now floors the
 pre-aggregation ice content (``zxibold``) at this same epsilon rather than
 at zero, matching r7492's own ``zxibold = MAX(pxib,eps)`` — previously
-computed but unused in jcm's port. Measured on a representative 6-column
-case at float64: the self-collection guard changes ``psprn`` by up to
-0.24% (median 0.09%); the riming guard changes ``psacln`` by up to 0.24%
-(median 0.12%). Neither guard's fix changes the float32 default path:
-jcm's previous floor was already float32's own machine epsilon there.
+computed but unused in jcm's port.
+
+This DOES move float32 results for an ice/liquid content between
+``cqtmin`` (1e-12, the gate both guards sit behind) and float32's own
+epsilon (~1.19e-7) — caught in review, since an earlier draft of this note
+claimed float32 was unaffected. ``cqtmin`` sits far below float32's own
+epsilon but far above float64's (~2.2e-16), so only float32 ever has cells
+in that gap: there, ``max(ice, eps32)`` floors the pre-aggregation ice up
+to ``eps32`` where it previously held the (smaller) ice value itself,
+shrinking the guarded rate — e.g. ``in_cloud_ice = 1e-8`` moves ``psprn``
+by a factor of ``(1e-8 + eps32)/(2·eps32) ≈ 0.54``
+(``lohmann_2m_test.py::test_precip_formation_cold_eps_guards_track_working_dtype``).
+At float64 the floor never binds (``cqtmin ≫ eps64``), so that precision
+is unaffected: measured on a representative 6-column case away from this
+low-ice regime, the self-collection guard changes ``psprn`` by up to 0.24%
+(median 0.09%) and the riming guard changes ``psacln`` by up to 0.24%
+(median 0.12%).
 
 **Ice mass and number from convective detrainment.** Detrainment supplies most
 of the 2M scheme's cloud-ice mass. ECHAM gives that ice a crystal number and a
