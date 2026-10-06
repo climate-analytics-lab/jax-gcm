@@ -229,6 +229,10 @@ M7_SPEC = ModalAerosolSpec(
     # over, exactly the soluble accumulation/coarse classes
     # (mo_ham_chemistry.f90 ``ham_wet_chemistry``; chemistry/aqueous.py).
     aqueous_sulfate_modes=("as", "cs"),
+    # HAM's cirrus "soluble aerosol number available for freezing" (pascs):
+    # every soluble mode except the nucleation mode ("ns") -- mo_ham_freezing
+    # .f90:127-131's ``jclass .NE. inucs`` test (jax-gcm#1017 task 2 part 2b).
+    cirrus_aerosol_modes=("ks", "as", "cs"),
     dust_emission=m7_dust_emission_policy(
         M7_SPECIES_BY_NAME["du"].density),
     sector_emission=m7_sector_policy(OM_OC_RATIO),

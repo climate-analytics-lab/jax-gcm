@@ -187,6 +187,14 @@ class ModalAerosolSpec:
     #: own restricted sum/split (M7: the soluble accumulation and coarse
     #: modes only).
     aqueous_sulfate_modes: tuple[str, ...] | None = None
+    #: Classes HAM's cirrus scheme sums as the "soluble aerosol number
+    #: available for freezing" (``pascs``, ``mo_ham_freezing.f90:122-134``):
+    #: every soluble mode EXCEPT the nucleation mode (HAM's own
+    #: ``jclass .NE. inucs`` test) — M7: the soluble Aitken, accumulation
+    #: and coarse modes. ``None`` (every MAM4 population) leaves
+    #: ``nic_cirrus = 2`` unwired for that population (today's default is
+    #: ``nic_cirrus = 1`` everywhere, so this changes no existing preset).
+    cirrus_aerosol_modes: tuple[str, ...] | None = None
     #: Population-specific dust-emission window/number policy (a
     #: :class:`~jcm.physics.aerosol.jam.emissions.dust.DustEmissionPolicy`,
     #: typed loosely for the same reason as ``freezing_roles``). ``None``
