@@ -124,6 +124,7 @@ class SlinnDryDeposition(PhysicsTerm):
                 v_grav = stokes_velocity(
                     r_sfc, aer.rho[i, -1], t_sfc, p_sfc,
                     geom_std_dev=mode.geom_std_dev, moment=moment,
+                    aspherical=mode.short == "cor",
                 )
                 v_dep = deposition_velocity(
                     r_sfc, v_grav, u_star, t_sfc, p_sfc, rho_sfc,

@@ -84,6 +84,7 @@ def stokes_velocity(
     *,
     geom_std_dev: float,
     moment: int,
+    aspherical: bool = False,
 ) -> jnp.ndarray:
     """Bulk Stokes settling velocity [m/s] of one lognormal mode.
 
@@ -110,6 +111,9 @@ def stokes_velocity(
         pressure: Air pressure [Pa].
         geom_std_dev: Geometric standard deviation of the mode.
         moment: Moment the velocity transports — 0 for number, 3 for mass.
+        aspherical: CAM's coarse-mode drag correction (0.8), based on
+            Huang et al. (2020), doi:10.1029/2019GL086592. Both moments
+            retain their lognormal weighting; the radius is unchanged.
 
     Returns:
         Settling velocity [m/s], positive downward.
@@ -124,8 +128,11 @@ def stokes_velocity(
     )
     kn = mfp / jnp.maximum(r, 1.0e-10)
     cunningham = 1.0 + kn * (1.257 + 0.4 * jnp.exp(-1.1 / jnp.maximum(kn, 1e-12)))
+    # CAM aero_model.F90 modal_aero_depvel_part applies this to its
+    # internally mixed coarse mode, including dust and sea spray.
+    shape_drag = 0.8 if aspherical else 1.0
     return ((2.0 * c.grav * rho_p * r ** 2 * cunningham) / (9.0 * mu)
-            * math.exp(2.0 * ln_sigma ** 2))
+            * math.exp(2.0 * ln_sigma ** 2) * shape_drag)
 
 
 def sediment_column(
@@ -202,6 +209,7 @@ class StokesSedimentation(PhysicsTerm):
                 moment: params.velocity_scale * stokes_velocity(
                     aer.r_wet[i], aer.rho[i], temperature, pressure,
                     geom_std_dev=mode.geom_std_dev, moment=moment,
+                    aspherical=mode.short == "cor",
                 )
                 for moment in (0, 3)
             }

@@ -93,6 +93,16 @@ which would advance number adjustment and mode transfer twice.
 
 ## Dust lifetime tests
 
+Coarse-mode drag includes CAM's 0.8 asphericity correction, motivated by
+[Huang et al. (2020)](https://doi.org/10.1029/2019GL086592) and present in
+`modal_aero_depvel_part` in CAM's October 2025 implementation. Both number
+and mass velocities retain their lognormal moment weighting. The correction
+also reaches the Stokes number used for turbulent impaction. CAM applies it
+to the internally mixed coarse mode, so it affects sea salt as well as dust;
+their burdens must be assessed together. It changes drag, not optical shape.
+Its magnitude is insufficient by itself to explain a several-fold lifetime
+deficit. The coarse-mode width and emission parameters are unchanged.
+
 The `dry_du` diagnostic combines gravitational surface loss and turbulent
 surface deposition. `sed_du` and `turb_dry_du` separately report those
 losses in kg/m²/s; their sum must equal `dry_du`. Together with `wet_du`,

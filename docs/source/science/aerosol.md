@@ -1027,6 +1027,13 @@ the cloud-borne tracers rather than the interstitial ones; the convective
 carrier acts in HAMMOZ's updraft-area footprint (see [convective tracer
 transport](#convective-tracer-transport--in-plume-scavenging)).
 
+CAM's coarse-mode asphericity drag factor (0.8, Huang et al. 2020,
+doi:10.1029/2019GL086592) reduces gravitational velocity for both number and
+mass, including its contribution to the impaction Stokes number. As in CAM,
+this applies to the internally mixed coarse mode, so the sea-salt response
+must be validated alongside dust. It leaves the modal width and optical
+shape unchanged.
+
 Stokes settling and the Slinn quasi-laminar resistance are evaluated at the
 **wet** particle's density, the mass-weighted mixture of dry material and
 condensed water ``ρ_wet = (ρ_dry + (g³ − 1)·ρ_w)/g³`` with ``g`` the κ-Köhler
