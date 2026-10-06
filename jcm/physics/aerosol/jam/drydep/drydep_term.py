@@ -230,11 +230,17 @@ class CAMDryDeposition(SlinnDryDeposition):
         from pathlib import Path
         import numpy as np
         import xarray as xr
-        from jcm.data.regridding import build_regridder, model_grid, nearest_index
+        from jcm.data.regridding import build_regridder, nearest_index
         path = Path(__file__).resolve().parents[4] / "data/bc/cam_landuse.nc"
         with xr.open_dataset(path) as ds:
-            lon, lat, _ = model_grid(coords)
-            if lon.ndim == lat.ndim == 1:
+            horizontal = coords.horizontal
+            lon = np.asarray(horizontal.longitudes)
+            lat = np.asarray(horizontal.latitudes)
+            # A column and point-grid host have geographic coordinates but
+            # no global quadrature or rectilinear cell edges. Never request
+            # those attributes just to select a local inventory mixture.
+            if (getattr(horizontal, "total_wavenumbers", None) is not None
+                    and lon.ndim == lat.ndim == 1 and min(lon.size, lat.size) > 1):
                 remap = build_regridder(ds.lon.values, ds.lat.values,
                                        np.ones((ds.sizes["lat"], ds.sizes["lon"])), lon, lat)
                 fractions = remap(ds.fraction_landuse.values).reshape(11, -1)

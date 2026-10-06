@@ -71,3 +71,22 @@ class CAMCollectionTest(unittest.TestCase):
                              terrain=SimpleNamespace(fmask=jnp.ones(64*32)),**kw)
         np.testing.assert_allclose(water,water[0],rtol=1e-6)
         self.assertGreater(float(jnp.max(jnp.abs(world-water))),1e-5)
+
+
+    def test_column_and_point_hosts_select_local_cover_without_quadrature(self):
+        from jcm.column_coordinates import ColumnCoordinates
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        term=CAMDryDeposition()
+        term.cache_coords(ColumnCoordinates.at_location(get_echam_levels(47),25.,15.))
+        desert=np.asarray(term._fractions.get_value())
+        self.assertEqual(desert.shape,(11,1))
+        self.assertGreater(float(desert[7,0]),.95)
+        # Two unrelated physical points are paired coordinates, not a 2x2
+        # Cartesian global grid. Neither host provides quadrature weights.
+        coords=SimpleNamespace(horizontal=SimpleNamespace(
+            longitudes=np.deg2rad([15.,209.5]),latitudes=np.deg2rad([25.,-30.5])))
+        term.cache_coords(coords)
+        mixtures=np.asarray(term._fractions.get_value())
+        self.assertEqual(mixtures.shape,(11,2))
+        np.testing.assert_allclose(mixtures[:,0],desert[:,0],atol=1e-7)
+        self.assertGreater(float(mixtures[6,1]),.99)
