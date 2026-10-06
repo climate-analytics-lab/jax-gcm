@@ -978,15 +978,24 @@ selector; see
 {ref}`below-cloud scavenging <ham-below-cloud-scheme>`
 for the scheme and its two reference-harness findings.
 
-`scheme="ham_nuc_bc"` additionally replaces the STRATIFORM in-cloud
-NUCLEATION pathway with ECHAM-HAM's own aerosol-size-dependent `ic_scav_nuc`
-(jax-gcm#1017 follow-up A): a per-mode critical-radius inversion against the
-actual in-cloud droplet/crystal number this step, for the three M7 soluble
-activating modes only (impaction, `ic_scav_imp`, is follow-up B and still
-runs implicitly). See
-{ref}`HAM in-cloud nucleation scavenging <ham-nucleation-scavenging>` for the
-formula, the two supported activation pairings (HAM's own ARG or Lin &
-Leaitch), and the validation scope.
+`scheme="ham"` additionally replaces BOTH stratiform in-cloud pathways:
+NUCLEATION with ECHAM-HAM's own aerosol-size-dependent `ic_scav_nuc`
+(jax-gcm#1017 follow-up A) — a per-mode critical-radius inversion against
+the actual in-cloud droplet/crystal number this step, for the three M7
+soluble activating modes only — and IMPACTION with `ic_scav_imp`
+(follow-up B) — a bilinear lookup of a Croft collection coefficient
+against the 2M scheme's own droplet/ice-plate effective radius, for
+EVERY M7 mode (unlike nucleation, impaction has no activating-mode gate
+in the reference). `get_icscavfrac` sums and clips the two in-cloud
+fractions exactly as the reference does. This selector was named
+`"ham_nuc_bc"` while nucleation and impaction landed separately; `"ham"`
+now that both are in — `"ham_below_cloud"` remains a separate, narrower
+selector (below-cloud only). See
+{ref}`HAM in-cloud nucleation scavenging <ham-nucleation-scavenging>` and
+{ref}`HAM in-cloud impaction scavenging <ham-impaction-scavenging>` for
+the formulas, the two supported activation pairings (HAM's own ARG or
+Lin & Leaitch), the suspected `cdroprad(6)` upstream data typo (ported as
+compiled, overridable), and the validation scope.
 
 Stokes settling and the Slinn quasi-laminar resistance are evaluated at the
 **wet** particle's density, the mass-weighted mixture of dry material and
