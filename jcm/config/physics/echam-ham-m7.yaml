@@ -16,13 +16,30 @@
 #   radiation_scheme: rrtmgp   -- the reference configuration's radiation
 #                                  (the design note's switch table); "grey"
 #                                  is rejected by echam_physics for aerosol_module="jam".
-#   jam_microphysics: m7_placeholder
-#                              -- the kappa-Koehler zero-tendency core on the
-#                                 M7 population (PlaceholderMicrophysics),
-#                                 the chain-test vehicle until the real M7
-#                                 core adapter (an m7-jax wrapper, the lead's
-#                                 task) lands. No coagulation, condensation,
-#                                 nucleation or ageing happens yet.
+#   jam_microphysics: m7_jax   -- the real M7 core (m7-jax, the optional
+#                                 jcm[m7] extra) on the M7 population:
+#                                 coagulation, condensation and nucleation
+#                                 run faithfully; ageing is a later task.
+#   jam_microphysics_options: {nucleation_scheme: 2}
+#                              -- the reference configuration's nsnucl = 2
+#                                 (Kazil and Lovejoy 2007 ion-mediated
+#                                 nucleation, mo_ham_m7_nucl.F90), not nsnucl
+#                                 = 1 (binary H2SO4-H2O, Vehkamaeki 2002) --
+#                                 HAM-M7's default and the design note's
+#                                 switch table. It needs $HAM_INPUT_DIR to
+#                                 hold the PARNUC lookup table
+#                                 (parnuc.15H2SO4.A0.total.nc) and the GCR
+#                                 ionisation tables (solmin.txt, solmax.txt),
+#                                 and an m7-jax build with Kazil/Lovejoy
+#                                 support (ham-m7/kazil-lovejoy); construction
+#                                 raises naming whichever of the two is
+#                                 missing rather than falling back silently --
+#                                 a run that should be faithful to nsnucl = 2
+#                                 must fail loudly if it cannot be, not quietly
+#                                 become a different (nsnucl = 1) physics. To
+#                                 run without that data, opt into nsnucl = 1
+#                                 explicitly:
+#                                 `+physics.jam_microphysics_options.nucleation_scheme=1`.
 #   jam_cloud_borne: false     -- HAM has no explicit cloud-borne phase: it
 #                                 scavenges interstitial aerosol by its
 #                                 activated fraction (M7_SPEC.cloud_borne is
@@ -50,10 +67,11 @@
 # What IS already M7-faithful through this preset: the population itself
 # (M7_SPEC -- modes, species, csr_conv, the HAM freezing-class mapping, the
 # HAM aqueous-sulfate split, the M7 dust-emission policy, the per-sector
-# primary-emission policy); every OTHER HAM-faithful variant in the design
-# note's table (optics, wet deposition, sea salt, cirrus, and the real
-# microphysics core) remains to be wired in by later #1017 tasks -- this
-# preset composes correctly today but is not yet validated against ECHAM-HAM.
+# primary-emission policy) and now the microphysics core itself (m7-jax,
+# nsnucl = 2); every OTHER HAM-faithful variant in the design note's table
+# (optics, wet deposition, sea salt, cirrus, ageing) remains to be wired in
+# by later #1017 tasks -- this preset composes correctly today but is not
+# yet validated end-to-end against ECHAM-HAM.
 #
 # Usage:
 #
@@ -64,7 +82,9 @@ builder: echam_physics
 aerosol_module: jam
 cloud_scheme: 2m
 radiation_scheme: rrtmgp
-jam_microphysics: m7_placeholder
+jam_microphysics: m7_jax
+jam_microphysics_options:
+  nucleation_scheme: 2
 jam_cloud_borne: false
 jam_arg_variant: arg2000
 jam_anthropogenic: true
