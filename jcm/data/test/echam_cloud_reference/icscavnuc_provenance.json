@@ -1,0 +1,32 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "routines": [
+   "mo_ham_wetdep.f90::ic_scav (494-557)",
+   "mo_ham_wetdep.f90::get_icscavfrac (560-681)",
+   "mo_ham_wetdep.f90::ic_scav_nuc (684-795)",
+   "mo_ham_tools.f90::ham_m7_logtail (203-320)",
+   "mo_ham_tools.f90::ham_m7_invertlogtail (325-419)",
+   "mo_ham_m7.f90::m7_cumulative_normal (75-326)"
+  ],
+  "compiled_unmodified_source_md5": {
+   "mo_ham_wetdep.f90": "51d92aab77491ab2840a57705e247311",
+   "mo_ham_tools.f90": "945bdd8d59fdda02b5db3302a3c842e5",
+   "mo_ham_m7.f90": "e402e3cabf9a975575c1323e92867e11"
+  },
+  "extraction": "verbatim via sed line ranges into mo_ham_wetdep_wrap.f90's own fresh module header/footer; TWO structural edits only (both deleted USE lines made redundant by host association within the one wrapper module -- see that file's header comment); ic_scav_imp is a STUB (impaction is follow-up B, out of scope, sfimp forced to 0 so pfrac_imp=0 and the total pfrac reduces exactly to pfrac_nuc); every other declarations-only module (mo_ham, mo_ham_wetdep_data, mo_ham_streams, mo_activ, mo_ham_m7_trac, mo_param_switches, mo_tracdef, mo_exception, mo_ham_m7ctl) is a fresh own-written stub, NOT copied from ECHAM."
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O0/-O2 -ffree-line-length-none -J. -I.",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "path": "/scr/dwatsonparris/ham-m7/w2/nuc/harness/fortran_harness/echam_icscavnuc",
+  "repository": "private scratch harness, not pushed"
+ },
+ "checks": {
+  "O0_vs_O2_max_abs": 0.0,
+  "n_cases": 19,
+  "n_rows": 38,
+  "note": "O0/O2 byte-identical CSVs confirmed before this script ran (assert above)"
+ }
+}

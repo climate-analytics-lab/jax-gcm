@@ -8,6 +8,14 @@ This is the one genuinely new piece of math follow-up A needs (a closed-
 form inverse-erf approximation); ``ham_logtail``/the normal CDF it also
 calls on the forward side are already ported and held to a compiled
 reference in ``ham_activation_reference_test.py``.
+
+``icscavnuc.npz`` is the second, broader reference: it holds the outputs of
+the UNMODIFIED ``ic_scav -> get_icscavfrac -> ic_scav_nuc`` chain itself
+(not just ``ham_m7_invertlogtail`` in isolation) on 19 designed M7 columns
+-- the review round that required this (house rule: "faithful means
+compiled numbers," a Known-Gaps note is not a resting place for an
+unvalidated pathway) is why both the per-primitive AND the full-chain
+compiled comparisons now exist side by side.
 """
 from __future__ import annotations
 
@@ -18,6 +26,7 @@ import jax
 import numpy as np
 import pytest
 
+from jcm.physics.aerosol.jam.wetdep.ham_below_cloud import cmedr2mmedr
 from jcm.physics.aerosol.jam.wetdep.ham_nucleation import (
     ham_m7_invertlogtail,
     ice_phase_xie,
@@ -27,17 +36,82 @@ from jcm.physics.aerosol.jam.wetdep.ham_nucleation import (
 
 REF = (Path(__file__).resolve().parents[4] / "data" / "test" / "echam_cloud_reference"
        / "haminvertlogtail.npz")
+REF_CHAIN = (Path(__file__).resolve().parents[4] / "data" / "test" / "echam_cloud_reference"
+             / "icscavnuc.npz")
 # Measured max relative error over the 33 cases: float64 1.6e-16 (round-
 # off); float32 1.8e-3, all at the single most extreme case (xie=-0.999999,
 # the small/huge-tail boundary, where log(1-x2) loses precision near its
 # singularity) -- the tolerance below is that measured max, not a guess.
 RTOL = {"float64": 1e-12, "float32": 2e-3}
 
+# M7 mode index (icscavnuc.npz's 1-based Fortran kmod) -> jcm mode_short,
+# for the three modes ic_scav_nuc actually computes (mo_ham_wetdep.f90:727:
+# "IF (kmod < 2 .OR. kmod > 4) THEN ... RETURN"); every other kmod's row is
+# a non-relevant-mode case, checked separately below.
+_KMOD_TO_SHORT = {2: "ks", 3: "as", 4: "cs"}
+
 
 @functools.lru_cache(maxsize=None)
 def load():
     with np.load(REF) as z:
         return {k: z[k] for k in z.files}
+
+
+@functools.lru_cache(maxsize=None)
+def load_chain():
+    with np.load(REF_CHAIN) as z:
+        return {k: z[k] for k in z.files}
+
+
+def test_full_chain_matches_compiled_icscavnuc_reference():
+    """Every row of ``icscavnuc.npz`` -- the compiled, verbatim
+    ``ic_scav -> get_icscavfrac -> ic_scav_nuc`` chain, not just
+    ``ham_m7_invertlogtail`` standalone -- reproduced from jcm's
+    ``water_phase_xie``/``ice_phase_xie``/``nucleation_scavenged_fraction``
+    at float64. Covers: liquid-only/ice-only/mixed-phase columns, cdnc/icnc
+    and na both sides of their gates, the ice phase's CS-then-AS-then-KS
+    size-ordered depletion with KS/AS/CS emptied in turn, ARG vs
+    Lin & Leaitch radius selection, the xie>=1 "huge tail" clip, and
+    non-relevant modes (checked separately, see below).
+    """
+    z = load_chain()
+    n = len(z["case_name"])
+    with jax.enable_x64(True):
+        for i in range(n):
+            kwat_phase = int(z["kwat_phase"][i])
+            kmod = int(z["kmod"][i])
+            ktrac_phase = int(z["ktrac_phase"][i])
+            sigmaln = np.log(z["sigma"][i])
+            radius = z["radius"][i]
+            ref_sfnuc = z["sfnuc"][i]
+            ref_rcritrad = z["rcritrad"][i]
+
+            if kmod not in _KMOD_TO_SHORT:
+                # ic_scav_nuc's own early RETURN zeroes these outright; jcm
+                # never calls the nucleation math for them at all (zeroed
+                # directly in wetdep_term.py's per-mode loop instead) -- a
+                # different code path reaching the same answer, so there is
+                # no Python function call to make here. Confirm the
+                # reference itself recorded exactly that.
+                assert ref_sfnuc == 0.0, (i, z["case_name"][i], "expected 0 for non-relevant mode")
+                continue
+
+            mode_short = _KMOD_TO_SHORT[kmod]
+            if kwat_phase == 1:
+                xie = water_phase_xie(z["cdnc"][i], z["prho"][i], z["na"][i], z["frac"][i])
+            else:
+                xie = ice_phase_xie(z["icnc"][i], z["nks"][i], z["nas"][i], z["ncs"][i], mode_short)
+
+            mass_factor = cmedr2mmedr(z["sigma"][i])
+            frac_number, frac_mass = nucleation_scavenged_fraction(
+                xie, radius, sigmaln, mass_factor)
+            got_sfnuc = float(frac_number if ktrac_phase == 1 else frac_mass)
+            got_rcritrad = float(ham_m7_invertlogtail(radius, xie, sigmaln))
+
+            np.testing.assert_allclose(got_rcritrad, ref_rcritrad, rtol=1e-12, atol=1e-30,
+                                        err_msg=f"rcritrad mismatch, row {i} ({z['case_name'][i]})")
+            np.testing.assert_allclose(got_sfnuc, ref_sfnuc, rtol=1e-12, atol=1e-30,
+                                        err_msg=f"sfnuc mismatch, row {i} ({z['case_name'][i]})")
 
 
 @pytest.mark.parametrize("prec", ("float64", "float32"))

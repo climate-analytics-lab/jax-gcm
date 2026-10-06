@@ -393,15 +393,21 @@ first, then AS the remainder, then KS what is left — three literal
 `IF (kmod == ...)` branches in the reference, not a general recurrence,
 ported the same way.
 
-**Validation.** `ham_m7_invertlogtail` — the one genuinely new piece of
-math — is checked against the compiled, unmodified routine on 33 designed
-cases spanning its small/mid/huge-tail branches and both M7 sigmas,
-exactly (float64 round-off, 1.6e-16; float32 1.8e-3 at the single most
-extreme case). The water/ice `xie` formulas and the orchestration
-(`get_icscavfrac`'s nucleation branch) are direct, literally-cited
-transcriptions checked by unit test rather than a second compiled
-harness — a deliberate scope line for this slice, not an oversight: see
-the follow-up A PR description for the tradeoff.
+**Validation.** Two compiled references, not one. `ham_m7_invertlogtail` —
+the one genuinely new piece of math — is checked standalone against the
+compiled, unmodified routine on 33 designed cases spanning its small/mid/
+huge-tail branches and both M7 sigmas, exactly (float64 round-off, 1.6e-16;
+float32 1.8e-3 at the single most extreme case). The surrounding chain —
+the UNMODIFIED `ic_scav -> get_icscavfrac -> ic_scav_nuc` itself, plus
+`ham_m7_logtail` and the normal CDF it calls, all compiled together — is
+checked separately on 19 designed M7 columns (liquid-only/ice-only/mixed-
+phase; cdnc/icnc and na on both sides of their gates; KS/AS/CS emptied in
+turn; ARG and Lin & Leaitch radius selection; the huge-tail clip), matching
+jcm's `water_phase_xie`/`ice_phase_xie`/`nucleation_scavenged_fraction`
+exactly (float64, measured max relative error 0.0 — not merely within
+tolerance) in `ham_nucleation_test.py::test_full_chain_matches_compiled_
+icscavnuc_reference`, against `jcm/data/test/echam_cloud_reference/
+icscavnuc.npz`.
 
 ## Known gaps
 
@@ -417,7 +423,3 @@ the follow-up A PR description for the tradeoff.
   synthetic test columns, for a reason not fully diagnosed (jax-gcm#1036).
 - `ham_nuc_bc` ports only the nucleation pathway; impaction under
   `nwetdep=3` is jax-gcm#1017's follow-up B.
-- `ham_nuc_bc`'s water/ice `xie` formulas and `get_icscavfrac`'s
-  orchestration are validated by careful transcription + unit test, not an
-  additional compiled harness beyond `ham_m7_invertlogtail` itself (see
-  the section above).
