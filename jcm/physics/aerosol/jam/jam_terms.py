@@ -201,6 +201,7 @@ def jam_aerosol_physics(
     sedimentation: SedParameters | None = None,
     drydep: DryDepParameters | None = None,
     wetdep: WetDepParameters | None = None,
+    wetdep_scheme: str = "jcm",
     vertical_mixing: bool = True,
     tracer_diffusion: TracerDiffusionParameters | None = None,
     convective_transport: bool = True,
@@ -211,6 +212,16 @@ def jam_aerosol_physics(
     Args:
         microphysics: the swappable core — ``"placeholder"`` or a
             ``ModalMicrophysicsTerm`` instance.
+        wetdep_scheme: ``WetScavenging``'s below-cloud pathway (jax-gcm#1017):
+            ``"jcm"`` (default) is today's CAM-Slinn-table below-cloud
+            impaction; ``"ham_below_cloud"`` is ECHAM-HAM's own size-dependent
+            Croft below-cloud tables (``bc_rain``/``bc_snow``,
+            ``mo_ham_wetdep.f90:963-1146``). Named for exactly the pathway it
+            replaces: the in-cloud (nucleation + impaction) pathways still
+            run as ``"jcm"`` does today under either setting -- those are
+            separate follow-ups (#1017). Requires ``cloud_scheme="2m"`` (it
+            reads the ``"precip_cover"`` diagnostic only the 2M scheme can
+            publish, via ``echam_physics``'s wiring).
         cloud_borne: prognose an explicit cloud-borne aerosol phase (#602).
             ``None`` (default) follows the core population's own
             ``spec.cloud_borne``; ``True``/``False`` override it for a
@@ -410,7 +421,8 @@ def jam_aerosol_physics(
         # post-cloud block (needs current clouds), just before wet scavenging.
         AqueousSulfur(params=aqueous, spec=spec, scheme=aqueous_scheme),
         WetScavenging(params=wetdep, spec=spec,
-                      in_plume_convective=convective_transport),
+                      in_plume_convective=convective_transport,
+                      scheme=wetdep_scheme),
     ]
     terms = [*pre_core, core, *optics_terms, *post_core]
     return terms

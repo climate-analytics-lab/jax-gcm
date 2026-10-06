@@ -205,6 +205,7 @@ def echam_physics(
     jam_microphysics: str = "placeholder",
     jam_cloud_borne: bool = True,
     jam_optics: bool = True,
+    jam_wetdep_scheme: str = "jcm",
     jam_arg_variant: str = "arg2000",
     jam_aqueous_scheme: str = "full",
     jam_dust_preset: int = 4,
@@ -423,6 +424,12 @@ def echam_physics(
             reads. ``False`` keeps MACv2-SP optics (cheaper; also makes
             the JAM aerosol radiatively passive, which controlled A/B
             experiments rely on).
+        jam_wetdep_scheme: ``jam_aerosol_physics``'s ``wetdep_scheme`` --
+            ``"jcm"`` (default) or ``"ham_below_cloud"`` (ECHAM-HAM's own
+            below-cloud Croft tables, #1017; the in-cloud pathways are
+            unaffected). The latter requires ``cloud_scheme="2m"`` (enforced
+            below) and turns on the 2M scheme's ``"precip_cover"``
+            diagnostic it reads.
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
         jam_dust_preset: HAMMOZ ``ndust`` preset for the Tegen dust scheme —
             4 (default, HAM2: Stier 2005 + East-Asian soils), 3 (Stier 2005)
@@ -834,6 +841,12 @@ def echam_physics(
     # 1-SW/0-LW aerosol layout fails its band-count check at first compute.
     band_config = RadiationBandConfig.for_terms([rad_term])
 
+    if jam_wetdep_scheme == "ham_below_cloud" and cloud_scheme != "2m":
+        raise ValueError(
+            "jam_wetdep_scheme='ham_below_cloud' requires cloud_scheme='2m' "
+            "(it reads the 2M scheme's 'precip_cover' diagnostic; the 1M "
+            f"scheme does not compute it), got cloud_scheme={cloud_scheme!r}."
+        )
     if cloud_scheme == "1m":
         micro_term = Echam1MMicrophysics(
             params=microphysics_p,
@@ -853,6 +866,12 @@ def echam_physics(
             aerosol_p.spa_exponent,
             aerosol_p.spa_cap_smoothing,
         )
+        # HAM's below-cloud wetdep pathway needs the per-level
+        # precipitating-area fraction (ECHAM's pclc/zclcpre), which only
+        # the 2M scheme computes; see WetScavenging's "ham_below_cloud"
+        # scheme and Lohmann2MMicrophysics.configure_precip_cover_diagnostic.
+        if jam_wetdep_scheme == "ham_below_cloud":
+            micro_term.configure_precip_cover_diagnostic(True)
     else:
         raise ValueError(
             f"Unknown cloud_scheme={cloud_scheme!r}. Choose '1m' or '2m'."
@@ -903,7 +922,7 @@ def echam_physics(
         from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
         jam_terms = jam_aerosol_physics(
             microphysics=jam_microphysics, cloud_borne=jam_cloud_borne,
-            optics=jam_optics,
+            optics=jam_optics, wetdep_scheme=jam_wetdep_scheme,
             arg_variant=jam_arg_variant,
             aqueous_scheme=jam_aqueous_scheme,
             dust_preset=jam_dust_preset,
