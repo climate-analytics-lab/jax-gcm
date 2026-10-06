@@ -217,6 +217,28 @@ class M7ChainTest(unittest.TestCase):
             self.assertTrue(np.all(np.isfinite(arr)), short)
             self.assertGreater(float(np.max(np.abs(arr))), 0.0, short)
 
+    def test_ham_variants_compose_and_run_finite(self):
+        """Every HAM harness variant together on M7, through ``Model.run``.
+
+        HAM activation over the 20-bin updraft PDF, the HAM Mie-table optics
+        (jcm-built tables when ``HAM_INPUT_DIR`` is unset), Long sea salt and
+        the full ``nwetdep = 3`` wet deposition: the integration path the
+        ``echam-ham-m7`` preset runs, minus the extra-gated M7-JAX core.
+        """
+        model, predictions = self._run(
+            jam_activation_scheme="ham_arg", jam_nactivpdf=1,
+            jam_optics_backend="ham_lut", jam_seasalt_scheme="long",
+            jam_wetdep_scheme="ham", jam_anthropogenic=True)
+        dyn = predictions.dynamics
+        self.assertTrue(bool(jnp.all(jnp.isfinite(dyn.temperature))))
+        for key, arr in dyn.tracers.items():
+            self.assertTrue(np.all(np.isfinite(np.asarray(arr))), key)
+        names = {t.name for t in model.physics.terms}
+        self.assertIn("jam_wet_deposition", names)
+        wet = next(t for t in model.physics.terms
+                   if t.name == "jam_wet_deposition")
+        self.assertEqual(wet.scheme, "ham")
+
 
 if __name__ == "__main__":
     unittest.main()

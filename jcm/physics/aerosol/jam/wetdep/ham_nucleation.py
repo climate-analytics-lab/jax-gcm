@@ -8,7 +8,8 @@ lognormal tail at the critical radius that reproduces the ACTUAL in-cloud
 droplet/crystal number this step, then reading the SAME tail forward for the
 tracer in question. This replaces jcm's existing implicit treatment (the
 activation scheme's OWN activated fraction, ``_jam_activation``) for the
-``"ham_nuc_bc"`` wetdep scheme only; ``"jcm"``/``"ham_below_cloud"`` keep the
+``"ham"`` wetdep scheme only (named ``"ham_nuc_bc"`` while this and
+follow-up B landed separately); ``"jcm"``/``"ham_below_cloud"`` keep the
 implicit treatment unchanged -- see ``wetdep_term.py``'s module docstring.
 
 ECHAM input -> jcm source

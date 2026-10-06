@@ -64,7 +64,7 @@ to 0 where ``mr <= eps`` (:275-284); the rain-rate bin is
 ``pfrain <= 0`` (:1004-1017). Both indices are read as a PAIR (``idx``,
 ``idx+1``, clipped independently) and fed to the same bilinear interpolation
 (``scavcoef_bilinterp``, ``mo_ham_tools.f90:424-527``, ported verbatim in
-:func:`_bilinear_interp` including its four degenerate branches -- two of
+:func:`bilinear_interp` including its four degenerate branches -- two of
 which read corner values that are provably identical to the "other" corner
 whenever that branch is taken, not a latent bug).
 
@@ -187,7 +187,7 @@ def rain_rate_bin(pfrain: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
     return idx1, idx2
 
 
-def _bilinear_interp(x, y, x1, x2, y1, y2, q11, q12, q21, q22):
+def bilinear_interp(x, y, x1, x2, y1, y2, q11, q12, q21, q22):
     """Faithful port of ``scavcoef_bilinterp`` (``mo_ham_tools.f90:424-527``).
 
     Four branches, matching the native ``MERGE`` cascade exactly (including
@@ -219,11 +219,11 @@ def _bilinear_interp(x, y, x1, x2, y1, y2, q11, q12, q21, q22):
     return out
 
 
-def _lookup(table, row_idx1, row_idx2, col_idx1, col_idx2):
-    """Gather the four corners for ``_bilinear_interp``, in ``bc_rain``'s OWN
+def lookup_swapped_corners(table, row_idx1, row_idx2, col_idx1, col_idx2):
+    """Gather the four corners for ``bilinear_interp``, in ``bc_rain``'s OWN
     (non-"intuitive") corner convention.
 
-    ``_bilinear_interp``'s ``lint4`` (full bilinear) formula needs
+    ``bilinear_interp``'s ``lint4`` (full bilinear) formula needs
     ``q12 = f(row1, col2)`` and ``q21 = f(row2, col1)`` to be the standard
     interpolation it reads as (derive it from the formula: the ``(Y2-y)/dy``
     term pairs ``q11``/``q21`` while varying X at ``row1``, i.e. ``q21`` must
@@ -241,6 +241,12 @@ def _lookup(table, row_idx1, row_idx2, col_idx1, col_idx2):
     Ported AS COMPILED, not as "corrected": this is reference fidelity, and
     is flagged to the maintainer as a likely-unintentional upstream quirk
     rather than silently fixed (see the PR description / jax-gcm#1017).
+
+    ``ic_scav_imp`` (follow-up B, ``ham_impaction.py``) fills its own
+    Q11..Q22 with the IDENTICAL (row2,col1)/(row1,col2) swap
+    (``mo_ham_wetdep.f90:872-875,932-935``) -- confirmed the same quirk,
+    not a different one, by the compiled full-chain harness -- so it
+    reuses this function rather than re-deriving it.
     """
     q11 = table[row_idx1, col_idx1]
     q12 = table[row_idx2, col_idx1]
@@ -271,8 +277,8 @@ def bc_rain_rate(pfrain: jnp.ndarray, mr_m: jnp.ndarray, *, phase: str,
     ry1, ry2 = aerosol_radius_bin(mr_m)
     x1, x2 = tables.crainrate[rx1], tables.crainrate[rx2]
     y1, y2 = tables.caerorad[ry1], tables.caerorad[ry2]
-    q11, q12, q21, q22 = _lookup(table, rx1, rx2, ry1, ry2)
-    return _bilinear_interp(pfrain, mr_m * 1.0e6, x1, x2, y1, y2, q11, q12, q21, q22)
+    q11, q12, q21, q22 = lookup_swapped_corners(table, rx1, rx2, ry1, ry2)
+    return bilinear_interp(pfrain, mr_m * 1.0e6, x1, x2, y1, y2, q11, q12, q21, q22)
 
 
 def bc_snow_rate(pfsnow: jnp.ndarray, mr_m: jnp.ndarray,
@@ -303,7 +309,7 @@ def bc_snow_rate(pfsnow: jnp.ndarray, mr_m: jnp.ndarray,
     # of the X pair are identical) and only the Y-only branch (lint2) can
     # fire -- lint1/lint4 never trigger since x1==x2 always here.
     x_dummy = jnp.ones_like(mr_m)
-    efficiency = _bilinear_interp(
+    efficiency = bilinear_interp(
         jnp.zeros_like(mr_m), mr_m * 1.0e6, x_dummy, x_dummy, yv1, yv2,
         q11, q12, q11, q12,
     )

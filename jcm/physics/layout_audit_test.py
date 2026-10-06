@@ -145,6 +145,9 @@ NOT_AUDITED = frozenset({
     "DmsEmissions", "DustEmissions", "Echam1MMicrophysics",
     "EchamBoundaryConditions", "EchamSurface", "EchamSurfaceExchange",
     "GreyTwoStreamRadiation",
+    # The HAM siblings of ArgActivation/JamOpticsTerm (#1017) need the same
+    # rich upstream ``_jam_state`` carry.
+    "HamActivation", "HamLutOpticsTerm",
     "HeldSuarez", "HinesGwd", "JamOpticsTerm", "Lohmann2MMicrophysics",
     "Macv2SpAerosol", "ModalMicrophysicsTerm", "NNEmulatorRadiation",
     "PreSpeciatedEmissions", "PrescribedOxidants",

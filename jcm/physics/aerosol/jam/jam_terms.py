@@ -248,7 +248,7 @@ def jam_aerosol_physics(
     drydep: DryDepParameters | None = None,
     wetdep: WetDepParameters | None = None,
     wetdep_scheme: str = "jcm",
-    nucleation_activation: str = "ham_arg",
+    nucleation_activation: str | None = None,
     vertical_mixing: bool = True,
     tracer_diffusion: TracerDiffusionParameters | None = None,
     convective_transport: bool = True,
@@ -273,29 +273,47 @@ def jam_aerosol_physics(
             ``ham_mie_tables.load_ham_mie_tables``). ``None`` (default)
             reads the ``HAM_INPUT_DIR`` environment variable; ignored for
             ``optics_backend="jcm"``.
-        wetdep_scheme: ``WetScavenging``'s below-cloud/nucleation pathway
+        wetdep_scheme: ``WetScavenging``'s below-cloud/in-cloud pathway
             (jax-gcm#1017): ``"jcm"`` (default) is today's CAM-Slinn-table
             below-cloud impaction with the implicit activated-fraction
-            in-cloud treatment; ``"ham_below_cloud"`` additionally replaces
-            the below-cloud pathway with ECHAM-HAM's own size-dependent
-            Croft tables (``bc_rain``/``bc_snow``,
-            ``mo_ham_wetdep.f90:963-1146``); ``"ham_nuc_bc"`` additionally
-            replaces the stratiform NUCLEATION pathway with HAM's own
-            aerosol-size-dependent ``ic_scav_nuc`` (follow-up A;
-            ``jcm.physics.aerosol.jam.wetdep.ham_nucleation``). Impaction
-            (``ic_scav_imp``) is follow-up B and still runs implicitly under
-            every setting; names will be reconsidered once all three land.
-            Requires ``cloud_scheme="2m"`` for ``"ham_below_cloud"``/
-            ``"ham_nuc_bc"`` (they read the ``"precip_cover"``/``"pfrain"``/
-            ``"pfsnow"`` diagnostics only the 2M scheme can publish, via
-            ``echam_physics``'s wiring).
-        nucleation_activation: only consulted for ``wetdep_scheme=
-            "ham_nuc_bc"`` -- ``"ham_arg"`` (default) or
-            ``"ham_lin_leaitch"``, HAM's own ``ncd_activ`` switch for which
-            activation scheme ``ic_scav_nuc`` reads its critical radius and
-            per-mode fraction from. See ``WetScavenging.__init__``'s
-            docstring for why this should match whichever activation scheme
-            ``echam_physics(jam_activation_scheme=...)`` actually composed.
+            in-cloud treatment; ``"ham_below_cloud"`` replaces only the
+            below-cloud pathway with ECHAM-HAM's own size-dependent Croft
+            tables (``bc_rain``/``bc_snow``, ``mo_ham_wetdep.f90:963-1146``),
+            keeping the implicit in-cloud treatment -- a deliberately
+            narrower configuration for below-cloud-only ablation runs;
+            ``"ham"`` is the FULL ``nwetdep=3`` scheme: below-cloud plus
+            BOTH in-cloud pathways, HAM's own aerosol-size-dependent
+            ``ic_scav_nuc`` (nucleation, ``jcm.physics.aerosol.jam.wetdep.
+            ham_nucleation``) and ``ic_scav_imp`` (impaction,
+            ``jcm.physics.aerosol.jam.wetdep.ham_impaction``). Requires
+            ``cloud_scheme="2m"`` for ``"ham_below_cloud"``/``"ham"`` (they
+            read the ``"precip_cover"``/``"pfrain"``/``"pfsnow"``
+            diagnostics, and ``"ham"`` additionally ``"reffl"``/``"reffi"``,
+            only the 2M scheme can publish, via ``echam_physics``'s
+            wiring). See ``WetScavenging.__init__``'s docstring for the
+            full rationale, including why ``"ham_nuc_bc"`` (this selector's
+            name while nucleation and impaction landed in separate PRs) is
+            retired now that both are in.
+        nucleation_activation: only consulted for ``wetdep_scheme="ham"``
+            -- ``"ham_arg"`` or ``"ham_lin_leaitch"``, HAM's own
+            ``ncd_activ`` switch for which activation scheme
+            ``ic_scav_nuc`` reads its critical radius and per-mode fraction
+            from. ``ic_scav_nuc`` reads whatever activation term this
+            factory actually composed (:func:`_activation_term`, keyed by
+            ``activation_scheme``), so the two selectors MUST agree: ``None``
+            (default) derives it FROM ``activation_scheme`` when that is
+            itself ``"ham_arg"``/``"ham_lin_leaitch"`` (the common case --
+            one selector controls both), and an explicit value is checked
+            against ``activation_scheme`` and rejected on a mismatch (e.g.
+            ``nucleation_activation="ham_arg"`` with
+            ``activation_scheme="ham_lin_leaitch"`` would read
+            ``ic_scav_nuc``'s critical-radius/fraction inputs from the
+            WRONG activation term's output). ``activation_scheme="arg"``
+            (CAM's own ARG, the default) has no ``ncd_activ`` analogue at
+            all (see ``WetScavenging.__init__``'s docstring), so it cannot
+            satisfy ``wetdep_scheme="ham"`` either way -- pass
+            ``activation_scheme="ham_arg"`` or ``"ham_lin_leaitch"``
+            explicitly alongside ``wetdep_scheme="ham"``.
         cloud_borne: prognose an explicit cloud-borne aerosol phase (#602).
             ``None`` (default) follows the core population's own
             ``spec.cloud_borne``; ``True``/``False`` override it for a
@@ -381,6 +399,36 @@ def jam_aerosol_physics(
         aqueous sulfur chemistry, and wet deposition.
 
     """
+    # ``ic_scav_nuc`` (wetdep_scheme="ham") reads whichever activation term
+    # ``_activation_term(activation_scheme, ...)`` below actually composed,
+    # so the two selectors must name the SAME scheme; see the
+    # ``nucleation_activation`` Args entry above for the full rationale.
+    # Irrelevant for any other ``wetdep_scheme`` (WetScavenging never
+    # consults it), so resolve to an inert placeholder rather than raise.
+    if wetdep_scheme == "ham":
+        if nucleation_activation is None:
+            if activation_scheme not in ("ham_arg", "ham_lin_leaitch"):
+                raise ValueError(
+                    "wetdep_scheme='ham' requires activation_scheme="
+                    "'ham_arg' or 'ham_lin_leaitch' (HAM's own ic_scav_nuc "
+                    "has no analogue for CAM's own 'arg' -- see "
+                    "WetScavenging.__init__'s docstring); got "
+                    f"activation_scheme={activation_scheme!r}. Pass "
+                    "activation_scheme='ham_arg' (or 'ham_lin_leaitch') "
+                    "explicitly."
+                )
+            nucleation_activation = activation_scheme
+        elif nucleation_activation != activation_scheme:
+            raise ValueError(
+                "wetdep_scheme='ham' requires nucleation_activation to "
+                "match activation_scheme -- ic_scav_nuc reads whichever "
+                "activation term was actually composed, so a mismatch "
+                "would read it from the wrong one; got "
+                f"nucleation_activation={nucleation_activation!r} with "
+                f"activation_scheme={activation_scheme!r}."
+            )
+    elif nucleation_activation is None:
+        nucleation_activation = "ham_arg"
     core = _resolve_microphysics(microphysics, cloud_borne)
     spec = core.spec
     emissions = [

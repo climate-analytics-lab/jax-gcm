@@ -78,6 +78,61 @@ class JamFactoryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             jam_aerosol_physics(microphysics="m7")
 
+    def test_nucleation_activation_derives_from_activation_scheme(self):
+        """``wetdep_scheme="ham"`` with ``nucleation_activation=None`` (the
+
+        default) composes the WetScavenging term with ``nucleation_
+        activation`` following ``activation_scheme`` -- ``ic_scav_nuc``
+        always reads whatever activation term was actually composed
+        (jax-gcm#1045 review).
+        """
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetScavenging
+
+        for scheme in ("ham_arg", "ham_lin_leaitch"):
+            terms = jam_aerosol_physics(
+                microphysics="m7_placeholder", wetdep_scheme="ham",
+                activation_scheme=scheme)
+            wetdep = next(t for t in terms if isinstance(t, WetScavenging))
+            self.assertEqual(wetdep._nucleation_activation, scheme)
+
+    def test_nucleation_activation_mismatch_with_activation_scheme_raises(self):
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+
+        with self.assertRaisesRegex(ValueError, "match activation_scheme"):
+            jam_aerosol_physics(
+                microphysics="m7_placeholder", wetdep_scheme="ham",
+                activation_scheme="ham_arg",
+                nucleation_activation="ham_lin_leaitch")
+
+    def test_wetdep_ham_rejects_cam_arg_activation_scheme(self):
+        """``activation_scheme="arg"`` (CAM's own, the default) has no
+
+        ``ncd_activ`` analogue, so it cannot pair with
+        ``wetdep_scheme="ham"`` even with ``nucleation_activation`` left
+        at its default.
+        """
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+
+        with self.assertRaisesRegex(ValueError, "activation_scheme"):
+            jam_aerosol_physics(
+                microphysics="m7_placeholder", wetdep_scheme="ham")
+
+    def test_nucleation_activation_unused_for_non_ham_wetdep(self):
+        """A non-"ham" ``wetdep_scheme`` never consults
+
+        ``nucleation_activation``, so a mismatched explicit value is not an
+        error -- it resolves to an inert placeholder on the composed term.
+        """
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetScavenging
+
+        terms = jam_aerosol_physics(
+            activation_scheme="arg", wetdep_scheme="jcm",
+            nucleation_activation="ham_lin_leaitch")
+        wetdep = next(t for t in terms if isinstance(t, WetScavenging))
+        self.assertEqual(wetdep.scheme, "jcm")
+
     def test_harness_declares_aerosol_tracers(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, jam_aerosol_physics, tracer_specs
 

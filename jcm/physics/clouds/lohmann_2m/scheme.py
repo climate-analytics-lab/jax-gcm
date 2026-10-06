@@ -1373,12 +1373,14 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         self._spa_cap_smoothing = nnx.Param(jnp.asarray(cap_smoothing))
 
     def configure_wetdep_hydro_diagnostics(self, enabled: bool) -> None:
-        """Publish the three per-level hydrological inputs HAM's below-cloud
-        wet deposition needs: ``"precip_cover"``, ``"pfrain"``, ``"pfsnow"``.
+        """Publish the five per-level hydrological/microphysical inputs
+        HAM's below-cloud AND in-cloud impaction wet deposition need:
+        ``"precip_cover"``, ``"pfrain"``, ``"pfsnow"``, ``"reffl"``,
+        ``"reffi"``.
 
         ``echam_physics`` turns this on exactly when ``jam_wetdep_scheme``
-        selects the HAM below-cloud pathway (jax-gcm#1017). This scheme
-        already computes all three identically to ECHAM inside its own
+        selects a HAM pathway that needs them (jax-gcm#1017). This scheme
+        already computes all five identically to ECHAM inside its own
         per-level sweep but, until this is enabled, discards them:
 
         - ``"precip_cover"`` is ECHAM's ``pclc``/``zclcpre`` -- the POST-
@@ -1399,11 +1401,20 @@ class Lohmann2MMicrophysics(PhysicsTerm):
           earlier version of this wiring approximated pfrain/pfsnow from
           the carry via an in-cloud ice-fraction proxy; this publishes the
           exact quantity the scheme already computes instead.
+        - ``"reffl"``/``"reffi"`` are the scheme's own ``preffl``/``preffi``
+          (Martin et al. 1994 / Peng & Lohmann 2003 effective radii, in
+          microns, ``eff_liquid_droplet_radius``/``eff_ice_crystal_radius``)
+          -- ``ic_scav_imp``'s (follow-up B) ``reffl``/``reffi`` streams
+          exactly (``mo_ham_wetdep.f90:813,859,911-912``), NOT the
+          radiation term's independently-formed ``clouds.r_eff_*`` (a
+          deliberately different quantity for a deliberately different
+          consumer, unchanged by this -- see the comment where these are
+          computed, ``update_tendencies_and_important_vars``).
 
         Off by default, matching every other diagnostics-key toggle in
         this term.
 
-        Also extends ``self.provides`` with the three keys (instance
+        Also extends ``self.provides`` with the five keys (instance
         override of the class-level tuple) when enabled: ``WetScavenging``
         declares them in ``requires``, and
         ``ComposablePhysics._validate_ordering`` checks that against every
@@ -1412,7 +1423,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         emitted at call time.
         """
         self._publish_wetdep_hydro = bool(enabled)
-        keys = ("precip_cover", "pfrain", "pfsnow")
+        keys = ("precip_cover", "pfrain", "pfsnow", "reffl", "reffi")
         base = tuple(t for t in type(self).provides if t not in keys)
         self.provides = (*base, *keys) if enabled else base
 
@@ -1570,11 +1581,15 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # (#667): with those fixed, summing both would remove
         # supersaturation twice per step with double the latent heating.
         # The scheme's own preffl/preffi (ECHAM cloud_micro_2m outputs) are
-        # not published: the radii radiation uses, and the ``clouds.r_eff_*``
-        # diagnostic, are formed by the radiation term from the step's state,
-        # as in ECHAM's cloud_optics.
+        # NOT used for radiation: the radii radiation uses, and the
+        # ``clouds.r_eff_*`` diagnostic, are formed by the radiation term
+        # from the step's state, as in ECHAM's cloud_optics -- that choice
+        # is unchanged. They ARE published, conditionally, for #1017's
+        # in-cloud impaction pathway (``ic_scav_imp`` needs ECHAM's own
+        # ``reffl``/``reffi`` streams, not a radiation-side estimate) --
+        # see ``configure_wetdep_hydro_diagnostics``.
         (tend_all, surface_rain_flux, surface_snow_flux,
-         _preffl, _preffi, rain_formation_warm, rain_from_melt,
+         preffl_all, preffi_all, rain_formation_warm, rain_from_melt,
          autoconv_all, accretion_all, wbf_all,
          precip_form_all, precip_evap_all, cloud_fraction_all,
          negative_mass_repair_all, scav_ledger_all,
@@ -1681,7 +1696,9 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             diagnostics = {**diagnostics,
                            "precip_cover": precip_cover_all.T,
                            "pfrain": pfrain_all.T,
-                           "pfsnow": pfsnow_all.T}
+                           "pfsnow": pfsnow_all.T,
+                           "reffl": preffl_all.T,
+                           "reffi": preffi_all.T}
         diagnostics = advance_thermo_run(
             diagnostics, dt,
             d_temperature=tendency.temperature,
