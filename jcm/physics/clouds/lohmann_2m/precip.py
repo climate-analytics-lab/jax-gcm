@@ -598,8 +598,20 @@ def precip_formation_cold(
     psacl = jnp.zeros_like(in_cloud_ice)    # snow-droplet accretion mass (grid-mean) [kg/kg]
     psacln = jnp.zeros_like(in_cloud_ice)   # snow-droplet accretion number [1/m^3]
 
+    # mo_cloud_micro_2m.f90's own `eps` (mo_cloud_utils.f90:27) is
+    # EPSILON(1._dp) -- the WORKING dtype's own machine epsilon, not
+    # params.eps (float32's, jax-gcm#1039): taken from the call's own ice
+    # array so a float64 call matches r7492 exactly and a float32-forward
+    # call (core_dtype="float32"-style callers) gets a floor sized to ITS
+    # own precision -- the literal float64 EPSILON(1._dp) (~2.22e-16) would
+    # be swallowed as a no-op by float32 arithmetic (x + 2.22e-16 == x for
+    # any float32-representable x), so it would not guard anything there.
+    _fortran_eps = jnp.finfo(in_cloud_ice.dtype).eps
+
     # Local variables
-    zxibold = jnp.maximum(in_cloud_ice, params.eps)  # noqa: F841 — store pxib with security for later use (Phase 5b)
+    zxibold = jnp.maximum(in_cloud_ice, _fortran_eps)  # store pxib (with
+    # security) before any cold-precip-related change, for the ice-number
+    # self-collection/break-up guard below (mo_cloud_micro_2m.f90:3134).
     zsaut = jnp.zeros_like(in_cloud_ice)      # aggregation mass [kg/kg]
     zxsp2 = jnp.zeros_like(in_cloud_ice)      # snow formed inside box (mass conc proxy) [??]
     zsaclin = jnp.zeros_like(in_cloud_ice)    # in-cloud droplet mass accreted by snow [kg/kg]
@@ -645,7 +657,6 @@ def precip_formation_cold(
     zsaut = in_cloud_ice * (1.0 - 1.0 / (1.0 + ztmp1 * dt * in_cloud_ice))
 
     # update in_cloud_ice = pxib - zsaut (only where ll1)
-    zxibold2 = in_cloud_ice  # store pxib pre-update for later
     in_cloud_ice = jnp.where(ll1, in_cloud_ice - zsaut, in_cloud_ice)
 
     # snow formed inside the grid box (mass concentration proxy)
@@ -693,9 +704,16 @@ def precip_formation_cold(
     # grid-mean accretion mass
     psacl = jnp.where(ll2, cloud_fraction * zsaclin, 0.0)
 
-    # number accretion (droplet number loss), only if liquid remains meaningful
+    # number accretion (droplet number loss), only if liquid remains
+    # meaningful. The sibling of the zsprn1 guard above (jax-gcm#1039):
+    # mo_cloud_micro_2m.f90's own riming-number guard divides by
+    # ``ztmp3+eps`` (``ztmp3`` = pxlb saved before the riming decrement,
+    # jcm's pxlb_before) with the SAME module-level eps = EPSILON(1._dp);
+    # _fortran_eps (the call's own working-dtype epsilon, defined above)
+    # reproduces that exactly at float64 and stays a meaningful floor at
+    # float32.
     ll2b = in_cloud_liquid > params.cqtmin
-    psacln_raw = droplet_number * zsaclin / (pxlb_before + params.eps)
+    psacln_raw = droplet_number * zsaclin / (pxlb_before + _fortran_eps)
     psacln_raw = jnp.minimum(psacln_raw, droplet_number - minimum_droplet_number)
     psacln_raw = jnp.maximum(psacln_raw, 0.0)
     psacln = jnp.where(ll2b, psacln_raw, 0.0)
@@ -735,8 +753,10 @@ def precip_formation_cold(
         jnp.logical_and(in_cloud_ice > params.epsec, ice_number >= params.icemin),
     )
 
-    zxibold_sec = jnp.maximum(zxibold2, 0.0)  # Fortran zxibold used here
-    zsprn1 = ice_number * (zsaci + zsaut) / (zxibold_sec + params.eps)
+    # zxibold (the pre-aggregation ice, floored above) is the Fortran's
+    # own `ztmp1 = zxibold; ztmp1 = MAX(ztmp1, 0.)` -- a no-op re-floor at
+    # 0 there, since zxibold is already >= eps > 0 by construction.
+    zsprn1 = ice_number * (zsaci + zsaut) / (zxibold + _fortran_eps)
     zself = 0.5 * dt * zc1 * ice_number * in_cloud_ice
     zsecprodn = params.mi0_rcp * air_density * zsecprod
 
