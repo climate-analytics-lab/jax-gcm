@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import inspect
+from typing import Any, Mapping
 
 from jcm.physics.aerosol.carry_seeder import AerosolCarrySeeder
 from jcm.physics.aerosol.jam.activation.arg_term import (
@@ -133,30 +135,75 @@ def _load_m7_jax() -> type[ModalMicrophysicsTerm]:
     return M7JaxMicrophysics
 
 
-# Core resolvers (each takes a spec override, ``None`` for the core default).
-# ``placeholder``/``m7_placeholder`` are built-in; ``mam4_jax`` is loaded
-# lazily so the optional GPL-3.0 ``mam4-jax`` dependency is only imported
-# when selected.
+def _build_core(core_cls, spec, options, name):
+    """Construct ``core_cls(spec=spec, **options)``, validating ``options``'
+    keys against the core's own constructor first.
+
+    ``options`` is the string-named core's ``microphysics_options`` mapping
+    (``None`` means "none given", same as an empty mapping). An unknown key
+    raises, naming the core and the keys its constructor actually accepts
+    (every ``__init__`` parameter but ``self``/``spec``) — e.g.
+    ``nucleation_scheme``/``organic_scheme``/``coagulation``/``condensation``/
+    ``enable_x64``/``core_dtype``/``kappa_table`` for ``"m7_jax"``. Every
+    other core (``placeholder``, ``m7_placeholder``, ``mam4_jax`` today) takes
+    no options, so any key is unknown for them.
+    """
+    kwargs = {} if options is None else dict(options)
+    valid = set(inspect.signature(core_cls.__init__).parameters) - {
+        "self", "spec"}
+    unknown = sorted(set(kwargs) - valid)
+    if unknown:
+        raise ValueError(
+            f"Unknown microphysics_options {unknown} for the {name!r} core. "
+            f"Valid keys: {sorted(valid)}."
+        )
+    return core_cls(spec=spec, **kwargs)
+
+
+# Core resolvers (each takes a spec override, ``None`` for the core default,
+# and a ``microphysics_options`` mapping, ``None`` for none given).
+# ``placeholder``/``m7_placeholder`` are built-in; ``mam4_jax``/``m7_jax`` are
+# loaded lazily so their optional dependencies are only imported when
+# selected.
 _MICROPHYSICS = {
-    "placeholder": lambda spec: PlaceholderMicrophysics(spec=spec),
-    "mam4_jax": lambda spec: _load_mam4_jax()(spec=spec),
+    "placeholder": lambda spec, options: _build_core(
+        PlaceholderMicrophysics, spec, options, "placeholder"),
+    "mam4_jax": lambda spec, options: _build_core(
+        _load_mam4_jax(), spec, options, "mam4_jax"),
     # The κ-Köhler zero-tendency core on the M7 population (jax-gcm#1017) —
     # the chain-test vehicle for the echam-ham-m7 preset until the real M7
     # core adapter lands. ``spec`` defaults to M7_SPEC rather than
     # PlaceholderMicrophysics's own MAM4_SPEC default.
-    "m7_placeholder": lambda spec: PlaceholderMicrophysics(
-        spec=spec or M7_SPEC),
+    "m7_placeholder": lambda spec, options: _build_core(
+        PlaceholderMicrophysics, spec or M7_SPEC, options, "m7_placeholder"),
     # The ECHAM-HAM M7 core over m7-jax (jax-gcm#1017), the optional
-    # ``jcm[m7]`` extra; loaded lazily like mam4_jax.
-    "m7_jax": lambda spec: _load_m7_jax()(spec=spec),
+    # ``jcm[m7]`` extra; loaded lazily like mam4_jax. ``microphysics_options``
+    # is how a preset selects ``nucleation_scheme=2`` (Kazil/Lovejoy) or the
+    # float32 forward core (``core_dtype="float32"``) without a bespoke
+    # factory argument for every switch the core adds.
+    "m7_jax": lambda spec, options: _build_core(
+        _load_m7_jax(), spec, options, "m7_jax"),
 }
 
 
 def _resolve_microphysics(
     microphysics: ModalMicrophysicsTerm | str,
     cloud_borne: bool | None = None,
+    microphysics_options: Mapping[str, Any] | None = None,
 ) -> ModalMicrophysicsTerm:
     if isinstance(microphysics, ModalMicrophysicsTerm):
+        if microphysics_options is not None:
+            # An already-constructed core has already made every one of
+            # these choices (or taken its own defaults); a mapping here
+            # would either be silently ignored or ambiguously re-applied
+            # on top of it, so it is rejected rather than guessed at —
+            # construct the instance with those keyword arguments directly.
+            raise ValueError(
+                "microphysics_options is only for a string-named core; got "
+                f"an already-constructed {type(microphysics).__name__} "
+                "instance. Pass those keyword arguments to its constructor "
+                "instead."
+            )
         if (
             cloud_borne is not None
             and microphysics.spec.cloud_borne != cloud_borne
@@ -177,12 +224,13 @@ def _resolve_microphysics(
             f"Choose one of {sorted(_MICROPHYSICS)} or pass a "
             "ModalMicrophysicsTerm instance."
         ) from None
-    core = factory(None)
+    core = factory(None, microphysics_options)
     if cloud_borne is not None and core.spec.cloud_borne != cloud_borne:
         # Rebuild on the same population with the flag flipped; construction
         # is compose-time only, so the double build costs nothing at run time.
         core = factory(
-            dataclasses.replace(core.spec, cloud_borne=cloud_borne)
+            dataclasses.replace(core.spec, cloud_borne=cloud_borne),
+            microphysics_options,
         )
     return core
 
@@ -190,6 +238,7 @@ def _resolve_microphysics(
 def jam_aerosol_physics(
     *,
     microphysics: ModalMicrophysicsTerm | str = "placeholder",
+    microphysics_options: Mapping[str, Any] | None = None,
     cloud_borne: bool | None = None,
     arg_variant: str = "arg2000",
     optics: bool = True,
@@ -270,6 +319,17 @@ def jam_aerosol_physics(
             from. See ``WetScavenging.__init__``'s docstring for why this
             should match whichever activation scheme
             ``echam_physics(jam_activation_scheme=...)`` actually composed.
+        microphysics_options: keyword arguments forwarded to a string-named
+            core's constructor (e.g. ``{"nucleation_scheme": 2}`` for
+            ``"m7_jax"``'s Kazil/Lovejoy (2007) ion-mediated nucleation, or
+            ``{"core_dtype": "float32"}`` for its forward-only float32
+            core). ``None`` (default) means today's call for every core —
+            MAM4 and the placeholder are unaffected. An unknown key raises,
+            naming the core and the keys its constructor actually accepts.
+            Only valid for a string-named core; an already-constructed
+            ``ModalMicrophysicsTerm`` instance has made these choices
+            itself, so passing both is an error — construct the instance
+            with the keyword arguments directly instead.
         cloud_borne: prognose an explicit cloud-borne aerosol phase (#602).
             ``None`` (default) follows the core population's own
             ``spec.cloud_borne``; ``True``/``False`` override it for a
@@ -347,7 +407,8 @@ def jam_aerosol_physics(
         aqueous sulfur chemistry, and wet deposition.
 
     """
-    core = _resolve_microphysics(microphysics, cloud_borne)
+    core = _resolve_microphysics(
+        microphysics, cloud_borne, microphysics_options)
     spec = core.spec
     emissions = [
         SeaSaltEmissions(params=seasalt, spec=spec, scheme=seasalt_scheme),
