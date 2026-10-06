@@ -274,6 +274,7 @@ def _patched_engine(shape):
                    return_value={"type2": jnp.ones(shape)}),
         mock.patch("jcm.forcing.read_dust_regions", return_value=jnp.ones(shape)),
         mock.patch("jcm.forcing.read_dust_roughness", return_value=jnp.ones(shape)),
+        mock.patch("jcm.forcing.read_dust_msg_source", return_value=jnp.ones(shape)),
         mock.patch("jcm.forcing.read_oxidant_vmr",
                    return_value={"oh": jnp.ones((1, *shape))}),
         mock.patch("jcm.forcing.validate_oxidant_levels"),
@@ -341,18 +342,26 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         # and this test stubs xarray.open_dataset for the whole engine, so it
         # composes the documented data-free variant (binary nucleation, jcm's
         # own Mie tables) - equivalence of the two doors is what is tested.
+        # forcing.dust_msg_file is pinned to an explicit path rather than left
+        # at the config's own "auto": the preset's ndust=5 needs it, but its
+        # mirror bundle is not staged yet (manifest "staged": False), so
+        # "auto" would raise a real "not yet published" error here that has
+        # nothing to do with the equivalence this test checks -- read_dust_
+        # msg_source is mocked above like its four dust-companion siblings.
         with mock.patch.dict(os.environ):
             os.environ.pop("HAM_INPUT_DIR", None)
             self._assert_door_matches_cli(
                 "ham-t63-l47",
-                {"physics.jam_microphysics_options.nucleation_scheme": 1})
+                {"physics.jam_microphysics_options.nucleation_scheme": 1,
+                 "forcing.dust_msg_file": "/dummy/dust_msg.nc"})
 
     @pytest.mark.requires_extra("m7")
     def test_ham_m7_preset_carries_hams_own_settings(self):
         """The preset builds HAM's switches, not the MAM4 calibrations.
 
-        Sea salt runs unscaled (the harness default, SEASALT_SCALE_DEFAULT,
-        calibrates the MAM4 population's AOD), wet deposition is the full
+        Sea salt and dust run unscaled (SEASALT_SCALE_DEFAULT and
+        NDUSCALE_JCM_T63_SCALE calibrate the MAM4 configuration's AOD), wet
+        deposition is the full
         nwetdep=3 scheme with the corrected cdroprad(6) = 30 um axis, and
         cirrus is nic_cirrus=2.
         """
@@ -370,6 +379,10 @@ class TestConfigurationsAcceptance(unittest.TestCase):
             return term(name).params.get_value()
 
         self.assertEqual(float(params("jam_seasalt_emissions").scale), 1.0)
+        # DustEmissions keeps its preset as (ndust, nudged, nduscale_scale):
+        # HAM's ndust=5 with jcm's MAM4 multiplier off.
+        self.assertEqual(term("jam_dust_emissions")._preset[0], 5)
+        self.assertEqual(term("jam_dust_emissions")._preset[2], 1.0)
         wet = term("jam_wet_deposition")
         self.assertEqual(wet.scheme, "ham")
         self.assertEqual(float(params("jam_wet_deposition").cdroprad_um[6]), 30.0)

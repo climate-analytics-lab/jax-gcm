@@ -66,12 +66,18 @@ jam_prescribed_speciated: false
 seasalt:
   scale: 1.0
 
-# Dust: HAM2's ndust=4 source. The reference's ndust=5 (the MSG-SEVIRI
-# Saharan source map) is selected once ported. The threshold multiplier stays
-# the harness default (NDUSCALE_JCM_T63_SCALE at T63): it adapts HAM's
-# threshold vector to jcm's own 10 m winds, a property of the host rather than
-# of the aerosol population, so it applies to M7 as it does to MAM4.
-jam_dust_preset: 4
+# Dust: HAM2's ndust=5 source, the reference run's own choice -- ndust=4's
+# standard Zobler/East-Asia mixture, PLUS the MSG-SEVIRI Saharan
+# dust-source-activation override (mo_ham_dust.f90:685-747) wherever
+# forcing.dust_msg is positive. Needs forcing.dust_msg_file set (see
+# jcm/config/configuration/ham-t63-l47.yaml, which sets it to "auto"; the
+# four other dust companions stay "auto" by forcing/from_file.yaml's own
+# default). HAM's own regional threshold vector (nduscale_reg) is used
+# unscaled: jcm's T63 multiplier (NDUSCALE_JCM_T63_SCALE) is a calibration of
+# the MAM4 configuration's dust AOD (docs/source/design/jam_aerosol_retune.md)
+# with no counterpart in ECHAM-HAM, so it does not apply to this preset.
+jam_dust_preset: 5
+jam_dust_nduscale_scale: 1.0
 
 # Wet deposition: the template's nwetdep=3, HAM's size-dependent in-cloud
 # nucleation (ic_scav_nuc, ARG critical radius to match ncd_activ=2) and

@@ -23,4 +23,10 @@ init:
 forcing:
   align: wrap_year
   file: hf://bundles/t63/forcing_pd.nc
+  # The physics preset selects ndust=5, whose MSG-SEVIRI Saharan map is NOT
+  # one of the four dust companions ``forcing/from_file.yaml`` defaults to
+  # "auto" (its bundle is not yet staged on the mirror, so an unconditional
+  # default would break every other ndust preset the moment dust is on --
+  # see that file's comment). Opt in explicitly here.
+  dust_msg_file: auto
 sl_off_centering: 0.2

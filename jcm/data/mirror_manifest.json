@@ -204,6 +204,23 @@
       "auto": true,
       "staged": true
     },
+    "dust_msg_sources": {
+      "path": "bundles/{grid}/dust_msg_sources.nc",
+      "source": "mirror",
+      "grids": [
+        "t106",
+        "t127",
+        "t255",
+        "t63"
+      ],
+      "levels": null,
+      "vertical": null,
+      "coverage": null,
+      "alignment": "static",
+      "key": "dust_msg_file",
+      "auto": true,
+      "staged": false
+    },
     "ozone_pd": {
       "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",
       "source": "mirror",

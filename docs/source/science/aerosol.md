@@ -737,7 +737,9 @@ exactly zero on every chunk thereafter.
 #### Dust emission (Tegen / HAMMOZ)
 
 **What we do.** A port of the MPI-BGC dust scheme as HAM2 configures it
-(``ndust = 4``). A 191-class soil size grid spanning 0.2-1262 µm carries a
+(``ndust = 4``, the default; ``ndust = 5`` additionally gates the Sahara on
+the MSG-SEVIRI dust-source-activation map, HAM's own reference-run choice —
+`jam_dust_preset`, below). A 191-class soil size grid spanning 0.2-1262 µm carries a
 Marticorena & Bergametti (1995) threshold friction velocity ``u*t(D)``; ``u*``
 comes from the diagnosed **10 m wind** through the fixed log law
 ``u* = vk·U10/ln(1000 cm/z0)`` with ``z0 = ndurough = 0.001 cm``, not from the
@@ -867,12 +869,45 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   ``nudging.enabled``, because the nudging term is appended after physics is
   composed and the dust term cannot otherwise see it. An explicit ``true`` or
   ``false`` wins.
+- **``ndust = 5``: the MSG-SEVIRI Saharan override.** HAM's own reference run
+  (`setup_templates/run_examples/run_transient_echam6-hamm7`) selects
+  ``ndust = 5``, not 4: everywhere the Schepanski et al. (2007, GRL; 2012, RSE)
+  MSG-SEVIRI dust-source-activation frequency (``forcing.dust_msg``, HAM's
+  ``mat_msg``, in [0, 1]) is positive, the cell's Zobler/East-Asian soil
+  mixture (``mat_s1..mat_s6``) is zeroed in favour of it: `0 < dust_msg < 0.01`
+  zeroes the preferential source too (the cell emits nothing from this term),
+  `dust_msg ≥ 0.01` forces the full preferential-source spectrum
+  (``psrc = 1``). This override block (`mo_ham_dust.f90:685-740`) is
+  wind- and soil-moisture-**independent** — it runs once, at annual-field
+  read time — so it is validated once, against the compiled, unmodified
+  Fortran, in `jcm/data/test/echam_cloud_reference/hamdustmsg.npz`
+  (`dust_test.py::MSGSourceTest`); the shared saltation/threshold chain it
+  feeds is `ndust = 4`'s own, unchanged. The override shares `ndust = 4`'s
+  East-Asia soil replacement (`k_dust_easo = 2`) but runs AFTER it and does
+  not special-case the interaction: a cell that is both East-Asian and
+  MSG-active (geographically disjoint in practice — the map is Saharan) has
+  its East-Asia-replaced residual zeroed by the MSG block while its
+  East-Asian texture fractions themselves are untouched, which can drive the
+  *reported* residual negative exactly as HAM's own literal
+  `mat_s1 - mat_s2 - ... - mat_s17` arithmetic would — reproduced, not
+  clipped. The MSG map's own mirror bundle is **not yet staged**
+  (`jcm/data/mirror/dust.py`'s `dust_msg_sources` product), so
+  `forcing.dust_msg_file` defaults to `null` (every preset but 5 is
+  unaffected) and `ndust = 5` configurations must set it explicitly once the
+  bundle exists.
 - **The one scalar jcm calibrates.** ``NDUSCALE_JCM_T63_SCALE`` multiplies the
   whole ``ndust = 4`` T63 vector, and is exposed per run as
   ``physics.jam_dust_nduscale_scale``. It is one number rather than eight
   because HAM's eight regional parameters cannot be identified from a
   global-mean and a zonal-mean dust AOD: the regional *ratios* stay HAM's and
-  only the level moves. It applies at T63, which is every resolution the model ships JAM
+  only the level moves. ``ndust = 5`` shares ``ndust = 4``'s T63 regional
+  vector bit-for-bit (`get_dust_namelist_defaults`'s ``CASE (4, 5)``), and the
+  scale itself corrects a mismatch between jcm's simulated 10 m wind climate
+  and the one HAM's vector was tuned against — a property of the host model,
+  not of which soil-source variant is active. It is a calibration of the MAM4
+  configuration's dust AOD with no counterpart in ECHAM-HAM, so the
+  ``echam-ham-m7`` preset sets it to 1 and runs HAM's own vector unscaled
+  (``ndust = 5`` shares that vector). It applies at T63, which is every resolution the model ships JAM
   at; a composition built at another resolution keeps HAM's untuned
   ``0.86``, since its source fields are interpolated from T63 anyway.
 

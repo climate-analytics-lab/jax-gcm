@@ -1,9 +1,11 @@
 """Mirror products for the Tegen/HAMMOZ dust emission scheme (issue #802).
 
-Five bundles per grid: the monthly potential-source (effective-LAI)
+Six bundles per grid: the monthly potential-source (effective-LAI)
 climatology, the static preferential-source (paleolake) fraction, the nine
-soil-texture area fractions, the categorical 1-8 tuning-region mask and the
-monthly satellite roughness map.
+soil-texture area fractions, the categorical 1-8 tuning-region mask, the
+monthly satellite roughness map, and the static MSG-SEVIRI Saharan
+dust-source-activation map (``ndust = 5`` only, jax-gcm#1017) — see
+:data:`DUST_PRODUCTS`.
 
 Sources — the ECHAM-HAMMOZ input pool (``/pool/data/ECHAM6-HAMMOZ`` on DKRZ
 Levante, see :mod:`jcm.data.mirror.sites`), at every resolution HAMMOZ ships:
@@ -95,8 +97,31 @@ NATIVE_SOURCES: dict[int, dict[str, dict[str, tuple[str, str]]]] = {
     },
 }
 
+#: The MSG-SEVIRI Saharan dust-source-activation map (``ndust = 5``,
+#: jax-gcm#1017; Schepanski et al. 2007/2012; ``mo_ham_dust.f90:382``'s
+#: ``mat_msg``, read from the Fortran's local name ``dust_msg_pot_sources.nc``
+#: with variable ``dsaf``). Added after the dict above (not through
+#: ``_new_lineage``, which is shared by T63 and T127) because only the T63
+#: file is confirmed to exist: a local verification copy was checked at
+#: ``/data/climate-analytics-lab-shared/ECHAM_emissions_v0006/hammoz/T63/
+#: msg_pot_sources_T63.nc`` (96x192, ``dsaf (lat, lon)``, no time axis, same
+#: grid as the other T63 products). The pool-relative path below follows the
+#: v0007 lineage's own ``<name>_T63.nc`` convention, by analogy with the other
+#: four dust products' real pool filenames (e.g. ``dust_preferential_sources_
+#: T63.nc`` for the Fortran's ``dust_preferential_sources.nc``) -- it has NOT
+#: been independently confirmed against the live DKRZ Levante pool, since
+#: that is a site this port was not run on. Whoever stages this bundle should
+#: verify the real ``v0007/hammoz/T63`` filename (and whether a T127/T255
+#: native file exists at all) before running ``stage_dust`` and fix this one
+#: string if it differs; the generic ``build_dust_product`` path below needs
+#: no other change (it already regrids T63 -> every other published grid for
+#: ``dust_surface_roughness``'s T255 case the same way).
+NATIVE_SOURCES[63]["dust_msg_sources"] = {
+    "dsaf": ("v0007/hammoz/T63/dust_msg_pot_sources_T63.nc", "dsaf")}
+
 DUST_PRODUCTS = ("dust_potential_sources", "dust_preferential_sources",
-                 "dust_soil_types", "dust_regions", "dust_surface_roughness")
+                 "dust_soil_types", "dust_regions", "dust_surface_roughness",
+                 "dust_msg_sources")
 
 #: Products whose time axis is a real 12-month climatology; the rest carry a
 #: degenerate length-1 axis in the source that is dropped on the way out.
@@ -134,6 +159,8 @@ _LONG_NAMES = {
     "source": "preferential (paleolake) dust source area fraction",
     "regions": "regional dust-tuning index (1-8, Huneeus et al. 2011)",
     "surfrough": "Prigent et al. (2005) satellite surface roughness length",
+    "dsaf": ("Schepanski et al. (2007, 2012) MSG-SEVIRI Saharan "
+            "dust-source-activation frequency"),
 }
 
 
