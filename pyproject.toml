@@ -42,7 +42,7 @@ jcm = [
 mam4 = [
     # Exact, not a floor: the adapter imports submodule paths that upstream
     # excludes from its semver contract (#737).
-    "mam4-jax @ git+https://github.com/reflective-org/MAM4-JAX.git@39365fb1158ffaed739169a14a6065c6991a4c0c",
+    "mam4-jax @ git+https://github.com/reflective-org/MAM4-JAX.git@25924f0e1402fbe053d41b3e085a01a728df1c63",
 ]
 # jax-cosp satellite simulators (COSP v2 in JAX): CloudSat radar + warm-rain
 # diagnostics via the CloudsatCosp physics term. Apache-2.0.

@@ -31,12 +31,20 @@ bundle. The initial sensitivity experiments used the separately retained
 1.5 source multiplier are already applied. Fluxes are carbon-equivalent
 molecules per square centimetre per second: CAM's surface-emission routine
 converts them using the destination tracer molecular weight, 12.011 g/mol.
-The 150 g/mol used for molecular diffusion/uptake kinetics must not be used
+The 250 g/mol defining the equilibrium saturation concentration must not be used
 to convert these emissions. That substitution would inflate the source by
-about 12.5 times.
+about 20.8 times.
 
 The captured MAM4 exchange uses slightly different conversion factors for
-SOAG (12.011/150) and aerosol SOA (12/150). Gas-plus-aerosol budgets must
+SOAG (12.011/150) and aerosol SOA (12/150). A per-call equilibrium
+molecular weight of 250 g/mol reproduces CAM6's 1.02 µg/m³ saturation
+concentration at 298 K (reference pressure 10⁻¹⁰ atm, enthalpy 156 kJ/mol).
+It scales equilibrium gas by 250/150 on the unchanged local molecular basis,
+equivalent to converting gas, SOA and absorbing POA to 250 before exchange
+and converting back afterwards. The 10% absorbing POA fraction is retained,
+except in primary carbon where coating is transient. Other microphysical
+volume conversions and CAM's 0.81 uptake ratio relative to sulphuric acid
+remain unchanged. Gas-plus-aerosol budgets must
 convert both to the common molecular basis: on the aerosol mass basis the
 gas receives a factor 12.011/12. The resulting 0.09% convention difference
 is reversible and must not be diagnosed as an additional organic source.

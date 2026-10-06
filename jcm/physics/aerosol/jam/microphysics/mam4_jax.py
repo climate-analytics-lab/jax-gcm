@@ -277,9 +277,10 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
                 "onto it is silently dropped at the state repack. Install "
                 "the pinned version (mam4-jax 0.4.0): pip install 'jcm[mam4]'."
             )
-        if "soa_uptake_mask" not in _amicphys.AmicphysParams._fields:
+        if not {"soa_uptake_mask", "soa_equilibrium_molecular_weight"}.issubset(
+                _amicphys.AmicphysParams._fields):
             raise ImportError(
-                "The installed mam4-jax lacks per-call SOA mode selection. "
+                "The installed mam4-jax lacks per-call CAM6 SOA configuration. "
                 "Its MOM reference allows coarse SOA uptake, whereas CAM6 "
                 "SOA occupies the Aitken/accumulation modes. Install the "
                 "dependency pinned by this checkout: pip install -U '.[mam4]'.")
@@ -507,7 +508,10 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             # reservoirs. Keep transient primary-carbon coating, which
             # aging transfers to accumulation, but exclude coarse uptake.
             soa_uptake_mask=jnp.asarray(
-                [mode.short != "cor" for mode in self.spec.modes], dtype=bool))
+                [mode.short != "cor" for mode in self.spec.modes], dtype=bool),
+            # CAM6 p0=1e-10 atm corresponds to C*=1.02 ug/m3 with
+            # molecular weight 250, rather than the MOM reference's 150.
+            soa_equilibrium_molecular_weight=jnp.asarray(250.0, cdt))
         one_step = lambda s: amicphys(
             wateruptake(calcsize(s)), core_params)
         flat_out = jax.vmap(one_step, in_axes=in_axes)(flat_state)

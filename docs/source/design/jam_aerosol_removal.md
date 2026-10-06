@@ -5,7 +5,7 @@ JAM removes aerosol through three composed terms, in this order:
 | term | category | what it removes |
 |---|---|---|
 | `StokesSedimentation` | `aerosol_sedimentation` | gravitational settling, whole column |
-| `SlinnDryDeposition` | `aerosol_drydep` | turbulent + Brownian removal, lowest layer |
+| `CAMDryDeposition` | `aerosol_drydep` | land-cover collection, including diffusion, impaction, interception and rebound, lowest layer |
 | `WetScavenging` | `aerosol_wetdep` | in-cloud nucleation + below-cloud impaction, net of re-evaporation |
 
 Every formulation below is matched against CAM's MAM4 (ESCOMP/CAM
@@ -174,7 +174,7 @@ Two things to be clear about:
 
 ## Wet particle density
 
-Settling and Slinn deposition use the **wet** radius, so they must use the
+Settling and surface collection use the **wet** radius, so they must use the
 density of that same wet particle: the mass-weighted mixture of dry
 material and condensed water,
 

@@ -66,9 +66,10 @@ ARG variant) is a compose-time Python decision with no traced branching.
    GMD 18 4899; coefficients reconstructed from the paper's Table 3, gated
    off by default pending PDF verification).
 4. `StokesSedimentation` — Stokes settling + donor-cell vertical transport.
-5. `SlinnDryDeposition` — aerodynamic + Slinn & Slinn (1980) over-water
-   resistances; reads `surface_friction_velocity` from the
-   `vertical_diffusion` diagnostic (previous step).
+5. `CAMDryDeposition` — aerodynamic resistance plus CAM's eleven-class
+   surface collection, including dry-surface rebound. Reads the current
+   `surface_friction_velocity` from `vertical_diffusion`. The former
+   `SlinnDryDeposition` ocean-only term remains available explicitly.
 6. `WetScavenging` — in-cloud nucleation + size-dependent below-cloud
    impaction scavenging, built from the cloud scheme's precip / condensate
    diagnostics.
