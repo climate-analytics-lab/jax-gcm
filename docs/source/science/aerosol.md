@@ -273,9 +273,17 @@ wet-scavenging schemes (see *Emissions, deposition, sedimentation, wet
 scavenging* above), which keep their present form for v3. ECHAM's immersion
 rate needs the cooling of the large-scale vertical motion as well as the
 turbulent updraft; only the latter reaches the 2M scheme (#705). The cirrus
-inputs of ``ham_IN_setup`` (the soluble aerosol number ``zascs`` and the
-freezing-mode number and radius) are not computed; their consumers, cirrus
-nucleation ``zninucl`` and the Kärcher–Lohmann scheme, are absent (#955, #552).
+inputs of ``ham_IN_setup`` -- the soluble aerosol number ``pascs``/``papnx``
+(``ham_cirrus_aerosol``, sourced from a population's own
+``ModalAerosolSpec.cirrus_aerosol_modes``, M7: soluble Aitken/accumulation/
+coarse) and the Kärcher-Lohmann cirrus scheme itself
+(``jcm/physics/clouds/lohmann_2m/cirrus.py``) that consumes them -- are now
+computed for M7 (``nic_cirrus = 2``; see {doc}`clouds_microphysics`, #552).
+The ``ld_het = .TRUE.`` branch of ``ham_IN_setup`` (feeding ``ndusol_strat``
+instead of ``papnx = ρ·pascs``) is not ported, for the same reason
+``cirrus.py`` does not port ``XFRZHET``: ``lhetfreeze`` is an ``em_error``
+unless ECHAM is compiled with ``-DWITH_LHET``. The ``nic_cirrus = 1`` cap
+``zninucl`` is a separate, still-absent consumer of ``zascs`` (#955).
 
 The partition is compared with the compiled ``ham_IN_setup`` in
 ``ham_freezing_reference_test.py`` (exact on nine designed M7 cells); the MAM4
