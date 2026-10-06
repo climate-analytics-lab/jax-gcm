@@ -280,7 +280,14 @@ nucleation ``zninucl`` and the Kärcher–Lohmann scheme, are absent (#955, #552
 The partition is compared with the compiled ``ham_IN_setup`` in
 ``ham_freezing_reference_test.py`` (exact on nine designed M7 cells); the MAM4
 mapping, a hand-computed cell and the gradients are in
-``ice_nucleation_test.py``.
+``ice_nucleation_test.py``. ``m7_freezing_chain_reference_test.py`` chains
+``ham_freezing_aerosol`` to ``het_mxphase_freezing`` on one M7 cell
+(``ham_IN_setup``'s own output fed straight to ``het_mxphase_freezing``,
+rather than each routine's reference data choosing its inputs independently)
+against the compiled Fortran run end to end, confirming contact freezing is
+genuinely non-zero under M7 — not just finite — to 1e-8/1e-4 relative
+(float64/float32); ``m7_chain_test.py`` repeats that check through the live,
+scan-based composed-physics model with seeded dust tracers.
 
 ### Cloud-borne aerosol store
 
