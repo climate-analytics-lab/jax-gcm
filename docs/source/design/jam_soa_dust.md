@@ -25,7 +25,9 @@ reverse-mode differentiation through the condensation solve.
 ## Emissions and reproduction
 
 The official NCAR anthropogenic, biogenic and biomass-burning SOAG surface
-inventories represent the 1995–2005 climatology. Their VOC yields and CAM's
+inventories are sampled at 2014 to match the existing present-day emissions
+bundle. The initial sensitivity experiments used the separately retained
+1995–2005 climatology; they are explicitly labelled below. Their VOC yields and CAM's
 1.5 source multiplier are already applied. Fluxes are carbon-equivalent
 molecules per square centimetre per second: CAM's surface-emission routine
 converts them using the destination tracer molecular weight, 12.011 g/mol.
@@ -45,14 +47,14 @@ closing the organic budget.
 `jcm.data.emissions.cam6_soa` pins the three upstream SHA256 hashes, validates
 nonnegative finite fluxes and matching calendars, sums their converted
 sources, and conservatively remaps them through the shared emissions pipeline.
-The prepared T63 inventory is packaged in `data/bc/t63/soag_cam6_2000.nc`;
+The prepared T63 inventory is packaged in `data/bc/t63/soag_cam6_2014.nc`;
 its metadata records source files and hashes. The `pkg://data/...` path
 resolves inside the installed package independently of the working directory.
 
 Reproduce a native-grid inventory with:
 
 ```bash
-python -m jcm.data.emissions.cam6_soa --truncation 63 --output soag.nc
+python -m jcm.data.emissions.cam6_soa --truncation 63 --year 2014 --output soag.nc
 ```
 
 Use the prepared file alongside the existing mass and number sources:
@@ -111,8 +113,10 @@ The CAM distribution factors in Stokes settling are retained: number and
 mass represent different moments of a lognormal mode. Reducing that factor
 to increase the dust burden would violate the reference formulation.
 
-Matched five-day control, SOA-only, coupling-only and combined tests use
-the same spun-up donor, meteorological forcing, emissions and precision.
+Matched five-day control and corrected runs use the same spun-up donor,
+meteorological forcing, emission calibration and precision. Separate
+experiments add coarse drag and land-cover collection to the corrected SOA
+and working-population coupling.
 Source and sink budgets, dust size and vertical distribution, and climate
 health must support any lifetime change before it becomes a release fix.
 

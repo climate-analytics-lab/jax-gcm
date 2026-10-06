@@ -170,8 +170,8 @@ builds one for you:
    exp = configurations.load("t63-echam-jam", **{"run.total_time": 30})
 
 For present-day SOA sensitivity tests, ``t63-echam-jam-soa`` adds the
-published CAM6 VOC-derived SOAG climatology and aerosol optical diagnostics.
-The inventory represents 1995–2005; PI and transient runs need matching
+published CAM6 VOC-derived SOAG inventory and aerosol optical diagnostics.
+The inventory is for 2014, matching the present-day emissions bundle; PI and transient runs need matching
 emissions. See :doc:`design/jam_soa_dust` for the formulation, units and
 short-run validation limits.
 

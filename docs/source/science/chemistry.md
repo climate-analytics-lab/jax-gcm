@@ -105,7 +105,7 @@ header).
 
 **What we do.** The present-day `t63-echam-jam-soa` configuration supplies
 anthropogenic, biogenic and biomass-burning SOAG from the official CAM6
-1995–2005 climatology. The fixed VOC yields and 1.5 source multiplier are
+2014 historical inventory (matching the present-day emissions bundle). The fixed VOC yields and 1.5 source multiplier are
 already included in the inventories. Carbon-equivalent fluxes are converted
 with the CAM destination-tracer molecular weight, 12.011 g/mol, conservatively
 remapped, and injected through the existing surface-emissions term.

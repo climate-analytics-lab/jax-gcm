@@ -81,3 +81,48 @@ class Cam6SoaTest(unittest.TestCase):
     def test_incomplete_inventory_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "anthro, biogenic and bb"):
             prepare_cam6_soa(None, {"biogenic": "missing.nc"})
+
+    def test_selects_complete_historical_year_and_preserves_months(self):
+        import pandas as pd
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        dates = pd.date_range('2000-01-01', periods=24, freq='MS') + pd.Timedelta(days=15)
+        days = (dates - pd.Timestamp('2000-01-01')).days.values.astype(float)
+        with tempfile.TemporaryDirectory() as directory:
+            sources = {}
+            for i, key in enumerate(SOURCES):
+                path = Path(directory) / f"{key}.nc"
+                values = np.ones((24,2,4)) * (i+1) * 1e10
+                values[12:] *= 2
+                ds = xr.Dataset({"emiss_"+key: (("time","lat","lon"),values)},
+                                coords={"time":days,"lat":[-45,45],"lon":[0,90,180,270]})
+                ds.time.attrs.update(units='days since 2000-01-01',calendar='gregorian')
+                ds['emiss_'+key].attrs['units']='molecules/cm2/s'
+                ds.to_netcdf(path)
+                sources[key]=str(path)
+            result=prepare_cam6_soa(coords,sources,year=2001)
+            np.testing.assert_allclose(result.aero_emis_g_soag,
+                                       12e10*molec_flux_to_mass_flux(12.011),rtol=2e-14)
+            np.testing.assert_array_equal(result.time,days[12:])
+            self.assertEqual(result.attrs['inventory_year'],'2001')
+            fields=read_year_fields(result)
+            self.assertEqual(set(fields),{'g_soag'})
+            with self.assertRaisesRegex(ValueError,'twelve distinct monthly'):
+                prepare_cam6_soa(None,sources,year=2014)
+            # Twelve fields do not suffice if a month is duplicated.
+            duplicate=days.copy()
+            duplicate[13]=duplicate[12]
+            for key,path in sources.items():
+                with xr.open_dataset(path,decode_times=False) as opened:
+                    changed=opened.load()
+                attrs=dict(changed.time.attrs)
+                changed=changed.assign_coords(time=duplicate)
+                changed.time.attrs.update(attrs)
+                changed.to_netcdf(path,mode='w')
+            with self.assertRaisesRegex(ValueError,'twelve distinct monthly'):
+                prepare_cam6_soa(None,sources,year=2001)
+
+
+def read_year_fields(data):
+    """Exercise the runtime CF/calendar reader for a selected historical year."""
+    from jcm.forcing import read_prescribed_aerosol_emissions
+    return read_prescribed_aerosol_emissions(data,align_mode='wrap_year')
