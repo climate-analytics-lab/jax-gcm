@@ -6,10 +6,8 @@ to the aerosol in the lowest model layer, published into the AeroCom
 read from the ``vertical_diffusion`` diagnostic's ``surface_friction_velocity``,
 which the TTE-TKE term derives from the unified surface momentum exchange
 coefficient (u*² = |U|·⟨CM·|U|⟩), so it is consistent with the surface stress
-and the vdiff damping. Because that term runs *after* the aerosol block in the
-default ECHAM ordering, the value comes from the previous step (or the floored
-carry on step 1), so it is read with a fallback rather than declared as a hard
-``requires``. The aerodynamic resistance uses a neutral log-law; a
+and the vdiff damping. The default ECHAM ordering runs vertical diffusion before aerosol removal.
+A fallback allows the standalone column harness without vertical diffusion. The aerodynamic resistance uses a neutral log-law; a
 Monin-Obukhov stability correction is a future refinement (the diagnostic does
 not yet carry a usable surface ``L``).
 
@@ -88,6 +86,13 @@ class SlinnDryDeposition(PhysicsTerm):
             return diagnostics["vertical_diffusion"].surface_friction_velocity
         return jnp.full((ncols,), params.u_star_default)
 
+    def _velocity(self, r, v_grav, u_star, t, p, rho, *, mode, moment, params, terrain):
+        return deposition_velocity(
+            r, v_grav, u_star, t, p, rho,
+            geom_std_dev=mode.geom_std_dev, moment=moment,
+            z_ref=params.z_ref, z0=params.z0,
+        )
+
     def __call__(self, state, diagnostics, forcing, terrain):
         params = self.params.get_value()
         aer = diagnostics["_jam_state"]
@@ -126,10 +131,9 @@ class SlinnDryDeposition(PhysicsTerm):
                     geom_std_dev=mode.geom_std_dev, moment=moment,
                     aspherical=mode.short == "cor",
                 )
-                v_dep = deposition_velocity(
+                v_dep = self._velocity(
                     r_sfc, v_grav, u_star, t_sfc, p_sfc, rho_sfc,
-                    geom_std_dev=mode.geom_std_dev, moment=moment,
-                    z_ref=params.z_ref, z0=params.z0,
+                    mode=mode, moment=moment, params=params, terrain=terrain,
                 )
                 loss_rate = v_dep / dz_sfc  # [1/s] applied to bottom layer
                 # Implicit (exponential) removal over the step, bounded to
@@ -206,3 +210,57 @@ class SlinnDryDeposition(PhysicsTerm):
             if name.startswith(("m_du_", "mc_du_"))
         ], jnp.zeros_like(air_density[0]))}
         return tendency, diagnostics
+
+
+class CAMDryDeposition(SlinnDryDeposition):
+    """CAM land-cover collection with the host's neutral surface resistance.
+
+    All eleven source classes are prescribed, conservatively remapped to
+    the model grid at construction. Aquaplanet terrain explicitly selects
+    all water. This is surface collection only; settling remains separate.
+    """
+
+    def __init__(self, params: DryDepParameters | None = None, *,
+                 spec: ModalAerosolSpec | None = None):
+        """Hold host resistance parameters and coordinate-dependent cover."""
+        super().__init__(params, spec=spec)
+        self._fractions = nnx.Variable(jnp.eye(11)[6, :, None])
+
+    def cache_coords(self, coords):
+        from pathlib import Path
+        import numpy as np
+        import xarray as xr
+        from jcm.data.regridding import build_regridder, model_grid, nearest_index
+        path = Path(__file__).resolve().parents[4] / "data/bc/cam_landuse.nc"
+        with xr.open_dataset(path) as ds:
+            lon, lat, _ = model_grid(coords)
+            if lon.ndim == lat.ndim == 1:
+                remap = build_regridder(ds.lon.values, ds.lat.values,
+                                       np.ones((ds.sizes["lat"], ds.sizes["lon"])), lon, lat)
+                fractions = remap(ds.fraction_landuse.values).reshape(11, -1)
+            else:
+                # Point-grid hosts have no rectilinear cell edges. Use the
+                # nearest inventory class mixture at each physical point.
+                sx, sy = np.meshgrid(ds.lon.values, ds.lat.values)
+                index = nearest_index(sy.ravel(), sx.ravel(),
+                                      np.rad2deg(lat).ravel(), np.rad2deg(lon).ravel())
+                fractions = ds.fraction_landuse.values.reshape(11, -1)[:, index]
+        # CAM normalizes AFTER remapping, because the raw inventory's PFT
+        # and lake/wetland/urban cover can overlap. Normalizing each source
+        # cell first would change the coarse-grid area-weighted mixture.
+        fractions /= fractions.sum(axis=0, keepdims=True)
+        self._fractions = nnx.Variable(jnp.asarray(fractions, dtype=jnp.float32))
+
+    def _velocity(self, r, v_grav, u_star, t, p, rho, *, mode, moment, params, terrain):
+        from jcm.physics.aerosol.jam.drydep.resistances import cam_collection_velocity
+        fractions = self._fractions.get_value()
+        # The prescribed land-use map is the CAM input, independent of the
+        # dynamical terrain. A flat all-ocean experiment must not inherit it.
+        mask = getattr(terrain, "fmask", None)
+        if mask is not None:
+            fractions = jnp.where(jnp.all(mask == 0), jnp.eye(11)[6, :, None], fractions)
+        return cam_collection_velocity(
+            r, v_grav, u_star, t, p, rho, fractions,
+            geom_std_dev=mode.geom_std_dev, moment=moment,
+            z_ref=params.z_ref, z0=params.z0,
+        )

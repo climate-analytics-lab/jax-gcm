@@ -115,3 +115,32 @@ Matched five-day control, SOA-only, coupling-only and combined tests use
 the same spun-up donor, meteorological forcing, emissions and precision.
 Source and sink budgets, dust size and vertical distribution, and climate
 health must support any lifetime change before it becomes a release fix.
+
+
+## Surface collection on land
+
+The previous JAM surface term applied Slinn & Slinn's ocean collection law
+on every surface. Dust source regions therefore had no surface-dependent
+impaction or rebound. JAM now uses CAM's eleven-class Zhang (2001) collection
+law (`aero_model.F90::modal_aero_depvel_part`), with the official
+`regrid_vegetation.nc` inventory reduced by CAM's PFT-to-Wesely mapping.
+The source URL and SHA256 accompany `jcm/data/bc/cam_landuse.nc`;
+`python -m jcm.data.bc.cam_landuse SOURCE.nc OUTPUT.nc` reproduces that asset.
+
+The inventory is conservatively remapped to a spectral model grid and
+normalized **after** remapping, as in CAM: some source PFT and urban/lake
+fractions overlap. Point-grid hosts use nearest inventory mixtures. An
+all-ocean terrain selects only the water class. Surface collector radius,
+Brownian exponent, impaction parameter and dry-surface sticking fraction
+follow CAM for both number and mass moments. The turbulent resistance retains
+the settling cross term, while the separate sedimentation term owns the
+gravitational sink. The host's neutral aerodynamic resistance is retained;
+this is not a port of CAM's entire surface-layer calculation. Cloud-borne
+surface collection still uses the internally mixed aerosol mode rather than
+CAM's explicit droplet velocities.
+
+Reference tests compare every class and both moments to velocities from the
+unmodified CAM routine compiled with minimal module stubs (CAM commit
+`21a782945d122785ccb5d78e27ea59d80fb73396`). This is a structural correction
+with fixed literature coefficients, not an emission or lifetime multiplier.
+Its global effect must be assessed together with sea salt and SOA removal.

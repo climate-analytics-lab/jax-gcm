@@ -41,7 +41,7 @@ from jcm.physics.aerosol.jam.chemistry.sulfur_gas import (
 )
 from jcm.physics.aerosol.jam.drydep.drydep_term import (
     DryDepParameters,
-    SlinnDryDeposition,
+    CAMDryDeposition,
 )
 from jcm.physics.aerosol.jam.emissions.anthropogenic import (
     AnthropogenicEmissions,
@@ -394,7 +394,7 @@ def jam_aerosol_physics(
         # activated number per class is ARG's.
         IceNucleation(spec=spec, classes=freezing_classes),
         StokesSedimentation(params=sedimentation, spec=spec),
-        SlinnDryDeposition(params=drydep, spec=spec),
+        CAMDryDeposition(params=drydep, spec=spec),
         # Cloud-borne cycling (#602): activation transfer + resuspension
         # against the current step's cloud field, so it runs in the
         # post-cloud block, before the aqueous chemistry that splits its

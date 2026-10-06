@@ -1184,3 +1184,13 @@ references: {doc}`../design/jam_carbon_aging`,
 {doc}`../design/dinosaur_sl_jam_configuration`,
 {doc}`../design/aerosol_optics_diagnostics`,
 {doc}`../design/aerocom_erfari_sampling`.
+
+
+JAM surface collection uses CAM's eleven land-cover classes and the
+Zhang et al. (2001) impaction, interception, diffusion and rebound law.
+The official CAM land-use map is conservatively remapped at model construction.
+This replaces the previous application of an ocean-only law over deserts
+and vegetation. Host aerodynamic resistance remains neutral; the prognostic
+cloud-borne phase still uses aerosol-mode collection velocities. See
+[the SOA and dust design note](../design/jam_soa_dust.md) for the source,
+reference comparisons and measured limitations.
