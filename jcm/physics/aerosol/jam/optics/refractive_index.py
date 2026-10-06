@@ -26,8 +26,16 @@ _LAM_UM = np.array([0.30, 0.55, 1.0, 3.0, 10.0, 25.0])
 
 # token -> (n[anchors], k[anchors]). Same length as _LAM_UM.
 _RI: dict[str, tuple[list[float], list[float]]] = {
-    # sulfate: transparent SW, absorbing LW (sulfate ν3 band near 9 µm).
-    "so4": ([1.45, 1.43, 1.42, 1.39, 1.85, 1.90],
+    # The sulfate tracer represents ammonium bisulfate (115 g/mol; see
+    # species.py and chemistry/aqueous.py), not fully neutralised ammonium
+    # sulfate. Li et al. (2001), JAS 58, 193–209, use n=1.473 for NH4HSO4:
+    # https://doi.org/10.1175/1520-0469(2001)058<0193:POTOPO>2.0.CO;2
+    # Treat the transparent 0.3–1 µm region as nondispersive at this
+    # representative value; these anchors are not a measured spectrum.
+    # Water dilution is applied separately by the modal volume mixing rule,
+    # so these must be DRY indices, not those of an aqueous sulfate solution.
+    # Sulfate remains absorbing in the LW (ν3 band near 9 µm).
+    "so4": ([1.473, 1.473, 1.473, 1.39, 1.85, 1.90],
             [1e-8, 1e-8, 1e-6, 1.6e-2, 0.46, 0.20]),
     "nh4": ([1.52, 1.50, 1.48, 1.40, 1.80, 1.85],
             [1e-7, 1e-7, 1e-4, 2e-2, 0.40, 0.20]),

@@ -182,6 +182,10 @@ class JamOpticsTerm(PhysicsTerm):
     # ``jam_optics.<field>`` on output. CF/AeroCom metadata for the fields that
     # survive (the per-band arrays are dropped by ``_EXCLUDED_OUTPUT_KEYS``).
     output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "od550dryaer": {
+            "units": "1",
+            "long_name": "550 nm optical depth of the same aerosol population without water",
+        },
         "jam_optics.aod_550": {
             "units": "1",
             "standard_name": (
@@ -220,7 +224,7 @@ class JamOpticsTerm(PhysicsTerm):
         because it adds a second Mie pass over
         ``_DIAG_WAVELENGTHS_NM``; enabled, it rides the same radiation gate
         as the radiative optics, so the incremental cost is
-        ``len(_DIAG_WAVELENGTHS_NM) / n_sw_band`` of the (already gated)
+        ``(len(_DIAG_WAVELENGTHS_NM) + 1) / n_sw_band`` of the (already gated)
         aerosol optics rather than a per-step cost.
         """
         self._spec = spec or MAM4_SPEC
@@ -238,12 +242,13 @@ class JamOpticsTerm(PhysicsTerm):
         if not self._optics_diagnostics:
             return ()
         species = sorted({sp for m in self._spec.modes for sp in m.species}) + ["wat"]
-        keys = ["od550aer", "abs550aer", "od355aer", "od440aer", "od670aer",
+        keys = ["od550aer", "od550dryaer", "abs550aer", "od355aer", "od440aer", "od670aer",
                 "od865aer", "ssa440aer", "ang4487aer", "ang550865aer",
                 "aerindex", "ec355aer"]
         keys += [f"od550_{sp}" for sp in species]
         keys += [f"abs550_{sp}" for sp in species]
         keys += [f"od550_mode_{m.short}" for m in self._spec.modes]
+        keys += [f"od550dry_mode_{m.short}" for m in self._spec.modes]
         keys += [f"abs550_mode_{m.short}" for m in self._spec.modes]
         return tuple(keys)
 
@@ -685,6 +690,18 @@ class JamOpticsTerm(PhysicsTerm):
             np.asarray(_DIAG_WAVELENGTHS_NM, np.float64), c.ri_diag,
             want_decomposition=True,
         )
+        # A water volume share is not the extinction enhancement caused by
+        # growth: water changes both size and refractive index. Evaluate the
+        # same dry mass/number population with dry radii and no condensed
+        # water, at 550 nm only. The wet-minus-dry difference is a physical
+        # counterfactual, rather than a component-apportionment convention.
+        ri_dry = {sp: (n[_I550:_I550 + 1], k[_I550:_I550 + 1])
+                  for sp, (n, k) in c.ri_diag.items()}
+        dry_tau, _, _, dry_mode_tau, _, _, _ = self._band_optics(
+            state, aer.copy(r_wet=aer.r_dry), num_per_area, col_factor,
+            np.asarray([_AOD_REF_NM], np.float64), ri_dry,
+            want_decomposition=True,
+        )
         # (n_wavelength, nlev, *horiz) -> column integral over the vertical.
         # The ``maximum`` is a defensive clamp only: the modal number is
         # already floored at 0 in ``_compute_fields`` and the Mie
@@ -699,6 +716,7 @@ class JamOpticsTerm(PhysicsTerm):
         absorp = col(tau * (1.0 - ssa))
         out = {
             "od550aer": od[_I550], "abs550aer": absorp[_I550],
+            "od550dryaer": col(dry_tau)[0],
             "od355aer": od[_I355], "od440aer": od[_I440],
             "od670aer": od[_I670], "od865aer": od[_I865],
         }
@@ -733,6 +751,8 @@ class JamOpticsTerm(PhysicsTerm):
         out["ec355aer"] = jnp.maximum(tau[_I355], 0.0) / jnp.maximum(dz, _TINY)
 
         for i, mode in enumerate(self._spec.modes):
+            out[f"od550dry_mode_{mode.short}"] = jnp.maximum(
+                jnp.sum(dry_mode_tau[0, i], axis=0), 0.0)
             out[f"od550_mode_{mode.short}"] = jnp.maximum(
                 jnp.sum(mode_tau[_I550, i], axis=0), 0.0)
             out[f"abs550_mode_{mode.short}"] = jnp.maximum(
