@@ -232,3 +232,24 @@ placeholder and MAM4 JAM compositions (with and without cloud-borne aerosol,
 with synthetic emissions on every sector) and the MACv2-SP 2M stack against the
 pre-change code, which must agree in every bit; and the release-matrix
 statistics.
+
+## Secondary organic aerosol (`nsoa = 1`, selectable)
+
+The preset keeps the reference template's `nsoa = 0`. With that setting, biogenic
+SOA enters as a prescribed primary organic source (the AeroCom II biogenic OC
+above). The interactive scheme of O'Donnell et al. (2011) is a selectable variant
+(`mo_ham_soa.f90`, `mo_ham_soa_processes.f90`). `nsoa = 2` (volatility basis set)
+exists only with SALSA and is out of scope.
+
+| part | HAM | jcm |
+|---|---|---|
+| precursors | 11 gas tracers: α-pinene, t-β-ocimene, β-pinene, limonene, sabinene, myrcene, 3-carene, isoprene, toluene, xylene, benzene | gas tracers `g_<token>` |
+| products | with `nsoalumping = 0` (default): 7 semi-volatile species (monoterpene SOA 1/2, isoprene SOA 1/2, toluene, xylene, benzene SOA). Each has a gas-phase tracer and an aerosol tracer in every class with `lsoainclass` (KS AS CS KI), plus 4 monoterpene/isoprene "total" tracers | the same tracers; `M7_SOA_SPEC` is the M7 population with the SOA species added to KS AS CS KI |
+| chemistry | `soa2prod`: precursor oxidation by OH/O₃/NO₃ into products with fixed yields | prescribed oxidants (`PrescribedOxidants`) |
+| partitioning | `soa_equi0`/`soa_equi1`, `soa_part`: absorptive gas–particle equilibrium (temperature-dependent Kp) over the organic mass of each class | a gas-chemistry-side term ahead of the core |
+| microphysics | the `nsoa == 1` branches of `m7` (`m7_dconc`, `m7_delcoa`: SOA moves with its class) | `m7-jax`, a second upstream release |
+| emissions | biogenic precursors online from MEGAN (`mo_hammoz_emi_biogenic.f90`: PFT emission factors, LAI, temperature, PAR; inputs `megan_*_T63.nc`); anthropogenic and fire aromatics, isoprene and terpenes from the inventory (`emi_spec_hammoz_default+isoa_transient_ham.txt`) | MEGAN term on jcm's land-surface fields; the inventory species as extra channels in the emissions bundle |
+
+**Cost.** Tracer count is about 11 + 7 + 4 + 7 × 4 = 50 on top of the M7
+preset's 25 aerosol and 4 gas tracers. Tracer transport dominates the dycore step
+at T63L47, so the variant runs at roughly half the preset's speed.
