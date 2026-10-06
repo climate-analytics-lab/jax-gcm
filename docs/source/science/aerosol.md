@@ -1014,12 +1014,22 @@ pathway above for the STRATIFORM carrier only: ECHAM-HAM r7492's own
 `nwetdep=3` scheme, a bilinear lookup against Betty Croft's aerosol
 size-dependent rain and snow collection tables (`mo_ham_wetdep.f90::bc_rain`/
 `bc_snow`, `mo_ham_wetdep_data.f90`), weighted by the stratiform
-precipitating-area fraction the cloud scheme publishes on request
-(`configure_precip_cover_diagnostic`). The convective below-cloud pathway and
-every in-cloud pathway are unaffected by this selector; see
+precipitating-area fraction and the in-cloud rain/snow flux the cloud scheme
+publishes on request (`configure_wetdep_hydro_diagnostics`). The convective
+below-cloud pathway and every in-cloud pathway are unaffected by this
+selector; see
 {ref}`below-cloud scavenging <ham-below-cloud-scheme>`
-for the scheme, its two reference-harness findings, and its one flagged
-approximation (the rain/snow carrier split).
+for the scheme and its two reference-harness findings.
+
+`scheme="ham_nuc_bc"` additionally replaces the STRATIFORM in-cloud
+NUCLEATION pathway with ECHAM-HAM's own aerosol-size-dependent `ic_scav_nuc`
+(jax-gcm#1017 follow-up A): a per-mode critical-radius inversion against the
+actual in-cloud droplet/crystal number this step, for the three M7 soluble
+activating modes only (impaction, `ic_scav_imp`, is follow-up B and still
+runs implicitly). See
+{ref}`HAM in-cloud nucleation scavenging <ham-nucleation-scavenging>` for the
+formula, the two supported activation pairings (HAM's own ARG or Lin &
+Leaitch), and the validation scope.
 
 Stokes settling and the Slinn quasi-laminar resistance are evaluated at the
 **wet** particle's density, the mass-weighted mixture of dry material and
