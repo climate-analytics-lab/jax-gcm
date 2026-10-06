@@ -449,20 +449,22 @@ from jcm.physics.surface.prescribed_flux import (  # noqa: E402
 
 
 def maybe_add_sponge(physics, cfg: DictConfig):
-    """Append an ``UpperSponge`` term if ``cfg.run.sponge.levels > 0``."""
+    """Append ECHAM's upper sponge (``UpperSponge``) if ``run.sponge.levels > 0``.
+
+    ``timescale_h`` / ``enspodi`` left ``null`` take ECHAM's values (the
+    term's defaults: ``spdrag = 0.926e-4`` s⁻¹, ``enspodi = 1``).
+    """
     sponge = cfg.run.get("sponge", None)
-    if sponge is None or sponge.get("levels", 0) <= 0:
+    if sponge is None or (sponge.get("levels", 0) or 0) <= 0:
         return physics
     from jcm.physics.dissipation import UpperSponge
-    raw_target_T_K = sponge.get("target_T_K", None)
-    target_T_K = None if raw_target_T_K is None else float(raw_target_T_K)
-    return physics + UpperSponge(
-        n_sponge_levels=int(sponge.levels),
-        sponge_timescale_s=float(sponge.timescale_h) * 3600.0,
-        enspodi=float(sponge.enspodi),
-        damp_temperature=bool(sponge.get("damp_temperature", True)),
-        target_T_K=target_T_K,
-    )
+    kwargs = {"n_sponge_levels": int(sponge.levels),
+              "damp_temperature": bool(sponge.get("damp_temperature", True))}
+    if sponge.get("timescale_h", None) is not None:
+        kwargs["sponge_timescale_s"] = float(sponge.timescale_h) * 3600.0
+    if sponge.get("enspodi", None) is not None:
+        kwargs["enspodi"] = float(sponge.enspodi)
+    return physics + UpperSponge(**kwargs)
 
 
 def _nudging_inv_tau(nudging_cfg, vertical):
@@ -968,6 +970,15 @@ def build_model(cfg: DictConfig) -> Model:
                 "nudging is dinosaur-only for now: the relaxation "
                 "broadcasts over a 2-D lon/lat horizontal layout, not "
                 "pySES physics columns."
+            )
+        # The run-group sponge (ECHAM's uspnge) separates the zonal mean on a
+        # lon-lat grid, which pySES's columns are not; its lid sponge lives in
+        # the dycore group. Refuse rather than drop a requested sponge.
+        if (cfg.get("run", {}).get("sponge", {}).get("levels", 0) or 0) > 0:
+            raise ValueError(
+                "run.sponge is the dinosaur upper sponge and does not run on "
+                "the pySES backend; set run.sponge.levels=0 and configure "
+                "dycore.lid_sponge instead."
             )
         return _build_pyses_model(cfg)
     if dycore_name != "dinosaur":

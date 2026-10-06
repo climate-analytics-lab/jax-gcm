@@ -13,10 +13,10 @@ coming from v1, read :doc:`v1_to_v2` first.
    :local:
    :depth: 1
 
-Read this first: the six changes that silently alter results
-------------------------------------------------------------
+Read this first: the seven changes that silently alter results
+--------------------------------------------------------------
 
-Most items below fail loudly. These six do not, so check them before
+Most items below fail loudly. These seven do not, so check them before
 comparing any v3 number against a v2 one.
 
 1. **Specific humidity is kg/kg everywhere** (:ref:`v3-q-units`). A v2-written
@@ -46,6 +46,10 @@ comparing any v3 number against a v2 one.
    prescribed ERA5 soil climatology and its evaporation a beta factor on the
    full saturation deficit; both change every ECHAM configuration's surface
    fluxes, land precipitation and the circulation they drive.
+7. **The sub-grid orographic drag acts on the low-level flow**
+   (:ref:`v3-sso-nktopg`). It was removing twice the surface friction's
+   westerly momentum; jets, the 850 hPa westerlies and the 500 hPa height
+   gradient of every ECHAM configuration change.
 
 Installation and dependencies
 -----------------------------
@@ -1409,6 +1413,39 @@ What a user has to know:
   ``couple_surface_tiles``. ``prepare_vertical_diffusion_state`` accepts
   ``surface_cair``/``surface_csat`` (default: ``surface_wetness`` for both, the
   former behaviour).
+
+.. _v3-sso-nktopg:
+
+Sub-grid orographic drag uses the grid's ``nktopg``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``LottMillerSso`` takes ECHAM's ``nktopg`` from the model grid
+(``echam_nktopg``, the ``mo_ssodrag.f90::sugwd`` rule: level 45 of L47, 93 of
+L95) instead of the model top. That level bounds the low-level layer whose
+wind, stability and density drive the drag; at the model top the layer was the
+whole column, and the scheme removed twice as much westerly momentum as the
+surface friction supplied. Every ``echam_physics`` package is affected.
+
+Measured from the ``ma-t63-l47`` warm state, days 20-30 against ERA5 January:
+200 hPa zonal wind bias −7.8 → −1.8 m/s, 850 hPa −4.3 → −0.6 m/s, 500 hPa
+height RMSE 180 → 73 m. ``sso_drag`` no longer has a default ``nktopg``;
+callers pass ``echam_nktopg(a_half, b_half)`` for their grid. It also no longer
+takes ``land_fraction``: like ECHAM's ``ssodrag`` it does not scale the drag by
+the land fraction, which the whole-cell descriptors already carry.
+
+.. _v3-upper-sponge:
+
+The upper sponge is ECHAM's ``uspnge``
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+``UpperSponge`` damps only the zonal anomalies (m ≠ 0) of u, v and T, with
+ECHAM's implicit factor, and ``run=longrun`` uses ECHAM's profile: the top
+level only, 3 h. The v2 sponge damped the full wind over ten levels and
+relaxed T to 250 K; that absolute target is gone, so
+``run.sponge.target_T_K=...`` overrides now fail, and the constructor no
+longer accepts ``target_T_K``. Its defaults are ECHAM's
+(``UpperSponge()`` is the ECHAM sponge). The stratospheric and mesospheric
+zonal-mean winds strengthen; the troposphere is unchanged within noise.
 
 SPEEDY shortwave heating is applied every step
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

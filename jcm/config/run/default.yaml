@@ -29,21 +29,22 @@ output: model_state.nc
 # computation, #735), and a silent run is not the same as a clean one.
 log_level: WARNING
 
-# Optional upper-sponge layer applied to (u, v) in the topmost ``levels``.
-# Off by default — set ``run.sponge.levels`` to a positive integer to enable.
-# ``damp_temperature`` (default true on ``UpperSponge``) and ``target_T_K``
-# (null = zonal-mean-only relaxation, no absolute target) only take effect
-# once ``levels`` is positive; they are listed here so every run group shares
-# one schema and the keys can be overridden without a ``+``. This base sponge
-# is the dinosaur-style upper sponge; the pySES finite-lid sponge is separate
-# and lives in ``dycore.lid_sponge`` (``run=pyses_year`` inherits ``levels: 0``
-# here, i.e. no dinosaur sponge, and relies on that lid sponge instead).
+# Upper sponge: ECHAM's ``uspnge`` (jcm.physics.dissipation.UpperSponge),
+# an implicit damping of the zonal anomalies (m != 0) of u, v and T over the
+# top ``levels`` model levels; the zonal mean is never damped. Off here
+# (``levels: 0``), so SPEEDY, Held-Suarez and any run group that inherits
+# this block untouched run without it; ``run=longrun`` (every ECHAM
+# configuration) turns on ECHAM's single-level sponge. ``timescale_h`` is the
+# e-folding time at the top level and ``enspodi`` the factor by which the
+# damping weakens per level going down; ``null`` takes ECHAM's value
+# (spdrag = 0.926e-4 1/s, i.e. 3.0 h, and enspodi = 1). Dinosaur only: the
+# pySES backend has its own finite-lid sponge in ``dycore.lid_sponge`` and
+# refuses a positive ``levels`` here.
 sponge:
   levels: 0
-  timescale_h: 3.0
-  enspodi: 2.0
+  timescale_h: null
+  enspodi: null
   damp_temperature: true
-  target_T_K: null
 
 # Chunked-mode options. When ``chunk_days > 0`` the integration is broken
 # into chunks and run through ``jcm.diagnostics.check_health`` between each

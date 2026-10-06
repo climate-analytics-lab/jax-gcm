@@ -1,40 +1,45 @@
-"""Upper sponge layer — Rayleigh drag on horizontal wind + relaxation
-of temperature toward its zonal mean at the top model levels.
+"""Upper sponge layer — ECHAM's ``uspnge`` (``mo_upper_sponge.f90``).
 
-Analog of ECHAM's ``uspnge`` (``mo_upper_sponge.f90``), reworked as a
-composable ``PhysicsTerm``. Applies linear relaxation at a configurable
-number of top model levels with a timescale that intensifies toward
-TOA::
+ECHAM damps the zonally *asymmetric* part of the flow at the top of the
+model. After each dynamics step ``uspnge`` multiplies every spectral
+coefficient of divergence, vorticity and temperature whose zonal wavenumber
+``m`` is non-zero, at the sponge levels ``nlvspd1..nlvspd2``, by
+``1 / (1 + zlf(k)·Δt)`` (``mo_upper_sponge.f90`` lines 91-113: the
+``IF (mymsp(is) /= 0)`` test skips the m = 0 coefficients). The zonal mean is
+never touched, so the sponge removes no angular momentum and leaves the
+radiatively-set zonal-mean temperature alone; it absorbs the planetary and
+gravity waves that would otherwise reflect off the lid.
 
-    du/dt += -u / tau(k)
-    dv/dt += -v / tau(k)
-    dT/dt += -(T - T_zonal_mean) / tau(k)        (when damp_temperature)
+This term is the exact grid-point equivalent. The maps from spectral
+(vorticity, divergence) to grid-point (u, v), and from spectral to grid-point
+temperature, are linear and conserve zonal wavenumber (they act on each
+longitude Fourier mode separately), so scaling the m ≠ 0 spectral
+coefficients is the same as scaling the zonal anomalies::
 
-    tau(k_top)   = sponge_timescale_s
-    tau(k_top+i) = sponge_timescale_s * enspodi ** i       (i = 1..n_sponge_levels-1)
-    tau(k >= n_sponge_levels) = infinity                   (no damping)
+    x'  = x − [x]                  for x in (u, v, T), [·] the zonal mean
+    x'  → x' / (1 + zlf(k)·Δt)      at each sponge level k
 
-The temperature relaxation is toward the zonal-mean profile at each
-sponge level — mathematically equivalent (in gridpoint space) to ECHAM's
-spectral implicit step that damps only the m≠0 components of T at the
-sponge levels (``mo_upper_sponge.f90`` lines 99-110, applied to ``stp``
-when ``mymsp(is) /= 0``). The zonal mean is preserved so radiation can
-still set the global stratospheric equilibrium structure; only the
-wave/Gibbs-ringing component of T is damped.
+and the term returns the tendency that produces exactly that implicit step
+when the host applies it over one physics step ``Δt``::
 
-With the ECHAM defaults (spdrag = 0.926e-4 s⁻¹ → 3 h, enspodi = 1.0,
-nlvspd1 = nlvspd2 = 1) all sponge levels share the same timescale and
-the sponge acts on level 1 only. This module's defaults use enspodi
-= 2.0 so the damping softens by a factor of 2 per level away from TOA;
-this gives a smoother transition into the freely-evolving troposphere
-and matches what we tend to ramp up via Hydra at runtime.
+    dx/dt = −x' · zlf(k) / (1 + zlf(k)·Δt)
 
-Note on (u, v): unlike ECHAM (which damps only m≠0 modes of u, v
-spectrally) we damp the full wind field at the sponge levels. In steady
-state that costs some stratospheric jet strength but is cheap to
-implement and operationally robust. If preserving the zonal-mean wind
-becomes important for stratospheric climatology, switch the wind path
-to use the same zonal-mean relaxation we now apply to T.
+Level profile (ECHAM ``setdyn.f90`` / ``uspnge``): the coefficient at the
+lowest sponge level is ``spdrag`` and it is multiplied by ``enspodi`` for each
+level going up. Here the profile is parameterised from the top (the e-folding
+time at the topmost level, ``sponge_timescale_s``, and the number of levels),
+so ``zlf(top + i) = 1 / (sponge_timescale_s · enspodi**i)``; ECHAM's
+``spdrag`` is the value at the lowest level,
+``1 / (sponge_timescale_s · enspodi**(n_sponge_levels − 1))``. ECHAM's sponge
+also always starts at the model top in production (``nlvspd1 = 1``), the only
+case this term represents. The ECHAM defaults — ``spdrag = 0.926e-4 s⁻¹``
+(3.0 h), ``enspodi = 1``, ``nlvspd1 = nlvspd2 = 1`` — are this term's
+defaults.
+
+The zonal mean needs a longitude axis, so the term runs on lon-lat grids only
+(the dinosaur door); :meth:`UpperSponge.cache_coords` rejects any other
+horizontal layout. The pySES backend has its own finite-lid sponge
+(``dycore.lid_sponge``).
 """
 
 from __future__ import annotations
@@ -49,78 +54,94 @@ from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.forcing import ForcingData
 from jcm.terrain import TerrainData
 
+#: ECHAM ``setdyn.f90``: ``spdrag = 0.926E-04`` s⁻¹ (an e-folding time of
+#: 3.0 h) at the sponge level, ``enspodi = 1``, ``nlvspd1 = nlvspd2 = 1``.
+ECHAM_SPDRAG = 0.926e-4
+ECHAM_SPONGE_TIMESCALE_S = 1.0 / ECHAM_SPDRAG
+ECHAM_ENSPODI = 1.0
+ECHAM_SPONGE_LEVELS = 1
+
 
 class UpperSponge(PhysicsTerm):
-    """Rayleigh drag on (u, v) and zonal-mean relaxation of T at top N levels."""
+    """Implicit damping of the zonal anomalies of u, v and T at the top levels."""
 
     name: ClassVar[str] = "upper_sponge"
     category: ClassVar[str] = "dissipation"
 
     def __init__(
         self,
-        n_sponge_levels: int = 5,
-        sponge_timescale_s: float = 3 * 3600.0,
-        enspodi: float = 2.0,
+        n_sponge_levels: int = ECHAM_SPONGE_LEVELS,
+        sponge_timescale_s: float = ECHAM_SPONGE_TIMESCALE_S,
+        enspodi: float = ECHAM_ENSPODI,
         damp_temperature: bool = True,
-        target_T_K: float | None = None,
     ):
         """Configure the sponge.
 
         Args:
-            n_sponge_levels: Number of top levels over which the sponge acts.
-                Levels deeper than this see no damping.
-            sponge_timescale_s: Rayleigh timescale tau at the topmost level (s).
-                ECHAM default spdrag = 0.926e-4 s⁻¹ corresponds to ~3 h.
-            enspodi: Multiplicative increase in tau (softening) per level
-                away from TOA. enspodi = 1.0 reproduces ECHAM's uniform-
-                strength sponge; enspodi > 1 softens the sponge downward.
-            damp_temperature: When True (default, matches ECHAM lmidatm
-                behaviour), relax temperature toward its zonal mean at
-                the sponge levels with the same tau profile. The zonal
-                mean is preserved so radiation continues to set the global
-                stratospheric structure; only the wave / spectral-ringing
-                component of T is damped. Set False to skip T damping
-                entirely.
-            target_T_K: Optional absolute temperature target (K) for T
-                relaxation at the sponge levels — i.e. ``dT/dt -=
-                (T - target_T_K) / tau(k)``. This is an extra term *added
-                to* the zonal-mean relaxation (when ``damp_temperature``
-                is True) and addresses the m=0 spectral mode that
-                zonal-mean relaxation by construction can't touch. Useful
-                during spin-up from non-equilibrated initial conditions
-                (e.g. JW-dry init with realistic ozone) where the
-                top-layer zonal mean drifts uncontrolled toward an
-                unphysical equilibrium. Set ``None`` (default) to skip
-                the absolute target and behave like ECHAM's sponge — fine
-                for runs starting from radiatively-balanced ICs. Picking
-                a value: 250-270 K is a reasonable mesospheric target for
-                the model top (~1 Pa); aim for whatever the long-term
-                radiative-equilibrium would be at the topmost full level.
+            n_sponge_levels: Number of levels, counted from the model top,
+                over which the sponge acts (ECHAM ``nlvspd2`` with
+                ``nlvspd1 = 1``). Default 1, ECHAM's.
+            sponge_timescale_s: e-folding time of the damping at the topmost
+                level (s). Default ``1 / 0.926e-4`` s = 3.0 h, ECHAM's
+                ``spdrag``.
+            enspodi: Factor by which the damping coefficient grows from one
+                level to the next one up (ECHAM ``enspodi``); equivalently the
+                factor by which the e-folding time grows per level going down.
+                Default 1, ECHAM's.
+            damp_temperature: Damp the zonal anomaly of temperature as well
+                as of the wind, as ECHAM does (``stp`` is damped with the same
+                factor). Default True.
 
         """
-        self.n_sponge_levels = n_sponge_levels
-        self.sponge_timescale_s = sponge_timescale_s
-        self.enspodi = enspodi
-        self.damp_temperature = damp_temperature
-        self.target_T_K = target_T_K
+        if n_sponge_levels < 1:
+            raise ValueError(
+                f"n_sponge_levels must be at least 1, got {n_sponge_levels}")
+        if sponge_timescale_s <= 0.0:
+            raise ValueError(
+                "sponge_timescale_s must be positive, got "
+                f"{sponge_timescale_s}")
+        if enspodi <= 0.0:
+            raise ValueError(f"enspodi must be positive, got {enspodi}")
+        self.n_sponge_levels = int(n_sponge_levels)
+        self.sponge_timescale_s = float(sponge_timescale_s)
+        self.enspodi = float(enspodi)
+        self.damp_temperature = bool(damp_temperature)
         self._coords_cached = False
 
     def cache_coords(self, coords) -> None:
-        """Precompute the 1/tau(k) damping profile and the (nlon, nlat) shape."""
+        """Precompute the damping coefficient profile and the grid shape.
+
+        Raises:
+            ValueError: if the horizontal grid is not a (lon, lat) grid, on
+                which the zonal mean this sponge preserves is not defined.
+
+        """
+        nodal_shape = tuple(coords.horizontal.nodal_shape)
+        if len(nodal_shape) != 2:
+            raise ValueError(
+                "UpperSponge needs a (longitude, latitude) grid to separate "
+                f"the zonal mean; got horizontal nodal shape {nodal_shape}. "
+                "On the pySES backend use dycore.lid_sponge instead.")
         nlev = coords.nodal_shape[0]
-        inv_tau = jnp.zeros(nlev)
-        for i in range(self.n_sponge_levels):
-            if i >= nlev:
-                break
-            tau_i = self.sponge_timescale_s * (self.enspodi ** i)
-            inv_tau = inv_tau.at[i].set(1.0 / tau_i)
-        self._inv_tau = nnx.Variable(inv_tau)
-        # Cache the (nlon, nlat) shape so __call__ can reshape a flattened
-        # ncols axis back into (lon, lat) for zonal-mean computation under
-        # vectorize_columns=True.
-        self._nlon = int(coords.horizontal.nodal_shape[0])
-        self._nlat = int(coords.horizontal.nodal_shape[1])
+        # zlf(k) [1/s], top-first (index 0 = model top, the physics frame).
+        zlf = jnp.zeros(nlev)
+        for i in range(min(self.n_sponge_levels, nlev)):
+            zlf = zlf.at[i].set(
+                1.0 / (self.sponge_timescale_s * self.enspodi ** i))
+        self._zlf = nnx.Variable(zlf)
+        self._nlon, self._nlat = (int(n) for n in nodal_shape)
         self._coords_cached = True
+
+    def _zonal_anomaly(self, x: jnp.ndarray) -> jnp.ndarray:
+        """``x − [x]`` for a level-major field on the host's horizontal layout.
+
+        The host hands either the whole grid ``(nlev, nlon, nlat)`` or the
+        lon-major flattened columns ``(nlev, nlon·nlat)``; both reshape to the
+        grid without copying, so one code path serves both.
+        """
+        grid = x.reshape((x.shape[0], self._nlon, self._nlat))
+        anomaly = grid - jnp.mean(grid, axis=1, keepdims=True)
+        return anomaly.reshape(x.shape)
 
     def __call__(
         self,
@@ -129,51 +150,27 @@ class UpperSponge(PhysicsTerm):
         forcing: ForcingData,
         terrain: TerrainData,
     ) -> tuple[PhysicsTendency, dict]:
-        """Return Rayleigh-drag tendencies on u, v and zonal-mean T relaxation."""
-        # state here is the column-vectorised state (nlev, ncols) when
-        # called from ComposablePhysics with vectorize_columns=True, or
-        # the full 3-D (nlev, nlon, nlat) when used without vectorisation.
-        # Either way broadcasting against inv_tau[:, None (, None)] works.
-        inv_tau = self._inv_tau.get_value()
-        shape = state.u_wind.shape
-        broadcast = (slice(None),) + (None,) * (state.u_wind.ndim - 1)
-        itau = inv_tau[broadcast]
+        """Return the tendencies of ECHAM's implicit m ≠ 0 damping step."""
+        dt = diagnostics["_dt_seconds"]
+        zlf = self._zlf.get_value()
+        # Rate that turns a forward-Euler step of length dt into ECHAM's
+        # implicit factor 1 / (1 + zlf·dt).
+        rate = zlf / (1.0 + zlf * dt)
+        rate = rate.reshape((-1,) + (1,) * (state.u_wind.ndim - 1))
 
-        du = -state.u_wind * itau
-        dv = -state.v_wind * itau
-
+        du = -self._zonal_anomaly(state.u_wind) * rate
+        dv = -self._zonal_anomaly(state.v_wind) * rate
         if self.damp_temperature:
-            T = state.temperature
-            # Compute zonal-mean T at each (level, lat). Reshape ncols→(lon, lat)
-            # if the state is column-vectorised.
-            if T.ndim == 2:
-                # (nlev, ncols=nlon*nlat) — reshape, mean over lon, broadcast.
-                nlev = T.shape[0]
-                T_3d = T.reshape(nlev, self._nlon, self._nlat)
-                T_zonal = jnp.mean(T_3d, axis=1, keepdims=True)         # (nlev, 1, nlat)
-                T_anomaly_3d = T_3d - T_zonal
-                T_anomaly = T_anomaly_3d.reshape(nlev, self._nlon * self._nlat)
-            else:
-                # (nlev, nlon, nlat) — direct mean over the lon axis.
-                T_zonal = jnp.mean(T, axis=1, keepdims=True)            # (nlev, 1, nlat)
-                T_anomaly = T - T_zonal
-            dT = -T_anomaly * itau
+            dT = -self._zonal_anomaly(state.temperature) * rate
         else:
-            dT = jnp.zeros(shape)
-
-        if self.target_T_K is not None:
-            # Add an absolute-target relaxation that catches the m=0 mode
-            # the zonal-mean relaxation by construction can't touch.
-            dT = dT - (state.temperature - float(self.target_T_K)) * itau
-
-        dq = jnp.zeros(shape)
-        tracers = {name: jnp.zeros(shape) for name in state.tracers}
+            dT = jnp.zeros_like(state.temperature)
 
         tend = PhysicsTendency(
             u_wind=du,
             v_wind=dv,
             temperature=dT,
-            specific_humidity=dq,
-            tracers=tracers,
+            specific_humidity=jnp.zeros_like(state.specific_humidity),
+            tracers={name: jnp.zeros_like(x)
+                     for name, x in state.tracers.items()},
         )
         return tend, diagnostics

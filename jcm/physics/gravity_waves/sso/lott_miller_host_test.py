@@ -127,3 +127,21 @@ class TestHostLayouts(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_cache_coords_sets_the_grid_nktopg():
+    """The host derives ``nktopg`` from its vertical grid, as ``sugwd`` does,
+    and refuses to run without it.
+    """
+    import pytest
+
+    from jcm.physics.gravity_waves.sso.lott_miller import echam_nktopg
+
+    term = LottMillerSso()
+    with pytest.raises(RuntimeError, match="cache_coords"):
+        term(None, {}, None, None)
+    coords, _ = _setup()
+    term.cache_coords(coords)
+    b = np.asarray(coords.vertical.boundaries)
+    assert term._nktopg == echam_nktopg(np.zeros_like(b), b)
+    assert 1 < term._nktopg <= NLEV

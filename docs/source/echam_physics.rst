@@ -782,14 +782,19 @@ fallback is available but excluded from the default.
    ``gstd`` (activation thresholds), ``gkdrag`` (wave-drag coefficient,
    0.2), ``gkwake`` (blocked-flow wake coefficient, 1.0), ``gklift``
    (mountain lift, 0.0). Static knobs (``nktopg``, ``ntop``) are passed
-   as Python kwargs to :py:func:`sso_drag`.
+   as Python kwargs to :py:func:`sso_drag`. ``nktopg`` is a property of
+   the vertical grid: :py:func:`echam_nktopg` computes it as ECHAM's
+   ``sugwd`` does (the highest level whose sigma at an 800 hPa reference
+   surface pressure is at least 0.94 — level 45 of L47, 93 of L95), and
+   ``LottMillerSso.cache_coords`` derives it from the model grid. It
+   raises the top of the blocked-flow / low-level averaging layer to at
+   least that level; it is not a model-top setting.
 
-   Real SSO descriptor data (``orostd``, ``orosig``, ``orogam``,
-   ``orothe``, ``oropic``, ``oroval``) is not yet plumbed through
-   :py:class:`TerrainData`; the wiring uses placeholders derived from
-   ``terrain.orog`` and ``terrain.fmask``. The activation gate
-   (``ppic-pmea > gpicmea`` AND ``pstd > gstd``) keeps drag at zero over
-   ocean automatically.
+   The sub-grid descriptors (``orostd``, ``orosig``, ``orogam``,
+   ``orothe``, ``oropic``, ``oroval``) come from :py:class:`TerrainData`
+   (preprocessed fields when the terrain file carries them). The
+   activation gate (``ppic-pmea > gpicmea`` AND ``pstd > gstd``) keeps
+   drag at zero over ocean automatically.
 
 **Simple monochromatic GWD (legacy)**
    The original placeholder scheme that used to live under ``hines/``

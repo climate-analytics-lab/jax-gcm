@@ -4,13 +4,10 @@
 # are streamed and not kept (``save_chunks: false``; set it true to also keep
 # ``{output_prefix}_day{N}.nc``). 5-day chunks with health checks between
 # them; the daily saves of one chunk are what sits in device memory, so the
-# footprint matches the old 30-day chunks of 5-day saves. Conservative
-# timestep, sponge enabled with T-damping toward an absolute target so the
-# JW-dry init can spin up against realistic ozone without a runaway at the
-# model top. ``run.total_time=<days>`` still works (a fixed length, e.g. for
-# benchmarks); ``run.total_time=null run.end_time=...`` for a named endpoint.
-# Replaces the old ``utils/run_echam_longrun.py`` script. See
-# ``feat: ECHAM lmidatm stability stack`` PR for the calibration.
+# footprint matches the old 30-day chunks of 5-day saves. ECHAM's upper
+# sponge is on (below). ``run.total_time=<days>`` still works (a fixed
+# length, e.g. for benchmarks); ``run.total_time=null run.end_time=...`` for
+# a named endpoint.
 #
 # Inherits the complete base schema from ``run/default.yaml``; only the keys
 # that differ from the default are set below.
@@ -27,23 +24,15 @@ save_chunks: false
 output: longrun.nc
 log_level: INFO
 
-# Production sponge config — settled on after the 2026-05-14/15 T63L47
-# sweep. ``target_T_K=250`` adds an absolute-target relaxation that
-# catches the m=0 (zonal-mean) mode that pure zonal-mean damping by
-# construction can't touch; without it the lev46 zonal mean drifts
-# ~4 K/hr from a JW-dry cold-cap init and NaN's before the first save.
-# Top-10 sponge depth ramps the damping smoothly into the stratosphere
-# (with ``enspodi=2`` the timescale doubles per level away from TOA,
-# so the level-10 sponge is ~768 h, essentially inactive); paired with
-# the colder ``target_T_K=250`` it gives the cleanest year-1 mesospheric
-# climatology in the 2026-05-14/15 three-way sweep. ``damp_temperature``
-# is True by default on UpperSponge — explicit here for clarity.
+# ECHAM's upper sponge (``mo_upper_sponge.f90::uspnge`` with the
+# ``setdyn.f90`` lmidatm defaults): the zonal anomalies of u, v and T at the
+# top model level relax on spdrag = 0.926e-4 1/s (3.0 h); the zonal mean is
+# untouched, so the sponge neither removes angular momentum nor holds the
+# lid temperature. ``timescale_h``/``enspodi`` stay null, i.e. ECHAM's
+# values (see run/default.yaml). The same configuration starts cold from the
+# dry JW profile (validated 60 days at T63L47 for the JAM and 1M members).
 sponge:
-  levels: 10
-  timescale_h: 1.5
-  enspodi: 2.0
-  damp_temperature: true
-  target_T_K: 250.0
+  levels: 1
 
 chunk_days: 5
 output_prefix: longrun

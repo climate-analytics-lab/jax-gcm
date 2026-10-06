@@ -20,14 +20,17 @@ from jcm.constants import grav, rd
 from jcm.physics.gravity_waves.sso import (
     SSOParameters, sso_drag,
 )
-from jcm.physics.gravity_waves.sso.lott_miller import _energy_conserving_cap
+from jcm.physics.gravity_waves.sso.lott_miller import (
+    _energy_conserving_cap, echam_nktopg,
+)
 from jcm.testing import check_gradients
 
 
 def _make_alps_column(nlev: int = 47, **overrides):
     """Mid-latitude column with Alps-like sub-grid orography.
 
-    Returns a dict suitable for ``sso_drag(**col, config=...)``.
+    Returns a dict suitable for ``sso_drag(**col, config=...,
+    nktopg=_nktopg(col))``.
     """
     pressure_half = np.logspace(np.log10(10.0), np.log10(101325.0), nlev + 1)
     pressure_full = 0.5 * (pressure_half[:-1] + pressure_half[1:])
@@ -67,10 +70,19 @@ def _make_alps_column(nlev: int = 47, **overrides):
         orography_orientation=jnp.asarray(30.0),
         peak_elevation=jnp.asarray(2500.0),
         valley_elevation=jnp.asarray(900.0),
-        land_fraction=jnp.asarray(1.0),
     )
     inputs.update({k: jnp.asarray(v) for k, v in overrides.items()})
     return inputs
+
+
+def _nktopg(col) -> int:
+    """``nktopg`` for a fixture column's (pure-pressure) levels, as sugwd does.
+
+    The fixture levels are fixed pressures at a 1013 hPa surface, i.e. a sigma
+    grid ``b = p / p_s``.
+    """
+    ph = np.asarray(col["pressure_half"], dtype=np.float64)
+    return echam_nktopg(np.zeros_like(ph), ph / ph[-1])
 
 
 class TestSSOBasic:
@@ -78,7 +90,8 @@ class TestSSOBasic:
 
     def test_returns_finite_tendencies(self):
         col = _make_alps_column()
-        tend, _ = sso_drag(**col, config=SSOParameters.default())
+        tend, _ = sso_drag(**col, config=SSOParameters.default(),
+                           nktopg=_nktopg(col))
         assert jnp.all(jnp.isfinite(tend.dudt))
         assert jnp.all(jnp.isfinite(tend.dvdt))
         assert jnp.all(jnp.isfinite(tend.dissip))
@@ -89,7 +102,8 @@ class TestSSOBasic:
         scheme entirely.
         """
         col = _make_alps_column(orography_std=0.5, peak_elevation=600.0)
-        tend, _ = sso_drag(**col, config=SSOParameters.default())
+        tend, _ = sso_drag(**col, config=SSOParameters.default(),
+                           nktopg=_nktopg(col))
         np.testing.assert_array_equal(np.asarray(tend.dudt), 0.0)
         np.testing.assert_array_equal(np.asarray(tend.dvdt), 0.0)
         np.testing.assert_array_equal(np.asarray(tend.dissip), 0.0)
@@ -97,7 +111,8 @@ class TestSSOBasic:
     def test_drag_opposes_low_level_wind(self):
         """The column-integrated zonal stress should oppose the mean wind."""
         col = _make_alps_column()
-        _, state = sso_drag(**col, config=SSOParameters.default())
+        _, state = sso_drag(**col, config=SSOParameters.default(),
+                            nktopg=_nktopg(col))
         assert float(state.u_stress) < 0.0   # westerly column
 
     def test_dissipation_non_negative(self):
@@ -105,19 +120,17 @@ class TestSSOBasic:
         is loose because the project default precision is f32.
         """
         col = _make_alps_column()
-        tend, _ = sso_drag(**col, config=SSOParameters.default())
+        tend, _ = sso_drag(**col, config=SSOParameters.default(),
+                           nktopg=_nktopg(col))
         peak_dissip = float(jnp.max(jnp.abs(tend.dissip)))
         assert jnp.all(tend.dissip >= -1e-4 * peak_dissip)
 
-    def test_land_fraction_scaling(self):
-        """Halving land_fraction halves the tendencies."""
-        config = SSOParameters.default()
-        tend_full, _ = sso_drag(**_make_alps_column(), config=config)
-        col_half = _make_alps_column(land_fraction=0.5)
-        tend_half, _ = sso_drag(**col_half, config=config)
-        np.testing.assert_allclose(np.asarray(tend_half.dudt),
-                                   0.5 * np.asarray(tend_full.dudt),
-                                   rtol=1e-6, atol=1e-12)
+    def test_takes_no_land_fraction(self):
+        """``mo_ssortns.f90::ssodrag`` takes no land mask: the descriptors,
+        whole-cell statistics, already carry a coastal cell's ocean part.
+        """
+        import inspect
+        assert "land_fraction" not in inspect.signature(sso_drag).parameters
 
 
 def _captured_blowup_columns():
@@ -148,19 +161,23 @@ def _run_captured_columns(cols):
     process default, as the model runs it.
     """
     config = SSOParameters.default()
+    # The columns are T63L47 model columns: nktopg is that grid's (sugwd).
+    from jcm.physics.echam.echam_levels import get_echam_levels
+    levels = get_echam_levels(np.asarray(cols["pressure_full"]).shape[-1])
+    nktopg = echam_nktopg(levels.a_boundaries, levels.b_boundaries)
 
-    def one(pf, ph, hf, T, u, v, orog, std, sig, gam, the, pic, val, fmask):
+    def one(pf, ph, hf, T, u, v, orog, std, sig, gam, the, pic, val):
         mass = (ph[1:] - ph[:-1]) / grav
         t, _ = sso_drag(
             jnp.asarray(cols["dt"]), jnp.zeros((), jnp.float32), hf, orog,
-            ph, pf, mass, T, u, v, orog, std, sig, gam, the, pic, val, fmask,
-            config, nktopg=1, ntop=1)
+            ph, pf, mass, T, u, v, orog, std, sig, gam, the, pic, val,
+            config, nktopg=nktopg, ntop=1)
         return t
 
     args = [jnp.asarray(cols[k], jnp.float32) for k in (
         "pressure_full", "pressure_half", "height_full", "temperature",
         "u_wind", "v_wind", "orog", "orostd", "orosig", "orogam", "orothe",
-        "oropic", "oroval", "fmask")]
+        "oropic", "oroval")]
     return jax.jit(jax.vmap(one))(*args)
 
 
@@ -260,7 +277,8 @@ class TestSSOJaxTransforms:
     def test_jit_runs(self):
         col = _make_alps_column()
         config = SSOParameters.default()
-        jitted = jax.jit(lambda **kw: sso_drag(**kw, config=config))
+        jitted = jax.jit(lambda **kw: sso_drag(**kw, config=config,
+                                                nktopg=_nktopg(col)))
         tend, _ = jitted(**col)
         assert jnp.all(jnp.isfinite(tend.dudt))
 
@@ -273,7 +291,7 @@ class TestSSOJaxTransforms:
         config = SSOParameters.default()
 
         def one(*args):
-            t, _ = sso_drag(*args, config=config)
+            t, _ = sso_drag(*args, config=config, nktopg=_nktopg(col1))
             return t.dudt
 
         out = jax.vmap(one)(*[batch[k] for k in keys])
@@ -327,7 +345,7 @@ class TestSSOGradients:
     AQUAPLANET = dict(
         orography_std=0.0, orography_slope=0.0, orography_anisotropy=0.0,
         peak_elevation=0.0, valley_elevation=0.0, mean_orography=0.0,
-        surface_height=0.0, land_fraction=0.0,
+        surface_height=0.0,
     )
 
     def _scheme_fn(self, column, config):
@@ -335,7 +353,8 @@ class TestSSOGradients:
         def f(*values):
             inputs = dict(column)
             inputs.update(dict(zip(self.KEYS, values)))
-            tend, _ = sso_drag(**inputs, config=config)
+            tend, _ = sso_drag(**inputs, config=config,
+                               nktopg=_nktopg(column))
             return (tend.dudt, tend.dvdt, tend.dissip)
 
         return f
@@ -407,3 +426,87 @@ class TestSSOGradients:
         check_gradients(
             self._scheme_fn(column, SSOParameters.default()),
             tuple(column[k] for k in self.KEYS), rtol=1e-2)
+
+
+class TestEchamNktopg:
+    """``nktopg`` is the grid level ``mo_ssodrag.f90::sugwd`` computes."""
+
+    def test_echam_l47_and_l95(self):
+        """45 on L47 is what the compiled ``sugwd`` set on jcm's L47 table
+        (``echam_ssodrag_reference``); L95 follows the same rule.
+        """
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        for nlev, expected in ((47, 45), (95, 93)):
+            levels = get_echam_levels(nlev)
+            assert echam_nktopg(levels.a_boundaries,
+                                levels.b_boundaries) == expected
+
+    def test_is_the_top_of_the_near_surface_levels(self):
+        """Highest level with 800-hPa-reference sigma >= 0.94, 1-based."""
+        b = np.array([0.0, 0.5, 0.9, 0.93, 0.95, 0.98, 1.0])
+        # full-level sigma: 0.25, 0.70, 0.915, 0.94, 0.965, 0.99
+        assert echam_nktopg(np.zeros_like(b), b) == 4
+
+    def test_grid_without_near_surface_levels_uses_the_lowest(self):
+        """``sugwd`` never assigns ``nktopg`` there; the lowest level is the
+        shallowest layer the scheme can represent.
+        """
+        b = np.array([0.0, 0.5, 0.8, 1.0])   # lowest full sigma 0.9
+        assert echam_nktopg(np.zeros_like(b), b) == 3
+
+
+class TestAgainstEchamFortran:
+    """jcm's ``sso_drag`` against the compiled ECHAM6.3 ``ssodrag``.
+
+    Four real T63L47 columns (Tibet, Andes, Alps, Rockies) and the tendencies
+    ECHAM returns for them; see ``jcm/data/test/echam_ssodrag_reference``. With
+    the grid's ``nktopg`` the port reproduces ECHAM to round-off; the model top
+    (``nktopg = 1``) gave errors of 60%-1600% of the drag and stresses of the
+    wrong sign.
+    """
+
+    @staticmethod
+    def _reference():
+        from importlib import resources
+        path = (resources.files("jcm.data.test")
+                / "echam_ssodrag_reference" / "ssodrag_T63L47.npz")
+        with resources.as_file(path) as f:
+            d = np.load(f)
+            return {k: np.asarray(d[k]) for k in d.files}
+
+    def _jcm(self, ref, n, nktopg):
+        cfg = SSOParameters.default()
+        ph = jnp.asarray(ref["pressure_half"][n])
+        tend, state = sso_drag(
+            jnp.asarray(ref["dt"]), jnp.asarray(0.0),
+            jnp.asarray(ref["height_full"][n]), jnp.asarray(ref["orog"][n]),
+            ph, jnp.asarray(ref["pressure_full"][n]),
+            (ph[1:] - ph[:-1]) / grav,
+            jnp.asarray(ref["temperature"][n]), jnp.asarray(ref["u_wind"][n]),
+            jnp.asarray(ref["v_wind"][n]),
+            *[jnp.asarray(ref[k][n]) for k in (
+                "orog", "orostd", "orosig", "orogam", "orothe", "oropic",
+                "oroval")],
+            cfg, nktopg=nktopg, ntop=1)
+        return tend, state
+
+    def test_tendencies_match_echam(self):
+        from jcm.constants import cpd
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        ref = self._reference()
+        levels = get_echam_levels(47)
+        nktopg = echam_nktopg(levels.a_boundaries, levels.b_boundaries)
+        assert nktopg == int(ref["echam_nktopg"])
+        for n in range(ref["u_wind"].shape[0]):
+            tend, state = self._jcm(ref, n, nktopg)
+            for ours, theirs in (
+                    (tend.dudt, ref["echam_dudt"][n]),
+                    (tend.dvdt, ref["echam_dvdt"][n]),
+                    (tend.dissip / cpd, ref["echam_dtdt"][n])):
+                scale = np.max(np.abs(theirs))
+                assert scale > 0.0
+                np.testing.assert_allclose(np.asarray(ours), theirs,
+                                           rtol=0.0, atol=1e-5 * scale)
+            np.testing.assert_allclose(
+                float(state.u_stress), ref["echam_u_stress"][n],
+                rtol=1e-5, atol=1e-8)

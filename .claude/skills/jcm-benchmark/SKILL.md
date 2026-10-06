@@ -158,8 +158,7 @@ The presets are not `physics=X grid=Y` — they carry the whole known-stable
 override set, because a T63L47 run from an isothermal cold start with no
 sponge **goes NaN within days**, which silently destroys the benchmark. Each
 T63 preset pins `init=jw init.rh=0.0`, real terrain and forcing from file,
-and `run=longrun` — which carries the settled production sponge
-(`target_T_K=250`). Ozone comes from `ozone_file: auto`, the shipped default,
+and `run=longrun` — which carries ECHAM's upper sponge. Ozone comes from `ozone_file: auto`, the shipped default,
 which resolves the packaged CMIP6 climatology; the preset deliberately does
 not override it.
 

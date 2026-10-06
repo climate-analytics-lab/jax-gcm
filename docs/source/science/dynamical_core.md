@@ -105,10 +105,10 @@ for hybrid L47/L95 grids the resolution-aware ``DiffusionFilter.auto`` selects t
 ECHAM ``lmidatm`` level-dependent order profile (∇² near the model top grading to
 ∇⁶/∇⁸ below, base timescale from ``setdyn.f90``'s ``dampth``); any other grid gets
 the uniform SPEEDY ∇²/∇⁴ profile (``DiffusionFilter.default``), with a warning for
-unrecognised hybrid grids. An optional upper sponge (Rayleigh drag on u/v plus temperature relaxation
-toward the zonal mean and, in production, an absolute ``target_T_K``) is
-enabled via the ``run`` group (``jcm/config/run/longrun.yaml``: ``levels: 10``,
-``target_T_K: 250``, ``enspodi: 2``). Resolutions T21–T425 are supported.
+unrecognised hybrid grids. ECHAM's upper sponge (``uspnge``: implicit damping of
+the zonal anomalies of u, v and T, the zonal mean untouched) is enabled via the
+``run`` group (``jcm/config/run/longrun.yaml``: the top level, 3 h, as ECHAM's
+lmidatm default; see {doc}`gravity_waves`). Resolutions T21–T425 are supported.
 
 **What ECHAM/CAM does.** ECHAM6 (Stevens et al. 2013, *JAMES*) is a spectral-
 transform core with leapfrog + semi-implicit correction and spectral (∇²ⁿ)
@@ -177,7 +177,7 @@ rely on.
 - ``jcm/dycore/pyses/dycore.py`` — ``PysesCamSEDycore``.
 - ``jcm/diffusion.py`` — ``DiffusionFilter`` and its ``auto`` / ``echam_lmidatm``
   / ``default`` constructors; ``_ECHAM_LMIDATM_ORDERS``.
-- ``jcm/config/run/longrun.yaml`` — production sponge.
+- ``jcm/config/run/longrun.yaml`` — ECHAM upper sponge.
 
 **Validation evidence.** ``jcm/dycore/dinosaur/dycore_test.py``,
 ``sharding_test.py``, ``state_bridge_test.py``;

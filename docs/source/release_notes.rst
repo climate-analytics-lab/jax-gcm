@@ -1112,6 +1112,63 @@ Fixes that change the climate of a configuration you did not otherwise touch.
 :doc:`v2_to_v3` quotes the measured direction and magnitude for each, where one
 was measured.
 
+Sub-grid orographic drag acts on the low-level flow, not the whole column
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The ECHAM configurations had jets about half their observed strength and
+  net easterly low-level flow (measured in the 1M and JAM T63L47 years alike):
+  a year had zonal wind 9 m/s at 200 hPa
+  and −3.3 m/s at 850 hPa in the global mean (ERA5 15.6 and +1.0), the
+  equator-to-60° 500 hPa height drop a quarter (NH) to a half (SH) of ERA5's,
+  and no Southern Ocean trough. The Lott-Miller SSO drag ran with
+  ``nktopg = 1``. In ECHAM ``nktopg`` is a grid level that ``sugwd`` sets
+  (level 45 of L47) and ``orosetup`` applies as ``kknu = MIN(kknu, nktopg)``,
+  a floor on the depth of the low-level layer; at 1 every such layer reached
+  the model top, so the "incident" wind, stability and density were column
+  means. The scheme then removed 0.052 N/m² of westerly momentum (area mean of
+  the column force × cos φ; the surface friction torque was 0.026), with
+  column forces up to 10 N/m² and drag of −12 m/s/day at 300 hPa over the
+  mountains, and the atmosphere settled into net surface easterlies to balance
+  it. ``LottMillerSso`` now takes ``nktopg`` from the model grid
+  (``echam_nktopg``), and ``sso_drag`` requires it. The port then reproduces
+  the compiled ECHAM ``ssodrag`` on real T63L47 columns to round-off.
+- **Changes results** in every configuration that composes ``LottMillerSso``
+  (all ``echam_physics`` packages). From the ``ma-t63-l47`` warm state, days
+  20-30 against ERA5 January: 200 hPa wind bias −7.8 → −1.8 m/s (RMSE 16.4 →
+  9.5), 850 hPa −4.3 → −0.6 m/s (RMSE 6.9 → 4.4), 500 hPa height RMSE 180 →
+  73 m; the NH subtropical jet reaches 46 m/s at 30°N (ERA5 44). Warm states
+  spun up before this change are out of angular-momentum balance and adjust
+  over about four weeks.
+- ``sso_drag`` no longer multiplies the drag by the cell's land fraction.
+  ``mo_ssortns.f90::ssodrag`` takes no land mask: the sub-grid descriptors are
+  statistics over the whole cell with its ocean part at zero elevation, so a
+  coastal cell's land fraction is already in them. The ``land_fraction``
+  argument is removed. **Changes results** in coastal cells only.
+
+The upper sponge is ECHAM's
+"""""""""""""""""""""""""""
+
+- ``UpperSponge`` damped the full (u, v) over the top ten levels of
+  ``run=longrun`` (down to 5.2 hPa, 1.5 h at the top) and relaxed T toward an
+  absolute 250 K. ECHAM's ``uspnge`` (``mo_upper_sponge.f90``) damps only the
+  m ≠ 0 part of vorticity, divergence and temperature, at the top level, with
+  ``spdrag = 0.926e-4`` s⁻¹ (3 h) applied implicitly. The term now does exactly
+  that in grid-point space (implicit damping of the zonal anomalies of u, v and
+  T), ``run=longrun`` uses ECHAM's single-level 3 h profile, and the term's
+  defaults are ECHAM's. The absolute target is removed (``run.sponge.target_T_K``
+  is no longer a key); ``timescale_h``/``enspodi`` default to null, meaning
+  ECHAM's values. The sponge refuses a non-lon-lat grid, and the pySES backend
+  refuses a positive ``run.sponge.levels`` (it has ``dycore.lid_sponge``).
+- **Changes results** above ~5 hPa in every ``run=longrun`` configuration: the
+  zonal-mean stratospheric and mesospheric jets are no longer damped (30 days
+  from the ``ma-t63-l47`` warm state: 1 hPa wind at 40°N 21 → 39 m/s, SH
+  summer easterlies −9 → −28 m/s; tropospheric scores unchanged). The dry-JW
+  cold start, which the absolute target had been added for, runs without it:
+  60 days at ``ma-t63-l47``, 150 days at ``t63-echam-1m`` and 30 days at
+  ``ma-t63-l95`` finished without a NaN, the top-level temperature settling at
+  150-210 K (JAM, L47 and L95) and 230-260 K (1M) instead of being held at
+  250 K.
+
 The semi-Lagrangian step conserves water
 """"""""""""""""""""""""""""""""""""""""
 

@@ -10,8 +10,9 @@
 #  - physics=speedy + grid=speedy_t31_l8: the ported SPEEDY column physics
 #    on its native low resolution; cheap enough for reference runs.
 #  - init defaults to isothermal (NOT overridden): SPEEDY spins up from
-#    isothermal rest. The ECHAM dry-JW init and longrun's deep sponge both
-#    NaN SPEEDY within a chunk, so this preset keeps the config defaults.
+#    isothermal rest. The ECHAM dry-JW init NaNs SPEEDY within a chunk, so
+#    this preset keeps the config defaults (and run=default's sponge-free
+#    lid; longrun's ECHAM sponge is not part of SPEEDY).
 #  - terrain=from_file + interpolate: no native T31 orography exists, so the
 #    packaged T63 field is bilinearly interpolated. Safe here because SPEEDY
 #    composes no SSO scheme (interpolation would otherwise corrupt the

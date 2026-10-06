@@ -29,9 +29,10 @@
 #    EMISSION-FREE, matching the pre-#640 middle-atmosphere benchmark, which
 #    supplied no emission inputs at any resolution. To drive aerosol at T119,
 #    prepare native-T119 emission files and point these keys at them.
-#  - run=longrun: 30-day health-gated chunks with the settled production
-#    upper sponge (levels=10, target_T_K=250) that stabilises the JW-dry
-#    stratosphere; the 12-min L47/L95 step now comes from the shared default (run/default.yaml).
+#  - run=longrun: one year of health-gated 5-day chunks written as monthly
+#    means, with ECHAM's upper sponge (uspnge: the zonal anomalies at the top
+#    level damped on 3 h); the 12-min L47/L95 step comes from the shared
+#    default (run/default.yaml).
 #  - sl_off_centering=0.2: semi-Lagrangian tracer-transport off-centering.
 #    This is the dinosaur SL constructor/runner default (DEFAULT_OFF_CENTERING);
 #    stated explicitly so the recorded config documents the value used.

@@ -19,7 +19,14 @@ plus two upper-boundary dissipation terms:
   and a native-grid file with only ``orog``/``lsm`` falls back to
   ``terrain.py::get_simplified_sso_descriptors``, whose **hard-coded
   approximations** (``orostd = 0.25·orog``, slope 0.1 over land, anisotropy 0.5)
-  are a placeholder rather than a measurement. Its energy-conserving cap
+  are a placeholder rather than a measurement. The scheme's level constant
+  ``nktopg`` is ECHAM's ``mo_ssodrag.f90::sugwd`` value for the model grid
+  (``echam_nktopg``: the highest level with sigma ≥ 0.94 at an 800 hPa
+  reference surface pressure, level 45 of L47), applied as in ``orosetup``
+  (``kknu = MIN(kknu, nktopg)``): a floor on the depth of the low-level layer
+  over which the incident wind, stability and density are averaged, so that
+  layer stays near the surface. With it the port reproduces the compiled ECHAM
+  ``ssodrag`` on real T63L47 columns to round-off. Its energy-conserving cap
   (``mo_ssortns.f90::orodrag`` lines 442-452) is ECHAM's ``IF (zdis < 0)``
   rescale written as ``u*·min(1, |u|/|u*|)``, branch-free, with the kinetic
   energy change formed from the wind increment: the heating is never negative
@@ -47,14 +54,17 @@ plus two upper-boundary dissipation terms:
   wind component — back to the pre-step speed, and takes the heating from the
   discrete KE loss so it is never negative.
 
-Upper-boundary dissipation is two terms: the ECHAM-style **upper sponge**
-(``jcm/physics/dissipation/upper_sponge.py::UpperSponge``) — Rayleigh drag on
-(u, v) and relaxation of T toward its zonal mean over the top N levels, plus an
-optional relaxation toward an **absolute** target that the production
-``run=longrun`` sponge switches on (``target_T_K: 250``), adding
-``-(T − 250)/τ``. The absolute branch has no ECHAM analogue: ``uspnge`` damps
-only the m≠0 anomaly, so the m=0 term here is a deliberate deviation that holds
-the JW-dry lid's energy budget. Alongside it is
+Upper-boundary dissipation is two terms: ECHAM's **upper sponge**
+(``jcm/physics/dissipation/upper_sponge.py::UpperSponge``), which damps the
+zonal anomalies — the m ≠ 0 part — of u, v and T at the top model levels with
+ECHAM's implicit factor ``1/(1 + zlf·Δt)`` and never touches the zonal mean.
+``uspnge`` scales the m ≠ 0 spectral coefficients of vorticity, divergence and
+temperature; the spectral-to-grid maps are linear and keep each zonal
+wavenumber separate, so damping the grid-point zonal anomalies is the same
+operation. The production ``run=longrun`` sponge is ECHAM's lmidatm default:
+the top level only, ``spdrag = 0.926e-4 s⁻¹`` (3.0 h), ``enspodi = 1``.
+Because the zonal mean is untouched, the sponge exerts no torque on the
+atmosphere and does not set the lid temperature. Alongside it is
 ``jcm/physics/dissipation/upper_temperature_relaxation.py::UpperTemperatureRelaxation``,
 a Newtonian relaxation of the top-level *temperatures* toward a reference profile
 (e.g. USSA-1976) purpose-built for finite mesospheric lids, with an *optional*
@@ -89,9 +99,11 @@ frontogenesis source (ESCOMP/CAM ``cam_cesm2_2_rel``: ``gw_common.F90`` +
   never operate this scheme with a lid layer as thin as ECHAM L47 (``ρ→0`` drives
   ~123 K/day heating there); every masked division/sqrt keeps its safe operand
   inside ``jnp.where`` for finite reverse-mode gradients.
-- `compute` — the upper sponge damps the full (u, v) field rather than only
-  ECHAM's m≠0 spectral modes; ``enspodi`` defaults to 2.0 (softening downward)
-  rather than ECHAM's uniform 1.0.
+- `compute` — the upper sponge is applied as a physics tendency in grid-point
+  space on the zonal anomalies, after the physics rather than after the
+  dynamics as ``uspnge`` is; the tendency is chosen so that one step reproduces
+  ECHAM's implicit factor exactly. It runs on lon-lat (dinosaur) grids only;
+  the pySES backend uses its own ``dycore.lid_sponge``.
 
 **Status & known limitations.** ``echam_physics(gw_scheme=...)`` selects
 ``"hines"`` (default), ``"frontal"``, ``"both"`` (Hines broad-spectrum
@@ -121,7 +133,9 @@ inert.
   ``upper_temperature_relaxation.py`` (``UpperTemperatureRelaxation``).
 
 **Validation evidence.** ``jcm/physics/gravity_waves/hines/hines_test.py``;
-``sso/lott_miller_test.py``, ``lott_miller_host_test.py``;
+``sso/lott_miller_test.py`` (including tendencies against the compiled
+ECHAM ``ssodrag``, ``jcm/data/test/echam_ssodrag_reference``),
+``lott_miller_host_test.py``;
 ``spectral/solver_test.py`` (NumPy float64 reference), ``frontal_test.py``,
 ``frontogenesis_test.py``, ``term_test.py``; ``simple/simple_gwd_test.py``;
 ``dissipation/upper_temperature_relaxation_test.py``. Design reference:
