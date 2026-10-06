@@ -36,12 +36,14 @@ the template does not set taken from its namelist default in the source.
 | `naerorad`, `nraddiag` | 1, 1 | template |
 | `lcdnc_progn`, `nauto` | true, 2 | template |
 | `ncd_activ` | 2 (ARG) | `setphys.f90:78` |
-| `nactivpdf` | **0** (single updraft `w_large + w_turb`) | `setphys.f90:79`; the template does not set it |
+| `nactivpdf` | **1** (West et al. 2013 20-bin updraft PDF) — maintainer decision | template leaves the code default 0 (`setphys.f90:79`) |
 | `nic_cirrus` | 2 (Kärcher–Lohmann) | `setphys.f90:80` |
 
-The template does not enable the updraft PDF: with `nactivpdf = 0` ARG runs on a
-single characteristic updraft. The 20-bin PDF (`nactivpdf ≥ 1`, West et al.
-2013) is ported as a selectable option, not the preset default.
+The preset runs ARG over the West et al. (2013) 20-bin updraft PDF
+(`nactivpdf = 1`). This deviates from the reference-run template, which leaves
+`nactivpdf` at its code default 0 (a single characteristic updraft
+`w_large + w_turb`); the maintainer chose the PDF on 2026-10-05.
+`jam_nactivpdf: 0` selects the template's single updraft.
 
 The template's run settings that belong to an ECHAM experiment rather than to
 the aerosol model (L31, nudging, AMIP SST) are not part of the reference: the
@@ -125,7 +127,7 @@ direct port of `m7`, and keeping its units keeps every threshold (`cmin_aernl`,
 | relative humidity, **clear-sky** | 0–1 | `(q − q_s·c)/(1 − c)`, `c = min(c_cloud, 1 − 1e-10)`, `q_s` from ECHAM's Sonntag water table (`jcm.physics.thermodynamics`), clipped to [0, 1] (`mo_ham_subm.f90:~250`) |
 | H2SO4 production | molecules cm⁻³ s⁻¹ | the running H2SO4 tendency of the step so far (gas chemistry + transport), `_tendency_run["tracers"]["g_h2so4"]` |
 | cloud fraction | 0–1 | previous step's `clouds.cloud_fraction` (ECHAM's `paclc` at the M7 call is the previous cover) |
-| ion-pair production rate | cm⁻³ s⁻¹ | GCR ionisation (`mo_ham_gcrion.f90`) computed host-side from latitude, pressure, temperature and solar activity |
+| ion-pair production rate | cm⁻³ s⁻¹ | GCR ionisation (`mo_ham_gcrion.f90`) computed in jcm, host-side as ECHAM computes it (`ham_subm_interface` calls `gcr_ionization` before `m7`), from the geomagnetic cut-off rigidity at the column's position, pressure, temperature and the solar activity of the model date |
 | forest fraction | 0–1 | `ForcingData.forest_fraction` |
 | in-PBL mask | bool | level index ≥ the PBL-top level, from the previous step's TTE-TKE PBL height (`nucl_activation`'s `jk ≥ int(ppbl)`) |
 | time step | s | `_dt_seconds` |
@@ -213,11 +215,11 @@ configuration's.
 | input | status |
 |---|---|
 | κ lookup `lut_kappa.nc` | shipped with `m7-jax` |
-| Kazil–Lovejoy table `parnuc.15H2SO4.nc` | HAMMOZ input pool; not on the dev box |
-| GCR ion-pair tables `gcr_ipr_sol{min,max}.txt` | HAMMOZ input pool; not on the dev box |
+| Kazil–Lovejoy table `parnuc.15H2SO4.nc` | HAMMOZ input pool, staged on the shared disk; read outside any traced function and passed to the core like the κ table. Until it is present the core refuses `nsnucl = 2` and the preset runs `nsnucl = 1` |
+| GCR ion-pair tables `gcr_ipr_sol{min,max}.txt` | HAMMOZ input pool, staged with the Kazil table; read by jcm's GCR ionisation term |
 | Mie tables | built by jcm's Mie kernel on HAM's axes (the SALSA repository's `lut_optical_properties*_M7.nc` are header-only stubs) |
 | anthropogenic, biomass-burning emissions | jcm's CEDS/BB4CMIP bundle, sized by HAM's per-sector rules; the residential (`DOM`) and energy (`ENE`) sectors need separate channels, added alongside the existing super-sector channels so the MAM4 inputs do not change |
-| biogenic OC | not in jcm's inputs; HAM's AeroCom II file is on the shared disk |
+| biogenic OC | HAM's own AeroCom II climatology (`emiss_aerocom_OC_monthly_2000`), converted into the emissions bundle as `emis_biogenic_oc`; HAM's split: 35 % KI at 0.03 µm, 32.5 % KS and 32.5 % AS without number, no OM:OC factor (`nsoa = 0`) |
 | oxidants, dust sources, DMS | jcm's existing inputs |
 
 ## Default-path invariance
