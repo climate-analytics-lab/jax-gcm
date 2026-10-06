@@ -501,6 +501,18 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
         float32 anyway (see the module docstring's Precision section), but
         casting to ``cdt`` explicitly is correct by construction rather than
         by that scoping accident.
+
+        ``gcr_ion_pair_rate``'s ``grav`` is deliberately left at its default
+        (jcm's own ``c.grav``, read dynamically) rather than passed as
+        HAM's literal ``9.80665``: this call converts jcm's OWN ``pressure``
+        into a mass column density, and the model's own column mass is
+        ``pressure/c.grav`` everywhere else too (hydrostatic balance) -- using
+        a different gravity here would make this one diagnostic's column
+        mass inconsistent with the rest of the model's, for a ~3e-4 relative
+        difference with no physical motivation on the model side (the lead's
+        call on this exact question; the compiled-routine-parity reference
+        test passes ``grav=9.80665`` instead, for the opposite reason -- see
+        ``gcr_ion_pair_rate``'s own docstring).
         """
         if self._lat is None or self._lon is None:
             raise RuntimeError("M7JaxMicrophysics needs cache_coords (lat/lon for "
