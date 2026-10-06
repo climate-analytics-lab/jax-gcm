@@ -258,6 +258,86 @@ drift from the mass actually removed: with operator splitting in place,
 guard below (each term records its ledger before `verify_tendencies` sees
 the summed tendency).
 
+(ham-below-cloud-scheme)=
+## The HAM below-cloud scheme (`ham_below_cloud`, #1017)
+
+`WetScavenging(scheme="ham_below_cloud")` swaps the STRATIFORM below-cloud
+pathway above for ECHAM-HAM r7492's own `nwetdep=3` scheme
+(`mo_ham_wetdep.f90::bc_rain`/`bc_snow`, `ham_below_cloud.py`): a bilinear
+lookup against Betty Croft's size-dependent rain and snow collection tables
+(`mo_ham_wetdep_data.f90`), rather than CAM's Slinn integral. Named
+`"ham_below_cloud"`, not `"ham"`: the in-cloud pathways (nucleation,
+impaction) are unaffected and still run as the `"jcm"` scheme does under
+either setting, and the convective below-cloud pathway above is also
+unaffected (it already mirrors HAMMOZ's own convective form with the
+Slinn coefficient). The remaining in-cloud pathways are tracked as
+jax-gcm#1017's follow-ups A (nucleation) and B (impaction).
+
+**`pclc`.** HAM's removal acts only within the precipitating fraction of
+the box — `pxtp10·pclc·(1 − exp(−Δt·(sfrain+sfsnow)))`
+(`mo_ham_wetdep.f90:434-437`) — unlike CAM's form, whose swept-volume
+cancellation makes the cloud weighting a no-op (see `below_cloud_rate`'s
+docstring above). `pclc` traces to `mo_submodel_interface.f90`'s
+`pclcpre`, ECHAM's cumulative max-overlap precipitating-area recurrence,
+computed internally by the Lohmann 2M scheme but not previously published.
+Rather than add a field to `CloudData` — which would change the
+checkpoint pytree of every 2M composition and break restart from existing
+stamped checkpoints — the 2M scheme gained a static
+`configure_precip_cover_diagnostic(bool)` flag that publishes the
+per-level recurrence as a plain `"precip_cover"` diagnostics key only when
+set; `echam_physics` sets it exactly when `jam_wetdep_scheme=
+"ham_below_cloud"`. The published value is the recurrence's POST-update
+state for the current level (`mo_cloud_micro_2m.f90:1719-1742`), i.e. the
+cover ECHAM itself passes into `cloud_subm_2` for that level.
+
+Checked against a compiled number: the existing 2M Fortran reference
+(`cloud2m_T63L47.npz`) already carries ECHAM's own `zclcpre` as
+`diag/<step>/clcpre`, and comparing against it
+(`lohmann_2m_fortran_reference_test.py::test_precip_cover_matches_echam_clcpre`)
+found the two agree everywhere but three synthetic test columns designed to
+stress ice-number diagnosis, mixed-phase detrainment and sedimentation —
+not realistic precipitating cells. One cause is identified and benign (a
+pre-existing, documented 1e-9-vs-ECHAM's-1e-12 flux floor in
+`cloud_utils.gridbox_falling_hydrometeor`, kept for its reverse-mode VJP
+safety); the rest is open as jax-gcm#1036. The test is `xfail(strict=True)`
+referencing it; below-cloud scavenging only reads `precip_cover` well below
+the first precipitating level in practice, so this does not block the
+below-cloud slice (confirmed by a full smoke-tested end-to-end model run
+with `jam_wetdep_scheme="ham_below_cloud"`).
+
+**Reference-harness findings.** A compiled-Fortran harness driving
+`bc_rain`/`bc_snow` end to end (wet radius → bin index → bilinear lookup →
+rate) over 96 designed cases caught two latent defects before they shipped:
+
+- The 50 µm wet-radius clip (`mo_ham_wetdep.f90:272`,
+  `MIN(rwet_p·zrad_fac, 50e-6)`) was missing from the initial port. Harmless
+  whenever the radius bin saturates at the table's last node, but
+  `caerorad`'s actual top node is 83.23 µm — well above the clip — so an
+  unclipped radius between the two extrapolated past the clamped value
+  instead of reading it.
+- `bc_rain`'s own data-filling loop assigns the bilinear interpolation's
+  two off-diagonal corners (`Q12`, `Q21`) the OPPOSITE of what
+  `scavcoef_bilinterp`'s formula needs for a textbook bilinear read (traced
+  by deriving the formula's corner roles directly from its `lint4`
+  branch). `bc_snow` is immune, since its X axis is always the dummy
+  `X1=X2=1`, which is why it alone did not surface this. Ported exactly as
+  compiled, flagged to the maintainer as a likely-unintentional upstream
+  quirk rather than silently "corrected" — see `ham_below_cloud.py::_lookup`.
+
+**`pfrain`/`pfsnow`.** `bc_rain`/`bc_snow` need the separate rain and snow
+carrier fluxes `update_precip_fluxes` computes every level (the in-cloud,
+cover-normalised, pre-evaporation flux) — and the 2M scheme already
+computes them internally, threaded to ECHAM's `cloud_subm_2` as
+`zfrain`/`zfsnow` (`mo_cloud_micro_2m.f90:1813`; `cloud_subm_2`'s own
+comment at `mo_submodel_interface.f90:1676-1677`, "rain/snow flux before
+evaporation", confirms the match). `configure_wetdep_hydro_diagnostics`
+threads them out alongside `precip_cover`, under the same static flag;
+`WetScavenging("ham_below_cloud")` reads them directly rather than
+deriving an approximation — an earlier version of this wiring split the
+stratiform carrier ledger by the in-cloud ice fraction as a proxy, which
+review correctly flagged as unnecessary once the exact quantity was
+located.
+
 ## Known gaps
 
 - Ice-sedimentation flux reaching the surface as snow carries no aerosol
@@ -265,3 +345,8 @@ the summed tendency).
   aerosol scavenging either.
 - Dry deposition uses a neutral log-law aerodynamic resistance; a
   Monin-Obukhov stability correction awaits a usable surface `L`.
+- `ham_below_cloud` ports only the below-cloud pathway; the in-cloud
+  nucleation and impaction pathways under `nwetdep=3` are jax-gcm#1017's
+  follow-ups A and B.
+- The 2M scheme's `precip_cover` disagrees with ECHAM's `clcpre` on three
+  synthetic test columns, for a reason not fully diagnosed (jax-gcm#1036).

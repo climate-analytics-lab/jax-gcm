@@ -187,6 +187,53 @@ class TestEchamComposablePhysics(unittest.TestCase):
             convective_updraft_precip_cover=False)
         self.assertFalse(cover_flag(jam_off))
 
+    def test_jam_wetdep_scheme_wires_precip_cover_and_the_term_flag(self):
+        """``jam_wetdep_scheme="ham_below_cloud"`` (#1017) turns on the 2M
+        scheme's ``precip_cover``/``pfrain``/``pfsnow`` publication and the
+        wetdep term's own selector together; the default leaves both off/"jcm".
+        """
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetScavenging
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        def parts(physics):
+            micro = next(t for t in physics.terms
+                        if isinstance(t, Lohmann2MMicrophysics))
+            wetdep = next(t for t in physics.terms
+                          if isinstance(t, WetScavenging))
+            return micro, wetdep
+
+        default = echam_physics(
+            checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
+            jam_microphysics="placeholder")
+        micro, wetdep = parts(default)
+        self.assertFalse(micro._publish_wetdep_hydro)
+        for key in ("precip_cover", "pfrain", "pfsnow"):
+            self.assertNotIn(key, micro.provides)
+        self.assertEqual(wetdep.scheme, "jcm")
+        self.assertNotIn("precip_cover", wetdep.requires)
+
+        ham_bc = echam_physics(
+            checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
+            jam_microphysics="placeholder", jam_wetdep_scheme="ham_below_cloud")
+        micro, wetdep = parts(ham_bc)
+        self.assertTrue(micro._publish_wetdep_hydro)
+        for key in ("precip_cover", "pfrain", "pfsnow"):
+            self.assertIn(key, micro.provides)
+        self.assertEqual(wetdep.scheme, "ham_below_cloud")
+        self.assertIn("precip_cover", wetdep.requires)
+
+    def test_jam_wetdep_scheme_ham_below_cloud_requires_2m(self):
+        """A clear, scheme-specific error, not the generic ordering-validator
+        one that would otherwise fire deep inside ComposablePhysics.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        with self.assertRaises(ValueError):
+            echam_physics(
+                checkpoint_terms=False, aerosol_module="jam", cloud_scheme="1m",
+                jam_microphysics="placeholder", jam_wetdep_scheme="ham_below_cloud")
+
     def test_jam_takes_ham_ice_inhomogeneity(self):
         """JAM (2M + ARG) defaults to ECHAM-HAM's ``zinhomi = 0.7``; every
         other stack keeps ECHAM6's 0.8, and an explicit override wins.
