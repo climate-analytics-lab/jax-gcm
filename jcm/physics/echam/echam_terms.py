@@ -204,6 +204,7 @@ def echam_physics(
     cloud_scheme: str = "1m",
     aerosol_module: str = "macv2sp",
     jam_microphysics: str = "placeholder",
+    jam_microphysics_options: Mapping[str, Any] | None = None,
     jam_cloud_borne: bool = True,
     jam_optics: bool = True,
     jam_optics_backend: str = "jcm",
@@ -416,8 +417,22 @@ def echam_physics(
             ``"placeholder"`` (κ-Köhler equilibrium on the MAM4 population,
             default) today; ``"mam4_jax"`` is #490 (optional ``jcm[mam4]``
             extra). ``"m7_placeholder"`` is the same κ-Köhler core on the M7
-            population instead (the ``echam-ham-m7`` preset's chain-test
-            vehicle, #1017) — the real M7 core adapter is a later task.
+            population instead (the ``echam-ham-m7`` preset's earlier
+            chain-test vehicle, #1017). ``"m7_jax"`` is the real ECHAM-HAM M7
+            core over the optional ``jcm[m7]`` extra (#1017); its switches
+            (nucleation/organic scheme, coagulation, condensation,
+            precision) are set via ``jam_microphysics_options``, not a
+            dedicated argument here.
+        jam_microphysics_options: keyword arguments forwarded to the
+            ``jam_microphysics`` core's constructor when it names a string
+            core — e.g. ``{"nucleation_scheme": 2}`` selects ``"m7_jax"``'s
+            Kazil and Lovejoy (2007) ion-mediated nucleation (needs
+            ``HAM_INPUT_DIR`` and an m7-jax with Kazil support; construction
+            raises naming both if either is missing), or
+            ``{"core_dtype": "float32"}`` selects its forward-only float32
+            core. ``None`` (default) means today's call for every core —
+            MAM4 and the placeholder cores take no options, so any key is
+            unknown for them.
         jam_cloud_borne: prognose the explicit cloud-borne aerosol phase
             (#602). ``True`` (default) cycles the ``mc_*``/``nc_*`` phase
             in the physics carry (activation transfer, resuspension,
@@ -936,7 +951,9 @@ def echam_physics(
             )
         from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
         jam_terms = jam_aerosol_physics(
-            microphysics=jam_microphysics, cloud_borne=jam_cloud_borne,
+            microphysics=jam_microphysics,
+            microphysics_options=jam_microphysics_options,
+            cloud_borne=jam_cloud_borne,
             optics=jam_optics, optics_backend=jam_optics_backend,
             seasalt_scheme=jam_seasalt_scheme,
             ham_optics_tables_dir=jam_optics_tables_dir,
