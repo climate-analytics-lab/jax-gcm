@@ -1165,6 +1165,337 @@ a 32 % wet / 68 % dry+sedimentation pathway split against HAM's published ~30/70
 accumulation-mode sulfate and black carbon are unchanged, as expected for a mode
 sitting in the Greenfield gap.
 
+## HAM M7 modal aerosol
+
+A second population on the same, core-agnostic JAM harness: ``echam-ham-m7``
+(``jcm/config/physics/echam-ham-m7.yaml``) runs the ordered process chain
+described above with ECHAM6.3-HAM2.3's own **M7** aerosol model instead of
+CAM's MAM4 — a different population (``M7_SPEC``), a different microphysics
+core, and a set of HAM-faithful process variants the preset turns on. The
+harness, the emission/deposition/sedimentation/scavenging/transport
+machinery and the activation→ice-nucleation coupling above are unchanged;
+this section covers what M7 adds or does differently. Design and the full
+reference table: {doc}`../design/ham_m7_configuration`.
+
+### M7 population and core
+
+**What we do.** ``M7_SPEC`` (``jcm/physics/aerosol/jam/microphysics/m7_data.py``)
+is HAM's seven log-normal modes (NS, KS, AS, CS soluble; KI, AI, CI
+insoluble), each with HAM's own σ_g (1.59 fine, 2.0 coarse), species
+membership and ``csr_conv``/``caccso4``, and HAM's own species table (``so4`` at
+96.0631 g/mol, not MAM4's 115 g/mol ammonium bisulfate; a new ``oc`` token
+distinct from MAM4's ``poa``, since HAM's OC tracer holds primary and
+biogenic organic matter alike with ``nsoa = 0``). ``cloud_borne = False``: HAM
+scavenges interstitial aerosol by its activated fraction rather than
+carrying an explicit cloud-borne phase. The microphysics is the complete
+native ``m7`` call, through an adapter (``M7JaxMicrophysics``,
+``jcm/physics/aerosol/jam/microphysics/m7_jax.py``) over the upstream
+``m7-jax`` package (BSD-3, the ``jcm[m7]`` extra, pinned exactly as ``jcm[mam4]``
+pins ``mam4-jax``) — ``calcsize``-equivalent sizing, κ-Köhler hydration against
+the authentic ``lut_kappa.nc`` table, binary/ion-mediated nucleation,
+coagulation and the cloud-free modal redistribution, all in M7's own units
+(SO₄ in molecules cm⁻³, other species in µg m⁻³, number in cm⁻³) so every
+HAM threshold (``cmin_aernl``, ``cmin_aerml``, …) stays at its native value. The
+adapter reproduces ECHAM's operator-split call exactly: it builds M7's
+input from ``state + running_tendency·Δt``, passes the H2SO4 gas at its
+step-start value with the accumulated tendency as the production rate
+(ECHAM's ``zgso4m1``/``zdgso4``), and returns ``(x_M7 − (x₀ + run·Δt))/Δt`` so the
+step's summed tendency is ``(x_M7 − x₀)/Δt``.
+
+**What ECHAM-HAM does.** ``mo_ham_m7ctl.f90`` (mode table), ``mo_ham.f90``
+(species, ``nham_subm = HAM_M7``), ``mo_ham_subm.f90::ham_subm_interface`` (the
+host↔core boundary this adapter reproduces).
+
+**Why we differ.**
+- ``science`` (reference correction, F1) — ``m7-jax``'s own SALSA-box copy of
+  ``m7_averageproperties`` takes the cube root of an insoluble mode's
+  *density* as if it were its mean particle volume (≈0.57 cm radius for
+  every insoluble mode); r7492, the reference this preset is held to,
+  computes the radius from the volume instead. The ``m7-jax`` build restores
+  the r7492 text at build time (recorded in its own provenance), so the
+  package stays byte-identical to its pinned hash and the reference the
+  port is held to is r7492's, not the shipped default's.
+- ``compute`` — the core runs in float64 by default (``mam4-jax``'s own
+  convention); unlike the MAM4 core's ``core_dtype="float32"`` option, whose
+  casts back to the host dtype run *inside* the scoped ``jax.enable_x64
+  (False)`` block and so silently stay float32 on a float64 host (#1033),
+  the M7 adapter's analogous scoped-precision path applies those casts
+  after the block closes.
+
+**Status & known limitations.** The preset's reference configuration is
+``nsnucl = 2`` (Kazil–Lovejoy ion-mediated nucleation, fed by GCR ionisation —
+see below), selected through ``jam_microphysics_options:
+{nucleation_scheme: 2}`` and validated against compiled reference Fortran at
+float64 round-off. This is the *shipped default*: ``echam-ham-m7.yaml`` needs
+``HAM_INPUT_DIR`` set (holding ``parnuc.15H2SO4.A0.total.nc``, ``solmin.txt``
+and ``solmax.txt``) and an ``m7-jax`` build with Kazil/Lovejoy support;
+construction raises, naming whichever is missing, rather than silently
+falling back. ``+physics.jam_microphysics_options.nucleation_scheme=1``
+opts into binary nucleation explicitly where that data is unavailable.
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/microphysics/m7_data.py`` — ``M7_SPEC``,
+  ``M7_FREEZING_ROLES``.
+- ``jcm/physics/aerosol/jam/microphysics/m7_jax.py`` — ``M7JaxMicrophysics``.
+
+### HAM activation: Köhler A/B, ARG, updraft PDF, Lin–Leaitch
+
+**What we do.** ``HamActivation`` (``jcm/physics/aerosol/jam/activation/
+ham_activation_term.py``) is HAM's own activation closed form, selected by
+``jam_activation_scheme="ham_arg"`` and distinct from the CAM-faithful
+``ArgActivation`` the MAM4 presets use: the Köhler ``A`` term uses the local
+temperature and HAM's own moist-air-corrected thermal conductivity, and the
+Köhler ``B`` term comes from each mode's electrolyte species (``nion``,
+osmotic coefficient) rather than a precomputed κ — ``koehler_ab``
+(``activation/ham_activation.py``). The ARG size-dependent shape closed form
+on top of that Köhler pair is the same Abdul-Razzak & Ghan (2000) form the
+CAM path uses (``ham_arg``). The updraft is HAM's own West et al. (2013)
+20-bin velocity PDF (``ham_updraft``, ``nactivpdf = 1``) rather than a single
+characteristic value; ``jam_nactivpdf: 0`` selects the single-updraft form
+the reference-run template itself leaves as the code default. HAM's own
+rational-Chebyshev normal CDF (``ham_logtail`` → ``_m7_cumulative_normal``, a
+port of ``m7_cumulative_normal``) stands in for ``jax.scipy.special.erf``.
+Lin–Leaitch (``ncd_activ = 1``, ``lin_leaitch``) is a selectable simpler
+alternative. The M7 preset turns ``ham_arg`` on with ``nactivpdf = 1`` — a
+**maintainer decision** that deviates from the reference-run template
+(which leaves the code default ``nactivpdf = 0``); ``jam_nactivpdf: 0``
+recovers the template's single updraft.
+
+**What ECHAM-HAM does.** ``mo_ham_activ.f90`` (``ham_activ_koehler_ab``,
+``ham_activ_abdulrazzak_ghan``, ``ham_avail_activ_lin_leaitch``),
+``mo_ham_tools.f90::ham_m7_logtail``, ``mo_ham_m7.f90::m7_cumulative_normal``,
+``mo_activ.f90`` (``activ_updraft``, ``aero_activ_updraft_pdf``,
+``activ_lin_leaitch``).
+
+**Why we differ.**
+- ``science`` (maintainer decision) — ``nactivpdf = 1`` (the 20-bin PDF) rather
+  than the reference template's own code default 0, chosen 2026-10-05.
+- ``compute`` / ``differentiability`` — reference physical constants (e.g.
+  ``argas = 8.314472``) are HAM's own literals, not the live, overridable
+  ``jcm.constants`` singleton: the compiled reference this module is held to
+  (rtol ≤ 1e-12) was built against those exact literals, and mixing in
+  ``jcm.constants`` would both break that tolerance and couple the comparison
+  to unrelated calibration changes — the same reasoning as ``arg.py``'s own
+  CAM literals.
+
+**Status & known limitations.** Every field matches the compiled r7492
+routines (20 designed M7 cells, ``jcm/data/test/echam_cloud_reference/
+ham_activ_*``) at float64 round-off (≤6e-15 relative) or exactly; float32
+agrees to a measured 4.8e-6 against a 1e-5 tolerance. Gradients are finite
+on every reference cell and every normal-CDF branch.
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/activation/ham_activation.py`` — ``koehler_ab``,
+  ``ham_arg``, ``ham_logtail``, ``ham_updraft``, ``lin_leaitch``.
+- ``jcm/physics/aerosol/jam/activation/ham_activation_term.py`` —
+  ``HamActivation``, ``HamActivationParameters``.
+
+### HAM per-sector primary emissions, and biogenic organic carbon
+
+**What we do.** ``m7_sector_policy`` (``jcm/physics/aerosol/jam/emissions/
+ham_sectors.py``) gives the population's own per-sector-class primary
+emission targets: HAM's Fortran sector index collapses onto exactly three
+size/mode classes — ``"fossil"`` (fossil-fuel-like surface/elevated sources;
+BC/OC to the insoluble Aitken mode, primary SO₄ split 50/50 Aitken-soluble/
+accumulation-soluble), ``"energy_ships"`` (energy stacks and shipping; SO₄
+only, split 50/50 accumulation/coarse-soluble instead), and
+``"biomass_like"`` (open/forest/agricultural fires and domestic/biofuel
+combustion; BC/OC to HAM's biomass number-median radius, 65% of OC taken as
+water-soluble into Aitken-soluble and the rest into the insoluble Aitken
+mode — HAM's own ``zbb_wsoc_perc``). Each target is a ``SectorTarget`` of a
+mass fraction and a number-median radius; HAM's mass→number conversion
+(``zm2n = 3/(4π·ρ·(cmr·cmr2ram)³)``) is reproduced exactly by jcm's existing
+monodisperse-diameter path once the number-median radius is converted to
+the equivalent volume-mean diameter (``cmr_to_emission_diameter``).
+``AnthropogenicEmissions`` reads this per-sector policy for a population that
+declares one (M7) and keeps its existing per-species/class-geometry split
+for one that does not (MAM4), so the MAM4 path does not change.
+
+HAM's own ``biogenic`` sector class — 35% to the insoluble Aitken mode at
+0.03 µm with number, 32.5% each to the Aitken-soluble and accumulation-
+soluble modes without number, no OM:OC scaling (consistent with ``nsoa = 0``)
+— and the mirror builder that sources it from HAM's own AeroCom II
+biogenic-OC climatology (:func:`~jcm.data.mirror.emissions.load_biogenic_oc`,
+``emis_biogenic_oc``) are on this preset branch (landed via pull request
+1035); the global-total cross-check is 19.06 Tg/yr against 19.1 Tg/yr
+published (Dentener et al. 2006).
+
+**What ECHAM-HAM does.** ``mo_ham_m7_emissions.f90``
+(``ham_m7_init_emissions`` lines 90-262 for the number-median radii and
+mass-to-number factors; ``ham_m7_emissions`` lines 564-646 for the
+per-sector-class assignment; the biogenic class at lines 596-607).
+
+**Why we differ.** Faithful, including one Fortran quirk reproduced rather
+than corrected: ``"biomass_like"``'s SO₄ targets are textually identical to
+``"fossil"``'s in the reference (``zm2n_s4ks_bb``/``zm2n_s4as_bb`` use the same
+``cmr_sk``/``cmr_sa`` as the fossil radii, not a biomass-specific one, unlike
+every other species) — this looks like an oversight in r7492, but it is
+what the compiled code does.
+
+**Status & known limitations.** The per-sector policy, biogenic-OC class
+included, is inert until an emissions bundle is supplied
+(``jam_anthropogenic: true`` in the preset).
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/emissions/ham_sectors.py`` — ``m7_sector_policy``,
+  ``SectorTarget``, ``HamSectorPolicy``, ``cmr_to_emission_diameter``.
+
+### Aqueous sulfate chemistry constants (#1031)
+
+**What we do.** ``_aqueous_so4`` (``jcm/physics/aerosol/jam/chemistry/
+aqueous.py``), the shared in-cloud SO₂ oxidation port both the MAM4 and M7
+presets call, uses six literals that differ from r7492: the SO₂ Henry's-law
+pair (``_H_SO2_0, _H_SO2_ACT = 1.23, 3020.0``, predating a correction
+HAMMOZ made at ``mo_ham_species.f90:181``, ``speclist(id_so2)%henry = (1.36,
+4250.0)``), the gas constant ``zrgas`` (``mo_ham_chemistry.f90:209``'s rounded
+``8.2e-2`` against jcm's ``r_universal/101.325``), Avogadro's number and the
+separately-rounded ``6.022e20`` the ``xtoc``/``ctox`` conversion uses, and SO₂'s
+molar mass. Measured against the compiled, unmodified ``ham_wet_chemistry``
+(16 designed M7 cells, ``jcm/data/test/echam_cloud_reference/hamaqueous_M7.
+*``), the SO₂ Henry pair alone accounts for **9–52% less in-cloud sulfate**
+than the reference; the remaining four literals account for the rest, down
+to <2.3% with only the Henry pair patched.
+
+**What ECHAM-HAM does.** ``mo_ham_chemistry.f90::ham_wet_chemistry``.
+
+**Why we differ.** ``science`` (defect, shared with MAM4) — ``_aqueous_so4`` is
+called by both presets, and the MAM4 presets are calibrated and frozen for
+v3.0, so these six literals cannot simply be changed on the shared default
+path; tracked as #1031 rather than fixed by editing them in place. A
+population-level ``AqueousConstants`` override
+(``jcm/physics/aerosol/jam/chemistry/aqueous_constants.py``) landed instead
+(pull request 1035): ``None`` by default, reproducing today's MAM4 values
+exactly, and r7492's own six values for M7 as ``HAM_AQUEOUS_CONSTANTS`` —
+set on ``M7_SPEC`` itself (``m7_data.py``), so the M7 preset gets r7492's
+literals automatically. Verified against the compiled reference
+(``ham_wet_chemistry``) at float64 1e-12 on every recorded field.
+
+**Status & known limitations.** The M7 preset's in-cloud sulfate production
+now matches r7492's own literals (``HAM_AQUEOUS_CONSTANTS``); the MAM4
+presets keep the six-literal #1031 discrepancy, unchanged and frozen for
+v3.0.
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/chemistry/aqueous.py`` — ``_aqueous_so4``.
+
+### Kazil–Lovejoy ion-mediated nucleation and GCR ionisation
+
+**What we do.** ``nsnucl = 2`` nucleates H₂SO₄/H₂O both neutrally and on the
+ions galactic cosmic rays produce — ``m7-jax``'s ``nucleation.kazil_lovejoy``,
+a 5-D log-linear interpolation of the tabulated PARNUC formation-rate
+lookup (``parnuc.15H2SO4.nc``, read outside any traced function and passed
+to the core like the κ table), needs an ion-pair production rate as an
+input alongside temperature, relative humidity, [H₂SO₄] and the H₂SO₄
+condensation sink. jcm computes that rate host-side, as ECHAM does
+(``ham_subm_interface`` calls ``gcr_ionization`` before ``m7``):
+``jcm/physics/aerosol/jam/chemistry/gcr_ionisation.py::gcr_ion_pair_rate``
+ports ``mo_ham_gcrion.f90::gcr_ionization``/``gcr_ionization_profile`` —
+geomagnetic latitude (via a port of ``mo_geopack.f90``'s dipole-axis
+``recalc``/``geo2mag``, reduced to only the degree-1 IGRF terms the rotation
+needs, not the full spherical-harmonic field model ``recalc`` also serves),
+the resulting vertical cutoff rigidity, and a 2-D (cutoff rigidity, mass
+column density) interpolation of the O'Brien solar-min/max ion-pair tables
+(``read_obrien_gcr_ipr``, the exact blocked text format of HAM's own
+``gcr_ipr_solmin.txt``/``gcr_ipr_solmax.txt`` -- or the staged
+distribution's ``solmin.txt``/``solmax.txt`` -- is read in). The
+companion ``solar_activity`` is the cosine solar-cycle parameterisation
+(``mo_ham_gcrion.f90::solar_activity``), fed the model's own calendar date
+via two new raw-calendar-fact fields on ``jcm/forcing.py``'s ``SolarGeometry``
+(``calendar_year``, ``day_of_year``) — the same date-derived-quantity pattern
+every other date-dependent term reads from ``forcing.solar``, not ``DateData``
+directly.
+
+The mass-column-density conversion's gravitational acceleration deliberately
+differs between the model path and the reference test: ``gcr_ion_pair_rate``
+defaults to jcm's own ``c.grav`` (read dynamically, honouring a
+``set_constants`` override), because the column mass it converts is the
+model's own ``pressure/c.grav`` everywhere else too; the reference test below
+passes r7492's literal ``9.80665`` instead, since it measures parity with the
+compiled routine specifically.
+
+**What ECHAM-HAM does.** ``mo_ham_gcrion.f90`` (whole module) and
+``mo_geopack.f90`` (``recalc``, ``geo2mag``, ``vertical_cutoff_rigidity``) for GCR
+ionisation; ``m7-jax``'s own ``nucleation.kazil_lovejoy`` for the PARNUC
+interpolation, a port of ``mo_ham_m7_nucl.f90::nucl_kazil_lovejoy`` +
+``ham_nucl_initialize``.
+
+**Why we differ.** Faithful. The IGRF dipole axis is genuinely
+date-dependent (it drifts over a model run), which the signature this was
+sketched against omitted; ``gcr_ion_pair_rate`` takes ``year``/``day_of_year``
+explicitly rather than freezing the axis at a reference epoch.
+
+**Status & known limitations.** Both the PARNUC table and the O'Brien GCR
+tables are staged at ``HAM_INPUT_DIR``. ``gcr_ion_pair_rate`` matches the
+compiled, unmodified ``gcr_ionization`` (28 designed columns spanning every
+latitude/longitude combination, 10 L47-like levels, 8 solar-activity/date
+scenarios including dates outside the IGRF table's 1965-2010 range) at
+float64 rtol=1e-12; ``m7-jax``'s ``kazil_lovejoy``/``nucleate_all``/``step_all`` at
+``nsnucl=2`` match the compiled ``nucl_kazil_lovejoy``/``m7_nuck``/``m7`` at float64
+round-off against the real PARNUC table, including its forward-only float32
+core (#1017 task 6) — the Kazil table and the GCR ion-pair tables rebuild at
+the core's own working dtype per step, the same rule the κ table follows.
+``echam-ham-m7.yaml`` selects ``nucleation_scheme=2`` by default (as noted
+under *M7 population and core* above); running the preset without
+``HAM_INPUT_DIR`` set fails construction rather than silently falling back
+to ``nsnucl = 1``.
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/chemistry/gcr_ionisation.py`` —
+  ``gcr_ion_pair_rate``, ``read_obrien_gcr_ipr``, ``solar_activity``, ``geo2mag``,
+  ``vertical_cutoff_rigidity``.
+- ``jcm/forcing.py`` — ``SolarGeometry``.
+- ``jcm/date.py`` — ``day_of_year_elapsed``.
+
+**Validation evidence.** ``jcm/physics/aerosol/jam/chemistry/
+gcr_ionisation_test.py`` runs the full comparison against
+``jcm/data/test/echam_cloud_reference/hamgcr.npz`` (built by a private
+Fortran harness compiling the unmodified ``mo_ham_gcrion.f90`` +
+``mo_geopack.f90`` against the real tables).
+
+### Contact freezing under M7
+
+**What we do.** M7's own class roles for the aerosol inputs to mixed-phase
+freezing (``M7_FREEZING_ROLES`` on ``M7_SPEC``: soluble accumulation/coarse for
+immersion, insoluble Aitken/accumulation/coarse for contact) are HAM's own
+class set exactly, unlike MAM4's approximating map — see
+[Aerosol inputs to ice formation](#aerosol-inputs-to-ice-formation) above
+for the shared ``ham_freezing_aerosol`` partition both populations run
+through. Unlike MAM4, which has no insoluble dust mode at all (so its
+contact-freezing inputs are structurally zero), M7's insoluble accumulation
+(AI) and coarse (CI) modes carry dust directly, so contact freezing under
+M7 is genuinely active: Brownian contact on AI/CI dust gives a contact-ice
+mixing ratio of about 3.6e-10 kg/kg in a seeded test column.
+
+**What ECHAM-HAM does.** ``mo_ham_freezing.f90::ham_IN_setup``, as for MAM4
+(see above); M7's own insoluble modes are exactly the dust-bearing classes
+HAM's contact-freezing inputs expect.
+
+**Why we differ.** Faithful — this is the one respect in which M7 needs no
+approximating map at all, since its class set already matches HAM's.
+
+**Status & known limitations.** ``ham_freezing_aerosol``'s M7 partition is
+compared with the compiled ``ham_IN_setup`` directly (``jcm/data/test/
+echam_cloud_reference/hamfrz_M7.npz``); the full chain — feeding that
+partition into ``het_mxphase_freezing`` and comparing against the compiled
+chain end to end — is verified by
+``jcm/physics/aerosol/jam/ice_nucleation/m7_freezing_chain_reference_test.py``
+(pull request 1034), confirming the non-zero contact-ice rate above against
+the compiled chain at both float32 and float64.
+
+### Status & known limitations (M7 preset, overall)
+
+HAM optics (the authentic-table Mie backend, with jcm's own kernel standing
+in for the unavailable authentic LUT files) is already documented under
+[Online aerosol optics](#online-aerosol-optics) above — ``jam_optics_backend
+="ham_lut"`` applies to either population. Cirrus ice nucleation
+(``nic_cirrus = 2``, Kärcher–Lohmann) remains hollow for every population,
+M7 included: see [Aerosol inputs to ice formation](#aerosol-inputs-to-ice-formation)
+and #552/#955/#679 for the open gaps in its consumer and producer sides.
+HAM's below-cloud/in-cloud wet-deposition tables (``nwetdep = 3``, Croft
+below-cloud) are not yet on this branch; the CAM-faithful chain documented
+under [Aerosol removal](#aerosol-removal-below-cloud-scavenging-settling-and-the-removal-chain)
+above applies to M7 unchanged until they land.
+
 ## MACv2-SP simple plumes
 
 **What we do.** A faithful port of MACv2-SP (Stevens et al. 2017): nine

@@ -35,8 +35,9 @@ Each column links to the process section that documents the scheme.
 | **echam-jam** | RRTMGP | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM modal (MAM4) | TTE-TKE + JAM tracer transport | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
 | **echam-jam-aerocom** | RRTMGP + aerosol-free solve | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM (+ AeroCom diagnostics incl. per-λ Mie optics) | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
 | **echam-jam-aerocom-optics** *(alias of the row above)* | RRTMGP + aerosol-free solve | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM (+ AeroCom diagnostics) | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
+| **echam-ham-m7** | RRTMGP (HAM Mie-table optics) | Tiedtke-Nordeng | Sundqvist | Lohmann 2-moment | JAM on the M7 (ECHAM-HAM) population, HAM activation | TTE-TKE + JAM | ECHAM multi-tile | Hines + SSO | SimpleChemistry + JAM sulfur |
 
-The ``echam-jam*`` packages are **factory-built** (``builder: echam_physics`` →
+The ``echam-jam*``/``echam-ham-m7`` packages are **factory-built** (``builder: echam_physics`` →
 ``echam_physics()`` + ``jam_aerosol_physics()``): the JAM aerosol chain is split
 around the cloud term, which a flat term list cannot express. The JAM path owns
 the aerosol slot itself and does not additionally run MACv2-SP; JAM online optics
@@ -137,6 +138,19 @@ scientific gap, so treat results with care:
 - The COSP-instrumented packages (``echam-rrtmgp-2m-cosp``, ``echam-jam-aci``),
   the idealized ``held_suarez``, the ``echam-strong-conv`` example, and the
   ``amip`` / ``era5`` / ``init=era5`` bundles that no configuration selects.
+- **``ham-t63-l47``** (``echam-ham-m7``, T63 L47 hybrid) — the ECHAM-HAM M7
+  aerosol population (``M7_SPEC``) and microphysics core on the same JAM
+  harness as ``echam-jam``, mirroring ``t63-echam-jam``'s grid/init/terrain/
+  forcing/run recipe. A skeleton configuration with no release-matrix run
+  yet; see {doc}`aerosol` ("HAM M7 modal aerosol") and
+  {doc}`../design/ham_m7_configuration` for exactly what is and is not yet
+  on this branch — in particular, H₂SO₄/H₂O nucleation still runs
+  Vehkamäki (``nsnucl=1``) rather than the reference's Kazil–Lovejoy
+  ion-mediated scheme (the factory wiring to select it is not yet composed,
+  though the underlying core and GCR-ionisation support are validated
+  against compiled reference Fortran), and the HAM aqueous-chemistry
+  constants and biogenic-OC source are prepared on separate open PRs, not
+  yet merged here.
 
 ## Tier 3 — guarded or invalid
 

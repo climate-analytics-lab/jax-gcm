@@ -541,6 +541,37 @@ interactive preset (``physics=speedy`` / ``echam``) they are rejected at
 start rather than silently ignored.
 See :doc:`design/surface_exchange` for the full contract.
 
+Running the ECHAM-HAM M7 aerosol preset
+---------------------------------------
+
+Reach for this if you want ECHAM6.3-HAM2.3's own **M7** aerosol population
+and microphysics (seven log-normal modes, HAM's own species properties and
+process variants) instead of the validated ``echam-jam`` configuration's
+CAM-derived MAM4. It composes and runs, but — unlike ``echam-jam`` — has no
+release-matrix validation yet; see :doc:`science/aerosol` ("HAM M7 modal
+aerosol") and :doc:`design/ham_m7_configuration` for exactly what is and is
+not yet faithful.
+
+The M7 microphysics core is a separate package, installed as its own extra:
+
+.. code-block:: bash
+
+   pip install jcm[m7]
+   python -m jcm.main +configuration=ham-t63-l47
+
+No further setup is needed to run the preset as shipped: it composes and
+runs on its own data (the κ-lookup table ships with the core, and the Mie
+optics tables build in-process). ``HAM_INPUT_DIR`` is relevant only to the
+reference's own ion-mediated nucleation (Kazil–Lovejoy, conditioned on
+galactic-cosmic-ray ionisation) — point it at a directory holding the
+HAMMOZ input pool's ``parnuc.15H2SO4.nc`` and ``gcr_ipr_solmin.txt``/
+``gcr_ipr_solmax.txt`` if you are working on that path directly (both the
+core and the ionisation term are validated against compiled reference
+Fortran); the preset itself still ships the simpler Vehkamäki nucleation
+(``nsnucl = 1``) until the configuration wiring to select the reference
+scheme is composed, so setting the variable has no effect on a run of this
+preset yet.
+
 Where to next
 -------------
 
