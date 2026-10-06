@@ -133,6 +133,73 @@ class M7ChainTest(unittest.TestCase):
             arr = np.asarray(getattr(freezing, field))
             self.assertTrue(np.all(np.isfinite(arr)), field)
 
+    def test_seeded_m7_dust_mass_gives_nonzero_contact_freezing_fractions(self):
+        """jax-gcm#1017 task 2 part 1: the composed-physics WIRING, not just
+        the bare :func:`ham_freezing_aerosol` call, produces non-zero contact
+        freezing fractions from a real M7 aerosol state.
+
+        The test just above only confirms *finite* on this model's cold
+        start, because that start's own dust is genuinely ~0 (an aquaplanet
+        has no land, so the Tegen source -- #802/#808 -- never fires in a
+        6-step run): it cannot exercise the non-zero branch. Emission is
+        validated end to end on its own path (``dust_integration_test.py``);
+        what is NOT otherwise covered is that ``PhysicsState`` tracers for
+        M7's insoluble accumulation/coarse dust (``ai``/``ci``) survive
+        through the scan-based ``ComposablePhysics`` loop into
+        :class:`IceNucleation`'s own harvesting of mass/number/wet-radius
+        diagnostics and out through :func:`ham_freezing_aerosol` -- the
+        exact chain ``m7_freezing_chain_reference_test.py`` verifies to
+        1e-8/1e-4 (float64/float32) against compiled HAM, but by calling the
+        two functions directly rather than through the live model.
+
+        Seeds a uniform (every level, every column) dust mass/number mixing
+        ratio directly into ``ai``/``ci`` at ``t=0`` -- bypassing emission
+        entirely, since emission is covered elsewhere -- sized from the
+        mode's own equilibrium geometry (:func:`particle_mean_mass`) so the
+        seed is an internally-consistent aerosol population, not an
+        arbitrary number. The absolute magnitude is not meant to be a
+        realistic atmospheric dust burden; it only needs to be unambiguously
+        non-zero after 6 steps of transport/microphysics.
+        """
+        from jcm.physics.aerosol.jam.emissions.distributors import (
+            particle_mean_mass)
+        from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
+
+        model = self._build()
+        # Build the default (zeroed-aerosol) dycore-native state, then
+        # convert it to the GRIDPOINT ``PhysicsState`` -- the dycore-native
+        # tracer representation has its own spectral packing, and hand-built
+        # ``to_modal`` arrays do not reproduce it (confirmed: doing so here
+        # reshapes into the wrong size downstream). ``model.run`` accepts a
+        # gridpoint ``PhysicsState`` directly and re-projects it through the
+        # dycore's own, already-tested ``initial_state`` path.
+        dycore_state = model.initial_state(physics_state=None, random_seed=0)
+        nodal_state = model.dycore.to_physics_state(dycore_state)
+
+        density = M7_SPEC.species_props("du").density
+        mass_mixing_ratio = {"ai": 1.0e-9, "ci": 1.0e-9}  # kg/kg, synthetic
+
+        tracers = dict(nodal_state.tracers)
+        for short, mmr in mass_mixing_ratio.items():
+            mean_mass = particle_mean_mass(M7_SPEC.mode(short), density)
+            number_mixing_ratio = mmr / mean_mass  # 1/kg, consistent geometry
+            tracers[mass_name("du", short)] = jnp.full_like(
+                tracers[mass_name("du", short)], mmr)
+            tracers[number_name(short)] = jnp.full_like(
+                tracers[number_name(short)], number_mixing_ratio)
+        nodal_state = nodal_state.copy(tracers=tracers)
+
+        predictions = model.run(
+            initial_state=nodal_state, save_interval=0.125, total_time=0.125)
+        dyn = predictions.dynamics
+        self.assertFalse(bool(jnp.any(jnp.isnan(dyn.temperature))))
+
+        freezing = predictions.physics["freezing_aerosol"]
+        for field in ("dust_insoluble_accumulation", "dust_insoluble_coarse"):
+            arr = np.asarray(getattr(freezing, field))
+            self.assertTrue(np.all(np.isfinite(arr)), field)
+            self.assertGreater(float(np.max(arr)), 0.0, field)
+
     def test_seasalt_mass_appears_only_in_as_cs(self):
         from jcm.physics.aerosol.jam.tracer_layout import mass_name
 
