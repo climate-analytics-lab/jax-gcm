@@ -2606,7 +2606,8 @@ Calibration and capability gaps
 """""""""""""""""""""""""""""""
 
 - **The calibration is two emission scales and one cloud-cover set; what is left
-  is structural.** Measured in the retune's 365-day T63 L47 JAM year and, for the
+  is structural.** Measured before the optics correction below in the retune's 365-day
+  T63 L47 JAM year and, for the
   1M and 2M, its control windows (:doc:`design/jam_aerosol_retune` has the
   evidence; the dust regional balance and the sulphur budget are from the
   review of its earlier-tree sweeps): clear-sky OLR is 8 to
@@ -2628,7 +2629,11 @@ Calibration and capability gaps
   deposition; and global-mean precipitation is 0.7 mm/day below GPCP (0.9 to
   1.1 over the ocean).
   See :doc:`design/jam_aerosol_retune` for the evidence.
-- **AOD needs a matched optical comparison before calibration.** The dry
+- **AOD optics now preserve aerosol mass at clipped modal sizes.** The
+  lognormal Mie integral is normalized to mass-derived wet volume, as in CAM,
+  rather than to potentially inconsistent modal number and radius (#823).
+  At fixed geometry and composition, extinction scales with aerosol mass.
+  **AOD still needs a matched optical comparison before calibration.** The dry
   sulfate optical surrogate now uses a representative real refractive index
   of 1.473 over 0.3–1 µm, consistent with the ammonium bisulfate represented
   by this species (115 g/mol); modal water

@@ -88,3 +88,17 @@ def test_dry_diagnostic_equals_ambient_without_water():
     out = term._optics_diagnostics_fields(state, aer, aer.number, factor, factor)
     np.testing.assert_array_equal(out["od550dryaer"], out["od550aer"])
     np.testing.assert_array_equal(out["od550_wat"], 0)
+
+
+def test_mass_normalization_survives_clipped_or_lagged_modal_number():
+    """Optical mass must not change when a bounded radius decouples from N."""
+    term, state, aer, _, _ = _sulfate_population([0.0, 0.8])
+    factor = jnp.ones(state.temperature.shape)
+    reference = term._optics_diagnostics_fields(state, aer, aer.number, factor, factor)
+    for multiplier in (0.1, 10.0):
+        changed = aer.copy(number=aer.number * multiplier)
+        out = term._optics_diagnostics_fields(state, changed, changed.number, factor, factor)
+        np.testing.assert_allclose(out["od550aer"], reference["od550aer"], rtol=1e-6)
+    doubled = state.copy(tracers={k: 2*v for k, v in state.tracers.items()})
+    out = term._optics_diagnostics_fields(doubled, aer, aer.number, factor, factor)
+    np.testing.assert_allclose(out["od550aer"], 2*reference["od550aer"], rtol=1e-6)

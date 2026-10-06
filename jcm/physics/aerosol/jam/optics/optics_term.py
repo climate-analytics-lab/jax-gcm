@@ -99,12 +99,12 @@ class ModeOpticsInputs(NamedTuple):
     modal geometry, the mass gate, the per-species apportionment and the
     column diagnostics, so a backend only has to answer the optical question.
 
-    Two normalisations of the same population are supplied because backends
-    differ in which one they predict against: the default Gauss-Hermite
-    quadrature integrates efficiencies per particle CROSS-SECTION and needs
-    ``num_per_area``, while an emulator predicting an extinction per unit
-    particle VOLUME needs ``vol_total * col_factor``. Both routes reduce to
-    ``pi * n_A * <Qe r^2>`` in the continuum, so they are directly comparable.
+    Both mass-derived volume and prognostic number are supplied. The default
+    quadrature normalizes its integrated cross-section to ``vol_total`` times
+    ``col_factor``, as CAM does. The number route agrees only when the radius,
+    number and mass share the same lognormal third moment. Radius clipping
+    and the microphysics update can break that identity; using number alone
+    would then change the amount of material represented in radiation.
 
     Attributes:
         mode: the :class:`~jcm.physics.aerosol.jam.population.AerosolMode`
@@ -404,15 +404,17 @@ class JamOpticsTerm(PhysicsTerm):
             (jnp.asarray(_GH_NODES, r_wet.dtype),
              jnp.asarray(_GH_WEIGHTS, r_wet.dtype)),
         )
-        # The three products keep the exact association they had before the
-        # per-mode block became a hook — extinction as
-        # ``n*sec*pi*r^2`` and the two scattering moments through a shared
-        # ``area`` — because float multiplication does not reassociate, and
-        # the default answers of every JAM configuration are pinned to these
-        # orderings.
-        area = inputs.num_per_area * math.pi * r_wet ** 2
-        tau = inputs.num_per_area * sec * math.pi * r_wet ** 2
-        return tau, area * sec_scat, area * sec_gscat
+        # Normalize to the mass-derived wet volume, as CAM's modal optics do.
+        # A clipped or lagged radius need not obey the third-moment identity
+        # V = N*(4*pi/3)*r_g**3*exp(4.5*ln(sigma)**2). Using N directly then
+        # silently discards (or invents) aerosol mass in radiation. For a
+        # consistent population this equals the number integral exactly.
+        # Substitute before dividing so empty modes have finite gradients.
+        safe_radius = jnp.where(r_wet > _MIN_DRY_RADIUS, r_wet, 1.0)
+        area = (inputs.vol_total * inputs.col_factor * 3.0
+                / (4.0 * safe_radius * math.exp(4.5 * ln_sig**2)))
+        area = jnp.where(r_wet > _MIN_DRY_RADIUS, area, 0.0)
+        return area * sec, area * sec_scat, area * sec_gscat
 
     def _map_bands(self, one_band, lam_all, ri_j):
         """Evaluate ``one_band`` over the band axis.
@@ -520,13 +522,9 @@ class JamOpticsTerm(PhysicsTerm):
                 # mode with no dry material, whatever ringing the number
                 # field carries.
                 #
-                # Where ``dg`` is unclipped, ``vol_tot`` below is moreover the
-                # third moment of the very lognormal the Gauss–Hermite
-                # quadrature integrates the Mie efficiencies over, so mixing
-                # rule and size integral describe one population. That
-                # stronger property is what clipping breaks: the size integral
-                # then follows the clipped radius while ``vol_dry`` follows
-                # the mass, and the two differ by ``(dg_clip/dg_true)³``.
+                # The default backend normalizes the size integral to this
+                # mass-derived volume, even if the radius is clipped or lags
+                # the microphysics mass/number update (#823).
                 #
                 # ``r_dry`` is floored so the ratio and its cube stay finite
                 # in the arm ``where`` does not take (both are evaluated, and

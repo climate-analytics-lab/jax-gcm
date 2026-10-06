@@ -97,12 +97,12 @@ hence of its apportioned extinction, ``od550aerh2o`` — is therefore
 ``(g³ − 1)/g³``. Only the *ratio* of the two radii enters, so this holds
 whether or not the core clips ``dg`` to a per-mode bound.
 
-Where ``dg`` is **unclipped** there is a stronger property: ``V_dry + V_w`` is
-then the third moment of the very lognormal the Gauss–Hermite quadrature
-integrates over, so the mixing rule and the size integral describe one
-particle population. Clipping breaks that second statement (not the first):
-the size integral follows the clipped radius while ``V_dry`` follows the mass,
-and the two part company by ``(dg_clip/dg_true)³``.
+The size integral is normalized to ``V_dry + V_w`` rather than directly to
+prognostic number. Dividing the integrated cross-section by the lognormal
+third moment gives extinction per wet volume, which is multiplied by the
+mass-derived wet volume. For consistent mass, number and radius this equals
+the number-normalized result. With a clipped or lagged radius it preserves
+the actual optical mass instead of representing a different aerosol burden.
 
 **What ECHAM-HAM/MAM does.** HAM carries aerosol water as a per-mode tracer
 and volume-mixes it with the mode's dry species before the optics lookup
@@ -155,13 +155,13 @@ carried here. Per-species optics are an apportionment of the mixed mode's
 extinction, not a decomposition — see
 {doc}`../design/aerosol_optics_diagnostics`.
 
-Because the water volume is number-free, the mixed refractive index is
-scale-free in the mode's masses, so **the core's ``dg`` diagnosis is the only
-channel from aerosol burden to radiation**. That channel saturates on a mode
-whose ``dg`` sits on a ``dgnum_lo``/``dgnum_hi`` bound: its radii, and hence
-its cross-section, stop responding to mass entirely. Neither core adjusts
-number to bring a clipped mode back inside its bounds the way MAM4's
-``calcsize`` does, so a clipped mode stays clipped — tracked in issue #823.
+The default optics now preserve the mass response on a mode whose ``dg``
+sits on a size bound (#823): at fixed geometry and composition, doubling
+mass doubles optical depth before the existing layer cap. Size bounds still
+limit the shape of the distribution; volume normalization does not remove
+that limitation or refresh a radius that lags the microphysics update. The
+MAM4-JAX core does adjust number in ``calcsize``; the placeholder is an
+equilibrium size diagnosis without that tendency.
 
 ### Cloud-droplet activation (ARG)
 

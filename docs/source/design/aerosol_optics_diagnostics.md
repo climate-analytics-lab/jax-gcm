@@ -116,7 +116,8 @@ either dry-particle mass extinction or its whole ambient extinction.
 
 The dry calculation retains internal mixing and all existing modal size
 limits. It does not turn each species into a separate pure population or
-repair inconsistencies between the core's clipped radius and mass/number.
+refresh a lagged radius. Extinction is normalized to mass-derived wet
+volume, including when the radius and prognostic number are inconsistent.
 Per-mode wet AOD divided by that mode's **interstitial** dry burden (summed
 over its dry species) is a meaningful ambient modal mass extinction
 efficiency. The optics exclude cloud-borne material, whereas the AeroCom
