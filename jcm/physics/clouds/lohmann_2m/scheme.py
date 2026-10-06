@@ -507,6 +507,75 @@ def cloud_microphysics_2m(
 
         zero_s = jnp.zeros_like(cf_k)
 
+        # --- Kaercher-Lohmann cirrus homogeneous nucleation (#552, #1017
+        # task 2 part 2b) ------------------------------------------------
+        # ECHAM computes ZSUSATIX and calls XFRZMSTR once per level inside
+        # SECTION 1's OWN loop (mo_cloud_micro_2m.f90:1009-1038) -- BEFORE
+        # sedimentation, melting or section 5 -- on the step-start humidity
+        # sice = pqm1/zqsi - 1 (:688-689), never section 5's adjusted
+        # zqp1tmp/zqsp1tmp (part 2b's claim (b)). The result (``znicex``)
+        # is used TWICE in the real Fortran: added directly into zicncq
+        # here (:1050-1058), and reused, UNCHANGED, as ``pnicex`` at
+        # update_in_cloud_water's own call far later (:1507) -- not a
+        # second xfrzmstr call. Computed once here and threaded through
+        # for both, matching that structure (an earlier version of this
+        # port only wired the second use, which this task's own end-to-end
+        # harness verification caught: section 1's direct addition is
+        # where nucleation actually reaches ICNC on every column except
+        # the rare one where pre-existing ice already exceeds icemin, so
+        # skipping it left non-degenerate cirrus columns pinned at the
+        # floor regardless of the aerosol number).
+        #
+        # The depletion reference at THIS point is ECHAM's zicncq right
+        # before its nic_cirrus block (:982) -- picnc's entry value plus
+        # this step's detrained-ice number, BEFORE sedimentation or
+        # melting have touched it (both run later, in section 4) -- not
+        # ``icnc_melt`` (a post-sedimentation, post-melt quantity that
+        # does not exist yet at this point in the sweep; part 2b's claim
+        # (a), also caught by the harness verification).
+        #
+        # ``nic_cirrus`` is a static (pytree_node=False) config field, so
+        # the plain Python ``if`` does not need to trace both branches --
+        # identical to how ``assembly.py``'s own
+        # ``nic_cirrus==1``/``==2`` dispatch works.
+        if params.nic_cirrus == 2:
+            sice_k = jnp.maximum(
+                q_m1_k / jnp.maximum(qsi_k, params.eps) - 1.0, 0.0)
+            zicncq_early_k = icnc0_k + znidetr_k
+            # zapnx = MAX(1e-6*(papnx - zicncq), 1e-6) [1/cm3]
+            # (mo_cloud_micro_2m.f90:1015,1018): the available aerosol
+            # number depleted by the ICNC already present.
+            apn_cm3_k = jnp.maximum(
+                1.0e-6 * (papnx_k - zicncq_early_k), 1.0e-6)
+            # verv_k is ECHAM's zvervx, already [cm/s] (turbulent_updraft_
+            # velocity's own docstring); xfrzmstr's own contract takes m/s
+            # (matching its updraft argument's name), so convert back.
+            _cirrus_ri_k, cirrus_pnicex_k = xfrzmstr(
+                sice_k, verv_k / 100.0, apn_cm3_k, t_m1_k, p_k, dt, params)
+            # The SAME depleted number, converted back to 1/m3, is HAM's
+            # ``pap`` -- update_in_cloud_water's own cap on the candidate
+            # (#552; see that function's nic_cirrus==2 branch).
+            cirrus_aerosol_number_available_k = apn_cm3_k * 1.0e6
+            # zninucl = MERGE(MIN(zap*1e6, znicex), 0, ll_ice) (:1050-1058):
+            # section 1's OWN cap+gate on znicex for the early join below --
+            # DIFFERENT from the raw znicex ``cirrus_pnicex_k`` itself
+            # passed to update_in_cloud_water, which applies its own,
+            # separate MIN(pnicex, pap*1e6) cap at a different point
+            # (:2618). ``ll_ice = (zsusatix>0)&(ptm1<zthomi)`` is already a
+            # SUBSET of xfrzmstr's own internal gate, so ``cirrus_pnicex_k``
+            # is already exactly 0 wherever ll_ice is false -- only the cap
+            # at ``cirrus_aerosol_number_available_k`` remains to apply.
+            zninucl_k = jnp.minimum(
+                cirrus_pnicex_k, cirrus_aerosol_number_available_k)
+        else:
+            cirrus_pnicex_k = inp_dep_k
+            cirrus_aerosol_number_available_k = zero_s
+            # NOT inp_dep_k: zninucl's own nic_cirrus=1 formula (zascs-based,
+            # #955) is unimplemented and distinct from ice_nuclei_deposition
+            # regardless -- this early join must stay exactly 0 whenever
+            # nic_cirrus != 2, never leak a future #679 producer into it.
+            zninucl_k = zero_s
+
         # --- 4. Sedimentation of cloud ice (grid-mean) -----------------
         # Acts on the ice present BEFORE this step's convective
         # detrainment, ECHAM zxip1 = pxim1 + ztmst·pxite (1227-1228):
@@ -530,12 +599,17 @@ def cloud_microphysics_2m(
         # pxim1 + ztmst·pxite reconstructs zxip1 exactly in the ledger.
         sedi_tend = (zxip1 - zxip1_pre) / dt
 
-        # The crystal number of the detrained ice joins the post-
-        # sedimentation ICNC, capped at icemax (1251-1252). ECHAM's floor at
-        # icemin (1253) is not applied: the ICNC lower bound stays cqtmin
+        # The crystal number of the detrained ice -- and, at nic_cirrus=2,
+        # the Kaercher-Lohmann cirrus nucleation computed just above
+        # (mo_cloud_micro_2m.f90's own ``zicncq += znidetr + zninucl``,
+        # :982,1050-1058, both folded into one addition here since jcm
+        # computes them at the same point) -- joins the post-sedimentation
+        # ICNC, capped at icemax (1251-1252). ECHAM's floor at icemin
+        # (1253) is not applied: the ICNC lower bound stays cqtmin
         # (znidetr's own floor, 978, as at entry) and number-less ice is
         # re-diagnosed in update_in_cloud_water (see the entry floor).
-        icnc_sedi = jnp.minimum(icnc_sedi + znidetr_k, params.icemax)
+        icnc_sedi = jnp.minimum(
+            icnc_sedi + znidetr_k + zninucl_k, params.icemax)
 
         # --- 3.1 Melting (fluxes + in-cloud ice) -----------------------
         # Runs after sedimentation (MG/PUMAS order, see docstring); the
@@ -726,40 +800,6 @@ def cloud_microphysics_2m(
             dt,
             params,
         )
-
-        # --- Kaercher-Lohmann cirrus homogeneous nucleation (#552, #1017
-        # task 2 part 2b) ------------------------------------------------
-        # ECHAM computes ZSUSATIX/calls XFRZMSTR once per level in SECTION
-        # 1 (mo_cloud_micro_2m.f90:1009-1038), on the STEP-START humidity
-        # sice = pqm1/zqsi - 1 (:688-689) -- q_m1_k/qsi_k here, not the
-        # section-5-adjusted zqp1tmp/zqsp1tmp. ``nic_cirrus`` is a static
-        # (pytree_node=False) config field, so the plain Python ``if`` does
-        # not need to trace both branches -- this is identical to how
-        # ``assembly.py``'s own ``nic_cirrus==1``/``==2`` dispatch works.
-        if params.nic_cirrus == 2:
-            sice_k = jnp.maximum(
-                q_m1_k / jnp.maximum(qsi_k, params.eps) - 1.0, 0.0)
-            # zapnx = MAX(1e-6*(papnx - icnc), 1e-6) [1/cm3]
-            # (mo_cloud_micro_2m.f90:1015,1018): the available aerosol
-            # number depleted by the ICNC already present. ``icnc_melt`` is
-            # this level's own ICNC at this point in the sweep -- the
-            # closest in-tree analogue of ECHAM's ``zicncq`` (which starts
-            # at ``picnc`` and accumulates within-level increments through
-            # section 1, mo_cloud_micro_2m.f90:630,982).
-            apn_cm3_k = jnp.maximum(
-                1.0e-6 * (papnx_k - icnc_melt), 1.0e-6)
-            # verv_k is ECHAM's zvervx, already [cm/s] (turbulent_updraft_
-            # velocity's own docstring); xfrzmstr's own contract takes m/s
-            # (matching its updraft argument's name), so convert back.
-            _cirrus_ri_k, cirrus_pnicex_k = xfrzmstr(
-                sice_k, verv_k / 100.0, apn_cm3_k, t_m1_k, p_k, dt, params)
-            # The SAME depleted number, converted back to 1/m3, is HAM's
-            # ``pap`` -- update_in_cloud_water's own cap on the candidate
-            # (#552; see that function's nic_cirrus==2 branch).
-            cirrus_aerosol_number_available_k = apn_cm3_k * 1.0e6
-        else:
-            cirrus_pnicex_k = inp_dep_k
-            cirrus_aerosol_number_available_k = zero_s
 
         # --- 5.5 In-cloud water update + activation / nucleation -------
         (cloud_flag, icnc_u, _nucl, cdnc_u, paclc, zxib, zxlb,
