@@ -26,14 +26,28 @@ size/mode "classes":
   biomass-specific ``cmr``), but it is what the compiled code does, so
   ``"biomass_like"``'s SO4 targets are a faithful, bit-for-bit copy of
   ``"fossil"``'s.
+* ``"biogenic"`` — ``idsec_biogenic`` (OC only, ``nsoa /= 1``: lines
+  596-607): no OM:OC scaling at all (the code comment "no OM to OC
+  conversion here"), 35 % to insoluble Aitken at ``cmr_bg`` WITH number,
+  32.5 % each to soluble Aitken/accumulation with NO number tendency
+  (HAM's own comment: soluble biogenic particles are assumed to condense
+  immediately onto existing particles rather than nucleate new ones,
+  P. Stier 2010) — unlike the other three classes, there is no jcm
+  super-sector feeding this one; it is read from its own forcing channel
+  (``emis_biogenic_oc``, maintainer decision F7) only when a population's
+  policy declares it (:func:`m7_sector_policy`; MAM4 never reads it).
 
-A :class:`SectorTarget` is ``(species, mode, mass_fraction, cmr_m)``:
-``mass_fraction`` of the species' ALREADY-SCALED emitted mass (BC: the raw
-BC flux; OC: the raw OC flux, the OM:OC scaling applied once by the caller,
-not baked in here, matching HAM's own ``pfactor(idx_mocki) = zom2oc·(...)``
-structure; SO4: the primary-SO4 mass the caller already derived from the
-SO2 flux — HAM's ``zso2tso4·(1−zfacso2)``, see ``sectors.py``), and
-``cmr_m`` the number-median radius [m] HAM assumes for that target.
+A :class:`SectorTarget` is ``(species, mode, mass_fraction, cmr_m,
+has_number)``: ``mass_fraction`` of the species' ALREADY-SCALED emitted
+mass (BC: the raw BC flux; OC: the raw OC flux, the OM:OC scaling applied
+once by the caller, not baked in here, matching HAM's own
+``pfactor(idx_mocki) = zom2oc·(...)`` structure — and never applied at all
+for ``"biogenic"``; SO4: the primary-SO4 mass the caller already derived
+from the SO2 flux — HAM's ``zso2tso4·(1−zfacso2)``, see ``sectors.py``),
+``cmr_m`` the number-median radius [m] HAM assumes for that target, and
+``has_number`` (default ``True``) whether HAM gives this target an
+explicit number tendency at all (``False`` for ``"biogenic"``'s soluble
+Aitken/accumulation targets only).
 
 HAM's mass->number conversion (``zm2n = 3/(4·pi·rho·(cmr·cmr2ram(mode))³)``,
 ``cmr2ram(mode) = exp(1.5·ln(sigma_mode)²)``, ``mo_ham_m7ctl.f90:427``) is
@@ -52,6 +66,7 @@ import math
 #: HAM's assumed number-median radii [m] (``mo_ham_m7_emissions.f90:150-175``).
 CMR_FF = 0.03e-6    # fossil fuel (BC/OC insoluble Aitken; SO4 Aitken half)
 CMR_BB = 0.075e-6   # biomass burning (BC/OC)
+CMR_BG = 0.03e-6    # biogenic secondary particle formation (mo_ham_m7_emissions.f90:160)
 CMR_SK = 0.03e-6    # primary SO4 -> Aitken soluble
 CMR_SA = 0.075e-6   # primary SO4 -> accumulation soluble
 CMR_SC = 0.75e-6    # primary SO4 -> coarse soluble (energy/ships)
@@ -61,8 +76,17 @@ CMR_SC = 0.75e-6    # primary SO4 -> coarse soluble (energy/ships)
 #: biomass OC; ``1 - this`` is the insoluble (Aitken-insoluble) share.
 BB_WSOC_FRACTION = 0.65
 
-#: Three HAM emission classes every jcm super-sector resolves to.
-HAM_SECTOR_CLASSES: tuple[str, ...] = ("fossil", "energy_ships", "biomass_like")
+#: HAM's biogenic water-soluble-OC fraction, ``zbg_wsoc_perc``
+#: (``mo_ham_m7_emissions.f90:92``, "Assume same Percentage of WSOC for
+#: biogenic OC" -- numerically identical to BB_WSOC_FRACTION but declared
+#: separately in the Fortran, so kept separate here too).
+BG_WSOC_FRACTION = 0.65
+
+#: HAM emission classes every jcm super-sector resolves to, plus the
+#: standalone "biogenic" class fed by its own forcing channel (see the
+#: module docstring).
+HAM_SECTOR_CLASSES: tuple[str, ...] = (
+    "fossil", "energy_ships", "biomass_like", "biogenic")
 
 
 def _cmr2ram(sigma_g: float) -> float:
@@ -87,12 +111,18 @@ def cmr_to_emission_diameter(cmr_m: float, sigma_g: float) -> float:
 
 @dataclasses.dataclass(frozen=True)
 class SectorTarget:
-    """One ``(species, mode, mass fraction, number-median radius)`` target."""
+    """One ``(species, mode, mass fraction, number-median radius)`` target.
+
+    ``has_number`` (default ``True``) is ``False`` only for ``"biogenic"``'s
+    soluble Aitken/accumulation targets, which HAM gives no explicit number
+    tendency at all (see the module docstring); ``cmr_m`` is then unused.
+    """
 
     species: str
     mode: str
     mass_fraction: float
     cmr_m: float
+    has_number: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
@@ -152,11 +182,23 @@ def m7_sector_policy(om_oc: float) -> HamSectorPolicy:
         # fossil ones -- so the mass/cmr targets are fossil's, unchanged.
         "so4": fossil["so4"],
     }
+    biogenic = {
+        # lines 601-607: no zom2oc scaling (the caller's om_oc is NOT
+        # applied for this class -- see AnthropogenicEmissions); 35% KI
+        # WITH number at cmr_bg, 32.5% each KS/AS with NO number (HAM's own
+        # "no OM to OC conversion here" / immediate-condensation comments).
+        "oc": (
+            SectorTarget("oc", "ki", 1.0 - BG_WSOC_FRACTION, CMR_BG),
+            SectorTarget("oc", "ks", 0.5 * BG_WSOC_FRACTION, CMR_BG, has_number=False),
+            SectorTarget("oc", "as", 0.5 * BG_WSOC_FRACTION, CMR_BG, has_number=False),
+        ),
+    }
     return HamSectorPolicy(
         targets={
             "fossil": fossil,
             "energy_ships": energy_ships,
             "biomass_like": biomass_like,
+            "biogenic": biogenic,
         },
         om_oc=om_oc,
     )

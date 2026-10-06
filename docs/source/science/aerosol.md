@@ -1031,13 +1031,11 @@ Avogadro's number and its separately-rounded ``xtoc``/``ctox`` factor
 mass (``_MW_SO2 = 64.0643``, ``mo_ham.f90:310``). All five are now
 ``_aqueous_so4``'s own module constants at r7492's values — a **deliberate
 change to the ``echam-jam``/MAM4 default path** (maintainer decision
-2026-10-06), not an optional override, since no second (M7) population
-exists on this branch to carry one. SO₄'s own molar mass stays jcm's MAM4-
-MOM value (115 g/mol, ``_MW_SO4``) — a jcm species-table choice, not a HAM
-literal, and outside jax-gcm#1031's scope — but is kept as a function
-parameter (``mw_so4``) rather than a bare module constant, so a future
-population with its own SO₄ species (M7's 96.0631 g/mol) can still supply
-it. The routine's ``xtoc`` conversion for the produced-sulfate mass now
+2026-10-06), shared by every population. SO₄'s own molar mass is the
+population's: jcm's MAM4-MOM value (115 g/mol, ``_MW_SO4``) for MAM4 — a jcm
+species-table choice, not a HAM literal — and HAM's 96.0631 g/mol for M7,
+passed as the ``mw_so4`` parameter by ``AqueousSulfur`` from
+``spec.species_props("so4")``. The routine's ``xtoc`` conversion for the produced-sulfate mass now
 consistently uses that same ``mw_so4`` parameter rather than the module
 constant unconditionally, fixing a related inconsistency found while
 tracing the literal fix through.
@@ -1045,9 +1043,9 @@ tracing the literal fix through.
 **Status & known limitations.** ``_aqueous_so4`` matches the compiled,
 unmodified ``ham_wet_chemistry`` at float64 rtol=1e-12 on every one of 16
 designed reference cells (``jcm/data/test/echam_cloud_reference/
-hamaqueous_M7.{npz,README.md}``), called directly with M7's own SO₄ molar
-mass (the fixture's species) since no M7 population exists here to carry
-it through the full term. See the pull request closing jax-gcm#1031 for
+hamaqueous_M7.{npz,README.md}``), both as the bare kernel with M7's SO₄
+molar mass and as the full ``AqueousSulfur`` term on ``M7_SPEC`` (HAM's
+number-fraction AS/CS split included). See the pull request closing jax-gcm#1031 for
 the measured change in ``echam-jam``'s in-cloud sulfate production and
 burden.
 

@@ -15,11 +15,13 @@ on the shared kernel, so it moves the ``echam-jam``/MAM4 default path too
 The reference fixture's SO4 species is M7's own (96.0631 g/mol), not jcm's
 MAM4 value (115 g/mol, kept as :data:`aqueous._MW_SO4` — jcm's own species
 choice, not a HAM literal) — ``_aqueous_so4``'s ``mw_so4``/``conv_so2_so4``
-parameters let this test supply M7's value directly without wiring up an
-M7 population on this branch (no ``AqueousConstants``/``ModalAerosolSpec``
-override exists here; see jax-gcm#1017 for that fuller M7 adapter).
+parameters let the kernel test supply M7's value directly.
+``test_aqueous_sulfur_m7_matches_ham_wet_chemistry`` additionally runs the
+full ``AqueousSulfur`` term on the M7 population (``M7_SPEC``), which carries
+M7's SO4 and HAM's number-fraction AS/CS split, against every recorded
+grid-mean tendency.
 
-This test calls the bare kernel, not the full ``AqueousSulfur`` term: the
+The kernel test calls the bare kernel, not the full ``AqueousSulfur`` term: the
 reference records GRID-MEAN tendencies after HAM's own number-fraction
 mode split (``pxtte_ms4as``/``pxtte_ms4cs``), but that split only
 redistributes the kernel's own undivided in-cloud production, so
@@ -38,7 +40,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from jcm.physics.aerosol.jam.chemistry.aqueous import _aqueous_so4
+import types
+
+from jcm.physics.aerosol.jam.chemistry.aqueous import AqueousSulfur, _aqueous_so4
+from jcm.physics.aerosol.jam.chemistry.oxidants import OxidantField
+from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
+from jcm.physics_interface import PhysicsState
 
 REF = (Path(__file__).resolve().parents[4] / "data" / "test" / "echam_cloud_reference"
        / "hamaqueous_M7.npz")
@@ -94,6 +102,82 @@ def test_aqueous_so4_kernel_matches_ham_wet_chemistry():
         expected = np.where(paclc > 0.0, rate * dt / safe_paclc, 0.0)
 
         np.testing.assert_allclose(got, expected, rtol=RTOL, atol=0.0)
+
+
+def run_jcm():
+    z = load()
+    n = len(z["meta/names"])
+    dtype = jnp.float64
+
+    def g(k):
+        return jnp.asarray(z[k], dtype)
+
+    tracers = {
+        "g_so2": g("in/so2"),
+        mass_name("so4", "as"): g("in/ms4as"),
+        mass_name("so4", "cs"): g("in/ms4cs"),
+        number_name("as"): g("in/nas"),
+        number_name("cs"): g("in/ncs"),
+    }
+    state = PhysicsState.zeros((n,)).copy(
+        temperature=g("in/tm1"), tracers=tracers,
+    )
+    ox = OxidantField(
+        oh=jnp.zeros(n, dtype), no3=jnp.zeros(n, dtype),
+        o3=g("in/o3_density"), h2o2=g("in/h2o2_density"),
+    )
+    paclc = g("in/paclc")
+    diagnostics = {
+        "oxidants": ox,
+        "clouds": types.SimpleNamespace(
+            cloud_fraction=paclc, qc=g("in/pmlwc") * paclc,
+        ),
+        "air_density": g("in/rhop1"),
+        "_dt_seconds": float(z["in/time_step_len"]),
+    }
+    term = AqueousSulfur(spec=M7_SPEC)
+    tend, _ = term(state, diagnostics, None, None)
+    return tend
+
+
+def test_aqueous_sulfur_m7_matches_ham_wet_chemistry():
+    """Every recorded field, every cell, at float64 round-off.
+
+    Covers the full branch structure HAM's number-fraction split has
+    (both-present/only-AS/only-CS/neither-present, the ``no_cloud`` LWC
+    gate, warm/cold, and every oxidant-limited regime) — see
+    ``hamaqueous_README.md``'s cell table.
+    """
+    with jax.enable_x64(True):
+        tend = run_jcm()
+        z = load()
+        n = len(z["meta/names"])
+        zeros = np.zeros(n)
+
+        np.testing.assert_allclose(
+            np.asarray(tend.tracers["g_so2"], np.float64),
+            z["out/pxtte_so2"], rtol=RTOL, atol=0.0, err_msg="g_so2",
+        )
+        np.testing.assert_allclose(
+            np.asarray(tend.tracers[mass_name("so4", "as")], np.float64),
+            z["out/pxtte_ms4as"], rtol=RTOL, atol=0.0, err_msg="m_so4_as",
+        )
+        np.testing.assert_allclose(
+            np.asarray(tend.tracers[mass_name("so4", "cs")], np.float64),
+            z["out/pxtte_ms4cs"], rtol=RTOL, atol=0.0, err_msg="m_so4_cs",
+        )
+        # HAM never adjusts the AS number tracer in ham_wet_chemistry; jcm
+        # correspondingly never emits an "n_as" tendency key.
+        np.testing.assert_allclose(
+            np.asarray(tend.tracers.get(number_name("as"), zeros), np.float64),
+            z["out/pxtte_nas"], rtol=RTOL, atol=0.0, err_msg="n_as",
+        )
+        # Nonzero only in the two "neither present" cells (as_below_cs_below,
+        # both_empty), where HAM seeds new CS number from the produced mass.
+        np.testing.assert_allclose(
+            np.asarray(tend.tracers.get(number_name("cs"), zeros), np.float64),
+            z["out/pxtte_ncs"], rtol=RTOL, atol=0.0, err_msg="n_cs",
+        )
 
 
 def test_reference_cells_exercise_every_branch():

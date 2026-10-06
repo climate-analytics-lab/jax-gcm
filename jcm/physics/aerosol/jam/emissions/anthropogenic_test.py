@@ -316,6 +316,43 @@ class M7SectorEmissionTest(unittest.TestCase):
         np.testing.assert_allclose(n_ki, _F_BC * self._zm2n("ki", "bc", CMR_FF),
                                    rtol=1e-5)
 
+    def test_biogenic_oc_channel_splits_ki_ks_as_no_om_oc_scaling(self):
+        from jcm.physics.aerosol.jam.emissions.ham_sectors import BG_WSOC_FRACTION, CMR_BG
+        from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
+
+        f_bg_oc = 2.0e-9
+        tend, rho, dz = self._run(emis_biogenic_oc=f_bg_oc)
+
+        m_ki = _column_integral(tend.tracers[mass_name("oc", "ki")], rho, dz)
+        m_ks = _column_integral(tend.tracers[mass_name("oc", "ks")], rho, dz)
+        m_as = _column_integral(tend.tracers[mass_name("oc", "as")], rho, dz)
+        # No OM_OC_RATIO scaling: the three fractions sum to exactly f_bg_oc.
+        np.testing.assert_allclose(m_ki, (1.0 - BG_WSOC_FRACTION) * f_bg_oc, rtol=1e-5)
+        np.testing.assert_allclose(m_ks, 0.5 * BG_WSOC_FRACTION * f_bg_oc, rtol=1e-5)
+        np.testing.assert_allclose(m_as, 0.5 * BG_WSOC_FRACTION * f_bg_oc, rtol=1e-5)
+        np.testing.assert_allclose(m_ki + m_ks + m_as, f_bg_oc, rtol=1e-5)
+
+        n_ki = _column_integral(tend.tracers[number_name("ki")], rho, dz)
+        np.testing.assert_allclose(
+            n_ki,
+            (1.0 - BG_WSOC_FRACTION) * f_bg_oc * self._zm2n("ki", "oc", CMR_BG),
+            rtol=1e-5)
+        # No explicit number tendency on the soluble biogenic targets.
+        self.assertTrue(
+            number_name("ks") not in tend.tracers
+            or np.all(np.asarray(tend.tracers[number_name("ks")]) == 0.0))
+        self.assertTrue(
+            number_name("as") not in tend.tracers
+            or np.all(np.asarray(tend.tracers[number_name("as")]) == 0.0))
+
+    def test_mam4_never_reads_biogenic_channel(self):
+        # MAM4's population has no "biogenic" class, and sector_emission is
+        # None, so AnthropogenicEmissions() never even looks at the channel.
+        state, diagnostics, forcing = _setup(emis_biogenic_oc=2.0e-9)
+        tend, _ = AnthropogenicEmissions()(state, diagnostics, forcing, None)
+        for v in tend.tracers.values():
+            self.assertTrue(np.all(np.asarray(v) == 0.0))
+
     def test_mam4_unaffected_by_m7_sector_policy_path(self):
         # The default (no spec override) path is bit-for-bit the one
         # exercised throughout the rest of this file.
