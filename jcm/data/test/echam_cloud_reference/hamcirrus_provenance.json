@@ -1,0 +1,39 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "routine": "mo_cirrus.f90::xfrzmstr (calling xfrzhom/xicehom; xfrzhet/xicehet and every aerosol-size-effect branch of xicehom/xicehet are UNREACHABLE in this build -- lhetfreeze is an em_error unless compiled with -DWITH_LHET, mo_ham.f90:616-622, which this build is not, and nosize is a PARAMETER .true., mo_cloud_micro_2m.f90:446)",
+  "compiled_unmodified": [
+   "mo_cirrus.f90",
+   "mo_kind.f90"
+  ],
+  "md5": {
+   "mo_kind.f90": "f7db37634d715105ed356b1a260a85ac",
+   "mo_cirrus.f90": "0595e9cb04d7ae29c312343a46cc47ce"
+  }
+ },
+ "mode": "cirrus_driver calls xfrzmstr directly (klev=1, kbdim=kproma=ncol, jk=1, nfrzmod=1); no HAM/aerosol module tree -- mo_cirrus.f90's only USE statement is mo_kind",
+ "configuration": {
+  "lhet": false,
+  "nosize": true,
+  "ztmst": 1200.0,
+  "tmelt": 273.15,
+  "zmin": 2.220446049250313e-16,
+  "zthomi": 238.14999999999998,
+  "nfrzmod": 1
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -D__LP64__ -ffp-contract=off -fimplicit-none",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "path": "/scr/dwatsonparris/ham-m7/w4/cirrus-harness",
+  "repository": "private scratch (own code: Makefile, src/cirrus_driver.f90, py/*), no ECHAM source committed",
+  "commit": "",
+  "uncommitted_changes": false
+ },
+ "checks": {
+  "O0_vs_O2_max_abs": {
+   "zri_m": 0.0,
+   "znicex_m3": 0.0
+  }
+ }
+}
