@@ -170,26 +170,29 @@ _N_EAST_ASIA_ROWS = len(EAST_ASIA_INDEX)
 #: to the ``ndust = 4`` T63 vector alone, since that is the only grid carrying
 #: native HAMMOZ source fields (#810).
 #:
-#: 0.379095663 is the best observed arm of the Stage-2 sweep of the JAM aerosol
-#: retune (the surrogate's own optimum is 0.3779; see
-#: ``docs/source/design/jam_aerosol_retune.md``). The retune loss (cloud
-#: radiative effects, cloud cover, precipitation, liquid water path, and the
-#: total and dust AOD against ESA-CCI SU v4.21 and SLSTR SU v1.12) was minimised
-#: by a 40-arm Sobol sweep (14-day windows) and a 25-arm Gaussian-process
-#: expected-improvement sweep (30-day windows), January and July, on dev
-#: 519f18e8; the dust scale acts through the dust AOD, and the AeroCom burden
-#: and lifetime are monitors that never enter the loss. A 365-day
-#: ``echam-jam-t63-l47`` year of the release configuration gives dust AOD 0.0092
-#: (observed 0.0213), a dust burden of 15.7 mg/m2 (AeroCom mean 37.6, median
-#: 40.2), D < 10 um emission of 1629 Tg/yr (AeroCom median 1640 at mixed size
+#: 0.344 is the best arm of Stage 2c of the JAM aerosol retune, calibrated with
+#: the Sundqvist T63 cloud-fraction set (``JCM_CALIBRATED_COVER_T63``) in place
+#: (see ``docs/source/design/jam_aerosol_retune.md``). The sweep is the control
+#: and 19 Gaussian-process expected-improvement arms, 30-day windows, January
+#: and July, over this scale ([0.2, 0.6]) and the sea-salt scale ([1, 4]), with
+#: the five cover parameters held at the shipped values. The retune loss is the
+#: cloud radiative effects, cloud cover, precipitation, liquid water path, and
+#: the total and dust AOD against ESA-CCI SU v4.21 and SLSTR SU v1.12; the dust
+#: scale acts through the dust AOD, and the AeroCom burden and lifetime are
+#: monitors that never enter the loss. The best arm has loss 326 against 557 for
+#: the control (scale 0.5, sea-salt scale 1) and every one of the five best arms
+#: has this scale in 0.340-0.353, so the sweep locates it. The stored digits are
+#: the rounded ones the 365-day confirmation year ran (the arm's own are
+#: 0.343962). That ``echam-jam-t63-l47`` year gives a dust AOD of 0.0109
+#: (observed 0.0213), a dust burden of 20.9 mg/m2 (AeroCom mean 37.6, median
+#: 40.2), a D < 10 um emission of 2351 Tg/yr (AeroCom median 1640 at mixed size
 #: cut-offs; the parent model's budget in this window is 642, see the science
-#: page) and a dust lifetime of 1.8 d (AeroCom 4.1). The year at scale 0.5 emits 563 Tg/yr:
-#: a 24 % lower threshold triples the emission, which is why the number is
-#: measured rather than inherited. What remains of the dust-AOD deficit is
-#: lifetime and regional source balance, which a global scalar cannot move.
-#: The digits stored are the ones the confirmation year ran. The derivation is
-#: in ``docs/source/science/aerosol.md``.
-NDUSCALE_JCM_T63_SCALE = 0.379095663
+#: page) and a dust lifetime of 1.6 d (AeroCom 4.1). A year at scale 0.5 emits
+#: 563 Tg/yr: a 31 % lower threshold quadruples the emission, which is why the
+#: number is measured rather than inherited. What remains of the dust-AOD
+#: deficit is lifetime and regional source balance, which a global scalar
+#: cannot move. The derivation is in ``docs/source/science/aerosol.md``.
+NDUSCALE_JCM_T63_SCALE = 0.344
 
 #: Number of regions in ``dust_regions.nc`` (1 = everywhere else, 2 = N America,
 #: 3 = S America, 4 = N Africa, 5 = S Africa, 6 = Middle East, 7 = Asia,

@@ -209,6 +209,26 @@ def precision(name: str):
 # numpy). ``nn`` is the spectral truncation whose resolution-dependent
 # constants ECHAM used (mo_echam_cloud_params.f90:198-240).
 # ===========================================================================
+def echam_cover_parameters(nn: int = 63):
+    """``CloudParameters`` at the constants ECHAM's Fortran ran with.
+
+    The reference stores the ``mo_echam_cloud_params`` values of each run
+    (``param/sonntag/*`` at T63, ``T{nn}/param/*`` at the other truncations).
+    Building the parameters from them rather than from
+    ``CloudParameters.default(truncation=nn)`` keeps this comparison one of
+    jcm's formulation against ECHAM's, whatever jcm ships as its own defaults
+    (jcm's T63 cover fields are a calibrated set, not ECHAM's).
+    """
+    from jcm.physics.clouds.sundqvist import CloudParameters
+
+    z = load("cover") if nn == 63 else load_resolution()
+    prefix = "param/sonntag/" if nn == 63 else f"T{nn}/param/"
+    fields = {k: float(z[prefix + k])
+              for k in ("crt", "crs", "nex", "csatsc", "cinv", "csecfrl")}
+    return CloudParameters.default(
+        truncation=nn, nadd=int(z[prefix + "nadd"]), **fields)
+
+
 def run_jcm_cover(inp: dict, nn: int = 63) -> dict:
     """ECHAM ``cover`` -> jcm ``SundqvistCloudFraction``. Returns ``paclc``.
 
@@ -219,12 +239,9 @@ def run_jcm_cover(inp: dict, nn: int = 63) -> dict:
     terrain.fmask; sea-ice fraction of the water part ``pfri / (pfrw + pfri)``
     -> forcing.sice_am; ktype -> convection.ktype. ``vct`` is the vertical
     grid ``cache_coords`` derives ECHAM's jbmin/jbmax from, and ``nn`` selects
-    ECHAM's parameter row (``CloudParameters.default(truncation=nn)``).
+    ECHAM's parameter row (:func:`echam_cover_parameters`).
     """
-    from jcm.physics.clouds.sundqvist import (
-        CloudParameters,
-        SundqvistCloudFraction,
-    )
+    from jcm.physics.clouds.sundqvist import SundqvistCloudFraction
 
     t = jnp.asarray(inp["ptm1"])
     nlev, ncol = t.shape
@@ -249,7 +266,7 @@ def run_jcm_cover(inp: dict, nn: int = 63) -> dict:
                                    nodal_shape=(ncol,)),
         vertical=SimpleNamespace(a_boundaries=vct[:nlev + 1],
                                  b_boundaries=vct[nlev + 1:]))
-    term = SundqvistCloudFraction(CloudParameters.default(truncation=nn))
+    term = SundqvistCloudFraction(echam_cover_parameters(nn))
     term.cache_coords(coords)
     _, out = term(state, diagnostics, forcing, terrain)
     return {"paclc": np.asarray(out["clouds"].cloud_fraction, np.float64)}

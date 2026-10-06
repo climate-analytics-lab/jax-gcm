@@ -30,6 +30,29 @@ switching between its rows. The interpolated values are jcm's choice and are
 untuned; the reference itself has no configuration between its truncations
 (ECHAM6.3 stops with "Truncation not supported").
 
+## A calibrated row
+
+A table row is the reference's unless jcm has calibrated it. The cloud cover's
+table keeps ECHAM's four rows verbatim (`ECHAM_CLOUD_DEFAULTS`, which its own
+test pins against the Fortran source) and lays jcm's calibrated T63 values of
+`crt`, `crs`, `nex`, `csatsc` and `cinv` over the T63 row
+(`JCM_CALIBRATED_COVER_T63`, giving `JCM_CLOUD_DEFAULTS`, the table the
+mechanism reads; {doc}`jam_aerosol_retune`, "Stage 2b: cloud fraction"). The
+other T63 fields (`nadd`, `cvtfall`, `csecfrl`, `clwprat`) and the other rows are
+ECHAM's and uncalibrated. Every consequence follows from the rule above and
+needs no special case:
+
+* T63, and a grid without a spectral truncation (the fallback row), get the
+  calibrated values.
+* A truncation between T63 and T127 interpolates between the calibrated T63 row
+  and ECHAM's T127 row, so T106 (43/64 of the way) is an untuned blend of the
+  two. `nex`, an integer in ECHAM, takes the nearer truncation's value: the
+  calibrated, real-valued one up to T94, ECHAM's 2 from T95.
+* Between T31 and T63 the interpolation runs toward the calibrated row.
+* The comparison against the ECHAM Fortran takes ECHAM's constants from the
+  reference data, not from the shipped defaults, so it tests the formulation
+  whatever is calibrated.
+
 ## Chosen at construction
 
 The defaults are fixed when the physics is built, so that the parameter pytree

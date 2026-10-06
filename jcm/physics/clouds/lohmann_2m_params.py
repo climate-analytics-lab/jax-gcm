@@ -250,9 +250,10 @@ class CloudParams2M:
         (``mo_cloud_micro_2m.f90`` l.97, 536; ``mo_echam_cloud_params.f90``
         l.198-237), the same ``cvtfall`` the 1M reads. ``truncation`` selects
         it like the 1M's (63, the default and what a build without a grid gets,
-        is ECHAM's T63 value 2.5; other truncations interpolate between
-        ECHAM's rows, ``None`` is a non-spectral grid, which takes the T63 row
-        with a warning). An explicit ``cvtfall`` wins. The remaining
+        is ECHAM's T63 value 2.5; other truncations interpolate between the
+        rows of ``echam_cloud_defaults``, whose ``cvtfall`` is ECHAM's at every
+        row, ``None`` is a non-spectral grid, which takes the T63 row with a
+        warning). An explicit ``cvtfall`` wins. The remaining
         defaults are not resolution dependent in ECHAM's 2M.
         """
         if cvtfall is None:

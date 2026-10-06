@@ -1,9 +1,10 @@
-"""ECHAM's grid-dependent cloud defaults and how they reach the cover.
+"""The cloud tunables' per-truncation defaults and how they reach the cover.
 
-Pins the table against ``mo_echam_cloud_params.f90::sucloud`` (r7492
-l.198-237), the interpolation between ECHAM's truncations, ECHAM's inversion
-levels, and the precedence of the values a run ends up with: an explicit
-``CloudParameters`` object, then a field override, then the grid's default.
+Pins ECHAM's table against ``mo_echam_cloud_params.f90::sucloud`` (r7492
+l.198-237), jcm's calibrated T63 cover fields laid over it, the interpolation
+between the table's truncations, ECHAM's inversion levels, and the precedence
+of the values a run ends up with: an explicit ``CloudParameters`` object, then
+a field override, then the grid's default.
 """
 
 import warnings
@@ -17,6 +18,8 @@ import pytest
 from jcm.physics import resolution_defaults
 from jcm.physics.clouds.echam_cloud_defaults import (
     ECHAM_CLOUD_DEFAULTS,
+    JCM_CALIBRATED_COVER_T63,
+    JCM_CLOUD_DEFAULTS,
     echam_cloud_defaults,
     inversion_levels,
 )
@@ -39,6 +42,18 @@ FORTRAN = {
     127: (0.994, 0.75, 2, 0, 0.7, 0.25, 3.0, 1.0e-5, 4.0),
     255: (0.994, 0.75, 2, 0, 0.7, 0.25, 3.0, 1.0e-5, 4.0),
 }
+
+#: jcm's calibrated T63 cover fields (Stage 2b of the v3 release calibration:
+#: the interior arm of the 25-arm sweep on the 2M host), transcribed
+#: independently of the module under test.
+CALIBRATED_T63 = dict(crt=0.679016061, crs=0.9, nex=1.84856084,
+                      csatsc=0.948216414, cinv=0.213005383)
+
+#: What ships: ECHAM's rows, T63's five cover fields calibrated.
+SHIPPED = {
+    truncation: {**dict(zip(FIELDS, row)),
+                 **(CALIBRATED_T63 if truncation == 63 else {})}
+    for truncation, row in FORTRAN.items()}
 
 
 def _grid(truncation, nlev=47, nodal_shape=(192, 96)):
@@ -63,41 +78,81 @@ def _fresh_warnings():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("truncation", sorted(FORTRAN))
-def test_echam_truncations_return_the_fortran_values(truncation):
-    got = echam_cloud_defaults(truncation)
+def test_echam_table_is_the_fortran_table(truncation):
+    """``ECHAM_CLOUD_DEFAULTS`` keeps ECHAM's values at all four truncations."""
+    got = ECHAM_CLOUD_DEFAULTS[truncation]
     assert tuple(got[f] for f in FIELDS) == FORTRAN[truncation]
-    assert got == ECHAM_CLOUD_DEFAULTS[truncation]
 
 
-def test_t106_is_interpolated_between_t63_and_t127():
-    """Linear in the truncation number: T106 is 43/64 of the way."""
+@pytest.mark.parametrize("truncation", sorted(FORTRAN))
+def test_shipped_rows_are_echams_with_the_t63_cover_calibrated(truncation):
+    """T31, T127 and T255 are ECHAM's; T63 has five calibrated cover fields."""
+    got = echam_cloud_defaults(truncation)
+    assert got == SHIPPED[truncation]
+    assert got == JCM_CLOUD_DEFAULTS[truncation]
+    if truncation != 63:
+        assert got == ECHAM_CLOUD_DEFAULTS[truncation]
+
+
+def test_calibrated_t63_cover_fields():
+    """The adopted Stage-2b set, and only the five cover fields of T63."""
+    assert JCM_CALIBRATED_COVER_T63 == CALIBRATED_T63
+    t63 = echam_cloud_defaults(63)
+    for field, value in CALIBRATED_T63.items():
+        assert t63[field] == value
+    # the fields outside the calibrated set are ECHAM's, untouched
+    for field in ("nadd", "cvtfall", "csecfrl", "clwprat"):
+        assert t63[field] == ECHAM_CLOUD_DEFAULTS[63][field]
+    # ... and the calibration does not alias ECHAM's own table
+    assert ECHAM_CLOUD_DEFAULTS[63]["crs"] == 0.975
+
+
+def test_t106_is_interpolated_between_the_t63_and_t127_rows():
+    """Linear in the truncation number: T106 is 43/64 of the way.
+
+    The T63 end is the shipped (calibrated) row and the T127 end is ECHAM's,
+    so T106 is an untuned blend of the two; ``nex`` and ``nadd`` take the
+    nearer truncation's value (T127's).
+    """
     w = (106 - 63) / (127 - 63)
     got = echam_cloud_defaults(106)
-    for f, lo, hi in zip(FIELDS, FORTRAN[63], FORTRAN[127]):
+    for f in FIELDS:
+        lo, hi = SHIPPED[63][f], SHIPPED[127][f]
         if f in ("nex", "nadd"):
-            assert got[f] == lo == hi           # equal at both neighbours
+            assert got[f] == hi
         else:
             assert got[f] == pytest.approx(lo + w * (hi - lo), rel=1e-15)
-    assert got["crs"] == pytest.approx(0.987765625)
+    assert got["crs"] == pytest.approx(0.9 + w * (0.994 - 0.9))
+    assert got["crt"] == pytest.approx(0.679016061 + w * (0.75 - 0.679016061))
     assert got["cvtfall"] == pytest.approx(2.8359375)
     assert got["csecfrl"] == pytest.approx(8.359375e-6)
 
 
 def test_integer_fields_take_the_nearer_truncation():
-    """``nex``/``nadd`` are integers in ECHAM: never interpolated."""
-    assert (echam_cloud_defaults(42)["nex"], echam_cloud_defaults(42)["nadd"]) == (1, 1)
-    assert (echam_cloud_defaults(47)["nex"], echam_cloud_defaults(47)["nadd"]) == (2, 0)
-    assert (echam_cloud_defaults(46)["nex"], echam_cloud_defaults(46)["nadd"]) == (1, 1)
+    """``nex``/``nadd`` are integers in ECHAM: never interpolated.
+
+    T63's calibrated ``nex`` is real, and holds up to T94; the midpoint
+    between T63 and T127, T95, takes the finer truncation's value.
+    """
+    def pair(nn):
+        got = echam_cloud_defaults(nn)
+        return got["nex"], got["nadd"]
+
+    assert pair(42) == (1, 1)
+    assert pair(46) == (1, 1)
+    assert pair(47) == (CALIBRATED_T63["nex"], 0)
+    assert pair(94) == (CALIBRATED_T63["nex"], 0)
+    assert pair(95) == (2, 0)
     # ... while the real-valued ones are interpolated at the same T42
     assert echam_cloud_defaults(42)["crt"] == pytest.approx(
-        0.85 + (42 - 31) / 32 * (0.75 - 0.85))
+        0.85 + (42 - 31) / 32 * (0.679016061 - 0.85))
 
 
 @pytest.mark.parametrize("truncation, end", [(21, 31), (511, 255)])
 def test_outside_the_range_holds_the_end_and_warns_once(truncation, end):
     with pytest.warns(UserWarning, match=f"T{truncation}"):
         got = echam_cloud_defaults(truncation)
-    assert got == ECHAM_CLOUD_DEFAULTS[end]
+    assert got == SHIPPED[end]
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         echam_cloud_defaults(truncation)        # second time: silent
@@ -106,7 +161,7 @@ def test_outside_the_range_holds_the_end_and_warns_once(truncation, end):
 def test_non_spectral_grid_gets_t63_with_a_warning():
     with pytest.warns(UserWarning, match="no spectral truncation"):
         got = echam_cloud_defaults(None)
-    assert got == ECHAM_CLOUD_DEFAULTS[63]
+    assert got == SHIPPED[63]
 
 
 def test_inversion_levels_are_echams():
@@ -141,7 +196,7 @@ class TestPrecedence:
     def test_no_grid_is_t63(self):
         from jcm.physics.echam.echam_terms import echam_physics
         p = _params(echam_physics())
-        assert float(p.crs) == pytest.approx(0.975)
+        assert float(p.crs) == pytest.approx(CALIBRATED_T63["crs"])
         assert p.defaults_truncation == 63
 
     def test_field_override_wins_over_the_grid_default(self):
@@ -203,6 +258,69 @@ class TestPrecedence:
         assert np.isfinite(float(g.crs)) and float(g.crs) != 0.0   # defaulted
 
 
+class TestShippedCover:
+    """The T63 cover fields every host ships, and the continuity of the profile."""
+
+    @staticmethod
+    def _assert_calibrated(p):
+        for field, value in CALIBRATED_T63.items():
+            assert float(getattr(p, field)) == pytest.approx(value, rel=1e-6), field
+        assert p.defaults_truncation == 63
+        # the fields outside the calibrated set are ECHAM's T63 values
+        assert int(p.nadd) == 0
+        assert float(p.csecfrl) == pytest.approx(5.0e-6)
+
+    @pytest.mark.parametrize("host", [
+        dict(cloud_scheme="1m"),
+        dict(cloud_scheme="2m"),
+        dict(cloud_scheme="2m", aerosol_module="jam",
+             jam_microphysics="placeholder", checkpoint_terms=False),
+    ], ids=["1m", "2m", "jam-2m"])
+    def test_each_host_builds_the_calibrated_cover(self, host):
+        """The 1M, 2M and JAM-2M factories read one set of cover parameters."""
+        from jcm.physics.echam.echam_terms import echam_physics
+        self._assert_calibrated(_params(echam_physics(**host)))
+
+    def test_echams_own_row_is_still_reachable(self):
+        """Calibrated defaults do not stop a run asking for ECHAM's constants."""
+        from jcm.physics.echam.echam_terms import echam_physics
+        p = _params(echam_physics(clouds={
+            f: ECHAM_CLOUD_DEFAULTS[63][f]
+            for f in ("crt", "crs", "nex", "csatsc", "cinv")}))
+        assert (float(p.crt), float(p.crs), float(p.nex), float(p.csatsc),
+                float(p.cinv)) == pytest.approx((0.75, 0.975, 2.0, 0.7, 0.25))
+
+    def test_the_profile_is_continuous_in_a_real_nex(self):
+        """``nex`` is an integer in ECHAM but the closure needs no integer.
+
+        ``rhc = crt + (crs - crt)·exp(1 - (p_s/p)^nex)`` has a base ``p_s/p >= 1``,
+        so a real exponent gives a profile that is ``crs`` at the surface, tends
+        to ``crt`` aloft and moves continuously and monotonically with ``nex``
+        between ECHAM's integers; the calibrated value lies between 1 and 2.
+        """
+        from jcm.physics.clouds.sundqvist import critical_relative_humidity
+        p = jnp.array([100000.0, 85000.0, 50000.0, 20000.0, 1000.0])
+        ps = jnp.asarray(100000.0)
+
+        def rhc(nex):
+            return np.asarray(critical_relative_humidity(
+                p, ps, CloudParameters.default(nex=nex)))
+
+        at = rhc(CALIBRATED_T63["nex"])
+        assert at[0] == pytest.approx(CALIBRATED_T63["crs"], rel=1e-6)
+        assert at[-1] == pytest.approx(CALIBRATED_T63["crt"], abs=1e-6)
+        assert np.all(np.diff(at) <= 0.0) and at[1] < at[0]   # falls with height
+        # between the profiles of nex = 2 and nex = 1 where they differ
+        # resolvably (850 and 500 hPa; aloft all three are crt in float32)
+        steep, shallow = rhc(2.0), rhc(1.0)
+        assert np.all(steep[1:3] < at[1:3]) and np.all(at[1:3] < shallow[1:3])
+        # and differentiable in it, which a calibration needs
+        g = jax.grad(lambda n: critical_relative_humidity(
+            p, ps, CloudParameters.default(nex=n)).sum())(
+                jnp.asarray(CALIBRATED_T63["nex"]))
+        assert np.isfinite(float(g)) and float(g) != 0.0
+
+
 class TestGridCheck:
 
     def test_defaults_for_another_grid_warn_naming_both(self):
@@ -242,7 +360,7 @@ class TestGridCheck:
         grid = _grid(None, nodal_shape=(1, 21600))
         with pytest.warns(UserWarning, match="no spectral truncation"):
             term = _cover_term(echam_physics(coords=grid))
-        assert term.params.get_value().crs == ECHAM_CLOUD_DEFAULTS[63]["crs"]
+        assert term.params.get_value().crs == SHIPPED[63]["crs"]
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             term.cache_coords(grid)

@@ -381,8 +381,12 @@ class SnowAndMoistureTest(unittest.TestCase):
 
     def test_fecan_raises_the_threshold_when_switched_on(self):
         # k_dust_smst = 0: uth -> uth·sqrt(1 + 1.21·(w − w_res)^0.68). Off in
-        # every preset but ndust=2, and jcm has no ECHAM ws/wsmx (#787).
-        params = DustParameters.preset(4).replace(fecan_moisture=True)
+        # every preset but ndust=2, and jcm has no ECHAM ws/wsmx (#787). The
+        # threshold scale is fixed at 0.5 rather than read from the shipped
+        # calibration: the wetness that stops the emission at a given wind
+        # depends on where the calibrated threshold sits.
+        params = DustParameters.preset(4, 63, nduscale_scale=0.5).replace(
+            fecan_moisture=True)
         dry, _ = DustEmissions(params=params)(*_inputs(wetness=0.0))
         damp, _ = DustEmissions(params=params)(*_inputs(wetness=0.5))
         self.assertTrue(np.all(_total_mass(dry) > 0.0))
@@ -485,23 +489,25 @@ class RegionTuningTest(unittest.TestCase):
             float(DustParameters.preset(2).nduscale_reg[0]), 0.68)
 
     def test_the_shipped_calibration_is_the_retune_optimum(self):
-        # The JAM aerosol retune (#682, docs/source/design/jam_aerosol_retune.md)
-        # fitted this scalar to the observed dust AOD in a 40-arm Sobol and a
-        # 25-arm GP expected-improvement sweep and confirmed it with a 365-day
-        # T63 L47 year. The digits are the ones that year ran, so the value is
-        # pinned to them: a change here moves the dust climate the release
-        # candidate was validated on, and the design page's table with it.
-        self.assertEqual(NDUSCALE_JCM_T63_SCALE, 0.379095663)
+        # Stage 2c of the JAM aerosol retune (#682,
+        # docs/source/design/jam_aerosol_retune.md) fitted this scalar to the
+        # observed dust AOD with the Sundqvist T63 cover set in place (a
+        # 20-arm sweep over the dust and sea-salt scales) and confirmed it
+        # with a 365-day T63 L47 year. The digits are the ones that year ran,
+        # so the value is pinned to them: a change here moves the dust climate
+        # the release candidate was validated on, and the design page's table
+        # with it.
+        self.assertEqual(NDUSCALE_JCM_T63_SCALE, 0.344)
         np.testing.assert_allclose(
             np.asarray(DustParameters.preset(4, 63).nduscale_reg),
             np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
-            * 0.379095663, rtol=1e-6)
+            * 0.344, rtol=1e-6)
         # HAM's ratios between regions are untouched: only the level moved.
         np.testing.assert_allclose(
             np.asarray(DustParameters.preset(4, 63).nduscale_reg)
             / np.asarray(DustParameters.preset(4, 63, nduscale_scale=1.0)
                          .nduscale_reg),
-            0.379095663, rtol=1e-6)
+            0.344, rtol=1e-6)
 
     def test_cache_coords_rebuilds_the_preset_at_the_model_truncation(self):
         # nduscale_reg's ndust=4 vector is defined only at T63; every other

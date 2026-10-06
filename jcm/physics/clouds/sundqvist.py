@@ -62,8 +62,11 @@ class CloudParameters:
     The numeric fields are differentiable pytree leaves. ``crt``, ``crs``,
     ``nex``, ``csatsc``, ``cinv``, ``csecfrl`` and ``nadd`` have
     resolution-dependent defaults (ECHAM's ``mo_echam_cloud_params.f90``
-    table, :func:`~jcm.physics.clouds.echam_cloud_defaults.echam_cloud_defaults`):
+    table, with jcm's calibrated T63 values of ``crt``, ``crs``, ``nex``,
+    ``csatsc`` and ``cinv``,
+    :func:`~jcm.physics.clouds.echam_cloud_defaults.echam_cloud_defaults`):
     build them with :meth:`default` ``(truncation=...)`` or :meth:`for_grid`.
+    The 1M, 2M and JAM-2M hosts read the same cover and so the same values.
 
     ``csecfrl`` and ``t_ice`` are ECHAM's ``csecfrl`` and ``cthomi``
     (``mo_echam_cloud_params.f90`` l.76, l.54), one value each, which
@@ -110,8 +113,9 @@ class CloudParameters:
 
         Args:
             truncation: the run's triangular truncation; ``None`` means a grid
-                that is not spectral (T63 defaults, with a warning). ECHAM's
-                values at T31/T63/T127/T255, interpolated between them (see
+                that is not spectral (T63 defaults, with a warning). The
+                table's values at T31/T63/T127/T255 (ECHAM's, with jcm's
+                calibrated T63 cover fields), interpolated between them (see
                 :mod:`jcm.physics.clouds.echam_cloud_defaults`).
             **overrides: field values that replace the defaults.
 
