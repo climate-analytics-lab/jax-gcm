@@ -2472,6 +2472,59 @@ Radiation derivatives are finite for cloud in the lowest layer and for negligibl
 - **Changes results** only in derivatives: the fluxes and heating rates of the
   replayed single columns of ``term_gradients_test.py`` are bit-identical.
 
+In-cloud aqueous sulfate chemistry used five constants that differ from r7492
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``_aqueous_so4`` (``chemistry/aqueous.py``, shared by every JAM/MAM4
+  composition) read the SO₂ Henry's-law pair, the gas constant, Avogadro's
+  number and its separately-rounded ``xtoc``/``ctox`` factor, and SO₂'s molar
+  mass from jcm's own constants/species tables rather than the compiled
+  ECHAM6.3-HAM2.3 r7492 values. The Henry pair alone (``1.23, 3020.0`` vs
+  r7492's ``1.36, 4250.0``, ``mo_ham_species.f90:181``) drove a -9% to -52%
+  disagreement in produced sulfate across 16 designed reference cells
+  (``jcm/data/test/echam_cloud_reference/hamaqueous_M7.npz``); the other four
+  account for the remaining <2.3% once the Henry pair alone is patched. All
+  five are now ``_aqueous_so4``'s own module constants at r7492's values
+  (#1031); ``_aqueous_so4`` matches the compiled, unmodified
+  ``ham_wet_chemistry`` at float64 rtol=1e-12 on every reference cell. See
+  :doc:`science/aerosol`.
+- **Changes results** in every configuration that composes JAM (MAM4 and the
+  placeholder core alike): in-cloud SO₄ production and burden move by the
+  magnitude above. The standard default-path bitid probe (a short, dry
+  6-step aquaplanet spin-up) shows no difference, because no in-cloud liquid
+  water has formed yet for the term to act on; see the pull request closing
+  #1031 for a longer comparison's measured change.
+
+The 2M cold-precipitation guards used float32 epsilon at every precision
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``precip_formation_cold``'s ice-number self-collection/break-up guard
+  (``zsprn1``) and riming droplet-number-loss guard (``psacln``) divided by a
+  quantity floored at ``params.eps`` (the scheme's own float32 machine
+  epsilon) at every precision, where ``mo_cloud_micro_2m.f90`` uses
+  ``EPSILON(1._dp)`` (``mo_cloud_utils.f90:27``) — correct by coincidence at
+  float32 (``params.eps`` already equals float32's own epsilon) but far too
+  large a floor at float64. Both guards now read the floor from the call's
+  own working dtype (``jnp.finfo(dtype).eps``), reproducing r7492 exactly at
+  float64 while staying a meaningful floor at float32 (#1039). The
+  self-collection guard also now floors the pre-aggregation ice content at
+  this epsilon rather than at zero, matching r7492's own
+  ``zxibold = MAX(pxib,eps)`` (previously computed but unused in jcm's
+  port). See :doc:`science/clouds_microphysics`.
+- **Changes results** at float64 away from the cold-precipitation guards'
+  own low-ice regime: measured on a representative 6-column case, the
+  self-collection guard changes ``psprn`` by up to 0.24% (median 0.09%) and
+  the riming guard changes ``psacln`` by up to 0.24% (median 0.12%). It
+  ALSO changes float32 results, for ice/liquid content between ``cqtmin``
+  (1e-12, the gate both guards sit behind) and float32's own epsilon
+  (~1.19e-7) — a gap that only exists at float32, since ``cqtmin`` sits far
+  above float64's epsilon (~2.2e-16): flooring the pre-aggregation ice at
+  ``eps32`` there (rather than at zero, the pre-#1039 behaviour) moves
+  ``psprn``, e.g. ``in_cloud_ice = 1e-8`` by a factor of ``~0.54``. Caught
+  in review (an earlier draft of this entry claimed the float32 default
+  path was bit-identical); see
+  ``lohmann_2m_test.py::test_precip_formation_cold_eps_guards_track_working_dtype``.
+
 Known limitations
 ^^^^^^^^^^^^^^^^^
 

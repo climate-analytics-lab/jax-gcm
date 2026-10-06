@@ -467,21 +467,45 @@ class TurbulenceDefaultArgHonoursOverrideTest(_OverrideCase):
         self.assertNotAlmostEqual(baseline, doubled_g, places=6)
 
 
-class AqueousChemistryHonoursOverrideTest(_OverrideCase):
-    """``chemistry/aqueous.py`` baked R*, N_A and M_air into module constants."""
+class AqueousChemistryHamLiteralsIgnoreOverrideTest(unittest.TestCase):
+    """``chemistry/aqueous.py``'s HAM literals do NOT track ``set_constants``.
 
-    def test_xtoc_factor_scales_with_avogadro(self):
+    jax-gcm#1031 moved ``_aqueous_so4``'s Avogadro's number, its xtoc/ctox
+    factor, the gas constant and SO2's molar mass from values derived from
+    jcm's own (live, overridable) constants/species tables to r7492's own
+    hardcoded literals (``_AVO``/``_AVO_XTOC``/``_ZRGAS``/``_MW_SO2``): the
+    fidelity target is the exact Fortran value HAM hardcodes, which a
+    derived-and-so-recomputable quantity would not reproduce bit for bit
+    even when numerically close (the same policy ``activation/
+    ham_activation.py`` uses for its own CAM/HAM literals). ``_mw_air`` is
+    the one exception: it backs the *simple* aqueous scheme, jcm's own
+    reduced alternative rather than a literal HAM transcription, so it
+    legitimately keeps tracking ``c.m_air``.
+    """
+
+    def test_literals_unaffected_by_a_constants_override(self):
         from jcm.physics.aerosol.jam.chemistry import aqueous
 
         original = c.physical_constants
         try:
-            baseline = aqueous._avo_xtoc()
-            # N_A is derived (R*/k_B), so halving k_B doubles it.
-            c.set_constants(ak=original.ak * 0.5)
-            doubled = aqueous._avo_xtoc()
+            baseline_avo_xtoc = aqueous._AVO_XTOC
+            baseline_avo = aqueous._AVO
+            baseline_zrgas = aqueous._ZRGAS
+            baseline_mw_so2 = aqueous._MW_SO2
+            baseline_mw_air = aqueous._mw_air()
+            # A large override that WOULD move every one of these if any
+            # were still derived from the live singleton (m_air = R*/Rd,
+            # so doubling R* doubles it with Rd held fixed).
+            c.set_constants(ak=original.ak * 0.5,
+                             r_universal=original.r_universal * 2.0)
+            self.assertEqual(aqueous._AVO_XTOC, baseline_avo_xtoc)
+            self.assertEqual(aqueous._AVO, baseline_avo)
+            self.assertEqual(aqueous._ZRGAS, baseline_zrgas)
+            self.assertEqual(aqueous._MW_SO2, baseline_mw_so2)
+            # _mw_air is the one legitimate exception (see the class docstring).
+            self.assertAlmostEqual(aqueous._mw_air() / baseline_mw_air, 2.0, places=6)
         finally:
             c.set_constants(original)
-        self.assertAlmostEqual(doubled / baseline, 2.0, places=6)
         self.assertEqual(c.physical_constants.ak, original.ak)
 
 

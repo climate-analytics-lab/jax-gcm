@@ -46,7 +46,6 @@ import jax.numpy as jnp
 import tree_math
 from flax import nnx
 
-from jcm.physics.aerosol.jam.gas_species import GAS_SPECIES
 from jcm.physics.aerosol.jam.cloud_borne_store import (
     CARRY_KEY,
     apply_updates,
@@ -69,62 +68,77 @@ _ZE1K, _ZE1H = 1.1e-2, 2300.0   # O3 Henry
 _ZE3K, _ZE3H = 1.2e-2, 2010.0   # SO2 first dissociation
 _ZQ298 = 1.0 / 298.0
 _ZLWCMIN = 1.0e-7         # in-cloud LWC threshold [kg/kg]
-# SO2 Henry's-law (H0 [mol/l/atm], activation [K]) — HAMMOZ speclist(id_so2).
-_H_SO2_0, _H_SO2_ACT = 1.23, 3020.0
+# SO2 Henry's-law (H0 [mol/l/atm], activation [K]) — HAMMOZ
+# speclist(id_so2)%henry, mo_ham_species.f90:181 (jax-gcm#1031).
+_H_SO2_0, _H_SO2_ACT = 1.36, 4250.0
+
+# Every constant below this point, down to _MW_SO2, is r7492's own literal
+# rather than derived from jcm's live, overridable ``jcm.constants``
+# singleton or species tables (jax-gcm#1031): the fidelity target is the
+# exact Fortran value HAM hardcodes, which a derived-and-so-recomputable
+# quantity would not reproduce bit for bit even when it is numerically
+# close — the same reasoning ``activation/ham_activation.py`` uses for its
+# own CAM/HAM literals (e.g. ``argas = 8.314472``).
+_ZRGAS = 8.2e-2            # gas constant [l.atm/mol/K], mo_ham_chemistry.f90:209
+_AVO = 6.02214179e23       # Avogadro's number [1/mol], mo_physical_constants.f90:58
+# xtoc/ctox's own molec-cm⁻³<->mass fold: a SEPARATELY rounded literal in
+# mo_ham_chemistry.f90, not ``_AVO·1e-3`` even at full precision.
+_AVO_XTOC = 6.022e20
 
 # Molar masses in g/mol (HAM works in grams).
-_MW_SO2 = GAS_SPECIES["so2"].molar_mass * 1000.0          # 64.0648
-_MW_SO4 = SPECIES["so4"].molar_mass * 1000.0             # 115.0 (jcm so4)
+_MW_SO2 = 64.0643          # mo_ham.f90:310 (r7492's own rounding, jax-gcm#1031;
+                           # jcm's GAS_SPECIES["so2"] value, 64.0648, is a
+                           # different rounding of the same quantity).
+# jcm's own MAM4-MOM ammonium-bisulfate SO4 species choice (SPECIES["so4"]),
+# NOT a HAM literal -- r7492's own SO4 is 96.0631 g/mol (M7's value, see the
+# ``mw_so4``/``conv_so2_so4`` parameters below), and changing jcm's MAM4
+# species table is outside jax-gcm#1031's scope.
+_MW_SO4 = SPECIES["so4"].molar_mass * 1000.0             # 115.0
 _CONV_SO2_SO4_MASS = _MW_SO4 / _MW_SO2
 
 _TINY = 1.0e-30
 _NC_MIN = 1.0      # cloud-borne number [kg⁻¹] below which a mode hosts no droplets
 
 
-# Quantities derived from jcm.constants are functions, not module-level
-# constants: evaluating them at import would capture the values before any
-# ``set_constants`` override and is exactly the staleness #772 is about. They
-# are called at trace time, so the cost is nil.
-def _zrgas() -> float:
-    """Gas constant in l·atm/mol/K (HAM ``zrgas``), from R* (1 l·atm = 101.325 J)."""
-    return c.r_universal / 101.325
-
-
-def _avo_xtoc() -> float:
-    """HAM's xtoc/ctox factor: N_A·1e-3, the unit fold between molec/cm³ and g."""
-    return c.avogadro * 1.0e-3
-
-
 def _mw_air() -> float:
-    """Molar mass of dry air in g/mol (HAM works in grams), ~28.96."""
+    """Molar mass of dry air in g/mol (HAM works in grams), ~28.96.
+
+    Unlike the constants above, this one legitimately tracks a
+    ``set_constants`` override (#772): it is read only by the *simple*
+    aqueous scheme (:func:`_simple_aqueous_so4`), which is jcm's own
+    reduced alternative, not a literal transcription of a HAM routine.
+    """
     return c.m_air * 1000.0
 
 
-def _xtoc(rho: jnp.ndarray, mw: float) -> jnp.ndarray:
-    """Mass-mixing-ratio → molec cm⁻³ factor (HAM ``xtoc``: ``ρ·6.022e20/mw``)."""
-    return rho * _avo_xtoc() / mw
-
-
-def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt):
+def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt,
+                 mw_so4: float = _MW_SO4,
+                 conv_so2_so4: float = _CONV_SO2_SO4_MASS):
     """In-cloud SO₂ oxidised to sulfate over ``niter`` sub-steps [kg/kg].
 
-    All faithful to ``ham_wet_chemistry``. ``so2``/``so4`` are in-cloud mass
-    mixing ratios [kg/kg]; ``h2o2``/``o3`` number densities [molec cm⁻³];
-    ``lwc`` the in-cloud liquid water [kg/kg]; ``rho`` air density [kg m⁻³].
-    Returns the SO₄ mass produced (mmr); SO₂ consumed = that ·(M_SO2/M_SO4).
+    All faithful to ``ham_wet_chemistry``, at r7492's own literals
+    throughout (jax-gcm#1031). ``so2``/``so4`` are in-cloud mass mixing
+    ratios [kg/kg]; ``h2o2``/``o3`` number densities [molec cm⁻³]; ``lwc``
+    the in-cloud liquid water [kg/kg]; ``rho`` air density [kg m⁻³].
+    ``mw_so4``/``conv_so2_so4`` are the SO₄ molar mass [g/mol] this call
+    should use and the SO₂->SO₄ mass-conversion factor derived from it —
+    defaulting to jcm's own MAM4 value (:data:`_MW_SO4`); the Fortran-
+    reference test passes M7's own 96.0631 g/mol instead, since that is
+    the species the compiled reference fixture was built against. Returns
+    the SO₄ mass produced (mmr); SO₂ consumed = that / ``conv_so2_so4``.
     """
     qtp1 = 1.0 / temperature - _ZQ298
     lwcl = jnp.maximum(lwc * rho * 1.0e-6, _TINY)   # [l-water/cm^3-air]
     lwcv = lwc * rho * 1.0e-3                        # liquid volume fraction
     # molec/cm^3(air) -> mol/l(water): HAM ``zfac1 = 1/(zlwcl·avo)``.
-    fac1 = 1.0 / (lwcl * c.avogadro)
+    fac1 = 1.0 / (lwcl * _AVO)
 
     # --- SO2 + H2O2 effective rate (pH from initial sulfate) ---
-    hp0 = _ZHPBASE + so4 * 1000.0 / (jnp.maximum(lwc, _TINY) * _MW_SO4)
+    hp0 = _ZHPBASE + so4 * 1000.0 / (jnp.maximum(lwc, _TINY) * mw_so4)
     rk = 8.0e4 * jnp.exp(-3650.0 * qtp1) / (0.1 + hp0)
-    rke = rk / (lwcl * c.avogadro)
+    rke = rk / (lwcl * _AVO)
     h_so2 = _H_SO2_0 * jnp.exp(_H_SO2_ACT * qtp1)
-    pfac = _zrgas() * lwcv * temperature
+    pfac = _ZRGAS * lwcv * temperature
     p_so2 = h_so2 * pfac
     f_so2 = p_so2 / (1.0 + p_so2)
     h_h2o2 = 9.7e4 * jnp.exp(6600.0 * qtp1)
@@ -135,14 +149,20 @@ def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt):
     # --- O3-path constants ---
     e1 = _ZE1K * jnp.exp(_ZE1H * qtp1)
     e3 = _ZE3K * jnp.exp(_ZE3H * qtp1)
-    za = h_so2 * _zrgas() * temperature * lwcv
+    za = h_so2 * _ZRGAS * temperature * lwcv
     a21 = 4.39e11 * jnp.exp(-4131.0 / temperature)
     a22 = 2.56e3 * jnp.exp(-926.0 / temperature)
-    ph_o3 = e1 * _zrgas() * temperature * lwcv
+    ph_o3 = e1 * _ZRGAS * temperature * lwcv
     f_o3 = ph_o3 / (1.0 + ph_o3)
 
-    so2m = so2 * _xtoc(rho, _MW_SO2)
-    so4m = so4 * _xtoc(rho, _MW_SO4)
+    # HAM's xtoc(x,y) = x*avo_xtoc/y, inlined so both conversions and the
+    # final ctox below all use the SAME _AVO_XTOC. so4m/hp0 use the
+    # mw_so4 PARAMETER (not the module's own _MW_SO4) so a caller asking
+    # for a different SO4 species (the reference test, M7's 96.0631) gets
+    # a self-consistent result throughout -- mo_ham_chemistry.f90:216 uses
+    # the same mw_so4 for both the pH calculation and this conversion.
+    so2m = so2 * (rho * _AVO_XTOC / _MW_SO2)
+    so4m = so4 * (rho * _AVO_XTOC / mw_so4)
     h2o2m = h2o2
     zdt = dt / _NITER
 
@@ -173,10 +193,10 @@ def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt):
         so4m = so4m + (so2mh - so2mo)
         so2m = so2mo
 
-    # ctox: molec/cm3 -> mmr is mw/(6.022e20·rho); SO2 remaining as mmr.
-    so2_rem = so2m * (_MW_SO2 / (_avo_xtoc() * rho))
+    # ctox: molec/cm3 -> mmr is mw/(avo_xtoc·rho); SO2 remaining as mmr.
+    so2_rem = so2m * (_MW_SO2 / (_AVO_XTOC * rho))
     dso2tot = jnp.clip(so2 - so2_rem, 0.0, so2)
-    return dso2tot * _CONV_SO2_SO4_MASS
+    return dso2tot * conv_so2_so4
 
 
 def _simple_aqueous_so4(so2, h2o2, rho):
@@ -189,7 +209,7 @@ def _simple_aqueous_so4(so2, h2o2, rho):
     [kg m⁻³]. Returns the in-cloud SO₄ mass produced [kg/kg]; the term applies
     the cloud-fraction weighting and the S-conserving SO₂ sink.
     """
-    n_air = rho * _avo_xtoc() / _mw_air()            # molec/cm³
+    n_air = rho * _AVO_XTOC / _mw_air()               # molec/cm³
     h2o2_molefrac = h2o2 / jnp.maximum(n_air, _TINY)
     # SO₂ mass an equal number of moles of H₂O₂ can oxidise (1:1).
     h2o2_as_so2 = h2o2_molefrac * (_MW_SO2 / _mw_air())

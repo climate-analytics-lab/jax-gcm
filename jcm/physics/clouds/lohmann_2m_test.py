@@ -415,6 +415,68 @@ class TestAutoconversion_2M:
         assert jnp.all(psacln[inactive] == 0.0)
         assert jnp.all(psprn[inactive] == 0.0)
 
+    def test_precip_formation_cold_eps_guards_track_working_dtype(self):
+        """The #1039 zsprn1/psacln guards are a dtype-dependent no-op ONLY
+        at float64; they genuinely change float32 results for an ice/liquid
+        content between ``cqtmin`` (1e-12, the ``ll1``/``ll2`` gate) and the
+        working dtype's own epsilon -- a Codex review on jax-gcm#1046 found
+        this (worked example: ``in_cloud_ice=1e-8`` moves ``psprn`` from
+        21.24 to 11.51 in float32) and an earlier release-notes/docs claim
+        that float32 was unaffected was wrong. The port is still faithful:
+        r7492's own ``zxibold = MAX(pxib,eps)`` then ``.../(ztmp1+eps)``
+        (``mo_cloud_micro_2m.f90`` lines ~3134, ~3401-3406) is a two-step
+        application of the SAME ``eps``, and ``eps`` is only ever
+        ``EPSILON(1._dp)`` in the real (always-float64) Fortran -- the
+        float32 regime is jcm's own forward-only approximation, not
+        something r7492 can be literally faithful to, so the only
+        self-consistent generalisation is the one implemented: both steps
+        read ``eps`` from the SAME working dtype.
+
+        Isolates the guard from the rest of ``precip_formation_cold``'s
+        float32 rounding (which would otherwise contaminate a ratio test)
+        by checking the exact two-line formula directly: the numerator
+        (``ice_number·(zsaci+zsaut)``) never involves ``eps``, so the
+        psprn-moved-by ratio is exactly ``(max(ice,0)+eps)/(max(ice,eps)+eps)``
+        regardless of the numerator's own value -- confirmed below to
+        4 significant figures against the Codex review's own example.
+        """
+        # float64 needs jax_enable_x64 on (jcm's conftest resets it around
+        # every test, #729): without it jnp.asarray(..., jnp.float64)
+        # silently truncates to float32, and eps64 (~2.2e-16) silently
+        # underflows to exactly 0.0 there -- which would make the float64
+        # branch below pass for the wrong reason (0.0 is as negligible as
+        # a floor gets) rather than genuinely exercising eps64.
+        with jax.enable_x64(True):
+            for dtype in (jnp.float32, jnp.float64):
+                eps = float(jnp.finfo(dtype).eps)
+                for ice in (1e-9, 1e-8, eps, 1e-6, 1e-5):
+                    ice_d = jnp.asarray(ice, dtype)
+                    pre_1039_denom = jnp.maximum(ice_d, 0.0) + eps  # old: floor at 0
+                    this_fix_denom = jnp.maximum(ice_d, eps) + eps  # #1039: floor at eps
+                    ratio = float(pre_1039_denom / this_fix_denom)
+                    if dtype == jnp.float64:
+                        # eps64 (~2.2e-16) is negligible next to cqtmin
+                        # (1e-12): the floor never binds, so the fix is a
+                        # true no-op.
+                        assert abs(ratio - 1.0) < 1e-6, (dtype, ice, ratio)
+                    elif ice < eps:
+                        # eps32 (~1.19e-7) is NOT negligible next to
+                        # cqtmin: the floor binds, and psprn shrinks
+                        # relative to the old (unguarded-at-eps) formula.
+                        assert ratio < 0.999, (dtype, ice, ratio)
+                    else:
+                        assert abs(ratio - 1.0) < 1e-3, (dtype, ice, ratio)
+
+        # The Codex review's own worked example, to 4 significant figures:
+        # in_cloud_ice=1e-8 at float32 moves psprn by a factor of 11.51/21.24.
+        eps32 = float(jnp.finfo(jnp.float32).eps)
+        ice_d = jnp.asarray(1e-8, jnp.float32)
+        pre_1039_denom = jnp.maximum(ice_d, 0.0) + eps32
+        this_fix_denom = jnp.maximum(ice_d, eps32) + eps32
+        np.testing.assert_allclose(
+            float(pre_1039_denom / this_fix_denom), 11.51 / 21.24, rtol=1e-3,
+        )
+
 
 
 class TestMeltingSnowIce_2M:
