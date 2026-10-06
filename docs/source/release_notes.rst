@@ -2606,7 +2606,8 @@ Calibration and capability gaps
 """""""""""""""""""""""""""""""
 
 - **The calibration is two emission scales and one cloud-cover set; what is left
-  is structural.** Measured in the retune's 365-day T63 L47 JAM year and, for the
+  is structural.** Measured before the optics correction below in the retune's 365-day
+  T63 L47 JAM year and, for the
   1M and 2M, its control windows (:doc:`design/jam_aerosol_retune` has the
   evidence; the dust regional balance and the sulphur budget are from the
   review of its earlier-tree sweeps): clear-sky OLR is 8 to
@@ -2628,6 +2629,25 @@ Calibration and capability gaps
   deposition; and global-mean precipitation is 0.7 mm/day below GPCP (0.9 to
   1.1 over the ocean).
   See :doc:`design/jam_aerosol_retune` for the evidence.
+- **AOD optics now preserve aerosol mass at clipped modal sizes.** The
+  lognormal Mie integral is normalized to mass-derived wet volume, as in CAM,
+  rather than to potentially inconsistent modal number and radius (#823).
+  At fixed geometry and composition, extinction scales with aerosol mass.
+  **AOD still needs a matched optical comparison before calibration.** The dry
+  sulfate optical surrogate now uses a representative real refractive index
+  of 1.473 over 0.3–1 µm, consistent with the ammonium bisulfate represented
+  by this species (115 g/mol); modal water
+  dilution is applied separately. With ``aerocom_optics=true``,
+  ``od550dryaer`` and ``od550dry_mode_<mode>`` evaluate the same aerosol
+  population without water. Wet minus dry AOD measures humidity enhancement;
+  ``od550_wat`` is instead a volume-based share of wet extinction. The
+  species shares divided by dry species burdens are not complete ambient
+  species mass extinction efficiencies. SOA precursor production remains
+  zero by default without VOC chemistry, nitrate is absent from this MAM4
+  population, and dust source/size/removal require calibration. These
+  limitations cannot be diagnosed as a single hygroscopicity deficit from
+  the component split. See :doc:`design/aerosol_optics_diagnostics` and
+  `issue #1030 <https://github.com/climate-analytics-lab/jax-gcm/issues/1030>`_.
 - **Cloud-borne aerosol is closed as a cycle but not as a full process set**
   (#602 is closed). Interstitial and cloud-borne mass and number exchange on
   activation and evaporation, wet and dry deposition drain the in-droplet

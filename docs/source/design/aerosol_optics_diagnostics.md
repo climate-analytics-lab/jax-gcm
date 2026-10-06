@@ -42,9 +42,10 @@ are labelled as such throughout the code.
 Extinction and absorption are apportioned differently, because they are
 driven by different parts of the refractive index:
 
-- **Extinction** is split by **volume fraction**, `V_s / ΣV`. In the
-  Rayleigh limit extinction is proportional to volume, so this is exact
-  for the fine mode and a reasonable interpolation elsewhere.
+- **Extinction** is split by **volume fraction**, `V_s / ΣV`. This is a
+  bookkeeping convention even for the fine mode: Rayleigh scattering
+  depends on particle volume squared and the mixed dielectric contrast,
+  so a volume split is not an exact physical species decomposition.
 - **Absorption** is split by the species' **contribution to the
   imaginary index**, `V_s k_s / Σ V_s k_s`. Absorption is driven by `k`,
   so a volume split would hand most of the absorption to whatever species
@@ -102,16 +103,39 @@ which makes the split inconsistent with its own optics in those
 configurations. JAM has only the volume rule, so that inconsistency cannot
 arise here.
 
-## Caveat: coating enhancement is credited to the absorber
+## Comparing dry and ambient extinction
 
-`abs_mode` comes out of the full coated-particle Mie calculation, so any
-lensing — a sulfate or water shell focusing light onto a soot core, which
-can enhance absorption substantially — is real in the total and is then
-apportioned by `V_s k_s`. Because soot's `k` dwarfs everything else
+`od550dryaer` evaluates the **same dry mass, number and modal width** at
+the dry radius with no condensed water, using a further Mie pass at
+550 nm. `od550dry_mode_<mode>` supplies the corresponding mode columns.
+Thus `od550aer - od550dryaer` measures the optical effect of hygroscopic
+growth for that population. It is not equal to `od550_wat`: the latter
+only assigns a volume share of the wet mixed-particle extinction to water.
+Do not interpret a species' apportioned AOD divided by its dry burden as
+either dry-particle mass extinction or its whole ambient extinction.
+
+The dry calculation retains internal mixing and all existing modal size
+limits. It does not turn each species into a separate pure population or
+refresh a lagged radius. Extinction is normalized to mass-derived wet
+volume, including when the radius and prognostic number are inconsistent.
+Per-mode wet AOD divided by that mode's **interstitial** dry burden (summed
+over its dry species) is a meaningful ambient modal mass extinction
+efficiency. The optics exclude cloud-borne material, whereas the AeroCom
+species burden includes it; including that material in the denominator
+would bias an optical efficiency low. Species comparisons need a
+matched attribution convention or a controlled pure-species calculation.
+
+## Caveat: absorption enhancement is credited to the absorber
+
+`abs_mode` comes out of the homogeneous volume-mixed Mie calculation;
+this model does not resolve a soot core and a sulfate/water shell and
+cannot separately diagnose core-shell lensing. Any absorption enhancement
+the effective-medium calculation produces is apportioned by `V_s k_s`.
+Because soot's `k` dwarfs everything else
 (BC ≈ 0.7 at 550 nm against ≈1e-9 for sulfate), **essentially all of that
 enhancement is credited to black carbon**, not to the coating that caused
 it. That is the physically sensible attribution and it matches HAM, but it
-means `abs550_bc` is "BC including its coating enhancement", not "what bare
+means `abs550_bc` is "BC's share of mixed-particle absorption", not "what bare
 BC would absorb". Do not difference it against an external-mixture
 calculation and call the residual an error.
 
@@ -144,7 +168,7 @@ The diagnostic is a second Mie sweep, so it is **off by default**
 (`aerocom_optics: false`). When enabled it rides the same radiation gate
 as the radiative optics — it is computed only on radiation-compute steps
 and replayed from the scan carry in between — so its cost is
-`len(_DIAG_WAVELENGTHS_NM) / n_sw_band` of the already-gated aerosol
+`(len(_DIAG_WAVELENGTHS_NM) + 1) / n_sw_band` of the already-gated aerosol
 optics, not a per-step Mie evaluation.
 
 Everything except the 355 nm extinction profile is reduced to a column

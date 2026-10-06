@@ -99,12 +99,12 @@ class ModeOpticsInputs(NamedTuple):
     modal geometry, the mass gate, the per-species apportionment and the
     column diagnostics, so a backend only has to answer the optical question.
 
-    Two normalisations of the same population are supplied because backends
-    differ in which one they predict against: the default Gauss-Hermite
-    quadrature integrates efficiencies per particle CROSS-SECTION and needs
-    ``num_per_area``, while an emulator predicting an extinction per unit
-    particle VOLUME needs ``vol_total * col_factor``. Both routes reduce to
-    ``pi * n_A * <Qe r^2>`` in the continuum, so they are directly comparable.
+    Both mass-derived volume and prognostic number are supplied. The default
+    quadrature normalizes its integrated cross-section to ``vol_total`` times
+    ``col_factor``, as CAM does. The number route agrees only when the radius,
+    number and mass share the same lognormal third moment. Radius clipping
+    and the microphysics update can break that identity; using number alone
+    would then change the amount of material represented in radiation.
 
     Attributes:
         mode: the :class:`~jcm.physics.aerosol.jam.population.AerosolMode`
@@ -182,6 +182,10 @@ class JamOpticsTerm(PhysicsTerm):
     # ``jam_optics.<field>`` on output. CF/AeroCom metadata for the fields that
     # survive (the per-band arrays are dropped by ``_EXCLUDED_OUTPUT_KEYS``).
     output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "od550dryaer": {
+            "units": "1",
+            "long_name": "550 nm optical depth of the same aerosol population without water",
+        },
         "jam_optics.aod_550": {
             "units": "1",
             "standard_name": (
@@ -220,7 +224,7 @@ class JamOpticsTerm(PhysicsTerm):
         because it adds a second Mie pass over
         ``_DIAG_WAVELENGTHS_NM``; enabled, it rides the same radiation gate
         as the radiative optics, so the incremental cost is
-        ``len(_DIAG_WAVELENGTHS_NM) / n_sw_band`` of the (already gated)
+        ``(len(_DIAG_WAVELENGTHS_NM) + 1) / n_sw_band`` of the (already gated)
         aerosol optics rather than a per-step cost.
         """
         self._spec = spec or MAM4_SPEC
@@ -238,12 +242,13 @@ class JamOpticsTerm(PhysicsTerm):
         if not self._optics_diagnostics:
             return ()
         species = sorted({sp for m in self._spec.modes for sp in m.species}) + ["wat"]
-        keys = ["od550aer", "abs550aer", "od355aer", "od440aer", "od670aer",
+        keys = ["od550aer", "od550dryaer", "abs550aer", "od355aer", "od440aer", "od670aer",
                 "od865aer", "ssa440aer", "ang4487aer", "ang550865aer",
                 "aerindex", "ec355aer"]
         keys += [f"od550_{sp}" for sp in species]
         keys += [f"abs550_{sp}" for sp in species]
         keys += [f"od550_mode_{m.short}" for m in self._spec.modes]
+        keys += [f"od550dry_mode_{m.short}" for m in self._spec.modes]
         keys += [f"abs550_mode_{m.short}" for m in self._spec.modes]
         return tuple(keys)
 
@@ -399,15 +404,17 @@ class JamOpticsTerm(PhysicsTerm):
             (jnp.asarray(_GH_NODES, r_wet.dtype),
              jnp.asarray(_GH_WEIGHTS, r_wet.dtype)),
         )
-        # The three products keep the exact association they had before the
-        # per-mode block became a hook — extinction as
-        # ``n*sec*pi*r^2`` and the two scattering moments through a shared
-        # ``area`` — because float multiplication does not reassociate, and
-        # the default answers of every JAM configuration are pinned to these
-        # orderings.
-        area = inputs.num_per_area * math.pi * r_wet ** 2
-        tau = inputs.num_per_area * sec * math.pi * r_wet ** 2
-        return tau, area * sec_scat, area * sec_gscat
+        # Normalize to the mass-derived wet volume, as CAM's modal optics do.
+        # A clipped or lagged radius need not obey the third-moment identity
+        # V = N*(4*pi/3)*r_g**3*exp(4.5*ln(sigma)**2). Using N directly then
+        # silently discards (or invents) aerosol mass in radiation. For a
+        # consistent population this equals the number integral exactly.
+        # Substitute before dividing so empty modes have finite gradients.
+        safe_radius = jnp.where(r_wet > _MIN_DRY_RADIUS, r_wet, 1.0)
+        area = (inputs.vol_total * inputs.col_factor * 3.0
+                / (4.0 * safe_radius * math.exp(4.5 * ln_sig**2)))
+        area = jnp.where(r_wet > _MIN_DRY_RADIUS, area, 0.0)
+        return area * sec, area * sec_scat, area * sec_gscat
 
     def _map_bands(self, one_band, lam_all, ri_j):
         """Evaluate ``one_band`` over the band axis.
@@ -515,13 +522,9 @@ class JamOpticsTerm(PhysicsTerm):
                 # mode with no dry material, whatever ringing the number
                 # field carries.
                 #
-                # Where ``dg`` is unclipped, ``vol_tot`` below is moreover the
-                # third moment of the very lognormal the Gauss–Hermite
-                # quadrature integrates the Mie efficiencies over, so mixing
-                # rule and size integral describe one population. That
-                # stronger property is what clipping breaks: the size integral
-                # then follows the clipped radius while ``vol_dry`` follows
-                # the mass, and the two differ by ``(dg_clip/dg_true)³``.
+                # The default backend normalizes the size integral to this
+                # mass-derived volume, even if the radius is clipped or lags
+                # the microphysics mass/number update (#823).
                 #
                 # ``r_dry`` is floored so the ratio and its cube stay finite
                 # in the arm ``where`` does not take (both are evaluated, and
@@ -685,6 +688,18 @@ class JamOpticsTerm(PhysicsTerm):
             np.asarray(_DIAG_WAVELENGTHS_NM, np.float64), c.ri_diag,
             want_decomposition=True,
         )
+        # A water volume share is not the extinction enhancement caused by
+        # growth: water changes both size and refractive index. Evaluate the
+        # same dry mass/number population with dry radii and no condensed
+        # water, at 550 nm only. The wet-minus-dry difference is a physical
+        # counterfactual, rather than a component-apportionment convention.
+        ri_dry = {sp: (n[_I550:_I550 + 1], k[_I550:_I550 + 1])
+                  for sp, (n, k) in c.ri_diag.items()}
+        dry_tau, _, _, dry_mode_tau, _, _, _ = self._band_optics(
+            state, aer.copy(r_wet=aer.r_dry), num_per_area, col_factor,
+            np.asarray([_AOD_REF_NM], np.float64), ri_dry,
+            want_decomposition=True,
+        )
         # (n_wavelength, nlev, *horiz) -> column integral over the vertical.
         # The ``maximum`` is a defensive clamp only: the modal number is
         # already floored at 0 in ``_compute_fields`` and the Mie
@@ -699,6 +714,7 @@ class JamOpticsTerm(PhysicsTerm):
         absorp = col(tau * (1.0 - ssa))
         out = {
             "od550aer": od[_I550], "abs550aer": absorp[_I550],
+            "od550dryaer": col(dry_tau)[0],
             "od355aer": od[_I355], "od440aer": od[_I440],
             "od670aer": od[_I670], "od865aer": od[_I865],
         }
@@ -733,6 +749,8 @@ class JamOpticsTerm(PhysicsTerm):
         out["ec355aer"] = jnp.maximum(tau[_I355], 0.0) / jnp.maximum(dz, _TINY)
 
         for i, mode in enumerate(self._spec.modes):
+            out[f"od550dry_mode_{mode.short}"] = jnp.maximum(
+                jnp.sum(dry_mode_tau[0, i], axis=0), 0.0)
             out[f"od550_mode_{mode.short}"] = jnp.maximum(
                 jnp.sum(mode_tau[_I550, i], axis=0), 0.0)
             out[f"abs550_mode_{mode.short}"] = jnp.maximum(

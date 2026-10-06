@@ -29,20 +29,21 @@ scattering-weighted-asymmetry optical depths for that mode alone, **ungated**.
 
 ### Why optical depths and not `(k_ext, ssa, g)`
 
-Backends disagree about normalisation, and the seam refuses to pick a winner.
-A quadrature over Mie efficiencies naturally produces an extinction per
-particle **cross-section**, so it wants the mode's column number per area; an
-emulator of the mode-integrated integral naturally produces an extinction per
-unit particle **volume**, so it wants a volume per area. `ModeOpticsInputs`
-supplies both normalisations — `num_per_area`, and `vol_total` with the
-`col_factor = air_density · dz` that converts it — and each backend uses the
-one it is expressed in. For the same reason it carries both radii and the
-dry/wet volume split rather than the minimum set: every quantity a backend
-would otherwise reconstruct from the others goes through a cube root or a
-division that is singular on an empty mode, and the record holds finite
-values for all of them. With `⟨·⟩` the number-weighted lognormal moment and
-`n_A` the column number per area, both routes reduce to `π·n_A·⟨Q_e r²⟩`, so
-the two are directly comparable rather than merely similar.
+The record supplies both the prognostic column number (`num_per_area`) and
+mass-derived wet volume (`vol_total * col_factor`). The default quadrature
+integrates Mie cross-sections, then divides by the lognormal third moment to
+obtain extinction per wet volume and multiplies by the latter. This follows
+CAM's modal optics and conserves optical mass even when modal radii are
+clipped or lag a mass/number update:
+
+`tau = V_wet * rho_air * dz * 3 * <Qe (r/r_g)^2> / (4 * r_g * exp(4.5 ln²σ_g))`.
+
+For a consistent population this equals `π N_A <Qe r²>`. At a clipped radius,
+the number route can represent a different amount of aerosol material and
+should not be assumed equivalent. Both normalizations remain available to
+backend authors, but comparisons must state which mass they represent. The
+record carries finite dry/wet radii and volume splits so backends can guard
+empty populations without reconstructing singular cube roots.
 
 Returning an optical depth also means the base class never has to divide by a
 number or a volume that may be zero, which is where the reverse-mode NaNs in
@@ -132,9 +133,8 @@ to enforce:
   which the default path (clamped to `[-1, 1]`) can.
 * **The per-species apportionment premise.** The AeroCom decomposition the
   base class computes weights extinction by species volume fraction and
-  absorption by `V_s k_s / Σ V_s k_s`. Those weights are *exact* under the
-  volume mixing rule the default path uses — `Σ V_s k_s` is then literally
-  `V_tot k_eff`. A backend that does not volume-mix, a core-shell treatment
+  absorption by `V_s k_s / Σ V_s k_s`. Those weights sum to the mode totals, but nonlinear Mie extinction
+  prevents interpreting them as independent species optical depths. A backend that does not volume-mix, a core-shell treatment
   for instance, still gets a defensible apportionment (and the only one an
   internally-mixed model can report), but not an exact one.
 

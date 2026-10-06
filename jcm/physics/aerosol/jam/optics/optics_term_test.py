@@ -200,7 +200,7 @@ class JamOpticsTermTest(unittest.TestCase):
 
         # Step 1 (cached): perturb the aerosol state; output must equal the
         # step-0 fields, not fresh ones.
-        aer2 = d0["_jam_state"].copy(number=d0["_jam_state"].number * 3.0)
+        aer2 = d0["_jam_state"].copy(r_wet=d0["_jam_state"].r_wet * 1.1)
         d1_in = {**base, "radiation": _Rad(jnp.int32(1)),
                  "_jam_state": aer2,
                  "_jam_optics": d0["_jam_optics"]}
@@ -210,7 +210,7 @@ class JamOpticsTermTest(unittest.TestCase):
             np.asarray(d0["aerosol"].aod_sw_per_band),
         )
 
-        # Step 8 (compute): the tripled number must now show (larger AOD).
+        # Step 8 (compute): the changed wet radius must now show fresh AOD.
         d8_in = {**d1_in, "radiation": _Rad(jnp.int32(8))}
         _, d8 = term(state, d8_in, None, None)
         self.assertGreater(
@@ -249,9 +249,8 @@ class JamOpticsTermTest(unittest.TestCase):
         num = num.at[:, :, 1].set(-1.0e7)
         diagnostics = {**diagnostics, "_jam_state": aer.copy(number=num)}
         # And the corresponding number tracers: the ringing field this models
-        # drives both negative together. (The optics read the number only
-        # through ``num_per_area`` — the water volume is number-free, #790 —
-        # so this pairing is realism, not a load-bearing input.)
+        # drives both negative together. Mass-normalized optics do not
+        # depend on this number when geometry is held fixed.
         tracers = dict(state.tracers)
         for mode in MAM4_SPEC.modes:
             nm = number_name(mode.short)
@@ -328,28 +327,17 @@ class JamOpticsTermTest(unittest.TestCase):
         )
 
     def test_refractive_index_independent_of_number(self):
-        """At fixed radii and masses, the modal number scales the extinction
-        but must not touch the volume-mixed refractive index.
-
-        The dry volume in the mixing rule comes from the mass tracers, so a
-        water volume carrying an ``N`` of its own — as ``N·(4/3)π·(r_wet³ −
-        r_dry³)`` does — would make the water FRACTION, and with it the SSA,
-        move with a quantity the dry volume never saw (#790). With the
-        number-free form the SSA and asymmetry are invariant and the AOD is
-        exactly linear in the number.
-        """
+        """Mass-normalized optics ignore a stale number at fixed geometry."""
         state, diagnostics, band, *_ = _setup()
         term = self._term(band)
         aer = diagnostics["_jam_state"]
         _, d1 = term(state, diagnostics, None, None)
-        # The fixture peaks near tau = 0.13 per layer and band, so tripling
-        # the number stays clear of the ``_MAX_LAYER_TAU`` = 1 clamp and the
-        # scaling below is exact rather than clipped.
+        # Deliberately decouple number from the fixed mass and radii.
         d_in3 = {**diagnostics, "_jam_state": aer.copy(number=3.0 * aer.number)}
         _, d3 = term(state, d_in3, None, None)
         a1, a3 = d1["aerosol"], d3["aerosol"]
         np.testing.assert_allclose(
-            np.asarray(a3.aod_sw_per_band), 3.0 * np.asarray(a1.aod_sw_per_band),
+            np.asarray(a3.aod_sw_per_band), np.asarray(a1.aod_sw_per_band),
             rtol=1e-6)
         np.testing.assert_allclose(
             np.asarray(a3.ssa_sw_per_band), np.asarray(a1.ssa_sw_per_band),
@@ -523,7 +511,12 @@ class JamOpticsTermTest(unittest.TestCase):
         mono = 0.0
         for i in range(MAM4_SPEC.n_modes()):
             r = float(aer.r_wet[i, 0, 0])
-            n_col = float(aer.number[i, 0, 0]) * rho_dz * nlev
+            vol = sum(float(state.tracers[mass_name(sp, MAM4_SPEC.modes[i].short)][0, 0])
+                      / MAM4_SPEC.species_props(sp).density
+                      for sp in MAM4_SPEC.modes[i].species)
+            vol *= (r / float(aer.r_dry[i, 0, 0]))**3
+            n_col = vol * rho_dz * nlev / (
+                4*np.pi/3 * r**3 * np.exp(4.5*np.log(MAM4_SPEC.modes[i].geom_std_dev)**2))
             q = float(interp_mie(
                 lut, jnp.asarray(2.0 * np.pi * r / lam),
                 jnp.asarray(1.45), jnp.asarray(1e-2))[0])
