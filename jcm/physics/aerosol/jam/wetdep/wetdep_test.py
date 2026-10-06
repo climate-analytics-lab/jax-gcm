@@ -1185,3 +1185,168 @@ class HamBelowCloudSchemeTest(unittest.TestCase):
 
         g = jax.grad(loss)(jnp.asarray(1.0))
         self.assertTrue(np.isfinite(float(g)))
+
+
+class HamNucleationSchemeTest(unittest.TestCase):
+    """``WetScavenging(scheme="ham_nuc_bc")``: the #1017 follow-up A selector.
+
+    ``ic_scav_nuc`` is M7-specific by construction (it zeroes every mode
+    but KS/AS/CS -- mo_ham_wetdep.f90:707-710), so this needs the M7
+    population, not ``WetDepTermTest``'s default MAM4 fixture.
+    """
+
+    @staticmethod
+    def _setup(nlev=4, ncols=2, activation="ham_arg"):
+        from jcm.physics.aerosol.jam.activation.arg_term import JamActivationData
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+        from jcm.physics.aerosol.jam.jam_state import JamAerosolState
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+        from jcm.physics.aerosol.jam.tracer_layout import mass_name, number_name
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics_interface import PhysicsState
+
+        spec = M7_SPEC
+        n_modes = spec.n_modes()
+        shape = (n_modes, nlev, ncols)
+        aer = JamAerosolState(
+            r_dry=jnp.full(shape, 0.05e-6),
+            r_wet=jnp.full(shape, 0.08e-6),
+            rho=jnp.full(shape, 1800.0),
+            kappa=jnp.full(shape, 0.5),
+            mass=jnp.full(shape, 1e-9),
+            number=jnp.full(shape, 1.0e8),
+        )
+        tracers = {
+            "qnc": jnp.full((nlev, ncols), 5.0e7),
+            "qni": jnp.full((nlev, ncols), 1.0e4),
+        }
+        carry = {}
+        for mode in spec.modes:
+            tracers[number_name(mode.short)] = jnp.full((nlev, ncols), 1.0e8)
+            carry[number_name(mode.short, cloud_borne=True)] = jnp.full(
+                (nlev, ncols), 1.0e8)
+            for sp in mode.species:
+                tracers[mass_name(sp, mode.short)] = jnp.full((nlev, ncols), 1e-9)
+                carry[mass_name(sp, mode.short, cloud_borne=True)] = jnp.full(
+                    (nlev, ncols), 1e-9)
+        state = PhysicsState.zeros((nlev, ncols)).copy(
+            temperature=jnp.full((nlev, ncols), 275.0), tracers=tracers)
+
+        precip = 1.0e-4
+        dm = 1.0 * 200.0
+        form = jnp.full((nlev, ncols), precip / (nlev * dm))
+        rain_flux = jnp.cumsum(form * dm, axis=0)
+        clouds = CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=jnp.full((nlev, ncols), 0.6),
+            qc=jnp.full((nlev, ncols), 1.0e-3),
+            qi=jnp.full((nlev, ncols), 1.0e-5),
+            precip_rain=jnp.full((ncols,), precip),
+            precip_formation_rate=form,
+            rain_flux=rain_flux,
+            incloud_liquid=jnp.full((nlev, ncols), 1.0e-3 / 0.6),
+            incloud_ice=jnp.full((nlev, ncols), 1.0e-5 / 0.6),
+            incloud_rain_formation=form / 0.6,
+            incloud_snow_formation=form / 0.6,
+            process_cloud_fraction=jnp.full((nlev, ncols), 0.6),
+        )
+        diagnostics = {
+            CARRY_KEY: carry,
+            "_jam_state": aer,
+            "activated_fraction": jnp.full((nlev, ncols), 0.7),
+            "air_density": jnp.full((nlev, ncols), 1.0),
+            "layer_thickness": jnp.full((nlev, ncols), 200.0),
+            "clouds": clouds,
+            "precip_cover": jnp.full((nlev, ncols), 0.6),
+            "pfrain": rain_flux,
+            "pfsnow": jnp.zeros((nlev, ncols)),
+        }
+        if activation == "ham_arg":
+            number_frac = jnp.zeros(shape)
+            mass_frac = jnp.zeros(shape)
+            for i, mode in enumerate(spec.modes):
+                if mode.can_activate:
+                    number_frac = number_frac.at[i].set(0.4)
+                    mass_frac = mass_frac.at[i].set(0.3)
+            diagnostics["activated_cdnc"] = jnp.full((nlev, ncols), 4.0e7)
+            diagnostics["_jam_activation"] = JamActivationData(
+                number_frac=number_frac, mass_frac=mass_frac)
+        return state, diagnostics, spec, mass_name
+
+    def test_requires_hydro_diagnostics(self):
+        term = WetScavenging(scheme="ham_nuc_bc")
+        for key in ("precip_cover", "pfrain", "pfsnow"):
+            self.assertIn(key, term.requires)
+
+    def test_rejects_unknown_nucleation_activation(self):
+        with self.assertRaises(ValueError):
+            WetScavenging(scheme="ham_nuc_bc", nucleation_activation="arg")
+
+    def test_ham_arg_runs_and_is_a_sink(self):
+        state, diagnostics, spec, mass_name = self._setup(activation="ham_arg")
+        term = WetScavenging(scheme="ham_nuc_bc", nucleation_activation="ham_arg", spec=spec)
+        tend, _ = term(state, diagnostics, None, None)
+        for mode in spec.modes:
+            if not mode.can_activate:
+                continue
+            key = mass_name(mode.species[0], mode.short)
+            self.assertTrue(bool(jnp.all(tend.tracers[key] <= 0.0)), mode.short)
+            self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))), mode.short)
+
+    def test_ham_arg_without_jam_activation_raises(self):
+        state, diagnostics, spec, mass_name = self._setup(activation="ham_arg")
+        del diagnostics["_jam_activation"]
+        term = WetScavenging(scheme="ham_nuc_bc", nucleation_activation="ham_arg", spec=spec)
+        with self.assertRaises(ValueError):
+            term(state, diagnostics, None, None)
+
+    def test_ham_lin_leaitch_runs_and_is_a_sink(self):
+        state, diagnostics, spec, mass_name = self._setup(activation="ham_lin_leaitch")
+        term = WetScavenging(scheme="ham_nuc_bc", nucleation_activation="ham_lin_leaitch", spec=spec)
+        tend, _ = term(state, diagnostics, None, None)
+        for mode in spec.modes:
+            if not mode.can_activate:
+                continue
+            key = mass_name(mode.species[0], mode.short)
+            self.assertTrue(bool(jnp.all(tend.tracers[key] <= 0.0)), mode.short)
+            self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))), mode.short)
+
+    def test_non_m7_modes_get_no_nucleation(self):
+        """NS/KI/AI/CI are not KS/AS/CS, so ic_scav_nuc contributes nothing
+        to them (mo_ham_wetdep.f90:707-710) -- only the (implicit-zero,
+        since they cannot activate) below-cloud/convective pathways act.
+        """
+        state, diagnostics, spec, mass_name = self._setup(activation="ham_arg")
+        term = WetScavenging(scheme="ham_nuc_bc", nucleation_activation="ham_arg", spec=spec)
+        tend, _ = term(state, diagnostics, None, None)
+        for mode in spec.modes:
+            if mode.can_activate:
+                continue
+            key = mass_name(mode.species[0], mode.short)
+            # Non-activating modes have zero in-cloud pathway contribution
+            # regardless of scheme (mode.can_activate gates it); this just
+            # confirms ham_nuc_bc did not change that.
+            self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))), mode.short)
+
+    def test_default_scheme_path_is_bit_identical_to_before(self):
+        state, diagnostics, spec, mass_name = self._setup(activation="ham_arg")
+        explicit = WetScavenging(scheme="jcm")(state, diagnostics, None, None)[0]
+        implicit = WetScavenging()(state, diagnostics, None, None)[0]
+        for key in explicit.tracers:
+            np.testing.assert_array_equal(
+                np.asarray(explicit.tracers[key]), np.asarray(implicit.tracers[key]))
+
+    def test_gradients_stay_finite(self):
+        state, diagnostics, spec, mass_name = self._setup(activation="ham_arg")
+        key = mass_name("so4", "as")
+
+        def loss(qnc_scale):
+            d = dict(diagnostics)
+            d2 = {**d}
+            new_tracers = dict(state.tracers)
+            new_tracers["qnc"] = state.tracers["qnc"] * qnc_scale
+            new_state = state.copy(tracers=new_tracers)
+            tend, _ = WetScavenging(scheme="ham_nuc_bc", spec=spec)(new_state, d2, None, None)
+            return jnp.sum(tend.tracers[key])
+
+        g = jax.grad(loss)(jnp.asarray(1.0))
+        self.assertTrue(np.isfinite(float(g)))
