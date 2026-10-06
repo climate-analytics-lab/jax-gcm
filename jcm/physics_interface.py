@@ -37,14 +37,18 @@ PhysicsCarryState: TypeAlias = Dict[str, Any]
 #: Cross-step carry key for the previous step's POST-PHYSICS state: the
 #: gridpoint state after the physics tendency was applied and before the
 #: dynamics ran, as the dynamical core actually advanced from it
-#: (:meth:`jcm.dycore.base.DynamicalCore.after_physics_state`). The slot is a
+#: (:meth:`jcm.dycore.base.DynamicalCore.after_physics_state`), passed through
+#: :func:`verify_state` so it is in the representation the physics receives
+#: (a consumer differencing it against the next received state must not read
+#: the entry clamp of a small negative as dynamics). The slot is a
 #: dict ``{"temperature", "specific_humidity", "tracers": {name: ...},
 #: "valid"}`` in the physics package's own layout, present only when a
 #: composed term declares ``requires_post_physics_fields``. ``valid`` is a
 #: scalar, 1 once ``Model`` has written the slot and 0 in the construction
 #: template, so a first step, a checkpoint that predates the slot and a host
 #: without a dynamical core all read as "no anchor". Consumers:
-#: :func:`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs`.
+#: :func:`jcm.physics.clouds.cloud_inputs.cloud_scheme_inputs` and the Tiedtke
+#: convection (the dynamics part of its ``pqte``).
 POST_PHYSICS_STATE_KEY = "_post_physics_state"
 
 logger = logging.getLogger(__name__)

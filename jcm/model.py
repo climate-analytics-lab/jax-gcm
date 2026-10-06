@@ -1198,11 +1198,19 @@ class Model:
                 # physics: the difference from the next step's gridpoint state
                 # is then the dynamics alone, which the cloud schemes need as
                 # an increment (ECHAM's ``ptte``/``pqte`` hold it at
-                # ``cloud``). It stays differentiable: one step back through
-                # the carry, like ``_prev_step``.
+                # ``cloud``) and Tiedtke as the dynamics part of ``pqte``. It
+                # stays differentiable: one step back through the carry, like
+                # ``_prev_step``.
+                #
+                # It is recorded through the same ``verify_state`` the physics
+                # applies to the state it receives, so both ends of that
+                # difference are in one representation: the next step's
+                # physics sees ``max(q, 0)``, and an unclamped anchor would
+                # turn the entry clamp of a small negative (spectral ringing)
+                # into a spurious ``−q_ap/dt`` of "convergence".
                 with profiling.scope(profiling.BRIDGE_TO_PHYSICS):
-                    post_physics = self.dycore.after_physics_state(
-                        state, physics_tendency)
+                    post_physics = verify_state(self.dycore.after_physics_state(
+                        state, physics_tendency))
                     new_physics_state = self.physics.record_post_physics_state(
                         new_physics_state, post_physics)
                     if axis is not None and POST_PHYSICS_STATE_KEY in new_physics_state:

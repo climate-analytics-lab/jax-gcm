@@ -2232,6 +2232,19 @@ Tiedtke-Nordeng takes ECHAM's decisions
   the lowest two levels), a failed first ascent leaves no surface plume for
   the second, and a downdraft whose level of free sinking lies above the
   final plume's top is cancelled, as in ``cuflx``.
+- The dynamics part of that moisture tendency is the received humidity
+  minus the dycore's post-physics humidity of the previous step
+  (``_post_physics_state``), not ``(q − q_prev)/dt`` minus the previous
+  physics tendency. The Dinosaur core carries humidity spectrally and adds
+  only the projection of the physics tendency, so the second form read the
+  discarded part (all of its 2Δx content) as convergence where convection
+  had just dried a column: a grid-scale positive feedback through ``zdqpbl``
+  that stippled the convective precipitation. On a 30-day warm-started
+  ``ma-t63-l47`` run the zonal power of the mean convective precipitation
+  above wavenumber 64 (30°S-30°N) falls from 8.5 % to 5.0 % of the total
+  and its Laplacian RMS by 22 % (tropical ocean) to 31 % (extratropics),
+  while the global mean changes by 2 %. Hosts without a dynamical core keep the ``_prev_step``
+  form, which is exact where the tendency is applied on the grid.
 - Each decision's derivative is that of a logistic surrogate
   (``tiedtke_nordeng/switches.py``, :doc:`design/surrogate_gradients`); the
   value does not depend on the widths.

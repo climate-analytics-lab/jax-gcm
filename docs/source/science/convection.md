@@ -75,7 +75,17 @@ carries, where the plume stops and where it rains are hard comparisons in
    ``pqte`` is the whole pre-convection moisture tendency, the same-step
    vertical diffusion (which contains the surface evaporation it delivered)
    plus the one-step-lagged dynamics; a standalone caller that gives only the
-   surface evaporation has it delivered to the lowest layer. A column that
+   surface evaporation has it delivered to the lowest layer. Under a
+   dynamical core the dynamics part is the received humidity minus the
+   carried post-physics humidity (``_post_physics_state``, the state the
+   dynamics advanced from), so the part of the previous physics tendency the
+   spectral projection discarded is not read as convergence: ECHAM's
+   ``pqte`` is the gridpoint dynamics tendency and has no such term, and
+   counting it raises ``zdqpbl`` exactly where convection dried a column, a
+   grid-scale positive feedback that stipples the convective precipitation.
+   Hosts that apply the physics tendency on the grid themselves (single
+   column, RCE) form it from the ``_prev_step`` carry, which is exact there.
+   A column that
    fails the gate is not convective, and ``cubasmc`` may seed a mid-level
    plume in it instead.
 3. The type: deep exactly where ``zdqcv = Σ pqte·Δp`` exceeds

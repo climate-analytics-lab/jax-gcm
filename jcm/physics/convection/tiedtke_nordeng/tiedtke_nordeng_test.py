@@ -2316,3 +2316,89 @@ if __name__ == "__main__":
     print("\n" + "="*50)
     print("ALL TESTS PASSED!")
     print("="*50)
+
+
+def _convection_outputs(diagnostics, state, terrain):
+    """Return the wrapper's convective precipitation, type and q tendency."""
+    tendency, out = TiedtkeConvection()(
+        state, diagnostics, forcing=None, terrain=terrain,
+    )
+    conv = out["convection"]
+    return (np.asarray(conv.precip_conv), np.asarray(conv.ktype),
+            np.asarray(tendency.specific_humidity))
+
+
+def test_lagged_dynamics_moisture_tendency_is_read_from_the_post_physics_state():
+    """ECHAM's dynamics part of ``pqte`` excludes what the dycore discarded.
+
+    The dinosaur core adds the spectral projection T(P) of the gridpoint
+    physics humidity tendency P, not P. The dynamics of the last step is
+    therefore the received humidity minus the carried post-physics humidity
+    (``_post_physics_state``), and the discarded ``P − T(P)`` must not be
+    read as moisture convergence: counted as dynamics it raises the
+    sub-cloud supply ``zdqpbl`` exactly where convection dried a column,
+    a grid-scale positive feedback that stipples the convective precip.
+
+    Checked on a deep-convecting column:
+      * with a valid slot, the convection depends on the slot alone: a
+        ``_prev_step`` physics tendency that differs from what the dycore
+        applied (a projection residual) changes nothing;
+      * the slot built as ``q_prev + dt·P_prev`` (a host that applies P on
+        the grid) reproduces the ``_prev_step`` result;
+      * an invalid slot (``valid = 0``: first step, hosts without a dycore)
+        falls back to the ``_prev_step`` form.
+    """
+    from jcm.physics_interface import POST_PHYSICS_STATE_KEY
+
+    state, diagnostics, terrain, dt = _deep_convecting_column()
+    prev = diagnostics["_prev_step"]
+    reference = _convection_outputs(diagnostics, state, terrain)
+    assert int(reference[1][0]) == 1, "fixture no longer triggers deep conv"
+    assert float(reference[0][0]) > 0.0
+
+    # What the dycore actually advanced from: q_prev + dt·P_prev (P_prev = 0
+    # in the fixture, so the convergence lives in q_now − q_prev).
+    q_after_physics = prev["specific_humidity"] + dt * prev["q_tendency"]
+
+    def slot(valid):
+        return {"temperature": jnp.zeros_like(state.temperature),
+                "specific_humidity": q_after_physics,
+                "tracers": {},
+                "valid": jnp.asarray(valid, dtype=state.temperature.dtype)}
+
+    # A projection residual in the carried physics tendency: sub-cloud
+    # moistening the dycore never applied. Read through ``_prev_step`` it
+    # appears as moisture divergence of the same size, which turns the
+    # cloud-base gate ``zlo1`` (``zdqpbl > 0``) off; the opposite sign reads
+    # as convergence where the physics dried the column.
+    nlev = state.specific_humidity.shape[0]
+    residual = jnp.zeros_like(state.specific_humidity).at[nlev - 3:].set(1.0e-6)
+    prev_with_residual = {**prev, "q_tendency": prev["q_tendency"] + residual}
+
+    with_slot = _convection_outputs(
+        {**diagnostics, POST_PHYSICS_STATE_KEY: slot(1.0)}, state, terrain)
+    for got, want in zip(with_slot, reference):
+        np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-12)
+
+    slot_ignores_residual = _convection_outputs(
+        {**diagnostics, "_prev_step": prev_with_residual,
+         POST_PHYSICS_STATE_KEY: slot(1.0)}, state, terrain)
+    for got, want in zip(slot_ignores_residual, reference):
+        np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-12)
+
+    # The residual does change the convection when read as dynamics (the
+    # check above is not vacuous) ...
+    residual_as_dynamics = _convection_outputs(
+        {**diagnostics, "_prev_step": prev_with_residual}, state, terrain)
+    assert float(residual_as_dynamics[0][0]) < 0.5 * float(reference[0][0])
+    # ... and that is what an invalid slot falls back to.
+    invalid_slot = _convection_outputs(
+        {**diagnostics, "_prev_step": prev_with_residual,
+         POST_PHYSICS_STATE_KEY: slot(0.0)}, state, terrain)
+    for got, want in zip(invalid_slot, residual_as_dynamics):
+        np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-12)
+
+
+def test_tiedtke_declares_the_post_physics_humidity_it_reads():
+    """The term asks the host to carry the post-physics humidity."""
+    assert "specific_humidity" in TiedtkeConvection.requires_post_physics_fields
