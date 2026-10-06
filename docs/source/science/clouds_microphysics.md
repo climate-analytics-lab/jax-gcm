@@ -119,8 +119,8 @@
   sources are absent, the mixed-phase heterogeneous freezing is ECHAM-HAM's
   only where a prognostic aerosol supplies its inputs (JAM) and a jcm closure
   otherwise, and a small set of jcm-only bounds remains (the Koop
-  homogeneous-freezing floor, the ``icemax`` cap on the ICNC diagnosis and
-  the falling-ice cover threshold). The
+  homogeneous-freezing floor -- ``nic_cirrus = 1`` only, see below -- the
+  ``icemax`` cap on the ICNC diagnosis and the falling-ice cover threshold). The
   absent processes and the deliberate deviations are listed below. See
   {doc}`../design/lohmann_2m_column_processes`.
 
@@ -640,17 +640,34 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   ``icncq_qd`` diagnostics for this fix): matches to float64 round-off on
   4 of 5 designed columns, 9.3e-15 absolute on the 5th (a zero-aerosol
   control cell with a near-cancelling subtraction); the ``zdep`` dispatch
-  formula matches the compiled ``zdep`` exactly. The end-to-end final
-  ICNC check is unaffected by this fix (``zqinucl`` is a vapour/mass
-  pathway feeding ``qi``, not the separate ``zninucl`` number pathway a
-  prior fix already wired); final ``q``/``qi`` are NOT independently
-  checked end-to-end against the compiled reference, because
-  ``deposition_freezing.py``'s Koop homogeneous-freezing floor (an
-  unrelated, pre-existing numerical safety net with no ``nic_cirrus``
-  gate at all, see its own docstring) dominates the two designed columns
-  with negligible nucleation and has no ECHAM equivalent to compare
-  against (see ``cirrus_end_to_end_reference_test.py`` for the measured
-  numbers).
+  formula matches the compiled ``zdep`` exactly.
+
+  Two more defects surfaced while validating this end-to-end, both fixed
+  on the same branch: the Koop homogeneous-freezing floor (section 12b of
+  ``deposition_freezing.py``) is jcm's own stand-in for the homogeneous-
+  nucleation deposition sink ``nic_cirrus = 1`` lacks; at ``nic_cirrus = 2``
+  ``zqinucl`` above IS that sink, and ECHAM r7492 has no such floor at
+  all, so running both double-counted it -- now gated
+  ``if params.nic_cirrus != 2`` (``nic_cirrus=1`` is unaffected: the gate
+  gives it the identical unguarded code it always ran). Separately,
+  ``mixed_phase_deposition_and_corrections``'s ``ll_het`` parameter
+  defaulted to ``True``, but ECHAM's own ``ll_het``
+  (``mo_ham_freezing.f90:156``, ``ld_het = lhetfreeze``) is ALWAYS
+  ``False`` in any supported build -- the same fact this section's own
+  "only the reachable path is ported" paragraph above already establishes
+  for ``XFRZHET``; at ``nic_cirrus = 1`` the parameter is unreachable (its
+  branches both require ``nic_cirrus != 1``), so the wrong default was
+  silent until ``nic_cirrus = 2`` was validated end-to-end here. Fixed by
+  correcting the default to ``False``.
+
+  With both fixed, final ``q``/``qi``/ICNC all match the compiled
+  reference's own tracer tendencies to ~5e-5 relative (3.2e-7 under a local
+  eps patch, confirming the residual is entirely #1039 — see
+  ``cirrus_end_to_end_reference_test.py`` for the measured numbers and the
+  corrected comparison target: the Fortran's ``pxtte_icnc`` tracer
+  tendency, not its same-step ``picnc`` diagnostic, which a ccwmin
+  mass-consistency repair (#688) can legitimately zero independently of
+  the latter in a near-zero-ice-mass cell).
 - Neither microphysics scheme publishes the radiative effective radii: as in
   ECHAM, the radiation forms them inside its own call from the step's
   condensate and droplet/crystal number (``mo_cloud_optics.f90::cloud_optics``;

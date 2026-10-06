@@ -93,43 +93,73 @@ absolute on the fifth, a deliberately degenerate zero-aerosol control cell
 where ``apn_cm3 = max(1e-6*(papnx-icncq), 1e-6)`` subtracts two nearly-equal
 numbers).
 
-**Final q/qi are NOT a clean end-to-end check of this fix (measured, not
-guessed) -- final ICNC remains the headline metric.** Comparing
-``out/pqte``/``out/pxite`` (final humidity/ice) end-to-end the same way the
-ICNC check below does: 3 of 5 columns match ECHAM to ~1e-8-1e-16 relative;
-the other 2 (``cirrus_low_updraft``, ``cirrus_no_aerosol_floor_control`` --
-the columns DESIGNED to have negligible homogeneous nucleation) diverge by
-up to 42%. Root cause: ``deposition_freezing.py``'s Koop homogeneous-
-freezing floor (section 12b, "interim toward #552") has NO ``nic_cirrus``
-gate at all -- it fires identically whether ``nic_cirrus`` is 1 or 2,
-whenever ``lo2 & T < cthomi``, which this design's T=210 K and S_ice=1.8
-satisfy in EVERY one of the 5 columns. It is reachable on, but not
-exclusive to, the ``nic_cirrus=2`` path (the #1017 w6 STOP condition for
-touching it was "unless it is on the nic_cirrus=2 path"; it is reachable
-there, but identically so on nic_cirrus=1, so it is left untouched here and
-reported instead). In the 3 "normal" columns the proper deposition
-branches (now including ``zqinucl``) already consume most of the
-supersaturation before the Koop check runs, so its excess is negligible;
-in the 2 designed-near-zero-nucleation columns, deposition barely touches
-the supersaturation, so Koop's floor -- which ECHAM's own
-``mo_cloud_micro_2m.f90`` has NO equivalent of at all -- deposits most of
-it instead, a mechanism this test's reference never exercises. This is a
-pre-existing divergence (the Koop floor predates this fix and does not
-depend on ``zqinucl``), not a defect in the ``zqinucl``/``zdep`` port, so
-no q/qi end-to-end check is added here.
+**Koop floor gated off at nic_cirrus=2 (follow-up to the above, same
+branch).** ``deposition_freezing.py``'s Koop homogeneous-freezing floor
+(section 12b) had NO ``nic_cirrus`` gate at all -- it fired identically
+whether ``nic_cirrus`` was 1 or 2. It exists because ``nic_cirrus=1`` has
+no homogeneous-nucleation deposition sink of its own to consume
+supersaturation that exceeds the Koop (2000) threshold; at ``nic_cirrus=2``
+the ``zqinucl`` deposition this fix ports IS that sink, and ECHAM r7492 has
+no Koop floor at all. Running both was double-counting a mechanism ECHAM's
+own reference never has. Now gated ``if params.nic_cirrus != 2:``
+(``nic_cirrus`` is a static field, so this is a plain Python ``if``, not
+traced); ``nic_cirrus=1`` runs the identical unguarded code, so it stays
+bit-identical.
 
-**The eps-patch (#1039) experiment, with this fix in place.** Re-running
-the ICNC comparison below with ``params.eps`` patched to
+**``ll_het`` default was also wrong, found while re-measuring the gate
+above.** ``mixed_phase_deposition_and_corrections``'s ``ll_het`` parameter
+defaulted to ``True``, but ECHAM's own ``ll_het`` (``cloud_subm_1``'s
+``ld_het = lhetfreeze``, ``mo_ham_freezing.f90:156``) is ALWAYS ``False`` in
+any supported build -- the same fact ``cirrus.py``'s own module docstring
+already establishes for ``XFRZHET`` (``lhetfreeze`` is an ``em_error``
+unless compiled with ``-DWITH_LHET``). The function's own docstring already
+said "default False", disagreeing with its signature -- a pre-existing slip.
+At ``nic_cirrus=1`` this parameter is unreachable (branches B/C both
+require ``NOT ll1_circ``), so the wrong default was silent until
+``nic_cirrus=2`` was first validated end-to-end here: with ``ll_het=True``,
+branch C (heterogeneous onset) spuriously fired in the 2 designed
+near-zero-nucleation columns, depositing ~3.8e-9 kg/kg ECHAM's own
+reference does not (confirmed: with the Koop floor already gated off,
+those 2 columns still showed final-``q`` relative error ~27.6%; forcing
+``ll_het=False`` in a local experiment dropped it to 0.0, confirming the
+branch-C false positive). Fixed by changing the default to ``False``.
+
+**The ICNC comparison target was ALSO wrong (a pre-existing test bug, not a
+code defect) -- found while chasing the residual on these same 2
+columns.** After both fixes above, final ``q``/``qi`` match the compiled
+reference to round-off or exactly 0.0 on every column, but comparing
+``qni_m1 + dt*dqnidt`` (jcm's own ICNC tracer reconstruction) against
+``out/picnc`` still showed 100% relative error on the 2 near-zero-ice
+columns (jcm exactly 0.0, reference 271/20, both well above
+``icemin=10``). Tracing jcm's OWN pre-repair ``icnc_final`` (the value
+``update_tendencies_and_important_vars`` actually receives, captured with a
+local spy) showed it matches ``out/picnc`` to ~1e-7 relative -- the 100%
+gap is entirely ``assembly.py``'s ccwmin mass-consistency repair (#688,
+faithfully ported from ``mo_cloud_micro_2m.f90:3640-3660``): where the
+reconstructed end-of-step GRID-MEAN ice mass falls below ``ccwmin``
+(1e-7 kg/kg, which both jcm's and ECHAM's near-zero-ice-mass columns do),
+the ICNC **tracer tendency** is zeroed, while ECHAM's own internal
+``picnc`` (a same-step diagnostic read by radiation/precip, not itself
+repaired) is not. ``out/picnc`` and the advected tracer tendency
+``out/pxtte_icnc`` are therefore two DIFFERENT Fortran quantities that
+happen to coincide almost everywhere -- except in exactly this
+near-zero-ice-mass regime, which only became visible once the two defects
+above stopped masking it. Comparing ``dqnidt`` against the correct,
+apples-to-apples field ``out/pxtte_icnc`` (jcm's own tracer-tendency
+quantity's direct Fortran counterpart) instead of ``out/picnc`` now matches
+exactly 0.0 on those 2 columns and ~1e-5 (the #1039 residual) on the other
+3 -- see the measured numbers below.
+
+**The eps-patch (#1039) experiment, with all three fixes in place.**
+Re-running the (corrected) ICNC comparison with ``params.eps`` patched to
 ``np.finfo(np.float64).eps`` (a LOCAL, uncommitted experiment -- #1039
-fixes this for real on its own branch): the 3 "normal" columns close from
-~4e-5/4e-5/4e-5 relative to ~3e-7/5e-7/3e-7 (round-off, confirming #1039 is
-their entire residual, unchanged by this fix). The other 2 columns stay at
-3.11e-2 (not 3.10e-2 -- a negligible shift) regardless of the eps patch:
-their residual is the SAME Koop-floor interaction described above, not
-#1039, so patching #1039 alone cannot close it. Since the residual does
-NOT uniformly close to round-off, ``RTOL_FLOAT64`` below is NOT tightened
-(per the house rule: tighten only when it closes); it already comfortably
-covers both measured mechanisms.
+fixes this for real on its own branch): max relative error across all 5
+columns drops from 4.78e-5 (current ``params.eps``) to 3.23e-7
+(round-off) -- ALL FIVE columns now close under the patch, confirming
+#1039 is the entire remaining residual. ``RTOL_FLOAT64`` below is kept at
+the MEASURED worst case with the CURRENT (unpatched) eps, per the house
+rule that it is tightened only once the real fix lands (tracked in #1039,
+not fixed on this branch).
 """
 from __future__ import annotations
 
@@ -151,16 +181,18 @@ from jcm.physics.clouds.lohmann_2m_fortran_reference_test import (
 
 REF = (Path(__file__).resolve().parents[3] / "data" / "test"
        / "echam_cloud_reference" / "cloud2m_cirrus_T63L47.npz")
-# Measured (not guessed) max relative error across the 5 designed columns,
-# all attributable to precip_formation_cold (see module docstring): 6e-4
-# (the 3 large-ICNC columns) to 3.1e-2 (the 2 columns whose final ICNC sits
-# within ~2x of icemin=10, where the SAME few-percent absolute perturbation
-# from precip_formation_cold is a larger fraction of a small number).
-# Root cause tracked in #1039 (precip_formation_cold's ice-number-loss
-# division guard uses a float32 eps unconditionally); not tightened here
-# per the lead -- re-check this tolerance once #1039 is fixed.
-RTOL_FLOAT64 = 0.05
-ATOL_FLOAT64 = 1.0  # 1/m3, comfortably above icemin=10's own scale
+# Measured (not guessed) max relative error of jcm's ICNC tracer tendency
+# (``dqnidt``) against the compiled reference's OWN tracer tendency
+# ``out/pxtte_icnc`` (the correct comparison target -- see the module
+# docstring's "ICNC comparison target was ALSO wrong" section; NOT
+# ``out/picnc``, a different, same-step-only diagnostic) across the 5
+# designed columns: 4.78e-5, entirely attributable to #1039
+# (precip_formation_cold's float32 eps division guard) -- confirmed by the
+# local eps-patch experiment closing it to 3.23e-7 (round-off) on every
+# column. Not tightened here per the house rule -- re-check once #1039 is
+# fixed. 20x margin over the measured worst case.
+RTOL_FLOAT64 = 1.0e-3
+ATOL_FLOAT64 = 1.0e-3  # 1/kg/s; both sides are exactly 0.0 on 2 of 5 columns
 
 
 @functools.lru_cache(maxsize=None)
@@ -278,21 +310,32 @@ def test_nic_cirrus_2_end_to_end_matches_compiled_fortran():
                 z["in/papnx"]]
         tend = jax.vmap(one, in_axes=1, out_axes=1)(*[jnp.asarray(a) for a in args])
 
-    qni_end = z["in/xtm1_icnc"] + dt * np.asarray(tend.dqnidt)
-    icnc_end = qni_end * rho
-    ref = z["out/picnc"]
+    # Compare the ICNC TRACER TENDENCY (jcm's ``dqnidt``) against the
+    # compiled reference's own tracer tendency ``out/pxtte_icnc`` -- the
+    # true Fortran counterpart of ``dqnidt`` (both are per-kg-of-air
+    # tendencies the host adds to the advected tracer). ``out/picnc`` is a
+    # DIFFERENT quantity (this-step's internal number, read by radiation/
+    # precip but not itself subject to the ccwmin mass-consistency repair
+    # the tracer tendency gets) -- see the module docstring; comparing
+    # against it was this test's own pre-existing bug, not a code defect.
+    ref = z["out/pxtte_icnc"]
 
     papm1 = z["in/papm1"]
     for j, n in enumerate(names):
         k = int(np.argmin(np.abs(papm1[:, j] - 23000.0)))
         np.testing.assert_allclose(
-            icnc_end[k, j], ref[k, j], rtol=RTOL_FLOAT64, atol=ATOL_FLOAT64,
-            err_msg=f"{n} (icnc_end vs picnc)")
+            tend.dqnidt[k, j], ref[k, j], rtol=RTOL_FLOAT64, atol=ATOL_FLOAT64,
+            err_msg=f"{n} (dqnidt vs pxtte_icnc)")
 
     # The headline claim: non-degenerate cirrus columns reach ICNC well
     # above the floor (the #552 regression this whole task guards) -- not
     # just "close to the compiled reference's own floor-pinned value",
-    # which the pre-fix wiring would also have passed trivially.
+    # which the pre-fix wiring would also have passed trivially. This is
+    # jcm's own internal reconstruction (qni anchor + dt*dqnidt, converted
+    # to 1/m3), a physical sanity check, not a second comparison against
+    # the Fortran -- the cross-reference check is the one above.
+    qni_end = z["in/xtm1_icnc"] + dt * np.asarray(tend.dqnidt)
+    icnc_end = qni_end * rho
     assert icnc_end[int(np.argmin(np.abs(papm1[:, 0] - 23000.0))), 0] > 100.0 * 10.0
 
 
