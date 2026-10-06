@@ -5,124 +5,216 @@ issue also raised — whether the post-#690 cloud state is right — was taken u
 the retune ([jam_aerosol_retune](jam_aerosol_retune.md)).*
 
 Total cloud cover is not a property of a cloud-fraction profile on its own: it
-is a profile plus an **overlap assumption**, and the three assumptions in
-common use differ by more than the model changes being measured against them.
-This document records which one the release-validation gate scores, why, and
-what the resulting numbers may and may not be compared with.
+is a profile, an **overlap assumption** and a **time treatment**, and the
+choices in common use differ by more than the model changes being measured
+against them. This document records which one the release-validation gate
+scores, why, and what the resulting numbers may and may not be compared with.
 
 ## What the gate scores
 
 `tools/release_validation/health.py` scores `cloud_cover` on
-`jcm.analysis.total_cloud_cover` applied to `clouds.cloud_fraction`:
-**ECHAM's own `aclcov`**, maximum-random overlap. Cloud in vertically
-contiguous layers is treated as one cloud (maximum overlap); cloud separated by
-clear air combines randomly. The clear-sky fraction accumulates down the column
-as
+`clouds.total_cloud_cover`: **ECHAM's own `aclcov`, accumulated in the model.**
+Every step the model applies maximum-random overlap to the step's final cloud
+fraction — cloud in vertically contiguous layers is treated as one cloud
+(maximum overlap), cloud separated by clear air combines randomly — and the
+saved frame is the mean of that per-step cover over the output interval
+(`run.output_averages`, which the release-validation launcher sets
+unconditionally, as do the `longrun` and `pyses_year` run configs). That is
+ECHAM's accumulation. The clear-sky fraction accumulates down the column as
 
 ```
-c(k)   = clip(paclc(k), 0, 1)                      ! guard added here, not ECHAM's
-zclcov = 1 - c(1)
+c(k)    = clip(paclc(k), 0, 1)                     ! guard added here, not ECHAM's
+zclcov  = 1 - c(1)
 DO k = 2, klev                                     ! DO 923; ICON: jks+1, klev
   zclcov = zclcov * (1 - max(c(k), c(k-1))) / (1 - min(c(k-1), zxsec))
 END DO
-aclcov = 1 - zclcov
+aclcov  = 1 - zclcov                               ! aclcov_na: the instantaneous value
+paclcov = paclcov + zdtime*aclcov                  ! ECHAM6's accumulated output
 ```
 
-which is a transcription of `mo_cloud.f90` section "10.2 Total cloud cover" —
-ICON `atm_phy_echam/mo_cloud.f90` lines 1165-1182, identically ECHAM6
-`mo_cloud.f90` lines 1359-1383. (ECHAM6's `paclcov` there is a *time
-accumulation*, `paclcov + zdtime*zclcov`; its `aclcov_na` and ICON's
-`paclcov` are the instantaneous value this function computes.)
-`zxsec = 1 - 1e-12` is the Fortran's own guard against dividing by
+a transcription of `mo_cloud.f90` section "10.2 Total cloud cover": ICON
+`atm_phy_echam/mo_cloud.f90` lines 1165-1182, identically ECHAM6
+`mo_cloud.f90` lines 1359-1383 (ICON's `paclcov` is the instantaneous
+value). `zxsec = 1 - 1e-12` is the Fortran's own guard against dividing by
 `1 - paclc` at an overcast layer; the matching numerator is zero there, so
 such a layer gives cover 1 rather than an infinity.
+
+**Where it is computed.** One recurrence, `max_random_cover` in
+`jcm/physics/clouds/cloud_overlap.py`, serves the jitted physics step and the
+offline scorer alike (the latter hands it `numpy` and a lazy per-level
+accessor, so a dask-backed window stays lazy), so the two cannot drift apart.
+The model keeps the result in `CloudData.total_cloud_cover`, and
+`CloudData.copy` recomputes it whenever `cloud_fraction` is replaced: the
+field is always the cover of the fraction beside it, and no term that writes a
+fraction can leave it stale. The microphysics' write-back of ECHAM's `paclc`
+(`FSEL(-(zxlp1_d*zxip1_d), paclc, 0)`, section 8.4) is the last write to the
+fraction before section 10.2 in ECHAM, and the last in the step in jcm, so the
+saved cover is that of the **final** fraction, as ECHAM's is, and not of the
+RH-diagnosed fraction the cover term starts the step with.
+
+The Fortran's denominator `1 - min(c, zxsec)` is written as the equal
+`max(1 - c, zepsec)`. `zxsec` is not representable in float32 (it rounds to
+exactly 1.0), where the Fortran form turns an overcast layer's `0 / 1e-12` into
+`0 / 0`: a NaN in the value (the saved field, and the NaN gate), and a NaN
+gradient wherever a gradient path reaches the cover, since even a zero
+cotangent into the Fortran form gives `0 * NaN`. The floor form is finite at
+either precision, and every local derivative of the recurrence is finite.
 
 The `clip` is the one deliberate addition. `paclc` inside the model is
 constructed in `[0, 1]`, but *saved* output can carry small out-of-range
 excursions, and a `c > 1` would make the numerator negative and the
-"clear-sky fraction" meaningless. It is applied out of place, so the caller's
-Dataset is never modified. With it, no clip is needed on the way out: each
-factor's numerator `1 - max(c_k, c_{k-1})` is at most its denominator
-`1 - min(c_{k-1}, zxsec)` under either branch of the `min`, so every factor —
-and hence the product, and hence the cover — lies in `[0, 1]` under IEEE
-division.
+"clear-sky fraction" meaningless. With it, no clip is needed on the way out:
+each factor's numerator `1 - max(c_k, c_{k-1})` is at most its denominator
+`max(1 - c_{k-1}, zepsec)`, so every factor, and hence the product and the
+cover, lies in `[0, 1]`.
 
 Three properties make this the right quantity for a gate:
 
 * **It is the reference model's definition.** The number is the same
-  construction as ECHAM6's `aclcov` ([Stevens et al.
+  construction, on the same instantaneous field and with the same
+  accumulation, as ECHAM6's `aclcov` ([Stevens et al.
   2013](https://doi.org/10.1002/jame.20015)), and it is a total cover, which
   is the basis the satellite climatologies are quoted on — rather than a
   reduction peculiar to one model's post-processing.
-* **It is deterministic and needs only `cloud_fraction`.** Every saved output,
-  at every resolution and under every radiation scheme, scores identically —
-  including re-scoring an archived run years later.
+* **It is deterministic and uses the full fraction.** There is no sub-column
+  sampling and no optical-depth threshold, so two runs of the same state score
+  the same number, and the cover does not move with how thin a cloud is.
 * **It is orientation-independent.** Cancelling the denominators leaves the
   clear-sky product as the adjacent-pair factors `1 - max(c_k, c_{k-1})`
   divided by the *interior* levels' `1 - c_k`, and both of those sets survive
-  reversing the axis unchanged. Files written before #710 carry TOA-first
+  reversing the axis unchanged. The physics-internal frame is top-first, the
+  saved output surface-first, and files written before #710 carry TOA-first
   interfaces (see
-  [output_vertical_conventions](output_vertical_conventions.md)) and still
-  score the same, so the function carries no orientation guard and needs none.
-  The cancellation is exact, but the two orders agree only *to rounding*: the
-  `min(c_{k-1}, zxsec)` guard is applied in loop order, so it caps a different
-  denominator in the reversed column, and a profile holding cover within
-  `zepsec` of 1 (`[0.2, 1 - 5e-13]`, say) differs by `O(zepsec)`. Over 200k
-  random 47-level profiles (uniform, sparsified, and with overcast layers
-  injected) the worst forward-versus-reversed difference was 1.1e-16.
+  [output_vertical_conventions](output_vertical_conventions.md)); all score the
+  same, so neither the in-model nor the offline function carries an
+  orientation guard. The cancellation is exact, but the two orders agree only
+  *to rounding*: the `max(1 - c_{k-1}, zepsec)` guard is applied in loop
+  order, so it caps a different denominator in the reversed column, and a
+  profile holding cover within `zepsec` of 1 (`[0.2, 1 - 5e-13]`, say) differs
+  by `O(zepsec)`. Over 200k random 47-level profiles (uniform, sparsified, and
+  with overcast layers injected) the worst forward-versus-reversed difference
+  was 1.1e-16.
 
-Two further covers are **printed and not gated**:
+### Output without the online field
+
+`jcm.analysis.total_cloud_cover` applies the same recurrence to a *saved*
+`clouds.cloud_fraction`, and `health.py` falls back to it, with a NOTE, when
+the window carries no `clouds.total_cloud_cover` (output written before the
+field existed). That keeps archived output scoreable, but it is a **different
+number, usually a lower one**. Under `run.output_averages` the saved fraction is already a
+time mean over the output interval, and the overlap product is non-linear in
+it. Smoothing over the interval moves each layer toward its mean fraction, and
+where cloud moved between layers during the interval that breaks the maximum
+overlap chain the instantaneous cloud had: a 0.5 cloud that alternates between
+the top and the bottom layer of a three-layer column is 0.5 cover on every step
+and so 0.5 on average, while its mean profile (0.25 in each outer layer, clear
+between) overlaps to 0.4375. The inequality is not general — clouds that fill
+several layers together, at the same times, push it the other way, and a column
+that is overcast half the time and clear the other half gives the same answer
+either way — but it is the usual direction. The fallback is an estimate whose
+bias is usually low and can have either sign; it is not a bound.
+
+### The covers side by side
+
+All covers are area-weighted, and time-averaged **after** the overlap product
+(it is non-linear). Rows 1-2 are archived year runs scored with `--last-n 40`
+(the settled ~200 days of 5-day means); they predate the online field, so the
+gate read them through the fallback, and both FAIL the 0.5 floor at **0.46**.
+Rows 3-4 are one T63 L47 ECHAM+RRTMGP+2M run that carries the online field,
+started from a warm state, on CPU.
+
+| run | saved means | offline overlap of the saved profile | column max | `radiation.total_cloud_cover` | **online** `clouds.total_cloud_cover` |
+|---|---|---|---|---|---|
+| JAM control year (2M + JAM), jcm `519f18e8`, days ~170-365 | 5-day | 0.462 | 0.402 | 0.582 | not saved |
+| 2M control year (2M + MACv2-SP), jcm `49c0724c`, days ~170-365 | 5-day | 0.459 | 0.395 | 0.584 | not saved |
+| 2M warm start, jcm `766570bc` + the online field: five daily-mean frames, each overlapped on its own, then averaged | 1-day | 0.529 | 0.487 | 0.604 | **0.562** |
+| the same trajectory as one 5-day mean (online and radiation: the mean of the frames; offline and column max: of the mean profile) | 5-day | 0.480 | 0.411 | 0.604 | **0.562** |
+
+Provenance, because it bounds what the table can be used for:
+
+* Rows 1-2 are T63 L47 `ECHAM+RRTMGP` years from the January end state of the
+  host's warm-state set (`echam-jam-t63-l47_jan_fixed_49c0724c`,
+  `echam-2m-t63_jan_fixed_49c0724c`), `run.start_time=2000-12-31`, 12-minute
+  time step, 5-day means, scored by the `health.py` of the tree that ran them.
+  The JAM year ran on Nautilus, the 2M year on the dev workstation.
+* Rows 3-4 are one 5-day run from `echam-2m-t63_jul_0e1d57f1` (the end of a
+  180-day July run, day 545 after a cold start) with `run.start_time=2000-07-01`,
+  12-minute time step, `run.output_averages=true`, daily-mean frames, on CPU
+  (`jcm.main` with the release recipe's overrides; global area-weighted means of
+  the saved fields). Rows 3 and 4 are the same five daily frames reduced two
+  ways, so they share the online and radiation covers (a mean of per-frame
+  means) and differ in the profile-based columns. They measure the definitions
+  on one 2000-07-01 state; they are not a climatology, and the first days of a
+  warm start still carry the donor's cloud.
+* The two kinds of row differ by code point as well as by interval, so read
+  across a row group, not down a column.
+
+Reading it: on the warm-start run the offline overlap of the saved profile sits
+**below** the cover of the same run's instantaneous fraction, and the gap grows
+with the averaging interval: **+0.033** at one day and **+0.082** at five, with
+the online cover the larger in 85 % of the area at five days. That comparison
+(online against offline, one trajectory) isolates the averaging effect, and it
+is the evidence that the offline overlap of a saved mean is biased low and the
+reason the gate scores the online field. At five days, the release-validation
+interval, the offline overlap (0.480) sits below the 0.5 floor on this state
+while the online cover (0.562) is above it. The control years cannot isolate
+the effect: their offline 0.46 sits 0.12 below the McICA 0.58, but that cover
+differs from the online one in its fraction and its thresholds too (below), so
+the pair is context, not a measurement of the bias. (One run, one state, one
+season; the size of the effect is not a constant.)
+
+### Printed and not gated
 
 | reported | what it is | why it is not the gate |
 |---|---|---|
-| `cloud_cover_colmax` | `clouds.cloud_fraction.max("level")` — the quantity the gate scored before | It assumes *every* layer overlaps maximally, so it is only a **lower bound**: two half-covered decks in different parts of the column read 0.5 where the sky is 0.75 covered. Retained so the #638 and #782 tables remain readable across this change. |
-| `cloud_cover_radiation` | mean of `radiation.total_cloud_cover` — the cover the flux solve integrates: under RRTMGP the fraction of McICA sub-columns with at least one cloudy layer, under the overlap rule the solve actually uses (default: maximum-random, ECHAM6.3's rule; the exponential option adds a decorrelation length); under grey two-stream the beam-split weight between its clear and cloudy calls (`column_total_cover`, the column maximum for the maximum-random and exponential rules) | The radiation view. It is not the gate because it is a scheme-dependent quantity with its own overlap treatment (sampled under RRTMGP, whose maximum-random sampler has `aclcov`'s adjacent-layer product as its expectation but is a finite draw of it; a column-maximum approximation under grey), and absent from output written before the diagnostic existed (`b772ffec`, 2026-07-31). An all-zero field is dropped rather than reported, so output that does not carry it cannot look like a cloudless run; the printed NOTE says which of the two cases held. |
+| `cloud_cover_colmax` | `clouds.cloud_fraction.max("level")` of the saved (interval-mean) fraction — the column-maximum cover of the #638 and #782 tables | It assumes *every* layer overlaps maximally, so it is only a **lower bound**: two half-covered decks in different parts of the column read 0.5 where the sky is 0.75 covered. Retained so the #638 and #782 tables remain readable. |
+| `cloud_cover_radiation` | mean of `radiation.total_cloud_cover` — the cover the flux solve integrates: under RRTMGP the fraction of McICA sub-columns with at least one cloudy layer, under the overlap rule the solve actually uses (default: maximum-random, ECHAM6.3's rule; the exponential option adds a decorrelation length); under grey two-stream the beam-split weight between its clear and cloudy calls (`column_total_cover`, the column maximum for the maximum-random and exponential rules) | The radiation view, with its own inputs and its own overlap treatment (sampled under RRTMGP, whose maximum-random sampler has `aclcov`'s adjacent-layer product as its expectation but is a finite draw of it; a column-maximum approximation under grey), and absent from output written before the diagnostic existed (`b772ffec`, 2026-07-31). An all-zero field is dropped rather than reported, so output that does not carry it cannot look like a cloudless run; the printed NOTE says which of the two cases held. |
 
 Random overlap, `1 - prod(1 - c_k)`, is the opposite bound: it ignores that a
 physically continuous cloud spans several model layers, and so double-counts
 its edges. It is neither scored nor reported.
 
+The observed total cover is printed beside the gate as `cloud_cover_obs`
+(**0.63**, see "The observed reference" below). It is a reference for reading
+the number, not a band.
+
 ### `cloud_cover_radiation` is a different measurement, not a cross-check
 
-It is tempting to read the two printed covers against each other. They are not
-comparable, for two independent reasons, and the measured gap is large:
+Both the online cover and `radiation.total_cloud_cover` are time means of an
+*instantaneous* cover, so unlike the offline overlap they are comparable in
+kind, but they are not the same field, and they are not expected to agree:
 
-* **Different field.** `radiation.total_cloud_cover` is built from
+* **Different fraction.** ECHAM calls `cover`, then radiation, and only then
+  `cloud` (`physc.f90` l.543, 566 and 1067): radiation integrates the
+  RH-diagnosed fraction, masked to cells with step-start condensate, before the
+  microphysics has written back its post-microphysics `paclc`. The online cover
+  is of the fraction the step *leaves*, after cells below `ccwmin` in both
+  phases have been cleared. jcm keeps that order, so the two are the cover of
+  different fractions even in the same step.
+* **Different treatment of thin cloud, and a sampled estimate.**
+  `radiation.total_cloud_cover` is built from
   `effective_cloud_fraction(cloud_fraction, eps=cld_frac_min)`
   (`jcm/physics/radiation/mcica.py`), which zeroes every cell with
   `cloud_fraction <= 2*cld_frac_min` so the sampler and the optics agree about
-  which cells are empty. `cloud_cover` reduces the cloud fraction as saved.
-* **Different time treatment.** Under `run.output_averages` the saved frame is
-  the running mean over the output interval (`jcm/model.py`), and the
-  release-validation launcher sets it unconditionally
-  (`tools/release_validation/launch.py`: `run.output_averages=true`), as do
-  the `longrun` and `pyses_year` run configs. So
-  `radiation.total_cloud_cover` is a time mean of an *instantaneous* cover,
-  while `cloud_cover` and `cloud_cover_colmax` are
-  overlaps of a *time-mean* profile. The overlap product is non-linear, so
-  those are different numbers: smoothing over the output interval moves each
-  layer toward its time-mean fraction, and where cloud moved between layers
-  during the interval that lowers the overlap-derived cover relative to the
-  mean of the instantaneous covers. (The inequality is not general — a column
-  that is overcast half the time and clear the other half gives the same
-  answer either way — but it is the usual direction.)
+  which cells are empty, and under RRTMGP it counts a finite set of sampled
+  sub-columns. The online cover has neither.
 
-On the 90-day 2M arm in the table below the two read **0.53 and 0.78**. A gap
-of that size is expected; it is not evidence of a defect in either. It also
-means the gated number is not the same quantity as the time-mean of the
-instantaneous total cover that ECHAM6 and the satellite products report, and
-on the one archived arm where both are available it is the smaller of the two
-— worth remembering before reading a small offset against an anchor as a
-model bias.
+On the warm-start run the McICA cover reads **0.604 against 0.562** online, the
+larger of the two by 0.042 at both intervals. Treat a gap of that order as
+expected, and read neither as a check on the other.
 
 ### Measured magnitudes
 
-All three definitions, scored with this branch's
-`jcm.analysis.total_cloud_cover` on the archived T63 L47 ECHAM+RRTMGP output
-on the shared dev workstation. Area-weighted, and the reduction is taken
+The three offline definitions of cover (column maximum, maximum-random and
+random overlap of the *saved mean profile*), scored with
+`jcm.analysis.total_cloud_cover` on the archived T63 L47 ECHAM+RRTMGP output on
+the shared dev workstation. Area-weighted, and the reduction is taken
 **after** the overlap product in every row (the product is non-linear). The
 runs save 5-day means, so "last 40 saved frames" is the window
-`--last-n 40` picks out of a 5-day-chunked run — the settled ~200 days.
+`--last-n 40` picks out of a 5-day-chunked run — the settled ~200 days. The
+online cover is not in this table because these runs predate it; it differs
+from the max-random column by the averaging effect set out above, usually
+upward.
 
 | run | code point | window | column max | **max-random** | random | offset |
 |---|---|---|---|---|---|---|
@@ -132,23 +224,26 @@ runs save 5-day means, so "last 40 saved frames" is the window
 | " | " | settled (last 40 frames) | 0.563 | **0.691** | 0.823 | +0.128 |
 | 2M+JAM 90-day arm<br>`jam_scav_ab/abbase_260823_0100_day{30,60,90}.nc` | jcm `0ee92eaa`, **post-#707** | days 1-90 | 0.425 | **0.535** | 0.699 | +0.111 |
 | " | " | days 61-90 | 0.417 | **0.527** | 0.703 | +0.110 |
+| JAM control year (2M + JAM) | jcm `519f18e8`, **post-#707** | settled (last 40 frames) | 0.402 | **0.462** | not scored | +0.060 |
+| 2M control year (2M + MACv2-SP) | jcm `49c0724c`, **post-#707** | settled (last 40 frames) | 0.395 | **0.459** | not scored | +0.064 |
 
 Provenance and caveats, because they bound what the table can be used for:
 
 * The two year runs are **pre-#690, pre-#707 and pre-#710**. Their directories
   carry no surviving `.hydra` snapshot, so the code point is fixed only by the
   run logs' date (2026-07-04) and the full resolved config they echo; #690
-  merged 2026-08-21 and #707 2026-08-22. They are still the only archived
-  T63 L47 ECHAM year runs on the box.
+  merged 2026-08-21 and #707 2026-08-22.
 * The 2M year additionally carries a known defect — its own `README.txt`
   records it as the pre-orientation-fix arm, with inverted MACv2-SP shortwave
   aerosol and ozone. Its *absolute* cover is therefore not a climatology; its
   offset between definitions is what this table uses it for.
-* The 90-day arm is the only archived **post-#707** ECHAM T63 L47 output here
-  (verified: `git merge-base --is-ancestor 5ba96f7f 0ee92eaa`). It is a 90-day
-  spin-up from a dry Jablonowski-Williamson start, so its absolute values are
-  spin-up values, not climate. It is in the table for one purpose: to show the
-  definitional offset survives the #690/#707 cloud-state change.
+* The 90-day arm is **post-#707** (verified:
+  `git merge-base --is-ancestor 5ba96f7f 0ee92eaa`). It is a 90-day spin-up from
+  a dry Jablonowski-Williamson start, so its absolute values are spin-up
+  values, not climate.
+* The two control years are the settled, post-#707 year runs (provenance in
+  the side-by-side table above); only the column-max and max-random columns
+  were recorded for them, so the random-overlap column is empty.
 * `radiation.total_cloud_cover` is **absent** from both year runs (they
   predate `b772ffec`). The 90-day arm saves it: 0.757 over days 1-90 and 0.776
   over days 61-90 — against a max-random 0.535/0.527 on the same files, which
@@ -157,15 +252,18 @@ Provenance and caveats, because they bound what the table can be used for:
 Two readings come out of this. First, the spread across definitions is
 **~0.27-0.30**, larger than any model change the gate has ever been asked to
 judge — which is the whole reason the definition has to be pinned down.
-Second, the column max is **0.11 to 0.15 low** against max-random, and that
-offset is stable across two microphysics schemes, two code points and
-the #690/#707 boundary. It is the artefact the previous gate carried.
+Second, the column max is low against max-random by an offset that is not a
+constant: **0.11 to 0.15** on the pre-#690 year runs and on the 90-day
+post-#707 spin-up arm, but **0.06** on the two settled post-#707 control years
+(and 0.07 on the 5-day mean of the warm-start run).
+It is the artefact a column-maximum score carries, and its size depends on the
+cloud state, so a band placed by this offset has to be read with that spread in mind.
 
 ### Reconciling with the #638 and #782 tables
 
 The numbers recorded in the #638 baseline sweep (2026-08-16) and the #782
-comparison are **column maxima**, on different code points, at T63 *and* T106,
-scored with `--last-n 40`. They are not directly comparable with the table
+comparison are **column maxima** of the saved mean profile, on different code
+points, at T63 *and* T106, scored with `--last-n 40`. They are not directly comparable with the table
 above, which is a different (earlier) code point at T63 only — the column max
 there reads 0.54-0.56 against 0.60-0.70 in the matrix, and that difference is
 model change plus resolution, not definition. What *is* transferable is the
@@ -185,9 +283,14 @@ using the offset measured on the matching scheme for the #638 column (1M
 +0.128, 2M +0.148, the JAM members being 2M) and the post-#707 offset (+0.110)
 for the current one. The two JAM members were scrapped in the #782 sweep
 pending the dust/sea-salt emissions investigation, so they have a #638 column
-only. These are *mapped* values, not measurements: no post-#707 year run has
-been scored on this definition, because none is archived. The next validation
-sweep prints all three covers and replaces this mapping with measurements.
+only. These are *mapped* values on the offline max-random definition, not
+measurements, and the online cover of the same member usually reads higher than
+them (see the side-by-side table; a member whose clouds fill several layers
+together can read the other way). The post-#707 column is also an upper estimate:
+the settled control years measure the offset directly at +0.06, not +0.11, which
+would map the post-#707 members to ~0.69 and ~0.72 (1M, T63 and T106) and ~0.54
+and ~0.55 (2M). The next validation sweep saves the online cover and replaces
+this mapping with measurements.
 
 `speedy-t31` is deliberately outside the mapping. SPEEDY scores
 `shortwave_rad.cloudc`, its own RH-based column cover
@@ -195,14 +298,26 @@ sweep prints all three covers and replaces this mapping with measurements.
 and which nothing in this work touched. There is no offset to apply to it, and
 it keeps the band it was calibrated with — see below.
 
+### The observed reference
+
+`health.py` prints `cloud_cover_obs = 0.63` beside the gate: the area-weighted
+global mean (0.632) of the ESA-CCI CLOUD v3.0 AVHRR-AMPM total cloud cover
+(`clt`), 1997-2016, conservatively remapped to the T63 Gaussian grid
+(`obs/t63/clt.nc` of the jcm-monitor repository, variable `annual`, the mean of
+the twelve monthly climatologies). It is the `clt` product the monitor's maps
+and the calibration compare the model against. It is a reference for reading
+the gated number, not a band: satellite products differ with their detection
+threshold by more than the model changes the gate is asked to judge (the
+GEWEX figures in the next section), so no single product is a pass line.
+
 ### The band
 
 The gate band is **0.5-0.9**: the same width the gate has always had, placed
-on this definition.
+on the max-random definition.
 
 Placement is the whole question, because a band is calibrated against a
 quantity. The previous band, 0.4-0.8, was calibrated by experience with column
-maxima. Carrying it unchanged onto a quantity that reads 0.11-0.15 higher
+maxima. Carrying it unchanged onto a quantity that reads 0.06-0.15 higher
 would loosen the floor and tighten the ceiling by that offset, and the mapped
 matrix above shows that is not academic: `echam-1m-t106`'s #638 baseline maps
 to ~0.83 and `echam-1m-t63`'s to ~0.81, so members that passed would fail on
@@ -228,9 +343,21 @@ a tuning target) and brackets both anchors:
   p. 5196) — which is why the anchor here is a range and not one satellite
   number.
 * **The model.** Every **ECHAM** member of the #638/#782 matrix maps into
-  **0.59-0.83**, and the directly measured year runs sit at 0.68-0.70. The
-  tightest margin is 0.07, at the ceiling, and it is held by a *superseded*
-  baseline; the current code point maps to 0.59-0.77, with 0.09 at the floor.
+  **0.59-0.83** on the offline definition, and the directly measured year runs
+  sit at 0.68-0.70. The tightest margin is 0.07, at the ceiling, and it is held
+  by a *superseded* baseline; the current code point maps to 0.59-0.77 with the
+  spin-up arm's offset and to 0.54-0.72 with the control years', so 0.04-0.09
+  above the floor for the 2M members. The 2M control year itself reads 0.459 on
+  the offline definition, 0.04 below the floor, while its McICA cover reads
+  0.58.
+
+The mapped values are offline overlaps of a saved mean profile; the online
+cover the gate scores usually reads above them (+0.08 at the 5-day interval on
+the warm-start run above), which moves a member toward the ceiling and away from
+the floor; no post-#707 year has been measured online, so the size of that shift
+is open. The band stays at 0.5-0.9 by the maintainer's decision; the members
+to watch against the 0.9 ceiling are the 1M ones, whose mapped values are the
+highest.
 
 ### SPEEDY keeps the old band
 
@@ -315,8 +442,8 @@ and they moved further: against the #638 baseline the year runs record
 0.12 of lost cloud. The alarming reading it produced at the time — "only 0.08
 of headroom above the 0.4 floor" — was also compounded by the gate scoring a
 lower bound: on the definition and band this document settles on, that member
-maps to ~0.59 against a 0.5 floor, so the headroom is ~0.09 and the picture is
-unchanged in substance. The point is not that the member is safer than it
+maps to ~0.54-0.59 against a 0.5 floor, so the headroom is ~0.04-0.09 and the
+picture is unchanged in substance. The point is not that the member is safer than it
 looked; it is that neither reading should have been taken from a quantity
 whose definition was not pinned down.
 
@@ -362,8 +489,10 @@ retune's 365-day years ([jam_aerosol_retune](jam_aerosol_retune.md)) are the
 first measurements: the `echam-2m-t63` control year scores 0.46 on the gate and
 0.58 as the radiation sees it, and the year with the Stage-2b cover parameters
 0.51 and 0.65; the `echam-1m-t63` control year scores 0.42 and 0.52, and with the
-same parameters 0.48 and 0.60, which still fails the gate. The mapping above has not been re-derived from them, and the band
-is worth revisiting with those numbers rather than a rounded offset.
+same parameters 0.48 and 0.60, which still fails the gate. The mapping above has
+not been re-derived from them, and the band is worth revisiting with those numbers
+rather than a rounded offset. The release-candidate matrix saves the online cover on
+every member and should replace the mapping with those measurements.
 
 Whether the new cloud state is *right* was the retune's question: the
 convective trigger and closure, and the 1M and 2M microphysics, were swept

@@ -99,6 +99,13 @@ class TestCloudRadiativeEffectActive(unittest.TestCase):
         # (SW CRE < 0). With condensate present but decoupled from the
         # optics (the Sundqvist-diagnostic failure mode), the two TOA
         # fields are identical and this fails.
+        # (3) The saved total cloud cover is ECHAM's aclcov of the saved
+        # fraction, on a run that does carry a cloud.
+        from jcm.physics.composable_physics_slow_test import (
+            assert_total_cover_is_aclcov_of_the_saved_fraction)
+        assert_total_cover_is_aclcov_of_the_saved_fraction(
+            self, preds, "echam-1m-seeded-cloud", require_cloud=True)
+
         rad = preds.physics["radiation"]
         sw_up = np.asarray(rad.toa_sw_up)
         sw_up_clear = np.asarray(rad.toa_sw_up_clear)

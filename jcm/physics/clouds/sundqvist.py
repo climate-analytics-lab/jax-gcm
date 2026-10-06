@@ -551,7 +551,14 @@ class SundqvistCloudFraction(PhysicsTerm):
     Like ECHAM's, this term runs first in the step, before radiation.
     Writes ``cloud_fraction``, plus a pass-through of the ``qc`` / ``qi`` the
     downstream microphysics starts from, into the public ``"clouds"`` key
-    (:class:`CloudData`), and publishes ``"cover_relative_humidity"``: the
+    (:class:`CloudData`). ``CloudData.copy`` recomputes ``total_cloud_cover``
+    (ECHAM's ``aclcov``) from the fraction it is given, so this term's value
+    is the cover of the RH-diagnosed fraction. It is not the saved one when a
+    microphysics term follows: that term writes back ECHAM's post-microphysics
+    ``paclc`` and with it the cover of the step's FINAL fraction, which is what
+    ECHAM accumulates (``mo_cloud.f90`` section 10.2 sits at the end of
+    ``cloud``). Under a stack with no microphysics this term's fraction is the
+    final one. The term also publishes ``"cover_relative_humidity"``: the
     ``q / qs`` the cover closure sees, with ``qs`` over ice where ECHAM's
     ``lo2`` selects it. That is a scheme-internal closure variable, so it
     does NOT overwrite the public water-saturation ``"relative_humidity"``

@@ -44,6 +44,51 @@ def _assert_physical_atmosphere(testcase, preds, label):
     testcase.assertGreater(float(q.max()), 0.0, f"{label}: atmosphere is bone dry")
 
 
+def assert_total_cover_is_aclcov_of_the_saved_fraction(
+        testcase, preds, label, require_cloud=False):
+    """``clouds.total_cloud_cover`` is saved and is ECHAM's ``aclcov`` of the
+    saved ``clouds.cloud_fraction``.
+
+    In a snapshot frame both belong to the same step, and ``cloud_fraction`` is
+    the one the microphysics left (its write-back is the last to write it), so
+    equality of the cover with the overlap of that fraction says the cover is
+    the FINAL fraction's, not the diagnosed fraction's the cover term started
+    from. The output carries the field with its CF metadata.
+
+    A cold-started idealised aquaplanet makes no cloud for its first day, and
+    there the equality is 0 == 0: it still checks the field is wired into the
+    output, with its shape, range and metadata. ``require_cloud`` makes the
+    caller's run one that carries cloud, so the equality compares real covers.
+    """
+    import xarray as xr
+
+    from jcm.analysis import total_cloud_cover
+
+    clouds = preds.physics["clouds"]
+    cover = np.asarray(clouds.total_cloud_cover)
+    fraction = np.asarray(clouds.cloud_fraction)
+    # (time, level, *horizontal) against (time, *horizontal).
+    testcase.assertEqual(fraction.shape[2:], cover.shape[1:], label)
+    testcase.assertTrue(np.isfinite(cover).all(), f"{label}: cover has NaN")
+    testcase.assertGreaterEqual(float(cover.min()), 0.0, label)
+    testcase.assertLessEqual(float(cover.max()), 1.0, label)
+    offline = total_cloud_cover(xr.DataArray(
+        fraction.astype(np.float64),
+        dims=("time", "level") + tuple(f"h{i}" for i in range(cover.ndim - 1))))
+    np.testing.assert_allclose(cover, np.asarray(offline), atol=1e-5,
+                               err_msg=label)
+    if require_cloud:
+        testcase.assertGreater(
+            float(cover.max()), 0.0,
+            f"{label}: no cloud anywhere, the comparison is vacuous")
+
+    ds = preds.to_xarray()
+    testcase.assertIn("clouds.total_cloud_cover", ds, label)
+    testcase.assertEqual(ds["clouds.total_cloud_cover"].attrs["units"], "1")
+    testcase.assertEqual(ds["clouds.total_cloud_cover"].attrs["standard_name"],
+                         "cloud_area_fraction")
+
+
 class TestComposableSpeedyIntegration(unittest.TestCase):
     """Integration tests for composable SPEEDY physics."""
 
@@ -154,6 +199,8 @@ class TestComposableEchamIntegration(unittest.TestCase):
             total_time=1.0,
         )
         _assert_physical_atmosphere(self, preds, "echam+remove")
+        assert_total_cover_is_aclcov_of_the_saved_fraction(
+            self, preds, "echam-1m")
 
     @pytest.mark.slow
     def test_echam_2m_composable_model_run(self):
@@ -179,6 +226,8 @@ class TestComposableEchamIntegration(unittest.TestCase):
             total_time=1.0,
         )
         _assert_physical_atmosphere(self, preds, "echam-2m")
+        assert_total_cover_is_aclcov_of_the_saved_fraction(
+            self, preds, "echam-2m")
 
 
 if __name__ == "__main__":

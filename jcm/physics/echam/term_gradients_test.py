@@ -325,6 +325,15 @@ class _Check:
     off: str | None = None
 
 
+# The outputs of ``sundqvist_cloud_fraction`` that are structural zeros: its
+# tendency ledger (the cover emits none) and the step's convective-detrainment
+# fields of ``clouds``, which the cover resets for ``TiedtkeConvection`` to
+# write.
+_SUNDQVIST_STRUCTURAL_ZEROS = (
+    "u_wind", "v_wind", "temperature", "specific_humidity",
+    "tracers/qc", "tracers/qi",
+    "clouds/conv_detrainment_qc", "clouds/conv_detrainment_qi")
+
 # Cells that are not the default. Keyed by (term, operating point); a term name
 # alone applies to both points.
 _CHECKS: dict = {
@@ -426,15 +435,22 @@ _CHECKS: dict = {
     # and live in the temperature and humidity. That the derivative is the
     # surrogate's, that the surrogate is smooth, and how far it lies from the
     # value are checked on the functions themselves in ``sundqvist_test.py``.
-    # Its tendency ledger is structurally zero (the cover emits none), and so
-    # are the step's convective-detrainment fields of ``clouds``, which the
-    # cover resets for ``TiedtkeConvection`` to write.
+    # Its tendency ledger and the detrainment fields are structural zeros
+    # (``_SUNDQVIST_STRUCTURAL_ZEROS``).
     "sundqvist_cloud_fraction": _Check(
         reference="adjoint",
-        skip_outputs=("u_wind", "v_wind", "temperature", "specific_humidity",
-                      "tracers/qc", "tracers/qi",
-                      "clouds/conv_detrainment_qc",
-                      "clouds/conv_detrainment_qi"),
+        skip_outputs=_SUNDQVIST_STRUCTURAL_ZEROS,
+        live_inputs=("[0]/temperature", "[0]/specific_humidity")),
+    # The stable column is exactly clear, and ``clouds.total_cloud_cover``, the
+    # maximum-random overlap of that fraction, has only a subgradient at tied
+    # layers: with every layer exactly zero JAX's tie rule gives the interior
+    # layers a derivative of exactly zero (and the surrogate tangent of the end
+    # layers is itself zero here), where the one-sided derivative is +1
+    # (#1013). The convecting column has no exact ties between its cloudy
+    # layers and checks the cover.
+    ("sundqvist_cloud_fraction", "stable"): _Check(
+        reference="adjoint",
+        skip_outputs=_SUNDQVIST_STRUCTURAL_ZEROS + ("clouds/total_cloud_cover",),
         live_inputs=("[0]/temperature", "[0]/specific_humidity")),
 
     # TTE-TKE, the 1M microphysics and Hines each cross an internal activation

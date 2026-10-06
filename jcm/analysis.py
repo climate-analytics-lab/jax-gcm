@@ -13,7 +13,11 @@ analysis notebook must read the same one
 ``radiation.total_cloud_cover`` diagnostic despite the matching name: that one
 is the in-model McICA sub-column cover, sampled under the flux solve's own
 overlap rule from a differently-preprocessed cloud fraction, and the design doc
-above sets out how far apart the two run in practice.
+above sets out how far apart the two run in practice. Nor is it the saved
+``clouds.total_cloud_cover``, which is the same overlap applied to the
+*instantaneous* fraction inside the model and time-averaged afterwards;
+this function applied to a saved mean profile is the offline approximation to
+it.
 
 Everything here takes labelled xarray in and returns xarray (or a Python
 ``float``) out, using numpy internally. It operates on *saved* output — never
@@ -22,7 +26,11 @@ column integral lives separately in
 :func:`jcm.physics.diagnostics.aerocom._column_integral`, because physics runs
 on JAX arrays inside ``jit`` (it integrates over ``pressure_half`` interfaces
 in the physics-internal frame). The two are deliberately kept apart —
-cross-reference, do not merge.
+cross-reference, do not merge. The one piece of in-model code this module does
+call is the maximum-random overlap recurrence behind :func:`total_cloud_cover`
+(:func:`jcm.physics.clouds.cloud_overlap.max_random_cover`), which is
+array-type-agnostic and is handed numpy here: the cover the physics step saves
+and the cover scored here must be the same arithmetic.
 """
 
 from __future__ import annotations
@@ -31,6 +39,7 @@ import numpy as np
 import xarray as xr
 
 import jcm.constants as c
+from jcm.physics.clouds.cloud_overlap import max_random_cover
 
 #: Dimensions that are never horizontal. The horizontal dims of a field are
 #: everything *else* — this is the convention promoted from
@@ -172,13 +181,6 @@ def column_burden(ds: xr.Dataset, var: str) -> xr.DataArray:
     return column_integral(ds[var], layer_pressure_thickness(ds))
 
 
-#: ECHAM's ``zepsec`` security epsilon (``mo_cloud.f90``, "Security
-#: parameters": ``zepsec = 1.0e-12``). The overlap denominator uses
-#: ``zxsec = 1 - zepsec`` so a cell with cover exactly 1 divides by 1e-12
-#: rather than by zero; its numerator is zero there, so the factor is zero.
-_ZEPSEC = 1.0e-12
-
-
 def total_cloud_cover(cloud_fraction: xr.DataArray,
                       dim: str = "level") -> xr.DataArray:
     r"""Total cloud cover [1] under ECHAM's maximum-random overlap.
@@ -191,7 +193,7 @@ def total_cloud_cover(cloud_fraction: xr.DataArray,
 
         C_\mathrm{clear} = (1 - c_0)\;
             \prod_{k=1}^{n-1}
-            \frac{1 - \max(c_k, c_{k-1})}{1 - \min(c_{k-1}, 1-\epsilon)},
+            \frac{1 - \max(c_k, c_{k-1})}{\max(1 - c_{k-1}, \epsilon)},
         \qquad \mathrm{aclcov} = 1 - C_\mathrm{clear},
 
     with the product running over ``k = 1 … n-1`` — the Fortran's ``DO 923``
@@ -201,11 +203,22 @@ def total_cloud_cover(cloud_fraction: xr.DataArray,
     ``mo_cloud.f90`` section "10.2 Total cloud cover" (ICON
     ``atm_phy_echam/mo_cloud.f90`` lines 1165-1182; the same loop is ECHAM6
     ``mo_cloud.f90`` lines 1359-1383, whose ``paclcov`` is a time accumulation
-    of it and whose ``aclcov_na`` is this instantaneous value). The one
-    addition to the Fortran is the ``[0, 1]`` clip of the input: saved output
-    can carry small out-of-range excursions that the in-model ``paclc`` never
-    has, and an unclipped ``c > 1`` would make the numerator negative and the
-    "clear-sky fraction" meaningless.
+    of it and whose ``aclcov_na`` is this instantaneous value), with the
+    Fortran's denominator ``1 - min(c_{k-1}, 1 - epsilon)`` written as the
+    equal ``max(1 - c_{k-1}, epsilon)``, which does not collapse to 0/0 in
+    float32. The one addition to the Fortran is the ``[0, 1]`` clip of the
+    input: saved output can carry small out-of-range excursions that the
+    in-model ``paclc`` never has, and an unclipped ``c > 1`` would make the
+    numerator negative and the "clear-sky fraction" meaningless.
+
+    The recurrence is :func:`jcm.physics.clouds.cloud_overlap.max_random_cover`,
+    the one the physics step accumulates into ``clouds.total_cloud_cover``
+    online (instantaneous cover, time-averaged under ``output_averages``, as
+    ECHAM's ``paclcov``). This function is its offline counterpart for output
+    that does not carry that field: a cover of a *saved time-mean* profile,
+    which differs from the time mean of the instantaneous cover (the product
+    is non-linear in ``cloud_fraction``; see
+    ``docs/source/design/cloud_cover_gate.md``).
 
     The product is built **level by level with lazy xarray slices**, so a
     dask-backed array (anything opened with
@@ -249,10 +262,10 @@ def total_cloud_cover(cloud_fraction: xr.DataArray,
     vertical conventions are described in
     ``docs/source/design/output_vertical_conventions.md``) score the same as
     current ones. The two orders agree to rounding, differing by at most
-    ``O(zepsec)``: the ``min(c_{k-1}, zxsec)`` guard is applied in loop order,
-    so it caps a *different* denominator in the reversed column and a profile
-    holding cover within ``1e-12`` of 1 (say ``[0.2, 1 - 5e-13]``) can differ
-    in that last digit. The cancellation argument itself is exact.
+    ``O(zepsec)``: the ``max(1 - c_{k-1}, zepsec)`` guard is applied in loop
+    order, so it caps a *different* denominator in the reversed column and a
+    profile holding cover within ``1e-12`` of 1 (say ``[0.2, 1 - 5e-13]``) can
+    differ in that last digit. The cancellation argument itself is exact.
 
     Parameters
     ----------
@@ -299,29 +312,19 @@ def total_cloud_cover(cloud_fraction: xr.DataArray,
     def level(k):
         """Level ``k`` of the cloud fraction, clipped, as float64.
 
-        float64 because ``zxsec`` is not representable in float32 (it rounds
-        to 1.0, turning an overcast layer's guarded 0/1e-12 into 0/0). Per
-        level rather than on the whole array so the numpy path's peak stays at
-        a couple of horizontal slices; ``astype`` and ``clip`` are both out of
-        place, so the caller's array is never modified, and on a dask array
-        both are lazy, so nothing is loaded here at all.
+        float64 so the product of up to ~100 factors accumulates in double
+        precision whatever precision the file was saved in. Per level rather
+        than on the whole array so the numpy path's peak stays at a couple of
+        horizontal slices; ``astype`` and ``clip`` are both out of place, so
+        the caller's array is never modified, and on a dask array both are
+        lazy, so nothing is loaded here at all.
         """
         return c.isel({dim: k}).astype(np.float64).clip(0.0, 1.0)
 
-    zxsec = 1.0 - _ZEPSEC
-    lower = level(0)
-    clear = 1.0 - lower
-    for k in range(1, c.sizes[dim]):
-        upper = level(k)
-        clear = clear * ((1.0 - np.maximum(upper, lower))
-                         / (1.0 - np.minimum(lower, zxsec)))
-        lower = upper
-
-    # No clip is needed on the way out. Each factor's numerator
-    # ``1 - max(c_k, c_{k-1})`` is at most its denominator
-    # ``1 - min(c_{k-1}, zxsec)`` (both branches of the min), so every factor
-    # is in [0, 1] under IEEE division, and so is the product.
-    cover = 1.0 - clear
+    # The recurrence is the in-model one (the module that holds it explains
+    # the denominator and why every factor lies in [0, 1]), so the cover the
+    # physics step accumulates and the cover scored here cannot drift apart.
+    cover = max_random_cover(level, c.sizes[dim], np)
     cover.attrs = {
         "standard_name": "cloud_area_fraction",
         "long_name": "total cloud cover (maximum-random overlap)",
