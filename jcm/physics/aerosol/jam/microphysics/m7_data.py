@@ -46,6 +46,9 @@ from __future__ import annotations
 
 import math
 
+from jcm.physics.aerosol.jam.chemistry.aqueous_constants import (
+    HAM_AQUEOUS_CONSTANTS,
+)
 from jcm.physics.aerosol.jam.emissions.dust import m7_dust_emission_policy
 from jcm.physics.aerosol.jam.emissions.ham_sectors import m7_sector_policy
 from jcm.physics.aerosol.jam.emissions.sectors import OM_OC_RATIO
@@ -232,4 +235,8 @@ M7_SPEC = ModalAerosolSpec(
     dust_emission=m7_dust_emission_policy(
         M7_SPECIES_BY_NAME["du"].density),
     sector_emission=m7_sector_policy(OM_OC_RATIO),
+    # r7492's own SO2-Henry/gas-constant/Avogadro/SO2-molar-mass literals
+    # (jax-gcm#1017 task 3; the jax-gcm#1031 MAM4-shared defect this isolates
+    # M7 from without touching MAM4's calibrated behaviour).
+    aqueous_constants=HAM_AQUEOUS_CONSTANTS,
 )

@@ -12,7 +12,9 @@ import unittest
 from jcm.physics.aerosol.jam.emissions.distributors import particle_mean_mass
 from jcm.physics.aerosol.jam.emissions.ham_sectors import (
     BB_WSOC_FRACTION,
+    BG_WSOC_FRACTION,
     CMR_BB,
+    CMR_BG,
     CMR_FF,
     CMR_SA,
     CMR_SC,
@@ -114,6 +116,26 @@ class M7SectorPolicyTest(unittest.TestCase):
         self.assertEqual(
             self._targets("biomass_like", "so4"),
             self._targets("fossil", "so4"))
+
+    def test_biogenic_oc_no_om_oc_35ki_325ks_325as_no_number_on_soluble(self):
+        # lines 601-607: 35% KI (with number, at cmr_bg), 32.5% each
+        # KS/AS (NO number -- HAM sets no pfactor(nocks)/pfactor(nocas)
+        # for the soluble biogenic targets).
+        targets = {t.mode: t for t in self.policy.targets["biogenic"]["oc"]}
+        self.assertEqual(set(targets), {"ki", "ks", "as"})
+        self.assertAlmostEqual(targets["ki"].mass_fraction, 1.0 - BG_WSOC_FRACTION)
+        self.assertAlmostEqual(targets["ki"].cmr_m, CMR_BG)
+        self.assertTrue(targets["ki"].has_number)
+        for short in ("ks", "as"):
+            self.assertAlmostEqual(targets[short].mass_fraction, 0.5 * BG_WSOC_FRACTION)
+            self.assertFalse(targets[short].has_number)
+        total = sum(t.mass_fraction for t in targets.values())
+        self.assertAlmostEqual(total, 1.0)
+
+    def test_biogenic_has_no_so4_or_bc_targets(self):
+        # mo_ham_m7_emissions.f90's biogenic branch only fires for kspec==id_oc.
+        self.assertNotIn("so4", self.policy.targets["biogenic"])
+        self.assertNotIn("bc", self.policy.targets["biogenic"])
 
     def test_m7_spec_carries_the_same_policy(self):
         self.assertEqual(M7_SPEC.sector_emission.om_oc, 1.4)
