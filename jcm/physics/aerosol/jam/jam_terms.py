@@ -13,6 +13,7 @@ on mode/species layout.
 from __future__ import annotations
 
 import dataclasses
+import os
 
 from jcm.physics.aerosol.carry_seeder import AerosolCarrySeeder
 from jcm.physics.aerosol.jam.activation.arg_term import (
@@ -64,6 +65,7 @@ from jcm.physics.aerosol.jam.microphysics.placeholder import (
     PlaceholderMicrophysics,
 )
 from jcm.physics.aerosol.jam.optics.optics_term import JamOpticsTerm
+from jcm.physics.aerosol.jam.optics.ham_lut_optics_term import HamLutOpticsTerm
 from jcm.physics.aerosol.jam.sedimentation.sedi_term import (
     StokesSedimentation,
     SedParameters,
@@ -222,7 +224,9 @@ def jam_aerosol_physics(
     activation_scheme: str = "arg",
     nactivpdf: int = 0,
     optics: bool = True,
+    optics_backend: str = "jcm",
     optics_diagnostics: bool = False,
+    ham_optics_tables_dir: str | os.PathLike | None = None,
     seasalt: SeaSaltParameters | None = None,
     dms: DmsParameters | None = None,
     dust: DustParameters | None = None,
@@ -252,6 +256,20 @@ def jam_aerosol_physics(
     Args:
         microphysics: the swappable core — ``"placeholder"`` or a
             ``ModalMicrophysicsTerm`` instance.
+        optics_backend: which ``_mode_optics`` implementation ``optics=True``
+            attaches (``docs/source/design/jam_optics_mode_seam.md``):
+            ``"jcm"`` (default) is the on-the-fly Gauss-Hermite quadrature
+            over jcm's own Mie LUT; ``"ham_lut"`` is ``HamLutOpticsTerm``,
+            ECHAM-HAM M7's own nearest-neighbour Mie-table lookup (#1017).
+            This is the one in-tree exception to the seam's "no registry"
+            design — the implementation lives in this repository, so it
+            gets a selector here rather than requiring an out-of-tree
+            subclass and a manual ``physics.replace(...)``.
+        ham_optics_tables_dir: directory holding HAM's authentic Mie LUT
+            NetCDF files for ``optics_backend="ham_lut"`` (see
+            ``ham_mie_tables.load_ham_mie_tables``). ``None`` (default)
+            reads the ``HAM_INPUT_DIR`` environment variable; ignored for
+            ``optics_backend="jcm"``.
         cloud_borne: prognose an explicit cloud-borne aerosol phase (#602).
             ``None`` (default) follows the core population's own
             ``spec.cloud_borne``; ``True``/``False`` override it for a
@@ -436,8 +454,22 @@ def jam_aerosol_physics(
     # ``optics_diagnostics`` adds the AeroCom per-species / per-mode /
     # spectral optics pass (jax-gcm#584) — a second Mie sweep at the
     # observation wavelengths, off unless a run asks for it.
+    if optics_backend == "jcm":
+        optics_extra_kwargs = {}
+        optics_cls = JamOpticsTerm
+    elif optics_backend == "ham_lut":
+        # HAM's own authentic Mie LUTs (#1017): loaded from HAM_INPUT_DIR
+        # (or this explicit override) at construction, never built by jcm
+        # itself -- see ham_mie_tables.py's module docstring for why.
+        optics_extra_kwargs = {"tables_dir": ham_optics_tables_dir}
+        optics_cls = HamLutOpticsTerm
+    else:
+        raise ValueError(
+            f"Unknown optics_backend={optics_backend!r}. Choose 'jcm' or "
+            "'ham_lut'."
+        )
     optics_terms = [
-        JamOpticsTerm(spec=spec, optics_diagnostics=optics_diagnostics)
+        optics_cls(spec=spec, optics_diagnostics=optics_diagnostics, **optics_extra_kwargs)
     ] if optics else []
     post_core = [
         _activation_term(activation_scheme, activation, spec, arg_variant,

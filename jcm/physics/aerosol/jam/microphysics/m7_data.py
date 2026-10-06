@@ -224,6 +224,10 @@ M7_SPEC = ModalAerosolSpec(
     cloud_borne=False,
     primary_emission=_M7_PRIMARY_EMISSION,
     accumulation_mode="as",
+    # HAM's dedicated nucleation class (``inucs``, ``nrad(1)=0`` in
+    # mo_ham.f90:583-585) -- the mode HamLutOpticsTerm's radiation gate
+    # excludes; see ``population.ModalAerosolSpec.nucleation_mode``.
+    nucleation_mode="ns",
     freezing_roles=M7_FREEZING_ROLES,
     # HAM sums the pH-setting sulfate over, and splits the produced sulfate
     # over, exactly the soluble accumulation/coarse classes

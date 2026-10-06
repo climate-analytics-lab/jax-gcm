@@ -171,6 +171,16 @@ class ModalAerosolSpec:
     #: a population with other mode names (M7's ``"as"``) points this at its
     #: own accumulation-sized soluble mode instead.
     accumulation_mode: str = "accum"
+    #: Name (or short) of the mode that plays HAM's dedicated nucleation
+    #: class (M7's ``"ns"``, ``inucs``/``nrad(1)``, ``mo_ham.f90:583-585``) --
+    #: the one mode HAM's own radiation interface never gives optics to
+    #: (``HamLutOpticsTerm._mode_optics``). ``None`` (every MAM4 population,
+    #: including the placeholder core's default) means the population has no
+    #: such class -- MAM4 has no nucleation mode at all, so its own mode 0
+    #: (accumulation) must keep its optics; a bare "mode index 0" gate would
+    #: silently zero it instead. Set only by a population that actually has
+    #: HAM's nucleation class.
+    nucleation_mode: str | None = None
     #: Which classes play HAM's roles in the aerosol inputs to mixed-phase
     #: freezing (a :class:`~jcm.physics.aerosol.jam.ice_nucleation.ham_freezing.HamFreezingClasses`,
     #: typed loosely here — ``jam.ice_nucleation.ham_freezing`` imports this
