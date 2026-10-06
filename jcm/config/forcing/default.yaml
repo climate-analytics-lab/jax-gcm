@@ -64,17 +64,25 @@ emissions_file: auto
 # nmol/L; ``bundles/<grid>/dms.nc``). Drives ``DmsEmissions``.
 dms_file: auto
 
-# The five Tegen/HAMMOZ dust inputs (#802). ``dust_file`` is the monthly
-# effective-LAI potential-source climatology, which both gates the flux and
-# multiplies it; the three static companions are mandatory alongside it (the
-# scheme would otherwise run on an all-coarse, untuned soil, so a missing one
-# raises). ``dust_roughness_file`` is the satellite roughness map, read only
-# on the ``ndurough = 0`` sensitivity path. ``dust_file: null`` disables dust.
+# The Tegen/HAMMOZ dust inputs (#802; the MSG map, jax-gcm#1017). ``dust_file``
+# is the monthly effective-LAI potential-source climatology, which both gates
+# the flux and multiplies it; the three static companions are mandatory
+# alongside it (the scheme would otherwise run on an all-coarse, untuned soil,
+# so a missing one raises). ``dust_roughness_file`` is the satellite roughness
+# map, read only on the ``ndurough = 0`` sensitivity path.
+# ``dust_msg_file`` (the MSG-SEVIRI Saharan source-activation map, ``ndust =
+# 5`` only) defaults to ``null`` rather than ``auto`` like its siblings: the
+# bundle is not yet staged on the mirror, so an unconditional ``auto`` default
+# would raise for every ndust != 5 run the moment dust is on. A configuration
+# that selects ``jam_dust_preset: 5`` must set ``forcing.dust_msg_file: auto``
+# itself (see ``jcm/config/configuration/ham-t63-l47.yaml``).
+# ``dust_file: null`` disables dust.
 dust_file: auto
 dust_preferential_file: auto
 dust_soil_types_file: auto
 dust_regions_file: auto
 dust_roughness_file: auto
+dust_msg_file: null
 
 # Oxidant monthly climatology on the model's hybrid levels (HAMMOZ/MACC
 # ``OH/NO3/O3/H2O2_VMR_avrg (time, mlev, lat, lon)`` mole/mole;
