@@ -2293,6 +2293,23 @@ Sub-grid orographic drag never accelerates the wind
   to round-off. See ``JAX_gotchas.md`` for how to recognise this class of
   failure.
 
+
+Radiation derivatives are finite for cloud in the lowest layer and for negligible condensate
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The derivative of the radiation was non-finite, with finite fluxes, in two
+  cloud states: cloud in the lowest model layer (the RRTMGP library's halo cells
+  repeated the surface layer's cloud paths, giving a cloudy below-surface cell
+  at the library's extrapolated temperature) and cloud of negligible but nonzero
+  condensate, whose optical depth is a nonzero float32 below about ``1e-19`` and
+  whose reciprocal square, in the divisions by the optical depth that both the
+  RRTMGP and the grey scheme make, overflows. The halo cells now hold no cloud,
+  and both schemes pass no cloud below an in-cloud path of ``1e-11 kg/m²``
+  (``1e-8 g/m²``, far below any radiative relevance). See
+  :doc:`science/radiation`.
+- **Changes results** only in derivatives: the fluxes and heating rates of the
+  replayed single columns of ``term_gradients_test.py`` are bit-identical.
+
 Known limitations
 ^^^^^^^^^^^^^^^^^
 

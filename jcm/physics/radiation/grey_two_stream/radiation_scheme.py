@@ -35,6 +35,7 @@ from ..mcica import (
     column_total_cover,
     effective_cloud_fraction,
     in_cloud_path,
+    resolvable_path,
 )
 from .planck import planck_bands_lw
 from .two_stream import longwave_fluxes, shortwave_fluxes, flux_to_heating_rate
@@ -435,14 +436,14 @@ def radiation_scheme(
     # differ. This within-cloud
     # horizontal-variability correction is distinct from the beam-split
     # clear/cloudy partitioning above.
-    in_cloud_lwp = in_cloud_path(
+    in_cloud_lwp = resolvable_path(in_cloud_path(
         rad_state.cloud_water_path, rad_state.cloud_fraction,
         eps=parameters.cld_frac_min,
-    )
-    in_cloud_ipath = in_cloud_path(
+    ))
+    in_cloud_ipath = resolvable_path(in_cloud_path(
         rad_state.cloud_ice_path, rad_state.cloud_fraction,
         eps=parameters.cld_frac_min,
-    )
+    ))
 
     cloud_sw_optics_cloudy, cloud_lw_optics_cloudy = cloud_optics(
         cloud_water_path=in_cloud_lwp,
