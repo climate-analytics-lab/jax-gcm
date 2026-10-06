@@ -41,10 +41,19 @@ Host diagnostics
   energy and the dynamic height ``min(z_top, 0.3·u*/|f|)`` with the previous
   step's surface friction velocity, as ECHAM uses the previous step's.
 * Forest fraction: ``ForcingData.forest_fraction`` (ECHAM's ``forest``).
-* Ion-pair production is not supplied: H2SO4/H2O nucleation runs
-  ``nucleation_scheme=1`` (Vehkamäki), and the reference ``nsnucl=2``
-  (Kazil–Lovejoy, ion-mediated) is refused until its table and the GCR rates
-  are staged (#1017 F5).
+* Ion-pair production for ``nucleation_scheme=2`` (Kazil–Lovejoy,
+  ion-mediated) comes from :mod:`jam.chemistry.gcr_ionisation`'s
+  ``gcr_ion_pair_rate``, fed the per-step solar activity/date carried on
+  ``forcing.solar`` (jax-gcm#1017 Kazil/GCR task, Part B) -- the same
+  date-derived-quantity pattern every other date-dependent term in this
+  codebase uses, not ``DateData`` directly. ``load_kazil_lovejoy_table`` is
+  imported lazily (only when ``nucleation_scheme=2`` is actually
+  constructed, not at this module's own import time): the ``jcm[m7]``
+  extra is pinned to an ``m7-jax`` release that does not have it yet, and
+  a module-level import would make plain ``nucleation_scheme=0``/``1``
+  construction (and even just importing this module) fail once that pin is
+  satisfied in CI's extras-tests job -- see the lazy import site's own
+  comment.
 
 Precision
 ---------
@@ -65,6 +74,7 @@ import numpy as np
 from flax import nnx
 
 import jcm.constants as c
+from jcm.physics.aerosol.jam.chemistry import gcr_ionisation
 from jcm.physics.aerosol.jam.gas_species import GAS_SPECIES
 from jcm.physics.aerosol.jam.jam_state import JamAerosolState
 from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
@@ -89,6 +99,12 @@ from m7_jax.properties import (  # noqa: E402
     default_kappa_table_path,
     load_kappa_table,
 )
+# load_kazil_lovejoy_table is NOT imported here: the jcm[m7] extra pins an
+# m7-jax release without it yet (jax-gcm#1017's Kazil/GCR task Part A is
+# unreleased at time of writing), and a module-level import would break
+# constructing M7JaxMicrophysics for EVERY nucleation_scheme, not just 2,
+# the moment that pin is satisfied. Imported lazily in __init__'s
+# nucleation_scheme == 2 branch instead, with a clear error if missing.
 
 #: HAM ``aerocomp`` order (``mo_ham_m7_trac.f90``): the 18 (species, class)
 #: components of the M7 state, the layout ``m7_jax`` expects.
@@ -147,6 +163,41 @@ def _default_kappa_table_path() -> Path:
     return Path(env) if env else Path(default_kappa_table_path())
 
 
+#: ``ham_nucl_initialize``/ECHAM itself opens this name; the staged
+#: distribution's file is named ``parnuc.15H2SO4.A0.total.nc`` instead
+#: (jax-gcm#1017 Kazil/GCR task STATUS). Both accepted, in that order.
+_KAZIL_TABLE_NAMES = ("parnuc.15H2SO4.nc", "parnuc.15H2SO4.A0.total.nc")
+
+
+def _ham_input_dir() -> Path:
+    """``HAM_INPUT_DIR``: the directory holding both ``nucleation_scheme=2``
+    datasets (the Kazil/Lovejoy PARNUC table and the O'Brien GCR ion-pair
+    tables -- jax-gcm#1017 Kazil/GCR task). Raises, naming the env var, if
+    unset; the individual readers raise, naming the missing filename(s), if
+    the directory exists but a file does not.
+    """
+    env = os.environ.get("HAM_INPUT_DIR")
+    if not env:
+        raise FileNotFoundError(
+            "nucleation_scheme=2 (Kazil-Lovejoy + GCR ionisation) needs HAM_INPUT_DIR "
+            "set to a directory containing parnuc.15H2SO4.nc (or "
+            "parnuc.15H2SO4.A0.total.nc) and gcr_ipr_solmin.txt/gcr_ipr_solmax.txt "
+            "(or their aliases -- see gcr_ionisation.py)."
+        )
+    return Path(env)
+
+
+def _kazil_table_path(directory: Path) -> Path:
+    for name in _KAZIL_TABLE_NAMES:
+        candidate = directory / name
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        f"None of {_KAZIL_TABLE_NAMES} found in {directory} (HAM_INPUT_DIR); "
+        "nucleation_scheme=2 needs the Kazil/Lovejoy PARNUC table."
+    )
+
+
 class M7JaxMicrophysics(ModalMicrophysicsTerm):
     """ECHAM-HAM M7 aerosol microphysics (``m7-jax``) on :data:`M7_SPEC`."""
 
@@ -182,12 +233,8 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
                 f"{M7_CLASSES} carrying HAM's 18 components); missing {missing}.")
         if self.spec.cloud_borne:
             raise ValueError("M7 has no explicit cloud-borne phase; use cloud_borne=False.")
-        if nucleation_scheme == 2:
-            raise NotImplementedError(
-                "nsnucl=2 (Kazil-Lovejoy) needs parnuc.15H2SO4.nc and the GCR ion-pair "
-                "tables, which are not staged yet (jax-gcm#1017 F5).")
-        if nucleation_scheme not in (0, 1) or organic_scheme not in (0, 1, 2):
-            raise ValueError("nucleation_scheme must be 0/1 and organic_scheme 0/1/2.")
+        if nucleation_scheme not in (0, 1, 2) or organic_scheme not in (0, 1, 2):
+            raise ValueError("nucleation_scheme must be 0/1/2 and organic_scheme 0/1/2.")
         if not enable_x64:
             raise ValueError("m7-jax runs in float64 only; enable_x64 must stay True.")
         jax.config.update("jax_enable_x64", True)
@@ -199,6 +246,31 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
         # compiled step), not a static attribute baked into the program as a
         # constant.
         self._table = nnx.data(load_kappa_table(kappa_table or _default_kappa_table_path()))
+        # nsnucl=2 (Kazil-Lovejoy ion-mediated nucleation) needs both its
+        # PARNUC lookup table and the GCR ion-pair rate it conditions on
+        # (jax-gcm#1017 Kazil/GCR task); both tables are read once here, not
+        # per step. Raises (naming HAM_INPUT_DIR, or the missing filename)
+        # for every other scheme this stays None and unread.
+        self._kazil_table = nnx.data(None)
+        self._gcr_table = nnx.data(None)
+        if nucleation_scheme == 2:
+            # Checked in this order (not the reverse) so the error is
+            # deterministic across environments: an old m7-jax pin (missing
+            # load_kazil_lovejoy_table) and a missing HAM_INPUT_DIR are
+            # independent problems, but a caller with NEITHER set up always
+            # sees the data-directory error first.
+            ham_input_dir = _ham_input_dir()
+            try:
+                from m7_jax.nucleation import load_kazil_lovejoy_table
+            except ImportError as exc:
+                raise ImportError(
+                    "nucleation_scheme=2 (Kazil-Lovejoy) needs an m7-jax release with "
+                    "load_kazil_lovejoy_table (jax-gcm#1017 Kazil/GCR task, Part A); "
+                    f"the installed m7-jax does not have it yet ({exc})."
+                ) from exc
+            self._kazil_table = nnx.data(
+                load_kazil_lovejoy_table(_kazil_table_path(ham_input_dir)))
+            self._gcr_table = nnx.data(gcr_ionisation.read_obrien_gcr_ipr(ham_input_dir))
         self._mw_so4_g = self.spec.species_props("so4").molar_mass * 1000.0
         self._mw_h2so4_g = GAS_SPECIES["h2so4"].molar_mass * 1000.0
         self._mass_names = tuple(mass_name(sp, cl) for sp, cl in M7_COMPONENTS)
@@ -210,12 +282,18 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
                   for i, (sp, cl) in enumerate(M7_COMPONENTS) if cl == cls)
             for cls in M7_CLASSES)
         self._coriolis = nnx.data(None)
+        self._lat = nnx.data(None)
+        self._lon = nnx.data(None)
 
     def cache_coords(self, coords) -> None:
-        """Cache the per-column Coriolis parameter for the PBL-top diagnostic."""
+        """Cache the per-column Coriolis parameter and lat/lon (the latter for the
+        nucleation_scheme=2 GCR-ionisation geomagnetic coordinate transform).
+        """
         super().cache_coords(coords)
-        lat, _ = column_lat_lon(coords.horizontal)
+        lat, lon = column_lat_lon(coords.horizontal)
         self._coriolis = nnx.data(jnp.asarray(2.0 * c.omega * np.sin(np.asarray(lat))))
+        self._lat = nnx.data(jnp.asarray(lat))
+        self._lon = nnx.data(jnp.asarray(lon))
 
     def __call__(self, state, diagnostics, forcing, terrain):
         out_dtype = state.temperature.dtype
@@ -263,9 +341,14 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
                   if forest is not None else zeros)
         in_pbl = self._in_pbl(state, diagnostics, terrain, temperature, q, shape)
 
+        step_kwargs = dict(self._options)
+        if self._options["nucleation_scheme"] == 2:
+            step_kwargs["kazil_lovejoy_table"] = self._kazil_table
+            step_kwargs["ion_pair_rate"] = self._gcr_ion_pair_rate(forcing, pressure, temperature, horiz, shape)
+
         result = step_all(
             FullState(mass, number, gas), temperature, pressure, rh, dt,
-            production, cloud_cover, self._table, forest, in_pbl, **self._options)
+            production, cloud_cover, self._table, forest, in_pbl, **step_kwargs)
         new_mass, new_number, new_gas = result.state
 
         new_mass_mmr = jnp.concatenate([
@@ -294,6 +377,45 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
             tracers=tracers,
         )
         return tendency, {**diagnostics, "_jam_state": jam_state}
+
+    def _gcr_ion_pair_rate(self, forcing, pressure, temperature, horiz, shape):
+        """GCR ion-pair production rate ``pipr`` [cm-3 s-1] for nucleation_scheme=2
+        (jax-gcm#1017 Kazil/GCR task, Part B): ``gcr_ionisation.gcr_ion_pair_rate``
+        on the cached lat/lon and the per-step solar geometry ECHAM's own
+        ``ham_subm_interface``/``gcr_ionization`` call reads
+        (``forcing.solar`` -- the established date-derived-quantity pattern
+        every other date-dependent term in this codebase uses, not
+        ``DateData`` directly; see ``jcm/forcing.py``'s ``SolarGeometry``).
+
+        ``gcr_ion_pair_rate``'s ``grav`` is deliberately left at its default
+        (jcm's own ``c.grav``, read dynamically) rather than passed as
+        HAM's literal ``9.80665``: this call converts jcm's OWN ``pressure``
+        into a mass column density, and the model's own column mass is
+        ``pressure/c.grav`` everywhere else too (hydrostatic balance) -- using
+        a different gravity here would make this one diagnostic's column
+        mass inconsistent with the rest of the model's, for a ~3e-4 relative
+        difference with no physical motivation on the model side (the lead's
+        call on this exact question; the compiled-routine-parity reference
+        test passes ``grav=9.80665`` instead, for the opposite reason -- see
+        ``gcr_ion_pair_rate``'s own docstring).
+        """
+        if self._lat is None or self._lon is None:
+            raise RuntimeError("M7JaxMicrophysics needs cache_coords (lat/lon for "
+                               "the GCR-ionisation geomagnetic coordinate transform).")
+        if forcing is None or getattr(forcing, "solar", None) is None:
+            raise RuntimeError("nucleation_scheme=2 needs forcing.solar (calendar_year/"
+                               "day_of_year/tyear) for the GCR ionisation date dependence.")
+        solar = forcing.solar
+        lat = jnp.asarray(self._lat, jnp.float64).reshape(horiz)
+        lon = jnp.asarray(self._lon, jnp.float64).reshape(horiz)
+        year = jnp.asarray(solar.calendar_year, jnp.float64)
+        day_of_year = jnp.asarray(solar.day_of_year, jnp.float64)
+        activity = gcr_ionisation.solar_activity(year, jnp.asarray(solar.tyear, jnp.float64))
+        rate = gcr_ionisation.gcr_ion_pair_rate(
+            lat, lon, pressure, temperature, activity, self._gcr_table,
+            year=year, day_of_year=day_of_year,
+        )
+        return jnp.broadcast_to(rate, shape)
 
     def _in_pbl(self, state, diagnostics, terrain, temperature, q, shape):
         """Per-cell ``jk >= ihpbl`` with ECHAM's PBL-top level (see :func:`pbl_top_level`)."""

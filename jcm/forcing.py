@@ -1,3 +1,4 @@
+import dataclasses
 import warnings
 from typing import Any
 
@@ -18,6 +19,8 @@ from jcm.data.bc.interpolate import interpolate_to_daily, upsample_forcings_ds
 from jcm.data.input_resolution import expand_yearly_files as expand_yearly_files
 from jcm.date import (
     DateData,
+    day_of_year_elapsed,
+    get_year,
     gregorian_ymd_from_days,
 )
 from jcm.ozone_climatology import OzoneClimatology
@@ -291,12 +294,25 @@ class SolarGeometry:
     tyear: jnp.ndarray            # fractional year [0, 1) — SPEEDY shortwave
     orbital_phase: jnp.ndarray    # 2π × fraction-of-year, jax_solar convention
     synodic_phase: jnp.ndarray    # 2π × fraction-of-day,   jax_solar convention
+    # Raw calendar facts (jax-gcm#1017 Kazil/GCR task, Part B): GCR ionisation's
+    # geomagnetic dipole axis needs the actual (year, day-of-year), not just
+    # the fraction-of-year `tyear` above -- the IGRF epoch table it interpolates
+    # is indexed by calendar year, not a repeating annual cycle. Defaulted (not
+    # required at every call site, like the three fields above) so the two
+    # other direct `SolarGeometry(...)` constructions (`jcm/rce.py`'s
+    # perpetual-sun geometry, `tools/radiation_emulator/generate_training_
+    # data.py`'s batched-from-disk geometry) are unaffected.
+    calendar_year: jnp.ndarray = dataclasses.field(
+        default_factory=lambda: jnp.zeros((), dtype=jnp.float32))
+    day_of_year: jnp.ndarray = dataclasses.field(
+        default_factory=lambda: jnp.zeros((), dtype=jnp.float32))
 
     @classmethod
     def zero(cls):
         """Build a null SolarGeometry for placeholder / static `ForcingData` objects."""
         zero = jnp.zeros((), dtype=jnp.float32)
-        return cls(tyear=zero, orbital_phase=zero, synodic_phase=zero)
+        return cls(tyear=zero, orbital_phase=zero, synodic_phase=zero,
+                   calendar_year=zero, day_of_year=zero)
 
 
 # ---------------------------------------------------------------------------
@@ -1522,10 +1538,17 @@ def _solar_from_date(date: DateData) -> SolarGeometry:
     fraction_of_day = date.dt.delta.seconds / 86400.0
     tyear = date.tyear()
     two_pi = 2.0 * jnp.pi
+    # Truncated (floor, matching the Fortran's `aint` for positive values) to
+    # an integer day -- `gcr_ionization`'s own `idoy = aint(get_year_day(...))`
+    # (mo_ham_gcrion.f90:274); unlike `tyear` above, sub-day resolution plays
+    # no role in the IGRF epoch interpolation this feeds.
+    day_of_year = jnp.floor(day_of_year_elapsed(date.dt))
     return SolarGeometry(
         tyear=jnp.asarray(tyear, dtype=jnp.float32),
         orbital_phase=jnp.asarray(two_pi * tyear, dtype=jnp.float32),
         synodic_phase=jnp.asarray(two_pi * fraction_of_day, dtype=jnp.float32),
+        calendar_year=jnp.asarray(get_year(date.dt), dtype=jnp.float32),
+        day_of_year=jnp.asarray(day_of_year, dtype=jnp.float32),
     )
 
 
