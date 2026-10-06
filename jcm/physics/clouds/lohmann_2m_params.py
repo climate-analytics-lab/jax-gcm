@@ -188,8 +188,8 @@ class CloudParams2M:
         # (mo_activ.f90, activ_initialize, T63L47, cdnc_min_fixed = 40). That
         # retune belongs with HAM's own aerosol and its insoluble dust mode,
         # which jcm's MAM4-based JAM does not reproduce, so the JAM member
-        # keeps the generic 95 until it does (maintainer decision; a tuning
-        # target of the #682 retune). On one 10-day T63 JAM run, 900 gives an
+        # keeps the generic 95 until it does (maintainer decision; the JAM
+        # retune swept it over 0.5-2 times 95 and kept 95). On one 10-day T63 JAM run, 900 gives an
         # ice water path of 7 g/m² and 95 gives 22.
         ccsaut: float = 95.0,
         # Warm autoconversion: ECHAM-HAM's retune for the same setup

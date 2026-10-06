@@ -163,19 +163,26 @@ EARTH_AREA_M2 = 4.0 * np.pi * 6.371e6 ** 2
 
 #: Release band on the annual D < 10 µm dust emission [Tg/yr] — the size range
 #: jcm actually emits (coarser mass is discarded and published separately as
-#: ``dust_supercoarse_flux``). The anchor is the parent model converted to
-#: this window: ECHAM6.3-HAM2.3 emits 1221 Tg/yr present-day (Krätschmer et
-#: al. 2022), which is the mass reaching M7 — tracers 1-4 of ``mo_ham_dust``,
+#: ``dust_supercoarse_flux``). The parent model converted to this window is
+#: the lower anchor: ECHAM6.3-HAM2.3 emits 1221 Tg/yr present-day (Krätschmer
+#: et al. 2022), which is the mass reaching M7 — tracers 1-4 of ``mo_ham_dust``,
 #: everything below 15.887 µm — and 47.4 % of that window is the 10-15.887 µm
-#: slice this port does not carry, so the comparable target is 642 Tg/yr
-#: present-day and 485 pre-industrial. The band is a factor ~1.6 below and ~2
-#: above that: it spans both converted values and the 829 Tg/yr a calibrated
-#: T63 year emits, and is far wider than the 6 % run-to-run spread, so it
-#: cannot act as a tuning target. The derivation and the literature it is
-#: read against are in ``docs/source/science/aerosol.md``. It is the check
-#: that dust has neither vanished (HAM's untuned threshold gives jcm 5.7
-#: Tg/yr, #808) nor run away (the same model's LGM run emits 5159).
-DUST_EMISSION_TG_PER_YR = (400.0, 1300.0)
+#: slice this port does not carry, so the comparable budget is 642 Tg/yr
+#: present-day and 485 pre-industrial. The shipped dust threshold scale is
+#: fitted to the observed dust AOD rather than to that budget (JAM aerosol
+#: retune, ``docs/source/design/jam_aerosol_retune.md``) and a T63 year emits
+#: 1629 Tg/yr, of the order of the AeroCom phase-I median of 1640 (Textor et
+#: al. 2006; Huneeus et al. 2011 give 1123 for their 15 models, at different
+#: size cut-offs). The band spans the converted budget and that year, with a
+#: factor of ~1.6 above the calibrated year, and is far wider than the 6 %
+#: run-to-run spread, so it cannot act as a tuning target. The derivation and
+#: the literature it is read against are in ``docs/source/science/aerosol.md``.
+#: It is the check that dust has neither vanished (HAM's untuned threshold
+#: gives jcm 5.7 Tg/yr, #808) nor run away (the same model's LGM run emits
+#: 5159 Tg/yr in HAM's size window, about 2700 in this one). Under the
+#: documented ``health.py --last-n 40`` recipe the record is 200 days, shorter
+#: than ``MIN_DUST_WINDOW_DAYS``, so the gate is unscored there (#1010).
+DUST_EMISSION_TG_PER_YR = (400.0, 2600.0)
 
 #: T63's Gaussian latitude count. The dust band is a T63 calibration (#810:
 #: the HAMMOZ source maps exist only at T63), so it is scored only there.

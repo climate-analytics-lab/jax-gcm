@@ -96,7 +96,8 @@ present:
   and `cmftau = min(3 h, 7200 s·63/nn)`) and the subgrid-orography wake
   coefficient `gkwake` (`mo_ssodrag.f90` l.93-122). The order the maintainer
   chose is convection and gravity-wave values per truncation first and the
-  Tiedtke retune after (#682).
+  Tiedtke retune after; that retune left the Tiedtke defaults unchanged
+  ({doc}`jam_aerosol_retune`).
 * the ice cloud-optics inhomogeneity `zinhomi` and the deep-convective liquid
   `zinhoml3` (`mo_cloud_optics.f90` l.115-134; #974). `RadiationParameters` is a
   `tree_math.struct`, which has no static field to record the truncation its

@@ -530,14 +530,38 @@ Interactive aerosol (JAM)
   carry it (#787). Because the flux lives in the far tail of the 10 m wind
   distribution, HAM's threshold vector is scaled for jcm's own winds by a
   single global multiplier, ``NDUSCALE_JCM_T63_SCALE`` (per run,
-  ``physics.jam_dust_nduscale_scale``), set to **0.5** at T63; the regional
-  ratios stay HAM's, and T106 and ne30 take the Fortran's uniform default
-  since their inputs are interpolated from T63. A full
-  ``echam-jam-t63-l47`` year emits 829 Tg/yr of D < 10 µm dust, against the
-  642 Tg/yr that the parent model's published budget becomes once converted
-  to this window; the annual budget is a release-validation gate on any T63
-  run of 300 days or more (``DUST_EMISSION_TG_PER_YR``, 400-1300 Tg/yr)
-  (#808).
+  ``physics.jam_dust_nduscale_scale``), set to **0.379095663** at T63 (fitted
+  to the observed dust optical depth by the aerosol retune, below); the
+  regional ratios stay HAM's, and T106 and ne30 take the Fortran's uniform
+  default since their inputs are interpolated from T63. A full
+  ``echam-jam-t63-l47`` year emits 1629 Tg/yr of D < 10 µm dust, 2.5 times
+  the 642 Tg/yr that the parent model's published budget becomes once
+  converted to this window and of the order of the AeroCom medians (1640; 1123
+  in the 15-model dust intercomparison); the annual
+  budget is a release-validation gate on any T63 run of 300 days or more
+  (``DUST_EMISSION_TG_PER_YR``, 400-2600 Tg/yr) (#808).
+- **The aerosol defaults are calibrated against observed AOD** (#682). Two
+  defaults are scaled from HAM's: the Gong sea-salt source by **2**
+  (``physics.seasalt.scale``, from 1) and the dust threshold multiplier to
+  **0.379095663** (``physics.jam_dust_nduscale_scale``, from 0.5). They are the
+  best observed arm of a 40-arm Sobol sweep (14-day windows) and a 25-arm
+  Gaussian-process sweep (30-day windows) of a loss over cloud radiative
+  effects, cloud cover, precipitation, liquid water path and the ESA-CCI total
+  and dust AOD, each against its inter-annual spread, and were confirmed in a
+  365-day T63 L47 year of the release configuration. Against the same year at
+  the previous values, global AOD at 550 nm rises from 0.059 to 0.082 (observed
+  0.145), dust AOD from 0.0032 to 0.0092 (0.0213), the dust burden from 5.3 to
+  15.7 mg/m² (AeroCom mean 37.6) and the sea-salt burden from 6.6 to 13.3 mg/m²
+  (AeroCom mean 14.7, median 12.5); sulphate stays inside the AeroCom band (5.3
+  to 5.2 mg SO4/m², ion basis, against a band of 1.95-5.85) and the net TOA flux
+  is unchanged within 0.3 W/m² (annual mean +7.4 to +7.1; CERES +1.0). The
+  year's results are tabulated in :doc:`design/jam_aerosol_retune`. The DMS, wet-removal, cloud
+  and convection defaults are unchanged: the 1M and 2M levers were swept as
+  well: the 2M's optimum sat on the lower edge of four of its five levers, the
+  1M's best arm took `cprcon` to the edge of its range, and both bought cloud
+  radiative effect with liquid water path. What the calibration cannot fix is
+  structural and is listed under *Known limitations*; the design page records
+  the targets, the stages and the evidence.
 - **Aerosol direct radiative effect from the modal population**: per-band Mie
   optics integrated over each mode's lognormal size distribution and fed to
   RRTMGP, with a broadband 550 nm path so the grey two-stream scheme keeps a
@@ -1478,7 +1502,8 @@ Lohmann 2M detrained ice carries ECHAM's crystal number
   longwave cloud effect from 14.0 to 17.2 W/m², and the mixed-phase
   condensate stays mostly liquid. Glaciation remains too warm, cold ice
   cloud holds too many crystals, and liquid water path lies below the
-  observed range; a retune follows (#682). The release-matrix bands of the
+  observed range; the retune left these defaults unchanged
+  (:doc:`design/jam_aerosol_retune`). The release-matrix bands of the
   ``echam-2m`` and ``echam-jam`` members shift accordingly. See
   :doc:`science/clouds_microphysics`.
 
@@ -1845,7 +1870,8 @@ JAM mixed-phase freezing follows ECHAM-HAM
   ECHAM-HAM's 900, and the JAM members take it. ECHAM-HAM's 900
   (``mo_activ.f90``) is a retune for HAM's own aerosol and
   its insoluble dust mode, which MAM4 does not reproduce. The value is a
-  tuning target of the #682 retune. ``ccraut`` keeps ECHAM-HAM's 10.6: it
+  swept lever of the retune and keeps 95 (:doc:`design/jam_aerosol_retune`).
+  ``ccraut`` keeps ECHAM-HAM's 10.6: it
   acts on droplets from AR&G activation, which JAM runs. The 2M presets
   already set 95 and 15, so the ``echam-2m`` members are unchanged; a 2M
   scheme built in Python without a preset gets 95 instead of 900 (see
@@ -1971,8 +1997,9 @@ The ECHAM land evaporates in JSBACH's form and closes a skin energy balance
   Tg yr⁻¹, burden −19 %) because the 10 m wind and friction velocity over the
   sources fall by 11 %, so the dust calibration ``jam_dust_nduscale_scale``,
   set against the prescribed land's winds, needs redoing on this surface, and
-  with it the dust-borne ice nuclei. Both belong to #682; nothing is retuned
-  here.
+  with it the dust-borne ice nuclei. The aerosol retune
+  (:doc:`design/jam_aerosol_retune`) redoes the dust scale on this surface;
+  nothing is retuned in this entry.
 
 
 ECHAM surface emissivity is ECHAM's cemiss
@@ -2389,13 +2416,24 @@ Regression fixtures follow the supported matrix
 Calibration and capability gaps
 """""""""""""""""""""""""""""""
 
-- **The aerosol configuration is validated for stability and wiring, not
-  calibrated.** Shortwave cloud forcing is too strong (SW CRE −56 against an
-  observed −45 W/m²), LW CRE is low because the ice is too thin, and OLR runs
-  about 15 W/m² low (an upstream residual, ``jax-rrtmgp#19``). Aerosol
-  lifetimes are mixed: BC and sea salt are in the observed range while
-  sulfate is long, i.e. wet scavenging is too weak. See
-  :doc:`design/dinosaur_sl_jam_configuration` for the current numbers.
+- **The aerosol and cloud calibration is two emission scales; what is left is
+  structural.** Measured in the retune's 365-day T63 L47 JAM year and, for the
+  1M and 2M, its control windows (:doc:`design/jam_aerosol_retune` has the
+  evidence; the dust regional balance and the sulphur budget are from the
+  review of its earlier-tree sweeps): clear-sky OLR is 8 to
+  10 W/m² below CERES on every ECHAM host and no swept lever moves it by more
+  than 1 W/m²; total cloud cover is 0.58 to 0.59 as the radiation sees it and
+  0.46 on the offline maximum-random overlap, against 0.63 observed, and the 1M and
+  2M optima buy cloud radiative effect with liquid water path instead of
+  cover; dust lifetime is 1.8 d against AeroCom's 4.1 and the regional dust
+  source balance is wrong, so dust AOD stays under half of the observed;
+  the sea-salt burden lies between the AeroCom median and mean but its
+  coarse-mode extinction per unit mass is low, and total AOD is 0.082 against
+  0.145; sulphate
+  is governed by wet removal and its DMS source, and there is no SO2
+  deposition; and global-mean precipitation is 0.7 mm/day below GPCP (0.9 to
+  1.1 over the ocean).
+  See :doc:`design/jam_aerosol_retune` for the evidence.
 - **Cloud-borne aerosol is closed as a cycle but not as a full process set**
   (#602 is closed). Interstitial and cloud-borne mass and number exchange on
   activation and evaporation, wet and dry deposition drain the in-droplet

@@ -474,4 +474,5 @@ function of the friction velocity, falls by a third. The dust calibration
 (`jam_dust_nduscale_scale`, set in #808 against the prescribed land's wind
 distribution) therefore needs redoing on this surface, as does everything
 calibrated against JAM's dust, including the immersion-freezing ice nuclei
-that follow it.
+that follow it. The JAM aerosol retune ({doc}`jam_aerosol_retune`) redoes the
+dust scale on this surface.

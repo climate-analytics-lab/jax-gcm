@@ -91,7 +91,10 @@ Two things to know before reading a failure:
   `nduscale_reg` recalibration for jcm's winds. Drawn from a warm state (a JAM
   member's second year or later) the burdens are on their plateau, where a
   from-cold five-day window is still on the dust emission ramp. A failure is a
-  regression, not a known-provisional state.
+  regression, not a known-provisional state — except that bands drawn before
+  the JAM aerosol retune's two defaults (dust threshold scale 0.379095663,
+  sea-salt scale 2) describe the previous aerosol climate and must be
+  regenerated before a JAM dust, sea-salt or AOD failure is read as one.
 
 ## Workflow
 
