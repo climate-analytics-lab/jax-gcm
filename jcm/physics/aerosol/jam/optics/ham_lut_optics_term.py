@@ -3,8 +3,8 @@
 Implements the ``_mode_optics``/``_build_mie_lut`` seam of
 :class:`~jcm.physics.aerosol.jam.optics.optics_term.JamOpticsTerm`
 (``docs/source/design/jam_optics_mode_seam.md``) with the ECHAM-HAM M7
-lookup-table pathway: per mode, a nearest-neighbour read of one of the four
-HAM Mie tables (:mod:`ham_mie_tables`) at this mode's volume-mixed
+lookup-table pathway: per mode, a nearest-neighbour read of one of HAM's own
+four Mie tables (:mod:`ham_mie_tables`) at this mode's volume-mixed
 refractive index and size parameter, rather than the default's on-the-fly
 Gauss-Hermite quadrature over jcm's own Bohren-Huffman LUT.
 
@@ -22,32 +22,83 @@ index".
 
 from __future__ import annotations
 
+import logging
 import math
+import os
 
 import jax
 import jax.numpy as jnp
 from flax import nnx
 
 from jcm.physics.aerosol.jam.optics.ham_mie_tables import (
+    HamRadLUT,
     default_ham_mie_tables,
     ham_rad_fitplus,
+    load_ham_mie_tables,
 )
 from jcm.physics.aerosol.jam.optics.optics_term import JamOpticsTerm
+
+logger = logging.getLogger(__name__)
 
 
 class HamLutOpticsTerm(JamOpticsTerm):
     """HAM M7's own nearest-neighbour Mie-table optics, as a ``_mode_optics`` backend."""
 
-    def __init__(self, **kwargs):
-        """Build or load HAM's four tables now, outside any traced function.
+    def __init__(self, *, tables_dir: str | os.PathLike | None = None,
+                 tables: dict[str, HamRadLUT] | None = None, **kwargs):
+        """Pick HAM's authentic tables, or jcm's own built fallback, now --
 
-        They are held as module data (pytree leaves passed into the compiled
-        step), never created lazily inside ``__call__``.
+        outside any traced function. Held as module data (pytree leaves
+        passed into the compiled step), never created lazily inside
+        ``__call__``.
+
+        Parameters
+        ----------
+        tables_dir
+            Directory holding HAM's own ``lut_optical_properties_M7.nc`` /
+            ``lut_optical_properties_lw_M7.nc``; defaults to the
+            ``HAM_INPUT_DIR`` environment variable (see
+            :func:`ham_mie_tables.load_ham_mie_tables`). Ignored when
+            ``tables`` is given directly. When neither this nor
+            ``HAM_INPUT_DIR`` resolves to a directory holding both files,
+            this term falls back to :func:`ham_mie_tables.
+            default_ham_mie_tables` (jcm's own built approximation -- see
+            ``ham_mie_tables.py``'s module docstring for the measured
+            differences) rather than raising: the authentic files are a
+            nice-to-have, not a hard requirement, for a term that otherwise
+            runs identically either way.
+        tables
+            Pre-built tables, bypassing both the file load and the fallback
+            entirely. For tests that exercise this term's OWN logic (mode
+            selection, gradients, the nucleation-mode gate) and want a
+            specific, deterministic table regardless of ``HAM_INPUT_DIR``'s
+            ambient state. No production config passes this.
+
+        ``self.table_source`` records which path was used --
+        ``"authentic"``, ``"jcm_built"`` or ``"explicit"`` -- logged once
+        here and readable afterwards by tests or a preset's own reporting.
+
         """
         super().__init__(**kwargs)
+        if tables is not None:
+            self.table_source = "explicit"
+        else:
+            try:
+                tables = load_ham_mie_tables(tables_dir)
+                self.table_source = "authentic"
+            except FileNotFoundError as exc:
+                logger.info(
+                    "HamLutOpticsTerm: HAM's authentic Mie LUT files are not "
+                    "available (%s); falling back to jcm's own built "
+                    "approximation (ham_mie_tables.default_ham_mie_tables; "
+                    "see that module's docstring for the measured "
+                    "differences against HAM's real tables).", exc)
+                tables = default_ham_mie_tables()
+                self.table_source = "jcm_built"
+        logger.info("HamLutOpticsTerm: using %s Mie tables.", self.table_source)
         self._ham_tables = nnx.data({
             name: jax.tree_util.tree_map(jnp.asarray, lut)
-            for name, lut in default_ham_mie_tables().items()})
+            for name, lut in tables.items()})
 
     def _build_mie_lut(self):
         """Skip the default Gauss-Hermite LUT: unused by this backend."""
