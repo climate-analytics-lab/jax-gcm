@@ -319,6 +319,25 @@ class TestEchamComposablePhysics(unittest.TestCase):
         self.assertAlmostEqual(
             zinhomi(echam_physics(**jam, radiation=explicit)), 0.9, places=6)
 
+    def test_jam_microphysics_options_reach_the_core(self):
+        """``jam_microphysics_options`` reaches the string-named core's own
+        constructor through ``jam_aerosol_physics`` (jax-gcm#1017 task 6):
+        an unknown key still raises (naming the core, as the placeholder
+        core takes none), and the error surfaces all the way up through
+        ``echam_physics``.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        with self.assertRaises(ValueError) as ctx:
+            echam_physics(
+                checkpoint_terms=False, aerosol_module="jam",
+                cloud_scheme="2m", jam_microphysics="placeholder",
+                jam_microphysics_options={"nucleation_scheme": 2},
+            )
+        message = str(ctx.exception)
+        self.assertIn("placeholder", message)
+        self.assertIn("nucleation_scheme", message)
+
     def test_cu_lmfmid_rejects_a_simultaneous_convection_override(self):
         """cu_lmfmid and an explicit convection Parameters are exclusive."""
         from jcm.physics.convection.tiedtke_nordeng import ConvectionParameters

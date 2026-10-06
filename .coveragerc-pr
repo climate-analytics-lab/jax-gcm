@@ -110,6 +110,11 @@ omit =
     # ``jcm[m7]`` — the M7-JAX core adapter (jax-gcm#1017); CI installs no
     # extras, so it is reachable only in the extras-tests job.
     jcm/physics/aerosol/jam/microphysics/m7_jax.py
+    # Host-side GCR ionisation for the M7 core's nsnucl=2: its only consumer
+    # is the m7_jax adapter above, so in CI's integration suite it is as
+    # unreachable as the adapter; gcr_ionisation_test.py covers it in the fast
+    # tier against compiled Fortran.
+    jcm/physics/aerosol/jam/chemistry/gcr_ionisation.py
 
 [report]
 # See the identical block in the base ``.coveragerc``: ``fail_under`` is judged

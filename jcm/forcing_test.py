@@ -696,6 +696,13 @@ class TestTimeSeriesAndSelect(unittest.TestCase):
         # orbital_phase = 2π × tyear, so close to π but not exactly π
         # because July 2 is a couple days off the year midpoint.
         self.assertAlmostEqual(float(sliced.solar.orbital_phase), 2.0 * float(jnp.pi) * float(date.tyear()), places=4)
+        # calendar_year/day_of_year (jax-gcm#1017 Kazil/GCR task, Part B):
+        # raw calendar facts GCR ionisation's geomagnetic dipole axis needs
+        # beyond the repeating annual tyear cycle above. 2 July 2001
+        # (non-leap) is the 183rd day of the year (ECHAM's 1-based
+        # get_year_day convention, truncated).
+        self.assertAlmostEqual(float(sliced.solar.calendar_year), 2001.0, places=4)
+        self.assertAlmostEqual(float(sliced.solar.day_of_year), 183.0, places=4)
 
     def test_time_series_wrap_year_indexing(self):
         """A 12-entry monthly TimeSeries selects the civil calendar month."""

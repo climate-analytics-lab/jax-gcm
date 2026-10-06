@@ -1,6 +1,9 @@
 """The M7-JAX core adapter on columns (jcm[m7] extra)."""
 from __future__ import annotations
 
+import datetime
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -8,6 +11,116 @@ pytestmark = pytest.mark.requires_extra("m7")
 
 NLEV, NCOL = 6, 3
 DT = 720.0
+
+# nsnucl=2 end-to-end chain reference (jax-gcm#1017 Kazil/GCR task, W5):
+# read_obrien_gcr_ipr -> gcr_ionization -> nucl_kazil_lovejoy, against the
+# UNMODIFIED compiled Fortran on the REAL O'Brien and PARNUC tables. Built
+# by /scr/dwatsonparris/ham-m7/w5/build_hamnucl2_chain.py (own scratch, not
+# part of this repository); see hamnucl2_README.md/hamnucl2_provenance.json
+# next to the npz for the exact build and the non-embedded-table rationale
+# (the real PARNUC table is ~200MB; only the per-case 2^5-corner bracket
+# m7_jax.nucleation.kazil_lovejoy's own bisection search touches is
+# embedded, which reproduces the full-table call bit-for-bit).
+_HAMNUCL2_REF = (Path(__file__).resolve().parents[4] / "data" / "test"
+                 / "echam_cloud_reference" / "hamnucl2_chain.npz")
+
+
+def _recompute_ion_pair_rate(ref, table):
+    """Run gcr_ion_pair_rate per case against ``table`` (either the embedded
+    or a freshly-read O'Brien table) -- stage 1 of the chain.
+    """
+    from jcm.physics.aerosol.jam.chemistry.gcr_ionisation import gcr_ion_pair_rate
+
+    n = len(ref["in/ion_pair_rate"])
+    recomputed = np.empty(n)
+    for i in range(n):
+        date = ref["meta/scenario_date"][i]
+        year, month, day = int(date[0]), int(date[1]), int(date[2])
+        doy = (datetime.date(year, month, day) - datetime.date(year, 1, 1)).days + 1
+        lat_rad = np.radians(ref["meta/column_lat"][i])
+        lon_rad = np.radians(ref["meta/column_lon"][i])
+        pressure_1 = np.asarray([ref["meta/pressure"][i]])
+        temperature_1 = np.asarray([ref["in/temperature"][i]])
+        out = gcr_ion_pair_rate(
+            lat_rad, lon_rad, pressure_1, temperature_1,
+            float(ref["meta/scenario_psolact"][i]), table,
+            year=float(year), day_of_year=float(doy), grav=9.80665)
+        recomputed[i] = float(np.asarray(out)[0])
+    return recomputed
+
+
+def _write_real_format_obrien_file(path, vcr, mcd, ipr):
+    """Write a solmin/solmax file in ``read_obrien_gcr_ipr``'s own blocked
+    text format (mo_ham_gcrion.f90:120-206: one skipped header line, then
+    per cutoff-rigidity block a skipped line, an "F11.6,A" cutoff-rigidity
+    line, two skipped lines, and ``len(mcd)`` "mcd ipr" data lines),
+    from REAL numbers (``vcr``/``mcd``/``ipr``, shape ``(len(vcr),
+    len(mcd))``) rather than synthetic ones -- unlike
+    gcr_ionisation_test.py's own ``_write_synthetic_format_test_file``,
+    this one is used to give the MARKED adapter test (below) a fully
+    offline ``HAM_INPUT_DIR`` built from the embedded hamnucl2 reference,
+    not to test the parser's format tolerance. ``.17g`` round-trips any
+    float64 exactly; the reader's own regex/``split()`` parsing does not
+    care about field width.
+    """
+    lines = ["HEADER real_obrien_excerpt"]
+    for block in range(len(vcr)):
+        lines.append("skip")
+        lines.append(f"{float(vcr[block]):.17g} GV vertical cutoff rigidity")
+        lines.append("skip")
+        lines.append("g cm-2      cm-3 s-1")
+        for row in range(len(mcd)):
+            lines.append(f"{float(mcd[row]):.17g} {float(ipr[block, row]):.17g}")
+    Path(path).write_text("\n".join(lines) + "\n")
+
+
+def _write_tiny_parnuc_netcdf(path, axes, log_pfr):
+    """Write a PARNUC table ``load_kazil_lovejoy_table`` can read, from a
+    REAL per-case excerpt (``axes`` shape ``(5, 2)``, ``log_pfr`` shape
+    ``(2, 2, 2, 2, 2)``, both from the embedded hamnucl2 reference's
+    ``in/kazil_table_axes``/``in/kazil_table_log_pfr``) -- a degenerate
+    2-points-per-axis table, not the real ~200MB (40,40,40,20,40) one.
+    ``kazil_lovejoy``'s own bracket search (``_bracket``, a clip then
+    ``searchsorted``) always resolves a 2-element strictly-increasing axis
+    to (0, 1) and then CLAMPS the query into ``[axis[0], axis[-1]]`` before
+    bracketing, so this is valid for ANY query the adapter's column
+    produces, not just the one the excerpt's own case was built from --
+    this is why the adapter does not need to be fed a column that
+    reproduces that case's exact (T, RH, H2SO4, sink, ion_pair_rate); see
+    ``kazil_lovejoy``'s own docstring/source for the clamp-before-bracket
+    order (mo_ham_m7_nucl.F90:320-668's own INTEGER search loop plus its
+    ``MIN``/``MAX`` clamps, lines ~422-480).
+    """
+    from scipy.io import netcdf_file
+
+    axis_names = ("temperature", "RH", "H2SO4", "ionization", "condensation_sink")
+    with netcdf_file(path, "w") as nc:
+        for name, values in zip(axis_names, axes):
+            nc.createDimension(name, len(values))
+            var = nc.createVariable(name, "d", (name,))
+            var[:] = np.asarray(values, dtype=np.float64)
+        pfr = nc.createVariable("pfr", "f", axis_names)
+        pfr[:] = np.asarray(log_pfr, dtype=np.float32)
+
+
+def _kazil_ham_input_dir(tmp_path, ref, case=0):
+    """Build a fully offline ``HAM_INPUT_DIR`` (O'Brien text files + a tiny
+    PARNUC netCDF) from ``hamnucl2_chain.npz``'s embedded real numbers, so
+    the MARKED Kazil adapter test below needs neither the shared disk nor
+    ``monkeypatch``ing past the adapter's real file-loading path. ``case``
+    selects which of the 16 embedded cases' PARNUC corner excerpt to use
+    (immaterial to correctness -- see ``_write_tiny_parnuc_netcdf``).
+    """
+    _write_real_format_obrien_file(
+        tmp_path / "gcr_ipr_solmin.txt", ref["in/vertical_cutoff_rigidity"],
+        ref["in/mass_column_density"], ref["in/ipr_solmin"])
+    _write_real_format_obrien_file(
+        tmp_path / "gcr_ipr_solmax.txt", ref["in/vertical_cutoff_rigidity"],
+        ref["in/mass_column_density"], ref["in/ipr_solmax"])
+    _write_tiny_parnuc_netcdf(
+        tmp_path / "parnuc.15H2SO4.nc", ref["in/kazil_table_axes"][case],
+        ref["in/kazil_table_log_pfr"][case])
+    return tmp_path
 
 
 def _fortran_ihpbl(dse, height, ustar, coriolis):
@@ -263,11 +376,143 @@ def test_adapter_float32_core_conserves_species_and_sulfur():
     assert np.all(np.asarray(js.mass) >= 0) and np.all(np.asarray(js.number) >= 0)
 
 
-def test_adapter_refuses_kazil_and_wrong_population():
+@pytest.mark.parametrize("core_dtype", ["float64", "float32"])
+def test_adapter_kazil_scheme_runs_end_to_end(core_dtype, tmp_path, monkeypatch):
+    """``nucleation_scheme=2`` (jax-gcm#1017 Kazil/GCR task) through the full
+    adapter, at both the default float64 core and the forward-only float32
+    core (jax-gcm#1017 task 6 -- the two switches compose: the Kazil table
+    and the GCR ion-pair tables follow the exact same float64-numpy-storage
+    -plus-per-step-rebuild rule as the kappa table, see m7_jax.py's module
+    docstring).
+
+    Runs fully offline: ``HAM_INPUT_DIR`` is pointed (via ``monkeypatch``) at
+    a ``tmp_path`` holding O'Brien text files and a tiny PARNUC netCDF built
+    from the embedded ``hamnucl2_chain.npz`` reference (see
+    ``_kazil_ham_input_dir``), so the adapter's own ``_ham_input_dir``/
+    ``read_obrien_gcr_ipr``/``load_kazil_lovejoy_table`` file-loading path is
+    genuinely exercised rather than skipped. This module's
+    ``@pytest.mark.requires_extra("m7")`` is the only gate: m7-jax's pin
+    (jax-gcm#1017's M7 preset) always has Kazil/Lovejoy support, so there is
+    nothing further to skip on.
+    """
+    import jax
+
+    from jcm.physics.aerosol.jam.microphysics.m7_jax import M7JaxMicrophysics
+
+    with np.load(_HAMNUCL2_REF) as z:
+        ref = {k: z[k] for k in z.files}
+    monkeypatch.setenv("HAM_INPUT_DIR", str(_kazil_ham_input_dir(tmp_path, ref)))
+
+    core = M7JaxMicrophysics(
+        nucleation_scheme=2, organic_scheme=0, core_dtype=core_dtype)
+    core._coriolis = jax.numpy.asarray(2 * 7.292e-5 * np.sin([-0.5, 0.0, 0.8]))
+    core._lat = jax.numpy.asarray([-0.5, 0.0, 0.8])
+    core._lon = jax.numpy.asarray([0.1, 1.5, -2.0])
+    state, diag = _column()
+
+    class _Solar:
+        calendar_year = jax.numpy.asarray(2000.0)
+        day_of_year = jax.numpy.asarray(100.0)
+        tyear = jax.numpy.asarray(100.0 / 366.0)
+
+    class _Forcing:
+        solar = _Solar()
+        forest_fraction = None
+
+    tend, out = core(state, diag, _Forcing(), None)
+    assert np.all(np.isfinite(np.asarray(tend.tracers["g_h2so4"])))
+    assert np.all(np.isfinite(np.asarray(out["_jam_state"].r_wet)))
+    # The output cast (__call__, outside the scoped x64 context) always
+    # restores float64 regardless of the core's own working dtype.
+    assert tend.tracers["g_h2so4"].dtype == jax.numpy.float64
+
+
+def test_adapter_refuses_kazil_without_ham_input_dir_and_wrong_population(monkeypatch):
     from jcm.physics.aerosol.jam.microphysics.m7_jax import M7JaxMicrophysics
     from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 
-    with pytest.raises(NotImplementedError, match="Kazil"):
+    # nucleation_scheme=2 is supported (jax-gcm#1017 Kazil/GCR task) given
+    # HAM_INPUT_DIR; what is always refused is constructing it without one.
+    monkeypatch.delenv("HAM_INPUT_DIR", raising=False)
+    with pytest.raises(FileNotFoundError, match="HAM_INPUT_DIR"):
         M7JaxMicrophysics(nucleation_scheme=2)
     with pytest.raises(ValueError, match="M7 population"):
         M7JaxMicrophysics(spec=MAM4_SPEC)
+
+
+@pytest.mark.parametrize("core_dtype", ["float64", "float32"])
+def test_kazil_lovejoy_chain_matches_fortran_reference(core_dtype):
+    """nsnucl=2 end-to-end chain (jax-gcm#1017 Kazil/GCR task, W5):
+    ``read_obrien_gcr_ipr -> gcr_ionization -> nucl_kazil_lovejoy``, against
+    the UNMODIFIED compiled Fortran on the REAL O'Brien and PARNUC tables
+    (``hamnucl2_chain.npz`` -- see its own README/provenance, next to it in
+    ``jcm/data/test/echam_cloud_reference/``, for the exact build).
+
+    Runs WITHOUT ``HAM_INPUT_DIR``: the real O'Brien table (small) is
+    embedded whole, and the real PARNUC table (~200MB, far too large to
+    commit) only as the per-case 2^5-corner bracket excerpt
+    ``kazil_lovejoy``'s own bisection search would read from the full
+    table for that case's query -- reproducing the full-table call
+    bit-for-bit (verified when ``hamnucl2_chain.npz`` was built). The
+    reference npz is committed to the repository, so its absence is a
+    checkout problem, not something to skip past.
+    """
+    assert _HAMNUCL2_REF.exists(), f"{_HAMNUCL2_REF} is committed to the repository"
+
+    import jax
+
+    from jcm.physics.aerosol.jam.chemistry.gcr_ionisation import ObrienGcrTable
+
+    with np.load(_HAMNUCL2_REF) as z:
+        ref = {k: z[k] for k in z.files}
+    n = len(ref["in/ion_pair_rate"])
+
+    # Stage 1: jcm's own gcr_ion_pair_rate against the embedded real O'Brien
+    # table must reproduce the ion_pair_rate stage 2 was built against (which
+    # is itself hamgcr.npz's Fortran gcr_ionization output -- see
+    # gcr_ionisation_test.py's own Fortran-parity test for that half).
+    with jax.enable_x64(True):
+        table = ObrienGcrTable(ref["in/vertical_cutoff_rigidity"], ref["in/mass_column_density"],
+                                ref["in/ipr_solmin"], ref["in/ipr_solmax"])
+        recomputed_ipr = _recompute_ion_pair_rate(ref, table)
+    np.testing.assert_allclose(recomputed_ipr, ref["in/ion_pair_rate"], rtol=1e-9, atol=0)
+
+    # Stage 2: feed that (jcm-recomputed, Fortran-matching) ion_pair_rate into
+    # m7-jax's own kazil_lovejoy, against the per-case mini-table excerpt of
+    # the real PARNUC table, at the requested core_dtype (jax-gcm#1017 task 6
+    # -- M7JaxMicrophysics's own float32 forward-only core).
+    from m7_jax.nucleation import KazilLovejoyTable, kazil_lovejoy
+
+    with jax.enable_x64(core_dtype == "float64"):
+        dt = jax.numpy.float64 if core_dtype == "float64" else jax.numpy.float32
+        rate = np.empty(n)
+        cluster = np.empty(n)
+        for i in range(n):
+            mini_table = KazilLovejoyTable(
+                *(jax.numpy.asarray(ref["in/kazil_table_axes"][i, a, :], dtype=dt) for a in range(5)),
+                jax.numpy.asarray(ref["in/kazil_table_log_pfr"][i], dtype=dt))
+            r, s = kazil_lovejoy(
+                dt(ref["in/temperature"][i]), dt(ref["in/relative_humidity_pct"][i]),
+                dt(ref["in/h2so4"][i]), dt(ref["in/total_sink"][i]),
+                dt(recomputed_ipr[i]), mini_table)
+            rate[i], cluster[i] = float(r), float(s)
+
+    # float64 matches to machine precision (measured 1.7e-16 when this
+    # reference was built); float32 loses precision in the log-space
+    # interpolation's exponentiation (measured 3.7e-6) -- both tolerances
+    # below hold a comfortable margin over the measured values.
+    tol = 1e-9 if core_dtype == "float64" else 1e-4
+    np.testing.assert_allclose(rate, ref["out/rate"], rtol=tol, atol=0)
+    np.testing.assert_allclose(cluster, ref["out/cluster_sulfate"], rtol=tol, atol=0)
+    assert np.any(rate == 0.0)  # the clamped-low-ion_pair_rate cases (col 14) exercise lset_zero
+    assert np.any(rate > 0.0)
+
+# The live-HAM_INPUT_DIR staleness guard (comparing a fresh disk read of the
+# real O'Brien/PARNUC tables against the embedded excerpts above) lives in
+# gcr_ionisation_test.py instead of here: this module's
+# @pytest.mark.requires_extra("m7") marker means CI's extras-tests job fails
+# ANY skip of it (JCM_REQUIRE_EXTRAS=1 has no HAM_INPUT_DIR), so a test that
+# can only run against the real shared disk cannot live in a marked module.
+# The gcr_ionisation_test.py versions are unmarked, do not import m7_jax at
+# all (so the extras scanner has nothing to flag), and skip on a reason that
+# does not name the m7/m7_jax package.

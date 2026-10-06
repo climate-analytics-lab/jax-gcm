@@ -132,6 +132,80 @@ class JamFactoryTest(unittest.TestCase):
             nucleation_activation="ham_lin_leaitch")
         wetdep = next(t for t in terms if isinstance(t, WetScavenging))
         self.assertEqual(wetdep.scheme, "jcm")
+    def test_microphysics_options_unknown_key_raises_naming_core_and_keys(self):
+        # PlaceholderMicrophysics.__init__ takes no keyword beyond ``spec``,
+        # so every key is unknown for it — the simplest core to exercise the
+        # validation with (jax-gcm#1017 task 6).
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+
+        with self.assertRaises(ValueError) as ctx:
+            jam_aerosol_physics(
+                microphysics="placeholder",
+                microphysics_options={"nucleation_scheme": 2},
+            )
+        message = str(ctx.exception)
+        self.assertIn("placeholder", message)
+        self.assertIn("nucleation_scheme", message)
+
+    def test_microphysics_options_rejected_with_an_instance_core(self):
+        # An already-constructed core has made its own choices (or taken
+        # its own defaults); microphysics_options would be ambiguous there,
+        # so it is an error rather than a silent no-op.
+        from jcm.physics.aerosol.jam import jam_aerosol_physics
+        from jcm.physics.aerosol.jam.microphysics.placeholder import (
+            PlaceholderMicrophysics,
+        )
+
+        with self.assertRaises(ValueError) as ctx:
+            jam_aerosol_physics(
+                microphysics=PlaceholderMicrophysics(),
+                microphysics_options={"anything": 1},
+            )
+        self.assertIn("microphysics_options", str(ctx.exception))
+
+    def test_microphysics_options_pass_through_to_a_string_named_core(self):
+        # A tiny fake core (not the real m7_jax adapter, which needs the
+        # optional jcm[m7] extra) exercises the pass-through path: the
+        # mapping reaches the core's own constructor, unknown keys still
+        # raise, and ``None`` still means "no options" for every untouched
+        # core (jax-gcm#1017 task 6, deliverable 2).
+        from jcm.physics.aerosol.jam.jam_terms import _MICROPHYSICS, _build_core
+        from jcm.physics.aerosol.jam.microphysics.base import ModalMicrophysicsTerm
+        from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
+
+        received = {}
+
+        class _FakeCore(ModalMicrophysicsTerm):
+            name = "fake_core_for_options_test"
+            spec = MAM4_SPEC
+
+            def __init__(self, spec=None, *, favourite_number=0):
+                received["favourite_number"] = favourite_number
+
+            def __call__(self, state, diagnostics, forcing, terrain):
+                raise NotImplementedError
+
+        try:
+            _MICROPHYSICS["_fake_for_options_test"] = (
+                lambda spec, options: _build_core(
+                    _FakeCore, spec, options, "_fake_for_options_test"))
+
+            from jcm.physics.aerosol.jam.jam_terms import _resolve_microphysics
+
+            core = _resolve_microphysics(
+                "_fake_for_options_test", None, {"favourite_number": 7})
+            self.assertIsInstance(core, _FakeCore)
+            self.assertEqual(received["favourite_number"], 7)
+
+            with self.assertRaises(ValueError) as ctx:
+                _resolve_microphysics(
+                    "_fake_for_options_test", None, {"bogus_key": 1})
+            message = str(ctx.exception)
+            self.assertIn("_fake_for_options_test", message)
+            self.assertIn("bogus_key", message)
+            self.assertIn("favourite_number", message)
+        finally:
+            del _MICROPHYSICS["_fake_for_options_test"]
 
     def test_harness_declares_aerosol_tracers(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, jam_aerosol_physics, tracer_specs
