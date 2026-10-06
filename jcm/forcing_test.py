@@ -3,6 +3,7 @@
 Tests for ForcingData struct, _fixed_ssts, and default_forcing functions.
 """
 
+import os
 import unittest
 import jax.numpy as jnp
 import numpy as np
@@ -1138,6 +1139,37 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         self.assertEqual(arr.shape, (self.NLON, self.NLAT))
         self.assertAlmostEqual(float(arr[2, 1]), 0.8)
 
+    def test_msg_source_reader_clips_and_has_no_time_axis(self):
+        # Unlike dust_preferential's degenerate-time `source`, the MSG map's
+        # `dsaf` carries NO time dimension at all (jax-gcm#1017; the Fortran
+        # reads it with read_var_nf77_2d, not the _3d call `_static` below
+        # mimics for the other dust statics) -- so this builds the dataset
+        # directly rather than going through `_static`.
+        import xarray as xr
+        from jcm.forcing import read_dust_msg_source
+        vals = np.zeros((self.NLAT, self.NLON))
+        vals[1, 1] = 0.3
+        vals[0, 0] = np.nan
+        ds = xr.Dataset(
+            {"dsaf": (("lat", "lon"), vals)},
+            coords={"lat": self.LAT_DESC, "lon": self.LON})
+        out = read_dust_msg_source(ds, lat_deg=self.LAT_DESC[::-1],
+                                   lon_deg=self.LON)
+        arr = np.asarray(out)
+        self.assertEqual(arr.shape, (self.NLON, self.NLAT))
+        self.assertTrue(np.isfinite(arr).all())            # NaN -> 0
+        self.assertTrue((arr >= 0.0).all())
+        self.assertAlmostEqual(float(arr[1, self.NLAT - 2]), 0.3)
+
+    def test_msg_source_reader_requires_its_variable(self):
+        import xarray as xr
+        from jcm.forcing import read_dust_msg_source
+        ds = xr.Dataset(
+            {"other": (("lat", "lon"), np.zeros((self.NLAT, self.NLON)))},
+            coords={"lat": self.LAT_DESC, "lon": self.LON})
+        with self.assertRaisesRegex(ValueError, "dsaf"):
+            read_dust_msg_source(ds)
+
     def test_soil_type_reader_returns_all_nine_fractions(self):
         from jcm.forcing import read_dust_soil_types
         names = ("type2", "type3", "type4", "type6", "type13", "type14",
@@ -1301,6 +1333,38 @@ class TestNaturalEmissionReaders(unittest.TestCase):
         self.assertEqual(
             sliced.oxidant_vmr["oh"].shape, (5, self.NLON, self.NLAT)
         )
+
+
+_MSG_SOURCE_FILE = (
+    "/data/climate-analytics-lab-shared/ECHAM_emissions_v0006/hammoz/T63/"
+    "msg_pot_sources_T63.nc")
+
+
+@unittest.skipUnless(
+    os.path.exists(_MSG_SOURCE_FILE),
+    f"ndust=5 MSG-source verification copy not present at {_MSG_SOURCE_FILE} "
+    "(jax-gcm#1017; see jcm/data/mirror/dust.py's NATIVE_SOURCES comment)")
+class MsgSourceRealFileTest(unittest.TestCase):
+    """``read_dust_msg_source`` against the real shared-disk verification file.
+
+    Not the mirror's own bundle (not yet staged, see build_mirror.py's
+    ``dust_msg_sources`` product): this is the local copy jax-gcm#1017 used
+    to validate the reader against the real ``dsaf (lat, lon)`` layout (96x192,
+    no time axis, 298 of 18432 cells > 0).
+    """
+
+    def test_reads_the_real_dsaf_layout(self):
+        import xarray as xr
+        from jcm.forcing import read_dust_msg_source
+        with xr.open_dataset(_MSG_SOURCE_FILE, decode_times=False) as ds:
+            self.assertEqual(ds["dsaf"].dims, ("lat", "lon"))
+            out = read_dust_msg_source(ds)
+        arr = np.asarray(out)
+        self.assertEqual(arr.shape, (192, 96))
+        self.assertTrue(np.all(arr >= 0.0))
+        self.assertTrue(np.all(arr <= 1.0))
+        self.assertGreater(float(np.sum(arr > 0.0)), 0.0)
+        self.assertGreater(float(np.sum(arr >= 0.01)), 0.0)
 
 
 class TestByDateInterp(unittest.TestCase):
