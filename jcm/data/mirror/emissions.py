@@ -8,8 +8,16 @@ bundle assembly, straight from these):
   into the model's three anthropogenic super-sectors (see
   ``jcm.physics.aerosol.jam.emissions.sectors``): ``surface_combustion``
   (AGR/TRA/RCO/SLV/WST), ``elevated_industrial`` (ENE/IND — 50 m
-  injection) and ``shipping`` (SHP), 0.5°, monthly 1850–2023, per
-  species.
+  injection) and ``shipping`` (SHP), PLUS two single-sector SUBSET
+  channels (``CEDS_SUBSET_SECTORS``, jax-gcm#1017 F6) each already
+  included in one of those sums: ``residential`` (RCO, sector 4, inside
+  ``surface_combustion``) and ``energy`` (ENE, sector 1, inside
+  ``elevated_industrial``) — HAM's M7 submodel sizes these two
+  differently from the rest of their super-sector
+  (``mo_ham_m7_emissions.f90:564-646``), so the model's M7 emission
+  policy (``emissions/ham_sectors.py``) reads them when present to split
+  that share out at its own size, rather than the whole super-sector's
+  parent size. 0.5°, monthly 1850–2023, per species.
 * ``bb4cmip7.zarr`` — DRES BB4CMIP7-2-0 open-burning flux
   ("biomass_burning" super-sector), 0.25°, monthly 1850–2023, per species.
 
@@ -52,6 +60,22 @@ CEDS_SUPER_SECTORS = {
     "shipping": [7],
 }
 
+# Two single-sector SUBSET channels, each already included in one of the
+# super-sectors above (NOT additional mass): HAM sizes these differently
+# from the rest of their super-sector (``mo_ham_m7_emissions.f90:564-646``,
+# jax-gcm#1017 F6) -- residential/commercial/other (RCO, sector 4, inside
+# ``surface_combustion``) like biomass burning, and energy (ENE, sector 1,
+# inside ``elevated_industrial``) with its primary SO4 in accumulation+
+# coarse rather than Aitken+accumulation. ``emissions/ham_sectors.py``'s
+# ``SECTOR_ROUTING`` already reads ``emis_residential_<sp>``/
+# ``emis_energy_<sp>`` when present and falls back to the parent
+# super-sector's own sizing (with a warning) when absent -- this dict is
+# what lets the bundle builder actually supply them.
+CEDS_SUBSET_SECTORS = {
+    "residential": [4],
+    "energy": [1],
+}
+
 
 def _climatologies(da: xr.DataArray) -> dict[str, xr.DataArray]:
     out = {}
@@ -63,11 +87,19 @@ def _climatologies(da: xr.DataArray) -> dict[str, xr.DataArray]:
 
 
 def load_ceds_species(species: str) -> list[xr.DataArray]:
-    """CEDS flux per anthropogenic super-sector, monthly 1850–2023.
+    """CEDS flux per anthropogenic super-sector AND subset, monthly 1850–2023.
 
     One ``<SPECIES>_<super_sector>`` array (kg m-2 s-1) per entry of
     ``CEDS_SUPER_SECTORS`` — the sector split carries the injection
-    altitudes the model's emission terms apply.
+    altitudes the model's emission terms apply — PLUS one
+    ``<SPECIES>_<subset>`` array per entry of ``CEDS_SUBSET_SECTORS``: each
+    subset's sector is already summed into one of the super-sectors above
+    (it is the model's HAM sizing split, not a fifth injection group), so
+    its own flux is carried alongside, never instead of, its parent's.
+    Both go through the identical ``isel(sector=...).sum("sector")`` ->
+    ``build_store``/``_climatologies`` path, so the subset channels get
+    the same regridding and climatology treatment as every other channel
+    this module writes.
     """
     files = sorted(glob.glob(
         f"{CEDS_ROOT}/{species}_em_anthro/gn/*/*.nc"))
@@ -78,7 +110,7 @@ def load_ceds_species(species: str) -> list[xr.DataArray]:
     da = ds[f"{species}_em_anthro"].sel(time=slice("1850-01-01", None))
     return [da.isel(sector=idx).sum("sector").astype(np.float32)
             .rename(f"{species}_{name}")
-            for name, idx in CEDS_SUPER_SECTORS.items()]
+            for name, idx in {**CEDS_SUPER_SECTORS, **CEDS_SUBSET_SECTORS}.items()]
 
 
 def load_bb_species(species: str) -> list[xr.DataArray]:

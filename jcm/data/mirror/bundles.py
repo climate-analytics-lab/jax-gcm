@@ -64,6 +64,7 @@ import numpy as np
 import xarray as xr
 
 from jcm.data.mirror import sites
+from jcm.data.mirror.emissions import CEDS_SUBSET_SECTORS
 from jcm.data.regridding import (conservative_to_gaussian, fill_nearest,
                                  interp_to, regrid_land_surface)
 
@@ -195,6 +196,11 @@ def land_surface_fields(era5: xr.Dataset, permanent_snow: xr.DataArray,
 
 _EMIS_SPECIES = ("so2", "bc", "oc")
 _ANTHRO_SECTORS = ("surface_combustion", "elevated_industrial", "shipping")
+# The two HAM-sizing subset channels (jax-gcm#1017 F6), each already
+# included in one of ``_ANTHRO_SECTORS``' sums above -- see
+# ``jcm.data.mirror.emissions.CEDS_SUBSET_SECTORS``, the single source of
+# truth for which CEDS sector each one is.
+_ANTHRO_SUBSETS = tuple(CEDS_SUBSET_SECTORS)
 
 
 def build_emissions_nc(ceds_zarr: str, bb_zarr: str, era: str,
@@ -205,6 +211,18 @@ def build_emissions_nc(ceds_zarr: str, bb_zarr: str, era: str,
     ``jcm.physics.aerosol.jam.emissions.sectors``) — the three CEDS
     anthropogenic groups keep their distinct injection altitudes
     (elevated_industrial ~50 m) plus biomass burning.
+
+    The ``residential``/``energy`` HAM-sizing subset channels
+    (``emis_residential_<species>``/``emis_energy_<species>``,
+    jax-gcm#1017 F6) are carried alongside: each is already part of its
+    parent super-sector's total (``surface_combustion``/
+    ``elevated_industrial`` respectively), regridded through the identical
+    call so
+    ``jcm.physics.aerosol.jam.emissions.anthropogenic.AnthropogenicEmissions``
+    can split that share out at HAM's own size instead of the whole
+    super-sector's parent size. No reader change needed:
+    ``forcing.read_anthropogenic_emissions`` already picks up every
+    ``emis_*`` variable in the file.
 
     ``biogenic_oc`` (jax-gcm#1017, maintainer decision F7) is HAM's own
     AeroCom II source (:func:`~jcm.data.mirror.emissions.load_biogenic_oc`),
@@ -222,6 +240,8 @@ def build_emissions_nc(ceds_zarr: str, bb_zarr: str, era: str,
         up = sp.upper()
         channels = [(sector, ceds[f"{up}_{sector}_{era}_clim"])
                     for sector in _ANTHRO_SECTORS]
+        channels += [(subset, ceds[f"{up}_{subset}_{era}_clim"])
+                     for subset in _ANTHRO_SUBSETS]
         channels.append(("biomass_burning", bb[f"{up}_{era}_clim"]))
         for prefix, da in channels:
             da = da.load()

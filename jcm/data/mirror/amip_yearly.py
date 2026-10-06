@@ -29,8 +29,9 @@ import xarray as xr
 
 from jcm.data.mirror import sites
 from jcm.data.mirror.bundles import (AMIP_ROOT, _ANTHRO_SECTORS,
-                                     _EMIS_SPECIES, _to_lonlat,
-                                     land_surface_fields, translate_land)
+                                     _ANTHRO_SUBSETS, _EMIS_SPECIES,
+                                     _to_lonlat, land_surface_fields,
+                                     translate_land)
 from jcm.data.regridding import (conservative_to_gaussian, fill_nearest,
                                  interp_to)
 
@@ -159,8 +160,9 @@ def build_emissions_year(ceds_zarr: str, bb_zarr: str, year: int, lats, lons,
     """One year of monthly transient emissions on a Gaussian grid.
 
     Same channels as the climatology ``build_emissions_nc`` (three CEDS
-    super-sectors + biomass burning per species), sliced from the
-    transient Tier-A series instead of the era climatology.
+    super-sectors + the residential/energy HAM-sizing subsets +
+    biomass burning per species), sliced from the transient Tier-A
+    series instead of the era climatology.
 
     ``biogenic_oc`` (jax-gcm#1017, maintainer decision F7): HAM's own
     AeroCom II biogenic-OC source (:func:`~jcm.data.mirror.emissions.
@@ -183,6 +185,8 @@ def build_emissions_year(ceds_zarr: str, bb_zarr: str, year: int, lats, lons,
         up = sp.upper()
         channels = [(sector, ceds[f"{up}_{sector}"])
                     for sector in _ANTHRO_SECTORS]
+        channels += [(subset, ceds[f"{up}_{subset}"])
+                     for subset in _ANTHRO_SUBSETS]
         channels.append(("biomass_burning", bb[up]))
         for prefix, da in channels:
             da = da.sel(time=span).load()
