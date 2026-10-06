@@ -133,9 +133,13 @@ direct port of `m7`, and keeping its units keeps every threshold (`cmin_aernl`,
 | time step | s | `_dt_seconds` |
 
 Static options (compile-time): `nwater`, `nsnucl`, `nonucl`, `lscond`,
-`lscoag`. Tables passed in, never read inside a traced function: the κ lookup
-(`lut_kappa.nc`, shipped with `m7-jax`) and the Kazil–Lovejoy table
-(`parnuc.15H2SO4.nc`, staged by jcm).
+`lscoag`, selected from the factory via
+`jam_microphysics_options` (e.g. `{nucleation_scheme: 2}`). Tables passed
+in, never read inside a traced function: the κ lookup (`lut_kappa.nc`,
+shipped with `m7-jax`) and, for `nsnucl = 2` (the preset's default), the
+Kazil–Lovejoy table and the GCR ion-pair tables — see the Data table below.
+`nsnucl = 2` needs `$HAM_INPUT_DIR` to hold them; construction raises,
+naming it, rather than silently running `nsnucl = 1` if it is unset.
 
 ### Outputs
 
@@ -215,8 +219,8 @@ configuration's.
 | input | status |
 |---|---|
 | κ lookup `lut_kappa.nc` | shipped with `m7-jax` |
-| Kazil–Lovejoy table `parnuc.15H2SO4.nc` | HAMMOZ input pool, staged on the shared disk; read outside any traced function and passed to the core like the κ table. Until it is present the core refuses `nsnucl = 2` and the preset runs `nsnucl = 1` |
-| GCR ion-pair tables `gcr_ipr_sol{min,max}.txt` | HAMMOZ input pool, staged with the Kazil table; read by jcm's GCR ionisation term |
+| Kazil–Lovejoy table `parnuc.15H2SO4.A0.total.nc` | HAMMOZ input pool, staged under `$HAM_INPUT_DIR`; read outside any traced function and passed to the core like the κ table, stored as float64 numpy and rebuilt at the core's own working dtype per step (so it composes with the float32 forward core too, #1017 task 6). The preset defaults to `nsnucl = 2` (`jam_microphysics_options: {nucleation_scheme: 2}`); construction raises, naming `HAM_INPUT_DIR`, if this table is absent — there is no silent fallback to `nsnucl = 1`. `+physics.jam_microphysics_options.nucleation_scheme=1` opts into binary nucleation explicitly where this data is unavailable |
+| GCR ion-pair tables `solmin.txt`/`solmax.txt` (ECHAM's own `gcr_ipr_solmin.txt`/`gcr_ipr_solmax.txt`, or README_GCR.txt's `SOLMIN.txt`/`SOLMAX.txt`) | HAMMOZ input pool, staged under `$HAM_INPUT_DIR` alongside the Kazil table; read by jcm's GCR ionisation term (`gcr_ionisation.py`), dtype-generic like the Kazil table, same reason |
 | Mie tables | built by jcm's Mie kernel on HAM's axes (the SALSA repository's `lut_optical_properties*_M7.nc` are header-only stubs) |
 | anthropogenic, biomass-burning emissions | jcm's CEDS/BB4CMIP bundle, sized by HAM's per-sector rules; the residential (`DOM`) and energy (`ENE`) sectors need separate channels, added alongside the existing super-sector channels so the MAM4 inputs do not change |
 | biogenic OC | HAM's own AeroCom II climatology (`emiss_aerocom_OC_monthly_2000`), converted into the emissions bundle as `emis_biogenic_oc`; HAM's split: 35 % KI at 0.03 µm, 32.5 % KS and 32.5 % AS without number, no OM:OC factor (`nsoa = 0`) |

@@ -1129,12 +1129,14 @@ host↔core boundary this adapter reproduces).
 
 **Status & known limitations.** The preset's reference configuration is
 ``nsnucl = 2`` (Kazil–Lovejoy ion-mediated nucleation, fed by GCR ionisation —
-see below); the adapter and the GCR term both support it given
-``HAM_INPUT_DIR``, validated against compiled reference Fortran at float64
-round-off. The *factory* wiring that would let ``echam_physics``/
-``jam_aerosol_physics`` select it is not yet on this branch, so the shipped
-``echam-ham-m7.yaml`` still runs ``nsnucl = 1`` (Vehkamäki) — the config file's
-own comment records this.
+see below), selected through ``jam_microphysics_options:
+{nucleation_scheme: 2}`` and validated against compiled reference Fortran at
+float64 round-off. This is the *shipped default*: ``echam-ham-m7.yaml`` needs
+``HAM_INPUT_DIR`` set (holding ``parnuc.15H2SO4.A0.total.nc``, ``solmin.txt``
+and ``solmax.txt``) and an ``m7-jax`` build with Kazil/Lovejoy support;
+construction raises, naming whichever is missing, rather than silently
+falling back. ``+physics.jam_microphysics_options.nucleation_scheme=1``
+opts into binary nucleation explicitly where that data is unavailable.
 
 **Code pointers.**
 - ``jcm/physics/aerosol/jam/microphysics/m7_data.py`` — ``M7_SPEC``,
@@ -1218,10 +1220,10 @@ HAM's own ``biogenic`` sector class — 35% to the insoluble Aitken mode at
 0.03 µm with number, 32.5% each to the Aitken-soluble and accumulation-
 soluble modes without number, no OM:OC scaling (consistent with ``nsoa = 0``)
 — and the mirror builder that sources it from HAM's own AeroCom II
-biogenic-OC climatology are prepared on a separate branch
-(``feat/1017-aqueous-ref-biogenic-oc``, pull request 1035) and are not yet on this
-preset branch; see that PR for the global-total cross-check (19.06 Tg/yr
-against 19.1 Tg/yr published, Dentener et al. 2006).
+biogenic-OC climatology (:func:`~jcm.data.mirror.emissions.load_biogenic_oc`,
+``emis_biogenic_oc``) are on this preset branch (landed via pull request
+1035); the global-total cross-check is 19.06 Tg/yr against 19.1 Tg/yr
+published (Dentener et al. 2006).
 
 **What ECHAM-HAM does.** ``mo_ham_m7_emissions.f90``
 (``ham_m7_init_emissions`` lines 90-262 for the number-median radii and
@@ -1235,9 +1237,9 @@ than corrected: ``"biomass_like"``'s SO₄ targets are textually identical to
 every other species) — this looks like an oversight in r7492, but it is
 what the compiled code does.
 
-**Status & known limitations.** The per-sector policy is inert until an
-emissions bundle is supplied (``jam_anthropogenic: true`` in the preset); the
-biogenic-OC source is pending pull request 1035, as above.
+**Status & known limitations.** The per-sector policy, biogenic-OC class
+included, is inert until an emissions bundle is supplied
+(``jam_anthropogenic: true`` in the preset).
 
 **Code pointers.**
 - ``jcm/physics/aerosol/jam/emissions/ham_sectors.py`` — ``m7_sector_policy``,
@@ -1264,16 +1266,19 @@ to <2.3% with only the Henry pair patched.
 **Why we differ.** ``science`` (defect, shared with MAM4) — ``_aqueous_so4`` is
 called by both presets, and the MAM4 presets are calibrated and frozen for
 v3.0, so these six literals cannot simply be changed on the shared default
-path; tracked as #1031 rather than fixed here. A population-level
-``AqueousConstants`` override (``None`` by default, reproducing today's MAM4
-values exactly; r7492's own six values for M7) is prepared on pull request 1035
-(``feat/1017-aqueous-ref-biogenic-oc``, the same branch as the biogenic-OC
-work above, verified against the compiled reference at float64 1e-12 on
-every recorded field) but not yet merged into this preset branch.
+path; tracked as #1031 rather than fixed by editing them in place. A
+population-level ``AqueousConstants`` override
+(``jcm/physics/aerosol/jam/chemistry/aqueous_constants.py``) landed instead
+(pull request 1035): ``None`` by default, reproducing today's MAM4 values
+exactly, and r7492's own six values for M7 as ``HAM_AQUEOUS_CONSTANTS`` —
+set on ``M7_SPEC`` itself (``m7_data.py``), so the M7 preset gets r7492's
+literals automatically. Verified against the compiled reference
+(``ham_wet_chemistry``) at float64 1e-12 on every recorded field.
 
-**Status & known limitations.** Until pull request 1035 lands, the M7 preset's
-in-cloud sulfate production carries the same #1031 discrepancy the MAM4
-presets do.
+**Status & known limitations.** The M7 preset's in-cloud sulfate production
+now matches r7492's own literals (``HAM_AQUEOUS_CONSTANTS``); the MAM4
+presets keep the six-literal #1031 discrepancy, unchanged and frozen for
+v3.0.
 
 **Code pointers.**
 - ``jcm/physics/aerosol/jam/chemistry/aqueous.py`` — ``_aqueous_so4``.
@@ -1325,17 +1330,19 @@ sketched against omitted; ``gcr_ion_pair_rate`` takes ``year``/``day_of_year``
 explicitly rather than freezing the axis at a reference epoch.
 
 **Status & known limitations.** Both the PARNUC table and the O'Brien GCR
-tables are now staged at ``HAM_INPUT_DIR``. ``gcr_ion_pair_rate`` matches the
+tables are staged at ``HAM_INPUT_DIR``. ``gcr_ion_pair_rate`` matches the
 compiled, unmodified ``gcr_ionization`` (28 designed columns spanning every
 latitude/longitude combination, 10 L47-like levels, 8 solar-activity/date
 scenarios including dates outside the IGRF table's 1965-2010 range) at
 float64 rtol=1e-12; ``m7-jax``'s ``kazil_lovejoy``/``nucleate_all``/``step_all`` at
 ``nsnucl=2`` match the compiled ``nucl_kazil_lovejoy``/``m7_nuck``/``m7`` at float64
-round-off against the real PARNUC table. ``M7JaxMicrophysics`` accepts
-``nucleation_scheme=2`` given ``HAM_INPUT_DIR``, but — as noted under *M7
-population and core* above — the preset's factory wiring to select it is
-not yet on this branch, so the shipped configuration still runs
-``nsnucl = 1``.
+round-off against the real PARNUC table, including its forward-only float32
+core (#1017 task 6) — the Kazil table and the GCR ion-pair tables rebuild at
+the core's own working dtype per step, the same rule the κ table follows.
+``echam-ham-m7.yaml`` selects ``nucleation_scheme=2`` by default (as noted
+under *M7 population and core* above); running the preset without
+``HAM_INPUT_DIR`` set fails construction rather than silently falling back
+to ``nsnucl = 1``.
 
 **Code pointers.**
 - ``jcm/physics/aerosol/jam/chemistry/gcr_ionisation.py`` —
@@ -1375,10 +1382,10 @@ approximating map at all, since its class set already matches HAM's.
 compared with the compiled ``ham_IN_setup`` directly (``jcm/data/test/
 echam_cloud_reference/hamfrz_M7.npz``); the full chain — feeding that
 partition into ``het_mxphase_freezing`` and comparing against the compiled
-chain end to end, confirming the non-zero contact-ice rate above — is
-prepared on a separate branch (pull request 1034, "M7 contact freezing verified
-against compiled ECHAM-HAM") and is not yet merged into this preset
-branch.
+chain end to end — is verified by
+``jcm/physics/aerosol/jam/ice_nucleation/m7_freezing_chain_reference_test.py``
+(pull request 1034), confirming the non-zero contact-ice rate above against
+the compiled chain at both float32 and float64.
 
 ### Status & known limitations (M7 preset, overall)
 
