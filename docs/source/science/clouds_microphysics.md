@@ -512,8 +512,11 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
     path).
   - ``ice_nuclei`` remains an optional input of the closure (an external INP
     number, the larger of it and DeMott is used); no in-tree term publishes
-    it. ``ice_nuclei_deposition`` reaches ``update_in_cloud_water`` as
-    ECHAM's ``pnicex``, read only by the ``nic_cirrus = 2`` branch (#552).
+    it. ``ice_nuclei_deposition`` (ECHAM's deposition-INP slot) also has no
+    in-tree producer yet (#679); it is read by ``update_in_cloud_water`` as
+    ``pnicex`` only when ``nic_cirrus != 2``, where it is unused today
+    (every preset defaults to ``nic_cirrus = 1``). At ``nic_cirrus = 2``,
+    ``pnicex`` instead comes from the Kärcher-Lohmann cirrus scheme below.
 - **Absent by decision.** These ECHAM-HAM processes are not in the 2M scheme:
   - the droplet number of detrained liquid, ``zqlnuccv`` (lines 889–941), and
     stratiform activation at cloud base copied to the levels above (lines
@@ -526,7 +529,6 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   - cirrus nucleation ``zninucl`` at ``nic_cirrus = 1`` (lines 986–999). Its
     cap is the soluble-aerosol number ``zascs``, which the scheme does not
     receive, and the ice budget stands without it (#955).
-  - Kärcher–Lohmann cirrus, ``nic_cirrus = 2`` (lines 1001–1117; #552).
   - ECHAM's aerosol-free freezing mode, ``lccnclim`` (see *What ECHAM/CAM
     does*). It is the faithful replacement for the DeMott closure and waits
     for the large-scale vertical velocity (#705).
@@ -578,6 +580,39 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   inversion is non-dimensionalised by a static 1 µm scale, so no gradient
   path, through the state or a parameter, divides by a tiny cube
   (`differentiability`).
+- **Kärcher-Lohmann cirrus homogeneous nucleation (``nic_cirrus = 2``).**
+  ``jcm/physics/clouds/lohmann_2m/cirrus.py`` ports ``mo_cirrus.f90``'s
+  ``XFRZMSTR``/``XFRZHOM``/``XICEHOM`` (Kärcher & Lohmann 2002b; Lohmann et
+  al. 2004): a per-level gate (adiabatic cooling over the step reaches the
+  Koop (2000) homogeneous threshold ``SCRHOM(T)``), a discrete search for
+  the temperature at which the threshold is first crossed, and the
+  ice-crystal number/radius the freezing event leaves, relaxed toward
+  vapour equilibrium over the step. ``ham_cirrus_aerosol``
+  (``jam/ice_nucleation/ham_freezing.py``) supplies its aerosol-number
+  input ``papnx`` from a population's own
+  ``ModalAerosolSpec.cirrus_aerosol_modes`` (M7: the soluble Aitken,
+  accumulation and coarse modes, HAM's own ``pascs`` sum,
+  ``mo_ham_freezing.f90:122-134`` — every soluble mode except the
+  nucleation mode); ``None`` for every other population leaves
+  ``nic_cirrus = 2`` unwired, so this changes no existing preset's default.
+  Only the reachable path is ported: ``XFRZHET`` (heterogeneous freezing)
+  and every aerosol-size-effect branch of ``XICEHOM``/``XICEHET`` are
+  unreachable in any supported ECHAM-HAM build (``lhetfreeze`` is an
+  ``em_error`` unless compiled with ``-DWITH_LHET``, ``mo_ham.f90:616-622``;
+  ``nosize`` is ``mo_cloud_micro_2m.f90:446``'s compile-time
+  ``PARAMETER .true.``). The compiled-reference harness (24 designed
+  cells, ``hamcirrus.npz``) matches to 8.0e-15 relative (float64) and
+  8.8e-7 (float32).
+
+  Fixes the ``#552``/``pap`` misread: ``update_in_cloud_water``'s cap on
+  the ``nic_cirrus = 2`` candidate reads ``pap`` — but *this subroutine's
+  own* ``pap`` is declared "total number of aerosols available"
+  (``mo_cloud_micro_2m.f90:2520``), not the generic ECHAM pressure
+  convention the parameter's prior name assumed; the real call site feeds
+  it the per-level, mode-summed, ICNC-depleted aerosol number (``zap``,
+  ``mo_cloud_micro_2m.f90:1507``), never ``papm1``. Renamed to
+  ``aerosol_number_available``, fed from the same depleted quantity
+  ``xfrzmstr`` itself consumes.
 - Neither microphysics scheme publishes the radiative effective radii: as in
   ECHAM, the radiation forms them inside its own call from the step's
   condensate and droplet/crystal number (``mo_cloud_optics.f90::cloud_optics``;
