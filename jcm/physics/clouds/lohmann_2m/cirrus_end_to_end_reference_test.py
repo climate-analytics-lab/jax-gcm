@@ -60,6 +60,24 @@ finding outside the ``nic_cirrus=2``-only path is a STOP, not something
 this task fixes), this residual is reported to the lead rather than
 patched here; the tolerance below is set to the MEASURED worst case with a
 margin, not tightened further by altering shared code.
+
+**Root cause, isolated and tracked as #1039.** Feeding the compiled
+reference's own recorded section-7 inputs directly into
+``precip_formation_cold`` (bypassing the rest of the column sweep) shows
+``xib_7``/``spr``/``sacl`` match to float64 round-off but ``icnc_7`` does
+not (1.07e-8 to 4.75e-5 relative at that isolated call -- smaller than the
+6e-4 to 3.1e-2 seen end-to-end above because the error compounds through
+sections 8's tendency formation). Bisected to one line: ``precip.py``'s
+``zsprn1 = ice_number * (zsaci + zsaut) / (zxibold_sec + params.eps)``
+uses ``params.eps`` = ``np.finfo(np.float32).eps`` (``lohmann_2m_params.py``)
+unconditionally, versus the Fortran's ``EPSILON(1.0_dp)`` (``eps``,
+``mo_cloud_utils.f90``, used at ``mo_cloud_micro_2m.f90:3405``) -- ~9
+orders of magnitude smaller. Substituting the float64 epsilon for
+``params.eps`` alone closes the gap to exactly 0.0 relative on all 5
+columns. This is shared code (identical regardless of ``nic_cirrus``,
+reachable by any 2M preset wherever in-cloud ice is comparable to or
+below ~1e-7 kg/kg -- an ordinary thin-cirrus regime), so it is tracked in
+#1039 rather than fixed on this branch.
 """
 from __future__ import annotations
 
@@ -84,6 +102,9 @@ REF = (Path(__file__).resolve().parents[3] / "data" / "test"
 # (the 3 large-ICNC columns) to 3.1e-2 (the 2 columns whose final ICNC sits
 # within ~2x of icemin=10, where the SAME few-percent absolute perturbation
 # from precip_formation_cold is a larger fraction of a small number).
+# Root cause tracked in #1039 (precip_formation_cold's ice-number-loss
+# division guard uses a float32 eps unconditionally); not tightened here
+# per the lead -- re-check this tolerance once #1039 is fixed.
 RTOL_FLOAT64 = 0.05
 ATOL_FLOAT64 = 1.0  # 1/m3, comfortably above icemin=10's own scale
 
