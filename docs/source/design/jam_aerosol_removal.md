@@ -324,16 +324,19 @@ rate) over 96 designed cases caught two latent defects before they shipped:
   compiled, flagged to the maintainer as a likely-unintentional upstream
   quirk rather than silently "corrected" — see `ham_below_cloud.py::_lookup`.
 
-**Flagged simplification: the pfrain/pfsnow phase split.** `bc_rain` and
-`bc_snow` need the carrier split into separate rain and snow fluxes, but
-jcm's cloud schemes do not publish a liquid/frozen split of the flux
-ENTERING a layer that is free of the ice-sedimentation contamination the
-existing clean carrier ledger (`flux_in`, above) was built specifically to
-avoid. `ham_below_cloud`'s stratiform carrier instead splits `flux_in` by
-`pice`, the in-cloud condensate pool's ice fraction already computed for
-the nucleation pathway — a reasonable, documented proxy, but not a
-verified match to HAMMOZ's own prognostic `pfrain`/`pfsnow` fields. Open
-for maintainer input; see `ham_below_cloud.py`'s module docstring.
+**`pfrain`/`pfsnow`.** `bc_rain`/`bc_snow` need the separate rain and snow
+carrier fluxes `update_precip_fluxes` computes every level (the in-cloud,
+cover-normalised, pre-evaporation flux) — and the 2M scheme already
+computes them internally, threaded to ECHAM's `cloud_subm_2` as
+`zfrain`/`zfsnow` (`mo_cloud_micro_2m.f90:1813`; `cloud_subm_2`'s own
+comment at `mo_submodel_interface.f90:1676-1677`, "rain/snow flux before
+evaporation", confirms the match). `configure_wetdep_hydro_diagnostics`
+threads them out alongside `precip_cover`, under the same static flag;
+`WetScavenging("ham_below_cloud")` reads them directly rather than
+deriving an approximation — an earlier version of this wiring split the
+stratiform carrier ledger by the in-cloud ice fraction as a proxy, which
+review correctly flagged as unnecessary once the exact quantity was
+located.
 
 ## Known gaps
 
@@ -342,9 +345,6 @@ for maintainer input; see `ham_below_cloud.py`'s module docstring.
   aerosol scavenging either.
 - Dry deposition uses a neutral log-law aerodynamic resistance; a
   Monin-Obukhov stability correction awaits a usable surface `L`.
-- `ham_below_cloud`'s rain/snow carrier split (above) is a documented
-  proxy (`pice`-weighted), not a verified match to HAMMOZ's own
-  prognostic `pfrain`/`pfsnow`.
 - `ham_below_cloud` ports only the below-cloud pathway; the in-cloud
   nucleation and impaction pathways under `nwetdep=3` are jax-gcm#1017's
   follow-ups A and B.
