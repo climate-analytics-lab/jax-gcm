@@ -48,13 +48,30 @@ Host diagnostics
 
 Precision
 ---------
-The core runs in float64 (``m7-jax`` requires x64, like ``mam4-jax``); the
-term turns ``jax_enable_x64`` on at construction, before the model state is
-built, unless ``enable_x64=False`` is passed, which ``m7-jax`` then refuses.
+``enable_x64`` controls the GLOBAL model precision, exactly as
+``Mam4JaxMicrophysics``: ``None`` (default) reads the ``M7_JAX_ENABLE_X64``
+env var (default ``"1"`` -> float64); ``True``/``False`` override it.
+Applied here, at construction, so the dycore state built afterwards
+inherits it.
+
+``core_dtype`` controls THIS CORE's precision independently of that global
+flag (#1017 W1 task 3, forward only -- m7-jax's reverse pass is untested in
+float32, so gradient/calibration work must keep ``"float64"``):
+``"float32"`` runs ``step_all`` under a *scoped* ``jax.enable_x64(False)``
+context -- the same scoped-context pattern ``Mam4JaxMicrophysics`` and the
+RRTMGP wrapper use -- with boundary casts jcm dtype -> core dtype on entry
+and back on the tendencies / ``_jam_state``; the κ lookup table is cast to
+the core dtype inside that same scope (loaded once as float64 numpy at
+construction -- a jnp array built once at import/construction time would
+freeze its dtype to whichever ``jax_enable_x64`` was live THEN, not track
+later per-call scoping, the same trap m7-jax's own ``_SECTION4_MASK`` had).
+``None`` (default) reads ``M7_JAX_CORE_DTYPE`` (default ``"float64"``) --
+bit-identical to before this precision option existed.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 from typing import ClassVar
@@ -82,10 +99,13 @@ from jcm.physics_interface import PhysicsTendency
 
 # m7-jax (BSD-3) is the optional ``jcm[m7]`` extra; this adapter module is
 # imported only when JAM selects the ``m7_jax`` core (lazily, via
-# ``jam_terms``), so a plain jcm import never needs it.
+# ``jam_terms``), so a plain jcm import never needs it. Unlike mam4_jax,
+# importing m7_jax has no jax_enable_x64 side effect, so no _preserved_x64
+# wrapper is needed around it.
 from m7_jax import interface as m7_interface  # noqa: E402
 from m7_jax.model import FullState, step_all  # noqa: E402
 from m7_jax.properties import (  # noqa: E402
+    KappaTable,
     default_kappa_table_path,
     load_kappa_table,
 )
@@ -162,7 +182,8 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
         organic_scheme: int = 1,
         coagulation: bool = True,
         condensation: bool = True,
-        enable_x64: bool = True,
+        enable_x64: bool | None = None,
+        core_dtype: str | None = None,
         kappa_table: str | os.PathLike | None = None,
     ):
         """Validate the population, the switches and the precision; load the κ table.
@@ -170,6 +191,9 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
         ``nucleation_scheme``/``organic_scheme``/``coagulation``/``condensation``
         are M7's ``nsnucl``/``nonucl``/``lscoag``/``lscond`` (static). The
         reference ``nsnucl=2`` is refused until its data are staged.
+
+        ``enable_x64``/``core_dtype``: see the module docstring's Precision
+        section.
         """
         if spec is not None:
             self.spec = spec
@@ -188,17 +212,42 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
                 "tables, which are not staged yet (jax-gcm#1017 F5).")
         if nucleation_scheme not in (0, 1) or organic_scheme not in (0, 1, 2):
             raise ValueError("nucleation_scheme must be 0/1 and organic_scheme 0/1/2.")
-        if not enable_x64:
-            raise ValueError("m7-jax runs in float64 only; enable_x64 must stay True.")
-        jax.config.update("jax_enable_x64", True)
+
+        # Precision -- applied here, at construction, so the dycore state
+        # built afterwards inherits it; toggling it later would leave an f64
+        # state meeting f32 tendencies (mixed-dtype errors). Mirrors
+        # Mam4JaxMicrophysics exactly (see the module docstring).
+        if enable_x64 is None:
+            want_x64 = os.environ.get("M7_JAX_ENABLE_X64", "1") != "0"
+        else:
+            want_x64 = bool(enable_x64)
+        jax.config.update("jax_enable_x64", want_x64)
+        self._enable_x64 = want_x64
+
+        if core_dtype is None:
+            core_dtype = os.environ.get("M7_JAX_CORE_DTYPE", "float64")
+        if core_dtype not in ("float32", "float64"):
+            raise ValueError(f"core_dtype must be 'float32' or 'float64', got {core_dtype!r}")
+        # A float64 core is only expressible when x64 is on; a float32 core
+        # works under either global setting (the scoped context in __call__
+        # is a no-op when x64 is already off).
+        self._core_f32 = core_dtype == "float32" or not want_x64
+
         self._options = dict(nucleation_scheme=int(nucleation_scheme),
                              organic_scheme=int(organic_scheme),
                              coagulation=bool(coagulation),
                              condensation=bool(condensation))
-        # The 45 MB κ lookup is module DATA (a pytree leaf passed into the
-        # compiled step), not a static attribute baked into the program as a
-        # constant.
-        self._table = nnx.data(load_kappa_table(kappa_table or _default_kappa_table_path()))
+        # Loaded once as float64 NUMPY (never a jnp array stored on the
+        # instance): a jnp array built here would freeze its dtype to
+        # whichever jax_enable_x64 was live at CONSTRUCTION time, not track
+        # the scoped float32 context __call__ enters per step (the same
+        # trap m7-jax's own module-level _SECTION4_MASK had -- #1017 W1 task
+        # 3). Rebuilt at the step's working dtype in _step instead.
+        _table64 = load_kappa_table(kappa_table or _default_kappa_table_path())
+        # nnx.data: a tuple of (numpy, so jax_enable_x64-immune) arrays is
+        # still a pytree of data leaves as far as nnx's static/data check is
+        # concerned, same as self._coriolis below.
+        self._table_np = nnx.data(tuple(np.asarray(x, dtype=np.float64) for x in _table64))
         self._mw_so4_g = self.spec.species_props("so4").molar_mass * 1000.0
         self._mw_h2so4_g = GAS_SPECIES["h2so4"].molar_mass * 1000.0
         self._mass_names = tuple(mass_name(sp, cl) for sp, cl in M7_COMPONENTS)
@@ -218,23 +267,65 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
         self._coriolis = nnx.data(jnp.asarray(2.0 * c.omega * np.sin(np.asarray(lat))))
 
     def __call__(self, state, diagnostics, forcing, terrain):
+        # Scoped core precision (#1017 W1 task 3): with a float32 core under
+        # a float64 host, everything from tracer packing to step_all runs
+        # inside jax.enable_x64(False) so the core's own dtype-less literals
+        # come out float32 too -- the same pattern Mam4JaxMicrophysics and
+        # the RRTMGP wrapper use. No-op when the host already runs float32,
+        # or for a float64 core.
         out_dtype = state.temperature.dtype
-        f64 = jnp.float64
+        ctx = (jax.enable_x64(False) if self._core_f32
+               else contextlib.nullcontext())
+        with ctx:
+            tracer_tends, jam_state = self._step(state, diagnostics, forcing, terrain)
+        # Cast the core-dtype outputs back to the host dtype OUTSIDE the
+        # scoped context: `jnp.asarray(x, jnp.float64)` /
+        # `x.astype(jnp.float64)` INSIDE a `jax.enable_x64(False)` block
+        # silently truncates to float32 (a real JAX property, not specific
+        # to this cast) rather than restoring float64 once the array is
+        # already float32 core output -- doing the cast here, after `ctx`
+        # has exited and the global flag is back to whatever it was, is
+        # what actually gets the host its own dtype back. `zeros_like` on an
+        # already-float64 state field is unaffected by the scope (it mirrors
+        # an existing array's dtype rather than requesting a new one), so
+        # the other PhysicsTendency fields need no such care.
+        tracers = {name: value.astype(out_dtype) for name, value in tracer_tends.items()}
+        jam_state = jax.tree.map(lambda x: x.astype(out_dtype), jam_state)
+        tendency = PhysicsTendency(
+            u_wind=jnp.zeros_like(state.u_wind),
+            v_wind=jnp.zeros_like(state.v_wind),
+            temperature=jnp.zeros_like(state.temperature),
+            specific_humidity=jnp.zeros_like(state.specific_humidity),
+            tracers=tracers,
+        )
+        return tendency, {**diagnostics, "_jam_state": jam_state}
+
+    def _step(self, state, diagnostics, forcing, terrain):
+        """Everything from tracer packing through step_all, in core dtype.
+
+        Returns ``(tracer_tends, jam_state)`` still in ``cdt`` -- __call__
+        (outside the scoped x64 context) casts both back to the host dtype.
+        """
+        cdt = jnp.float32 if self._core_f32 else jnp.float64
         shape = state.temperature.shape            # (nlev, *horiz)
         horiz = shape[1:]
-        dt = jnp.asarray(diagnostics["_dt_seconds"], f64)
-        rho = jnp.asarray(diagnostics["air_density"], f64)
-        pressure = jnp.asarray(diagnostics["pressure_full"], f64)
-        temperature = jnp.asarray(state.temperature, f64)
-        q = jnp.asarray(state.specific_humidity, f64)
-        zeros = jnp.zeros(shape, f64)
+        dt = jnp.asarray(diagnostics["_dt_seconds"], cdt)
+        rho = jnp.asarray(diagnostics["air_density"], cdt)
+        pressure = jnp.asarray(diagnostics["pressure_full"], cdt)
+        temperature = jnp.asarray(state.temperature, cdt)
+        q = jnp.asarray(state.specific_humidity, cdt)
+        zeros = jnp.zeros(shape, cdt)
+        # The kappa table must be passed in the core dtype: rebuilt fresh
+        # here (not cached as a jnp array on the instance -- see __init__)
+        # so it tracks cdt even though self._core_f32 is fixed per instance.
+        table = KappaTable(*(jnp.asarray(x, dtype=cdt) for x in self._table_np))
 
         # Aerosol after every earlier process of the step (ECHAM's pxtm1+pxtte·dt).
         view = split_view(self.spec, state, diagnostics)
         run = (diagnostics.get("_tendency_run") or {}).get("tracers", {})
 
         def fetch(name):
-            return jnp.maximum(jnp.asarray(view.get(name, zeros), f64), 0.0)
+            return jnp.maximum(jnp.asarray(view.get(name, zeros), cdt), 0.0)
 
         mass_mmr = jnp.stack([fetch(n) for n in self._mass_names], axis=-1)
         number_mmr = jnp.stack([fetch(n) for n in self._number_names], axis=-1)
@@ -246,26 +337,26 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
         number = m7_interface.number_mixing_ratio_to_native(number_mmr, rho_e)
 
         h2so4_name = gas_name("h2so4")
-        h2so4_0 = jnp.maximum(jnp.asarray(state.tracers.get(h2so4_name, zeros), f64), 0.0)
-        h2so4_run = jnp.asarray(run.get(h2so4_name, zeros), f64)
+        h2so4_0 = jnp.maximum(jnp.asarray(state.tracers.get(h2so4_name, zeros), cdt), 0.0)
+        h2so4_run = jnp.asarray(run.get(h2so4_name, zeros), cdt)
         gas = m7_interface.so4_mixing_ratio_to_native(h2so4_0, rho, self._mw_h2so4_g)
         production = m7_interface.so4_mixing_ratio_to_native(h2so4_run, rho, self._mw_h2so4_g)
 
         clouds = diagnostics.get("clouds")
-        cloud_cover = (jnp.clip(jnp.asarray(clouds.cloud_fraction, f64), 0.0, 1.0)
+        cloud_cover = (jnp.clip(jnp.asarray(clouds.cloud_fraction, cdt), 0.0, 1.0)
                        if clouds is not None else zeros)
         # ECHAM's water-only Sonntag table and its 0.5 cap (qsat_from_es).
         qs = saturation_specific_humidity(temperature, pressure, phase="water")
         rh = clear_sky_relative_humidity(q, qs, cloud_cover)
 
         forest = getattr(forcing, "forest_fraction", None) if forcing is not None else None
-        forest = (jnp.broadcast_to(jnp.asarray(forest, f64).reshape(horiz), shape)
+        forest = (jnp.broadcast_to(jnp.asarray(forest, cdt).reshape(horiz), shape)
                   if forest is not None else zeros)
-        in_pbl = self._in_pbl(state, diagnostics, terrain, temperature, q, shape)
+        in_pbl = self._in_pbl(state, diagnostics, terrain, temperature, q, shape, cdt)
 
         result = step_all(
             FullState(mass, number, gas), temperature, pressure, rh, dt,
-            production, cloud_cover, self._table, forest, in_pbl, **self._options)
+            production, cloud_cover, table, forest, in_pbl, **self._options)
         new_mass, new_number, new_gas = result.state
 
         new_mass_mmr = jnp.concatenate([
@@ -277,25 +368,18 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
 
         tracers = {}
         for i, n in enumerate(self._mass_names):
-            tracers[n] = ((new_mass_mmr[..., i] - mass_mmr[..., i]) / dt).astype(out_dtype)
+            tracers[n] = (new_mass_mmr[..., i] - mass_mmr[..., i]) / dt
         for i, n in enumerate(self._number_names):
-            tracers[n] = ((new_number_mmr[..., i] - number_mmr[..., i]) / dt).astype(out_dtype)
+            tracers[n] = (new_number_mmr[..., i] - number_mmr[..., i]) / dt
         # Gas: the core integrated the running production itself, so the
         # step's H2SO4 change is (new − x₀); remove what the earlier terms
         # already contribute through the running sum.
-        tracers[h2so4_name] = ((new_h2so4 - h2so4_0) / dt - h2so4_run).astype(out_dtype)
+        tracers[h2so4_name] = (new_h2so4 - h2so4_0) / dt - h2so4_run
 
-        jam_state = self._jam_state(result, new_mass_mmr, new_number_mmr, out_dtype)
-        tendency = PhysicsTendency(
-            u_wind=jnp.zeros_like(state.u_wind),
-            v_wind=jnp.zeros_like(state.v_wind),
-            temperature=jnp.zeros_like(state.temperature),
-            specific_humidity=jnp.zeros_like(state.specific_humidity),
-            tracers=tracers,
-        )
-        return tendency, {**diagnostics, "_jam_state": jam_state}
+        jam_state = self._jam_state(result, new_mass_mmr, new_number_mmr)
+        return tracers, jam_state
 
-    def _in_pbl(self, state, diagnostics, terrain, temperature, q, shape):
+    def _in_pbl(self, state, diagnostics, terrain, temperature, q, shape, cdt):
         """Per-cell ``jk >= ihpbl`` with ECHAM's PBL-top level (see :func:`pbl_top_level`)."""
         nlev = shape[0]
         horiz = shape[1:]
@@ -305,19 +389,23 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
         vdiff = diagnostics.get("vertical_diffusion")
         # The previous step's u*, as ECHAM's ustarm. On the first step there is
         # none: u* = 0 makes the dynamic height 0 m, as ECHAM's would be.
-        ustar = (jnp.asarray(vdiff.surface_friction_velocity, jnp.float64).reshape(horiz)
-                 if vdiff is not None else jnp.zeros(horiz, jnp.float64))
-        coriolis = jnp.asarray(self._coriolis, jnp.float64).reshape(horiz)
-        geopotential = jnp.asarray(state.geopotential, jnp.float64)
+        ustar = (jnp.asarray(vdiff.surface_friction_velocity, cdt).reshape(horiz)
+                 if vdiff is not None else jnp.zeros(horiz, cdt))
+        coriolis = jnp.asarray(self._coriolis, cdt).reshape(horiz)
+        geopotential = jnp.asarray(state.geopotential, cdt)
         if terrain is not None and getattr(terrain, "orog", None) is not None:
-            geopotential = geopotential - c.grav * jnp.asarray(terrain.orog, jnp.float64).reshape(horiz)
+            geopotential = geopotential - c.grav * jnp.asarray(terrain.orog, cdt).reshape(horiz)
         dse = geopotential + temperature * c.cpd * (1.0 + c.vtmpc2 * q)
         ihpbl = pbl_top_level(dse, geopotential / c.grav, ustar, coriolis)
         jk = jnp.arange(1, nlev + 1).reshape((nlev,) + (1,) * len(horiz))
         return jk >= ihpbl
 
-    def _jam_state(self, result, mass_mmr, number_mmr, out_dtype):
-        """``_jam_state`` per class from the post-call state (``ham_subm_interface``'s rdry/rwet/densaer)."""
+    def _jam_state(self, result, mass_mmr, number_mmr):
+        """``_jam_state`` per class from the post-call state (``ham_subm_interface``'s rdry/rwet/densaer).
+
+        Returned in core dtype; ``__call__`` casts to the host dtype outside
+        the scoped x64 context (see its comment).
+        """
         props = result.properties
         wet = props.wet_radius * 1.0e-2                       # cm -> m
         dry = jnp.concatenate([props.dry_radius * 1.0e-2, wet[..., 4:]], axis=-1)
@@ -328,10 +416,10 @@ class M7JaxMicrophysics(ModalMicrophysicsTerm):
             vk = sum(mass_mmr[..., i] / d * k for i, d, k in comps)
             kappa.append(jnp.where(vol > 1e-40, vk / jnp.maximum(vol, 1e-40), 0.0))
             mass.append(sum(mass_mmr[..., i] for i, _, _ in comps))
-        move = lambda a: jnp.moveaxis(a, -1, 0).astype(out_dtype)  # noqa: E731
+        move = lambda a: jnp.moveaxis(a, -1, 0)  # noqa: E731
         return JamAerosolState(
             r_dry=move(dry), r_wet=move(wet), rho=move(rho_p),
-            kappa=jnp.stack(kappa, axis=0).astype(out_dtype),
-            mass=jnp.stack(mass, axis=0).astype(out_dtype),
+            kappa=jnp.stack(kappa, axis=0),
+            mass=jnp.stack(mass, axis=0),
             number=move(number_mmr),
         )
