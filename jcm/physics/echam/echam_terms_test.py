@@ -189,8 +189,8 @@ class TestEchamComposablePhysics(unittest.TestCase):
 
     def test_jam_wetdep_scheme_wires_precip_cover_and_the_term_flag(self):
         """``jam_wetdep_scheme="ham_below_cloud"`` (#1017) turns on the 2M
-        scheme's ``precip_cover`` publication and the wetdep term's own
-        selector together; the default leaves both off/"jcm".
+        scheme's ``precip_cover``/``pfrain``/``pfsnow`` publication and the
+        wetdep term's own selector together; the default leaves both off/"jcm".
         """
         from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetScavenging
         from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
@@ -207,8 +207,9 @@ class TestEchamComposablePhysics(unittest.TestCase):
             checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
             jam_microphysics="placeholder")
         micro, wetdep = parts(default)
-        self.assertFalse(micro._publish_precip_cover)
-        self.assertNotIn("precip_cover", micro.provides)
+        self.assertFalse(micro._publish_wetdep_hydro)
+        for key in ("precip_cover", "pfrain", "pfsnow"):
+            self.assertNotIn(key, micro.provides)
         self.assertEqual(wetdep.scheme, "jcm")
         self.assertNotIn("precip_cover", wetdep.requires)
 
@@ -216,8 +217,9 @@ class TestEchamComposablePhysics(unittest.TestCase):
             checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
             jam_microphysics="placeholder", jam_wetdep_scheme="ham_below_cloud")
         micro, wetdep = parts(ham_bc)
-        self.assertTrue(micro._publish_precip_cover)
-        self.assertIn("precip_cover", micro.provides)
+        self.assertTrue(micro._publish_wetdep_hydro)
+        for key in ("precip_cover", "pfrain", "pfsnow"):
+            self.assertIn(key, micro.provides)
         self.assertEqual(wetdep.scheme, "ham_below_cloud")
         self.assertIn("precip_cover", wetdep.requires)
 

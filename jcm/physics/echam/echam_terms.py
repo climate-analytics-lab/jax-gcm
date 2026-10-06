@@ -866,12 +866,14 @@ def echam_physics(
             aerosol_p.spa_exponent,
             aerosol_p.spa_cap_smoothing,
         )
-        # HAM's below-cloud wetdep pathway needs the per-level
-        # precipitating-area fraction (ECHAM's pclc/zclcpre), which only
-        # the 2M scheme computes; see WetScavenging's "ham_below_cloud"
-        # scheme and Lohmann2MMicrophysics.configure_precip_cover_diagnostic.
+        # HAM's below-cloud wetdep pathway needs three per-level
+        # hydrological inputs only the 2M scheme computes: the
+        # precipitating-area fraction (ECHAM's pclc/zclcpre) and the
+        # in-cloud pre-evaporation rain/snow flux (zfrain/zfsnow); see
+        # WetScavenging's "ham_below_cloud" scheme and
+        # Lohmann2MMicrophysics.configure_wetdep_hydro_diagnostics.
         if jam_wetdep_scheme == "ham_below_cloud":
-            micro_term.configure_precip_cover_diagnostic(True)
+            micro_term.configure_wetdep_hydro_diagnostics(True)
     else:
         raise ValueError(
             f"Unknown cloud_scheme={cloud_scheme!r}. Choose '1m' or '2m'."

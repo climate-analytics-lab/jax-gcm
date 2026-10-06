@@ -613,7 +613,7 @@ def test_cloud_params_relevant_to_941_match_echam():
 # ===========================================================================
 def run_jcm_precip_cover(inp: dict, g: dict, dt: float, prec: str) -> tuple[np.ndarray, np.ndarray]:
     """Run the per-level ``precip_cover`` the 2M scheme would publish via
-    ``configure_precip_cover_diagnostic``, end to end from ECHAM's raw step
+    ``configure_wetdep_hydro_diagnostics``, end to end from ECHAM's raw step
     inputs (same adapter as ``run_jcm_column``, just different elements of
     :func:`cloud_microphysics_2m`'s return tuple -- the POST-update
     precipitating-area fraction, ECHAM's ``zclcpre_2d``
