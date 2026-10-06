@@ -199,6 +199,18 @@ def solar_activity(year, tyear):
 # below -- the exact failure mode jcm.constants' own "derived quantities
 # are properties, not module constants" rule (see CLAUDE.md) exists to
 # prevent, here hitting a literal table instead of a derived constant.)
+#
+# Every kernel in this module (below) is dtype-generic -- it anchors on its
+# own arguments' dtype rather than forcing float64, the same rule the
+# M7-JAX kappa/Kazil tables follow (jax-gcm#1017 task 6): this module's
+# caller, M7JaxMicrophysics, can run in float32 throughout
+# (``core_dtype="float32"``) since that task, and a hardcoded float64 cast
+# inside a scoped ``jax.enable_x64(False)`` block silently downcasts to
+# float32 anyway (a real, non-obvious JAX behaviour) -- relying on that
+# quirk instead of being explicit is exactly the kind of fragility task 6
+# exists to remove. These tuples, and every input, are converted at the
+# dtype the caller's own arrays (or the ambient ``jax_enable_x64``, for a
+# bare Python float/int) already carry.
 _IGRF_EPOCH_YEARS = (1965., 1970., 1975., 1980., 1985., 1990., 1995., 2000., 2005.)
 _IGRF_G2 = (-30334., -30220., -30100., -29992., -29873., -29775., -29692., -29619.4, -29556.8)
 _IGRF_G3 = (-2119., -2068., -2013., -1956., -1905., -1848., -1784., -1728.2, -1671.8)
@@ -216,16 +228,21 @@ def _dipole_axis_coefficients(year, day_of_year):
     there, silent here -- the clamp is a pre-existing IGRF-table limitation,
     not something introduced by this port).
     """
-    # Converted from the plain-tuple module constants at call time, so the
-    # dtype tracks whatever jax_enable_x64 is active NOW (see the tuples'
-    # own comment above) rather than whatever was active at import time.
-    epoch_years = jnp.asarray(_IGRF_EPOCH_YEARS, jnp.float64)
-    g2_table = jnp.asarray(_IGRF_G2, jnp.float64)
-    g3_table = jnp.asarray(_IGRF_G3, jnp.float64)
-    h3_table = jnp.asarray(_IGRF_H3, jnp.float64)
+    # Dtype-generic (see the tuples' own comment above): anchor on the
+    # caller's year/day_of_year, falling back to the ambient
+    # jax_enable_x64 default for a bare Python float/int (unchanged
+    # behaviour there -- weak-typed scalars already tracked "jax_enable_x64
+    # active NOW" before this function took on other dtypes too).
+    year = jnp.asarray(year)
+    day_of_year = jnp.asarray(day_of_year)
+    dtype = jnp.result_type(year, day_of_year)
+    epoch_years = jnp.asarray(_IGRF_EPOCH_YEARS, dtype)
+    g2_table = jnp.asarray(_IGRF_G2, dtype)
+    g3_table = jnp.asarray(_IGRF_G3, dtype)
+    h3_table = jnp.asarray(_IGRF_H3, dtype)
 
-    iy = jnp.clip(jnp.asarray(year, jnp.float64), 1965.0, 2010.0)
-    t = iy + (jnp.asarray(day_of_year, jnp.float64) - 1.0) / 365.25
+    iy = jnp.clip(year.astype(dtype), 1965.0, 2010.0)
+    t = iy + (day_of_year.astype(dtype) - 1.0) / 365.25
     bucket = jnp.clip(jnp.floor((iy - 1965.0) / 5.0), 0, 7).astype(jnp.int32)
     f2 = (t - epoch_years[bucket]) / 5.0
     f1 = 1.0 - f2
@@ -260,8 +277,10 @@ def geo2mag(lat_deg, lon_deg, year, day_of_year):
     st0, ct0, sl0, cl0 = _dipole_axis_coefficients(year, day_of_year)
     stcl, stsl, ctsl, ctcl = st0 * cl0, st0 * sl0, ct0 * sl0, ct0 * cl0
 
-    theta = jnp.pi * (0.5 - jnp.asarray(lat_deg, jnp.float64) / 180.0)
-    phi = jnp.pi * jnp.asarray(lon_deg, jnp.float64) / 180.0
+    # Dtype-generic: lat_deg/lon_deg follow the caller's own dtype, not a
+    # forced float64 (see the module-constant comment above).
+    theta = jnp.pi * (0.5 - jnp.asarray(lat_deg) / 180.0)
+    phi = jnp.pi * jnp.asarray(lon_deg) / 180.0
     # sphcar(r=1, theta, phi, ->, j=1).
     sq = jnp.sin(theta)
     xgeo = sq * jnp.cos(phi)
@@ -292,7 +311,8 @@ def geo2mag(lat_deg, lon_deg, year, day_of_year):
 
 def vertical_cutoff_rigidity(mag_lat_deg):
     """``mo_geopack.f90::vertical_cutoff_rigidity`` [GV]."""
-    return 14.9 * jnp.cos(jnp.pi * jnp.asarray(mag_lat_deg, jnp.float64) / 180.0) ** 4.0
+    # Dtype-generic, as geo2mag above.
+    return 14.9 * jnp.cos(jnp.pi * jnp.asarray(mag_lat_deg) / 180.0) ** 4.0
 
 
 # --- mo_ham_gcrion.f90::gcr_ionization/gcr_ionization_profile --------------
@@ -347,8 +367,14 @@ def gcr_ion_pair_rate(lat, lon, pressure, temperature, solar_activity, tables,
       catch fidelity bugs at 1e-12, for a reason that has nothing to do
       with this function's correctness.
     """
-    lat_deg = jnp.asarray(lat, jnp.float64) * (180.0 / jnp.pi)
-    lon_deg = jnp.asarray(lon, jnp.float64) * (180.0 / jnp.pi)
+    # Dtype-generic throughout (jax-gcm#1017 task 6): every input follows
+    # the caller's own dtype rather than a forced float64 -- this function's
+    # caller (M7JaxMicrophysics) rebuilds pressure/temperature/tables/
+    # lat/lon/year/day_of_year at its own working dtype per step, the same
+    # rule the kappa/Kazil tables follow, so there is nothing left for this
+    # function itself to force.
+    lat_deg = jnp.asarray(lat) * (180.0 / jnp.pi)
+    lon_deg = jnp.asarray(lon) * (180.0 / jnp.pi)
     mag_lat, _ = geo2mag(lat_deg, lon_deg, year, day_of_year)
     zvcr = vertical_cutoff_rigidity(mag_lat)                      # (*horiz)
 
@@ -358,8 +384,8 @@ def gcr_ion_pair_rate(lat, lon, pressure, temperature, solar_activity, tables,
     ivcr0, ivcr1 = _bracket(vcr_table, zvcr)                      # (*horiz)
     zv = (zvcr - vcr_table[ivcr0]) / (vcr_table[ivcr1] - vcr_table[ivcr0])
 
-    press_hpa = jnp.asarray(pressure, jnp.float64) * 0.01         # (kx, *horiz)
-    ptemp = jnp.asarray(temperature, jnp.float64)                 # (kx, *horiz)
+    press_hpa = jnp.asarray(pressure) * 0.01                      # (kx, *horiz)
+    ptemp = jnp.asarray(temperature)                              # (kx, *horiz)
     g = c.grav if grav is None else grav
     zmcd = 10.0 * press_hpa / g                                    # g cm-2, (kx, *horiz)
     zmcd = jnp.clip(zmcd, mcd_table[0], mcd_table[-1])
@@ -386,7 +412,7 @@ def gcr_ion_pair_rate(lat, lon, pressure, temperature, solar_activity, tables,
     ipr_solmin = gather(tables.ipr_solmin)
     ipr_solmax = gather(tables.ipr_solmax)
 
-    psolact = jnp.asarray(solar_activity, jnp.float64)
+    psolact = jnp.asarray(solar_activity)
     pgcripr = 0.5 * ((1.0 - psolact) * ipr_solmin + (1.0 + psolact) * ipr_solmax)
     # Local-condition rescaling (gcr_ionization_profile:520): normal
     # conditions are 273.15 K, 1013.25 hPa.
