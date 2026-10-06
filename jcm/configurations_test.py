@@ -9,6 +9,7 @@ import ast
 import contextlib
 import unittest
 from pathlib import Path
+import os
 from unittest import mock
 
 import jax
@@ -291,16 +292,18 @@ class TestConfigurationsAcceptance(unittest.TestCase):
     def tearDown(self):
         jax.config.update("jax_enable_x64", self._x64)
 
-    def _assert_door_matches_cli(self, name):
+    def _assert_door_matches_cli(self, name, overrides=None):
         """Both doors build the same patched engine; assert they agree."""
         coords = _t63l47_coords()
         shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
         with contextlib.ExitStack() as stack:
             for p in _patched_engine(shape):
                 stack.enter_context(p)
-            exp = configurations.load(name)
+            overrides = dict(overrides or {})
+            exp = configurations.load(name, **overrides)
             # The CLI composition, built through the same runners the door uses.
-            cfg = configurations._compose(name, [])
+            cfg = configurations._compose(
+                name, [f"{k}={v}" for k, v in overrides.items()])
             ref_model = runners.build_model(cfg)
             ref_forcing = runners.build_forcing(
                 cfg, ref_model.coords,
@@ -334,7 +337,15 @@ class TestConfigurationsAcceptance(unittest.TestCase):
     @pytest.mark.requires_extra("m7")
     def test_ham_m7_load_equivalent_to_cli_composition(self):
         # The ECHAM-HAM M7 preset composes the optional m7-jax core (#1017).
-        self._assert_door_matches_cli("ham-t63-l47")
+        # Its default nsnucl=2 needs the licensed HAM inputs ($HAM_INPUT_DIR),
+        # and this test stubs xarray.open_dataset for the whole engine, so it
+        # composes the documented data-free variant (binary nucleation, jcm's
+        # own Mie tables) - equivalence of the two doors is what is tested.
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HAM_INPUT_DIR", None)
+            self._assert_door_matches_cli(
+                "ham-t63-l47",
+                {"physics.jam_microphysics_options.nucleation_scheme": 1})
 
 
 @pytest.mark.slow
