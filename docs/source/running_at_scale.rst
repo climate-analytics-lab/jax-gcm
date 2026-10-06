@@ -362,6 +362,14 @@ when the working directory is ephemeral (a container, a scratch job) — and run
 unhealthy chunk instead of integrating a doomed state for hours; set it
 ``false`` to log and keep going.
 
+A chunk's host work — the device-to-host copy, the health check, the netCDF,
+monthly and checkpoint writes — runs on a background thread while the next
+chunk integrates, so it adds no wall time unless it outlasts a chunk; each
+report's ``Host:`` line says how long it took. A chunk's report therefore
+prints after the next chunk's ``Model starting`` line, and a bailing run stops
+one chunk later, discarding that chunk unwritten. See
+:doc:`design/chunked_run_io_overlap`.
+
 Multi-day integrations on preemptible compute (spot instances, Slurm
 ``--requeue`` queues, NRP Nautilus) can be killed at short notice. Set
 ``run.checkpoint_path`` to make a chunked run resumable: after each chunk the

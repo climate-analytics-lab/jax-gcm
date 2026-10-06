@@ -439,6 +439,26 @@ class TestDataToXarray(unittest.TestCase):
         self.assertIn('lon', ds.coords)
         self.assertIn('lat', ds.coords)
 
+    def test_data_to_xarray_keeps_the_input_variable_order(self):
+        """Variables come out in the input dict's order, in every process.
+
+        A set-based ordering followed the string hash, which changes with
+        PYTHONHASHSEED, so two runs of the same model wrote their files'
+        variables (and the monthly restart state) in different orders. With
+        30 names a hash order matching the insertion order is vanishingly
+        unlikely, so this fails for any set-based implementation.
+        """
+        sigma_boundaries = compute_sigma_boundaries(8)
+        coords = get_coords(sigma_boundaries, spectral_truncation=21)
+        shape = (2, coords.vertical.layers) + coords.horizontal.nodal_shape
+        names = [f'field_{i:02d}_{"abcdefghij"[i % 10]}' for i in range(30)]
+        data = {name: np.zeros(shape) for name in names}
+        data['tracers'] = {'q_b': np.zeros(shape), 'q_a': np.zeros(shape)}
+
+        ds = data_to_xarray(data, coords=coords, times=np.arange(2))
+
+        self.assertEqual(list(ds.data_vars), names + ['q_b', 'q_a'])
+
     def test_data_to_xarray_with_tracers(self):
         """data_to_xarray should handle tracers dict."""
         sigma_boundaries = compute_sigma_boundaries(8)

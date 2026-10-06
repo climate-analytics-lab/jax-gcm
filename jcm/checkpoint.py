@@ -228,7 +228,7 @@ def _struct_fields(node, prefix: str = "", out: dict | None = None) -> dict:
     return out
 
 
-def _dycore_tracers(model) -> dict[str, bool]:
+def _dycore_tracers(model, dycore_state=None) -> dict[str, bool]:
     """``name -> nondimensionalize`` for the tracers in the saved state.
 
     The flag is what a unit migration keys on: a
@@ -240,7 +240,9 @@ def _dycore_tracers(model) -> dict[str, bool]:
     every dycore carries without declaring.
     """
     specs = getattr(getattr(model, "dycore", None), "tracer_specs", None) or {}
-    tracers = getattr(model.dycore_state, "tracers", None)
+    if dycore_state is None:
+        dycore_state = model.dycore_state
+    tracers = getattr(dycore_state, "tracers", None)
     names = tracers if isinstance(tracers, Mapping) else specs
     return {
         str(name): bool(getattr(specs.get(name), "nondimensionalize", True))
@@ -316,7 +318,8 @@ def _mirror_revision() -> str:
 
 
 def save_checkpoint(model, path, *, elapsed_days: float | None = None,
-                    keep_previous: bool = False) -> Path:
+                    keep_previous: bool = False,
+                    run_state=None) -> Path:
     """Persist the model's current dycore + physics state to ``path``.
 
     Writes schema ``SCHEMA_VERSION``: every state array under its pytree
@@ -336,21 +339,27 @@ def save_checkpoint(model, path, *, elapsed_days: float | None = None,
             written, so a failed save (full disk, quota, a kill mid-write)
             leaves ``path`` and ``.prev`` as they were. See
             :func:`atomic_open`.
+        run_state: The :class:`~jcm.model.RunState` to save instead of the
+            model's current one (default). The chunked runner writes a
+            chunk's checkpoint while the model is already integrating the
+            next chunk, so it passes the state it captured at the chunk
+            boundary rather than whatever the model holds by then.
 
     Returns:
         ``Path(path)`` for chaining.
 
     """
-    if model.dycore_state is None or model.physics_carry is None:
-        raise ValueError(
-            "Model has no state to checkpoint — call Model.run(...), "
-            "Model.resume(...), or Model.bootstrap_state(...) first."
-        )
+    if run_state is None:
+        if model.dycore_state is None or model.physics_carry is None:
+            raise ValueError(
+                "Model has no state to checkpoint — call Model.run(...), "
+                "Model.resume(...), or Model.bootstrap_state(...) first."
+            )
+        run_state = model.run_state
+    if run_state is None or run_state.time is None:
+        raise ValueError("Model has no exact run clock to checkpoint.")
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    run_state = model.run_state
-    if run_state is None:
-        raise ValueError("Model has no exact run clock to checkpoint.")
     delta = run_state.time - model.start_time
     clock_elapsed = int(delta.days) + int(delta.seconds) / 86400.0
     if elapsed_days is not None and not np.isclose(
@@ -372,10 +381,10 @@ def save_checkpoint(model, path, *, elapsed_days: float | None = None,
         # With the clock, the run's identity: the data-mirror commit its
         # inputs were read at, so a resume can refuse different inputs.
         "data_mirror_revision": _mirror_revision(),
-        "dycore": dict(_named_leaves(model.dycore_state)),
-        "physics": dict(_named_leaves(model.physics_carry)),
-        "physics_fields": _struct_fields(model.physics_carry),
-        "dycore_tracers": _dycore_tracers(model),
+        "dycore": dict(_named_leaves(run_state.dynamics)),
+        "physics": dict(_named_leaves(run_state.physics)),
+        "physics_fields": _struct_fields(run_state.physics),
+        "dycore_tracers": _dycore_tracers(model, run_state.dynamics),
         # Recorded so a *reader* that no longer composes the owning term
         # still knows this file's carry held state nothing recomputes, and
         # refuses to drop it rather than migrating it away.

@@ -291,3 +291,82 @@ def test_compact_restart_file_of_an_empty_accumulator(tmp_path):
     restored, _ = temporal_aggregation.MonthlyMeanAccumulator.load(
         empty.save(tmp_path / "s"))
     assert restored.finish() is None
+
+
+def _xarray_reference_months(ds):
+    """Monthly means accumulated frame by frame with xarray arithmetic.
+
+    The accumulator's documented arithmetic, written the plain way: each
+    interval adds ``fillna(0).astype(float64) * duration`` to a float64 sum
+    and ``notnull * duration`` to an int64 valid duration, in interval
+    order, and a month's mean is the sum over the nonzero valid duration.
+    """
+    bounds = ds.time_bounds.values.astype("datetime64[ms]")
+    months = bounds[:, 0].astype("datetime64[M]")
+    names = [name for name, var in ds.data_vars.items()
+             if "time" in var.dims and name != "time_bounds"]
+    out = {}
+    for month in np.unique(months):
+        means = {}
+        for name in names:
+            total = valid = None
+            for i in np.flatnonzero(months == month):
+                duration = int((bounds[i, 1] - bounds[i, 0])
+                               / np.timedelta64(1, "ms"))
+                value = ds[name].isel(time=i, drop=True)
+                part = value.fillna(0).astype(np.float64) * duration
+                weight = value.notnull().astype(np.int64) * duration
+                total = part if total is None else total + part
+                valid = weight if valid is None else valid + weight
+            means[name] = (total / valid.where(valid != 0)).values
+        out[str(month)] = means
+    return out
+
+
+@pytest.mark.parametrize("seams", [(), (3,), (2, 6, 7, 9, 30, 36)])
+def test_stream_is_bitwise_the_xarray_accumulation(tmp_path, seams):
+    """The in-place NumPy accumulation is bit for bit the xarray one.
+
+    float32 fields with scattered missing values (some points missing on
+    some days, one point missing all month), an integer and a boolean field,
+    two month edges, and chunk seams with a restart-file round trip at each:
+    every emitted month equals the frame-by-frame xarray accumulation with
+    ``np.array_equal`` (NaN where a point was never valid), so the faster
+    bookkeeping changes no bit of the monthly files.
+    """
+    ds = _gridded_daily("2000-01-25", "2000-03-04")
+    n = ds.sizes["time"]
+    rng = np.random.default_rng(7)
+    field = (250.0 + 30.0 * rng.standard_normal((n, 2, 3, 4))).astype(np.float32)
+    field[rng.random(field.shape) < 0.05] = np.nan
+    field[:, 1, 2, 3] = np.nan          # never valid
+    ds["temperature"] = (("time", "level", "lat", "lon"), field,
+                         {"cell_methods": "time: mean", "units": "K"})
+    ds["count"] = ("time", np.arange(n, dtype=np.int32) * 3,
+                   {"cell_methods": "time: mean"})
+    ds["wet"] = (("time", "lat"), rng.random((n, 3)) < 0.5,
+                 {"cell_methods": "time: mean"})
+    expected = _xarray_reference_months(ds)
+
+    edges = [0, *seams, n]
+    accumulator = temporal_aggregation.MonthlyMeanAccumulator()
+    emitted = []
+    for k, (lo, hi) in enumerate(zip(edges[:-1], edges[1:])):
+        closed = accumulator.update(ds.isel(time=slice(lo, hi)))
+        if closed is not None:
+            emitted.append(closed)
+        if hi < n:
+            path = accumulator.save(tmp_path / f"seam{k}.monthly")
+            accumulator, _ = temporal_aggregation.MonthlyMeanAccumulator.load(
+                path)
+    emitted.append(accumulator.finish())
+    months = xr.concat(emitted, dim="time", data_vars="all")
+
+    labels = [str(np.datetime64(b, "M")) for b in months.time_bounds.values[:, 0]]
+    assert labels == list(expected)
+    for t, label in enumerate(labels):
+        for name, want in expected[label].items():
+            got = months[name].isel(time=t).values
+            assert got.dtype == np.float64
+            assert np.array_equal(got, want, equal_nan=True), (label, name)
+    assert np.isnan(months.temperature.values[:, 1, 2, 3]).all()
