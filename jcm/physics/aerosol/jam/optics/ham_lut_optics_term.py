@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import math
 
+import jax
 import jax.numpy as jnp
+from flax import nnx
 
 from jcm.physics.aerosol.jam.optics.ham_mie_tables import (
     default_ham_mie_tables,
@@ -35,6 +37,17 @@ from jcm.physics.aerosol.jam.optics.optics_term import JamOpticsTerm
 
 class HamLutOpticsTerm(JamOpticsTerm):
     """HAM M7's own nearest-neighbour Mie-table optics, as a ``_mode_optics`` backend."""
+
+    def __init__(self, **kwargs):
+        """Build or load HAM's four tables now, outside any traced function.
+
+        They are held as module data (pytree leaves passed into the compiled
+        step), never created lazily inside ``__call__``.
+        """
+        super().__init__(**kwargs)
+        self._ham_tables = nnx.data({
+            name: jax.tree_util.tree_map(jnp.asarray, lut)
+            for name, lut in default_ham_mie_tables().items()})
 
     def _build_mie_lut(self):
         """Skip the default Gauss-Hermite LUT: unused by this backend."""
@@ -64,7 +77,7 @@ class HamLutOpticsTerm(JamOpticsTerm):
         zeros = jnp.zeros_like(inputs.r_wet)
         if inputs.mode_index == 0:
             return zeros, zeros, zeros
-        tables = default_ham_mie_tables()
+        tables = self._ham_tables
         fine = abs(inputs.mode.geom_std_dev - 1.59) <= abs(inputs.mode.geom_std_dev - 2.00)
         if inputs.is_sw:
             lut = tables["sw_fine"] if fine else tables["sw_coarse"]

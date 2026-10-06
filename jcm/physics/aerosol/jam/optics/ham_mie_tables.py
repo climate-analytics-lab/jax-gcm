@@ -65,6 +65,7 @@ from pathlib import Path
 
 import jax.numpy as jnp
 import numpy as np
+from flax import struct
 
 from jcm.physics.aerosol.jam.optics.mie import mie_efficiencies_grid
 
@@ -91,12 +92,12 @@ class HamTableAxes:
     name: str
     sigma: float
     sw: bool          # SW table (stores ssa, g) vs LW (extinction only)
-    x_min: float
-    x_max: float
-    nr_min: float
-    nr_max: float
-    ni_min: float
-    ni_max: float
+    x_min: float = struct.field(pytree_node=False)
+    x_max: float = struct.field(pytree_node=False)
+    nr_min: float = struct.field(pytree_node=False)
+    nr_max: float = struct.field(pytree_node=False)
+    ni_min: float = struct.field(pytree_node=False)
+    ni_max: float = struct.field(pytree_node=False)
 
 
 # M7 submodel column, mo_ham_rad_data.f90:420-431 (x0_min/x0_max) and
@@ -114,14 +115,19 @@ HAM_TABLE_AXES: dict[str, HamTableAxes] = {
 }
 
 
-@dataclasses.dataclass(frozen=True)
+@struct.dataclass
 class HamRadLUT:
-    """One tabulated table plus the affine grid mapping ``ham_rad_fitplus`` needs."""
+    """One tabulated table plus the affine grid mapping ``ham_rad_fitplus`` needs.
+
+    A pytree: the three tables are leaves, so a term holds them as module
+    data and passes them into the compiled step; the axis constants are
+    static.
+    """
 
     q_ext: jnp.ndarray         # (NX, NMR, NMI); Qext*x**2/(4*pi)
     ssa: jnp.ndarray | None    # (NX, NMR, NMI) or None for an LW table
     g: jnp.ndarray | None
-    sw: bool
+    sw: bool = struct.field(pytree_node=False)
     # Both the linear bound and its log are stored independently (mirroring
     # mo_ham_rad_data.f90's own x0_min/log_x0_min pair, set once at init and
     # never reconstructed from each other) -- reconstructing x_min as
@@ -129,17 +135,17 @@ class HamRadLUT:
     # (log then exp is not a perfect round-trip), which flips the in-range
     # test at exactly x==x_min and disagreed with the compiled reference at
     # that exact boundary (caught by hamrad_lookup's designed edge cases).
-    x_min: float
-    x_max: float
-    log_x_min: float
-    log_x_max: float
-    nr_min: float
-    nr_max: float
-    inc_nr: float
-    ni_min: float
-    ni_max: float
-    log_ni_min: float
-    inc_ni: float
+    x_min: float = struct.field(pytree_node=False)
+    x_max: float = struct.field(pytree_node=False)
+    log_x_min: float = struct.field(pytree_node=False)
+    log_x_max: float = struct.field(pytree_node=False)
+    nr_min: float = struct.field(pytree_node=False)
+    nr_max: float = struct.field(pytree_node=False)
+    inc_nr: float = struct.field(pytree_node=False)
+    ni_min: float = struct.field(pytree_node=False)
+    ni_max: float = struct.field(pytree_node=False)
+    log_ni_min: float = struct.field(pytree_node=False)
+    inc_ni: float = struct.field(pytree_node=False)
 
 
 def _cache_dir() -> Path:
@@ -228,9 +234,12 @@ def build_ham_mie_tables() -> dict[str, HamRadLUT]:
     for name, axes in HAM_TABLE_AXES.items():
         qe, ssa, g = _build_or_load(axes)
         out[name] = HamRadLUT(
-            q_ext=jnp.asarray(qe, jnp.float32),
-            ssa=jnp.asarray(ssa, jnp.float32) if ssa is not None else None,
-            g=jnp.asarray(g, jnp.float32) if g is not None else None,
+            # NumPy, never jax: the memo below is process-global, and a jax
+            # array created while a caller is being traced would leak that
+            # trace's tracer into every later call.
+            q_ext=np.asarray(qe, np.float32),
+            ssa=np.asarray(ssa, np.float32) if ssa is not None else None,
+            g=np.asarray(g, np.float32) if g is not None else None,
             sw=axes.sw,
             x_min=axes.x_min, x_max=axes.x_max,
             log_x_min=math.log(axes.x_min), log_x_max=math.log(axes.x_max),
