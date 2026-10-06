@@ -200,6 +200,19 @@ class ModalAerosolSpec:
     #: existing ``primary_split``-based mode targets and class-geometry
     #: number factor.
     sector_emission: object | None = None
+    #: Population-specific override of every HAM literal the in-cloud aqueous
+    #: chemistry (``chemistry/aqueous.py``) would otherwise read from jcm's
+    #: own constants/species tables — SO2 Henry's law, the gas constant,
+    #: Avogadro's number and its ``xtoc``/``ctox`` rounding, SO2's molar mass
+    #: (a
+    #: :class:`~jcm.physics.aerosol.jam.chemistry.aqueous_constants.AqueousConstants`,
+    #: typed loosely for the same reason as ``freezing_roles`` — ``aqueous.py``
+    #: imports this module, so a strict type hint would cycle back). ``None``
+    #: (every MAM4 population) keeps :func:`~...aqueous._aqueous_so4`'s
+    #: existing values; M7 sets
+    #: :data:`~...aqueous_constants.HAM_AQUEOUS_CONSTANTS` (r7492's own
+    #: numbers, jax-gcm#1017 task 3 / jax-gcm#1031).
+    aqueous_constants: object | None = None
 
     def __post_init__(self) -> None:
         """Validate the family tag and species references."""

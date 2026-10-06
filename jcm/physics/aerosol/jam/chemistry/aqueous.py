@@ -49,6 +49,7 @@ import jax.numpy as jnp
 import tree_math
 from flax import nnx
 
+from jcm.physics.aerosol.jam.chemistry.aqueous_constants import AqueousConstants
 from jcm.physics.aerosol.jam.gas_species import GAS_SPECIES
 from jcm.physics.aerosol.jam.cloud_borne_store import (
     CARRY_KEY,
@@ -72,7 +73,13 @@ _ZE1K, _ZE1H = 1.1e-2, 2300.0   # O3 Henry
 _ZE3K, _ZE3H = 1.2e-2, 2010.0   # SO2 first dissociation
 _ZQ298 = 1.0 / 298.0
 _ZLWCMIN = 1.0e-7         # in-cloud LWC threshold [kg/kg]
-# SO2 Henry's-law (H0 [mol/l/atm], activation [K]) — HAMMOZ speclist(id_so2).
+# SO2 Henry's-law (H0 [mol/l/atm], activation [K]) — intended to be HAMMOZ's
+# speclist(id_so2)%henry, but these two numbers predate a correction HAM
+# later made (mo_ham_species.f90:181 reads (1.36, 4250.0), not this). A
+# genuine MAM4-shared defect, filed as jax-gcm#1031 and NOT fixed here (that
+# would move MAM4's calibrated behaviour); AqueousConstants/
+# HAM_AQUEOUS_CONSTANTS (aqueous_constants.py) gives the HAM path r7492's
+# own value instead.
 _H_SO2_0, _H_SO2_ACT = 1.23, 3020.0
 
 # Molar masses in g/mol (HAM works in grams).
@@ -117,9 +124,18 @@ def _xtoc(rho: jnp.ndarray, mw: float) -> jnp.ndarray:
     return rho * _avo_xtoc() / mw
 
 
+# AqueousConstants / HAM_AQUEOUS_CONSTANTS live in aqueous_constants.py (a
+# dependency-light sibling module) and are re-imported above purely so
+# ``microphysics/m7_data.py`` can set ``ModalAerosolSpec.aqueous_constants``
+# without pulling in this module's own import of ``cloud_borne_store`` —
+# which would otherwise close a circular import back through the
+# ``microphysics`` package's ``__init__.py`` (which imports ``m7_data``).
+
+
 def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt,
                  mw_so4: float = _MW_SO4,
-                 conv_so2_so4: float = _CONV_SO2_SO4_MASS):
+                 conv_so2_so4: float = _CONV_SO2_SO4_MASS,
+                 constants: AqueousConstants | None = None):
     """In-cloud SO₂ oxidised to sulfate over ``niter`` sub-steps [kg/kg].
 
     All faithful to ``ham_wet_chemistry``. ``so2``/``so4`` are in-cloud mass
@@ -128,21 +144,34 @@ def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt,
     ``mw_so4``/``conv_so2_so4`` are the population's own SO₄ molar mass
     [g/mol] and the SO₂->SO₄ mass-conversion factor derived from it
     (:class:`AqueousSulfur` computes both from ``spec.species_props("so4")``
-    at construction); the defaults reproduce jcm's MAM4 value. Returns the
-    SO₄ mass produced (mmr); SO₂ consumed = that / ``conv_so2_so4``.
+    at construction); the defaults reproduce jcm's MAM4 value. ``constants``
+    (``None`` for MAM4) is a :class:`AqueousConstants` overriding every
+    OTHER HAM literal this function would otherwise read from jcm's own
+    constants/species tables (SO2 Henry's law, the gas constant, Avogadro's
+    number and its separate ``xtoc``/``ctox`` rounding, SO2's molar mass) —
+    see that class's docstring for exactly which, and why each one differs.
+    Returns the SO₄ mass produced (mmr); SO₂ consumed = that / ``conv_so2_so4``.
     """
+    ac = constants
+    h_so2_0 = ac.h_so2_0 if ac is not None else _H_SO2_0
+    h_so2_act = ac.h_so2_act if ac is not None else _H_SO2_ACT
+    zrgas = ac.zrgas if ac is not None else _zrgas()
+    avo = ac.avo if ac is not None else c.avogadro
+    avo_xtoc = ac.avo_xtoc if ac is not None else _avo_xtoc()
+    mw_so2 = ac.mw_so2 if ac is not None else _MW_SO2
+
     qtp1 = 1.0 / temperature - _ZQ298
     lwcl = jnp.maximum(lwc * rho * 1.0e-6, _TINY)   # [l-water/cm^3-air]
     lwcv = lwc * rho * 1.0e-3                        # liquid volume fraction
     # molec/cm^3(air) -> mol/l(water): HAM ``zfac1 = 1/(zlwcl·avo)``.
-    fac1 = 1.0 / (lwcl * c.avogadro)
+    fac1 = 1.0 / (lwcl * avo)
 
     # --- SO2 + H2O2 effective rate (pH from initial sulfate) ---
     hp0 = _ZHPBASE + so4 * 1000.0 / (jnp.maximum(lwc, _TINY) * mw_so4)
     rk = 8.0e4 * jnp.exp(-3650.0 * qtp1) / (0.1 + hp0)
-    rke = rk / (lwcl * c.avogadro)
-    h_so2 = _H_SO2_0 * jnp.exp(_H_SO2_ACT * qtp1)
-    pfac = _zrgas() * lwcv * temperature
+    rke = rk / (lwcl * avo)
+    h_so2 = h_so2_0 * jnp.exp(h_so2_act * qtp1)
+    pfac = zrgas * lwcv * temperature
     p_so2 = h_so2 * pfac
     f_so2 = p_so2 / (1.0 + p_so2)
     h_h2o2 = 9.7e4 * jnp.exp(6600.0 * qtp1)
@@ -153,14 +182,19 @@ def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt,
     # --- O3-path constants ---
     e1 = _ZE1K * jnp.exp(_ZE1H * qtp1)
     e3 = _ZE3K * jnp.exp(_ZE3H * qtp1)
-    za = h_so2 * _zrgas() * temperature * lwcv
+    za = h_so2 * zrgas * temperature * lwcv
     a21 = 4.39e11 * jnp.exp(-4131.0 / temperature)
     a22 = 2.56e3 * jnp.exp(-926.0 / temperature)
-    ph_o3 = e1 * _zrgas() * temperature * lwcv
+    ph_o3 = e1 * zrgas * temperature * lwcv
     f_o3 = ph_o3 / (1.0 + ph_o3)
 
-    so2m = so2 * _xtoc(rho, _MW_SO2)
-    so4m = so4 * _xtoc(rho, _MW_SO4)
+    # HAM's xtoc(x,y) = x*avo_xtoc/y, inlined so each conversion uses the
+    # SAME avo_xtoc as the final ctox below. so4m previously read the
+    # module-level _MW_SO4 (MAM4's own molar mass) here regardless of the
+    # mw_so4 parameter -- a bug (mo_ham_chemistry.f90:216 uses the SAME
+    # mw_so4 the pH calculation above does); fixed to use the parameter.
+    so2m = so2 * (rho * avo_xtoc / mw_so2)
+    so4m = so4 * (rho * avo_xtoc / mw_so4)
     h2o2m = h2o2
     zdt = dt / _NITER
 
@@ -191,8 +225,8 @@ def _aqueous_so4(so2, so4, h2o2, o3, lwc, rho, temperature, dt,
         so4m = so4m + (so2mh - so2mo)
         so2m = so2mo
 
-    # ctox: molec/cm3 -> mmr is mw/(6.022e20·rho); SO2 remaining as mmr.
-    so2_rem = so2m * (_MW_SO2 / (_avo_xtoc() * rho))
+    # ctox: molec/cm3 -> mmr is mw/(avo_xtoc·rho); SO2 remaining as mmr.
+    so2_rem = so2m * (mw_so2 / (avo_xtoc * rho))
     dso2tot = jnp.clip(so2 - so2_rem, 0.0, so2)
     return dso2tot * conv_so2_so4
 
@@ -273,13 +307,23 @@ class AqueousSulfur(PhysicsTerm):
         # MAM4 and diverge only where the population's own so4 differs, e.g.
         # M7's 96.0631 g/mol vs MAM4-MOM's 115 g/mol ammonium bisulfate).
         self._mw_so4 = self._spec.species_props("so4").molar_mass * 1000.0
-        self._conv_so2_so4 = self._mw_so4 / _MW_SO2
+        # HAM's every-other-literal override (jax-gcm#1017 task 3): None for
+        # every MAM4 population, which keeps _MW_SO2 (and _aqueous_so4's own
+        # dynamic zrgas/avo/avo_xtoc reads) exactly as before.
+        self._aqueous_constants: AqueousConstants | None = (
+            self._spec.aqueous_constants
+        )
+        mw_so2 = (
+            self._aqueous_constants.mw_so2
+            if self._aqueous_constants is not None else _MW_SO2
+        )
+        self._conv_so2_so4 = self._mw_so4 / mw_so2
         # The S-conserving SO2 sink below divides the OTHER way round
-        # (``_MW_SO2/_MW_SO4``, not ``1/self._conv_so2_so4``): computed as
-        # its own ratio so the MAM4 default stays bit-identical (a reciprocal
-        # of a quotient is not bit-identical to the quotient computed
-        # directly, per CLAUDE.md's "no reordering arithmetic" rule).
-        self._conv_so4_so2 = _MW_SO2 / self._mw_so4
+        # (``mw_so2/mw_so4``, not ``1/self._conv_so2_so4``): computed as its
+        # own ratio so the MAM4 default stays bit-identical (a reciprocal of
+        # a quotient is not bit-identical to the quotient computed directly,
+        # per CLAUDE.md's "no reordering arithmetic" rule).
+        self._conv_so4_so2 = mw_so2 / self._mw_so4
         # Modes carrying sulfate that can host cloud-borne SO4 (accum, coarse).
         self._so4_modes = tuple(
             m.short for m in self._spec.modes if "so4" in m.species
@@ -378,6 +422,7 @@ class AqueousSulfur(PhysicsTerm):
                 dt=dt,
                 mw_so4=self._mw_so4,
                 conv_so2_so4=self._conv_so2_so4,
+                constants=self._aqueous_constants,
             )
         dso4 = jnp.where(active, dso4, 0.0)
 

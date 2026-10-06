@@ -1,4 +1,4 @@
-"""Super-sectored CEDS + BB4CMIP7 emissions mirror (the #515 product).
+"""Super-sectored CEDS + BB4CMIP7 + HAM biogenic emissions mirror (#515, #1017).
 
 Two Tier A stores, each at its source's native resolution ("always regrid
 from the highest resolution available" — regridding happens once, at
@@ -15,6 +15,13 @@ bundle assembly, straight from these):
 
 Both stores also carry 12-month PI (1850–1859) and PD (2005–2014)
 climatology arrays so bundles need no time arithmetic.
+
+:func:`load_biogenic_oc` (jax-gcm#1017, maintainer decision F7) is a third,
+much simpler source: HAM's own AeroCom II biogenic-OC file, already a
+single T63 monthly climatology (no PI/PD transient split -- HAM replays it
+every model year regardless of era), feeding the M7 sector policy's
+standalone ``"biogenic"`` class (``emissions/ham_sectors.py``) rather than
+any of the four model super-sectors above.
 """
 
 from __future__ import annotations
@@ -83,6 +90,50 @@ def load_bb_species(species: str) -> list[xr.DataArray]:
     da = ds[species].sel(time=slice("1850-01-01", None))
     return [da.rename({"latitude": "lat", "longitude": "lon"})
             .astype(np.float32)]
+
+
+#: HAM's reference run emits BIOGENIC OC from this AeroCom II file (the
+#: emi_spec row ``BIOGENIC=EF_FILE, ..., emiss_biogenic, EF_LONLAT,
+#: surface``). Already on the T63 model grid.
+HAM_BIOGENIC_OC_FILE = (
+    "/data/climate-analytics-lab-shared/ECHAM_emissions_v0006/hammoz/T63/"
+    "aerocom_II/T63/2000/emiss_aerocom_OC_monthly_2000_T63.nc")
+
+
+def load_biogenic_oc(path: str = HAM_BIOGENIC_OC_FILE) -> xr.DataArray:
+    """HAM's biogenic OC source, a T63 monthly climatology (year 2000).
+
+    Returns the raw ``emiss_biogenic`` variable [kg m-2 s-1] (12 monthly
+    records, T63 gaussian grid, 192x96) renamed ``oc_biogenic`` -- a single
+    AeroCom II climatology HAM replays every model year (unlike the CEDS/
+    BB4CMIP7 sources above, which are a 1850-2023 transient series with a
+    PI/PD split), so :func:`~jcm.data.mirror.bundles.build_emissions_nc`
+    reads it once and uses the same climatology for every ``era``. The
+    file's ``long_name`` ("SOA emissions") is a label inherited from its
+    processing chain (``RG_source_file`` points at an AeroCom "SOA" 1x1
+    file); HAM itself treats this mass as primary OC when its own SOA
+    scheme is off (``nsoa /= 1``, ``mo_ham_m7_emissions.f90:596``), which is
+    why the M7 sector policy's ``"biogenic"`` class (``emissions/
+    ham_sectors.py``) applies no OM:OC scaling to it.
+
+    Global annual total ~19.06 Tg/yr (area-weighted with
+    ``jcm.analysis.area_weights``), matching the 19.1 Tg/yr AeroCom-II
+    biogenic-OC source multiple models including ECHAM5-HAMMOZ use
+    (Dentener et al. 2006, cited in Tsigaridis et al. 2014, ACP 14,
+    10845-10895, https://doi.org/10.5194/acp-14-10845-2014) to 0.2%.
+
+    Build/verify (one command, writes to a scratch path -- never uploads)::
+
+        python -c "
+        from jcm.data.mirror.emissions import load_biogenic_oc
+        from jcm.analysis import area_weights, global_mean
+        da = load_biogenic_oc()
+        gm = global_mean(da, area_weights(da))
+        print(float(gm.mean()) * 4*3.14159265*6371000.0**2 * 86400*365.25/1e9, 'Tg/yr')
+        da.to_netcdf('/scr/<you>/oc_biogenic_t63.nc')"
+    """
+    ds = xr.open_dataset(path)
+    return ds["emiss_biogenic"].rename("oc_biogenic").astype(np.float32)
 
 
 def build_store(loader, species, out_path: str, source_attr: str) -> None:
