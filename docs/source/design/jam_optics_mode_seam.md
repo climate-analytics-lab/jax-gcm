@@ -26,6 +26,14 @@ Three overridable methods, all on `jcm/physics/aerosol/jam/optics/optics_term.py
 `_mode_optics` receives a `ModeOpticsInputs` record and returns
 `(tau, tau_scat, tau_scat_g)` — extinction, scattering, and
 scattering-weighted-asymmetry optical depths for that mode alone, **ungated**.
+The record's `is_sw` field is `True` for every call except the one over
+`cache_band_config`'s LW band set (static, so branching on it is the same
+allowance as branching on `mode`) — for a backend that is wavelength-general
+this is never read; it exists for one that keeps genuinely separate SW/LW
+tables or networks (`HamLutOpticsTerm`, #1017, is exactly that) and has no
+other way to tell the two calls apart, since `wavelength_m` alone does not:
+RRTM-SW's reddest band already reaches ~8 μm, inside what LW tables also
+cover.
 
 ### Why optical depths and not `(k_ext, ssa, g)`
 
@@ -108,11 +116,38 @@ correct, roughly 8x the optics cost, and completely silent. A backend that
 holds extra post-compose state of its own overrides the same hook.
 
 There is deliberately **no config key, registry or entry point** for
-selecting a backend. Nothing in this repository implements one, so a string
-selector would have nothing to resolve to; and a user who has installed and
-imported a third-party optics package is already writing Python. If a backend
-is ever vendored in-tree, it gets a config group entry then, like any other
-in-repo scheme.
+selecting a *third-party* backend. A third-party package has no name this
+repository could resolve a string against, and a user who has installed and
+imported one is already writing Python.
+
+**One in-tree exception**: `jam_aerosol_physics(optics_backend=...)` (and
+`echam_physics(jam_optics_backend=...)`) selects between `"jcm"` (default,
+`JamOpticsTerm` itself) and `"ham_lut"` (`HamLutOpticsTerm`, ECHAM-HAM M7's
+own nearest-neighbour Mie-table lookup, #1017) — a plain Python string
+kwarg, not a Hydra config group, because the only two choices today are both
+`JamOpticsTerm` subclasses already imported by `jam_terms.py`; a Hydra group
+would be a config file per choice resolving to the identical two classes.
+Still no manual `physics.replace(...)` needed for these two, unlike a
+genuinely external backend — that is what "vendored in-tree" buys it.
+
+`HamLutOpticsTerm` prefers HAM's own authentic Mie LUT files
+(`lut_optical_properties_M7.nc` / `lut_optical_properties_lw_M7.nc`) at
+construction — `ham_optics_tables_dir`/`jam_optics_tables_dir`, or by
+default the `HAM_INPUT_DIR` environment variable, should point at a
+directory holding them (see `jcm.physics.aerosol.jam.optics.ham_mie_tables`'s
+module docstring for what's in them and how they're read) — and FALLS BACK
+to `ham_mie_tables.default_ham_mie_tables()` (jcm's own built approximation,
+with jcm's own Mie kernel on the same axes) when they are not reachable,
+rather than raising: the real files are a nice-to-have, not a hard
+construction requirement. Which source was used is logged once and recorded
+as `term.table_source` (`"authentic"`, `"jcm_built"`, or `"explicit"` when a
+test passes `tables=` directly). The built approximation's own LW tables
+compute absorption directly (an earlier version computed extinction
+instead, which overstated LW aerosol optical depth by orders of magnitude
+wherever scattering dominates) — even so, it is not a literal port of
+whatever offline tool built HAM's authentic tables, so it disagrees with
+them at a level measured and tolerance-checked in
+`ham_mie_tables_test.py::test_built_tables_vs_authentic_measured_tolerance`.
 
 ## Notes for backend authors
 
