@@ -321,8 +321,8 @@ def prepare_speciated_emissions(
             values = np.tensordot(values, dz_cm, axes=([alt_axis], [0]))
         # CAM uses the destination tracer's molecular weight. A channel can
         # override a rounded source attribute (SOAG is emitted as carbon
-        # equivalents, 12.011 g/mol; its 150 g/mol physical molecule is used
-        # only by the condensation kinetics, not this mass conversion).
+        # equivalents, 12.011 g/mol; the core's local molecular basis and
+        # 250-g/mol equilibrium convention do not set emission mass).
         mw = ch.molar_mass
         if mw is None:
             mw = float(da.attrs["molecular_weight"])

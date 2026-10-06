@@ -38,7 +38,7 @@ jcm = [
 [project.optional-dependencies]
 # MAM4-JAX modal aerosol microphysics core (issue #490). GPL-3.0 — kept as an
 # opt-in extra so the Apache-2.0 jcm core never bundles GPL code. Pinned to the
-# immutable CAM6 mode-selection commit. Install with `pip install jcm[mam4]`.
+# immutable CAM6 mode-selection and equilibrium commit. Install with `pip install jcm[mam4]`.
 mam4 = [
     # Exact, not a floor: the adapter imports submodule paths that upstream
     # excludes from its semver contract (#737).

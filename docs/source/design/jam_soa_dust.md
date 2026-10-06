@@ -74,7 +74,11 @@ python -m jcm.main +configuration=t63-echam-jam-soa
 This is an explicit present-day inventory choice, not a default substitution
 for preindustrial or transient forcing. Those simulations need matching
 SOAG inventories. Five days from a zero-SOA donor measures the initial
-response, not the equilibrium SOA burden or annual AOD.
+response, not the equilibrium SOA burden or annual AOD. Jo et al. document
+upper-tropospheric and high-latitude SOA biases in the original CAM6 scheme;
+matching its formulation does not establish a validated JCM climatology.
+An annual assessment must include the vertical distribution and removal,
+in addition to total AOD.
 
 ## The aerosol working population
 
@@ -156,3 +160,69 @@ unmodified CAM routine compiled with minimal module stubs (CAM commit
 `21a782945d122785ccb5d78e27ea59d80fb73396`). This is a structural correction
 with fixed literature coefficients, not an emission or lifetime multiplier.
 Its global effect must be assessed together with sea salt and SOA removal.
+
+## Matched five-day evidence
+
+The January and July comparisons use separate T63L47 warm donors, each
+spun up for 185 days on `49c0724c`. Both arms start from the same donor and
+reset its clock to the stated calendar date. Dust emissions and the coarse
+mode width are fixed. The control is `35dc1997` with diagnostic-only additions
+for the separated dust dry sinks. The corrected production code is
+`102d936f`, with the immutable MAM4 dependency pin `25924f0` and the 2014
+CAM6 inventory. Runs use native `jcm.main`, float32, and five-day health gates.
+The donors contain no SOA.
+
+The table uses global means of native daily averages over **days 3–5**.
+Dust burden includes interstitial and cloud-borne mass. The diagnosed
+lifetime is **mean burden divided by mean dry-plus-wet loss**, not the mean
+of daily burden/loss ratios, an equilibrium residence time, or an annual
+estimate. SOA's optical diagnostic is its volume-allocated share of wet
+extinction; water has its own share.
+
+| Season / case | Total AOD | Dust lifetime, days | Dust burden, mg/m² | Sea salt, mg/m² | SOA AOD share |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| January control | 0.07678 | 1.12 | 16.11 | 16.76 | 0.00000 |
+| January corrected | 0.08878 | 2.04 | 24.99 | 21.33 | 0.00206 |
+| July control | 0.08236 | 0.89 | 40.54 | 12.94 | 0.00000 |
+| July corrected | 0.10185 | 1.70 | 73.09 | 17.23 | 0.00277 |
+
+AOD increases by 16% in January and 24% in July. Diagnosed dust lifetime
+increases by 83% and 92%, respectively. Sea-salt burden also increases by
+27% and 33%, a material response of the internally mixed coarse mode.
+Both corrected runs complete their health gates.
+
+
+The isolated January ablations used the retained 2000 climatology, keeping
+that source fixed across corrected cases. Working-population coupling plus
+SOA gave AOD 0.08465 and diagnosed dust lifetime 1.24 days; adding coarse
+asphericity gave 0.08667 and 1.42 days; adding CAM surface collection gave
+0.08873 and 2.05 days. These are sensitivity experiments, distinct from the
+final 2014-inventory comparison above. They identify surface collection as
+the largest of the tested dust-lifetime corrections.
+
+The changes improve short-run AOD but do not establish the annual AOD,
+equilibrium SOA burden, or an acceptable sea-salt climatology. Nitrate remains
+absent, and the dust size-to-extinction relationship needs annual evaluation.
+The box tests conserve organics on the common molecular basis; native
+float32 budget diagnostics do not establish whole-model closure below their
+reported precision floor.
+
+To reproduce the corrected short-run setup, supply the appropriate donor:
+
+```bash
+python -m jcm.main +configuration=t63-jam-aod-5day \
+  physics.jam_microphysics=mam4_jax_astem \
+  'forcing.emissions_file=[hf://bundles/t63/emissions_pd.nc,pkg://data/bc/t63/soag_cam6_2014.nc]' \
+  'forcing.emissions_align=[auto,wrap_year]' \
+  init.file=warm_january.msgpack run.start_time=2000-01-01 \
+  run.total_time=5 run.output_prefix=corrected_january \
+  +run.checkpoint_path=corrected_january.ckpt
+```
+
+For July, use the July donor and `run.start_time=2000-07-01`. Run the control
+on `35dc1997` with the same donor, date and output settings, omitting the
+SOA source and ASTEM overrides. Diagnostic-only additions are needed to
+split its dry sinks; its native `dry_du` already reports their total.
+Use `jcm.analysis.global_mean` on `jam_optics.aod_550`,
+`aerocom_burden_du`, `aerocom_burden_ss`, `dry_du` and `wet_du` to reproduce
+the table from the daily output file.
