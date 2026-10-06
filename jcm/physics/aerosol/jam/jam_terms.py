@@ -115,6 +115,26 @@ JAM_PARAMETER_CLASSES = {
 }
 
 
+#: Activation schemes ``jam_aerosol_physics`` composes: CAM's ARG on κ (the
+#: JAM default) or ECHAM-HAM's own activation (``HamActivation``: Köhler A/B
+#: from the electrolyte species + ARG, ``ncd_activ = 2``; or Lin & Leaitch,
+#: ``ncd_activ = 1``), each publishing the same diagnostics.
+ACTIVATION_SCHEMES = ("arg", "ham_arg", "ham_lin_leaitch")
+
+
+def activation_parameter_class(activation_scheme: str):
+    """Return the ``Parameters`` class an ``activation`` mapping applies to."""
+    if activation_scheme == "arg":
+        return ArgParameters
+    if activation_scheme in ACTIVATION_SCHEMES:
+        from jcm.physics.aerosol.jam.activation.ham_activation_term import (
+            HamActivationParameters)
+        return HamActivationParameters
+    raise ValueError(
+        f"Unknown activation_scheme {activation_scheme!r}; choose one of "
+        f"{ACTIVATION_SCHEMES}.")
+
+
 def _load_mam4_jax() -> type[ModalMicrophysicsTerm]:
     """Import the MAM4-JAX core lazily (optional GPL-3.0 dependency)."""
     from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
@@ -175,11 +195,32 @@ def _resolve_microphysics(
     return core
 
 
+def _activation_term(scheme, params, spec, arg_variant, nactivpdf):
+    """Build the activation term ``activation_scheme`` names."""
+    activation_parameter_class(scheme)   # validates the name
+    if scheme == "arg":
+        if nactivpdf:
+            raise ValueError(
+                "nactivpdf is HAM's updraft PDF switch; it applies only to "
+                "activation_scheme='ham_arg'.")
+        return ArgActivation(params=params, spec=spec, variant=arg_variant)
+    from jcm.physics.aerosol.jam.activation.ham_activation_term import (
+        HamActivation)
+    if scheme == "ham_lin_leaitch" and nactivpdf:
+        raise ValueError(
+            "Lin & Leaitch uses a single updraft (setphys.f90 sets nw = 1 for "
+            "ncd_activ = 1); nactivpdf must stay 0.")
+    return HamActivation(spec, params, scheme=scheme.removeprefix("ham_"),
+                         nactivpdf=nactivpdf)
+
+
 def jam_aerosol_physics(
     *,
     microphysics: ModalMicrophysicsTerm | str = "placeholder",
     cloud_borne: bool | None = None,
     arg_variant: str = "arg2000",
+    activation_scheme: str = "arg",
+    nactivpdf: int = 0,
     optics: bool = True,
     optics_diagnostics: bool = False,
     seasalt: SeaSaltParameters | None = None,
@@ -223,6 +264,14 @@ def jam_aerosol_physics(
             its activated fraction, the implicit M7/TOMAS-style treatment.
             Both settings are complete physics, one flag apart.
         arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
+        activation_scheme: ``"arg"`` (default; CAM's ARG on κ with
+            ``arg_variant``), ``"ham_arg"`` or ``"ham_lin_leaitch"``
+            (ECHAM-HAM's activation, :class:`HamActivation`; ``arg_variant``
+            is then unused). ``activation`` takes the matching Parameters
+            class (:func:`activation_parameter_class`).
+        nactivpdf: HAM's updraft switch for ``"ham_arg"``: ``0`` (default)
+            a single characteristic updraft, ``1`` the West et al. (2013)
+            20-bin PDF, ``n > 1`` an ``n``-bin PDF.
         seasalt/dms/dust: optional ``Parameters`` overrides for the natural
             emission schemes (Gong sea salt, Nightingale DMS, Tegen dust).
         dust_preset: HAMMOZ ``ndust`` preset — 4 (default, Stier 2005 +
@@ -391,7 +440,8 @@ def jam_aerosol_physics(
         JamOpticsTerm(spec=spec, optics_diagnostics=optics_diagnostics)
     ] if optics else []
     post_core = [
-        ArgActivation(params=activation, spec=spec, variant=arg_variant),
+        _activation_term(activation_scheme, activation, spec, arg_variant,
+                         nactivpdf),
         # ECHAM-HAM's aerosol inputs to mixed-phase freezing (mo_ham_freezing
         # ham_IN_setup) -> ``freezing_aerosol``, which the 2M scheme turns into
         # contact + immersion freezing rates (#953). After ARG: HAM's
