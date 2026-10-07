@@ -38,11 +38,11 @@ jcm = [
 [project.optional-dependencies]
 # MAM4-JAX modal aerosol microphysics core (issue #490). GPL-3.0 — kept as an
 # opt-in extra so the Apache-2.0 jcm core never bundles GPL code. Pinned to the
-# immutable CAM6 mode-selection and equilibrium commit. Install with `pip install jcm[mam4]`.
+# released CAM6 mode-selection and equilibrium API. Install with `pip install jcm[mam4]`.
 mam4 = [
     # Exact, not a floor: the adapter imports submodule paths that upstream
     # excludes from its semver contract (#737).
-    "mam4-jax @ git+https://github.com/reflective-org/MAM4-JAX.git@25924f0e1402fbe053d41b3e085a01a728df1c63",
+    "mam4-jax==0.5.0",
 ]
 # jax-cosp satellite simulators (COSP v2 in JAX): CloudSat radar + warm-rain
 # diagnostics via the CloudsatCosp physics term. Apache-2.0.

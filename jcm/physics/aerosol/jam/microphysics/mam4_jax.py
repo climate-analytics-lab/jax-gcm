@@ -275,7 +275,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
                 "(AmicphysParams): BC/POA would never leave the "
                 "primary-carbon mode (jax-gcm#721) and so4/soa condensed "
                 "onto it is silently dropped at the state repack. Install "
-                "the pinned version (mam4-jax 0.4.0): pip install 'jcm[mam4]'."
+                "the pinned version (mam4-jax 0.5.0): pip install 'jcm[mam4]'."
             )
         if not {"soa_uptake_mask", "soa_equilibrium_molecular_weight"}.issubset(
                 _amicphys.AmicphysParams._fields):
@@ -283,7 +283,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
                 "The installed mam4-jax lacks per-call CAM6 SOA configuration. "
                 "Its MOM reference allows coarse SOA uptake, whereas CAM6 "
                 "SOA occupies the Aitken/accumulation modes. Install the "
-                "dependency pinned by this checkout: pip install -U '.[mam4]'.")
+                "released mam4-jax 0.5.0: pip install -U '.[mam4]'.")
         # Monolayer threshold: 3.0 is what the MAM4 amicphys path
         # actually receives (via phys_control; the 8.0 in
         # modal_aero_gasaerexch.F90 belongs to the legacy
