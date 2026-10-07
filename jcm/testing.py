@@ -489,10 +489,10 @@ def _freeze(tangent, args, fixed_inputs):
     and whose value selects a code path rather than scaling a result: the
     SPEEDY sigma-grid metrics (``speedy_coords``), from which the schemes build
     masks they document as compile-time constants — ``stratosphere_mask(fsg)``,
-    ``hsg[k+1] > 0.5`` — and the smoothing widths, which sit at exactly 0 by
-    default behind ``jnp.where(w > 0.0, smooth, hard)`` guards where a negative
-    width is out of domain. Perturbing either crosses the selector, so no
-    two-sided derivative exists along it and the whole direction is wasted:
+    ``hsg[k+1] > 0.5``. (SPEEDY's surrogate widths are not structural: the
+    value does not depend on them, so their gradient is zero both ways.)
+    Perturbing a structural leaf crosses the selector, so no two-sided
+    derivative exists along it and the whole direction is wasted:
     with the sigma grid free, ``speedy_longwave``'s check straddles the
     sigma < 0.2 stratosphere mask (``fsg`` has an entry at exactly 0.2) and
     reports a jump instead of a gradient.

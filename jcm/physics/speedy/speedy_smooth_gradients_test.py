@@ -1,11 +1,20 @@
-"""Gradient tests for the smoothed SPEEDY branches.
+"""Gradient tests for SPEEDY's surrogate-gradient switches.
 
-Each scheme-level test pins the specific unlock its smoothing knob exists
-for: a gradient that is exactly zero (or a forward value that jumps)
-under the hard branches must be finite and nonzero with a positive
-width, and every knob at width 0 must reproduce the hard scheme exactly.
-If one of these regresses to zero the corresponding gate has been
-re-hardened.
+Every SPEEDY switch keeps the reference value at any width; the width only
+gives its derivative that of a smooth function
+(``jcm.physics.speedy.smoothing``). The primitive tests check that contract
+for every helper (``check_surrogate_gradient``). The scheme-level tests pin
+the two halves where each switch is formed: the scheme's output is
+bit-identical at width 0 and at a positive width, and a gradient that is
+exactly zero (or unbounded) under the reference derivative is finite and
+nonzero with a positive width -- the humidity trigger (with its column
+moisture budget), the vertical-diffusion onset, the condensation cap, the
+stratiform clip and the drizzle corner of the cloud cover, and the dry-land
+evaporation hinge. The convective precipitation onset is a single
+``surrogate_pos`` and is covered by the primitive tests and, through the
+trigger's budget test, by its tangent in a switching-on plume. If a value
+test regresses the forward model has been changed; if a gradient test, the
+switch has been re-hardened.
 """
 import dataclasses
 
@@ -15,7 +24,10 @@ import numpy as np
 
 from jcm.physics.speedy.smoothing import (
     smooth_clip01, smooth_gate, smooth_max, smooth_min, smooth_pos,
+    surrogate_clip01, surrogate_gate, surrogate_max, surrogate_min,
+    surrogate_pos, surrogate_sqrt,
 )
+from jcm.testing import check_surrogate_gradient
 
 # NB: no jax_enable_x64 here: the flag is process-global and would
 # repin the f32 reference-trajectory tolerances of the regression suite.
@@ -57,6 +69,51 @@ class TestSmoothingPrimitives:
             assert jnp.isfinite(g) and g != 0.0, (
                 f"smooth gradient dead on the clipped side of {fn}"
             )
+
+
+class TestSurrogatePrimitives:
+    """Hard value, smooth derivative: the with_surrogate_gradient contract."""
+
+    W = 0.1
+
+    def test_value_is_hard_and_derivatives_are_the_smooth_functions(self):
+        x = jnp.linspace(-1.5, 2.5, 33)
+        w = self.W
+        cases = (
+            (surrogate_gate, smooth_gate, (x, jnp.asarray(0.5))),
+            (surrogate_pos, smooth_pos, (x,)),
+            (surrogate_min, smooth_min, (x, jnp.asarray(1.0))),
+            (surrogate_max, smooth_max, (x, jnp.asarray(1.0))),
+            (surrogate_clip01, smooth_clip01, (x,)),
+        )
+        for surrogate, smooth, operands in cases:
+            check_surrogate_gradient(
+                lambda *xs: surrogate(*xs, w),
+                lambda *xs: smooth(*xs, 0.0),
+                lambda *xs: smooth(*xs, w),
+                operands,
+            )
+
+    def test_width_has_no_gradient_and_zero_width_is_the_reference(self):
+        x = jnp.asarray(0.3)
+        assert jax.grad(lambda w: surrogate_pos(x, w))(jnp.asarray(0.1)) == 0.0
+        assert jax.grad(lambda v: surrogate_gate(v, 0.5, 0.0))(x) == 0.0
+        assert jax.grad(lambda v: surrogate_pos(v, 0.0))(jnp.asarray(-0.3)) == 0.0
+
+    def test_sqrt_value_is_floored_and_slope_is_bounded_at_the_corner(self):
+        floor, offset = 1e-9, 0.04
+        x = jnp.asarray([0.0, 1e-8, 1e-3, 4.0])
+        np.testing.assert_array_equal(
+            np.asarray(surrogate_sqrt(x, floor, offset)),
+            np.asarray(jnp.sqrt(jnp.maximum(x, floor))),
+        )
+        slope = jax.vmap(jax.grad(lambda v: surrogate_sqrt(v, floor, offset)))(x)
+        reference = jax.vmap(jax.grad(lambda v: surrogate_sqrt(v, floor, 0.0)))(x)
+        assert jnp.all(jnp.isfinite(slope))
+        assert float(slope.max()) <= 1.0 / (2.0 * np.sqrt(offset)) + 1e-6
+        assert float(reference[1]) > 1e3  # the corner the surrogate removes
+        # Far from the corner the slope is the reference's to O(offset/x).
+        np.testing.assert_allclose(slope[-1], reference[-1], rtol=offset / 4.0)
 
 
 def _convection_column(kx=8, rh_pbl_top=0.85):
@@ -106,32 +163,77 @@ def _diagnose(psa, se, qa, qsat, coords, trigger_smoothing):
     return diagnose_convection(psa, se, qa, qsat, parameters, physics_data)
 
 
-class TestConvectionTriggerSmoothing:
-    def test_width_zero_matches_hard_trigger(self):
-        for rh in (0.80, 0.895, 0.905, 0.99):
+class TestConvectionTriggerSurrogate:
+    def test_trigger_value_is_the_hard_trigger_at_any_width(self):
+        for rh in (0.80, 0.88, 0.895, 0.905, 0.99):
             psa, se, qa, qsat, coords = _convection_column(rh_pbl_top=rh)
             iptop0, qdif0 = _diagnose(psa, se, qa, qsat, coords, 0.0)
-            assert jnp.all(jnp.isfinite(qdif0))
+            iptop1, qdif1 = _diagnose(psa, se, qa, qsat, coords, 0.02)
             # Hard trigger: active iff both RH criteria exceed rhbl = 0.9.
             assert (float(qdif0[0, 0]) > 0.0) == (rh > 0.9)
+            np.testing.assert_array_equal(np.asarray(qdif1), np.asarray(qdif0))
+            np.testing.assert_array_equal(np.asarray(iptop1), np.asarray(iptop0))
 
-    def test_smooth_trigger_ramps_and_unlocks_the_gradient(self):
-        # Just below the hard threshold: qdif is exactly zero and so is
-        # its gradient with respect to the PBL-top humidity.
-        def qdif_of_dq(dq, width):
-            psa, se, qa, qsat, coords = _convection_column(rh_pbl_top=0.88)
+    def test_surrogate_derivative_sees_the_trigger_jump(self):
+        # On either side of the RH threshold the reference derivative of
+        # qdif with respect to the PBL-top humidity is exactly zero: below
+        # it qdif is 0, above it qdif is the SURFACE-layer excess. The jump
+        # between them is what the surrogate derivative resolves.
+        def qdif_of_dq(dq, width, rh):
+            psa, se, qa, qsat, coords = _convection_column(rh_pbl_top=rh)
             qa = qa.at[-2].add(dq)
             _, qdif = _diagnose(psa, se, qa, qsat, coords, width)
             return qdif[0, 0]
 
-        hard_val = qdif_of_dq(jnp.array(0.0), 0.0)
-        hard_grad = jax.grad(qdif_of_dq)(jnp.array(0.0), 0.0)
-        assert hard_val == 0.0 and hard_grad == 0.0
+        for rh in (0.89, 0.91):
+            hard_grad = jax.grad(qdif_of_dq)(jnp.array(0.0), 0.0, rh)
+            smooth_grad = jax.grad(qdif_of_dq)(jnp.array(0.0), 0.02, rh)
+            assert hard_grad == 0.0
+            assert jnp.isfinite(smooth_grad) and smooth_grad > 0.0
 
-        smooth_val = qdif_of_dq(jnp.array(0.0), 0.02)
-        smooth_grad = jax.grad(qdif_of_dq)(jnp.array(0.0), 0.02)
-        assert smooth_val > 0.0
-        assert jnp.isfinite(smooth_grad) and smooth_grad > 0.0
+    @staticmethod
+    def _column_budget(dq, rh, width, qsat_aloft_scale=1.0):
+        """Column moisture tendency and convective rain on the trigger column."""
+        import jcm.constants as c
+        from jcm.physics.speedy.params import Parameters
+        from jcm.physics.speedy.physics_data import HumidityData, PhysicsData
+        from jcm.physics_interface import PhysicsState
+        from jcm.physics.convection.speedy_convection import get_convection_tendencies
+
+        psa, se, qa, qsat, coords = _convection_column(rh_pbl_top=rh)
+        qsat = qsat.at[:-2].multiply(qsat_aloft_scale)
+        qa = qa.at[-2].add(dq)
+        kx = se.shape[0]
+        parameters = Parameters.default()
+        parameters = dataclasses.replace(
+            parameters, convection=dataclasses.replace(
+                parameters.convection, trigger_smoothing=jnp.array(width)))
+        physics_data = PhysicsData.zeros(
+            (1, 1), kx, speedy_coords=coords,
+            humidity=HumidityData.zeros((1, 1), kx, qsat=qsat))
+        state = PhysicsState.zeros(
+            (kx, 1, 1), temperature=se / c.cpd, specific_humidity=qa,
+            normalized_surface_pressure=psa)
+        tend, out = get_convection_tendencies(state, physics_data, parameters)
+        column_moisture = jnp.sum(tend.specific_humidity * coords.dhs[:, None, None])
+        return column_moisture, out.convection.precnv[0, 0]
+
+    def test_trigger_tangent_closes_the_column_moisture_budget(self):
+        """Below the threshold the derivative is a whole plume switching on.
+
+        Convection converts column moisture into rain at a fixed ratio (the
+        values above the threshold show it). The trigger's surrogate
+        derivative has to respect that ratio on both sides of the
+        threshold: a moisture tangent without the matching rain tangent
+        would be a sink the scheme does not have.
+        """
+        moisture, rain = self._column_budget(0.0, 0.95, 0.0)
+        ratio = float(moisture / rain)
+        for rh in (0.89, 0.91):
+            (_, _), (d_moisture, d_rain) = jax.jvp(
+                lambda d: self._column_budget(d, rh, 0.02), (jnp.array(0.0),), (jnp.array(1.0),))
+            assert float(d_rain) > 0.0
+            np.testing.assert_allclose(float(d_moisture), ratio * float(d_rain), rtol=1e-4)
 
 
 class TestVdiffGateSmoothing:
@@ -182,14 +284,22 @@ class TestVdiffGateSmoothing:
         )
         return tend.specific_humidity
 
-    def test_hard_gate_is_a_value_jump_and_smooth_gate_ramps(self):
+    def test_gate_value_is_the_hard_jump_at_any_width(self):
         # drh0 at the PBL interface is rhgrad * (fsg[-1] - fsg[-2]) ~ 0.0575.
         just_below, just_above = 0.050, 0.065
         hard_lo = self._tendencies(0.0, just_below)
         hard_hi = self._tendencies(0.0, just_above)
-        # The hard gate switches a finite flux on: the tendency jumps.
+        # The hard gate switches a finite flux on: the tendency jumps,
+        # whatever the width.
         assert float(jnp.abs(hard_lo).max()) == 0.0
         assert float(jnp.abs(hard_hi).max()) > 1e-7
+        for drh in (just_below, just_above):
+            np.testing.assert_array_equal(
+                np.asarray(self._tendencies(0.02, drh)),
+                np.asarray(self._tendencies(0.0, drh)))
+
+    def test_surrogate_gate_derivative_sees_the_onset(self):
+        just_below = 0.050
 
         def pbl_qtend(drh_scale, width):
             return self._tendencies(width, drh_scale)[-1, 0, 0]
@@ -202,11 +312,11 @@ class TestVdiffGateSmoothing:
 
 class TestVdiffSeFluxOneSided:
     def test_stable_column_gets_no_reversed_heat_flux(self):
-        """The smoothed shallow-convection SE flux must stay one-sided.
+        """The shallow-convection SE flux stays one-sided at any width.
 
         gate * dmse would go negative below the threshold (a reversed
-        heat flux in stable columns); the softplus hinge keeps it >= 0
-        (Codex review, PR #567).
+        heat flux in stable columns); the hinge, whose value is the hard
+        maximum, keeps it >= 0 (Codex review, PR #567).
         """
         import dataclasses
 
@@ -309,19 +419,18 @@ class TestLscCapSmoothing:
         assert hard_grad == 0.0, "cap not engaged: test is vacuous"
         assert jnp.isfinite(smooth_grad) and smooth_grad != 0.0
 
-    def test_width_zero_matches_hard_cap(self):
-        assert float(self._heating(0.0, jnp.array(0.9))) == float(
-            self._heating(0.0, jnp.array(0.9))
-        )
-        # And the smooth cap approaches the hard one as the width shrinks.
+    def test_capped_heating_is_the_hard_cap_at_any_width(self):
         hard = float(self._heating(0.0, jnp.array(0.9)))
-        near = float(self._heating(1e-6, jnp.array(0.9)))
-        assert abs(near - hard) < 1e-8 * max(1.0, abs(hard))
+        assert float(self._heating(0.05, jnp.array(0.9))) == hard
 
 
 class TestCoverSmoothing:
     def _clstr(self, cover_smoothing, gse_s1):
         """Stratiform cover on a column whose stability saturates fstab."""
+        return self._clouds(cover_smoothing, gse_s1).cloudstr[0, 0]
+
+    def _clouds(self, cover_smoothing, gse_s1, precnv=0.0):
+        """Run the cloud diagnosis on that column, with a convective rain rate."""
         from jcm.forcing import ForcingData
         from jcm.physics.speedy.params import Parameters
         from jcm.physics.speedy.physics_data import (
@@ -353,7 +462,8 @@ class TestCoverSmoothing:
         rh = jnp.full((kx, ix, il), 0.2)
         humidity = HumidityData.zeros((ix, il), kx, rh=rh, qsat=qsat)
         convection = ConvectionData.zeros(
-            (ix, il), kx, iptop=jnp.full((ix, il), kx + 1, dtype=int), se=se
+            (ix, il), kx, iptop=jnp.full((ix, il), kx + 1, dtype=int), se=se,
+            precnv=jnp.full((ix, il), precnv),
         )
         condensation = CondensationData.zeros((ix, il), kx)
         physics_data = PhysicsData.zeros(
@@ -369,7 +479,7 @@ class TestCoverSmoothing:
             PhysicsTendency.zeros(shape=(kx, ix, il)),
         )
         _, pd, *_ = clouds(operand)
-        return pd.shortwave_rad.cloudstr[0, 0]
+        return pd.shortwave_rad
 
     def test_saturated_fstab_gradient_survives_with_smoothing(self):
         hard_grad = jax.grad(self._clstr, argnums=1)(0.0, jnp.array(0.40))
@@ -377,20 +487,39 @@ class TestCoverSmoothing:
         assert hard_grad == 0.0, "fstab not saturated: test is vacuous"
         assert jnp.isfinite(smooth_grad) and smooth_grad != 0.0
 
-    def test_width_zero_matches_hard_cover(self):
-        # Width 0 is exact (the regression suite pins it); small widths
-        # converge as O(sqrt(w)) because the sqrt-corner regularization
-        # replaces sqrt(epsilon) with sqrt(w*log 2) at zero precipitation.
+    def test_drizzle_cover_slope_is_bounded_with_smoothing(self):
+        """The sqrt(precipitation) corner: unbounded reference slope, bounded surrogate's.
+
+        A precipitation rate of 1e-8 g/(m^2 s) (~1e-6 mm/day) sits on the
+        corner; the reference d(cover)/d(precnv) there is hundreds of times
+        the surrogate's bound wpcl * 86.4 / (2 * w * pmaxcl).
+        """
+        from jcm.physics.speedy.params import ShortwaveRadiationParameters
+
+        sw = ShortwaveRadiationParameters.default()
+        width = 0.05
+
+        def cover(precnv, w):
+            return self._clouds(w, jnp.array(0.40), precnv).cloudc[0, 0]
+
+        rain = jnp.array(1e-8)
+        assert float(cover(rain, width)) == float(cover(rain, 0.0))
+        reference = float(jax.grad(cover)(rain, 0.0))
+        surrogate = float(jax.grad(cover)(rain, width))
+        bound = float(sw.wpcl * 86.4 / (2.0 * width * sw.pmaxcl))
+        assert reference > 100.0 * bound
+        assert 0.0 < surrogate <= bound * (1 + 1e-5)
+
+    def test_cover_is_the_hard_cover_at_any_width(self):
+        # The sqrt-corner and every clip keep their reference values: the
+        # width changes no cover, only its derivatives.
         hard = float(self._clstr(0.0, jnp.array(0.40)))
-        near = float(self._clstr(1e-7, jnp.array(0.40)))
-        nearer = float(self._clstr(1e-9, jnp.array(0.40)))
         assert np.isfinite(hard)
-        assert abs(near - hard) < 1e-3
-        assert abs(nearer - hard) < abs(near - hard)
+        assert float(self._clstr(0.05, jnp.array(0.40))) == hard
 
 
 class TestSurfaceEvapSmoothing:
-    def _dry_land_evap(self, evap_smoothing):
+    def _dry_land_evap(self, evap_smoothing, soilw=0.7):
         """Land evaporation on a column whose evap hinge is firmly closed."""
         import dataclasses
 
@@ -447,23 +576,27 @@ class TestSurfaceEvapSmoothing:
         forcing = ForcingData.ones(
             xy,
             sea_surface_temperature=jnp.full(xy, 292.0),
-            soilw_am=jnp.full(xy, 0.7),
+            soilw_am=jnp.full(xy, 1.0) * soilw,
             stl_am=jnp.full(xy, 288.0),
         )
         _, pd = get_surface_fluxes(state, physics_data, parameters, forcing, terrain)
         # fmask = 1 everywhere, so the published grid mean is the land value.
-        return float(jnp.max(jnp.abs(pd.surface_flux.evap)))
+        return jnp.max(jnp.abs(pd.surface_flux.evap))
 
-    def test_dry_column_energy_balance_uses_the_smoothed_gate(self):
-        # The skin-temperature energy balance must weight d(Evap)/d(Tskin)
-        # by the hinge derivative: with the hard evap > 0 mask a smoothed
-        # dry column inherits the full latent sensitivity and the balance
-        # adds a spurious O(0.01) evaporation correction (Codex review,
-        # PR #567).
-        hard = self._dry_land_evap(0.0)
-        smooth = self._dry_land_evap(0.1)
+    def test_dry_column_evaporation_is_the_hard_hinge_at_any_width(self):
+        # The hinge and the energy balance's activity weight keep their hard
+        # values, so a dry column evaporates exactly nothing at any width
+        # (no softplus tail, no latent correction from the skin balance).
+        hard = float(self._dry_land_evap(0.0))
         assert hard == 0.0, "hinge not closed: test is vacuous"
-        assert smooth < 1e-3, (
-            f"dry-column evap {smooth:.3e} with smoothing on: the energy "
-            "balance is applying the hard-mask latent sensitivity"
-        )
+        assert float(self._dry_land_evap(0.1)) == 0.0
+
+    def test_dry_column_evaporation_derivative_opens_with_smoothing(self):
+        # The column sits a few tenths of a g/kg below the hinge: the
+        # reference evaporation has zero derivative in the soil moisture,
+        # the surrogate a positive one.
+        def total_evap(soilw, width):
+            return self._dry_land_evap(width, soilw)
+
+        assert float(jax.grad(total_evap)(jnp.array(0.7), 0.0)) == 0.0
+        assert float(jax.grad(total_evap)(jnp.array(0.7), 0.1)) > 0.0

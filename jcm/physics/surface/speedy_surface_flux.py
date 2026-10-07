@@ -89,7 +89,7 @@ from jcm.physics.speedy.params import Parameters, SurfaceFluxParameters
 from jcm.physics_interface import PhysicsTendency, PhysicsState
 from jcm.utils import cast_like
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics.speedy.smoothing import smooth_gate, smooth_pos
+from jcm.physics.speedy.smoothing import surrogate_gate, surrogate_pos
 import jcm.constants as c
 from jcm.physics.speedy.physical_constants import alhc
 from jcm.physics.speedy.speedy_coords import PBL_TOP_SIGMA, interp_to_sigma
@@ -235,9 +235,9 @@ def _land_fluxes(
 
     # The soil-moisture-limited evaporation onset is a hinge that zeroes
     # every gradient through dry land columns (and gates the d(Evap)/d(Tskin)
-    # term in the energy balance below on the same hard condition).
-    # evap_smoothing > 0 [g/kg] rounds it with a softplus; 0 keeps the hard
-    # maximum.
+    # term in the energy balance below on the same hard condition). The
+    # value is the hard maximum; evap_smoothing > 0 [g/kg] gives it the
+    # derivative of a softplus of that half-width.
     # Whole-land availability: ``soilw_am`` describes the non-glacier land
     # and the glacier share evaporates at the potential rate
     # (``jcm.forcing.land_wetness``, the same combination the ECHAM path
@@ -245,7 +245,7 @@ def _land_fluxes(
     wetness = land_wetness(forcing.soilw_am,
                            getattr(forcing, "glacier_fraction", None))
     evap_excess = wetness * qsat_skin - air.q_land
-    evap = sfp.chl * rho_wind * smooth_pos(evap_excess, sfp.evap_smoothing)
+    evap = sfp.chl * rho_wind * surrogate_pos(evap_excess, sfp.evap_smoothing)
 
     tsk3 = tskin ** 3.0
     drls = 4.0 * esbc * tsk3
@@ -266,11 +266,10 @@ def _land_fluxes(
         residual = hfluxn - clamb * (tskin - stl_am)
 
         # d(Evap)/d(Tskin) for a 1-degree increment. The activity weight is
-        # smooth_gate — the analytic derivative of the smooth_pos hinge above
-        # — so a dry column whose evaporation is only the softplus tail gets
-        # the matching fraction of the latent sensitivity rather than all of
-        # it. At width 0 it reduces to the hard evap > 0 mask.
-        evap_gate = smooth_gate(evap_excess, 0.0, sfp.evap_smoothing)
+        # the hard evap > 0 mask, with the derivative of the sigmoid that is
+        # the analytic slope of the evaporation hinge's softplus surrogate
+        # above, so the two carry the same derivative.
+        evap_gate = surrogate_gate(evap_excess, 0.0, sfp.evap_smoothing)
         dqsat = evap_gate * wetness * (
             get_qsat(tskin + 1.0, air.psa, 1.0) - qsat_skin)
 

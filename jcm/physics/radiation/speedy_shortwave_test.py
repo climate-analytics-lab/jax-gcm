@@ -841,20 +841,17 @@ class TestShortWaveRadiation(unittest.TestCase):
         # meaningful derivative); the residual is float32 differencing of
         # cloudc, which get_clouds clips at 1. Measured agreement 7.5e-7.
         #
-        # Two leaves are held fixed because no two-sided derivative exists along
-        # them here, not because the check converges better without them:
-        #   * speedy_coords/fsg is what the cover diagnosis selects reference
-        #     sigmas and a stratosphere mask from, rather than evaluating a
-        #     function of. The rest of the sigma grid scales results and is
-        #     left live — naming the parent struct would freeze nine further
-        #     leaves and stop checking their gradients too.
-        #   * cover_smoothing is 0 at the default, and every smoothing helper
-        #     branches on ``width > 0`` (smoothing.py::_safe_width). The two
-        #     branches agree in value at 0 but not in slope, and a negative
-        #     width is outside the parameter's domain, so the point is the
-        #     hinge of the scheme's own smoothing switch.
+        # speedy_coords/fsg is held fixed because no two-sided derivative
+        # exists along it here, not because the check converges better
+        # without it: it is what the cover diagnosis selects reference sigmas
+        # and a stratosphere mask from, rather than evaluating a function of.
+        # The rest of the sigma grid scales results and is left live — naming
+        # the parent struct would freeze nine further leaves and stop checking
+        # their gradients too. cover_smoothing stays live: the cover does not
+        # depend on it (it shapes only the derivative), so its difference
+        # quotient and its AD gradient are both exactly zero.
         check_gradients(f, (physics_data_floats, state_floats, parameters_floats, forcing_floats, terrain_floats), rtol=1e-3,
-                        fixed_inputs=["speedy_coords/fsg", "cover_smoothing"])
+                        fixed_inputs=["speedy_coords/fsg"])
 
 class TestCloudDiagnosticsResolutionInvariance(unittest.TestCase):
     """The cloud diagnostics feeding the SW scheme are evaluated at fixed sigma

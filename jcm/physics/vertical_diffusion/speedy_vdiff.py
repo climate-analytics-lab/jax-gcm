@@ -8,7 +8,7 @@ import jcm.constants as c
 # alhc is SPEEDY's latent heat in J/g (q is in g/kg) — a SPEEDY-specific value.
 # cpd is shared and read as a module attribute from jcm.constants.
 from jcm.physics.speedy.physical_constants import alhc
-from jcm.physics.speedy.smoothing import smooth_gate, smooth_pos
+from jcm.physics.speedy.smoothing import surrogate_gate, surrogate_pos
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.physics.speedy.physics_data import PhysicsData
 
@@ -73,35 +73,37 @@ def get_vertical_diffusion_tend(
     # diffusion branch (dmse < 0, drh > drh0) are complementary hard
     # gates, and both gate fluxes that are proportional to drh rather
     # than to the distance from the threshold, so each boundary is a
-    # value jump in the tendencies. With mse_gate_smoothing [J/kg] and
-    # rh_gate_smoothing [RH fraction] positive, the branches crossfade:
-    # g_mse + (1 - g_mse) = 1 partitions the column smoothly between the
-    # two regimes, and the drh onsets get their own sigmoid gates. All
+    # value jump in the tendencies whose reference derivative is zero. The
     # contributions are written arithmetically (gate * flux), which is
-    # bit-identical to the original where-selects at width 0 because the
-    # branch conditions are mutually exclusive.
+    # bit-identical to the original where-selects because the branch
+    # conditions are mutually exclusive, and the gates are surrogates:
+    # their value is the hard 0/1 test, their derivative a sigmoid's of
+    # half-width mse_gate_smoothing [J/kg] / rh_gate_smoothing [RH
+    # fraction], so g_mse + (1 - g_mse) = 1 hands the derivative smoothly
+    # between the two regimes.
     w_mse = parameters.vertical_diffusion.mse_gate_smoothing
     w_rh = parameters.vertical_diffusion.rh_gate_smoothing
-    g_mse = smooth_gate(dmse, 0.0, w_mse)
+    g_mse = surrogate_gate(dmse, 0.0, w_mse)
 
     # Shallow convection is damped by redshc where deep convection is
     # active; the deep-convection index is discrete and stays hard.
     fcnv = jnp.where(icnv > 0, parameters.vertical_diffusion.redshc, 1.0)
 
     # The dry static energy flux has no complementary branch below the
-    # threshold, so it takes a one-sided softplus hinge rather than the
-    # crossfade gate: gate * dmse would turn negative (a reversed heat
-    # flux) in stable columns (Codex review, PR #567).
-    fluxse = fcnv * fshcse * smooth_pos(dmse, w_mse)
+    # threshold, so it takes a one-sided hinge (with a softplus surrogate
+    # derivative) rather than the crossfade gate: gate * dmse would turn
+    # negative (a reversed heat flux) in stable columns (Codex review,
+    # PR #567).
+    fluxse = fcnv * fshcse * surrogate_pos(dmse, w_mse)
     ttenvd = ttenvd.at[nl1 - 1].set(fluxse * rsig[nl1 - 1])
     ttenvd = ttenvd.at[kx - 1].set(-fluxse * rsig[kx - 1])
 
-    g_rh1 = smooth_gate(drh, 0.0, w_rh)
+    g_rh1 = surrogate_gate(drh, 0.0, w_rh)
     fluxq_condition1 = g_mse * g_rh1 * fcnv * fshcq * qsat[kx - 1] * drh
     qtenvd = qtenvd.at[nl1 - 1].set(fluxq_condition1 * rsig[nl1 - 1])
     qtenvd = qtenvd.at[kx - 1].set(-fluxq_condition1 * rsig[kx - 1])
 
-    g_rh2 = smooth_gate(drh, drh0, w_rh)
+    g_rh2 = surrogate_gate(drh, drh0, w_rh)
     fluxq_condition2 = (1.0 - g_mse) * g_rh2 * fvdiq2 * qsat[nl1 - 1] * drh
     qtenvd = qtenvd.at[nl1 - 1].add(fluxq_condition2 * rsig[nl1 - 1])
     qtenvd = qtenvd.at[kx - 1].add(-fluxq_condition2 * rsig[kx - 1])
@@ -129,10 +131,10 @@ def get_vertical_diffusion_tend(
     drh = rh[k_range + 1] - rh[k_range]  # Shape: (ix, il, len(k_range))
 
     # Moisture-diffusion onset: the flux is proportional to drh, so the
-    # hard drh >= drh0 gate is a value jump; smooth it with the same
-    # rh_gate_smoothing sigmoid. The per-interface sigma condition is
-    # static and stays hard.
-    g_rh3 = smooth_gate(drh, drh0[:, jnp.newaxis, jnp.newaxis], w_rh)
+    # hard drh >= drh0 gate is a value jump; it keeps its hard value with
+    # the same rh_gate_smoothing sigmoid as its derivative. The
+    # per-interface sigma condition is static and stays hard.
+    g_rh3 = surrogate_gate(drh, drh0[:, jnp.newaxis, jnp.newaxis], w_rh)
     fluxq = jnp.where(
         condition[:, jnp.newaxis, jnp.newaxis],
         g_rh3 * fvdiq2[:, jnp.newaxis, jnp.newaxis] * qsat[k_range] * drh,
