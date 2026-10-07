@@ -34,16 +34,11 @@ import re
 
 DEFAULT_REPO = "climate-analytics-lab/jax-gcm-data"
 
-#: The dataset commit every mirror read resolves against: the commit of
-#: 2026-09-28 05:06:26 UTC, whose forcing bundles (``forcing_{pd,pi}``,
-#: ``forcing_amip``, ``forcing_era5``) carry the #672 land-surface convention
-#: (``lsm``, ``forest``, ``glac``, mask-weighted land regrid). It lives here,
-#: not in the generated ``mirror_manifest.json``, because the manifest is
-#: rewritten by ``build_mirror --stage manifest``. Bumping it changes every
-#: mirror input a run reads, so it is a reviewed one-line change:
-#: ``build_mirror --stage upload`` prints the new commit, and band files drawn
-#: at the old one are regenerated in the same PR.
-MIRROR_REVISION = "2ec867b36ea7acf0b71180faeec1a9c0aae9a629"
+#: Dataset snapshot with CAM6 SOAG in every Gaussian PD/PI emissions bundle
+#: (2005–2014 / 1850–1859 climatologies). Existing bulk emissions and the
+#: #672 land-surface convention are preserved. Keep the snapshot immutable
+#: so all machines resolve the same inputs regardless of their HF cache.
+MIRROR_REVISION = "a6a3d075cd8f32c9ade195dccf8630f0d9e5fb6c"
 
 #: Environment variable overriding :data:`MIRROR_REVISION` for a process.
 REVISION_ENV = "JCM_MIRROR_REVISION"

@@ -103,9 +103,11 @@ header).
 
 ## Prescribed CAM6 secondary organic aerosol
 
-**What we do.** The present-day `t63-echam-jam-soa` configuration supplies
-anthropogenic, biogenic and biomass-burning SOAG from the official CAM6
-2014 historical inventory (matching the present-day emissions bundle). The fixed VOC yields and 1.5 source multiplier are
+**What we do.** Default JAM runs load anthropogenic, biogenic and
+biomass-burning SOAG from the HF emissions bundles. The official CAM6
+historical inventories are averaged over 2005–2014 for present-day and
+1850–1859 for preindustrial, matching the bulk source periods. Fixed VOC
+yields and the 1.5 source multiplier are
 already included in the inventories. Carbon-equivalent fluxes are converted
 with the CAM destination-tracer molecular weight, 12.011 g/mol, conservatively
 remapped, and injected through the existing surface-emissions term.

@@ -104,6 +104,14 @@ class Cam6SoaTest(unittest.TestCase):
                                        12e10*molec_flux_to_mass_flux(12.011),rtol=2e-14)
             np.testing.assert_array_equal(result.time,days[12:])
             self.assertEqual(result.attrs['inventory_year'],'2001')
+            climatology = prepare_cam6_soa(coords, sources, year_range=(2000, 2001))
+            np.testing.assert_allclose(climatology.aero_emis_g_soag,
+                                       9e10*molec_flux_to_mass_flux(12.011), rtol=2e-14)
+            np.testing.assert_array_equal(climatology.time.dt.month, np.arange(1, 13))
+            self.assertEqual(climatology.attrs['inventory_year'], '2000–2001 climatology')
+            with self.assertRaisesRegex(ValueError, 'twelve distinct monthly'):
+                prepare_cam6_soa(coords, sources, year_range=(1999, 2001))
+
             fields=read_year_fields(result)
             self.assertEqual(set(fields),{'g_soag'})
             with self.assertRaisesRegex(ValueError,'twelve distinct monthly'):

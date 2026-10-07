@@ -169,11 +169,11 @@ builds one for you:
    # Override any key with Hydra dotted syntax:
    exp = configurations.load("t63-echam-jam", **{"run.total_time": 30})
 
-For present-day SOA sensitivity tests, ``t63-echam-jam-soa`` adds the
-published CAM6 VOC-derived SOAG inventory and aerosol optical diagnostics.
-The inventory is for 2014, matching the present-day emissions bundle; PI and transient runs need matching
-emissions. See :doc:`design/jam_soa_dust` for the formulation, units and
-short-run validation limits.
+JAM runs load CAM6 VOC-derived SOAG from the HF emissions bundle by default,
+with period-matched present-day or preindustrial climatologies. No separate
+SOA configuration or packaged inventory is needed. The default uses the
+conservative ASTEM condensation corrector; its adaptive solve is forward-only.
+See :doc:`design/jam_soa_dust` for the formulation, units and validation limits.
 
 The recipes' own run length is a **calendar year of daily means**
 (``run.total_time: 12 months``). The CLI streams those into one file per

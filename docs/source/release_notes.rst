@@ -2696,17 +2696,19 @@ Calibration and capability gaps
   ``od550_wat`` is instead a volume-based share of wet extinction. The
   species shares divided by dry species burdens are not complete ambient
   species mass extinction efficiencies. SOA precursor production remains
-  zero in configurations without a precursor inventory; the explicit
-  present-day ``t63-echam-jam-soa`` configuration now supplies the published
-  CAM6 VOC-derived SOAG inventory for 2014. Nitrate is absent from this MAM4
+  zero in configurations without a precursor inventory. Default JAM runs
+  now load CAM6 VOC-derived SOAG from the HF emissions bundles, averaged
+  over matching PD (2005–2014) or PI (1850–1859) source periods. Nitrate is absent from this MAM4
   population, and dust source/size/removal require calibration. These
   limitations cannot be diagnosed as a single hygroscopicity deficit from
   the component split. See :doc:`design/aerosol_optics_diagnostics` and
   `issue #1030 <https://github.com/climate-analytics-lab/jax-gcm/issues/1030>`_.
-- **CAM6 SOA and sequential aerosol coupling.** The new present-day SOA
-  configuration uses reversible fine-mode partitioning, aerosol wet/dry
+- **CAM6 SOA and sequential aerosol coupling.** Default JAM uses released
+  MAM4-JAX 0.5.0 with reversible fine-mode partitioning, aerosol wet/dry
   removal, and CAM's ASTEM corrector, which conserves the organic budget
-  during evaporation. The official source already includes VOC yields and
+  during evaporation. The adaptive solve is forward-only. SOAG is included
+  in HF emissions bundles rather than packaged in the wheel, and the
+  separate JAM+SOA configuration is removed. The official source already includes VOC yields and
   the CAM source multiplier; neither is applied again. Turbulent mixing and
   convection now include fresh emissions before removal, microphysics reads
   the current population, and optics uses matching mass and geometry.

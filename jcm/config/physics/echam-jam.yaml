@@ -46,7 +46,10 @@ builder: echam_physics
 aerosol_module: jam
 cloud_scheme: 2m            # ARG activated_cdnc feeds the 2-moment scheme
 radiation_scheme: rrtmgp    # the ECHAM radiation; "grey" (idealized, not ECHAM) is rejected
-jam_microphysics: mam4_jax  # the MAM4-JAX core (#490); "placeholder" for κ-Köhler
+# CAM6 SOA needs the conservative evaporation corrector. The adaptive
+# solve is forward-only; select mam4_jax explicitly for the fixed-substep
+# differentiation backend, whose warm-cell evaporation can lose closure.
+jam_microphysics: mam4_jax_astem
 jam_arg_variant: ghosh2025  # or arg2000
 jam_aqueous_scheme: full
 

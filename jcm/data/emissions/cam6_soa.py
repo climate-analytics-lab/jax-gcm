@@ -51,12 +51,14 @@ HISTORICAL_SHA256 = {
 }
 
 
-def prepare_cam6_soa(coords, sources=None, *, year=None):
+def prepare_cam6_soa(coords, sources=None, *, year=None, year_range=None):
     """Conservatively remap and sum the three CAM6 surface SOAG sources.
 
     ``sources`` optionally maps anthro/biogenic/bb to local paths or URLs.
     All three categories are required so an incomplete inventory fails.
-    ``year`` selects exactly one complete monthly year, with source hashes
+    ``year`` selects one complete monthly year; ``year_range`` averages matching
+    months across its inclusive range. Both require twelve distinct months in
+    every source year, with source hashes
     recorded for the original historical files, not an untraceable subset.
     """
     import hashlib
@@ -65,9 +67,14 @@ def prepare_cam6_soa(coords, sources=None, *, year=None):
     import xarray as xr
     from jcm.data.emissions.downloader import fetch
 
+    if year is not None and year_range is not None:
+        raise ValueError("Specify year or year_range, not both")
+    if year_range is not None and year_range[0] > year_range[1]:
+        raise ValueError("SOAG year_range must be increasing")
+    historical = year is not None or year_range is not None
     official = sources is None
     if official:
-        base, catalog, known = ((INPUTDATA, SOURCES, SOURCE_SHA256) if year is None
+        base, catalog, known = ((INPUTDATA, SOURCES, SOURCE_SHA256) if not historical
                                 else (HISTORICAL_INPUTDATA, HISTORICAL_SOURCES, HISTORICAL_SHA256))
         sources = {k: base + v for k, v in catalog.items()}
     if set(sources) != set(SOURCES):
@@ -87,12 +94,16 @@ def prepare_cam6_soa(coords, sources=None, *, year=None):
             if time is not None and not time.identical(source.time):
                 raise ValueError("CAM6 SOAG source calendars/time axes must agree")
             time = source.time.copy(deep=True)
-            if year is not None:
+            if historical:
                 decoded = xr.decode_cf(source[["time"]]).time
-                time_index = np.flatnonzero(decoded.dt.year.values == year)
-                months = decoded.isel(time=time_index).dt.month.values
-                if len(time_index) != 12 or set(months) != set(range(1, 13)):
-                    raise ValueError(f"CAM6 SOAG requires twelve distinct monthly fields for {year}")
+                first, last = year_range if year_range is not None else (year, year)
+                source_years = decoded.dt.year.values
+                time_index = np.flatnonzero((source_years >= first) & (source_years <= last))
+                for selected_year in range(first, last + 1):
+                    months = decoded.dt.month.values[source_years == selected_year]
+                    if len(months) != 12 or set(months) != set(range(1, 13)):
+                        raise ValueError(
+                            f"CAM6 SOAG requires twelve distinct monthly fields for {selected_year}")
                 field = field.isel(time=time_index)
             values = field.values
             if not np.isfinite(values).all() or (values < 0).any():
@@ -103,10 +114,17 @@ def prepare_cam6_soa(coords, sources=None, *, year=None):
         for k in SOURCES
     )
     ds = prepare_speciated_emissions(channels, coords, time_index=time_index)
+    if year_range is not None:
+        # Average matching months, never all 120 fields into one annual rate.
+        ds = xr.decode_cf(ds).groupby("time.month").mean("time", keep_attrs=True)
+        ds = ds.rename(month="time").assign_coords(
+            time=np.array([np.datetime64(f"{year_range[0]}-{m:02d}-01")
+                           for m in range(1, 13)]))
+    period = (f"{year_range[0]}–{year_range[1]} climatology" if year_range is not None
+              else "1995–2005 climatology" if year is None else str(year))
     ds.attrs.update(
-        title=("CAM6 prescribed SOAG: 1995–2005 climatology" if year is None
-               else f"CAM6 prescribed SOAG: {year}"),
-        inventory_year=("1995–2005 climatology" if year is None else str(year)),
+        title=f"CAM6 prescribed SOAG: {period}",
+        inventory_year=period,
         source="; ".join(str(sources[k]) for k in SOURCES),
         source_sha256="; ".join(f"{k}:{hashes[k]}" for k in SOURCES),
         reference="https://doi.org/10.5194/gmd-16-3893-2023 (section 2.2)",

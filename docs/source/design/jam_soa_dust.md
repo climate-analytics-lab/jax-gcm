@@ -2,8 +2,8 @@
 
 JAM's MAM4 core already partitions SOAG reversibly into aerosol SOA. A
 zero SOAG source therefore gives zero SOA regardless of optical parameters.
-The present-day `t63-echam-jam-soa` configuration supplies the published CAM6
-single-bin source alongside the existing emissions. This is the original
+Default JAM loads the published CAM6 single-bin source from the same HF
+emissions bundle as its existing bulk sources. This is the original
 CAM6 formulation described in [Jo et al. (2023), section 2.2](https://gmd.copernicus.org/articles/16/3893/2023/).
 It uses prescribed VOC-derived SOAG, reversible gas–particle exchange,
 and aerosol wet/dry removal. It does not implement the distinct CAM6.3
@@ -14,7 +14,7 @@ transient primary-carbon coating subsequently transferred by ageing.
 Coarse-mode SOA uptake is disabled through a per-call core parameter:
 the MAM4-MOM box-model default includes that reservoir, but CAM6 does not.
 
-The SOA preset selects the Fortran ASTEM semi-implicit condensation backend.
+The default JAM configuration selects the Fortran ASTEM semi-implicit condensation backend.
 Its corrector conserves gas plus aerosol during both condensation and
 evaporation. A warm, aerosol-rich cell exposed a 1.27% organic excess in the
 fixed-substep backend: its frozen equilibrium flux can exhaust a modal
@@ -25,9 +25,10 @@ reverse-mode differentiation through the condensation solve.
 ## Emissions and reproduction
 
 The official NCAR anthropogenic, biogenic and biomass-burning SOAG surface
-inventories are sampled at 2014 to match the existing present-day emissions
-bundle. The initial sensitivity experiments used the separately retained
-1995–2005 climatology; they are explicitly labelled below. Their VOC yields and CAM's
+inventories are averaged over the bundle's bulk source period: 2005–2014
+for present-day and 1850–1859 for preindustrial. The sensitivity experiments
+below used a separately prepared 2014 inventory or the 1995–2005 climatology,
+as labelled. Their VOC yields and CAM's
 1.5 source multiplier are already applied. Fluxes are carbon-equivalent
 molecules per square centimetre per second: CAM's surface-emission routine
 converts them using the destination tracer molecular weight, 12.011 g/mol.
@@ -55,25 +56,28 @@ closing the organic budget.
 `jcm.data.emissions.cam6_soa` pins the three upstream SHA256 hashes, validates
 nonnegative finite fluxes and matching calendars, sums their converted
 sources, and conservatively remaps them through the shared emissions pipeline.
-The prepared T63 inventory is packaged in `data/bc/t63/soag_cam6_2014.nc`;
-its metadata records source files and hashes. The `pkg://data/...` path
-resolves inside the installed package independently of the working directory.
+The mirror builder adds `aero_emis_g_soag` to `emissions_pd.nc` and
+`emissions_pi.nc` on T63, T106, T127 and T255. It aligns rates by calendar
+month, keeps every bulk field unchanged, and records SOAG source hashes,
+period and units in bundle metadata. JAM's existing automatic emission
+resolver reads both bulk and pre-speciated channels from this single file.
+The runtime snapshot is [the SOAG bundle commit](https://huggingface.co/datasets/climate-analytics-lab/jax-gcm-data/commit/a6a3d075cd8f32c9ade195dccf8630f0d9e5fb6c).
+MAM4-JAX is installed from PyPI as `mam4-jax==0.5.0`; no dependency SHA
+or packaged SOAG inventory is required.
 
-Reproduce a native-grid inventory with:
+```bash
+python -m jcm.main +configuration=t63-echam-jam
+```
+
+Explicit transient inventories still need matching SOAG; the existing
+automatic AMIP/ERA5 ancillary choice remains the present-day climatology.
+To reproduce the earlier single-year sensitivity inventory:
 
 ```bash
 python -m jcm.data.emissions.cam6_soa --truncation 63 --year 2014 --output soag.nc
 ```
 
-Use the prepared file alongside the existing mass and number sources:
-
-```bash
-python -m jcm.main +configuration=t63-echam-jam-soa
-```
-
-This is an explicit present-day inventory choice, not a default substitution
-for preindustrial or transient forcing. Those simulations need matching
-SOAG inventories. Five days from a zero-SOA donor measures the initial
+Five days from a zero-SOA donor measures the initial
 response, not the equilibrium SOA burden or annual AOD. Jo et al. document
 upper-tropospheric and high-latitude SOA biases in the original CAM6 scheme;
 matching its formulation does not establish a validated JCM climatology.
@@ -168,8 +172,9 @@ spun up for 185 days on `49c0724c`. Both arms start from the same donor and
 reset its clock to the stated calendar date. Dust emission parameters and the coarse
 mode width are fixed. The control is `35dc1997` with diagnostic-only additions
 for the separated dust dry sinks. The corrected production code is
-`102d936f`, with the immutable MAM4 dependency pin `25924f0` and the 2014
-CAM6 inventory. Runs use native `jcm.main`, float32, and five-day health gates.
+`102d936f`, with MAM4 production code `25924f0` (now released in 0.5.0) and the
+2014 CAM6 inventory. These historical comparisons predate the default
+period-matched bundle update. Runs use native `jcm.main`, float32, and five-day health gates.
 The donors contain no SOA.
 
 The table uses global means of native daily averages over **days 3–5**.
@@ -239,12 +244,14 @@ The box tests conserve organics on the common molecular basis; native
 float32 budget diagnostics do not establish whole-model closure below their
 reported precision floor.
 
-To reproduce the corrected short-run setup, supply the appropriate donor:
+To reproduce the historical corrected short-run setup, prepare the 2014
+`soag.nc` above and pin the old bulk-only mirror snapshot. Supply the appropriate donor:
 
 ```bash
+JCM_MIRROR_REVISION=2ec867b36ea7acf0b71180faeec1a9c0aae9a629 \
 python -m jcm.main +configuration=t63-jam-aod-5day \
   physics.jam_microphysics=mam4_jax_astem \
-  'forcing.emissions_file=[hf://bundles/t63/emissions_pd.nc,pkg://data/bc/t63/soag_cam6_2014.nc]' \
+  'forcing.emissions_file=[hf://bundles/t63/emissions_pd.nc,/absolute/path/soag.nc]' \
   'forcing.emissions_align=[auto,wrap_year]' \
   init.file=warm_january.msgpack run.start_time=2000-01-01 \
   run.total_time=5 run.output_prefix=corrected_january \
@@ -253,7 +260,8 @@ python -m jcm.main +configuration=t63-jam-aod-5day \
 
 For July, use the July donor and `run.start_time=2000-07-01`. Run the control
 on `35dc1997` with the same donor, date and output settings, omitting the
-SOA source and ASTEM overrides. Diagnostic-only additions are needed to
+SOA source and selecting `physics.jam_microphysics=mam4_jax` explicitly
+when reproducing its fixed-substep backend from the updated configuration. Diagnostic-only additions are needed to
 split its dry sinks; its native `dry_du` already reports their total.
 Use `jcm.analysis.global_mean` on `jam_optics.aod_550`,
 `aerocom_burden_du`, `aerocom_burden_ss`, `dry_du` and `wet_du` to reproduce
