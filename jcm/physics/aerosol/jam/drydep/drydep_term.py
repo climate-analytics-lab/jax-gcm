@@ -6,7 +6,8 @@ to the aerosol in the lowest model layer, published into the AeroCom
 read from the ``vertical_diffusion`` diagnostic's ``surface_friction_velocity``,
 which the TTE-TKE term derives from the unified surface momentum exchange
 coefficient (u*² = |U|·⟨CM·|U|⟩), so it is consistent with the surface stress
-and the vdiff damping. The default ECHAM ordering runs vertical diffusion before aerosol removal.
+and the vdiff damping. Default ECHAM aerosol removal precedes vertical
+diffusion, so it reads the previous step's friction velocity from the carry.
 A fallback allows the standalone column harness without vertical diffusion. The aerodynamic resistance uses a neutral log-law; a
 Monin-Obukhov stability correction is a future refinement (the diagnostic does
 not yet carry a usable surface ``L``).

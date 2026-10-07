@@ -258,6 +258,11 @@ drift from the mass actually removed: with operator splitting in place,
 guard below (each term records its ledger before `verify_tendencies` sees
 the summed tendency).
 
+Default ECHAM aerosol transport and removal precede TTE-TKE vertical
+diffusion and therefore use its previous-step `kh` and friction velocity
+from the carry. The aerosol working population remains sequential within
+the current step; it does not change the provenance of those coefficients.
+
 ## Known gaps
 
 - Ice-sedimentation flux reaching the surface as snow carries no aerosol

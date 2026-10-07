@@ -10,8 +10,8 @@ generically: an unconditionally stable backward-Euler diffusion of an
 explicit tracer list, using the ``kh`` exchange-coefficient profile the
 TTE-TKE term publishes in the ``vertical_diffusion`` diagnostic.
 
-The default ECHAM ordering publishes the current-step vdiff profile before
-tracer transport. A standalone composition without vdiff can supply a
+Default ECHAM tracer transport precedes vertical diffusion, so it reads
+the previous step's kh profile from the carry. A composition without vdiff can supply a
 carry profile; a zero profile makes this term a no-op. Boundaries are
 zero-flux: the surface exchange is dry
 deposition's job, and emission injection is the emission terms' job, so
