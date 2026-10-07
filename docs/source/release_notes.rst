@@ -2719,7 +2719,7 @@ Calibration and capability gaps
   collection law and prescribed vegetation map replace the ocean collection
   law previously used on land. Dry-surface rebound, impaction, interception
   and the settling resistance cross term follow CAM; coarse-mode drag also
-  uses CAM's asphericity correction. Dust emissions and mode width remain
+  uses CAM's asphericity correction. Dust emission parameters and mode width remain
   fixed. Short matched tests increase the diagnosed dust lifetime; the mixed
   coarse-mode changes also increase sea-salt burden. The host retains its
   neutral aerodynamic resistance and aerosol-mode cloud-borne velocity;

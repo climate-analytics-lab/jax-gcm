@@ -165,7 +165,7 @@ Its global effect must be assessed together with sea salt and SOA removal.
 
 The January and July comparisons use separate T63L47 warm donors, each
 spun up for 185 days on `49c0724c`. Both arms start from the same donor and
-reset its clock to the stated calendar date. Dust emissions and the coarse
+reset its clock to the stated calendar date. Dust emission parameters and the coarse
 mode width are fixed. The control is `35dc1997` with diagnostic-only additions
 for the separated dust dry sinks. The corrected production code is
 `102d936f`, with the immutable MAM4 dependency pin `25924f0` and the 2014
@@ -199,6 +199,38 @@ asphericity gave 0.08667 and 1.42 days; adding CAM surface collection gave
 0.08873 and 2.05 days. These are sensitivity experiments, distinct from the
 final 2014-inventory comparison above. They identify surface collection as
 the largest of the tested dust-lifetime corrections.
+
+## Matched twenty-day continuations
+
+Both arms continued from their own day-five checkpoints for another fifteen
+days, retaining native five-day health gates. All continuation health gates
+passed. January retains daily output; July uses native partial-month means
+(`run.monthly_means=true run.save_chunks=false`) covering exactly July 6–20,
+with coverage 15/31. The July rows therefore describe the entire continuation,
+not its last three days. Each comparison uses the same window in both arms.
+
+| Window / case | Total AOD | Dust lifetime, days | Dust burden, mg/m² | Sea salt, mg/m² | SOA AOD share |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| January days 18–20 control | 0.09476 | 0.95 | 43.10 | 15.45 | 0.00000 |
+| January days 18–20 corrected | 0.10829 | 1.45 | 60.79 | 19.44 | 0.00435 |
+| July days 6–20 control | 0.12860 | 0.99 | 124.66 | 12.48 | 0.00000 |
+| July days 6–20 corrected | 0.16642 | 1.98 | 251.01 | 17.40 | 0.00497 |
+
+The January late-window gain is 14% in AOD and 54% in diagnosed dust
+lifetime; July's continuation-mean gains are 29% and 101%. Sea-salt burden
+increases by 26% and 39%, respectively. SOA burden reaches 1.04 mg/m² in
+the January late window and averages 1.18 mg/m² over the July continuation.
+The control's substantial seasonal and weather evolution demonstrates why
+these values cannot be compared directly with the observed annual AOD 0.145.
+SOA remains a modest contribution; these tests do not establish a missing
+0.02–0.03 of annual fine-mode AOD.
+
+To reproduce a continuation, use each arm's own day-five checkpoint with
+`init.file`, set `run.start_time=2000-01-06` (or `2000-07-06`) and
+`run.total_time=15`, and retain its original physics and forcing settings.
+For January, average native daily outputs for days 18–20. For July, add the
+monthly-output overrides above and reduce the partial-month file. Compute
+lifetime from window-mean burden and window-mean dry-plus-wet loss.
 
 The changes improve short-run AOD but do not establish the annual AOD,
 equilibrium SOA burden, or an acceptable sea-salt climatology. Nitrate remains
