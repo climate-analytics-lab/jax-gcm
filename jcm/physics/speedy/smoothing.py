@@ -1,22 +1,35 @@
-"""Width-parameterized smooth replacements for hard branches in SPEEDY physics.
+"""Smooth surrogates for the hard branches in SPEEDY physics.
 
 The SPEEDY schemes gate fluxes and diagnostics with hard comparisons
-(``drh > drh0``, ``clip(x, 0, 1)``, ``max(x, 0)``). The comparisons whose
-gated quantity does not vanish at the threshold put value jumps in the
-model's parameter and state dependence, and every hinge zeroes a gradient
-on one side. These helpers replace them with sigmoid gates, softplus
-hinges, and hyperbolic min/max of a caller-chosen half-width.
+(``drh > drh0``, ``clip(x, 0, 1)``, ``max(x, 0)``) and take a square root
+of the precipitation rate in the cloud cover. Each is part of the reference
+formulation, and the model's value stays exactly that. What is useless for
+gradient work is their derivative: zero on a plateau or on either side of a
+switch, unbounded at the square root's corner.
 
-All helpers accept ``width = 0`` and then reproduce the hard operation
-exactly (bit-identical forward), so the default parameters leave SPEEDY
-untouched and the pinned regression references stay valid. The width-0
-branch is guarded with the double-where pattern so it cannot leak a
-division-by-zero cotangent (see JAX_gotchas.md).
+Two families of functions live here.
 
-The width is a physical scale in the units of the gated variable (an RH
-fraction, an energy in J/kg, a humidity in g/kg): roughly the range over
-which the hard switch is smeared. Choose it small against the natural
-variability of the argument so the forward change stays a perturbation.
+- ``smooth_gate`` / ``smooth_pos`` / ``smooth_min`` / ``smooth_max`` /
+  ``smooth_clip01`` are the smooth functions themselves: sigmoid gates,
+  softplus hinges, hyperbolic min/max and a softplus-pair clip of a
+  caller-chosen half-width. At ``width = 0`` each is exactly the hard
+  operation (guarded with the double-where pattern so the width-0 branch
+  cannot leak a division-by-zero cotangent; see JAX_gotchas.md).
+- ``surrogate_gate`` / ``surrogate_pos`` / ``surrogate_min`` /
+  ``surrogate_max`` / ``surrogate_clip01`` / ``surrogate_sqrt`` are what the
+  schemes call. Each returns the hard operation's value, bit for bit, and
+  the derivatives of the matching smooth function at the given width -- the
+  construction of :func:`jcm.physics.surrogate_gradient.with_surrogate_gradient`
+  (``docs/source/design/surrogate_gradients.md``). A width of zero gives the
+  reference derivative; the forward model never depends on the width.
+
+The width is a scale in the units of the gated variable (an RH fraction, an
+energy in J/kg, a humidity in g/kg): roughly the range over which the
+derivative sees the switch as a ramp. It is a field of the scheme's
+parameters, and so a pytree leaf, but it only shapes the derivative: every
+surrogate drops its tangent and holds it fixed at higher orders, so any
+derivative with respect to it is zero, as it must be for a quantity the
+value does not depend on.
 """
 from __future__ import annotations
 
@@ -25,8 +38,15 @@ import jax.numpy as jnp
 
 
 def _safe_width(width):
-    """Width guarded for use as a divisor when it may be exactly zero."""
-    on = width > 0.0
+    """Width guarded for use as a divisor when it may be exactly zero.
+
+    A width so small that its square underflows (below ``sqrt(tiny)`` of its
+    dtype, ~1e-19 in float32) counts as zero: the hyperbolic min/max would
+    otherwise take ``sqrt(0)`` at the corner, whose derivative is NaN.
+    """
+    width = jnp.asarray(width)
+    dtype = width.dtype if jnp.issubdtype(width.dtype, jnp.inexact) else jnp.float32
+    on = width > jnp.sqrt(jnp.finfo(dtype).tiny)
     return on, jnp.where(on, width, 1.0)
 
 
@@ -87,3 +107,108 @@ def smooth_clip01(x, width):
     on, w = _safe_width(width)
     soft = w * jax.nn.softplus(x / w) - w * jax.nn.softplus((x - 1.0) / w)
     return jnp.where(on, soft, jnp.clip(x, 0.0, 1.0))
+
+
+def surrogate_of(smooth):
+    """Wrap ``smooth(*operands, width)`` as hard value + smooth derivative.
+
+    ``smooth`` may be a single hinge or a whole block of a scheme -- a
+    product of decisions with the quantity they gate -- which is how a
+    combined decision keeps a derivative where several of its tests fail at
+    once (a product of separately surrogate 0/1 gates has zero derivative
+    there: each slope is multiplied by another gate's hard zero).
+
+    The value is ``smooth(*operands, 0.0)`` -- the hard operation, exactly --
+    and the derivatives are those of ``smooth(*operands, width)``, taken by
+    differentiating it, with the width held fixed: the construction of
+    :func:`jcm.physics.surrogate_gradient.with_surrogate_gradient`. The width
+    is a primal argument of the ``custom_jvp`` whose tangent the rule
+    ignores, rather than a closure: it is a traced parameter leaf, and a
+    ``custom_jvp`` re-traces its rule outside the jit trace that produced a
+    closed-over tracer (``nnx.grad`` around a jitted scheme), which leaks it.
+    """
+
+    @jax.custom_jvp
+    def surrogate(*operands_and_width):
+        *operands, _ = operands_and_width
+        return smooth(*operands, 0.0)
+
+    @surrogate.defjvp
+    def surrogate_jvp(primals, tangents):
+        *operands, width = primals
+        *operand_tangents, _ = tangents
+        # The width is held fixed for every order of differentiation: its
+        # tangent is dropped here, and stop_gradient keeps a second
+        # differentiation of this rule from reaching it either, so mixed
+        # derivatives with respect to the width are zero both ways round.
+        fixed_width = jax.lax.stop_gradient(width)
+        _, tangent_out = jax.jvp(
+            lambda *xs: smooth(*xs, fixed_width), tuple(operands), tuple(operand_tangents))
+        # The value from ``surrogate`` itself, so a second differentiation
+        # meets this rule again rather than the hard operation's kinks.
+        primal_out = surrogate(*primals)
+        # A width of another precision (a float64 width read from a file or
+        # produced by an optimiser, float32 operands) must not change the
+        # tangent's dtype: custom_jvp requires it to match the primal's.
+        return primal_out, tangent_out.astype(primal_out.dtype)
+
+    surrogate.__name__ = "surrogate_" + smooth.__name__.removeprefix("smooth_")
+    surrogate.__doc__ = (
+        f"``{smooth.__name__}``'s hard value with its derivatives at ``width``."
+    )
+    return surrogate
+
+
+surrogate_gate = surrogate_of(smooth_gate)
+surrogate_pos = surrogate_of(smooth_pos)
+surrogate_min = surrogate_of(smooth_min)
+surrogate_max = surrogate_of(smooth_max)
+surrogate_clip01 = surrogate_of(smooth_clip01)
+
+
+def _floored_sqrt(x, floor, offset):
+    """``sqrt(max(x, floor))``, or with ``offset > 0`` the regularised root.
+
+    The regularised form is ``sqrt(smooth_pos(x, sqrt(offset)) + offset)``.
+    ``offset = 0`` is exactly the floored root (double-where guarded).
+    """
+    on, safe = _safe_width(offset)
+    regularised = jnp.sqrt(smooth_pos(x, jnp.sqrt(safe)) + safe)
+    return jnp.where(on, regularised, jnp.sqrt(jnp.maximum(x, floor)))
+
+
+_surrogate_floored_sqrt = surrogate_of(_floored_sqrt)
+
+
+def surrogate_sqrt(x, floor, offset):
+    """``sqrt(max(x, floor))`` with the derivative of ``sqrt(x+ + offset)``.
+
+    The value is the reference's floored square root. Its slope,
+    ``1/(2 sqrt(x))``, is unbounded as ``x`` goes to the floor -- a singular
+    point the model visits wherever it barely rains (the cloud cover's
+    precipitation term). The derivative is instead that of
+    ``sqrt(smooth_pos(x, sqrt(offset)) + offset)``, bounded by
+    ``1/(2 sqrt(offset))`` and within ``offset/x`` of the reference slope
+    where ``x`` is large against ``offset``. ``offset = 0`` gives the
+    reference derivative.
+    """
+    return _surrogate_floored_sqrt(x, floor, offset)
+
+
+def chain_gates(*gates):
+    """Multiply 0/1 surrogate gates, with the derivative of the first that fails.
+
+    ``g1 * where(g1 > 0, g2 * where(g2 > 0, g3, 1), 1)`` has the product's
+    value; where the chain fails its derivative is that of the first gate
+    that failed -- the decision that switched the quantity off -- rather
+    than the zero a plain product gives once two gates fail
+    (``docs/source/design/surrogate_gradients.md``, "Chains of decisions").
+    Only for 0/1 decisions: for a continuous factor the ``1`` it substitutes
+    would rescale the derivative wherever the other factor is nonzero.
+    """
+    *head, last = gates
+    weight = last
+    for gate in reversed(head):
+        weight = gate * jnp.where(gate > 0, weight, 1.0)
+    return weight
+

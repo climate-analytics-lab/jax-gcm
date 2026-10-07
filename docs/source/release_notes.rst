@@ -1082,6 +1082,20 @@ Reference-exact values with surrogate derivatives
   equals ``exact``'s, its jvp and vjp equal ``surrogate``'s, and its two AD
   modes are adjoint. The ECHAM cover, the 1M scheme and the Tiedtke-Nordeng
   convection use it (see the corrected physics entries). See :doc:`design/surrogate_gradients`.
+- **SPEEDY's switch widths are surrogate widths.** ``convection.trigger_smoothing``,
+  ``convection.precnv_smoothing``, ``condensation.cap_smoothing``,
+  ``shortwave_radiation.cover_smoothing``, ``surface_flux.evap_smoothing`` and
+  ``vertical_diffusion.mse_gate_smoothing`` / ``rh_gate_smoothing`` no longer
+  smooth the forward model (as they did in 3.0.0rc1): at any width the
+  SPEEDY trigger, onsets, caps, clips and gates keep their reference values,
+  and the width gives only their derivatives those of a smooth function
+  (``jcm.physics.speedy.smoothing.surrogate_*``). The cloud cover's
+  ``sqrt(precipitation)`` corner, whose reference slope is unbounded in
+  drizzle, gets a bounded surrogate under ``cover_smoothing``. Every width
+  still defaults to 0, the reference derivative, so a run that never set one
+  is unchanged; a run that set one now integrates the reference model. The
+  convective trigger's widened ``iptop`` activation, which existed only to
+  make the smoothed value continuous, is gone.
 
 JAM runs float32 physics under 64-bit mode without mixed-dtype scatters
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
