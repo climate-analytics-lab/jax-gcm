@@ -45,7 +45,11 @@ SPEEDY's bulk surface fluxes are ``suflux.f90``.
 
 **Why we differ.** Faithful in structure — the ECHAM implicit-flux delivery
 (``pev_vdiff`` identity, reported equals received) and the SPEEDY ``suflux`` port
-are reproductions. The main scoping choice is `compute` / status: ocean and
+are reproductions. `differentiability` — SPEEDY's soil-moisture-limited
+evaporation hinge, and its ``evap > 0`` activity weight in the land skin
+balance, keep their reference values; with ``surface_flux.evap_smoothing`` > 0
+they carry a softplus and its sigmoid derivative
+({doc}`../design/surrogate_gradients`). The main scoping choice is `compute` / status: ocean and
 sea-ice tiles return zero prognostic temperature tendencies (SST and ice are
 prescribed from boundary forcing); slab / mixed-layer evolution lives outside the
 repo.

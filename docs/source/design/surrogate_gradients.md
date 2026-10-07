@@ -96,6 +96,30 @@ which is the decision that turned the quantity off.
 The cloud cover and the one-moment microphysics use it as recorded in their
 science pages.
 
+SPEEDY's switches use it through the helpers of
+`jcm.physics.speedy.smoothing` (`surrogate_gate`, `surrogate_pos`,
+`surrogate_min`, `surrogate_max`, `surrogate_clip01`, `surrogate_sqrt`), each
+the hard operation's value with the derivatives of the matching smooth
+function. Every width defaults to 0, the reference derivative. SPEEDY's
+parameters are `tree_math` structs, which have no static fields, so its
+widths are pytree leaves; each surrogate holds its width fixed
+(`stop_gradient`), so a gradient with respect to a width is exactly zero, as
+for a static one.
+
+| Site | Exact value | Surrogate | Width |
+|---|---|---|---|
+| SPEEDY humidity trigger (`speedy_convection.py::diagnose_convection`) | both RH tests `> rhbl`, gating `qdif` (a value jump) | product of sigmoid gates | `convection.trigger_smoothing`, an RH fraction (scaled by `qsat`) |
+| SPEEDY convective precipitation onset (`speedy_convection.py`) | `max(fuq - fmass*qsatb, 0)` | softplus | `convection.precnv_smoothing`, g m⁻² s⁻¹ |
+| SPEEDY grid-point-storm heating cap (`speedy_condensation.py`) | `min(-dqlsc, cap)` | hyperbolic minimum | `condensation.cap_smoothing`, a fraction of the cap |
+| SPEEDY cloud cover (`speedy_shortwave.py::clouds`) | RH hinge and max over reference levels, the `pmaxcl` cap, `sqrt(max(eps, pr))`, the saturation at 1, the stratocumulus clips | softplus / hyperbolic min-max / softplus-pair clip; for the square root, `sqrt(pr+ + (w*pmaxcl)²)`, whose slope is bounded by `1/(2*w*pmaxcl)` where the reference's reaches ~1.6e4 per mm/day in drizzle | `shortwave_radiation.cover_smoothing`, a cover fraction |
+| SPEEDY soil-moisture-limited evaporation (`speedy_surface_flux.py`) | `max(wetness*qsat - q, 0)` and its `evap > 0` activity weight in the skin balance | softplus and its sigmoid derivative | `surface_flux.evap_smoothing`, g/kg |
+| SPEEDY shallow convection and moisture diffusion (`speedy_vdiff.py`) | the `dmse >= 0` branch, the `drh > 0` / `drh > drh0` onsets (value jumps) | sigmoid gates; softplus for the one-sided heat flux | `vertical_diffusion.mse_gate_smoothing` J/kg, `rh_gate_smoothing` an RH fraction |
+
+The square root is the singular-point case: in a multi-step adjoint of a
+high-resolution coupled run its reference slope produced isolated grid-point
+sensitivities orders of magnitude above their neighbours wherever it barely
+rained.
+
 ## What a user has to know
 
 The gradient is not the derivative of the value. A finite-difference check of

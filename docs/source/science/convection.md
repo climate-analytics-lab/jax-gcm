@@ -207,6 +207,12 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   can then give it a plume.
 - SPEEDY and Betts-Miller are idealized alternatives; Betts-Miller is
   specific-humidity-formulated (Isca's mixing-ratio form differs at second order).
+- `differentiability` — SPEEDY's humidity trigger (a value jump in ``qdif``)
+  and its precipitation onset keep their reference values; with
+  ``convection.trigger_smoothing`` / ``precnv_smoothing`` > 0 they carry the
+  derivatives of sigmoid gates and a softplus. The cloud top ``iptop`` is a
+  level index and stays hard. See
+  {doc}`../design/surrogate_gradients`.
 - **Tiedtke creates water where the downdraft out-takes the plume's rain
   (#912).** As in ECHAM, ``cumastr`` scales the first ascent's downdraft to the
   closed flux and re-runs ``cuasc``, and ``cuflx`` floors the rain and snow
