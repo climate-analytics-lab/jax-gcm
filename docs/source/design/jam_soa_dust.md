@@ -237,6 +237,21 @@ For January, average native daily outputs for days 18–20. For July, add the
 monthly-output overrides above and reduce the partial-month file. Compute
 lifetime from window-mean burden and window-mean dry-plus-wet loss.
 
+## Default-bundle validation
+
+A native five-day January run on `218a15d5` uses the new HF snapshot and
+MAM4-JAX 0.5.0, built from upstream main with the version metadata correction
+in [MAM4-JAX #83](https://github.com/reflective-org/MAM4-JAX/pull/83).
+It uses the same January warm donor and `t63-jam-aod-5day`, with no physics,
+emissions-file or alignment overrides. Provenance records the pinned SOAG
+bundle snapshot, and the native health gate passes.
+
+Means over days 3–5 are total AOD **0.08843**, diagnosed dust lifetime
+**2.02 days**, SOA burden **0.5016 mg/m²**, and SOA's allocated AOD share
+**0.00206**. This verifies default delivery of the matched-period inventory;
+it does not replace the historical paired comparisons above or annual
+release calibration.
+
 The changes improve short-run AOD but do not establish the annual AOD,
 equilibrium SOA burden, or an acceptable sea-salt climatology. Nitrate remains
 absent, and the dust size-to-extinction relationship needs annual evaluation.
