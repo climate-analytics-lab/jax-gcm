@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 _EMISSION_AUTO_KEYS = ("emissions_file", "dms_file", "dust_file",
                        "dust_preferential_file", "dust_soil_types_file",
                        "dust_regions_file", "dust_roughness_file",
-                       "oxidants_file")
+                       "dust_msg_file", "oxidants_file")
 
 #: The Tegen dust inputs that must arrive together: ``mo_ham_dust.f90`` aborts
 #: without any of them, and running with the soil textures, preferential sources
@@ -52,8 +52,14 @@ _DUST_REQUIRED_KEYS = ("dust_preferential_file", "dust_soil_types_file",
 
 #: Every key that only supports ``dust_file``. They follow it: resolving them
 #: when dust is off would fetch maps the run never opens, and counting them as
-#: sources would hide the zero-emission warning.
-DUST_COMPANION_KEYS = (*_DUST_REQUIRED_KEYS, "dust_roughness_file")
+#: sources would hide the zero-emission warning. ``dust_msg_file`` (ndust=5's
+#: MSG-SEVIRI map, jax-gcm#1017) is here for the same "follows dust_file"
+#: reason, but — unlike the roughness map — its own forcing-group default is
+#: ``null``, not ``auto`` (see ``jcm/config/forcing/default.yaml``): the
+#: bundle is not yet staged, so defaulting it to ``auto`` would raise for
+#: every ndust != 5 run the moment dust is on.
+DUST_COMPANION_KEYS = (*_DUST_REQUIRED_KEYS, "dust_roughness_file",
+                       "dust_msg_file")
 
 
 # ---------------------------------------------------------------------------
@@ -856,7 +862,7 @@ def _dust_path(forcing_cfg, key):
 
 
 def _attach_dust(forcing, forcing_cfg, coords):
-    """Attach the five Tegen/HAMMOZ dust inputs (#802).
+    """Attach the Tegen/HAMMOZ dust inputs (#802; the MSG map, jax-gcm#1017).
 
     No-op when ``dust_file`` is unset. Otherwise loads the monthly effective-LAI
     potential-source climatology as a ``WRAP_YEAR`` ``TimeSeries`` (the Fortran
@@ -864,8 +870,11 @@ def _attach_dust(forcing, forcing_cfg, coords):
     sources, nine soil-texture fractions and categorical tuning regions, all of
     which ``mo_ham_dust.f90`` treats as mandatory — a missing one raises rather
     than letting the scheme run on an all-coarse, untuned soil. The monthly
-    satellite roughness map is optional: it is consumed only on the
-    ``ndurough = 0`` sensitivity path. Grid handling as in :func:`_attach_dms`.
+    satellite roughness map and the MSG-SEVIRI Saharan map are both optional:
+    the former is consumed only on the ``ndurough = 0`` sensitivity path, the
+    latter only by ``ndust = 5`` (which raises its own clear error if it is
+    missing — see ``DustEmissions._require_companions``). Grid handling as in
+    :func:`_attach_dms`.
     """
     if forcing_cfg is None:
         return forcing
@@ -874,9 +883,9 @@ def _attach_dust(forcing, forcing_cfg, coords):
         return forcing
     import xarray as xr
 
-    from jcm.forcing import (read_dust_preferential, read_dust_regions,
-                             read_dust_roughness, read_dust_soil_types,
-                             read_dust_source)
+    from jcm.forcing import (read_dust_msg_source, read_dust_preferential,
+                             read_dust_regions, read_dust_roughness,
+                             read_dust_soil_types, read_dust_source)
     lat_deg, lon_deg = _model_latlon_deg(coords)
     companions = {key: _dust_path(forcing_cfg, key)
                   for key in _DUST_REQUIRED_KEYS}
@@ -903,6 +912,11 @@ def _attach_dust(forcing, forcing_cfg, coords):
     if roughness is not None:
         with xr.open_dataset(roughness) as ds:
             fields["dust_roughness"] = read_dust_roughness(
+                ds, lat_deg=lat_deg, lon_deg=lon_deg)
+    msg = _dust_path(forcing_cfg, "dust_msg_file")
+    if msg is not None:
+        with xr.open_dataset(msg) as ds:
+            fields["dust_msg"] = read_dust_msg_source(
                 ds, lat_deg=lat_deg, lon_deg=lon_deg)
     forcing = _ensure_parent_forcing(forcing, coords)
     return forcing.copy(**fields)

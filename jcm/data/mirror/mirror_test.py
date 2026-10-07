@@ -516,6 +516,13 @@ class DustProductTest(unittest.TestCase):
         # Roughness is NaN away from dust sources, as in the HAMMOZ map.
         rough = np.full(month, np.nan)
         rough[:, 30:60, 20:80] = 0.02
+        # The MSG map is static (no time axis at all, unlike the other four
+        # products): zero almost everywhere, with one patch at each side of
+        # the 0.01 "strong" threshold so the build+read round trip exercises
+        # both.
+        msg = np.zeros((self.NLAT, self.NLON))
+        msg[10:15, 10:15] = 0.005
+        msg[40:45, 40:45] = 0.3
         months = np.array([np.datetime64(f"2000-{m:02d}-01") for m in range(1, 13)])
         coords = {"lat": desc, "lon": lons}
         files = {
@@ -534,6 +541,8 @@ class DustProductTest(unittest.TestCase):
             "surface_rough_12m_T63.nc": xr.Dataset(
                 {"surfrough": (("time", "lat", "lon"), rough)},
                 coords={**coords, "time": months}),
+            "dust_msg_pot_sources_T63.nc": xr.Dataset(
+                {"dsaf": (("lat", "lon"), msg)}, coords=coords),
         }
         os.makedirs(os.path.join(tmp, self.T63))
         for name, ds in files.items():
@@ -620,14 +629,16 @@ class DustProductTest(unittest.TestCase):
         import jax.numpy as jnp
         import xarray as xr
 
-        from jcm.forcing import (WRAP_YEAR, read_dust_preferential,
-                                 read_dust_regions, read_dust_roughness,
-                                 read_dust_soil_types, read_dust_source)
+        from jcm.forcing import (WRAP_YEAR, read_dust_msg_source,
+                                 read_dust_preferential, read_dust_regions,
+                                 read_dust_roughness, read_dust_soil_types,
+                                 read_dust_source)
         readers = {"dust_potential_sources": read_dust_source,
                    "dust_preferential_sources": read_dust_preferential,
                    "dust_soil_types": read_dust_soil_types,
                    "dust_regions": read_dust_regions,
-                   "dust_surface_roughness": read_dust_roughness}
+                   "dust_surface_roughness": read_dust_roughness,
+                   "dust_msg_sources": read_dust_msg_source}
         with tempfile.TemporaryDirectory() as tmp:
             lats, lons = self._sources(tmp)
             for name, reader in readers.items():

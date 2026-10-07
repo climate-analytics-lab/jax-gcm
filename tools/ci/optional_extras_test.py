@@ -179,7 +179,7 @@ def test_required_session_refuses_to_start_without_every_extra(tmp_path):
                                 "test_cases.py": _CASES},
                      env={optional_extras.REQUIRE_ENV: "1"})
     assert code == 4, out                                   # usage error
-    assert "era5, mam4, pyses" in out, out
+    assert "era5, m7, mam4, pyses" in out, out
 
 
 def test_required_session_fails_any_skip_of_a_marked_test(tmp_path):

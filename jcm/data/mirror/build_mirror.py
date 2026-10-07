@@ -20,7 +20,7 @@ regrid from exactly the data the other grids were built from::
 Stages: ``pull`` (Tier A from the published mirror), ``sso``,
 ``era5``, ``ozone``, ``emissions`` (fat-node PBS job
 recommended — see ``--help``), ``aux`` (dms/oxidants via
-``tools/prep_jam_aux_inputs.py``), ``dust`` (the five Tegen/HAMMOZ
+``tools/prep_jam_aux_inputs.py``), ``dust`` (the six Tegen/HAMMOZ
 dust inputs), ``bundles``, ``amip`` (yearly
 transient forcing/emissions/ozone, ``--years first,last`` — issue #610),
 ``era5-transient`` (yearly all-ERA5 forcing incl. transient land —
@@ -116,10 +116,11 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "grids": "gaussian", "levels": False, "coverage": None,
      "alignment": "climatology", "key": "dms_file", "auto": True,
      "staged": True},
-    # The five Tegen/HAMMOZ dust inputs (#802). They replace the CAM
-    # erodibility product that used to sit at ``bundles/{grid}/dust.nc``; that
-    # name is retired rather than reused so no warm cache can resolve a CAM
-    # geomorphic map into a scheme that expects an effective-LAI fraction.
+    # The six Tegen/HAMMOZ dust inputs (#802; the MSG map, #1017). They
+    # replace the CAM erodibility product that used to sit at
+    # ``bundles/{grid}/dust.nc``; that name is retired rather than reused so
+    # no warm cache can resolve a CAM geomorphic map into a scheme that
+    # expects an effective-LAI fraction.
     {"name": "dust_potential_sources",
      "path": "bundles/{grid}/dust_potential_sources.nc",
      "grids": "gaussian", "levels": False, "coverage": None,
@@ -143,6 +144,15 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "grids": "gaussian", "levels": False, "coverage": None,
      "alignment": "climatology", "key": "dust_roughness_file", "auto": True,
      "staged": True},
+    # The MSG-SEVIRI Saharan dust-source-activation map (``ndust = 5``,
+    # jax-gcm#1017; see jcm/data/mirror/dust.py's NATIVE_SOURCES comment on
+    # the one unconfirmed pool path). NOT staged yet: the "auto" default for
+    # this key stays null in jcm/config/forcing/*.yaml until it is, so
+    # resolving the other four dust companions never breaks on this one.
+    {"name": "dust_msg_sources", "path": "bundles/{grid}/dust_msg_sources.nc",
+     "grids": "gaussian", "levels": False, "coverage": None,
+     "alignment": "static", "key": "dust_msg_file", "auto": True,
+     "staged": False},
     {"name": "ozone_pd", "path": "bundles/{grid}_l{nlev}/ozone_pd.nc",
      "grids": "gaussian", "levels": True, "coverage": None,
      "alignment": "climatology", "key": "ozone_file", "auto": True,
@@ -624,7 +634,8 @@ def stage_aux() -> None:
 
 
 def stage_dust() -> None:
-    """Build the five Tegen/HAMMOZ dust bundles (#802) from the HAMMOZ pool.
+    """Build the six Tegen/HAMMOZ dust bundles (#802; the MSG map, #1017)
+    from the HAMMOZ pool.
 
     Native at T63/T127/T255, conservatively remapped from the finest native
     file elsewhere (t106), region mask regenerated — see mirror/dust.py.

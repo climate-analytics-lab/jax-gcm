@@ -1,3 +1,4 @@
+import dataclasses
 import warnings
 from typing import Any
 
@@ -18,6 +19,8 @@ from jcm.data.bc.interpolate import interpolate_to_daily, upsample_forcings_ds
 from jcm.data.input_resolution import expand_yearly_files as expand_yearly_files
 from jcm.date import (
     DateData,
+    day_of_year_elapsed,
+    get_year,
     gregorian_ymd_from_days,
 )
 from jcm.ozone_climatology import OzoneClimatology
@@ -291,12 +294,26 @@ class SolarGeometry:
     tyear: jnp.ndarray            # fractional year [0, 1) — SPEEDY shortwave
     orbital_phase: jnp.ndarray    # 2π × fraction-of-year, jax_solar convention
     synodic_phase: jnp.ndarray    # 2π × fraction-of-day,   jax_solar convention
+    # Raw calendar facts (jax-gcm#1017 Kazil/GCR task, Part B): GCR ionisation's
+    # geomagnetic dipole axis needs the actual (year, day-of-year), not just
+    # the fraction-of-year `tyear` above -- the IGRF epoch table it interpolates
+    # is indexed by calendar year, not a repeating annual cycle. Defaulted (not
+    # required at every call site, like the three fields above) so direct
+    # `SolarGeometry(...)` constructions that never feed GCR ionisation
+    # (`jcm/rce.py`'s perpetual-sun geometry) need not supply them; a caller
+    # that vmaps every leaf over columns (`tools/radiation_emulator/
+    # generate_training_data.py`) passes per-column values instead.
+    calendar_year: jnp.ndarray = dataclasses.field(
+        default_factory=lambda: jnp.zeros((), dtype=jnp.float32))
+    day_of_year: jnp.ndarray = dataclasses.field(
+        default_factory=lambda: jnp.zeros((), dtype=jnp.float32))
 
     @classmethod
     def zero(cls):
         """Build a null SolarGeometry for placeholder / static `ForcingData` objects."""
         zero = jnp.zeros((), dtype=jnp.float32)
-        return cls(tyear=zero, orbital_phase=zero, synodic_phase=zero)
+        return cls(tyear=zero, orbital_phase=zero, synodic_phase=zero,
+                   calendar_year=zero, day_of_year=zero)
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +499,10 @@ class ForcingData:
     dust_soil_types: Any = None
     dust_regions: Any = None
     dust_roughness: Any = None
+    # The MSG-SEVIRI Saharan dust-source-activation frequency (jax-gcm#1017),
+    # static, in [0, 1]. Consumed only by ``ndust = 5``
+    # (``DustParameters.use_msg_source``); every other preset leaves it unset.
+    dust_msg: Any = None
 
     # Prescribed oxidant volume mixing ratios for the JAM sulfur chemistry
     # (#496 follow-up): a mapping ``{"oh"|"no3"|"o3"|"h2o2": TimeSeries}`` of
@@ -747,6 +768,12 @@ class ForcingData:
             "dust_file": "auto", "dust_preferential_file": "auto",
             "dust_soil_types_file": "auto", "dust_regions_file": "auto",
             "dust_roughness_file": "auto",
+            # Opt-in, unlike the four dust companions above: ndust=5's MSG
+            # map is not yet staged on the mirror, so defaulting it to "auto"
+            # here would raise for every ndust != 5 caller the moment dust is
+            # on. A caller that wants ndust=5 passes dust_msg_file="auto"
+            # itself (see jcm/config/configuration/ham-t63-l47.yaml).
+            "dust_msg_file": None,
             "oxidants_file": "auto", "align": "auto",
             "macv2_file": macv2_file,
             "years": years, "available_years": None,
@@ -1036,6 +1063,7 @@ class ForcingData:
              dust_soil_types=None,
              dust_regions=None,
              dust_roughness=None,
+             dust_msg=None,
              oxidant_vmr=None,
              anthropogenic_emissions=None,
              prescribed_aerosol_emissions=None,
@@ -1086,6 +1114,7 @@ class ForcingData:
                           else self.dust_regions),
             dust_roughness=(dust_roughness if dust_roughness is not None
                             else self.dust_roughness),
+            dust_msg=dust_msg if dust_msg is not None else self.dust_msg,
             oxidant_vmr=oxidant_vmr if oxidant_vmr is not None else self.oxidant_vmr,
             anthropogenic_emissions=(
                 anthropogenic_emissions if anthropogenic_emissions is not None
@@ -1522,10 +1551,17 @@ def _solar_from_date(date: DateData) -> SolarGeometry:
     fraction_of_day = date.dt.delta.seconds / 86400.0
     tyear = date.tyear()
     two_pi = 2.0 * jnp.pi
+    # Truncated (floor, matching the Fortran's `aint` for positive values) to
+    # an integer day -- `gcr_ionization`'s own `idoy = aint(get_year_day(...))`
+    # (mo_ham_gcrion.f90:274); unlike `tyear` above, sub-day resolution plays
+    # no role in the IGRF epoch interpolation this feeds.
+    day_of_year = jnp.floor(day_of_year_elapsed(date.dt))
     return SolarGeometry(
         tyear=jnp.asarray(tyear, dtype=jnp.float32),
         orbital_phase=jnp.asarray(two_pi * tyear, dtype=jnp.float32),
         synodic_phase=jnp.asarray(two_pi * fraction_of_day, dtype=jnp.float32),
+        calendar_year=jnp.asarray(get_year(date.dt), dtype=jnp.float32),
+        day_of_year=jnp.asarray(day_of_year, dtype=jnp.float32),
     )
 
 
@@ -1861,6 +1897,26 @@ def read_dust_preferential(ds, lat_deg=None, lon_deg=None, var_name="source"):
             f"{sorted(map(str, ds.data_vars))}.")
     arr = _orient_to_model_grid(ds[var_name], lat_deg, lon_deg, name=var_name)
     arr = _drop_degenerate_time(arr, ds, var_name)
+    return jnp.asarray(np.clip(np.nan_to_num(arr, nan=0.0), 0.0, 1.0))
+
+
+def read_dust_msg_source(ds, lat_deg=None, lon_deg=None, var_name="dsaf"):
+    """Read the MSG-SEVIRI Saharan dust-source map for ``ForcingData.dust_msg``.
+
+    HAM's ``dust_msg_pot_sources.nc`` (jax-gcm#1017; ``mo_ham_dust.f90::
+    bgc_read_annual_fields``, ``ndust = 5`` only): ``dsaf (lat, lon)`` with
+    **no time axis at all** — unlike ``dust_preferential_sources.nc``'s
+    degenerate-time ``source``, the Fortran reads this one with
+    ``read_var_nf77_2d``. The Schepanski et al. (2007, GRL; 2012, RSE)
+    MSG-SEVIRI dust-source-activation frequency, March 2006-February 2010,
+    in [0, 1] (observed max ~0.39). Returned as a static ``(lon, lat)`` array;
+    ``DustEmissions`` thresholds it at 0 and 0.01.
+    """
+    if var_name not in ds.data_vars:
+        raise ValueError(
+            f"MSG dust-source file has no {var_name!r} variable; found "
+            f"{sorted(map(str, ds.data_vars))}.")
+    arr = _orient_to_model_grid(ds[var_name], lat_deg, lon_deg, name=var_name)
     return jnp.asarray(np.clip(np.nan_to_num(arr, nan=0.0), 0.0, 1.0))
 
 

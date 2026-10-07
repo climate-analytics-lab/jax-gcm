@@ -59,5 +59,6 @@ forcing:
   dust_soil_types_file: null
   dust_regions_file: null
   dust_roughness_file: null
+  dust_msg_file: null
   oxidants_file: null
 sl_off_centering: 0.2

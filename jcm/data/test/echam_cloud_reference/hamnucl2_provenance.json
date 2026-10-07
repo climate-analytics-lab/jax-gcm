@@ -1,0 +1,193 @@
+{
+ "chain": "read_obrien_gcr_ipr -> gcr_ionization -> nucl_kazil_lovejoy (jax-gcm#1017 Kazil/GCR task, W5)",
+ "stage1_source": "jcm/data/test/echam_cloud_reference/hamgcr.npz (out/pgcripr) reused unmodified as this stage's ion_pair_rate input; ALSO independently re-verified in this build (max_rel_err_stage1_jcm_gcr_ion_pair_rate_vs_fortran below) by recomputing it via jcm's own gcr_ion_pair_rate from the embedded real O'Brien table.",
+ "stage2": {
+  "echam_source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src/mo_ham_m7_nucl.F90::nucl_kazil_lovejoy (verbatim, via m7-jax's tools/m7_oracle.py build_oracle(kazil_table_path=...))",
+  "real_table": "/data/climate-analytics-lab-shared/ECHAM_emissions_v0006/hammoz/T63/hammoz/parnuc.15H2SO4.A0.total.nc",
+  "m7_jax_commit": "26d3611b601b6667ec9d8e5316d9c96dad250371",
+  "oracle_provenance": {
+   "checked": true,
+   "hammoz": false,
+   "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+   "flags": [
+    "-cpp",
+    "-O2",
+    "-fno-fast-math",
+    "-fno-lto",
+    "-ffree-line-length-none",
+    "-fcheck=all",
+    "-ffpe-trap=invalid,zero,overflow",
+    "-fbacktrace"
+   ],
+   "source_sha256": {
+    "parkind1.F90": "bd7aa3a0f896829781c6c9c1924726def9bd8b2825778e26274c615c2642ff5a",
+    "mo_kind.F90": "e7d3a5f28d216e60828c395a704e33a7bfc5db6e966533776fc438f4d782d255",
+    "mo_math_constants.F90": "ceae6f761c288597f7fb495ff2a55030fee8f861e1ee0dcd8adc0ba3ba95734f",
+    "mo_physical_constants.F90": "12405902248f437d9f7ae9b03d1efe194cd7605f6b396156c3d820366b8a79b0",
+    "mo_ham_m7ctl.F90": "890e9ea622897dd35b0df18a2070d89bfffb81c6953425dcf423a2dcd7d8c3e1",
+    "mo_ham_m7_nucl.F90": "2b39fc6436c7cf6db1f385d39a3d9542ee35c2129d1b6096dc6cf20853c41c18",
+    "mo_ham_kappa.F90": "17608f5b55afaa1c1d98c0836c7fd7ebc2eeb7134263eb60e18fe3fe5175b12f",
+    "mo_ham_m7.F90": "4ef82634ad0e566f111e984ffb86a60d7069daec057aa130ae062277a677b1b6"
+   },
+   "table_sha256": "5dd7c435c237b08a506ee1a78e427ca46e0f67c8d9aea520242562503c4243ce",
+   "compile_seconds": 2.612246816046536,
+   "overlay": "PUBLIC visibility only for complete mo_ham_m7; original ctl initialization and nucleation leaves extracted verbatim",
+   "registry": {
+    "sulfate_components": [
+     1,
+     2,
+     3,
+     4
+    ],
+    "species": [
+     "SO4",
+     "BC",
+     "OC",
+     "SS",
+     "DU",
+     "WAT"
+    ],
+    "nsoa": 0,
+    "components": 18
+   },
+   "excluded": [
+    "Kazil lookup nucleation",
+    "organic nucleation"
+   ],
+   "source_corrections": [
+    {
+     "file": "mo_ham_m7.F90",
+     "reason": "insoluble-mode radius from mean particle volume, as ECHAM6.3-HAM2.3 r7492 mo_ham_m7.f90:862-874"
+    }
+   ],
+   "hammoz_stubs": [],
+   "compiled_constants": {
+    "avo": 6.02214179e+23,
+    "bk": 1.38e-16,
+    "rerg": 83140000.0,
+    "r_kcal": 0.001986,
+    "mw_so4": 96.0631,
+    "wh2so4": 98.0734,
+    "dh2so4": 1.841,
+    "dh2o": 1.0,
+    "critn": 5.919052006638581,
+    "cmin_aernl": 1e-10,
+    "cmin_aerml": 1e-15,
+    "cminvol": 1e-23,
+    "cminrad": 1e-08,
+    "cminrho": 1e-10,
+    "cdconv": 0.001,
+    "crh": 0.45,
+    "so4_coating_threshold": 1.0,
+    "sigma": [
+     1.59,
+     1.59,
+     1.59,
+     2.0,
+     1.59,
+     1.59,
+     2.0
+    ],
+    "sigmaln": [
+     0.4637340162321402,
+     0.4637340162321402,
+     0.4637340162321402,
+     0.6931471805599453,
+     0.4637340162321402,
+     0.4637340162321402,
+     0.6931471805599453
+    ],
+    "cmr2ram": [
+     1.3806768593529442,
+     1.3806768593529442,
+     1.3806768593529442,
+     2.0558297153248497,
+     1.3806768593529442,
+     1.3806768593529442,
+     2.0558297153248497
+    ],
+    "ram2cmr": [
+     0.7242824367090872,
+     0.7242824367090872,
+     0.7242824367090872,
+     0.4864216099931147,
+     0.7242824367090872,
+     0.7242824367090872,
+     0.4864216099931147
+    ],
+    "cmr2ras": [
+     1.2399229465545132,
+     1.2399229465545132,
+     1.2399229465545132,
+     1.6168066722416745,
+     1.2399229465545132,
+     1.2399229465545132,
+     1.6168066722416745
+    ],
+    "cmr2mmr": [
+     2.1226649100838775,
+     2.1226649100838775,
+     2.1226649100838775,
+     5.374070069465458,
+     2.1226649100838775,
+     2.1226649100838775,
+     5.374070069465458
+    ],
+    "cmedr2mmedr": [
+     1.9062685899527094,
+     1.9062685899527094,
+     1.9062685899527094,
+     4.226435818412653,
+     1.9062685899527094,
+     1.9062685899527094,
+     4.226435818412653
+    ],
+    "caccso4": [
+     1.0,
+     1.0,
+     1.0,
+     1.0,
+     0.3,
+     0.3,
+     0.3
+    ],
+    "crdiv": [
+     5e-08,
+     5e-07,
+     5e-06,
+     5e-05
+    ]
+   },
+   "generated_source_sha256": {
+    "parkind1.F90": "bd7aa3a0f896829781c6c9c1924726def9bd8b2825778e26274c615c2642ff5a",
+    "mo_kind.F90": "e7d3a5f28d216e60828c395a704e33a7bfc5db6e966533776fc438f4d782d255",
+    "mo_math_constants.F90": "ceae6f761c288597f7fb495ff2a55030fee8f861e1ee0dcd8adc0ba3ba95734f",
+    "mo_physical_constants.F90": "12405902248f437d9f7ae9b03d1efe194cd7605f6b396156c3d820366b8a79b0",
+    "metadata.F90": "987bf2c73c669d37b1373f504553d21c37b5a0fdee635b5b891a348edfd779dd",
+    "mo_ham_m7ctl.F90": "2510b58d38ff0c03d2e6f800edf99b9be836b3abdf2620841756867680ffc999",
+    "mo_ham_kappa.F90": "948fd0f5e4cabd0a73f9e575fcb00517ee3822f5bb7d9e30158b30dd39b7108d",
+    "mo_ham_m7_nucl.F90": "004b35be2891c0ed937df6bfdd73e606a2c11a007aa22e54d558ea79fbbe6cd8",
+    "mo_ham_m7.F90": "6b2a0753922a51a3dd774ebe06a75032eaf4873f34e484aa6c52b3224c63c851",
+    "driver.F90": "65cdc0d8f7db4f2329a7d29948cf7384049efecdcb3a55a22eab781a131c8357"
+   },
+   "table_binary_sha256": "b83e34011b607331541b0529ae476ab4f7b7d74ede4d53471abb66a60f0d3eaf",
+   "metadata_source_sha256": {
+    "mo_ham.F90": "117e36d7a8dfbacc986e8736275de88d2deacda2cdd12c4287d3022afd042737",
+    "mo_ham_species.F90": "828b524dc894bf8423dd89328624f46c0a9b95ae907e7d58eac8d50d9e8e4cd0",
+    "mo_ham_init.F90": "184c4abf33df411e874493d0476b0fddbcdc45813a82c3d7144afc451c123f1f"
+   }
+  }
+ },
+ "mini_table_note": "in/kazil_table_axes/in/kazil_table_log_pfr are PER-CASE 2-point-per-axis / 2^5-corner excerpts of the real (40,40,40,20,40) PARNUC table -- the exact bracket kazil_lovejoy's own bisection search (_bracket) selects for that case's query, so re-running kazil_lovejoy against this mini table reproduces the full-table call bit-for-bit (verified in this build: max abs diff 0.0). Not embedding the full ~200MB table.",
+ "checks": {
+  "max_rel_err_stage1_jcm_gcr_ion_pair_rate_vs_fortran": 0.0,
+  "max_rel_err_jax_full_table_vs_fortran": 0.0,
+  "max_rel_err_jax_mini_table_vs_fortran": 0.0,
+  "max_rel_err_jax_mini_table_float32_vs_fortran_float64": 3.6928286012923766e-06,
+  "mini_table_reproduces_full_table_jax_call": "bit-identical (np.testing.assert_array_equal)"
+ },
+ "cases": {
+  "count": 16,
+  "design": "8 (RH%, H2SO4, sink) combinations x 2 (column, level) stage-1 pairs (one genuine mid-table interpolation, one below-range clamp)"
+ }
+}

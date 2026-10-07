@@ -9,6 +9,7 @@ import ast
 import contextlib
 import unittest
 from pathlib import Path
+import os
 from unittest import mock
 
 import jax
@@ -273,6 +274,7 @@ def _patched_engine(shape):
                    return_value={"type2": jnp.ones(shape)}),
         mock.patch("jcm.forcing.read_dust_regions", return_value=jnp.ones(shape)),
         mock.patch("jcm.forcing.read_dust_roughness", return_value=jnp.ones(shape)),
+        mock.patch("jcm.forcing.read_dust_msg_source", return_value=jnp.ones(shape)),
         mock.patch("jcm.forcing.read_oxidant_vmr",
                    return_value={"oh": jnp.ones((1, *shape))}),
         mock.patch("jcm.forcing.validate_oxidant_levels"),
@@ -291,16 +293,18 @@ class TestConfigurationsAcceptance(unittest.TestCase):
     def tearDown(self):
         jax.config.update("jax_enable_x64", self._x64)
 
-    def _assert_door_matches_cli(self, name):
+    def _assert_door_matches_cli(self, name, overrides=None):
         """Both doors build the same patched engine; assert they agree."""
         coords = _t63l47_coords()
         shape = tuple(int(x) for x in coords.horizontal.nodal_shape)
         with contextlib.ExitStack() as stack:
             for p in _patched_engine(shape):
                 stack.enter_context(p)
-            exp = configurations.load(name)
+            overrides = dict(overrides or {})
+            exp = configurations.load(name, **overrides)
             # The CLI composition, built through the same runners the door uses.
-            cfg = configurations._compose(name, [])
+            cfg = configurations._compose(
+                name, [f"{k}={v}" for k, v in overrides.items()])
             ref_model = runners.build_model(cfg)
             ref_forcing = runners.build_forcing(
                 cfg, ref_model.coords,
@@ -330,6 +334,62 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         # the GPL extra is installed (the extras-tests CI job) and skips in the
         # default jobs, which install none.
         self._assert_door_matches_cli("t63-echam-jam")
+
+    @pytest.mark.requires_extra("m7")
+    def test_ham_m7_load_equivalent_to_cli_composition(self):
+        # The ECHAM-HAM M7 preset composes the optional m7-jax core (#1017).
+        # Its default nsnucl=2 needs the licensed HAM inputs ($HAM_INPUT_DIR),
+        # and this test stubs xarray.open_dataset for the whole engine, so it
+        # composes the documented data-free variant (binary nucleation, jcm's
+        # own Mie tables) - equivalence of the two doors is what is tested.
+        # forcing.dust_msg_file is pinned to an explicit path rather than left
+        # at the config's own "auto": the preset's ndust=5 needs it, but its
+        # mirror bundle is not staged yet (manifest "staged": False), so
+        # "auto" would raise a real "not yet published" error here that has
+        # nothing to do with the equivalence this test checks -- read_dust_
+        # msg_source is mocked above like its four dust-companion siblings.
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HAM_INPUT_DIR", None)
+            self._assert_door_matches_cli(
+                "ham-t63-l47",
+                {"physics.jam_microphysics_options.nucleation_scheme": 1,
+                 "forcing.dust_msg_file": "/dummy/dust_msg.nc"})
+
+    @pytest.mark.requires_extra("m7")
+    def test_ham_m7_preset_carries_hams_own_settings(self):
+        """The preset builds HAM's switches, not the MAM4 calibrations.
+
+        Sea salt and dust run unscaled (SEASALT_SCALE_DEFAULT and
+        NDUSCALE_JCM_T63_SCALE calibrate the MAM4 configuration's AOD), wet
+        deposition is the full
+        nwetdep=3 scheme with the corrected cdroprad(6) = 30 um axis, and
+        cirrus is nic_cirrus=2.
+        """
+        cfg = configurations._compose(
+            "ham-t63-l47",
+            ["physics.jam_microphysics_options.nucleation_scheme=1"])
+        with mock.patch.dict(os.environ):
+            os.environ.pop("HAM_INPUT_DIR", None)
+            physics = runners.build_physics(cfg, _t63l47_coords())
+
+        def term(name):
+            return next(t for t in physics.terms if t.name == name)
+
+        def params(name):
+            return term(name).params.get_value()
+
+        self.assertEqual(float(params("jam_seasalt_emissions").scale), 1.0)
+        # DustEmissions keeps its preset as (ndust, nudged, nduscale_scale):
+        # HAM's ndust=5 with jcm's MAM4 multiplier off.
+        self.assertEqual(term("jam_dust_emissions")._preset[0], 5)
+        self.assertEqual(term("jam_dust_emissions")._preset[2], 1.0)
+        wet = term("jam_wet_deposition")
+        self.assertEqual(wet.scheme, "ham")
+        self.assertEqual(float(params("jam_wet_deposition").cdroprad_um[6]), 30.0)
+        cloud = next(t for t in physics.terms
+                     if hasattr(t, "params")
+                     and hasattr(t.params.get_value(), "nic_cirrus"))
+        self.assertEqual(cloud.params.get_value().nic_cirrus, 2)
 
 
 @pytest.mark.slow

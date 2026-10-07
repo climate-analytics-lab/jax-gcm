@@ -204,6 +204,7 @@ def echam_physics(
     cloud_scheme: str = "1m",
     aerosol_module: str = "macv2sp",
     jam_microphysics: str = "placeholder",
+    jam_microphysics_options: Mapping[str, Any] | None = None,
     jam_cloud_borne: bool = True,
     jam_optics: bool = True,
     jam_optics_backend: str = "jcm",
@@ -418,8 +419,22 @@ def echam_physics(
             ``"placeholder"`` (κ-Köhler equilibrium on the MAM4 population,
             default) today; ``"mam4_jax"`` is #490 (optional ``jcm[mam4]``
             extra). ``"m7_placeholder"`` is the same κ-Köhler core on the M7
-            population instead (the ``echam-ham-m7`` preset's chain-test
-            vehicle, #1017) — the real M7 core adapter is a later task.
+            population instead (the ``echam-ham-m7`` preset's earlier
+            chain-test vehicle, #1017). ``"m7_jax"`` is the real ECHAM-HAM M7
+            core over the optional ``jcm[m7]`` extra (#1017); its switches
+            (nucleation/organic scheme, coagulation, condensation,
+            precision) are set via ``jam_microphysics_options``, not a
+            dedicated argument here.
+        jam_microphysics_options: keyword arguments forwarded to the
+            ``jam_microphysics`` core's constructor when it names a string
+            core — e.g. ``{"nucleation_scheme": 2}`` selects ``"m7_jax"``'s
+            Kazil and Lovejoy (2007) ion-mediated nucleation (needs
+            ``HAM_INPUT_DIR`` and an m7-jax with Kazil support; construction
+            raises naming both if either is missing), or
+            ``{"core_dtype": "float32"}`` selects its forward-only float32
+            core. ``None`` (default) means today's call for every core —
+            MAM4 and the placeholder cores take no options, so any key is
+            unknown for them.
         jam_cloud_borne: prognose the explicit cloud-borne aerosol phase
             (#602). ``True`` (default) cycles the ``mc_*``/``nc_*`` phase
             in the physics carry (activation transfer, resuspension,
@@ -475,9 +490,11 @@ def echam_physics(
         jam_nactivpdf: ``jam_aerosol_physics``'s ``nactivpdf`` (HAM's updraft
             PDF switch, ``"ham_arg"`` only; default 0).
         jam_dust_preset: HAMMOZ ``ndust`` preset for the Tegen dust scheme —
-            4 (default, HAM2: Stier 2005 + East-Asian soils), 3 (Stier 2005)
-            or 2 (Cheng 2008). The resolution-dependent regional tuning vector
-            is rebuilt at the model's own truncation.
+            5 (HAM2 + the MSG-SEVIRI Saharan source-activation map; needs
+            ``forcing.dust_msg_file`` set), 4 (HAM2: Stier 2005 + East-Asian
+            soils), 3 (Stier 2005) or 2 (Cheng 2008). The resolution-dependent
+            regional tuning vector is rebuilt at the model's own truncation
+            (shared bit-for-bit between 4 and 5).
         jam_dust_nudged: take HAM's *nudged* regional tuning vector
             (0.95/1.25 at T63) instead of the free-running one (1.05/1.45).
             The shipped config leaves this ``null``, which the runner fills
@@ -485,7 +502,7 @@ def echam_physics(
         jam_dust_nduscale_scale: global multiplier on that regional vector —
             jcm's single dust-emission calibration knob (#808). ``null``
             takes the calibrated default, which exists at T63 ``ndust = 4``
-            only.
+            or ``5`` only (the two share the same vector and calibration).
         jam_aqueous_scheme: ``"full"`` (default, HAM port) or ``"simple"``
             (H2O2-limited) in-cloud aqueous sulfur chemistry.
         jam_anthropogenic: include prescribed CEDS anthropogenic emissions
@@ -971,7 +988,9 @@ def echam_physics(
             )
         from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
         jam_terms = jam_aerosol_physics(
-            microphysics=jam_microphysics, cloud_borne=jam_cloud_borne,
+            microphysics=jam_microphysics,
+            microphysics_options=jam_microphysics_options,
+            cloud_borne=jam_cloud_borne,
             optics=jam_optics, optics_backend=jam_optics_backend,
             ham_optics_tables_dir=jam_optics_tables_dir,
             seasalt_scheme=jam_seasalt_scheme,
