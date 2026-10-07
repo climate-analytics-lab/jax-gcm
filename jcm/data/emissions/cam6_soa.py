@@ -14,10 +14,12 @@ Usage::
 
     python -m jcm.data.emissions.cam6_soa --truncation 63 --output soag.nc
 
-Add the result to ``forcing.emissions_file=[hf://bundles/t63/emissions_pd.nc,/absolute/path/soag.nc]``
-with ``forcing.emissions_align=[auto,wrap_year]``. With ``--year``, select
-that year from the official 1750–2015 historical inventories. Without it,
-use the 1995–2005 climatology. Do not substitute either for a different era.
+Default HF emissions bundles already include SOAG; combining another SOAG
+file with them is rejected as a duplicate source. This standalone output is
+for custom bundles or historical sensitivity tests with a bulk-only mirror
+snapshot. With ``--year``, select that year from the official 1750–2015
+inventories. Without it, use the 1995–2005 climatology. The mirror builder
+uses ``year_range`` to match each bundle's PD/PI source period.
 """
 
 from __future__ import annotations
