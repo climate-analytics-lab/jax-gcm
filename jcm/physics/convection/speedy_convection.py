@@ -2,6 +2,7 @@
 version of the Tiedtke (1993) mass-flux convection scheme.
 """
 from jax import jit
+import jax
 import jax.numpy as jnp
 from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
@@ -16,7 +17,26 @@ import jcm.constants as c
 # SPEEDY-specific value, not the shared SI constant. Shared constants (cpd, p0,
 # grav) are read as module attributes from jcm.constants.
 from jcm.physics.speedy.physical_constants import alhc
-from jcm.physics.speedy.smoothing import surrogate_gate, surrogate_pos
+from jcm.physics.speedy.smoothing import smooth_gate, smooth_pos, surrogate_of, surrogate_pos
+
+def _humidity_trigger(qa_surface, qthr_surface, qsat_surface, qa_pbl_top, qthr_pbl_top, qsat_pbl_top, width):
+    """``qdif`` on the humidity-trigger branch: the gated surface-layer excess.
+
+    The reference is ``(qa > qthr) * (qa_sc > qthr_sc) * max(qa - qthr, 0)``.
+    The surface test is redundant with the hinge -- the excess is positive
+    exactly where it passes -- so the block is ``gate(PBL-top) * pos(surface
+    excess)``, the same value. At ``width`` > 0 (an RH fraction, scaled by
+    each level's saturation humidity) the gate is a sigmoid and the hinge a
+    softplus, so the derivative survives where either test, or both, fail.
+    """
+    surface_width = width * jax.lax.stop_gradient(qsat_surface)
+    pbl_top_width = width * jax.lax.stop_gradient(qsat_pbl_top)
+    return (smooth_gate(qa_pbl_top, qthr_pbl_top, pbl_top_width)
+            * smooth_pos(qa_surface - qthr_surface, surface_width))
+
+
+_surrogate_humidity_trigger = surrogate_of(_humidity_trigger)
+
 
 @jit
 def diagnose_convection(
@@ -142,21 +162,16 @@ def _diagnose_convection(
 
     # The humidity trigger is a value jump: when either RH condition flips,
     # qdif switches between 0 and the finite surface-layer excess, and the
-    # reference derivative of that jump is zero on both sides. The trigger
-    # is written as gate * excess with the gates surrogate: their value is
-    # the hard 0/1 test, so qdif and iptop are the reference's exactly, and
-    # their derivative is a sigmoid's of half-width trigger_smoothing (an RH
-    # fraction, scaled by qsat to a humidity), which sees the switch as a
-    # ramp of ~2 widths. Width 0 gives the reference derivative. qdif is
-    # written over the whole RH-trigger branch -- the gates' value zeroes it
-    # wherever the RH test fails, exactly as the reference leaves it -- so
-    # its derivative sees the ramp on both sides of the threshold; iptop is
-    # a level index and keeps the hard test.
+    # reference derivative of that jump is zero on both sides. The whole
+    # trigger * excess block is one surrogate (_humidity_trigger): its value
+    # is the reference's exactly, and at trigger_smoothing > 0 (an RH
+    # fraction, scaled by qsat to a humidity) its derivative is that of a
+    # sigmoid gate times a softplus excess, which sees the switch as a ramp
+    # of ~2 widths even where both tests fail. Width 0 gives the reference
+    # derivative. qdif is written over the whole RH-trigger branch -- the
+    # block's value zeroes it wherever the RH test fails, exactly as the
+    # reference leaves it; iptop is a level index and keeps the hard test.
     w_rh = parameters.convection.trigger_smoothing
-    trigger_gate = (
-        surrogate_gate(qa[kx-1], qthr0, w_rh * qsat[kx-1])
-        * surrogate_gate(qa_sc, qthr1, w_rh * qsat_sc)
-    )
     lqthr = (qa[kx-1] > qthr0) & (qa_sc > qthr1)
     rh_branch = mask_psa & (ktop1 < kx) & ~(ktop2 < kx)
     case_2 = rh_branch & lqthr
@@ -166,7 +181,8 @@ def _diagnose_convection(
     qdif = jnp.where(case_1, jnp.maximum(qa[kx-1] - qthr0, (mse0 - msthr) * rlhc), qdif)
     qdif = jnp.where(
         rh_branch,
-        trigger_gate * jnp.maximum(qa[kx-1] - qthr0, 0.0),
+        _surrogate_humidity_trigger(
+            qa[kx-1], qthr0, qsat[kx-1], qa_sc, qthr1, qsat_sc, w_rh),
         qdif,
     )
     return iptop, flux_top, qdif

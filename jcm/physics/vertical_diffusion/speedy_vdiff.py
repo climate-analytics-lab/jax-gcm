@@ -8,7 +8,7 @@ import jcm.constants as c
 # alhc is SPEEDY's latent heat in J/g (q is in g/kg) — a SPEEDY-specific value.
 # cpd is shared and read as a module attribute from jcm.constants.
 from jcm.physics.speedy.physical_constants import alhc
-from jcm.physics.speedy.smoothing import surrogate_gate, surrogate_pos
+from jcm.physics.speedy.smoothing import chain_gates, surrogate_gate, surrogate_pos
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 from jcm.physics.speedy.physics_data import PhysicsData
 
@@ -98,13 +98,17 @@ def get_vertical_diffusion_tend(
     ttenvd = ttenvd.at[nl1 - 1].set(fluxse * rsig[nl1 - 1])
     ttenvd = ttenvd.at[kx - 1].set(-fluxse * rsig[kx - 1])
 
+    # Each branch is a chain of two decisions; chain_gates gives it the
+    # product's value with the derivative of the first decision that fails,
+    # so a stable, drying column (both fail) still carries the shallow-
+    # convection gate's derivative rather than the zero of a plain product.
     g_rh1 = surrogate_gate(drh, 0.0, w_rh)
-    fluxq_condition1 = g_mse * g_rh1 * fcnv * fshcq * qsat[kx - 1] * drh
+    fluxq_condition1 = chain_gates(g_mse, g_rh1) * fcnv * fshcq * qsat[kx - 1] * drh
     qtenvd = qtenvd.at[nl1 - 1].set(fluxq_condition1 * rsig[nl1 - 1])
     qtenvd = qtenvd.at[kx - 1].set(-fluxq_condition1 * rsig[kx - 1])
 
     g_rh2 = surrogate_gate(drh, drh0, w_rh)
-    fluxq_condition2 = (1.0 - g_mse) * g_rh2 * fvdiq2 * qsat[nl1 - 1] * drh
+    fluxq_condition2 = chain_gates(1.0 - g_mse, g_rh2) * fvdiq2 * qsat[nl1 - 1] * drh
     qtenvd = qtenvd.at[nl1 - 1].add(fluxq_condition2 * rsig[nl1 - 1])
     qtenvd = qtenvd.at[kx - 1].add(-fluxq_condition2 * rsig[kx - 1])
     

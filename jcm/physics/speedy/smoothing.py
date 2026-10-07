@@ -109,8 +109,14 @@ def smooth_clip01(x, width):
     return jnp.where(on, soft, jnp.clip(x, 0.0, 1.0))
 
 
-def _surrogate(smooth):
+def surrogate_of(smooth):
     """Wrap ``smooth(*operands, width)`` as hard value + smooth derivative.
+
+    ``smooth`` may be a single hinge or a whole block of a scheme -- a
+    product of decisions with the quantity they gate -- which is how a
+    combined decision keeps a derivative where several of its tests fail at
+    once (a product of separately surrogate 0/1 gates has zero derivative
+    there: each slope is multiplied by another gate's hard zero).
 
     The value is ``smooth(*operands, 0.0)`` -- the hard operation, exactly --
     and the derivatives are those of ``smooth(*operands, width)``, taken by
@@ -153,11 +159,11 @@ def _surrogate(smooth):
     return surrogate
 
 
-surrogate_gate = _surrogate(smooth_gate)
-surrogate_pos = _surrogate(smooth_pos)
-surrogate_min = _surrogate(smooth_min)
-surrogate_max = _surrogate(smooth_max)
-surrogate_clip01 = _surrogate(smooth_clip01)
+surrogate_gate = surrogate_of(smooth_gate)
+surrogate_pos = surrogate_of(smooth_pos)
+surrogate_min = surrogate_of(smooth_min)
+surrogate_max = surrogate_of(smooth_max)
+surrogate_clip01 = surrogate_of(smooth_clip01)
 
 
 def _floored_sqrt(x, floor, offset):
@@ -171,7 +177,7 @@ def _floored_sqrt(x, floor, offset):
     return jnp.where(on, regularised, jnp.sqrt(jnp.maximum(x, floor)))
 
 
-_surrogate_floored_sqrt = _surrogate(_floored_sqrt)
+_surrogate_floored_sqrt = surrogate_of(_floored_sqrt)
 
 
 def surrogate_sqrt(x, floor, offset):
@@ -187,4 +193,22 @@ def surrogate_sqrt(x, floor, offset):
     reference derivative.
     """
     return _surrogate_floored_sqrt(x, floor, offset)
+
+
+def chain_gates(*gates):
+    """Multiply 0/1 surrogate gates, with the derivative of the first that fails.
+
+    ``g1 * where(g1 > 0, g2 * where(g2 > 0, g3, 1), 1)`` has the product's
+    value; where the chain fails its derivative is that of the first gate
+    that failed -- the decision that switched the quantity off -- rather
+    than the zero a plain product gives once two gates fail
+    (``docs/source/design/surrogate_gradients.md``, "Chains of decisions").
+    Only for 0/1 decisions: for a continuous factor the ``1`` it substitutes
+    would rescale the derivative wherever the other factor is nonzero.
+    """
+    *head, last = gates
+    weight = last
+    for gate in reversed(head):
+        weight = gate * jnp.where(gate > 0, weight, 1.0)
+    return weight
 

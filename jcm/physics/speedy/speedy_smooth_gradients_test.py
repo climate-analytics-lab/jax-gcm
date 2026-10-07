@@ -191,6 +191,20 @@ class TestConvectionTriggerSurrogate:
             assert hard_grad == 0.0
             assert jnp.isfinite(smooth_grad) and smooth_grad > 0.0
 
+    def test_trigger_derivative_survives_when_both_rh_tests_fail(self):
+        """A dry column (surface and PBL-top RH both below rhbl) still sees the trigger."""
+        def qdif_of_dq(dq, width):
+            psa, se, qa, qsat, coords = _convection_column(rh_pbl_top=0.85)
+            qa = qa.at[-1].set(0.85 * qsat[-1])  # surface RH below rhbl = 0.9 too
+            qa = qa.at[-1].add(dq)
+            _, qdif = _diagnose(psa, se, qa, qsat, coords, width)
+            return qdif[0, 0]
+
+        assert float(qdif_of_dq(jnp.array(0.0), 0.0)) == 0.0
+        assert float(qdif_of_dq(jnp.array(0.0), 0.05)) == 0.0
+        assert float(jax.grad(qdif_of_dq)(jnp.array(0.0), 0.0)) == 0.0
+        assert float(jax.grad(qdif_of_dq)(jnp.array(0.0), 0.05)) > 0.0
+
     @staticmethod
     def _column_budget(dq, rh, width, qsat_aloft_scale=1.0):
         """Column moisture tendency and convective rain on the trigger column."""
@@ -308,6 +322,27 @@ class TestVdiffGateSmoothing:
         smooth_grad = jax.grad(pbl_qtend)(jnp.asarray(just_below), 0.02)
         assert hard_grad == 0.0
         assert jnp.isfinite(smooth_grad) and smooth_grad != 0.0
+
+
+class TestChainedGates:
+    def test_chain_has_the_product_value_and_the_first_failures_derivative(self):
+        from jcm.physics.speedy.smoothing import chain_gates
+
+        zero, w = jnp.asarray(0.0), jnp.asarray(0.2)
+
+        def chain(x, y):
+            return chain_gates(surrogate_gate(x, zero, w), surrogate_gate(y, zero, w))
+
+        for x, y in ((0.3, 0.4), (0.3, -0.4), (-0.3, 0.4), (-0.3, -0.4)):
+            assert float(chain(jnp.asarray(x), jnp.asarray(y))) == float((x > 0) * (y > 0))
+        # Both fail: the plain product's gradient is zero, the chain's is the
+        # first gate's.
+        x, y = jnp.asarray(-0.3), jnp.asarray(-0.4)
+        plain = jax.grad(lambda x_: surrogate_gate(x_, zero, w) * surrogate_gate(y, zero, w))(x)
+        chained = jax.grad(chain, argnums=0)(x, y)
+        assert float(plain) == 0.0
+        np.testing.assert_allclose(
+            float(chained), float(jax.grad(lambda x_: smooth_gate(x_, zero, w))(x)), rtol=1e-6)
 
 
 class TestVdiffSeFluxOneSided:
