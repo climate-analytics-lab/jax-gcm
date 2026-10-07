@@ -1473,7 +1473,7 @@ The whole-model RCE testbed runs RRTMGP
   0.98 of the steps, column water steady to 0.05 mm/d, a clear lowest level. No public API changes; see
   :doc:`design/rce_testbed` for the configuration, the bounds and their
   provenance. The column is finite for the 200 days run under jax-rrtmgp
-  0.5.1 and is overcast (total cloud cover 1.0).
+  0.5.0 and is overcast (total cloud cover 1.0).
 
 Grey two-stream shortwave conserves energy
 """"""""""""""""""""""""""""""""""""""""""
