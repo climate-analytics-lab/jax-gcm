@@ -35,6 +35,7 @@ from ..cloud_utils import (
     ice_fall_speed_air_density_factor,
     ice_volume_mean_radius_from_temperature,
     ice_volume_mean_radius_schumann,
+    karcher_lohmann_deposition_rate,
     latent_heat_over_cp,
     minimum_CDNC,
     sundqvist_condensation,
@@ -47,6 +48,7 @@ from .types import (
     ScavengingLedger,
 )
 from .sedimentation_melt import melting_snow_and_ice, sedimentation_ice
+from .cirrus import xfrzmstr
 from .deposition_freezing import (
     demott2010_inp,
     freezing_below_238K,
@@ -85,7 +87,7 @@ def cloud_microphysics_2m(
     tke: jnp.ndarray,               # (nlev,)  m²/s²  turbulent kinetic energy
     activated_cdnc: jnp.ndarray,    # (nlev,)  1/m³   aerosol-activated CDNC (from MACv2-SP)
     ice_nuclei: jnp.ndarray,        # (nlev,)  1/m³   external immersion INP for the DeMott closure (none in-tree)
-    ice_nuclei_deposition: jnp.ndarray,  # (nlev,) 1/m³  deposition INP (pnicex; read only at nic_cirrus=2)
+    ice_nuclei_deposition: jnp.ndarray,  # (nlev,) 1/m³  deposition INP (no in-tree producer yet, #679); NOT read when nic_cirrus=2, see cirrus_aerosol_number
     dt: jnp.ndarray,                # scalar   seconds
     params: CloudParams2M,          # tunable parameters
     temperature_increment: jnp.ndarray | None = None,  # (nlev,) K      ztmst·ptte
@@ -97,6 +99,7 @@ def cloud_microphysics_2m(
     detrained_qc: jnp.ndarray | None = None,           # (nlev,) kg/kg  ztmst·pxtecl
     detrained_qi: jnp.ndarray | None = None,           # (nlev,) kg/kg  ztmst·pxteci
     freezing_aerosol: HeterogeneousFreezingAerosol | None = None,  # (nlev,) leaves: HAM freezing inputs
+    cirrus_aerosol_number: jnp.ndarray | None = None,  # (nlev,) 1/m³  papnx (HAM soluble aerosol number available for cirrus freezing; ham_cirrus_aerosol); read only at nic_cirrus=2
 ) -> tuple[
     MicrophysicsTendencies_2M,      # per-level tendencies
     jnp.ndarray, jnp.ndarray,       # surface rain / snow flux [kg/m^2/s]
@@ -223,6 +226,7 @@ def cloud_microphysics_2m(
     qni_increment = _or_zeros(qni_increment)
     detrained_qc = _or_zeros(detrained_qc)
     detrained_qi = _or_zeros(detrained_qi)
+    cirrus_aerosol_number = _or_zeros(cirrus_aerosol_number)
 
     # ------------------------------------------------------------------
     # Upstream increments (ECHAM's accumulated tendencies × ztmst)
@@ -499,10 +503,93 @@ def cloud_microphysics_2m(
          cdnc0_k, icnc0_k,
          esw_k, esi_k, qsw_k, qsi_k, dqsw_k, dqsi_k,
          subice_k, subwat_k, thermo_k, eta_k, verv_k, visc_k, melt_k,
-         act_cdnc_k, n_inp_k, inp_dep_k, is_bottom_k,
+         act_cdnc_k, n_inp_k, inp_dep_k, papnx_k, is_bottom_k,
          lvdcp_k, lsdcp_k, freezing_k) = level_in
 
         zero_s = jnp.zeros_like(cf_k)
+
+        # --- Kaercher-Lohmann cirrus homogeneous nucleation (#552, #1017
+        # task 2 part 2b) ------------------------------------------------
+        # ECHAM computes ZSUSATIX and calls XFRZMSTR once per level inside
+        # SECTION 1's OWN loop (mo_cloud_micro_2m.f90:1009-1038) -- BEFORE
+        # sedimentation, melting or section 5 -- on the step-start humidity
+        # sice = pqm1/zqsi - 1 (:688-689), never section 5's adjusted
+        # zqp1tmp/zqsp1tmp (part 2b's claim (b)). The result (``znicex``)
+        # is used TWICE in the real Fortran: added directly into zicncq
+        # here (:1050-1058), and reused, UNCHANGED, as ``pnicex`` at
+        # update_in_cloud_water's own call far later (:1507) -- not a
+        # second xfrzmstr call. Computed once here and threaded through
+        # for both, matching that structure (an earlier version of this
+        # port only wired the second use, which this task's own end-to-end
+        # harness verification caught: section 1's direct addition is
+        # where nucleation actually reaches ICNC on every column except
+        # the rare one where pre-existing ice already exceeds icemin, so
+        # skipping it left non-degenerate cirrus columns pinned at the
+        # floor regardless of the aerosol number).
+        #
+        # The depletion reference at THIS point is ECHAM's zicncq right
+        # before its nic_cirrus block (:982) -- picnc's entry value plus
+        # this step's detrained-ice number, BEFORE sedimentation or
+        # melting have touched it (both run later, in section 4) -- not
+        # ``icnc_melt`` (a post-sedimentation, post-melt quantity that
+        # does not exist yet at this point in the sweep; part 2b's claim
+        # (a), also caught by the harness verification).
+        #
+        # ``nic_cirrus`` is a static (pytree_node=False) config field, so
+        # the plain Python ``if`` does not need to trace both branches --
+        # identical to how ``assembly.py``'s own
+        # ``nic_cirrus==1``/``==2`` dispatch works.
+        if params.nic_cirrus == 2:
+            sice_k = jnp.maximum(
+                q_m1_k / jnp.maximum(qsi_k, params.eps) - 1.0, 0.0)
+            zicncq_early_k = icnc0_k + znidetr_k
+            # zapnx = MAX(1e-6*(papnx - zicncq), 1e-6) [1/cm3]
+            # (mo_cloud_micro_2m.f90:1015,1018): the available aerosol
+            # number depleted by the ICNC already present.
+            apn_cm3_k = jnp.maximum(
+                1.0e-6 * (papnx_k - zicncq_early_k), 1.0e-6)
+            # verv_k is ECHAM's zvervx, already [cm/s] (turbulent_updraft_
+            # velocity's own docstring); xfrzmstr's own contract takes m/s
+            # (matching its updraft argument's name), so convert back.
+            cirrus_ri_raw_k, cirrus_pnicex_k = xfrzmstr(
+                sice_k, verv_k / 100.0, apn_cm3_k, t_m1_k, p_k, dt, params)
+            # The SAME depleted number, converted back to 1/m3, is HAM's
+            # ``pap`` -- update_in_cloud_water's own cap on the candidate
+            # (#552; see that function's nic_cirrus==2 branch).
+            cirrus_aerosol_number_available_k = apn_cm3_k * 1.0e6
+            # zninucl = MERGE(MIN(zap*1e6, znicex), 0, ll_ice) (:1050-1058):
+            # section 1's OWN cap+gate on znicex for the early join below --
+            # DIFFERENT from the raw znicex ``cirrus_pnicex_k`` itself
+            # passed to update_in_cloud_water, which applies its own,
+            # separate MIN(pnicex, pap*1e6) cap at a different point
+            # (:2618). ``ll_ice = (zsusatix>0)&(ptm1<zthomi)`` is already a
+            # SUBSET of xfrzmstr's own internal gate, so ``cirrus_pnicex_k``
+            # is already exactly 0 wherever ll_ice is false -- only the cap
+            # at ``cirrus_aerosol_number_available_k`` remains to apply.
+            zninucl_k = jnp.minimum(
+                cirrus_pnicex_k, cirrus_aerosol_number_available_k)
+            # The Kaercher-Lohmann deposition rate ``zqinucl``
+            # (mo_cloud_micro_2m.f90:1046-1102): the vapour
+            # deposited onto the crystals ``xfrzmstr`` just nucleated, with
+            # ventilation, computed here (step-start quantities only) and
+            # carried to section 5 below, matching ECHAM's own section-1
+            # placement -- entirely before sedimentation/melting/section 4.
+            # The ICNC ``icnc_before_floor`` is ECHAM's ``zicncq`` right
+            # after ``+= zninucl`` (:1058), the SAME pre-sedimentation sum
+            # ``icnc_sedi`` below adds (:982,1050-1058); this call floors
+            # it independently (it is read, not mutated, before that add).
+            _icncq_floored_k, zqinucl_k = karcher_lohmann_deposition_rate(
+                cirrus_ri_raw_k, zrid_k, zicncq_early_k + zninucl_k,
+                qi_m1_k, cf_k, rho_k, adc_k, visc_k, sice_k, t_m1_k, p_k,
+                esi_k, q_m1_k, qsi_k, dt, params)
+        else:
+            cirrus_pnicex_k = inp_dep_k
+            cirrus_aerosol_number_available_k = zero_s
+            # NOT inp_dep_k: zninucl's own nic_cirrus=1 formula (zascs-based,
+            # #955) is unimplemented and distinct from ice_nuclei_deposition
+            # regardless -- this early join must stay exactly 0 whenever
+            # nic_cirrus != 2, never leak a future #679 producer into it.
+            zninucl_k = zero_s
 
         # --- 4. Sedimentation of cloud ice (grid-mean) -----------------
         # Acts on the ice present BEFORE this step's convective
@@ -527,12 +614,17 @@ def cloud_microphysics_2m(
         # pxim1 + ztmst·pxite reconstructs zxip1 exactly in the ledger.
         sedi_tend = (zxip1 - zxip1_pre) / dt
 
-        # The crystal number of the detrained ice joins the post-
-        # sedimentation ICNC, capped at icemax (1251-1252). ECHAM's floor at
-        # icemin (1253) is not applied: the ICNC lower bound stays cqtmin
+        # The crystal number of the detrained ice -- and, at nic_cirrus=2,
+        # the Kaercher-Lohmann cirrus nucleation computed just above
+        # (mo_cloud_micro_2m.f90's own ``zicncq += znidetr + zninucl``,
+        # :982,1050-1058, both folded into one addition here since jcm
+        # computes them at the same point) -- joins the post-sedimentation
+        # ICNC, capped at icemax (1251-1252). ECHAM's floor at icemin
+        # (1253) is not applied: the ICNC lower bound stays cqtmin
         # (znidetr's own floor, 978, as at entry) and number-less ice is
         # re-diagnosed in update_in_cloud_water (see the entry floor).
-        icnc_sedi = jnp.minimum(icnc_sedi + znidetr_k, params.icemax)
+        icnc_sedi = jnp.minimum(
+            icnc_sedi + znidetr_k + zninucl_k, params.icemax)
 
         # --- 3.1 Melting (fluxes + in-cloud ice) -----------------------
         # Runs after sedimentation (MG/PUMAS order, see docstring); the
@@ -698,9 +790,24 @@ def cloud_microphysics_2m(
             dq_up_k, zdqsat, cf_k, zxib, zxlb, zqp1,
             lo2.astype(zqp1.dtype), params.xsec, params.epsec)
         if params.nic_cirrus == 2:
-            # ECHAM: zdep = zqinucl·zifrac — the Kärcher-Lohmann
-            # nucleated vapour, which jcm does not compute (#552).
-            zdep0 = zero_s
+            # ECHAM 1449-1458: at nic_cirrus=2
+            # the deposition leg is ``zqinucl`` (computed in section 1
+            # above) standing in for ``zqcdif`` -- zcnd is UNAFFECTED
+            # (always built from zqcdif, 1437-1441). The Fortran writes
+            # ``zdep = zqinucl*zifrac`` unconditionally and only zeroes it
+            # where ``ll2 = (NOT dissipation) & (NOT lo2)`` (1455-1458);
+            # since its own ``zifrac`` MERGEs to 1.0 outside dissipation
+            # (1443), recomputing the dissipation-branch fraction here and
+            # dispatching it exactly as ``sundqvist_condensation`` dispatches
+            # zqcdif's own zdep reproduces that MERGE: dissipation uses the
+            # clipped in-cloud ice fraction, growth uses the ice/liquid
+            # ``lo2`` weight, condensation (ll2) is zero either way.
+            dissipation = _zqcdif < 0.0
+            zifrac = jnp.clip(
+                zxib / jnp.maximum(zxib + zxlb, params.epsec), 0.0, 1.0)
+            zdep0 = jnp.where(
+                dissipation, zqinucl_k * zifrac,
+                lo2.astype(zqp1.dtype) * zqinucl_k)
 
         # --- 5.4 Supersaturation corrections ---------------------------
         (zcnd, zdep, ztp1tmp, zqp1tmp, zqsp1tmp,
@@ -727,11 +834,11 @@ def cloud_microphysics_2m(
         # --- 5.5 In-cloud water update + activation / nucleation -------
         (cloud_flag, icnc_u, _nucl, cdnc_u, paclc, zxib, zxlb,
          cdnc_min_k) = update_in_cloud_water(
-            p_k,
+            cirrus_aerosol_number_available_k,  # pap: NOT pressure (#552)
             act_cdnc_k,
             zcnd, zdep,
             zero_s, zero_s,     # Tompkins sources
-            inp_dep_k,          # pnicex: read only by the nic_cirrus=2 branch
+            cirrus_pnicex_k,    # pnicex: read only by the nic_cirrus=2 branch
             zqp1tmp, zqsp1tmp,
             rho_k,
             zrid_k,             # prid: ECHAM zrid [m] (1511)
@@ -1036,8 +1143,8 @@ def cloud_microphysics_2m(
         es_water, es_ice, qsat_water, qsat_ice, dqsw_dt, dqsi_dt,
         subsat_wrt_ice, subsat_wrt_water, thermo_term_water,
         bergeron_eta, updraft_velocity, dynamic_viscosity, melt_mask,
-        activated_cdnc, n_inp, ice_nuclei_deposition, is_bottom_level,
-        lvdcp, lsdcp, freezing_levels,
+        activated_cdnc, n_inp, ice_nuclei_deposition, cirrus_aerosol_number,
+        is_bottom_level, lvdcp, lsdcp, freezing_levels,
     )
 
     zero_scalar = jnp.array(0.0, dtype=qc.dtype)
@@ -1563,13 +1670,29 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # ECHAM's contact + immersion rates in section 6.2; without it the
         # scheme uses its aerosol-free DeMott (2010) closure. ``ice_nuclei``
         # is an optional external INP number for that closure (no in-tree
-        # term publishes it). ``ice_nuclei_deposition`` reaches
-        # ``update_in_cloud_water`` as ECHAM's ``pnicex``, read only by the
-        # nic_cirrus=2 branch (#552).
+        # term publishes it).
+        #
+        # ``ice_nuclei_deposition`` is HAM's deposition-INP slot (#679): no
+        # in-tree term publishes it either, so it stays zero -- it is only
+        # READ by ``cloud_microphysics_2m`` when ``nic_cirrus != 2``, where
+        # it is unused anyway (today's default everywhere), so this is a
+        # dead read, not a live one.
+        #
+        # ``cirrus_aerosol_number`` (HAM's ``papnx``, from
+        # ``ham_cirrus_aerosol`` via :class:`IceNucleation`, published only
+        # for a population with ``cirrus_aerosol_modes`` set -- M7) is what
+        # the ``nic_cirrus=2`` branch actually reads for ECHAM's ``pnicex``
+        # (#552, jax-gcm#1017 task 2 part 2b): :func:`cloud_microphysics_2m`
+        # feeds it through :func:`jcm.physics.clouds.lohmann_2m.cirrus.
+        # xfrzmstr` itself, not a diagnostics passthrough like the two
+        # above.
         zeros_2d = jnp.zeros_like(state.temperature)
         ice_nuclei = diagnostics.get("ice_nuclei", zeros_2d)
         ice_nuclei_deposition = diagnostics.get(
             "ice_nuclei_deposition", zeros_2d
+        )
+        cirrus_aerosol_number = diagnostics.get(
+            "cirrus_aerosol_number", zeros_2d
         )
         freezing_aerosol = diagnostics.get("freezing_aerosol")
 
@@ -1598,7 +1721,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             cloud_microphysics_2m,
             in_axes=(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
                      None, None, 1, 1, 1, 1, 1, 1, 1, 1,
-                     None if freezing_aerosol is None else 1),
+                     None if freezing_aerosol is None else 1, 1),
             out_axes=(0,) * 20,
         )(
             anchor.temperature, anchor.specific_humidity, pressure_full,
@@ -1610,6 +1733,7 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             increment.tracers["qc"], increment.tracers["qi"],
             increment.tracers["qnc"], increment.tracers["qni"],
             inputs.detrained_qc, inputs.detrained_qi, freezing_aerosol,
+            cirrus_aerosol_number,
         )
 
         tendency = PhysicsTendency(

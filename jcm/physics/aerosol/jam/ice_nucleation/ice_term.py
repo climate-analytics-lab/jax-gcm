@@ -24,6 +24,7 @@ from jcm.physics.aerosol.jam.cloud_borne_store import tracer_view
 from jcm.physics.aerosol.jam.ice_nucleation.ham_freezing import (
     MAM4_FREEZING_CLASSES,
     HamFreezingClasses,
+    ham_cirrus_aerosol,
     ham_freezing_aerosol,
 )
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
@@ -126,7 +127,8 @@ class IceNucleation(PhysicsTerm):
                 masses[(sp, short)] = jnp.maximum(
                     tracer(mass_name(sp, short))
                     + tracer(mass_name(sp, short, cloud_borne=True)), 0.0)
-        number, wet_radius, activated = {}, {}, {}
+        cirrus_modes = spec.cirrus_aerosol_modes or ()
+        number, wet_radius, activated, cirrus_number = {}, {}, {}, {}
         for i, mode in enumerate(spec.modes):
             if not mode.soluble:
                 number[mode.short] = jnp.maximum(
@@ -138,10 +140,23 @@ class IceNucleation(PhysicsTerm):
             # the classes sum to ``activated_cdnc``.
             activated[mode.short] = (
                 act.number_frac[i] * jnp.maximum(aer.number[i], 0.0) * rho)
+            if mode.short in cirrus_modes:
+                # ham_cirrus_aerosol's pascs wants HAM's own post-step value
+                # (pxtm1 + pxtte*ztmst, mo_ham_freezing.f90:130) -- the SAME
+                # core post-step number ``activated`` above already uses, not
+                # the step-start interstitial tracer ``number`` (above) uses
+                # for the mixed-phase fractions (see ham_cirrus_aerosol's
+                # docstring).
+                cirrus_number[mode.short] = jnp.maximum(aer.number[i], 0.0)
 
         freezing = ham_freezing_aerosol(
             spec, classes, masses, number, activated, wet_radius, rho,
             diagnostics["activated_cdnc"],
         )
         tendency = PhysicsTendency.zeros(state.temperature.shape)
-        return tendency, {**diagnostics, "freezing_aerosol": freezing}
+        diagnostics = {**diagnostics, "freezing_aerosol": freezing}
+        if spec.cirrus_aerosol_modes is not None:
+            _pascs, papnx, _paprx = ham_cirrus_aerosol(
+                spec, cirrus_number, wet_radius[spec.accumulation_mode], rho)
+            diagnostics = {**diagnostics, "cirrus_aerosol_number": papnx}
+        return tendency, diagnostics
