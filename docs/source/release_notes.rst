@@ -1473,7 +1473,7 @@ The whole-model RCE testbed runs RRTMGP
   0.98 of the steps, column water steady to 0.05 mm/d, a clear lowest level. No public API changes; see
   :doc:`design/rce_testbed` for the configuration, the bounds and their
   provenance. The column is finite for the 200 days run under jax-rrtmgp
-  0.5.0 and is overcast (total cloud cover 1.0).
+  0.5.1 and is overcast (total cloud cover 1.0).
 
 Grey two-stream shortwave conserves energy
 """"""""""""""""""""""""""""""""""""""""""
@@ -2704,7 +2704,7 @@ Calibration and capability gaps
   the component split. See :doc:`design/aerosol_optics_diagnostics` and
   `issue #1030 <https://github.com/climate-analytics-lab/jax-gcm/issues/1030>`_.
 - **CAM6 SOA and sequential aerosol coupling.** Default JAM uses released
-  MAM4-JAX 0.5.0 with reversible fine-mode partitioning, aerosol wet/dry
+  MAM4-JAX 0.5.1 with reversible fine-mode partitioning, aerosol wet/dry
   removal, and CAM's ASTEM corrector, which conserves the organic budget
   during evaporation. The adaptive solve is forward-only. SOAG is included
   in HF emissions bundles rather than packaged in the wheel, and the

@@ -62,7 +62,7 @@ month, keeps every bulk field unchanged, and records SOAG source hashes,
 period and units in bundle metadata. JAM's existing automatic emission
 resolver reads both bulk and pre-speciated channels from this single file.
 The runtime snapshot is [the SOAG bundle commit](https://huggingface.co/datasets/climate-analytics-lab/jax-gcm-data/commit/a6a3d075cd8f32c9ade195dccf8630f0d9e5fb6c).
-MAM4-JAX is installed from PyPI as `mam4-jax==0.5.0`; no dependency SHA
+MAM4-JAX is installed from PyPI as `mam4-jax==0.5.1`; no dependency SHA
 or packaged SOAG inventory is required.
 
 ```bash
@@ -172,7 +172,7 @@ spun up for 185 days on `49c0724c`. Both arms start from the same donor and
 reset its clock to the stated calendar date. Dust emission parameters and the coarse
 mode width are fixed. The control is `35dc1997` with diagnostic-only additions
 for the separated dust dry sinks. The corrected production code is
-`102d936f`, with MAM4 production code `25924f0` (now released in 0.5.0) and the
+`102d936f`, with MAM4 production code `25924f0` (included in the 0.5.1 release source) and the
 2014 CAM6 inventory. These historical comparisons predate the default
 period-matched bundle update. Runs use native `jcm.main`, float32, and five-day health gates.
 The donors contain no SOA.
@@ -240,8 +240,10 @@ lifetime from window-mean burden and window-mean dry-plus-wet loss.
 ## Default-bundle validation
 
 A native five-day January run on `218a15d5` uses the new HF snapshot and
-MAM4-JAX 0.5.0, built from upstream main with the version metadata correction
-in [MAM4-JAX #83](https://github.com/reflective-org/MAM4-JAX/pull/83).
+a locally built MAM4-JAX wheel declaring 0.5.0. Its numerical source is
+identical to the 0.5.1 correction in
+[MAM4-JAX #82](https://github.com/reflective-org/MAM4-JAX/pull/82); only the
+version metadata differs.
 It uses the same January warm donor and `t63-jam-aod-5day`, with no physics,
 emissions-file or alignment overrides. Provenance records the pinned SOAG
 bundle snapshot, and the native health gate passes.

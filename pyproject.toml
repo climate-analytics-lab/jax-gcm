@@ -42,7 +42,7 @@ jcm = [
 mam4 = [
     # Exact, not a floor: the adapter imports submodule paths that upstream
     # excludes from its semver contract (#737).
-    "mam4-jax==0.5.0",
+    "mam4-jax==0.5.1",
 ]
 # jax-cosp satellite simulators (COSP v2 in JAX): CloudSat radar + warm-rain
 # diagnostics via the CloudsatCosp physics term. Apache-2.0.

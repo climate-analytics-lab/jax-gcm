@@ -65,7 +65,7 @@ See {doc}`../design/jam_carbon_aging`.
   oxidation is jcm-side).
 
 **Status & known limitations.** Every shipped ``echam-jam*`` configuration pins
-``jam_microphysics: mam4_jax_astem`` (requiring ``jcm[mam4]``, MAM4-JAX 0.5.0).
+``jam_microphysics: mam4_jax_astem`` (requiring ``jcm[mam4]``, MAM4-JAX 0.5.1).
 This conservative condensation solve is forward-only; the explicit
 ``mam4_jax`` backend retains fixed-substep differentiation support, with the
 warm-cell evaporation limitation described in {doc}`../design/jam_soa_dust`. The
