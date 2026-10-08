@@ -1109,20 +1109,30 @@ surface's soil heat tendency. Each value is now pinned to its operand's dtype.
 A fast test traces the ECHAM+JAM package under x64 with ``FutureWarning`` as an
 error. Results with x64 off are unchanged.
 
-JAM activation stays finite at extreme model-top temperatures
-"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+JAM activation and sulfur chemistry stay finite at extreme model-top temperatures
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
-The ARG activation evaluated its saturation vapour pressure (a Magnus fit) at
-any temperature. In float32 that value underflows near 80 K, the growth
-coefficient and ``gamma`` overflow, and the activated number and fraction come
-out NaN. The ``ma-t63-l47`` model top can reach about 70 K: 30-day windows of
-3.0.0rc1 started from the 49c0724c warm states develop a grid-scale temperature
-oscillation at 1-11 Pa over the Antarctic summer mesopause (70 K at 4 Pa beside
-315 K at 11 Pa). There the NaN activation entered the aerosol tracers through
-the cloud-borne exchange and wet deposition at the next step, and the whole
-state within the day. The saturation vapour pressure is now evaluated with the
-temperature held to CAM's saturation-table range, 127.16-375.16 K. Results are
-bit-identical wherever the temperature is inside that range.
+The ``ma-t63-l47`` model top can reach 50-70 K: 30-day windows of 3.0.0rc1
+started from the 49c0724c warm states develop a grid-scale temperature
+oscillation at 1-11 Pa over the Antarctic summer mesopause (70.6 K at 4 Pa
+beside 315 K at 11 Pa in one captured run, 48.6 K in another). Two JAM closed
+forms then returned NaN in float32, and the NaN reached every aerosol tracer
+through the cloud-borne exchange and wet deposition at the next step and the
+whole state within the day:
+
+- The ARG activation evaluated its saturation vapour pressure (a Magnus fit) at
+  any temperature. Below about 80 K that value underflows, the growth
+  coefficient and ``gamma`` overflow, and the activated number and fraction
+  were NaN. The saturation vapour pressure is now evaluated with the
+  temperature held to CAM's saturation-table range, 127.16-375.16 K; results
+  are bit-identical inside it.
+- The DMS+OH addition rate ``1.7e-42·exp(7810/T)·[O₂] / (1 + 5.5e-31·exp(7460/T)·[O₂])``
+  overflowed its two exponentials separately: 0 below about 84 K and inf/inf =
+  NaN near 50 K. It is now evaluated in log space, the same function to float32
+  rounding at every temperature.
+
+These remove the two non-finite producers found; the upper-level instability
+that drives the model top to those temperatures is not addressed here.
 
 Finite parameter gradients at degenerate inputs
 """""""""""""""""""""""""""""""""""""""""""""""
