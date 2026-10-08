@@ -500,3 +500,46 @@ class Mam4JaxModelTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DefaultCoreIsReverseDifferentiableTest(unittest.TestCase):
+    """The ``echam-jam`` physics group's default core supports ``jax.grad``.
+
+    #1052 made the adaptive ASTEM solve the default; its ``lax.while_loop``
+    with data-dependent bounds raises under reverse mode, so every
+    ``jax.grad`` through an ECHAM+JAM model raised. The default is the
+    fixed-substep core; ASTEM stays an explicit, forward-only choice.
+    """
+
+    def test_echam_jam_config_defaults_to_the_substep_core(self):
+        from pathlib import Path
+
+        import yaml
+
+        cfg = yaml.safe_load(Path(__file__).resolve().parents[4].joinpath(
+            "config/physics/echam-jam.yaml").read_text())
+        self.assertEqual(cfg["jam_microphysics"], "mam4_jax")
+
+    def test_default_core_takes_a_reverse_mode_gradient(self):
+        pytest.importorskip("mam4_jax")
+        from mam4_jax.coupling import amicphys as _amicphys
+
+        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        state, diagnostics = _column_state()
+        key = mass_name(MAM4_SPEC.modes[1].species[0], MAM4_SPEC.modes[1].short)
+        try:
+            term = Mam4JaxMicrophysics(n_substeps=4)   # the default backend
+
+            def loss(x):
+                tend, _ = term(state.copy(tracers={**state.tracers, key: x}),
+                               diagnostics, None, None)
+                return jnp.sum(tend.tracers[key])
+
+            g = jax.grad(loss)(state.tracers[key])   # raises on the ASTEM backend
+            self.assertEqual(np.shape(g), np.shape(state.tracers[key]))
+        finally:
+            _amicphys.configure_condensation(backend="substep")

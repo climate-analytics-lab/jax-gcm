@@ -2718,9 +2718,12 @@ Calibration and capability gaps
   the component split. See :doc:`design/aerosol_optics_diagnostics` and
   `issue #1030 <https://github.com/climate-analytics-lab/jax-gcm/issues/1030>`_.
 - **CAM6 SOA and sequential aerosol coupling.** Default JAM uses released
-  MAM4-JAX 0.5.1 with reversible fine-mode partitioning, aerosol wet/dry
-  removal, and CAM's ASTEM corrector, which conserves the organic budget
-  during evaporation. The adaptive solve is forward-only. SOAG is included
+  MAM4-JAX 0.5.1 with reversible fine-mode partitioning and aerosol wet/dry
+  removal on the fixed-substep core, which ``jax.grad`` differentiates;
+  ``physics.jam_microphysics=mam4_jax_astem`` selects CAM's ASTEM corrector,
+  which conserves the organic budget during evaporation but whose adaptive
+  solve is forward-only (the substep core's warm-cell closure gap is #1064).
+  SOAG is included
   in HF emissions bundles rather than packaged in the wheel, and the
   separate JAM+SOA configuration is removed. The official source already includes VOC yields and
   the CAM source multiplier; neither is applied again. Turbulent mixing and

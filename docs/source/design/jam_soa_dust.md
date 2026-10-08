@@ -14,13 +14,17 @@ transient primary-carbon coating subsequently transferred by ageing.
 Coarse-mode SOA uptake is disabled through a per-call core parameter:
 the MAM4-MOM box-model default includes that reservoir, but CAM6 does not.
 
-The default JAM configuration selects the Fortran ASTEM semi-implicit condensation backend.
-Its corrector conserves gas plus aerosol during both condensation and
-evaporation. A warm, aerosol-rich cell exposed a 1.27% organic excess in the
-fixed-substep backend: its frozen equilibrium flux can exhaust a modal
-reservoir, after which clipping the aerosol breaks the budget. The ASTEM
-choice avoids that defect; it has an adaptive loop and is unsuitable for
-reverse-mode differentiation through the condensation solve.
+The default JAM configuration runs the fixed-substep condensation backend
+(`mam4_jax`), the one reverse-mode differentiation goes through; CAM's
+Fortran ASTEM semi-implicit backend is selectable
+(`physics.jam_microphysics=mam4_jax_astem`). ASTEM's corrector conserves gas
+plus aerosol during both condensation and evaporation. A warm, aerosol-rich
+cell exposed a 1.27% organic excess in the fixed-substep backend: its frozen
+equilibrium flux can exhaust a modal reservoir, after which clipping the
+aerosol breaks the budget (#1064). ASTEM avoids that defect, but its adaptive
+loop (a `lax.while_loop` with data-dependent bounds) cannot be differentiated
+in reverse mode, so it is not the default of a model whose contract is
+`jax.grad`; the matched runs below were made with it.
 
 ## Emissions and reproduction
 
