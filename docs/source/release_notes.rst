@@ -1131,8 +1131,15 @@ whole state within the day:
   NaN near 50 K. It is now evaluated in log space, the same function to float32
   rounding at every temperature.
 
-These remove the two non-finite producers found; the upper-level instability
-that drives the model top to those temperatures is not addressed here.
+- The Sonntag (1990) fit held at ECHAM's 50 K table floor gives
+  ``es ≈ 6e-41 Pa``, a float32 denormal that XLA flushes to zero on GPU, so
+  the Sundqvist cover's ``q / qsat`` was inf or NaN at those columns. ``es``
+  and the ECHAM-form ``qsat`` are now held at the dtype's smallest normal
+  float; values above about 75 K are unchanged.
+
+These remove the three non-finite producers found; the upper-level
+instability that drives the model top to those temperatures (#1060) is not
+addressed here.
 
 Finite parameter gradients at degenerate inputs
 """""""""""""""""""""""""""""""""""""""""""""""
