@@ -106,6 +106,20 @@ def _ln_es(temperature, coefficients):
     return a1 / t + a2 + a3 * 0.01 * t + a4 * 1.0e-5 * t * t + a5 * jnp.log(t)
 
 
+def _finite_es(es):
+    """Hold ``es`` at the smallest normal float of its dtype.
+
+    At the bottom of ECHAM's table range the Sonntag fit gives
+    ``es(50 K) ≈ 6e-41 Pa``: a float32 denormal, which XLA on GPU flushes to
+    zero, so ``q / qsat`` is inf or NaN wherever the model top reaches such
+    temperatures (the 3.0.0rc1 mesopause cooling). ECHAM's double-precision
+    table carries the value; this floor (1.2e-38 Pa in float32) is the
+    float32-safe equivalent and changes nothing above ~75 K, where the fit is
+    already far above it.
+    """
+    return jnp.maximum(es, jnp.finfo(es.dtype).tiny)
+
+
 def _dln_es_dT(temperature, coefficients):
     a1, _, a3, a4, a5 = coefficients
     t = jnp.clip(temperature, ECHAM_TABLE_T_MIN, ECHAM_TABLE_T_MAX)
@@ -122,7 +136,7 @@ def es_water(temperature):
     ``tlucuaw``/``tlucuw``. Temperature [K] is clipped to ECHAM's table range
     [50, 400] K.
     """
-    return jnp.exp(_ln_es(temperature, WATER_COEFFICIENTS))
+    return _finite_es(jnp.exp(_ln_es(temperature, WATER_COEFFICIENTS)))
 
 
 def es_ice(temperature):
@@ -132,7 +146,7 @@ def es_ice(temperature):
     melting point, here evaluated at every temperature. Temperature [K] is
     clipped to ECHAM's table range [50, 400] K.
     """
-    return jnp.exp(_ln_es(temperature, ICE_COEFFICIENTS))
+    return _finite_es(jnp.exp(_ln_es(temperature, ICE_COEFFICIENTS)))
 
 
 def dlnes_dT_water(temperature):
@@ -191,6 +205,11 @@ def qsat_from_es(es, pressure):
     """
     x = jnp.minimum(es * (c.rd / c.rv) / jnp.maximum(pressure, _P_MIN),
                     _X_MAX)
+    # ``es·rd/rv/p`` can fall below the smallest normal float32 (``es`` is
+    # held at it, and ``rd/rv/p`` is far below one at the model top), and a
+    # zero ``qs`` makes every ``q / qs`` ratio downstream inf or NaN. Held at
+    # that float, as :func:`_finite_es` holds ``es``.
+    x = jnp.maximum(x, jnp.finfo(x.dtype).tiny)
     return x / (1.0 - c.vtmpc1 * x)
 
 

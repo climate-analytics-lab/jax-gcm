@@ -178,7 +178,11 @@ transport coefficients — water-vapour diffusivity
 ``Ka = (5.69 + 0.017·(T − 273 K))·4.186e-3`` W m⁻¹ K⁻¹ (Pruppacher & Klett 13.3,
 13.18) — and the Kelvin coefficient is CAM's fixed ``aten`` (surface tension
 0.076 N m⁻¹ at 273 K), so every mode's critical supersaturation is
-level-independent. Two shape-coefficient variants are selectable: every shipped ``echam-jam*``
+level-independent. The saturation vapour pressure in the growth coefficient
+is evaluated with the temperature held to CAM's saturation-table range,
+127.16-375.16 K (``wv_saturation.F90`` ``tmin``/``tmax``): no liquid-water
+activation happens outside it, and below about 80 K the float32 Magnus value
+underflows and the closed form returns NaN. Two shape-coefficient variants are selectable: every shipped ``echam-jam*``
 configuration pins ``ghosh2025`` (the revised coefficients); ``arg2000`` (the
 original paper's) is the bare-factory default.
 (``jcm/physics/aerosol/jam/activation/arg.py``, ``arg_term.py``.)

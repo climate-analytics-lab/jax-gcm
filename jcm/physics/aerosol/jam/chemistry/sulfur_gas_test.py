@@ -1,5 +1,6 @@
 """Phase 2 tests: gas-phase sulfur chemistry (DMS/SO2 -> SO2/H2SO4) (#496)."""
 
+import math
 import unittest
 
 import jax
@@ -35,6 +36,30 @@ class RateConstantTest(unittest.TestCase):
         t = 280.0
         k1, _ = _k_dms_oh(jnp.asarray(t), jnp.asarray(2.3e19))
         self.assertAlmostEqual(float(k1), 9.6e-12 * np.exp(-234.0 / t), places=18)
+
+
+class RateConstantExtremeColdTest(unittest.TestCase):
+    """The DMS+OH addition rate is the published expression at any T.
+
+    The ``ma-t63-l47`` model top has reached 48.6 K at 4 Pa (a captured
+    3.0.0rc1 run): there the float32 quotient was inf/inf = NaN, and 0 from
+    about 84 K down to 50 K.
+    """
+
+    def test_addition_rate_finite_and_matches_float64_reference(self):
+        lo2 = math.log(0.21)
+        for T in (300.0, 220.0, 120.0, 84.0, 70.0, 48.6, 30.0):
+            n_air = 4.0 / (1.380649e-23 * T) * 1.0e-6     # 4 Pa [molec/cm³]
+            _, k2 = _k_dms_oh(jnp.asarray(T, jnp.float32),
+                              jnp.asarray(n_air, jnp.float32))
+            k2 = float(k2)
+            self.assertTrue(np.isfinite(k2), f"k2 non-finite at {T} K")
+            # float64 reference of the same expression, in log space.
+            num = math.log(1.7e-42) + 7810.0 / T + lo2 + math.log(n_air)
+            den = math.log1p(math.exp(math.log(5.5e-31) + 7460.0 / T + lo2
+                                      + math.log(n_air))) if T > 60.0 else (
+                math.log(5.5e-31) + 7460.0 / T + lo2 + math.log(n_air))
+            np.testing.assert_allclose(k2, math.exp(num - den), rtol=2e-4)
 
 
 class SulfurGasTendencyTest(unittest.TestCase):
