@@ -90,8 +90,8 @@ def _saturation_vapor_pressure(temperature: jnp.ndarray) -> jnp.ndarray:
     ``t_c`` in °C (here ``t_c + 243.12 = T − 30.03`` for ``T`` in K). The
     three numbers are the standard empirical Magnus fit, not derivable from
     fundamental constants. The temperature is held to CAM's saturation-table
-    range ``[_ES_T_MIN, _ES_T_MAX]``; no liquid-water activation happens
-    outside it, and below it the float32 ``es`` underflows.
+    range ``[_ES_T_MIN, _ES_T_MAX]``: below it the float32 ``es`` underflows,
+    and :func:`arg_activation` masks its activation to zero there.
     """
     t = jnp.clip(temperature, _ES_T_MIN, _ES_T_MAX)
     t_c = t - 273.15
@@ -240,6 +240,16 @@ def arg_activation(
     u = (2.0 * jnp.log(sm / s_max)) / (3.0 * jnp.sqrt(2.0) * ln_sigma)
     f_act = 0.5 * (1.0 - erf(u))
     f_mass = 0.5 * (1.0 - erf(u - 3.0 * ln_sigma / jnp.sqrt(2.0)))
+    # No liquid-water activation below the saturation table's floor: the
+    # Köhler problem has no liquid solution there (homogeneous freezing is
+    # ~100 K warmer), and the clamped ``es`` alone would still hand the
+    # cloud-borne exchange a large activated fraction for a 50 K mesopause
+    # cell. Zero number and mass activation, and their fractions, below
+    # ``_ES_T_MIN``; ``s_max`` stays the finite clamped-table value. Above
+    # the floor nothing changes.
+    liquid = (temperature >= _ES_T_MIN).astype(f_act.dtype)[None]
+    f_act = f_act * liquid
+    f_mass = f_mass * liquid
     n_act = jnp.sum(can_activate * number_vol * f_act, axis=0)
 
     n_total = jnp.sum(can_activate * number_vol, axis=0)

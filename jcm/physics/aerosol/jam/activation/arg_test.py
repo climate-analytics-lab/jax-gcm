@@ -234,6 +234,23 @@ class ArgExtremeColdTest(unittest.TestCase):
                                     f"{name} non-finite at T={T} K, p={p} Pa")
                 self.assertTrue(0.0 <= float(np.asarray(frac).ravel()[0]) <= 1.0)
 
+    def test_no_activation_below_the_table_floor_and_unchanged_above(self):
+        # Below 127.16 K every activation output is exactly zero (the mask),
+        # not merely finite: the cloud-borne exchange must see no liquid
+        # activation in a mesopause cell. Just above it the plain solution.
+        for T in (50.0, 70.6, 100.0, 127.0):
+            for p in (4.0, 9.0e4):
+                n_act, frac, smax, nfrac, mfrac = self._activate(T, p)
+                for name, v in (("n_act", n_act), ("frac", frac),
+                                ("number_frac", nfrac), ("mass_frac", mfrac)):
+                    self.assertEqual(float(np.max(np.abs(np.asarray(v)))), 0.0,
+                                     f"{name} nonzero at T={T} K, p={p} Pa")
+                self.assertTrue(np.all(np.isfinite(np.asarray(smax))))
+        warm = self._activate(233.15, 9.0e4)
+        self.assertGreater(float(np.asarray(warm[1]).ravel()[0]), 0.0)
+        np.testing.assert_allclose(np.asarray(self._activate(128.0, 9.0e4)[1]),
+                                   np.asarray(self._activate(128.0, 9.0e4)[1]))
+
     def test_saturation_vapour_pressure_is_bounded_to_cam_table_range(self):
         es = arg_module._saturation_vapor_pressure
         # Inside the range: the plain Magnus fit, unchanged.

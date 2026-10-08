@@ -1124,8 +1124,9 @@ whole state within the day:
   any temperature. Below about 80 K that value underflows, the growth
   coefficient and ``gamma`` overflow, and the activated number and fraction
   were NaN. The saturation vapour pressure is now evaluated with the
-  temperature held to CAM's saturation-table range, 127.16-375.16 K; results
-  are bit-identical inside it.
+  temperature held to CAM's saturation-table range, 127.16-375.16 K, and the
+  activated number, mass and fractions are zero below that floor (no liquid
+  solution exists there); results are bit-identical inside the range.
 - The DMS+OH addition rate ``1.7e-42·exp(7810/T)·[O₂] / (1 + 5.5e-31·exp(7460/T)·[O₂])``
   overflowed its two exponentials separately: 0 below about 84 K and inf/inf =
   NaN near 50 K. It is now evaluated in log space, the same function to float32
