@@ -546,6 +546,8 @@ def stage_era5() -> None:
 
 
 def stage_ozone() -> None:
+    import xarray as xr
+
     from jcm.data.bc.interpolate_ozone import interpolate_ozone
     from jcm.data.mirror.ozone import load_pd, load_pi, regrid_climatology
     from jcm.data.regridding import gaussian_latlon
@@ -564,6 +566,18 @@ def stage_ozone() -> None:
                     plev, out / f"ozone_fzj_cmip7_{era}_{grid}_l{nlev}.nc",
                     nlev)
             print("ozone:", era, grid, flush=True)
+    # The packaged jcm/data/bc/t63/ozone.nc (what ``forcing.ozone_file: auto``
+    # resolves at T63L47, offline) is the zonal mean of the PD T63 L47 file.
+    pd_l47 = out / "ozone_fzj_cmip7_pd2005-2014_t63_l47.nc"
+    if pd_l47.exists():
+        from jcm.data.mirror.ozone import zonal_mean_climatology
+        with xr.open_dataset(pd_l47) as ds:
+            zm = zonal_mean_climatology(ds.load(), str(pd_l47))
+        zm.to_netcdf(out / "packaged_t63_ozone.nc",
+                     encoding={"O3": {"zlib": True, "complevel": 9,
+                                      "shuffle": True}})
+        print("ozone: packaged t63 zonal mean -> copy to "
+              "jcm/data/bc/t63/ozone.nc", flush=True)
 
 
 def stage_emissions() -> None:

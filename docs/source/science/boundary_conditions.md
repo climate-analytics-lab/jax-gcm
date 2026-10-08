@@ -45,11 +45,26 @@ in ``jcm/data/input_resolution.py``, driven by the Hydra ``forcing`` group
   slowly-evolving-species behaviour, not linear extrapolation — and a
   ``strict`` run is refused.
 - **Ozone auto-resolve.** ``forcing.ozone_file: auto`` (the shipped default)
-  resolves a packaged CMIP6 ozone climatology matching the grid; no match degrades
-  to the analytic profile with a warning; an explicit path loads strictly (grid
-  lat/lon passed so flipped/shifted grids are caught); ``null`` silently disables
-  it (analytic fallback). The grid-aware loader is
+  resolves a packaged ozone climatology matching the grid, else the data
+  mirror's level-matched ``bundles/<grid>_l<nlev>/ozone_pd.nc``; on a hybrid grid
+  with neither it raises, and on a sigma grid it degrades to the analytic
+  profile with a warning; an explicit path loads strictly (grid lat/lon passed
+  so flipped/shifted grids are caught); ``analytic`` takes the analytic profile
+  deliberately. The grid-aware loader is
   ``jcm/ozone_climatology.py::OzoneClimatology``.
+- **One present-day ozone source, through the lid.** Every ``ozone_pd``
+  product is the FZJ CMIP7 2005–2014 climatology (FZJ-CMIP-ozone-1-0,
+  input4MIPs; ``jcm/data/mirror/ozone.py``), whose 66 levels reach 0.01 Pa,
+  log-pressure interpolated to the model levels. The packaged
+  ``jcm/data/bc/t63/ozone.nc`` that ``auto`` resolves at T63L47 is its zonal
+  mean (``zonal_mean_climatology``; under 1 MB against ~25 MB for the full
+  field), so the 1M/2M/RRTMGP members and the ``ma-*`` presets, which name
+  the full-field bundle, carry the same profile, including the decline from
+  ~7 ppmv near 1 hPa to ~0.2 ppmv at the 1 Pa lid. ``interpolate_ozone``
+  refuses a source whose top level lies below the model's top level
+  (``allow_top_clamp`` overrides): holding a stratospheric value up to the
+  lid puts some forty times the mesospheric ozone there, and its heating holds
+  the summer mesopause about 60 K too warm.
 
 **What ECHAM/CAM does.** The standard prescribed-AMIP protocol: PCMDI-AMIP
 mid-month SST/sea-ice boundary values, a CMIP6 ozone climatology, global-mean GHG
@@ -144,6 +159,10 @@ a simplification suited to slowly-evolving species.
 - ``jcm/data/input_resolution.py`` — the typed input-resolution engine
   (``resolve_input``, ``resolve_packaged``, ``expand_yearly_files``).
 - ``jcm/ozone_climatology.py`` — ``OzoneClimatology`` (grid-aware loader).
+- ``jcm/data/mirror/ozone.py`` — the FZJ CMIP7 ozone sources and
+  ``zonal_mean_climatology`` (the packaged T63L47 copy);
+  ``jcm/data/bc/interpolate_ozone.py`` — the model-level interpolation and its
+  top guard.
 - ``jcm/config/forcing/{default,from_file,amip,era5}.yaml``.
 - ``jcm/data/mirror/dust.py`` — ``build_dust_product`` (the five dust bundles).
 - Data provenance and the mirror: {doc}`../design/data_mirror`.
@@ -151,6 +170,8 @@ a simplification suited to slowly-evolving species.
 **Validation evidence.** ``jcm/forcing_test.py`` (incl. year-expansion / start-date
 cases), ``jcm/physics/forcing/echam_boundary_conditions_test.py``,
 ``jcm/data/input_resolution_test.py`` (per-product coverage and auto resolution),
+``jcm/data/bc/interpolate_ozone_test.py`` (the top guard and the packaged
+profile),
 ``TestDatedInputPersistence`` in ``jcm/forcing_test.py`` (every dated input ×
 strict/hold) and the entry-point matrix in
 ``jcm/physics/surface/surface_exchange_test.py``.

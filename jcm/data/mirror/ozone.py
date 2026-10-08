@@ -54,3 +54,39 @@ def regrid_climatology(da: xr.DataArray, lats: np.ndarray,
     ds.plev.attrs["units"] = "Pa"
     ds.attrs["source"] = "FZJ-CMIP-ozone-1-0 (input4MIPs CMIP7)"
     return ds
+
+
+def zonal_mean_climatology(ds: xr.Dataset, source: str) -> xr.Dataset:
+    """Zonal-mean copy of a model-level ozone climatology, broadcast in lon.
+
+    This is how the packaged ``jcm/data/bc/t63/ozone.nc`` (the file
+    ``forcing.ozone_file: auto`` resolves at T63L47) is built from the
+    mirror's ``bundles/t63_l47/ozone_pd.nc``: the same FZJ CMIP7 2005-2014
+    climatology on the same ECHAM L47 levels, averaged over longitude so the
+    packaged copy compresses to under 1 MB (the full field is ~25 MB). The
+    longitudinal structure it drops is the climatology's zonal asymmetry; the
+    vertical profile, including the decline through the mesosphere to the
+    1 Pa lid, is the bundle's.
+
+    Args:
+        ds: A ``jcm.data.bc.interpolate_ozone`` output — ``O3`` on
+            ``(time, level, lat, lon)`` plus the level-pressure variables.
+        source: Provenance string recorded in the ``source_file`` attribute.
+
+    Returns:
+        The dataset with ``O3`` replaced by its zonal mean, broadcast back to
+        every longitude, and the history extended.
+
+    """
+    zm = ds["O3"].mean("lon").broadcast_like(ds["O3"]).transpose(*ds["O3"].dims)
+    out = ds.copy()
+    out["O3"] = zm.astype(ds["O3"].dtype)
+    out["O3"].attrs = dict(ds["O3"].attrs)
+    out.attrs = {
+        **ds.attrs,
+        "history": (ds.attrs.get("history", "") + " Zonal mean broadcast to "
+                    "every longitude by jcm.data.mirror.ozone."
+                    "zonal_mean_climatology for the packaged copy."),
+        "source_file": source,
+    }
+    return out
