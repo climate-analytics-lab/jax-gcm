@@ -19,6 +19,7 @@ otherwise use.
 
 from __future__ import annotations
 
+import os
 import warnings
 from typing import TYPE_CHECKING, Any, Mapping
 
@@ -205,7 +206,14 @@ def echam_physics(
     jam_microphysics: str = "placeholder",
     jam_cloud_borne: bool = True,
     jam_optics: bool = True,
+    jam_optics_backend: str = "jcm",
+    jam_optics_tables_dir: str | os.PathLike | None = None,
+    jam_seasalt_scheme: str = "gong",
+    jam_wetdep_scheme: str = "jcm",
+    jam_nucleation_activation: str | None = None,
     jam_arg_variant: str = "arg2000",
+    jam_activation_scheme: str = "arg",
+    jam_nactivpdf: int = 0,
     jam_aqueous_scheme: str = "full",
     jam_dust_preset: int = 4,
     jam_dust_nudged: bool = False,
@@ -407,7 +415,11 @@ def echam_physics(
             the SPA floor. The online aerosol *direct radiative* effect that
             would let JAM fully replace MACv2-SP optics is tracked in #495.
         jam_microphysics: JAM core when ``aerosol_module="jam"`` —
-            ``"placeholder"`` (κ-Köhler equilibrium) today; MAM4-JAX is #490.
+            ``"placeholder"`` (κ-Köhler equilibrium on the MAM4 population,
+            default) today; ``"mam4_jax"`` is #490 (optional ``jcm[mam4]``
+            extra). ``"m7_placeholder"`` is the same κ-Köhler core on the M7
+            population instead (the ``echam-ham-m7`` preset's chain-test
+            vehicle, #1017) — the real M7 core adapter is a later task.
         jam_cloud_borne: prognose the explicit cloud-borne aerosol phase
             (#602). ``True`` (default) cycles the ``mc_*``/``nc_*`` phase
             in the physics carry (activation transfer, resuspension,
@@ -419,7 +431,49 @@ def echam_physics(
             reads. ``False`` keeps MACv2-SP optics (cheaper; also makes
             the JAM aerosol radiatively passive, which controlled A/B
             experiments rely on).
+        jam_optics_backend: ``jam_aerosol_physics``'s ``optics_backend`` --
+            ``"jcm"`` (default) or ``"ham_lut"`` (ECHAM-HAM M7's own
+            Mie-table lookup, #1017). Ignored when ``jam_optics=False``.
+        jam_optics_tables_dir: directory holding HAM's authentic
+            ``lut_optical_properties_M7.nc``/``lut_optical_properties_lw_
+            M7.nc`` for ``jam_optics_backend="ham_lut"``. ``None`` (default)
+            reads the ``HAM_INPUT_DIR`` environment variable instead;
+            ignored for ``jam_optics_backend="jcm"``.
+        jam_seasalt_scheme: ``"gong"`` (default, unchanged) or ``"long"``
+            (Long et al. 2011 + the Sofiev et al. 2011 SST correction, HAM
+            ``nseasalt=7``; #1017) — passed through to
+            :func:`~jcm.physics.aerosol.jam.jam_terms.jam_aerosol_physics`'s
+            ``seasalt_scheme``. ``"long"`` requires ``jam_microphysics``'s
+            population to carry exactly two ``ss`` classes (HAM's own
+            accumulation-then-coarse split); the default MAM4 population
+            carries three (it also has an Aitken-mode sea salt tracer, which
+            HAM's M7 configuration does not) and so is rejected with
+            ``"long"``.
+        jam_wetdep_scheme: ``jam_aerosol_physics``'s ``wetdep_scheme`` --
+            ``"jcm"`` (default), ``"ham_below_cloud"`` (ECHAM-HAM's own
+            below-cloud Croft tables only, #1017 -- a deliberately narrower
+            ablation configuration) or ``"ham"`` (the FULL ``nwetdep=3``
+            scheme: below-cloud plus both in-cloud pathways, stratiform
+            nucleation and impaction). ``"ham_below_cloud"``/``"ham"``
+            require ``cloud_scheme="2m"`` (enforced below) and turn on the
+            2M scheme's ``"precip_cover"``/``"pfrain"``/``"pfsnow"``
+            diagnostics they read; ``"ham"`` additionally turns on
+            ``"reffl"``/``"reffi"`` for ``ic_scav_imp``.
+        jam_nucleation_activation: only consulted for ``jam_wetdep_scheme=
+            "ham"`` -- ``"ham_arg"`` or ``"ham_lin_leaitch"``, forwarded to
+            ``jam_aerosol_physics``'s ``nucleation_activation``. ``None``
+            (default) derives it from ``jam_activation_scheme`` below; an
+            explicit value must match it (see ``jam_aerosol_physics``'s
+            ``nucleation_activation`` Args entry for why -- ``ic_scav_nuc``
+            reads whichever activation term ``jam_activation_scheme``
+            actually composed).
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
+        jam_activation_scheme: ``jam_aerosol_physics``'s ``activation_scheme``
+            -- ``"arg"`` (default), ``"ham_arg"`` or ``"ham_lin_leaitch"``
+            (#1017). An ``activation`` mapping applies to the chosen scheme's
+            Parameters class.
+        jam_nactivpdf: ``jam_aerosol_physics``'s ``nactivpdf`` (HAM's updraft
+            PDF switch, ``"ham_arg"`` only; default 0).
         jam_dust_preset: HAMMOZ ``ndust`` preset for the Tegen dust scheme —
             4 (default, HAM2: Stier 2005 + East-Asian soils), 3 (Stier 2005)
             or 2 (Cheng 2008). The resolution-dependent regional tuning vector
@@ -713,13 +767,17 @@ def echam_physics(
     if aerosol_module == "jam":
         # Imported here, not at module scope: the JAM package is only worth
         # loading for a JAM composition (as ``jam_aerosol_physics`` below).
-        from jcm.physics.aerosol.jam.jam_terms import JAM_PARAMETER_CLASSES
+        from jcm.physics.aerosol.jam.jam_terms import (
+            JAM_PARAMETER_CLASSES, activation_parameter_class)
+        _jam_classes = {**JAM_PARAMETER_CLASSES,
+                        "activation": activation_parameter_class(
+                            jam_activation_scheme)}
         # A mapping is applied on the class default (the JAM schemes have no
         # factory choice of their own to keep); an object is used as given and
         # ``None`` leaves the scheme to build its default.
         jam_p = {
             name: (with_field_overrides(
-                       JAM_PARAMETER_CLASSES[name].default(), value,
+                       _jam_classes[name].default(), value,
                        scheme=name)
                    if isinstance(value, Mapping) else value)
             for name, value in _jam_args.items()}
@@ -830,6 +888,13 @@ def echam_physics(
     # 1-SW/0-LW aerosol layout fails its band-count check at first compute.
     band_config = RadiationBandConfig.for_terms([rad_term])
 
+    if jam_wetdep_scheme in ("ham_below_cloud", "ham") and cloud_scheme != "2m":
+        raise ValueError(
+            f"jam_wetdep_scheme={jam_wetdep_scheme!r} requires cloud_scheme="
+            "'2m' (it reads the 2M scheme's 'precip_cover'/'pfrain'/'pfsnow' "
+            "diagnostics; the 1M scheme does not compute them), got "
+            f"cloud_scheme={cloud_scheme!r}."
+        )
     if cloud_scheme == "1m":
         micro_term = Echam1MMicrophysics(
             params=microphysics_p,
@@ -849,6 +914,14 @@ def echam_physics(
             aerosol_p.spa_exponent,
             aerosol_p.spa_cap_smoothing,
         )
+        # HAM's below-cloud wetdep pathway needs three per-level
+        # hydrological inputs only the 2M scheme computes: the
+        # precipitating-area fraction (ECHAM's pclc/zclcpre) and the
+        # in-cloud pre-evaporation rain/snow flux (zfrain/zfsnow); see
+        # WetScavenging's "ham_below_cloud" scheme and
+        # Lohmann2MMicrophysics.configure_wetdep_hydro_diagnostics.
+        if jam_wetdep_scheme in ("ham_below_cloud", "ham"):
+            micro_term.configure_wetdep_hydro_diagnostics(True)
     else:
         raise ValueError(
             f"Unknown cloud_scheme={cloud_scheme!r}. Choose '1m' or '2m'."
@@ -899,8 +972,14 @@ def echam_physics(
         from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
         jam_terms = jam_aerosol_physics(
             microphysics=jam_microphysics, cloud_borne=jam_cloud_borne,
-            optics=jam_optics,
+            optics=jam_optics, optics_backend=jam_optics_backend,
+            ham_optics_tables_dir=jam_optics_tables_dir,
+            seasalt_scheme=jam_seasalt_scheme,
+            wetdep_scheme=jam_wetdep_scheme,
+            nucleation_activation=jam_nucleation_activation,
             arg_variant=jam_arg_variant,
+            activation_scheme=jam_activation_scheme,
+            nactivpdf=jam_nactivpdf,
             aqueous_scheme=jam_aqueous_scheme,
             dust_preset=jam_dust_preset,
             dust_nudged=jam_dust_nudged,

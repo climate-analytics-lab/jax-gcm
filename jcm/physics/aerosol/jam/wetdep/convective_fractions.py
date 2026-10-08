@@ -31,8 +31,15 @@ insoluble dust classes AI/CI would give 0.40.
 
 from __future__ import annotations
 
+from typing import Union
+
+from jcm.physics.aerosol.jam.population import AerosolMode
+
 #: Convective in-droplet fraction per JAM mode name, from HAMMOZ's
 #: ``csr_conv`` of the corresponding M7 class (see the module docstring).
+#: Only consulted for a mode whose own ``csr_conv`` is unset (every MAM4
+#: mode); M7 modes carry HAM's value directly (``AerosolMode.csr_conv``,
+#: set in ``microphysics/m7_data.py``) and never reach this table.
 HAM_CSR_CONV: dict[str, tuple[str, float]] = {
     "accum": ("AS", 0.99),
     "coarse": ("CS", 0.99),
@@ -41,12 +48,25 @@ HAM_CSR_CONV: dict[str, tuple[str, float]] = {
 }
 
 
-def convective_csr(mode_name: str) -> float:
-    """Return HAMMOZ's convective in-droplet fraction for a JAM mode."""
+def convective_csr(mode: Union[AerosolMode, str]) -> float:
+    """Return the convective in-droplet fraction for a JAM mode/class.
+
+    ``mode`` may be the :class:`AerosolMode` itself — in which case its own
+    ``csr_conv`` wins when set (HAM's native M7 value) — or a bare mode name,
+    which always resolves through the MAM4-specific :data:`HAM_CSR_CONV`
+    table (today's behaviour, unchanged).
+    """
+    if isinstance(mode, AerosolMode):
+        if mode.csr_conv is not None:
+            return mode.csr_conv
+        name = mode.name
+    else:
+        name = mode
     try:
-        return HAM_CSR_CONV[mode_name][1]
+        return HAM_CSR_CONV[name][1]
     except KeyError:
         raise KeyError(
-            f"No HAMMOZ csr_conv mapping for JAM mode {mode_name!r}; add it "
-            "to HAM_CSR_CONV with the M7 class it corresponds to."
+            f"No HAMMOZ csr_conv mapping for JAM mode {name!r}; add it "
+            "to HAM_CSR_CONV with the M7 class it corresponds to, or set "
+            "AerosolMode.csr_conv directly on the population."
         ) from None

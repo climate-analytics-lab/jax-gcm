@@ -149,11 +149,55 @@ number field carries.
 in-repo pathway has no core–shell treatment of black carbon, so BC's imaginary
 index is smeared over the whole particle by the volume mixing rule above. An
 alternative bulk-optics pathway — a core–shell treatment, or a neural emulator
-of the mode integral — is supplied out-of-tree against the per-mode seam in
-{doc}`../design/jam_optics_mode_seam`, which is why no second Mie pathway is
-carried here. Per-species optics are an apportionment of the mixed mode's
-extinction, not a decomposition — see
-{doc}`../design/aerosol_optics_diagnostics`.
+of the mode integral — can be supplied out-of-tree against the per-mode seam
+in {doc}`../design/jam_optics_mode_seam`; the volume mixing, size integral and
+AeroCom apportionment above apply to any such pathway unchanged, since the
+seam delegates only the mode-integrated optical question itself. Per-species
+optics are an apportionment of the mixed mode's extinction, not a
+decomposition — see {doc}`../design/aerosol_optics_diagnostics`.
+
+**HAM's own Mie-table pathway (`HamLutOpticsTerm`, #1017).** A second,
+in-tree backend against the same seam: rather than the 8-node Gauss–Hermite
+quadrature above, it reproduces ECHAM-HAM's own `ham_rad_fitplus`
+(`mo_ham_rad.f90:1264-1419`) — a **nearest-neighbour** read (no
+interpolation; HAM's own `loint=.FALSE.`) of a table of Qext·x²/(4π) (SW) or
+Qabs·x²/(4π) (LW — HAM's own LW tables hold **absorption**, matching
+ECHAM's non-scattering LW solver, not extinction; see
+`ham_mie_tables.py`'s module docstring) pre-integrated over the lognormal at
+HAM's own σ_g (1.59 fine, 2.0 coarse), real refractive index and imaginary
+refractive index, selected by whichever of HAM's two σ_g a mode's own
+`geom_std_dev` is nearer to. `HamLutOpticsTerm` prefers HAM's authentic
+`lut_optical_properties_M7.nc` / `lut_optical_properties_lw_M7.nc`, loaded
+at construction (`ham_mie_tables.py::load_ham_mie_tables`, from
+`ham_optics_tables_dir`/`jam_optics_tables_dir` or, by default, the
+`HAM_INPUT_DIR` environment variable), and FALLS BACK to a built
+approximation (`ham_mie_tables.py::default_ham_mie_tables`, this
+repository's own Bohren–Huffman kernel, `optics/mie.py`, on HAM's own axes
+— `mo_ham_rad_data.f90:95-102,420-433` — via the same 8-node Gauss–Hermite
+lognormal quadrature `JamOpticsTerm`'s default backend runs per mode per
+step, evaluated once per table point instead) when the authentic files are
+not reachable: the real tables are a nice-to-have, not a hard requirement,
+for a term that otherwise runs identically either way. Which table source
+was actually used is logged once at construction and recorded on the
+instance (`term.table_source`: `"authentic"`, `"jcm_built"` or
+`"explicit"` for a test-injected table). The built approximation's LW
+tables compute absorption directly (an earlier version computed
+extinction instead and so overstated LW aerosol optical depth by orders of
+magnitude wherever scattering dominates); even after that fix the built
+tables disagree with the authentic ones at a level documented and measured
+in `ham_mie_tables.py`'s and `ham_mie_tables_test.py`'s own docstrings
+(`test_built_tables_vs_authentic_measured_tolerance`) — numerics from a
+different Mie code and quadrature, not a definitional mismatch (the
+small-x corner of every table agrees to ~1e-6 either way). The nucleation
+mode carries no optics (HAM's `nrad(1)=0`, `mo_ham.f90:583-585`) — gated on
+the population's own `ModalAerosolSpec.nucleation_mode` identity (M7's
+`"ns"`), not on mode index 0: MAM4 has no nucleation mode at all (its own
+mode 0 is accumulation) and leaves `nucleation_mode` unset, so this gate
+never fires for it. Selected
+via `jam_aerosol_physics(optics_backend="ham_lut")` /
+`echam_physics(jam_optics_backend="ham_lut")` — the one in-tree exception to
+the seam's "no registry" design, see
+{doc}`../design/jam_optics_mode_seam`.
 
 The default optics now preserve the mass response on a mode whose ``dg``
 sits on a size bound (#823): at fixed geometry and composition, doubling
@@ -543,13 +587,24 @@ cancels and its below-cloud term acts on the grid mean.
 differentiable jittable forms. Gong sea salt is computed **online** from the 10 m
 wind and open-water fraction, so it needs no input file; DMS reads a prescribed
 seawater-concentration field and dust the five prescribed soil/source fields
-below, and both are inert until those are supplied. Anthropogenic emissions are either bulk
+below, and both are inert until those are supplied. A second sea-salt scheme,
+Long et al. (2011) with the Sofiev et al. (2011) SST correction (HAM
+``nseasalt=7``), is selectable with ``jam_seasalt_scheme="long"``
+(``echam_physics``) / ``seasalt_scheme="long"`` (``jam_aerosol_physics``); unlike
+Gong, its source function does not factorise into wind-only per-class constants
+(the SST correction's shape varies with particle size), so it is evaluated per
+bin against the actual SST field (``forcing.sea_surface_temperature``) every
+call, and it ports HAM's own fixed two-class (accumulation, coarse) AS/CS split
+rather than Gong's population-size-range partition — it therefore requires the
+population's ``ss`` species to carry exactly two classes in that order (MAM4's
+three, including an Aitken-mode sea-salt tracer HAM's M7 configuration does not
+have, do not qualify). Anthropogenic emissions are either bulk
 super-sectors with in-model differentiable speciation or CAM6/MAM4-faithful
 already-speciated per-tracer fields. Dry deposition
 (``jcm/physics/aerosol/jam/drydep/``) is a resistance-in-series scheme with a
 Slinn & Slinn (1980) sub-layer resistance; sedimentation
 (``sedimentation/``) is per-moment Stokes settling with Cunningham slip; wet
-scavenging (``wetdep/``) is in-cloud nucleation + below-cloud impaction + a
+scavenging (``jcm/physics/aerosol/jam/wetdep/``) is in-cloud nucleation + below-cloud impaction + a
 **re-evaporation re-injection ledger** that returns carried aerosol to the
 interstitial phase where precip evaporates, and it deliberately excludes the
 sedimenting cloud-ice flux from the in-cloud carrier flux.
@@ -605,7 +660,8 @@ re-evaporation ledger).
 - ``jcm/physics/aerosol/jam/cloud_borne_store.py``, ``cloud_borne.py``.
 - ``jcm/physics/convection/tracer_transport.py`` — ``ConvectiveTracerTransport``.
 - ``jcm/physics/aerosol/jam/emissions/`` (seasalt, dms, dust, anthropogenic,
-  prescribed); ``drydep/``; ``sedimentation/``; ``wetdep/``; ``ice_nucleation/``;
+  prescribed); ``drydep/``; ``sedimentation/``;
+  ``jcm/physics/aerosol/jam/wetdep/``; ``ice_nucleation/``;
   ``optics/optics_term.py``.
 
 #### Sea-salt and DMS emission wind
@@ -976,13 +1032,11 @@ Avogadro's number and its separately-rounded ``xtoc``/``ctox`` factor
 mass (``_MW_SO2 = 64.0643``, ``mo_ham.f90:310``). All five are now
 ``_aqueous_so4``'s own module constants at r7492's values — a **deliberate
 change to the ``echam-jam``/MAM4 default path** (maintainer decision
-2026-10-06), not an optional override, since no second (M7) population
-exists on this branch to carry one. SO₄'s own molar mass stays jcm's MAM4-
-MOM value (115 g/mol, ``_MW_SO4``) — a jcm species-table choice, not a HAM
-literal, and outside jax-gcm#1031's scope — but is kept as a function
-parameter (``mw_so4``) rather than a bare module constant, so a future
-population with its own SO₄ species (M7's 96.0631 g/mol) can still supply
-it. The routine's ``xtoc`` conversion for the produced-sulfate mass now
+2026-10-06), shared by every population. SO₄'s own molar mass is the
+population's: jcm's MAM4-MOM value (115 g/mol, ``_MW_SO4``) for MAM4 — a jcm
+species-table choice, not a HAM literal — and HAM's 96.0631 g/mol for M7,
+passed as the ``mw_so4`` parameter by ``AqueousSulfur`` from
+``spec.species_props("so4")``. The routine's ``xtoc`` conversion for the produced-sulfate mass now
 consistently uses that same ``mw_so4`` parameter rather than the module
 constant unconditionally, fixing a related inconsistency found while
 tracing the literal fix through.
@@ -990,9 +1044,9 @@ tracing the literal fix through.
 **Status & known limitations.** ``_aqueous_so4`` matches the compiled,
 unmodified ``ham_wet_chemistry`` at float64 rtol=1e-12 on every one of 16
 designed reference cells (``jcm/data/test/echam_cloud_reference/
-hamaqueous_M7.{npz,README.md}``), called directly with M7's own SO₄ molar
-mass (the fixture's species) since no M7 population exists here to carry
-it through the full term. See the pull request closing jax-gcm#1031 for
+hamaqueous_M7.{npz,README.md}``), both as the bare kernel with M7's SO₄
+molar mass and as the full ``AqueousSulfur`` term on ``M7_SPEC`` (HAM's
+number-fraction AS/CS split included). See the pull request closing jax-gcm#1031 for
 the measured change in ``echam-jam``'s in-cloud sulfate production and
 burden.
 
@@ -1026,6 +1080,43 @@ against the in-precip-area rain rate and the stratiform in-cloud pathway acts on
 the cloud-borne tracers rather than the interstitial ones; the convective
 carrier acts in HAMMOZ's updraft-area footprint (see [convective tracer
 transport](#convective-tracer-transport--in-plume-scavenging)).
+
+`WetScavenging(scheme="ham_below_cloud")` is an alternative to the CAM/Slinn
+pathway above for the STRATIFORM carrier only: ECHAM-HAM r7492's own
+`nwetdep=3` scheme, a bilinear lookup against Betty Croft's aerosol
+size-dependent rain and snow collection tables (`mo_ham_wetdep.f90::bc_rain`/
+`bc_snow`, `mo_ham_wetdep_data.f90`), weighted by the stratiform
+precipitating-area fraction and the in-cloud rain/snow flux the cloud scheme
+publishes on request (`configure_wetdep_hydro_diagnostics`). The convective
+below-cloud pathway and every in-cloud pathway are unaffected by this
+selector; see
+{ref}`below-cloud scavenging <ham-below-cloud-scheme>`
+for the scheme and its two reference-harness findings.
+
+`scheme="ham"` additionally replaces BOTH stratiform in-cloud pathways:
+NUCLEATION with ECHAM-HAM's own aerosol-size-dependent `ic_scav_nuc`
+(jax-gcm#1017 follow-up A) — a per-mode critical-radius inversion against
+the actual in-cloud droplet/crystal number this step, for the three M7
+soluble activating modes only — and IMPACTION with `ic_scav_imp`
+(follow-up B) — a bilinear lookup of a Croft collection coefficient
+against the 2M scheme's own droplet/ice-plate effective radius, for
+EVERY M7 mode (unlike nucleation, impaction has no activating-mode gate
+in the reference). `get_icscavfrac` sums and clips the two in-cloud
+fractions exactly as the reference does. `"ham_below_cloud"` is a
+separate, narrower selector (below-cloud only).
+
+One deliberate deviation from r7492: the impaction lookup's cloud-droplet
+radius axis `cdroprad` (`mo_ham_wetdep_data.f90`) reads 0.0 at index 6
+where its regular 5 µm spacing implies 30 µm, a suspected upstream typo.
+jcm's default uses 30 µm by maintainer decision (2026-10-06; *science*: a
+zero node inside a monotone axis interpolates droplets of 25-35 µm
+against a spurious zero radius). `WetDepParameters.cdroprad_um` is
+overridable, and `CDROPRAD_UM_AS_COMPILED` reproduces r7492 exactly. See
+{ref}`HAM in-cloud nucleation scavenging <ham-nucleation-scavenging>` and
+{ref}`HAM in-cloud impaction scavenging <ham-impaction-scavenging>` for
+the formulas, the two supported activation pairings (HAM's own ARG or
+Lin & Leaitch), the measured effect of the `cdroprad` node, and the
+validation scope.
 
 Stokes settling and the Slinn quasi-laminar resistance are evaluated at the
 **wet** particle's density, the mass-weighted mixture of dry material and

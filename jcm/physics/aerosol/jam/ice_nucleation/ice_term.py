@@ -77,11 +77,13 @@ class IceNucleation(PhysicsTerm):
     ):
         """Hold the population and its HAM freezing-class mapping.
 
-        ``classes`` defaults to the MAM4 mapping; a population with other
-        class names must say which of its classes play HAM's roles.
+        ``classes`` defaults to the population's own ``spec.freezing_roles``
+        when it sets one (M7), else the MAM4 mapping; a population with other
+        class names and no ``freezing_roles`` of its own must say explicitly
+        which of its classes play HAM's roles.
         """
         self._spec = spec or MAM4_SPEC
-        self._classes = classes or MAM4_FREEZING_CLASSES
+        self._classes = classes or self._spec.freezing_roles or MAM4_FREEZING_CLASSES
         known = set(self._spec.mode_shorts)
         named = set(self._classes.soluble) | {
             s for s in (self._classes.insoluble_aitken,

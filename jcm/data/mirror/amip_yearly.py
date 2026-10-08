@@ -29,8 +29,9 @@ import xarray as xr
 
 from jcm.data.mirror import sites
 from jcm.data.mirror.bundles import (AMIP_ROOT, _ANTHRO_SECTORS,
-                                     _EMIS_SPECIES, _to_lonlat,
-                                     land_surface_fields, translate_land)
+                                     _ANTHRO_SUBSETS, _EMIS_SPECIES,
+                                     _to_lonlat, land_surface_fields,
+                                     translate_land)
 from jcm.data.regridding import (conservative_to_gaussian, fill_nearest,
                                  interp_to)
 
@@ -155,12 +156,22 @@ def build_forcing_year(era5_path: str, year: int, lats, lons,
 
 
 def build_emissions_year(ceds_zarr: str, bb_zarr: str, year: int, lats, lons,
-                         out_path: str) -> None:
+                         out_path: str, biogenic_oc=None) -> None:
     """One year of monthly transient emissions on a Gaussian grid.
 
     Same channels as the climatology ``build_emissions_nc`` (three CEDS
-    super-sectors + biomass burning per species), sliced from the
-    transient Tier-A series instead of the era climatology.
+    super-sectors + the residential/energy HAM-sizing subsets +
+    biomass burning per species), sliced from the transient Tier-A
+    series instead of the era climatology.
+
+    ``biogenic_oc`` (jax-gcm#1017, maintainer decision F7): HAM's own
+    AeroCom II biogenic-OC source (:func:`~jcm.data.mirror.emissions.
+    load_biogenic_oc`), the SAME single 12-month climatology
+    ``build_emissions_nc`` feeds every era with -- HAM replays it every
+    model year regardless of year or era, so there is no transient series
+    to slice here either; this just regrids and repeats it onto the
+    requested year's 12 month-start timestamps. ``None`` (default) omits
+    ``emis_biogenic_oc``, matching an MAM4-only bundle build.
     """
     _check_year(year)
     span = slice(f"{year}-01-01", f"{year}-12-31")
@@ -174,6 +185,8 @@ def build_emissions_year(ceds_zarr: str, bb_zarr: str, year: int, lats, lons,
         up = sp.upper()
         channels = [(sector, ceds[f"{up}_{sector}"])
                     for sector in _ANTHRO_SECTORS]
+        channels += [(subset, ceds[f"{up}_{subset}"])
+                     for subset in _ANTHRO_SUBSETS]
         channels.append(("biomass_burning", bb[up]))
         for prefix, da in channels:
             da = da.sel(time=span).load()
@@ -183,6 +196,13 @@ def build_emissions_year(ceds_zarr: str, bb_zarr: str, year: int, lats, lons,
             ds[f"emis_{prefix}_{sp}"] = (
                 ("time", "lon", "lat"), arr.transpose(0, 2, 1),
                 {"units": "kg m-2 s-1"})
+    if biogenic_oc is not None:
+        da = biogenic_oc.load()
+        arr = conservative_to_gaussian(
+            np.nan_to_num(da.values), da.lat.values, da.lon.values, lats, lons)
+        ds["emis_biogenic_oc"] = (
+            ("time", "lon", "lat"), arr.transpose(0, 2, 1),
+            {"units": "kg m-2 s-1"})
     ds.attrs = {
         "title": (f"jax-gcm prescribed emissions (bulk per-super-sector "
                   f"surface flux), year {year}"),

@@ -64,6 +64,7 @@ import numpy as np
 import xarray as xr
 
 from jcm.data.mirror import sites
+from jcm.data.mirror.emissions import CEDS_SUBSET_SECTORS
 from jcm.data.regridding import (conservative_to_gaussian, fill_nearest,
                                  interp_to, regrid_land_surface)
 
@@ -195,16 +196,41 @@ def land_surface_fields(era5: xr.Dataset, permanent_snow: xr.DataArray,
 
 _EMIS_SPECIES = ("so2", "bc", "oc")
 _ANTHRO_SECTORS = ("surface_combustion", "elevated_industrial", "shipping")
+# The two HAM-sizing subset channels (jax-gcm#1017 F6), each already
+# included in one of ``_ANTHRO_SECTORS``' sums above -- see
+# ``jcm.data.mirror.emissions.CEDS_SUBSET_SECTORS``, the single source of
+# truth for which CEDS sector each one is.
+_ANTHRO_SUBSETS = tuple(CEDS_SUBSET_SECTORS)
 
 
 def build_emissions_nc(ceds_zarr: str, bb_zarr: str, era: str,
-                       lats, lons, out_path: str) -> None:
+                       lats, lons, out_path: str, biogenic_oc=None) -> None:
     """Per-grid emissions file keyed ``emis_<super_sector>_<species>``.
 
     All four model super-sectors (see
     ``jcm.physics.aerosol.jam.emissions.sectors``) — the three CEDS
     anthropogenic groups keep their distinct injection altitudes
     (elevated_industrial ~50 m) plus biomass burning.
+
+    The ``residential``/``energy`` HAM-sizing subset channels
+    (``emis_residential_<species>``/``emis_energy_<species>``,
+    jax-gcm#1017 F6) are carried alongside: each is already part of its
+    parent super-sector's total (``surface_combustion``/
+    ``elevated_industrial`` respectively), regridded through the identical
+    call so
+    ``jcm.physics.aerosol.jam.emissions.anthropogenic.AnthropogenicEmissions``
+    can split that share out at HAM's own size instead of the whole
+    super-sector's parent size. No reader change needed:
+    ``forcing.read_anthropogenic_emissions`` already picks up every
+    ``emis_*`` variable in the file.
+
+    ``biogenic_oc`` (jax-gcm#1017, maintainer decision F7) is HAM's own
+    AeroCom II source (:func:`~jcm.data.mirror.emissions.load_biogenic_oc`),
+    optional and ``None`` by default so an MAM4-only bundle build is
+    unaffected. Unlike the CEDS/BB4CMIP7 species, it carries a single
+    climatology (no ``era``), feeding ``emis_biogenic_oc`` -- read only by
+    a population whose sector policy declares a ``"biogenic"`` class (M7);
+    MAM4 never looks at this channel.
     """
     ceds = xr.open_zarr(ceds_zarr)
     bb = xr.open_zarr(bb_zarr)
@@ -214,6 +240,8 @@ def build_emissions_nc(ceds_zarr: str, bb_zarr: str, era: str,
         up = sp.upper()
         channels = [(sector, ceds[f"{up}_{sector}_{era}_clim"])
                     for sector in _ANTHRO_SECTORS]
+        channels += [(subset, ceds[f"{up}_{subset}_{era}_clim"])
+                     for subset in _ANTHRO_SUBSETS]
         channels.append(("biomass_burning", bb[f"{up}_{era}_clim"]))
         for prefix, da in channels:
             da = da.load()
@@ -223,11 +251,19 @@ def build_emissions_nc(ceds_zarr: str, bb_zarr: str, era: str,
             ds[f"emis_{prefix}_{sp}"] = (
                 ("time", "lon", "lat"), arr.transpose(0, 2, 1),
                 {"units": "kg m-2 s-1"})
+    if biogenic_oc is not None:
+        da = biogenic_oc.load()
+        arr = conservative_to_gaussian(
+            np.nan_to_num(da.values), da.lat.values, da.lon.values, lats, lons)
+        ds["emis_biogenic_oc"] = (
+            ("time", "lon", "lat"), arr.transpose(0, 2, 1),
+            {"units": "kg m-2 s-1"})
     ds.attrs = {
         "title": ("jax-gcm prescribed emissions (bulk per-super-sector "
                   "surface flux)"),
         "era": era,
-        "source": "CEDS-CMIP-2025-04-18 + DRES-CMIP-BB4CMIP7-2-0",
+        "source": ("CEDS-CMIP-2025-04-18 + DRES-CMIP-BB4CMIP7-2-0"
+                   + (" + HAM AeroCom-II biogenic OC" if biogenic_oc is not None else "")),
     }
     ds.to_netcdf(out_path)
     print("wrote", out_path, flush=True)

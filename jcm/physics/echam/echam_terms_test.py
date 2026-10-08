@@ -187,6 +187,116 @@ class TestEchamComposablePhysics(unittest.TestCase):
             convective_updraft_precip_cover=False)
         self.assertFalse(cover_flag(jam_off))
 
+    def test_jam_wetdep_scheme_wires_precip_cover_and_the_term_flag(self):
+        """``jam_wetdep_scheme="ham_below_cloud"`` (#1017) turns on the 2M
+        scheme's ``precip_cover``/``pfrain``/``pfsnow`` publication and the
+        wetdep term's own selector together; the default leaves both off/"jcm".
+        """
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetScavenging
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        def parts(physics):
+            micro = next(t for t in physics.terms
+                        if isinstance(t, Lohmann2MMicrophysics))
+            wetdep = next(t for t in physics.terms
+                          if isinstance(t, WetScavenging))
+            return micro, wetdep
+
+        default = echam_physics(
+            checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
+            jam_microphysics="placeholder")
+        micro, wetdep = parts(default)
+        self.assertFalse(micro._publish_wetdep_hydro)
+        for key in ("precip_cover", "pfrain", "pfsnow"):
+            self.assertNotIn(key, micro.provides)
+        self.assertEqual(wetdep.scheme, "jcm")
+        self.assertNotIn("precip_cover", wetdep.requires)
+
+        ham_bc = echam_physics(
+            checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
+            jam_microphysics="placeholder", jam_wetdep_scheme="ham_below_cloud")
+        micro, wetdep = parts(ham_bc)
+        self.assertTrue(micro._publish_wetdep_hydro)
+        for key in ("precip_cover", "pfrain", "pfsnow"):
+            self.assertIn(key, micro.provides)
+        self.assertEqual(wetdep.scheme, "ham_below_cloud")
+        self.assertIn("precip_cover", wetdep.requires)
+
+    def test_jam_wetdep_scheme_ham_below_cloud_requires_2m(self):
+        """A clear, scheme-specific error, not the generic ordering-validator
+        one that would otherwise fire deep inside ComposablePhysics.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        with self.assertRaises(ValueError):
+            echam_physics(
+                checkpoint_terms=False, aerosol_module="jam", cloud_scheme="1m",
+                jam_microphysics="placeholder", jam_wetdep_scheme="ham_below_cloud")
+
+    def test_jam_wetdep_scheme_ham_wires_through(self):
+        """``jam_wetdep_scheme="ham"`` (#1017, all three slices) turns on
+        the 2M hydro diagnostics -- "ham_below_cloud"'s three PLUS
+        "reffl"/"reffi" for follow-up B's in-cloud impaction -- and also
+        sets the wetdep term's scheme + nucleation_activation.
+
+        Needs an M7-shaped population: ``scheme="ham"`` requires HAM's own
+        KS/AS/CS activating modes (``WetScavenging.__init__``), which the
+        MAM4 ``"placeholder"`` core does not have -- use
+        ``"m7_placeholder"`` (M7_SPEC) instead, matching the ``echam-ham-m7``
+        preset's own chain-test vehicle.
+        """
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import WetScavenging
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        physics = echam_physics(
+            checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
+            jam_microphysics="m7_placeholder", jam_wetdep_scheme="ham",
+            jam_nucleation_activation="ham_lin_leaitch",
+            jam_activation_scheme="ham_lin_leaitch")
+        micro = next(t for t in physics.terms if isinstance(t, Lohmann2MMicrophysics))
+        wetdep = next(t for t in physics.terms if isinstance(t, WetScavenging))
+        self.assertTrue(micro._publish_wetdep_hydro)
+        self.assertEqual(wetdep.scheme, "ham")
+        self.assertEqual(wetdep._nucleation_activation, "ham_lin_leaitch")
+        for key in ("precip_cover", "pfrain", "pfsnow", "reffl", "reffi"):
+            self.assertIn(key, wetdep.requires)
+            self.assertIn(key, micro.provides)
+
+    def test_jam_wetdep_scheme_ham_requires_2m(self):
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        with self.assertRaises(ValueError):
+            echam_physics(
+                checkpoint_terms=False, aerosol_module="jam", cloud_scheme="1m",
+                jam_microphysics="m7_placeholder", jam_wetdep_scheme="ham",
+                jam_activation_scheme="ham_arg")
+
+    def test_jam_wetdep_scheme_ham_rejects_a_non_m7_population(self):
+        """The documented default population (MAM4, via
+
+        ``jam_microphysics="placeholder"``) cannot support
+        ``jam_wetdep_scheme="ham"`` -- it lacks HAM's own KS/AS/CS
+        activating modes -- so composing it must raise rather than
+        silently run with in-cloud nucleation permanently off.
+
+        ``jam_activation_scheme="ham_arg"`` is passed explicitly to isolate
+        THIS rejection from the separate activation_scheme/
+        nucleation_activation consistency check (also enforced for
+        ``jam_wetdep_scheme="ham"``, jax-gcm#1045 review comment
+        4197639949): leaving ``jam_activation_scheme`` at its own default
+        ("arg", CAM's own) would raise that other error first, since it is
+        checked before the population is even resolved.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        with self.assertRaisesRegex(ValueError, "activating modes"):
+            echam_physics(
+                checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
+                jam_microphysics="placeholder", jam_wetdep_scheme="ham",
+                jam_activation_scheme="ham_arg")
+
     def test_jam_takes_ham_ice_inhomogeneity(self):
         """JAM (2M + ARG) defaults to ECHAM-HAM's ``zinhomi = 0.7``; every
         other stack keeps ECHAM6's 0.8, and an explicit override wins.
@@ -540,7 +650,8 @@ class TestEchamComposablePhysics(unittest.TestCase):
             mu_water_air=default.mu_water_air,
             impact_scale=jnp.asarray(0.4),
             conv_scav_ratio=default.conv_scav_ratio,
-            conv_updraft_velocity=default.conv_updraft_velocity)
+            conv_updraft_velocity=default.conv_updraft_velocity,
+            cdroprad_um=default.cdroprad_um)
         wet = self._jam_term_params(
             echam_physics(**self._JAM_KWARGS, wetdep=obj), "jam_wet_deposition")
         self.assertAlmostEqual(float(wet.incloud_scale), 0.3)

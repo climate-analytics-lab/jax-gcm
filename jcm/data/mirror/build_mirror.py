@@ -567,7 +567,30 @@ def stage_ozone() -> None:
 
 
 def stage_emissions() -> None:
-    """Multi-GB streaming — run inside a PBS job, not a login node."""
+    """Multi-GB streaming — run inside a PBS job, not a login node.
+
+    Rebuild (Tier A + every grid's bundle) after a change to
+    ``jcm.data.mirror.emissions``/``jcm.data.mirror.bundles`` (e.g. the
+    ``residential``/``energy`` HAM-sizing subset channels, jax-gcm#1017
+    F6), on a site whose ``sites.input4mips`` resolves (Derecho/glade;
+    CEDS is not on Levante, see the module docstring above)::
+
+        python -m jcm.data.mirror.build_mirror --stage emissions,bundles \
+            --products emissions
+
+    ``--stage emissions`` rewrites ``build/ceds_anthro.zarr`` and
+    ``build/bb4cmip7.zarr`` (every species, since ``build_store`` skips a
+    species already present — delete the stale store first to force a
+    full rebuild of an existing one); ``--stage bundles --products
+    emissions`` then rewrites every grid's ``upload/bundles/<grid>/
+    emissions_{pd,pi}.nc`` from those stores. What to upload afterwards
+    (not run here): the two Tier A zarr stores under ``build/`` and every
+    rewritten ``emissions_{pd,pi}.nc`` under ``upload/bundles/<grid>/`` —
+    ``--stage registry`` then ``--stage upload`` (the published HF
+    dataset; needs ``hf auth login`` with write access). The #1017
+    coordinator stages this data; do not run ``--stage upload`` from an
+    agent session.
+    """
     from jcm.data.mirror.emissions import (SPECIES, build_store,
                                            load_bb_species,
                                            load_ceds_species)
@@ -622,9 +645,16 @@ def stage_dust() -> None:
 def stage_bundles() -> None:
     from jcm.data.mirror.bundles import (build_emissions_nc, build_forcing,
                                          build_terrain)
+    from jcm.data.mirror.emissions import load_biogenic_oc
     from jcm.data.regridding import gaussian_latlon
 
     era5 = BUILD / "era5_land_climo_2005-2014_0p25.nc"
+    # HAM's own AeroCom II biogenic-OC source (#1017 F7): a single
+    # climatology (no PI/PD split, see load_biogenic_oc's docstring) fed to
+    # every grid/era's ``build_emissions_nc`` call below. Loaded once here,
+    # not per grid/era, since it is grid-independent at its native
+    # resolution -- ``build_emissions_nc`` regrids it per call.
+    biogenic_oc = load_biogenic_oc() if _want("emissions") else None
     for grid, nlat in _grids().items():
         lats, lons = gaussian_latlon(nlat)
         d = UPLOAD / "bundles" / grid
@@ -639,7 +669,8 @@ def stage_bundles() -> None:
             if _want("emissions"):
                 build_emissions_nc(str(BUILD / "ceds_anthro.zarr"),
                                    str(BUILD / "bb4cmip7.zarr"), era, lats,
-                                   lons, str(d / f"emissions_{era}.nc"))
+                                   lons, str(d / f"emissions_{era}.nc"),
+                                   biogenic_oc=biogenic_oc)
 
     trunc = {grid: _truncation(grid) for grid in _grids()}
     for grid in _grids():
@@ -697,6 +728,7 @@ def stage_amip() -> None:
                                              build_forcing_year,
                                              load_ozone_year,
                                              regrid_ozone_year)
+    from jcm.data.mirror.emissions import load_biogenic_oc
     from jcm.data.regridding import gaussian_latlon
 
     first, last = _AMIP_YEARS
@@ -707,6 +739,10 @@ def stage_amip() -> None:
               "ozone); nothing to build", flush=True)
         return
     era5 = BUILD / "era5_land_climo_2005-2014_0p25.nc"
+    # Same single HAM AeroCom-II climatology ``stage_bundles`` feeds every
+    # era with (#1017 F7) -- replayed onto every AMIP year's time axis
+    # below rather than sliced, since there is no transient biogenic series.
+    biogenic_oc = load_biogenic_oc() if _want("emissions") else None
     scratch = BUILD / "ozone_amip"
     scratch.mkdir(parents=True, exist_ok=True)
     for grid, nlat in _grids(transient=True).items():
@@ -725,7 +761,8 @@ def stage_amip() -> None:
                 build_emissions_year(str(BUILD / "ceds_anthro.zarr"),
                                      str(BUILD / "bb4cmip7.zarr"), year,
                                      lats, lons,
-                                     str(g / "emissions_amip" / f"{year}.nc"))
+                                     str(g / "emissions_amip" / f"{year}.nc"),
+                                     biogenic_oc=biogenic_oc)
             if _want("ozone"):
                 plev = scratch / f"ozone_{grid}_{year}_plev.nc"
                 regrid_ozone_year(load_ozone_year(year), lats,

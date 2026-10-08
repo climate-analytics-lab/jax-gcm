@@ -3,8 +3,11 @@
 Port of the MPI-BGC dust scheme ``mo_ham_dust.f90`` (``bgc_dust_initialize``,
 ``bgc_dust_calc_emis``) as configured by HAM2 (``ndust = 4``): a size-resolved
 Marticorena-Bergametti (1995) saltation flux over a 191-class soil size grid
-and a per-cell mixture of prescribed soil textures, sandblasted into an emitted
-spectrum and integrated onto MAM4's accumulation and coarse emission windows.
+and a per-cell mixture of prescribed soil textures, sandblasted into an
+emitted spectrum and integrated onto the population's own emission windows —
+MAM4's accumulation/coarse by default, or M7's insoluble accumulation/coarse
+with HAM's own fixed-radius number conversion when ``spec.dust_emission`` is
+set (:class:`DustEmissionPolicy`, :func:`m7_dust_emission_policy`).
 
 The chain, in CGS as the Fortran is (cm, cm/s, g, g cm⁻² s⁻¹):
 
@@ -38,6 +41,7 @@ switch is a hard step with zero gradient (#664).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 from typing import ClassVar
@@ -205,6 +209,121 @@ def soil_diameters() -> np.ndarray:
     return DMIN * np.exp(np.arange(NCLASS) * DSTEP)
 
 
+# --- M7 dust-emission policy (jax-gcm#1017) ---------------------------------
+#
+# HAM routes the SAME BGC-dust source (``bgc_dust_calc_emis``) straight into
+# M7's own insoluble accumulation/coarse classes rather than MAM4's windows
+# (``mo_ham_m7_emissions.f90::ham_m7_dust_emissions``, lines 652-780): BGC
+# "tracer" 1 -> AI (``min_ai=max_ai=1``), tracers 2-4 -> CI (``min_ci=2,
+# max_ci=4``; lines 690-693). A BGC tracer is a sum over
+# :data:`_BGC_TRACER_CLASSES` (24) consecutive classes of the same 191-class
+# soil size grid this module already uses (``mo_ham_dust.f90``: ``ntrace=8``
+# line 98, ``nbin=24`` line 99) — tracer ``t`` (1-based) covers classes
+# ``(t-1)*24+1 .. t*24`` — so AI is classes 1-24 and CI is classes 25-96;
+# classes 97-191 (BGC tracers 5-8, the "super-coarse mode") are never summed
+# into ``ibc_dust``/``ibc_dust+1`` and so never enter the aerosol here either,
+# same as MAM4's :data:`SUPERCOARSE_UM` discard but at HAM's own, higher edge.
+_BGC_TRACER_CLASSES = 24
+
+
+def _bgc_tracer_edge_um(tracer: int) -> float:
+    """Dry diameter [µm] of the FIRST class of 1-based BGC tracer ``tracer``.
+
+    This is the half-open ``[lo, hi)`` boundary between tracer ``tracer - 1``
+    and ``tracer`` on the module's own ``soil_diameters()`` grid — e.g.
+    ``_bgc_tracer_edge_um(5) == 16.635...`` µm is the edge above which HAM's
+    tracers 5-8 (and this module's windowing) discard the mass, a hair above
+    the 15.887 µm diameter of tracer 4's LAST class quoted elsewhere in this
+    module for narrative comparison with MAM4's ``SUPERCOARSE_UM``.
+    """
+    idx = (tracer - 1) * _BGC_TRACER_CLASSES
+    return float(soil_diameters()[idx] * 1.0e4)
+
+
+#: M7's insoluble accumulation (AI) and coarse (CI) emission windows [µm]:
+#: BGC tracer 1 (classes 1-24) and tracers 2-4 (classes 25-96) respectively.
+M7_AI_UM = (0.0, _bgc_tracer_edge_um(2))
+M7_CI_UM = (_bgc_tracer_edge_um(2), _bgc_tracer_edge_um(5))
+
+#: HAM's fixed source mass-median RADII for the M7 dust classes
+#: (``mo_ham_m7_emissions.f90:180-181``) — unlike MAM4's number-conserving
+#: ``_effective_diameter``, M7's number flux uses these two FIXED sizes
+#: regardless of the emitted spectrum's own shape.
+MMR_DUST_AI_M = 0.35e-6   # m
+MMR_DUST_CI_M = 1.75e-6   # m
+#: The reference σ_g M7's zm2n factors are defined at (``ref_sigma_dust_ai``
+#: = ``sigma_fine``, ``ref_sigma_dust_ci`` = ``sigma_coarse``,
+#: ``mo_ham_m7_emissions.f90:101-102``, asserted equal to the AI/CI modes'
+#: own σ at ``mo_ham_m7ctl.f90:171-172`` by the Fortran's consistency check,
+#: ``mo_ham_m7_emissions.f90:698``) — HAM constants, not population-derived.
+_REF_SIGMA_DUST_AI = 1.59
+_REF_SIGMA_DUST_CI = 2.0
+
+
+def _m7_mass_median_number_factor(mmr_m: float, sigma_g: float,
+                                  density: float) -> float:
+    """HAM's mass-flux -> number-flux factor for a mass-MEDIAN radius class.
+
+    ``mo_ham_m7_emissions.f90:261-262``: ``zm2n = 3/(4·pi·rho·mmr³) ·
+    exp(4.5·ln(sigma_g)²)``, giving ``N = M · zm2n``. The exponential term
+    MULTIPLIES here, the opposite sign from :attr:`AerosolMode.number_factor`
+    (which divides by it) — because ``mmr`` is the lognormal's MASS-median
+    radius, not its COUNT-median ``AerosolMode.dgnum``/2: for a lognormal
+    with count-median radius r_n and geometric std σ_g, the mass-median
+    radius is ``r_mmr = r_n · exp(3·ln²σ_g)`` (the standard moment shift), so
+    substituting ``r_n = r_mmr · exp(-3·ln²σ_g)`` into the usual
+    ``N = M / (rho · (4/3)·pi·r_n³ · exp(4.5·ln²σ_g))`` flips the sign of the
+    exponent on the ``r_mmr``-based form derived here — reproducing HAM's
+    formula exactly.
+    """
+    ln_sigma = math.log(sigma_g)
+    return (3.0 / (4.0 * math.pi * density * mmr_m ** 3)) * math.exp(
+        4.5 * ln_sigma ** 2)
+
+
+@dataclasses.dataclass(frozen=True)
+class DustEmissionPolicy:
+    """Population-specific dust-emission window/mode/number policy.
+
+    Pure compose-time data (never a JAX pytree leaf), like
+    :class:`~jcm.physics.aerosol.jam.population.AerosolMode`. ``None`` (every
+    MAM4-family population) keeps :class:`DustEmissions`'s existing
+    behaviour: the species' ``primary_split("du")`` modes/fractions for the
+    destination, :data:`ACCUM_UM`/:data:`COARSE_UM` for the windows, and a
+    number-conserving effective diameter (:func:`_effective_diameter`) for
+    the implied number flux. Setting ``spec.dust_emission`` to one of these
+    switches all three to the policy's own values — built for M7 by
+    :func:`m7_dust_emission_policy`.
+    """
+
+    accum_mode: str          # population mode short
+    coarse_mode: str
+    accum_um: tuple[float, float]
+    coarse_um: tuple[float, float]
+    #: Fixed number-per-mass factors [kg⁻¹] (HAM's ``zm2n``), used directly
+    #: instead of the MAM4 number-conserving-diameter path.
+    accum_number_factor: float
+    coarse_number_factor: float
+
+
+def m7_dust_emission_policy(du_density: float) -> DustEmissionPolicy:
+    """Build the M7 :class:`DustEmissionPolicy`.
+
+    ``du_density`` is the dust material density [kg/m³] from the CALLER's own
+    species table (``microphysics/m7_data.py``'s ``M7_SPECIES["du"].density``
+    = 2650, ``mo_ham_species.f90:411``), so this module carries no duplicate
+    copy of that number — only HAM's own window/mode/radius constants above.
+    """
+    return DustEmissionPolicy(
+        accum_mode="ai", coarse_mode="ci",
+        accum_um=M7_AI_UM, coarse_um=M7_CI_UM,
+        accum_number_factor=_m7_mass_median_number_factor(
+            MMR_DUST_AI_M, _REF_SIGMA_DUST_AI, du_density),
+        coarse_number_factor=_m7_mass_median_number_factor(
+            MMR_DUST_CI_M, _REF_SIGMA_DUST_CI, du_density),
+    )
+
+
 def threshold_friction_velocity(diameters, a_rnolds, b_rnolds, x_rnolds,
                                 d_thrsld, coeff):
     """MB95 (5)-(7) threshold friction velocity [cm/s] per soil class.
@@ -254,7 +373,9 @@ def soil_size_distributions(soil_table, diameters):
 _AGGREGATES = (("acc", 0), ("acc", 1), ("cor", 0), ("cor", 1), ("all", 0))
 
 
-def emission_weight_matrix(srel, srel_v, su_srel_v, diameters):
+def emission_weight_matrix(srel, srel_v, su_srel_v, diameters,
+                           accum_um: tuple[float, float] = ACCUM_UM,
+                           coarse_um: tuple[float, float] = COARSE_UM):
     """Reduce the sandblasting redistribution to one matrix per mixture row.
 
     The Fortran redistributes each saltating class ``k ≥ 2`` over classes
@@ -271,11 +392,15 @@ def emission_weight_matrix(srel, srel_v, su_srel_v, diameters):
     ``(ntype, 191, ncols)``; ``dust_test`` checks it against a direct transcription
     of the Fortran loops.
 
+    ``accum_um``/``coarse_um`` default to MAM4's windows; a population with
+    its own :class:`DustEmissionPolicy` (M7) passes its own windows instead,
+    bit-identically reusing this same reduction.
+
     Returns ``(nrow, 5, 191)`` for :data:`MIXTURE_ROWS` and :data:`_AGGREGATES`.
     """
     d_um = diameters * 1.0e4
-    windows = {"acc": (d_um >= ACCUM_UM[0]) & (d_um < ACCUM_UM[1]),
-               "cor": (d_um >= COARSE_UM[0]) & (d_um < COARSE_UM[1]),
+    windows = {"acc": (d_um >= accum_um[0]) & (d_um < accum_um[1]),
+               "cor": (d_um >= coarse_um[0]) & (d_um < coarse_um[1]),
                "all": jnp.ones_like(d_um, dtype=bool)}
     rows = []
     for flux_type, size_type in MIXTURE_ROWS:
@@ -521,7 +646,22 @@ class DustEmissions(PhysicsTerm):
                                        nduscale_scale=nduscale_scale))
         self._spec = spec or MAM4_SPEC
         self._diameters = jnp.asarray(soil_diameters())
-        (self._accum, _), (self._coarse, _) = self._spec.primary_split("du")
+        policy: DustEmissionPolicy | None = self._spec.dust_emission
+        if policy is None:
+            # MAM4 default, unchanged: destination modes from the
+            # population's primary-emission policy, MAM4's windows, and a
+            # number-conserving effective diameter for the number flux.
+            (self._accum, _), (self._coarse, _) = self._spec.primary_split("du")
+            self._accum_um = ACCUM_UM
+            self._coarse_um = COARSE_UM
+            self._fixed_number_factor = None
+        else:
+            self._accum = self._spec.mode(policy.accum_mode)
+            self._coarse = self._spec.mode(policy.coarse_mode)
+            self._accum_um = policy.accum_um
+            self._coarse_um = policy.coarse_um
+            self._fixed_number_factor = (
+                policy.accum_number_factor, policy.coarse_number_factor)
 
     def cache_coords(self, coords) -> None:
         """Rebuild the preset at the model's truncation.
@@ -690,7 +830,8 @@ class DustEmissions(PhysicsTerm):
                 & (pot > p.r_dust_lai))
 
         srel, srel_v, su_srel_v = soil_size_distributions(p.soil_table, d)
-        weight_matrix = emission_weight_matrix(srel, srel_v, su_srel_v, d)
+        weight_matrix = emission_weight_matrix(
+            srel, srel_v, su_srel_v, d, self._accum_um, self._coarse_um)
         alpha = jnp.stack([p.soil_table[jf - 1, ALPHA_COL]
                            for jf, _ in MIXTURE_ROWS])                   # (nrow,)
 
@@ -742,18 +883,26 @@ class DustEmissions(PhysicsTerm):
         dry_scale = jnp.where(mask, 10.0 * (1.0 - snow) * pot, 0.0)
         scale = jnp.where(wetness <= p.w0, dry_scale, 0.0)
         mass_acc = moments[0] * scale
-        num_acc = moments[1] * scale
         mass_cor = moments[2] * scale
-        num_cor = moments[3] * scale
         mass_all = moments[4] * scale
 
-        # Number-conserving emitted diameter within each window: the diameter at
-        # which one particle's mass equals mass/number, D = (ΣF / Σ(F/D³))^(1/3).
-        d_acc = _effective_diameter(mass_acc, num_acc, ACCUM_UM)
-        d_cor = _effective_diameter(mass_cor, num_cor, COARSE_UM)
-
-        fluxes = [("du", self._accum.short, mass_acc, d_acc),
-                  ("du", self._coarse.short, mass_cor, d_cor)]
+        if self._fixed_number_factor is not None:
+            # M7: number from HAM's own fixed mass-median-radius factors
+            # (``mo_ham_m7_emissions.f90:261-262``), not the emitted
+            # spectrum's own number-conserving diameter.
+            fac_acc, fac_cor = self._fixed_number_factor
+            fluxes = [("du", self._accum.short, mass_acc, None, fac_acc),
+                      ("du", self._coarse.short, mass_cor, None, fac_cor)]
+        else:
+            num_acc = moments[1] * scale
+            num_cor = moments[3] * scale
+            # Number-conserving emitted diameter within each window: the
+            # diameter at which one particle's mass equals mass/number,
+            # D = (ΣF / Σ(F/D³))^(1/3).
+            d_acc = _effective_diameter(mass_acc, num_acc, self._accum_um)
+            d_cor = _effective_diameter(mass_cor, num_cor, self._coarse_um)
+            fluxes = [("du", self._accum.short, mass_acc, d_acc),
+                      ("du", self._coarse.short, mass_cor, d_cor)]
         tracer_tends = distribute_surface_flux(self._spec, fluxes, air_density, dz)
 
         tendency = PhysicsTendency(
