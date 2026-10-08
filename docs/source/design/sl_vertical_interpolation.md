@@ -89,9 +89,11 @@ The summer-mesosphere residual upwelling is of order 1 cm/s.
 
 The near-surface cell is equally non-uniform in either coordinate (the
 boundary-layer levels thin towards the ground), so the change there is
-immaterial and dominated by boundary-layer vertical diffusion. The L95 grid's
-top is spaced by a ratio of about 1.2 per level, which is stable in either
-coordinate; ``ln s`` makes it no worse. The L8 sigma grids are close to
+immaterial and dominated by boundary-layer vertical diffusion. Below its top
+level the L95 grid is spaced by a ratio of about 1.2 per level, where the
+cubic cells are stable in either coordinate; its top cell (0.995 to 2.34 Pa)
+is still linear in ``s`` under the old rule, with 0.63 of the log-pressure
+weight, so ``ln s`` changes the L95 lid level too, by less. The L8 sigma grids are close to
 uniform in ``σ`` and slightly less so in ``ln σ`` (largest gain 1.000 in
 ``σ`` against 1.002 in ``ln σ``), which is why sigma grids keep ``σ``.
 

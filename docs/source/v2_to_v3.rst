@@ -1447,6 +1447,33 @@ longer accepts ``target_T_K``. Its defaults are ECHAM's
 (``UpperSponge()`` is the ECHAM sponge). The stratospheric and mesospheric
 zonal-mean winds strengthen; the troposphere is unchanged within noise.
 
+.. _v3-model-top:
+
+The model top: log-pressure SL interpolation, the lmidatm zonal mean, ozone to the lid
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Three changes act above ~100 Pa on the L47/L95 hybrid grids:
+
+- The semi-Lagrangian step interpolates in the log of the reference sigma on
+  hybrid grids (``dycore.sl_vertical_coordinate``; ``sigma`` reproduces the
+  earlier rule). The trajectories are unchanged. Interpolating in sigma on the
+  geometrically spaced L47 top misread vertical advection and amplified 2Δz
+  structure under upwelling: at the summer pole the coldest 1 Pa cells ran
+  ~20 K too cold and the 4.3 Pa level ~20 K too warm, and some trajectories
+  formed ice and a runaway humidity dipole at 1–11 Pa (see
+  :doc:`design/sl_vertical_interpolation`).
+- The ECHAM ``lmidatm`` hyperdiffusion profile no longer diffuses the zonal
+  mean, as in ECHAM; ``DiffusionFilter(diffuse_zonal_mean=...)`` exposes it.
+- ``forcing.ozone_file: auto`` at T63L47 resolves the zonal mean of the FZJ
+  CMIP7 present-day climatology (the same source as the ``ma-*`` presets'
+  bundle) instead of a CAM6chem file held at its 4 hPa value up to the lid;
+  the T63L47 presets on ``auto`` lose ~60 K of mesospheric warm bias.
+  ``jcm.data.bc.interpolate_ozone`` raises for a source that stops below the
+  model top unless ``allow_top_clamp=True``.
+
+Warm states spun up before these changes carry a summer mesopause that is too
+cold at 1 Pa and too warm at 4 Pa (L47); they adjust within about a week.
+
 SPEEDY shortwave heating is applied every step
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

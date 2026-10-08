@@ -1244,6 +1244,64 @@ no longer exceeds evaporation, and a retune of anything calibrated against
 the old balance. The Eulerian core (SPEEDY) is unchanged and bit-identical.
 See :doc:`design/tracer_mass_conservation`.
 
+The semi-Lagrangian step interpolates in log-pressure at the model top
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- On hybrid grids the vertical stage of the semi-Lagrangian interpolation is
+  done in the log of the reference sigma (``dycore.sl_vertical_coordinate``,
+  default ``null`` = ``log_pressure`` on hybrid grids, ``sigma`` on sigma
+  grids); the trajectories are still solved in sigma. At the pure-pressure
+  top of the L47 grid the levels are spaced geometrically (1.0, 4.3, 11.1,
+  23.1 Pa), and Lagrange weights in sigma there misread vertical advection —
+  0.44, 1.37 and 1.16 of the exact displacement at the 1.0, 4.3 and 11.1 Pa
+  levels for a profile linear in height — and amplify 2Δz structure under
+  steady upwelling (a 2Δz pattern grew 1.5x in five days at 2 cm/s; it now
+  decays to 0.06). Under the summer-mesosphere upwelling that cooled the
+  1 Pa level and warmed the 4 Pa level: from the ``ma-t63-l47`` January warm
+  state the coldest 1 Pa cells reached 136 K by day 11, and ice and a
+  ±1e-2 kg/kg humidity dipole formed at 1–11 Pa, the start of the
+  per-trajectory failures of #1060.
+- **Changes results** above ~100 Pa on the L47 grid, and at the lid level of
+  the L95 grid (whose cubic cells are stable in either rule but whose linear
+  top cell under-read by 0.63); the troposphere, where ``ln s ≈ s − 1``, is
+  essentially unchanged. From the same day-8 January
+  state the summer polar cap holds 162–169 K at 1 Pa, 196 K at 4.3 Pa and
+  224 K at 11 Pa (was 164, 217 and 221 K, with ice from day 9). See
+  :doc:`design/sl_vertical_interpolation`.
+
+ECHAM middle-atmosphere hyperdiffusion leaves the zonal mean alone
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``DiffusionFilter.echam_lmidatm`` — what ``diffusion.kind=auto`` selects on
+  the L47/L95 hybrid grids — no longer diffuses the zonal-mean (m = 0)
+  coefficients, at any level, as ECHAM's ``hdiff`` does under ``lmidatm``
+  (``mo_hdiff.f90``). The ∇² of the top levels was smoothing the zonal-mean
+  jets and temperature of the mesosphere. **Changes results** at the top
+  levels of every L47/L95 configuration (small: the summer-cap temperature
+  within 1 K and the jet within 2 m/s over the first four days). The SPEEDY
+  default is unchanged. ECHAM's other ``lmidatm`` branch, the Courant-number
+  damping ``damhih``, guards Eulerian leapfrog advection and is not ported.
+
+The packaged T63L47 ozone declines through the mesosphere
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``forcing.ozone_file: auto`` resolves the packaged
+  ``jcm/data/bc/t63/ozone.nc`` at T63L47. It was a CAM6chem climatology whose
+  source stops near 4 hPa, held constant above it, so the top nine L47 levels
+  carried 7.4 ppmv up to the 1 Pa lid (the FZJ CMIP7 bundle the ``ma-*``
+  presets name has 0.19 ppmv there). It is now the zonal mean of that bundle
+  (FZJ CMIP7 2005–2014), so every T63L47 preset carries one ozone profile;
+  ``interpolate_ozone`` refuses a source that stops below the model top
+  (``allow_top_clamp`` to clamp on purpose).
+- **Changes results** in ``t63-echam-1m``, ``t63-echam-2m``,
+  ``t63-echam-rrtmgp`` and the other T63L47 presets left on ``auto``: their
+  mesosphere was about 60 K warmer than the JAM member's (#1029). From the
+  January warm state, the JAM preset run with the old file held its summer
+  polar cap at 229 K (1 Pa) and 297 K (4.3 Pa) where the bundle gives 164 K
+  and 217 K; the 2M preset with the bundle gives 160 K and 218 K. The
+  stratospheric maximum is about 10 % lower in the FZJ climatology than in
+  CAM6chem.
+
 ECHAM surface albedo and frozen-surface saturation
 """"""""""""""""""""""""""""""""""""""""""""""""""
 

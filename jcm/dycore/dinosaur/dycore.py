@@ -122,10 +122,11 @@ DEFAULT_VERTICAL_INTERPOLATION = "cubic"
 #: interpolation is done, by vertical-coordinate family. Hybrid grids
 #: interpolate in the log of the reference pressure: their top is pure
 #: pressure and spaced geometrically, and Lagrange weights in ``s`` itself
-#: there are both inaccurate (the linear top cell under-reads vertical
-#: advection by half) and, in the cubic cells, anti-diffusive under upwelling
-#: (#1060). Sigma grids (SPEEDY / Held-Suarez L8) are quasi-uniform in ``σ``
-#: and keep it. See jcm/dycore/dinosaur/log_pressure_interpolation.py and
+#: there are both inaccurate (on L47 the linear top cell credits the lid
+#: level with 0.44 of the vertical advection a profile linear in height
+#: carries) and, in the cubic cells, anti-diffusive under upwelling (#1060).
+#: Sigma grids (SPEEDY / Held-Suarez L8) are quasi-uniform in ``σ`` and keep
+#: it. See jcm/dycore/dinosaur/log_pressure_interpolation.py and
 #: docs/source/design/sl_vertical_interpolation.md.
 DEFAULT_SL_VERTICAL_COORDINATE = {"hybrid": "log_pressure", "sigma": "sigma"}
 
