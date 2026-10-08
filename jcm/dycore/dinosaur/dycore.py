@@ -1125,6 +1125,11 @@ class DinosaurDycore(DynamicalCore):
         transport error (a genuinely empty field spinning up, a physics
         bug) and must surface in the ``budget_dyn_*`` gauge rather than
         be silently absorbed here.
+
+        Being global, the factor returns the limiter's mass creation —
+        concentrated where a tracer is patchy — in proportion to the tracer
+        everywhere, so it moves mass from smooth regions to patchy ones;
+        a local (Bermejo–Conde) fixer is #1062.
         """
         w = jnp.asarray(self.coords.horizontal.quadrature_weights)
         dp_ref = self._nodal_tracer_column_weight(state_ref)

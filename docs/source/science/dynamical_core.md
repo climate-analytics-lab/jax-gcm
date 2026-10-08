@@ -170,7 +170,13 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
   backend runs float64 dynamics with a float32 physics seam (the SE core
   needs x64).
 
-**Status & known limitations.** SPEEDY physics is generalised to arbitrary
+**Status & known limitations.** The hybrid top layer uses Dinosaur's
+Simmons & Burridge limit α₁ = 1 where ECHAM uses ln 2 (``mo_hyb.f90``), which
+places the dynamics' top full level at p₃/₂/e rather than at the p₃/₂/2 the
+physics uses; switching needs a Dinosaur option (#1061). The global
+proportional mass fixer returns the quasi-monotone limiter's mass creation in
+proportion to each tracer everywhere, so it moves cloud ice and aerosol from
+smooth to patchy regions (#1062). SPEEDY physics is generalised to arbitrary
 vertical level counts; high-``nlev`` / high-truncation configurations need a
 resolution-aware timestep to stay stable (see
 {doc}`../design/speedy_variable_levels`). The ECHAM ``lmidatm`` hyperdiffusion
