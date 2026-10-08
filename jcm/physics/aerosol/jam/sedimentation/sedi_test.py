@@ -98,6 +98,22 @@ class StokesVelocityTest(unittest.TestCase):
                 float(v[0]) / expected, 1.0, delta=0.03,
                 msg=f"p={pressure} T={temperature} moment={moment}")
 
+    def test_matches_cam_aspherical_coarse_drag(self):
+        # CAM modal_aero_depvel_part (Oct 2025 aspherical branch):
+        # number-median radius 0.7 um, density 2500 kg/m3, sigma 1.8.
+        # These use CAM's viscosity constants, independent of this module.
+        for pressure, temperature, moment, expected in (
+            (1e5, 288., 0, 2.6498863e-4),
+            (1e5, 288., 3, 1.9647577e-3),
+            (2e4, 220., 0, 4.1812846e-4),
+            (2e4, 220., 3, 2.6950901e-3),
+        ):
+            v = stokes_velocity(
+                jnp.asarray([.7e-6]), jnp.asarray([2500.]),
+                jnp.asarray([temperature]), jnp.asarray([pressure]),
+                geom_std_dev=1.8, moment=moment, aspherical=True)
+            self.assertAlmostEqual(float(v[0]) / expected, 1., delta=.03)
+
     def test_wet_radius_capped(self):
         # HAMMOZ caps the settling diameter at 50 µm (25 µm radius), so a
         # runaway κ-Köhler wet-growth tail can't inflate the fall speed: the

@@ -10,11 +10,10 @@ generically: an unconditionally stable backward-Euler diffusion of an
 explicit tracer list, using the ``kh`` exchange-coefficient profile the
 TTE-TKE term publishes in the ``vertical_diffusion`` diagnostic.
 
-Like the other consumers of that diagnostic (ARG's updraft, dry
-deposition's u*), the profile comes from the previous step's carry
-because the vdiff term runs after the aerosol block in the ECHAM
-ordering; on the very first step the carry is seeded with ``kh = 0``
-(zero exchange coefficient), so the term is a no-op. Boundaries are zero-flux: the surface exchange is dry
+Default ECHAM tracer transport precedes vertical diffusion, so it reads
+the previous step's kh profile from the carry. A composition without vdiff can supply a
+carry profile; a zero profile makes this term a no-op. Boundaries are
+zero-flux: the surface exchange is dry
 deposition's job, and emission injection is the emission terms' job, so
 this term is pure interior mixing and conserves each tracer's column mass
 exactly.
@@ -34,7 +33,7 @@ import tree_math
 from flax import nnx
 
 from jcm.physics.physics_term import PhysicsTerm
-from jcm.physics_interface import PhysicsTendency
+from jcm.physics_interface import PhysicsTendency, working_tracers
 
 #: Physical floor on the layer mass [kg/m²] in divisions (a 1e-3 kg/m²
 #: layer is far thinner than any real grid); keeps the guarded-division
@@ -151,8 +150,11 @@ class TracerVerticalDiffusion(PhysicsTerm):
             tracer_tends = {nm: zeros for nm in self._tracer_names}
         else:
             dt = diagnostics.get("_dt_seconds", 1800.0)
+            # Surface emissions precede mixing. Mix their current-step mass
+            # before removal, as ECHAM's vdiff surface-source RHS does.
+            view = working_tracers(state, diagnostics)
             q = jnp.stack([
-                state.tracers.get(nm, zeros) for nm in self._tracer_names
+                view.get(nm, zeros) for nm in self._tracer_names
             ])
             q_new = diffuse_tracers_implicit(
                 q,

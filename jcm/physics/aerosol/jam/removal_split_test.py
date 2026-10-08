@@ -160,6 +160,8 @@ class SequentialRemovalTest(unittest.TestCase):
         acc, out = _run_chain(state, diagnostics)
         dm = np.asarray(diagnostics["air_density"]
                         * diagnostics["layer_thickness"])
+        np.testing.assert_allclose(out["sed_du"] + out["turb_dry_du"],
+                                   out["dry_du"], rtol=2e-6)
         for species in ("ss", "du", "so4", "bc"):
             removed = 0.0
             for mode in spec.modes:

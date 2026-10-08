@@ -245,9 +245,17 @@ def _patched_engine(shape):
     """Network-free stand-ins so both doors traverse the same patched engine.
 
     Terrain is forced to aquaplanet (identical for both builds, so model
-    equivalence is unaffected) because the global ``open_dataset`` stub the
-    forcing readers need would otherwise starve the terrain load.
+    equivalence is unaffected) because the forcing ``open_dataset`` stub
+    would otherwise starve the terrain load. The bundled CAM land-cover
+    inventory stays real: its construction is part of the JAM recipe.
     """
+    real_open_dataset = xr.open_dataset
+
+    def open_forcing_stub(path, *args, **kwargs):
+        if isinstance(path, (str, Path)) and Path(path).name == "cam_landuse.nc":
+            return real_open_dataset(path, *args, **kwargs)
+        return xr.Dataset()
+
     base = ForcingData.zeros(shape)
     return [
         # Engine-side resolvers: both doors run through forcing_assembly, so
@@ -259,7 +267,7 @@ def _patched_engine(shape):
         mock.patch.object(runners, "build_terrain",
                           side_effect=lambda cfg, c: TerrainData.aquaplanet(c)),
         mock.patch.object(ForcingData, "from_file", return_value=base),
-        mock.patch("xarray.open_dataset", return_value=xr.Dataset()),
+        mock.patch("xarray.open_dataset", side_effect=open_forcing_stub),
         mock.patch("jcm.forcing.read_anthropogenic_emissions",
                    return_value={"emis_so2_ant": jnp.ones(shape)}),
         mock.patch("jcm.forcing.read_prescribed_aerosol_emissions",

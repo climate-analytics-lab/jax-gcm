@@ -90,6 +90,6 @@ harness-side approximation satisfies neither requirement.
 
 ## Requirements
 
-The core is pinned to **mam4-jax 0.4.0**, the first release carrying the
+The core is pinned to **mam4-jax 0.5.1**; version 0.4.0 first carried the
 ageing port; `Mam4JaxMicrophysics` refuses to construct against a core
 without it.

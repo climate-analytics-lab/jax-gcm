@@ -119,6 +119,20 @@ class SulfurGasTermTest(unittest.TestCase):
         for v in tend.tracers.values():
             self.assertTrue(np.all(np.isfinite(np.asarray(v))))
 
+    def test_emissions_and_transport_precede_oxidation(self):
+        state, diagnostics = self._setup()
+        dt = diagnostics["_dt_seconds"]
+        source = {"g_dms": jnp.full_like(state.temperature, 1e-12),
+                  "g_so2": -0.5 * state.tracers["g_so2"] / dt}
+        working = state.copy(tracers={
+            k: q + dt * source.get(k, 0.0) for k, q in state.tracers.items()})
+        term = SulfurGasChemistry()
+        expected, _ = term(working, diagnostics, None, None)
+        actual, _ = term(state, {**diagnostics, "_tendency_run": {
+            "tracers": source}}, None, None)
+        for name in expected.tracers:
+            np.testing.assert_allclose(actual.tracers[name], expected.tracers[name])
+
     def test_grad_through_soag_param_finite(self):
         from jcm.physics.aerosol.jam.chemistry.sulfur_gas import (
             SulfurGasParameters,

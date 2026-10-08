@@ -38,6 +38,7 @@ from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.optics.mie_lut import default_mie_lut, interp_mie
 from jcm.physics.aerosol.jam.optics.refractive_index import refractive_index_at
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
+from jcm.physics.aerosol.jam.removal_split import split_view
 from jcm.physics.aerosol.jam.tracer_layout import mass_name
 from jcm.physics.physics_term import PhysicsTendency, PhysicsTerm
 
@@ -484,7 +485,7 @@ class JamOpticsTerm(PhysicsTerm):
                 vol_tot = jnp.zeros_like(state.temperature)
                 vol_sp: dict = {}
                 for sp in mode.species:
-                    mass = state.tracers.get(mass_name(sp, mode.short), zeros)
+                    mass = jnp.maximum(state.tracers.get(mass_name(sp, mode.short), zeros), 0.0)
                     v = mass / self._spec.species_props(sp).density
                     n_sp, k_sp = ri_band[sp]
                     vol_n = vol_n + v * n_sp
@@ -763,6 +764,10 @@ class JamOpticsTerm(PhysicsTerm):
 
     def _compute_fields(self, state, diagnostics) -> dict:
         """Fresh per-band optics + the AOD-550 column diagnostic."""
+        # Match the post-core geometry with its current working-copy mass.
+        # Passing a shallow state copy keeps every optics backend on the same
+        # input contract without altering the prognostic host state.
+        state = state.copy(tracers=split_view(self._spec, state, diagnostics))
         aer = diagnostics["_jam_state"]
         air_density = diagnostics["air_density"]
         dz = diagnostics["layer_thickness"]

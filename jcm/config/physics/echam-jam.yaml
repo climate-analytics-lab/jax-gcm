@@ -34,8 +34,9 @@
 #     python -m jcm.main physics=echam-jam grid=echam_t42_l8_sigma \
 #         forcing.emissions_file=/path/to/emissions_on_model_grid.nc
 #
-# Both emission terms are enabled but **inert until a matching file is given**,
-# so a plain ``physics=echam-jam`` run is the zero-emission JAM baseline.
+# Both emission terms are enabled. On supported grids, emissions_file=auto
+# loads bulk sources and CAM6 SOAG together from the period-matched HF bundle.
+# Set forcing.emissions_file=null explicitly for a zero-prescribed-source run.
 #
 # Defaults use the real MAM4-JAX core, which is an optional GPL extra:
 #     pip install jcm[mam4]
@@ -46,7 +47,10 @@ builder: echam_physics
 aerosol_module: jam
 cloud_scheme: 2m            # ARG activated_cdnc feeds the 2-moment scheme
 radiation_scheme: rrtmgp    # the ECHAM radiation; "grey" (idealized, not ECHAM) is rejected
-jam_microphysics: mam4_jax  # the MAM4-JAX core (#490); "placeholder" for κ-Köhler
+# CAM6 SOA needs the conservative evaporation corrector. The adaptive
+# solve is forward-only; select mam4_jax explicitly for the fixed-substep
+# differentiation backend, whose warm-cell evaporation can lose closure.
+jam_microphysics: mam4_jax_astem
 jam_arg_variant: ghosh2025  # or arg2000
 jam_aqueous_scheme: full
 

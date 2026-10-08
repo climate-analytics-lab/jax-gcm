@@ -197,6 +197,41 @@ _EMIS_SPECIES = ("so2", "bc", "oc")
 _ANTHRO_SECTORS = ("surface_combustion", "elevated_industrial", "shipping")
 
 
+def add_cam6_soa(ds: xr.Dataset, *, sources=None) -> xr.Dataset:
+    """Add era-matched monthly SOAG to the bulk emissions bundle.
+
+    Source periods match CEDS/BB: PD 2005–2014 and PI 1850–1859. Align by
+    calendar month explicitly: NCAR labels mid-month, while these bundles
+    label month starts. A raw xarray join would otherwise drop every flux.
+    WRAP_YEAR uses calendar months, so those labels have the same meaning.
+    """
+    from types import SimpleNamespace
+
+    from jcm.data.emissions.cam6_soa import prepare_cam6_soa
+
+    periods = {"pd": (2005, 2014), "pi": (1850, 1859)}
+    period = periods[ds.attrs["era"]]
+    nlon, nlat = ds.sizes["lon"], ds.sizes["lat"]
+    weights = np.polynomial.legendre.leggauss(nlat)[1]
+    coords = SimpleNamespace(horizontal=SimpleNamespace(
+        longitudes=np.deg2rad(ds.lon.values),
+        latitudes=np.deg2rad(ds.lat.values), nodal_shape=(nlon, nlat),
+        quadrature_weights=np.broadcast_to(weights[None, :] * 2 * np.pi / nlon,
+                                           (nlon, nlat))))
+    soa = prepare_cam6_soa(coords, sources, year_range=period)
+    # Preserve the bundle's time and grid coordinates exactly; all source
+    # months have already been checked and ordered by the preparation step.
+    months = np.asarray(ds.time.dt.month)
+    if len(months) != 12 or set(months) != set(range(1, 13)):
+        raise ValueError("SOAG bundle requires twelve distinct calendar months")
+    field = soa.aero_emis_g_soag.isel(time=months - 1)
+    out = ds.copy()
+    out["aero_emis_g_soag"] = (("time", "lon", "lat"), field.values,
+                                dict(field.attrs))
+    out.attrs.update({f"soag_{key}": value for key, value in soa.attrs.items()})
+    return out
+
+
 def build_emissions_nc(ceds_zarr: str, bb_zarr: str, era: str,
                        lats, lons, out_path: str) -> None:
     """Per-grid emissions file keyed ``emis_<super_sector>_<species>``.
@@ -229,6 +264,7 @@ def build_emissions_nc(ceds_zarr: str, bb_zarr: str, era: str,
         "era": era,
         "source": "CEDS-CMIP-2025-04-18 + DRES-CMIP-BB4CMIP7-2-0",
     }
+    ds = add_cam6_soa(ds)
     ds.to_netcdf(out_path)
     print("wrote", out_path, flush=True)
 

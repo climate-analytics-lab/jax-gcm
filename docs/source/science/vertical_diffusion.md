@@ -57,6 +57,13 @@ all constituents likewise.
   separate ``TracerVerticalDiffusion`` term rather than in the same tridiagonal
   ; its boundaries are zero-flux (surface exchange is dry deposition's job).
 
+The tracer solve consumes the sequential working population, including
+surface emissions already injected this step, and returns only its mixing
+change. `science` — the emitted mass enters the implicit RHS before
+deposition, consistent with ECHAM `mo_vdiff_solver`'s surface tracer source;
+fresh aerosol must not wait a step to mix while being eligible for same-step
+deposition. Source-plus-mixing column conservation is tested explicitly.
+
 **Status & known limitations.** ``TracerVerticalDiffusion`` is a no-op on the
 first step — it reads the previous step's ``kh`` carry, which is seeded to
 zero on step 0 (zero exchange coefficient, zero tendency)

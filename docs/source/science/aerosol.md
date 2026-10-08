@@ -65,7 +65,10 @@ See {doc}`../design/jam_carbon_aging`.
   oxidation is jcm-side).
 
 **Status & known limitations.** Every shipped ``echam-jam*`` configuration pins
-``jam_microphysics: mam4_jax`` (requiring the ``jcm[mam4]`` extra); the
+``jam_microphysics: mam4_jax_astem`` (requiring ``jcm[mam4]``, MAM4-JAX 0.5.1).
+This conservative condensation solve is forward-only; the explicit
+``mam4_jax`` backend retains fixed-substep differentiation support, with the
+warm-cell evaporation limitation described in {doc}`../design/jam_soa_dust`. The
 zero-tendency κ-Köhler placeholder is the bare-factory default and the
 documented fallback when the GPL extra is unavailable. The core's cloudy ``amicphys``
 sub-area is not ported upstream, so cloud-borne activation is the harness's job
@@ -1027,6 +1030,13 @@ the cloud-borne tracers rather than the interstitial ones; the convective
 carrier acts in HAMMOZ's updraft-area footprint (see [convective tracer
 transport](#convective-tracer-transport--in-plume-scavenging)).
 
+CAM's coarse-mode asphericity drag factor (0.8, Huang et al. 2020,
+doi:10.1029/2019GL086592) reduces gravitational velocity for both number and
+mass, including its contribution to the impaction Stokes number. As in CAM,
+this applies to the internally mixed coarse mode, so the sea-salt response
+must be validated alongside dust. It leaves the modal width and optical
+shape unchanged.
+
 Stokes settling and the Slinn quasi-laminar resistance are evaluated at the
 **wet** particle's density, the mass-weighted mixture of dry material and
 condensed water ``ρ_wet = (ρ_dry + (g³ − 1)·ρ_w)/g³`` with ``g`` the κ-Köhler
@@ -1131,6 +1141,19 @@ a 32 % wet / 68 % dry+sedimentation pathway split against HAM's published ~30/70
 accumulation-mode sulfate and black carbon are unchanged, as expected for a mode
 sitting in the Greenfield gap.
 
+JAM microphysics, chemistry, removal, optics and ice nucleation consume the
+sequential working aerosol population: earlier tracer tendencies are folded
+into the step-start tracers, while cloud-borne updates are integrated once in
+their carry. After MAM4 condensation, ageing and coagulation, the adapter
+diagnoses the updated mass/number lognormal size relation and equilibrium water
+for downstream removal and optics. It does not repeat the time-dependent
+`calcsize` adjustment. `science` — mass, number and geometry must describe the
+same population at each process; the reference relation is CAM
+`modal_aero_calcsize`, with Köhler equilibrium from MAM4 `wateruptake`.
+Separate `sed_du` and `turb_dry_du` diagnostics attribute the combined `dry_du`
+loss to gravitational settling and turbulent surface collection. See
+[SOA and dust design](../design/jam_soa_dust.md).
+
 ## MACv2-SP simple plumes
 
 **What we do.** A faithful port of MACv2-SP (Stevens et al. 2017): nine
@@ -1164,3 +1187,13 @@ references: {doc}`../design/jam_carbon_aging`,
 {doc}`../design/dinosaur_sl_jam_configuration`,
 {doc}`../design/aerosol_optics_diagnostics`,
 {doc}`../design/aerocom_erfari_sampling`.
+
+
+JAM surface collection uses CAM's eleven land-cover classes and the
+Zhang et al. (2001) impaction, interception, diffusion and rebound law.
+The official CAM land-use map is conservatively remapped at model construction.
+This replaces the previous application of an ocean-only law over deserts
+and vegetation. Host aerodynamic resistance remains neutral; the prognostic
+cloud-borne phase still uses aerosol-mode collection velocities. See
+[the SOA and dust design note](../design/jam_soa_dust.md) for the source,
+reference comparisons and measured limitations.

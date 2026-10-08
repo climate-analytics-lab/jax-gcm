@@ -54,6 +54,13 @@ class FluxAccumulationTest(unittest.TestCase):
         want = 4e-12 * RHO * DZ * NLEV
         np.testing.assert_allclose(np.asarray(out["emi_ss"]), want, rtol=1e-6)
 
+    def test_soag_source_has_its_own_gas_budget_flux(self):
+        tend = {"g_soag": jnp.full((NLEV, NCOLS), 1e-12)}
+        out = accumulate_emission_fluxes({}, tend, *_mass_fields())
+        np.testing.assert_allclose(out["emi_soag"], 1e-12 * RHO * DZ * NLEV,
+                                   rtol=1e-6)
+        np.testing.assert_allclose(out["emi_soa"], 0.0)
+
     def test_accumulates_across_terms(self):
         """Several terms emit the same species; AeroCom wants the total."""
         d = accumulate_emission_fluxes(
