@@ -56,21 +56,15 @@ import jax.numpy as jnp
 import numpy as np
 from dinosaur import primitive_equations, semi_lagrangian
 
-#: Coordinates the dinosaur backend offers for the vertical stage of the
-#: semi-Lagrangian interpolation: ``log_pressure`` (``ln s``) or ``sigma``
-#: (``s`` itself, dinosaur's native rule).
-SL_VERTICAL_COORDINATES = ("log_pressure", "sigma")
-
-
 def log_interpolation_nodes(
     nodes: semi_lagrangian.VerticalNodes,
 ) -> semi_lagrangian.VerticalNodes:
     """Map the trajectory nodes to ``ln s``.
 
     Only ``centers`` is read by the transport (the fields live at layer
-    centres). The layer boundaries include ``s = 0`` at a pressure-zero lid;
-    it is mapped half a top layer above the top centre in ``ln s`` so the
-    boundaries stay finite and increasing. Nothing interpolates on them.
+    centres). The layer boundaries include ``s = 0`` at a pressure-zero lid,
+    which is mapped to ``ln(s₀/2)`` (``ln 2`` above the top centre) so the
+    boundaries stay finite and increasing; nothing interpolates on them.
     """
     centers = np.asarray(nodes.centers)
     boundaries = np.asarray(nodes.boundaries)

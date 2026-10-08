@@ -64,7 +64,7 @@ in ``jcm/data/input_resolution.py``, driven by the Hydra ``forcing`` group
   refuses a source whose top level lies below the model's top level
   (``allow_top_clamp`` overrides): holding a stratospheric value up to the
   lid puts some forty times the mesospheric ozone there, and its heating holds
-  the summer mesopause about 60 K too warm.
+  the summer mesopause 60-80 K too warm.
 
 **What ECHAM/CAM does.** The standard prescribed-AMIP protocol: PCMDI-AMIP
 mid-month SST/sea-ice boundary values, a CMIP6 ozone climatology, global-mean GHG

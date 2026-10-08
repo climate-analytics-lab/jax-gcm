@@ -622,6 +622,12 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
             "'echam_t85_l47'."
         )
 
+    # null keeps the profile's own choice (False for the ECHAM lmidatm
+    # profiles, True for the SPEEDY default).
+    zonal = None if diffusion is None else diffusion.get("diffuse_zonal_mean", None)
+    if zonal is not None:
+        base = dataclasses.replace(base, diffuse_zonal_mean=bool(zonal))
+
     base.validate_layers(layers)
     return base.scaled(scale)
 

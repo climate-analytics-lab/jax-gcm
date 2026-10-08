@@ -172,7 +172,9 @@ class DiffusionFilter:
     # the radiatively and wave-driven zonal-mean jets and temperature of the
     # stratosphere and mesosphere are not smoothed by the ∇² of the top
     # levels; the SPEEDY default diffuses every wavenumber. ``None`` means
-    # True (diffuse it).
+    # True (diffuse it). The exemption covers every modal field the filters
+    # touch, the modal ``specific_humidity`` included; ECHAM's humidity is a
+    # grid-point field that its spectral diffusion never sees at all.
     diffuse_zonal_mean: Optional[bool] = None
 
     @classmethod

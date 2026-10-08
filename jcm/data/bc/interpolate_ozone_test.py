@@ -222,8 +222,12 @@ class VerticalInterpDtypeTest(unittest.TestCase):
 
 
 
-def _write_source(path, plev_pa, value_fn):
-    """Write a 12-month (time, plev, lat, lon) ozone source on ``plev_pa``."""
+def _write_source(path, plev_pa, value_fn, units=None):
+    """Write a 12-month (time, plev, lat, lon) ozone source on ``plev_pa``.
+
+    ``units`` sets the ``plev`` units attribute, with the coordinate written
+    in that unit (hPa: divided by 100).
+    """
     import xarray as xr
 
     lat = np.array([-45.0, 45.0])
@@ -231,10 +235,13 @@ def _write_source(path, plev_pa, value_fn):
     o3 = np.broadcast_to(
         value_fn(plev_pa)[None, :, None, None],
         (12, plev_pa.size, lat.size, lon.size)).astype(np.float32)
+    plev = plev_pa / 100.0 if units == "hPa" else plev_pa
     ds = xr.Dataset(
         {"O3": (("time", "plev", "lat", "lon"), o3)},
-        coords={"time": np.arange(1, 13), "plev": plev_pa,
+        coords={"time": np.arange(1, 13), "plev": plev,
                 "lat": lat, "lon": lon})
+    if units is not None:
+        ds.plev.attrs["units"] = units
     ds.to_netcdf(path)
 
 
@@ -244,7 +251,7 @@ class OzoneTopClampGuardTest(unittest.TestCase):
     ``np.interp`` holds the source's top value above its top level, so a CAM6
     climatology ending near 4 hPa wrote its 7 ppmv stratospheric value into
     every L47 level up to the 1 Pa lid (#1060): ~40x the mesospheric ozone,
-    which held the model top some 50 K too warm.
+    which held the summer mesopause 60-80 K too warm.
     """
 
     def test_a_source_below_the_lid_is_refused(self):
@@ -300,6 +307,46 @@ class OzoneTopClampGuardTest(unittest.TestCase):
             np.testing.assert_allclose(top, 1e-7 * (1.0 + np.log(p / 0.01)),
                                        rtol=1e-5)
             self.assertTrue(np.all(np.diff(top) > 0))
+
+    def test_an_hpa_source_is_read_in_pa(self):
+        import tempfile
+        from pathlib import Path
+
+        import xarray as xr
+
+        from jcm.data.bc.interpolate_ozone import interpolate_ozone
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Stops at 4 hPa: in hPa it is below the lid and must be refused;
+            # read as Pa it would wrongly appear to reach 0.04 Pa.
+            src = Path(tmp) / "src_hpa.nc"
+            _write_source(src, np.logspace(np.log10(400.0), 5.0, 20),
+                          lambda p: 7e-6 * np.ones_like(p), units="hPa")
+            with self.assertRaisesRegex(ValueError, "above it"):
+                interpolate_ozone(src, Path(tmp) / "out.nc", 47)
+            # Reaching the lid in hPa: interpolated on the right levels.
+            src = Path(tmp) / "src_hpa_full.nc"
+            _write_source(src, np.logspace(-2.0, 5.0, 40),
+                          lambda p: 1e-7 * (1.0 + np.log(p / 0.01)), units="hPa")
+            interpolate_ozone(src, Path(tmp) / "out.nc", 47)
+            with xr.open_dataset(Path(tmp) / "out.nc") as out:
+                top = out.O3.values[0, :3, 0, 0]
+                p = out.level_pressure_pa.values[:3]
+            np.testing.assert_allclose(top, 1e-7 * (1.0 + np.log(p / 0.01)),
+                                       rtol=1e-5)
+
+    def test_an_unknown_plev_unit_is_refused(self):
+        import tempfile
+        from pathlib import Path
+
+        from jcm.data.bc.interpolate_ozone import interpolate_ozone
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "src.nc"
+            _write_source(src, np.logspace(-2.0, 5.0, 40),
+                          lambda p: 1e-7 * np.ones_like(p), units="kPa")
+            with self.assertRaisesRegex(ValueError, "units"):
+                interpolate_ozone(src, Path(tmp) / "out.nc", 47)
 
 
 class PackagedOzoneTest(unittest.TestCase):

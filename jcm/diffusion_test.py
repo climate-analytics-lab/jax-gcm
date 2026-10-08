@@ -348,6 +348,33 @@ class ZonalMeanExemptionTest(unittest.TestCase):
             DiffusionFilter.echam_lmidatm(63, 47).scaled(0.5).diffuses_zonal_mean)
 
 
+class ZonalMeanHydraDoorTest(unittest.TestCase):
+    """``diffusion.diffuse_zonal_mean`` overrides the profile's choice."""
+
+    def _build(self, **diffusion):
+        from omegaconf import OmegaConf
+
+        from jcm.runners import build_diffusion
+
+        cfg = OmegaConf.create({
+            "diffusion": {"kind": "auto", "scale": 1.0, **diffusion},
+            "grid": {"layers": 47, "spectral_truncation": 63,
+                     "vertical": "hybrid"},
+        })
+        return build_diffusion(cfg)
+
+    def test_null_keeps_the_profile_choice(self):
+        self.assertFalse(self._build(diffuse_zonal_mean=None).diffuses_zonal_mean)
+        self.assertFalse(self._build().diffuses_zonal_mean)
+
+    def test_true_diffuses_the_zonal_mean_of_the_lmidatm_profile(self):
+        f = self._build(diffuse_zonal_mean=True, scale=0.5)
+        self.assertTrue(f.diffuses_zonal_mean)
+        # the rest of the profile is untouched by the override
+        npt.assert_array_equal(f.level_orders_temp,
+                               DiffusionFilter.echam_lmidatm(63, 47).level_orders_temp)
+
+
 class ZonalMeanExemptionDycoreTest(unittest.TestCase):
     """The dycore filter keeps the m = 0 coefficients under ``lmidatm``.
 

@@ -123,6 +123,33 @@ def vertical_interp_log_p(
     return np.moveaxis(out.reshape(*lead_shape, plev_target.size), -1, 1)
 
 
+#: Pressure units the source ``plev`` may carry, as factors to Pa. A source
+#: without a ``units`` attribute is taken to be in Pa, the convention of the
+#: files ``jcm.data.mirror`` writes.
+_PLEV_TO_PA = {"pa": 1.0, "hpa": 100.0, "mbar": 100.0, "mb": 100.0,
+               "millibar": 100.0}
+
+
+def _plev_in_pa(plev) -> np.ndarray:
+    """Convert the source ``plev`` coordinate to Pa from its ``units`` attribute.
+
+    The top guard and the interpolation compare it with model pressures in
+    Pa; a source in hPa read as Pa would have every level a hundredfold too
+    low in pressure, pass the guard and interpolate the wrong levels.
+
+    Raises:
+        ValueError: if ``units`` is set to anything other than a known
+            pressure unit.
+
+    """
+    units = str(plev.attrs.get("units", "Pa")).strip().lower()
+    if units not in _PLEV_TO_PA:
+        raise ValueError(
+            f"plev has units {plev.attrs.get('units')!r}; expected one of "
+            f"Pa, hPa, mbar")
+    return np.asarray(plev.values, dtype=np.float64) * _PLEV_TO_PA[units]
+
+
 def interpolate_ozone(
     input_path: str | Path,
     output_path: str | Path,
@@ -139,8 +166,8 @@ def interpolate_ozone(
     between 1 hPa and the 0.01 hPa lid of the L47/L95 grids, so that is not a
     harmless boundary choice: a CAM6 climatology whose top level is ~4 hPa
     filled the top nine L47 levels with 7 ppmv where the observed mesospheric
-    value is ~0.2-1 ppmv, and the resulting ozone heating held the model top
-    some 50 K too warm. A target grid that reaches above the source's top
+    value is ~0.2-1 ppmv, and the resulting ozone heating held the summer
+    mesopause 60-80 K too warm. A target grid that reaches above the source's top
     level is therefore refused unless ``allow_top_clamp`` says the clamp is
     intended. (The bottom is not guarded: sources end at 1000 hPa, a few hPa
     above the lowest model level, where ozone hardly varies.)
@@ -174,7 +201,7 @@ def interpolate_ozone(
         raise ValueError(
             f"Expected '{var_name}' shape (time, plev, lat, lon); got {o3_in.shape}"
         )
-    plev_source = np.asarray(ds_in[var_name].plev.values)
+    plev_source = _plev_in_pa(ds_in[var_name].plev)
 
     # Build the model's hybrid-level center pressures at the reference ps.
     # ``a_centers`` is in Pa; ``b_centers`` is dimensionless. Together

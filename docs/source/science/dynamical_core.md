@@ -108,8 +108,9 @@ Horizontal hyperdiffusion is configured by ``jcm/diffusion.py::DiffusionFilter``
 for hybrid L47/L95 grids the resolution-aware ``DiffusionFilter.auto`` selects the
 ECHAM ``lmidatm`` level-dependent order profile (∇² near the model top grading to
 ∇⁶/∇⁸ below, base timescale from ``setdyn.f90``'s ``dampth``), which like ECHAM's
-``hdiff`` under ``lmidatm`` leaves the zonal mean (m = 0) undiffused at every
-level; any other grid gets the uniform SPEEDY ∇²/∇⁴ profile on every wavenumber
+``hdiff`` under ``lmidatm`` leaves the zonal mean (m = 0) of vorticity, divergence
+and temperature undiffused at every level (the modal humidity too, which ECHAM,
+whose humidity is a grid-point field, does not diffuse at all); any other grid gets the uniform SPEEDY ∇²/∇⁴ profile on every wavenumber
 (``DiffusionFilter.default``), with a warning for unrecognised hybrid grids. ECHAM's upper sponge (``uspnge``: implicit damping of
 the zonal anomalies of u, v and T, the zonal mean untouched) is enabled via the
 ``run`` group (``jcm/config/run/longrun.yaml``: the top level, 3 h, as ECHAM's

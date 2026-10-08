@@ -30,13 +30,21 @@ def _l47_dycore(**sl_options):
     )
 
 
+def _trajectory_nodes(dycore):
+    """Return the SL primitive's trajectory nodes (hybrid ``s`` or sigma ``σ``)."""
+    primitive = dycore.primitive
+    if hasattr(primitive, "_reference_vertical_nodes"):
+        return primitive._reference_vertical_nodes
+    return primitive._vertical_nodes
+
+
 def _upwelling_departure(dycore, dlnp):
     """Departure points displaced down by ``dlnp`` in ln s, horizontally fixed."""
     import jax.numpy as jnp
     from dinosaur import primitive_equations, semi_lagrangian
 
     grid = dycore.coords.horizontal
-    nodes = dycore.primitive._reference_vertical_nodes
+    nodes = _trajectory_nodes(dycore)
     nlev = len(nodes.centers)
     lon, sin_lat = grid.nodal_mesh
     shape = (nlev,) + grid.nodal_shape
@@ -159,14 +167,17 @@ class TopCellAdvectionTest(unittest.TestCase):
         dycore = _l47_dycore(vertical_coordinate=coordinate)
         s = np.asarray(dycore.primitive._reference_vertical_nodes.centers)
         lapse = 10.0                     # K per unit ln p: T falls upward
-        profile = lapse * np.log(s / s[-1])
+        # Anchored at the top so T′ is small where the 0.02 K signal is
+        # measured (float32 round-off of a large T′ would dominate it).
+        profile = lapse * np.log(s / s[0])
         out = _transported_temperature(dycore, profile, steps=1)
         exact = lapse * _DLNP           # change of T at a departure dlnp below
         return (out[:3] - profile[:3]) / exact
 
     def test_log_pressure_advects_the_top_levels_exactly(self):
+        # Measured 1.000 / 1.000 / 0.998; the ``s`` rule differs by 0.56.
         np.testing.assert_allclose(self._advected_fraction("log_pressure"),
-                                   1.0, atol=2e-3)
+                                   1.0, atol=1e-2)
 
     def test_sigma_misreads_the_top_cells(self):
         # Measured 0.44 / 1.37 / 1.16 for the top three levels: the top
@@ -176,6 +187,34 @@ class TopCellAdvectionTest(unittest.TestCase):
         self.assertLess(fraction[0], 0.5)
         self.assertGreater(fraction[0], 0.4)
         self.assertGreater(fraction[1], 1.2)
+
+
+class SigmaGridTransportTest(unittest.TestCase):
+    """``log_pressure`` on a sigma grid transports through ``ln σ``.
+
+    The SPEEDY L8 grid keeps ``σ`` by default; asked for ``ln σ`` its
+    transport (whose σ boundaries include 0 at the lid) must stay finite and
+    advect a profile linear in ``ln σ`` exactly in the cubic cells.
+    """
+
+    def test_profile_linear_in_log_sigma_is_advected_exactly(self):
+        from jcm.dycore.dinosaur.dycore import DinosaurDycore
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        from jcm.terrain import TerrainData
+
+        coords = get_speedy_coords(layers=8, spectral_truncation=21)
+        dycore = DinosaurDycore(
+            coords=coords, terrain=TerrainData.aquaplanet(coords),
+            dt_seconds=720.0, advection="semi_lagrangian",
+            sl_options={"vertical_coordinate": "log_pressure"})
+        s = np.asarray(_trajectory_nodes(dycore).centers)
+        profile = 10.0 * np.log(s / s[0])
+        out = _transported_temperature(dycore, profile, steps=1)
+        self.assertTrue(np.all(np.isfinite(out)))
+        fraction = (out - profile) / (10.0 * _DLNP)
+        # the cubic cells (the first and last cells are linear in ln σ too,
+        # so every level but the clipped bottom one is exact)
+        np.testing.assert_allclose(fraction[:-1], 1.0, atol=1e-2)
 
 
 class TwoDeltaZStabilityTest(unittest.TestCase):

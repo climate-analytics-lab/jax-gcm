@@ -92,27 +92,30 @@ boundary-layer levels thin towards the ground), so the change there is
 immaterial and dominated by boundary-layer vertical diffusion. Below its top
 level the L95 grid is spaced by a ratio of about 1.2 per level, where the
 cubic cells are stable in either coordinate; its top cell (0.995 to 2.34 Pa)
-is still linear in ``s`` under the old rule, with 0.63 of the log-pressure
-weight, so ``ln s`` changes the L95 lid level too, by less. The L8 sigma grids are close to
+gives the second level 0.63 of the log-pressure weight when it is linear in
+``s``, so the coordinate matters at the L95 lid level too, by less. The L8 sigma grids are close to
 uniform in ``σ`` and slightly less so in ``ln σ`` (largest gain 1.000 in
 ``σ`` against 1.002 in ``ln σ``), which is why sigma grids keep ``σ``.
 
-## What it changes
+## Measured consequence
 
-In ``ma-t63-l47`` started from the January 49c0724c warm state, with the
-level-matched FZJ CMIP7 ozone, the summer (south) polar cap of the 1 Pa level
-cooled from 247 K to 165 K in eight days in both rules. From the day-8 state
-onward, interpolating in ``s`` drove the cap's coldest cells to 136 K by day
-11: ice formed at 1-4 Pa, and within a day the top two levels carried
-``q`` up to 1e-2 kg/kg beside −1e-3 below, with the 1 Pa and 4 Pa
-temperatures splitting apart (the ``s``-rule profile at the cap was 164 K at
-1 Pa over 217 K at 4.3 Pa and 221 K at 11 Pa). Interpolating in ``ln s`` the
-1 Pa cap settled at 162-169 K with its coldest cells at 156-162 K, the 4.3 Pa
-cap at 196 K and the 11 Pa cap at 224 K — a monotone mesospheric lapse — and
-no ice formed in twenty days. Linear interpolation in ``s`` (stable in the
-cubic cells, but with the same linear top cell) cooled the cap to 144 K by
-day 12 and formed ice, which isolates the top cell as the cause of the cold
-bias. 30-day January and July A/B statistics are in the pull request.
+In ``ma-t63-l47`` from the January and July warm states, with the
+level-matched FZJ CMIP7 ozone, the summer polar cap of the 1 Pa level cools
+from 247 K to ~165 K in the first eight days under either rule. From there:
+
+| rule | summer cap at 1 / 4.3 / 11 Pa, from day 9 until any runaway | coldest 1 Pa cells | ice at 1-4 Pa |
+|---|---|---|---|
+| cubic in ``s`` | 156-164 / 206-217 / 220-230 K | 136 K by day 11 (Jan), 13 (Jul) | from day 9 (Jan), 11 (Jul); runaway from day 11 (Jan), 13 (Jul) |
+| linear in ``s`` (Jan) | 131-158 / 171-206 / 209-220 K | 128 K by day 19 | from day 10; runaway on day 20 |
+| cubic in ``ln s`` | 161-170 / 194-210 / 221-228 K | 156-165 K | none in 20 days |
+
+Cubic interpolation in ``s`` splits the 1 Pa and 4.3 Pa levels apart (the
+lid under-reads the advection from below, the next level over-reads it).
+Linear interpolation in ``s``, stable in the cubic cells but with the same
+linear top cell, is colder still at the lid and has no warm 4.3 Pa level,
+which isolates the top cell as the cause of the cold bias and the cubic cells
+as the source of the warm 4.3 Pa level. In ``ln s`` the cap keeps a monotone
+mesospheric lapse.
 
 ## Reference
 

@@ -1463,16 +1463,20 @@ Three changes act above ~100 Pa on the L47/L95 hybrid grids:
   formed ice and a runaway humidity dipole at 1–11 Pa (see
   :doc:`design/sl_vertical_interpolation`).
 - The ECHAM ``lmidatm`` hyperdiffusion profile no longer diffuses the zonal
-  mean, as in ECHAM; ``DiffusionFilter(diffuse_zonal_mean=...)`` exposes it.
+  mean, as in ECHAM; ``diffusion.diffuse_zonal_mean`` (``true`` restores the
+  earlier behaviour) and ``DiffusionFilter.diffuse_zonal_mean`` expose it.
 - ``forcing.ozone_file: auto`` at T63L47 resolves the zonal mean of the FZJ
   CMIP7 present-day climatology (the same source as the ``ma-*`` presets'
   bundle) instead of a CAM6chem file held at its 4 hPa value up to the lid;
-  the T63L47 presets on ``auto`` lose ~60 K of mesospheric warm bias.
+  the T63L47 presets on ``auto`` lose a 60-80 K mesospheric warm bias.
   ``jcm.data.bc.interpolate_ozone`` raises for a source that stops below the
   model top unless ``allow_top_clamp=True``.
 
-Warm states spun up before these changes carry a summer mesopause that is too
-cold at 1 Pa and too warm at 4 Pa (L47); they adjust within about a week.
+Warm states spun up before these changes are out of balance at the top and
+adjust within about a week: those of the ``ma-*`` presets (FZJ ozone) carry a
+summer mesopause too cold at 1 Pa and too warm at 4.3 Pa (L47), those of the
+T63L47 presets on ``auto`` (``t63-echam-1m``/``2m``/``rrtmgp``, the release
+fixtures among them) a mesosphere 60-80 K too warm.
 
 SPEEDY shortwave heating is applied every step
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

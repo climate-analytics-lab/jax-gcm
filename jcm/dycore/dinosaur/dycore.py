@@ -31,11 +31,6 @@ import jcm.constants as jcm_constants
 from jcm.constants import PhysicalConstants
 from jcm.diffusion import DiffusionFilter, level_dependent_scaling
 from jcm.dycore.base import DynamicalCore, Predictions
-from jcm.dycore.dinosaur.log_pressure_interpolation import (
-    SL_VERTICAL_COORDINATES,
-    LogPressureSemiLagrangianHybrid,
-    LogPressureSemiLagrangianSigma,
-)
 from jcm.dycore.dinosaur.state_bridge import (
     CONDENSATE_TRACERS,
     dynamics_state_to_physics_state,
@@ -129,6 +124,10 @@ DEFAULT_VERTICAL_INTERPOLATION = "cubic"
 #: it. See jcm/dycore/dinosaur/log_pressure_interpolation.py and
 #: docs/source/design/sl_vertical_interpolation.md.
 DEFAULT_SL_VERTICAL_COORDINATE = {"hybrid": "log_pressure", "sigma": "sigma"}
+
+#: Coordinates the vertical stage of the SL interpolation can use
+#: (``sl_options['vertical_coordinate']`` / ``dycore.sl_vertical_coordinate``).
+SL_VERTICAL_COORDINATES = ("log_pressure", "sigma")
 
 
 #: Transport schemes the dinosaur backend offers (see ``DinosaurDycore``'s
@@ -456,6 +455,14 @@ class DinosaurDycore(DynamicalCore):
             departure_iterations=self._sl_options.get("departure_iterations", 1),
             vertical_interpolation_order=self.vertical_interpolation_order,
         )
+        # Imported here, after ``_require_semi_lagrangian`` has run in
+        # ``__init__``: the module subclasses dinosaur's SL classes at import
+        # time, and an install without them must get that check's message.
+        from jcm.dycore.dinosaur.log_pressure_interpolation import (
+            LogPressureSemiLagrangianHybrid,
+            LogPressureSemiLagrangianSigma,
+        )
+
         log_pressure = self.sl_vertical_coordinate == "log_pressure"
         if isinstance(self.coords.vertical, HybridCoordinates):
             sl_class = (LogPressureSemiLagrangianHybrid if log_pressure else
@@ -642,8 +649,11 @@ class DinosaurDycore(DynamicalCore):
     def _make_diffusion_fn(self, timescale, order, replace_fn, level_orders=None):
         """Hyperdiffusion filter closure for one of the three state slots.
 
-        Lifted unchanged from :meth:`jcm.model.Model._make_diffusion_fn` — the
-        Phase-1 baseline asserts the bit-level invariance.
+        Damps the modal coefficients by ``exp(-dt/τ·(n(n+1)/N(N+1))**p)``; with
+        ``diffusion.diffuse_zonal_mean`` False (the ECHAM ``lmidatm`` profile)
+        the m = 0 column is restored afterwards, so the zonal mean is not
+        diffused. With the zonal mean diffused (the SPEEDY default) the result
+        is the filter's output unchanged.
         """
         keep_zonal_mean = not self.diffusion.diffuses_zonal_mean
         if keep_zonal_mean:

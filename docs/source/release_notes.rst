@@ -1258,14 +1258,14 @@ The semi-Lagrangian step interpolates in log-pressure at the model top
   steady upwelling (a 2Δz pattern grew 1.5x in five days at 2 cm/s; it now
   decays to 0.06). Under the summer-mesosphere upwelling that cooled the
   1 Pa level and warmed the 4 Pa level: from the ``ma-t63-l47`` January warm
-  state the coldest 1 Pa cells reached 136 K by day 11, and ice and a
-  ±1e-2 kg/kg humidity dipole formed at 1–11 Pa, the start of the
-  per-trajectory failures of #1060.
+  state the coldest 1 Pa cells reached 136 K by day 11, ice formed at 1–4 Pa,
+  and a humidity dipole (up to 1e-2 kg/kg at 1 Pa over −2e-3 below) followed:
+  the start of the per-trajectory failures of #1060.
 - **Changes results** above ~100 Pa on the L47 grid, and at the lid level of
   the L95 grid (whose cubic cells are stable in either rule but whose linear
   top cell under-read by 0.63); the troposphere, where ``ln s ≈ s − 1``, is
   essentially unchanged. From the same day-8 January
-  state the summer polar cap holds 162–169 K at 1 Pa, 196 K at 4.3 Pa and
+  state the summer polar cap holds 161–169 K at 1 Pa, 196 K at 4.3 Pa and
   224 K at 11 Pa (was 164, 217 and 221 K, with ice from day 9). See
   :doc:`design/sl_vertical_interpolation`.
 
@@ -1275,7 +1275,8 @@ ECHAM middle-atmosphere hyperdiffusion leaves the zonal mean alone
 - ``DiffusionFilter.echam_lmidatm`` — what ``diffusion.kind=auto`` selects on
   the L47/L95 hybrid grids — no longer diffuses the zonal-mean (m = 0)
   coefficients, at any level, as ECHAM's ``hdiff`` does under ``lmidatm``
-  (``mo_hdiff.f90``). The ∇² of the top levels was smoothing the zonal-mean
+  (``mo_hdiff.f90``; ``diffusion.diffuse_zonal_mean``, default ``null`` = the
+  profile's choice). The ∇² of the top levels was smoothing the zonal-mean
   jets and temperature of the mesosphere. **Changes results** at the top
   levels of every L47/L95 configuration (small: the summer-cap temperature
   within 1 K and the jet within 2 m/s over the first four days). The SPEEDY
@@ -1295,7 +1296,7 @@ The packaged T63L47 ozone declines through the mesosphere
   (``allow_top_clamp`` to clamp on purpose).
 - **Changes results** in ``t63-echam-1m``, ``t63-echam-2m``,
   ``t63-echam-rrtmgp`` and the other T63L47 presets left on ``auto``: their
-  mesosphere was about 60 K warmer than the JAM member's (#1029). From the
+  mesosphere was 60-80 K warmer than the JAM member's (#1029). From the
   January warm state, the JAM preset run with the old file held its summer
   polar cap at 229 K (1 Pa) and 297 K (4.3 Pa) where the bundle gives 164 K
   and 217 K; the 2M preset with the bundle gives 160 K and 218 K. The
