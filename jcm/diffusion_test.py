@@ -325,5 +325,72 @@ class DiffusionFilterScaledTest(unittest.TestCase):
                                base.level_orders_temp)
 
 
+
+class ZonalMeanExemptionTest(unittest.TestCase):
+    """ECHAM's ``lmidatm`` hyperdiffusion leaves the zonal mean alone.
+
+    ``mo_hdiff.f90::hdiff`` skips every m = 0 spectral coefficient when
+    ``lmidatm`` is set (``IF (lmidatm .AND. mymsp(is)==0) CYCLE``), at all
+    levels; the SPEEDY default diffuses every wavenumber.
+    """
+
+    def test_lmidatm_profile_does_not_diffuse_the_zonal_mean(self):
+        f = DiffusionFilter.echam_lmidatm(63, 47)
+        self.assertFalse(f.diffuses_zonal_mean)
+        self.assertFalse(DiffusionFilter.auto(63, 95, "hybrid").diffuses_zonal_mean)
+
+    def test_speedy_default_diffuses_every_wavenumber(self):
+        self.assertTrue(DiffusionFilter.default().diffuses_zonal_mean)
+        self.assertTrue(DiffusionFilter.auto(31, 8, "sigma").diffuses_zonal_mean)
+
+    def test_scaling_keeps_the_choice(self):
+        self.assertFalse(
+            DiffusionFilter.echam_lmidatm(63, 47).scaled(0.5).diffuses_zonal_mean)
+
+
+class ZonalMeanExemptionDycoreTest(unittest.TestCase):
+    """The dycore filter keeps the m = 0 coefficients under ``lmidatm``.
+
+    It leaves them as they were for the ECHAM profile and damps them under the
+    SPEEDY default.
+    """
+
+    def _filtered_vorticity(self, diffusion):
+        import jax
+
+        from jcm.dycore.dinosaur.dycore import DinosaurDycore
+        from jcm.physics.echam.echam_levels import get_echam_levels
+        from jcm.terrain import TerrainData
+        from jcm.utils import get_coords
+
+        coords = get_coords(get_echam_levels(47), spectral_truncation=21)
+        dycore = DinosaurDycore(coords=coords,
+                                terrain=TerrainData.aquaplanet(coords),
+                                dt_seconds=720.0, diffusion=diffusion)
+        state = dycore.initial_state(None, random_seed=0)
+        grid = coords.horizontal
+        noise = jax.random.normal(jax.random.PRNGKey(3), state.vorticity.shape)
+        vor = grid.clip_wavenumbers(noise * 1e-5)
+        state = state.replace(vorticity=vor)
+        out = state
+        for f in dycore._filters:
+            out = f(state, out)
+        return np.asarray(vor), np.asarray(out.vorticity), grid
+
+    def test_lmidatm_keeps_m0_and_damps_the_rest(self):
+        before, after, grid = self._filtered_vorticity(
+            DiffusionFilter.echam_lmidatm(21, 47))
+        m = np.asarray(grid.modal_axes[0])
+        self.assertEqual(m[0], 0)
+        np.testing.assert_array_equal(after[:, 0, :], before[:, 0, :])
+        # the top level (∇²) damps the highest total wavenumber of m = 1
+        self.assertLess(abs(after[0, 1, -2]), abs(before[0, 1, -2]))
+
+    def test_default_damps_m0(self):
+        before, after, _ = self._filtered_vorticity(DiffusionFilter.default())
+        changed = np.abs(after[:, 0, 2:] - before[:, 0, 2:]).max()
+        self.assertGreater(changed, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

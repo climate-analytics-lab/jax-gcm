@@ -107,9 +107,10 @@ physics carries the moisture and condensate terms.
 Horizontal hyperdiffusion is configured by ``jcm/diffusion.py::DiffusionFilter``:
 for hybrid L47/L95 grids the resolution-aware ``DiffusionFilter.auto`` selects the
 ECHAM ``lmidatm`` level-dependent order profile (∇² near the model top grading to
-∇⁶/∇⁸ below, base timescale from ``setdyn.f90``'s ``dampth``); any other grid gets
-the uniform SPEEDY ∇²/∇⁴ profile (``DiffusionFilter.default``), with a warning for
-unrecognised hybrid grids. ECHAM's upper sponge (``uspnge``: implicit damping of
+∇⁶/∇⁸ below, base timescale from ``setdyn.f90``'s ``dampth``), which like ECHAM's
+``hdiff`` under ``lmidatm`` leaves the zonal mean (m = 0) undiffused at every
+level; any other grid gets the uniform SPEEDY ∇²/∇⁴ profile on every wavenumber
+(``DiffusionFilter.default``), with a warning for unrecognised hybrid grids. ECHAM's upper sponge (``uspnge``: implicit damping of
 the zonal anomalies of u, v and T, the zonal mean untouched) is enabled via the
 ``run`` group (``jcm/config/run/longrun.yaml``: the top level, 3 h, as ECHAM's
 lmidatm default; see {doc}`gravity_waves`). Resolutions T21–T425 are supported.
@@ -157,6 +158,10 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
   4 Pa level for a profile linear in height) and amplify 2Δz structure under
   upwelling; in log-pressure the top levels are near-uniform. See
   {doc}`../design/sl_vertical_interpolation`.
+- `science` — ECHAM's ``hdiff`` damhih branch (a thousandfold diffusion at
+  wavenumbers whose advective Courant number exceeds one, ``mo_hdiff.f90``)
+  is not ported: it guards ECHAM's Eulerian leapfrog advection, and the
+  semi-Lagrangian transport has no such Courant limit.
 - `compute` — the dinosaur backend integrates with a two-time-level
   semi-Lagrangian semi-implicit Crank–Nicolson RK2 step rather than ECHAM's
   three-time-level leapfrog + semi-implicit (both are semi-implicit; the
@@ -191,7 +196,7 @@ rely on.
 - ``jcm/dycore/dinosaur/log_pressure_interpolation.py`` — the log-pressure
   vertical interpolation (``LogPressureSemiLagrangianHybrid`` / ``…Sigma``).
 - ``jcm/diffusion.py`` — ``DiffusionFilter`` and its ``auto`` / ``echam_lmidatm``
-  / ``default`` constructors; ``_ECHAM_LMIDATM_ORDERS``.
+  / ``default`` constructors; ``_ECHAM_LMIDATM_ORDERS``; ``diffuse_zonal_mean``.
 - ``jcm/config/run/longrun.yaml`` — ECHAM upper sponge.
 
 **Validation evidence.** ``jcm/dycore/dinosaur/dycore_test.py``,

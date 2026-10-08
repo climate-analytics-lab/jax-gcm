@@ -644,6 +644,25 @@ class DinosaurDycore(DynamicalCore):
         Lifted unchanged from :meth:`jcm.model.Model._make_diffusion_fn` — the
         Phase-1 baseline asserts the bit-level invariance.
         """
+        keep_zonal_mean = not self.diffusion.diffuses_zonal_mean
+        if keep_zonal_mean:
+            # The zonal mean is the modal column with zonal wavenumber 0,
+            # which dinosaur stores first on the longitude-mode axis (any SPMD
+            # padding goes at the end).
+            m_axis = np.asarray(self.coords.horizontal.modal_axes[0])
+            if m_axis[0] != 0:
+                raise ValueError(
+                    "diffuse_zonal_mean=False needs the m = 0 coefficients "
+                    "first on the longitude-mode axis; this grid's modal axis "
+                    f"starts with m = {m_axis[0]}")
+
+        def restore_zonal_mean(x_next, x_filtered):
+            # Leave the m = 0 column as it was before the filter.
+            if not keep_zonal_mean or not hasattr(x_next, "shape") \
+                    or np.ndim(x_next) < 2:
+                return x_filtered
+            return x_filtered.at[..., 0, :].set(x_next[..., 0, :])
+
         if level_orders is None:
             def diffusion_filter(u, u_next):
                 eigenvalues = self.coords.horizontal.laplacian_eigenvalues
@@ -654,7 +673,8 @@ class DinosaurDycore(DynamicalCore):
                 # largest-wavenumber eigenvalue with or without padding.
                 scale = self._dt / (timescale * abs(eigenvalues).max() ** order)
                 filter_fn = horizontal_diffusion_filter(self.coords.horizontal, scale, order)
-                u_temp = filter_fn(u_next)
+                u_temp = jax.tree_util.tree_map(
+                    restore_zonal_mean, u_next, filter_fn(u_next))
                 return replace_fn(u_next, u_temp)
             return diffusion_filter
 
@@ -670,7 +690,7 @@ class DinosaurDycore(DynamicalCore):
                 target_shape = np.shape(x)
                 if target_shape != np.broadcast_shapes(target_shape, scaling_const.shape):
                     return x
-                return scaling_const * x
+                return restore_zonal_mean(x, scaling_const * x)
             u_temp = jax.tree_util.tree_map(rescale, u_next)
             return replace_fn(u_next, u_temp)
         return diffusion_filter
