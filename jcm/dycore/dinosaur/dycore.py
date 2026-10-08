@@ -31,6 +31,11 @@ import jcm.constants as jcm_constants
 from jcm.constants import PhysicalConstants
 from jcm.diffusion import DiffusionFilter, level_dependent_scaling
 from jcm.dycore.base import DynamicalCore, Predictions
+from jcm.dycore.dinosaur.log_pressure_interpolation import (
+    SL_VERTICAL_COORDINATES,
+    LogPressureSemiLagrangianHybrid,
+    LogPressureSemiLagrangianSigma,
+)
 from jcm.dycore.dinosaur.state_bridge import (
     CONDENSATE_TRACERS,
     dynamics_state_to_physics_state,
@@ -111,6 +116,18 @@ VERTICAL_INTERPOLATION_ORDERS = ("linear", "cubic")
 #: construction and the Hydra runner; see
 #: docs/source/design/tracer_mass_conservation.md.
 DEFAULT_VERTICAL_INTERPOLATION = "cubic"
+
+
+#: Coordinate in which the vertical stage of the semi-Lagrangian
+#: interpolation is done, by vertical-coordinate family. Hybrid grids
+#: interpolate in the log of the reference pressure: their top is pure
+#: pressure and spaced geometrically, and Lagrange weights in ``s`` itself
+#: there are both inaccurate (the linear top cell under-reads vertical
+#: advection by half) and, in the cubic cells, anti-diffusive under upwelling
+#: (#1060). Sigma grids (SPEEDY / Held-Suarez L8) are quasi-uniform in ``σ``
+#: and keep it. See jcm/dycore/dinosaur/log_pressure_interpolation.py and
+#: docs/source/design/sl_vertical_interpolation.md.
+DEFAULT_SL_VERTICAL_COORDINATE = {"hybrid": "log_pressure", "sigma": "sigma"}
 
 
 #: Transport schemes the dinosaur backend offers (see ``DinosaurDycore``'s
@@ -268,7 +285,11 @@ class DinosaurDycore(DynamicalCore):
         (1), ``off_centering`` (:data:`DEFAULT_OFF_CENTERING`),
         ``vertical_interpolation_order``
         (:data:`DEFAULT_VERTICAL_INTERPOLATION`, or linear below four
-        levels), ``mass_fixer`` (True: every global mass fixer below) and
+        levels), ``vertical_coordinate`` (the coordinate of the vertical
+        interpolation: :data:`DEFAULT_SL_VERTICAL_COORDINATE`, i.e.
+        ``log_pressure`` on hybrid grids and ``sigma`` on sigma grids; see
+        :attr:`sl_vertical_coordinate`), ``mass_fixer`` (True: every global
+        mass fixer below) and
         ``humidity_mass_fixer`` (True: the fixer for the modal
         ``specific_humidity``; see :meth:`step`).
         """
@@ -290,6 +311,13 @@ class DinosaurDycore(DynamicalCore):
                 "sl_options['vertical_interpolation_order'] must be one of "
                 f"{VERTICAL_INTERPOLATION_ORDERS} or None (the default), got "
                 f"{vorder!r}"
+            )
+        vcoord = self._sl_options.get("vertical_coordinate")
+        if vcoord is not None and vcoord not in SL_VERTICAL_COORDINATES:
+            raise ValueError(
+                "sl_options['vertical_coordinate'] must be one of "
+                f"{SL_VERTICAL_COORDINATES} or None (the default), got "
+                f"{vcoord!r}"
             )
         self.coords = coords
         self.terrain = terrain
@@ -427,8 +455,11 @@ class DinosaurDycore(DynamicalCore):
             departure_iterations=self._sl_options.get("departure_iterations", 1),
             vertical_interpolation_order=self.vertical_interpolation_order,
         )
+        log_pressure = self.sl_vertical_coordinate == "log_pressure"
         if isinstance(self.coords.vertical, HybridCoordinates):
-            self._primitive = primitive_equations.SemiLagrangianPrimitiveEquationsHybrid(
+            sl_class = (LogPressureSemiLagrangianHybrid if log_pressure else
+                        primitive_equations.SemiLagrangianPrimitiveEquationsHybrid)
+            self._primitive = sl_class(
                 reference_temperature=self._reference_temperature,
                 orography=self._truncated_orography,
                 coords=self.coords,
@@ -439,7 +470,9 @@ class DinosaurDycore(DynamicalCore):
                 **sl_kwargs,
             )
         else:
-            self._primitive = primitive_equations.SemiLagrangianPrimitiveEquations(
+            sl_class = (LogPressureSemiLagrangianSigma if log_pressure else
+                        primitive_equations.SemiLagrangianPrimitiveEquations)
+            self._primitive = sl_class(
                 reference_temperature=self._reference_temperature,
                 orography=self._truncated_orography,
                 coords=self.coords,
@@ -542,6 +575,22 @@ class DinosaurDycore(DynamicalCore):
         if self.coords.vertical.layers < 4:
             return "linear"
         return DEFAULT_VERTICAL_INTERPOLATION
+
+    @property
+    def sl_vertical_coordinate(self) -> str:
+        """Coordinate of the vertical stage of the SL interpolation.
+
+        The ``sl_options`` override, else
+        :data:`DEFAULT_SL_VERTICAL_COORDINATE` for the grid's vertical family:
+        ``log_pressure`` (the log of the reference sigma ``s``) on hybrid
+        grids, ``sigma`` (``s`` itself, dinosaur's native rule) on sigma grids.
+        """
+        vcoord = self._sl_options.get("vertical_coordinate")
+        if vcoord is not None:
+            return vcoord
+        family = ("hybrid" if isinstance(self.coords.vertical, HybridCoordinates)
+                  else "sigma")
+        return DEFAULT_SL_VERTICAL_COORDINATE[family]
 
     @property
     def humidity_mass_fixer(self) -> bool:

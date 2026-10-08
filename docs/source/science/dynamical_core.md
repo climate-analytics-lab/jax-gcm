@@ -20,9 +20,13 @@ column physics through a pg2 finite-volume physics grid (see
 On the **dinosaur** backend tracer transport is **semi-Lagrangian** by default —
 departure-point transport with a Bermejo–Staniforth quasi-monotone limiter,
 cubic Lagrange interpolation in the horizontal and **4-point cubic Lagrange
-interpolation in the vertical** (reference σ, degraded to linear in the first
-and last cells; ``dycore.sl_vertical_interpolation``); the Eulerian core is
-meant for physics that carries no extra tracers.
+interpolation in the vertical** (degraded to linear in the first and last
+cells; ``dycore.sl_vertical_interpolation``). The trajectories are solved in
+the reference σ; the vertical interpolation is done in its logarithm on hybrid
+grids (log-pressure at the pure-pressure top) and in σ itself on sigma grids
+(``dycore.sl_vertical_coordinate``; see
+{doc}`../design/sl_vertical_interpolation`). The Eulerian core is meant for
+physics that carries no extra tracers.
 Every jcm extra tracer (aerosol mass/number, gases, cloud condensate) rides as
 a *nodal* tracer while ``specific_humidity`` stays modal for the implicit
 q↔Tᵥ coupling; the condensate species additionally enter the dynamics through
@@ -144,6 +148,15 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
   energy sink (~−11 W/m² in the dynamics alone). The fixer is proportional
   rather than ECHAM-SL's Rasch & Williamson (1990) weighting; see
   {doc}`../design/tracer_mass_conservation`.
+- `compute` — the vertical stage of the semi-Lagrangian interpolation uses
+  the log of the reference σ on hybrid grids, not σ. ECHAM has no
+  semi-Lagrangian dynamics to follow (its vertical advection is the
+  Simmons & Burridge (1981) centred difference, ``dyn.f90``), and on the
+  L47 top, whose levels are spaced geometrically, Lagrange weights in σ
+  misread vertical advection (0.44 of it at the 1 Pa level and 1.37 at the
+  4 Pa level for a profile linear in height) and amplify 2Δz structure under
+  upwelling; in log-pressure the top levels are near-uniform. See
+  {doc}`../design/sl_vertical_interpolation`.
 - `compute` — the dinosaur backend integrates with a two-time-level
   semi-Lagrangian semi-implicit Crank–Nicolson RK2 step rather than ECHAM's
   three-time-level leapfrog + semi-implicit (both are semi-implicit; the
@@ -175,15 +188,19 @@ rely on.
 - ``jcm/config/dycore/dinosaur.yaml`` — ``advection``,
   ``sl_vertical_interpolation``, ``humidity_mass_fixer``.
 - ``jcm/dycore/pyses/dycore.py`` — ``PysesCamSEDycore``.
+- ``jcm/dycore/dinosaur/log_pressure_interpolation.py`` — the log-pressure
+  vertical interpolation (``LogPressureSemiLagrangianHybrid`` / ``…Sigma``).
 - ``jcm/diffusion.py`` — ``DiffusionFilter`` and its ``auto`` / ``echam_lmidatm``
   / ``default`` constructors; ``_ECHAM_LMIDATM_ORDERS``.
 - ``jcm/config/run/longrun.yaml`` — ECHAM upper sponge.
 
 **Validation evidence.** ``jcm/dycore/dinosaur/dycore_test.py``,
-``sharding_test.py``, ``state_bridge_test.py``;
+``sharding_test.py``, ``state_bridge_test.py``,
+``log_pressure_interpolation_test.py``;
 ``jcm/dycore/pyses/pyses_dycore_test.py``, ``physics_grid_test.py``,
 ``rrtmgp_x64_test.py``; ``jcm/dycore/base_test.py``; ``jcm/diffusion_test.py``.
-Design references: {doc}`../design/tracer_mass_conservation`,
+Design references: {doc}`../design/sl_vertical_interpolation`,
+{doc}`../design/tracer_mass_conservation`,
 {doc}`../design/pyses_cam_se_dycore`,
 {doc}`../design/speedy_variable_levels`,
 {doc}`../design/dinosaur_sl_jam_configuration`.

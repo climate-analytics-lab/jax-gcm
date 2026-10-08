@@ -1010,6 +1010,9 @@ def build_model(cfg: DictConfig) -> Model:
         # null -> the dycore default (cubic; linear below four levels).
         "vertical_interpolation_order": dycore_cfg.get(
             "sl_vertical_interpolation", None),
+        # null -> the dycore default (log_pressure on hybrid grids, sigma on
+        # sigma grids).
+        "vertical_coordinate": dycore_cfg.get("sl_vertical_coordinate", None),
         "humidity_mass_fixer": bool(dycore_cfg.get("humidity_mass_fixer", True)),
     }
     dycore = DinosaurDycore(
