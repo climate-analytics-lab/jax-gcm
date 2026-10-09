@@ -98,6 +98,25 @@ class AqueousTermTest(unittest.TestCase):
         self.assertGreater(float(cb[0, 0]), 0.0)
         self.assertLess(float(tend.tracers["g_so2"][0, 0]), 0.0)
 
+    def test_crystal_held_reservoirs_host_no_aqueous_sulfate(self):
+        # Sulfate forms in droplets: the split over modes uses the
+        # droplet-held part of each mode's cloud-borne number, as the
+        # exchange records it.
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+
+        state, diagnostics = self._setup()
+        shape = state.temperature.shape
+        modes = [mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species]
+        share = {number_name(m, cloud_borne=True): jnp.full(
+            shape, 0.0 if m == "cor" else 1.0) for m in modes}
+        diag = {**diagnostics, LIQUID_SHARE_KEY: share}
+        _, out = AqueousSulfur()(state, diag, None, None)
+        cor = self._cb_rate(diag, out, mass_name("so4", "cor", cloud_borne=True))
+        acc = self._cb_rate(diag, out, mass_name("so4", "acc", cloud_borne=True))
+        np.testing.assert_array_equal(cor, 0.0)
+        self.assertGreater(float(acc[0, 0]), 0.0)
+
     def test_sulfur_conserved(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC
         from jcm.physics.aerosol.jam.chemistry.aqueous import _MW_SO2, _MW_SO4

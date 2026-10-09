@@ -65,15 +65,18 @@ Mirrors ``mo_hammoz_wetdep``.
 
 from __future__ import annotations
 
+import math
 from typing import ClassVar
 
 import jax
 import jax.numpy as jnp
 import tree_math
 from flax import nnx
+from jax.scipy.special import ndtr, ndtri
 
 from jcm.physics.aerosol.jam.cloud_borne_store import (
     CARRY_KEY,
+    LIQUID_SHARE_KEY,
     apply_updates,
     carry_mode,
     mirror_names,
@@ -212,6 +215,122 @@ def incloud_scavenged_fractions(
         ),
     )
     return f_wat, f_ice, pice
+
+
+#: In-ice number fractions at or below this take a zero mass share, and at or
+#: above ``1 - _ICE_SHARE_EDGE_HI`` a full one: the probit diverges at 0 and 1.
+#: At 1e-12 the HAM mass share of a σ = 1.8 mode is ~1e-7, so the cut is below
+#: anything the exchange or the removal can resolve.
+_ICE_SHARE_EDGE_LO = 1.0e-12
+_ICE_SHARE_EDGE_HI = 1.0e-6
+
+#: Number mixing ratio [1/kg] below which a mode holds no particles to put in
+#: the ice (a physical floor, far below any real population, for the f32 VJP of
+#: the division).
+_NUMBER_FLOOR = 1.0e-3
+
+
+def ice_phase_fractions(spec: ModalAerosolSpec, number, icnc):
+    """Per-mode share of the in-cloud aerosol inside ice crystals (HAM rule).
+
+    The port of ECHAM-HAM ``mo_ham_wetdep.f90::ic_scav_nuc`` for the ice phase
+    (``nwetdep = 3``): every crystal holds one aerosol particle, and the
+    crystals are filled from the largest activatable mode down. The number
+    share of mode ``m`` is
+
+        f_n(m) = clip((ICNC − Σ_{modes larger than m} N) / N_m, 0, 1),
+
+    and the particles in the ice are the largest of the mode: the mass share
+    is the log-normal mass tail beyond the radius whose number tail is
+    ``f_n``, ``Φ(Φ⁻¹(f_n) + 3 ln σ)`` — the radius-free form of HAM's
+    ``ham_m7_invertlogtail``/``ham_m7_logtail`` pair. Modes that cannot
+    activate (HAM's insoluble modes) take none.
+
+    Args:
+        spec: the modal population.
+        number: per-mode total number mixing ratio [1/kg] (interstitial plus,
+            with an explicit phase, cloud-borne), ordered like ``spec.modes``.
+        icnc: in-cloud ice crystal number [1/kg].
+
+    Returns:
+        ``(f_number, f_mass)``: per-mode lists like ``number``.
+
+    """
+    order = sorted(
+        (i for i, m in enumerate(spec.modes) if m.can_activate),
+        key=lambda i: spec.modes[i].dgnum, reverse=True,
+    )
+    zeros = jnp.zeros_like(icnc)
+    f_number = [zeros for _ in spec.modes]
+    f_mass = [zeros for _ in spec.modes]
+    remaining = jnp.maximum(icnc, 0.0)
+    for i in order:
+        n = jnp.maximum(number[i], 0.0)
+        has = n > _NUMBER_FLOOR
+        f = jnp.where(has, jnp.clip(remaining / jnp.where(has, n, 1.0),
+                                    0.0, 1.0), 0.0)
+        remaining = jnp.maximum(remaining - n, 0.0)
+        inner = (f > _ICE_SHARE_EDGE_LO) & (f < 1.0 - _ICE_SHARE_EDGE_HI)
+        f_safe = jnp.where(inner, f, 0.5)
+        shift = 3.0 * math.log(spec.modes[i].geom_std_dev)
+        tail = ndtr(ndtri(f_safe) + shift)
+        f_number[i] = f
+        f_mass[i] = jnp.where(inner, tail, jnp.where(f >= 0.5, 1.0, 0.0))
+    return f_number, f_mass
+
+
+def post_microphysics_icnc(state, diagnostics, dt):
+    """In-cloud ice crystal number [1/kg] as the cloud microphysics leaves it.
+
+    The two-moment scheme's ``qni`` tracer (ECHAM's ``idt_icnc``, in-cloud
+    crystals per kg of air) advanced by the tendency the terms upstream of
+    the caller have accumulated this step — the ``t+dt`` value HAM's wet
+    deposition reads after the cloud microphysics. Only the two-moment
+    scheme carries crystal numbers, and the ice share of the in-cloud
+    aerosol cannot be formed without them, so a host without ``qni`` is
+    refused rather than read as crystal-free (the ECHAM factory already
+    requires ``cloud_scheme='2m'`` for JAM). A structural probe with no
+    tracers seeded returns zeros.
+    """
+    qni = state.tracers.get("qni")
+    if qni is None and not state.tracers:
+        return jnp.zeros_like(state.temperature)
+    if qni is None:
+        raise ValueError(
+            "JAM's in-cloud aerosol split needs the two-moment cloud "
+            "scheme's ice crystal number (tracer 'qni'): the ice share is "
+            "HAM's one-particle-per-crystal rule. Compose JAM with "
+            "cloud_scheme='2m'."
+        )
+    run = diagnostics.get("_tendency_run")
+    dqni = None if run is None else run.get("tracers", {}).get("qni")
+    if dqni is not None:
+        qni = qni + dt * dqni
+    return jnp.maximum(qni, 0.0)
+
+
+def phase_split(clouds, dt):
+    """``(f_wat, f_ice, p_ice)``: HAM's in-cloud scavenged fractions and phase split.
+
+    ``incloud_scavenged_fractions`` from the process-time ledger. Where that
+    ledger holds neither a pool nor a formation (a cell the microphysics left
+    covered but recorded no in-cloud condensate for), the ice share is taken
+    from the cloud scheme's grid-mean condensate ``qi / (qc + qi)`` instead of
+    defaulting to all-liquid, so an ice cloud is never read as a droplet cloud.
+    """
+    f_wat, f_ice, pice = incloud_scavenged_fractions(clouds, dt)
+    pool = jnp.maximum(clouds.incloud_liquid, 0.0) + jnp.maximum(
+        clouds.incloud_ice, 0.0)
+    form = dt * (
+        jnp.maximum(clouds.incloud_rain_formation + clouds.incloud_riming, 0.0)
+        + jnp.maximum(clouds.incloud_snow_formation, 0.0))
+    ledger = (pool > _LEDGER_POOL_MIN) | (form > _LEDGER_POOL_MIN)
+    qc = jnp.maximum(clouds.qc, 0.0)
+    qi = jnp.maximum(clouds.qi, 0.0)
+    cond = qc + qi
+    has_cond = cond > _LEDGER_POOL_MIN
+    pice_cond = jnp.where(has_cond, qi / jnp.where(has_cond, cond, 1.0), 0.0)
+    return f_wat, f_ice, jnp.where(ledger, pice, pice_cond)
 
 
 def fraction_to_rate(fraction: jnp.ndarray, dt: jnp.ndarray) -> jnp.ndarray:
@@ -567,13 +686,26 @@ class WetScavenging(PhysicsTerm):
         # preferentially) and vary by mode. The aggregate fraction is kept
         # only as a fallback for standalone composition without ARG
         # upstream.
-        f_wat, f_ice, pice = incloud_scavenged_fractions(clouds, dt)
+        #
+        # HAM scavenges the in-cloud aerosol's two phases apart
+        # (``mo_ham_wetdep.f90::ham_wetdep``): the water part, by its
+        # activated fraction, at the liquid conversion ``f_wat``; the ice
+        # part, by the one-particle-per-crystal share (``ic_scav_nuc``), at
+        # the ice conversion ``f_ice``. With an explicit phase the exchange
+        # term records each reservoir's droplet-held share; without one the
+        # same split is formed here from the crystal number.
+        f_wat, f_ice, pice = phase_split(clouds, dt)
         f_comb = (1.0 - pice) * f_wat + pice * f_ice
         rate_ledger = fraction_to_rate(f_comb, dt)
         cf_proc = jnp.clip(clouds.process_cloud_fraction, 0.0, 1.0)
         rate_ic_unit = params.incloud_scale * cf_proc * rate_ledger
-        rate_cb = params.incloud_scale * rate_ledger
         jam_act = diagnostics.get("_jam_activation")
+        liquid_share = diagnostics.get(LIQUID_SHARE_KEY) or {}
+
+        def phase_rate(share):
+            """Return the removal rate of a reservoir with droplet-held ``share``."""
+            return params.incloud_scale * fraction_to_rate(
+                share * f_wat + (1.0 - share) * f_ice, dt)
 
         # Build per-tracer scavenging rates and stack with the matching
         # tracers, so the elementwise removal runs as one batched op (rather
@@ -614,6 +746,12 @@ class WetScavenging(PhysicsTerm):
         # out). Without it, the implicit treatment stands — the interstitial
         # tracers are scavenged by their per-mode activated fractions.
         explicit_cb = self._spec.cloud_borne
+        if not explicit_cb and jam_act is not None:
+            ice_number, ice_mass = ice_phase_fractions(
+                self._spec,
+                [jnp.maximum(view.get(number_name(m.short), zeros), 0.0)
+                 for m in self._spec.modes],
+                post_microphysics_icnc(state, diagnostics, dt))
         for i, mode in enumerate(self._spec.modes):
             # Number and mass ride different moments of the same lognormal,
             # so CAM tabulates and applies a separate impaction coefficient
@@ -637,12 +775,18 @@ class WetScavenging(PhysicsTerm):
             # always acts on interstitial (updrafts ingest environment air).
             if mode.can_activate and not explicit_cb:
                 if jam_act is not None:
-                    frac_num = jam_act.number_frac[i]
-                    frac_mass = jam_act.mass_frac[i]
+                    # HAM's implicit form of the same split: the cloudy part
+                    # of the box, times each phase's in-cloud share times
+                    # that phase's conversion, removed this step — the mass
+                    # the explicit phase removes at exchange equilibrium.
+                    def form_rate(f_liq, f_in_ice):
+                        return params.incloud_scale * fraction_to_rate(
+                            cf_proc * ((1.0 - pice) * f_liq * f_wat
+                                       + pice * f_in_ice * f_ice), dt)
+                    form_num = form_rate(jam_act.number_frac[i], ice_number[i])
+                    form_mass = form_rate(jam_act.mass_frac[i], ice_mass[i])
                 else:
-                    frac_num = frac_mass = activated_fraction
-                form_num = frac_num * rate_ic_unit
-                form_mass = frac_mass * rate_ic_unit
+                    form_num = form_mass = activated_fraction * rate_ic_unit
                 conv_num = below_conv_num + rate_conv_incloud
                 conv_mass = below_conv_mass + rate_conv_incloud
             elif mode.can_activate:
@@ -683,7 +827,8 @@ class WetScavenging(PhysicsTerm):
                     reinject_to.append(partner)
                     q_list.append(jnp.maximum(view.get(nm, zeros), 0.0))
                     rate_below_strat.append(zeros)
-                    rate_form_strat.append(rate_cb)
+                    rate_form_strat.append(
+                        phase_rate(liquid_share.get(nm, 1.0 - pice)))
                     rate_conv.append(zeros)
 
         # Implicit (exponential) scavenging over the step: q(t+dt) = q·exp(-rate·dt).

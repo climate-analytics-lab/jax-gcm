@@ -43,8 +43,10 @@ aerosol does not sediment (it follows the hydrometeors — see
 ``sedi_term``). ECHAM-HAM's M7 and sectional schemes like TOMAS never carry
 an explicit cloud-borne phase at all: for those populations
 ``spec.cloud_borne = False`` and this term is not composed — the harness
-then scavenges interstitial aerosol by ``cf · activated_fraction``, which
-removes the same mass at exchange equilibrium. The representations still
+then scavenges interstitial aerosol by ``cf · [(1 − p_ice)·f_act·f_wat +
+p_ice·f_ice_share·f_ice]``, HAM's own form, which removes the same mass at
+exchange equilibrium (wet deposition removes this reservoir phase by phase,
+from the droplet-held share the term records under ``LIQUID_SHARE_KEY``). The representations still
 differ where the representation itself matters: the explicit phase delays
 rainout by the exchange timescale, and its in-droplet mass is invisible to
 the (interstitial-only) aerosol optics, whereas the implicit treatment
@@ -64,21 +66,22 @@ transport or the next transfer refills the cell.
 
 from __future__ import annotations
 
-import math
 from typing import ClassVar
 
 import jax.numpy as jnp
 import tree_math
-from jax.scipy.special import erf, erfinv
 from flax import nnx
 
 from jcm.physics.aerosol.jam.cloud_borne_store import (
     CARRY_KEY,
+    LIQUID_SHARE_KEY,
     apply_updates,
     carry_mode,
 )
 from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
-    incloud_scavenged_fractions,
+    ice_phase_fractions,
+    phase_split,
+    post_microphysics_icnc,
 )
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.removal_split import split_view
@@ -93,94 +96,9 @@ from jcm.physics_interface import PhysicsTendency
 #: timescale, so a vanishingly thin cloud cannot make it infinite.
 _MIN_CLOUD_FRACTION = 1.0e-3
 
-#: In-ice number fractions this close to 0 or 1 take the endpoint mass
-#: fraction directly: the inverse error function diverges there.
-_ICE_FRACTION_EDGE = 1.0e-5
-
-#: Number mixing ratio [1/kg] below which a mode holds no particles to put in
-#: the ice (a physical floor, far below any real population, for the f32 VJP of
-#: the division).
-_NUMBER_FLOOR = 1.0e-3
-
-
-def ice_phase_fractions(spec: ModalAerosolSpec, number, icnc):
-    """Per-mode share of the in-cloud aerosol inside ice crystals (HAM rule).
-
-    The port of ECHAM-HAM ``mo_ham_wetdep.f90::ic_scav_nuc`` for the ice phase
-    (``nwetdep = 3``): every crystal holds one aerosol particle, and the
-    crystals are filled from the largest activatable mode down. The number
-    share of mode ``m`` is
-
-        f_n(m) = clip((ICNC − Σ_{modes larger than m} N) / N_m, 0, 1),
-
-    and the particles in the ice are the largest of the mode: the mass share
-    is the log-normal mass tail beyond the radius whose number tail is
-    ``f_n`` — ``½·erfc(erfc⁻¹(2 f_n) − 3 ln σ/√2)``, the radius-free form of
-    HAM's ``ham_m7_invertlogtail``/``ham_m7_logtail`` pair. Modes that cannot
-    activate (HAM's insoluble modes) take none.
-
-    Args:
-        spec: the modal population.
-        number: per-mode total (interstitial + cloud-borne) number mixing
-            ratio [1/kg], a sequence ordered like ``spec.modes``.
-        icnc: in-cloud ice crystal number [1/kg].
-
-    Returns:
-        ``(f_number, f_mass)``: per-mode lists like ``number``.
-
-    """
-    order = sorted(
-        (i for i, m in enumerate(spec.modes) if m.can_activate),
-        key=lambda i: spec.modes[i].dgnum, reverse=True,
-    )
-    zeros = jnp.zeros_like(icnc)
-    f_number = [zeros for _ in spec.modes]
-    f_mass = [zeros for _ in spec.modes]
-    remaining = jnp.maximum(icnc, 0.0)
-    for i in order:
-        n = jnp.maximum(number[i], 0.0)
-        has = n > _NUMBER_FLOOR
-        f = jnp.where(has, jnp.clip(remaining / jnp.where(has, n, 1.0),
-                                    0.0, 1.0), 0.0)
-        remaining = jnp.maximum(remaining - n, 0.0)
-        inner = (f > _ICE_FRACTION_EDGE) & (f < 1.0 - _ICE_FRACTION_EDGE)
-        f_safe = jnp.where(inner, f, 0.5)
-        shift = 3.0 * math.log(spec.modes[i].geom_std_dev) / math.sqrt(2.0)
-        tail = 0.5 * (1.0 - erf(erfinv(1.0 - 2.0 * f_safe) - shift))
-        f_number[i] = f
-        f_mass[i] = jnp.where(inner, tail, jnp.where(f >= 0.5, 1.0, 0.0))
-    return f_number, f_mass
-
-
-def _post_microphysics_icnc(state, diagnostics, dt):
-    """In-cloud ice crystal number [1/kg] as the cloud microphysics leaves it.
-
-    The two-moment scheme's ``qni`` tracer (ECHAM's ``idt_icnc``, in-cloud
-    crystals per kg of air) advanced by the tendency the terms upstream of
-    this one have accumulated this step — the ``t+dt`` value HAM's wet
-    deposition reads after the cloud microphysics. Only the two-moment
-    scheme carries crystal numbers, and the ice share of the activated
-    partition cannot be formed without them, so a host without ``qni`` is
-    refused rather than read as crystal-free (the ECHAM factory already
-    requires ``cloud_scheme='2m'`` for JAM).
-    """
-    qni = state.tracers.get("qni")
-    if qni is None and not state.tracers:
-        # A structural probe with no tracers seeded: nothing to activate.
-        return jnp.zeros_like(state.temperature)
-    if qni is None:
-        raise ValueError(
-            "CloudBorneExchange needs the two-moment cloud scheme's ice "
-            "crystal number (tracer 'qni'): the ice share of the activated "
-            "partition is HAM's one-particle-per-crystal rule. Compose JAM "
-            "with cloud_scheme='2m'."
-        )
-    run = diagnostics.get("_tendency_run")
-    dqni = None if run is None else run.get("tracers", {}).get("qni")
-    if dqni is not None:
-        qni = qni + dt * dqni
-    return jnp.maximum(qni, 0.0)
-
+#: Partition below which a pair's phase composition is undefined and the
+#: condensate's own liquid share stands in.
+_SHARE_FLOOR = 1.0e-12
 
 #: Grid-mean condensate floor [kg/kg] deciding whether the cell saw any cloud
 #: process this step (evaporation + surviving pool + formation); below it the
@@ -265,8 +183,9 @@ class CloudBorneExchange(PhysicsTerm):
         cf = jnp.clip(clouds.cloud_fraction, 0.0, 1.0)
         dt = diagnostics.get("_dt_seconds", 1800.0)
         # HAM's phase split of the in-cloud condensate (the process-time
-        # pool, as the scavenging below uses it).
-        f_wat, f_ice, pice = incloud_scavenged_fractions(clouds, dt)
+        # pool, as the scavenging uses it) and the per-phase scavenged
+        # fractions of this step.
+        f_wat, f_ice, pice = phase_split(clouds, dt)
 
         # Gather every (interstitial, cloud-borne) pair with its activated
         # fraction and run the relaxation once over the whole stack (the
@@ -285,6 +204,7 @@ class CloudBorneExchange(PhysicsTerm):
         q_int: list[jnp.ndarray] = []
         q_cb: list[jnp.ndarray] = []
         fracs: list[jnp.ndarray] = []
+        liquid_share: list[jnp.ndarray] = []
         # In-cloud aerosol inside the ice (HAM): crystals filled one particle
         # each from the largest mode down, against the total (interstitial +
         # cloud-borne) number of each mode.
@@ -295,25 +215,33 @@ class CloudBorneExchange(PhysicsTerm):
             for m in self._spec.modes
         ]
         ice_number, ice_mass = ice_phase_fractions(
-            self._spec, number, _post_microphysics_icnc(state, diagnostics, dt))
+            self._spec, number, post_microphysics_icnc(state, diagnostics, dt))
         for i, mode in enumerate(self._spec.modes):
             # Activated partition of the in-cloud aerosol: the liquid share
             # by ARG droplet activation, the ice share by the crystal count.
             pairs = [(
                 number_name(mode.short),
                 number_name(mode.short, cloud_borne=True),
-                (1.0 - pice) * act.number_frac[i] + pice * ice_number[i],
+                (1.0 - pice) * act.number_frac[i], pice * ice_number[i],
             )] + [(
                 mass_name(sp, mode.short),
                 mass_name(sp, mode.short, cloud_borne=True),
-                (1.0 - pice) * act.mass_frac[i] + pice * ice_mass[i],
+                (1.0 - pice) * act.mass_frac[i], pice * ice_mass[i],
             ) for sp in mode.species]
-            for int_nm, cb_nm, frac in pairs:
+            for int_nm, cb_nm, in_liquid, in_ice in pairs:
                 int_names.append(int_nm)
                 cb_names.append(cb_nm)
                 q_int.append(jnp.maximum(view.get(int_nm, zeros), 0.0))
                 q_cb.append(jnp.maximum(view.get(cb_nm, zeros), 0.0))
+                frac = in_liquid + in_ice
                 fracs.append(frac)
+                # The droplet-held share of the reservoir, at the partition
+                # it relaxes toward: what rain formation removes and aqueous
+                # chemistry sees, against the crystal-held rest that only
+                # snow formation removes (HAM scavenges the two phases apart).
+                has = frac > _SHARE_FLOOR
+                liquid_share.append(jnp.where(
+                    has, in_liquid / jnp.where(has, frac, 1.0), 1.0 - pice))
 
         q_int_arr = jnp.stack(q_int)
         q_cb_arr = jnp.stack(q_cb)
@@ -397,7 +325,10 @@ class CloudBorneExchange(PhysicsTerm):
                 clouds.incloud_rain_formation + clouds.incloud_riming, 0.0)
             + jnp.maximum(clouds.incloud_snow_formation, 0.0)
         )
-        f_form = (1.0 - pice) * f_wat + pice * f_ice
+        # Per pair: the reservoir's droplet-held share rains out at the
+        # liquid fraction, its crystal-held share at the ice fraction.
+        share = jnp.stack(liquid_share)
+        f_form = share * f_wat + (1.0 - share) * f_ice
         live = (e_gm + pool_gm + formed_gm) > _PROCESS_FLOOR
         f_evap = jnp.where(
             live,
@@ -439,6 +370,10 @@ class CloudBorneExchange(PhysicsTerm):
             self._spec, diagnostics,
             {nm: transfer[k] for k, nm in enumerate(cb_names)}, dt,
         )
+        diagnostics = {
+            **diagnostics,
+            LIQUID_SHARE_KEY: {nm: share[k] for k, nm in enumerate(cb_names)},
+        }
         for k, nm in enumerate(int_names):
             tracer_tends[nm] = -transfer[k]
 

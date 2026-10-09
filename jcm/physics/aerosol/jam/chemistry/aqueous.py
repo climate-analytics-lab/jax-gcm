@@ -48,6 +48,7 @@ from flax import nnx
 
 from jcm.physics.aerosol.jam.cloud_borne_store import (
     CARRY_KEY,
+    LIQUID_SHARE_KEY,
     apply_updates,
     carry_mode,
     mirror_names,
@@ -360,10 +361,14 @@ class AqueousSulfur(PhysicsTerm):
         # branch below, so no dead ``mc_*`` tendencies are emitted.
         tracer_tends: dict[str, jnp.ndarray] = {"g_so2": so2_rate}
         if self._spec.cloud_borne:
+            # The droplet-held part of each mode's cloud-borne number: the
+            # crystal-held rest hosts no aqueous chemistry (the exchange
+            # records the split; an all-droplet reservoir without it).
+            share = diagnostics.get(LIQUID_SHARE_KEY) or {}
             nc = {
                 m: jnp.maximum(
                     view.get(number_name(m, cloud_borne=True), zeros), 0.0,
-                )
+                ) * share.get(number_name(m, cloud_borne=True), 1.0)
                 for m in self._so4_modes
             }
             nc_sum = sum(nc.values())

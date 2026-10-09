@@ -322,6 +322,16 @@ the radius holding that number share. ICNC is the two-moment scheme's in-cloud
 crystal number after this step's microphysics; the term refuses a host without
 it (JAM is two-moment only).
 
+Where the process ledger records no condensate, the ice share is that of the
+cloud scheme's grid-mean condensate, so an ice cloud is never read as a droplet
+cloud. The exchange records each reservoir's droplet-held share,
+``(1 − p_ice)·f_ARG / f``. Wet deposition removes that share at the per-step
+liquid conversion ``c_wat`` and the crystal-held rest at the ice conversion
+``c_ice`` (HAM's ``peffwat`` / ``peffice``), as HAM scavenges the two phases
+apart. Aqueous sulfate forms on the droplet-held part only. A population
+without the explicit phase is scavenged by the same split directly,
+``cf·[(1 − p_ice)·f_ARG·c_wat + p_ice·f_ice·c_ice]``.
+
 The cloud fraction sets the relaxation rate. Under ice cloud with fewer
 crystals than particles the partition is small, so the reservoir drains to the
 interstitial phase on the resuspension timescale. Where the whole cover has

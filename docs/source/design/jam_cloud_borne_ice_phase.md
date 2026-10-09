@@ -21,7 +21,8 @@ This is ECHAM-HAM's treatment of in-cloud aerosol (`mo_ham_wetdep.f90`, HAM2.3,
 - **Phase split.** `ham_wetdep` divides the in-cloud tracer into a water and an
   ice part by the ice share `pice` of the in-cloud condensate
   (`prep_wetdep_hydro`). jcm takes `p_ice` from the same process-time pool its
-  wet scavenging uses.
+  wet scavenging uses. Where that ledger is empty in a covered cell it takes the
+  share of the grid-mean condensate instead, so ice is never read as liquid.
 - **Water part.** `f_ARG` is the per-mode ARG droplet-activation fraction,
   number and mass apart.
 - **Ice part.** `ic_scav_nuc` (`kwat_phase = 2`) puts one aerosol particle in
@@ -41,7 +42,18 @@ This is ECHAM-HAM's treatment of in-cloud aerosol (`mo_ham_wetdep.f90`, HAM2.3,
 Under persistent ice cloud with fewer crystals than particles, `f` is small and
 the reservoir drains to the interstitial phase on the resuspension timescale.
 Once the whole cover has gone, the microphysics' evaporation and formation
-ledger decides the release, unchanged.
+ledger decides the release.
+
+**Removal by phase.** HAM scavenges each part at its own conversion: the water
+part by the liquid conversion `peffwat`, the ice part by `peffice`. The
+exchange records each reservoir's droplet-held share, `(1 − p_ice)·f_ARG / f`,
+under a step-local key.
+- Wet deposition removes that share at the liquid conversion and the rest at
+  the ice conversion. A single condensate-weighted fraction would instead rain
+  out crystal-held aerosol at the liquid rate.
+- Aqueous chemistry forms sulfate on the droplet-held cloud-borne number only.
+- Without the explicit phase, wet deposition applies the same split directly,
+  `cf·[(1 − p_ice)·f_ARG·peffwat + p_ice·f_ice·peffice]`.
 
 ## Why the ice phase matters
 
@@ -58,8 +70,13 @@ evaporates.
   at 237 hPa over the Southern Ocean, fifty times the surface mixing ratio.
 - In the austral-winter polar vortex the reservoir held 50-77 % of the sea
   salt in the core of the 198 K ice-cloud layer.
-- Those clouds carry 2-4 crystals per litre against 10⁴-10⁶ particles per
-  litre, so the one-particle-per-crystal rule leaves them empty.
+- Because the crystals fill the coarse mode first, what matters is ICNC
+  against the coarse number. Those clouds carry 2-4 crystals per litre:
+  - 6·10⁵ coarse particles per litre in the vortex layer and 4·10⁴ in the spike
+    is a coarse number share of 10⁻⁵-10⁻⁴;
+  - the largest particles go first, so that is a mass share of a few per cent
+    (3 % at a share of 1.7·10⁻⁴, σ = 1.8);
+  - nothing is left for the accumulation mode.
 
 **The interaction with the transport.** Thin, sharp layers are where the
 semi-Lagrangian quasi-monotone limiter creates mass. The global proportional
@@ -76,16 +93,51 @@ fixer returns it in proportion to the field everywhere (#1062).
 **Convective anvils** carry hundreds to thousands of crystals per litre against
 0.1-30 coarse and 10³-10⁴ accumulation particles per litre. The rule therefore
 puts the whole coarse mode and much of the accumulation mode into the ice, and
-the anvil's snow removes it.
+the anvil's snow removes it. In 5-day means of a T63L47 January, the in-ice
+mass share in tropical anvils (130-250 hPa) is 0.95 for the coarse mode and
+0.52 for the accumulation mode.
 
 **The rejected alternative.** CAM's liquid-only rule (`microp_aero.F90`: the
 activation cover `lcldn = cldn·qc/(qc + qi)`) also empties the cirrus. It
 leaves the anvils empty too, so convectively detrained aerosol at the anvil
 level has no in-cloud sink. Run from the January state with it, sea salt above
-150 hPa at 15-30°S reached 6-9 mg/m² within 10 days (12 µg/kg at 91 hPa), where
-the anvil uptake keeps it below 0.1.
+150 hPa at 15-30°S reached 6-9 mg/m² within 10 days (12 µg/kg at 91 hPa),
+against the 4-5 mg/m² spin-up peak of the crystal-number rule below.
+
+## Spin-up from states built under droplet activation in ice
+
+Warm states made before this rule hold an upper and middle troposphere shaped
+by the stronger uptake: droplet activation in every cloud, including
+mixed-phase and ice cloud whose crystal number is below the coarse number.
+Started from such a state, the crystal-number rule scavenges less of the
+subtropical mid-tropospheric aerosol on its way up. Part of it reaches the
+tropical tropopause and lower stratosphere before the column adjusts.
+
+From the January state (T63L47 JAM, defaults), sea salt above 150 hPa at
+15-30°S:
+
+| day | 5 | 10 | 20 | 30 | 50 | 70 | 90 | 125 | 155 |
+|---|---|---|---|---|---|---|---|---|---|
+| mg/m² | 4.1 | 4.7 | 1.7 | 0.96 | 0.24 | 0.10 | 0.06 | 0.03 | 0.01 |
+
+- The e-folding time is about 20 days. From day ~70 the value sits at the
+  0.02-0.1 mg/m² that droplet activation in ice keeps there.
+- Sulfate above 100 hPa follows the same course: 1.5 mg/m² at day 15, 0.57 at
+  day 45.
+- The 150-300 hPa band is back at its old level within 25 days.
+
+It is an adjustment of the initial state, not a property of the rule. A state
+spun up under the rule does not carry it, and 30-day calibration windows
+should start from such states.
 
 ## Related
 
-The transport half of the interaction, a local (Bermejo–Conde) fixer in place
-of the global proportional one, is #1062.
+- **The transport half of the interaction** is #1062: a local (Bermejo–Conde,
+  IFS) fixer in place of the global proportional one. It changes the transport
+  of every nodal tracer including cloud ice. With the crystal-number rule the
+  upper-level aerosol does not build up without it. Added to the rule, it
+  reduced the spin-up transient above by only 15-25 %, so the transient's
+  source is the uptake, not the amplifier.
+- **HAM's in-cloud impaction** (`ic_scav_imp`: collision of interstitial
+  aerosol with cloud droplets and ice plates) is the other half of HAM's
+  in-cloud fraction. It is not ported (#1067).
