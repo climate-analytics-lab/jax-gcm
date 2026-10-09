@@ -239,6 +239,14 @@ class CloudBorneExchange(PhysicsTerm):
                 # it relaxes toward: what rain formation removes and aqueous
                 # chemistry sees, against the crystal-held rest that only
                 # snow formation removes (HAM scavenges the two phases apart).
+                # It describes the whole reservoir, with no memory of the
+                # phase the aerosol was taken up in: the aerosol sits in the
+                # hydrometeors the cell holds now. Droplets that froze hold
+                # it in the ice, droplets that evaporated release it through
+                # the evaporation ledger below, and a droplet-held remainder
+                # in a cell without droplets is not a state the cloud can be
+                # in. HAM likewise splits its in-cloud aerosol by the
+                # current ``pice`` every step.
                 has = frac > _SHARE_FLOOR
                 liquid_share.append(jnp.where(
                     has, in_liquid / jnp.where(has, frac, 1.0), 1.0 - pice))

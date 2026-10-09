@@ -325,7 +325,9 @@ it (JAM is two-moment only).
 Where the process ledger records no condensate, the ice share is that of the
 cloud scheme's grid-mean condensate, so an ice cloud is never read as a droplet
 cloud. The exchange records each reservoir's droplet-held share,
-``(1 − p_ice)·f_ARG / f``. Wet deposition removes that share at the per-step
+``(1 − p_ice)·f_ARG / f``, for the whole reservoir at the current condensate's
+split: the aerosol sits in the hydrometeors the cell holds now, as HAM splits
+its in-cloud aerosol by the current ``pice`` each step. Wet deposition removes that share at the per-step
 liquid conversion ``c_wat`` and the crystal-held rest at the ice conversion
 ``c_ice`` (HAM's ``peffwat`` / ``peffice``), as HAM scavenges the two phases
 apart. Aqueous sulfate forms on the droplet-held part only, and counts as
