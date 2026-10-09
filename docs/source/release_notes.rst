@@ -1633,7 +1633,16 @@ JAM cloud-borne aerosol in ice cloud follows ECHAM-HAM
 - Crystal-poor cirrus and vortex ice now hold next to nothing. Their reservoir
   drains to the interstitial phase. Crystal-rich convective anvils still take
   up the coarse and much of the accumulation mode for their snow to remove.
-  See :doc:`design/jam_cloud_borne_ice_phase` (#1066).
+- Wet deposition removes the droplet-held part at the liquid conversion and
+  the crystal-held part at the ice conversion, and aqueous sulfate forms on
+  the droplet-held cloud-borne number only.
+- Over 155 days from the January state, polar-cap sea salt above 300 hPa stays
+  at or below 0.1 mg/m² and the #1027 jets and vortex are kept.
+- A run started from a warm state built before this change carries a
+  spin-up pulse of aerosol into the tropical tropopause and lower
+  stratosphere, gone after about 50 days. Calibration windows should start
+  from states spun up under the new rule. See
+  :doc:`design/jam_cloud_borne_ice_phase` (#1066).
 
 Convective scavenging follows ECHAM-HAM
 """""""""""""""""""""""""""""""""""""""

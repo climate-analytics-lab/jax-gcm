@@ -114,17 +114,23 @@ subtropical mid-tropospheric aerosol on its way up. Part of it reaches the
 tropical tropopause and lower stratosphere before the column adjusts.
 
 From the January state (T63L47 JAM, defaults), sea salt above 150 hPa at
-15-30°S:
+15-30°S, against the same run under droplet activation in ice:
 
 | day | 5 | 10 | 20 | 30 | 50 | 70 | 90 | 125 | 155 |
 |---|---|---|---|---|---|---|---|---|---|
-| mg/m² | 4.1 | 4.7 | 1.7 | 0.96 | 0.24 | 0.10 | 0.06 | 0.03 | 0.01 |
+| crystal-number rule, mg/m² | 4.0 | 4.9 | 1.4 | 0.63 | 0.17 | 0.07 | 0.04 | 0.02 | 0.01 |
+| droplet activation in ice, mg/m² | 0.00 | 0.00 | 0.02 | 0.09 | 0.79 | 0.18 | 0.04 | 0.10 | 0.07 |
 
-- The e-folding time is about 20 days. From day ~70 the value sits at the
-  0.02-0.1 mg/m² that droplet activation in ice keeps there.
-- Sulfate above 100 hPa follows the same course: 1.5 mg/m² at day 15, 0.57 at
-  day 45.
-- The 150-300 hPa band is back at its old level within 25 days.
+- The excess falls by a factor of eight between days 10 and 30, and is at or
+  below the old rule's value from day 50 on.
+- The 150-300 hPa band at 15-30°S starts at 3 mg/m² and is below the old
+  rule's value from day 20.
+- North of the equator (5-30°N) the pulse is smaller: 0.29 mg/m² at day 20,
+  0.04 by day 70. From the July state it is 0.48 mg/m² at day 10 and gone by
+  day 20.
+- Sulfate above 100 hPa follows the same course: 1.7 mg/m² at day 15, 0.57 at
+  day 45, 0.21 at day 75 and 0.10 at day 155, against the 0.05-0.11 that the
+  old rule holds there.
 
 It is an adjustment of the initial state, not a property of the rule. A state
 spun up under the rule does not carry it, and 30-day calibration windows
