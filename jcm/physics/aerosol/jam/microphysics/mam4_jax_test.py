@@ -502,6 +502,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
+@pytest.mark.requires_extra("mam4")
 class DefaultCoreIsReverseDifferentiableTest(unittest.TestCase):
     """The ``echam-jam`` physics group's default core supports ``jax.grad``.
 
@@ -521,7 +522,6 @@ class DefaultCoreIsReverseDifferentiableTest(unittest.TestCase):
         self.assertEqual(cfg["jam_microphysics"], "mam4_jax")
 
     def test_default_core_takes_a_reverse_mode_gradient(self):
-        pytest.importorskip("mam4_jax")
         from mam4_jax.coupling import amicphys as _amicphys
 
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
