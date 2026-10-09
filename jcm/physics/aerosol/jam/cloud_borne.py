@@ -12,11 +12,15 @@ activated fractions (``_jam_activation``, number and mass separately — large
 particles activate preferentially, so the mass fraction is well above the
 number fraction) define the grid-mean equilibrium cloud-borne amount
 
-    q_cb* = cloud_fraction · f_act · (q_int + q_cb)
+    q_cb* = f_act · (q_int + q_cb)      where there is liquid cloud, else 0
 
 and the pair relaxes toward it with a tunable timescale, activation and
-resuspension each getting their own knob. A growing or persistent cloud pulls
-``q_cb`` up toward the activated partition; the downward direction is keyed
+resuspension each getting their own knob; the liquid cloud cover
+``cf · qc / (qc + qi)`` (CAM's ``lcldn``) stretches the activation timescale
+by its inverse, and an ice cloud activates nothing. A growing or persistent
+liquid cloud pulls ``q_cb`` up toward the activated partition; under ice-only
+cover the reservoir drains to the interstitial phase on the resuspension
+timescale; once the whole cover has gone the downward direction is keyed
 to the microphysics' condensate-evaporation ledger (#708): the reservoir
 share released each step is the share of the droplet population that
 EVAPORATED — a sky cleared by evaporation resuspends everything, a sky
