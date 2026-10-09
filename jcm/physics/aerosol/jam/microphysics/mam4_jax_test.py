@@ -512,6 +512,12 @@ class DefaultCoreIsReverseDifferentiableTest(unittest.TestCase):
     fixed-substep core; ASTEM stays an explicit, forward-only choice.
     """
 
+    def setUp(self):
+        self._x64 = jax.config.read("jax_enable_x64")
+
+    def tearDown(self):
+        jax.config.update("jax_enable_x64", self._x64)
+
     def test_echam_jam_config_defaults_to_the_substep_core(self):
         from pathlib import Path
 
