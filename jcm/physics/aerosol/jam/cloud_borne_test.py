@@ -426,6 +426,87 @@ class CloudBorneExchangeTest(unittest.TestCase):
         )
 
 
+    # ----- Liquid cover (CAM ``lcldn``) --------------------------------
+
+    def _phase_setup(self, *, qc, qi, q_cb=0.0, n_cb=0.0):
+        """Persistent cloud (cf 0.5) with the given grid-mean condensate."""
+        state, diagnostics = self._setup(cloud_fraction=0.5, q_cb=q_cb,
+                                         n_cb=n_cb)
+        shape = state.temperature.shape
+        clouds = diagnostics["clouds"]
+        clouds.qc = jnp.full(shape, qc)
+        clouds.qi = jnp.full(shape, qi)
+        # A live, non-evaporating, non-precipitating pool, as under a
+        # persistent deck.
+        clouds.incloud_ice = jnp.full(shape, 2.0 * qi)
+        clouds.incloud_liquid = jnp.full(shape, 2.0 * qc)
+        clouds.process_cloud_fraction = jnp.full(shape, 0.5)
+        return state, diagnostics
+
+    def test_ice_cloud_activates_nothing(self):
+        # Cirrus / polar-vortex ice cloud: no liquid, so no droplet
+        # activation into the cloud-borne phase (CAM's lcldn = 0).
+        state, diagnostics = self._phase_setup(qc=0.0, qi=1.0e-5)
+        tend, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        np.testing.assert_array_equal(np.asarray(out[CARRY_KEY][nm]), 0.0)
+        np.testing.assert_array_equal(
+            np.asarray(tend.tracers[mass_name("so4", "acc")]), 0.0)
+
+    def test_mixed_phase_activates_at_the_liquid_cover_rate(self):
+        # Half the condensate liquid: the activation timescale stretches by
+        # 1/(cf * liquid share) = 1/0.25, against 1/0.5 for an all-liquid
+        # cloud of the same cover; the target is unchanged.
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        dt, tau = 1800.0, 900.0
+        q1 = {}
+        for qc, qi in ((1.0e-4, 0.0), (1.0e-4, 1.0e-4)):
+            state, diagnostics = self._phase_setup(qc=qc, qi=qi)
+            _, out = CloudBorneExchange()(state, diagnostics, None, None)
+            q1[qi > 0] = float(np.asarray(out[CARRY_KEY][nm]).mean())
+        target = 0.9 * 1.0e-9
+        for mixed, lcf in ((False, 0.5), (True, 0.25)):
+            expected = target * -np.expm1(-dt / (tau / lcf))
+            np.testing.assert_allclose(q1[mixed], expected, rtol=1e-4)
+
+    def test_store_drains_once_only_ice_is_left(self):
+        # Aerosol activated while the cloud still held liquid returns to the
+        # interstitial phase on the resuspension timescale once the cover is
+        # all ice (CAM's shrinking-liquid-cloud resuspension), instead of
+        # waiting in a persistent ice cloud with no exit.
+        state, diagnostics = self._phase_setup(
+            qc=0.0, qi=1.0e-5, q_cb=1.0e-9, n_cb=1.0e8)
+        tend, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        phi = -np.expm1(-1800.0 / 900.0)
+        np.testing.assert_allclose(np.asarray(out[CARRY_KEY][nm]),
+                                   1.0e-9 * (1.0 - phi), rtol=1e-5)
+        # ... and the interstitial phase gains exactly what the store lost.
+        np.testing.assert_allclose(
+            np.asarray(tend.tracers[mass_name("so4", "acc")]) * 1800.0,
+            1.0e-9 * phi, rtol=1e-4)
+
+    def test_liquid_cloud_fraction(self):
+        from jcm.physics.aerosol.jam.cloud_borne import liquid_cloud_fraction
+
+        cf = jnp.asarray([0.5, 0.5, 0.5, 0.0])
+        clouds = _Clouds(cf, qc=jnp.asarray([1e-4, 1e-4, 0.0, 0.0]),
+                         qi=jnp.asarray([0.0, 3e-4, 1e-4, 0.0]))
+        np.testing.assert_allclose(
+            np.asarray(liquid_cloud_fraction(clouds)),
+            [0.5, 0.125, 0.0, 0.0], rtol=1e-6)
+
+    def test_grad_through_the_liquid_share(self):
+        from jcm.physics.aerosol.jam.cloud_borne import liquid_cloud_fraction
+        from jcm.testing import check_gradients
+
+        cf = jnp.asarray([0.3, 0.6])
+        check_gradients(
+            lambda qc, qi: liquid_cloud_fraction(_Clouds(cf, qc=qc, qi=qi)),
+            (jnp.asarray([1e-4, 2e-5]), jnp.asarray([5e-5, 1e-4])),
+            rtol=1e-3)
+
+
 class FactorySwitchTest(unittest.TestCase):
     def test_default_composes_exchange_and_store(self):
         from jcm.physics.aerosol.jam import jam_aerosol_physics
