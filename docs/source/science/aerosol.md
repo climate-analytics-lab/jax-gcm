@@ -65,10 +65,12 @@ See {doc}`../design/jam_carbon_aging`.
   oxidation is jcm-side).
 
 **Status & known limitations.** Every shipped ``echam-jam*`` configuration pins
-``jam_microphysics: mam4_jax_astem`` (requiring ``jcm[mam4]``, MAM4-JAX 0.5.1).
-This conservative condensation solve is forward-only; the explicit
-``mam4_jax`` backend retains fixed-substep differentiation support, with the
-warm-cell evaporation limitation described in {doc}`../design/jam_soa_dust`. The
+``jam_microphysics: mam4_jax`` (requiring ``jcm[mam4]``, MAM4-JAX 0.5.1), the
+fixed-substep core through which ``jax.grad`` runs; ``mam4_jax_astem`` selects
+CAM's adaptive ASTEM corrector, which conserves the organic budget in warm
+evaporating cells but is forward-only (#1064).
+The substep core's warm-cell evaporation limitation is described in
+{doc}`../design/jam_soa_dust`. The
 zero-tendency κ-Köhler placeholder is the bare-factory default and the
 documented fallback when the GPL extra is unavailable. The core's cloudy ``amicphys``
 sub-area is not ported upstream, so cloud-borne activation is the harness's job

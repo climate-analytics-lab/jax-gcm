@@ -47,10 +47,14 @@ builder: echam_physics
 aerosol_module: jam
 cloud_scheme: 2m            # ARG activated_cdnc feeds the 2-moment scheme
 radiation_scheme: rrtmgp    # the ECHAM radiation; "grey" (idealized, not ECHAM) is rejected
-# CAM6 SOA needs the conservative evaporation corrector. The adaptive
-# solve is forward-only; select mam4_jax explicitly for the fixed-substep
-# differentiation backend, whose warm-cell evaporation can lose closure.
-jam_microphysics: mam4_jax_astem
+# The fixed-substep MAM4-JAX core: the one every ``jax.grad`` through an
+# ECHAM+JAM model goes through (the adaptive ASTEM solve runs a
+# ``lax.while_loop`` with data-dependent bounds, which reverse mode cannot
+# differentiate). Its warm-cell SOA evaporation can lose closure by ~1 %
+# of the organic mass in a cell (#1064, upstream MAM4-JAX); set
+# ``physics.jam_microphysics=mam4_jax_astem`` for a forward-only SOA study
+# that needs CAM's conservative corrector.
+jam_microphysics: mam4_jax
 jam_arg_variant: ghosh2025  # or arg2000
 jam_aqueous_scheme: full
 
