@@ -328,7 +328,8 @@ cloud. The exchange records each reservoir's droplet-held share,
 ``(1 − p_ice)·f_ARG / f``. Wet deposition removes that share at the per-step
 liquid conversion ``c_wat`` and the crystal-held rest at the ice conversion
 ``c_ice`` (HAM's ``peffwat`` / ``peffice``), as HAM scavenges the two phases
-apart. Aqueous sulfate forms on the droplet-held part only. A population
+apart. Aqueous sulfate forms on the droplet-held part only, and counts as
+droplet-held in its reservoir's share, so it is removed at ``c_wat``. A population
 without the explicit phase is scavenged by the same split directly,
 ``cf·[(1 − p_ice)·f_ARG·c_wat + p_ice·f_ice·c_ice]``.
 

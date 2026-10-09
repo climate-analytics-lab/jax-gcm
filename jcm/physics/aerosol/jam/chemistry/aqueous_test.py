@@ -117,6 +117,75 @@ class AqueousTermTest(unittest.TestCase):
         np.testing.assert_array_equal(cor, 0.0)
         self.assertGreater(float(acc[0, 0]), 0.0)
 
+    def test_fresh_sulfate_is_droplet_held_in_the_share(self):
+        # Wet deposition removes the recorded droplet-held share at the
+        # liquid conversion: sulfate formed here in droplets must raise each
+        # reservoir's share to (s·m + Δm)/(m + Δm), number shares unchanged.
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+
+        state, diagnostics = self._setup()
+        shape = state.temperature.shape
+        modes = [mm.short for mm in MAM4_SPEC.modes if "so4" in mm.species]
+        share = {}
+        for m in modes:
+            share[number_name(m, cloud_borne=True)] = jnp.full(shape, 0.7)
+            share[mass_name("so4", m, cloud_borne=True)] = jnp.full(shape, 0.4)
+        diag = {**diagnostics, LIQUID_SHARE_KEY: share}
+        _, out = AqueousSulfur()(state, diag, None, None)
+        for m in modes:
+            nm = mass_name("so4", m, cloud_borne=True)
+            old = np.asarray(diag[CARRY_KEY][nm])
+            fresh = self._cb_rate(diag, out, nm) * 1800.0
+            self.assertGreater(float(fresh[0, 0]), 0.0)
+            np.testing.assert_allclose(
+                np.asarray(out[LIQUID_SHARE_KEY][nm]),
+                (0.4 * old + fresh) / (old + fresh), rtol=1e-5)
+            nn = number_name(m, cloud_borne=True)
+            np.testing.assert_array_equal(
+                np.asarray(out[LIQUID_SHARE_KEY][nn]), np.asarray(share[nn]))
+
+    def test_share_left_alone_without_production_or_record(self):
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+
+        # No cloud: nothing forms, so the recorded share is kept.
+        state, diagnostics = self._setup(cloud_fraction=0.0)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        share = {nm: jnp.full(state.temperature.shape, 0.4)}
+        _, out = AqueousSulfur()(
+            state, {**diagnostics, LIQUID_SHARE_KEY: share}, None, None)
+        np.testing.assert_allclose(
+            np.asarray(out[LIQUID_SHARE_KEY][nm]), np.asarray(share[nm]),
+            rtol=1e-6)
+        # No exchange record at all: none is invented.
+        state, diagnostics = self._setup()
+        _, out = AqueousSulfur()(state, diagnostics, None, None)
+        self.assertNotIn(LIQUID_SHARE_KEY, out)
+
+    def test_share_gradient_finite_on_empty_reservoirs(self):
+        # An empty reservoir with no production takes the discarded branch
+        # of the share update; its derivative must stay finite.
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+
+        for cloud_fraction in (0.0, 0.6):
+            state, diagnostics = self._setup(cloud_fraction=cloud_fraction,
+                                             nc=0.0)
+            nm = mass_name("so4", "acc", cloud_borne=True)
+            shape = state.temperature.shape
+
+            def loss(cb, s):
+                carry = {**diagnostics[CARRY_KEY], nm: cb}
+                diag = {**diagnostics, CARRY_KEY: carry,
+                        LIQUID_SHARE_KEY: {nm: s}}
+                _, out = AqueousSulfur()(state, diag, None, None)
+                return jnp.sum(out[LIQUID_SHARE_KEY][nm])
+
+            grads = jax.grad(loss, argnums=(0, 1))(
+                jnp.zeros(shape), jnp.full(shape, 0.4))
+            for g in grads:
+                self.assertTrue(np.all(np.isfinite(np.asarray(g))),
+                                msg=f"cf={cloud_fraction}")
+
     def test_sulfur_conserved(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC
         from jcm.physics.aerosol.jam.chemistry.aqueous import _MW_SO2, _MW_SO4

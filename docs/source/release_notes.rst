@@ -1634,8 +1634,9 @@ JAM cloud-borne aerosol in ice cloud follows ECHAM-HAM
   drains to the interstitial phase. Crystal-rich convective anvils still take
   up the coarse and much of the accumulation mode for their snow to remove.
 - Wet deposition removes the droplet-held part at the liquid conversion and
-  the crystal-held part at the ice conversion, and aqueous sulfate forms on
-  the droplet-held cloud-borne number only.
+  the crystal-held part at the ice conversion. Aqueous sulfate forms on the
+  droplet-held cloud-borne number only and is removed with the droplet-held
+  part.
 - Over 155 days from the January state, polar-cap sea salt above 300 hPa stays
   at or below 0.1 mg/m² and the #1027 jets and vortex are kept.
 - A run started from a warm state built before this change carries a

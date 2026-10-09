@@ -52,6 +52,8 @@ under a step-local key.
   the ice conversion. A single condensate-weighted fraction would instead rain
   out crystal-held aerosol at the liquid rate.
 - Aqueous chemistry forms sulfate on the droplet-held cloud-borne number only.
+  The sulfate it forms is added to its reservoir's droplet-held share, so
+  wet deposition removes it at the liquid conversion.
 - Without the explicit phase, wet deposition applies the same split directly,
   `cf·[(1 − p_ice)·f_ARG·peffwat + p_ice·f_ice·peffice]`.
 
