@@ -1625,9 +1625,11 @@ JAM cloud-borne aerosol in ice cloud follows ECHAM-HAM
 - The in-cloud aerosol is now split between liquid and ice by the ice share of
   the condensate, as ECHAM-HAM splits it (``mo_ham_wetdep.f90``,
   ``nwetdep = 3``):
+
   - the liquid part is ARG activation;
   - the ice part is HAM's ``ic_scav_nuc`` rule, one aerosol particle per ice
     crystal, largest mode first, using the two-moment scheme's crystal number.
+
 - Crystal-poor cirrus and vortex ice now hold next to nothing. Their reservoir
   drains to the interstitial phase. Crystal-rich convective anvils still take
   up the coarse and much of the accumulation mode for their snow to remove.

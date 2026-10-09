@@ -368,6 +368,14 @@ no aerosol is held in ice cloud at all.
   stratosphere (sea salt reaching 60 hPa within days of a January start). See
   {doc}`../design/jam_cloud_borne_ice_phase`.
 
+**Status & known limitations.** HAM's in-cloud scavenged fraction is nucleation
+*plus* impaction of interstitial aerosol by cloud droplets and ice crystals
+(``mo_ham_wetdep.f90::ic_scav_imp``, with the ``scavdrop`` / ``scaviceplate``
+collision tables). The impaction half is not ported (#1067): jcm's stratiform
+in-cloud removal is nucleation only, through this reservoir, which is CAM's form
+(``sol_facti = 0`` for interstitial aerosol). Coarse aerosol lofted through
+mixed-phase and ice cloud is therefore scavenged less than in ECHAM-HAM.
+
 ### Convective tracer transport + in-plume scavenging
 
 **What we do.** ``jcm/physics/convection/tracer_transport.py::ConvectiveTracerTransport``
