@@ -429,7 +429,7 @@ class CloudBorneExchangeTest(unittest.TestCase):
     # ----- Liquid cover (CAM ``lcldn``) --------------------------------
 
     def _phase_setup(self, *, qc, qi, q_cb=0.0, n_cb=0.0):
-        """Persistent cloud (cf 0.5) with the given grid-mean condensate."""
+        """Set up a persistent cloud (cf 0.5) with the given condensate."""
         state, diagnostics = self._setup(cloud_fraction=0.5, q_cb=q_cb,
                                          n_cb=n_cb)
         shape = state.temperature.shape
