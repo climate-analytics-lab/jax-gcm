@@ -190,6 +190,7 @@ class CarryModeExchangeTest(unittest.TestCase):
             tracers[number_name(mode.short)] = jnp.full(shape, 1.0e8)
             for sp in mode.species:
                 tracers[mass_name(sp, mode.short)] = jnp.full(shape, 1.0e-9)
+        tracers["qni"] = jnp.zeros(shape)   # the 2M crystal number
         state = PhysicsState.zeros(shape).copy(
             temperature=jnp.full(shape, 275.0), tracers=tracers,
         )
@@ -207,10 +208,6 @@ class CarryModeExchangeTest(unittest.TestCase):
             # this step" routes resuspension to the timescale drain these
             # tests were written against.
             cloud_fraction = jnp.full(shape, cf)
-            # An all-liquid cloud: the exchange activates in the liquid
-            # cover, which is then the whole cover.
-            qc = jnp.full(shape, 1.0e-4)
-            qi = jnp.zeros(shape)
             incloud_liquid = jnp.zeros(shape)
             incloud_ice = jnp.zeros(shape)
             incloud_rain_formation = jnp.zeros(shape)

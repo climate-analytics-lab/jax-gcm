@@ -47,10 +47,6 @@ class _Clouds:
     def __init__(self, cloud_fraction, **ledger):
         self.cloud_fraction = cloud_fraction
         zeros = jnp.zeros_like(cloud_fraction)
-        # Grid-mean condensate: an all-liquid cloud unless a test says
-        # otherwise, so the exchange's liquid cover equals the cover.
-        self.qc = ledger.get("qc", jnp.full_like(cloud_fraction, 1.0e-4))
-        self.qi = ledger.get("qi", zeros)
         for f in ("incloud_liquid", "incloud_ice", "incloud_rain_formation",
                   "incloud_snow_formation", "incloud_riming",
                   "process_cloud_fraction", "condensate_evaporation_rate"):
@@ -69,6 +65,7 @@ class CloudBorneExchangeTest(unittest.TestCase):
         n_int=1.0e8,
         q_cb=0.0,
         n_cb=0.0,
+        qni=0.0,
     ):
         shape = (nlev, ncols)
         tracers = {}
@@ -83,6 +80,9 @@ class CloudBorneExchangeTest(unittest.TestCase):
                 carry[mass_name(sp, mode.short, cloud_borne=True)] = (
                     jnp.full(shape, q_cb)
                 )
+        # The two-moment scheme's in-cloud crystal number; none unless a
+        # test sets it (the ice phase then holds nothing).
+        tracers["qni"] = jnp.full(shape, qni)
         state = PhysicsState.zeros(shape).copy(
             temperature=jnp.full(shape, 275.0), tracers=tracers,
         )
@@ -425,85 +425,133 @@ class CloudBorneExchangeTest(unittest.TestCase):
             np.asarray(diagnostics[CARRY_KEY][nm]), rtol=1e-7,
         )
 
-    # ----- Liquid cover (CAM ``lcldn``) --------------------------------
+    # ----- Phase split: HAM's aerosol-in-ice rule ---------------------
 
-    def _phase_setup(self, *, qc, qi, q_cb=0.0, n_cb=0.0):
-        """Set up a persistent cloud (cf 0.5) with the given condensate."""
+    def _ice_setup(self, *, pice=1.0, qni=0.0, q_cb=0.0, n_cb=0.0):
+        """Set up a persistent, non-precipitating cloud of ice share ``pice``."""
         state, diagnostics = self._setup(cloud_fraction=0.5, q_cb=q_cb,
-                                         n_cb=n_cb)
+                                         n_cb=n_cb, qni=qni)
         shape = state.temperature.shape
         clouds = diagnostics["clouds"]
-        clouds.qc = jnp.full(shape, qc)
-        clouds.qi = jnp.full(shape, qi)
-        # A live, non-evaporating, non-precipitating pool, as under a
-        # persistent deck.
-        clouds.incloud_ice = jnp.full(shape, 2.0 * qi)
-        clouds.incloud_liquid = jnp.full(shape, 2.0 * qc)
+        clouds.incloud_ice = jnp.full(shape, 1.0e-4 * pice)
+        clouds.incloud_liquid = jnp.full(shape, 1.0e-4 * (1.0 - pice))
         clouds.process_cloud_fraction = jnp.full(shape, 0.5)
         return state, diagnostics
 
-    def test_ice_cloud_activates_nothing(self):
-        # Cirrus / polar-vortex ice cloud: no liquid, so no droplet
-        # activation into the cloud-borne phase (CAM's lcldn = 0).
-        state, diagnostics = self._phase_setup(qc=0.0, qi=1.0e-5)
-        tend, out = CloudBorneExchange()(state, diagnostics, None, None)
-        nm = mass_name("so4", "acc", cloud_borne=True)
-        np.testing.assert_array_equal(np.asarray(out[CARRY_KEY][nm]), 0.0)
-        np.testing.assert_array_equal(
-            np.asarray(tend.tracers[mass_name("so4", "acc")]), 0.0)
+    def _cb(self, out, mode="acc", sp="so4"):
+        return float(np.asarray(
+            out[CARRY_KEY][mass_name(sp, mode, cloud_borne=True)]).mean())
 
-    def test_mixed_phase_activates_at_the_liquid_cover_rate(self):
-        # Half the condensate liquid: the activation timescale stretches by
-        # 1/(cf * liquid share) = 1/0.25, against 1/0.5 for an all-liquid
-        # cloud of the same cover; the target is unchanged.
-        nm = mass_name("so4", "acc", cloud_borne=True)
-        dt, tau = 1800.0, 900.0
-        q1 = {}
-        for qc, qi in ((1.0e-4, 0.0), (1.0e-4, 1.0e-4)):
-            state, diagnostics = self._phase_setup(qc=qc, qi=qi)
-            _, out = CloudBorneExchange()(state, diagnostics, None, None)
-            q1[qi > 0] = float(np.asarray(out[CARRY_KEY][nm]).mean())
-        target = 0.9 * 1.0e-9
-        for mixed, lcf in ((False, 0.5), (True, 0.25)):
-            expected = target * -np.expm1(-dt / (tau / lcf))
-            np.testing.assert_allclose(q1[mixed], expected, rtol=1e-4)
+    def test_crystal_poor_ice_cloud_activates_next_to_nothing(self):
+        # Cirrus / polar-vortex ice cloud: a few crystals per litre against
+        # 1e8 particles per kg in each mode, so the ice holds ~1e-5 of them.
+        state, diagnostics = self._ice_setup(pice=1.0, qni=1.0e3)
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        for mode, sp in (("acc", "so4"), ("cor", "ss"), ("ait", "so4")):
+            self.assertLess(self._cb(out, mode, sp), 1e-6 * 1.0e-9)
 
-    def test_store_drains_once_only_ice_is_left(self):
+    def test_anvil_crystals_fill_the_largest_mode_first(self):
+        # 1.5x the coarse-mode number of crystals: the whole coarse mode is
+        # in the ice, the remaining 0.5 x N go to the accumulation mode, and
+        # the Aitken mode gets none (HAM ic_scav_nuc's fill order).
+        from jcm.physics.aerosol.jam.cloud_borne import ice_phase_fractions
+        state, diagnostics = self._ice_setup(pice=1.0, qni=1.5e8)
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        phi = -np.expm1(-1800.0 / (900.0 / 0.5))
+        idx = {m.short: i for i, m in enumerate(MAM4_SPEC.modes)}
+        n = [jnp.full((3, 2), 1.0e8) for _ in MAM4_SPEC.modes]
+        f_n, f_m = ice_phase_fractions(MAM4_SPEC, n, jnp.full((3, 2), 1.5e8))
+        np.testing.assert_allclose(np.asarray(f_n[idx["cor"]]), 1.0)
+        np.testing.assert_allclose(np.asarray(f_n[idx["acc"]]), 0.5,
+                                   rtol=1e-6)
+        np.testing.assert_allclose(np.asarray(f_n[idx["ait"]]), 0.0)
+        self.assertGreater(float(f_m[idx["acc"]].mean()), 0.5)
+        for mode, sp in (("cor", "ss"), ("acc", "so4")):
+            expected = float(f_m[idx[mode]].mean()) * 1.0e-9 * phi
+            np.testing.assert_allclose(self._cb(out, mode, sp), expected,
+                                       rtol=1e-4)
+        self.assertEqual(self._cb(out, "ait", "so4"), 0.0)
+
+    def test_mixed_phase_blends_the_two_partitions(self):
+        # Half the in-cloud condensate ice and no crystals: the target is
+        # half the liquid (ARG) partition.
+        state, diagnostics = self._ice_setup(pice=0.5, qni=0.0)
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        phi = -np.expm1(-1800.0 / (900.0 / 0.5))
+        np.testing.assert_allclose(self._cb(out), 0.5 * 0.9e-9 * phi,
+                                   rtol=1e-4)
+
+    def test_store_drains_under_crystal_poor_ice(self):
         # Aerosol activated while the cloud still held liquid returns to the
-        # interstitial phase on the resuspension timescale once the cover is
-        # all ice (CAM's shrinking-liquid-cloud resuspension), instead of
-        # waiting in a persistent ice cloud with no exit.
-        state, diagnostics = self._phase_setup(
-            qc=0.0, qi=1.0e-5, q_cb=1.0e-9, n_cb=1.0e8)
+        # interstitial phase on the resuspension timescale once the cloud is
+        # ice with few crystals, instead of waiting with no exit.
+        state, diagnostics = self._ice_setup(pice=1.0, qni=0.0,
+                                             q_cb=1.0e-9, n_cb=1.0e8)
         tend, out = CloudBorneExchange()(state, diagnostics, None, None)
-        nm = mass_name("so4", "acc", cloud_borne=True)
         phi = -np.expm1(-1800.0 / 900.0)
-        np.testing.assert_allclose(np.asarray(out[CARRY_KEY][nm]),
-                                   1.0e-9 * (1.0 - phi), rtol=1e-5)
-        # ... and the interstitial phase gains exactly what the store lost.
+        np.testing.assert_allclose(self._cb(out), 1.0e-9 * (1.0 - phi),
+                                   rtol=1e-5)
         np.testing.assert_allclose(
             np.asarray(tend.tracers[mass_name("so4", "acc")]) * 1800.0,
             1.0e-9 * phi, rtol=1e-4)
 
-    def test_liquid_cloud_fraction(self):
-        from jcm.physics.aerosol.jam.cloud_borne import liquid_cloud_fraction
+    def test_ice_mass_share_is_the_lognormal_tail(self):
+        # The mass in the ice is that of the largest particles: the mass
+        # tail beyond the radius holding the number share, checked against a
+        # direct quadrature of a log-normal.
+        from jcm.physics.aerosol.jam.cloud_borne import ice_phase_fractions
+        i_cor = [m.short for m in MAM4_SPEC.modes].index("cor")
+        sigma = MAM4_SPEC.modes[i_cor].geom_std_dev
+        x = np.linspace(-12.0, 12.0, 200001)          # ln(r / r_median)
+        pdf = np.exp(-0.5 * (x / np.log(sigma)) ** 2)
+        mass = pdf * np.exp(3.0 * x)
+        for share in (0.05, 0.3, 0.8):
+            n = [jnp.full((1,), 1.0e6) for _ in MAM4_SPEC.modes]
+            f_n, f_m = ice_phase_fractions(
+                MAM4_SPEC, n, jnp.full((1,), share * 1.0e6))
+            ncum = np.cumsum(pdf[::-1])[::-1] / pdf.sum()
+            k = np.searchsorted(-ncum, -share)
+            expected = mass[k:].sum() / mass.sum()
+            np.testing.assert_allclose(float(f_n[i_cor][0]), share,
+                                       rtol=1e-5)
+            np.testing.assert_allclose(float(f_m[i_cor][0]), expected,
+                                       rtol=2e-3)
 
-        cf = jnp.asarray([0.5, 0.5, 0.5, 0.0])
-        clouds = _Clouds(cf, qc=jnp.asarray([1e-4, 1e-4, 0.0, 0.0]),
-                         qi=jnp.asarray([0.0, 3e-4, 1e-4, 0.0]))
-        np.testing.assert_allclose(
-            np.asarray(liquid_cloud_fraction(clouds)),
-            [0.5, 0.125, 0.0, 0.0], rtol=1e-6)
+    def test_a_host_without_crystal_numbers_is_refused(self):
+        state, diagnostics = self._setup()
+        tracers = dict(state.tracers)
+        del tracers["qni"]
+        state = state.copy(tracers=tracers)
+        with self.assertRaisesRegex(ValueError, "qni"):
+            CloudBorneExchange()(state, diagnostics, None, None)
 
-    def test_grad_through_the_liquid_share(self):
-        from jcm.physics.aerosol.jam.cloud_borne import liquid_cloud_fraction
+    def test_grad_through_the_ice_partition(self):
+        from jcm.physics.aerosol.jam.cloud_borne import ice_phase_fractions
         from jcm.testing import check_gradients
 
-        cf = jnp.asarray([0.3, 0.6])
+        def f(n_cor, n_acc, icnc):
+            n = []
+            for m in MAM4_SPEC.modes:
+                n.append({"cor": n_cor, "acc": n_acc}.get(
+                    m.short, jnp.full_like(icnc, 3.0e8)))
+            f_n, f_m = ice_phase_fractions(MAM4_SPEC, n, icnc)
+            return jnp.stack(f_n + f_m)
+
         check_gradients(
-            lambda qc, qi: liquid_cloud_fraction(_Clouds(cf, qc=qc, qi=qi)),
-            (jnp.asarray([1e-4, 2e-5]), jnp.asarray([5e-5, 1e-4])),
-            rtol=1e-3)
+            f, (jnp.asarray([1.0e6, 4.0e6]), jnp.asarray([5.0e7, 2.0e8]),
+                jnp.asarray([3.0e6, 6.0e7])), rtol=1e-3)
+
+    def test_grad_of_the_exchange_through_the_crystal_number(self):
+        from jcm.testing import check_gradients
+
+        def run(qni):
+            state, diagnostics = self._ice_setup(pice=0.7, qni=0.0)
+            state = state.copy(tracers={**state.tracers, "qni": qni})
+            _, out = CloudBorneExchange()(state, diagnostics, None, None)
+            return jnp.stack([out[CARRY_KEY][mass_name("so4", m, cloud_borne=True)]
+                              for m in ("acc", "ait")])
+
+        check_gradients(run, (jnp.full((3, 2), 1.2e8),), rtol=1e-3)
 
 
 class FactorySwitchTest(unittest.TestCase):
