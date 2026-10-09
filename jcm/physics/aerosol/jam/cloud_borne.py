@@ -190,10 +190,14 @@ class CloudBorneExchange(PhysicsTerm):
         params = self.params.get_value()
         act = diagnostics["_jam_activation"]
         clouds = diagnostics["clouds"]
-        # Droplet activation acts in the LIQUID part of the cover only
-        # (CAM's ``lcldn``, see ``liquid_cloud_fraction``): everything below
-        # — the activation rate, the target, and "cleared" — is keyed to it.
-        cf = liquid_cloud_fraction(clouds)
+        # Two covers. Droplet activation acts in the LIQUID part of the cloud
+        # only (CAM's ``lcldn``, see ``liquid_cloud_fraction``): it sets the
+        # activation rate and whether there is an activated partition to
+        # relax toward. The TOTAL cover decides whether the sky has cleared,
+        # which is when the downward direction switches to the evaporation
+        # ledger below.
+        cf = jnp.clip(clouds.cloud_fraction, 0.0, 1.0)
+        lcf = liquid_cloud_fraction(clouds)
         dt = diagnostics.get("_dt_seconds", 1800.0)
 
         # Gather every (interstitial, cloud-borne) pair with its activated
@@ -250,12 +254,25 @@ class CloudBorneExchange(PhysicsTerm):
         # cloud fraction enters through the activation flux and the
         # cloud-fraction increment, so under a persistent deck the reservoir
         # fills toward the activated fraction of the total. Matching that here:
-        # where there is cloud, relax toward ``f_act · q_total`` on a timescale
-        # stretched by 1/cf — thin cloud processes the box slowly — and where
-        # the cloud has gone, drain to zero on the resuspension timescale.
-        cloudy_cf = jnp.maximum(cf, _MIN_CLOUD_FRACTION)
+        # where there is liquid cloud, relax toward ``f_act · q_total`` on a
+        # timescale stretched by 1/lcf — thin cloud processes the box slowly —
+        # and where the liquid cloud has gone, drain to zero on the
+        # resuspension timescale.
+        #
+        # The cover in both is CAM's liquid one. ``dropmixnuc`` runs on
+        # ``lcldn`` (``microp_aero.F90``; the CAM5 behaviour CAM6 keeps
+        # without pre-existing ice), so an ice cloud neither activates aerosol
+        # into the cloud-borne phase nor holds it: when the liquid cover
+        # shrinks, its cloud-borne aerosol returns to the interstitial phase.
+        # This matters most for cold upper-level ice cloud. The reservoir is
+        # neither advected nor sedimented, so a store filled under cirrus or
+        # the polar-vortex ice cloud would collect the aerosol carried through
+        # the cloud and return it, concentrated, wherever the ice evaporated —
+        # a source of thin, sharp aerosol layers at the ice-cloud level that
+        # no sink up there removes.
+        cloudy_cf = jnp.maximum(lcf, _MIN_CLOUD_FRACTION)
         target = jnp.where(
-            cf > _MIN_CLOUD_FRACTION,
+            lcf > _MIN_CLOUD_FRACTION,
             jnp.stack(fracs) * (q_int_arr + q_cb_arr),
             0.0,
         )
@@ -276,9 +293,12 @@ class CloudBorneExchange(PhysicsTerm):
         # term) caps it, so the two sinks cannot jointly overdraw the
         # reservoir: evaporated + rained fractions of one droplet
         # population sum to at most 1. WBF and freezing move condensate
-        # between phases WITHIN the pool, so they neither evaporate nor
-        # rain out cloud-borne aerosol here — the aerosol rides into the
-        # ice and meets the snow pathway (#686) in the ledger instead.
+        # between phases WITHIN the pool, so within a step that ends with
+        # the whole cover gone they neither evaporate nor rain out
+        # cloud-borne aerosol here — the aerosol rides into the ice and
+        # meets the snow pathway (#686) in the ledger instead. Where ice
+        # cover persists after the liquid has gone, the reservoir instead
+        # drains on the resuspension timescale (see ``cleared`` below).
         e_gm = jnp.maximum(clouds.condensate_evaporation_rate, 0.0) * dt
         cf_proc = jnp.clip(clouds.process_cloud_fraction, 0.0, 1.0)
         pool_gm = cf_proc * (
@@ -308,7 +328,7 @@ class CloudBorneExchange(PhysicsTerm):
             0.0,
         )
         # The ledger keying applies ONLY where the sky has cleared
-        # (cf < _MIN_CLOUD_FRACTION, i.e. target = 0): a rained-out cell
+        # (cf < _MIN_CLOUD_FRACTION, so also target = 0): a rained-out cell
         # is ``live`` through its formation ledger with f_evap ≈ 0 (no
         # resuspension racing the rainout), an evaporated cell releases
         # everything in one step, and a no-process cell (advected-in q_cb
@@ -321,7 +341,12 @@ class CloudBorneExchange(PhysicsTerm):
         # ratchet — q_cb can rise toward the activation target but never
         # fall, loading the cloud-borne phase without bound at cloud
         # levels. The under-cloud relaxation is what bounds the reservoir
-        # by the activation equilibrium.
+        # by the activation equilibrium. The same relaxation, toward a zero
+        # target, is CAM's resuspension of a shrinking liquid cloud: under
+        # ice-only cover (cf > 0, lcf = 0) the reservoir drains to the
+        # interstitial phase on the resuspension timescale, so aerosol that
+        # was activated while liquid was present cannot sit in a persistent
+        # ice cloud with no exit.
         cleared = cf <= _MIN_CLOUD_FRACTION
         release = jnp.minimum(f_evap, jnp.maximum(1.0 - f_form, 0.0))
         phi_down = jnp.where(cleared & live, release, phi_slow)
