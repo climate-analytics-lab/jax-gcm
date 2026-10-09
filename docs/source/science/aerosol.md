@@ -307,10 +307,28 @@ turbulent vertical mixing of the carry with the same TTE-TKE coefficients the
 interstitial tracers get. ``CloudBorneExchange`` cycles activation-transfer +
 resuspension against the current cloud field.
 
+Activation into the cloud-borne phase happens in the **liquid part of the cloud
+only**: the cover it acts in is ``cf · qc / (qc + qi)`` from the cloud scheme's
+grid-mean condensate (``cloud_borne.py::liquid_cloud_fraction``). That liquid
+cover sets the activation rate (the timescale stretched by its inverse) and
+whether there is an activated partition, ``f_act · (q_int + q_cb)``, to relax
+toward. Where ice cover persists after the liquid has gone, the target is zero
+and the reservoir drains to the interstitial phase on the resuspension
+timescale. Where the whole cover has gone in the step, the microphysics'
+evaporation and formation ledger decides as before: evaporated droplets release
+their aerosol, and rained- or snowed-out ones leave it to wet deposition.
+
 **What ECHAM/CAM does.** This is CAM's ``qqcw``-in-``pbuf`` pattern (cloud-borne
-aerosol in the physics buffer, not advected). ECHAM-HAM (M7/TOMAS-style, implicit)
-has no explicit prognostic cloud-borne phase — it scavenges interstitial aerosol
-by activated fraction.
+aerosol in the physics buffer, not advected). CAM runs ``dropmixnuc`` on the
+liquid cloud fraction ``lcldn = cldn · qc / (qc + qi)`` (``microp_aero.F90``, the
+CAM5 behaviour CAM6 keeps without pre-existing ice), so an ice cloud neither
+activates aerosol into ``qqcw`` nor holds it: as the liquid cover shrinks, the
+cloud-borne aerosol returns to the interstitial phase. ECHAM-HAM (M7/TOMAS-style,
+implicit) has no explicit prognostic cloud-borne phase. It scavenges
+interstitial aerosol by activated fraction in liquid cloud. In ice cloud
+(``mo_ham_wetdep.f90::ic_scav_nuc``, ``nwetdep = 3``) it fills the crystals one
+aerosol particle each, so the in-ice share of a mode is at most ICNC over its
+number concentration.
 
 **Why we differ.**
 - `compute` / `differentiability` / stability — a controlled 30-day A/B showed
@@ -321,6 +339,18 @@ by activated fraction.
   ``pbuf``; pySES is the most tracer-count-sensitive backend). The trade given up
   — resolved-scale advection of in-droplet aerosol — is one CAM accepts too. See
   {doc}`../design/dinosaur_sl_jam_configuration`.
+- `science` — the liquid cover is CAM's choice and the physically consistent
+  one: ARG is droplet activation, and a store filled under cirrus or the cold
+  polar-vortex ice cloud, being neither advected nor sedimented, would collect
+  the aerosol carried through the ice cloud and return it concentrated where
+  the ice evaporates — thin, sharp aerosol layers at the ice-cloud level with
+  no sink there. HAM's one-particle-per-crystal rule is the alternative for
+  the ice phase. It takes only as many particles into the ice as there are
+  crystals, largest first, so for the accumulation and coarse modes it is a
+  small fraction where ARG's droplet activation is nearly all of the mass. It
+  would also need the crystal number inside the exchange. The CAM rule is kept
+  because the cloud-borne phase is CAM's construct; see
+  {doc}`../design/jam_cloud_borne_liquid_cover`.
 
 ### Convective tracer transport + in-plume scavenging
 
