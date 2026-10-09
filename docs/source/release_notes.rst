@@ -1608,27 +1608,30 @@ Grey two-stream shortwave conserves energy
   ``E - P + precip_floor_source``. The grey RCE column reaches this regime
   once its clouds reflect, at ~0.06-0.09 mm/d.
 
-JAM cloud-borne aerosol is activated in liquid cloud only
-"""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+JAM cloud-borne aerosol in ice cloud follows ECHAM-HAM
+""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
-- The JAM cloud-borne exchange activated aerosol into its cloud-borne phase
-  under the total cloud cover, including cirrus and the 198 K ice cloud of the
-  austral-winter polar vortex. That phase is neither advected nor sedimented.
-  The upper-level ice cloud swept the aerosol out of the air passing through it
-  and released it as thin, concentrated layers where the ice evaporated. The
-  semi-Lagrangian limiter then grew those layers, with mass taken from the
-  boundary layer by the global fixer (#1062).
+- The JAM cloud-borne exchange activated aerosol into its cloud-borne phase by
+  ARG droplet activation under any cloud, including cirrus and the 198 K ice
+  cloud of the austral-winter polar vortex. That phase is neither advected nor
+  sedimented. The upper-level ice cloud swept the aerosol out of the air
+  passing through it and released it as thin, concentrated layers where the ice
+  evaporated. The semi-Lagrangian limiter then grew those layers, with mass
+  taken from the boundary layer by the global fixer (#1062).
 - From the January state on dev, sea salt above 300 hPa reached 30-230 mg/m²
   at 40-60°S and 12-300 mg/m² over the polar cap by days 40-140. Once the
   vortex formed, about half of every aged mode's global column sat above
   300 hPa.
-- Activation now acts in the liquid cover ``cf·qc/(qc+qi)``, CAM's ``lcldn``
-  (``microp_aero.F90``). Under ice-only cover the cloud-borne aerosol returns to
-  the interstitial phase on the resuspension timescale, as CAM resuspends that
-  of a shrinking liquid cloud.
-- The same configuration keeps 0.1-1.3 mg/m² above 300 hPa at 40-60°S and
-  about 0.1 mg/m² over the cap. See :doc:`design/jam_cloud_borne_liquid_cover`
-  (#1066).
+- The in-cloud aerosol is now split between liquid and ice by the ice share of
+  the condensate, as ECHAM-HAM splits it (``mo_ham_wetdep.f90``,
+  ``nwetdep = 3``):
+  - the liquid part is ARG activation;
+  - the ice part is HAM's ``ic_scav_nuc`` rule, one aerosol particle per ice
+    crystal, largest mode first, using the two-moment scheme's crystal number.
+- Crystal-poor cirrus and vortex ice now hold next to nothing. Their reservoir
+  drains to the interstitial phase. Crystal-rich convective anvils still take
+  up the coarse and much of the accumulation mode for their snow to remove.
+  See :doc:`design/jam_cloud_borne_ice_phase` (#1066).
 
 Convective scavenging follows ECHAM-HAM
 """""""""""""""""""""""""""""""""""""""
