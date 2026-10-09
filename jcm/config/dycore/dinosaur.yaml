@@ -33,6 +33,18 @@ advection: null
 # core. See docs/source/design/tracer_mass_conservation.md.
 sl_vertical_interpolation: null
 
+# Coordinate of that vertical interpolation: log_pressure | sigma | null
+# (= the dycore default: log_pressure on hybrid grids, sigma on sigma grids).
+# log_pressure interpolates in the log of the reference sigma, which at the
+# pure-pressure top of the L47/L95 grids is log-pressure: there the levels
+# are spaced geometrically, and Lagrange weights in sigma itself under-read
+# vertical advection in the linear top cell (a numerical cold bias of the
+# lid level under the summer-mesosphere upwelling) and amplify 2-dz vertical
+# structure in the cubic cells below it (#1060). sigma reproduces dinosaur's
+# native rule. The trajectories are solved in sigma either way. Ignored by
+# the Eulerian core. See docs/source/design/sl_vertical_interpolation.md.
+sl_vertical_coordinate: null
+
 # Global mass fixer for the modal specific humidity under semi-Lagrangian
 # transport: after the step, scale q so that its global mass equals the
 # post-physics, pre-transport value, as the nodal tracers' fixer does for

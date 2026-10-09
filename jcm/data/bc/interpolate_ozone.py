@@ -123,14 +123,54 @@ def vertical_interp_log_p(
     return np.moveaxis(out.reshape(*lead_shape, plev_target.size), -1, 1)
 
 
+#: Pressure units the source ``plev`` may carry, as factors to Pa. A source
+#: without a ``units`` attribute is taken to be in Pa, the convention of the
+#: files ``jcm.data.mirror`` writes.
+_PLEV_TO_PA = {"pa": 1.0, "hpa": 100.0, "mbar": 100.0, "mb": 100.0,
+               "millibar": 100.0}
+
+
+def _plev_in_pa(plev) -> np.ndarray:
+    """Convert the source ``plev`` coordinate to Pa from its ``units`` attribute.
+
+    The top guard and the interpolation compare it with model pressures in
+    Pa; a source in hPa read as Pa would have every level a hundredfold too
+    low in pressure, pass the guard and interpolate the wrong levels.
+
+    Raises:
+        ValueError: if ``units`` is set to anything other than a known
+            pressure unit.
+
+    """
+    units = str(plev.attrs.get("units", "Pa")).strip().lower()
+    if units not in _PLEV_TO_PA:
+        raise ValueError(
+            f"plev has units {plev.attrs.get('units')!r}; expected one of "
+            f"Pa, hPa, mbar")
+    return np.asarray(plev.values, dtype=np.float64) * _PLEV_TO_PA[units]
+
+
 def interpolate_ozone(
     input_path: str | Path,
     output_path: str | Path,
     nlevels: int,
     var_name: str = "O3",
     reference_ps_pa: float = REFERENCE_SURFACE_PRESSURE_PA,
+    allow_top_clamp: bool = False,
 ) -> None:
     """Vertical-interp an ozone climatology onto the ECHAM hybrid grid.
+
+    The interpolation holds the source's top value above its top level, so a
+    source that stops below the model lid would write its uppermost value into
+    every model level above it. Ozone falls by more than an order of magnitude
+    between 1 hPa and the 0.01 hPa lid of the L47/L95 grids, so that is not a
+    harmless boundary choice: a CAM6 climatology whose top level is ~4 hPa
+    filled the top nine L47 levels with 7 ppmv where the observed mesospheric
+    value is ~0.2-1 ppmv, and the resulting ozone heating held the summer
+    mesopause 60-80 K too warm. A target grid that reaches above the source's top
+    level is therefore refused unless ``allow_top_clamp`` says the clamp is
+    intended. (The bottom is not guarded: sources end at 1000 hPa, a few hPa
+    above the lowest model level, where ozone hardly varies.)
 
     Args:
         input_path: Source netCDF (``(time, plev, lat, lon)`` mole/mole).
@@ -139,6 +179,12 @@ def interpolate_ozone(
         var_name: Source variable name (default ``"O3"``).
         reference_ps_pa: Reference surface pressure used to evaluate the
             hybrid-level centers (default 1013.25 hPa).
+        allow_top_clamp: Write the source's top value into model levels above
+            the source's top level instead of refusing (default False).
+
+    Raises:
+        ValueError: if the model's top level lies above the source's top level
+            and ``allow_top_clamp`` is False.
 
     """
     input_path = Path(input_path)
@@ -155,7 +201,7 @@ def interpolate_ozone(
         raise ValueError(
             f"Expected '{var_name}' shape (time, plev, lat, lon); got {o3_in.shape}"
         )
-    plev_source = np.asarray(ds_in[var_name].plev.values)
+    plev_source = _plev_in_pa(ds_in[var_name].plev)
 
     # Build the model's hybrid-level center pressures at the reference ps.
     # ``a_centers`` is in Pa; ``b_centers`` is dimensionless. Together
@@ -164,6 +210,19 @@ def interpolate_ozone(
     a = np.asarray(vertical.a_centers)
     b = np.asarray(vertical.b_centers)
     plev_target = a + b * reference_ps_pa
+
+    source_top = float(np.min(plev_source))
+    above = plev_target < source_top
+    if np.any(above) and not allow_top_clamp:
+        raise ValueError(
+            f"{input_path} stops at {source_top:g} Pa but the L{nlevels} grid "
+            f"has {int(above.sum())} level(s) above it (top level "
+            f"{float(np.min(plev_target)):g} Pa). They would all receive the "
+            f"source's top value, which for ozone is the stratospheric "
+            f"maximum rather than the mesospheric decline. Use a source that "
+            f"reaches the model lid, or pass allow_top_clamp=True "
+            f"(--allow-top-clamp) to clamp deliberately."
+        )
 
     o3_out = vertical_interp_log_p(o3_in, plev_source, plev_target)
 
@@ -239,6 +298,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--var", default="O3",
                         help="Source variable name (default 'O3').")
     parser.add_argument(
+        "--allow-top-clamp", action="store_true",
+        help="Hold the source's top value in model levels above the source's "
+             "top level instead of refusing (see interpolate_ozone).",
+    )
+    parser.add_argument(
         "--reference-ps-pa", type=float, default=REFERENCE_SURFACE_PRESSURE_PA,
         help=f"Reference surface pressure for hybrid-level evaluation "
              f"(default {REFERENCE_SURFACE_PRESSURE_PA} Pa).",
@@ -252,6 +316,7 @@ def main(argv: list[str] | None = None) -> int:
             nlevels=args.nlevels,
             var_name=args.var,
             reference_ps_pa=args.reference_ps_pa,
+            allow_top_clamp=args.allow_top_clamp,
         )
         return 0
     except Exception:

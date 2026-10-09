@@ -622,6 +622,12 @@ def build_diffusion(cfg: DictConfig) -> DiffusionFilter:
             "'echam_t85_l47'."
         )
 
+    # null keeps the profile's own choice (False for the ECHAM lmidatm
+    # profiles, True for the SPEEDY default).
+    zonal = None if diffusion is None else diffusion.get("diffuse_zonal_mean", None)
+    if zonal is not None:
+        base = dataclasses.replace(base, diffuse_zonal_mean=bool(zonal))
+
     base.validate_layers(layers)
     return base.scaled(scale)
 
@@ -1010,6 +1016,9 @@ def build_model(cfg: DictConfig) -> Model:
         # null -> the dycore default (cubic; linear below four levels).
         "vertical_interpolation_order": dycore_cfg.get(
             "sl_vertical_interpolation", None),
+        # null -> the dycore default (log_pressure on hybrid grids, sigma on
+        # sigma grids).
+        "vertical_coordinate": dycore_cfg.get("sl_vertical_coordinate", None),
         "humidity_mass_fixer": bool(dycore_cfg.get("humidity_mass_fixer", True)),
     }
     dycore = DinosaurDycore(

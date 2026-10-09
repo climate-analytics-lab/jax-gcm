@@ -83,7 +83,8 @@ production physics unchanged:
 | T106L95 | 4, `spmd_mesh [2,2,1]` | 42 days/hr |
 
 Level-resolved aux forcing must be regenerated for L95
-(`jcm.data.bc.interpolate_ozone --nlevels 95` works out of the box; the
+(`jcm.data.bc.interpolate_ozone --nlevels 95` works out of the box from a
+source that reaches the lid — it refuses one that stops below it; the
 oxidant climatology needs the same treatment). 80 GB cards are expected to
 fit T106L95 on one or two GPUs.
 
