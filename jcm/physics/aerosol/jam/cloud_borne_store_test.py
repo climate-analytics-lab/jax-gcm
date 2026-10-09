@@ -207,6 +207,10 @@ class CarryModeExchangeTest(unittest.TestCase):
             # this step" routes resuspension to the timescale drain these
             # tests were written against.
             cloud_fraction = jnp.full(shape, cf)
+            # An all-liquid cloud: the exchange activates in the liquid
+            # cover, which is then the whole cover.
+            qc = jnp.full(shape, 1.0e-4)
+            qi = jnp.zeros(shape)
             incloud_liquid = jnp.zeros(shape)
             incloud_ice = jnp.zeros(shape)
             incloud_rain_formation = jnp.zeros(shape)
