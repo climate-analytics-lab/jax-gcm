@@ -84,6 +84,32 @@ from jcm.physics_interface import PhysicsTendency
 #: timescale, so a vanishingly thin cloud cannot make it infinite.
 _MIN_CLOUD_FRACTION = 1.0e-3
 
+#: Grid-mean condensate [kg/kg] below which a cell holds no cloud to split
+#: into liquid and ice (CAM ``microp_aero``'s ``qsmall`` test, at a physical
+#: rather than round-off size for the same f32 VJP reason as the floors below).
+_CONDENSATE_FLOOR = 1.0e-12
+
+
+def liquid_cloud_fraction(clouds) -> jnp.ndarray:
+    """Liquid part of the cloud cover: the cover droplet activation acts in.
+
+    ``cloud_fraction · qc / (qc + qi)`` from the cloud scheme's grid-mean
+    condensate, and 0 where the cell holds none — CAM's ``lcldn``
+    (``microp_aero.F90``), the partition ``dropmixnuc`` activates into.
+    ARG is droplet activation, so an ice cloud (cirrus, the polar-vortex
+    ice cloud) activates nothing into the cloud-borne phase.
+    """
+    cf = jnp.clip(clouds.cloud_fraction, 0.0, 1.0)
+    qc = jnp.maximum(clouds.qc, 0.0)
+    cond = qc + jnp.maximum(clouds.qi, 0.0)
+    liquid_share = jnp.where(
+        cond > _CONDENSATE_FLOOR,
+        qc / jnp.maximum(cond, _CONDENSATE_FLOOR),
+        0.0,
+    )
+    return cf * liquid_share
+
+
 #: Grid-mean condensate floor [kg/kg] deciding whether the cell saw any cloud
 #: process this step (evaporation + surviving pool + formation); below it the
 #: evaporation-ledger keying falls back to the slow timescale drain. Physical
@@ -164,7 +190,10 @@ class CloudBorneExchange(PhysicsTerm):
         params = self.params.get_value()
         act = diagnostics["_jam_activation"]
         clouds = diagnostics["clouds"]
-        cf = jnp.clip(clouds.cloud_fraction, 0.0, 1.0)
+        # Droplet activation acts in the LIQUID part of the cover only
+        # (CAM's ``lcldn``, see ``liquid_cloud_fraction``): everything below
+        # — the activation rate, the target, and "cleared" — is keyed to it.
+        cf = liquid_cloud_fraction(clouds)
         dt = diagnostics.get("_dt_seconds", 1800.0)
 
         # Gather every (interstitial, cloud-borne) pair with its activated

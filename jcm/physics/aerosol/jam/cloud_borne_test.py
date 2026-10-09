@@ -47,6 +47,10 @@ class _Clouds:
     def __init__(self, cloud_fraction, **ledger):
         self.cloud_fraction = cloud_fraction
         zeros = jnp.zeros_like(cloud_fraction)
+        # Grid-mean condensate: an all-liquid cloud unless a test says
+        # otherwise, so the exchange's liquid cover equals the cover.
+        self.qc = ledger.get("qc", jnp.full_like(cloud_fraction, 1.0e-4))
+        self.qi = ledger.get("qi", zeros)
         for f in ("incloud_liquid", "incloud_ice", "incloud_rain_formation",
                   "incloud_snow_formation", "incloud_riming",
                   "process_cloud_fraction", "condensate_evaporation_rate"):
