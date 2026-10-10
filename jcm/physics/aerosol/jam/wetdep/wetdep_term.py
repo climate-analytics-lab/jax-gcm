@@ -124,10 +124,10 @@ _FLUX_FLOOR = 1.0e-12   # [kg/m²/s]
 class WetDepParameters:
     """Tunable scavenging knobs (differentiable)."""
 
-    incloud_scale: jnp.ndarray     # multiplies in-cloud removal
+    incloud_scale: jnp.ndarray     # multiplies in-cloud removal (nucleation and impaction)
     sol_factb: jnp.ndarray         # below-cloud solubility factor [-]
     mu_water_air: jnp.ndarray      # water/air viscosity ratio, interception
-    impact_scale: jnp.ndarray      # multiplies inertial-impaction efficiency
+    impact_scale: jnp.ndarray      # multiplies below-cloud inertial-impaction efficiency
     conv_scav_ratio: jnp.ndarray   # convective in-cloud scavenging ratio [-]
     conv_updraft_velocity: jnp.ndarray  # sets the convective precip footprint [m/s]
 
@@ -842,10 +842,12 @@ class WetScavenging(PhysicsTerm):
             """Return the removal rate of interstitial aerosol by in-cloud impaction alone.
 
             The interstitial aerosol in the cloudy part of the box
-            (``cf_proc``), split between the phases by ``pice`` as HAM
-            splits its in-cloud aerosol, collected at each phase's
-            impaction fraction and removed with that phase's
-            condensate→precip conversion (``ic_scav``: ``pxt·pfrac·peff``).
+            (``cf_proc`` of the grid mean: the interstitial aerosol is taken
+            as uniform across clear and cloudy air, as the exchange takes
+            it), split between the phases by ``pice`` as HAM splits its
+            in-cloud aerosol, collected at each phase's impaction fraction
+            and removed with that phase's condensate→precip conversion
+            (``ic_scav``: ``pxt·pfrac·peff``).
             """
             imp_w, imp_i = imp
             return params.incloud_scale * fraction_to_rate(
@@ -902,6 +904,10 @@ class WetScavenging(PhysicsTerm):
                         jam_act.mass_frac[i], ice_mass[i],
                         imp_mass if impaction else None)
                 else:
+                    # Standalone composition without ARG upstream: the
+                    # aggregate activated fraction, with the impaction rate
+                    # added rather than HAM's capped sum (the batched
+                    # exponential still bounds the removal by the tracer).
                     form_num = form_mass = activated_fraction * rate_ic_unit
                     if impaction:
                         form_num = form_num + impaction_rate(imp_num)

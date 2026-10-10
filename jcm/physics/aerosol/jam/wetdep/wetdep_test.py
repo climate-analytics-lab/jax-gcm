@@ -1262,6 +1262,33 @@ class ImpactionInWetScavengingTest(unittest.TestCase):
                 np.testing.assert_array_equal(np.asarray(off.tracers[nm]), 0.0)
                 self.assertGreater(float(frac.min()), 0.0, nm)
 
+    def test_incloud_scale_scales_impaction_and_impact_scale_does_not(self):
+        """``incloud_scale`` is the in-cloud lever, impaction included.
+
+        ``impact_scale`` acts on the below-cloud Slinn efficiency only, so it
+        leaves the in-cloud collection alone.
+        """
+        import dataclasses
+
+        from jcm.physics.aerosol.jam import mass_name
+
+        state, diag, _ = self._cloudy()
+        nm = mass_name("du", "cor")
+        base = self._params()
+
+        def removed(params):
+            tend, _ = WetScavenging(params=params)(state, diag, None, None)
+            return np.asarray(tend.tracers[nm])
+
+        ref = removed(base)
+        self.assertLess(float(ref.max()), 0.0)
+        np.testing.assert_array_equal(
+            removed(dataclasses.replace(base, incloud_scale=jnp.asarray(0.0))),
+            0.0)
+        np.testing.assert_array_equal(
+            removed(dataclasses.replace(base, impact_scale=jnp.asarray(3.0))),
+            ref)
+
     def test_cloud_borne_removal_is_unchanged(self):
         """Impaction adds an interstitial pathway; the reservoir's removal stays."""
         from jcm.physics.aerosol.jam import mass_name
