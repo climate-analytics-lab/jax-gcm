@@ -47,6 +47,8 @@ def _column(nlev=4, ncols=2, precip=1.0e-3, r_wet=1.78e-6, dz=200.0):
             tracers[mass_name(sp, mode.short)] = jnp.full((nlev, ncols), 1.0e-9)
             carry[mass_name(sp, mode.short, cloud_borne=True)] = jnp.full(
                 (nlev, ncols), 1.0e-9)
+    # The 2M crystal number; a warm column, so no crystals.
+    tracers["qni"] = jnp.zeros((nlev, ncols))
     state = PhysicsState.zeros((nlev, ncols)).copy(
         temperature=jnp.full((nlev, ncols), 285.0),
         tracers=tracers,
@@ -72,6 +74,11 @@ def _column(nlev=4, ncols=2, precip=1.0e-3, r_wet=1.78e-6, dz=200.0):
         "pressure_full": jnp.full((nlev, ncols), 1.0e5),
         "clouds": clouds,
         "_dt_seconds": DT,
+        # The 2M scheme's in-cloud effective radii [um]: warm-cloud droplets,
+        # so the chain includes the in-cloud impaction of interstitial
+        # aerosol by droplets.
+        "reffl": jnp.full((nlev, ncols), 12.0),
+        "reffi": jnp.zeros((nlev, ncols)),
     }
     return state, diagnostics, MAM4_SPEC, mass_name, number_name
 

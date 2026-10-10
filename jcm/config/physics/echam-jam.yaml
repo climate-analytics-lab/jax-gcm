@@ -57,6 +57,12 @@ radiation_scheme: rrtmgp    # the ECHAM radiation; "grey" (idealized, not ECHAM)
 jam_microphysics: mam4_jax
 jam_arg_variant: ghosh2025  # or arg2000
 jam_aqueous_scheme: full
+# In-cloud impaction scavenging of interstitial aerosol by cloud droplets and
+# ice crystals, ECHAM-HAM's ``ic_scav_imp`` (nwetdep = 3). ``ham`` corrects the
+# three lookup defects of the r7492 code (droplet node 6, the swapped
+# interpolation corners, the plate index above 50 um); ``ham_r7492`` keeps
+# them, for like-for-like comparison with ECHAM-HAM; ``none`` is CAM's form.
+jam_incloud_impaction: ham
 
 # HAMMOZ ``ndust`` preset for the Tegen dust scheme: 4 = HAM2 (Stier 2005 +
 # Cheng's East-Asian soils, the regional tuning vector), 3 = Stier 2005, 2 =
