@@ -394,9 +394,10 @@ ECHAM-HAM's collision tables (Croft et al. 2010):
 
 - **Droplets.** ``F_w`` is ``SCAVDROPN`` (number) or ``SCAVDROPM`` (mass) at the
   droplet effective radius and the aerosol radius.
-- **Ice.** ``F_i = 1 − exp(−K·ICNC·Δt)``. ``K`` is the collection kernel of a
-  plate from ``SCAVICEPLATE`` at the crystal effective radius and the aerosol
-  radius; ICNC is the in-cloud crystal number concentration.
+- **Ice.** ``F_i = 1 − exp(−10⁻⁶·K·ICNC·Δt)``. ``K`` is the collection kernel
+  of a plate (cm³ s⁻¹) from ``SCAVICEPLATE`` at the crystal effective radius
+  and the aerosol radius; ICNC is the in-cloud crystal number concentration
+  (m⁻³).
 - **Aerosol radius.** The wet count-median radius for number and the wet
   mass-median radius ``r·exp(3 ln²σ)`` for mass, capped at 50 µm.
 - **Interpolation.** Bilinear in the two radii between the bracketing table
@@ -406,9 +407,12 @@ ECHAM-HAM's collision tables (Croft et al. 2010):
   number after the microphysics. The term refuses a host without them.
 
 The interstitial aerosol in the cloudy part of the box (the process cover
-``cf``) is split between the phases by ``p_ice`` and removed with each phase's
-conversion: ``cf·[(1 − p_ice)·F_w·c_wat + p_ice·F_i·c_ice]`` per step. Every
-mode is collected, insoluble ones included. The removed aerosol joins the
+``cf`` times the grid mean, taking the interstitial aerosol as uniform across
+clear and cloudy air, as the exchange does) is split between the phases by
+``p_ice`` and removed with each phase's conversion:
+``cf·[(1 − p_ice)·F_w·c_wat + p_ice·F_i·c_ice]`` per step. Every mode is
+collected, insoluble ones included. ``physics.wetdep.incloud_scale`` scales it
+with the rest of the in-cloud removal. The removed aerosol joins the
 precipitation formed in the layer and is released below where that
 precipitation evaporates, like the nucleation-scavenged aerosol. A population
 without the explicit cloud-borne phase sums the two fractions per phase,
@@ -444,10 +448,12 @@ interstitial aerosol (``sol_facti = 0``).
   interstitial aerosol. The droplet- and crystal-held aerosol sits in the
   reservoir and is removed there in full at each phase's conversion. HAM has
   no such phase. It applies the impaction fraction to the whole in-cloud
-  aerosol of the mode and caps nucleation plus impaction at one. The two forms
-  differ by the in-hydrometeor share of the mode on the impaction term. That
-  share is small in ice cloud with fewer crystals than particles, where most
-  of the collection happens (half to all of it, burden-weighted).
+  aerosol of the mode and caps nucleation plus impaction at one, with all of
+  the in-cloud aerosol taken from a box-uniform total. The two forms differ on
+  the impaction term by the in-hydrometeor share of the mode and by the
+  cloud-borne aerosol outside the cloud cover. The share is small in ice cloud
+  with fewer crystals than particles, where most of the collection happens
+  (half to all of it, burden-weighted).
 - `science` — the radii are the microphysics' own, which ``ic_scav_imp``
   reads. The radiation's radii (``clouds.r_eff_*``) come from the step-start
   condensate by the radiation's own ice law and are held between radiation
@@ -485,7 +491,7 @@ alone removes, burden-weighted, coarse dust with an e-folding time of 26-27
 years, accumulation-mode dust, sulfate and sea salt of 4-15 years, primary
 carbon of 2-3 years and coarse sea salt of 200-340 days. Against JAM's dust
 lifetime of 2.7 days and sea-salt lifetime of 0.37 days that is at most 0.2 % of
-the removal. IMPACTION_RUN_NUMBERS
+the removal.
 
 ### Convective tracer transport + in-plume scavenging
 
@@ -1196,9 +1202,13 @@ differentiable knobs sit on the collection integral itself — ``mu_water_air``
 the inertial-impaction efficiency, 1) — because impaction is the least
 constrained part of the scheme; both default to CAM as written. The stratiform
 carrier is not cloud-weighted, because the swept precipitating volume cancels
-against the in-precip-area rain rate. In-cloud, the interstitial aerosol is
-collected by the cloud droplets and crystals instead (see [in-cloud impaction
-scavenging](#in-cloud-impaction-scavenging)); the convective
+against the in-precip-area rain rate. The interstitial aerosol in the cloud is
+therefore collected by the falling precipitation and, as well, by the cloud
+droplets and crystals (see [in-cloud impaction
+scavenging](#in-cloud-impaction-scavenging)). ECHAM-HAM applies its own
+below-cloud term to the clear part of the box only (``pxtp10·pclc``), so there
+the cloudy interstitial aerosol meets one collector; in-cloud impaction is small
+enough (see that section) that the overlap does not matter. The convective
 carrier acts in HAMMOZ's updraft-area footprint (see [convective tracer
 transport](#convective-tracer-transport--in-plume-scavenging)).
 
