@@ -413,17 +413,38 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
             Mam4JaxMicrophysics,
         )
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
 
+        jax.config.update("jax_enable_x64", True)
         t64 = Mam4JaxMicrophysics()          # default: float64 core
         self.assertFalse(t64._core_f32)
         state, diagnostics = _column_state()
+        self.assertEqual(state.temperature.dtype, jnp.dtype("float64"))
+        diagnostics[CARRY_KEY] = {
+            k: q for k, q in state.tracers.items()
+            if k.startswith(("mc_", "nc_"))
+        }
         tend64, _ = t64(state, diagnostics, None, None)
 
         t32 = Mam4JaxMicrophysics(core_dtype="float32")
         self.assertTrue(t32._core_f32)
-        tend32, _ = t32(state, diagnostics, None, None)
+        tend32, result32 = t32(state, diagnostics, None, None)
         self.assertTrue(jax.config.read("jax_enable_x64"),
                         "scoped f32 core must not clear the global x64 flag")
+
+        # Inspect actual JAX dtypes before NumPy conversion can hide a
+        # float32 result from a host cast inside the x64-off scope (#1033).
+        for field in ("u_wind", "v_wind", "temperature", "specific_humidity"):
+            self.assertEqual(getattr(tend32, field).dtype,
+                             getattr(state, field).dtype, field)
+        for name, value in tend32.tracers.items():
+            self.assertEqual(value.dtype, state.temperature.dtype, name)
+        for field in ("r_dry", "r_wet", "rho", "kappa", "mass", "number"):
+            self.assertEqual(getattr(result32["_jam_state"], field).dtype,
+                             state.temperature.dtype, field)
+        self.assertEqual(set(result32[CARRY_KEY]), set(diagnostics[CARRY_KEY]))
+        for name, value in result32[CARRY_KEY].items():
+            self.assertEqual(value.dtype, state.temperature.dtype, name)
 
         for k in tend64.tracers:
             a = np.asarray(tend32.tracers[k], np.float64)
