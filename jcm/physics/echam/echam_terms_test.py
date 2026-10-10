@@ -187,6 +187,28 @@ class TestEchamComposablePhysics(unittest.TestCase):
             convective_updraft_precip_cover=False)
         self.assertFalse(cover_flag(jam_off))
 
+    def test_jam_incloud_impaction_door(self):
+        """``jam_incloud_impaction`` reaches the wet-scavenging term (#1067).
+
+        The default is HAM's corrected lookup, which reads the 2M radii the
+        microphysics publishes; ``none`` drops the requirement.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        def wetdep(physics):
+            return next(t for t in physics.terms
+                        if t.name == "jam_wet_deposition")
+
+        jam = dict(checkpoint_terms=False, aerosol_module="jam",
+                   cloud_scheme="2m", jam_microphysics="placeholder")
+        default = wetdep(echam_physics(**jam))
+        self.assertEqual(default._incloud_impaction, "ham")
+        self.assertIn("reffl", default.requires)
+        for choice in ("ham_r7492", "none"):
+            term = wetdep(echam_physics(**jam, jam_incloud_impaction=choice))
+            self.assertEqual(term._incloud_impaction, choice)
+        self.assertNotIn("reffl", term.requires)
+
     def test_jam_takes_ham_ice_inhomogeneity(self):
         """JAM (2M + ARG) defaults to ECHAM-HAM's ``zinhomi = 0.7``; every
         other stack keeps ECHAM6's 0.8, and an explicit override wins.

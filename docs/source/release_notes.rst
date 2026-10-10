@@ -1608,6 +1608,66 @@ Grey two-stream shortwave conserves energy
   ``E - P + precip_floor_source``. The grey RCE column reaches this regime
   once its clouds reflect, at ~0.06-0.09 mm/d.
 
+JAM cloud-borne aerosol in ice cloud follows ECHAM-HAM
+""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The JAM cloud-borne exchange activated aerosol into its cloud-borne phase by
+  ARG droplet activation under any cloud, including cirrus and the 198 K ice
+  cloud of the austral-winter polar vortex. That phase is neither advected nor
+  sedimented. The upper-level ice cloud swept the aerosol out of the air
+  passing through it and released it as thin, concentrated layers where the ice
+  evaporated. The semi-Lagrangian limiter then grew those layers, with mass
+  taken from the boundary layer by the global fixer (#1062).
+- From the January state on dev, sea salt above 300 hPa reached 30-230 mg/m²
+  at 40-60°S and 12-300 mg/m² over the polar cap by days 40-140. Once the
+  vortex formed, about half of every aged mode's global column sat above
+  300 hPa.
+- The in-cloud aerosol is now split between liquid and ice by the ice share of
+  the condensate, as ECHAM-HAM splits it (``mo_ham_wetdep.f90``,
+  ``nwetdep = 3``):
+
+  - the liquid part is ARG activation;
+  - the ice part is HAM's ``ic_scav_nuc`` rule, one aerosol particle per ice
+    crystal, largest mode first, using the two-moment scheme's crystal number.
+
+- Crystal-poor cirrus and vortex ice now hold next to nothing. Their reservoir
+  drains to the interstitial phase. Crystal-rich convective anvils still take
+  up the coarse and much of the accumulation mode for their snow to remove.
+- Wet deposition removes the droplet-held part at the liquid conversion and
+  the crystal-held part at the ice conversion. Aqueous sulfate forms on the
+  droplet-held cloud-borne number only and is removed with the droplet-held
+  part.
+- Over 155 days from the January state, polar-cap sea salt above 300 hPa stays
+  at or below 0.1 mg/m² and the #1027 jets and vortex are kept.
+- A run started from a warm state built before this change carries a
+  spin-up pulse of aerosol into the tropical tropopause and lower
+  stratosphere, gone after about 50 days. Calibration windows should start
+  from states spun up under the new rule. See
+  :doc:`design/jam_cloud_borne_ice_phase` (#1066).
+
+JAM in-cloud impaction scavenging follows ECHAM-HAM
+"""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- JAM's stratiform in-cloud removal was nucleation scavenging only. Cloud
+  droplets and ice crystals now also collect interstitial aerosol by
+  impaction, ECHAM-HAM's ``ic_scav_imp`` (``nwetdep = 3``, Croft et al.
+  2010). The droplet and plate collision tables are read at the two-moment
+  scheme's droplet and crystal effective radii and its crystal number, and
+  the collected aerosol is removed with each phase's condensate-to-precipitation
+  conversion.
+- Three defects of the r7492 lookup are corrected: droplet-axis node 6 reads
+  0 µm instead of 30 µm, the two off-diagonal interpolation corners are
+  swapped, and above 50 µm the plate index brackets the wrong nodes.
+  ``physics.jam_incloud_impaction=ham_r7492`` keeps the compiled r7492 lookup;
+  ``none`` turns in-cloud impaction off.
+- The two-moment microphysics publishes its own in-cloud droplet and crystal
+  effective radii as the output fields ``reffl`` and ``reffi`` (µm).
+- It is a minor sink. Impaction alone removes coarse dust on a timescale of
+  decades and coarse sea salt of 200-340 days, at most 0.2 % of their
+  removal. In 30-day January and July windows the dust lifetime moved by
+  −0.06 and +0.07 days, within the runs' chaotic spread. See the in-cloud
+  impaction section of :doc:`science/aerosol` (#1067).
+
 Convective scavenging follows ECHAM-HAM
 """""""""""""""""""""""""""""""""""""""
 

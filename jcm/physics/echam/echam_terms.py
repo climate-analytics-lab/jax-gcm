@@ -207,6 +207,7 @@ def echam_physics(
     jam_optics: bool = True,
     jam_arg_variant: str = "arg2000",
     jam_aqueous_scheme: str = "full",
+    jam_incloud_impaction: str = "ham",
     jam_dust_preset: int = 4,
     jam_dust_nudged: bool = False,
     jam_dust_nduscale_scale: float | None = None,
@@ -434,6 +435,12 @@ def echam_physics(
             only.
         jam_aqueous_scheme: ``"full"`` (default, HAM port) or ``"simple"``
             (H2O2-limited) in-cloud aqueous sulfur chemistry.
+        jam_incloud_impaction: in-cloud impaction scavenging of interstitial
+            aerosol by cloud droplets and ice crystals (ECHAM-HAM
+            ``ic_scav_imp``): ``"ham"`` (default, its three r7492 lookup
+            defects corrected), ``"ham_r7492"`` (the compiled r7492 lookup,
+            for like-for-like comparison with ECHAM-HAM) or ``"none"`` (CAM's
+            form, no in-cloud impaction).
         jam_anthropogenic: include prescribed CEDS anthropogenic emissions
             (#498), the bulk in-model-speciated path; inert until CEDS forcing
             fluxes are supplied.
@@ -902,6 +909,7 @@ def echam_physics(
             optics=jam_optics,
             arg_variant=jam_arg_variant,
             aqueous_scheme=jam_aqueous_scheme,
+            incloud_impaction=jam_incloud_impaction,
             dust_preset=jam_dust_preset,
             dust_nudged=jam_dust_nudged,
             dust_nduscale_scale=jam_dust_nduscale_scale,

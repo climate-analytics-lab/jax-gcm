@@ -192,6 +192,7 @@ class WetDepTermTest(unittest.TestCase):
                 carry[mass_name(sp, mode.short, cloud_borne=True)] = (
                     jnp.full((nlev, ncols), 1e-9)
                 )
+        tracers["qni"] = jnp.zeros((nlev, ncols))   # the 2M crystal number
         state = PhysicsState.zeros((nlev, ncols)).copy(
             temperature=jnp.full((nlev, ncols), 275.0),
             tracers=tracers,
@@ -224,6 +225,11 @@ class WetDepTermTest(unittest.TestCase):
             "air_density": jnp.full((nlev, ncols), 1.0),
             "layer_thickness": jnp.full((nlev, ncols), 200.0),
             "clouds": clouds,
+            # The 2M scheme's in-cloud effective radii [um]. Zero here, so the
+            # in-cloud impaction collects nothing and these tests isolate the
+            # other pathways; ImpactionInWetScavengingTest sets them.
+            "reffl": jnp.zeros((nlev, ncols)),
+            "reffi": jnp.zeros((nlev, ncols)),
         }
         return state, diagnostics, MAM4_SPEC, mass_name
 
@@ -890,6 +896,82 @@ class WetDepTermTest(unittest.TestCase):
                 err_msg=key_int,
             )
 
+    def _mixed_phase(self, state, diagnostics, *, pice, f_wat_ic, f_ice_ic,
+                     qni=0.0):
+        """Rewrite the setup's cloud as mixed-phase with known conversions."""
+        shape = state.temperature.shape
+        clouds = diagnostics["clouds"]
+        pool = 1.0e-3 / 0.6
+        dt = 1800.0
+        clouds = clouds.copy(
+            incloud_liquid=jnp.full(shape, pool * (1.0 - pice)),
+            incloud_ice=jnp.full(shape, pool * pice),
+            incloud_rain_formation=jnp.full(
+                shape, f_wat_ic * pool * (1.0 - pice) / dt),
+            incloud_snow_formation=jnp.full(shape, f_ice_ic * pool * pice / dt),
+            incloud_riming=jnp.zeros(shape),
+        )
+        tracers = {**state.tracers, "qni": jnp.full(shape, qni)}
+        return state.copy(tracers=tracers), {**diagnostics, "clouds": clouds}
+
+    def test_reservoir_phases_are_removed_at_their_own_conversion(self):
+        # HAM scavenges the droplet-held and crystal-held aerosol apart
+        # (ham_wetdep: water part x f_wat, ice part x f_ice). A reservoir the
+        # exchange recorded as 30 % droplet-held loses 0.3 f_wat + 0.7 f_ice
+        # of itself, not the condensate-weighted (1-p) f_wat + p f_ice.
+        from jcm.physics.aerosol.jam import mass_name
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+
+        state, diagnostics, spec, _ = self._setup(precip=1.0e-7)
+        state, diagnostics = self._mixed_phase(
+            state, diagnostics, pice=0.5, f_wat_ic=0.4, f_ice_ic=0.1)
+        params = WetDepParameters(
+            incloud_scale=jnp.asarray(1.0), sol_factb=jnp.asarray(0.0),
+            mu_water_air=jnp.asarray(60.0), impact_scale=jnp.asarray(1.0),
+            conv_scav_ratio=jnp.asarray(0.99),
+            conv_updraft_velocity=jnp.asarray(2.0))
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        diag = {**diagnostics, LIQUID_SHARE_KEY: {nm: jnp.full(
+            state.temperature.shape, 0.3)}}
+        _, out = WetScavenging(params=params)(state, diag, None, None)
+        lost = -self._cb_rate(diag, out, nm) * 1800.0 / 1.0e-9
+        np.testing.assert_allclose(lost, 0.3 * 0.4 + 0.7 * 0.1, rtol=2e-3)
+
+    def test_implicit_population_splits_the_phases(self):
+        # Without an explicit phase the in-cloud removal is HAM's
+        # cf * [(1-p) f_ARG f_wat + p f_ice_nuc f_ice]: in an ice cloud with
+        # no crystals nothing activated by droplet rules is removed.
+        import dataclasses
+        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
+        from jcm.physics.aerosol.jam.activation.arg_term import (
+            JamActivationData)
+
+        state, diagnostics, spec, _ = self._setup(precip=1.0e-7)
+        params = WetDepParameters(
+            incloud_scale=jnp.asarray(1.0), sol_factb=jnp.asarray(0.0),
+            mu_water_air=jnp.asarray(60.0), impact_scale=jnp.asarray(1.0),
+            conv_scav_ratio=jnp.asarray(0.99),
+            conv_updraft_velocity=jnp.asarray(2.0))
+        n_modes = MAM4_SPEC.n_modes()
+        shape = state.temperature.shape
+        act = JamActivationData(
+            number_frac=jnp.full((n_modes,) + shape, 0.5),
+            mass_frac=jnp.full((n_modes,) + shape, 0.8))
+        implicit = WetScavenging(
+            params=params,
+            spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False))
+        nm = mass_name("so4", "acc")
+        removed = {}
+        for pice in (0.0, 1.0):
+            st, dg = self._mixed_phase(state, {**diagnostics,
+                                               "_jam_activation": act},
+                                       pice=pice, f_wat_ic=0.4, f_ice_ic=0.4)
+            tend, _ = implicit(st, dg, None, None)
+            removed[pice] = float(-np.asarray(tend.tracers[nm]).mean()) * 1800.0
+        np.testing.assert_allclose(removed[0.0] / 1.0e-9, 0.6 * 0.8 * 0.4,
+                                   rtol=2e-3)
+        self.assertLess(removed[1.0], 1e-6 * removed[0.0])
+
     def test_grad_through_sol_factb(self):
         state, diagnostics, spec, mass_name = self._setup()
 
@@ -998,6 +1080,7 @@ class FormationLedgerTest(unittest.TestCase):
                     (nlev, ncols), 1e-9)
                 carry[mass_name(sp, mode.short, cloud_borne=True)] = (
                     jnp.full((nlev, ncols), 1e-10))
+        tracers["qni"] = jnp.zeros((nlev, ncols))   # the 2M crystal number
         state = PhysicsState.zeros((nlev, ncols)).copy(
             temperature=jnp.full((nlev, ncols), 275.0), tracers=tracers)
         shape = (spec.n_modes(), nlev, ncols)
@@ -1029,6 +1112,8 @@ class FormationLedgerTest(unittest.TestCase):
             "layer_thickness": jnp.full((nlev, ncols), 200.0),
             "clouds": clouds,
             "_dt_seconds": 1800.0,
+            "reffl": jnp.zeros((nlev, ncols)),
+            "reffi": jnp.zeros((nlev, ncols)),
         }
         return state, diagnostics, spec
 
@@ -1109,3 +1194,192 @@ class FormationLedgerTest(unittest.TestCase):
         self.assertAlmostEqual(float(f_wat[4]), 0.0)   # sub-floor pool, no formation
         # Phase split falls back to the formation ledger in emptied cells.
         self.assertAlmostEqual(float(pice[2]), 0.0)
+
+
+class ImpactionInWetScavengingTest(unittest.TestCase):
+    """In-cloud impaction of interstitial aerosol (HAM ``ic_scav_imp``, #1067)."""
+
+    _setup = WetDepTermTest._setup
+    _mixed_phase = WetDepTermTest._mixed_phase
+    _cb_rate = staticmethod(WetDepTermTest._cb_rate)
+
+    DT = 1800.0
+    CF, PICE, F_WAT, F_ICE = 0.6, 0.5, 0.4, 0.3
+
+    @staticmethod
+    def _params():
+        # No below-cloud impaction, so in the explicit representation the
+        # interstitial removal is the in-cloud impaction alone.
+        return WetDepParameters(
+            incloud_scale=jnp.asarray(1.0), sol_factb=jnp.asarray(0.0),
+            mu_water_air=jnp.asarray(60.0), impact_scale=jnp.asarray(1.0),
+            conv_scav_ratio=jnp.asarray(0.99),
+            conv_updraft_velocity=jnp.asarray(2.0))
+
+    def _cloudy(self, *, reffl=12.0, reffi=60.0, qni=2.0e7, r_wet=3.0e-6):
+        """Build a mixed-phase cloud with known conversions, radii and crystals."""
+        state, diag, spec, _ = self._setup(precip=1.0e-7)
+        state, diag = self._mixed_phase(
+            state, diag, pice=self.PICE, f_wat_ic=self.F_WAT,
+            f_ice_ic=self.F_ICE, qni=qni)
+        shape = state.temperature.shape
+        aer = diag["_jam_state"]
+        diag = {**diag, "reffl": jnp.full(shape, reffl),
+                "reffi": jnp.full(shape, reffi),
+                "_jam_state": aer.copy(r_wet=jnp.full_like(aer.r_wet, r_wet))}
+        return state, diag, spec
+
+    def _fractions(self, spec, i, moment, diag, state):
+        """HAM's (droplet, crystal) impaction fractions for mode ``i``."""
+        from jcm.physics.aerosol.jam.wetdep import incloud_impaction as ii
+
+        mode = spec.modes[i]
+        mr = ii.impaction_radius_um(diag["_jam_state"].r_wet[i],
+                                    mode.geom_std_dev, moment)
+        icnc_m3 = state.tracers["qni"] * diag["air_density"]
+        return (ii.droplet_impaction_fraction(diag["reffl"], mr, moment),
+                ii.crystal_impaction_fraction(diag["reffi"], icnc_m3, mr,
+                                              self.DT))
+
+    def test_explicit_phase_collects_the_interstitial_aerosol(self):
+        """``cf·[(1 − p)·F_w·c_wat + p·F_i·c_ice]`` of each interstitial tracer."""
+        from jcm.physics.aerosol.jam import mass_name, number_name
+
+        state, diag, spec = self._cloudy()
+        tend, _ = WetScavenging(params=self._params())(state, diag, None, None)
+        off, _ = WetScavenging(params=self._params(), incloud_impaction="none")(
+            state, diag, None, None)
+        for i, mode in enumerate(spec.modes):
+            for nm, moment in ((number_name(mode.short), "number"),
+                               (mass_name(mode.species[0], mode.short), "mass")):
+                f_w, f_i = self._fractions(spec, i, moment, diag, state)
+                frac = self.CF * ((1.0 - self.PICE) * f_w * self.F_WAT
+                                  + self.PICE * f_i * self.F_ICE)
+                removed = -np.asarray(tend.tracers[nm]) * self.DT
+                q = np.asarray(state.tracers[nm])
+                np.testing.assert_allclose(removed, q * np.asarray(frac),
+                                           rtol=1e-4, err_msg=nm)
+                np.testing.assert_array_equal(np.asarray(off.tracers[nm]), 0.0)
+                self.assertGreater(float(frac.min()), 0.0, nm)
+
+    def test_incloud_scale_scales_impaction_and_impact_scale_does_not(self):
+        """``incloud_scale`` is the in-cloud lever, impaction included.
+
+        ``impact_scale`` acts on the below-cloud Slinn efficiency only, so it
+        leaves the in-cloud collection alone.
+        """
+        import dataclasses
+
+        from jcm.physics.aerosol.jam import mass_name
+
+        state, diag, _ = self._cloudy()
+        nm = mass_name("du", "cor")
+        base = self._params()
+
+        def removed(params):
+            tend, _ = WetScavenging(params=params)(state, diag, None, None)
+            return np.asarray(tend.tracers[nm])
+
+        ref = removed(base)
+        self.assertLess(float(ref.max()), 0.0)
+        np.testing.assert_array_equal(
+            removed(dataclasses.replace(base, incloud_scale=jnp.asarray(0.0))),
+            0.0)
+        np.testing.assert_array_equal(
+            removed(dataclasses.replace(base, impact_scale=jnp.asarray(3.0))),
+            ref)
+
+    def test_cloud_borne_removal_is_unchanged(self):
+        """Impaction adds an interstitial pathway; the reservoir's removal stays."""
+        from jcm.physics.aerosol.jam import mass_name
+
+        state, diag, _ = self._cloudy()
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        _, on = WetScavenging(params=self._params())(state, diag, None, None)
+        _, off = WetScavenging(params=self._params(),
+                               incloud_impaction="none")(state, diag, None, None)
+        np.testing.assert_array_equal(self._cb_rate(diag, on, nm),
+                                      self._cb_rate(diag, off, nm))
+
+    def test_implicit_population_sums_nucleation_and_impaction(self):
+        """Without the phase: ``min(1, f_ARG + F_w)`` and ``min(1, f_ice + F_i)``."""
+        import dataclasses
+
+        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
+        from jcm.physics.aerosol.jam.activation.arg_term import (
+            JamActivationData)
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
+            ice_phase_fractions)
+
+        spec = dataclasses.replace(MAM4_SPEC, cloud_borne=False)
+        # Large droplets and a 40 um mode drive the droplet mass fraction to
+        # its clip, and the mass sum to its cap.
+        for reffl, r_wet in ((12.0, 3.0e-6), (40.0, 4.0e-5)):
+            state, diag, _ = self._cloudy(reffl=reffl, r_wet=r_wet)
+            shape = state.temperature.shape
+            n_modes = spec.n_modes()
+            act = JamActivationData(
+                number_frac=jnp.full((n_modes,) + shape, 0.5),
+                mass_frac=jnp.full((n_modes,) + shape, 0.8))
+            diag = {**diag, "_jam_activation": act}
+            tend, _ = WetScavenging(params=self._params(), spec=spec)(
+                state, diag, None, None)
+            ice_n, ice_m = ice_phase_fractions(
+                spec, [state.tracers[number_name(m.short)] for m in spec.modes],
+                state.tracers["qni"])
+            mode = spec.modes[2]                                   # coarse
+            nm = mass_name(mode.species[0], mode.short)
+            f_w, f_i = self._fractions(spec, 2, "mass", diag, state)
+            frac = self.CF * (
+                (1.0 - self.PICE) * jnp.minimum(0.8 + f_w, 1.0) * self.F_WAT
+                + self.PICE * jnp.minimum(ice_m[2] + f_i, 1.0) * self.F_ICE)
+            removed = -np.asarray(tend.tracers[nm]) * self.DT
+            np.testing.assert_allclose(
+                removed, np.asarray(state.tracers[nm] * frac), rtol=1e-4)
+        self.assertEqual(float(f_w.min()), 1.0)    # the clipped regime ran
+
+    def test_none_needs_no_radii_and_ham_refuses_without_them(self):
+        state, diag, _ = self._cloudy()
+        bare = {k: v for k, v in diag.items() if k not in ("reffl", "reffi")}
+        WetScavenging(incloud_impaction="none")(state, bare, None, None)
+        with self.assertRaisesRegex(ValueError, "reffl"):
+            WetScavenging()(state, bare, None, None)
+        with self.assertRaisesRegex(ValueError, "incloud_impaction"):
+            WetScavenging(incloud_impaction="cam")
+        self.assertIn("reffi", WetScavenging().requires)
+        self.assertNotIn("reffl", WetScavenging(incloud_impaction="none").requires)
+
+    def test_r7492_variant_reaches_the_term(self):
+        from jcm.physics.aerosol.jam import mass_name
+
+        state, diag, _ = self._cloudy(reffi=75.0)
+        nm = mass_name("du", "cor")
+        ham, _ = WetScavenging(params=self._params())(state, diag, None, None)
+        old, _ = WetScavenging(params=self._params(),
+                               incloud_impaction="ham_r7492")(
+            state, diag, None, None)
+        self.assertFalse(np.allclose(np.asarray(ham.tracers[nm]),
+                                     np.asarray(old.tracers[nm]),
+                                     rtol=1e-3, atol=0.0))
+
+    def test_gradients_through_radii_and_crystal_number(self):
+        """AD matches a central difference through the whole term."""
+        from jcm.physics.aerosol.jam import mass_name
+        from jcm.testing import check_gradients
+
+        with jax.enable_x64(True):
+            state, diag, _ = self._cloudy(reffl=13.7, reffi=63.4, qni=2.0e7)
+            shape = state.temperature.shape
+            nm = mass_name("du", "cor")
+            term = WetScavenging(params=self._params())
+
+            def removal(reffl, reffi, qni):
+                st = state.copy(tracers={**state.tracers, "qni": qni})
+                dg = {**diag, "reffl": reffl, "reffi": reffi}
+                return term(st, dg, None, None)[0].tracers[nm]
+
+            check_gradients(
+                removal,
+                (jnp.full(shape, 13.7), jnp.full(shape, 63.4),
+                 jnp.full(shape, 2.0e7)),
+                rtol=1e-5, live_inputs=("[0]", "[1]", "[2]"))

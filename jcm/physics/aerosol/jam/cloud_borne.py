@@ -12,11 +12,18 @@ activated fractions (``_jam_activation``, number and mass separately — large
 particles activate preferentially, so the mass fraction is well above the
 number fraction) define the grid-mean equilibrium cloud-borne amount
 
-    q_cb* = cloud_fraction · f_act · (q_int + q_cb)
+    q_cb* = f · (q_int + q_cb),   f = (1 − p_ice)·f_act + p_ice·f_ice
 
 and the pair relaxes toward it with a tunable timescale, activation and
-resuspension each getting their own knob. A growing or persistent cloud pulls
-``q_cb`` up toward the activated partition; the downward direction is keyed
+resuspension each getting their own knob. The in-cloud aerosol is split
+between the liquid and ice phases by the ice share ``p_ice`` of the in-cloud
+condensate, as HAM splits it (``mo_ham_wetdep.f90::ham_wetdep``): the liquid
+part is ARG droplet activation; the ice part is HAM's rule for aerosol in ice
+(``ic_scav_nuc``): one particle per ice crystal, largest mode first
+(``ice_phase_fractions``). A growing or persistent cloud pulls ``q_cb`` up
+toward that partition; an ice cloud with few crystals therefore holds next to
+none, and its reservoir drains on the resuspension timescale. Where the cover
+has gone, the downward direction is keyed
 to the microphysics' condensate-evaporation ledger (#708): the reservoir
 share released each step is the share of the droplet population that
 EVAPORATED — a sky cleared by evaporation resuspends everything, a sky
@@ -36,8 +43,10 @@ aerosol does not sediment (it follows the hydrometeors — see
 ``sedi_term``). ECHAM-HAM's M7 and sectional schemes like TOMAS never carry
 an explicit cloud-borne phase at all: for those populations
 ``spec.cloud_borne = False`` and this term is not composed — the harness
-then scavenges interstitial aerosol by ``cf · activated_fraction``, which
-removes the same mass at exchange equilibrium. The representations still
+then scavenges interstitial aerosol by ``cf · [(1 − p_ice)·f_act·f_wat +
+p_ice·f_ice_share·f_ice]``, HAM's own form, which removes the same mass at
+exchange equilibrium (wet deposition removes this reservoir phase by phase,
+from the droplet-held share the term records under ``LIQUID_SHARE_KEY``). The representations still
 differ where the representation itself matters: the explicit phase delays
 rainout by the exchange timescale, and its in-droplet mass is invisible to
 the (interstitial-only) aerosol optics, whereas the implicit treatment
@@ -65,11 +74,14 @@ from flax import nnx
 
 from jcm.physics.aerosol.jam.cloud_borne_store import (
     CARRY_KEY,
+    LIQUID_SHARE_KEY,
     apply_updates,
     carry_mode,
 )
 from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
-    incloud_scavenged_fractions,
+    ice_phase_fractions,
+    phase_split,
+    post_microphysics_icnc,
 )
 from jcm.physics.aerosol.jam.microphysics.mam4_data import MAM4_SPEC
 from jcm.physics.aerosol.jam.removal_split import split_view
@@ -83,6 +95,10 @@ from jcm.physics_interface import PhysicsTendency
 #: cloud-borne reservoir drains. Also floors the 1/cf stretch of the activation
 #: timescale, so a vanishingly thin cloud cannot make it infinite.
 _MIN_CLOUD_FRACTION = 1.0e-3
+
+#: Partition below which a pair's phase composition is undefined and the
+#: condensate's own liquid share stands in.
+_SHARE_FLOOR = 1.0e-12
 
 #: Grid-mean condensate floor [kg/kg] deciding whether the cell saw any cloud
 #: process this step (evaporation + surviving pool + formation); below it the
@@ -166,6 +182,10 @@ class CloudBorneExchange(PhysicsTerm):
         clouds = diagnostics["clouds"]
         cf = jnp.clip(clouds.cloud_fraction, 0.0, 1.0)
         dt = diagnostics.get("_dt_seconds", 1800.0)
+        # HAM's phase split of the in-cloud condensate (the process-time
+        # pool, as the scavenging uses it) and the per-phase scavenged
+        # fractions of this step.
+        f_wat, f_ice, pice = phase_split(clouds, dt)
 
         # Gather every (interstitial, cloud-borne) pair with its activated
         # fraction and run the relaxation once over the whole stack (the
@@ -184,22 +204,52 @@ class CloudBorneExchange(PhysicsTerm):
         q_int: list[jnp.ndarray] = []
         q_cb: list[jnp.ndarray] = []
         fracs: list[jnp.ndarray] = []
+        liquid_share: list[jnp.ndarray] = []
+        # In-cloud aerosol inside the ice (HAM): crystals filled one particle
+        # each from the largest mode down, against the total (interstitial +
+        # cloud-borne) number of each mode.
+        number = [
+            jnp.maximum(view.get(number_name(m.short), zeros), 0.0)
+            + jnp.maximum(view.get(number_name(m.short, cloud_borne=True),
+                                   zeros), 0.0)
+            for m in self._spec.modes
+        ]
+        ice_number, ice_mass = ice_phase_fractions(
+            self._spec, number, post_microphysics_icnc(state, diagnostics, dt))
         for i, mode in enumerate(self._spec.modes):
+            # Activated partition of the in-cloud aerosol: the liquid share
+            # by ARG droplet activation, the ice share by the crystal count.
             pairs = [(
                 number_name(mode.short),
                 number_name(mode.short, cloud_borne=True),
-                act.number_frac[i],
+                (1.0 - pice) * act.number_frac[i], pice * ice_number[i],
             )] + [(
                 mass_name(sp, mode.short),
                 mass_name(sp, mode.short, cloud_borne=True),
-                act.mass_frac[i],
+                (1.0 - pice) * act.mass_frac[i], pice * ice_mass[i],
             ) for sp in mode.species]
-            for int_nm, cb_nm, frac in pairs:
+            for int_nm, cb_nm, in_liquid, in_ice in pairs:
                 int_names.append(int_nm)
                 cb_names.append(cb_nm)
                 q_int.append(jnp.maximum(view.get(int_nm, zeros), 0.0))
                 q_cb.append(jnp.maximum(view.get(cb_nm, zeros), 0.0))
+                frac = in_liquid + in_ice
                 fracs.append(frac)
+                # The droplet-held share of the reservoir, at the partition
+                # it relaxes toward: what rain formation removes and aqueous
+                # chemistry sees, against the crystal-held rest that only
+                # snow formation removes (HAM scavenges the two phases apart).
+                # It describes the whole reservoir, with no memory of the
+                # phase the aerosol was taken up in: the aerosol sits in the
+                # hydrometeors the cell holds now. Droplets that froze hold
+                # it in the ice, droplets that evaporated release it through
+                # the evaporation ledger below, and a droplet-held remainder
+                # in a cell without droplets is not a state the cloud can be
+                # in. HAM likewise splits its in-cloud aerosol by the
+                # current ``pice`` every step.
+                has = frac > _SHARE_FLOOR
+                liquid_share.append(jnp.where(
+                    has, in_liquid / jnp.where(has, frac, 1.0), 1.0 - pice))
 
         q_int_arr = jnp.stack(q_int)
         q_cb_arr = jnp.stack(q_cb)
@@ -221,9 +271,19 @@ class CloudBorneExchange(PhysicsTerm):
         # cloud fraction enters through the activation flux and the
         # cloud-fraction increment, so under a persistent deck the reservoir
         # fills toward the activated fraction of the total. Matching that here:
-        # where there is cloud, relax toward ``f_act · q_total`` on a timescale
+        # where there is cloud, relax toward ``f · q_total`` on a timescale
         # stretched by 1/cf — thin cloud processes the box slowly — and where
         # the cloud has gone, drain to zero on the resuspension timescale.
+        #
+        # ``f`` is the phase-split partition above, which matters most for
+        # cold upper-level ice cloud. The reservoir is neither advected nor
+        # sedimented, so filling it by droplet activation under cirrus or the
+        # polar-vortex ice cloud — a few crystals per litre — would collect the
+        # aerosol carried through the cloud and return it, concentrated,
+        # wherever the ice evaporated: thin, sharp aerosol layers at the
+        # ice-cloud level with no sink up there. HAM's crystal count leaves
+        # such clouds next to empty and still fills convective anvils
+        # (thousands of crystals per litre), whose snow then removes it.
         cloudy_cf = jnp.maximum(cf, _MIN_CLOUD_FRACTION)
         target = jnp.where(
             cf > _MIN_CLOUD_FRACTION,
@@ -247,9 +307,12 @@ class CloudBorneExchange(PhysicsTerm):
         # term) caps it, so the two sinks cannot jointly overdraw the
         # reservoir: evaporated + rained fractions of one droplet
         # population sum to at most 1. WBF and freezing move condensate
-        # between phases WITHIN the pool, so they neither evaporate nor
-        # rain out cloud-borne aerosol here — the aerosol rides into the
-        # ice and meets the snow pathway (#686) in the ledger instead.
+        # between phases WITHIN the pool, so within a step that ends with
+        # the whole cover gone they neither evaporate nor rain out
+        # cloud-borne aerosol here — the aerosol rides into the ice and
+        # meets the snow pathway (#686) in the ledger instead. Where ice
+        # cover persists, the reservoir relaxes toward the ice phase's own
+        # partition (below).
         e_gm = jnp.maximum(clouds.condensate_evaporation_rate, 0.0) * dt
         cf_proc = jnp.clip(clouds.process_cloud_fraction, 0.0, 1.0)
         pool_gm = cf_proc * (
@@ -270,8 +333,10 @@ class CloudBorneExchange(PhysicsTerm):
                 clouds.incloud_rain_formation + clouds.incloud_riming, 0.0)
             + jnp.maximum(clouds.incloud_snow_formation, 0.0)
         )
-        f_wat, f_ice, pice = incloud_scavenged_fractions(clouds, dt)
-        f_form = (1.0 - pice) * f_wat + pice * f_ice
+        # Per pair: the reservoir's droplet-held share rains out at the
+        # liquid fraction, its crystal-held share at the ice fraction.
+        share = jnp.stack(liquid_share)
+        f_form = share * f_wat + (1.0 - share) * f_ice
         live = (e_gm + pool_gm + formed_gm) > _PROCESS_FLOOR
         f_evap = jnp.where(
             live,
@@ -292,7 +357,12 @@ class CloudBorneExchange(PhysicsTerm):
         # ratchet — q_cb can rise toward the activation target but never
         # fall, loading the cloud-borne phase without bound at cloud
         # levels. The under-cloud relaxation is what bounds the reservoir
-        # by the activation equilibrium.
+        # by the activation equilibrium. Under an ice cloud with fewer
+        # crystals than particles that equilibrium is small, so aerosol
+        # activated while the cloud still held liquid returns to the
+        # interstitial phase on the resuspension timescale (CAM likewise
+        # resuspends the cloud-borne aerosol of a shrinking liquid cloud)
+        # instead of sitting in a persistent ice cloud with no exit.
         cleared = cf <= _MIN_CLOUD_FRACTION
         release = jnp.minimum(f_evap, jnp.maximum(1.0 - f_form, 0.0))
         phi_down = jnp.where(cleared & live, release, phi_slow)
@@ -308,6 +378,10 @@ class CloudBorneExchange(PhysicsTerm):
             self._spec, diagnostics,
             {nm: transfer[k] for k, nm in enumerate(cb_names)}, dt,
         )
+        diagnostics = {
+            **diagnostics,
+            LIQUID_SHARE_KEY: {nm: share[k] for k, nm in enumerate(cb_names)},
+        }
         for k, nm in enumerate(int_names):
             tracer_tends[nm] = -transfer[k]
 
