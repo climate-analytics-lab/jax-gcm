@@ -148,4 +148,10 @@ should start from such states.
   source is the uptake, not the amplifier.
 - **HAM's in-cloud impaction** (`ic_scav_imp`: collision of interstitial
   aerosol with cloud droplets and ice plates) is the other half of HAM's
-  in-cloud fraction. It is not ported (#1067).
+  in-cloud fraction. jcm applies it to the interstitial aerosol of every
+  cloud (see the in-cloud impaction section of {doc}`../science/aerosol`).
+  It does not take over the uptake this rule leaves out of crystal-poor ice
+  cloud. At the crystal numbers and radii of the January and July T63 L47
+  states the crystals collect a burden-weighted 1-2·10⁻⁴ of the interstitial
+  coarse dust per step, and impaction alone removes it on a timescale of
+  decades.

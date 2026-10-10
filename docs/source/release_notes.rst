@@ -1645,6 +1645,28 @@ JAM cloud-borne aerosol in ice cloud follows ECHAM-HAM
   from states spun up under the new rule. See
   :doc:`design/jam_cloud_borne_ice_phase` (#1066).
 
+JAM in-cloud impaction scavenging follows ECHAM-HAM
+"""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- JAM's stratiform in-cloud removal was nucleation scavenging only. Cloud
+  droplets and ice crystals now also collect interstitial aerosol by
+  impaction, ECHAM-HAM's ``ic_scav_imp`` (``nwetdep = 3``, Croft et al.
+  2010). The droplet and plate collision tables are read at the two-moment
+  scheme's droplet and crystal effective radii and its crystal number, and
+  the collected aerosol is removed with each phase's condensate-to-precipitation
+  conversion.
+- Three defects of the r7492 lookup are corrected: droplet-axis node 6 reads
+  0 µm instead of 30 µm, the two off-diagonal interpolation corners are
+  swapped, and above 50 µm the plate index brackets the wrong nodes.
+  ``physics.jam_incloud_impaction=ham_r7492`` keeps the compiled r7492 lookup;
+  ``none`` turns in-cloud impaction off.
+- The two-moment microphysics publishes its own in-cloud droplet and crystal
+  effective radii as the output fields ``reffl`` and ``reffi`` (µm).
+- It is a minor sink. Impaction alone removes coarse dust on a timescale of
+  decades and coarse sea salt of 200-340 days, at most 0.2 % of their
+  removal. IMPACTION_RELEASE_RUN_NUMBERS See the in-cloud impaction section
+  of :doc:`science/aerosol` (#1067).
+
 Convective scavenging follows ECHAM-HAM
 """""""""""""""""""""""""""""""""""""""
 

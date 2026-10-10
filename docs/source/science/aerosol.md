@@ -382,12 +382,110 @@ no aerosol is held in ice cloud at all.
   {doc}`../design/jam_cloud_borne_ice_phase`.
 
 **Status & known limitations.** HAM's in-cloud scavenged fraction is nucleation
-*plus* impaction of interstitial aerosol by cloud droplets and ice crystals
-(``mo_ham_wetdep.f90::ic_scav_imp``, with the ``scavdrop`` / ``scaviceplate``
-collision tables). The impaction half is not ported (#1067): jcm's stratiform
-in-cloud removal is nucleation only, through this reservoir, which is CAM's form
-(``sol_facti = 0`` for interstitial aerosol). Coarse aerosol lofted through
-mixed-phase and ice cloud is therefore scavenged less than in ECHAM-HAM.
+*plus* impaction. This reservoir carries the nucleation half; the impaction of
+the interstitial aerosol by droplets and crystals is the next section.
+
+### In-cloud impaction scavenging
+
+**What we do.** Cloud droplets and ice crystals collect interstitial aerosol
+(``jcm/physics/aerosol/jam/wetdep/incloud_impaction.py``, applied by
+``WetScavenging``). Per mode, moment and phase, a collected fraction comes from
+ECHAM-HAM's collision tables (Croft et al. 2010):
+
+- **Droplets.** ``F_w`` is ``SCAVDROPN`` (number) or ``SCAVDROPM`` (mass) at the
+  droplet effective radius and the aerosol radius.
+- **Ice.** ``F_i = 1 − exp(−K·ICNC·Δt)``. ``K`` is the collection kernel of a
+  plate from ``SCAVICEPLATE`` at the crystal effective radius and the aerosol
+  radius; ICNC is the in-cloud crystal number concentration.
+- **Aerosol radius.** The wet count-median radius for number and the wet
+  mass-median radius ``r·exp(3 ln²σ)`` for mass, capped at 50 µm.
+- **Interpolation.** Bilinear in the two radii between the bracketing table
+  nodes (HAM's ``scavcoef_bilinterp``), clamped at the table ends.
+- **Inputs.** The radii are the two-moment scheme's own effective radii of the
+  condensate it leaves (``reffl`` / ``reffi``), and ICNC its in-cloud crystal
+  number after the microphysics. The term refuses a host without them.
+
+The interstitial aerosol in the cloudy part of the box (the process cover
+``cf``) is split between the phases by ``p_ice`` and removed with each phase's
+conversion: ``cf·[(1 − p_ice)·F_w·c_wat + p_ice·F_i·c_ice]`` per step. Every
+mode is collected, insoluble ones included. The removed aerosol joins the
+precipitation formed in the layer and is released below where that
+precipitation evaporates, like the nucleation-scavenged aerosol. A population
+without the explicit cloud-borne phase sums the two fractions per phase,
+capped at one: ``min(1, f_ARG + F_w)`` and ``min(1, f_ice + F_i)``.
+
+**What ECHAM/CAM does.** ECHAM-HAM with ``nwetdep = 3``
+(``mo_ham_wetdep.f90::get_icscavfrac``) sums ``ic_scav_nuc`` and ``ic_scav_imp``
+per phase and clips the sum to [0, 1]. ``ic_scav`` then removes ``pfrac·peff`` of
+the phase's in-cloud tracer. ``ic_scav_imp`` reads the 2M ``reffl`` / ``reffi``
+(``mo_activ``) and ``pxtp1c(idt_icnc)·ρ``. The tables are in
+``mo_ham_wetdep_data.f90``; the interpolation is
+``mo_ham_tools.f90::scavcoef_bilinterp``. CAM has no in-cloud impaction of
+interstitial aerosol (``sol_facti = 0``).
+
+**Why we differ.**
+- `science` (decision) — three defects of the r7492 lookup are corrected:
+  - ``cdroprad(6)`` reads 0 µm where the 5 µm droplet axis gives 30 µm;
+  - ``ic_scav_imp`` fills the two off-diagonal interpolation corners
+    transposed relative to ``scavcoef_bilinterp``, so the result is not an
+    interpolation of the table;
+  - above 50 µm the plate node pair is ``8 + ⌊reffi/50⌋`` on an axis spaced
+    25 µm, so crystals of 50-150 µm extrapolate from a bracket that does not
+    contain them.
+
+  With the corrections the lookup is the continuous piecewise-bilinear
+  interpolant of the tables. On the real cells of the reference below, the
+  corrected droplet fractions are 0.09-5 times and the crystal fractions
+  0.2-13 times the r7492 ones (5th-95th percentiles). The node-6 fix does not
+  act on them, since the model's droplets stay below 25 µm.
+  ``physics.jam_incloud_impaction=ham_r7492`` reproduces the compiled r7492
+  lookup.
+- `science` — with the explicit cloud-borne phase, impaction collects the
+  interstitial aerosol. The droplet- and crystal-held aerosol sits in the
+  reservoir and is removed there in full at each phase's conversion. HAM has
+  no such phase. It applies the impaction fraction to the whole in-cloud
+  aerosol of the mode and caps nucleation plus impaction at one. The two forms
+  differ by the in-hydrometeor share of the mode on the impaction term. That
+  share is small in ice cloud with fewer crystals than particles, where most
+  of the collection happens (half to all of it, burden-weighted).
+- `science` — the radii are the microphysics' own, which ``ic_scav_imp``
+  reads. The radiation's radii (``clouds.r_eff_*``) come from the step-start
+  condensate by the radiation's own ice law and are held between radiation
+  steps.
+
+**Status & known limitations.** In-cloud impaction is a minor sink at this
+model's cloud radii and crystal numbers. Cloud droplets collect up to about 1 %
+of a coarse mode's mass (99th percentile of ``F_w``), and in a step crystals
+collect a burden-weighted 1-4·10⁻⁴ of the dust and accumulation-mode mass. As in
+HAM there is no convective in-cloud impaction; convective in-cloud
+scavenging is ``csr_conv`` in the plume. The tables are indexed by the collector
+radius and the mode's median radius only, and jcm reads them for the MAM4 modes
+as HAM reads them for M7's.
+
+**Code pointers.**
+- ``jcm/physics/aerosol/jam/wetdep/incloud_impaction.py`` —
+  ``droplet_impaction_fraction``, ``crystal_impaction_fraction``,
+  ``impaction_radius_um``, ``scavcoef_bilinterp``.
+- ``jcm/physics/aerosol/jam/wetdep/incloud_impaction_tables.py`` — the tables.
+- ``jcm/physics/aerosol/jam/wetdep/wetdep_term.py`` — ``WetScavenging``,
+  ``incloud_effective_radii``.
+- ``jcm/physics/clouds/lohmann_2m/scheme.py`` — ``Lohmann2MMicrophysics``,
+  which publishes the radii.
+
+**Validation evidence.** ``incloud_impaction_test.py`` compares every mode,
+phase and moment with ``ic_scav_imp`` compiled from r7492, unmodified and with
+the three corrections, on real T63 L47 cells and designed edge cells
+(``jcm/data/test/echam_cloud_reference/hamimpaction_T63L47.npz``): the
+fractions agree to round-off (largest difference 8·10⁻¹⁷). The same file
+checks gradients against central differences and their finiteness at the table
+edges.
+
+On the first-step fields of the January and July T63 L47 states, impaction
+alone removes, burden-weighted, coarse dust with an e-folding time of 26-27
+years, accumulation-mode dust, sulfate and sea salt of 4-15 years, primary
+carbon of 2-3 years and coarse sea salt of 200-340 days. Against JAM's dust
+lifetime of 2.7 days and sea-salt lifetime of 0.37 days that is at most 0.2 % of
+the removal. IMPACTION_RUN_NUMBERS
 
 ### Convective tracer transport + in-plume scavenging
 
@@ -625,8 +723,8 @@ already-speciated per-tracer fields. Dry deposition
 (``jcm/physics/aerosol/jam/drydep/``) is a resistance-in-series scheme with a
 Slinn & Slinn (1980) sub-layer resistance; sedimentation
 (``sedimentation/``) is per-moment Stokes settling with Cunningham slip; wet
-scavenging (``wetdep/``) is in-cloud nucleation + below-cloud impaction + a
-**re-evaporation re-injection ledger** that returns carried aerosol to the
+scavenging (``wetdep/``) is in-cloud nucleation + in-cloud impaction +
+below-cloud impaction + a **re-evaporation re-injection ledger** that returns carried aerosol to the
 interstitial phase where precip evaporates, and it deliberately excludes the
 sedimenting cloud-ice flux from the in-cloud carrier flux.
 
@@ -1098,8 +1196,9 @@ differentiable knobs sit on the collection integral itself — ``mu_water_air``
 the inertial-impaction efficiency, 1) — because impaction is the least
 constrained part of the scheme; both default to CAM as written. The stratiform
 carrier is not cloud-weighted, because the swept precipitating volume cancels
-against the in-precip-area rain rate and the stratiform in-cloud pathway acts on
-the cloud-borne tracers rather than the interstitial ones; the convective
+against the in-precip-area rain rate. In-cloud, the interstitial aerosol is
+collected by the cloud droplets and crystals instead (see [in-cloud impaction
+scavenging](#in-cloud-impaction-scavenging)); the convective
 carrier acts in HAMMOZ's updraft-area footprint (see [convective tracer
 transport](#convective-tracer-transport--in-plume-scavenging)).
 
