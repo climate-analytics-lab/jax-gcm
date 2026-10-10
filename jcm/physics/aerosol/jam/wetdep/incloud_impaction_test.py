@@ -173,14 +173,15 @@ def test_plate_lookup_brackets_large_crystals():
                                    rtol=1e-12)
 
 
-def _fractions(reffl, reffi, icnc_m3, r_wet, dt):
+def _fractions(reffl, reffi, icnc_m3, r_wet, dt, variant="ham"):
     """Both phases and moments of the coarse mode, the gradient test target."""
     sigma = MAM4_SPEC.modes[2].geom_std_dev
     out = []
     for moment in ("number", "mass"):
         mr = ii.impaction_radius_um(r_wet, sigma, moment)
-        out.append(ii.droplet_impaction_fraction(reffl, mr, moment))
-        out.append(ii.crystal_impaction_fraction(reffi, icnc_m3, mr, dt))
+        out.append(ii.droplet_impaction_fraction(reffl, mr, moment, variant))
+        out.append(ii.crystal_impaction_fraction(reffi, icnc_m3, mr, dt,
+                                                 variant))
     return jnp.stack(out)
 
 
@@ -196,23 +197,29 @@ def test_gradients_inside_the_table():
                         live_inputs=("[0]", "[1]", "[2]", "[3]", "[4]"))
 
 
+@pytest.mark.parametrize("variant", ii.VARIANTS)
 @pytest.mark.parametrize("dtype", (jnp.float32, jnp.float64))
-def test_gradients_are_finite_at_the_table_edges(dtype):
+def test_gradients_are_finite_at_the_table_edges(dtype, variant):
     """Clamped and gated inputs give finite gradients, never NaN.
 
     No liquid or ice (radius 0), no crystals, a crystal below 1 um, a droplet
     beyond the last node, a crystal beyond the largest plate, an empty mode
-    (radius 0) and a mode above the 50 um cap.
+    (radius 0), a mode above the 50 um cap, and r7492's extrapolated plate
+    lookup, whose kernel goes negative near 100 um (here with crystals
+    numerous enough that exp(-x) would overflow in float32).
     """
     with jax.enable_x64(dtype == jnp.float64):
-        reffl = jnp.asarray([0.0, 0.0, 60.0, 3.0, 47.0, 12.0, 12.0], dtype)
-        reffi = jnp.asarray([0.0, 0.5, 30.0, 700.0, 0.0, 30.0, 30.0], dtype)
-        icnc = jnp.asarray([0.0, 1e5, 0.0, 1e5, 1e5, 1e5, 1e5], dtype)
-        r_wet = jnp.asarray([1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 0.0, 1e-4], dtype)
+        reffl = jnp.asarray([0.0, 0.0, 60.0, 3.0, 47.0, 12.0, 12.0, 12.0],
+                            dtype)
+        reffi = jnp.asarray([0.0, 0.5, 30.0, 700.0, 0.0, 30.0, 30.0, 99.8],
+                            dtype)
+        icnc = jnp.asarray([0.0, 1e5, 0.0, 1e5, 1e5, 1e5, 1e5, 1e9], dtype)
+        r_wet = jnp.asarray([1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 0.0, 1e-4,
+                             7.7e-6], dtype)
         dt = jnp.asarray(720.0, dtype)
 
         def total(*a):
-            return jnp.sum(_fractions(*a))
+            return jnp.sum(_fractions(*a, variant=variant))
 
         grads = jax.grad(total, argnums=(0, 1, 2, 3, 4))(
             reffl, reffi, icnc, r_wet, dt)

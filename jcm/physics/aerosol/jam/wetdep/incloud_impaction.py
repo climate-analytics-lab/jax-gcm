@@ -40,10 +40,11 @@ matches the compiled r7492 routines to round-off:
   widths. ``8 + floor(reffi/25)`` brackets every radius.
 
 With the three corrections the result is the piecewise-bilinear
-interpolant of the tables, continuous in both radii and clamped at the
-table ends: constant beyond the last droplet node and the largest plate,
-and zero below a 1 um crystal, where HAM's plate index returns the zero
-row.
+interpolant of the tables, continuous in both radii except at HAM's 1 um
+crystal gate, and clamped at the table ends: constant beyond the last
+droplet node and the largest plate, and zero below a 1 um crystal, where
+HAM's plate index returns the zero row (the two-moment scheme's crystals
+are at least ``ceffmin`` = 10 um).
 
 All functions broadcast over any input shape and are differentiable in
 the radii, the crystal number and the timestep. The table node pair is
@@ -265,6 +266,12 @@ def crystal_impaction_fraction(reffi_um, icnc_m3, mr_um, dt,
     i1, i2 = _plate_nodes(reffi_um, icnc_m3, step)
     kernel = _interpolate(SCAVICEPLATE, CPLATERAD_UM, reffi_um, i1, i2,
                           mr_um, variant)
+    # r7492's plate index extrapolates, and the kernel can go negative; HAM's
+    # clip then zeroes the fraction. Flooring the kernel first gives the same
+    # value and keeps exp(+x) from overflowing, which would turn the clip's
+    # zero derivative into 0 * inf = NaN. The corrected lookup interpolates
+    # non-negative entries, so the floor never binds there.
+    kernel = jnp.maximum(kernel, 0.0)
     # -expm1 is HAM's 1 - exp(-x), conditioned for small x.
     frac = -jnp.expm1(-kernel * 1.0e-6 * icnc_m3 * dt)
     return jnp.clip(frac, 0.0, 1.0)
