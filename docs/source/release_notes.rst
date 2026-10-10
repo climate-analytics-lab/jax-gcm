@@ -1664,8 +1664,9 @@ JAM in-cloud impaction scavenging follows ECHAM-HAM
   effective radii as the output fields ``reffl`` and ``reffi`` (µm).
 - It is a minor sink. Impaction alone removes coarse dust on a timescale of
   decades and coarse sea salt of 200-340 days, at most 0.2 % of their
-  removal. See the in-cloud impaction section
-  of :doc:`science/aerosol` (#1067).
+  removal. In 30-day January and July windows the dust lifetime moved by
+  −0.06 and +0.07 days, within the runs' chaotic spread. See the in-cloud
+  impaction section of :doc:`science/aerosol` (#1067).
 
 Convective scavenging follows ECHAM-HAM
 """""""""""""""""""""""""""""""""""""""

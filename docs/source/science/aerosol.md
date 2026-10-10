@@ -493,6 +493,14 @@ carbon of 2-3 years and coarse sea salt of 200-340 days. Against JAM's dust
 lifetime of 2.7 days and sea-salt lifetime of 0.37 days that is at most 0.2 % of
 the removal.
 
+30-day T63 L47 windows from the January and July states at the default levers,
+with and without in-cloud impaction, show no change beyond the runs' chaotic
+spread. The dust lifetime moves by −0.06 and +0.07 days (2.5 and 2.8 days
+without), against an 8 % divergence of the dust emission between the two January
+runs. The sea-salt lifetime moves by at most 0.01 days. TOA net radiation, cloud
+cover, precipitation and the 200 hPa wind move by at most 0.25 W/m², 0.004,
+0.02 mm/day and 0.04 m/s, and no non-finite value appears.
+
 ### Convective tracer transport + in-plume scavenging
 
 **What we do.** ``jcm/physics/convection/tracer_transport.py::ConvectiveTracerTransport``
