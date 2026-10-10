@@ -1,0 +1,16 @@
+{
+  "reference": "ECHAM6.3-HAM2.3-MOZ1.0 r7492",
+  "routines": {
+    "mo_ham_wetdep.f90": {"ic_scav_imp": "798-960", "ham_wetdep mr/indexy block": "262-286", "md5": "51d92aab77491ab2840a57705e247311"},
+    "mo_ham_tools.f90": {"scavcoef_bilinterp": "424-528", "md5": "945bdd8d59fdda02b5db3302a3c842e5"},
+    "mo_ham_wetdep_data.f90": {"whole module": "1-1100", "md5": "889c3906fe046fc28cbba513821f0dce"}
+  },
+  "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+  "flags": ["-O0", "-O2", "-ffree-line-length-none"],
+  "variants": {
+    "r7492": "unmodified",
+    "fixed": "cdroprad(6)=30; Q12<-(x1,y2), Q21<-(x2,y1) in ic_scav_imp; plate index 8+FLOOR(reffi/25), 9+FLOOR(reffi/25)"
+  },
+  "cells": {"real": 47, "designed": 14, "source_state": "jam_fix1068_state365 (jcm 30be3de3), first step of ma-t63-l47 from 2001-12-31, jcm 9a123572+impaction working tree"},
+  "o0_equals_o2": true
+}
