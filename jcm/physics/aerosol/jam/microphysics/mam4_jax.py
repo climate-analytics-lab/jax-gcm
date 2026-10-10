@@ -415,19 +415,17 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         # (pySES), everything from tracer packing to the amicphys vmap runs
         # inside jax.enable_x64(False) so the core's own dtype-less literals
         # come out float32 too — the RRTMGP-wrapper pattern (commit 27bb36f).
-        # No-op when the host already runs float32, or for a float64 c
-        # ore.
+        # No-op when the host already runs float32, or for a float64 core.
         ctx = (jax.enable_x64(False) if self._core_f32
                else contextlib.nullcontext())
         with ctx:
             core_result = self._step(state, diagnostics)
+        # Host casts and carry integration must run with host precision
+        # restored: requesting float64 inside the scope yields float32.
         return self._assemble_outputs(state, diagnostics, core_result)
-
-        
 
     def _step(self, state, diagnostics):
         cdt = jnp.float32 if self._core_f32 else jnp.float64
-        out_dtype = state.temperature.dtype
         shape = state.temperature.shape
         zeros_c = jnp.zeros(shape, cdt)
         dt = jnp.asarray(diagnostics["_dt_seconds"], cdt)
@@ -568,6 +566,7 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
 
 
     def _assemble_outputs(self, state, diagnostics, core_result):
+        """Restore host precision before assembling tendencies and carry."""
         tracer_tends, cb_updates, dt, jam_state = core_result
         host_dtype = state.temperature.dtype
         tracer_tends = {
@@ -603,7 +602,3 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         )
 
         return tendency, {**diagnostics, "_jam_state": jam_state}
-
-
-
-
