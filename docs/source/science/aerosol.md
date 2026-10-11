@@ -748,26 +748,31 @@ scavenging ``mo_hammoz_wetdep`` / ``mo_ham_wetdep`` (``peffwat`` / ``peffice``
 re-evaporation ledger).
 
 **Why we differ.**
-- `science` (calibration) — the Gong sea-salt source is scaled by **4**
+- `science` (calibration) — the Gong sea-salt source is scaled by **2.57**
   (``SEASALT_SCALE_DEFAULT``, ``physics.seasalt.scale``), where the Fortran
   applies none. HAM's unscaled function emits 2057 Tg/yr at T63 L47 against the
   AeroCom median of 6280 (mean 16 600) and leaves a sea-salt burden of
   6.6 mg/m² against 14.7 (AeroCom mean; median 12.5). The JAM aerosol retune
-  ({doc}`../design/jam_aerosol_retune`) fitted the scale, with the dust threshold
+  ({doc}`../design/jam_aerosol_retune`) swept the scale, with the dust threshold
   scale, as one of the aerosol levers of a loss that includes the ESA-CCI total
   AOD (SU v4.21) and the cloud radiative terms, with the burden as a monitor. The
-  value is that of its Stage 2c, which swept it over [1, 4] with the Sundqvist T63
-  cover set ({doc}`clouds_microphysics`) in place: the 13 best of 20 arms sit at
-  3.996 or above, so 4 is the edge of the range and not an interior optimum. The
-  cover set's larger cloud fraction removes sea salt faster, which is why the
-  scale is larger than the one fitted on ECHAM's cover parameters (2; the
-  sea-salt lifetime is 0.60 d on those and 0.37 d with the cover set). A 365-day T63 L47 year at 4 emits
-  8475 Tg/yr (AeroCom median 6280, mean 16 600) with a burden of 16.4 mg/m²
-  (12 % above the AeroCom mean, 31 % above the median) and a lifetime of 0.37 d
-  (AeroCom 0.48); the total AOD it gives is 0.074 against 0.145 observed, so the
-  AOD deficit that remains is not a burden deficit. The
-  scale is a T63 L47 calibration against this host's 10 m wind and its wet
-  removal and is applied at every resolution, since no other has been validated.
+  loss reads the scale through the total AOD and keeps asking for more sea salt
+  past any burden the AeroCom models carry (the loss constrains it from below
+  only: the optimum sat on the upper edge of every range up to [1, 4]), so the
+  value is set on the burden instead, in Stage 2c, which swept it over [2, 8]
+  with the Sundqvist T63 cover set ({doc}`clouds_microphysics`) in place and the
+  cloud-borne aerosol held by liquid cloud only: the two-window sea-salt burden
+  is linear in the scale (0.65 + 5.44 s + 0.14 d mg/m², R² 0.999, nearly
+  independent of the dust scale d) and crosses the AeroCom mean of 14.7 mg/m²
+  at 2.57. The cover set's larger cloud fraction removes sea salt faster, which
+  is why the scale is larger than the one fitted on ECHAM's cover parameters
+  (2; the sea-salt lifetime is 0.60 d on those and 0.37 d with the cover set).
+  A 365-day T63 L47 year at 2.57 has a burden of 14.5 mg/m² (15.0 over the
+  last 195 days) and a lifetime of 0.36 d (AeroCom 0.48); the total AOD it
+  gives is 0.101 against 0.145 observed, so the AOD deficit that remains is
+  not a burden deficit. The scale is a T63 L47 calibration against this host's
+  10 m wind and its wet removal and is applied at every resolution, since no
+  other has been validated.
 - `science` (decision) — the DMS flux scale (``physics.dms.flux_scale``), the
   wet-removal scales (``physics.wetdep.incloud_scale`` / ``impact_scale``,
   ``physics.conv_transport.conv_scav_scale``) and every convection and
@@ -1039,50 +1044,65 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   about 2700 in this one, 4 % above the upper edge, which is why the band is
   not widened to give the calibrated year more room).
 
-  **The value is 0.344, the best arm of the retune's Stage 2c, fitted with the
-  Sundqvist T63 cover set in place.** The retune ({doc}`../design/jam_aerosol_retune`) minimised a loss over
-  the SW and LW cloud radiative effects, total cloud cover, zonal precipitation,
-  ocean liquid water path, total AOD (ESA-CCI SU v4.21) and dust AOD (ESA-CCI
-  SLSTR SU v1.12), each as a global-mean bias and a 10-degree zonal-mean error
-  divided by the larger of the observation's inter-annual spread and a floor:
-  a 40-arm Sobol sweep (14-day windows) and a 25-arm Gaussian-process
+  **The value is 0.465, set by the AeroCom dust burden in Stage 2c of the
+  retune, with the Sundqvist T63 cover set in place and the cloud-borne aerosol
+  store that holds aerosol in liquid cloud only.** The retune
+  ({doc}`../design/jam_aerosol_retune`) minimised a loss over the SW and LW
+  cloud radiative effects, total cloud cover, zonal precipitation, ocean liquid
+  water path, total AOD (ESA-CCI SU v4.21) and dust AOD (ESA-CCI SLSTR SU
+  v1.12), each as a global-mean bias and a 10-degree zonal-mean error divided
+  by the larger of the observation's inter-annual spread and a floor: a 40-arm
+  Sobol sweep (14-day windows) and a 25-arm Gaussian-process
   expected-improvement sweep (30-day windows), January and July, over the dust
   scale, the sea-salt scale, the DMS flux scale and the wet-removal scale, on
-  ECHAM's cover parameters (best observed arm 0.379095663, the surrogate's own
-  optimum 0.3779), and then, in Stage 2c, a 20-arm Gaussian-process
-  expected-improvement sweep (30-day windows, January and July) over the dust
-  scale (0.2-0.6) and the sea-salt scale (1-4) alone, with the five cover
-  parameters at their shipped values: the five best arms lie in 0.340-0.353 and
-  the best, 0.343962, was run as 0.344. The dust scale acts through the dust AOD:
-  its standardised effect on the global dust AOD is -3.2 in both windows of the
-  Stage-1 sweep, against at most 0.3 for any of the seven other levers. The
-  AeroCom burden, lifetime and emission are monitors and never enter the loss.
-  Two 365-day ``echam-jam-t63-l47`` years that differ in the threshold scale
-  (the second is the release configuration, which also carries the cover set
-  and the sea-salt scale; the sea-salt scale does not enter dust, and the cover
-  set moves the emission by 1 %, 1629 to 1645 Tg/yr, and shortens the dust
-  lifetime by 9 %, 1.80 to 1.64 d, both at 0.379095663) give
+  ECHAM's cover parameters, and then, in Stage 2c, a 20-arm Gaussian-process
+  expected-improvement sweep (30-day windows, January and July, from states
+  spun up on the same tree) over the dust scale (0.3-1.0) and the sea-salt
+  scale (2-8) alone, with the five cover parameters at their shipped values.
+  The dust scale is the only lever that moves the dust AOD (its standardised
+  effect on the global dust AOD is -3.2 in both windows of the Stage-1 sweep,
+  against at most 0.3 for any of the seven other levers), but the loss does
+  not set it: the January window's dust-AOD terms are a few dust events, and
+  the loss minimum (0.727) has dust nearly off, a burden of 13-17 mg/m²
+  against the AeroCom mean of 37.6. The scale is set on that burden, a monitor
+  of the sweep that never enters the loss: the fitted two-window burden crosses
+  37.6 mg/m² at 0.522 (bootstrap 16-84 % 0.518-0.527, independent of the
+  sea-salt scale), a 365-day year at 0.522 reads 24.6 mg/m² over the health
+  statistics' window (the last 195 days; the two 30-day windows sample the
+  dusty seasons), and the sensitivity between that year and one at 0.344
+  (94.1 mg/m² on the same window), d ln B / d scale = -7.5, puts 37.6 at
+  0.465. Three 365-day ``echam-jam-t63-l47`` years on that tree, differing in
+  the threshold scale (the first also carries the sea-salt scale 4; the
+  sea-salt scale does not enter dust), give
 
-  | | year at scale 0.5 | year at 0.344 | reference |
-  |---|---|---|---|
-  | dust AOD 550 nm | 0.0032 | 0.0109 | 0.0213 (ESA-CCI SLSTR) |
-  | dust burden, mg/m² | 5.3 | 20.9 | 37.6 (AeroCom mean), 40.2 (median) |
-  | D < 10 µm emission, Tg/yr | 563 | 2351 | 642 (parent model, converted); 1640 (AeroCom median, mixed cut-offs) |
-  | dust lifetime, d | 1.78 | 1.60 | 4.1 (AeroCom) |
+  | | year at 0.344 | year at 0.522 | year at 0.465 | reference |
+  |---|---|---|---|---|
+  | dust AOD 550 nm, annual | 0.045 | 0.0151 | 0.0247 | 0.0213 (ESA-CCI SLSTR) |
+  | dust burden, mg/m², last 195 days / annual | 94.1 / - | 24.6 / 27.3 | 34.1 / 43.8 | 37.6 (AeroCom mean), 40.2 (median) |
+  | D < 10 µm emission, Tg/yr | - | 1702 | 2715 | 642 (parent model, converted); 1640 (AeroCom median, mixed cut-offs) |
+  | dust lifetime, d, annual | 2.8 (last 195 days) | 3.0 | 3.0 | 4.1 (AeroCom) |
 
-  The emission rises fourfold for a 31 % lower threshold, because saltation
+  The emission rises 1.6-fold for an 11 % lower threshold, because saltation
   samples the far tail of the wind distribution and jcm's tail is thin; that
-  steepness is why the scalar is fitted to a run and not inherited. What is
-  left of the dust-AOD deficit is a short lifetime (1.6 d against 4.1) and the
-  regional source balance (in the review of the earlier-tree sweep arms that
-  reached the observed global dust AOD, the modelled-to-observed regional dust
-  AOD of the best arm was 0.84 in January and 0.51 in July over the
-  Sahara/Sahel, 1.65 and 1.88 over Arabia, 3.9 and 1.1 over Asia and 4.1 and
-  0.38 over Australia), neither of which a global scalar can move. The shipped
-  emission is 3.7 times the parent model's converted budget and above the
-  AeroCom medians (1640; 1123), and still gives about half (0.51) of the observed
-  dust AOD: at this lifetime the emission that would match it is larger again,
-  which is what the lower threshold encodes.
+  steepness is why the scalar is fitted to a run and not inherited, and why
+  the same scale on a tree with a different wind climate gives a different
+  budget (the dust climate of the earlier cloud-borne store and circulation is
+  tabulated on the design page). The health statistics' window excludes the
+  spring dust season (March and May of the year at 0.465 read 87 and
+  98 mg/m²), which is why the annual burden of that year is 17 % above the
+  AeroCom mean, its dust AOD 16 % above the observed value and its annual
+  emission 2715 Tg/yr, above the 2600 Tg/yr upper edge of the release band
+  (``DUST_EMISSION_TG_PER_YR``); on the annual burden the same two-year
+  sensitivity puts 37.6 mg/m² at 0.48-0.49, with an emission of about 2300.
+  What is left of the dust-AOD error is a short lifetime (3.0 d against 4.1)
+  and the regional source balance (in the review of the earlier-tree sweep
+  arms that reached the observed global dust AOD, the modelled-to-observed
+  regional dust AOD of the best arm was 0.84 in January and 0.51 in July over
+  the Sahara/Sahel, 1.65 and 1.88 over Arabia, 3.9 and 1.1 over Asia and 4.1
+  and 0.38 over Australia), neither of which a global scalar can move. The
+  shipped emission is 4.2 times the parent model's converted budget and above
+  the AeroCom medians (1640; 1123): at this lifetime the emission that matches
+  the burden is that large, which is what the lower threshold encodes.
 
   The same scheme driven offline with ERA5 6-hourly 10 m winds regridded to
   T63 — every other input the model's own — gives 125 Tg/yr at 1.00, 421 at
@@ -1137,7 +1157,7 @@ transcription of the Fortran loops for all twelve mixture rows, the East-Asia
 overlap guards, the region vector, the snow and saturation cut-offs, the
 emitted ``D_eff`` (0.5698 / 1.9125 µm for a medium soil, against MAM4's own
 0.310 / 5.64 µm), the gradients through α and ``nduscale_reg``, and the shipped
-threshold scale (0.344, the digits the confirmation year ran).
+threshold scale (0.465, the digits the confirmation year ran).
 
 ### Aqueous sulfate chemistry: in-cloud SO₂ oxidation
 

@@ -3330,7 +3330,9 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         dms = self._term_params(physics, "jam_dms_emissions")
         self.assertAlmostEqual(float(dms.flux_scale), 0.6)
         ss = self._term_params(physics, "jam_seasalt_emissions")
-        self.assertEqual(float(ss.scale), SEASALT_SCALE_DEFAULT)
+        # The scale is a float32 leaf; 2.57 is not exactly representable.
+        self.assertAlmostEqual(float(ss.scale), SEASALT_SCALE_DEFAULT,
+                               places=6)
 
     def test_jam_preset_ships_the_retuned_aerosol_defaults(self):
         # A plain ``physics=echam-jam`` build carries the two defaults of the
@@ -3341,12 +3343,12 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         # defaults: the retune left them where they were.
         physics = build_physics(_compose([*self._JAM]))
         ss = self._term_params(physics, "jam_seasalt_emissions")
-        self.assertEqual(float(ss.scale), 4.0)
+        self.assertAlmostEqual(float(ss.scale), 2.57, places=6)
         du = self._term_params(physics, "jam_dust_emissions")
         np.testing.assert_allclose(
             np.asarray(du.nduscale_reg),
             np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
-            * 0.344)
+            * 0.465)
         self.assertEqual(float(self._term_params(
             physics, "jam_dms_emissions").flux_scale), 1.0)
         wet = self._term_params(physics, "jam_wet_deposition")
