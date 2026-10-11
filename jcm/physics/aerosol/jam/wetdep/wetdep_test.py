@@ -192,6 +192,7 @@ class WetDepTermTest(unittest.TestCase):
                 carry[mass_name(sp, mode.short, cloud_borne=True)] = (
                     jnp.full((nlev, ncols), 1e-9)
                 )
+        tracers["qni"] = jnp.zeros((nlev, ncols))   # the 2M crystal number
         state = PhysicsState.zeros((nlev, ncols)).copy(
             temperature=jnp.full((nlev, ncols), 275.0),
             tracers=tracers,
@@ -889,6 +890,82 @@ class WetDepTermTest(unittest.TestCase):
                 removed_implicit, removed_explicit, rtol=5e-3,
                 err_msg=key_int,
             )
+
+    def _mixed_phase(self, state, diagnostics, *, pice, f_wat_ic, f_ice_ic,
+                     qni=0.0):
+        """Rewrite the setup's cloud as mixed-phase with known conversions."""
+        shape = state.temperature.shape
+        clouds = diagnostics["clouds"]
+        pool = 1.0e-3 / 0.6
+        dt = 1800.0
+        clouds = clouds.copy(
+            incloud_liquid=jnp.full(shape, pool * (1.0 - pice)),
+            incloud_ice=jnp.full(shape, pool * pice),
+            incloud_rain_formation=jnp.full(
+                shape, f_wat_ic * pool * (1.0 - pice) / dt),
+            incloud_snow_formation=jnp.full(shape, f_ice_ic * pool * pice / dt),
+            incloud_riming=jnp.zeros(shape),
+        )
+        tracers = {**state.tracers, "qni": jnp.full(shape, qni)}
+        return state.copy(tracers=tracers), {**diagnostics, "clouds": clouds}
+
+    def test_reservoir_phases_are_removed_at_their_own_conversion(self):
+        # HAM scavenges the droplet-held and crystal-held aerosol apart
+        # (ham_wetdep: water part x f_wat, ice part x f_ice). A reservoir the
+        # exchange recorded as 30 % droplet-held loses 0.3 f_wat + 0.7 f_ice
+        # of itself, not the condensate-weighted (1-p) f_wat + p f_ice.
+        from jcm.physics.aerosol.jam import mass_name
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+
+        state, diagnostics, spec, _ = self._setup(precip=1.0e-7)
+        state, diagnostics = self._mixed_phase(
+            state, diagnostics, pice=0.5, f_wat_ic=0.4, f_ice_ic=0.1)
+        params = WetDepParameters(
+            incloud_scale=jnp.asarray(1.0), sol_factb=jnp.asarray(0.0),
+            mu_water_air=jnp.asarray(60.0), impact_scale=jnp.asarray(1.0),
+            conv_scav_ratio=jnp.asarray(0.99),
+            conv_updraft_velocity=jnp.asarray(2.0))
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        diag = {**diagnostics, LIQUID_SHARE_KEY: {nm: jnp.full(
+            state.temperature.shape, 0.3)}}
+        _, out = WetScavenging(params=params)(state, diag, None, None)
+        lost = -self._cb_rate(diag, out, nm) * 1800.0 / 1.0e-9
+        np.testing.assert_allclose(lost, 0.3 * 0.4 + 0.7 * 0.1, rtol=2e-3)
+
+    def test_implicit_population_splits_the_phases(self):
+        # Without an explicit phase the in-cloud removal is HAM's
+        # cf * [(1-p) f_ARG f_wat + p f_ice_nuc f_ice]: in an ice cloud with
+        # no crystals nothing activated by droplet rules is removed.
+        import dataclasses
+        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
+        from jcm.physics.aerosol.jam.activation.arg_term import (
+            JamActivationData)
+
+        state, diagnostics, spec, _ = self._setup(precip=1.0e-7)
+        params = WetDepParameters(
+            incloud_scale=jnp.asarray(1.0), sol_factb=jnp.asarray(0.0),
+            mu_water_air=jnp.asarray(60.0), impact_scale=jnp.asarray(1.0),
+            conv_scav_ratio=jnp.asarray(0.99),
+            conv_updraft_velocity=jnp.asarray(2.0))
+        n_modes = MAM4_SPEC.n_modes()
+        shape = state.temperature.shape
+        act = JamActivationData(
+            number_frac=jnp.full((n_modes,) + shape, 0.5),
+            mass_frac=jnp.full((n_modes,) + shape, 0.8))
+        implicit = WetScavenging(
+            params=params,
+            spec=dataclasses.replace(MAM4_SPEC, cloud_borne=False))
+        nm = mass_name("so4", "acc")
+        removed = {}
+        for pice in (0.0, 1.0):
+            st, dg = self._mixed_phase(state, {**diagnostics,
+                                               "_jam_activation": act},
+                                       pice=pice, f_wat_ic=0.4, f_ice_ic=0.4)
+            tend, _ = implicit(st, dg, None, None)
+            removed[pice] = float(-np.asarray(tend.tracers[nm]).mean()) * 1800.0
+        np.testing.assert_allclose(removed[0.0] / 1.0e-9, 0.6 * 0.8 * 0.4,
+                                   rtol=2e-3)
+        self.assertLess(removed[1.0], 1e-6 * removed[0.0])
 
     def test_grad_through_sol_factb(self):
         state, diagnostics, spec, mass_name = self._setup()

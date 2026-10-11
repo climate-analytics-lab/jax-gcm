@@ -307,10 +307,55 @@ turbulent vertical mixing of the carry with the same TTE-TKE coefficients the
 interstitial tracers get. ``CloudBorneExchange`` cycles activation-transfer +
 resuspension against the current cloud field.
 
+The cloud-borne amount each pair relaxes toward is the **in-cloud activated
+partition split between the liquid and ice phases**, as HAM splits the in-cloud
+aerosol: ``f·(q_int + q_cb)`` with ``f = (1 − p_ice)·f_ARG + p_ice·f_ice``. The
+ice share ``p_ice`` is that of the in-cloud condensate (``prep_wetdep_hydro``'s
+``pice``, from the cloud scheme's process-time pool). ``f_ARG`` is the ARG
+droplet-activation fraction of the liquid phase. ``f_ice`` is HAM's
+aerosol-in-ice rule (``cloud_borne.py::ice_phase_fractions``): every ice crystal
+holds one aerosol particle, and the crystals are filled from the largest
+activatable mode down, so the number share of a mode is
+``clip((ICNC − N of the larger modes)/N, 0, 1)``. The particles in the ice are
+the largest of the mode, so the mass share is the log-normal mass tail beyond
+the radius holding that number share. ICNC is the two-moment scheme's in-cloud
+crystal number after this step's microphysics; the term refuses a host without
+it (JAM is two-moment only).
+
+Where the process ledger records no condensate, the ice share is that of the
+cloud scheme's grid-mean condensate, so an ice cloud is never read as a droplet
+cloud. The exchange records each reservoir's droplet-held share,
+``(1 − p_ice)·f_ARG / f``, for the whole reservoir at the current condensate's
+split: the aerosol sits in the hydrometeors the cell holds now, as HAM splits
+its in-cloud aerosol by the current ``pice`` each step. Wet deposition removes that share at the per-step
+liquid conversion ``c_wat`` and the crystal-held rest at the ice conversion
+``c_ice`` (HAM's ``peffwat`` / ``peffice``), as HAM scavenges the two phases
+apart. Aqueous sulfate forms on the droplet-held part only, and counts as
+droplet-held in its reservoir's share, so it is removed at ``c_wat``. A population
+without the explicit phase is scavenged by the same split directly,
+``cf·[(1 − p_ice)·f_ARG·c_wat + p_ice·f_ice·c_ice]``.
+
+The cloud fraction sets the relaxation rate. Under ice cloud with fewer
+crystals than particles the partition is small, so the reservoir drains to the
+interstitial phase on the resuspension timescale. Where the whole cover has
+gone in the step, the microphysics' evaporation and formation ledger decides:
+evaporated droplets release their aerosol, and rained- or snowed-out ones leave
+it to wet deposition.
+
 **What ECHAM/CAM does.** This is CAM's ``qqcw``-in-``pbuf`` pattern (cloud-borne
-aerosol in the physics buffer, not advected). ECHAM-HAM (M7/TOMAS-style, implicit)
-has no explicit prognostic cloud-borne phase — it scavenges interstitial aerosol
-by activated fraction.
+aerosol in the physics buffer, not advected). ECHAM-HAM (M7/TOMAS-style,
+implicit) has no explicit prognostic cloud-borne phase. It scavenges the
+in-cloud aerosol split by ``pice`` into a water and an ice part
+(``mo_ham_wetdep.f90::ham_wetdep``), each by its own nucleation-scavenging
+fraction. With ``nwetdep = 3`` (``ic_scav_nuc``, the HAM2.3 reference setting)
+the water part uses the activated fraction. The ice part uses the
+one-particle-per-crystal fill described above: the crystal number over the
+modal numbers of the soluble modes, coarse first, inverted through the
+log-normal tail (``ham_m7_invertlogtail`` / ``ham_m7_logtail``). jcm's
+partition is that split, applied to the explicit phase. CAM instead runs
+``dropmixnuc`` on the liquid cloud fraction ``lcldn = cldn · qc / (qc + qi)``
+(``microp_aero.F90``, the CAM5 behaviour CAM6 keeps without pre-existing ice):
+no aerosol is held in ice cloud at all.
 
 **Why we differ.**
 - `compute` / `differentiability` / stability — a controlled 30-day A/B showed
@@ -321,6 +366,28 @@ by activated fraction.
   ``pbuf``; pySES is the most tracer-count-sensitive backend). The trade given up
   — resolved-scale advection of in-droplet aerosol — is one CAM accepts too. See
   {doc}`../design/dinosaur_sl_jam_configuration`.
+- `science` — the ice phase follows HAM because the cloud-borne reservoir is
+  neither advected nor sedimented. Filled by droplet activation under cirrus or
+  the cold polar-vortex ice cloud (a few crystals per litre), it would collect
+  the aerosol carried through the cloud and return it concentrated where the
+  ice evaporated: thin, sharp layers at the ice-cloud level with no sink there,
+  which the semi-Lagrangian transport then grows. The crystal count leaves such
+  clouds next to empty. Convective anvils (thousands of crystals per litre)
+  still take up the coarse and much of the accumulation mode, which their snow
+  removes.
+- CAM's liquid-only rule is the alternative, rejected for the anvils: with no
+  aerosol taken up in ice, the aerosol convection detrains into tropical anvils
+  is not scavenged there. It loads the tropical tropopause and lower
+  stratosphere (sea salt reaching 60 hPa within days of a January start). See
+  {doc}`../design/jam_cloud_borne_ice_phase`.
+
+**Status & known limitations.** HAM's in-cloud scavenged fraction is nucleation
+*plus* impaction of interstitial aerosol by cloud droplets and ice crystals
+(``mo_ham_wetdep.f90::ic_scav_imp``, with the ``scavdrop`` / ``scaviceplate``
+collision tables). The impaction half is not ported (#1067): jcm's stratiform
+in-cloud removal is nucleation only, through this reservoir, which is CAM's form
+(``sol_facti = 0`` for interstitial aerosol). Coarse aerosol lofted through
+mixed-phase and ice cloud is therefore scavenged less than in ECHAM-HAM.
 
 ### Convective tracer transport + in-plume scavenging
 
