@@ -419,11 +419,13 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         ctx = (jax.enable_x64(False) if self._core_f32
                else contextlib.nullcontext())
         with ctx:
-            return self._step(state, diagnostics)
+            core_result = self._step(state, diagnostics)
+        # Host casts and carry integration must run with host precision
+        # restored: requesting float64 inside the scope yields float32.
+        return self._assemble_outputs(state, diagnostics, core_result)
 
     def _step(self, state, diagnostics):
         cdt = jnp.float32 if self._core_f32 else jnp.float64
-        out_dtype = state.temperature.dtype
         shape = state.temperature.shape
         zeros_c = jnp.zeros(shape, cdt)
         dt = jnp.asarray(diagnostics["_dt_seconds"], cdt)
@@ -525,24 +527,15 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
         }
         q_new, qqcw_new = out["q"], out["qqcw"]
 
-        tracer_tends: dict[str, jnp.ndarray] = {}
-        for name, idx in self._q_pack:
-            tracer_tends[name] = (
-                (q_new[..., idx] - q[..., idx]) / dt
-            ).astype(out_dtype)
-        cb_updates: dict[str, jnp.ndarray] = {}
-        for name, idx in self._qqcw_pack:
-            cb_updates[name] = (
-                (qqcw_new[..., idx] - qqcw[..., idx]) / dt
-            ).astype(out_dtype)
-        if carry_mode(self.spec):
-            diagnostics, passthrough = apply_updates(
-                self.spec, diagnostics,
-                cb_updates, jnp.asarray(dt, out_dtype),
-            )
-            tracer_tends.update(passthrough)
-        else:
-            tracer_tends.update(cb_updates)
+        tracer_tends = {
+            name: (q_new[..., idx] - q[..., idx]) / dt
+            for name, idx in self._q_pack
+        }
+
+        cb_updates = {
+            name: (qqcw_new[..., idx] - qqcw[..., idx]) / dt
+            for name, idx in self._qqcw_pack
+        }
 
         # Downstream optics/removal need the population AFTER condensation,
         # ageing and coagulation. Repeating calcsize here would advance its
@@ -567,7 +560,37 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
 
         jam_state = self._jam_state(
             q_new, out["dgncur_a"], out["dgncur_awet"], out["wetdens"],
-            out_dtype,
+            cdt,
+        )
+        return tracer_tends, cb_updates, dt, jam_state
+
+
+    def _assemble_outputs(self, state, diagnostics, core_result):
+        """Restore host precision before assembling tendencies and carry."""
+        tracer_tends, cb_updates, dt, jam_state = core_result
+        host_dtype = state.temperature.dtype
+        tracer_tends = {
+            name: value.astype(host_dtype)
+            for name, value in tracer_tends.items()
+        }
+
+        cb_updates = {
+            name: value.astype(host_dtype)
+            for name, value in cb_updates.items()
+        }
+        dt = jnp.asarray(dt, dtype=host_dtype)
+
+        if carry_mode(self.spec):
+            diagnostics, passthrough = apply_updates(
+                self.spec, diagnostics, cb_updates, dt,
+            )
+            tracer_tends.update(passthrough)
+        else:
+            tracer_tends.update(cb_updates)
+
+        jam_state = jax.tree_util.tree_map(
+            lambda value: value.astype(host_dtype),
+            jam_state,
         )
 
         tendency = PhysicsTendency(
@@ -577,4 +600,5 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
             specific_humidity=jnp.zeros_like(state.specific_humidity),
             tracers=tracer_tends,
         )
+
         return tendency, {**diagnostics, "_jam_state": jam_state}
