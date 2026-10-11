@@ -1288,8 +1288,11 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         "pressure_full", "air_density", "layer_thickness",
         "clouds", "aerosol",
     )
+    # ``reffl``/``reffi`` are the scheme's own in-cloud droplet and crystal
+    # effective radii, ECHAM's ``mo_activ`` ``REFFL``/``REFFI`` streams, which
+    # HAM's in-cloud impaction scavenging reads (``ic_scav_imp``).
     provides: ClassVar[tuple[str, ...]] = (
-        "autoconv", "accretn", "wbf", "clouds",
+        "autoconv", "accretn", "wbf", "clouds", "reffl", "reffi",
     )
     # ECHAM's anchor (ptm1, pqm1, pxlm1, pxim1, pxtm1 of cdnc/icnc) is the
     # previous step's post-physics state; the model carries it for this term
@@ -1299,7 +1302,15 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     )
     # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
     # the cover term; this term fills the precip / 2M / process-rate fields.
-    output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        **CLOUD_OUTPUT_ATTRS,
+        "reffl": {"units": "um",
+                  "long_name": "in-cloud droplet effective radius after the "
+                               "two-moment microphysics"},
+        "reffi": {"units": "um",
+                  "long_name": "in-cloud ice crystal effective radius after "
+                               "the two-moment microphysics"},
+    }
 
     def __init__(self, params: 'CloudParams2M | None' = None, *,
                  params_are_defaults: bool = False):
@@ -1488,12 +1499,14 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # was suppressed ~1e6x by the c.ak/zdqsdt transcription bugs
         # (#667): with those fixed, summing both would remove
         # supersaturation twice per step with double the latent heating.
-        # The scheme's own preffl/preffi (ECHAM cloud_micro_2m outputs) are
-        # not published: the radii radiation uses, and the ``clouds.r_eff_*``
-        # diagnostic, are formed by the radiation term from the step's state,
-        # as in ECHAM's cloud_optics.
+        # The scheme's own preffl/preffi (ECHAM cloud_micro_2m outputs, the
+        # ``mo_activ`` REFFL/REFFI streams) are published as ``reffl``/``reffi``
+        # for HAM's in-cloud impaction scavenging, which reads exactly these.
+        # Radiation does not use them: the radii it radiates with, and the
+        # ``clouds.r_eff_*`` diagnostic, are formed by the radiation term from
+        # the step's state, as in ECHAM's cloud_optics.
         (tend_all, surface_rain_flux, surface_snow_flux,
-         _preffl, _preffi, rain_formation_warm, rain_from_melt,
+         preffl_all, preffi_all, rain_formation_warm, rain_from_melt,
          autoconv_all, accretion_all, wbf_all,
          precip_form_all, precip_evap_all, cloud_fraction_all,
          negative_mass_repair_all, scav_ledger_all,
@@ -1587,7 +1600,12 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         diagnostics = {**diagnostics,
                        "autoconv": autoconv_all,
                        "accretn": accretion_all,
-                       "wbf": wbf_all}
+                       "wbf": wbf_all,
+                       # (nlev, ncols) [um], 0 where the level holds no
+                       # liquid / ice cloud; transposed like the profiles
+                       # above.
+                       "reffl": preffl_all.T,
+                       "reffi": preffi_all.T}
         diagnostics = advance_thermo_run(
             diagnostics, dt,
             d_temperature=tendency.temperature,

@@ -189,6 +189,7 @@ def jam_aerosol_physics(
     sulfur_gas: SulfurGasParameters | None = None,
     aqueous: AqueousSulfurParameters | None = None,
     aqueous_scheme: str = "full",
+    incloud_impaction: str = "ham",
     freezing_classes: HamFreezingClasses | None = None,
     activation: ArgParameters | None = None,
     cloud_borne_exchange: CloudBorneExchangeParameters | None = None,
@@ -239,6 +240,11 @@ def jam_aerosol_physics(
             prescribed-oxidant + gas-phase + aqueous sulfur chemistry (#496).
         aqueous_scheme: ``"full"`` (default, HAM ``ham_wet_chemistry`` port) or
             ``"simple"`` (H2O2-limited stoichiometric oxidation).
+        incloud_impaction: in-cloud impaction scavenging of interstitial
+            aerosol by droplets and ice crystals: ``"ham"`` (default, HAM's
+            ``ic_scav_imp`` with its three r7492 lookup defects corrected),
+            ``"ham_r7492"`` (the compiled r7492 lookup) or ``"none"``. See
+            ``WetScavenging``.
         freezing_classes: which classes of the population play HAM's roles in
             the aerosol inputs to mixed-phase freezing (``HamFreezingClasses``);
             ``None`` takes the MAM4 mapping, ``MAM4_FREEZING_CLASSES``.
@@ -406,7 +412,8 @@ def jam_aerosol_physics(
         # post-cloud block (needs current clouds), just before wet scavenging.
         AqueousSulfur(params=aqueous, spec=spec, scheme=aqueous_scheme),
         WetScavenging(params=wetdep, spec=spec,
-                      in_plume_convective=convective_transport),
+                      in_plume_convective=convective_transport,
+                      incloud_impaction=incloud_impaction),
     ]
     terms = [*pre_core, core, *optics_terms, *post_core]
     return terms
