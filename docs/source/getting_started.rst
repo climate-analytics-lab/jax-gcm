@@ -191,7 +191,9 @@ invisible.
 
 Configurations that select an optional component need its extra installed —
 ``jcm[mam4]`` for the JAM aerosol recipes, ``jcm[pyses]`` for the CAM-SE
-backend, ``jcm[cosp]`` for the COSP variant — and fail with a clear
+backend, ``jcm[cosp]`` for the COSP variant (after
+``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``,
+since jax-cosp is not on PyPI yet) — and fail with a clear
 ``ModuleNotFoundError`` at load otherwise.
 
 :doc:`science/configurations` lists every shipped configuration and how far
