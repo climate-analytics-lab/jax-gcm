@@ -1,7 +1,7 @@
 Release Notes
 =============
 
-v3.0.0 (unreleased)
+v3.0.0 (2026-10-12)
 -------------------
 
 v3.0 is a deliberate major release. It makes **online interactive aerosol**
@@ -2800,8 +2800,13 @@ Accepted limitations (proposed)
   the resolution every shipped JAM configuration runs at; online aerosol on
   the cubed sphere is separate work. See :doc:`science/boundary_conditions`.
 - **The release-validation matrix has two gaps**: the T106 members' multi-GPU
-  mesh configurations have never been run for a full year, and ``echam-jam``
-  at L95 needs L95 oxidant and ozone inputs staged (#638).
+  mesh configurations have never been run for a full year, and the
+  ``echam-jam-t63-l95`` year on the release tree reached day 310 of 365 before
+  a cluster storage outage interrupted it (its gates are read at that point;
+  the member's regression band is the previous one). The 1M T63 and JAM L47
+  warm-start comparator years were interrupted the same way at about day
+  200; the cold years of every member and the 2M T63 comparator completed
+  (#638, #943).
 - **PrescribedStateModel re-diagnoses carried state from a cold start.** Each
   time is evaluated independently, so TTE-TKE turbulence takes its spin-up
   value and JAM's carry-stored cloud-borne aerosol is an empty reservoir at
