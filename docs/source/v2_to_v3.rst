@@ -1674,14 +1674,20 @@ free.
      - Dinosaur (semi-Lagrangian)
      - pySES CAM-SE (``jcm[pyses]``)
    * - ``speedy``
-     - **Release-validated**, T31 L8 sigma (``speedy-t31``)
+     - **Release-validated**, T31 L8 on SPEEDY's sigma table (``speedy-t31``);
+       every gate passes on ``3.0.0rc3``
      - Composes and builds; no packaged configuration, never validated
    * - ``echam`` (1M)
-     - **Release-validated**, T63 and T106 L47
+     - **Release-validated**, T63 and T106 L47; the T63 year misses the
+       offline cloud-cover floor (0.47 vs 0.5), accepted and documented in
+       the release notes
      - No packaged configuration; composes only with ``cu_lmfmid=false``
        (:ref:`v3-limitation-omega`)
    * - ``echam-rrtmgp-2m``
-     - **Release-validated**, T63 and T106 L47
+     - **Release-validated**, T63 and T106 L47; T63 misses the offline
+       cloud-cover floor by 0.005, T106 misses the TOA band by 0.2 W/m² and
+       the cover floor (untuned cover blend at T106, #1014), all accepted
+       and documented in the release notes
      - No packaged configuration; composes only with ``cu_lmfmid=false``
        (:ref:`v3-limitation-omega`)
    * - ``echam-jam``

@@ -2761,6 +2761,26 @@ Positivity corrections are an explicit water-budget source
 Accepted limitations (proposed)
 """""""""""""""""""""""""""""""
 
+- **Three release-matrix members miss a gate on the release tree, by a
+  documented margin** (maintainer decision 2026-10-12; the gate floors are
+  unchanged). The offline cloud-cover gate (maximum-random overlap of the
+  daily-mean profile, floor 0.5) reads 0.4953 on ``echam-2m-t63`` and 0.47
+  on ``echam-1m-t63``, where the cover the radiation sees is 0.65 and 0.61
+  against 0.63 observed: the calibrated cover set was fitted on the 2M host
+  and the 1M host reads it without a calibration of its own, and the tree
+  moved the offline statistic by one hundredth after the fit. ``echam-2m-t106``
+  reads a net TOA flux of +10.2 W/m² against the ±10 band and an offline cover
+  of 0.45, because the T63 cover set is interpolated toward ECHAM's T127 row
+  at T106 and that blend is untuned (#1014). Every other gate of these
+  members passes (NaN, precipitation, near-surface temperature, AOD, and the
+  TOA band on the T63 members); ``speedy-t31`` passes every gate on the
+  ``3.0.0rc3`` tag, and ``echam-jam-t63-l47`` lands on the burdens its
+  defaults were set to.
+- **SPEEDY's relative humidity spikes in the top sigma level near the poles**
+  (#407, still present in the rc3 validation year: top-level values of order
+  10\ :sup:`5` in 2 % of polar samples while the field is O(1) elsewhere). The
+  release gates do not read that level and all pass; the spikes are a
+  property of the diagnostic at σ = 0.025, not of the integration.
 - **pySES publishes no** ``omega``, so ECHAM's mid-level convection trigger
   cannot run on that backend. Model construction **raises** rather than
   substituting zero; the reference's own ``cu_lmfmid=false`` switch is the
