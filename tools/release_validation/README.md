@@ -92,7 +92,7 @@ Two things to know before reading a failure:
   member's second year or later) the burdens are on their plateau, where a
   from-cold five-day window is still on the dust emission ramp. A failure is a
   regression, not a known-provisional state — except that bands drawn before
-  the JAM aerosol retune's two defaults (dust threshold scale 0.465, sea-salt
+  the JAM aerosol retune's two defaults (dust threshold scale 0.485, sea-salt
   scale 2.57), or before the Sundqvist T63 cover set they were calibrated with,
   describe the previous aerosol and cloud climate and must be regenerated
   before a JAM dust, sea-salt, AOD or cloud failure is read as one (#943).

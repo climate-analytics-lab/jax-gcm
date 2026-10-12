@@ -12,7 +12,7 @@ The aerosol scales are the Stage-2c values and not the ones fitted on ECHAM's
 cover parameters (Stage 2), because the two sets of defaults interact: the
 larger cloud fraction raises wet removal, and the aerosol the earlier scales were
 fitted to deliver is stripped (`jam_rc_cloud`, below). The 365-day year of the
-release configuration is `fix1068_year_c`. Every other default, including every
+release configuration is `fix1068_year_d`. Every other default, including every
 convection, microphysics, DMS and wet-removal field, stays at its ECHAM /
 ECHAM-HAM value. This page records the targets, the levers, the stages, the
 evidence for the values, why the 1M and 2M convection and microphysics defaults
@@ -20,7 +20,7 @@ were not touched, and what the calibration cannot reach.
 
 | default | value | where | basis |
 |---|---|---|---|
-| dust threshold scale | **0.465** | `NDUSCALE_JCM_T63_SCALE` in `jcm/physics/aerosol/jam/emissions/dust.py`; `physics.jam_dust_nduscale_scale` | the AeroCom dust burden (a monitor of the sweep, not the loss): the fitted two-window burden of the Stage-2c sweep on the liquid-cloud store crosses 37.6 mg/m² at 0.522, and the annual sensitivity between two 365-day years moves that to 0.465 on the monitor's window (below) |
+| dust threshold scale | **0.485** | `NDUSCALE_JCM_T63_SCALE` in `jcm/physics/aerosol/jam/emissions/dust.py`; `physics.jam_dust_nduscale_scale` | the annual AeroCom dust burden (a monitor of the sweep, not the loss): the fitted two-window burden of the Stage-2c sweep on the liquid-cloud store crosses 37.6 mg/m² at 0.522, two 365-day years bracket the annual burden (27.3 at 0.522, 43.8 at 0.465) and put 37.6 at 0.483, and the year at 0.485 confirms it (36.2; below) |
 | sea-salt emission scale | **2.57** | `SEASALT_SCALE_DEFAULT` in `jcm/physics/aerosol/jam/emissions/seasalt.py`; `physics.seasalt.scale` | the AeroCom sea-salt burden: the fitted two-window burden of the same sweep (linear in the scale, R² 0.999) crosses 14.7 mg/m² at 2.57; confirmed by the year (15.0) |
 | Sundqvist cover at T63: `crt`, `crs`, `nex`, `csatsc`, `cinv` | **0.679016061, 0.9, 1.84856084, 0.948216414, 0.213005383** (ECHAM's T63 row: 0.75, 0.975, 2, 0.7, 0.25) | `JCM_CALIBRATED_COVER_T63` in `jcm/physics/clouds/echam_cloud_defaults.py`; all three hosts | interior arm of the Stage-2b sweep on the 2M host (below); acts through the cloud fraction; the aerosol scales above are fitted with it in place |
 | DMS flux scale, wet-removal scales, every convection and microphysics field | unchanged | | a weak lever (DMS); a burden guard (wet removal); structural, not parametric (convection, microphysics) |
@@ -133,7 +133,7 @@ with the dust and sea-salt scales as the only levers and the Stage-2b cover set
 held fixed. It was run twice: once on the cloud-borne aerosol store that
 activated aerosol under any cloud (its Stage-3 year is `jam_cloud_ss4`), and
 again on the store that holds aerosol in liquid cloud only, which is the shipped
-one; its Stage-3 year, `fix1068_year_c`, is the release configuration.
+one; its Stage-3 year, `fix1068_year_d`, is the release configuration.
 
 The sweeps and years reported here ran on dev 519f18e8, which carries the
 semi-Lagrangian specific-humidity conservation fix (cubic vertical
@@ -620,74 +620,72 @@ over the 20 arms:
   s = 2.57 (2.566-2.569 for dust 0.4-0.6).
 
 **The confirmation years**, 365 days from the fixed-tree January state on the
-recipe of the other Stage-3 years, on the liquid-cloud store. The year at
-0.522 / 2.57 (`fix1068_year_a`) reads a dust burden of 24.6 mg/m² over the
-monitor's window: the two 30-day windows sample the dusty seasons. The
-sensitivity between that year and `fix1068_default` on the same window
-(d ln B / d scale = -7.5) puts 37.6 at 0.465, and the year at 0.465 / 2.57
-(`fix1068_year_c`) reads 34.1 there. Burdens, lifetimes and sulphate are given
-on both the monitor's window (the last 195 days, the health statistics) and the
-whole year (`aerosol_stats.py` over the 73 saves); AOD, cloud and radiation are
-12-month means; the emissions are the mean over all saves.
+recipe of the other Stage-3 years, on the liquid-cloud store. The dust value is
+matched on the **annual** burden, which is what AeroCom's 37.6 mg/m² is and
+what the release matrix scores, and the two 30-day windows cannot give it: they
+sample the dusty seasons (the year at 0.522 / 2.57, `fix1068_year_a`, reads
+27.3 mg/m² over the year against the fit's 37.6 on the windows). Nor can the
+monitor's window, the last 195 days of a year started from a dust-free state,
+which excludes the spring dust season: matched on that window (34.1 mg/m² at
+0.465, `fix1068_year_c`, from the sensitivity between `fix1068_year_a` and
+`fix1068_default` there) the year reads 43.8 over the year, with March and May
+at 87 and 98 mg/m², and emits 2715 Tg/yr, above the release band's upper edge
+of 2600, which was kept at 1.11 times the earlier calibrated year because the
+parent model's last-glacial-maximum emission is about 2700 in this size
+window. The annual sensitivity between those two years (d ln B / d scale =
+-8.3; the same with the spin-up month excluded) puts 37.6 at 0.483, and the
+year at 0.485 / 2.57 (`fix1068_year_d`) confirms it: 36.2 mg/m² and 2270
+Tg/yr. One year's annual dust burden carries the sampling noise of its dust
+events (a 6 % spread between free-running members in the emission; ±30 % in
+the January window burden), so the value is read from the three-year
+sensitivity rather than from any one spring. Burdens, lifetimes and sulphate
+are given on both the whole year (`aerosol_stats.py` over the 73 saves) and
+the monitor's window (the last 195 days, the health statistics); AOD, cloud and
+radiation are 12-month means; the emissions are the mean over all saves.
 
-| 365 d | `fix1068_default` (0.344 / 4) | `fix1068_year_a` (0.522 / 2.57) | **`fix1068_year_c` (0.465 / 2.57)** | reference |
-|---|---|---|---|---|
-| dust burden mg/m², window / year | 94.1 / - | 24.6 / 27.3 | **34.1 / 43.8** | 37.6 (AeroCom mean), 40.2 (median) |
-| dust burden by month, mg/m² | | 11, 18, 50, 36, 36, 30, 26, 26, 13, 27, 27, 30 | 13, 40, 87, 50, 98, 37, 38, 36, 17, 37, 35, 35 | |
-| dust emission Tg/yr, D < 10 µm | | 1702 | **2715** | release band 400-2600; AeroCom 1840 / 1640 |
-| dust lifetime d, window / year | 2.77 / - | 2.77 / 3.0 | **2.48 / 3.0** | 4.1 |
-| dust AOD 550 | 0.045 | 0.0151 | **0.0247** | 0.0213 |
-| sea-salt burden mg/m², window / year | 22.9 / - | 14.9 / 14.4 | **15.0 / 14.5** | 14.7 (mean), 12.5 (median) |
-| sea-salt lifetime d | 0.36 | 0.37 | **0.36** | 0.48 |
-| sulphate mg SO4/m², ion basis, window | 3.96 | 4.05 | **4.02** | band 1.95-5.85 |
-| AOD 550 | 0.140 | 0.091 | **0.101** | 0.145 |
-| net TOA W/m², gate / annual | +5.4 / +6.9 | +5.9 / +7.2 | **+6.0 / +7.3** | CERES +1.0 |
-| cover, gate / radiation | 0.51 / 0.67 | 0.50 / 0.66 | **0.51 / 0.67** | 0.63 (radiation) |
-| SW CRE / LW CRE W/m² | -43.2 / 26.8 | -43.5 / 26.8 | **-43.6 / 26.8** | -45.7 / 27.9 |
-| reflected SW W/m² | 95.5 | 94.7 | **94.9** | 99.0 |
-| liquid water path g/m² | 42.9 | 42.8 | **43.1** | 36.4 |
-| precipitation mm/day | 2.36 | 2.37 | **2.36** | 3.07 |
-| sea salt above 300 hPa over the polar cap, mg/m² | 0.0 all year | 0.0 all year | **0.0 all year** | earlier store: 107-415 |
+| 365 d | `fix1068_default` (0.344 / 4) | `fix1068_year_a` (0.522 / 2.57) | `fix1068_year_c` (0.465 / 2.57) | **`fix1068_year_d` (0.485 / 2.57)** | reference |
+|---|---|---|---|---|---|
+| dust burden mg/m², year / window | - / 94.1 | 27.3 / 24.6 | 43.8 / 34.1 | **36.2 / 29.9** | 37.6 (AeroCom mean), 40.2 (median) |
+| dust burden by month, mg/m² | | 11, 18, 50, 36, 36, 30, 26, 26, 13, 27, 27, 30 | 13, 40, 87, 50, 98, 37, 38, 36, 17, 37, 35, 35 | **14, 32, 56, 61, 61, 40, 35, 29, 14, 22, 30, 35** | |
+| dust emission Tg/yr, D < 10 µm | | 1702 | 2715 | **2270** | release band 400-2600; AeroCom 1840 / 1640 |
+| dust lifetime d, year / window | - / 2.77 | 3.0 / 2.77 | 3.0 / 2.48 | **3.0 / 2.60** | 4.1 |
+| dust AOD 550 | 0.045 | 0.0151 | 0.0247 | **0.0198** | 0.0213 |
+| sea-salt burden mg/m², year / window | - / 22.9 | 14.4 / 14.9 | 14.5 / 15.0 | **14.5 / 15.0** | 14.7 (mean), 12.5 (median) |
+| sea-salt lifetime d | 0.36 | 0.37 | 0.36 | **0.36** | 0.48 |
+| sulphate mg SO4/m², ion basis, window | 3.96 | 4.05 | 4.02 | **3.99** | band 1.95-5.85 |
+| AOD 550 | 0.140 | 0.091 | 0.101 | **0.096** | 0.145 |
+| net TOA W/m², gate / annual | +5.4 / +6.9 | +5.9 / +7.2 | +6.0 / +7.3 | **+5.8 / +7.1** | CERES +1.0 |
+| cover, gate / radiation | 0.51 / 0.67 | 0.50 / 0.66 | 0.51 / 0.67 | **0.51 / 0.67** | 0.63 (radiation) |
+| SW CRE / LW CRE W/m² | -43.2 / 26.8 | -43.5 / 26.8 | -43.6 / 26.8 | **-43.8 / 26.9** | -45.7 / 27.9 |
+| reflected SW W/m² | 95.5 | 94.7 | 94.9 | **95.1** | 99.0 |
+| liquid water path g/m² | 42.9 | 42.8 | 43.1 | **43.2** | 36.4 |
+| precipitation mm/day | 2.36 | 2.37 | 2.36 | **2.37** | 3.07 |
+| sea salt above 300 hPa over the polar cap, mg/m² | 0.0 all year | 0.0 all year | 0.0 all year | **0.0 all year** | earlier store: 107-415 |
 
-The two aerosol scales do not move the cloud and radiation fields: the three
-years agree to 0.4 W/m² in the SW CRE and to 0.01 in the cover. Those fields
-differ from `jam_cloud_ss4`'s (net TOA +7.3 against +2.7, cover 0.51 against
-0.52 on the gate, liquid water path 43 against 57 g/m², reflected SW 94.9
+The two aerosol scales do not move the cloud and radiation fields: the four
+years agree to 0.6 W/m² in the SW CRE and to 0.01 in the cover. Those fields
+differ from `jam_cloud_ss4`'s (net TOA +7.1 against +2.7, cover 0.51 against
+0.52 on the gate, liquid water path 43 against 57 g/m², reflected SW 95.1
 against 99.3) because the tree changed between the two: the liquid-cloud store
 itself, CAM6 secondary organic aerosol, the model-top treatment and the
 log-pressure vertical interpolation of the semi-Lagrangian transport all
 landed between them, and the cover set was not re-fitted.
 
-**Gates.** On the 40-save recipe (the last 195 days) `fix1068_year_c` passes
-every release gate except the POA and SOA drifts (-0.0051 and -0.0037 /day
+**Gates.** On the 40-save recipe (the last 195 days) `fix1068_year_d` passes
+every release gate except the POA and SOA drifts (-0.0050 and -0.0036 /day
 against 0.002): the six-month line reads the burning-season cycle (POA 0.56 in
 May, 1.90 in September, 1.03 in December, the same cycle as `jam_cloud_ss4`)
 and the SOA spin-up from a state that carried none. Over the whole year, with
 the annual harmonic fitted jointly and the 0.003 /day limit of whole-year
-records ({doc}`jam_regression`): sea salt (+0.0004), sulphate (-0.0021), SOA
-(+0.0010) and BC (-0.0026) pass; POA fails at -0.0034 (-0.0033 in
-`fix1068_year_a`: a property of the tree, not of the two scales); dust fails at
-+0.0045 (+0.0043 in `fix1068_year_a`), because both years start from a nearly
-dust-free January state and the one-harmonic fit reads the first month's
-spin-up (13 mg/m² in January, 40 in February) as a trend. The annual dust
-emission, 2715 Tg/yr, is above the release band's upper edge of 2600 (the gate
-is unscored on the 40-save recipe, #1010, and is scored on whole years).
-
-**Which window the burden is matched on decides the dust value.** The monitor's
-window, the last 195 days of a year started from a dust-free state, excludes
-the spring dust season: March and May of `fix1068_year_c` read 87 and
-98 mg/m², and the year's annual dust burden (43.8) is above the AeroCom mean,
-its dust AOD (0.0247) above the observed value, and its emission above the
-band whose upper edge was kept at 1.11 times the earlier calibrated year
-because the parent model's last-glacial-maximum emission is about 2700 in this
-size window. On the annual convention, the sensitivity between the two years
-(d ln B / d scale = -8.3; -8.3 as well with January excluded) puts 37.6 mg/m²
-at 0.483 (0.491 without the spin-up month), with an emission of about 2300
-Tg/yr, inside the band; a year at 0.485 / 2.57 (`fix1068_year_d`) brackets the
-two conventions. One year's annual dust burden carries the sampling noise of
-its dust events (a 6 % spread between free-running members in the emission;
-±30 % in the January window burden), which is the case for the monitor's
-longer window and against reading a single spring too closely.
+records ({doc}`jam_regression`): the dust emission (2270 Tg/yr, the gate that
+the 40-save recipe leaves unscored, #1010), sea salt (+0.0005), sulphate
+(-0.0019), SOA (+0.0010) and BC (-0.0025) pass; POA fails at -0.0032 (-0.0033
+and -0.0034 in the years at 0.522 and 0.465: a property of the tree, not of
+the two scales); dust fails at +0.0047 (+0.0043 and +0.0045 in those years),
+because the years start from a nearly dust-free January state and the
+one-harmonic fit reads the first month's spin-up (14 mg/m² in January, 32 in
+February) as a trend. The year at 0.465 fails the dust emission band as well
+(2715), which is the upper bracket of the value.
 
 ## What the calibration cannot reach
 
@@ -722,11 +720,11 @@ earlier-tree sweeps.
   earlier-tree sweeps the modelled-to-observed regional dust AOD was 0.84
   (January) and 0.51 (July) over the Sahara and Sahel and 1.65 / 1.88 over
   Arabia, 3.9 / 1.1 over Asia and 4.1 / 0.38 over Australia. The shipped year's
-  dust AOD is 1.16 times the observed (0.0247 against 0.0213) at an annual
-  burden 1.17 times the AeroCom mean, from an emission of 2715 Tg/yr, 4.2 times
-  the parent model's converted budget; the threshold scale cannot repair a
-  lifetime or a regional ratio, and the seasonal weighting of the burden it is
-  matched on is what sets its last 10 % (the second Stage-2c section).
+  dust AOD is 0.93 of the observed (0.0198 against 0.0213) at an annual burden
+  0.96 of the AeroCom mean, from an emission of 2270 Tg/yr, 3.5 times the
+  parent model's converted budget; the threshold scale cannot repair a lifetime
+  or a regional ratio, and the seasonal weighting of the burden it is matched
+  on moves its value by 4 % (the second Stage-2c section).
 - **Sea salt.** The burden (14.5 mg/m² annual, 15.0 over the monitor's window)
   is on the AeroCom mean (14.7; median 12.5) with a lifetime of 0.36 d (AeroCom
   0.48); the coarse-mode extinction per unit mass is at the low end (about
@@ -774,11 +772,12 @@ earlier-tree sweeps.
   free-running members, with the parent model's last-glacial-maximum run (5159
   Tg/yr in HAM's size window, about 2700 in this one) 4 % above the upper edge,
   which is why the band was not widened. The shipped year on the liquid-cloud
-  store emits 2715 Tg/yr at a lifetime of 3.0 d (the second Stage-2c section);
-  the band and the convention that sets the dust scale have to agree, and the
-  release matrix, which scores whole years, is where the gate is read. It is
-  not scored by the documented `health.py --last-n 40` recipe, whose 200-day
-  window is shorter than the 300 days it needs (#1010).
+  store emits 2270 Tg/yr at a lifetime of 3.0 d, 13 % below the upper edge; the
+  year at 0.465, matched on the monitor's window, emits 2715 and is above it,
+  which is one reason the dust scale is matched on the annual burden (the
+  second Stage-2c section). The gate is read on whole years, as in the release
+  matrix; it is not scored by the documented `health.py --last-n 40` recipe,
+  whose 200-day window is shorter than the 300 days it needs (#1010).
 
 ## Reproducing the numbers
 
@@ -794,9 +793,10 @@ Stage 2c is the 20-arm ledger of the JAM host on the same tree (levers
 fixed), and the year `jam_cloud_ss4`; its repeat on the liquid-cloud store is
 the 20-arm ledger on 9a123572 (JEM-Cal `retune_echam_v3.py --stage 2
 --launcher traced`, seed 7, the regenerated January and July states) and the
-years `fix1068_default`, `fix1068_year_a` and `fix1068_year_c`, scored with the
-same recipe and, for the whole-year statistics, `aerosol_stats.py` over their
-73 saves. The annual dust and sea-salt emissions are
+years `fix1068_default`, `fix1068_year_a`, `fix1068_year_c` and
+`fix1068_year_d`, scored with the same recipe and, for the whole-year
+statistics, `aerosol_stats.py` over their 73 saves. The annual dust and
+sea-salt emissions are
 the chunk-duration-weighted mean of the saved `emi_du` and `emi_ss` with the
 Gauss-Legendre area weights of `jcm.analysis.area_weights` times the Earth's
 area (the same reduction `tools/release_validation/aerosol_stats.py` applies to

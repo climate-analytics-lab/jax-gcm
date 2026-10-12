@@ -3348,7 +3348,7 @@ class TestFactoryPresetParameterOverrides(unittest.TestCase):
         np.testing.assert_allclose(
             np.asarray(du.nduscale_reg),
             np.array([1.05, 1.45, 1.45, 1.05, 1.05, 1.05, 1.45, 1.05])
-            * 0.465)
+            * 0.485)
         self.assertEqual(float(self._term_params(
             physics, "jam_dms_emissions").flux_scale), 1.0)
         wet = self._term_params(physics, "jam_wet_deposition")
