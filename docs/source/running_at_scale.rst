@@ -143,9 +143,10 @@ command is one validated configuration::
 Some configurations need an **optional extra** on top of the base install: the
 JAM recipes (``*-jam*``, ``ma-*``) select the MAM4-JAX core and need
 ``pip install jcm[mam4]``; the pySES recipes need ``jcm[pyses]``; the COSP
-satellite-simulator variant needs ``jcm[cosp]``; ERA5 init/nudging (below)
-needs ``jcm[era5]``. A missing extra fails at model construction
-(``ModuleNotFoundError``), not mid-run.
+satellite-simulator variant needs ``jcm[cosp]`` (its ``jax-cosp`` is not on
+PyPI yet: ``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``
+first); ERA5 init/nudging (below) needs ``jcm[era5]``. A missing extra fails
+at model construction (``ModuleNotFoundError``), not mid-run.
 
 Note the leading ``+``: a configuration is *added* to the default composition
 and then overrides the physics/grid/init/run/terrain/forcing groups it selects.

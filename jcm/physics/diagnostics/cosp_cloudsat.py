@@ -85,7 +85,9 @@ production. ``ncolumns`` trades sampling noise against cost roughly
 linearly if a cheaper compromise is wanted.
 
 The jcosp dependency is imported lazily so jcm works without it; install
-with ``pip install jcm[cosp]``.
+jax-cosp from GitHub (it is not on PyPI yet) and then the extra:
+``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``,
+``pip install jcm[cosp]``.
 """
 
 from typing import ClassVar
@@ -250,8 +252,10 @@ class CloudsatCosp(PhysicsTerm):
             import jcosp  # noqa: F401
         except ImportError as err:
             raise ImportError(
-                "CloudsatCosp requires the jax-cosp package "
-                "(pip install jcm[cosp])") from err
+                "CloudsatCosp requires the jax-cosp package, which is not on "
+                "PyPI yet: pip install \"jax-cosp @ git+https://github.com/"
+                "climate-analytics-lab/jax-cosp.git\", then pip install "
+                "jcm[cosp]") from err
         import importlib.resources
 
         from jcosp.radar.optics import load_lut

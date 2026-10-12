@@ -2963,9 +2963,14 @@ Other floors that are floors for a reason:
   tracer-hyperviscosity bug active on the ``quasi_uniform`` path every
   canonical ne30 configuration selects. **ne30 results produced with an older
   pyses should be treated as provisional** (#599).
-- The ``cosp`` extra still installs ``jax-cosp`` from a VCS URL, so
-  ``pip install jcm[cosp]`` needs git and cannot be resolved from PyPI alone.
-  The core install and every other extra are PyPI-resolvable.
+- The ``cosp`` extra depends on ``jax-cosp`` by name. PyPI refuses any
+  distribution whose metadata carries a direct-URL dependency, so the
+  earlier ``jax-cosp @ git+https://...`` form made the jcm wheel itself
+  unpublishable (the 3.0.0rc1 and rc2 uploads were rejected for it). jax-cosp
+  is not on PyPI yet: install it from GitHub first
+  (``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``),
+  then ``pip install jcm[cosp]``. The core install and every other extra are
+  PyPI-resolvable.
 
 v2.0.0b1
 --------

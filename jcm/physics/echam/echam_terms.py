@@ -462,7 +462,8 @@ def echam_physics(
 
             enable_cosp: Attach the CloudSat satellite-simulator
             diagnostic (``CloudsatCosp``; requires the optional
-            jax-cosp dependency, ``pip install jcm[cosp]``). Runs
+            jax-cosp dependency: ``pip install jcm[cosp]`` after
+            installing jax-cosp from GitHub, see ``pyproject.toml``). Runs
             after the cloud microphysics and writes the
             ``cosp_*`` warm-rain / precip-cover diagnostics.
         cosp_ncolumns: Stochastic subcolumns per gridbox for the

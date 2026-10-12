@@ -45,10 +45,16 @@ mam4 = [
     "mam4-jax==0.5.1",
 ]
 # jax-cosp satellite simulators (COSP v2 in JAX): CloudSat radar + warm-rain
-# diagnostics via the CloudsatCosp physics term. Apache-2.0.
-# Install with `pip install jcm[cosp]`.
+# diagnostics via the CloudsatCosp physics term. Apache-2.0. Named, not
+# pinned to its GitHub URL: PyPI rejects any distribution whose metadata
+# carries a direct-URL dependency ("Can't have direct dependency"), so a URL
+# here makes the whole jcm wheel unpublishable. jax-cosp is not on PyPI yet,
+# so install it first from GitHub and then the extra:
+#   pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"
+#   pip install jcm[cosp]
+# (`.github/workflows/run_test.yaml`'s extras-tests job does the same.)
 cosp = [
-    "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git",
+    "jax-cosp",
 ]
 # WeatherBench2 cloud ERA5 access (jcm.data.era5): nudging targets and
 # initial conditions from the public GCS zarr stores (#610).
