@@ -311,7 +311,7 @@ class TestEchamComposablePhysics(unittest.TestCase):
     def test_jam_factory_ships_the_retuned_aerosol_defaults(self):
         """The JAM preset carries the JAM aerosol retune's two defaults (#682).
 
-        Sea-salt scale 4 and the dust threshold scale 0.344 on HAM's T63
+        Sea-salt scale 2.57 and the dust threshold scale 0.485 on HAM's T63
         regional vector; DMS and the three wet-removal scales stay at 1. A
         mapping or an explicit scale wins over the shipped value.
         """
@@ -328,11 +328,12 @@ class TestEchamComposablePhysics(unittest.TestCase):
                         if t.name == name).params.get_value()
 
         physics = echam_physics(**jam)
-        self.assertEqual(float(params(physics, "jam_seasalt_emissions").scale),
-                         4.0)
+        self.assertAlmostEqual(
+            float(params(physics, "jam_seasalt_emissions").scale), 2.57,
+            places=6)
         np.testing.assert_allclose(
             np.asarray(params(physics, "jam_dust_emissions").nduscale_reg),
-            ham_t63 * 0.344)
+            ham_t63 * 0.485)
         self.assertEqual(
             float(params(physics, "jam_dms_emissions").flux_scale), 1.0)
         wet = params(physics, "jam_wet_deposition")

@@ -536,53 +536,61 @@ Interactive aerosol (JAM)
   carry it (#787). Because the flux lives in the far tail of the 10 m wind
   distribution, HAM's threshold vector is scaled for jcm's own winds by a
   single global multiplier, ``NDUSCALE_JCM_T63_SCALE`` (per run,
-  ``physics.jam_dust_nduscale_scale``), set to **0.344** at T63 (fitted
-  to the observed dust optical depth by the aerosol retune, below, with the T63
+  ``physics.jam_dust_nduscale_scale``), set to **0.485** at T63 (set on the
+  annual AeroCom dust burden by the aerosol retune, below, with the T63
   cloud-cover set in place); the
   regional ratios stay HAM's, and T106 and ne30 take the Fortran's uniform
   default since their inputs are interpolated from T63. A full
-  ``echam-jam-t63-l47`` year emits 2351 Tg/yr of D < 10 µm dust, 3.7 times
+  ``echam-jam-t63-l47`` year emits 2270 Tg/yr of D < 10 µm dust, 3.5 times
   the 642 Tg/yr that the parent model's published budget becomes once
   converted to this window and above the AeroCom medians (1640; 1123
   in the 15-model dust intercomparison); the annual
   budget is a release-validation gate on any T63 run of 300 days or more
-  (``DUST_EMISSION_TG_PER_YR``, 400-2600 Tg/yr; the calibrated year is 10 %
+  (``DUST_EMISSION_TG_PER_YR``, 400-2600 Tg/yr; the calibrated year is 13 %
   below the upper edge) (#808).
 - **The release configuration is the T63 cloud-cover set and two aerosol scales
-  calibrated with it** (#682). The scales are the Gong sea-salt source, **4**
+  calibrated with it** (#682). The scales are the Gong sea-salt source, **2.57**
   (``physics.seasalt.scale``, from 1), and the dust threshold multiplier,
-  **0.344** (``physics.jam_dust_nduscale_scale``, from 0.5). They are the best arm
-  of a 20-arm Gaussian-process sweep over exactly these two (30-day January and
+  **0.485** (``physics.jam_dust_nduscale_scale``, from 0.5). They come from a
+  20-arm Gaussian-process sweep over exactly these two (30-day January and
   July windows) with the cover set of *The cloud-cover defaults at T63 are
-  calibrated*, below, held fixed, on a loss over cloud radiative effects, cloud
-  cover, precipitation, liquid water path and the ESA-CCI total and dust AOD,
-  each against its inter-annual spread. An earlier 40-arm Sobol sweep and a
-  25-arm Gaussian-process sweep of four aerosol levers on ECHAM's cover
-  parameters had put the same two scales at 0.379095663 and 2; the cover set's
-  larger cloud fraction raises wet removal and strips the aerosol those values
-  delivered, so the scales are fitted again with it in place. A 365-day T63 L47
-  year of the release configuration confirms them. Against the control year
-  (ECHAM's cover parameters, dust 0.5, sea salt 1), global AOD at 550 nm rises
-  from 0.059 to 0.074 (observed 0.145), dust AOD from 0.0032 to 0.0109 (0.0213),
-  the dust burden from 5.3 to 20.9 mg/m² (AeroCom mean 37.6) and the sea-salt
-  burden from 6.6 to 16.4 mg/m² (AeroCom mean 14.7, median 12.5); sulphate
-  stays inside the AeroCom band (5.3 to 4.1 mg SO4/m², ion basis, against a band
-  of 1.95-5.85). **What it gains** on the JAM host: the annual net TOA flux falls
-  from +7.4 to +2.7 W/m² (CERES +1.0), the ``cloud_cover`` release gate passes
-  (0.52 on the offline overlap, 0.65 as the radiation sees it, against 0.46 and
-  0.58), the reflected SW rises from 92.6 to 99.3 W/m² (observed 99.0) and the
-  LW CRE from 25.5 to 27.4 (27.9), and the loss on the Stage-2 windows falls from
-  469.6 to 325.8. On the 2M host the cover set takes the TOA bias from +9.8 to
-  +5.6 W/m² and passes the same gate (0.51). **What it costs:** on the JAM host
-  the liquid water path is 57 g/m² against 36 observed (49 for the control) and
-  the SW CRE is 3.1 W/m² too strong (-48.8 against -45.7; the control's is 2.9
-  too weak); the sea-salt source is four times HAM's (8475 Tg/yr, AeroCom median
-  6280) and its burden is 12 % above the AeroCom mean; the total AOD is below
-  that of an aerosol-only configuration on ECHAM's cover parameters (0.074
-  against 0.082); and the year's POA drift is -0.0039 /day on the six-month line
-  of the 40-save recipe (limit 0.002; the whole-year fit with the annual harmonic
-  gives -0.0025 against its limit of 0.003, and every aerosol gate passes under
-  it). The year's results are tabulated in
+  calibrated*, below, held fixed, on the tree whose cloud-borne aerosol store
+  holds aerosol in liquid cloud only (*JAM cloud-borne aerosol in ice cloud
+  follows ECHAM-HAM*, below), from states spun up on it. The sweep's loss
+  (cloud radiative effects, cloud cover, precipitation, liquid water path and
+  the ESA-CCI total and dust AOD, each against its inter-annual spread) sets
+  neither scale: its minimum has dust nearly off (the January dust terms are a
+  few dust events) and is flat in the sea-salt scale, so both are set on the
+  AeroCom burdens the sweep monitors, as annual means. The fitted sea-salt
+  burden crosses 14.7 mg/m² at 2.57. The fitted dust burden crosses 37.6 mg/m²
+  at 0.522 on the two windows, which sample the dusty seasons, so 365-day
+  years bracket the annual value (27.3 mg/m² at 0.522, 43.8 at 0.465) and put
+  37.6 at 0.483; the year at 0.485 confirms it. Earlier fits had put the
+  scales at 0.379095663 and 2 on ECHAM's cover parameters, and at 0.344 and 4
+  on the cover set with the earlier store: the cover set's larger cloud
+  fraction raises wet removal, and the store and the circulation changed the
+  dust climate under the scales (at 0.344 and 4 the shipped tree's dust burden
+  is 94 mg/m² over the last 195 days), so the scales are fitted on the tree
+  that ships. The 365-day T63 L47 year of the release configuration: dust
+  burden 36.2 mg/m² annual (AeroCom mean 37.6; 29.9 over the health
+  statistics' window, the last 195 days, which excludes the spring dust
+  season), dust AOD 0.0198 (observed 0.0213), sea-salt burden 14.5 / 15.0
+  (14.7), sulphate 4.0 mg SO4/m² on the ion basis (band 1.95-5.85), total AOD
+  0.096 (0.145), dust lifetime 3.0 d (4.1), sea-salt lifetime 0.36 d (0.48),
+  and a dust emission of 2270 Tg/yr, inside the 400-2600 Tg/yr release band
+  on the annual budget (the year at 0.465 emits 2715, above it, which is why
+  the burden is matched as an annual mean; :doc:`design/jam_aerosol_retune`
+  records all four years). The cloud and radiation fields, which the two
+  scales do not move, are: net TOA +7.1 W/m² annual (+5.8 on the gate; CERES
+  +1.0), cover 0.51 on the offline overlap and 0.67 as the radiation sees it
+  (the ``cloud_cover`` gate passes), reflected SW 95.1 W/m² (observed 99.0),
+  LW CRE 26.9 (27.9), SW CRE -43.8 (-45.7), liquid water path 43 g/m² (36),
+  precipitation 2.37 mm/day (3.07). The POA drift is -0.0032 /day on the
+  whole-year fit with the annual harmonic (limit 0.003) at every setting of
+  the two scales on this tree, and the dust drift reads the first month's
+  spin-up from the dust-free January state. On the 2M host
+  the cover set takes the TOA bias from +9.8 to +5.6 W/m² and passes the same
+  gate (0.51). The year's results are tabulated in
   :doc:`design/jam_aerosol_retune`. The DMS, wet-removal,
   convection and microphysics defaults are unchanged: the 1M and 2M levers
   were swept as well: the 2M's optimum
@@ -2150,9 +2158,9 @@ The cloud-cover defaults at T63 are calibrated
   much worse), and the black-carbon (+0.0032 /day) and sulphate (+0.0026 /day)
   drifts of the year fail the recipe's 0.002 /day limit, black carbon also the
   0.003 /day limit for whole-year records. The shipped aerosol scales are the
-  ones fitted with this set in place (dust 0.344, sea salt 4, in the entry on the
-  aerosol defaults above); the cover parameters themselves were not re-fitted on
-  the JAM host.
+  ones fitted with this set in place (dust 0.485, sea salt 2.57, in the entry on
+  the aerosol defaults above); the cover parameters themselves were not
+  re-fitted on the JAM host.
 - **Changes results** on every ECHAM host at T63 (cloud cover, cloud radiative
   effect, TOA balance, surface temperature), and at T106 and on the cubed
   sphere, which take the T63 row or interpolate from it. ECHAM's constants are
