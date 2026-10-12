@@ -1,5 +1,14 @@
 # T31 / 8 sigma layers — the standard SPEEDY resolution.
-vertical: sigma
+#
+# `speedy`, not `sigma`: the SPEEDY physics is tuned on the Fortran model's
+# hand-set 8-layer table (half levels 0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77,
+# 0.9, 1) and relies on its thin lowest layer and stratospheric top levels
+# (docs/source/design/speedy_variable_levels.md). `sigma` builds equidistant
+# layers, on which SPEEDY is a different, untuned model: at T31L8 the net TOA
+# flux moves by about -15 W/m² and the cloud cover by +0.11. The Python API's
+# `get_speedy_coords` has always built this table; this family is the same
+# levels for the CLI.
+vertical: speedy
 layers: 8
 spectral_truncation: 31
 # SPMD device mesh (longitude, latitude, vertical); null = single device.

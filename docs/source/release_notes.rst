@@ -418,6 +418,22 @@ One vertical direction in the output, and CF metadata
 SPEEDY output flattening, hyperdiffusion coverage, and backlog fixes
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
+- **The CLI runs SPEEDY on SPEEDY's own sigma table.** ``grid=speedy_t31_l8``
+  (the default grid, and the ``speedy-t31`` configuration) declares
+  ``vertical: speedy``, a grid family that builds the Fortran model's hand-set
+  8-layer table (half levels 0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1),
+  the levels the physics is tuned on and the Python API's
+  ``get_speedy_coords`` has always built. The CLI's ``sigma`` family is
+  equidistant, and every CLI SPEEDY run had used it: until #1007 the physics
+  took its vertical metrics from the native table while the dynamics ran on
+  the equidistant grid (the water-budget leak #1007 closed), and with the
+  metrics taken from the model grid SPEEDY on equidistant layers is a
+  different, untuned model — net TOA flux −11 W/m² against the ±10 release
+  gate, cloud cover 0.64, precipitation 3.06 mm/day in a T31L8 year, where
+  the table gives +4.9, 0.59 and 2.80 and passes every gate. **Changes
+  results** for every CLI SPEEDY run and for the ``speedy-t31`` matrix
+  member; ``sigma`` stays the family of ``held_suarez_t31_l8``. See
+  :doc:`design/speedy_variable_levels`.
 - **SPEEDY surface fluxes are published as flat 2D maps** (#645, #328,
   #390). ``ustr``, ``vstr``, ``shf``, ``evap`` and ``rlus`` carried land,
   sea and area-weighted values in a trailing channel axis, so output files

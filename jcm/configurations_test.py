@@ -229,7 +229,7 @@ class TestPackagedConfigSearchpath(unittest.TestCase):
         # grid, 15-min step, and terrain/forcing file overrides all nest there.
         atm = cfg.atmosphere
         self.assertEqual(atm.grid.layers, 8)
-        self.assertEqual(atm.grid.vertical, "sigma")
+        self.assertEqual(atm.grid.vertical, "speedy")
         self.assertEqual(atm.run.time_step, 15)
         self.assertEqual(atm.terrain.file, "hf://bundles/t63/terrain.nc")
         self.assertEqual(atm.forcing.file, "hf://bundles/t63/forcing_pd.nc")
