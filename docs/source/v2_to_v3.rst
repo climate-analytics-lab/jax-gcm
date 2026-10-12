@@ -56,11 +56,11 @@ Installation and dependencies
 
 .. code-block:: console
 
-   $ pip install --pre --upgrade jcm          # 3.0.0rc2 is a pre-release
-   $ pip install "jcm==3.0.0rc2"              # or pin it
+   $ pip install --pre --upgrade jcm          # 3.0.0rc3 is a pre-release
+   $ pip install "jcm==3.0.0rc3"              # or pin it
 
 Until 3.0.0 is tagged, a plain ``pip install --upgrade jcm`` keeps serving the
-2.x line: ``3.0.0rc2`` is a PEP 440 pre-release and pip ignores those unless
+2.x line: ``3.0.0rc3`` is a PEP 440 pre-release and pip ignores those unless
 asked.
 
 Minimum versions that changed, and why each floor is a floor rather than a
