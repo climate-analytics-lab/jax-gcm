@@ -318,7 +318,7 @@ class TestConfigComposition(unittest.TestCase):
     def test_default_compose(self):
         cfg = _compose()
         self.assertIn("speedy_convection", cfg.physics.terms)
-        self.assertEqual(cfg.grid.vertical, "sigma")
+        self.assertEqual(cfg.grid.vertical, "speedy")
         self.assertEqual(cfg.grid.layers, 8)
         self.assertEqual(cfg.run.time_step, 12)
         self.assertEqual(cfg.init.kind, "isothermal")
@@ -455,6 +455,30 @@ class TestBuilders(unittest.TestCase):
         cfg = _compose()
         coords = build_coords(cfg)
         self.assertEqual(coords.horizontal.nodal_shape, (96, 48))
+        # The default grid is SPEEDY's own 8-layer table, the levels the
+        # physics is tuned on and the Python API's get_speedy_coords builds;
+        # an equidistant grid changes the T31L8 climate (net TOA -15 W/m2).
+        from jcm.physics.speedy.speedy_coords import get_speedy_coords
+        np.testing.assert_allclose(
+            np.asarray(coords.vertical.boundaries),
+            [0.0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1.0], atol=1e-7)
+        np.testing.assert_allclose(
+            np.asarray(coords.vertical.boundaries),
+            np.asarray(get_speedy_coords().vertical.boundaries))
+
+    def test_build_coords_sigma_family_is_equidistant(self):
+        # ``vertical: sigma`` stays the equidistant family for physics that
+        # does not depend on the spacing (Held-Suarez).
+        cfg = _compose(["grid=held_suarez_t31_l8"])
+        coords = build_coords(cfg)
+        np.testing.assert_allclose(
+            np.asarray(coords.vertical.boundaries), np.linspace(0.0, 1.0, 9),
+            atol=1e-7)
+
+    def test_build_coords_rejects_unknown_family(self):
+        cfg = _compose(["grid.vertical=stretched"])
+        with self.assertRaisesRegex(ValueError, "stretched"):
+            build_coords(cfg)
 
     def test_build_coords_echam_sigma(self):
         cfg = _compose(["grid=echam_t42_l8_sigma"])
