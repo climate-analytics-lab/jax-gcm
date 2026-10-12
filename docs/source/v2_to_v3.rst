@@ -1678,9 +1678,9 @@ free.
        every gate passes on ``3.0.0rc3``
      - Composes and builds; no packaged configuration, never validated
    * - ``echam`` (1M)
-     - **Release-validated**, T63 and T106 L47; the T63 year misses the
-       offline cloud-cover floor (0.47 vs 0.5), accepted and documented in
-       the release notes
+     - **Release-validated**, T63 and T106 L47; both years miss the offline
+       cloud-cover floor (0.47 and 0.42 vs 0.5; T106 is the untuned cover
+       blend, #1014), accepted and documented in the release notes
      - No packaged configuration; composes only with ``cu_lmfmid=false``
        (:ref:`v3-limitation-omega`)
    * - ``echam-rrtmgp-2m``

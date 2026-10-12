@@ -2770,10 +2770,11 @@ Accepted limitations (proposed)
   and the 1M host reads it without a calibration of its own, and the tree
   moved the offline statistic by one hundredth after the fit. ``echam-2m-t106``
   reads a net TOA flux of +10.2 W/m² against the ±10 band and an offline cover
-  of 0.45, because the T63 cover set is interpolated toward ECHAM's T127 row
-  at T106 and that blend is untuned (#1014). Every other gate of these
+  of 0.45, and ``echam-1m-t106`` an offline cover of 0.42 (TOA +4.3, inside
+  the band), because the T63 cover set is interpolated toward ECHAM's T127
+  row at T106 and that blend is untuned (#1014). Every other gate of these
   members passes (NaN, precipitation, near-surface temperature, AOD, and the
-  TOA band on the T63 members); ``speedy-t31`` passes every gate on the
+  TOA band on three of the four); ``speedy-t31`` passes every gate on the
   ``3.0.0rc3`` tag, and ``echam-jam-t63-l47`` lands on the burdens its
   defaults were set to.
 - **SPEEDY's relative humidity spikes in the top sigma level near the poles**
