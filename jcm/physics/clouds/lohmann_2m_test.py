@@ -1980,13 +1980,18 @@ class TestColumnWaterConservation2M:
         of this test passed even with the double-counting bug, because the
         ECHAM deposition branch alone already pulls S_ice down near 1.0
         (below ``scrit + 0.02``) -- it never caught the floor over-drying
-        the cell on top of that. The three cases below reproduce #963's
-        table (``nic_cirrus=1`` at S_ice 1.74 and 2.2, and ``nic_cirrus=2``
-        at S_ice 2.2); ``expected_s_after`` is the issue's "without floor"
-        column -- what the branch increment alone reaches once the floor
-        stops double-removing it -- and the buggy pre-fix formula instead
-        landed at 0.887 / 0.429 / 0.718 respectively, well outside the
+        the cell on top of that. The two ``nic_cirrus=1`` cases reproduce
+        #963's table (S_ice 1.74 and 2.2); ``expected_s_after`` is the
+        issue's "without floor" column -- what the branch increment alone
+        reaches once the floor stops double-removing it -- and the buggy
+        pre-fix formula instead landed at 0.887 / 0.429, well outside the
         tolerance below.
+
+        At ``nic_cirrus=2`` there is no floor: ECHAM r7492 has none, and
+        Kaercher-Lohmann nucleation is the sink (checked end to end against
+        the compiled reference in ``cirrus_end_to_end_reference_test.py``).
+        This column carries no freezing aerosol, so nothing nucleates and the
+        vapour stays above the Koop threshold.
         """
         import numpy as np
         from jcm.physics import thermodynamics
@@ -2019,8 +2024,11 @@ class TestColumnWaterConservation2M:
         cases = [
             (1.74, 1, 1.012, 0.05),
             (2.2, 1, 1.014, 0.05),
-            (2.2, 2, 1.303, 0.05),
         ]
+        s_after, _ = run(2.2, 2)
+        assert float(np.min(s_after)) > scrit + 0.1, (
+            f"nic_cirrus=2: the Koop floor acted (S_ice {s_after}); it is "
+            "nic_cirrus=1 only")
         for s_start, nic_cirrus, expected, tol in cases:
             s_after, tend = run(s_start, nic_cirrus)
             s_after_max = float(np.max(s_after))
