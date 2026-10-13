@@ -28,6 +28,7 @@ from jcm.physics.aerosol.jam.wetdep.ham_below_cloud import (
     bc_rain_rate,
     bc_snow_rate,
     load_croft_tables,
+    rain_rate_bin,
 )
 
 REF = (Path(__file__).resolve().parents[4] / "data" / "test" / "echam_cloud_reference"
@@ -55,7 +56,8 @@ def test_bc_rain_rate_matches_compiled_reference(prec):
         for flux, radius, phase, ref_rain in zip(z["flux"], z["radius"], z["phase"],
                                                    z["rain_rate"]):
             got = float(bc_rain_rate(np.asarray(flux, dtype), np.asarray(radius, dtype),
-                                     phase=_PHASE[int(phase)], tables=tables))
+                                     phase=_PHASE[int(phase)], tables=tables,
+                                     variant="ham_r7492"))
             np.testing.assert_allclose(got, ref_rain, rtol=RTOL[prec], atol=1e-30)
 
 
@@ -78,7 +80,8 @@ def test_bc_rain_rate_vectorizes_over_a_column():
         tables = load_croft_tables()
         flux = np.asarray(z["flux"][:8], np.float64)
         radius = np.asarray(z["radius"][:8], np.float64)
-        got = np.asarray(bc_rain_rate(flux, radius, phase="number", tables=tables))
+        got = np.asarray(bc_rain_rate(flux, radius, phase="number", tables=tables,
+                                      variant="ham_r7492"))
         mask = z["phase"][:8] == 1
         np.testing.assert_allclose(got[mask], z["rain_rate"][:8][mask], rtol=1e-12)
 
@@ -95,3 +98,95 @@ def test_below_50um_clip_matters():
         above = float(bc_rain_rate(np.asarray(0.01), np.asarray(120e-6),
                                    phase="mass", tables=tables))
         assert capped == above, "radii above the 50 um cap must clamp to the cap's rate"
+
+
+def _bilinear_reference(tables, table, pfrain, mr_um):
+    """Return the textbook bilinear interpolant of ``table`` in (rain rate, radius)."""
+    cr = np.asarray(tables.crainrate)
+    ca = np.asarray(tables.caerorad)
+    i = int(np.clip(np.searchsorted(cr, pfrain, side="right") - 1, 0, len(cr) - 2))
+    j = int(np.clip(np.searchsorted(ca, mr_um, side="right") - 1, 0, len(ca) - 2))
+    wx = (pfrain - cr[i]) / (cr[i + 1] - cr[i])
+    wy = (mr_um - ca[j]) / (ca[j + 1] - ca[j])
+    t = np.asarray(table)
+    return ((1 - wx) * (1 - wy) * t[i, j] + wx * (1 - wy) * t[i + 1, j]
+            + (1 - wx) * wy * t[i, j + 1] + wx * wy * t[i + 1, j + 1])
+
+
+@pytest.mark.parametrize("phase", ("number", "mass"))
+def test_corrected_lookup_is_the_bilinear_interpolant(phase):
+    """Inside the table the default lookup is the bilinear interpolant, at
+    points inside each bin (clear of the nodes' 4-digit rounding).
+    """
+    with jax.enable_x64(True):
+        tables = load_croft_tables()
+        table = tables.cscavbcrn if phase == "number" else tables.cscavbcrm
+        cr = np.asarray(tables.crainrate)
+        ca = np.asarray(tables.caerorad)
+        for i in range(1, len(cr) - 1):
+            pfrain = np.sqrt(cr[i] * cr[i + 1])
+            for j in range(20, 58, 3):
+                mr_um = np.sqrt(ca[j] * ca[j + 1])
+                got = float(bc_rain_rate(np.asarray(pfrain), np.asarray(mr_um * 1e-6),
+                                         phase=phase, tables=tables))
+                want = _bilinear_reference(tables, table, pfrain, mr_um)
+                np.testing.assert_allclose(got, want, rtol=1e-12, atol=1e-30,
+                                           err_msg=f"node ({i}, {j})")
+
+
+def test_corrected_rain_pair_reaches_zero_continuously():
+    """Below the first rain node r7492's pair collapses onto the zero-rain row;
+    the corrected rate interpolates to it, continuous across the switch and
+    linear in the rain rate below the first node.
+    """
+    with jax.enable_x64(True):
+        tables = load_croft_tables()
+        cr1 = float(tables.crainrate[1])
+        switch = 10.0 ** -2.5 / 3600.0     # where 2 log10(3600 p) + 5 = 0
+        mr = np.asarray(0.5e-6)
+        below, above = np.asarray(switch * (1 - 1e-9)), np.asarray(switch * (1 + 1e-9))
+        assert rain_rate_bin(below, "ham_r7492") == (0, 0)
+        assert rain_rate_bin(below) == (0, 1)
+        r7492 = [float(bc_rain_rate(p, mr, phase="number", tables=tables,
+                                    variant="ham_r7492")) for p in (below, above)]
+        fixed = [float(bc_rain_rate(p, mr, phase="number", tables=tables))
+                 for p in (below, above)]
+        assert r7492[0] == 0.0 and r7492[1] > 0.0
+        np.testing.assert_allclose(fixed[0], fixed[1], rtol=1e-8)
+        at_node = float(bc_rain_rate(np.asarray(cr1), mr, phase="number", tables=tables))
+        tiny = float(bc_rain_rate(np.asarray(cr1 * 1e-3), mr, phase="number",
+                                  tables=tables))
+        np.testing.assert_allclose(tiny, 1e-3 * at_node, rtol=1e-9)
+
+
+def test_corrected_lookup_interpolates_along_radius_at_the_rain_clamp():
+    """Above 100 mm/h the rain axis clamps to its last node; the radius axis
+    must still interpolate (r7492's swapped corners return the upper radius
+    node's value throughout the bin instead).
+    """
+    with jax.enable_x64(True):
+        tables = load_croft_tables()
+        ca = np.asarray(tables.caerorad)
+        row = np.asarray(tables.cscavbcrn)[-1]
+        j = 40
+        mr_um = np.sqrt(ca[j] * ca[j + 1])
+        wy = (mr_um - ca[j]) / (ca[j + 1] - ca[j])
+        got = float(bc_rain_rate(np.asarray(0.05), np.asarray(mr_um * 1e-6),
+                                 phase="number", tables=tables))
+        np.testing.assert_allclose(got, (1 - wy) * row[j] + wy * row[j + 1],
+                                   rtol=1e-12)
+
+
+def test_corrected_lookup_gradients_are_finite():
+    import jax.numpy as jnp
+
+    with jax.enable_x64(True):
+        tables = load_croft_tables()
+
+        def rate(log_p, mr):
+            return bc_rain_rate(jnp.exp(log_p), mr, phase="mass", tables=tables)
+
+        for p in (1e-8, 5e-7, 3e-5, 0.01, 0.05):
+            for mr in (1e-8, 2e-7, 3e-6, 4e-5):
+                g = jax.grad(rate, argnums=(0, 1))(jnp.log(p), jnp.asarray(mr))
+                assert all(np.isfinite(float(x)) for x in g), (p, mr)
