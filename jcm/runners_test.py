@@ -230,6 +230,14 @@ class TestTracerPositivityResolution(unittest.TestCase):
     def test_auto_on_for_prognostic_aerosol(self):
         self.assertIsNotNone(build_tracer_filter(_compose(["physics=echam-jam"])))
 
+    def test_echam_jam_declares_the_wet_scavenging_lookups(self):
+        """The HAM lookup selectors override without Hydra's ``+`` syntax."""
+        cfg = _compose(["physics=echam-jam",
+                        "physics.jam_below_cloud_lookup=ham_r7492",
+                        "physics.jam_incloud_impaction=ham_r7492"])
+        self.assertEqual(cfg.physics.jam_below_cloud_lookup, "ham_r7492")
+        self.assertEqual(cfg.physics.jam_incloud_impaction, "ham_r7492")
+
     def test_auto_off_for_diagnostic_aerosol(self):
         # echam term-list preset uses diagnostic MACv2-SP → no advected aerosol.
         self.assertIsNone(build_tracer_filter(_compose(["physics=echam"])))

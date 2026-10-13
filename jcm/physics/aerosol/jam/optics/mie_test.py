@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from jcm.physics.aerosol.jam.optics.mie import mie_efficiencies
+from jcm.physics.aerosol.jam.optics.mie import mie_efficiencies, mie_efficiencies_grid
 from jcm.physics.aerosol.jam.optics.mie_lut import build_mie_lut, interp_mie
 
 
@@ -42,6 +42,38 @@ class MieKernelTest(unittest.TestCase):
         _, _, g_small = mie_efficiencies(0.5, 1.5, 0.0)
         _, _, g_big = mie_efficiencies(8.0, 1.5, 0.0)
         self.assertGreater(g_big, g_small)
+
+
+class MieEfficienciesGridTest(unittest.TestCase):
+    """The batched grid evaluator against the scalar reference it mirrors."""
+
+    def test_matches_scalar_reference_across_the_grid(self):
+        mr = np.array([1.0, 1.33, 1.8, 2.5, 3.0])
+        mi = np.array([1.0e-9, 1.0e-3, 0.1, 1.0, 2.0])
+        mr_grid, mi_grid = np.meshgrid(mr, mi, indexing="ij")
+        for x in (0.001, 0.4, 3.0, 25.0, 40.0):
+            q_ext, ssa, g = mie_efficiencies_grid(x, mr_grid, mi_grid)
+            for i in range(mr_grid.shape[0]):
+                for j in range(mr_grid.shape[1]):
+                    qe, ss, gg = mie_efficiencies(x, mr_grid[i, j], mi_grid[i, j])
+                    # Relative, not absolute, tolerance: the grid path shares
+                    # one worst-case ``nmx`` across the batch (see
+                    # mie_efficiencies_grid's docstring) where the scalar path
+                    # uses its own per-point nmx; the downward D_n recurrence
+                    # converges to the same answer from either starting order
+                    # but not bit-for-bit, and the gap scales with q_ext at
+                    # the table's largest x/mi corners.
+                    np.testing.assert_allclose(float(q_ext[i, j]), qe, rtol=1e-5)
+                    np.testing.assert_allclose(float(ssa[i, j]), ss, rtol=1e-5, atol=1e-8)
+                    np.testing.assert_allclose(float(g[i, j]), gg, rtol=1e-5, atol=1e-8)
+
+    def test_output_shape_and_finiteness(self):
+        mr = np.full((3, 4), 1.5)
+        mi = np.geomspace(1.0e-8, 1.0, 12).reshape(3, 4)
+        q_ext, ssa, g = mie_efficiencies_grid(10.0, mr, mi)
+        for arr in (q_ext, ssa, g):
+            self.assertEqual(arr.shape, (3, 4))
+            self.assertTrue(np.all(np.isfinite(arr)))
 
 
 class MieLUTTest(unittest.TestCase):

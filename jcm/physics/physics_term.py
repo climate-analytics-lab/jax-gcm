@@ -92,6 +92,37 @@ class PhysicsTerm(nnx.Module):
     # ``_band_config``, ...) are exempt.
     requires: ClassVar[tuple[str, ...]] = ()
     provides: ClassVar[tuple[str, ...]] = ()
+    # Diagnostics keys this term reads CONDITIONALLY — via
+    # ``diagnostics.get("key")`` or an ``if "key" in diagnostics`` guard —
+    # and is declaring as a *known* soft dependency, not an accidental one.
+    # Two distinct patterns both belong here, and either is legitimate:
+    #
+    #   1. A deliberate CROSS-STEP read: this term runs upstream, in the
+    #      composition order, of the term that `provides` the key, so the
+    #      value seen is the carry's one-step-lagged value (or, on the
+    #      first step / a composition without a producer, the ``.get``
+    #      fallback). ``SundqvistCloudFraction`` reading last step's
+    #      ``"convection"`` ``ktype`` is the canonical example (jax-gcm#673)
+    #      — it runs before ``TiedtkeConvection`` by design, and the
+    #      one-step lag is ECHAM's own ``cover``/``cucall`` ordering, not a
+    #      bug.
+    #   2. An OPTIONAL dependency across compositions: the key is always
+    #      fresh (same-step) when present, but this term can also be
+    #      composed without its producer (a reduced stack, a unit-test
+    #      harness, a different aerosol/cloud module), so the read
+    #      gracefully degrades via the ``.get`` default rather than
+    #      failing to compose.
+    #
+    # ``requires_audit_test.py`` cross-checks every soft read against this
+    # set (on top of ``requires``/``provides``/``carry_slots``/...), so an
+    # accidental stale read that NOBODY declared — the failure mode #673
+    # exists to catch, which the ``.get()``/``in`` convention above would
+    # otherwise hide from the audit entirely — fails the test instead of
+    # silently returning last step's (or nobody's) value. Document WHICH
+    # of the two patterns applies, and why, next to the read itself (most
+    # terms already do, in their module or class docstring); this field is
+    # the audit hook, not a substitute for that explanation.
+    optional_requires: ClassVar[tuple[str, ...]] = ()
     # CSV mapping this term's output variable names to units and
     # descriptions, which ``ModelPredictions.to_xarray`` attaches to the
     # dataset. Columns: Variable, Units, <source name>, Description.

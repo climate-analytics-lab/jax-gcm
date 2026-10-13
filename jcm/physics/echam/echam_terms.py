@@ -19,6 +19,7 @@ otherwise use.
 
 from __future__ import annotations
 
+import os
 import warnings
 from typing import TYPE_CHECKING, Any, Mapping
 
@@ -59,6 +60,9 @@ from jcm.physics.radiation.aerosol_free import (
     resolve_aerosol_free_interval,
 )
 from jcm.physics.radiation.band_config import RadiationBandConfig
+from jcm.physics.radiation.echam_cloud_optics_defaults import (
+    JAM_ARG_ICE_INHOMOGENEITY_T63,
+)
 from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 from jcm.physics.surface.echam.surface_physics import EchamSurface
@@ -76,6 +80,8 @@ if TYPE_CHECKING:
     # Only the annotations of ``echam_physics`` name these: the JAM package is
     # imported in the JAM branch of the factory, not for every composition.
     from jcm.physics.aerosol.jam.activation.arg_term import ArgParameters
+    from jcm.physics.aerosol.jam.activation.ham_activation_term import (
+        HamActivationParameters)
     from jcm.physics.aerosol.jam.chemistry.aqueous import (
         AqueousSulfurParameters)
     from jcm.physics.aerosol.jam.chemistry.oxidants import OxidantParameters
@@ -116,23 +122,35 @@ GREY_RADIATION_REJECTION = (
 )
 
 
-def default_radiation_parameters(aerosol_module: str = "macv2sp"
+def default_radiation_parameters(aerosol_module: str = "macv2sp",
+                                 truncation: int | None = 63,
                                  ) -> RadiationParameters:
     """``RadiationParameters`` the ECHAM factory uses when none are given.
+
+    The three liquid factors and the ice factor otherwise come from ECHAM's
+    per-truncation table (``RadiationParameters.default(truncation=...)``,
+    :mod:`jcm.physics.radiation.echam_cloud_optics_defaults`, #974).
 
     ECHAM-HAM re-tunes the ice-cloud inhomogeneity for its two-moment +
     Abdul-Razzak & Ghan configuration (``lcdnc_progn`` with ``ncd_activ = 2``:
     ``zinhomi = 0.7`` at T63, L31 and L47 alike;
-    ``mo_cloud_optics.f90::setup_cloud_optics``). jcm's JAM stack is exactly
-    that pairing — the 2M scheme fed by ARG activation — so it takes HAM's
-    value; every other composition keeps ECHAM6's T63 ``zinhomi = 0.8``.
+    ``mo_cloud_optics.f90::setup_cloud_optics``), a row ECHAM defines at T63
+    only. jcm's JAM stack is exactly that pairing — the 2M scheme fed by ARG
+    activation — so it takes HAM's value at EVERY truncation (there is no
+    other row to interpolate from or to; see
+    ``echam_cloud_optics_defaults``'s module docstring for why it is held
+    rather than interpolated), overriding only the table's ice factor; every
+    other composition keeps the table's ice factor (0.80 at T31/T63, 0.85 at
+    T127/T255) unmodified.
 
     Public so a caller that builds its own radiation term for
     ``echam_physics(radiation_scheme=<term>)`` can give it the same defaults
     the string route would.
     """
+    ice_override = (JAM_ARG_ICE_INHOMOGENEITY_T63
+                    if aerosol_module == "jam" else None)
     return RadiationParameters.default(
-        cloud_inhomogeneity_ice=0.7 if aerosol_module == "jam" else 0.8)
+        truncation=truncation, cloud_inhomogeneity_ice=ice_override)
 
 
 def _warn_if_shared_cloud_constants_differ(cover_params, cloud_params, cloud_scheme):
@@ -186,7 +204,7 @@ def echam_physics(
     oxidants: OxidantParameters | Mapping[str, Any] | None = None,
     sulfur_gas: SulfurGasParameters | Mapping[str, Any] | None = None,
     aqueous: AqueousSulfurParameters | Mapping[str, Any] | None = None,
-    activation: ArgParameters | Mapping[str, Any] | None = None,
+    activation: ArgParameters | HamActivationParameters | Mapping[str, Any] | None = None,
     cloud_borne_exchange: (
         CloudBorneExchangeParameters | Mapping[str, Any] | None) = None,
     sedimentation: SedParameters | Mapping[str, Any] | None = None,
@@ -205,9 +223,17 @@ def echam_physics(
     jam_microphysics: str = "placeholder",
     jam_cloud_borne: bool = True,
     jam_optics: bool = True,
+    jam_optics_backend: str = "jcm",
+    jam_optics_tables_dir: str | os.PathLike | None = None,
+    jam_seasalt_scheme: str = "gong",
+    jam_wetdep_scheme: str = "jcm",
+    jam_nucleation_activation: str | None = None,
     jam_arg_variant: str = "arg2000",
+    jam_activation_scheme: str = "arg",
+    jam_nactivpdf: int = 0,
     jam_aqueous_scheme: str = "full",
     jam_incloud_impaction: str = "ham",
+    jam_below_cloud_lookup: str = "ham",
     jam_dust_preset: int = 4,
     jam_dust_nudged: bool = False,
     jam_dust_nduscale_scale: float | None = None,
@@ -408,7 +434,11 @@ def echam_physics(
             the SPA floor. The online aerosol *direct radiative* effect that
             would let JAM fully replace MACv2-SP optics is tracked in #495.
         jam_microphysics: JAM core when ``aerosol_module="jam"`` —
-            ``"placeholder"`` (κ-Köhler equilibrium) today; MAM4-JAX is #490.
+            ``"placeholder"`` (κ-Köhler equilibrium on the MAM4 population,
+            default) today; ``"mam4_jax"`` is #490 (optional ``jcm[mam4]``
+            extra). ``"m7_placeholder"`` is the same κ-Köhler core on the M7
+            population instead (the ``echam-ham-m7`` preset's chain-test
+            vehicle, #1017) — the real M7 core adapter is a later task.
         jam_cloud_borne: prognose the explicit cloud-borne aerosol phase
             (#602). ``True`` (default) cycles the ``mc_*``/``nc_*`` phase
             in the physics carry (activation transfer, resuspension,
@@ -420,7 +450,49 @@ def echam_physics(
             reads. ``False`` keeps MACv2-SP optics (cheaper; also makes
             the JAM aerosol radiatively passive, which controlled A/B
             experiments rely on).
+        jam_optics_backend: ``jam_aerosol_physics``'s ``optics_backend`` --
+            ``"jcm"`` (default) or ``"ham_lut"`` (ECHAM-HAM M7's own
+            Mie-table lookup, #1017). Ignored when ``jam_optics=False``.
+        jam_optics_tables_dir: directory holding HAM's authentic
+            ``lut_optical_properties_M7.nc``/``lut_optical_properties_lw_
+            M7.nc`` for ``jam_optics_backend="ham_lut"``. ``None`` (default)
+            reads the ``HAM_INPUT_DIR`` environment variable instead;
+            ignored for ``jam_optics_backend="jcm"``.
+        jam_seasalt_scheme: ``"gong"`` (default, unchanged) or ``"long"``
+            (Long et al. 2011 + the Sofiev et al. 2011 SST correction, HAM
+            ``nseasalt=7``; #1017) — passed through to
+            :func:`~jcm.physics.aerosol.jam.jam_terms.jam_aerosol_physics`'s
+            ``seasalt_scheme``. ``"long"`` requires ``jam_microphysics``'s
+            population to carry exactly two ``ss`` classes (HAM's own
+            accumulation-then-coarse split); the default MAM4 population
+            carries three (it also has an Aitken-mode sea salt tracer, which
+            HAM's M7 configuration does not) and so is rejected with
+            ``"long"``.
+        jam_wetdep_scheme: ``jam_aerosol_physics``'s ``wetdep_scheme`` --
+            ``"jcm"`` (default), ``"ham_below_cloud"`` (ECHAM-HAM's own
+            below-cloud Croft tables only, #1017 -- a deliberately narrower
+            ablation configuration) or ``"ham"`` (the Croft below-cloud
+            tables plus HAM's own nucleation scavenging ``ic_scav_nuc``;
+            with the default ``jam_incloud_impaction="ham"`` this is the
+            full ``nwetdep=3``). ``"ham_below_cloud"``/``"ham"`` require
+            ``cloud_scheme="2m"`` (enforced below) and turn on the 2M
+            scheme's ``"precip_cover"``/``"pfrain"``/``"pfsnow"``
+            diagnostics they read.
+        jam_nucleation_activation: only consulted for ``jam_wetdep_scheme=
+            "ham"`` -- ``"ham_arg"`` or ``"ham_lin_leaitch"``, forwarded to
+            ``jam_aerosol_physics``'s ``nucleation_activation``. ``None``
+            (default) derives it from ``jam_activation_scheme`` below; an
+            explicit value must match it (see ``jam_aerosol_physics``'s
+            ``nucleation_activation`` Args entry for why -- ``ic_scav_nuc``
+            reads whichever activation term ``jam_activation_scheme``
+            actually composed).
         jam_arg_variant: ``"arg2000"`` (default) or ``"ghosh2025"`` activation.
+        jam_activation_scheme: ``jam_aerosol_physics``'s ``activation_scheme``
+            -- ``"arg"`` (default), ``"ham_arg"`` or ``"ham_lin_leaitch"``
+            (#1017). An ``activation`` mapping applies to the chosen scheme's
+            Parameters class.
+        jam_nactivpdf: ``jam_aerosol_physics``'s ``nactivpdf`` (HAM's updraft
+            PDF switch, ``"ham_arg"`` only; default 0).
         jam_dust_preset: HAMMOZ ``ndust`` preset for the Tegen dust scheme —
             4 (default, HAM2: Stier 2005 + East-Asian soils), 3 (Stier 2005)
             or 2 (Cheng 2008). The resolution-dependent regional tuning vector
@@ -441,6 +513,11 @@ def echam_physics(
             defects corrected), ``"ham_r7492"`` (the compiled r7492 lookup,
             for like-for-like comparison with ECHAM-HAM) or ``"none"`` (CAM's
             form, no in-cloud impaction).
+        jam_below_cloud_lookup: the Croft rain lookup of the HAM below-cloud
+            schemes (``jam_wetdep_scheme="ham_below_cloud"``/``"ham"``):
+            ``"ham"`` (default, r7492's swapped interpolation corners and its
+            zero rate below the first rain-rate node corrected) or
+            ``"ham_r7492"`` (the compiled ``bc_rain``).
         jam_anthropogenic: include prescribed CEDS anthropogenic emissions
             (#498), the bulk in-model-speciated path; inert until CEDS forcing
             fluxes are supplied.
@@ -699,6 +776,10 @@ def echam_physics(
     truncation = 63 if coords is None else spectral_truncation(coords)
     clouds_are_defaults = clouds is None
     microphysics_are_defaults = microphysics is None
+    # Used below to tell RRTMGPRadiation's resolution-defaulted
+    # RadiationParameters (#974) from a user-supplied object, same
+    # ``params_are_defaults`` contract as the cloud terms.
+    radiation_are_defaults = radiation is None
     clouds_p = clouds or default_parameters(CloudParameters, truncation)
     microphysics_p = microphysics or default_parameters(
         MicrophysicsParameters, truncation)
@@ -717,8 +798,10 @@ def echam_physics(
                 "pass them to its constructor (params=...).")
         radiation_p = None
     else:
-        # An explicit ``radiation=`` wins over the factory default.
-        radiation_p = radiation or default_radiation_parameters(aerosol_module)
+        # An explicit ``radiation=`` wins over the factory default. Built for
+        # the run's truncation (#974), same as clouds_p/microphysics_p above.
+        radiation_p = radiation or default_radiation_parameters(
+            aerosol_module, truncation)
     vertical_diffusion_p = vertical_diffusion or VDiffParameters.default()
     surface_p = surface or SurfaceParameters.default()
     land_surface_p = land_surface or JsbachLandParameters.default()
@@ -729,13 +812,22 @@ def echam_physics(
     if aerosol_module == "jam":
         # Imported here, not at module scope: the JAM package is only worth
         # loading for a JAM composition (as ``jam_aerosol_physics`` below).
-        from jcm.physics.aerosol.jam.jam_terms import JAM_PARAMETER_CLASSES
+        from jcm.physics.aerosol.jam.jam_terms import (
+            JAM_PARAMETER_CLASSES, activation_parameter_class)
+        _jam_classes = {**JAM_PARAMETER_CLASSES,
+                        "activation": activation_parameter_class(
+                            jam_activation_scheme)}
         # A mapping is applied on the class default (the JAM schemes have no
         # factory choice of their own to keep); an object is used as given and
         # ``None`` leaves the scheme to build its default.
+        # The sea-salt default depends on the scheme (Gong's calibration,
+        # Long's native scale).
+        _jam_defaults = {name: cls.default for name, cls in _jam_classes.items()}
+        _jam_defaults["seasalt"] = lambda: _jam_classes["seasalt"].default(
+            jam_seasalt_scheme)
         jam_p = {
             name: (with_field_overrides(
-                       JAM_PARAMETER_CLASSES[name].default(), value,
+                       _jam_defaults[name](), value,
                        scheme=name)
                    if isinstance(value, Mapping) else value)
             for name, value in _jam_args.items()}
@@ -818,7 +910,8 @@ def echam_physics(
         rad_term = RRTMGPRadiation(
             params=radiation_p,
             compute_cre=radiation_compute_cre,
-            aerosol_free_interval=aerosol_free_interval)
+            aerosol_free_interval=aerosol_free_interval,
+            **defaults_flag_kwargs(RRTMGPRadiation, radiation_are_defaults))
     elif radiation_scheme == "emulated":
         # "auto" (default) resolves the packaged trained checkpoint
         # (jcm/data/emulator_weights_per_band_u64.nc). The explicit "random"
@@ -846,6 +939,13 @@ def echam_physics(
     # 1-SW/0-LW aerosol layout fails its band-count check at first compute.
     band_config = RadiationBandConfig.for_terms([rad_term])
 
+    if jam_wetdep_scheme in ("ham_below_cloud", "ham") and cloud_scheme != "2m":
+        raise ValueError(
+            f"jam_wetdep_scheme={jam_wetdep_scheme!r} requires cloud_scheme="
+            "'2m' (it reads the 2M scheme's 'precip_cover'/'pfrain'/'pfsnow' "
+            "diagnostics; the 1M scheme does not compute them), got "
+            f"cloud_scheme={cloud_scheme!r}."
+        )
     if cloud_scheme == "1m":
         micro_term = Echam1MMicrophysics(
             params=microphysics_p,
@@ -865,6 +965,14 @@ def echam_physics(
             aerosol_p.spa_exponent,
             aerosol_p.spa_cap_smoothing,
         )
+        # HAM's below-cloud wetdep pathway needs three per-level
+        # hydrological inputs only the 2M scheme computes: the
+        # precipitating-area fraction (ECHAM's pclc/zclcpre) and the
+        # in-cloud pre-evaporation rain/snow flux (zfrain/zfsnow); see
+        # WetScavenging's "ham_below_cloud" scheme and
+        # Lohmann2MMicrophysics.configure_wetdep_hydro_diagnostics.
+        if jam_wetdep_scheme in ("ham_below_cloud", "ham"):
+            micro_term.configure_wetdep_hydro_diagnostics(True)
     else:
         raise ValueError(
             f"Unknown cloud_scheme={cloud_scheme!r}. Choose '1m' or '2m'."
@@ -915,10 +1023,17 @@ def echam_physics(
         from jcm.physics.aerosol.jam.jam_terms import jam_aerosol_physics
         jam_terms = jam_aerosol_physics(
             microphysics=jam_microphysics, cloud_borne=jam_cloud_borne,
-            optics=jam_optics,
+            optics=jam_optics, optics_backend=jam_optics_backend,
+            ham_optics_tables_dir=jam_optics_tables_dir,
+            seasalt_scheme=jam_seasalt_scheme,
+            wetdep_scheme=jam_wetdep_scheme,
+            nucleation_activation=jam_nucleation_activation,
             arg_variant=jam_arg_variant,
+            activation_scheme=jam_activation_scheme,
+            nactivpdf=jam_nactivpdf,
             aqueous_scheme=jam_aqueous_scheme,
             incloud_impaction=jam_incloud_impaction,
+            below_cloud_lookup=jam_below_cloud_lookup,
             dust_preset=jam_dust_preset,
             dust_nudged=jam_dust_nudged,
             dust_nduscale_scale=jam_dust_nduscale_scale,

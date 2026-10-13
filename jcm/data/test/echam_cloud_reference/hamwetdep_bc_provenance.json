@@ -1,0 +1,29 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "routine": "mo_ham_wetdep.f90::bc_rain (963-1066), bc_snow (1069-1146), the indexy1/indexy2 index snippet (262-286); mo_ham_tools.f90::scavcoef_bilinterp (424-528); mo_ham_wetdep_data.f90 (whole file, unmodified) for the Croft tables",
+  "compiled_unmodified_source_md5": {
+   "mo_ham_wetdep_data.f90": "889c3906fe046fc28cbba513821f0dce",
+   "mo_ham_tools.f90": "945bdd8d59fdda02b5db3302a3c842e5",
+   "mo_ham_wetdep.f90": "51d92aab77491ab2840a57705e247311"
+  },
+  "extraction": "verbatim via sed line ranges into mo_bc_wrap.f90/mo_ham_tools.f90 (own fresh module headers/footers; declaration stubs mo_kind.f90/mo_exception.f90 are NOT copied from ECHAM) -- see mo_bc_wrap.f90's own header comment"
+ },
+ "configuration": {
+  "kscavBCtype": 3,
+  "zrad_fac": 1.0
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -ffp-contract=off -fimplicit-none",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "path": "/scr/dwatsonparris/ham-m7/w2/wetdep/harness/fortran_harness/echam_hamwetdep",
+  "commit": "HEAD",
+  "uncommitted_changes": true,
+  "repository": "private scratch harness (fortran_harness/echam_hamwetdep), not pushed"
+ },
+ "checks": {
+  "O0_vs_O2_max_abs": 0.0,
+  "n_cases": 96
+ }
+}

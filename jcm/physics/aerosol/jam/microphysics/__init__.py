@@ -26,6 +26,12 @@ from jcm.physics.aerosol.jam.microphysics.mam4_data import (
 from jcm.physics.aerosol.jam.microphysics.placeholder import (
     PlaceholderMicrophysics,
 )
+# After mam4_data/placeholder: m7_data.py pulls in emissions.dust and
+# ice_nucleation.ham_freezing, neither of which import this package, but
+# mam4_data must already be fully loaded first (dust.py reads MAM4_SPEC).
+from jcm.physics.aerosol.jam.microphysics.m7_data import (
+    M7_SPEC,
+)
 
 #: Cores deferred to first access: attribute name -> module that defines it.
 #: Listed here precisely because importing their module pulls an optional
@@ -38,6 +44,7 @@ __all__ = [
     "ModalMicrophysicsTerm",
     "PlaceholderMicrophysics",
     "MAM4_SPEC",
+    "M7_SPEC",
     *_LAZY_CORES,
 ]
 

@@ -1,0 +1,76 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "routines": {
+   "activ_updraft": "mo_activ.f90:75-152 (+ aero_activ_updraft_sigma 154-182, aero_activ_updraft_pdf 184-238)",
+   "activ_lin_leaitch": "mo_activ.f90:242-330",
+   "ham_activ_abdulrazzak_ghan": "mo_ham_activ.f90:65-375",
+   "ham_activ_koehler_ab": "mo_ham_activ.f90:463-594",
+   "ham_avail_activ_lin_leaitch": "mo_ham_activ.f90:606-732",
+   "ham_m7_logtail": "mo_ham_tools.f90:203-320",
+   "m7_cumulative_normal": "mo_ham_m7.f90:75-326"
+  },
+  "extraction_note": "Each routine's body above is copied byte-for-byte into this harness's own src/mo_activ.f90, mo_ham_activ.f90, mo_ham_tools.f90, mo_ham_m7.f90 (same module names), instead of compiling the four full original files, because the OTHER routines those files also contain (stream construction, geoindex, the daylength diagnostic, the full M7 microphysics core) pull in grid-decomposition and stream-registration modules unrelated to activation. See each extracted file's header comment.",
+  "compiled_unmodified": [
+   "mo_kind.f90"
+  ],
+  "md5": {
+   "mo_kind.f90": "f7db37634d715105ed356b1a260a85ac"
+  }
+ },
+ "stubs": "fortran_harness/echam_hamactiv/stubs/mo_ham_activ_stubs.f90 and mo_ham_streams_stub.f90: declarations only (M7 layout: modes nucs aits accs coas aiti acci coai, species SO4 BC OC SS DU, mo_ham_init membership; KS/AS/CS lactivation=.TRUE., mo_ham.f90 dod #377)",
+ "configuration": {
+  "nham_subm": "HAM_M7",
+  "ncd_activ": 2,
+  "nactivpdf": "0 (reference preset) and 1 (West et al. 2013 PDF, nw=20)",
+  "sigma_g": {
+   "nucs": 1.59,
+   "aits": 1.59,
+   "accs": 1.59,
+   "coas": 2.0,
+   "aiti": 1.59,
+   "acci": 1.59,
+   "coai": 2.0
+  },
+  "density_kg_m3": {
+   "so4": 1841.0,
+   "bc": 2000.0,
+   "oc": 2000.0,
+   "ss": 2165.0,
+   "du": 2650.0
+  },
+  "moleweight_g_mol": {
+   "so4": 96.0631,
+   "bc": 12.01,
+   "oc": 180.0,
+   "ss": 58.443,
+   "du": 250.0
+  },
+  "nion": {
+   "so4": 2,
+   "bc": 0,
+   "oc": 0,
+   "ss": 2,
+   "du": 0
+  },
+  "osm": {
+   "so4": 1.0,
+   "bc": 0.0,
+   "oc": 0.0,
+   "ss": 1.0,
+   "du": 0.0
+  }
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O2 -g -fbacktrace -cpp -ffree-line-length-none -ffp-contract=off -fimplicit-none",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "path": "/scr/dwatsonparris/ham-m7/w4/harness/fortran_harness/echam_hamactiv",
+  "commit": "ab8cb715d60b482d1bad83adbe6ddcd4eee3071b",
+  "uncommitted_changes": false,
+  "repository": "private scratch harness (fortran_harness/echam_hamactiv), not pushed"
+ },
+ "checks": {
+  "O0_vs_O2_max_abs": 0.0
+ }
+}

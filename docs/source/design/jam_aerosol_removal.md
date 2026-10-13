@@ -263,6 +263,233 @@ diffusion and therefore use its previous-step `kh` and friction velocity
 from the carry. The aerosol working population remains sequential within
 the current step; it does not change the provenance of those coefficients.
 
+(ham-below-cloud-scheme)=
+## The HAM below-cloud scheme (`ham_below_cloud`, #1017)
+
+`WetScavenging(scheme="ham_below_cloud")` swaps the STRATIFORM below-cloud
+pathway above for ECHAM-HAM r7492's own `nwetdep=3` scheme
+(`mo_ham_wetdep.f90::bc_rain`/`bc_snow`, `ham_below_cloud.py`): a bilinear
+lookup against Betty Croft's size-dependent rain and snow collection tables
+(`mo_ham_wetdep_data.f90`), rather than CAM's Slinn integral. Named
+`"ham_below_cloud"`, not `"ham"`, DELIBERATELY: with both in-cloud
+pathways now also in (nucleation below; impaction is the shared
+`incloud_impaction`), `"ham"` is the full `nwetdep=3` scheme and
+`"ham_below_cloud"` is kept as a genuinely
+narrower configuration — below-cloud only, implicit in-cloud treatment —
+for an ablation run that isolates the below-cloud change on its own. The
+convective below-cloud pathway above is unaffected by either selector (it
+already mirrors HAMMOZ's own convective form with the Slinn coefficient).
+
+**`pclc`.** HAM's removal acts only within the precipitating fraction of
+the box — `pxtp10·pclc·(1 − exp(−Δt·(sfrain+sfsnow)))`
+(`mo_ham_wetdep.f90:434-437`) — unlike CAM's form, whose swept-volume
+cancellation makes the cloud weighting a no-op (see `below_cloud_rate`'s
+docstring above). `pclc` traces to `mo_submodel_interface.f90`'s
+`pclcpre`, ECHAM's cumulative max-overlap precipitating-area recurrence,
+computed internally by the Lohmann 2M scheme but not previously published.
+Rather than add a field to `CloudData` — which would change the
+checkpoint pytree of every 2M composition and break restart from existing
+stamped checkpoints — the 2M scheme gained a static
+`configure_wetdep_hydro_diagnostics(bool)` flag that publishes the
+per-level recurrence as a plain `"precip_cover"` diagnostics key (plus
+`"pfrain"`/`"pfsnow"`) only when set; `echam_physics` sets it exactly when `jam_wetdep_scheme`
+selects a HAM pathway that needs them. The published value is the recurrence's POST-update
+state for the current level (`mo_cloud_micro_2m.f90:1719-1742`), i.e. the
+cover ECHAM itself passes into `cloud_subm_2` for that level.
+
+Checked against a compiled number: the existing 2M Fortran reference
+(`cloud2m_T63L47.npz`) already carries ECHAM's own `zclcpre` as
+`diag/<step>/clcpre`, and comparing against it
+(`lohmann_2m_fortran_reference_test.py::test_precip_cover_matches_echam_clcpre`)
+leaves out the cells whose ECHAM flux lies between `cqtmin` (1e-12) and jcm's
+1e-9 flux floor in `cloud_utils.gridbox_frac_falling_hydrometeor`, a
+documented differentiability choice: there jcm reads no cover
+(`icnc_diagnosis_zrid`'s ~6·10⁻¹¹ kg m⁻² s⁻¹ snow tail is the case). Given
+ECHAM's own flux, the recurrence reproduces `clcpre`. The remaining
+disagreements come from the flux jcm forms upstream (jax-gcm#1087,
+`precip_formation_warm`/`cold`). On `detrainment_mixed_lo2_false` jcm forms no
+rain from detrained supercooled liquid with CDNC on its floor, so its cover is
+0 where ECHAM's is 0.5 and the HAM below-cloud schemes scavenge nothing there.
+On `sediment_then_detrain` the snow formation is ~3.5 % low and the cover
+~0.2 %. The test is `xfail(strict=True)` on #1087.
+
+**Reference-harness findings.** A compiled-Fortran harness driving
+`bc_rain`/`bc_snow` end to end (wet radius → bin index → bilinear lookup →
+rate) over 96 designed cases caught two latent defects before they shipped:
+
+- The 50 µm wet-radius clip (`mo_ham_wetdep.f90:272`,
+  `MIN(rwet_p·zrad_fac, 50e-6)`) was missing from the initial port. Harmless
+  whenever the radius bin saturates at the table's last node, but
+  `caerorad`'s actual top node is 83.23 µm — well above the clip — so an
+  unclipped radius between the two extrapolated past the clamped value
+  instead of reading it.
+- `bc_rain`'s own data-filling loop assigns the bilinear interpolation's
+  two off-diagonal corners (`Q12`, `Q21`) the OPPOSITE of what
+  `scavcoef_bilinterp`'s formula needs for a textbook bilinear read (traced
+  by deriving the formula's corner roles directly from its `lint4`
+  branch). `bc_snow` is immune, since its X axis is always the dummy
+  `X1=X2=1`, which is why it alone did not surface this.
+
+The default lookup (`below_cloud_lookup="ham"`) corrects the corner order, as
+`incloud_impaction` does for `ic_scav_imp`'s identical swap, and a second
+r7492 defect: below ~0.0032 mm/h (8.8e-7 kg m⁻² s⁻¹) both rain-rate indices
+clip to the zero-rain node, whose rates are 0, so the removal drops to 0 instead
+of interpolating to the first node; the corrected pair is (0, 1). The aerosol
+pair is taken from the radius axis itself rather than from its nominal
+`2^(1/3)` spacing, which the four-digit table nodes miss by up to ~1e-4 of a
+bin, enough for a ~0.5 % jump next to a node. The rain and snow lookups are
+then the bilinear interpolants of the tables, clamped at 100 mm/h and 50 µm
+(`ham_below_cloud_test.py`). `below_cloud_lookup="ham_r7492"` keeps the
+compiled routine, which the 96-case harness reference is checked against.
+
+**`pfrain`/`pfsnow`.** `bc_rain`/`bc_snow` need the separate rain and snow
+carrier fluxes `update_precip_fluxes` computes every level (the in-cloud,
+cover-normalised, pre-evaporation flux) — and the 2M scheme already
+computes them internally, threaded to ECHAM's `cloud_subm_2` as
+`zfrain`/`zfsnow` (`mo_cloud_micro_2m.f90:1813`; `cloud_subm_2`'s own
+comment at `mo_submodel_interface.f90:1676-1677`, "rain/snow flux before
+evaporation", confirms the match). `configure_wetdep_hydro_diagnostics`
+threads them out alongside `precip_cover`, under the same static flag;
+`WetScavenging("ham_below_cloud")` reads them directly rather than
+deriving an approximation — an earlier version of this wiring split the
+stratiform carrier ledger by the in-cloud ice fraction as a proxy, which
+review correctly flagged as unnecessary once the exact quantity was
+located.
+
+(ham-nucleation-scavenging)=
+## HAM in-cloud nucleation scavenging (`ham`, #1017 follow-up A)
+
+`WetScavenging(scheme="ham")` additionally replaces the STRATIFORM
+in-cloud nucleation pathway above (the implicit activated-fraction
+treatment) with ECHAM-HAM's own aerosol-size-dependent `ic_scav_nuc`
+(`mo_ham_wetdep.f90:684-795`, `jcm.physics.aerosol.jam.wetdep.ham_nucleation`)
+for the three M7 soluble activating modes (KS/AS/CS; `ic_scav_nuc` itself
+zeroes every other mode, `mo_ham_wetdep.f90:707-710` — it is M7-specific by
+construction, "made unuseable if an alternate aerosol microphysics scheme
+is used", per the reference's own comment). See the next section for its
+combination with in-cloud impaction and the below-cloud section above for
+why `"ham_below_cloud"` is kept as a separate, narrower selector.
+
+Because `ic_scav_nuc`'s KS/AS/CS gate is M7-specific by construction,
+`WetScavenging(scheme="ham")` raises at construction (not at call time)
+for a population lacking all three modes — including the documented
+default `jam_microphysics="placeholder"` (MAM4) — rather than silently
+running with the in-cloud nucleation pathway permanently off.
+`"ham_below_cloud"` has no such requirement: its Croft tables key off mode
+radius/`geom_std_dev` only, never mode identity, so it accepts any
+population.
+
+**The formula.** `ic_scav_nuc` INVERTS the mode's own lognormal tail at a
+critical radius that reproduces the ACTUAL in-cloud droplet/crystal number
+this step (`ham_m7_invertlogtail`, a closed-form inverse-erf
+approximation — new code, since `ham_logtail`/the forward normal CDF it
+also needs are already ported in `ham_activation.py`), then reads the SAME
+tail forward for the tracer in question (number with `mass_factor=1`,
+mass with `mass_factor=cmedr2mmedr` — the identical `ham_logtail` two-call
+pattern `HamActivation`'s own ARG branch already uses to turn a number
+tail into a mass one).
+
+**Inputs.** `ic_scav_nuc` reads `pxtp1c_sav`: the in-cloud CDNC, ICNC and
+KS/AS/CS number after the cloud microphysics, weighted by the cover
+(`mo_ham_wetdep.f90:518, 560-562`). jcm reads them from the operator-split
+working copy (`removal_split.split_view`: the step-start tracers advanced by
+the tendencies of every term already run this step, the 2M microphysics
+included), times `clouds.cloud_fraction`. The step-start `state.tracers` would
+be the pre-microphysics values.
+
+**Removal.** The two phases are scavenged apart, as in the implicit `"jcm"`
+treatment and `ham_wetdep`: the in-cloud aerosol is split by the condensate's
+ice share `p_ice`, and each part is removed at its own phase's fraction and
+conversion, `cf·[(1 − p_ice)·F_w·f_wat + p_ice·F_i·f_ice]` per step, with
+`F_w`/`F_i` the per-phase in-cloud fractions below (`ic_scav`'s
+`pxt·pfrac·peff`).
+
+**Water phase.** The critical-radius inversion's target is `1 -
+2·clip(cdnc_incloud·ρ·frac(kmod)/na, 0, 1)` (`mo_ham_wetdep.f90:749-755`):
+`na` and `frac(kmod)` are read EXACTLY as HAM's own `ham_activ_diag_
+abdulrazzak_ghan_strat` publishes them for ARG (`na` = the SAME sum over
+activating modes as `activated_cdnc`; `frac(kmod)` = the SAME per-mode
+fraction as `_jam_activation.number_frac[kmod]`, confirmed identical by
+tracing both to the one Fortran routine that sets them,
+`mo_ham_activ.f90:409-416`) — this scheme reads those two diagnostics
+directly for `nucleation_activation="ham_arg"`. Lin & Leaitch publishes a
+DIFFERENT `na`/`frac(kmod)` from the same routine family
+(`ham_avail_activ_lin_leaitch`, `mo_ham_activ.f90:606-732`) that
+`HamActivation`'s own published `number_frac` does NOT equal (that term's
+Lin & Leaitch `number_frac` additionally scales by `cdncact/na` for its
+OWN consumer, the cloud-borne exchange term — a different contract);
+`nucleation_activation="ham_lin_leaitch"` recomputes the raw `na`/`frac`
+instead, reusing `ham_logtail`/`LL_CRCUT_STRAT` (the shared primitives,
+not a re-port). Lin & Leaitch activates number only; that term's
+`mass_frac` takes the activated particles as each mode's largest, as
+`ic_scav_nuc` does: the mass tail beyond the radius whose number tail is
+its `number_frac`.
+
+`WetScavenging`'s own `nucleation_activation` just names which diagnostics
+to read; it does not know which activation TERM actually published them.
+`jam_aerosol_physics`'s `activation_scheme` selector is what composes that
+term (`ArgActivation` for `"arg"`, `HamActivation` for `"ham_arg"`/
+`"ham_lin_leaitch"`), so for `wetdep_scheme="ham"` the two selectors must
+agree: `nucleation_activation=None` (`jam_aerosol_physics`'s default)
+derives it from `activation_scheme`, and an explicit value mismatching
+`activation_scheme` raises. `activation_scheme="arg"` (CAM's own ARG, the
+factory default) has no `ncd_activ` analogue at all and so cannot pair
+with `wetdep_scheme="ham"` either way.
+
+**Ice phase.** No activation-term coupling at all — a pure M7 size-ordered
+depletion of ICNC against the three modes' own NUMBER tracers
+(`mo_ham_wetdep.f90:757-778`): CS (coarse) is assumed to use up ICNC
+first, then AS the remainder, then KS what is left — three literal
+`IF (kmod == ...)` branches in the reference, not a general recurrence,
+ported the same way.
+
+The default `"jcm"` treatment and `CloudBorneExchange` apply the same
+one-particle-per-crystal rule (`wetdep_term.ice_phase_fractions`, generalised
+to any population's activating modes), with the mass share in its exact
+closed form, `Φ(Φ⁻¹(f_n) + 3 ln σ)`. This scheme keeps HAM's own numerics
+instead, the approximate inverse error function of `ham_m7_invertlogtail`,
+because it is the configuration compared with compiled HAM. The two forms
+differ by up to 1.6·10⁻⁴ in the number share and 2.5·10⁻³ in the mass share.
+
+**Validation.** Two compiled references, not one. `ham_m7_invertlogtail` —
+the one genuinely new piece of math — is checked standalone against the
+compiled, unmodified routine on 33 designed cases spanning its small/mid/
+huge-tail branches and both M7 sigmas, exactly (float64 round-off, 1.6e-16;
+float32 1.8e-3 at the single most extreme case). The surrounding chain —
+the UNMODIFIED `ic_scav -> get_icscavfrac -> ic_scav_nuc` itself, plus
+`ham_m7_logtail` and the normal CDF it calls, all compiled together — is
+checked separately on 19 designed M7 columns (liquid-only/ice-only/mixed-
+phase; cdnc/icnc and na on both sides of their gates; KS/AS/CS emptied in
+turn; ARG and Lin & Leaitch radius selection; the huge-tail clip), matching
+jcm's `water_phase_xie`/`ice_phase_xie`/`nucleation_scavenged_fraction`
+exactly (float64, measured max relative error 0.0 — not merely within
+tolerance) in `ham_nucleation_test.py::test_full_chain_matches_compiled_
+icscavnuc_reference`, against `jcm/data/test/echam_cloud_reference/
+icscavnuc.npz`.
+
+(ham-impaction-scavenging)=
+## In-cloud impaction under `scheme="ham"`
+
+`ic_scav_imp` is not ported a second time for this scheme: `WetScavenging`
+reads the one lookup every scheme uses (`wetdep.incloud_impaction`, selected
+by `incloud_impaction`; see the science page's in-cloud impaction section for
+its tables, inputs and the three r7492 lookup defects its default corrects).
+Under `scheme="ham"` the per-phase in-cloud fraction is `get_icscavfrac`'s
+combination, the nucleation fraction plus the impaction fraction capped at one
+(`mo_ham_wetdep.f90:673-679`): `F_w = min(1, f_nuc,w + F_imp,w)`, and likewise
+for ice. Impaction has no activating-mode gate, so every M7 mode, insoluble ones
+included, is collected; only KS/AS/CS add a nucleation fraction.
+
+**Validation.** A compiled harness of the unmodified r7492 `ic_scav ->
+get_icscavfrac -> {ic_scav_nuc, ic_scav_imp}` chain, with `scavcoef_bilinterp`
+and the real `mo_ham_wetdep_data.f90`, on 27 designed M7 columns (the 19
+nucleation cases plus 8 targeting the droplet node 6, the three plate-index
+regimes and the `ICNC < ε` gate), records `pfrac_nuc`, `pfrac_imp` and the
+combined `pfrac` (`jcm/data/test/echam_cloud_reference/icscavimp.npz`).
+`ham_nucleation`'s fractions with `incloud_impaction`'s `ham_r7492` variant
+reproduce all 54 rows to rtol 1e-12
+(`incloud_impaction_test.py::test_r7492_variant_reproduces_the_compiled_get_icscavfrac_chain`).
+
 ## Known gaps
 
 - Ice-sedimentation flux reaching the surface as snow carries no aerosol
@@ -270,3 +497,11 @@ the current step; it does not change the provenance of those coefficients.
   aerosol scavenging either.
 - Dry deposition uses a neutral log-law aerodynamic resistance; a
   Monin-Obukhov stability correction awaits a usable surface `L`.
+- `ham_below_cloud` ports only the below-cloud pathway (a deliberate,
+  narrower ablation configuration, not an in-progress one — see that
+  section above); `"ham"` with the default `incloud_impaction` is the full
+  `nwetdep=3` scheme.
+- The 2M scheme's rain and snow formation differs from ECHAM's on two
+  synthetic test columns (jax-gcm#1087). The `precip_cover` the HAM
+  below-cloud schemes read inherits it: in one column it is 0 where ECHAM's
+  `clcpre` is 0.5, so the removal is missed there.

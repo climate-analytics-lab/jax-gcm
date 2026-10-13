@@ -1547,6 +1547,17 @@ class Echam1MMicrophysics(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = (
         "autoconv", "accretn", "wbf", "clouds",
     )
+    # ``"convection"``: same-step (this term runs after ``TiedtkeConvection``
+    # in the default order) and composition-optional — the re-typing it
+    # amends is a no-op without a convection term (class docstring).
+    # ``"pressure_thickness"``: same-step, published by
+    # ``MoistAirColumnState`` (the first term, every step); read via
+    # ``.get()`` only so this term also composes against a host that
+    # supplies the moist-air diagnostics under a different mechanism
+    # (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = (
+        "convection", "pressure_thickness",
+    )
     # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
     # the cover term; this term fills the precip/process-rate fields.
     output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS

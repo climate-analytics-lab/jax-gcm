@@ -806,6 +806,54 @@ class TestRadiationEffectiveRadii:
         assert float(jnp.max(r_rad)) == 0.0
         assert bool(jnp.all(r_diag > 0.0))
 
+    def test_cloud_fraction_raw_gives_the_in_cloud_condensate_a_live_derivative(self):
+        """``cloud_fraction_raw`` (#973) reaches the condensate FEEDING the
+        effective-radius law.
+
+        Review finding on this PR: the mask-gradient fix originally only
+        reached the radiation term's own in-cloud condensate/cover, not
+        ``radiation_effective_radii`` -- it still called the plain, zero-
+        derivative-at-the-mask ``in_cloud_condensate`` internally, even when
+        the caller had the raw cover in hand. Passing it through
+        ``cloud_fraction_raw`` fixes that for the IN-CLOUD CONDENSATE
+        (``cw_in``/``ci_in``) the law is built from, checked here directly.
+
+        It does NOT reach the FINAL radius ``echam_cloud_effective_radii``
+        returns: that function's own ``jnp.where(cloud_water_in_cloud > 0,
+        ..., 0)`` guard is not a stylistic zero -- the Martin et al. (1994)
+        law it guards is a cube root of the water content, whose derivative
+        is genuinely infinite at exactly 0 (the "singular-point case"
+        ``docs/source/design/surrogate_gradients.md`` names for square
+        roots; a cube root has the same ``x**(-2/3)`` blow-up). Bypassing
+        the guard would trade a zero derivative for a NaN/Inf one -- worse,
+        not better -- so closing that specific gap needs its own smoothed
+        surrogate of the cube root, not a bypass; tracked as a further
+        instance of the same "downstream hard gate blocks an upstream
+        surrogate" class as jax-gcm#1093, not attempted here.
+        """
+        from jcm.physics.clouds.cloud_data import condensate_masked_cover
+        from jcm.physics.radiation.mcica import (
+            in_cloud_condensate, in_cloud_condensate_with_mask_gradient)
+
+        cf = jnp.array(0.5)
+        qi = jnp.array(0.0)
+
+        def cw_in(qc, with_raw):
+            masked = condensate_masked_cover(cf, qc, qi)
+            if with_raw:
+                return in_cloud_condensate_with_mask_gradient(
+                    qc, masked, cf, eps=1.0e-3)
+            return in_cloud_condensate(qc, masked, eps=1.0e-3)
+
+        v_omitted = cw_in(jnp.float32(0.0), False)
+        v_passed = cw_in(jnp.float32(0.0), True)
+        np.testing.assert_allclose(np.asarray(v_omitted), np.asarray(v_passed))
+
+        grad_omitted = jax.grad(lambda q: cw_in(q, False))(jnp.float32(0.0))
+        grad_passed = jax.grad(lambda q: cw_in(q, True))(jnp.float32(0.0))
+        assert float(grad_omitted) == 0.0
+        assert float(grad_passed) == pytest.approx(1.0 / 0.5)
+
     @pytest.mark.parametrize("prognostic", [False, True], ids=["1m", "2m"])
     def test_gradients_are_live_in_both_modes(self, prognostic):
         """Both AD modes match a difference, and every physical input is live.

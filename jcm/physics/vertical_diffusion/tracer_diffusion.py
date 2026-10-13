@@ -125,6 +125,12 @@ class TracerVerticalDiffusion(PhysicsTerm):
         "air_density", "layer_thickness",
     )
     provides: ClassVar[tuple[str, ...]] = ()
+    # ``"vertical_diffusion"``: a DELIBERATE cross-step read, documented in
+    # the module docstring above ("Default ECHAM tracer transport precedes
+    # vertical diffusion, so it reads the previous step's kh profile from
+    # the carry") — this term runs upstream of ``TteTkeVerticalDiffusion``
+    # in the default ``echam_physics`` order (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = ("vertical_diffusion",)
 
     def __init__(
         self,

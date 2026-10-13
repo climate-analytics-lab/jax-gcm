@@ -1,0 +1,35 @@
+{
+ "echam": {
+  "source": "/data/dwatsonparris/echam6.3.0-ham2.3-moz1.0.r7492/src",
+  "routines": [
+   "mo_ham_wetdep.f90::get_icscavfrac (560-681)",
+   "mo_ham_wetdep.f90::ic_scav_nuc (684-795)",
+   "mo_ham_wetdep.f90::ic_scav_imp (798-960)",
+   "mo_ham_wetdep.f90:262-286 (mr/indexy1/indexy2, wrapped fresh as compute_indexy_mr)",
+   "mo_ham_tools.f90::ham_m7_logtail (203-320)",
+   "mo_ham_tools.f90::ham_m7_invertlogtail (325-419)",
+   "mo_ham_tools.f90::scavcoef_bilinterp (424-528)",
+   "mo_ham_m7.f90::m7_cumulative_normal (75-326)"
+  ],
+  "compiled_unmodified_source_md5": {
+   "mo_ham_wetdep.f90": "51d92aab77491ab2840a57705e247311",
+   "mo_ham_tools.f90": "945bdd8d59fdda02b5db3302a3c842e5",
+   "mo_ham_m7.f90": "e402e3cabf9a975575c1323e92867e11",
+   "mo_ham_wetdep_data.f90": "889c3906fe046fc28cbba513821f0dce"
+  },
+  "extraction": "verbatim via sed line ranges into mo_ham_wetdep_wrap.f90's own fresh module header/footer. ic_scav_imp itself required ZERO structural edits (its three USE lines resolve against genuinely separate compiled modules: the REAL, complete mo_ham_wetdep_data.f90, mo_activ's reffl/reffi stub, and mo_ham_tools.f90's scavcoef_bilinterp, reused unmodified from the already-accepted below-cloud harness, fortran_harness/echam_hamwetdep). Every declarations-only module (mo_ham, mo_ham_streams, mo_activ, mo_ham_m7_trac, mo_param_switches, mo_tracdef, mo_exception, mo_ham_m7ctl, mo_time_control) is a fresh own-written stub, NOT copied from ECHAM."
+ },
+ "compiler": "GNU Fortran (Ubuntu 11.3.0-1ubuntu1~22.04.1) 11.3.0",
+ "fflags": "-O0/-O2 -ffree-line-length-none -J. -I.",
+ "host": "Linux-5.15.0-72-generic-x86_64-with-glibc2.35",
+ "harness": {
+  "path": "/scr/dwatsonparris/ham-m7/w2/imp/harness/fortran_harness/echam_icscavimp",
+  "repository": "private scratch harness, not pushed"
+ },
+ "checks": {
+  "O0_vs_O2_max_abs": 0.0,
+  "n_cases": 27,
+  "n_rows": 54,
+  "note": "O0/O2 byte-identical CSVs confirmed before this script ran (assert above)"
+ }
+}

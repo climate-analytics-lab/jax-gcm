@@ -174,6 +174,15 @@ class PrescribedOxidants(PhysicsTerm):
     category: ClassVar[str] = "aerosol_oxidants"
     requires: ClassVar[tuple[str, ...]] = ("pressure_full",)
     provides: ClassVar[tuple[str, ...]] = ("oxidants",)
+    # ``"chemistry"`` (real O3) and ``"radiation"`` (real cos(SZA)) are read
+    # OPTIONALLY (module docstring): this term runs before both in the
+    # default ``echam_physics`` order, so when they ARE present the value
+    # is last step's, which is fine for a slowly-varying climatological
+    # input; when a composition carries neither (or on the first step) the
+    # ``o3_fallback_vmr``/``cos_zenith_fallback`` params take over. Both
+    # patterns (cross-step lag and composition-optional) are deliberate,
+    # not an accidental stale read (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = ("chemistry", "radiation")
 
     def __init__(self, params: OxidantParameters | None = None):
         """Hold the (differentiable) oxidant scales."""

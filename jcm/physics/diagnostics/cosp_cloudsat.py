@@ -306,6 +306,14 @@ class CloudsatCosp(PhysicsTerm):
         # enable_isccp; jax-gcm#1079).
         "cosp_sunlit",
     )
+    # All three same-step: this term runs downstream of the microphysics,
+    # convection, radiation and surface terms (class docstring), so
+    # ``"radiation"``, ``"surface"`` and ``"thermo_run"`` are always fresh
+    # when present; read via ``.get()`` only so this diagnostic also
+    # composes without one of them (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = (
+        "radiation", "surface", "thermo_run",
+    )
 
     def __init__(self, ncolumns: int = 40, overlap: int = 3, seed: int = 0,
                  lut_path=None, enable_calipso: bool = False,
