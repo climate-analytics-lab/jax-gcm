@@ -83,12 +83,15 @@ jam_dust_nduscale_scale: 1.0
 # Wet deposition: the template's nwetdep=3, HAM's size-dependent in-cloud
 # nucleation (ic_scav_nuc, ARG critical radius to match ncd_activ=2) and
 # impaction (ic_scav_imp) scavenging plus the Croft below-cloud tables.
-# Impaction is the shared jam_incloud_impaction lookup; its default "ham"
-# corrects r7492's three lookup defects (cdroprad(6) = 30 um by maintainer
-# decision 2026-10-06, the swapped corners, the plate index above 50 um), and
-# jam_incloud_impaction=ham_r7492 reproduces r7492.
 jam_wetdep_scheme: ham
 jam_nucleation_activation: ham_arg
+# The impaction and below-cloud lookups: "ham" corrects r7492's lookup
+# defects (impaction: cdroprad(6) = 30 um by maintainer decision 2026-10-06,
+# the swapped corners, the plate index above 50 um, the aerosol-radius
+# bracket; below-cloud: the swapped corners, the zero rate below 0.0032 mm/h,
+# the aerosol-radius bracket); "ham_r7492" reproduces r7492.
+jam_incloud_impaction: ham
+jam_below_cloud_lookup: ham
 
 # Cirrus: nic_cirrus=2 (setphys.f90), Kaercher-Lohmann homogeneous
 # nucleation limited by the M7 soluble aerosol number available for freezing.

@@ -47,12 +47,16 @@ The preset runs ARG over the West et al. (2013) 20-bin updraft PDF
 
 Three further settings are deliberate, each recorded where it is set:
 
-- **The r7492 impaction-lookup defects are corrected.** The preset's in-cloud
+- **The r7492 lookup defects are corrected.** The preset's in-cloud
   impaction is the shared `incloud_impaction` lookup with its default `ham`
   variant, which corrects `cdroprad(6)` (0.0 where the 5 µm spacing implies
-  30 µm; maintainer decision 2026-10-06), the swapped interpolation corners
-  and the plate index above 50 µm. `jam_incloud_impaction=ham_r7492`
-  reproduces r7492 for like-for-like comparisons.
+  30 µm; maintainer decision 2026-10-06), the swapped interpolation corners,
+  the plate index above 50 µm and the aerosol-radius bracket. Its Croft
+  below-cloud lookup is `below_cloud_lookup`'s `ham`, the bilinear interpolant
+  of the tables (r7492 swaps the corners, removes nothing below 0.0032 mm/h
+  and mis-brackets the aerosol radius). `jam_incloud_impaction=ham_r7492` and
+  `jam_below_cloud_lookup=ham_r7492` reproduce r7492 for like-for-like
+  comparisons.
 - **Sea salt unscaled.** The harness default `SEASALT_SCALE_DEFAULT` is a T63L47
   AOD calibration of the Gong source for the MAM4 population; the preset runs
   HAM's Long source at scale 1, as ECHAM-HAM does.

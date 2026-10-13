@@ -394,6 +394,7 @@ class TestConfigurationsAcceptance(unittest.TestCase):
         wet = term("jam_wet_deposition")
         self.assertEqual(wet.scheme, "ham")
         self.assertEqual(wet._incloud_impaction, "ham")
+        self.assertEqual(wet._below_cloud_lookup, "ham")
         cloud = next(t for t in physics.terms
                      if hasattr(t, "params")
                      and hasattr(t.params.get_value(), "nic_cirrus"))
