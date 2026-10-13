@@ -182,8 +182,12 @@ dependency parity:
 
 .. code-block:: console
 
+   $ pip install -r tools/ci/extras_preinstall.txt
    $ pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
    $ JCM_REQUIRE_EXTRAS=1 pytest -rs -m requires_extra
+
+The first line installs the extras' dependencies that are not on PyPI, which
+``pyproject.toml`` names without a URL so the jcm wheel stays publishable.
 
 The workflow is triggered by pull requests, and by pushes to ``main`` and
 ``dev`` only. A branch with no open pull request gets no CI at all, so run the
