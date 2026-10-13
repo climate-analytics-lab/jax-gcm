@@ -720,6 +720,58 @@ class CloudBorneExchangeTest(unittest.TestCase):
                 g_trace, g_normal, rtol=1e-4,
                 err_msg=f"gradient drifted at q_cb={q_cb:.0e}")
 
+    def test_grad_stays_finite_when_both_phase_terms_are_independently_tiny(self):
+        # #1070 (Codex review finding, fourth round): ``retained`` can be
+        # astronomically small even when neither ``q_cb_arr`` nor ``target``
+        # is -- ``share`` and ``r_liq`` can EACH independently be a tiny
+        # float32 value whose PRODUCT underflows further still (ice fully
+        # releases, share is pinned tiny by a near-zero activation mass
+        # fraction with no crystal number to fall back on, and liquid
+        # releases nearly but not quite completely). An exact
+        # ``retained <= 0`` guard does not catch this: retained is positive,
+        # just far below where dividing by it -- or its VJP's squared
+        # denominator -- stays representable in float32.
+        from jcm.physics.aerosol.jam.activation.arg_term import JamActivationData
+        from jcm.physics.aerosol.jam import MAM4_SPEC
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+
+        def f(e_liq):
+            state, diagnostics = self._mixed_phase_setup(
+                q_cb=1.0e-9, pool_liq=self._MIXED_POOL,
+                pool_ice=self._MIXED_POOL, qni=1.0e-30,
+            )
+            shape = state.temperature.shape
+            n_modes = MAM4_SPEC.n_modes()
+            can = jnp.asarray(
+                [float(m.can_activate) for m in MAM4_SPEC.modes]
+            ).reshape(-1, 1, 1)
+            per_mode = can / (1.0 + jnp.arange(n_modes).reshape(-1, 1, 1))
+            # A near-zero ARG mass fraction with (via qni ~ 0) no crystals
+            # to hold any ice-phase share either pins the pre-transfer
+            # ``share`` itself to a tiny value.
+            diagnostics["_jam_activation"] = JamActivationData(
+                number_frac=per_mode * jnp.full((n_modes,) + shape, 0.3),
+                mass_frac=per_mode * jnp.full((n_modes,) + shape, 1.0e-16),
+            )
+            diagnostics["clouds"].condensate_evaporation_ice_rate = (
+                jnp.full(shape, 1.0e15 / 1800.0)  # ice fully releases
+            )
+            diagnostics["clouds"].condensate_evaporation_liquid_rate = (
+                jnp.full(shape, e_liq / 1800.0)
+            )
+            _, out = CloudBorneExchange()(state, diagnostics, None, None)
+            nm = mass_name("so4", "acc", cloud_borne=True)
+            return jnp.mean(out[LIQUID_SHARE_KEY][nm])
+
+        # e_liq tuned so the liquid pool is ~99.99998% (not quite 100%)
+        # released -- the residual ``r_liq`` is itself a tiny float32 value.
+        pool_liq_gm = 0.5 * self._MIXED_POOL
+        e_liq = pool_liq_gm * (1.0 / 1.2e-7 - 1.0)
+        value = f(jnp.asarray(e_liq))
+        g = jax.grad(f)(jnp.asarray(e_liq))
+        self.assertTrue(np.isfinite(float(value)))
+        self.assertTrue(np.isfinite(float(g)), f"non-finite gradient: {g}")
+
     # ----- Phase split: HAM's aerosol-in-ice rule ---------------------
 
     def _ice_setup(self, *, pice=1.0, qni=0.0, q_cb=0.0, n_cb=0.0):

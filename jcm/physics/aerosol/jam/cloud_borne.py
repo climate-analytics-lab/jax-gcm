@@ -494,20 +494,47 @@ class CloudBorneExchange(PhysicsTerm):
         # 0 only when both phi_eff are exactly 1 (both phases fully
         # release), and otherwise exactly represents a real, well-defined
         # composition — including a small one. A 1e-6 RELATIVE cutoff here
-        # (Codex review of this PR) wrongly discarded exactly that case: a
-        # phase that releases completely (its own ``r`` term is exactly 0)
-        # alongside a phase that releases 99.9999% but not quite all of it
-        # (``r`` ~ 1e-6, small but exact, not noise) gives a `retained`
-        # small enough to trip a 1e-6 threshold while ``share * r_liq``
-        # is UNAMBIGUOUSLY 0 — publishing the stale mixed ``share`` there
-        # claims aerosol is still droplet-held when none is. Guard only
-        # the genuine 0/0 (both exactly 1) with an exact comparison.
-        negligible = retained <= 0.0
+        # (Codex review of this PR, round 1) wrongly discarded exactly that
+        # case: a phase that releases completely (its own ``r`` term is
+        # exactly 0) alongside a phase that releases 99.9999% but not quite
+        # all of it (``r`` ~ 1e-6, small but exact, not noise) gave a
+        # ``retained`` small enough to trip a 1e-6 threshold while
+        # ``share * r_liq`` was UNAMBIGUOUSLY 0.
+        #
+        # An EXACT ``retained <= 0.0`` guard (the first fix) is not enough
+        # either: ``share`` and ``r_liq`` can EACH independently be a tiny
+        # positive float32 value (e.g. a near-fully-ice-held pair whose
+        # liquid-held share nearly, but not quite, fully evaporates), whose
+        # PRODUCT is smaller than either alone — round 2 of Codex review
+        # measured ``retained`` as small as ~1e-22 this way without ever
+        # hitting literal 0. Differentiating a division by a denominator
+        # that small hits JAX's ``d(a/b)/db ∝ -a/b²``, and ``b²`` (~1e-44)
+        # underflows float32 (min positive normal ~1.18e-38) well before
+        # ``b`` itself reads as zero — NaN/Inf gradients into wet
+        # deposition and aqueous chemistry.
+        #
+        # The guard below (``1e-12``) sits with wide margin on both sides:
+        # above it, the LIVE division's denominator is never smaller than
+        # 1e-12, whose square (~1e-24) stays safely representable, so no
+        # VJP through it can underflow; below it, it is still ~5 orders of
+        # magnitude above the largest "small but exact, not noise" retained
+        # fraction either Codex round actually constructed (~1e-6), so it
+        # cannot resurrect the round-1 bug. A pair genuinely retaining less
+        # than 1e-12 of itself is, for any physical purpose, empty — falling
+        # back to the stale ``share`` there is harmless because there is
+        # nothing left to mischaracterize. ``jnp.where`` guards BOTH the
+        # numerator and the denominator the LIVE branch sees (not only the
+        # denominator, as the round-2 fix did) — the standard double-where
+        # hardening (#558): masking only one operand still differentiates
+        # the OTHER, unmasked one in the branch JAX computes but discards,
+        # which is exactly how round 2's denominator-only mask still let a
+        # live, unmasked ``share * r_liq`` numerator chase a live,
+        # underflowing denominator through the "selected-away" branch.
+        negligible = retained <= 1.0e-12
+        safe_retained = jnp.where(negligible, 1.0, retained)
+        safe_numerator = jnp.where(negligible, 0.0, share * r_liq)
         share_after = jnp.where(
-            negligible,
-            share,
-            share * r_liq / jnp.where(negligible, 1.0, retained),
-        )
+            negligible, share, safe_numerator / safe_retained)
 
         # Cloud-borne side to the active store (carry mode integrates it
         # now, sequentially); interstitial side through the ordinary
