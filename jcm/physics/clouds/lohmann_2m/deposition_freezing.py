@@ -358,13 +358,23 @@ def mixed_phase_deposition_and_corrections(
     # ICNC-limited depositional growth can consume it, and the latent-
     # heat spike when the state finally collapses NaN'd the coupled
     # T63L47 runs three times (days 30/90/110). Rides the deposition
-    # ledger, so water/enthalpy bookkeeping is exact by construction. The
-    # excess is taken from the pre-increment humidity, so it also removes
-    # what the branch above already deposited (#963).
+    # ledger, so water/enthalpy bookkeeping is exact by construction.
+    #
+    # The excess must be evaluated AFTER the branch-A/B/C increment above
+    # is removed from the parcel, not from the same pre-increment
+    # `specific_humidity_tmp` the branch itself used (#963): branch A
+    # already brings S_ice down to ~1.01 on its own, so testing the
+    # pre-increment humidity against S_crit double-removes that
+    # increment's vapor and can dry the cell well below ice saturation
+    # (measured: S_ice 0.43 instead of ~1.01 on the 190.2 K/S_ice=2.2
+    # column in #963). `post_branch_q` is ECHAM's q_tmp minus what the
+    # branch already deposited this step; only the amount still above
+    # S_crit after that is this floor's to take.
+    post_branch_q = specific_humidity_tmp - dep_increment
     scrit_koop = 2.349 - temperature_tmp / 259.0
     koop_excess = jnp.where(
         jnp.logical_and(lo2, temperature_tmp < params.cthomi),
-        jnp.maximum(specific_humidity_tmp - scrit_koop * qsat_tmp, 0.0),
+        jnp.maximum(post_branch_q - scrit_koop * qsat_tmp, 0.0),
         0.0,
     )
     deposition_rate = deposition_rate + koop_excess

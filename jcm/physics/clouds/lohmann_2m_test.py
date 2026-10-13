@@ -1963,11 +1963,23 @@ class TestColumnWaterConservation2M:
         it, ending in a latent-heat NaN near day 110. Homogeneous
         nucleation physics forbids that state: above S_crit(T) =
         2.349 - T/259 (Koop et al. 2000), solution droplets freeze in
-        seconds. One microphysics step must bring S_ice at 190 K from
-        1.74 to at/below the threshold, with bounded latent heating. With
-        ``nic_cirrus = 1`` the ECHAM deposition branch alone already brings
-        it to ~1.01, so this checks the outcome rather than the floor, which
-        over-deposits to ~0.89 (#963).
+        seconds. One microphysics step must bring S_ice at 190 K down
+        towards the threshold, with bounded latent heating.
+
+        This also bounds S_ice from BELOW (#963): the floor must remove
+        only the vapor the branch-A/B/C deposition increment itself left
+        above S_crit, not re-test the pre-increment humidity and remove
+        that increment's vapor a second time. The upper-bound-only version
+        of this test passed even with the double-counting bug, because the
+        ECHAM deposition branch alone already pulls S_ice down near 1.0
+        (below ``scrit + 0.02``) -- it never caught the floor over-drying
+        the cell on top of that. The three cases below reproduce #963's
+        table (``nic_cirrus=1`` at S_ice 1.74 and 2.2, and ``nic_cirrus=2``
+        at S_ice 2.2); ``expected_s_after`` is the issue's "without floor"
+        column -- what the branch increment alone reaches once the floor
+        stops double-removing it -- and the buggy pre-fix formula instead
+        landed at 0.887 / 0.429 / 0.718 respectively, well outside the
+        tolerance below.
         """
         import numpy as np
         from jcm.physics import thermodynamics
@@ -1978,24 +1990,48 @@ class TestColumnWaterConservation2M:
         T = jnp.full(nlev, 190.2)
         p = jnp.linspace(3000.0, 4500.0, nlev)
         rho = p / (287.0 * T)
-        # The scheme's own ice saturation (ECHAM's ``ua`` table), so the
-        # start really is at S_ice = 1.74, above the 1.615 threshold.
+        # The scheme's own ice saturation (ECHAM's ``ua`` table).
         qsi = np.asarray(thermodynamics.saturation_specific_humidity(T, p))
-        q = jnp.asarray(1.74 * qsi)
         qi = jnp.full(nlev, 1.5e-4)
-        tend, _, _, *_ = cloud_microphysics_2m(
-            T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), jnp.zeros(nlev),
-            jnp.full(nlev, 0.287), rho,
-            jnp.full(nlev, 800.0), jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
-            jnp.zeros(nlev), jnp.zeros(nlev), 720.0, CloudParams2M.default(),
-        )
-        s_after = (np.asarray(q) + 720.0 * np.asarray(tend.dqdt)) / qsi
         scrit = 2.349 - 190.2 / 259.0
-        assert float(np.max(s_after)) <= scrit + 0.02, (
-            f"S_ice {s_after} not pulled to the Koop threshold {scrit:.3f}"
-        )
-        # Latent heating from the burst stays small (q is tiny at 190 K).
-        assert float(np.max(np.abs(720.0 * np.asarray(tend.dtedt)))) < 1.0
+
+        def run(s_start, nic_cirrus):
+            q = jnp.asarray(s_start * qsi)
+            params = CloudParams2M.default(nic_cirrus=nic_cirrus)
+            tend, _, _, *_ = cloud_microphysics_2m(
+                T, q, p, jnp.zeros(nlev), qi, jnp.zeros(nlev), jnp.zeros(nlev),
+                jnp.full(nlev, 0.287), rho,
+                jnp.full(nlev, 800.0), jnp.full(nlev, 0.1), jnp.full(nlev, 5e7),
+                jnp.zeros(nlev), jnp.zeros(nlev), 720.0, params,
+            )
+            s_after = (np.asarray(q) + 720.0 * np.asarray(tend.dqdt)) / qsi
+            return s_after, tend
+
+        # (start S_ice, nic_cirrus, expected S_ice after [issue's "without
+        # floor" column], absolute tolerance).
+        cases = [
+            (1.74, 1, 1.012, 0.05),
+            (2.2, 1, 1.014, 0.05),
+            (2.2, 2, 1.303, 0.05),
+        ]
+        for s_start, nic_cirrus, expected, tol in cases:
+            s_after, tend = run(s_start, nic_cirrus)
+            s_after_max = float(np.max(s_after))
+            assert s_after_max <= scrit + 0.02, (
+                f"nic_cirrus={nic_cirrus}, S_ice0={s_start}: S_ice {s_after} "
+                f"not pulled to the Koop threshold {scrit:.3f}"
+            )
+            # Lower bound: the floor must not double-remove the branch
+            # increment's vapor. A regression back to the pre-fix formula
+            # over-dries to ~0.43-0.89 here, well below expected-tol.
+            assert abs(s_after_max - expected) <= tol, (
+                f"nic_cirrus={nic_cirrus}, S_ice0={s_start}: S_ice after "
+                f"{s_after_max:.3f} is not within {tol} of the expected "
+                f"{expected} (branch-increment-only outcome) -- the floor "
+                f"is removing more than the branch's own excess (#963)"
+            )
+            # Latent heating from the burst stays small (q is tiny at 190 K).
+            assert float(np.max(np.abs(720.0 * np.asarray(tend.dtedt)))) < 1.0
 
     def test_supercooled_stratus_rains(self):
         """Warm-rain coalescence must drain supercooled liquid decks.
