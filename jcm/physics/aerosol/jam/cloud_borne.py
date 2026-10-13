@@ -256,7 +256,16 @@ class CloudBorneExchange(PhysicsTerm):
                 # the evaporation ledger below, and a droplet-held remainder
                 # in a cell without droplets is not a state the cloud can be
                 # in. HAM likewise splits its in-cloud aerosol by the
-                # current ``pice`` every step.
+                # current ``pice`` every step — but HAM has no reservoir to
+                # carry between steps at all, so for it this is the whole
+                # design, not a simplification. jcm's explicit reservoir
+                # DOES persist, yet this estimate is re-derived from scratch
+                # every step with no memory of the PREVIOUS step's share —
+                # self-consistent within a single step (the post-transfer
+                # correction below), but not across steps if the condensate
+                # composition swings abruptly between them. Tracked as #1102
+                # (persist the share itself, or split the reservoir into
+                # separate liquid-held/ice-held stores).
                 has = frac > _SHARE_FLOOR
                 liquid_share.append(jnp.where(
                     has, in_liquid / jnp.where(has, frac, 1.0), 1.0 - pice))
