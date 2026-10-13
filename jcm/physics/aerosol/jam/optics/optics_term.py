@@ -185,8 +185,11 @@ class JamOpticsTerm(PhysicsTerm):
     # block, upstream of the radiation term in the default
     # ``echam_physics`` order, so the counter read here is deliberately
     # last step's pre-increment value — the counter's whole job is to
-    # persist across steps (jax-gcm#673).
-    optional_requires: ClassVar[tuple[str, ...]] = ("radiation",)
+    # persist across steps. ``"pressure_full"`` (read in ``_compute_fields``
+    # to zero the optics above ~2 hPa) is always same-step fresh in any
+    # real composition (``MoistAirColumnState`` runs first), read via
+    # ``.get()`` defensively for a probe/harness that skips it (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = ("radiation", "pressure_full")
     # JAM's column optics diagnostics publish under the explicit ``jam_optics.*``
     # namespace (#640): the ``_jam_optics`` carry dict flattens to
     # ``jam_optics.<field>`` on output. CF/AeroCom metadata for the fields that

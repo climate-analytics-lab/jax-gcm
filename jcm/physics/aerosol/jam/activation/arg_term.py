@@ -70,6 +70,14 @@ class ArgActivation(PhysicsTerm):
     provides: ClassVar[tuple[str, ...]] = (
         "activated_cdnc", "activated_fraction", "_jam_activation",
     )
+    # Both read in ``_updraft`` (module docstring): ``updraft_velocity`` is
+    # a deliberately-empty hook (no in-tree term provides it yet);
+    # ``vertical_diffusion`` is a cross-step read of last step's TTE-TKE
+    # (this term runs in the pre-cloud aerosol block, upstream of
+    # ``TteTkeVerticalDiffusion`` in the default ``echam_physics`` order).
+    optional_requires: ClassVar[tuple[str, ...]] = (
+        "updraft_velocity", "vertical_diffusion",
+    )
 
     def __init__(
         self,

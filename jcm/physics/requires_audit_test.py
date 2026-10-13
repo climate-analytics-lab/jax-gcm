@@ -55,6 +55,16 @@ _PLUMBING = frozenset({
     # ``_dt_seconds`` for the carried previous-step state, gated on
     # ``requires_post_physics_fields`` rather than a producer term.
     "_post_physics_state",
+    # ``ComposablePhysics`` overwrites this at the top of EVERY term's call
+    # (``diagnostics["_tendency_run"] = acc``/the 3D-path equivalent), so it
+    # is unconditionally fresh from the first term onward in a step, the
+    # same tier as ``_dt_seconds`` -- not a producer/consumer contract
+    # between terms. Currently only read by shared module-level helpers
+    # (``_post_physics``/``_running_tendency``/``post_microphysics_icnc``),
+    # not a class method directly, so it would not have surfaced as a
+    # violation either way; listed for completeness should a term ever
+    # read it inline.
+    "_tendency_run",
 })
 
 # jax-gcm repo root: .../jax-gcm/jcm/physics/requires_audit_test.py -> 3 parents up.
@@ -158,6 +168,22 @@ def audit_class(cls: ast.ClassDef, module=None):
     carry = set()
     optional = set()
     call_fn = None
+    # Diagnostics-reading logic is not always inline in `__call__` -- a term
+    # may delegate to a helper method (``Mam4JaxMicrophysics.__call__`` calls
+    # `_step`; `AerocomDiagnostics.__call__` calls per-group `_*_group`
+    # helpers). Walking only `__call__`'s own AST would miss a read inside
+    # any such helper entirely -- a Codex review of PR #1094 caught exactly
+    # this (both examples above read `diagnostics` undeclared in a helper
+    # while the audit saw only `__call__` and passed). Rather than trace
+    # which methods `__call__` actually calls (a call graph this simple
+    # AST pass has no business building, and one that could silently miss
+    # an indirect call), every method in the class whose own signature
+    # takes a `diagnostics` parameter is in scope: that is precisely the
+    # set of methods that COULD contain a `diagnostics` read under this
+    # audit's matching rules (which require a bare `Name` bound to that
+    # parameter), so it has no false-positive risk from an unrelated method
+    # that merely shares the name in a different role.
+    helper_fns = []
     for item in cls.body:
         if isinstance(item, (ast.Assign, ast.AnnAssign)):
             tgt = item.targets[0] if isinstance(item, ast.Assign) else item.target
@@ -178,13 +204,17 @@ def audit_class(cls: ast.ClassDef, module=None):
                 lit = _resolve_tuple(val, module)
                 if lit is not None:
                     optional |= set(lit)
-        elif isinstance(item, ast.FunctionDef) and item.name == "__call__":
-            call_fn = item
+        elif isinstance(item, ast.FunctionDef):
+            arg_names = {a.arg for a in item.args.args}
+            if item.name == "__call__":
+                call_fn = item
+            elif "diagnostics" in arg_names:
+                helper_fns.append(item)
     if requires is None or call_fn is None:
         return None
 
     hard, soft = set(), set()
-    for n in ast.walk(call_fn):
+    for n in (x for fn in (call_fn, *helper_fns) for x in ast.walk(fn)):
         # bare diagnostics["key"] loads
         if (isinstance(n, ast.Subscript) and isinstance(n.value, ast.Name)
                 and n.value.id == "diagnostics"
@@ -430,6 +460,71 @@ class DynamicKeyReader(PhysicsTerm):
         result = audit_class(self._parse_one_class(src), module)
         self.assertEqual(result["soft"], [])
         self.assertEqual(result["hard"], [])
+
+    def test_undeclared_read_in_a_diagnostics_taking_helper_is_rejected(self):
+        """A Codex finding on PR #1094: a read inside a helper __call__ delegates to.
+
+        ``Mam4JaxMicrophysics.__call__`` calls ``self._step(state, diagnostics)``,
+        and the undeclared read lives in ``_step``, not in ``__call__`` itself.
+        """
+        src = """
+class DelegatingTerm(PhysicsTerm):
+    requires: ClassVar[tuple[str, ...]] = ("pressure_full",)
+    provides: ClassVar[tuple[str, ...]] = ()
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        return self._step(state, diagnostics)
+
+    def _step(self, state, diagnostics):
+        vdiff = diagnostics.get("vertical_diffusion")
+        return tendency, diagnostics
+"""
+        result = audit_class(self._parse_one_class(src))
+        self.assertEqual(result["soft"], ["vertical_diffusion"])
+
+    def test_helper_read_declared_via_optional_requires_passes(self):
+        src = """
+class DelegatingTerm(PhysicsTerm):
+    requires: ClassVar[tuple[str, ...]] = ("pressure_full",)
+    provides: ClassVar[tuple[str, ...]] = ()
+    optional_requires: ClassVar[tuple[str, ...]] = ("vertical_diffusion",)
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        return self._step(state, diagnostics)
+
+    def _step(self, state, diagnostics):
+        vdiff = diagnostics.get("vertical_diffusion")
+        return tendency, diagnostics
+"""
+        result = audit_class(self._parse_one_class(src))
+        self.assertEqual(result["soft"], [])
+
+    def test_helper_without_a_diagnostics_parameter_is_not_walked(self):
+        """A same-named-but-unrelated method must not be pulled into the scan.
+
+        ``_cloud_group(self, clouds, temperature, ...)`` (no ``diagnostics``
+        parameter) is exactly this shape in ``AerocomDiagnostics`` -- it
+        operates on pre-extracted fields, so it is correctly OUT of scope
+        even though the class also has helpers that do take ``diagnostics``.
+        """
+        src = """
+class PreExtractedHelper(PhysicsTerm):
+    requires: ClassVar[tuple[str, ...]] = ("clouds",)
+    provides: ClassVar[tuple[str, ...]] = ()
+
+    def __call__(self, state, diagnostics, forcing, terrain):
+        clouds = diagnostics["clouds"]
+        return self._cloud_group(clouds)
+
+    def _cloud_group(self, clouds):
+        # No `diagnostics` parameter here -- reading a module-level dict
+        # that happens to be named `diagnostics` elsewhere must not count.
+        diagnostics = {"not": "the term's diagnostics dict"}
+        return diagnostics.get("unrelated_key")
+"""
+        result = audit_class(self._parse_one_class(src))
+        self.assertEqual(result["hard"], [])
+        self.assertEqual(result["soft"], [])
 
 
 if __name__ == "__main__":
