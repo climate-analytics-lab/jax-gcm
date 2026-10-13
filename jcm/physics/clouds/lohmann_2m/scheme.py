@@ -1541,11 +1541,54 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             },
         )
 
+        # Publish the resolved CDNC into ``clouds.droplet_number`` (#1053).
+        # ``CloudData`` is created with this field at zero and only the 1M
+        # path (``echam_1m.py``) used to fill it; the 2M carries its number
+        # as the prognostic tracer ``qnc`` [kg^-1] instead, so this path left
+        # the CF-advertised CDNC at its zero seed forever.
+        #
+        # GRID-MEAN, not in-cloud: ECHAM-HAM hands its radiation the grid-mean
+        # number unmasked by cover, ``pacdnc(:,jk) = zcdnc(:,jk)``
+        # (``mo_cloud_micro_2m.f90:1710``) with ``zcdnc`` the grid-mean
+        # ``ρ·(pxtm1 + ztmst·pxtte)`` (line 600) — there is no ``/paclc``
+        # anywhere on that path. The same convention is already load-bearing
+        # elsewhere in jcm: ``cloud_optics.radiation_effective_radii``'s
+        # prognostic branch forms ``max(qnc, 0)·air_density`` and
+        # ``AerocomDiagnostics._number_concentrations`` derives its grid-mean
+        # ``cdnc_gm`` the identical way. This differs from the 1M path's
+        # CONVENTION for the same field (a characteristic in-cloud value,
+        # nonzero in clear sky — see that field's entry in
+        # ``CLOUD_OUTPUT_ATTRS`` and ``cloud_utils.prescribed_droplet_number``):
+        # the 1M's ``acdnc`` is a profile ECHAM prescribes from pressure alone
+        # and hands unmasked to both the in-cloud microphysics formulas and
+        # the radiation, so it was never grid-mean to begin with; the 2M's
+        # number is a genuine prognostic grid-mean tracer, so masking it by
+        # cover here would invent an in-cloud value ECHAM-HAM's own CDNC
+        # output does not have.
+        #
+        # Timing: formed from THIS STEP's saved ``qnc``, not the step-start
+        # tracer the term receives. Operator splitting means the host applies
+        # ``tendency.tracers["qnc"]`` to ``state.tracers["qnc"]`` only after
+        # this term returns, so reading the step-start tracer here would date
+        # the published CDNC one step behind the tracer value saved at the
+        # same timestamp — the lag ``aerocom._post_physics_tracer`` and
+        # ``cosp_cloudsat._post_micro_condensate`` exist to avoid for every
+        # other post-microphysics diagnostic. No term downstream of this one
+        # writes a ``qnc`` tendency (the 2M scheme is its only source), so the
+        # sum below is exactly the tracer value the dycore will save this
+        # step, with no need to reach for the ``_tendency_run`` those two
+        # helpers use to handle a value written by an UPSTREAM term instead.
+        qnc_post_physics = jnp.maximum(
+            state.tracers.get("qnc", jnp.zeros_like(state.temperature))
+            + dt * tendency.tracers["qnc"], 0.0)
+        droplet_number = qnc_post_physics * diagnostics["air_density"]
+
         # ``qnc_prev``/``qni_prev`` record the raw number tracers of the
         # state this term receives, not the scheme's entry-floored working
         # numbers. No term reads them. The surface precipitation comes from
         # the lax.scan carry.
         clouds_next = clouds.copy(
+            droplet_number=droplet_number,
             # ECHAM writes the post-microphysics cloud fraction back to
             # ``paclc``: cells the scheme has just emptied of both condensates,
             # or driven below ``clc_min``, are no longer cloudy. Radiation and
