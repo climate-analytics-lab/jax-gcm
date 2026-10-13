@@ -215,14 +215,13 @@ radius.
   physical (unscaled) condensate, so the inhomogeneity does not shrink the
   crystal radius the IWC laws give. On the grey backend the τ-weighted ssa/asymmetry are
   likewise taken from the unscaled per-phase optical depths, exactly ECHAM's
-  ``zomg``/``zasy``. The RRTMGP backend scales the per-phase condensate paths
-  it hands to jax-rrtmgp, which weights the combined ssa/asymmetry by the τ
-  those paths produce: identical to ECHAM wherever the liquid and ice factors
-  are equal (every column except ``ktype = 4`` ones at the defaults), while in
-  a ``ktype = 4`` layer holding both phases the total τ is exact but the
-  ssa/asymmetry weighting uses the scaled τ. jax-rrtmgp 0.5.0 accepts per-phase
-  optical-depth scales that weight by the unscaled τ; wiring them is #958. The
-  four factors are
+  ``zomg``/``zasy``. The RRTMGP backend hands jax-rrtmgp 0.5.0 the UNSCALED
+  per-phase condensate paths plus the two factors as
+  ``cloud_tau_scale_liq``/``_ice`` on ``compute_heating_rate``; the library
+  applies them after its own table lookup and weights the combined
+  ssa/asymmetry by the unscaled τ those paths produce -- identical to ECHAM
+  in every ``ktype = 4`` layer holding both phases as well as the columns
+  where the two factors already coincide. The four factors are
   ``RadiationParameters.cloud_inhomogeneity_{liquid, liquid_convective,
   liquid_shallow, ice}``, differentiable leaves.
 

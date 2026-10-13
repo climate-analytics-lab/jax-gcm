@@ -646,9 +646,12 @@ def radiation_scheme_rrtmgp(
     # ``q_c`` used in the vapour-VMR maths, so the sub-grid inhomogeneity
     # factor must NOT be baked in here -- that would shrink the inferred
     # crystal and partly undo the reduction (#678). The inhomogeneity factor
-    # is applied to the per-gpoint optical-depth paths
-    # (``in_cloud_{lwp,ipath}_lib`` below), which is where it belongs (ECHAM
-    # ``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``).
+    # (ECHAM ``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``)
+    # is passed to jax-rrtmgp as ``cloud_tau_scale_liq``/``_ice`` alongside
+    # the UNSCALED per-gpoint paths (``in_cloud_{lwp,ipath}_lib`` below, the
+    # ``lib_in`` dict further down) rather than baked into those paths here,
+    # so the library weights ssa/asymmetry by the unscaled per-phase τ as
+    # ECHAM does (#958).
     #
     # Only the NaN guard (``_MAX_IN_CLOUD_CONDENSATE``) is applied: a *thin*
     # but resolved cloud (cf ~ 0.01-0.05) carrying large grid-mean condensate
@@ -746,37 +749,41 @@ def radiation_scheme_rrtmgp(
         needs_reversal, flip_per_gpt, identity, masks_sw,
     )
     # Per-gpoint condensate paths carry the cloud optical depth (τ ∝ path at the
-    # effective radius formed from the PHYSICAL in-cloud condensate). The ECHAM sub-grid
-    # inhomogeneity factors multiply the per-phase optical depth
+    # effective radius formed from the PHYSICAL in-cloud condensate). ECHAM's
+    # sub-grid inhomogeneity factors scale the per-PHASE optical depth
     # (``mo_cloud_optics.f90``: ``ztau = ztol*zinhoml + ztoi*zinhomi``,
-    # ``l_variable_inhoml = .FALSE.``), so they are applied HERE -- to the
-    # τ-driving paths -- not to the physical path that set the effective radius
-    # above. The liquid factor follows the column's convective type (``zinhoml``
-    # 1/2/3); the ice factor is ``zinhomi``.
-    #
-    # jax-rrtmgp's only per-phase inputs are these paths, and it weights the
-    # combined ssa (by τ) and asymmetry (by τ·ssa) with the τ they produce.
-    # Wherever the two factors are equal -- every column at the T63 defaults
-    # except shallow-convective ``ktype == 4`` ones -- the common factor cancels
-    # in those weights and this is exactly ECHAM's ``ztau``/``zomg``/``zasy``.
-    # Where they differ AND a layer holds both phases, the ssa/asymmetry are
-    # weighted by the scaled rather than ECHAM's unscaled τ; the total optical
-    # depth is still exact. jax-rrtmgp 0.5.0 takes per-phase optical-depth
-    # scales (``cloud_tau_scale_liq``/``_ice``) that weight by the unscaled
-    # τ; passing them instead of scaling the paths is #958.
+    # ``l_variable_inhoml = .FALSE.``) and then weight the combined ssa/asymmetry
+    # by the UNSCALED ``ztol``/``ztoi``. jax-rrtmgp 0.5.0 exposes exactly that:
+    # ``cloud_tau_scale_liq``/``_ice`` on ``compute_heating_rate`` (passed below),
+    # applied after its own table lookup with ssa/asymmetry weighted by the
+    # unscaled per-phase τ. So the paths handed to the library here are the
+    # PHYSICAL (unscaled) per-phase paths -- scaling them ourselves, as a
+    # pre-#958 version of this function did, would hand the library an
+    # already-scaled τ that it would then weight ssa/asymmetry by directly,
+    # recreating the same bug these two factors differ (shallow-convective
+    # ``ktype == 4`` columns) that passing the factors separately fixes. The
+    # liquid factor follows the column's convective type (``zinhoml`` 1/2/3,
+    # :func:`liquid_inhomogeneity`); the ice factor is ``zinhomi``. Both are
+    # per-COLUMN scalars (not per-level), so no orientation flip or halo
+    # padding applies to them -- only the per-level paths below need it.
     zinhoml = liquid_inhomogeneity(convection_type, parameters)
-    # The floor applies to the path the library receives, factor included: a
-    # path above it scaled by a small factor must not re-enter the band whose
-    # derivative overflows (``mcica.NEGLIGIBLE_CLOUD_PATH_KG_M2``).
-    in_cloud_lwp_lib = resolvable_path(zinhoml * lax.cond(
+    zinhomi = parameters.cloud_inhomogeneity_ice
+    # The floor applies to the PHYSICAL (pre-scaling) path the library
+    # receives: #958 moved the ECHAM inhomogeneity scaling from here into the
+    # library's own ``cloud_tau_scale_{liq,ice}`` arguments, so this floor no
+    # longer sees the scaled path. zinhoml/zinhomi are O(0.4-0.85) (never
+    # below 0.4), so the floor's effective threshold on the SCALED path moves
+    # by under a factor of ~2.5x either way -- far inside the "~9 orders of
+    # magnitude of margin" the floor already has (see
+    # ``mcica.NEGLIGIBLE_CLOUD_PATH_KG_M2``), so no recalibration is needed.
+    in_cloud_lwp_lib = resolvable_path(lax.cond(
         needs_reversal, lambda a: a[::-1], identity,
         icon_state.cloud_water_path,
     ))
-    in_cloud_ipath_lib = resolvable_path(
-        parameters.cloud_inhomogeneity_ice * lax.cond(
-            needs_reversal, lambda a: a[::-1], identity,
-            icon_state.cloud_ice_path,
-        ))
+    in_cloud_ipath_lib = resolvable_path(lax.cond(
+        needs_reversal, lambda a: a[::-1], identity,
+        icon_state.cloud_ice_path,
+    ))
 
     nlev = icon_state.temperature.shape[0]
     halo = 1
@@ -961,6 +968,12 @@ def radiation_scheme_rrtmgp(
         vmr_fields=vmr_fields or None,
         aerosol_optics_sw=aerosol_optics_sw,
         aerosol_optics_lw=aerosol_optics_lw,
+        # ECHAM's sub-grid inhomogeneity factors (#958): passed to the
+        # library instead of pre-scaling the paths above, so it weights
+        # ssa/asymmetry by the UNSCALED per-phase τ (``zinhoml``/``zinhomi``
+        # are per-column scalars; see the comment above ``in_cloud_lwp_lib``).
+        cloud_tau_scale_liq=zinhoml,
+        cloud_tau_scale_ice=zinhomi,
         **rrtmgp_input,
     ))
     with jax.enable_x64(False):

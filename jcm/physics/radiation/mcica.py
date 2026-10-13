@@ -125,11 +125,13 @@ def resolvable_path(path: jnp.ndarray) -> jnp.ndarray:
 # This is a one-sided clip -- the identity almost everywhere, flattening
 # everything above the threshold to the same value -- and is NOT the sub-grid
 # inhomogeneity treatment. The inhomogeneity factor (ECHAM ``zinhoml``/
-# ``zinhomi``) is a separate FIXED multiplicative reduction applied to the
-# per-gpoint optical-depth paths (see ``RadiationParameters.cloud_inhomogeneity_*``
-# and the ``in_cloud_*_lib`` scaling in ``radiation_scheme_rrtmgp``). Measured on
-# T63L47 output this clip binds in ~0.003% of cloudy cells, so it is inert in
-# practice; keep it strictly as a NaN guard (#678).
+# ``zinhomi``) is a separate FIXED multiplier (see
+# ``RadiationParameters.cloud_inhomogeneity_*``), passed to jax-rrtmgp as
+# ``cloud_tau_scale_liq``/``_ice`` in ``radiation_scheme_rrtmgp`` rather than
+# baked into the per-gpoint paths here, so the library weights ssa/asymmetry
+# by the UNSCALED per-phase τ as ECHAM does (#958). Measured on T63L47 output
+# this clip binds in ~0.003% of cloudy cells, so it is inert in practice;
+# keep it strictly as a NaN guard (#678).
 _MAX_IN_CLOUD_CONDENSATE = 1.0e-2
 
 
