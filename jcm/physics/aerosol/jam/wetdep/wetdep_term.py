@@ -1053,9 +1053,11 @@ class WetScavenging(PhysicsTerm):
                                            tables=self._croft_tables,
                                            variant=self._below_cloud_lookup)
                 sfsnow_num = bc_snow_rate(pfsnow_in, mr_num,
-                                          tables=self._croft_tables)
+                                          tables=self._croft_tables,
+                                          variant=self._below_cloud_lookup)
                 sfsnow_mass = bc_snow_rate(pfsnow_in, mr_mass,
-                                           tables=self._croft_tables)
+                                           tables=self._croft_tables,
+                                           variant=self._below_cloud_lookup)
                 # HAM removes ``pxtp10·pclc·(1 − exp(−dt·(sfrain + sfsnow)))``
                 # (mo_ham_wetdep.f90:434-437); as the equivalent uncovered
                 # rate it composes with the other rate families, as in

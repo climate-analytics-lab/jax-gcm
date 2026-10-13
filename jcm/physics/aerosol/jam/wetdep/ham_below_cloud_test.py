@@ -69,7 +69,7 @@ def test_bc_snow_rate_matches_compiled_reference(prec):
         dtype = np.float64 if prec == "float64" else np.float32
         for flux, radius, ref_snow in zip(z["flux"], z["radius"], z["snow_rate"]):
             got = float(bc_snow_rate(np.asarray(flux, dtype), np.asarray(radius, dtype),
-                                     tables=tables))
+                                     tables=tables, variant="ham_r7492"))
             np.testing.assert_allclose(got, ref_snow, rtol=RTOL[prec], atol=1e-30)
 
 
@@ -190,3 +190,24 @@ def test_corrected_lookup_gradients_are_finite():
             for mr in (1e-8, 2e-7, 3e-6, 4e-5):
                 g = jax.grad(rate, argnums=(0, 1))(jnp.log(p), jnp.asarray(mr))
                 assert all(np.isfinite(float(x)) for x in g), (p, mr)
+
+
+def test_corrected_lookup_is_continuous_across_the_aerosol_nodes():
+    """r7492's aerosol index assumes the nominal 2**(1/3) spacing of nodes the
+    table rounds to four digits, so its rate jumps where the index switches;
+    the corrected bracket is the table's own and the rate is continuous.
+    """
+    with jax.enable_x64(True):
+        tables = load_croft_tables()
+        jumps = {"ham": 0.0, "ham_r7492": 0.0}
+        for k in range(2, 59):
+            switch_m = 1e-4 * 2 ** ((k - 1) / 3) * 1e-6
+            for variant in jumps:
+                lo, hi = (float(bc_rain_rate(np.asarray(3e-5), np.asarray(switch_m * f),
+                                             phase="number", tables=tables,
+                                             variant=variant))
+                          for f in (1 - 1e-12, 1 + 1e-12))
+                if max(lo, hi) > 0:
+                    jumps[variant] = max(jumps[variant], abs(hi - lo) / max(lo, hi))
+        assert jumps["ham"] < 1e-9
+        assert jumps["ham_r7492"] > 1e-3

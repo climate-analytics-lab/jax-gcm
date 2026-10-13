@@ -334,9 +334,12 @@ The default lookup (`below_cloud_lookup="ham"`) corrects the corner order, as
 `incloud_impaction` does for `ic_scav_imp`'s identical swap, and a second
 r7492 defect: below ~0.0032 mm/h (8.8e-7 kg m⁻² s⁻¹) both rain-rate indices
 clip to the zero-rain node, whose rates are 0, so the removal drops to 0 instead
-of interpolating to the first node; the corrected pair is (0, 1). The rain
-lookup is then the bilinear interpolant of the tables, clamped at 100 mm/h and
-50 µm (`ham_below_cloud_test.py`). `below_cloud_lookup="ham_r7492"` keeps the
+of interpolating to the first node; the corrected pair is (0, 1). The aerosol
+pair is taken from the radius axis itself rather than from its nominal
+`2^(1/3)` spacing, which the four-digit table nodes miss by up to ~1e-4 of a
+bin, enough for a ~0.5 % jump next to a node. The rain and snow lookups are
+then the bilinear interpolants of the tables, clamped at 100 mm/h and 50 µm
+(`ham_below_cloud_test.py`). `below_cloud_lookup="ham_r7492"` keeps the
 compiled routine, which the 96-case harness reference is checked against.
 
 **`pfrain`/`pfsnow`.** `bc_rain`/`bc_snow` need the separate rain and snow

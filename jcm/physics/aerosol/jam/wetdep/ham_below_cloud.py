@@ -57,8 +57,13 @@ Two defects of r7492's ``bc_rain`` lookup are corrected by default (variant
   kg m-2 s-1) both rain indices clip to the zero-rain node, whose rates are
   0, so the removal drops to 0 there instead of following the interpolation
   to the first node (0.01 mm/h). The corrected pair is (0, 1).
+* **Aerosol-radius pair** (rain and snow). The index assumes the radius
+  axis's nominal ``2**(1/3)`` spacing, but the table's nodes are that series
+  rounded to four digits; next to a node the pair is then the neighbouring
+  bracket and the rate jumps there (by up to ~0.5 %). The corrected pair is
+  the bracket of ``caerorad`` itself.
 
-With the corrections the rain lookup is the piecewise-bilinear interpolant of
+With the corrections the lookups are the piecewise-bilinear interpolants of
 the tables, clamped at the 100 mm/h and 50 um ends.
 
 Croft tables, lookup and index formulas
@@ -99,6 +104,7 @@ import dataclasses
 import math
 from pathlib import Path
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -186,15 +192,28 @@ def cmedr2mmedr(geom_std_dev: float) -> float:
     return math.exp(3.0 * math.log(geom_std_dev) ** 2)
 
 
-def aerosol_radius_bin(mr_m: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
+def aerosol_radius_bin(mr_m: jnp.ndarray, caerorad=None, variant: str = "ham"
+                       ) -> tuple[jnp.ndarray, jnp.ndarray]:
     """Aerosol wet-radius bin pair (``mo_ham_wetdep.f90:264-284``).
 
     ``mr_m`` is the wet radius already clipped to 50 um and scaled by
     ``cmedr2mmedr`` for a mass tracer (still in METRES here; this function
     does the m->um conversion, matching ``*1.E+6_dp`` at :273).
+
+    r7492 computes the pair from the axis's nominal ``2**(1/3)`` spacing,
+    ``floor(3 log2(1e4 mr) + 1)``; the table's nodes are that series rounded
+    to four digits, so next to a node the pair can be the neighbouring
+    bracket and the rate jumps there (by up to ~0.5 %). The corrected variant
+    takes the bracket from ``caerorad`` itself.
     """
-    mr_um = mr_m * 1.0e6
+    _check_variant(variant)
+    mr_um = jax.lax.stop_gradient(mr_m) * 1.0e6
     live = mr_um > _EPS
+    if variant == "ham":
+        lower = jnp.searchsorted(caerorad, mr_um, side="right") - 1
+        idx1 = jnp.where(live, jnp.clip(lower, 0, 59), 0).astype(jnp.int32)
+        idx2 = jnp.where(live, idx1 + 1, 0).astype(jnp.int32)
+        return idx1, idx2
     safe = jnp.where(live, mr_um, 1.0)
     frac = jnp.floor(3.0 * jnp.log(1.0e4 * safe) / math.log(2.0) + 1.0)
     idx1 = jnp.where(live, jnp.clip(frac, 0, 60), 0.0).astype(jnp.int32)
@@ -320,7 +339,7 @@ def bc_rain_rate(pfrain: jnp.ndarray, mr_m: jnp.ndarray, *, phase: str,
     table = tables.cscavbcrn if phase == "number" else tables.cscavbcrm
     mr_m = jnp.minimum(mr_m, _MR_CAP_M)
     rx1, rx2 = rain_rate_bin(pfrain, variant)
-    ry1, ry2 = aerosol_radius_bin(mr_m)
+    ry1, ry2 = aerosol_radius_bin(mr_m, tables.caerorad, variant)
     x1, x2 = tables.crainrate[rx1], tables.crainrate[rx2]
     y1, y2 = tables.caerorad[ry1], tables.caerorad[ry2]
     gather = lookup_swapped_corners if variant == "ham_r7492" else lookup_corners
@@ -329,7 +348,7 @@ def bc_rain_rate(pfrain: jnp.ndarray, mr_m: jnp.ndarray, *, phase: str,
 
 
 def bc_snow_rate(pfsnow: jnp.ndarray, mr_m: jnp.ndarray,
-                 tables: CroftTables | None = None):
+                 tables: CroftTables | None = None, variant: str = "ham"):
     """Below-cloud snow removal rate [1/s] (same for number and mass).
 
     ``bc_snow``'s ``kscavBCtype=3`` branch (``mo_ham_wetdep.f90:1106-1138``):
@@ -347,7 +366,7 @@ def bc_snow_rate(pfsnow: jnp.ndarray, mr_m: jnp.ndarray,
     """
     tables = tables or default_croft_tables()
     mr_m = jnp.minimum(mr_m, _MR_CAP_M)
-    y1, y2 = aerosol_radius_bin(mr_m)
+    y1, y2 = aerosol_radius_bin(mr_m, tables.caerorad, variant)
     yv1, yv2 = tables.caerorad[y1], tables.caerorad[y2]
     q11 = tables.csnowcolleff[1, y1]
     q12 = tables.csnowcolleff[1, y2]

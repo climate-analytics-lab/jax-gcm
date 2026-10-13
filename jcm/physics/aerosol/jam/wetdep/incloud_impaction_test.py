@@ -292,3 +292,21 @@ def test_r7492_variant_reproduces_the_compiled_get_icscavfrac_chain():
             np.testing.assert_allclose(np.clip(nuc + imp, 0.0, 1.0),
                                        z["pfrac"][i], rtol=1e-12, atol=1e-30,
                                        err_msg=label)
+
+
+def test_corrected_lookup_is_continuous_across_the_aerosol_nodes():
+    """The corrected aerosol bracket is the table's own: no jump where r7492's
+    nominal-spacing index switches (r7492's crystal fraction jumps there).
+    """
+    with jax.enable_x64(True):
+        jumps = {"ham": 0.0, "ham_r7492": 0.0}
+        for k in range(2, 59):
+            switch_um = 1e-4 * 2 ** ((k - 1) / 3)
+            for variant in jumps:
+                lo, hi = (float(ii.crystal_impaction_fraction(
+                              80.0, 2e4, switch_um * f, 1200.0, variant))
+                          for f in (1 - 1e-12, 1 + 1e-12))
+                if max(lo, hi) > 0:
+                    jumps[variant] = max(jumps[variant], abs(hi - lo) / max(lo, hi))
+        assert jumps["ham"] < 1e-9
+        assert jumps["ham_r7492"] > 1e-2
