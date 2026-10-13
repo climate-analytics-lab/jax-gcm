@@ -56,12 +56,8 @@ Installation and dependencies
 
 .. code-block:: console
 
-   $ pip install --pre --upgrade jcm          # 3.0.0rc3 is a pre-release
-   $ pip install "jcm==3.0.0rc3"              # or pin it
-
-Until 3.0.0 is tagged, a plain ``pip install --upgrade jcm`` keeps serving the
-2.x line: ``3.0.0rc3`` is a PEP 440 pre-release and pip ignores those unless
-asked.
+   $ pip install --upgrade jcm                # 3.0.0 is a normal release
+   $ pip install "jcm==3.0.0"                 # or pin it
 
 Minimum versions that changed, and why each floor is a floor rather than a
 preference:
@@ -1674,18 +1670,26 @@ free.
      - Dinosaur (semi-Lagrangian)
      - pySES CAM-SE (``jcm[pyses]``)
    * - ``speedy``
-     - **Release-validated**, T31 L8 sigma (``speedy-t31``)
+     - **Release-validated**, T31 L8 on SPEEDY's sigma table (``speedy-t31``);
+       every gate passes on the release tree
      - Composes and builds; no packaged configuration, never validated
    * - ``echam`` (1M)
-     - **Release-validated**, T63 and T106 L47
+     - **Release-validated**, T63 and T106 L47; both years miss the offline
+       cloud-cover floor (0.47 and 0.42 vs 0.5; T106 is the untuned cover
+       blend, #1014), accepted and documented in the release notes
      - No packaged configuration; composes only with ``cu_lmfmid=false``
        (:ref:`v3-limitation-omega`)
    * - ``echam-rrtmgp-2m``
-     - **Release-validated**, T63 and T106 L47
+     - **Release-validated**, T63 and T106 L47; T63 misses the offline
+       cloud-cover floor by 0.005, T106 misses the TOA band by 0.2 W/m² and
+       the cover floor (untuned cover blend at T106, #1014), all accepted
+       and documented in the release notes
      - No packaged configuration; composes only with ``cu_lmfmid=false``
        (:ref:`v3-limitation-omega`)
    * - ``echam-jam``
-     - **Release-validated**, T63 L47 and T63 L95
+     - **Release-validated**, T63 L47 (cold year on the calibration targets;
+       warm state published); T63 L95 validated to day 310 of its year (a
+       cluster storage outage interrupted it)
      - Benchmark-validated at ne30 L47/L95, with ``cu_lmfmid=false`` and
        prescribed-emission-free (below)
    * - ``echam-emulated-2m``
@@ -1879,8 +1883,9 @@ quoting a validated configuration:
 
 * the **T106 members' multi-GPU mesh configurations have never been run for a
   full year**;
-* ``echam-jam`` at **L95** needs L95 oxidant and ozone inputs staged, which is
-  a data dependency rather than a code one.
+* ``echam-jam`` at **L95** ran on the release tree to day 310 of its year
+  before a cluster storage outage interrupted it; its band is the previous
+  one.
 
 A ``FAIL`` from ``health.py`` is also a recorded verdict rather than
 automatically a blocker: several members fail a gate by design until the
