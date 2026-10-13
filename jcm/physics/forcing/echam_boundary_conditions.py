@@ -11,10 +11,14 @@ expects to find in the typed ``RadiationData`` / ``SurfaceData`` /
   temperature-dependent sea ice; zenith-dependent open water) and per-tile
   emissivities, all held in a differentiable
   :class:`SurfaceOpticsParameters` (#347, #672).
-- Surface temperature (land = the prognostic skin temperature carried in
-  ``surface.land_surface_temperature``, seeded from ``forcing.stl_am`` when
-  unset; ocean = ``forcing.sea_surface_temperature``).
-- Roughness length (1 cm over land, 0.1 mm over ocean).
+- Surface temperature: the tile-weighted T**4 mean of land (the prognostic
+  skin temperature carried in ``surface.land_surface_temperature``, seeded
+  from ``forcing.stl_am`` when unset), sea ice and ocean
+  (``forcing.sea_surface_temperature``) -- ECHAM's own ``radtemp``
+  (:func:`tile_weighted_radiative_temperature`, #988).
+- Roughness length (1 cm where land is the majority of the cell, 0.1 mm
+  elsewhere -- not tile-weighted, and unrelated to the ECHAM-Louis land
+  tile's own roughness; see the comment beside its assignment).
 - CO2 and CH4 from ``forcing.co2_vmr`` / ``forcing.ch4_vmr``; O3 from the
   ``forcing.ozone_climatology`` when loaded, else this term's analytical
   profile.
@@ -169,6 +173,42 @@ def sea_ice_surface_temperature(sea_surface_temperature, sea_ice_fraction):
     )
 
 
+def tile_weighted_radiative_temperature(
+    land_fraction: jnp.ndarray,
+    sea_ice_fraction: jnp.ndarray,
+    land_temperature: jnp.ndarray,
+    ice_temperature: jnp.ndarray,
+    ocean_temperature: jnp.ndarray,
+) -> jnp.ndarray:
+    """ECHAM's ``radtemp`` — the tile-weighted T**4 mean (#988).
+
+    ``mo_surface.f90`` forms the grid radiative surface temperature as
+    ``pztsnew = (land_fract*zteffl4 + seaice_fract*T_ice**4
+    + ocean_fract*T_ocean**4)**0.25`` (~l.1712) and hands radiation
+    ``pzti = radtemp**0.25`` (l.1710). This is the single place both
+    :class:`EchamBoundaryConditions` (the radiation input) and
+    ``correct_surface_longwave``'s caller (the re-emission after the land
+    balance, which must mirror whatever temperature the cached flux was
+    solved with) build that quantity, so the two cannot drift apart.
+
+    Replaces the previous ``where(land_fraction > 0.5, land, sst)`` snap:
+    that discarded the minority tile outright in every coastal cell
+    (``0 < land_fraction < 1``) and never read the sea-ice temperature at
+    all (sea-ice cells fell into the ``sst`` branch). Degenerates to the old
+    behaviour exactly at ``land_fraction`` in ``{0, 1}`` with no sea ice,
+    which is why the existing pure-land/pure-ocean regression tests are
+    unchanged by this function.
+    """
+    land_fraction, sea_ice_fraction, ocean_fraction = _tile_partition(
+        land_fraction, sea_ice_fraction)
+    t4 = (
+        land_fraction * land_temperature ** 4
+        + sea_ice_fraction * ice_temperature ** 4
+        + ocean_fraction * ocean_temperature ** 4
+    )
+    return t4 ** 0.25
+
+
 class EchamBoundaryConditions(PhysicsTerm):
     """Apply ECHAM time-varying boundary conditions to the diagnostics dict.
 
@@ -290,6 +330,8 @@ class EchamBoundaryConditions(PhysicsTerm):
             forcing.solar, self._lons.get_value(), self._lats.get_value(),
         ).reshape(ncols)
 
+        ice_temperature = sea_ice_surface_temperature(
+            sst, jnp.clip(sea_ice_fraction, 0.0, 1.0 - land_fraction))
         albedo_vis, albedo_nir, emissivity, land_albedo = _surface_optical_properties(
             land_fraction, sea_ice_fraction, self.surface_optics.get_value(),
             background_albedo=col(forcing.alb0),
@@ -298,15 +340,35 @@ class EchamBoundaryConditions(PhysicsTerm):
             # packaged files, whose ``snowc`` shares the variable name.
             snow_fraction=jnp.clip(col(forcing.snowc_am), 0.0, 1.0),
             land_temperature=land_temperature,
-            ice_temperature=sea_ice_surface_temperature(
-                sst, jnp.clip(sea_ice_fraction, 0.0, 1.0 - land_fraction)),
+            ice_temperature=ice_temperature,
             cos_zenith=cos_zenith,
             forest_fraction=optional_col(forcing.forest_fraction),
             glacier_fraction=optional_col(forcing.glacier_fraction),
         )
-        surface_temperature = jnp.where(
-            land_fraction > 0.5, land_temperature, sst,
+        # Tile-weighted T**4 mean, ECHAM's own ``radtemp`` (#988) — see
+        # :func:`tile_weighted_radiative_temperature`. Replaces the previous
+        # majority-tile snap, which discarded the minority tile in every
+        # coastal cell and never read the sea-ice temperature at all.
+        surface_temperature = tile_weighted_radiative_temperature(
+            land_fraction, sea_ice_fraction, land_temperature,
+            ice_temperature, sst,
         )
+        # Momentum roughness: 1 cm over land, 0.1 mm over ocean. Unlike the
+        # temperature above, this is NOT a radiative quantity ECHAM blends
+        # across tiles -- JSBACH/the ocean/sea ice each keep their own
+        # physical z0 and mo_surface never forms a grid-mean roughness. It
+        # stays a majority-tile value deliberately (not "any land", and not
+        # tile-weighted): it is PUBLIC -- read as the single grid-cell
+        # roughness by ``jcm.physics.diagnostics.aerocom``'s 2 m-reduction
+        # diagnostic (``aerocom_tas``/``aerocom_dew2``), where a coastal cell
+        # with a trace of land should still read as "mostly ocean" (Codex
+        # review on #988: an "any land" gate made every near-pure-ocean
+        # coastal cell's 2 m diagnostics jump 100x in roughness). The
+        # ECHAM-Louis LAND TILE's own momentum roughness is a separate,
+        # unconditional constant in ``vertical_diffusion.py`` (that tile IS
+        # land, regardless of its area fraction) and no longer reads this
+        # field at all, which is what actually fixes the minority-land
+        # coastal cell this field's old ``> 0.5`` gate used to mishandle.
         roughness_length = jnp.where(
             land_fraction > 0.5,
             0.01,    # 1 cm over land

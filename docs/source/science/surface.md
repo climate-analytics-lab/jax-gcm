@@ -105,9 +105,10 @@ implicitly to the lowest model level.
   The land absorbs the held downward shortwave through the land albedo of the
   last radiation solve, as ECHAM's JSBACH takes the radiation's net shortwave
   and moves its albedo only at a radiation step. The surface temperature the
-  radiation solves with, and the re-emission corrects, is the grid value snapped
-  to the land skin where ``fmask > 0.5`` and to the SST elsewhere, where ECHAM's
-  ``radtemp`` is the tile-weighted T⁴ mean (#988).
+  radiation solves with, and the re-emission corrects, is ECHAM's own
+  ``radtemp``: the tile-weighted T⁴ mean over land, sea ice and ocean
+  (``mo_surface.f90`` ~l.1712,
+  :func:`~jcm.physics.forcing.echam_boundary_conditions.tile_weighted_radiative_temperature`).
 
 **What ECHAM/CAM does.** ECHAM6.3 couples JSBACH: a five-layer soil-water and
 soil-temperature model, prognostic snow and an interception reservoir, BETHY

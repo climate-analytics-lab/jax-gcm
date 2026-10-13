@@ -1735,6 +1735,82 @@ class TestSurfaceTilePhase:
         assert e_cold == 0.0, e_cold
 
 
+class TestLandTileRoughnessIsUnconditional:
+    """The ECHAM-Louis land tile's momentum roughness is always 1 cm,
+    independent of ``surface.roughness_length`` (Codex review on #988).
+
+    That field is PUBLIC (``jcm.physics.diagnostics.aerocom`` reads it as
+    the single grid-cell roughness for its 2 m-reduction diagnostic) and
+    stays majority-tile-gated for that reason
+    (``echam_boundary_conditions_test.py::RoughnessLengthTileGateTest``).
+    Borrowing it for the land tile's OWN roughness handed every coastal
+    cell with ``land_fraction`` in ``(0, 0.5]`` the OCEAN value (1e-4 m)
+    for its LAND tile under the majority gate -- so the land tile must not
+    read it at all, regardless of what value it carries.
+    """
+
+    def test_land_tile_exchange_is_independent_of_the_public_field(self):
+        from jcm.forcing import ForcingData
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from .vertical_diffusion import TteTkeVerticalDiffusion
+        from .vertical_diffusion_types import VerticalDiffusionData
+
+        vstate = _make_marine_bl_state(ncol=1, sst_offset=5.0, wind=10.0)
+        nlev = vstate.u.shape[1]
+        to_col = lambda a: jnp.asarray(a).T  # noqa: E731
+        state = PhysicsState(
+            u_wind=to_col(vstate.u), v_wind=to_col(vstate.v),
+            temperature=to_col(vstate.temperature),
+            specific_humidity=to_col(vstate.qv),
+            geopotential=to_col(vstate.geopotential),
+            normalized_surface_pressure=jnp.ones((1,)),
+            tracers={"qc": jnp.zeros((nlev, 1)), "qi": jnp.zeros((nlev, 1))},
+        )
+        t_land = float(vstate.surface_temperature[0, 0])
+        # A minority-land (30%) coastal cell: the case the old majority
+        # gate mishandled.
+        terrain = TerrainData.single_column(fmask=0.3)
+        forcing = ForcingData.zeros((1, 1)).copy(
+            stl_am=jnp.full((1, 1), t_land),
+            sea_surface_temperature=jnp.full((1, 1), t_land),
+            soilw_am=jnp.full((1, 1), 0.5),
+        )
+
+        def run(public_roughness):
+            diagnostics = {
+                "_dt_seconds": 900.0,
+                "pressure_full": to_col(vstate.pressure_full),
+                "pressure_half": to_col(vstate.pressure_half),
+                "height_full": to_col(vstate.height_full),
+                "height_half": to_col(vstate.height_half),
+                "surface": SurfaceData.zeros((1,), nlev).copy(
+                    roughness_length=jnp.full((1,), public_roughness)),
+                "clouds": CloudData.zeros((1,), nlev),
+                "vertical_diffusion": VerticalDiffusionData.zeros((1,), nlev).copy(
+                    tke=jnp.full((nlev, 1), 3.0),
+                    surface_exchange_heat=jnp.full_like(
+                        VerticalDiffusionData.zeros((1,), nlev).surface_exchange_heat,
+                        0.01)),
+            }
+            _, diag = TteTkeVerticalDiffusion()(state, diagnostics, forcing, terrain)
+            return diag["vertical_diffusion"]
+
+        # The grid-mean public field spans a huge range (ocean-smooth to
+        # absurdly rough); the LAND tile's own exchange must not move.
+        small = run(1e-4)
+        large = run(0.5)
+        land = slice(2, 3)  # [water, ice, land] stacking
+        np.testing.assert_allclose(
+            np.asarray(small.surface_exchange_momentum)[:, land],
+            np.asarray(large.surface_exchange_momentum)[:, land], rtol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(small.surface_exchange_heat)[:, land],
+            np.asarray(large.surface_exchange_heat)[:, land], rtol=1e-6)
+
+
 class TestMoistInteriorWiring:
     """The cloud cover reaches the column, and one moist buoyancy feeds both consumers."""
 

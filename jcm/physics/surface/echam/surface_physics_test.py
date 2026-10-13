@@ -746,6 +746,71 @@ class TestLongwaveReEmission:
         np.testing.assert_array_equal(run["temperature"][:-1], state.temperature[:-1])
         np.testing.assert_array_equal(run["specific_humidity"], state.specific_humidity)
 
+    def test_t_grid_new_mirrors_the_boundary_conditions_tile_weighting(self):
+        """``t_grid_new`` (the re-emission's "new" surface temperature, #988)
+        must use the SAME tile weighting as ``EchamBoundaryConditions``'
+        ``surface_temperature`` -- a coastal cell with sea ice, checked
+        against :func:`tile_weighted_radiative_temperature` directly.
+        """
+        import numpy as np
+
+        from jcm.forcing import ForcingData
+        from jcm.physics.forcing.echam_boundary_conditions import (
+            tile_weighted_radiative_temperature,
+        )
+        from jcm.physics.surface.echam.surface_physics import EchamSurface
+        from jcm.physics.surface.echam.surface_types import SurfaceData
+        from jcm.physics.vertical_diffusion.tte_tke.vertical_diffusion_types import (
+            VerticalDiffusionData,
+        )
+        from jcm.physics_interface import PhysicsState
+        from jcm.terrain import TerrainData
+
+        nlev, ncols = 4, 1
+        z_half = jnp.linspace(4000.0, 0.0, nlev + 1)[:, None]
+        p_half = jnp.linspace(6.0e4, 1.0e5, nlev + 1)[:, None]
+        state = PhysicsState(
+            u_wind=jnp.full((nlev, ncols), 5.0), v_wind=jnp.zeros((nlev, ncols)),
+            temperature=jnp.full((nlev, ncols), 270.0),
+            specific_humidity=jnp.full((nlev, ncols), 0.004),
+            geopotential=9.81 * 0.5 * (z_half[:-1] + z_half[1:]),
+            normalized_surface_pressure=jnp.ones((ncols,)), tracers={})
+        new_land_skin = jnp.array([250.0])
+        sst = jnp.array([[295.0]])
+        diagnostics = {
+            "_dt_seconds": 720.0,
+            "pressure_full": 0.5 * (p_half[:-1] + p_half[1:]), "pressure_half": p_half,
+            "height_full": 0.5 * (z_half[:-1] + z_half[1:]),
+            "surface": SurfaceData.zeros((ncols,), nlev).copy(
+                surface_temperature=jnp.array([280.0]),  # last step's blend
+                land_surface_temperature=new_land_skin,
+                roughness_length=jnp.array([0.01])),
+            "vertical_diffusion": VerticalDiffusionData.zeros((ncols,), nlev).copy(
+                surface_exchange_heat=jnp.full((ncols, 3), 0.01),
+                surface_exchange_moisture=jnp.full((ncols, 3), 0.01),
+                surface_exchange_momentum=jnp.full((ncols, 3), 0.012)),
+            "radiation": self._radiation(ncols, nlev),
+            "thermo_run": {"temperature": state.temperature,
+                           "specific_humidity": state.specific_humidity},
+        }
+        forcing = ForcingData.zeros((1, 1)).copy(
+            sea_surface_temperature=sst, sice_am=jnp.array([[0.2]]))
+        land_fraction, sea_ice_fraction = 0.4, 0.2
+        terrain = TerrainData.single_column(fmask=land_fraction)
+        out = EchamSurface()(state, diagnostics, forcing, terrain)[1]
+
+        ice_surface_temp = jnp.minimum(sst.reshape(1), 271.38)  # CTFREEZ
+        expect = tile_weighted_radiative_temperature(
+            jnp.array([land_fraction]), jnp.array([sea_ice_fraction]),
+            new_land_skin, ice_surface_temp, sst.reshape(1))
+        np.testing.assert_allclose(
+            np.asarray(out["surface"].surface_temperature), np.asarray(expect),
+            rtol=1e-6)
+        # Sanity: strictly between the coldest and warmest tile.
+        got = float(out["surface"].surface_temperature[0])
+        assert got > float(new_land_skin[0])
+        assert got < float(sst[0, 0])
+
 
 if __name__ == "__main__":
     pytest.main([__file__])
