@@ -232,10 +232,11 @@ Ping the user for review once **all** of:
 - `ruff check .` is clean and the full suite passes locally
 - docs updated in the same PR if user-facing behaviour changed (`CLAUDE.md`:
   documentation lives with the change)
-- every issue in the PR's `Closes` list has its `#NNN` citations cleared from
-  the science register (`grep -rn "#NNN" docs/source`; rewrite the entry in the
-  present tense, drop the token) — the close-hook files a follow-up issue
-  otherwise (`CLAUDE.md`: closing an issue clears its register citations)
+- every issue in the PR's `Closes` list has its science-register citations
+  cleared (`python docs/tracked_gaps.py cites NNN` lists the citing pages via
+  the register parser; rewrite each entry in the present tense, drop the
+  token) — the close-hook files a follow-up issue otherwise (`CLAUDE.md`:
+  closing an issue clears its register citations)
 
 Then summarise: what landed, what was measured, what you decided and why, and
 anything you are still unsure about. Flag open questions explicitly rather

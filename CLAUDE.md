@@ -117,10 +117,13 @@ user-facing behaviour is incomplete until the docs say so:
    no notion of tense: an entry that still carries the token after the issue
    closes is flagged by the close-hook/daily sweep and a follow-up issue is filed
    (#1082, #1088 were exactly this). Before handing back any PR whose body says
-   ``Closes #NNN``, ``grep -rn "#NNN" docs/source`` for every such issue and
-   rewrite each entry to the present-tense state of the code with the token
-   removed (name the PR only in prose: a bare ``#PR`` token trips the sweep as
-   a pull-request citation). ``python docs/tracked_gaps.py stale`` cannot see
+   ``Closes #NNN``, run ``python docs/tracked_gaps.py cites NNN`` for every such
+   issue (it applies the register parser and lists only the science pages that
+   cite it, exit 1 when none; a plain grep also hits design docs and release
+   notes the parser never reads, which must not be rewritten) and rewrite each
+   listed entry to the present-tense state of the code with the token removed
+   (name the PR only in prose: a bare ``#PR`` token trips the sweep as a
+   pull-request citation). ``python docs/tracked_gaps.py stale`` cannot see
    this before the merge, because the issue is still open then.
  - **Where things go.** General design decisions and analyses belong in
    ``docs/source/design/*.md`` (added to the toctree in ``docs/source/design.rst``);
