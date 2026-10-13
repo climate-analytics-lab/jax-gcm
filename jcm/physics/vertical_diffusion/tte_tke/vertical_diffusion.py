@@ -751,10 +751,13 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # skin temperature for land.
         surface_in = diagnostics["surface"]
         # Water-tile temperature straight from the SST FORCING, not the
-        # blended ``surface.surface_temperature`` (which is snapped to
-        # one-or-the-other in mixed coastal cells — with fmask > 0.5 the
-        # residual ocean fraction would exchange with the LAND
-        # temperature, corrupting coastal fluxes; Codex review on #555).
+        # blended ``surface.surface_temperature`` — that is the
+        # tile-WEIGHTED T**4 mean EchamBoundaryConditions forms for
+        # radiation (#988), a single grid value that is never the right
+        # temperature for any one tile's own turbulent exchange (Codex
+        # review on #555, against the convention as it stood then: a
+        # majority-tile snap that would have exchanged the residual ocean
+        # fraction with the LAND temperature in mixed coastal cells).
         # Same per-tile sources as EchamSurface.
         sst_col = forcing.sea_surface_temperature.reshape(ncols)
         stl_col = forcing.stl_am.reshape(ncols)

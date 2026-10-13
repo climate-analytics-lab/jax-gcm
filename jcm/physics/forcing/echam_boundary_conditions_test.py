@@ -263,6 +263,107 @@ class LandSkinTemperatureTest(unittest.TestCase):
                                    P.land_emissivity)
 
 
+class TileWeightedRadiativeTemperatureTest(unittest.TestCase):
+    """ECHAM's ``radtemp`` tile-weighted T**4 mean (#988), vs the old
+    ``where(fmask > 0.5, land, sst)`` snap it replaces.
+    """
+
+    def test_matches_mo_surface_formula_directly(self):
+        from jcm.physics.forcing.echam_boundary_conditions import (
+            tile_weighted_radiative_temperature,
+        )
+        land_f = jnp.array([0.3])
+        ice_f = jnp.array([0.2])
+        t_land, t_ice, t_ocean = 270.0, 260.0, 285.0
+        got = tile_weighted_radiative_temperature(
+            land_f, ice_f, jnp.array([t_land]), jnp.array([t_ice]),
+            jnp.array([t_ocean]))
+        ocean_f = 1.0 - 0.3 - 0.2
+        expect = (0.3 * t_land ** 4 + 0.2 * t_ice ** 4
+                  + ocean_f * t_ocean ** 4) ** 0.25
+        np.testing.assert_allclose(got, [expect], rtol=1e-6)
+
+    def test_degenerates_to_pure_land_and_pure_ocean(self):
+        """At the extremes the tile-weighted mean must reduce exactly to
+        the single-tile value — this is why the pure-land/pure-ocean
+        regression tests elsewhere are unaffected by #988.
+        """
+        from jcm.physics.forcing.echam_boundary_conditions import (
+            tile_weighted_radiative_temperature,
+        )
+        land = jnp.array([280.0])
+        ocean = jnp.array([290.0])
+        ice = jnp.array([260.0])
+        pure_land = tile_weighted_radiative_temperature(
+            jnp.array([1.0]), jnp.array([0.0]), land, ice, ocean)
+        pure_ocean = tile_weighted_radiative_temperature(
+            jnp.array([0.0]), jnp.array([0.0]), land, ice, ocean)
+        np.testing.assert_allclose(pure_land, land, rtol=1e-6)
+        np.testing.assert_allclose(pure_ocean, ocean, rtol=1e-6)
+
+    def test_sea_ice_tile_now_enters(self):
+        """The sea-ice temperature entered NEITHER branch of the old snap
+        (it fell into the ``sst`` branch regardless of ``sice_am``); with
+        the T**4 mean a colder ice tile measurably cools the grid value
+        relative to its SST.
+        """
+        from jcm.physics.forcing.echam_boundary_conditions import (
+            tile_weighted_radiative_temperature,
+        )
+        warm_ice = tile_weighted_radiative_temperature(
+            jnp.array([0.0]), jnp.array([0.5]),
+            jnp.array([280.0]), jnp.array([273.0]), jnp.array([290.0]))
+        no_ice = tile_weighted_radiative_temperature(
+            jnp.array([0.0]), jnp.array([0.0]),
+            jnp.array([280.0]), jnp.array([273.0]), jnp.array([290.0]))
+        self.assertLess(float(warm_ice[0]), float(no_ice[0]))
+
+    def test_coastal_cell_moves_land_only_and_ocean_only_do_not(self):
+        """End-to-end through the term: land-only and ocean-only cells'
+        ``surface_temperature`` are unchanged (round-off) by #988; the
+        reported number is the coastal cell's own move away from the old
+        majority-tile snap.
+        """
+        term = _cached_term(ncols=3)
+        state, diagnostics, forcing, _ = _term_inputs(
+            ncols=3, stl_am=jnp.full((3,), 260.0),
+            sea_surface_temperature=jnp.full((3,), 290.0))
+        # Columns: pure land, pure ocean, 30% land coastal cell.
+        terrain = types.SimpleNamespace(fmask=jnp.array([1.0, 0.0, 0.3]))
+        out = term(state, diagnostics, forcing, terrain)[1]
+        t_new = np.asarray(out["surface"].surface_temperature)
+
+        old_snap = np.where(np.array([1.0, 0.0, 0.3]) > 0.5, 260.0, 290.0)
+        np.testing.assert_allclose(t_new[:2], old_snap[:2], atol=1e-5)
+        coastal_old, coastal_new = old_snap[2], t_new[2]
+        expect_coastal = (0.3 * 260.0 ** 4 + 0.7 * 290.0 ** 4) ** 0.25
+        np.testing.assert_allclose(coastal_new, expect_coastal, rtol=1e-6)
+        # Report (via assertion, not print): the old snap picked the OCEAN
+        # value outright (fmask=0.3 <= 0.5, all-290 K) for a cell that is
+        # 30% land; the new blend sits strictly between the two tiles, ~8 K
+        # cooler than the old snap's all-ocean answer.
+        self.assertLess(coastal_new, coastal_old)
+        self.assertGreater(coastal_new, 260.0)
+        self.assertGreater(coastal_old - coastal_new, 0.5)  # non-trivial move
+
+
+class RoughnessLengthTileGateTest(unittest.TestCase):
+    """The land-tile roughness placeholder must key on "any land", not
+    "majority land" (#988) — it feeds ONLY the land tile downstream
+    (``vertical_diffusion.py``'s ``roughness[:, 2]``), so a majority-ocean
+    coastal cell must still see the LAND value for its land tile.
+    """
+
+    def test_any_land_gets_the_land_roughness(self):
+        term = _cached_term(ncols=3)
+        state, diagnostics, forcing, _ = _term_inputs(ncols=3)
+        # Pure ocean, pure land, and a minority-land (30%) coastal cell.
+        terrain = types.SimpleNamespace(fmask=jnp.array([0.0, 1.0, 0.3]))
+        out = term(state, diagnostics, forcing, terrain)[1]
+        rough = np.asarray(out["surface"].roughness_length)
+        np.testing.assert_allclose(rough, [0.0001, 0.01, 0.01])
+
+
 class SolveTimeSurfaceOpticsTest(unittest.TestCase):
     """The radiation solves with, and publishes, the solve-time albedo.
 
