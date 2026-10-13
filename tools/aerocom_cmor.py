@@ -490,6 +490,122 @@ def _collect_optics(ds: xr.Dataset) -> tuple[dict[str, xr.DataArray], set[str]]:
     return out, consumed
 
 
+# --- COSP time-mean safety (jax-gcm#1079) ---------------------------------
+#
+# ``CloudsatCosp`` emits several conditional-mean products that a plain
+# ``output_averages`` time mean does not recover correctly; it ALSO emits a
+# companion field alongside each one (see
+# ``jcm/physics/diagnostics/cosp_cloudsat.py``'s "Time-mean safety"
+# docstring section) that lets this post-processor divide the time mean of
+# the field by the time mean of its companion and get the CFMIP/CMIP
+# quantity back. This holds whether the input file carries time means or
+# instantaneous snapshots -- the companions are emitted unconditionally.
+
+# CALIPSO layer cover -> its validity-count companion ("1 where the lidar
+# had a usable signal in that layer, 0 where jcosp's R_UNDEF" -- GOCCP
+# excludes the latter from the mean).
+_CALIPSO_VALID_COMPANION = {
+    "cltcalipso": "cltcalipso_n", "cllcalipso": "cllcalipso_n",
+    "clmcalipso": "clmcalipso_n", "clhcalipso": "clhcalipso_n",
+}
+
+# MODIS/ISCCP scalar products that are zero at night and need the shared
+# ``cosp_sunlit`` daytime-mean companion.
+_SUNLIT_SCALARS = ("cltmodis", "clwmodis", "climodis", "cltisccp")
+
+# MODIS/ISCCP joint histograms needing the same ``cosp_sunlit`` correction,
+# applied per flattened ``<name>.<i>`` channel before histogram reassembly.
+_SUNLIT_HISTOGRAMS = ("clmodis", "jpdftaureliqmodis", "jpdftaureicemodis",
+                      "lwpreffmodis", "iwpreffmodis", "clisccp")
+
+# MODIS in-cloud means -> the cloud-fraction companion they were stored
+# pre-weighted by (CMIP convention: reffclwmodis is weighted by clwmodis so
+# the RATIO is the in-cloud mean; jcosp forms tauwmodis/lwpmodis the same
+# way -- same n_wat/n_ice denominator -- so the same treatment applies).
+# This ratio needs no further ``cosp_sunlit`` division: clwmodis/climodis
+# are themselves already 0 at night, so night steps contribute zero weight
+# on both sides of the ratio automatically.
+_INCLOUD_WEIGHT = {
+    "tauwmodis": "clwmodis", "reffclwmodis": "clwmodis", "lwpmodis": "clwmodis",
+    "tauimodis": "climodis", "reffclimodis": "climodis", "iwpmodis": "climodis",
+}
+
+# Below this, a companion's time mean is treated as "never valid/sunlit/
+# cloudy" rather than divided into (0/~0 would otherwise blow up to noise).
+_COMPANION_EPS = 1e-9
+
+
+def _safe_ratio(num: xr.DataArray, den: xr.DataArray) -> xr.DataArray:
+    """``num / den``, NaN (genuinely undefined) wherever ``den`` is ~0."""
+    return num / den.where(den > _COMPANION_EPS)
+
+
+def _warn_missing_companion(name: str, companion: str) -> None:
+    print(
+        f"WARNING tools/aerocom_cmor.py: {name!r} has no {companion!r} "
+        f"time-mean-safety companion (jax-gcm#1079) -- this looks like "
+        f"output from before that fix. Writing the UNCORRECTED time mean, "
+        f"which may be biased (CALIPSO layer covers: too low when "
+        f"sometimes fully attenuated; MODIS/ISCCP: too low by the sunlit "
+        f"fraction; MODIS in-cloud means: biased by cloud-pixel "
+        f"occurrence). Regenerate from a model built after jax-gcm#1079 "
+        f"for a correct submission.",
+        file=sys.stderr)
+
+
+def _apply_time_mean_safety(ds: xr.Dataset) -> xr.Dataset:
+    """Recover the CFMIP/CMIP-defined COSP means using jcm's #1079 companions.
+
+    Returns a shallow copy of ``ds`` with the affected source variables
+    REPLACED by their corrected values, so the rest of ``convert`` (the
+    plain ``NAME_MAP`` scale/offset loop, histogram reassembly) needs no
+    further change -- it only ever sees already-correct fields. A source
+    variable missing its companion (pre-#1079 output) is passed through
+    unmodified with a loud warning rather than refused outright, so an old
+    file remains usable with its known, documented bias.
+    """
+    out = ds.copy()
+
+    for name, companion in _CALIPSO_VALID_COMPANION.items():
+        if name not in ds.data_vars:
+            continue
+        if companion not in ds.data_vars:
+            _warn_missing_companion(name, companion)
+            continue
+        out[name] = _safe_ratio(ds[name], ds[companion])
+
+    sunlit = ds.get("cosp_sunlit")
+    sunlit_needed = [n for n in _SUNLIT_SCALARS if n in ds.data_vars]
+    sunlit_needed += [n for n in _SUNLIT_HISTOGRAMS
+                      if f"{n}.0" in ds.data_vars]
+    if sunlit is None:
+        for name in sunlit_needed:
+            _warn_missing_companion(name, "cosp_sunlit")
+    else:
+        for name in _SUNLIT_SCALARS:
+            if name in ds.data_vars:
+                out[name] = _safe_ratio(ds[name], sunlit)
+        for hist_name in _SUNLIT_HISTOGRAMS:
+            i = 0
+            while f"{hist_name}.{i}" in ds.data_vars:
+                ch = f"{hist_name}.{i}"
+                out[ch] = _safe_ratio(ds[ch], sunlit)
+                i += 1
+
+    for name, weight in _INCLOUD_WEIGHT.items():
+        if name not in ds.data_vars:
+            continue
+        if weight not in ds.data_vars:
+            _warn_missing_companion(name, weight)
+            continue
+        # Deliberately divides by the UNCORRECTED ``clwmodis``/``climodis``
+        # (``ds[weight]``, not the sunlit-corrected ``out[weight]``) -- see
+        # the module docstring note above.
+        out[name] = _safe_ratio(ds[name], ds[weight])
+
+    return out
+
+
 def convert(
     ds: xr.Dataset,
     model: str,
@@ -505,6 +621,12 @@ def convert(
     """Write one file per mapped variable; return (written, skipped)."""
     outdir.mkdir(parents=True, exist_ok=True)
     written: list[str] = []
+
+    # Recover the CFMIP/CMIP-defined COSP means from jcm's #1079 companions
+    # BEFORE anything below looks at the affected source variables, so the
+    # rest of this function (the NAME_MAP loop, histogram reassembly) only
+    # ever sees already-correct fields.
+    ds = _apply_time_mean_safety(ds)
 
     candidates: dict[str, tuple[xr.DataArray, str, str]] = {}
     for src, (cmor, units, vert, scale, offset) in NAME_MAP.items():
@@ -572,8 +694,13 @@ def convert(
     mapped_srcs = {s for s in NAME_MAP if s in ds.data_vars}
     dep_srcs = {f"{k}_{sp}" for sp in DEPOSITION_SPECIES
                 for k in ("dry", "wet")}
+    # The #1079 companions are consumed above (as divisors), not written
+    # under their own name, but they are NOT a coverage gap -- excluded so
+    # the skipped-report stays a genuine "no AeroCom mapping" list.
+    companion_srcs = (set(_CALIPSO_VALID_COMPANION.values())
+                     | {"cosp_sunlit"}) & set(ds.data_vars)
     skipped = sorted(set(ds.data_vars) - mapped_srcs - optics_srcs - hist_srcs
-                     - dep_srcs
+                     - dep_srcs - companion_srcs
                      - {f"aerocom_burden_{sp}" for sp in BURDEN_SPECIES})
     return written, skipped
 
