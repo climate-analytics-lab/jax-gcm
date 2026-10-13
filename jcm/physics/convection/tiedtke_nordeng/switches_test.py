@@ -198,12 +198,20 @@ class TestWidthsAreStatic:
     """The widths configure derivatives only: static, and never negative."""
 
     def test_widths_are_not_pytree_leaves(self):
+        """Every ``pytree_node=False`` field is static, not just the widths.
+
+        Counts directly from the dataclass field metadata rather than
+        ``SURROGATE_WIDTH_FIELDS`` alone, so a non-width static switch (e.g.
+        ``conservative_downdraft_uptake``, jax-gcm#912) is covered by this
+        invariant without the test needing to know its name.
+        """
+        import dataclasses
+
         leaves = jax.tree_util.tree_leaves(_DEFAULT)
-        n_fields = len(_DEFAULT.__dataclass_fields__)
-        from jcm.physics.convection.tiedtke_nordeng.types import (
-            SURROGATE_WIDTH_FIELDS,
-        )
-        assert len(leaves) == n_fields - len(SURROGATE_WIDTH_FIELDS)
+        fields = dataclasses.fields(_DEFAULT)
+        n_static = sum(
+            1 for f in fields if not f.metadata.get("pytree_node", True))
+        assert len(leaves) == len(fields) - n_static
 
     def test_negative_width_is_rejected(self):
         with pytest.raises(ValueError):

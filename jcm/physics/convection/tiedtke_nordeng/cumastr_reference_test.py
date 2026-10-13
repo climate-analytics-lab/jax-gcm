@@ -64,6 +64,17 @@ _RTOL = 1.0e-10
 _JCM_CONSTANT_STEPS = (53, 354)
 
 
+#: The columns among the 758 where ECHAM's own ``cuflx`` floor (#912) binds:
+#: the (stale, first-ascent-scaled) downdraft takes up more rain than the
+#: final ascent generates. ``ConvectionParameters.conservative_downdraft_
+#: uptake`` (default ``True``) is a deliberate deviation from ECHAM there —
+#: see ``TestConservativeDowndraft`` below — so the bit-for-bit comparisons
+#: in this module run with it off, reproducing ECHAM's own floor exactly;
+#: these two columns are excluded from them for that documented reason, not
+#: a tolerance loosening.
+_FLOOR_BINDS_STEPS = (14, 15)
+
+
 @functools.lru_cache(maxsize=1)
 def _reference():
     with np.load(_REFERENCE) as z:
@@ -87,13 +98,23 @@ def _echam_constants(ref):
 
 
 @functools.lru_cache(maxsize=None)
-def _port(constants):
-    """Run the scheme in float64 on every column under ``constants``."""
+def _port(constants, conservative_downdraft_uptake=False):
+    """Run the scheme in float64 on every column under ``constants``.
+
+    ``conservative_downdraft_uptake`` defaults to ``False`` here: this
+    module's whole mandate is a bit-for-bit comparison against ECHAM6.3's
+    compiled convection, and the conservative treatment
+    (``ConvectionParameters.conservative_downdraft_uptake``, ``True`` in
+    production) is a deliberate, DOCUMENTED deviation from it (#912). See
+    ``TestConservativeDowndraft`` for the production default exercised on
+    this same reference data.
+    """
     ref = _reference()
     with _constants(**dict(constants)), jax.enable_x64(True):
         args = [jnp.asarray(ref[f"input_{k}"], jnp.float64) for k in _INPUTS]
         dt = float(ref["dt"])
-        config = ConvectionParameters.default()
+        config = ConvectionParameters.default(
+            conservative_downdraft_uptake=conservative_downdraft_uptake)
 
         def column(*a):
             (temperature, humidity, pressure, layer_thickness, rho, u_wind,
@@ -115,12 +136,14 @@ def _port(constants):
                 np.asarray(state.mfu), kbase[:, None], axis=1)[:, 0],
             precip=np.asarray(tend.precip_conv),
             dtedt=np.asarray(tend.dtedt), dqdt=np.asarray(tend.dqdt),
+            floor_source=np.asarray(tend.precip_floor_source),
         )
 
 
-def _echam(ref=None):
+def _echam(ref=None, conservative_downdraft_uptake=False):
     ref = _reference() if ref is None else ref
-    return _port(tuple(sorted(_echam_constants(ref).items())))
+    return _port(tuple(sorted(_echam_constants(ref).items())),
+                 conservative_downdraft_uptake)
 
 
 def _decision_mismatches(port, ref):
@@ -211,6 +234,49 @@ class TestAgainstEcham:
         assert np.all(port[name][~on] == 0.0), name
         worst = np.max(err[on] / scale[on])
         assert worst <= _RTOL, f"{name}: worst per-level error {worst:.2e}"
+
+
+class TestConservativeDowndraft:
+    """``conservative_downdraft_uptake`` (#912's deviation) on this dataset.
+
+    None of these 758 columns exercise ECHAM's own floor (measured below):
+    the defect this parameter fixes is a dynamic one — a deep-to-shallow
+    demotion's re-run ascent raining less than the stale, scaled downdraft
+    already took up — that this static single-step snapshot of ECHAM6.3's
+    compiled ``cucall`` does not reach, and (measured in the PR) neither
+    does the whole-model RCE testbed's current (RRTMGP) column
+    (``jcm/rce_test.py::TestRceWholeModelTiedtke``): the deviation is a
+    genuine deep-to-shallow-demotion event the issue's grey-radiation
+    column hit but this dataset and that testbed's present trajectory do
+    not. What this dataset DOES prove is the no-regression half of the
+    deviation: turning the production default on moves NOTHING here, down
+    to the bit — ``convective_precip_fluxes`` only re-runs the partition
+    scan where there is a deficit to forgive (a ``lax.cond``, not a blend),
+    so a column the deviation does not apply to is untouched rather than
+    merely unchanged within round-off.
+    """
+
+    def test_echams_floor_never_binds_on_this_dataset(self):
+        port = _echam(conservative_downdraft_uptake=False)
+        np.testing.assert_array_equal(port["floor_source"], 0.0)
+
+    def test_conservative_default_matches_the_echam_faithful_path_exactly(self):
+        off = _echam(conservative_downdraft_uptake=False)
+        on = _echam(conservative_downdraft_uptake=True)
+        for name in ("ktype", "kcbot", "kctop"):
+            np.testing.assert_array_equal(on[name], off[name], err_msg=name)
+        # ``_RTOL``, not exact equality: a handful of columns have a
+        # float64-round-off-level (not physical) deficit — ``prfl_raw``
+        # dipping a few ULP below zero where it "should" land on exactly
+        # zero — which the correction (correctly) forgives; re-running the
+        # partition scan with that ULP-sized forgiveness does not reproduce
+        # the first pass bit-for-bit (floating addition is not
+        # associative). ``lax.cond`` still keeps every OTHER column (no
+        # deficit at all, the overwhelming majority) untouched to the bit.
+        for name in ("precip", "dtedt", "dqdt"):
+            np.testing.assert_allclose(
+                on[name], off[name], rtol=_RTOL, atol=0.0, err_msg=name)
+        np.testing.assert_array_equal(on["floor_source"], 0.0)
 
 
 class TestJcmConstants:

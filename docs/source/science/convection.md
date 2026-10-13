@@ -182,6 +182,33 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   ``t63-echam-1m``) that is a heating dipole estimated at order 10 K/hr,
   which jcm does not reproduce. Wherever it is at most one interface above,
   the two agree.
+- `science` — the downdraft's rain uptake is bounded by what the FINAL
+  ascent generates, not the first. ECHAM's ``cumastr`` scales the FIRST
+  ascent's downdraft to the closed cloud-base flux and re-runs ``cuasc``
+  rather than re-running the downdraft (``mo_cumastr.f90:944-986``); where
+  the re-run (e.g. deep-to-shallow demoted) ascent rains less than that
+  stale, scaled downdraft takes up, ECHAM's own floor on ``cuflx``'s rain
+  and snow fluxes (``mo_cufluxdts.f90:324-325``) creates the shortfall as
+  water, since ``cudtdq`` still charges the unfloored ``pdmfup + pdmfdp`` to
+  the heat/moisture ledger. ``ConvectionParameters.
+  conservative_downdraft_uptake`` (default ``True``) bounds the uptake
+  instead: ``convective_precip_fluxes`` forgives exactly that shortfall —
+  per phase, since the floor acts on rain and snow independently — from the
+  deepest matching-phase downdraft-active levels upward, before the floor
+  runs, so the column's water and enthalpy budgets close exactly and
+  ``convection.precip_floor_source`` reads ~0; the forgiveness is an exact
+  no-op wherever ECHAM's own floor was never going to bind, so it cannot
+  move a column the deviation does not apply to. ECHAM's own
+  (non-conservative) floor stays reachable bit-for-bit with
+  ``conservative_downdraft_uptake = False``, for an A/B of convective
+  precipitation and the global water budget against the released
+  behaviour. None of the 758 ``echam_cumastr_reference`` columns exercise
+  ECHAM's floor at all (``cumastr_reference_test.py::
+  TestConservativeDowndraft``), and nor does the whole-model RCE column's
+  present (RRTMGP) trajectory over days 40-80
+  ({doc}`../design/rce_testbed`); the deviation is demonstrated on a
+  synthetic column built to exercise it instead
+  (``flux_tendencies_test.py::TestConservativeDowndraftUptake``).
 - `science` / `compute` (stopgap) — ECHAM bounds the mass flux, not the
   heating: the cloud-base flux and the per-level entrainment are held to the
   layer's air mass per step (``zmfmax = layer_mass/dt``, ``mo_cumastr.f90``
@@ -213,18 +240,6 @@ is Betts & Miller (1986) as simplified by Frierson, D.M.W. (2007), *J. Atmos. Sc
   derivatives of sigmoid gates and a softplus. The cloud top ``iptop`` is a
   level index and stays hard. See
   {doc}`../design/surrogate_gradients`.
-- **Tiedtke creates water where the downdraft out-takes the plume's rain
-  (#912).** As in ECHAM, ``cumastr`` scales the first ascent's downdraft to the
-  closed flux and re-runs ``cuasc``, and ``cuflx`` floors the rain and snow
-  fluxes at zero while the vapour ledger keeps the unfloored
-  ``pdmfup + pdmfdp``. A second ascent that rains less than the scaled
-  downdraft takes up (a deep-to-shallow demotion) therefore creates the
-  difference as water. The amount is published as
-  ``convection.precip_floor_source``, so a column budget closes as
-  ``E - P + precip_floor_source``; in the whole-model RCE column, with grey
-  or RRTMGP radiation, it is below 0.001 mm/d over days 40-80
-  ({doc}`../design/rce_testbed`).
-
 **Code pointers.**
 - ``jcm/physics/convection/tiedtke_nordeng/`` — ``tiedtke_nordeng.py``
   (``TiedtkeConvection``, the CFL cap, ``_DTDT_MAX``), ``switches.py`` (the
