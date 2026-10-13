@@ -211,14 +211,12 @@ self-collection/break-up guard (``zsprn1``, ``mo_cloud_micro_2m.f90`` lines
 subroutine) — read their floor from the call's own working dtype
 (``jnp.finfo(dtype).eps``), reproducing r7492's ``eps``
 (``mo_cloud_utils.f90:27``, ``EPSILON(1._dp)``) exactly at float64, jcm's
-own precision (jax-gcm#1039). A fixed float64 literal would not serve a
-float32-forward call: ``EPSILON(1._dp)`` (~2.22e-16) is far below
-float32's own representable precision and would be absorbed as a no-op
-there, so the dtype-generic form is the correct floor at both precisions,
-not merely the float64 one. The ice-number guard also now floors the
-pre-aggregation ice content (``zxibold``) at this same epsilon rather than
-at zero, matching r7492's own ``zxibold = MAX(pxib,eps)`` — previously
-computed but unused in jcm's port.
+own precision. A float64 literal would not serve a float32-forward call:
+``EPSILON(1._dp)`` (~2.22e-16) is far below float32's own representable
+precision and would be absorbed as a no-op there, so the dtype-generic form
+is the correct floor at both precisions, not merely the float64 one. The
+ice-number guard also floors the pre-aggregation ice content (``zxibold``)
+at this same epsilon, matching r7492's own ``zxibold = MAX(pxib,eps)``.
 
 This DOES move float32 results for an ice/liquid content between
 ``cqtmin`` (1e-12, the gate both guards sit behind) and float32's own
