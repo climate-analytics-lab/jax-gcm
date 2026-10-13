@@ -338,8 +338,8 @@ def jam_aerosol_physics(
         seasalt_scheme: ``"gong"`` (default, unchanged) or ``"long"`` (Long
             et al. 2011 + the Sofiev et al. 2011 SST correction, HAM
             ``nseasalt=7``; #1017). ``"long"`` requires the microphysics
-            core's population to carry exactly two ``ss`` classes, in HAM's
-            own accumulation-then-coarse order — see
+            core's population to carry exactly two ``ss`` classes of
+            different size (HAM's accumulation and coarse roles) — see
             :class:`~jcm.physics.aerosol.jam.emissions.seasalt.SeaSaltEmissions`.
         dust_preset: HAMMOZ ``ndust`` preset — 4 (default, Stier 2005 +
             East-Asian soils = HAM2), 3 (Stier 2005) or 2 (Cheng 2008).

@@ -19,7 +19,7 @@ field, so the per-bin size/SST arrays are precomputed at construction and
 the ``(nbin, ncols)`` evaluation happens at call time. Long's own AS/CS
 split is HAM's fixed diameter bins (``_DBEG``/``_DEND``), not a population-
 derived one: the population must therefore carry exactly two ``ss``
-classes, in HAM's own accumulation/coarse order.
+classes of different size; the smaller takes HAM's AS flux, the larger CS.
 
 The source functions are HAM's; the shipped overall scale
 (:data:`SEASALT_SCALE_DEFAULT`) is a calibration of 4 on top of them for the
@@ -377,17 +377,18 @@ class SeaSaltEmissions(PhysicsTerm):
             self._fac = gong_class_factors(self._spec.classes_for("ss"), density)
         elif scheme == "long":
             classes = self._spec.classes_for("ss")
-            if len(classes) != 2:
+            if len(classes) != 2 or classes[0].dgnum == classes[1].dgnum:
                 raise ValueError(
                     "scheme='long' ports HAM's own two-class (accumulation, "
                     "coarse) AS/CS output (mo_ham_m7_emi_seasalt.f90's fixed "
                     "dbeg/dend bins, not a population size-range partition "
                     f"like Gong's); got {len(classes)} 'ss' classes "
                     f"({[c.short for c in classes]}). Supply a population "
-                    "whose 'ss' species carries exactly two classes, in "
-                    "HAM's accumulation-then-coarse order."
+                    "whose 'ss' species carries exactly two classes of "
+                    "different size."
                 )
-            self._long_classes = classes   # (accumulation-like, coarse-like)
+            # HAM's AS/CS roles by size, whatever order the spec declares.
+            self._long_classes = tuple(sorted(classes, key=lambda c: c.dgnum))
             # Precomputed jnp arrays, not a differentiable leaf (bin geometry
             # fixed at construction) -- nnx.data so the Module's pytree
             # flattening treats it as data, not a static attribute (unlike
