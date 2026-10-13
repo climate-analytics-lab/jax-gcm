@@ -150,14 +150,21 @@ class TestSpeedyNumericalEquivalence(unittest.TestCase):
         # Should produce valid (non-NaN) tendencies
         self.assertFalse(jnp.any(jnp.isnan(tend.temperature)))
 
-    def test_speedy_humidity_publishes_capped_rh_without_touching_physics_input(self):
+    def test_speedy_humidity_publishes_bolton_rh_without_touching_physics_input(self):
         """SpeedyHumidity must leave ``humidity.rh`` (a physics input read by
         speedy_vdiff/speedy_shortwave/speedy_surface_flux) exactly as the
-        reference computes it, however extreme, while also publishing a
-        separate, sanity-capped ``relative_humidity`` diagnostic (#407 and
-        its Codex review: capping ``humidity.rh`` in place -- even scoped to
-        specific levels -- changed cloud diagnosis on some vertical grids).
+        reference computes it, however extreme, while publishing a
+        separate ``relative_humidity`` diagnostic computed from the SAME
+        Bolton formula ``MoistAirColumnState`` uses for every ECHAM
+        composition (#407 and its Codex review: a first version instead
+        published SPEEDY's own ice/water-switching ratio, sanity-capped,
+        under this name -- silently redefining an existing cross-package
+        output contract that ``tools/aerocom_cmor.py`` and the science docs
+        both rely on).
         """
+        from jcm.physics.diagnostics.moist_air_state import (
+            bolton_relative_humidity,
+        )
         from jcm.physics.speedy.speedy_terms import SpeedyHumidity
 
         term = SpeedyHumidity()
@@ -165,9 +172,6 @@ class TestSpeedyNumericalEquivalence(unittest.TestCase):
 
         state = self.state.copy(
             temperature=self.state.temperature.at[0].set(126.0),
-            specific_humidity=jnp.full_like(
-                self.state.specific_humidity, 5e-4,
-            ),
         )
 
         _, diagnostics = term(state, {}, self.forcing, self.terrain)
@@ -176,15 +180,30 @@ class TestSpeedyNumericalEquivalence(unittest.TestCase):
         reported_rh = diagnostics["relative_humidity"]
 
         # The physics-facing field is the raw, uncapped ratio -- the same
-        # pathological value speedy_vdiff.py etc. would read unmodified.
+        # pathological value speedy_vdiff.py etc. would read unmodified --
+        # and is wildly different from the Bolton-based public field, since
+        # the two are now genuinely different formulas (not the same ratio
+        # under two names).
         self.assertTrue(float(jnp.max(physics_rh)) > 1e4)
-        # The published diagnostic is sanity-capped.
-        self.assertTrue(float(jnp.max(reported_rh)) <= 10.0)
-        # Everywhere physics_rh is NOT pathological, the two agree exactly.
-        ordinary = physics_rh <= 10.0
-        np.testing.assert_allclose(
-            reported_rh[ordinary], physics_rh[ordinary],
+        self.assertFalse(
+            jnp.allclose(reported_rh, physics_rh, rtol=1e-2).item(),
         )
+
+        # relative_humidity matches a direct call to the shared function on
+        # SPEEDY's own pure-sigma pressure -- i.e. it is exactly the same
+        # computation an ECHAM composition's MoistAirColumnState would do
+        # given the same (T, q, p), not a rescaled version of humidity.rh.
+        import jcm.constants as c
+        from jcm.physics.speedy.speedy_coords import SpeedyCoords
+        fsg = SpeedyCoords.from_coordinate_system(self.coords).fsg
+        pressure_full = (
+            fsg.reshape((-1,) + (1,) * state.normalized_surface_pressure.ndim)
+            * (state.normalized_surface_pressure * c.p0)[jnp.newaxis]
+        )
+        expected = bolton_relative_humidity(
+            state.temperature, state.specific_humidity, pressure_full,
+        )
+        np.testing.assert_allclose(reported_rh, expected, rtol=1e-6)
 
     def test_every_output_variable_is_documented(self):
         """Every published variable carries units and a description.

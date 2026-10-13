@@ -26,15 +26,29 @@ Bug fixes
   SPEEDY vertical grid) and ``speedy_surface_flux.py`` all read it — so
   capping it in place, even restricted to specific levels, risks changing
   simulated clouds and fluxes on some configuration (caught by two rounds
-  of Codex review). The fix instead leaves ``humidity.rh`` exactly as the
-  reference computes it and adds a separate ``relative_humidity``
-  diagnostic, capped at 1000% (generously above any physically meaningful
-  supersaturation), mirroring the ``relative_humidity`` /
-  ``cover_relative_humidity`` split ECHAM's Sundqvist closure already uses
-  for the identical reason. A full ``speedy-t31`` year confirms every
-  existing output field, including ``humidity.rh`` and ``humidity.qsat``
-  themselves, is bit-for-bit unchanged; ``relative_humidity`` is the only
-  new field, and it is the one to read going forward.
+  of Codex review). A third round then caught that publishing SPEEDY's own
+  (sanity-capped) ratio under the name ``relative_humidity`` silently
+  redefined an existing cross-package output contract: every other
+  composition's ``relative_humidity`` is the water-only Bolton (1980) WMO
+  definition ``MoistAirColumnState`` computes (what ``tools/aerocom_cmor.py``
+  writes as CMIP ``hur``), documented in ``science/clouds_microphysics.md``
+  and ``science/constants.md`` as unchanged by which physics produced it.
+
+  The fix leaves ``humidity.rh`` exactly as the reference computes it and
+  adds a ``relative_humidity`` diagnostic computed independently from the
+  SAME shared Bolton formula (now factored out as
+  :func:`~jcm.physics.diagnostics.moist_air_state.bolton_relative_humidity`)
+  on SPEEDY's own pure-sigma pressure — mirroring the ``relative_humidity``
+  / ``cover_relative_humidity`` split ECHAM's Sundqvist closure already
+  uses for the identical reason, and giving a SPEEDY run's
+  ``relative_humidity`` the same physical meaning as an ECHAM run's. That
+  formula's own ``es`` floor (designed for exactly this cold, low-pressure
+  regime) is what keeps the result bounded, with no SPEEDY-specific cap:
+  a full ``speedy-t31`` year's maximum drops from 1.64e6 to 20.1 (2010%,
+  8.7 at the top level specifically) — every existing output field,
+  including ``humidity.rh`` and ``humidity.qsat`` themselves, is otherwise
+  bit-for-bit unchanged; ``relative_humidity`` is the only new field, and
+  it is the one to read going forward.
 
 v3.0.0 (2026-10-12)
 -------------------

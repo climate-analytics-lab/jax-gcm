@@ -11,50 +11,6 @@ from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import PhysicsData
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 
-# Numerical-sanity ceiling for the *public* relative-humidity diagnostic
-# (``capped_relative_humidity`` below) — not a physical bound, and not
-# applied to ``physics_data.humidity.rh`` itself (see that function's
-# docstring for why). 10.0 (1000 %) is generously above any physically
-# meaningful supersaturation (ice nucleation / cirrus tops out around
-# 1.5-2), so it only ever clips the numerical pathology this exists for.
-_RH_SANITY_MAX = 10.0
-
-
-def capped_relative_humidity(rh: jnp.ndarray) -> jnp.ndarray:
-    """Sanity-capped relative humidity for the public diagnostic (#407).
-
-    ``get_qsat`` follows the reference Fortran's ice-Tetens branch
-    verbatim and, like the reference, floors neither the saturation
-    specific humidity nor ``rh = q / qsat``: as T keeps falling the
-    exponential drives ``qsat`` down by many more orders of magnitude
-    than any physically-resolvable specific humidity falls, so a
-    near-zero but non-zero ``q`` divided by a near-zero ``qsat`` is
-    unbounded. SPEEDY's top sigma layers are exactly where this bites —
-    deep polar night can put the model lid's temperature near 125-150 K
-    (a known, accepted characteristic of SPEEDY's crude top-level
-    radiative balance, not this function's concern) — and the raw ratio
-    then reaches the hundreds of thousands of percent (measured 1.64e6 on
-    the ``speedy-t31`` release-validation year).
-
-    This is applied only to the separate ``"relative_humidity"`` output
-    diagnostic (:class:`~jcm.physics.speedy.speedy_terms.SpeedyHumidity`),
-    never to ``physics_data.humidity.rh`` itself: that field is also a
-    *physics input* — ``speedy_vdiff.py``, ``speedy_shortwave.py``'s cloud
-    diagnosis (including its fixed-sigma ``interp_to_sigma`` blends, which
-    are not confined to any one level on every SPEEDY vertical grid) and
-    ``speedy_surface_flux.py`` all read it — so capping it in place would
-    change simulated clouds and fluxes on a config where some bracketing
-    level's raw ratio exceeds the cap, not just the reported number. Two
-    Codex review rounds on #407 found exactly this when the cap was first
-    applied in place (restricting it to specific levels was still grid-
-    dependent and unsafe). Keeping the reference quantity untouched and
-    adding a distinct, always-sane public field mirrors the
-    ``relative_humidity`` / ``cover_relative_humidity`` split already used
-    for ECHAM's Sundqvist closure (:mod:`jcm.physics.diagnostics.moist_air_state`).
-    """
-    return jnp.minimum(rh, _RH_SANITY_MAX)
-
-
 @jit
 def spec_hum_to_rel_hum(
     state: PhysicsState,

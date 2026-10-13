@@ -2,7 +2,6 @@ import unittest
 import jax.numpy as jnp
 import jax
 import functools
-import numpy as np
 from jax.test_util import check_vjp, check_jvp
 
 from jcm.testing import check_gradients
@@ -130,20 +129,20 @@ class TestHumidityUnit(unittest.TestCase):
         self.assertTrue((physics_data.humidity.rh >= 0.99).all() and (physics_data.humidity.rh <= 1).all(), "Relative humidity should be close to 1 when specific humidity is near qsat")
 
     def test_spec_hum_to_rel_hum_never_caps_the_physics_input(self):
-        """Regression for #407 (and its two Codex review rounds):
-        ``physics_data.humidity.rh`` must stay exactly the reference
-        Fortran's uncapped ratio, however extreme, because it is a
-        *physics input* (``speedy_vdiff``, ``speedy_shortwave``,
-        ``speedy_surface_flux`` all read it, on every SPEEDY vertical
-        grid). At SPEEDY's top sigma layer (0.025) in deep polar night,
-        temperature can fall to ~125-150 K; the ice-Tetens ``qsat`` then
-        collapses many orders of magnitude faster than any residual
-        specific humidity, so the raw ratio reaches the hundreds of
-        thousands of percent (measured 1.64e6 on the ``speedy-t31``
-        release-validation year) -- and must be allowed to, here.
-        The sanity cap belongs only on the separate ``relative_humidity``
-        diagnostic (see ``speedy_terms_test.py`` and
-        ``test_capped_relative_humidity_caps_only_the_pathology`` below).
+        """Regression for #407: ``physics_data.humidity.rh`` must stay
+        exactly the reference Fortran's uncapped ratio, however extreme,
+        because it is a *physics input* (``speedy_vdiff``,
+        ``speedy_shortwave``, ``speedy_surface_flux`` all read it, on
+        every SPEEDY vertical grid). At SPEEDY's top sigma layer (0.025)
+        in deep polar night, temperature can fall to ~125-150 K; the
+        ice-Tetens ``qsat`` then collapses many orders of magnitude faster
+        than any residual specific humidity, so the raw ratio reaches the
+        hundreds of thousands of percent (measured 1.64e6 on the
+        ``speedy-t31`` release-validation year) -- and must be allowed to,
+        here. The fix for the *reported* spike is a separate
+        ``relative_humidity`` diagnostic computed independently via the
+        shared Bolton formula (see ``speedy_terms_test.py`` and
+        ``moist_air_state_test.py``), never a cap on this field.
         """
         top_sigma = float(speedy_coords.fsg[0])
         self.assertAlmostEqual(top_sigma, 0.025, places=3)
@@ -182,24 +181,6 @@ class TestHumidityUnit(unittest.TestCase):
         raw_ratio = qg[0] / qsat_top
         self.assertTrue((raw_ratio > 1e4).all())
         self.assertTrue(jnp.allclose(rh_top, raw_ratio))
-
-    def test_capped_relative_humidity_caps_only_the_pathology(self):
-        """``capped_relative_humidity`` is the public, sanity-capped
-        diagnostic (#407); it must leave an ordinary ratio untouched and
-        clip only values the qsat-collapse pathology produces.
-        """
-        from jcm.physics.clouds.speedy_humidity import (
-            _RH_SANITY_MAX, capped_relative_humidity,
-        )
-
-        ordinary = jnp.array([0.0, 0.3, 0.8, 1.0, 1.5])
-        np.testing.assert_allclose(
-            capped_relative_humidity(ordinary), ordinary,
-        )
-
-        pathological = jnp.array([100.0, 1.64e6])
-        capped = capped_relative_humidity(pathological)
-        self.assertTrue(jnp.allclose(capped, _RH_SANITY_MAX).all())
 
     def test_rel_hum_to_spec_hum(self):
         temp = self.temp_standard
