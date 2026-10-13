@@ -450,8 +450,8 @@ class CloudBorneExchange(PhysicsTerm):
         # and well-conditioned however small ``base`` is in absolute
         # terms; the one remaining division (by ``share · r_liq +
         # (1 − share) · r_ice``) is therefore never a tiny-absolute-mass
-        # VJP, only a dimensionless retained fraction guarded by an
-        # ordinary (not absolute-scaled) epsilon below.
+        # VJP, only a dimensionless retained fraction — which an EXACT
+        # (not epsilon-fuzzed) zero guard below is enough to make safe.
         #
         # ``base`` itself is stop-gradiented before it divides anything.
         # It is only a NORMALIZATION choice — ``r_liq``/``r_ice``'s ratio
@@ -479,7 +479,21 @@ class CloudBorneExchange(PhysicsTerm):
         r_ice = (q_cb_arr * (1.0 - phi_eff_ice)
                  + target * phi_eff_ice) / base_safe
         retained = share * r_liq + (1.0 - share) * r_ice
-        negligible = retained <= 1.0e-6
+        # ``retained`` is a SUM of two nonnegative terms (``share``,
+        # ``r_liq``, ``r_ice`` are each clipped into [0, 1] upstream), never
+        # a difference, so it carries no cancellation error: it is exactly
+        # 0 only when both phi_eff are exactly 1 (both phases fully
+        # release), and otherwise exactly represents a real, well-defined
+        # composition — including a small one. A 1e-6 RELATIVE cutoff here
+        # (Codex review of this PR) wrongly discarded exactly that case: a
+        # phase that releases completely (its own ``r`` term is exactly 0)
+        # alongside a phase that releases 99.9999% but not quite all of it
+        # (``r`` ~ 1e-6, small but exact, not noise) gives a `retained`
+        # small enough to trip a 1e-6 threshold while ``share * r_liq``
+        # is UNAMBIGUOUSLY 0 — publishing the stale mixed ``share`` there
+        # claims aerosol is still droplet-held when none is. Guard only
+        # the genuine 0/0 (both exactly 1) with an exact comparison.
+        negligible = retained <= 0.0
         share_after = jnp.where(
             negligible,
             share,

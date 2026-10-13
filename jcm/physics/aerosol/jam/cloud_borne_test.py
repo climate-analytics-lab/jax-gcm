@@ -581,6 +581,34 @@ class CloudBorneExchangeTest(unittest.TestCase):
         share_after = float(np.asarray(out[LIQUID_SHARE_KEY][nm]).mean())
         np.testing.assert_allclose(share_after, 0.0, atol=1e-6)
 
+    def test_small_retained_fraction_still_gets_its_exact_composition(self):
+        # #1070 (Codex review finding): "negligible" must guard only the
+        # genuine 0/0 (both phases fully release), not every SMALL but
+        # exactly known retained fraction. Complete liquid release (its own
+        # retained term is exactly 0) alongside a slightly-short-of-complete
+        # ice release (retained term ~1e-6, small but exact, not noise)
+        # leaves a reservoir that is unambiguously fully crystal-held, even
+        # though the TOTAL retained fraction is tiny -- a loose epsilon on
+        # that total previously discarded this exact composition for the
+        # stale, mixed pre-transfer ``share``.
+        from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
+        state, diagnostics = self._mixed_phase_setup(
+            # e_liq enormous relative to pool_liq_gm so f_evap_liq rounds to
+            # EXACTLY 1.0 in float32 (r_liq exactly 0, not merely tiny).
+            q_cb=1.0e-9, e_liq=1.0e15, pool_liq=self._MIXED_POOL,
+            pool_ice=self._MIXED_POOL, qni=self._QNI,
+        )
+        shape = state.temperature.shape
+        # f_evap_ice = 0.999999 exactly: pool_ice_gm = 0.5 * _MIXED_POOL.
+        pool_ice_gm = 0.5 * self._MIXED_POOL
+        e_ice = pool_ice_gm * 0.999999 / (1.0 - 0.999999)
+        diagnostics["clouds"].condensate_evaporation_ice_rate = jnp.full(
+            shape, e_ice / 1800.0)
+        _, out = CloudBorneExchange()(state, diagnostics, None, None)
+        nm = mass_name("so4", "acc", cloud_borne=True)
+        share_after = float(np.asarray(out[LIQUID_SHARE_KEY][nm]).mean())
+        np.testing.assert_allclose(share_after, 0.0, atol=1e-6)
+
     def test_droplet_held_share_correction_is_concentration_independent(self):
         # #1070 (Codex review finding, twice over): the post-transfer
         # correction must not depend on the ABSOLUTE size of the reservoir
