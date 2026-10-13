@@ -191,6 +191,118 @@ class TestECHAMLouisScheme:
         np.testing.assert_allclose(np.asarray(sCH1), np.asarray(sCH2))
 
 
+class TestEchamLouisNeutralDrag:
+    """``echam_louis_neutral_drag`` vs ECHAM6.3's own ``ln(1 + z/z0)`` (#1056).
+
+    Reference: land ``mo_surface_land.f90:238`` (``zcdnl``), ocean
+    ``mo_surface_ocean.f90:378-380`` (``zalo``/``zcdnw``), sea ice
+    ``mo_surface_ice.f90:639,642`` (``zalo``/``zcdni``) — all three tiles
+    build the neutral log term the same way, with no cap on ``z/z0``.
+    """
+
+    @staticmethod
+    def _bn_and_cdn(z_ref, z0_values, wind=5.0):
+        """Run :func:`echam_louis_neutral_drag` on one column per ``z0``."""
+        from .surface_layer import echam_louis_neutral_drag
+        import jcm.constants as c
+        ncol = len(z0_values)
+        nlev, nsfc = 2, 1
+        state = VDiffState(
+            u=jnp.zeros((ncol, nlev)), v=jnp.zeros((ncol, nlev)),
+            temperature=jnp.full((ncol, nlev), 280.0),
+            qv=jnp.zeros((ncol, nlev)), qc=jnp.zeros((ncol, nlev)),
+            qi=jnp.zeros((ncol, nlev)), cloud_fraction=jnp.zeros((ncol, nlev)),
+            pressure_full=jnp.full((ncol, nlev), 100000.0),
+            pressure_half=jnp.full((ncol, nlev + 1), 101325.0),
+            geopotential=jnp.zeros((ncol, nlev)),
+            air_mass=jnp.full((ncol, nlev), 100.0),
+            surface_temperature=jnp.full((ncol, nsfc), 280.0),
+            surface_fraction=jnp.ones((ncol, nsfc)),
+            roughness_length=jnp.asarray(z0_values).reshape(ncol, nsfc),
+            roughness_heat=jnp.asarray(z0_values).reshape(ncol, nsfc),
+            surface_wetness=jnp.ones((ncol, nsfc)),
+            height_full=jnp.full((ncol, nlev), z_ref),
+            height_half=jnp.zeros((ncol, nlev + 1)),
+            tke=jnp.full((ncol, nlev), 0.1),
+            thv_variance=jnp.full((ncol, nlev), 0.01),
+            ocean_u=jnp.zeros(ncol), ocean_v=jnp.zeros(ncol),
+        )
+        params = VDiffParameters.default(surface_layer_scheme="echam_louis")
+        wind_arr = jnp.full((ncol,), wind)
+        bn, cfn_m = echam_louis_neutral_drag(state, params, wind_arr)
+        karman = c.karman_const
+        cdn = (karman / bn[:, 0]) ** 2
+        return np.asarray(bn[:, 0]), np.asarray(cdn)
+
+    def test_matches_ln_one_plus_z_over_z0_to_round_off(self):
+        """``cdn`` built from ``bn`` must equal ``kappa**2/ln(1+z/z0)**2``
+        exactly (the function and the reference formula are the same
+        expression; this guards against a future accidental re-floor).
+        """
+        import jcm.constants as c
+        z_ref = 30.0
+        z0_values = [1e-4, 1e-3, 0.1, 1.0, 5.0, 10.0]
+        bn, cdn = self._bn_and_cdn(z_ref, z0_values)
+        karman = c.karman_const
+        expect_bn = np.log1p(z_ref / np.asarray(z0_values))
+        expect_cdn = (karman / expect_bn) ** 2
+        # float32 round-off (jax defaults to x32 unless the test runner
+        # enables x64); the two sides compute the identical expression, so
+        # agreement is bounded by float32 epsilon, not a formula mismatch.
+        np.testing.assert_allclose(bn, expect_bn, rtol=1e-6)
+        np.testing.assert_allclose(cdn, expect_cdn, rtol=1e-6)
+
+    def test_relative_difference_vs_the_old_e2_floored_form(self):
+        """Reproduces #1056's table: relative difference of the OLD
+        ``ln(max(z/z0, e^2))`` form against the current ``ln(1+z/z0)``
+        form, at z_ref=30 m across the issue's z0 sweep.
+        """
+        import jcm.constants as c
+        z_ref = 30.0
+        karman = c.karman_const
+        cases = [
+            (1e-4, 5.3e-7), (1e-3, 6.5e-6), (0.1, 1.17e-3),
+            (1.0, 1.94e-2), (5.0, -5.34e-2), (10.0, -0.520),
+        ]
+        z0_values = [z0 for z0, _ in cases]
+        _, cdn_new = self._bn_and_cdn(z_ref, z0_values)
+        old_bn = np.log(np.maximum(z_ref / np.asarray(z0_values),
+                                    np.exp(2.0)))
+        cdn_old = (karman / old_bn) ** 2
+        reldiff = (cdn_old - cdn_new) / cdn_new
+        for (_, expect), got in zip(cases, reldiff):
+            assert abs(got - expect) < 2e-3 * max(abs(expect), 1.0), (
+                f"expected relative difference {expect}, got {got}")
+
+    def test_smooth_surface_unchanged_to_1e_minus_5(self):
+        """Over ocean/sea-ice-like roughness (z0 <~ 1e-3 m) the fix changes
+        nothing a production run would notice: old and new forms agree to
+        well inside the 1e-5 ceiling the issue sets for 'negligible'.
+        """
+        z_ref = 30.0
+        z0_values = [1.0e-4, 3.0e-4, 1.0e-3]
+        _, cdn_new = self._bn_and_cdn(z_ref, z0_values)
+        karman = 0.4
+        old_bn = np.log(np.maximum(z_ref / np.asarray(z0_values),
+                                    np.exp(2.0)))
+        cdn_old = (karman / old_bn) ** 2
+        reldiff = np.abs((cdn_old - cdn_new) / cdn_new)
+        assert np.all(reldiff < 1e-5), reldiff
+
+    def test_no_cap_binds_over_rough_land(self):
+        """z/z0 < e^2 (rough land/orography) must no longer be floored: the
+        new ``bn`` keeps rising as z0 grows past z_ref/e^2, unlike the old
+        form which pinned ``bn`` at exactly 2.0 there.
+        """
+        z_ref = 30.0
+        bn_at_5, _ = self._bn_and_cdn(z_ref, [5.0])
+        bn_at_10, _ = self._bn_and_cdn(z_ref, [10.0])
+        # Old form: both would give bn == 2.0 (the e^2 floor binds for both,
+        # since z_ref/z0 = 6.0 and 3.0 are both below e^2 ≈ 7.39).
+        assert bn_at_5[0] != 2.0 and bn_at_10[0] != 2.0
+        assert bn_at_10[0] < bn_at_5[0]  # larger z0 -> smaller ln(1+z/z0)
+
+
 class TestWind10mReduction:
     """ECHAM ``nsurf_diag`` 10 m wind reduction (#723)."""
 
