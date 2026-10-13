@@ -582,19 +582,22 @@ class CloudBorneExchangeTest(unittest.TestCase):
         np.testing.assert_allclose(share_after, 0.0, atol=1e-6)
 
     def test_droplet_held_share_correction_is_concentration_independent(self):
-        # #1070 (Codex review finding): the post-transfer correction must
-        # not depend on the ABSOLUTE size of the reservoir -- only on
-        # which phase released. A trace reservoir undergoing the identical
-        # liquid-evaporates/ice-persists process must publish the SAME
-        # share as a normal-sized one; the floor that decides "negligible"
-        # has to scale with the reservoir, not sit at a fixed absolute mass
-        # (the dimensionless ``_SHARE_FLOOR`` was previously reused as an
-        # absolute floor, making a 1e-13 kg/kg reservoir publish the stale
-        # ~0.48 pre-transfer share instead of the correct ~0).
+        # #1070 (Codex review finding, twice over): the post-transfer
+        # correction must not depend on the ABSOLUTE size of the reservoir
+        # -- only on which phase released. A trace reservoir undergoing the
+        # identical liquid-evaporates/ice-persists process must publish the
+        # SAME share as a normal-sized one. Two successive absolute floors
+        # broke this at two different scales: first reusing the
+        # dimensionless ``_SHARE_FLOOR`` directly as an absolute mass floor
+        # (wrong below ~1e-12 kg/kg), then reusing it inside a
+        # ``maximum(q_cb_arr, _SHARE_FLOOR)`` meant to be "relative" (still
+        # wrong below ~1e-18, where the floor dominates ``q_cb_arr``
+        # itself). The fixed guard has no absolute floor anywhere in it;
+        # sweep well past both of the broken scales.
         from jcm.physics.aerosol.jam.cloud_borne_store import LIQUID_SHARE_KEY
         nm = mass_name("so4", "acc", cloud_borne=True)
         shares = {}
-        for q_cb in (1.0e-9, 1.0e-13, 1.0e-16):
+        for q_cb in (1.0e-9, 1.0e-13, 1.0e-16, 1.0e-18, 1.0e-19, 1.0e-25):
             state, diagnostics = self._mixed_phase_setup(
                 q_cb=q_cb, e_liq=1.0e3, pool_liq=self._MIXED_POOL,
                 pool_ice=self._MIXED_POOL, qni=self._QNI,

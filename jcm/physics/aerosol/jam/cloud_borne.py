@@ -435,23 +435,28 @@ class CloudBorneExchange(PhysicsTerm):
         ice_after = (ice_before * (1.0 - phi_eff_ice)
                      + (1.0 - share) * target * phi_eff_ice)
         total_after = liquid_after + ice_after
-        # "Negligible" must be RELATIVE to what the pair held before the
-        # transfer, not an absolute mass: ``_SHARE_FLOOR`` bounds a
-        # dimensionless activation fraction elsewhere, and reusing it as an
-        # absolute floor here made the correction concentration-dependent
-        # (Codex review of this PR) — a trace reservoir (q_cb_arr ~ 1e-13)
-        # could end with total_after below the absolute floor while still
+        # "Negligible" must be RELATIVE, with NO absolute floor anywhere in
+        # the comparison: ``_SHARE_FLOOR`` bounds a dimensionless activation
+        # fraction elsewhere, and reusing it as an absolute floor here (even
+        # indirectly, as a floor UNDER ``q_cb_arr`` inside a ``maximum``)
+        # made the correction concentration-dependent at whatever scale the
+        # floor sits — first at 1e-12, then again at 1e-18 after the first
+        # fix, both found by Codex review of this PR. A trace reservoir
+        # could end with total_after below ANY fixed floor while still
         # carrying the SAME, perfectly determined phase split as a larger
-        # one that clears the floor, and that larger reservoir's correct
-        # share got silently discarded for the stale pre-transfer value.
-        # Scaling the floor by ``q_cb_arr`` keeps the negligibility test
-        # scale-free: it fires only when the pair is near-fully emptied
-        # (both phases released, total_after is float32 cancellation noise
-        # on q_cb_arr) or was already ~0 before the transfer, in which case
-        # the stale ``share`` is harmless because nothing is left to
-        # mischaracterize.
-        negligible = total_after <= 1.0e-6 * jnp.maximum(
-            q_cb_arr, _SHARE_FLOOR)
+        # one clearing it, silently discarding the correct share for the
+        # stale pre-transfer value. The natural scale-free reference is
+        # ``q_cb_arr + target``: the pair's own pre-transfer content plus
+        # what it is relaxing toward, the only two nonnegative quantities
+        # ``total_after`` is built from (see the derivation above) — it is
+        # exactly 0 only when the pair has nothing before AND nothing to
+        # grow toward, the one case where ``share`` is genuinely undefined
+        # and harmless to leave stale. Elsewhere this correctly flags ONLY
+        # float32 cancellation noise (both phases fully released, or a
+        # vanishing growth increment, where ``share_after`` provably equals
+        # ``share`` anyway) and never a real small-but-nonzero value.
+        scale = q_cb_arr + target
+        negligible = total_after <= 1.0e-6 * scale
         share_after = jnp.where(
             negligible,
             share,
