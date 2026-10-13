@@ -412,7 +412,10 @@ Lin & Leaitch `number_frac` additionally scales by `cdncact/na` for its
 OWN consumer, the cloud-borne exchange term — a different contract);
 `nucleation_activation="ham_lin_leaitch"` recomputes the raw `na`/`frac`
 instead, reusing `ham_logtail`/`LL_CRCUT_STRAT` (the shared primitives,
-not a re-port).
+not a re-port). Lin & Leaitch activates number only; that term's
+`mass_frac` takes the activated particles as each mode's largest, as
+`ic_scav_nuc` does: the mass tail beyond the radius whose number tail is
+its `number_frac`.
 
 `WetScavenging`'s own `nucleation_activation` just names which diagnostics
 to read; it does not know which activation TERM actually published them.
