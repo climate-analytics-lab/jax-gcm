@@ -640,9 +640,9 @@ def run_jcm_precip_cover(inp: dict, g: dict, dt: float, prec: str) -> tuple[np.n
             qc_increment=dqc_, qi_increment=dqi_,
             qnc_increment=dqnc, qni_increment=dqni,
             detrained_qc=dqc, detrained_qi=dqi)
-        # precip_cover_profile, rain_flux_profile, snow_flux_profile --
-        # see the return-tuple comment in cloud_microphysics_2m.
-        return out[-3], out[-2] + out[-1]
+        # The tuple ends precip_cover, pfrain, pfsnow, rain_flux, snow_flux
+        # (see the return statement of cloud_microphysics_2m).
+        return out[-5], out[-2] + out[-1]
 
     args = [inp["ptm1"], inp["pqm1"], inp["pxlm1"], inp["pxim1"],
             inp["xtm1_cdnc"], inp["xtm1_icnc"],
@@ -665,27 +665,21 @@ def test_precip_cover_matches_echam_clcpre(step, prec):
     could not otherwise verify against a compiled number. The reference
     DOES cover ``pclcpre`` (``diag/<step>/clcpre``, confirmed here).
 
-    The two agree on every realistic cell (every column but the three
-    named below, and most levels of those). The disagreement has at least
-    two distinct, pre-existing causes, neither introduced by jax-gcm#1017:
+    Four of the eight columns agree exactly. The other four do not
+    (jax-gcm#1036), on both timesteps and in both precisions:
 
-    1. ``icnc_diagnosis_zrid``/``detrainment_mixed_lo2_false`` carry a tail
-       flux of ~6e-11 kg/m2/s one level below a snow-forming layer --
-       inside the gap between ECHAM's ``cqtmin`` (1e-12) gate on the total
-       flux and jcm's deliberately higher 1e-9 floor
-       (``cloud_utils.gridbox_frac_falling_hydrometeor``'s own documented
-       differentiability trade-off: the division's reverse-mode VJP blows
-       up near ``cqtmin``). A documented, intentional choice -- not fixed
-       here.
-    2. ``icnc_diagnosis_zrid`` level 23 itself (where the flux FORMS, well
-       above both floors) and ``sediment_then_detrain``'s small but
-       nonzero residual are NOT explained by (1) and remain open --
-       jax-gcm#1036.
+    - ``icnc_diagnosis_zrid``: jcm's cover is 0 where ECHAM's is 0.5, at
+      levels where jcm's own carrier flux is ~2e-6 kg/m2/s, both where the
+      precipitation forms and below it. The flux is far above both
+      ``cqtmin`` (1e-12) and jcm's 1e-9 floor, so the floor does not
+      explain it.
+    - ``detrainment_mixed_lo2_false``: 0 against 0.5 under a flux of ~5e-17.
+    - ``sediment_then_detrain``: ~1e-3 apart under a real flux.
+    - ``detrainment_cold``: ~2e-6 relative, float64 only.
 
-    xfail(strict=True) until #1036 is resolved; below-cloud scavenging
-    reads `precip_cover` at levels BELOW the first precipitating one, so
-    this gap does not block jax-gcm#1017 (the published value already
-    matches the smoke-tested, full end-to-end model run; see the PR).
+    The HAM below-cloud schemes remove aerosol only inside this cover, so
+    in such cells they scavenge nothing where ECHAM-HAM scavenges half the
+    box. xfail(strict=True) until #1036 is resolved.
     """
     with echam_constants(), precision(prec):
         inp, g, dt = echam_in(), echam_diag(step), ztmst(step)

@@ -252,7 +252,8 @@ class TestEchamComposablePhysics(unittest.TestCase):
 
         physics = echam_physics(
             checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
-            jam_microphysics="m7_placeholder", jam_wetdep_scheme="ham",
+            jam_microphysics="m7_placeholder", jam_cloud_borne=False,
+            jam_wetdep_scheme="ham",
             jam_nucleation_activation="ham_lin_leaitch",
             jam_activation_scheme="ham_lin_leaitch")
         micro = next(t for t in physics.terms if isinstance(t, Lohmann2MMicrophysics))
@@ -263,6 +264,20 @@ class TestEchamComposablePhysics(unittest.TestCase):
         for key in ("precip_cover", "pfrain", "pfsnow", "reffl", "reffi"):
             self.assertIn(key, wetdep.requires)
             self.assertIn(key, micro.provides)
+
+    def test_jam_wetdep_scheme_ham_rejects_an_explicit_cloud_borne_phase(self):
+        """``ic_scav_nuc`` acts on an implicit population; with the explicit
+        phase (``echam_physics``'s default ``jam_cloud_borne=True``) the
+        exchange would fill the in-cloud aerosol instead, so composing it
+        raises.
+        """
+        from jcm.physics.echam.echam_terms import echam_physics
+
+        with self.assertRaisesRegex(ValueError, "cloud-borne"):
+            echam_physics(
+                checkpoint_terms=False, aerosol_module="jam", cloud_scheme="2m",
+                jam_microphysics="m7_placeholder", jam_wetdep_scheme="ham",
+                jam_activation_scheme="ham_arg")
 
     def test_jam_wetdep_scheme_ham_requires_2m(self):
         from jcm.physics.echam.echam_terms import echam_physics

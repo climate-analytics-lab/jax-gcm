@@ -301,16 +301,15 @@ Checked against a compiled number: the existing 2M Fortran reference
 (`cloud2m_T63L47.npz`) already carries ECHAM's own `zclcpre` as
 `diag/<step>/clcpre`, and comparing against it
 (`lohmann_2m_fortran_reference_test.py::test_precip_cover_matches_echam_clcpre`)
-found the two agree everywhere but three synthetic test columns designed to
-stress ice-number diagnosis, mixed-phase detrainment and sedimentation —
-not realistic precipitating cells. One cause is identified and benign (a
-pre-existing, documented 1e-9-vs-ECHAM's-1e-12 flux floor in
-`cloud_utils.gridbox_falling_hydrometeor`, kept for its reverse-mode VJP
-safety); the rest is open as jax-gcm#1036. The test is `xfail(strict=True)`
-referencing it; below-cloud scavenging only reads `precip_cover` well below
-the first precipitating level in practice, so this does not block the
-below-cloud slice (confirmed by a full smoke-tested end-to-end model run
-with `jam_wetdep_scheme="ham_below_cloud"`).
+finds four of its eight synthetic columns in exact agreement and four not
+(jax-gcm#1036). In `icnc_diagnosis_zrid` jcm's cover is 0 where ECHAM's is 0.5,
+at levels carrying a carrier flux of ~2·10⁻⁶ kg m⁻² s⁻¹ (far above both
+ECHAM's `cqtmin` and jcm's 1e-9 flux floor), both where the precipitation forms
+and below it; `detrainment_mixed_lo2_false` shows the same 0 against 0.5 under a
+~5·10⁻¹⁷ flux; `sediment_then_detrain` differs by ~10⁻³ and `detrainment_cold`
+by ~2·10⁻⁶ relative. HAM's below-cloud removal acts only inside this cover, so
+in such cells the HAM schemes scavenge nothing where ECHAM-HAM scavenges half
+the box. The test is `xfail(strict=True)` on #1036.
 
 **Reference-harness findings.** A compiled-Fortran harness driving
 `bc_rain`/`bc_snow` end to end (wet radius → bin index → bilinear lookup →
@@ -431,6 +430,14 @@ first, then AS the remainder, then KS what is left — three literal
 `IF (kmod == ...)` branches in the reference, not a general recurrence,
 ported the same way.
 
+The default `"jcm"` treatment and `CloudBorneExchange` apply the same
+one-particle-per-crystal rule (`wetdep_term.ice_phase_fractions`, generalised
+to any population's activating modes), with the mass share in its exact
+closed form, `Φ(Φ⁻¹(f_n) + 3 ln σ)`. This scheme keeps HAM's own numerics
+instead, the approximate inverse error function of `ham_m7_invertlogtail`,
+because it is the configuration compared with compiled HAM. The two forms
+differ by up to 1.6·10⁻⁴ in the number share and 2.5·10⁻³ in the mass share.
+
 **Validation.** Two compiled references, not one. `ham_m7_invertlogtail` —
 the one genuinely new piece of math — is checked standalone against the
 compiled, unmodified routine on 33 designed cases spanning its small/mid/
@@ -481,5 +488,7 @@ reproduce all 54 rows to rtol 1e-12
   narrower ablation configuration, not an in-progress one — see that
   section above); `"ham"` with the default `incloud_impaction` is the full
   `nwetdep=3` scheme.
-- The 2M scheme's `precip_cover` disagrees with ECHAM's `clcpre` on three
-  synthetic test columns, for a reason not fully diagnosed (jax-gcm#1036).
+- The 2M scheme's `precip_cover` disagrees with ECHAM's `clcpre` on four of
+  eight synthetic test columns, in one of them by 0 against 0.5 under a real
+  precipitation flux, so the HAM below-cloud schemes miss removal there
+  (jax-gcm#1036).

@@ -186,10 +186,8 @@ for a term that otherwise runs identically either way. Which table source
 was actually used is logged once at construction and recorded on the
 instance (`term.table_source`: `"authentic"`, `"jcm_built"` or
 `"explicit"` for a test-injected table). The built approximation's LW
-tables compute absorption directly (an earlier version computed
-extinction instead and so overstated LW aerosol optical depth by orders of
-magnitude wherever scattering dominates); even after that fix the built
-tables disagree with the authentic ones at a level documented and measured
+tables hold absorption, as HAM's do (its LW tables are absorption, not
+extinction); the built tables disagree with the authentic ones at a level documented and measured
 in `ham_mie_tables.py`'s and `ham_mie_tables_test.py`'s own docstrings
 (`test_built_tables_vs_authentic_measured_tolerance`) — numerics from a
 different Mie code and quadrature, not a definitional mismatch (the

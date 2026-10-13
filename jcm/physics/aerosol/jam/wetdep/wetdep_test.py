@@ -1410,22 +1410,135 @@ class HamNucleationSchemeTest(unittest.TestCase):
             self.assertTrue(bool(jnp.all(tend.tracers[key] <= 0.0)), mode.short)
             self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))), mode.short)
 
+    @staticmethod
+    def _incloud_only(diagnostics):
+        """No below-cloud carrier, so only the in-cloud pathways remove."""
+        nlev, ncols = diagnostics["air_density"].shape
+        zero = jnp.zeros((nlev, ncols))
+        return {**diagnostics, "pfrain": zero, "pfsnow": zero,
+                "precip_cover": zero}
+
     def test_non_m7_modes_get_no_nucleation(self):
-        """NS/KI/AI/CI are not KS/AS/CS, so ic_scav_nuc contributes nothing
-        to them (mo_ham_wetdep.f90:707-710) -- only the (implicit-zero,
-        since they cannot activate) below-cloud/convective pathways act.
+        """``ic_scav_nuc`` zeroes every mode but KS/AS/CS
+        (mo_ham_wetdep.f90:707-710): with impaction off and no below-cloud
+        carrier, only those three modes are removed in cloud.
         """
         state, diagnostics, spec, mass_name = self._setup(activation="ham_arg")
-        term = WetScavenging(scheme="ham", nucleation_activation="ham_arg", spec=spec)
+        diagnostics = self._incloud_only(diagnostics)
+        term = WetScavenging(scheme="ham", nucleation_activation="ham_arg",
+                             spec=spec, incloud_impaction="none")
         tend, _ = term(state, diagnostics, None, None)
         for mode in spec.modes:
-            if mode.can_activate:
-                continue
-            key = mass_name(mode.species[0], mode.short)
-            # Non-activating modes have zero in-cloud pathway contribution
-            # regardless of scheme (mode.can_activate gates it); this just
-            # confirms ham did not change that.
-            self.assertTrue(np.all(np.isfinite(np.asarray(tend.tracers[key]))), mode.short)
+            removed = np.asarray(tend.tracers[mass_name(mode.species[0], mode.short)])
+            if mode.short in ("ks", "as", "cs"):
+                self.assertTrue(np.all(removed < 0.0), mode.short)
+            else:
+                np.testing.assert_array_equal(removed, 0.0, err_msg=mode.short)
+
+    def test_phases_combine_as_get_icscavfrac_and_ham_wetdep(self):
+        """Per phase ``min(nucleation + impaction, 1)``, each part of the
+        cloud removed at its own conversion:
+        ``cf·[(1 − p_ice)·F_w·f_wat + p_ice·F_i·f_ice]``, insoluble modes by
+        impaction alone.
+        """
+        from jcm.physics.aerosol.jam.tracer_layout import number_name
+        from jcm.physics.aerosol.jam.wetdep import ham_nucleation as hn
+        from jcm.physics.aerosol.jam.wetdep import incloud_impaction as ii
+        from jcm.physics.aerosol.jam.wetdep.ham_below_cloud import cmedr2mmedr
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import (
+            fraction_to_rate,
+            phase_split,
+        )
+
+        state, diag, spec, mass_name = self._setup(activation="ham_arg")
+        nlev, ncols = state.temperature.shape
+        clouds = diag["clouds"]
+        # A mixed-phase cloud, both conversions partial.
+        clouds = clouds.copy(
+            incloud_ice=jnp.full((nlev, ncols), 5e-4 / 0.6),
+            qi=jnp.full((nlev, ncols), 5e-4),
+            incloud_snow_formation=clouds.incloud_rain_formation * 0.1)
+        diag = {**self._incloud_only(diag), "clouds": clouds,
+                "reffl": jnp.full((nlev, ncols), 30.0),
+                "reffi": jnp.full((nlev, ncols), 80.0)}
+        state = state.copy(tracers={**state.tracers,
+                                    "qni": jnp.full((nlev, ncols), 5e6)})
+        dt = 1800.0
+        f_wat, f_ice, pice = phase_split(clouds, dt)
+        self.assertTrue(bool(jnp.all((pice > 0.1) & (pice < 0.9))))
+        aer, rho = diag["_jam_state"], diag["air_density"]
+        cf = clouds.cloud_fraction
+        qni = state.tracers["qni"]
+        tend, _ = WetScavenging(scheme="ham", spec=spec)(state, diag, None, None)
+        for short, moment in (("as", "mass"), ("as", "number"),
+                              ("ki", "mass"), ("ns", "number")):
+            i = [m.short for m in spec.modes].index(short)
+            mode = spec.modes[i]
+            mr = ii.impaction_radius_um(aer.r_wet[i], mode.geom_std_dev, moment)
+            imp_w = ii.droplet_impaction_fraction(diag["reffl"], mr, moment)
+            imp_i = ii.crystal_impaction_fraction(diag["reffi"], qni * rho, mr, dt)
+            nuc_w = nuc_i = 0.0
+            if short in ("ks", "as", "cs"):
+                n_in = {m: state.tracers[number_name(m)] * cf
+                        for m in ("ks", "as", "cs")}
+                xie_w = hn.water_phase_xie(
+                    state.tracers["qnc"] * cf, rho, diag["activated_cdnc"],
+                    diag["_jam_activation"].number_frac[i])
+                xie_i = hn.ice_phase_xie(qni * cf, n_in["ks"], n_in["as"],
+                                         n_in["cs"], short)
+                args = (aer.r_dry[i], jnp.log(mode.geom_std_dev),
+                        cmedr2mmedr(mode.geom_std_dev))
+                k = 0 if moment == "number" else 1
+                nuc_w = hn.nucleation_scavenged_fraction(xie_w, *args)[k]
+                nuc_i = hn.nucleation_scavenged_fraction(xie_i, *args)[k]
+            removed = clouds.process_cloud_fraction * (
+                (1.0 - pice) * jnp.minimum(nuc_w + imp_w, 1.0) * f_wat
+                + pice * jnp.minimum(nuc_i + imp_i, 1.0) * f_ice)
+            rate = fraction_to_rate(removed, dt)
+            key = (number_name(short) if moment == "number"
+                   else mass_name(mode.species[0], short))
+            expect = jnp.expm1(-rate * dt) * state.tracers[key] / dt
+            np.testing.assert_allclose(np.asarray(tend.tracers[key]),
+                                       np.asarray(expect), rtol=1e-5,
+                                       err_msg=f"{short} {moment}")
+
+    def test_nucleation_reads_the_post_microphysics_tracers(self):
+        """``ic_scav_nuc`` reads CDNC/ICNC after the microphysics: the
+        step-start tracers advanced by the running tendency, not the
+        step-start values themselves.
+        """
+        state, diagnostics, spec, mass_name = self._setup(activation="ham_arg")
+        dt = 1800.0
+        d_qnc = -0.5 * state.tracers["qnc"] / dt
+        d_qni = 2.0 * state.tracers["qni"] / dt
+        term = WetScavenging(scheme="ham", spec=spec)
+        run = {**diagnostics, "_dt_seconds": dt,
+               "_tendency_run": {"tracers": {"qnc": d_qnc, "qni": d_qni}}}
+        advanced = state.copy(tracers={
+            **state.tracers,
+            "qnc": state.tracers["qnc"] + dt * d_qnc,
+            "qni": state.tracers["qni"] + dt * d_qni})
+        with_run = term(state, run, None, None)[0]
+        pre_advanced = term(advanced, {**diagnostics, "_dt_seconds": dt},
+                            None, None)[0]
+        step_start = term(state, {**diagnostics, "_dt_seconds": dt},
+                          None, None)[0]
+        key = mass_name("so4", "as")
+        np.testing.assert_allclose(np.asarray(with_run.tracers[key]),
+                                   np.asarray(pre_advanced.tracers[key]),
+                                   rtol=1e-6)
+        self.assertFalse(np.allclose(np.asarray(with_run.tracers[key]),
+                                     np.asarray(step_start.tracers[key]),
+                                     rtol=1e-3))
+
+    def test_rejects_an_explicit_cloud_borne_phase(self):
+        import dataclasses
+
+        from jcm.physics.aerosol.jam.microphysics.m7_data import M7_SPEC
+
+        with self.assertRaisesRegex(ValueError, "cloud-borne"):
+            WetScavenging(scheme="ham",
+                          spec=dataclasses.replace(M7_SPEC, cloud_borne=True))
 
     def test_default_scheme_path_is_bit_identical_to_before(self):
         state, diagnostics, spec, mass_name = self._setup(activation="ham_arg")

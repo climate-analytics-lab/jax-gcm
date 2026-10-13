@@ -667,17 +667,22 @@ class WetScavenging(PhysicsTerm):
         ``"ham"`` also needs an M7-shaped ``spec`` with HAM's activating modes
         ``ks``/``as``/``cs`` (``ic_scav_nuc``'s mode gate,
         ``mo_ham_wetdep.f90:707-710``); any other population raises rather
-        than run with nucleation scavenging silently off. With an explicit
-        cloud-borne phase the in-droplet and in-crystal aerosol is the
-        cloud-borne tracers', removed by their own phase as under ``"jcm"``.
+        than run with nucleation scavenging silently off. For the same reason
+        it refuses an explicit cloud-borne phase: there the in-droplet and
+        in-crystal aerosol is the cloud-borne tracers', filled by
+        ``CloudBorneExchange`` instead of ``ic_scav_nuc``. M7 has no such
+        phase (``echam_physics(jam_cloud_borne=False)``).
 
         ``nucleation_activation`` is HAM's ``ncd_activ``: the activation
         scheme ``ic_scav_nuc`` takes its critical radius and per-mode fraction
         from, ``"ham_arg"`` (dry radius; needs ``activated_cdnc``) or
         ``"ham_lin_leaitch"`` (wet radius). It is read for ``scheme="ham"``
         only and must match the composed activation term
-        (``jam_aerosol_physics`` checks that). ``ic_scav_imp`` reads the wet
-        radius under either.
+        (``jam_aerosol_physics`` checks that). CAM's ARG is not one of
+        ``ncd_activ``'s options: ``ic_scav_nuc``'s ``na`` and ``frac(kmod)``
+        are the diagnostics HAM's own activation schemes set
+        (``mo_ham_activ.f90:409-416``). ``ic_scav_imp`` reads the wet radius
+        under either.
         """
         if incloud_impaction not in (*INCLOUD_IMPACTION_VARIANTS, "none"):
             raise ValueError(
@@ -716,6 +721,13 @@ class WetScavenging(PhysicsTerm):
                     "mode-identity requirement) or the default "
                     "scheme='jcm' instead."
                 )
+            if self._spec.cloud_borne:
+                raise ValueError(
+                    "scheme='ham' scavenges by HAM's ic_scav_nuc, which acts on "
+                    "an implicit population; this spec carries an explicit "
+                    "cloud-borne phase, whose in-cloud aerosol "
+                    "CloudBorneExchange fills instead. Compose without it "
+                    "(echam_physics(jam_cloud_borne=False), M7's own setting).")
         # Per-mode Slinn impaction tables, built once here exactly as CAM
         # builds them in ``modal_aero_bcscavcoef_init`` (the 50x51 double
         # integral is far too costly to evaluate per cell per step). CAM
@@ -911,8 +923,9 @@ class WetScavenging(PhysicsTerm):
         # out). Without it, the implicit treatment stands — the interstitial
         # tracers are scavenged by their per-mode activated fractions.
         explicit_cb = self._spec.cloud_borne
-        # HAM's own nucleation scavenging replaces the implicit ARG split.
-        ham_nucleation = self.scheme == "ham" and not explicit_cb
+        # HAM's own nucleation scavenging replaces the implicit ARG split
+        # (``__init__`` refuses it with an explicit phase).
+        ham_nucleation = self.scheme == "ham"
         implicit_split = (not explicit_cb and jam_act is not None
                           and not ham_nucleation)
         impaction = self._incloud_impaction != "none"
