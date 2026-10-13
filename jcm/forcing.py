@@ -70,7 +70,13 @@ def _validate_bc_fields(ds) -> None:
         "sst":  (220.0, 320.0),  # K
         "icec": (0.0,   1.0),    # fraction
         "alb":  (0.0,   1.0),    # fraction
-        "soilw_am": (0.0, 5.0),  # kg/m^2 (column-integrated soil water)
+        # Dimensionless root-zone availability index ws/wsmx (#1057) — SPEEDY's
+        # vegetation-weighted blend of the 7-28 cm layer, clipped to [0, 1] at
+        # construction (``jcm.data.bc.compile.compute_soilw_am``,
+        # ``jcm.data.mirror.bundles.translate_land``). NOT a column-integrated
+        # water depth; the range check below matches the production builders'
+        # own clip, same as ``jcm.data.regridding._CONDITIONAL_RANGE``.
+        "soilw_am": (0.0, 1.0),
         # Relative soil wetness ws/wsmx — a fraction by construction, so
         # anything outside [0, 1] means it was written as a volumetric content
         # or a water depth instead (#787).
@@ -388,7 +394,7 @@ class ForcingData:
 
     sice_am: jnp.ndarray # sea ice concentration (or TimeSeries thereof)
     snowc_am: jnp.ndarray # snow cover SWE/sd2sc; min(1, .) is the cover fraction (SPEEDY snowcl_ob; ECHAM land albedo, #672)
-    soilw_am: jnp.ndarray # soil moisture (used to be soilwcl_ob in fortran - but one day of that was soilw_am)
+    soilw_am: jnp.ndarray # dimensionless root-zone soil-water availability index ws/wsmx in [0, 1] (#1057), read by speedy_surface_flux.py's land_wetness; used to be soilwcl_ob in fortran - but one day of that was soilw_am
     stl_am: jnp.ndarray # temperature over land
     sea_surface_temperature: jnp.ndarray # SST, should come from sea_model.py or some default value
 

@@ -38,7 +38,7 @@ ozone/oxidants with 1870–1879 SST/ice (earliest observed decade).
 |---|---|
 | `jcm/data/bc/t63/terrain.nc` | ECHAM T63GR15 orography + SSO stats (NB `orosig`≈0 — defective; mirror supersedes) |
 | `jcm/data/bc/t63/forcing.nc` | AMIP monthly climatology (NB systematically dry soil / low snow vs the mirror — see release notes) |
-| `jcm/data/bc/t63/ozone.nc` | CAM6chem 2005–2014 on T63L47 (`forcing.ozone_file: auto` resolves it by grid shape) |
+| `jcm/data/bc/t63/ozone.nc` | FZJ CMIP7 2005–2014 zonal mean on T63L47, the zonal mean of the mirror's `t63_l47/ozone_pd.nc` (`forcing.ozone_file: auto` resolves it by grid shape) |
 | `jcm/data/bc/t30/…` | same set at T30 |
 
 ## 3. Legacy prepared files (`--data local`)

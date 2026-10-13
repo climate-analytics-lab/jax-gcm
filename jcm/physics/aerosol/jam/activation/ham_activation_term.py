@@ -34,6 +34,9 @@ from jcm.physics.aerosol.jam.activation.ham_activation import (
 from jcm.physics.aerosol.jam.population import ModalAerosolSpec
 from jcm.physics.aerosol.jam.removal_split import split_view
 from jcm.physics.aerosol.jam.tracer_layout import mass_name
+from jcm.physics.aerosol.jam.wetdep.ham_nucleation import (
+    nucleation_scavenged_fraction,
+)
 from jcm.physics.physics_term import PhysicsTerm
 from jcm.physics.thermodynamics import saturation_vapor_pressure
 from jcm.physics_interface import PhysicsTendency
@@ -126,11 +129,14 @@ class HamActivation(PhysicsTerm):
         )
 
     def _n_pdf_bins(self):
-        if self._nactivpdf == 0:
+        # activ_initialize's SELECT CASE(ABS(nactivpdf)): 1 is the default
+        # 20-bin PDF, any other non-zero value its own bin count.
+        n = abs(self._nactivpdf)
+        if n == 0:
             return None
-        if self._nactivpdf == 1:
+        if n == 1:
             return PDF_DEFAULT_BINS
-        return abs(self._nactivpdf)
+        return n
 
     def _tke(self, diagnostics, shape):
         """Previous-step TKE, the same optional access ``ArgActivation``
@@ -219,12 +225,14 @@ class HamActivation(PhysicsTerm):
             # Flagged for lead review: there is no second, independent, more
             # "correct" partition to check it against.
             number_frac = jnp.where(can_activate_col, cut_frac * ratio, 0.0)
-            # Lin & Leaitch has no mass-activation concept at all (purely
-            # number-based); mass_frac mirrors number_frac as the simplest
-            # defensible default for the downstream cloud-borne mass
-            # exchange that both activation sources must feed -- also
-            # flagged for lead review.
-            mass_frac = number_frac
+            # Lin & Leaitch activates number only. The activated particles are
+            # taken as each mode's largest, as HAM's ic_scav_nuc takes them for
+            # this scheme (mo_ham_wetdep.f90:779-794): the mass share is the
+            # mass tail beyond the radius whose number tail is number_frac.
+            cmedr2mmedr = mode_col(jnp.asarray(self._cmedr2mmedr), ndim_cell)
+            _, mass_tail = nucleation_scavenged_fraction(
+                1.0 - 2.0 * number_frac, aer.r_wet, ln_sigma, cmedr2mmedr)
+            mass_frac = jnp.where(can_activate_col, mass_tail, 0.0)
         else:
             n_pdf_bins = self._n_pdf_bins()
             w, pwpdf = ham_updraft(tke, omega, air_density, params.w_min,

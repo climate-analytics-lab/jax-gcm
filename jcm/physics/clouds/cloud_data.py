@@ -161,8 +161,34 @@ class CloudData:
     process_cloud_fraction: jnp.ndarray     # (nlev, ncols) [1]
     condensate_evaporation_rate: jnp.ndarray  # (nlev, ncols) [kg/kg/s]
 
-    # Cloud properties
-    droplet_number: jnp.ndarray  # Droplet number concentration [1/m³] (nlev, ncols)
+    # Cloud properties.
+    #
+    # Droplet number concentration [1/m^3] (nlev, ncols) (#1053). The two
+    # microphysics schemes fill it with different CONVENTIONS, because their
+    # Fortran sources differ, not by jcm choice:
+    #
+    #  * 1-moment (``echam_1m.py``, ``cloud_utils.prescribed_droplet_number``):
+    #    ECHAM's ``acdnc`` profile, a function of pressure and land type alone
+    #    that ECHAM hands unmasked to both the in-cloud microphysics formulas
+    #    and the radiation (``physc.f90`` section 3.12) — a characteristic
+    #    IN-CLOUD value, nonzero even in clear sky, times the MACv2-SP Twomey
+    #    factor.
+    #  * 2-moment (``lohmann_2m/scheme.py``): the prognostic tracer ``qnc``
+    #    [kg^-1] times air density, GRID-MEAN, matching ECHAM-HAM's own
+    #    ``pacdnc(:,jk) = zcdnc(:,jk)`` (``mo_cloud_micro_2m.f90:1710``, with
+    #    ``zcdnc`` the grid-mean ``ρ·(pxtm1 + ztmst·pxtte)`` at line 600 —
+    #    there is no ``/paclc`` on that path). Formed from the tracer as it
+    #    will be SAVED this step (the term's own tendency applied to the
+    #    step-start tracer), not the step-start value, so it is never a step
+    #    behind the tracer at the same timestamp.
+    #
+    # ``AerocomDiagnostics._number_concentrations`` derives both a grid-mean
+    # and an in-cloud form from whichever convention is live (it reads the
+    # prognostic ``qnc`` tracer directly rather than this field when one is
+    # carried, so it is unaffected by which scheme fills this field); nothing
+    # else resolves the difference, so a consumer of this field alone must
+    # know which scheme produced it.
+    droplet_number: jnp.ndarray
 
     # Droplet / crystal effective radii [um] (nlev, ncols) the radiation used
     # (ECHAM ``re_droplets2d``/``re_crystals2d``): a DIAGNOSTIC written by the
@@ -359,7 +385,10 @@ CLOUD_OUTPUT_ATTRS: dict[str, dict[str, str]] = {
     "clouds.droplet_number": {
         "standard_name":
             "number_concentration_of_cloud_liquid_water_particles_in_air",
-        "units": "m-3", "long_name": "cloud droplet number concentration"},
+        "units": "m-3", "long_name": "cloud droplet number concentration",
+        "comment": ("1M: ECHAM's prescribed in-cloud profile (nonzero in "
+                    "clear sky); 2M: grid-mean qnc*rho, zero away from "
+                    "cloud. See CloudData.droplet_number.")},
     "clouds.r_eff_liq": {
         "units": "um",
         "long_name": "cloud droplet effective radius used by the radiation"},

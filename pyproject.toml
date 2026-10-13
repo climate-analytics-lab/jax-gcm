@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jcm"
-version = "3.0.0rc1"
+version = "3.0.0"
 dynamic = ["dependencies"]
 description = "JAX-based General Circulation Model"
 authors = [
@@ -38,11 +38,11 @@ jcm = [
 [project.optional-dependencies]
 # MAM4-JAX modal aerosol microphysics core (issue #490). GPL-3.0 — kept as an
 # opt-in extra so the Apache-2.0 jcm core never bundles GPL code. Pinned to the
-# tagged release. Install with `pip install jcm[mam4]`.
+# released CAM6 mode-selection and equilibrium API. Install with `pip install jcm[mam4]`.
 mam4 = [
     # Exact, not a floor: the adapter imports submodule paths that upstream
     # excludes from its semver contract (#737).
-    "mam4-jax==0.4.0",
+    "mam4-jax==0.5.1",
 ]
 # M7-JAX: the ECHAM-HAM M7 aerosol microphysics core (jax-gcm#1017), BSD-3.
 # An opt-in extra like mam4 (the echam-ham-m7 preset needs it). Exact pin, as
@@ -54,10 +54,16 @@ m7 = [
     "m7-jax @ git+https://github.com/reflective-org/M7-JAX.git@8fe0fa7496b86026523984d6c573c1555c86c90e",
 ]
 # jax-cosp satellite simulators (COSP v2 in JAX): CloudSat radar + warm-rain
-# diagnostics via the CloudsatCosp physics term. Apache-2.0.
-# Install with `pip install jcm[cosp]`.
+# diagnostics via the CloudsatCosp physics term. Apache-2.0. Named, not
+# pinned to its GitHub URL: PyPI rejects any distribution whose metadata
+# carries a direct-URL dependency ("Can't have direct dependency"), so a URL
+# here makes the whole jcm wheel unpublishable. jax-cosp is not on PyPI yet,
+# so install it first from GitHub and then the extra:
+#   pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"
+#   pip install jcm[cosp]
+# (`.github/workflows/run_test.yaml`'s extras-tests job does the same.)
 cosp = [
-    "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git",
+    "jax-cosp",
 ]
 # WeatherBench2 cloud ERA5 access (jcm.data.era5): nudging targets and
 # initial conditions from the public GCS zarr stores (#610).

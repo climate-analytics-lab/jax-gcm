@@ -386,17 +386,21 @@ class CodexRegressionTest(unittest.TestCase):
     """Regressions for the P1 findings on PR #582."""
 
     def test_cdnc_uses_prognostic_qnc_when_2m_is_active(self):
-        """2M leaves CloudData.droplet_number zero; cdnc must not be zero.
+        """When qnc is carried, cdnc must come from it, not CloudData.droplet_number.
 
         Codex #582: the advertised echam-jam-aerocom preset runs the
-        2-moment scheme, which carries qnc (kg^-1) and never populates
-        CloudData.droplet_number, so reading the latter reported zero CDNC
-        throughout.
+        2-moment scheme, which carries qnc (kg^-1); at the time of #582
+        ``CloudData.droplet_number`` was never populated under 2M (fixed by
+        #1053), so reading the latter reported zero CDNC throughout. This
+        pins the function's preference for the tracer over the CloudData
+        field — still correct now that the field is filled, since the
+        field's value is the one the cloud term saw at ITS point in the
+        step, not necessarily this function's post-full-stack view.
         """
         term = AerocomDiagnostics()
 
         class _Clouds:
-            droplet_number = jnp.zeros((4, 3))  # as the 2M scheme leaves it
+            droplet_number = jnp.zeros((4, 3))  # unused: qnc takes priority
             cloud_fraction = jnp.full((4, 3), 0.5)
 
         class _State:

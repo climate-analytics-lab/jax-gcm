@@ -15,9 +15,10 @@ tracer TENDENCIES, not only the removal chain: emissions, tracer vertical
 diffusion, convective transport and the sulfur chemistry all precede
 sedimentation in ``jam_aerosol_physics``. Aerosol emitted or formed this
 step is therefore present to be removed, and aerosol convection has
-already exported is not. Terms that transform tracers in place rather
-than through the tendency dict — the MAM4 core and ice nucleation read
-``tracer_view`` — are outside it.
+already exported is not. The microphysics core, optics and ice nucleation read the same working
+copy; each process returns only its own change, so sources and removal are
+applied once. Cloud-borne updates already integrated in the carry are
+not reconstructed from interstitial tendencies.
 
 Cloud-borne tracers live in the physics carry, which the removal terms
 already integrate sequentially through ``cloud_borne_store.apply_updates``,
@@ -26,9 +27,8 @@ so they pass through unchanged.
 
 from __future__ import annotations
 
-import jax.numpy as jnp
-
 from jcm.physics.aerosol.jam.cloud_borne_store import tracer_view
+from jcm.physics_interface import working_tracers
 
 
 def split_view(spec, state, diagnostics) -> dict:
@@ -38,15 +38,6 @@ def split_view(spec, state, diagnostics) -> dict:
     published (a term exercised standalone, or the structural probe); both
     driver hosts publish it.
     """
-    view = tracer_view(spec, state, diagnostics)
-    run = diagnostics.get("_tendency_run")
-    if run is None:
-        return view
-    dt = diagnostics.get("_dt_seconds", 1800.0)
-    updated = dict(view)
-    for name, tendency in run.get("tracers", {}).items():
-        prev = updated.get(name)
-        if prev is None or jnp.ndim(tendency) != jnp.ndim(prev):
-            continue
-        updated[name] = prev + dt * tendency
-    return updated
+    view = (state.tracers if spec is None
+            else tracer_view(spec, state, diagnostics))
+    return working_tracers(state, diagnostics, base=view)

@@ -47,12 +47,11 @@ The preset runs ARG over the West et al. (2013) 20-bin updraft PDF
 
 Three further settings are deliberate, each recorded where it is set:
 
-- **`cdroprad(6)` = 30 µm.** r7492's in-cloud impaction droplet-radius axis
-  (`mo_ham_wetdep_data.f90`) reads 0.0 at index 6 where its regular 5 µm
-  spacing implies 30 µm, a suspected upstream typo; a zero node inside a
-  monotone axis interpolates every droplet of 25-35 µm against a spurious zero
-  radius. jcm's default is the corrected axis by maintainer decision
-  (2026-10-06); `WetDepParameters.cdroprad_um = CDROPRAD_UM_AS_COMPILED`
+- **The r7492 impaction-lookup defects are corrected.** The preset's in-cloud
+  impaction is the shared `incloud_impaction` lookup with its default `ham`
+  variant, which corrects `cdroprad(6)` (0.0 where the 5 µm spacing implies
+  30 µm; maintainer decision 2026-10-06), the swapped interpolation corners
+  and the plate index above 50 µm. `jam_incloud_impaction=ham_r7492`
   reproduces r7492 for like-for-like comparisons.
 - **Sea salt unscaled.** The harness default `SEASALT_SCALE_DEFAULT` is a T63L47
   AOD calibration of the Gong source for the MAM4 population; the preset runs

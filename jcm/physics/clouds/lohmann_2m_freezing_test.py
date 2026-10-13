@@ -19,6 +19,17 @@ aerosol-free path (#953).
   tendency field is unchanged. See the PR closing #1039 for the full
   measurement.
 
+  Regenerated again for the Koop homogeneous-freezing floor fix (#963,
+  previously pinned at dev 6388d834, before that fix): the floor no longer
+  double-removes the branch-A/B/C deposition increment's own vapor in the
+  one cell of this fixture cold enough (T < cthomi) to engage it, so less
+  vapor deposits there this step. ``dtedt``/``dqdt`` move by up to
+  4.81e-05 K (s step) / 1.70e-08 kg/kg, both ~21% relative (6 of the 47x4
+  cells); ``dqidt`` by up to 3.40e-09 kg/kg, 2.5% relative (1 cell);
+  ``dqnidt`` by up to 2210 m^-3, 3.8% relative (1 cell, a downstream
+  ICNC-diagnosis consequence of the smaller ice deposit); ``dqcdt``/
+  ``dqncdt`` unchanged. See the PR fixing #963 for the full measurement.
+
 The comparison with the compiled Fortran is ``lohmann_2m_freezing_reference_test.py``.
 """
 from __future__ import annotations

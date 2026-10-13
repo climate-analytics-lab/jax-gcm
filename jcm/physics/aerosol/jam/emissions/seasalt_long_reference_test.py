@@ -69,9 +69,9 @@ _MAX_RELATIVE_ERROR = {"f32": 5e-6, "f64": 1e-12}
 
 
 def _two_class_ss_spec(density: float) -> ModalAerosolSpec:
-    """Build a population whose 'ss' species carries exactly two classes, in
-    HAM's own accumulation-then-coarse spec order -- what scheme="long"
-    requires.
+    """Build a population whose 'ss' species carries exactly two classes,
+    accumulation then coarse -- what scheme="long" requires (two classes of
+    different size).
     """
     accum = AerosolMode(
         name="accum", short="acc", geom_std_dev=2.0, dgnum=3.0e-7,
@@ -177,6 +177,64 @@ def test_long_scheme_wiring_through_full_call():
     cold = run(wind=10.0, sst=272.0, land=0.0, seaice=0.0)
     assert float(warm.tracers[mass_name("ss", "cor")][-1, 0]) != pytest.approx(
         float(cold.tracers[mass_name("ss", "cor")][-1, 0]))
+
+
+def test_long_classes_take_their_roles_by_size_not_spec_order():
+    """A spec declaring the coarse class first still gets HAM's AS flux on the
+    smaller class and CS on the larger.
+    """
+    import dataclasses
+
+    density = 2165.0
+    ordered = _two_class_ss_spec(density)
+    reversed_spec = dataclasses.replace(ordered, modes=ordered.modes[::-1])
+    state = PhysicsState.zeros((2, 1)).copy(
+        temperature=jnp.full((2, 1), 285.0), u_wind=jnp.full((2, 1), 10.0))
+    diagnostics = {"air_density": jnp.full((2, 1), 1.2),
+                   "layer_thickness": jnp.full((2, 1), 100.0)}
+    terrain = type("T", (), {"fmask": jnp.asarray([0.0])})()
+    forcing = type("F", (), {"sice_am": jnp.asarray([0.0]),
+                             "sea_surface_temperature": jnp.asarray([285.0])})()
+    want = SeaSaltEmissions(spec=ordered, scheme="long")(
+        state, diagnostics, forcing, terrain)[0].tracers
+    got = SeaSaltEmissions(spec=reversed_spec, scheme="long")(
+        state, diagnostics, forcing, terrain)[0].tracers
+    for key in (mass_name("ss", "acc"), mass_name("ss", "cor"),
+                number_name("acc"), number_name("cor")):
+        np.testing.assert_array_equal(np.asarray(got[key]),
+                                      np.asarray(want[key]), err_msg=key)
+
+
+def test_long_defaults_to_the_native_source_and_gong_keeps_its_calibration():
+    """Built with default parameters, Long emits HAM's unscaled source;
+    Gong's calibration scale stays Gong's.
+    """
+    from jcm.physics.aerosol.jam.emissions.seasalt import SEASALT_SCALE_DEFAULT
+
+    assert float(SeaSaltParameters.default("gong").scale) == pytest.approx(
+        SEASALT_SCALE_DEFAULT)
+    assert float(SeaSaltParameters.default("long").scale) == 1.0
+    spec = _two_class_ss_spec(2165.0)
+    term = SeaSaltEmissions(spec=spec, scheme="long")
+    state = PhysicsState.zeros((2, 1)).copy(
+        temperature=jnp.full((2, 1), 285.0), u_wind=jnp.full((2, 1), 10.0))
+    diagnostics = {"air_density": jnp.full((2, 1), 1.2),
+                   "layer_thickness": jnp.full((2, 1), 100.0)}
+    terrain = type("T", (), {"fmask": jnp.asarray([0.0])})()
+    forcing = type("F", (), {"sice_am": jnp.asarray([0.0]),
+                             "sea_surface_temperature": jnp.asarray([285.0])})()
+    tend = term(state, diagnostics, forcing, terrain)[0].tracers
+    u10 = jnp.asarray([10.0])
+    mass_as, mass_cs, number_as, number_cs = term._long_as_cs_fluxes(
+        u10, jnp.asarray([285.0]), jnp.asarray([1.0]))
+    per_kg = 1.0 / (1.2 * 100.0)
+    for key, native in ((mass_name("ss", "acc"), mass_as),
+                        (mass_name("ss", "cor"), mass_cs),
+                        (number_name("acc"), number_as),
+                        (number_name("cor"), number_cs)):
+        np.testing.assert_allclose(np.asarray(tend[key][-1]),
+                                   np.asarray(native) * per_kg, rtol=1e-6,
+                                   err_msg=key)
 
 
 def test_two_class_requirement_is_checked_at_construction():

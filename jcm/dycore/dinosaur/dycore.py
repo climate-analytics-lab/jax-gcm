@@ -113,6 +113,23 @@ VERTICAL_INTERPOLATION_ORDERS = ("linear", "cubic")
 DEFAULT_VERTICAL_INTERPOLATION = "cubic"
 
 
+#: Coordinate in which the vertical stage of the semi-Lagrangian
+#: interpolation is done, by vertical-coordinate family. Hybrid grids
+#: interpolate in the log of the reference pressure: their top is pure
+#: pressure and spaced geometrically, and Lagrange weights in ``s`` itself
+#: there are both inaccurate (on L47 the linear top cell credits the lid
+#: level with 0.44 of the vertical advection a profile linear in height
+#: carries) and, in the cubic cells, anti-diffusive under upwelling (#1060).
+#: Sigma grids (SPEEDY / Held-Suarez L8) are quasi-uniform in ``σ`` and keep
+#: it. See jcm/dycore/dinosaur/log_pressure_interpolation.py and
+#: docs/source/design/sl_vertical_interpolation.md.
+DEFAULT_SL_VERTICAL_COORDINATE = {"hybrid": "log_pressure", "sigma": "sigma"}
+
+#: Coordinates the vertical stage of the SL interpolation can use
+#: (``sl_options['vertical_coordinate']`` / ``dycore.sl_vertical_coordinate``).
+SL_VERTICAL_COORDINATES = ("log_pressure", "sigma")
+
+
 #: Transport schemes the dinosaur backend offers (see ``DinosaurDycore``'s
 #: ``advection`` argument). Semi-Lagrangian is the default and what the
 #: physics-decided mode always picks for tracer-carrying physics; Eulerian is
@@ -268,7 +285,11 @@ class DinosaurDycore(DynamicalCore):
         (1), ``off_centering`` (:data:`DEFAULT_OFF_CENTERING`),
         ``vertical_interpolation_order``
         (:data:`DEFAULT_VERTICAL_INTERPOLATION`, or linear below four
-        levels), ``mass_fixer`` (True: every global mass fixer below) and
+        levels), ``vertical_coordinate`` (the coordinate of the vertical
+        interpolation: :data:`DEFAULT_SL_VERTICAL_COORDINATE`, i.e.
+        ``log_pressure`` on hybrid grids and ``sigma`` on sigma grids; see
+        :attr:`sl_vertical_coordinate`), ``mass_fixer`` (True: every global
+        mass fixer below) and
         ``humidity_mass_fixer`` (True: the fixer for the modal
         ``specific_humidity``; see :meth:`step`).
         """
@@ -290,6 +311,13 @@ class DinosaurDycore(DynamicalCore):
                 "sl_options['vertical_interpolation_order'] must be one of "
                 f"{VERTICAL_INTERPOLATION_ORDERS} or None (the default), got "
                 f"{vorder!r}"
+            )
+        vcoord = self._sl_options.get("vertical_coordinate")
+        if vcoord is not None and vcoord not in SL_VERTICAL_COORDINATES:
+            raise ValueError(
+                "sl_options['vertical_coordinate'] must be one of "
+                f"{SL_VERTICAL_COORDINATES} or None (the default), got "
+                f"{vcoord!r}"
             )
         self.coords = coords
         self.terrain = terrain
@@ -427,8 +455,19 @@ class DinosaurDycore(DynamicalCore):
             departure_iterations=self._sl_options.get("departure_iterations", 1),
             vertical_interpolation_order=self.vertical_interpolation_order,
         )
+        # Imported here, after ``_require_semi_lagrangian`` has run in
+        # ``__init__``: the module subclasses dinosaur's SL classes at import
+        # time, and an install without them must get that check's message.
+        from jcm.dycore.dinosaur.log_pressure_interpolation import (
+            LogPressureSemiLagrangianHybrid,
+            LogPressureSemiLagrangianSigma,
+        )
+
+        log_pressure = self.sl_vertical_coordinate == "log_pressure"
         if isinstance(self.coords.vertical, HybridCoordinates):
-            self._primitive = primitive_equations.SemiLagrangianPrimitiveEquationsHybrid(
+            sl_class = (LogPressureSemiLagrangianHybrid if log_pressure else
+                        primitive_equations.SemiLagrangianPrimitiveEquationsHybrid)
+            self._primitive = sl_class(
                 reference_temperature=self._reference_temperature,
                 orography=self._truncated_orography,
                 coords=self.coords,
@@ -439,7 +478,9 @@ class DinosaurDycore(DynamicalCore):
                 **sl_kwargs,
             )
         else:
-            self._primitive = primitive_equations.SemiLagrangianPrimitiveEquations(
+            sl_class = (LogPressureSemiLagrangianSigma if log_pressure else
+                        primitive_equations.SemiLagrangianPrimitiveEquations)
+            self._primitive = sl_class(
                 reference_temperature=self._reference_temperature,
                 orography=self._truncated_orography,
                 coords=self.coords,
@@ -544,6 +585,22 @@ class DinosaurDycore(DynamicalCore):
         return DEFAULT_VERTICAL_INTERPOLATION
 
     @property
+    def sl_vertical_coordinate(self) -> str:
+        """Coordinate of the vertical stage of the SL interpolation.
+
+        The ``sl_options`` override, else
+        :data:`DEFAULT_SL_VERTICAL_COORDINATE` for the grid's vertical family:
+        ``log_pressure`` (the log of the reference sigma ``s``) on hybrid
+        grids, ``sigma`` (``s`` itself, dinosaur's native rule) on sigma grids.
+        """
+        vcoord = self._sl_options.get("vertical_coordinate")
+        if vcoord is not None:
+            return vcoord
+        family = ("hybrid" if isinstance(self.coords.vertical, HybridCoordinates)
+                  else "sigma")
+        return DEFAULT_SL_VERTICAL_COORDINATE[family]
+
+    @property
     def humidity_mass_fixer(self) -> bool:
         """Whether the SL step restores the global mass of ``specific_humidity``."""
         return bool(self._sl_options.get("mass_fixer", True)
@@ -592,9 +649,31 @@ class DinosaurDycore(DynamicalCore):
     def _make_diffusion_fn(self, timescale, order, replace_fn, level_orders=None):
         """Hyperdiffusion filter closure for one of the three state slots.
 
-        Lifted unchanged from :meth:`jcm.model.Model._make_diffusion_fn` — the
-        Phase-1 baseline asserts the bit-level invariance.
+        Damps the modal coefficients by ``exp(-dt/τ·(n(n+1)/N(N+1))**p)``; with
+        ``diffusion.diffuse_zonal_mean`` False (the ECHAM ``lmidatm`` profile)
+        the m = 0 column is restored afterwards, so the zonal mean is not
+        diffused. With the zonal mean diffused (the SPEEDY default) the result
+        is the filter's output unchanged.
         """
+        keep_zonal_mean = not self.diffusion.diffuses_zonal_mean
+        if keep_zonal_mean:
+            # The zonal mean is the modal column with zonal wavenumber 0,
+            # which dinosaur stores first on the longitude-mode axis (any SPMD
+            # padding goes at the end).
+            m_axis = np.asarray(self.coords.horizontal.modal_axes[0])
+            if m_axis[0] != 0:
+                raise ValueError(
+                    "diffuse_zonal_mean=False needs the m = 0 coefficients "
+                    "first on the longitude-mode axis; this grid's modal axis "
+                    f"starts with m = {m_axis[0]}")
+
+        def restore_zonal_mean(x_next, x_filtered):
+            # Leave the m = 0 column as it was before the filter.
+            if not keep_zonal_mean or not hasattr(x_next, "shape") \
+                    or np.ndim(x_next) < 2:
+                return x_filtered
+            return x_filtered.at[..., 0, :].set(x_next[..., 0, :])
+
         if level_orders is None:
             def diffusion_filter(u, u_next):
                 eigenvalues = self.coords.horizontal.laplacian_eigenvalues
@@ -605,7 +684,8 @@ class DinosaurDycore(DynamicalCore):
                 # largest-wavenumber eigenvalue with or without padding.
                 scale = self._dt / (timescale * abs(eigenvalues).max() ** order)
                 filter_fn = horizontal_diffusion_filter(self.coords.horizontal, scale, order)
-                u_temp = filter_fn(u_next)
+                u_temp = jax.tree_util.tree_map(
+                    restore_zonal_mean, u_next, filter_fn(u_next))
                 return replace_fn(u_next, u_temp)
             return diffusion_filter
 
@@ -621,7 +701,7 @@ class DinosaurDycore(DynamicalCore):
                 target_shape = np.shape(x)
                 if target_shape != np.broadcast_shapes(target_shape, scaling_const.shape):
                     return x
-                return scaling_const * x
+                return restore_zonal_mean(x, scaling_const * x)
             u_temp = jax.tree_util.tree_map(rescale, u_next)
             return replace_fn(u_next, u_temp)
         return diffusion_filter
@@ -1045,6 +1125,11 @@ class DinosaurDycore(DynamicalCore):
         transport error (a genuinely empty field spinning up, a physics
         bug) and must surface in the ``budget_dyn_*`` gauge rather than
         be silently absorbed here.
+
+        Being global, the factor returns the limiter's mass creation —
+        concentrated where a tracer is patchy — in proportion to the tracer
+        everywhere, so it moves mass from smooth regions to patchy ones;
+        a local (Bermejo–Conde) fixer is #1062.
         """
         w = jnp.asarray(self.coords.horizontal.quadrature_weights)
         dp_ref = self._nodal_tracer_column_weight(state_ref)

@@ -1416,8 +1416,11 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         "pressure_full", "air_density", "layer_thickness",
         "clouds", "aerosol",
     )
+    # ``reffl``/``reffi`` are the scheme's own in-cloud droplet and crystal
+    # effective radii, ECHAM's ``mo_activ`` ``REFFL``/``REFFI`` streams, which
+    # HAM's in-cloud impaction scavenging reads (``ic_scav_imp``).
     provides: ClassVar[tuple[str, ...]] = (
-        "autoconv", "accretn", "wbf", "clouds",
+        "autoconv", "accretn", "wbf", "clouds", "reffl", "reffi",
     )
     # ECHAM's anchor (ptm1, pqm1, pxlm1, pxim1, pxtm1 of cdnc/icnc) is the
     # previous step's post-physics state; the model carries it for this term
@@ -1427,7 +1430,15 @@ class Lohmann2MMicrophysics(PhysicsTerm):
     )
     # CF/units metadata for the ``clouds.*`` output fields (#740). Shared with
     # the cover term; this term fills the precip / 2M / process-rate fields.
-    output_attrs: ClassVar[dict[str, dict[str, str]]] = CLOUD_OUTPUT_ATTRS
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        **CLOUD_OUTPUT_ATTRS,
+        "reffl": {"units": "um",
+                  "long_name": "in-cloud droplet effective radius after the "
+                               "two-moment microphysics"},
+        "reffi": {"units": "um",
+                  "long_name": "in-cloud ice crystal effective radius after "
+                               "the two-moment microphysics"},
+    }
 
     def __init__(self, params: 'CloudParams2M | None' = None, *,
                  params_are_defaults: bool = False):
@@ -1480,57 +1491,34 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         self._spa_cap_smoothing = nnx.Param(jnp.asarray(cap_smoothing))
 
     def configure_wetdep_hydro_diagnostics(self, enabled: bool) -> None:
-        """Publish the five per-level hydrological/microphysical inputs
-        HAM's below-cloud AND in-cloud impaction wet deposition need:
-        ``"precip_cover"``, ``"pfrain"``, ``"pfsnow"``, ``"reffl"``,
-        ``"reffi"``.
+        """Publish the per-level precipitation inputs of HAM's below-cloud scavenging.
 
-        ``echam_physics`` turns this on exactly when ``jam_wetdep_scheme``
-        selects a HAM pathway that needs them (jax-gcm#1017). This scheme
-        already computes all five identically to ECHAM inside its own
-        per-level sweep but, until this is enabled, discards them:
+        ``"precip_cover"``, ``"pfrain"`` and ``"pfsnow"``. ``echam_physics``
+        turns this on exactly when ``jam_wetdep_scheme`` selects a HAM
+        below-cloud pathway (jax-gcm#1017). The scheme computes all three in
+        its per-level sweep and discards them unless this is enabled:
 
-        - ``"precip_cover"`` is ECHAM's ``pclc``/``zclcpre`` -- the POST-
-          update precipitating-area fraction (same value as this level's
-          share of the carry). See the ``level_out``/``carry_out`` comment
-          in ``_column_level_step`` for exactly which point in the
-          recurrence this is.
-        - ``"pfrain"``/``"pfsnow"`` are ``update_precip_fluxes``'s own
-          ``pfrain``/``pfsnow`` OUTPUTS at this level (the in-cloud, cover-
-          normalised, pre-evaporation rain/snow flux) -- ECHAM threads the
-          SAME call's outputs to ``cloud_subm_2`` as ``zfrain``/``zfsnow``
-          (``mo_cloud_micro_2m.f90:1813``), which ``cloud_subm_2`` itself
-          documents as "rain/snow flux before evaporation [kg/m2/s]"
-          (``mo_submodel_interface.f90:1676-1677``) -- the exact match to
-          jcm's own value and docstring. NOT the scan's raw carry
-          ``rain_flux``/``snow_flux`` (ECHAM's column ``prfl``/``psfl``,
-          which are post-evaporation and not cover-normalised) -- an
-          earlier version of this wiring approximated pfrain/pfsnow from
-          the carry via an in-cloud ice-fraction proxy; this publishes the
-          exact quantity the scheme already computes instead.
-        - ``"reffl"``/``"reffi"`` are the scheme's own ``preffl``/``preffi``
-          (Martin et al. 1994 / Peng & Lohmann 2003 effective radii, in
-          microns, ``eff_liquid_droplet_radius``/``eff_ice_crystal_radius``)
-          -- ``ic_scav_imp``'s (follow-up B) ``reffl``/``reffi`` streams
-          exactly (``mo_ham_wetdep.f90:813,859,911-912``), NOT the
-          radiation term's independently-formed ``clouds.r_eff_*`` (a
-          deliberately different quantity for a deliberately different
-          consumer, unchanged by this -- see the comment where these are
-          computed, ``update_tendencies_and_important_vars``).
+        - ``"precip_cover"`` is ECHAM's ``pclc``/``zclcpre``: the precipitating
+          area fraction after this level's ``update_precip_fluxes``, the value
+          that becomes this level's share of the carry.
+        - ``"pfrain"``/``"pfsnow"`` are that same call's ``pfrain``/``pfsnow``
+          outputs, the in-cloud, cover-normalised rain/snow flux before
+          evaporation that ECHAM passes to ``cloud_subm_2`` as
+          ``zfrain``/``zfsnow`` (``mo_cloud_micro_2m.f90:1813``). They are not
+          the scan's carry ``rain_flux``/``snow_flux`` (ECHAM's column
+          ``prfl``/``psfl``), which are post-evaporation and not
+          cover-normalised.
 
-        Off by default, matching every other diagnostics-key toggle in
-        this term.
+        The in-cloud effective radii ``"reffl"``/``"reffi"`` are not part of
+        this switch: every 2M run publishes them (the class-level
+        ``provides``), for in-cloud impaction scavenging.
 
-        Also extends ``self.provides`` with the five keys (instance
-        override of the class-level tuple) when enabled: ``WetScavenging``
-        declares them in ``requires``, and
-        ``ComposablePhysics._validate_ordering`` checks that against every
-        upstream term's ``provides`` at COMPOSE time, not by actually
-        running the term -- so the keys must be declared here, not only
-        emitted at call time.
+        Enabling also adds the three keys to ``self.provides``: ``WetScavenging``
+        lists them in its ``requires``, and ``ComposablePhysics._validate_ordering``
+        checks that against the upstream ``provides`` at compose time.
         """
         self._publish_wetdep_hydro = bool(enabled)
-        keys = ("precip_cover", "pfrain", "pfsnow", "reffl", "reffi")
+        keys = ("precip_cover", "pfrain", "pfsnow")
         base = tuple(t for t in type(self).provides if t not in keys)
         self.provides = (*base, *keys) if enabled else base
 
@@ -1703,14 +1691,12 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         # was suppressed ~1e6x by the c.ak/zdqsdt transcription bugs
         # (#667): with those fixed, summing both would remove
         # supersaturation twice per step with double the latent heating.
-        # The scheme's own preffl/preffi (ECHAM cloud_micro_2m outputs) are
-        # NOT used for radiation: the radii radiation uses, and the
-        # ``clouds.r_eff_*`` diagnostic, are formed by the radiation term
-        # from the step's state, as in ECHAM's cloud_optics -- that choice
-        # is unchanged. They ARE published, conditionally, for #1017's
-        # in-cloud impaction pathway (``ic_scav_imp`` needs ECHAM's own
-        # ``reffl``/``reffi`` streams, not a radiation-side estimate) --
-        # see ``configure_wetdep_hydro_diagnostics``.
+        # The scheme's own preffl/preffi (ECHAM cloud_micro_2m outputs, the
+        # ``mo_activ`` REFFL/REFFI streams) are published as ``reffl``/``reffi``
+        # for HAM's in-cloud impaction scavenging, which reads exactly these.
+        # Radiation does not use them: the radii it radiates with, and the
+        # ``clouds.r_eff_*`` diagnostic, are formed by the radiation term from
+        # the step's state, as in ECHAM's cloud_optics.
         (tend_all, surface_rain_flux, surface_snow_flux,
          preffl_all, preffi_all, rain_formation_warm, rain_from_melt,
          autoconv_all, accretion_all, wbf_all,
@@ -1749,11 +1735,59 @@ class Lohmann2MMicrophysics(PhysicsTerm):
             },
         )
 
+        # Publish the resolved CDNC into ``clouds.droplet_number`` (#1053).
+        # ``CloudData`` is created with this field at zero and only the 1M
+        # path (``echam_1m.py``) used to fill it; the 2M carries its number
+        # as the prognostic tracer ``qnc`` [kg^-1] instead, so this path left
+        # the CF-advertised CDNC at its zero seed forever.
+        #
+        # GRID-MEAN, not in-cloud: ECHAM-HAM hands its radiation the grid-mean
+        # number unmasked by cover, ``pacdnc(:,jk) = zcdnc(:,jk)``
+        # (``mo_cloud_micro_2m.f90:1710``) with ``zcdnc`` the grid-mean
+        # ``ρ·(pxtm1 + ztmst·pxtte)`` (line 600) — there is no ``/paclc``
+        # anywhere on that path. The same convention is already load-bearing
+        # elsewhere in jcm: ``cloud_optics.radiation_effective_radii``'s
+        # prognostic branch forms ``max(qnc, 0)·air_density`` and
+        # ``AerocomDiagnostics._number_concentrations`` derives its grid-mean
+        # ``cdnc_gm`` the identical way. This differs from the 1M path's
+        # CONVENTION for the same field (a characteristic in-cloud value,
+        # nonzero in clear sky — see that field's entry in
+        # ``CLOUD_OUTPUT_ATTRS`` and ``cloud_utils.prescribed_droplet_number``):
+        # the 1M's ``acdnc`` is a profile ECHAM prescribes from pressure alone
+        # and hands unmasked to both the in-cloud microphysics formulas and
+        # the radiation, so it was never grid-mean to begin with; the 2M's
+        # number is a genuine prognostic grid-mean tracer, so masking it by
+        # cover here would invent an in-cloud value ECHAM-HAM's own CDNC
+        # output does not have.
+        #
+        # Timing: formed from THIS STEP's saved ``qnc``, not the step-start
+        # tracer the term receives. Operator splitting means the host sums
+        # EVERY term's tendency (this one plus any upstream term that also
+        # touches ``qnc``) onto ``state.tracers["qnc"]`` only after the whole
+        # step's physics has run, so reading the step-start tracer plus only
+        # this term's own tendency would both date the published CDNC a step
+        # and drop any upstream term's contribution — the lag
+        # ``aerocom._post_physics_tracer`` / ``cosp_cloudsat
+        # ._post_micro_condensate`` exist to avoid, and exactly the gap
+        # Codex review flagged on #1053 (PR #1085). ``inputs.provisional``
+        # is already ``state.tracers["qnc"] + dt`` times the running upstream
+        # tendency (``cloud_scheme_inputs``' ``anchor + increment``, with no
+        # detrainment term for ``qnc``) — the same baseline the scheme's own
+        # ``tracer_tm1_cdnc=qnc_raw`` ledger above uses, so adding this
+        # term's tendency to it reproduces exactly what the dycore will save,
+        # whether or not a future upstream term ever writes a ``qnc``
+        # tendency (today, none does).
+        qnc_post_physics = jnp.maximum(
+            inputs.provisional.tracers["qnc"] + dt * tendency.tracers["qnc"],
+            0.0)
+        droplet_number = qnc_post_physics * diagnostics["air_density"]
+
         # ``qnc_prev``/``qni_prev`` record the raw number tracers of the
         # state this term receives, not the scheme's entry-floored working
         # numbers. No term reads them. The surface precipitation comes from
         # the lax.scan carry.
         clouds_next = clouds.copy(
+            droplet_number=droplet_number,
             # ECHAM writes the post-microphysics cloud fraction back to
             # ``paclc``: cells the scheme has just emptied of both condensates,
             # or driven below ``clc_min``, are no longer cloudy. Radiation and
@@ -1808,21 +1842,19 @@ class Lohmann2MMicrophysics(PhysicsTerm):
         diagnostics = {**diagnostics,
                        "autoconv": autoconv_all,
                        "accretn": accretion_all,
-                       "wbf": wbf_all}
+                       "wbf": wbf_all,
+                       # (nlev, ncols) [um], 0 where the level holds no
+                       # liquid / ice cloud; transposed like the profiles
+                       # above.
+                       "reffl": preffl_all.T,
+                       "reffi": preffi_all.T}
         if self._publish_wetdep_hydro:
-            # Static flag, so this branch is the same for every trace of a
-            # given composition -- the diagnostics key set stays fixed
-            # across steps, as the scan carry requires; it only differs
-            # between a HAM-below-cloud-wetdep composition and every other
-            # one, exactly like ``optics_diagnostics`` in JamOpticsTerm.
-            # The vmap puts the column axis first -- transpose like the
-            # other per-level profiles above.
+            # A static flag, so the diagnostics key set is fixed for a given
+            # composition, as the scan carry requires.
             diagnostics = {**diagnostics,
                            "precip_cover": precip_cover_all.T,
                            "pfrain": pfrain_all.T,
-                           "pfsnow": pfsnow_all.T,
-                           "reffl": preffl_all.T,
-                           "reffi": preffi_all.T}
+                           "pfsnow": pfsnow_all.T}
         diagnostics = advance_thermo_run(
             diagnostics, dt,
             d_temperature=tendency.temperature,

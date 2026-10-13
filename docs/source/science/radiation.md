@@ -242,6 +242,14 @@ cover it reports is the adjacent-layer Geleyn-Hollingsworth product
 ``rte-rrtmgp-nn``.
 
 **Why we differ.**
+- `differentiability` — SPEEDY's cloud cover keeps every reference value
+  (the RH hinge, the maximum over reference levels, the ``pmaxcl`` cap, the
+  ``sqrt`` of the precipitation rate, the clips); with
+  ``shortwave_radiation.cover_smoothing`` > 0 each carries the derivative of a
+  smooth counterpart. The square root matters most: its reference slope
+  reaches ~1.6e4 per mm/day in drizzle, which a multi-step adjoint turns into
+  isolated grid-point spikes; the surrogate bounds it at
+  ``1/(2*cover_smoothing*pmaxcl)`` ({doc}`../design/surrogate_gradients`).
 - `science` — the effective radii follow ECHAM's ``cloud_optics`` with four
   stated departures. (1) On the 2-moment path ECHAM-HAM evaluates
   ``breadth_factor`` on the droplet number after converting it to cm⁻³,
@@ -602,6 +610,7 @@ uses civil months rather than twelve equal fractions of a nominal year.
 This changes the seasonal forcing relative to the former epoch-based 365-day
 clock, so old climate baselines are not numerically interchangeable. The
 calendar-boundary tests establish date alignment; multi-year SPEEDY and ECHAM
-climate comparisons are part of the v3.0 release validation tracked in #831.
-The clock, forcing-selection and output-labelling contracts, and how to migrate
-from the v2 clock, are described in {ref}`v3-datetime`.
+climate comparisons against this clock were part of the v3.0 release
+validation (closed with the 3.0.0 release). The clock, forcing-selection and
+output-labelling contracts, and how to migrate from the v2 clock, are
+described in {ref}`v3-datetime`.

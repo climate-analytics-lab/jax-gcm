@@ -274,8 +274,13 @@ jobs:
       # PyPI wheel brings the CUDA stack (~4.4 GB installed) to a CPU-only
       # runner; the CPU build satisfies the same requirement.
       - name: Install every optional extra
+        # jax-cosp comes from GitHub first: the `cosp` extra names it without
+        # a URL (PyPI refuses direct-URL dependencies in published metadata)
+        # and it is not on PyPI, so the extra resolves only once it is
+        # installed.
         run: |
           pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"
           pip install -e ".[$(python tools/ci/optional_extras.py pip-extras)]"
 
       - name: Report runner resources

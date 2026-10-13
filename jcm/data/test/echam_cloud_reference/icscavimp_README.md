@@ -1,4 +1,4 @@
-# ECHAM6.3-HAM2.3 ic_scav -> get_icscavfrac -> {ic_scav_nuc,ic_scav_imp} reference (#1017 follow-up B)
+# ECHAM6.3-HAM2.3 ic_scav -> get_icscavfrac -> {ic_scav_nuc,ic_scav_imp} reference (#1017)
 
 Outputs of the **unmodified** `ic_scav -> get_icscavfrac -> {ic_scav_nuc,
 ic_scav_imp}` chain (ECHAM6.3-HAM2.3 r7492's `mo_ham_wetdep.f90`, plus
@@ -14,10 +14,11 @@ collector-radius (`cplaterad`) three regimes (dead/`reffi<1`,
 fine/`[1,50)`, coarse/`>=50`), and the `icnc<eps` gate. **Data only**: no
 ECHAM or HAM source is part of this repository.
 
-They are the numerical reference for
-`jcm/physics/aerosol/jam/wetdep/ham_impaction.py` AND the COMBINATION
-`get_icscavfrac` performs (`pfrac = clip(pfrac_nuc+pfrac_imp, 0, 1)`),
-compared by `jcm/physics/aerosol/jam/wetdep/ham_impaction_test.py`.
+They are the numerical reference for the `ham_r7492` variant of
+`jcm/physics/aerosol/jam/wetdep/incloud_impaction.py`, together with
+`ham_nucleation.py`, AND the COMBINATION `get_icscavfrac` performs
+(`pfrac = clip(pfrac_nuc+pfrac_imp, 0, 1)`), compared by
+`jcm/physics/aerosol/jam/wetdep/incloud_impaction_test.py::test_r7492_variant_reproduces_the_compiled_get_icscavfrac_chain`.
 
 Integrity: -O0 vs -O2 max abs difference 0.0 (`icscavimp_provenance.json`).
 

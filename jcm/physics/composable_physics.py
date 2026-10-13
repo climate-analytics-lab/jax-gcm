@@ -811,6 +811,10 @@ class ComposablePhysics(nnx.Module, Physics):
     # (``jcm.physics.radiation.SURFACE_OPTICS_KEY``).
     _STEP_LOCAL_KEYS: ClassVar[frozenset[str]] = frozenset({
         "_surface_optics",
+        # JAM's per-reservoir droplet-held share, written by the cloud-borne
+        # exchange for the wet deposition and aqueous chemistry that follow
+        # (``jcm.physics.aerosol.jam.cloud_borne_store.LIQUID_SHARE_KEY``).
+        "_jam_cloud_borne_liquid_share",
     })
 
     @classmethod

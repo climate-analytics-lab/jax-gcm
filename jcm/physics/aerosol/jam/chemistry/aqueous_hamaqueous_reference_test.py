@@ -200,3 +200,15 @@ def test_reference_cells_exercise_every_branch():
     totals = [z["out/pxtte_ms4as"][col[c]] + z["out/pxtte_ms4cs"][col[c]]
               for c in split_cells]
     assert np.allclose(totals, totals[0], rtol=1e-12)
+
+
+def test_ham_split_refuses_an_explicit_cloud_borne_phase():
+    """HAM's AS/CS split puts the sulfate on interstitial number; with an
+    explicit cloud-borne phase it would bypass the cloud-borne reservoirs.
+    """
+    import dataclasses
+
+    import pytest
+
+    with pytest.raises(ValueError, match="cloud-borne"):
+        AqueousSulfur(spec=dataclasses.replace(M7_SPEC, cloud_borne=True))

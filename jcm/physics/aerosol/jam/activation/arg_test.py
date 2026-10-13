@@ -202,6 +202,80 @@ class ArgActivationCoreTest(unittest.TestCase):
         self.assertGreaterEqual(float(g), 0.0)  # more updraft -> more droplets
 
 
+class ArgExtremeColdTest(unittest.TestCase):
+    """The float32 ARG solution stays finite at extreme model-top temperatures.
+
+    The T63L47 JAM configuration can reach about 70 K at 4 Pa (a captured
+    3.0.0rc1 run, one step before its aerosol tracers went non-finite).
+    """
+
+    def _activate(self, T, p, dtype=jnp.float32, number=(2.4e3, 4.0, 0.0)):
+        # Default: the captured cell's population (an empty coarse mode).
+        col = lambda *v: jnp.asarray(v, dtype).reshape(3, 1, 1)  # noqa: E731
+        return arg_activation(
+            r_dry=col(0.013e-6, 0.06e-6, 1.0e-6), kappa=col(0.5, 0.5, 1.1),
+            number_vol=col(*number), sigma_g=col(1.6, 1.8, 1.8),
+            can_activate=col(1.0, 1.0, 1.0),
+            updraft=jnp.full((1, 1), 0.3, dtype),
+            temperature=jnp.full((1, 1), T, dtype),
+            pressure=jnp.full((1, 1), p, dtype),
+            sigma_acc=1.8, variant="ghosh2025")
+
+    def test_finite_and_bounded_down_to_the_captured_model_top_temperature(self):
+        # The unbounded Magnus es falls below 1e-30 Pa near 80 K; the growth
+        # coefficient and gamma (both ~1/es) then overflow float32 and every
+        # output was NaN at 80, 75 and 70.6 K (the captured cell).
+        for T in (100.0, 80.0, 75.0, 70.6, 50.0):
+            for p in (4.0, 9.0e4):
+                n_act, frac, smax, nfrac, mfrac = self._activate(T, p)
+                for name, v in (("n_act", n_act), ("frac", frac), ("s_max", smax),
+                                ("number_frac", nfrac), ("mass_frac", mfrac)):
+                    self.assertTrue(np.all(np.isfinite(np.asarray(v))),
+                                    f"{name} non-finite at T={T} K, p={p} Pa")
+                self.assertTrue(0.0 <= float(np.asarray(frac).ravel()[0]) <= 1.0)
+
+    def test_no_activation_below_the_table_floor_and_unchanged_above(self):
+        # Below 127.16 K every activation output is exactly zero (the mask),
+        # not merely finite: the cloud-borne exchange must see no liquid
+        # activation in a mesopause cell. Just above it the plain solution.
+        for T in (50.0, 70.6, 100.0, 127.0):
+            for p in (4.0, 9.0e4):
+                n_act, frac, smax, nfrac, mfrac = self._activate(T, p)
+                for name, v in (("n_act", n_act), ("frac", frac),
+                                ("number_frac", nfrac), ("mass_frac", mfrac)):
+                    self.assertEqual(float(np.max(np.abs(np.asarray(v)))), 0.0,
+                                     f"{name} nonzero at T={T} K, p={p} Pa")
+                self.assertTrue(np.all(np.isfinite(np.asarray(smax))))
+        warm = self._activate(233.15, 9.0e4)
+        self.assertGreater(float(np.asarray(warm[1]).ravel()[0]), 0.0)
+        np.testing.assert_allclose(np.asarray(self._activate(128.0, 9.0e4)[1]),
+                                   np.asarray(self._activate(128.0, 9.0e4)[1]))
+
+    def test_saturation_vapour_pressure_is_bounded_to_cam_table_range(self):
+        es = arg_module._saturation_vapor_pressure
+        # Inside the range: the plain Magnus fit, unchanged.
+        for T in (128.0, 233.15, 273.15, 303.15):
+            t_c = T - 273.15
+            np.testing.assert_allclose(
+                float(es(jnp.asarray(T))),
+                611.2 * np.exp(17.62 * t_c / (T - 30.03)), rtol=1e-5)
+        # Below it: the value at the bound, a finite positive float32.
+        lo = float(es(jnp.asarray(arg_module._ES_T_MIN, jnp.float32)))
+        cold = float(es(jnp.asarray(70.6, jnp.float32)))
+        self.assertGreater(lo, 0.0)
+        self.assertEqual(cold, lo)
+
+    def test_temperature_gradient_finite_at_extreme_cold(self):
+        # At the model top (4 Pa) with every mode populated; the bounded es has
+        # a zero derivative below _ES_T_MIN, the other coefficients keep theirs.
+        def loss(T):
+            n_act, *_ = self._activate(T, 4.0, number=(2.4e3, 4.0, 1.0))
+            return jnp.sum(n_act)
+
+        g = jax.grad(loss)(jnp.asarray(70.6, jnp.float32))
+        self.assertTrue(np.isfinite(float(g)))
+
+
 def _mam4_like():
     """Aitken / accumulation / coarse modes, MAM4-like sizes and kappas."""
     col = lambda *v: jnp.asarray(v).reshape(3, 1, 1)

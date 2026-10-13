@@ -236,12 +236,21 @@ def compute_surface_exchange_coefficients_echam_louis(
         ri = ri_all[:, isfc]
 
         # ---- Louis (1979) stability + log-law neutral ----------------
-        # Effective roughness lengths capped to ½·z_ref via
-        # ``MAX(2, z/z0)`` per ECHAM's lmix-bounded form. The momentum pair
-        # comes from ``echam_louis_neutral_drag`` so the 10 m reduction shares
-        # this scheme's own neutral reference rather than re-deriving it.
+        # ``ln(1 + z/z0)``, unfloored, per ECHAM6.3's own tiles (#1056):
+        # land ``mo_surface_land.f90:238`` (``zcdnl``), ocean
+        # ``mo_surface_ocean.f90:378-380`` (``zalo``/``zcdnw``) and sea ice
+        # ``mo_surface_ice.f90:639,642`` (``zalo``/``zcdni``) all build the
+        # neutral log term this way with no cap on ``z/z0``. An earlier
+        # version of this code capped it at ``MAX(z/z0, e^2)`` and attributed
+        # that to "ECHAM's lmix-bounded form" — no such floor exists on any
+        # of the three tiles' *drag* coefficient in this reference; the one
+        # ``e^2``-flavoured constant that does appear (ice's ``zepz0o = 2``)
+        # bounds the roughness length itself for a separate 2 m-diagnostic
+        # reduction, not the neutral log here. The momentum pair comes from
+        # ``echam_louis_neutral_drag`` so the 10 m reduction shares this
+        # scheme's own neutral reference rather than re-deriving it.
         log_zm = bn_all[:, isfc]
-        log_zh = jnp.log(jnp.maximum(z_ref / z0h, jnp.exp(2.0)))
+        log_zh = jnp.log1p(z_ref / z0h)
         cdn = (karman * karman) / (log_zm * log_zm)             # neutral drag
         chn = (karman * karman) / (log_zm * log_zh)             # neutral CHN
 
@@ -349,15 +358,23 @@ def wind_10m_reduction(
 
 
 def echam_louis_neutral_drag(state, params, wind_speed):
-    """``(ln(z/z0), CM_n·|U|)`` of the ECHAM-Louis scheme, per tile.
+    """``(ln(1 + z/z0), CM_n·|U|)`` of the ECHAM-Louis scheme, per tile.
 
     THE definition, not a copy of one:
     :func:`compute_surface_exchange_coefficients_echam_louis` calls this for
     the ``log_zm``/``cfn_m`` its own drag is built on, so ``bn = κ/√CDN``
     holds for the pair by construction and the two cannot drift.
+
+    The neutral log term is ``ln(1 + z/z0)`` with no cap on ``z/z0`` — the
+    form every ECHAM6.3 tile uses for its own neutral drag (#1056; see the
+    reference lines cited beside ``log_zh`` above). ``z0`` itself is still
+    floored to ``params.z0m_min`` (a few mm) a few lines up, which is what
+    keeps this finite over an ocean/sea-ice tile's near-zero roughness —
+    that floor is on the roughness length, not on ``z/z0``, so it does not
+    reintroduce the cap this function used to apply.
     """
     z_ref = jnp.maximum(state.height_full[:, -1] - state.height_half[:, -1], 1.0)
     z0 = jnp.maximum(state.roughness_length, params.z0m_min)
-    bn = jnp.log(jnp.maximum(z_ref[:, None] / z0, jnp.exp(2.0)))
+    bn = jnp.log1p(z_ref[:, None] / z0)
     floored = jnp.sqrt(jnp.maximum(wind_speed ** 2, 1.0))[:, None]
     return bn, floored * c.karman_const ** 2 / bn ** 2

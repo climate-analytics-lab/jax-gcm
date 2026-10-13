@@ -381,22 +381,26 @@ def mixed_phase_deposition_and_corrections(
     # ``scheme.py``'s section 5 as this branch's ``deposition_rate`` seed)
     # IS that sink -- the thing this floor stood in for. Running the floor
     # on top of it would deposit vapor ECHAM's own reference never removes
-    # (confirmed: #1017 w6's end-to-end harness showed exactly this -- in
-    # the 2 of 5 designed columns with negligible real nucleation, this
-    # floor fired identically to the 3 "normal" columns, forcing deposition
-    # the compiled reference does not perform at all), so it is gated off
-    # at nic_cirrus=2. ``nic_cirrus`` is a static (pytree_node=False) field,
-    # so this plain Python ``if`` does not trace both branches -- same
-    # pattern as ``assembly.py``'s and ``scheme.py``'s own nic_cirrus
-    # dispatch. Rides the deposition ledger, so water/enthalpy bookkeeping
-    # is exact by construction when it does run. The excess is taken from
-    # the pre-increment humidity, so it also removes what the branch above
-    # already deposited (#963).
+    # (#1017 w6's end-to-end harness: in the 2 of 5 designed columns with
+    # negligible real nucleation the floor fired anyway, forcing deposition
+    # the compiled reference does not perform), so it is gated off at
+    # nic_cirrus=2. ``nic_cirrus`` is a static (pytree_node=False) field,
+    # so this plain Python ``if`` does not trace both branches. Rides the
+    # deposition ledger, so water/enthalpy bookkeeping is exact by
+    # construction when it does run.
+    #
+    # The excess is evaluated AFTER the branch-A/B/C increment above is
+    # removed from the parcel (#963): branch A already brings S_ice down to
+    # ~1.01 on its own, so testing the pre-increment humidity against
+    # S_crit would remove that increment's vapor twice. ``post_branch_q`` is
+    # ECHAM's q_tmp minus what the branch already deposited this step; only
+    # the amount still above S_crit after that is this floor's to take.
     if params.nic_cirrus != 2:
+        post_branch_q = specific_humidity_tmp - dep_increment
         scrit_koop = 2.349 - temperature_tmp / 259.0
         koop_excess = jnp.where(
             jnp.logical_and(lo2, temperature_tmp < params.cthomi),
-            jnp.maximum(specific_humidity_tmp - scrit_koop * qsat_tmp, 0.0),
+            jnp.maximum(post_branch_q - scrit_koop * qsat_tmp, 0.0),
             0.0,
         )
         deposition_rate = deposition_rate + koop_excess

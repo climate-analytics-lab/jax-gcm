@@ -1468,3 +1468,271 @@ class TestDustEmissionBand:
         reason = dict(A.unscored_gates(days, series))[
             "dust_emission_tg_per_yr"]
         assert "10 of 74" in reason
+
+
+class TestAnnualWindowBounds:
+    """``annual_window_bounds()``: which trailing slice is the annual
+    window, regardless of what ``--last-n`` later asks for (#1010).
+    """
+
+    @staticmethod
+    def _days(n):
+        return np.arange(5.0, 5.0 * n + 5.0, 5.0)
+
+    def test_a_200_day_record_is_whole(self):
+        # The documented health.py --last-n 40 recipe's window, when it also
+        # happens to be the WHOLE run directory: too short for the dust gate
+        # either way, but not through any trimming here.
+        assert A.annual_window_bounds(self._days(40)) == (0, None)
+
+    def test_a_365_day_record_is_whole(self):
+        assert A.annual_window_bounds(self._days(73)) == (0, None)
+
+    def test_a_400_day_record_trims_to_the_last_year(self):
+        days = self._days(80)      # 80 x 5 days = 400
+        start, window_start = A.annual_window_bounds(days)
+        # 73 trailing 5-day chunks is exactly 365 days; 72 would be 360.
+        assert start == 80 - 73 == 7
+        assert window_start == days[6]
+        assert A.covered_days(days[start:], window_start) == pytest.approx(365.0)
+
+    def test_a_record_already_sliced_short_of_a_year_keeps_its_own_start(self):
+        # annual_window_bounds treats its ``days`` argument as the whole
+        # record it is given; one that is ITSELF already a slice of a longer
+        # run (as a pre-sliced --series-in cache can be, see slice_windows)
+        # carries that slice's own window_start forward rather than
+        # inventing day 0.
+        assert A.annual_window_bounds(self._days(40), window_start=195.0) \
+            == (0, 195.0)
+
+
+class TestWindowSplitting:
+    """``slice_windows()``: the request (``--last-n``) and annual windows
+    the summary functions are handed, from one record (#1010).
+
+    ``collect_windows()`` (the file-reading sibling used by both ``main``
+    entry points) shares the same index arithmetic via ``_window_indices``;
+    :class:`TestCollectWindowsReadsTheRightFiles` exercises it against real
+    chunk files.
+    """
+
+    @staticmethod
+    def _series(n):
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        return days, {"emi_du": np.arange(float(n))}
+
+    def test_last_n_short_of_a_year_still_reaches_back_for_the_annual_window(self):
+        # An 80-chunk/400-day record (#1010's reproduction): --last-n 40
+        # asks for the final 200 days, but the annual window needs the
+        # final 365 (73 chunks) — strictly more, and starting earlier.
+        days, series = self._series(80)
+        request, annual = A.slice_windows(days, series, last_n=40)
+        req_days, _req_series, req_window_start = request
+        ann_days, _ann_series, ann_window_start = annual
+        assert req_days.size == 40 and req_days[0] == days[40]
+        assert ann_days.size == 73 and ann_days[0] == days[7]
+        assert req_window_start == days[39]
+        assert ann_window_start == days[6]
+        assert ann_days[0] < req_days[0]        # the annual window reaches further back
+
+    def test_last_n_already_a_year_or_more_makes_the_two_windows_equal(self):
+        days, series = self._series(80)
+        request, annual = A.slice_windows(days, series, last_n=73)
+        np.testing.assert_array_equal(request[0], annual[0])
+        assert request[2] == annual[2]
+
+    def test_a_whole_record_short_of_a_year_keeps_both_windows_equal(self):
+        # A run directory that is genuinely only 200 days old: the fix must
+        # not invent a longer annual window than the run has.
+        days, series = self._series(40)
+        request, annual = A.slice_windows(days, series, last_n=40)
+        np.testing.assert_array_equal(request[0], annual[0])
+        assert request[2] is None and annual[2] is None
+
+    def test_no_last_n_makes_the_request_the_whole_record_too(self):
+        days, series = self._series(80)
+        request, annual = A.slice_windows(days, series, last_n=None)
+        assert request[0].size == 80                  # no slicing at all
+        assert annual[0].size == 73                    # still trimmed to a year
+
+
+class TestDustScoredOnTheWholeRecord:
+    """The #1010 fix: ``dust_emission_tg_per_yr`` reads the run directory's
+    own year, independent of whatever ``--last-n`` sliced the request window
+    (``days``/``series``) to for the drift/ledger/mean statistics.
+    """
+
+    @staticmethod
+    def _dust_series(n, tg_per_yr, nlat=96.0):
+        days = np.arange(5.0, 5.0 * n + 5.0, 5.0)
+        flux = tg_per_yr * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        return days, {"emi_du": np.full(n, flux), "nlat": np.full(n, nlat)}
+
+    def test_a_200_day_request_still_scores_the_365_day_annual_window(self):
+        # Exactly #1010's reproduction: health.py --last-n 40 hands
+        # summarize() a 200-day request from a run whose directory holds a
+        # full year. The request's own emi_du is set far outside the band
+        # (9999 Tg/yr) so a PASS below can only come from the annual series.
+        request_days, request_series = self._dust_series(40, 9999.0)
+        annual_days, annual_series = self._dust_series(73, 450.0)
+        stats = A.summarize(request_days, request_series,
+                            annual_days=annual_days,
+                            annual_series=annual_series)
+        assert stats["dust_emission_tg_per_yr"] == pytest.approx(450.0,
+                                                                  rel=1e-6)
+        assert stats["record_days"] == pytest.approx(195.0)    # request span
+        assert stats["dust_window_days"] == pytest.approx(365.0)
+        rows = dict((name, ok) for name, _v, _lim, ok
+                    in A.physics_gates(stats))
+        assert rows["dust_emission_tg_per_yr"]
+
+    def test_unscored_gates_checks_the_annual_series_not_the_request(self):
+        # The request carries no emi_du at all (unremarkable: a trimmed
+        # --last-n reduction need not keep every diagnostic the annual
+        # window's own chunks do); the annual series does. unscored_gates
+        # must check the annual series, not report "no emi_du" from the
+        # request having none.
+        request_days, request_series = self._dust_series(40, 450.0)
+        del request_series["emi_du"]
+        annual_days, annual_series = self._dust_series(73, 450.0)
+        reasons = dict(A.unscored_gates(request_days, request_series,
+                                        annual_days=annual_days,
+                                        annual_series=annual_series))
+        assert "dust_emission_tg_per_yr" not in reasons
+
+    def test_a_short_whole_record_is_unscored_even_with_a_long_request(self):
+        # The run directory itself is only 200 days old: no --last-n choice
+        # can conjure a real year, and the fix must not fabricate one.
+        request_days, request_series = self._dust_series(40, 450.0)
+        annual_days, annual_series = self._dust_series(40, 450.0)
+        stats = A.summarize(request_days, request_series,
+                            annual_days=annual_days,
+                            annual_series=annual_series)
+        assert "dust_emission_tg_per_yr" not in stats
+        reasons = dict(A.unscored_gates(request_days, request_series,
+                                        annual_days=annual_days,
+                                        annual_series=annual_series))
+        assert "seasonal" in reasons["dust_emission_tg_per_yr"]
+        assert "200" in reasons["dust_emission_tg_per_yr"]
+
+    def test_a_400_day_record_only_uses_its_final_365_days(self):
+        # The first 7 (of 80) chunks read a wildly different flux; slicing
+        # through slice_windows() must drop exactly those for the annual
+        # statistic, leaving only the trailing 450 Tg/yr portion.
+        days = np.arange(5.0, 5.0 * 80 + 5.0, 5.0)
+        flux_450 = 450.0 * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        flux_9999 = 9999.0 * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        emi = np.concatenate([np.full(7, flux_9999), np.full(73, flux_450)])
+        series = {"emi_du": emi, "nlat": np.full(80, 96.0)}
+        request, annual = A.slice_windows(days, series, last_n=40)
+        req_days, req_series, req_window_start = request
+        ann_days, ann_series, ann_window_start = annual
+        stats = A.summarize(req_days, req_series, window_start=req_window_start,
+                            annual_days=ann_days, annual_series=ann_series,
+                            annual_window_start=ann_window_start)
+        assert stats["dust_emission_tg_per_yr"] == pytest.approx(450.0,
+                                                                  rel=1e-6)
+        assert stats["dust_window_days"] == pytest.approx(365.0)
+
+    def test_drift_still_reads_the_request_window_regardless_of_the_annual_series(self):
+        # The annual_* arguments must steer ONLY the annual-budget
+        # statistic; the drift gate stays exactly what it was pre-#1010.
+        days = np.arange(5, 370, 5, dtype=float)
+        values = np.full(days.size, 3.0)
+        tail = days >= 320
+        values[tail] = 3.0 * np.exp(0.12 * (days[tail] - 320.0))
+        annual_days, annual_series = self._dust_series(73, 450.0)
+        stats = A.summarize(days, {"burden_so4": values},
+                            annual_days=annual_days,
+                            annual_series=annual_series)
+        rows = A.physics_gates(stats)
+        failed = [name for name, _v, _lim, ok in rows if not ok]
+        assert "dlnB_dt_so4_per_day" in failed
+        passed = dict((name, ok) for name, _v, _lim, ok in rows)
+        assert passed["dust_emission_tg_per_yr"]
+
+    def test_dust_window_days_is_not_a_regression_target(self):
+        # Bookkeeping, like record_days: a run scored over a different
+        # window than its reference is not thereby a regression.
+        days, series = self._dust_series(73, 450.0)
+        stats = A.summarize(days, series)
+        reference = dict(stats, dust_window_days=1.0)
+        names = [name for name, _v, _lim, _ok
+                 in A.compare_to_reference(stats, reference, series)]
+        assert "dust_window_days" not in names
+
+
+class TestCollectWindowsReadsTheRightFiles:
+    """``collect_windows()``: the file-reading sibling of ``slice_windows()``,
+    end to end against real chunk files (#1010).
+    """
+
+    @staticmethod
+    def _dust_chunk(tg_per_yr, nlat=96, nlon=2) -> xr.Dataset:
+        """Build a minimal JAM-like chunk: just enough for chunk_reduction()
+        to read ``emi_du`` and ``nlat`` without crashing on the rest.
+        """
+        lat = np.linspace(-89.0, 89.0, nlat)
+        lon = np.linspace(0.0, 360.0, nlon, endpoint=False)
+        dp = np.array([300.0, 250.0, 250.0, 200.0]) * 100.0
+        half = np.concatenate([[1000e2], 1000e2 - np.cumsum(dp)])
+        full = 0.5 * (half[:-1] + half[1:])
+        flux = tg_per_yr * 1e9 / (A.EARTH_AREA_M2 * 86400.0 * 365.0)
+        data = {
+            "pressure_full": (("time", "level", "lon", "lat"),
+                              np.broadcast_to(
+                                  full[None, :, None, None],
+                                  (1, dp.size, nlon, nlat)).copy()),
+            "pressure_half": (("time", "level_i", "lon", "lat"),
+                              np.broadcast_to(
+                                  half[None, :, None, None],
+                                  (1, dp.size + 1, nlon, nlat)).copy()),
+            "emi_du": (("time", "lon", "lat"), np.full((1, nlon, nlat), flux)),
+        }
+        coords = {"lat": lat, "lon": lon,
+                  "level_i": ("level_i", np.linspace(1.0, 0.0, dp.size + 1),
+                              {"positive": "down"})}
+        return xr.Dataset(data, coords=coords)
+
+    def _write_run(self, tmp_path, n, tg_per_yr=450.0):
+        """``n`` 5-day chunks, all carrying the same flux."""
+        for i in range(n):
+            day = 5 * (i + 1)
+            self._dust_chunk(tg_per_yr).to_netcdf(tmp_path / f"mx_day{day}.nc")
+        return A.run_files(str(tmp_path))
+
+    def test_the_request_and_annual_windows_split_correctly(self, tmp_path):
+        files = self._write_run(tmp_path, n=80, tg_per_yr=450.0)
+        request, annual = A.collect_windows(files, last_n=40)
+        req_days, req_series, req_window_start = request
+        ann_days, ann_series, ann_window_start = annual
+        assert req_days.size == 40 and req_days[0] == 205.0
+        assert ann_days.size == 73 and ann_days[0] == 40.0
+        assert req_window_start == 200.0
+        assert ann_window_start == 35.0
+        np.testing.assert_allclose(req_series["emi_du"] * A.EARTH_AREA_M2
+                                   * 86400.0 * 365.0 / 1e9, 450.0, rtol=1e-6)
+        np.testing.assert_allclose(ann_series["emi_du"] * A.EARTH_AREA_M2
+                                   * 86400.0 * 365.0 / 1e9, 450.0, rtol=1e-6)
+
+    def test_the_whole_pipeline_scores_the_dust_gate_under_a_short_last_n(
+            self, tmp_path):
+        """End-to-end reproduction of the #1010 bug and its fix.
+
+        80 chunks (400 days) at a flux inside the band; ``--last-n 40`` asks
+        for only the final 200 days (the documented recipe's exact window).
+        Pre-#1010 this was UNSCORED; it must now PASS, scored on the whole
+        record's trailing year.
+        """
+        files = self._write_run(tmp_path, n=80, tg_per_yr=450.0)
+        request, annual = A.collect_windows(files, last_n=40)
+        req_days, req_series, req_window_start = request
+        ann_days, ann_series, ann_window_start = annual
+        stats = A.summarize(req_days, req_series, window_start=req_window_start,
+                            annual_days=ann_days, annual_series=ann_series,
+                            annual_window_start=ann_window_start)
+        assert stats["dust_emission_tg_per_yr"] == pytest.approx(450.0,
+                                                                  rel=1e-6)
+        rows = dict((name, ok) for name, _v, _lim, ok
+                    in A.physics_gates(stats))
+        assert rows["dust_emission_tg_per_yr"]

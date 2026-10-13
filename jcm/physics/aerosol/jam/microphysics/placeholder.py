@@ -153,17 +153,20 @@ class PlaceholderMicrophysics(ModalMicrophysicsTerm):
         self._initialized = True
 
     def __call__(self, state, diagnostics, forcing, terrain):
+        from jcm.physics.aerosol.jam.removal_split import split_view
+
         spec = self.spec
         zeros = jnp.zeros_like(state.temperature)
+        view = split_view(spec, state, diagnostics)
         masses = {
-            mass_name(sp, mode.short): state.tracers.get(
+            mass_name(sp, mode.short): view.get(
                 mass_name(sp, mode.short), zeros
             )
             for mode in spec.modes
             for sp in mode.species
         }
         numbers = {
-            number_name(mode.short): state.tracers.get(
+            number_name(mode.short): view.get(
                 number_name(mode.short), zeros
             )
             for mode in spec.modes

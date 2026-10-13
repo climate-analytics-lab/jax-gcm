@@ -51,6 +51,7 @@ from flax import nnx
 
 from jcm.physics.aerosol.jam.cloud_borne_store import (
     CARRY_KEY,
+    LIQUID_SHARE_KEY,
     apply_updates,
     carry_mode,
     mirror_names,
@@ -110,6 +111,11 @@ _ZEPS_NUMBER = 1.0e-3
 
 _TINY = 1.0e-30
 _NC_MIN = 1.0      # cloud-borne number [kg⁻¹] below which a mode hosts no droplets
+# Cloud-borne sulfate [kg/kg] below which a reservoir's droplet-held share is
+# left as the exchange recorded it. Far below any sulfate that matters, and
+# large enough that its square stays a normal float32, so the discarded
+# branch's division cotangent cannot form 0/0 (the double-where NaN class).
+_CB_SO4_MIN = 1.0e-18
 
 
 def _mw_air() -> float:
@@ -310,6 +316,15 @@ class AqueousSulfur(PhysicsTerm):
                     "(HAM's AS/CS pair in ham_wet_chemistry's branch "
                     f"structure); got {self._aqueous_modes!r}."
                 )
+            if self._spec.cloud_borne:
+                # HAM's split acts on a population without a cloud-borne phase:
+                # with one, the sulfate forms in the cloud-borne reservoirs.
+                raise ValueError(
+                    "aqueous_sulfate_modes (HAM's AS/CS split of the produced "
+                    "sulfate onto interstitial number) needs a population "
+                    "without an explicit cloud-borne phase, as in HAM; this "
+                    "spec carries one. Compose without it "
+                    "(echam_physics(jam_cloud_borne=False), M7's own setting).")
         # The pH-setting sulfate sum (``zso4`` in ham_wet_chemistry, lines
         # ~203/288): restricted to ``aqueous_sulfate_modes`` when set, else
         # today's whole-population sum (``self._so4_modes``, unchanged).
@@ -336,6 +351,33 @@ class AqueousSulfur(PhysicsTerm):
             # _validate_ordering enforce that, instead of apply_updates
             # silently seeding an unmixed, unmanaged dict.
             self.requires = (*type(self).requires, CARRY_KEY)
+
+    def _add_droplet_sulfate_to_share(self, diagnostics, share, view,
+                                      tracer_tends, dt, zeros):
+        """Count this step's aqueous sulfate as droplet-held in the share.
+
+        The exchange records each reservoir's droplet-held mass share before
+        this term runs, and wet deposition removes that share at the liquid
+        conversion and the rest at the ice conversion. Sulfate formed here is
+        formed in droplets, so each cloud-borne sulfate reservoir's share
+        becomes ``(s·m + Δm)/(m + Δm)``: the fresh mass follows the liquid
+        conversion, the crystal-held part of the old mass the ice one.
+        Reservoirs the exchange recorded no share for keep wet deposition's
+        own fallback.
+        """
+        updated = dict(share)
+        for m in self._so4_modes:
+            nm = mass_name("so4", m, cloud_borne=True)
+            if nm not in share:
+                continue
+            old = jnp.maximum(view.get(nm, zeros), 0.0)
+            fresh = jnp.maximum(tracer_tends[nm], 0.0) * dt
+            total = old + fresh
+            mixed = (share[nm] * old + fresh) / jnp.maximum(total, _CB_SO4_MIN)
+            updated[nm] = jnp.where(total > _CB_SO4_MIN, mixed, share[nm])
+        if not updated:
+            return diagnostics
+        return {**diagnostics, LIQUID_SHARE_KEY: updated}
 
     def __call__(self, state, diagnostics, forcing, terrain):
         params = self.params.get_value()
@@ -441,10 +483,14 @@ class AqueousSulfur(PhysicsTerm):
             new_n_cs = so4_rate / (_ZSO4_MASSC * (self._mw_so4 / _MW_S))
             tracer_tends[number_name(cs_short)] = jnp.where(neither, new_n_cs, 0.0)
         elif self._spec.cloud_borne:
+            # The droplet-held part of each mode's cloud-borne number: the
+            # crystal-held rest hosts no aqueous chemistry (the exchange
+            # records the split; an all-droplet reservoir without it).
+            share = diagnostics.get(LIQUID_SHARE_KEY) or {}
             nc = {
                 m: jnp.maximum(
                     view.get(number_name(m, cloud_borne=True), zeros), 0.0,
-                )
+                ) * share.get(number_name(m, cloud_borne=True), 1.0)
                 for m in self._so4_modes
             }
             nc_sum = sum(nc.values())
@@ -460,6 +506,8 @@ class AqueousSulfur(PhysicsTerm):
                 tracer_tends[mass_name("so4", m, cloud_borne=True)] = (
                     so4_rate * frac
                 )
+            diagnostics = self._add_droplet_sulfate_to_share(
+                diagnostics, share, view, tracer_tends, dt, zeros)
             # Interstitial fallback carries the full production where no
             # droplet population exists (m_so4_* keys are disjoint from the
             # mc_* ones above, so this is a fresh entry, not an accumulation).

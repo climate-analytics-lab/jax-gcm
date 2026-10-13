@@ -149,6 +149,19 @@
   step-start state and the dynamics increment is zero. See
   {doc}`../design/operator_split_physics`.
 
+  **Published droplet number.** ``clouds.droplet_number`` (CF
+  ``number_concentration_of_cloud_liquid_water_particles_in_air``, m⁻³) is the
+  2M's resolved CDNC: the saved ``qnc`` tracer [kg⁻¹] times air density,
+  GRID-MEAN. This is ECHAM-HAM's own convention for the quantity —
+  ``pacdnc(:,jk) = zcdnc(:,jk)`` (``mo_cloud_micro_2m.f90:1710``), with
+  ``zcdnc`` the grid-mean ``ρ·(pxtm1 + ztmst·pxtte)`` (line 600) handed to its
+  radiation unmasked by cloud cover — not the 1M's prescribed-profile
+  convention (characteristic in-cloud, nonzero in clear sky; above). The two
+  schemes' Fortran sources differ, so the field means something different
+  depending which cloud scheme is composed; ``AerocomDiagnostics`` resolves
+  the difference into a single grid-mean/in-cloud pair for its own
+  consumers rather than reading this field.
+
 Both schemes convert a condensed/evaporated/frozen mixing-ratio increment to a
 temperature increment with ``L / cp`` where ``cp`` is the **moist** isobaric
 heat capacity ``cpd·(1 + vtmpc2·q)`` evaluated per-level at the step-start
@@ -211,14 +224,12 @@ self-collection/break-up guard (``zsprn1``, ``mo_cloud_micro_2m.f90`` lines
 subroutine) — read their floor from the call's own working dtype
 (``jnp.finfo(dtype).eps``), reproducing r7492's ``eps``
 (``mo_cloud_utils.f90:27``, ``EPSILON(1._dp)``) exactly at float64, jcm's
-own precision (jax-gcm#1039). A fixed float64 literal would not serve a
-float32-forward call: ``EPSILON(1._dp)`` (~2.22e-16) is far below
-float32's own representable precision and would be absorbed as a no-op
-there, so the dtype-generic form is the correct floor at both precisions,
-not merely the float64 one. The ice-number guard also now floors the
-pre-aggregation ice content (``zxibold``) at this same epsilon rather than
-at zero, matching r7492's own ``zxibold = MAX(pxib,eps)`` — previously
-computed but unused in jcm's port.
+own precision. A float64 literal would not serve a float32-forward call:
+``EPSILON(1._dp)`` (~2.22e-16) is far below float32's own representable
+precision and would be absorbed as a no-op there, so the dtype-generic form
+is the correct floor at both precisions, not merely the float64 one. The
+ice-number guard also floors the pre-aggregation ice content (``zxibold``)
+at this same epsilon, matching r7492's own ``zxibold = MAX(pxib,eps)``.
 
 This DOES move float32 results for an ice/liquid content between
 ``cqtmin`` (1e-12, the gate both guards sit behind) and float32's own
@@ -369,7 +380,12 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   derivative of the recurrence is finite, and the true one wherever adjacent layers
   differ; at exactly tied layers (an exactly clear column) it is a subgradient
   that leaves a cloud-free interior layer with zero sensitivity where the
-  one-sided derivative is +1 (#1013).
+  one-sided derivative is +1. This is accepted rather than fixed: gradient-
+  based calibration targets the AeroCom cloud-optical-depth-thresholded
+  cover (`clt`) that satellite retrievals see, not this online, release-gate
+  `aclcov` (maintainer decision 2026-10-05, tracked by the now-closed issue
+  1013) — a fix would be warranted only if `clouds.total_cloud_cover`
+  itself enters a loss.
 - Radiation's cover, `science` — ECHAM's radiation uses the cover only where
   the step-start grid-mean condensate it radiates is positive
   (``mo_radiation.f90`` l.428-434, ``xq = MAX(xlm1, 0)``,
@@ -393,6 +409,32 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   masks select on the masked cover (#973). The AeroCom diagnostics read the post-microphysics
   cover, which is ECHAM's written-back ``aclc`` (zero where both condensates
   are below ``ccwmin``), and are not masked again.
+- COSP satellite-simulator outputs under time averaging, `science` — three
+  product families from ``jcm/physics/diagnostics/cosp_cloudsat.py`` are
+  CONDITIONAL means, not plain per-step grid-box means, so
+  ``output_averages``'s plain arithmetic mean of the per-step field is the
+  wrong quantity unless divided by a matching companion the term emits
+  alongside it. CALIPSO's
+  ``cllcalipso``/``clmcalipso``/``clhcalipso``/``cltcalipso`` follow GOCCP
+  (Chepfer et al. 2010): a subcolumn with no usable signal (fully
+  attenuated from above) is excluded from the mean rather than counted as
+  clear, and GOCCP's own averaging POOLS the valid-subcolumn counts across
+  steps rather than plainly averaging each step's already-divided
+  fraction, so the field is stored pre-multiplied by that step's valid
+  fraction (of ``ncolumns``) and the same weight is emitted as the
+  ``<name>_n`` companion. MODIS/ISCCP products
+  (``cltmodis``/``clwmodis``/``climodis``/``cltisccp`` and their joint
+  histograms) are CFMIP-defined DAYTIME means, but the passive retrievals are
+  0 at night; a shared ``cosp_sunlit`` companion lets the post-processor
+  divide the all-steps mean by the sunlit fraction. The MODIS in-cloud means
+  (``tauwmodis``/``reffclwmodis``/``lwpmodis`` and the ice equivalents) are
+  CMIP-defined weighted by the matching cloud fraction so their RATIO is the
+  in-cloud mean; the term stores the pre-weighted product rather than the
+  bare mean so the same ratio recipe works under both time-averaged and
+  instantaneous output. ``tools/aerocom_cmor.py`` applies all three
+  corrections when building AeroCom submission files; a file from before
+  these companions existed is passed through with a warning rather than
+  refused.
 - Cover and radiation condensate, time level — the cover reads the state the
   physics receives, which contains the step's dynamics, and so does the
   radiation's condensate (``cloud_data.radiation_cloud_fields``); ECHAM's
@@ -465,13 +507,15 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   emission scales fitted on ECHAM's cover parameters (dust 0.379095663, sea salt
   2) the extra cloud adds wet removal (a sea-salt burden of 9.2 mg/m², a total
   AOD of 0.052) and the loss on the Stage-2 windows (461.1) is worse than that of
-  the same host on ECHAM's cover (377.6). The shipped aerosol scales (dust 0.344,
-  sea salt 4) are fitted with this cover set in place (Stage 2c of the design
-  page): the JAM-2M year passes the cover gate (0.52), reads a reflected SW of
-  99.3 W/m² and a LW CRE of 27.4 (observed 99.0, 27.9), a net TOA flux of
-  +2.7 W/m², a SW CRE 3.1 W/m² too strong, 57 g/m² of liquid water path and a
-  total AOD of 0.074 (observed 0.145), and its loss (325.8) is below the
-  aerosol-only configuration's (377.6).
+  the same host on ECHAM's cover (377.6). The shipped aerosol scales (dust
+  0.485, sea salt 2.57) are fitted with this cover set in place (Stage 2c of
+  the design page, on the cloud-borne aerosol store that holds aerosol in
+  liquid cloud only): the JAM-2M year of that configuration passes the cover
+  gate (0.51 on the offline overlap; 0.67 as the radiation sees it), reads a
+  reflected SW of 95.1 W/m² and a LW CRE of 26.9 (observed 99.0, 27.9), a net
+  TOA flux of +7.1 W/m², a SW CRE 1.9 W/m² too weak, 43 g/m² of liquid water
+  path and a total AOD of 0.096 (observed 0.145). The cover set was not
+  re-fitted on that store.
   ECHAM's own row stays in ``ECHAM_CLOUD_DEFAULTS``, and the Fortran comparison
   runs on the constants its reference data recorded. Evidence and the year
   tables: {doc}`../design/jam_aerosol_retune` ("Stage 2b: cloud fraction").
