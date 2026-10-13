@@ -967,6 +967,27 @@ class CloudBorneExchangeTest(unittest.TestCase):
         _, _, pice_liq = phase_split(clouds_liq, 1800.0)
         np.testing.assert_allclose(np.asarray(pice_liq), 0.0, atol=1e-6)
 
+    def test_evaporation_fallback_detects_a_process_at_the_exchanges_own_floor(self):
+        # #1070 (Codex review finding, PR #1099): the evaporation fallback
+        # above used HAMMOZ's coarser pool floor (_LEDGER_POOL_MIN = 1e-10)
+        # to decide "is there evaporation information here", but
+        # CloudBorneExchange treats the SAME e_liq + e_ice sum as a live
+        # process down to its own, finer _PROCESS_FLOOR (1e-12). A total
+        # evaporation strictly between the two floors was live to the
+        # exchange's per-phase release math but read as "no information"
+        # here, so a pure-ice sublimation in that narrow band defaulted to
+        # p_ice=0 (assume liquid) -- starving the crystal-held share of any
+        # release weight despite the exchange itself treating this cell as
+        # actively evaporating.
+        from jcm.physics.aerosol.jam.wetdep.wetdep_term import phase_split
+        shape = (2, 3)
+        clouds = _Clouds(
+            jnp.full(shape, 0.0),
+            condensate_evaporation_ice_rate=jnp.full(shape, 9.0e-11 / 1800.0),
+        )
+        _, _, pice = phase_split(clouds, 1800.0)
+        np.testing.assert_allclose(np.asarray(pice), 1.0, rtol=1e-6)
+
     def test_pure_ice_cloud_with_no_crystal_history_fully_sublimates(self):
         # #1070 (Codex review finding): a pure-ice cloud (no crystal number
         # at all, qni=0) whose condensate fully sublimates this step --

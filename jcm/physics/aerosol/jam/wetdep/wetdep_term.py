@@ -175,6 +175,16 @@ class WetDepParameters:
 #: ledger pool counts as absent and the scavenged fraction comes from the
 #: formation-ledger marker instead of the division.
 _LEDGER_POOL_MIN = 1.0e-10
+#: ``phase_split``'s evaporation fallback must detect a process at the
+#: same sensitivity ``CloudBorneExchange._PROCESS_FLOOR`` (cloud_borne.py)
+#: does, not HAMMOZ's coarser pool floor above: that term keys its
+#: per-phase release to the identical ``e_liq + e_ice`` sum starting at
+#: 1e-12, so this module (which it imports) cannot mirror a value from
+#: it without a cycle. A cleared cell whose total evaporation sits between
+#: the two floors (#1070 Codex review) is live to the exchange but was
+#: read as "no evaporation information" here, defaulting a pure-ice
+#: sublimation's phase split to all-liquid.
+_EVAP_PROCESS_FLOOR = 1.0e-12
 #: Cap on a per-step scavenged fraction before converting it to an
 #: equivalent decay rate via -log1p(-f)/dt: keeps the rate finite (~14/dt)
 #: while the batched ``1 - exp(-rate*dt)`` still removes >0.999999 of the
@@ -401,7 +411,17 @@ def phase_split(clouds, dt):
     e_liq = jnp.maximum(
         clouds.condensate_evaporation_liquid_rate, 0.0) * dt
     e_ice = jnp.maximum(clouds.condensate_evaporation_ice_rate, 0.0) * dt
-    has_evap = (e_liq + e_ice) > _LEDGER_POOL_MIN
+    # ``CloudBorneExchange`` treats this same ``e_liq + e_ice`` sum as a
+    # live process down to its own ``_PROCESS_FLOOR`` (1e-12, #1070 Codex
+    # review) -- a looser ``_LEDGER_POOL_MIN`` (1e-10, HAM's pool floor,
+    # tuned for condensate MASS not a cleared cell's residual evaporation)
+    # here left a gap: between the two floors, the exchange already keys
+    # its release to the per-phase evaporation fraction, but this fallback
+    # read the SAME evaporation as "no information" and defaulted p_ice to
+    # 0 (assume liquid) regardless of which phase it actually was. Reusing
+    # cloud_borne.py's floor value (not importing it -- that module imports
+    # this one) keeps the two reads of one physical quantity consistent.
+    has_evap = (e_liq + e_ice) > _EVAP_PROCESS_FLOOR
     pice_evap = jnp.where(
         has_evap, e_ice / jnp.where(has_evap, e_liq + e_ice, 1.0), 0.0)
     pice_cond = jnp.where(
