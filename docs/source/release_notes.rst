@@ -1,7 +1,7 @@
 Release Notes
 =============
 
-v3.0.0 (unreleased)
+v3.0.0 (2026-10-12)
 -------------------
 
 v3.0 is a deliberate major release. It makes **online interactive aerosol**
@@ -418,6 +418,22 @@ One vertical direction in the output, and CF metadata
 SPEEDY output flattening, hyperdiffusion coverage, and backlog fixes
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
+- **The CLI runs SPEEDY on SPEEDY's own sigma table.** ``grid=speedy_t31_l8``
+  (the default grid, and the ``speedy-t31`` configuration) declares
+  ``vertical: speedy``, a grid family that builds the Fortran model's hand-set
+  8-layer table (half levels 0, 0.05, 0.14, 0.26, 0.42, 0.6, 0.77, 0.9, 1),
+  the levels the physics is tuned on and the Python API's
+  ``get_speedy_coords`` has always built. The CLI's ``sigma`` family is
+  equidistant, and every CLI SPEEDY run had used it: until #1007 the physics
+  took its vertical metrics from the native table while the dynamics ran on
+  the equidistant grid (the water-budget leak #1007 closed), and with the
+  metrics taken from the model grid SPEEDY on equidistant layers is a
+  different, untuned model — net TOA flux −11 W/m² against the ±10 release
+  gate, cloud cover 0.64, precipitation 3.06 mm/day in a T31L8 year, where
+  the table gives +4.9, 0.59 and 2.80 and passes every gate. **Changes
+  results** for every CLI SPEEDY run and for the ``speedy-t31`` matrix
+  member; ``sigma`` stays the family of ``held_suarez_t31_l8``. See
+  :doc:`design/speedy_variable_levels`.
 - **SPEEDY surface fluxes are published as flat 2D maps** (#645, #328,
   #390). ``ustr``, ``vstr``, ``shf``, ``evap`` and ``rlus`` carried land,
   sea and area-weighted values in a trailing channel axis, so output files
@@ -536,53 +552,61 @@ Interactive aerosol (JAM)
   carry it (#787). Because the flux lives in the far tail of the 10 m wind
   distribution, HAM's threshold vector is scaled for jcm's own winds by a
   single global multiplier, ``NDUSCALE_JCM_T63_SCALE`` (per run,
-  ``physics.jam_dust_nduscale_scale``), set to **0.344** at T63 (fitted
-  to the observed dust optical depth by the aerosol retune, below, with the T63
+  ``physics.jam_dust_nduscale_scale``), set to **0.485** at T63 (set on the
+  annual AeroCom dust burden by the aerosol retune, below, with the T63
   cloud-cover set in place); the
   regional ratios stay HAM's, and T106 and ne30 take the Fortran's uniform
   default since their inputs are interpolated from T63. A full
-  ``echam-jam-t63-l47`` year emits 2351 Tg/yr of D < 10 µm dust, 3.7 times
+  ``echam-jam-t63-l47`` year emits 2270 Tg/yr of D < 10 µm dust, 3.5 times
   the 642 Tg/yr that the parent model's published budget becomes once
   converted to this window and above the AeroCom medians (1640; 1123
   in the 15-model dust intercomparison); the annual
   budget is a release-validation gate on any T63 run of 300 days or more
-  (``DUST_EMISSION_TG_PER_YR``, 400-2600 Tg/yr; the calibrated year is 10 %
+  (``DUST_EMISSION_TG_PER_YR``, 400-2600 Tg/yr; the calibrated year is 13 %
   below the upper edge) (#808).
 - **The release configuration is the T63 cloud-cover set and two aerosol scales
-  calibrated with it** (#682). The scales are the Gong sea-salt source, **4**
+  calibrated with it** (#682). The scales are the Gong sea-salt source, **2.57**
   (``physics.seasalt.scale``, from 1), and the dust threshold multiplier,
-  **0.344** (``physics.jam_dust_nduscale_scale``, from 0.5). They are the best arm
-  of a 20-arm Gaussian-process sweep over exactly these two (30-day January and
+  **0.485** (``physics.jam_dust_nduscale_scale``, from 0.5). They come from a
+  20-arm Gaussian-process sweep over exactly these two (30-day January and
   July windows) with the cover set of *The cloud-cover defaults at T63 are
-  calibrated*, below, held fixed, on a loss over cloud radiative effects, cloud
-  cover, precipitation, liquid water path and the ESA-CCI total and dust AOD,
-  each against its inter-annual spread. An earlier 40-arm Sobol sweep and a
-  25-arm Gaussian-process sweep of four aerosol levers on ECHAM's cover
-  parameters had put the same two scales at 0.379095663 and 2; the cover set's
-  larger cloud fraction raises wet removal and strips the aerosol those values
-  delivered, so the scales are fitted again with it in place. A 365-day T63 L47
-  year of the release configuration confirms them. Against the control year
-  (ECHAM's cover parameters, dust 0.5, sea salt 1), global AOD at 550 nm rises
-  from 0.059 to 0.074 (observed 0.145), dust AOD from 0.0032 to 0.0109 (0.0213),
-  the dust burden from 5.3 to 20.9 mg/m² (AeroCom mean 37.6) and the sea-salt
-  burden from 6.6 to 16.4 mg/m² (AeroCom mean 14.7, median 12.5); sulphate
-  stays inside the AeroCom band (5.3 to 4.1 mg SO4/m², ion basis, against a band
-  of 1.95-5.85). **What it gains** on the JAM host: the annual net TOA flux falls
-  from +7.4 to +2.7 W/m² (CERES +1.0), the ``cloud_cover`` release gate passes
-  (0.52 on the offline overlap, 0.65 as the radiation sees it, against 0.46 and
-  0.58), the reflected SW rises from 92.6 to 99.3 W/m² (observed 99.0) and the
-  LW CRE from 25.5 to 27.4 (27.9), and the loss on the Stage-2 windows falls from
-  469.6 to 325.8. On the 2M host the cover set takes the TOA bias from +9.8 to
-  +5.6 W/m² and passes the same gate (0.51). **What it costs:** on the JAM host
-  the liquid water path is 57 g/m² against 36 observed (49 for the control) and
-  the SW CRE is 3.1 W/m² too strong (-48.8 against -45.7; the control's is 2.9
-  too weak); the sea-salt source is four times HAM's (8475 Tg/yr, AeroCom median
-  6280) and its burden is 12 % above the AeroCom mean; the total AOD is below
-  that of an aerosol-only configuration on ECHAM's cover parameters (0.074
-  against 0.082); and the year's POA drift is -0.0039 /day on the six-month line
-  of the 40-save recipe (limit 0.002; the whole-year fit with the annual harmonic
-  gives -0.0025 against its limit of 0.003, and every aerosol gate passes under
-  it). The year's results are tabulated in
+  calibrated*, below, held fixed, on the tree whose cloud-borne aerosol store
+  holds aerosol in liquid cloud only (*JAM cloud-borne aerosol in ice cloud
+  follows ECHAM-HAM*, below), from states spun up on it. The sweep's loss
+  (cloud radiative effects, cloud cover, precipitation, liquid water path and
+  the ESA-CCI total and dust AOD, each against its inter-annual spread) sets
+  neither scale: its minimum has dust nearly off (the January dust terms are a
+  few dust events) and is flat in the sea-salt scale, so both are set on the
+  AeroCom burdens the sweep monitors, as annual means. The fitted sea-salt
+  burden crosses 14.7 mg/m² at 2.57. The fitted dust burden crosses 37.6 mg/m²
+  at 0.522 on the two windows, which sample the dusty seasons, so 365-day
+  years bracket the annual value (27.3 mg/m² at 0.522, 43.8 at 0.465) and put
+  37.6 at 0.483; the year at 0.485 confirms it. Earlier fits had put the
+  scales at 0.379095663 and 2 on ECHAM's cover parameters, and at 0.344 and 4
+  on the cover set with the earlier store: the cover set's larger cloud
+  fraction raises wet removal, and the store and the circulation changed the
+  dust climate under the scales (at 0.344 and 4 the shipped tree's dust burden
+  is 94 mg/m² over the last 195 days), so the scales are fitted on the tree
+  that ships. The 365-day T63 L47 year of the release configuration: dust
+  burden 36.2 mg/m² annual (AeroCom mean 37.6; 29.9 over the health
+  statistics' window, the last 195 days, which excludes the spring dust
+  season), dust AOD 0.0198 (observed 0.0213), sea-salt burden 14.5 / 15.0
+  (14.7), sulphate 4.0 mg SO4/m² on the ion basis (band 1.95-5.85), total AOD
+  0.096 (0.145), dust lifetime 3.0 d (4.1), sea-salt lifetime 0.36 d (0.48),
+  and a dust emission of 2270 Tg/yr, inside the 400-2600 Tg/yr release band
+  on the annual budget (the year at 0.465 emits 2715, above it, which is why
+  the burden is matched as an annual mean; :doc:`design/jam_aerosol_retune`
+  records all four years). The cloud and radiation fields, which the two
+  scales do not move, are: net TOA +7.1 W/m² annual (+5.8 on the gate; CERES
+  +1.0), cover 0.51 on the offline overlap and 0.67 as the radiation sees it
+  (the ``cloud_cover`` gate passes), reflected SW 95.1 W/m² (observed 99.0),
+  LW CRE 26.9 (27.9), SW CRE -43.8 (-45.7), liquid water path 43 g/m² (36),
+  precipitation 2.37 mm/day (3.07). The POA drift is -0.0032 /day on the
+  whole-year fit with the annual harmonic (limit 0.003) at every setting of
+  the two scales on this tree, and the dust drift reads the first month's
+  spin-up from the dust-free January state. On the 2M host
+  the cover set takes the TOA bias from +9.8 to +5.6 W/m² and passes the same
+  gate (0.51). The year's results are tabulated in
   :doc:`design/jam_aerosol_retune`. The DMS, wet-removal,
   convection and microphysics defaults are unchanged: the 1M and 2M levers
   were swept as well: the 2M's optimum
@@ -1082,6 +1106,20 @@ Reference-exact values with surrogate derivatives
   equals ``exact``'s, its jvp and vjp equal ``surrogate``'s, and its two AD
   modes are adjoint. The ECHAM cover, the 1M scheme and the Tiedtke-Nordeng
   convection use it (see the corrected physics entries). See :doc:`design/surrogate_gradients`.
+- **SPEEDY's switch widths are surrogate widths.** ``convection.trigger_smoothing``,
+  ``convection.precnv_smoothing``, ``condensation.cap_smoothing``,
+  ``shortwave_radiation.cover_smoothing``, ``surface_flux.evap_smoothing`` and
+  ``vertical_diffusion.mse_gate_smoothing`` / ``rh_gate_smoothing`` no longer
+  smooth the forward model (as they did in 3.0.0rc1): at any width the
+  SPEEDY trigger, onsets, caps, clips and gates keep their reference values,
+  and the width gives only their derivatives those of a smooth function
+  (``jcm.physics.speedy.smoothing.surrogate_*``). The cloud cover's
+  ``sqrt(precipitation)`` corner, whose reference slope is unbounded in
+  drizzle, gets a bounded surrogate under ``cover_smoothing``. Every width
+  still defaults to 0, the reference derivative, so a run that never set one
+  is unchanged; a run that set one now integrates the reference model. The
+  convective trigger's widened ``iptop`` activation, which existed only to
+  make the smoothed value continuous, is gone.
 
 JAM runs float32 physics under 64-bit mode without mixed-dtype scatters
 """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
@@ -1094,6 +1132,39 @@ emission, the dry deposition of every deposited moment, and the ECHAM land
 surface's soil heat tendency. Each value is now pinned to its operand's dtype.
 A fast test traces the ECHAM+JAM package under x64 with ``FutureWarning`` as an
 error. Results with x64 off are unchanged.
+
+JAM activation and sulfur chemistry stay finite at extreme model-top temperatures
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+The ``ma-t63-l47`` model top can reach 50-70 K: 30-day windows of 3.0.0rc1
+started from the 49c0724c warm states develop a grid-scale temperature
+oscillation at 1-11 Pa over the Antarctic summer mesopause (70.6 K at 4 Pa
+beside 315 K at 11 Pa in one captured run, 48.6 K in another). Two JAM closed
+forms then returned NaN in float32, and the NaN reached every aerosol tracer
+through the cloud-borne exchange and wet deposition at the next step and the
+whole state within the day:
+
+- The ARG activation evaluated its saturation vapour pressure (a Magnus fit) at
+  any temperature. Below about 80 K that value underflows, the growth
+  coefficient and ``gamma`` overflow, and the activated number and fraction
+  were NaN. The saturation vapour pressure is now evaluated with the
+  temperature held to CAM's saturation-table range, 127.16-375.16 K, and the
+  activated number, mass and fractions are zero below that floor (no liquid
+  solution exists there); results are bit-identical inside the range.
+- The DMS+OH addition rate ``1.7e-42·exp(7810/T)·[O₂] / (1 + 5.5e-31·exp(7460/T)·[O₂])``
+  overflowed its two exponentials separately: 0 below about 84 K and inf/inf =
+  NaN near 50 K. It is now evaluated in log space, the same function to float32
+  rounding at every temperature.
+
+- The Sonntag (1990) fit held at ECHAM's 50 K table floor gives
+  ``es ≈ 6e-41 Pa``, a float32 denormal that XLA flushes to zero on GPU, so
+  the Sundqvist cover's ``q / qsat`` was inf or NaN at those columns. ``es``
+  and the ECHAM-form ``qsat`` are now held at the dtype's smallest normal
+  float; values above about 75 K are unchanged.
+
+These remove the three non-finite producers found; the upper-level
+instability that drives the model top to those temperatures (#1060) is not
+addressed here.
 
 Finite parameter gradients at degenerate inputs
 """""""""""""""""""""""""""""""""""""""""""""""
@@ -1229,6 +1300,65 @@ which cubic removes, so expect a warmer atmosphere. Expect precipitation that
 no longer exceeds evaporation, and a retune of anything calibrated against
 the old balance. The Eulerian core (SPEEDY) is unchanged and bit-identical.
 See :doc:`design/tracer_mass_conservation`.
+
+The semi-Lagrangian step interpolates in log-pressure at the model top
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- On hybrid grids the vertical stage of the semi-Lagrangian interpolation is
+  done in the log of the reference sigma (``dycore.sl_vertical_coordinate``,
+  default ``null`` = ``log_pressure`` on hybrid grids, ``sigma`` on sigma
+  grids); the trajectories are still solved in sigma. At the pure-pressure
+  top of the L47 grid the levels are spaced geometrically (1.0, 4.3, 11.1,
+  23.1 Pa), and Lagrange weights in sigma there misread vertical advection —
+  0.44, 1.37 and 1.16 of the exact displacement at the 1.0, 4.3 and 11.1 Pa
+  levels for a profile linear in height — and amplify 2Δz structure under
+  steady upwelling (a 2Δz pattern grew 1.5x in five days at 2 cm/s; it now
+  decays to 0.06). Under the summer-mesosphere upwelling that cooled the
+  1 Pa level and warmed the 4 Pa level: from the ``ma-t63-l47`` January warm
+  state the coldest 1 Pa cells reached 136 K by day 11, ice formed at 1–4 Pa,
+  and a humidity dipole (up to 1e-2 kg/kg at 1 Pa over −2e-3 below) followed:
+  the start of the per-trajectory failures of #1060.
+- **Changes results** above ~100 Pa on the L47 grid, and at the lid level of
+  the L95 grid (whose cubic cells are stable in either rule but whose linear
+  top cell under-read by 0.63); the troposphere, where ``ln s ≈ s − 1``, is
+  essentially unchanged. From the same day-8 January
+  state the summer polar cap holds 161–169 K at 1 Pa, 196 K at 4.3 Pa and
+  224 K at 11 Pa (was 164, 217 and 221 K, with ice from day 9). See
+  :doc:`design/sl_vertical_interpolation`.
+
+ECHAM middle-atmosphere hyperdiffusion leaves the zonal mean alone
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``DiffusionFilter.echam_lmidatm`` — what ``diffusion.kind=auto`` selects on
+  the L47/L95 hybrid grids — no longer diffuses the zonal-mean (m = 0)
+  coefficients, at any level, as ECHAM's ``hdiff`` does under ``lmidatm``
+  (``mo_hdiff.f90``; ``diffusion.diffuse_zonal_mean``, default ``null`` = the
+  profile's choice). The ∇² of the top levels was smoothing the zonal-mean
+  jets and temperature of the mesosphere. **Changes results** at the top
+  levels of every L47/L95 configuration (small: the summer-cap temperature
+  within 1 K and the jet within 2 m/s over the first four days). The SPEEDY
+  default is unchanged. ECHAM's other ``lmidatm`` branch, the Courant-number
+  damping ``damhih``, guards Eulerian leapfrog advection and is not ported.
+
+The packaged T63L47 ozone declines through the mesosphere
+"""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- ``forcing.ozone_file: auto`` resolves the packaged
+  ``jcm/data/bc/t63/ozone.nc`` at T63L47. It was a CAM6chem climatology whose
+  source stops near 4 hPa, held constant above it, so the top nine L47 levels
+  carried 7.4 ppmv up to the 1 Pa lid (the FZJ CMIP7 bundle the ``ma-*``
+  presets name has 0.19 ppmv there). It is now the zonal mean of that bundle
+  (FZJ CMIP7 2005–2014), so every T63L47 preset carries one ozone profile;
+  ``interpolate_ozone`` refuses a source that stops below the model top
+  (``allow_top_clamp`` to clamp on purpose).
+- **Changes results** in ``t63-echam-1m``, ``t63-echam-2m``,
+  ``t63-echam-rrtmgp`` and the other T63L47 presets left on ``auto``: their
+  mesosphere was 60-80 K warmer than the JAM member's (#1029). From the
+  January warm state, the JAM preset run with the old file held its summer
+  polar cap at 229 K (1 Pa) and 297 K (4.3 Pa) where the bundle gives 164 K
+  and 217 K; the 2M preset with the bundle gives 160 K and 218 K. The
+  stratospheric maximum is about 10 % lower in the FZJ climatology than in
+  CAM6chem.
 
 ECHAM surface albedo and frozen-surface saturation
 """"""""""""""""""""""""""""""""""""""""""""""""""
@@ -1501,6 +1631,66 @@ Grey two-stream shortwave conserves energy
   tracked (#912). A column water budget closes as
   ``E - P + precip_floor_source``. The grey RCE column reaches this regime
   once its clouds reflect, at ~0.06-0.09 mm/d.
+
+JAM cloud-borne aerosol in ice cloud follows ECHAM-HAM
+""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- The JAM cloud-borne exchange activated aerosol into its cloud-borne phase by
+  ARG droplet activation under any cloud, including cirrus and the 198 K ice
+  cloud of the austral-winter polar vortex. That phase is neither advected nor
+  sedimented. The upper-level ice cloud swept the aerosol out of the air
+  passing through it and released it as thin, concentrated layers where the ice
+  evaporated. The semi-Lagrangian limiter then grew those layers, with mass
+  taken from the boundary layer by the global fixer (#1062).
+- From the January state on dev, sea salt above 300 hPa reached 30-230 mg/m²
+  at 40-60°S and 12-300 mg/m² over the polar cap by days 40-140. Once the
+  vortex formed, about half of every aged mode's global column sat above
+  300 hPa.
+- The in-cloud aerosol is now split between liquid and ice by the ice share of
+  the condensate, as ECHAM-HAM splits it (``mo_ham_wetdep.f90``,
+  ``nwetdep = 3``):
+
+  - the liquid part is ARG activation;
+  - the ice part is HAM's ``ic_scav_nuc`` rule, one aerosol particle per ice
+    crystal, largest mode first, using the two-moment scheme's crystal number.
+
+- Crystal-poor cirrus and vortex ice now hold next to nothing. Their reservoir
+  drains to the interstitial phase. Crystal-rich convective anvils still take
+  up the coarse and much of the accumulation mode for their snow to remove.
+- Wet deposition removes the droplet-held part at the liquid conversion and
+  the crystal-held part at the ice conversion. Aqueous sulfate forms on the
+  droplet-held cloud-borne number only and is removed with the droplet-held
+  part.
+- Over 155 days from the January state, polar-cap sea salt above 300 hPa stays
+  at or below 0.1 mg/m² and the #1027 jets and vortex are kept.
+- A run started from a warm state built before this change carries a
+  spin-up pulse of aerosol into the tropical tropopause and lower
+  stratosphere, gone after about 50 days. Calibration windows should start
+  from states spun up under the new rule. See
+  :doc:`design/jam_cloud_borne_ice_phase` (#1066).
+
+JAM in-cloud impaction scavenging follows ECHAM-HAM
+"""""""""""""""""""""""""""""""""""""""""""""""""""
+
+- JAM's stratiform in-cloud removal was nucleation scavenging only. Cloud
+  droplets and ice crystals now also collect interstitial aerosol by
+  impaction, ECHAM-HAM's ``ic_scav_imp`` (``nwetdep = 3``, Croft et al.
+  2010). The droplet and plate collision tables are read at the two-moment
+  scheme's droplet and crystal effective radii and its crystal number, and
+  the collected aerosol is removed with each phase's condensate-to-precipitation
+  conversion.
+- Three defects of the r7492 lookup are corrected: droplet-axis node 6 reads
+  0 µm instead of 30 µm, the two off-diagonal interpolation corners are
+  swapped, and above 50 µm the plate index brackets the wrong nodes.
+  ``physics.jam_incloud_impaction=ham_r7492`` keeps the compiled r7492 lookup;
+  ``none`` turns in-cloud impaction off.
+- The two-moment microphysics publishes its own in-cloud droplet and crystal
+  effective radii as the output fields ``reffl`` and ``reffi`` (µm).
+- It is a minor sink. Impaction alone removes coarse dust on a timescale of
+  decades and coarse sea salt of 200-340 days, at most 0.2 % of their
+  removal. In 30-day January and July windows the dust lifetime moved by
+  −0.06 and +0.07 days, within the runs' chaotic spread. See the in-cloud
+  impaction section of :doc:`science/aerosol` (#1067).
 
 Convective scavenging follows ECHAM-HAM
 """""""""""""""""""""""""""""""""""""""
@@ -1984,9 +2174,9 @@ The cloud-cover defaults at T63 are calibrated
   much worse), and the black-carbon (+0.0032 /day) and sulphate (+0.0026 /day)
   drifts of the year fail the recipe's 0.002 /day limit, black carbon also the
   0.003 /day limit for whole-year records. The shipped aerosol scales are the
-  ones fitted with this set in place (dust 0.344, sea salt 4, in the entry on the
-  aerosol defaults above); the cover parameters themselves were not re-fitted on
-  the JAM host.
+  ones fitted with this set in place (dust 0.485, sea salt 2.57, in the entry on
+  the aerosol defaults above); the cover parameters themselves were not
+  re-fitted on the JAM host.
 - **Changes results** on every ECHAM host at T63 (cloud cover, cloud radiative
   effect, TOA balance, surface temperature), and at T106 and on the cubed
   sphere, which take the T63 row or interpolate from it. ECHAM's constants are
@@ -2571,6 +2761,27 @@ Positivity corrections are an explicit water-budget source
 Accepted limitations (proposed)
 """""""""""""""""""""""""""""""
 
+- **Three release-matrix members miss a gate on the release tree, by a
+  documented margin** (maintainer decision 2026-10-12; the gate floors are
+  unchanged). The offline cloud-cover gate (maximum-random overlap of the
+  daily-mean profile, floor 0.5) reads 0.4953 on ``echam-2m-t63`` and 0.47
+  on ``echam-1m-t63``, where the cover the radiation sees is 0.65 and 0.61
+  against 0.63 observed: the calibrated cover set was fitted on the 2M host
+  and the 1M host reads it without a calibration of its own, and the tree
+  moved the offline statistic by one hundredth after the fit. ``echam-2m-t106``
+  reads a net TOA flux of +10.2 W/m² against the ±10 band and an offline cover
+  of 0.45, and ``echam-1m-t106`` an offline cover of 0.42 (TOA +4.3, inside
+  the band), because the T63 cover set is interpolated toward ECHAM's T127
+  row at T106 and that blend is untuned (#1014). Every other gate of these
+  members passes (NaN, precipitation, near-surface temperature, AOD, and the
+  TOA band on three of the four); ``speedy-t31`` passes every gate on the
+  ``3.0.0rc3`` tag, and ``echam-jam-t63-l47`` lands on the burdens its
+  defaults were set to.
+- **SPEEDY's relative humidity spikes in the top sigma level near the poles**
+  (#407, still present in the rc3 validation year: top-level values of order
+  10\ :sup:`5` in 2 % of polar samples while the field is O(1) elsewhere). The
+  release gates do not read that level and all pass; the spikes are a
+  property of the diagnostic at σ = 0.025, not of the integration.
 - **pySES publishes no** ``omega``, so ECHAM's mid-level convection trigger
   cannot run on that backend. Model construction **raises** rather than
   substituting zero; the reference's own ``cu_lmfmid=false`` switch is the
@@ -2589,8 +2800,13 @@ Accepted limitations (proposed)
   the resolution every shipped JAM configuration runs at; online aerosol on
   the cubed sphere is separate work. See :doc:`science/boundary_conditions`.
 - **The release-validation matrix has two gaps**: the T106 members' multi-GPU
-  mesh configurations have never been run for a full year, and ``echam-jam``
-  at L95 needs L95 oxidant and ozone inputs staged (#638).
+  mesh configurations have never been run for a full year, and the
+  ``echam-jam-t63-l95`` year on the release tree reached day 310 of 365 before
+  a cluster storage outage interrupted it (its gates are read at that point;
+  the member's regression band is the previous one). The 1M T63 and JAM L47
+  warm-start comparator years were interrupted the same way at about day
+  200; the cold years of every member and the 2M T63 comparator completed
+  (#638, #943).
 - **PrescribedStateModel re-diagnoses carried state from a cold start.** Each
   time is evaluated independently, so TTE-TKE turbulence takes its spin-up
   value and JAM's carry-stored cloud-borne aerosol is an empty reservoir at
@@ -2696,11 +2912,40 @@ Calibration and capability gaps
   ``od550_wat`` is instead a volume-based share of wet extinction. The
   species shares divided by dry species burdens are not complete ambient
   species mass extinction efficiencies. SOA precursor production remains
-  zero by default without VOC chemistry, nitrate is absent from this MAM4
+  zero in configurations without a precursor inventory. Default JAM runs
+  now load CAM6 VOC-derived SOAG from the HF emissions bundles, averaged
+  over matching PD (2005–2014) or PI (1850–1859) source periods. Nitrate is absent from this MAM4
   population, and dust source/size/removal require calibration. These
   limitations cannot be diagnosed as a single hygroscopicity deficit from
   the component split. See :doc:`design/aerosol_optics_diagnostics` and
   `issue #1030 <https://github.com/climate-analytics-lab/jax-gcm/issues/1030>`_.
+- **CAM6 SOA and sequential aerosol coupling.** Default JAM uses released
+  MAM4-JAX 0.5.1 with reversible fine-mode partitioning and aerosol wet/dry
+  removal on the fixed-substep core, which ``jax.grad`` differentiates;
+  ``physics.jam_microphysics=mam4_jax_astem`` selects CAM's ASTEM corrector,
+  which conserves the organic budget during evaporation but whose adaptive
+  solve is forward-only (the substep core's warm-cell closure gap is #1064).
+  SOAG is included
+  in HF emissions bundles rather than packaged in the wheel, and the
+  separate JAM+SOA configuration is removed. The official source already includes VOC yields and
+  the CAM source multiplier; neither is applied again. Turbulent mixing and
+  convection now include fresh emissions before removal, microphysics reads
+  the current population, and optics uses matching mass and geometry.
+  ``sed_du`` and ``turb_dry_du`` separate gravitational and turbulent dust
+  surface losses. These changes address distinct missing-source and coupling
+  defects; a short run does not establish equilibrium burdens or annual AOD.
+  See :doc:`design/jam_soa_dust` for source provenance, validation and the
+  measured lifetime and AOD responses.
+- **Dust surface removal now depends on land cover.** CAM's eleven-class
+  collection law and prescribed vegetation map replace the ocean collection
+  law previously used on land. Dry-surface rebound, impaction, interception
+  and the settling resistance cross term follow CAM; coarse-mode drag also
+  uses CAM's asphericity correction. Dust emission parameters and mode width remain
+  fixed. Short matched tests increase the diagnosed dust lifetime; the mixed
+  coarse-mode changes also increase sea-salt burden. The host retains its
+  neutral aerodynamic resistance and aerosol-mode cloud-borne velocity;
+  this change does not port CAM's entire surface-layer calculation. Annual
+  AOD and the dust/sea-salt climatology still require release validation.
 - **Cloud-borne aerosol is closed as a cycle but not as a full process set**
   (#602 is closed). Interstitial and cloud-borne mass and number exchange on
   activation and evaporation, wet and dry deposition drain the in-droplet
@@ -2760,9 +3005,14 @@ Other floors that are floors for a reason:
   tracer-hyperviscosity bug active on the ``quasi_uniform`` path every
   canonical ne30 configuration selects. **ne30 results produced with an older
   pyses should be treated as provisional** (#599).
-- The ``cosp`` extra still installs ``jax-cosp`` from a VCS URL, so
-  ``pip install jcm[cosp]`` needs git and cannot be resolved from PyPI alone.
-  The core install and every other extra are PyPI-resolvable.
+- The ``cosp`` extra depends on ``jax-cosp`` by name. PyPI refuses any
+  distribution whose metadata carries a direct-URL dependency, so the
+  earlier ``jax-cosp @ git+https://...`` form made the jcm wheel itself
+  unpublishable (the 3.0.0rc1 and rc2 uploads were rejected for it). jax-cosp
+  is not on PyPI yet: install it from GitHub first
+  (``pip install "jax-cosp @ git+https://github.com/climate-analytics-lab/jax-cosp.git"``),
+  then ``pip install jcm[cosp]``. The core install and every other extra are
+  PyPI-resolvable.
 
 v2.0.0b1
 --------

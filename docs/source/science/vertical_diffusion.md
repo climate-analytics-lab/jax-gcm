@@ -40,6 +40,12 @@ coefficient ``cfh`` (the ``pxtte`` update in ``mo_vdiff_solver``); CAM diffuses
 all constituents likewise.
 
 **Why we differ.**
+- `differentiability` — SPEEDY's shallow convection and moisture diffusion
+  (``speedy_vdiff.py``) gate fluxes proportional to ``drh`` on hard tests
+  (``dmse >= 0``, ``drh > 0``, ``drh > drh0``), so each onset is a value jump
+  with a zero reference derivative. The gates keep their reference values;
+  with ``vertical_diffusion.mse_gate_smoothing`` / ``rh_gate_smoothing`` > 0
+  they carry sigmoid derivatives ({doc}`../design/surrogate_gradients`).
 - `science` — the surface-layer exchange uses a Louis (1979) / Mauritsen (2007)
   form matching ECHAM/ICON to order of magnitude across the Richardson-number
   range, not a bit-exact reproduction of every ECHAM branch. Against ECHAM6.3's
@@ -50,6 +56,13 @@ all constituents likewise.
   (u, v, T, qᵥ, qc, qi, TKE, θᵥ variance), so aerosol/gas tracers are mixed by the
   separate ``TracerVerticalDiffusion`` term rather than in the same tridiagonal
   ; its boundaries are zero-flux (surface exchange is dry deposition's job).
+
+The tracer solve consumes the sequential working population, including
+surface emissions already injected this step, and returns only its mixing
+change. `science` — the emitted mass enters the implicit RHS before
+deposition, consistent with ECHAM `mo_vdiff_solver`'s surface tracer source;
+fresh aerosol must not wait a step to mix while being eligible for same-step
+deposition. Source-plus-mixing column conservation is tested explicitly.
 
 **Status & known limitations.** ``TracerVerticalDiffusion`` is a no-op on the
 first step — it reads the previous step's ``kh`` carry, which is seeded to

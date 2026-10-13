@@ -5,10 +5,9 @@ below-cloud impaction pathway (``impaction.py``) with ECHAM-HAM's
 ``nwetdep=3`` below-cloud scheme (``ham_setscav`` maps ``nwetdep=3`` to
 ``kscavBCtype=3``, ``mo_ham_wetdep.f90:1407-1411`` -- it does NOT read the
 mode-wise ``csr_strat_*``/``cbcr``/``cbcs`` tables ``nwetdep=1``/``2`` use).
-Only this one pathway is ported here; the in-cloud pathways (nucleation,
-impaction) still run exactly as the ``"jcm"`` scheme's ``incloud_*``
-machinery does today under either setting -- see ``wetdep_term.py``'s
-module docstring and jax-gcm#1017's follow-ups A/B.
+This module is the below-cloud pathway only: ``scheme="ham"`` adds HAM's
+nucleation scavenging (``ham_nucleation``), and in-cloud impaction is
+``incloud_impaction``'s under every scheme (see ``WetScavenging.__init__``).
 
 ECHAM input -> jcm source
 -------------------------
@@ -28,8 +27,8 @@ ECHAM (``mo_ham_wetdep.f90`` unless noted)                          jcm source
 ``pclc``               fraction of grid box covered by precip,      ``CloudData``-adjacent ``"precip_cover"`` diagnostic,
                        STRATIFORM case (:147; traced to              published by ``Lohmann2MMicrophysics`` only when
                        ``mo_submodel_interface.f90:1771``'s          ``configure_wetdep_hydro_diagnostics(True)`` is set
-                       ``pclcpre``, itself an argument of            (``echam_physics`` turns this on exactly when
-                       ``cloud_subm_2`` supplied by ECHAM's cloud    ``jam_wetdep_scheme="ham_below_cloud"``); the POST-
+                       ``pclcpre``, itself an argument of            (``echam_physics`` turns this on whenever
+                       ``cloud_subm_2`` supplied by ECHAM's cloud    ``jam_wetdep_scheme`` is a HAM scheme); the POST-
                        microphysics, outside this file)              update value (``mo_cloud_micro_2m.f90:1719-1742``)
 ``mr``                 wet radius, clipped to 50 um, converted to   ``aer.r_wet[i]`` (number tracers) or
                        um, mass-median-scaled for mass tracers      ``aer.r_wet[i]*cmedr2mmedr(mode.geom_std_dev)`` (mass
@@ -242,11 +241,9 @@ def lookup_swapped_corners(table, row_idx1, row_idx2, col_idx1, col_idx2):
     is flagged to the maintainer as a likely-unintentional upstream quirk
     rather than silently fixed (see the PR description / jax-gcm#1017).
 
-    ``ic_scav_imp`` (follow-up B, ``ham_impaction.py``) fills its own
-    Q11..Q22 with the IDENTICAL (row2,col1)/(row1,col2) swap
-    (``mo_ham_wetdep.f90:872-875,932-935``) -- confirmed the same quirk,
-    not a different one, by the compiled full-chain harness -- so it
-    reuses this function rather than re-deriving it.
+    ``ic_scav_imp`` fills its Q11..Q22 with the same swap
+    (``mo_ham_wetdep.f90:872-875,932-935``); ``wetdep.incloud_impaction``
+    corrects it there by default and keeps it under ``variant="ham_r7492"``.
     """
     q11 = table[row_idx1, col_idx1]
     q12 = table[row_idx2, col_idx1]

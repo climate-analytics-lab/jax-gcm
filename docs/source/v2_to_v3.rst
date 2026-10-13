@@ -56,12 +56,8 @@ Installation and dependencies
 
 .. code-block:: console
 
-   $ pip install --pre --upgrade jcm          # 3.0.0rc1 is a pre-release
-   $ pip install "jcm==3.0.0rc1"              # or pin it
-
-Until 3.0.0 is tagged, a plain ``pip install --upgrade jcm`` keeps serving the
-2.x line: ``3.0.0rc1`` is a PEP 440 pre-release and pip ignores those unless
-asked.
+   $ pip install --upgrade jcm                # 3.0.0 is a normal release
+   $ pip install "jcm==3.0.0"                 # or pin it
 
 Minimum versions that changed, and why each floor is a floor rather than a
 preference:
@@ -1447,6 +1443,37 @@ longer accepts ``target_T_K``. Its defaults are ECHAM's
 (``UpperSponge()`` is the ECHAM sponge). The stratospheric and mesospheric
 zonal-mean winds strengthen; the troposphere is unchanged within noise.
 
+.. _v3-model-top:
+
+The model top: log-pressure SL interpolation, the lmidatm zonal mean, ozone to the lid
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Three changes act above ~100 Pa on the L47/L95 hybrid grids:
+
+- The semi-Lagrangian step interpolates in the log of the reference sigma on
+  hybrid grids (``dycore.sl_vertical_coordinate``; ``sigma`` reproduces the
+  earlier rule). The trajectories are unchanged. Interpolating in sigma on the
+  geometrically spaced L47 top misread vertical advection and amplified 2Δz
+  structure under upwelling: at the summer pole the coldest 1 Pa cells ran
+  ~20 K too cold and the 4.3 Pa level ~20 K too warm, and some trajectories
+  formed ice and a runaway humidity dipole at 1–11 Pa (see
+  :doc:`design/sl_vertical_interpolation`).
+- The ECHAM ``lmidatm`` hyperdiffusion profile no longer diffuses the zonal
+  mean, as in ECHAM; ``diffusion.diffuse_zonal_mean`` (``true`` restores the
+  earlier behaviour) and ``DiffusionFilter.diffuse_zonal_mean`` expose it.
+- ``forcing.ozone_file: auto`` at T63L47 resolves the zonal mean of the FZJ
+  CMIP7 present-day climatology (the same source as the ``ma-*`` presets'
+  bundle) instead of a CAM6chem file held at its 4 hPa value up to the lid;
+  the T63L47 presets on ``auto`` lose a 60-80 K mesospheric warm bias.
+  ``jcm.data.bc.interpolate_ozone`` raises for a source that stops below the
+  model top unless ``allow_top_clamp=True``.
+
+Warm states spun up before these changes are out of balance at the top and
+adjust within about a week: those of the ``ma-*`` presets (FZJ ozone) carry a
+summer mesopause too cold at 1 Pa and too warm at 4.3 Pa (L47), those of the
+T63L47 presets on ``auto`` (``t63-echam-1m``/``2m``/``rrtmgp``, the release
+fixtures among them) a mesosphere 60-80 K too warm.
+
 SPEEDY shortwave heating is applied every step
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
@@ -1643,18 +1670,26 @@ free.
      - Dinosaur (semi-Lagrangian)
      - pySES CAM-SE (``jcm[pyses]``)
    * - ``speedy``
-     - **Release-validated**, T31 L8 sigma (``speedy-t31``)
+     - **Release-validated**, T31 L8 on SPEEDY's sigma table (``speedy-t31``);
+       every gate passes on the release tree
      - Composes and builds; no packaged configuration, never validated
    * - ``echam`` (1M)
-     - **Release-validated**, T63 and T106 L47
+     - **Release-validated**, T63 and T106 L47; both years miss the offline
+       cloud-cover floor (0.47 and 0.42 vs 0.5; T106 is the untuned cover
+       blend, #1014), accepted and documented in the release notes
      - No packaged configuration; composes only with ``cu_lmfmid=false``
        (:ref:`v3-limitation-omega`)
    * - ``echam-rrtmgp-2m``
-     - **Release-validated**, T63 and T106 L47
+     - **Release-validated**, T63 and T106 L47; T63 misses the offline
+       cloud-cover floor by 0.005, T106 misses the TOA band by 0.2 W/m² and
+       the cover floor (untuned cover blend at T106, #1014), all accepted
+       and documented in the release notes
      - No packaged configuration; composes only with ``cu_lmfmid=false``
        (:ref:`v3-limitation-omega`)
    * - ``echam-jam``
-     - **Release-validated**, T63 L47 and T63 L95
+     - **Release-validated**, T63 L47 (cold year on the calibration targets;
+       warm state published); T63 L95 validated to day 310 of its year (a
+       cluster storage outage interrupted it)
      - Benchmark-validated at ne30 L47/L95, with ``cu_lmfmid=false`` and
        prescribed-emission-free (below)
    * - ``echam-emulated-2m``
@@ -1848,8 +1883,9 @@ quoting a validated configuration:
 
 * the **T106 members' multi-GPU mesh configurations have never been run for a
   full year**;
-* ``echam-jam`` at **L95** needs L95 oxidant and ozone inputs staged, which is
-  a data dependency rather than a code one.
+* ``echam-jam`` at **L95** ran on the release tree to day 310 of its year
+  before a cluster storage outage interrupted it; its band is the previous
+  one.
 
 A ``FAIL`` from ``health.py`` is also a recorded verdict rather than
 automatically a blocker: several members fail a gate by design until the

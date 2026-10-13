@@ -92,6 +92,24 @@ class _VDiff:
 
 
 class TracerVerticalDiffusionTermTest(unittest.TestCase):
+    def test_fresh_surface_emissions_mix_before_deposition(self):
+        state, diagnostics = self._setup()
+        name = "m_so4_acc"
+        q_emitted = state.tracers[name]
+        empty = state.copy(tracers={name: jnp.zeros_like(q_emitted)})
+        dt = diagnostics["_dt_seconds"]
+        source = q_emitted / dt
+        term = TracerVerticalDiffusion((name,))
+        expected, _ = term(state, diagnostics, None, None)
+        actual, _ = term(empty, {**diagnostics,
+            "_tendency_run": {"tracers": {name: source}}}, None, None)
+        np.testing.assert_allclose(actual.tracers[name], expected.tracers[name],
+                                   rtol=2e-6, atol=1e-20)
+        advanced = dt * (source + actual.tracers[name])
+        self.assertGreater(float(advanced[-2, 0]), 0.0)
+        np.testing.assert_allclose(jnp.sum(advanced, axis=0),
+                                   jnp.sum(q_emitted, axis=0), rtol=2e-6)
+
     def _setup(self, nlev=8, ncols=2, with_vdiff=True):
         shape = (nlev, ncols)
         tracers = {

@@ -475,6 +475,14 @@ class EchamSurface(PhysicsTerm):
         terrain: TerrainData,
     ) -> tuple[PhysicsTendency, dict]:
         """Compute lowest-level surface-flux tendencies and surface diagnostics."""
+        # Lazy: ``echam_boundary_conditions`` imports ``jcm.physics.surface.
+        # echam`` (for the albedo schemes), so a module-level import here
+        # would cycle back into this package's own ``__init__`` mid-import.
+        # Deferred to call time, this module is always fully loaded by then.
+        from jcm.physics.forcing.echam_boundary_conditions import (
+            tile_weighted_radiative_temperature,
+        )
+
         nlev, ncols = state.temperature.shape
         dt = diagnostics["_dt_seconds"]
         params = self.params.get_value()
@@ -497,13 +505,12 @@ class EchamSurface(PhysicsTerm):
         # Per-tile surface temperatures: SST for ocean, min(SST, ctfreez)
         # for ice (saline freezing point), stl_am for land (this bookkeeping
         # step is diagnostic-only; the land's prognostic skin temperature is
-        # the vdiff's, published below). Read straight
-        # from forcing rather than the upstream-blended
-        # ``_surface.surface_temperature``, which is snapped to one-or-the-
-        # other via ``where(fmask>0.5)`` in EchamBoundaryConditions and would
-        # feed the wrong T into the minority tile (e.g. the 40 % ocean
-        # fraction of an fmask=0.6 cell would otherwise use stl_am instead
-        # of sst).
+        # the vdiff's, published below). Read straight from forcing rather
+        # than ``_surface.surface_temperature`` — that field is the
+        # tile-WEIGHTED T**4 mean EchamBoundaryConditions forms for radiation
+        # (:func:`~jcm.physics.forcing.echam_boundary_conditions.tile_weighted_radiative_temperature`,
+        # #988), a single blended grid value that is never the right
+        # temperature for any one tile on its own.
         ocean_temp = forcing.sea_surface_temperature.reshape(ncols)
         land_temp = forcing.stl_am.reshape(ncols)
         ice_surface_temp = jnp.where(
@@ -589,12 +596,23 @@ class EchamSurface(PhysicsTerm):
         # imp_moist factor) no longer exists. The field is kept for API
         # stability (the Tiedtke moisture-budget closure reads it).
         evaporation = vdiff.surface_evaporation.reshape(ncols)
-        # The grid surface temperature after the land balance, snapped by
-        # fmask as EchamBoundaryConditions forms it for the radiation.
+        # The grid surface temperature after the land balance, weighted the
+        # same way EchamBoundaryConditions forms it for the radiation
+        # (#988): the re-emission below must mirror the temperature the
+        # cached longwave was SOLVED with, or the correction and the cached
+        # flux describe two different surfaces. ``t_grid_old`` is last
+        # step's published (already tile-weighted) value; ``t_grid_new``
+        # re-applies the identical weights to this step's post-balance
+        # tile temperatures, using the land tile's NEW prognostic skin
+        # (``prev_surface.land_surface_temperature``, just updated by the
+        # vdiff's implicit solve) with ocean/sea-ice held at their
+        # prescribed values (unchanged within a step).
         t_grid_old = prev_surface.surface_temperature.reshape(ncols)
-        t_grid_new = jnp.where(land_fraction > 0.5,
-                               prev_surface.land_surface_temperature.reshape(ncols),
-                               ocean_temp)
+        t_grid_new = tile_weighted_radiative_temperature(
+            land_fraction, sea_ice_fraction,
+            prev_surface.land_surface_temperature.reshape(ncols),
+            ice_surface_temp, ocean_temp,
+        )
         out = {}
         if isinstance(radiation, RadiationData):
             radiation_out, heating = correct_surface_longwave(

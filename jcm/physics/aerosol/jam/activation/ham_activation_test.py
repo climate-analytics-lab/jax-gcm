@@ -352,6 +352,35 @@ class HamActivationTermTest(unittest.TestCase):
         _, out = term(state, diag, None, None)
         self.assertTrue(np.all(np.isfinite(np.asarray(out["activated_cdnc"]))))
 
+    def test_lin_leaitch_mass_fraction_is_the_largest_particles_mass_tail(self):
+        """The activated particles are each mode's largest, as HAM's
+        ic_scav_nuc takes them: the mass share is the mass tail beyond the
+        radius whose number tail is the number share, above it where it is
+        partial.
+        """
+        from jcm.physics.aerosol.jam.wetdep.ham_nucleation import (
+            nucleation_scavenged_fraction)
+
+        state, diag = self._state_and_diag(scheme="lin_leaitch")
+        spec = self._spec()
+        term = HamActivation(spec, scheme="lin_leaitch")
+        act = term(state, diag, None, None)[1]["_jam_activation"]
+        number_frac = np.asarray(act.number_frac)
+        mass_frac = np.asarray(act.mass_frac)
+        r_wet = diag["_jam_state"].r_wet
+        for i, mode in enumerate(spec.modes):
+            if not mode.can_activate:
+                np.testing.assert_array_equal(mass_frac[i], 0.0)
+                continue
+            sigma = mode.geom_std_dev
+            _, want = nucleation_scavenged_fraction(
+                1.0 - 2.0 * number_frac[i], r_wet[i], np.log(sigma),
+                float(np.exp(3.0 * np.log(sigma) ** 2)))
+            np.testing.assert_allclose(mass_frac[i], np.asarray(want), rtol=1e-5)
+            partial = (number_frac[i] > 1e-3) & (number_frac[i] < 1 - 1e-3)
+            self.assertTrue(np.any(partial))
+            self.assertTrue(np.all(mass_frac[i][partial] > number_frac[i][partial]))
+
     def test_bad_scheme_rejected(self):
         with self.assertRaises(ValueError):
             HamActivation(self._spec(), scheme="nope")

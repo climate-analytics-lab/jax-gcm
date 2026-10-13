@@ -487,3 +487,32 @@ class TestMoistIsobaricHeatCapacity:
         assert np.isfinite(float(g(jnp.asarray(0.0))))
         np.testing.assert_allclose(
             float(g(jnp.asarray(0.01))), c.cpd * c.vtmpc2, rtol=1e-6)
+
+
+class SonntagExtremeColdTest(unittest.TestCase):
+    """The float32 Sonntag fit stays a positive normal float at the table floor.
+
+    ``es(50 K)`` is about 6e-41 Pa, a float32 denormal that XLA flushes to
+    zero on GPU; the Sundqvist cover's ``q / qsat`` then went non-finite in a
+    captured 3.0.0rc1 run whose model top reached 48.6 K.
+    """
+
+    def test_es_is_a_positive_normal_float32_at_and_below_the_table_floor(self):
+        tiny = float(jnp.finfo(jnp.float32).tiny)
+        for T in (48.6, 50.0, 60.0, 70.0):
+            for f in (thermo.es_water, thermo.es_ice):
+                v = float(f(jnp.asarray(T, jnp.float32)))
+                self.assertTrue(np.isfinite(v) and v >= tiny, f"{f.__name__}({T}) = {v}")
+
+    def test_fit_is_unchanged_where_it_matters(self):
+        # Above ~75 K the fit sits far above the floor: bit-identical values.
+        for T in (85.0, 150.0, 233.15, 273.15, 303.15):
+            t = jnp.asarray(T, jnp.float32)
+            a1, a2, a3, a4, a5 = thermo.WATER_COEFFICIENTS
+            ln_es = a1 / T + a2 + a3 * 0.01 * T + a4 * 1.0e-5 * T * T + a5 * np.log(T)
+            np.testing.assert_allclose(float(thermo.es_water(t)), np.exp(ln_es), rtol=1e-5)
+
+    def test_qsat_ratio_finite_at_the_captured_temperature(self):
+        qsat = thermo.qsat_from_es(thermo.es_ice(jnp.asarray(48.6, jnp.float32)),
+                                   jnp.asarray(4.0, jnp.float32))
+        self.assertTrue(np.isfinite(float(jnp.asarray(1e-6, jnp.float32) / qsat)))

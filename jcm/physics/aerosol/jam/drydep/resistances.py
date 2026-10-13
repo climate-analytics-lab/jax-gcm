@@ -114,3 +114,37 @@ def deposition_velocity(
         v_grav, u_star, temperature, pressure, air_density,
     )
     return 1.0 / (ra + rb)
+
+
+def cam_collection_velocity(
+    r_wet, v_grav, u_star, temperature, pressure, air_density,
+    fractions, *, geom_std_dev, moment, z_ref=10.0, z0=1e-4,
+):
+    """CAM/Zhang (2001) non-gravitational velocity for eleven surface classes.
+
+    Port of aero_model.F90::modal_aero_depvel_part. Gravitational removal
+    is separate, but its aerodynamic/quasi-laminar cross term is retained.
+    The host still uses its neutral aerodynamic resistance. Fractions have
+    shape (11, ncols), with CAM's Wesely ordering; dry surfaces rebound.
+    """
+    r = moment_radius(r_wet, geom_std_dev=geom_std_dev, moment=moment)
+    mu = air_viscosity(temperature)
+    nu = mu / air_density
+    cc = cunningham_slip(r, temperature, pressure)
+    diffusion = c.ak * temperature * cc / (6 * jnp.pi * mu * jnp.maximum(r, 1e-10))
+    sc = nu / diffusion
+    u = jnp.maximum(u_star, 1e-3)
+    gamma = jnp.asarray([.56,.54,.54,.56,.56,.56,.50,.54,.54,.54,.54])[:, None]
+    alpha = jnp.asarray([1.5,1.2,1.2,.8,1.,.8,100.,50.,2.,1.2,50.])[:, None]
+    collector = jnp.asarray([.01,.0035,.0035,.0051,.002,.005,-1.,-1.,.01,.0035,-1.])[:, None]
+    wet = jnp.asarray([False,False,False,False,False,False,True,False,True,False,False])[:, None]
+    positive_collector = jnp.maximum(collector, 1e-12)
+    st = jnp.where(collector > 0, v_grav * u / (c.grav * positive_collector),
+                   v_grav * u**2 / (c.grav * nu))
+    interception = jnp.where(collector > 0, 2 * (r / positive_collector)**2, 0.)
+    impaction = (st / (alpha + st))**2
+    # The inactive branch must also have a finite derivative at calm wind.
+    sticking = jnp.where(wet, 1., jnp.maximum(jnp.exp(-jnp.sqrt(jnp.maximum(st, 1e-30))), 1e-10))
+    rb = 1 / jnp.maximum(3 * u * sticking * (sc**(-gamma) + interception + impaction), 1e-12)
+    ra = aerodynamic_resistance(u, z_ref=z_ref, z0=z0)
+    return jnp.sum(fractions / (ra + rb + ra * rb * v_grav), axis=0)

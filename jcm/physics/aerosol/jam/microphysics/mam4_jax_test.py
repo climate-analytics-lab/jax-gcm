@@ -75,6 +75,119 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         self.assertEqual(packed["g_h2so4"], 6)
         self.assertEqual(packed["g_soag"], 9)
 
+    def test_cam6_preset_selects_astem(self):
+        from jcm.physics.aerosol.jam.jam_terms import _resolve_microphysics
+        term = _resolve_microphysics("mam4_jax_astem")
+        self.assertEqual(term._condensation_backend, "astem")
+
+    def test_upstream_sources_are_processed_once(self):
+        """Sequential chemistry/emissions equal explicitly updated input.
+
+        SOAG made this timestep must condense this timestep. Returning a
+        tendency against the step-start input would count the source twice.
+        """
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import Mam4JaxMicrophysics
+
+        state, diagnostics = _column_state(nlev=1, ncols=1)
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+        diagnostics[CARRY_KEY] = {
+            k: q for k, q in state.tracers.items() if k.startswith(("mc_", "nc_"))}
+        dt = diagnostics["_dt_seconds"]
+        sources = {
+            "g_soag": jnp.full((1, 1), 1e-9 / dt),
+            "m_du_cor": jnp.full((1, 1), 1e-8 / dt),
+            "n_cor": jnp.full((1, 1), 1e7 / dt),
+        }
+        working = state.copy(tracers={
+            k: q + dt * sources.get(k, 0.0) for k, q in state.tracers.items()})
+        term = Mam4JaxMicrophysics()
+        expected, expected_diag = term(working, diagnostics, None, None)
+        actual, actual_diag = term(
+            state, {**diagnostics, "_tendency_run": {"tracers": sources}},
+            None, None)
+        for name in expected.tracers:
+            np.testing.assert_allclose(actual.tracers[name], expected.tracers[name],
+                                       rtol=1e-6, atol=1e-25)
+        np.testing.assert_allclose(actual_diag["_jam_state"].r_wet,
+                                   expected_diag["_jam_state"].r_wet)
+        # CAM's captured conversion factors use 12.011/150 for SOAG and
+        # 12/150 for aerosol SOA. Close the common molecular basis, rather
+        # than treating their 0.09% convention difference as mass creation.
+        from mam4_jax.core import data
+        gas_index = dict(term._q_pack)["g_soag"]
+        soa_index = dict(term._q_pack)["m_soa_acc"]
+        gas_to_soa = (data.MMR_TO_VMR[gas_index] * data.FCVT_GAS[0] /
+                      (data.MMR_TO_VMR[soa_index] * data.FCVT_AER[0]))
+        soa_delta = gas_to_soa * np.asarray(actual.tracers["g_soag"], np.float64)
+        soa_delta += sum(np.asarray(v, np.float64) for k, v in actual.tracers.items()
+                         if k.startswith("m_soa_"))
+        soa_delta += sum(
+            np.asarray(actual_diag[CARRY_KEY][k] - q, np.float64) / dt
+            for k, q in diagnostics[CARRY_KEY].items() if k.startswith("mc_soa_"))
+        np.testing.assert_allclose(soa_delta, 0.0, atol=1e-19)
+
+    def test_removal_geometry_matches_post_microphysics_population(self):
+        """The radius's third moment must describe the mass/number returned.
+
+        Coagulation changes number and condensation changes volume; carrying
+        their pre-step radii into settling would use a different population.
+        """
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import Mam4JaxMicrophysics
+        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
+
+        state, diagnostics = _column_state(nlev=1, ncols=1)
+        term = Mam4JaxMicrophysics()
+        tendency, result = term(state, diagnostics, None, None)
+        dt = diagnostics["_dt_seconds"]
+        aer = result["_jam_state"]
+        for i, mode in enumerate(MAM4_SPEC.modes):
+            def updated(name):
+                return state.tracers[name] + dt * tendency.tracers[name]
+            volume = sum(updated(mass_name(sp, mode.short)) /
+                         MAM4_SPEC.species_props(sp).density for sp in mode.species)
+            number = updated(number_name(mode.short))
+            diameter = (6 * volume / (np.pi * number)) ** (1 / 3) * np.exp(
+                -1.5 * np.log(mode.geom_std_dev) ** 2)
+            np.testing.assert_allclose(2 * aer.r_dry[i],
+                np.clip(diameter, mode.dgnum_lo, mode.dgnum_hi), rtol=2e-5)
+
+    def test_cam6_soag_produces_fine_mode_soa(self):
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import Mam4JaxMicrophysics
+        state, diagnostics = _column_state(nlev=1, ncols=1)
+        tracers = {k: (jnp.zeros_like(q) if "soa_" in k else q)
+                   for k, q in state.tracers.items()}
+        tracers["g_soag"] = jnp.full((1, 1), 1e-8)
+        state = state.copy(tracers=tracers)
+        tendency, _ = Mam4JaxMicrophysics()(state, diagnostics, None, None)
+        self.assertLess(float(tendency.tracers["g_soag"][0, 0]), 0.)
+        self.assertGreater(float(tendency.tracers["m_soa_acc"][0, 0]), 0.)
+        np.testing.assert_array_equal(tendency.tracers["m_soa_cor"], 0.)
+
+    def test_organic_budget_closes_in_cold_and_evaporating_cells(self):
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import Mam4JaxMicrophysics
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
+        state, diagnostics = _column_state(nlev=1, ncols=8)
+        tracers = {k: (jnp.zeros_like(q) if "soa_" in k else q)
+                   for k, q in state.tracers.items()}
+        tracers["m_soa_acc"] = jnp.asarray([[1e-10] * 4 + [1e-8] * 4])
+        tracers["g_soag"] = jnp.asarray([[1e-8] * 4 + [1e-12] * 4])
+        state = state.copy(temperature=jnp.asarray([[260., 280., 298., 310.] * 2]),
+                           tracers=tracers)
+        dt = diagnostics["_dt_seconds"] = 720.
+        carry = {k: q for k, q in tracers.items() if k.startswith(("mc_", "nc_"))}
+        diagnostics[CARRY_KEY] = carry
+        tendency, result = Mam4JaxMicrophysics(condensation_backend="astem")(
+            state, diagnostics, None, None)
+        delta = (12.011 / 12 * np.asarray(tendency.tracers["g_soag"], np.float64)
+                 + sum(np.asarray(q, np.float64) for k, q in tendency.tracers.items()
+                       if k.startswith("m_soa_"))) * dt
+        delta += sum(np.asarray(result[CARRY_KEY][k] - q, np.float64)
+                     for k, q in carry.items() if k.startswith("mc_soa_"))
+        total = 12.011 / 12 * np.asarray(tracers["g_soag"], np.float64)
+        total += sum(np.asarray(q, np.float64) for k, q in tracers.items()
+                     if "soa_" in k)
+        np.testing.assert_allclose(delta / total, 0., atol=2e-6)
+
     def test_packing_covers_every_interstitial_tracer(self):
         from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name, number_name
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
@@ -300,17 +413,38 @@ class Mam4JaxAdapterTest(unittest.TestCase):
         from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
             Mam4JaxMicrophysics,
         )
+        from jcm.physics.aerosol.jam.cloud_borne_store import CARRY_KEY
 
+        jax.config.update("jax_enable_x64", True)
         t64 = Mam4JaxMicrophysics()          # default: float64 core
         self.assertFalse(t64._core_f32)
         state, diagnostics = _column_state()
+        self.assertEqual(state.temperature.dtype, jnp.dtype("float64"))
+        diagnostics[CARRY_KEY] = {
+            k: q for k, q in state.tracers.items()
+            if k.startswith(("mc_", "nc_"))
+        }
         tend64, _ = t64(state, diagnostics, None, None)
 
         t32 = Mam4JaxMicrophysics(core_dtype="float32")
         self.assertTrue(t32._core_f32)
-        tend32, _ = t32(state, diagnostics, None, None)
+        tend32, result32 = t32(state, diagnostics, None, None)
         self.assertTrue(jax.config.read("jax_enable_x64"),
                         "scoped f32 core must not clear the global x64 flag")
+
+        # Inspect actual JAX dtypes before NumPy conversion can hide a
+        # float32 result from a host cast inside the x64-off scope (#1033).
+        for field in ("u_wind", "v_wind", "temperature", "specific_humidity"):
+            self.assertEqual(getattr(tend32, field).dtype,
+                             getattr(state, field).dtype, field)
+        for name, value in tend32.tracers.items():
+            self.assertEqual(value.dtype, state.temperature.dtype, name)
+        for field in ("r_dry", "r_wet", "rho", "kappa", "mass", "number"):
+            self.assertEqual(getattr(result32["_jam_state"], field).dtype,
+                             state.temperature.dtype, field)
+        self.assertEqual(set(result32[CARRY_KEY]), set(diagnostics[CARRY_KEY]))
+        for name, value in result32[CARRY_KEY].items():
+            self.assertEqual(value.dtype, state.temperature.dtype, name)
 
         for k in tend64.tracers:
             a = np.asarray(tend32.tracers[k], np.float64)
@@ -387,3 +521,52 @@ class Mam4JaxModelTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@pytest.mark.requires_extra("mam4")
+class DefaultCoreIsReverseDifferentiableTest(unittest.TestCase):
+    """The ``echam-jam`` physics group's default core supports ``jax.grad``.
+
+    #1052 made the adaptive ASTEM solve the default; its ``lax.while_loop``
+    with data-dependent bounds raises under reverse mode, so every
+    ``jax.grad`` through an ECHAM+JAM model raised. The default is the
+    fixed-substep core; ASTEM stays an explicit, forward-only choice.
+    """
+
+    def setUp(self):
+        self._x64 = jax.config.read("jax_enable_x64")
+
+    def tearDown(self):
+        jax.config.update("jax_enable_x64", self._x64)
+
+    def test_echam_jam_config_defaults_to_the_substep_core(self):
+        from pathlib import Path
+
+        import yaml
+
+        cfg = yaml.safe_load(Path(__file__).resolve().parents[4].joinpath(
+            "config/physics/echam-jam.yaml").read_text())
+        self.assertEqual(cfg["jam_microphysics"], "mam4_jax")
+
+    def test_default_core_takes_a_reverse_mode_gradient(self):
+        from mam4_jax.coupling import amicphys as _amicphys
+
+        from jcm.physics.aerosol.jam import MAM4_SPEC, mass_name
+        from jcm.physics.aerosol.jam.microphysics.mam4_jax import (
+            Mam4JaxMicrophysics,
+        )
+
+        state, diagnostics = _column_state()
+        key = mass_name(MAM4_SPEC.modes[1].species[0], MAM4_SPEC.modes[1].short)
+        try:
+            term = Mam4JaxMicrophysics(n_substeps=4)   # the default backend
+
+            def loss(x):
+                tend, _ = term(state.copy(tracers={**state.tracers, key: x}),
+                               diagnostics, None, None)
+                return jnp.sum(tend.tracers[key])
+
+            g = jax.grad(loss)(state.tracers[key])   # raises on the ASTEM backend
+            self.assertEqual(np.shape(g), np.shape(state.tracers[key]))
+        finally:
+            _amicphys.configure_condensation(backend="substep")

@@ -18,6 +18,18 @@ from jcm.data import mirror_manifest as mm
 
 
 class TestParseSpec(unittest.TestCase):
+    def test_package_paths_resolve_from_any_working_directory(self):
+        from pathlib import Path
+        path = ir._fetch_path("pkg://data/input_resolution.py", None)
+        self.assertEqual(Path(path), Path(ir.__file__).resolve())
+        self.assertEqual(ir._fetch_path([None, "pkg://data/input_resolution.py"],
+                                       None), [None, path])
+        for spec in ("pkg://../outside.nc", "pkg:///tmp/outside.nc"):
+            with self.assertRaisesRegex(ValueError, "inside the jcm package"):
+                ir._fetch_path(spec, None)
+        with self.assertRaisesRegex(FileNotFoundError, "Packaged input"):
+            ir._fetch_path("pkg://data/missing-inventory.nc", None)
+
     def test_auto_none_explicit(self):
         self.assertIs(ir.InputSpec.parse("k", "auto").kind, ir.SpecKind.AUTO)
         for v in (None, "", "null", "none"):

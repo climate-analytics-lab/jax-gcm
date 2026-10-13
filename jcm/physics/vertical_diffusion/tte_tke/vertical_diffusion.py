@@ -751,10 +751,13 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
         # skin temperature for land.
         surface_in = diagnostics["surface"]
         # Water-tile temperature straight from the SST FORCING, not the
-        # blended ``surface.surface_temperature`` (which is snapped to
-        # one-or-the-other in mixed coastal cells — with fmask > 0.5 the
-        # residual ocean fraction would exchange with the LAND
-        # temperature, corrupting coastal fluxes; Codex review on #555).
+        # blended ``surface.surface_temperature`` — that is the
+        # tile-WEIGHTED T**4 mean EchamBoundaryConditions forms for
+        # radiation (#988), a single grid value that is never the right
+        # temperature for any one tile's own turbulent exchange (Codex
+        # review on #555, against the convention as it stood then: a
+        # majority-tile snap that would have exchanged the residual ocean
+        # fraction with the LAND temperature in mixed coastal cells).
         # Same per-tile sources as EchamSurface.
         sst_col = forcing.sea_surface_temperature.reshape(ncols)
         stl_col = forcing.stl_am.reshape(ncols)
@@ -782,11 +785,21 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
             [sst_col, ice_temp_col, land_temp_col], axis=1,
         )
 
-        roughness_length_col = surface_in.roughness_length.reshape(ncols)
+        # The land tile's own momentum roughness is an unconditional 1 cm
+        # constant, not ``surface_in.roughness_length``: that field is
+        # PUBLIC (``jcm.physics.diagnostics.aerocom`` reads it as the
+        # single grid-cell roughness for its 2 m-reduction diagnostic) and
+        # majority-tile-gated for that reason (Codex review on #988). This
+        # tile IS land whenever its fraction is nonzero, regardless of how
+        # EchamBoundaryConditions' public field happens to be gated, so it
+        # must not borrow that field -- doing so previously handed every
+        # coastal cell with land_fraction in (0, 0.5] the OCEAN value
+        # (1e-4 m) for its LAND tile, a 100x error with no ECHAM
+        # counterpart.
         roughness = jnp.stack([
             jnp.full(ncols, 1e-4),
             jnp.full(ncols, 1e-3),
-            roughness_length_col,
+            jnp.full(ncols, 0.01),
         ], axis=1)
 
         # Ocean heat roughness via the ECHAM kB⁻¹ relationship

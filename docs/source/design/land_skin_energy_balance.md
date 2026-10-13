@@ -181,10 +181,17 @@ snow has no mass to lose, so the excess is published as the melt heat flux,
 the term that closes the budget.
 
 **What the skin feeds.** The step-start skin temperature is what the land
-albedo's melting ramp, the grid surface temperature the radiation solves with
-(snapped by `fmask > 0.5`, where ECHAM's `radtemp` is the tile-weighted T⁴
-mean, #988), the surface-layer saturation, buoyancy and
-Richardson number, and the Richtmyer–Morton coefficients all see.
+albedo's melting ramp, the grid surface temperature the radiation solves
+with, the surface-layer saturation, buoyancy and Richardson number, and the
+Richtmyer–Morton coefficients all see. That grid temperature is the
+tile-weighted T⁴ mean over land, sea ice and ocean, ECHAM's own `radtemp`
+(`mo_surface.f90` ~l.1712,
+{func}`~jcm.physics.forcing.echam_boundary_conditions.tile_weighted_radiative_temperature`,
+#988): every cell's land, sea-ice and ocean tiles each contribute their own
+temperature, weighted by their fraction of the box. `EchamSurface`'s
+longwave re-emission below forms this step's "new" grid temperature with the
+same weights, so the correction always mirrors the temperature the cached
+flux was solved with.
 
 **Shortwave between radiation calls.** The radiation holds the downward and
 upward surface shortwave between solves (rescaled to the sun,

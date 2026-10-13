@@ -5,14 +5,13 @@ coverage gate, ``.coveragerc``) that otherwise cannot run in CI, but its
 pure wiring -- which per-process builder it calls, with which arguments --
 is still worth testing directly against synthetic Tier A sources, the same
 pattern ``bundles_test.py``/``emissions_test.py`` use for the builders
-themselves. This covers the one gap those two do not: that ``stage_bundles``
-(and ``stage_amip``) actually LOAD HAM's biogenic-OC source and FORWARD it
-into every ``build_emissions_nc``/``build_emissions_year`` call -- a mirror
-rebuild never published ``emis_biogenic_oc`` before this (jax-gcm#1045
-review), even though ``build_emissions_nc`` itself has supported the
-parameter since #1017.
+themselves. This covers the one gap those two do not: that the
+``biogenic`` stage stages HAM's biogenic-OC source as a Tier A product, and
+that ``stage_bundles`` (and ``stage_amip``) load that product and forward it
+into every ``build_emissions_nc``/``build_emissions_year`` call.
 """
 
+import dataclasses
 import tempfile
 from pathlib import Path
 
@@ -98,6 +97,68 @@ def _synthetic_biogenic_oc(seed=1) -> xr.DataArray:
                         coords={"lat": lat, "lon": lon}, name="oc_biogenic")
 
 
+def _tier_a_biogenic(build_dir):
+    """Stand in for ``load_biogenic_oc``, checking it reads the Tier A copy."""
+    from jcm.data.mirror.emissions import HAM_BIOGENIC_OC_PRODUCT
+
+    def load(path):
+        assert Path(path) == build_dir / HAM_BIOGENIC_OC_PRODUCT, path
+        return _synthetic_biogenic_oc()
+    return load
+
+
+def test_biogenic_oc_is_a_tier_a_product():
+    """Published under ``products/``, pulled, and checked before bundles/amip."""
+    from jcm.data.mirror.emissions import (HAM_BIOGENIC_OC_PRODUCT,
+                                           HAM_BIOGENIC_OC_RELPATH)
+    from jcm.data.mirror.sites import current
+
+    assert HAM_BIOGENIC_OC_PRODUCT in build_mirror._TIER_A
+    assert f"products/{HAM_BIOGENIC_OC_PRODUCT}" in build_mirror._TIER_A_PULL
+    product = str(build_mirror.BUILD / HAM_BIOGENIC_OC_PRODUCT)
+    without_tree = dataclasses.replace(current(), ham_emissions=None)
+    table = build_mirror._stage_sources(without_tree)
+    assert table["biogenic"] == ()
+    for stage in ("bundles", "amip"):
+        assert ("Tier A HAM biogenic OC", product) in table[stage]
+    with_tree = dataclasses.replace(current(), ham_emissions="/ham")
+    assert build_mirror._stage_sources(with_tree)["biogenic"] == (
+        ("ECHAM-HAM emissions tree (AeroCom II biogenic OC)",
+         f"/ham/{HAM_BIOGENIC_OC_RELPATH}"),)
+
+
+def test_stage_biogenic_copies_the_site_tree_or_fetches_the_mirror(monkeypatch):
+    """The HAM file verbatim from the site's tree; without one, the published copy."""
+    from jcm.data.mirror.emissions import (HAM_BIOGENIC_OC_PRODUCT,
+                                           HAM_BIOGENIC_OC_RELPATH)
+    from jcm.data.mirror.sites import current
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        build_dir = tmp_path / "build"
+        build_dir.mkdir()
+        monkeypatch.setattr(build_mirror, "BUILD", build_dir)
+        tree = tmp_path / "ham"
+        src = tree / HAM_BIOGENIC_OC_RELPATH
+        src.parent.mkdir(parents=True)
+        src.write_bytes(b"site copy")
+        monkeypatch.setattr(build_mirror, "SITE",
+                            dataclasses.replace(current(), ham_emissions=str(tree)))
+        build_mirror.stage_biogenic()
+        assert (build_dir / HAM_BIOGENIC_OC_PRODUCT).read_bytes() == b"site copy"
+
+        published = tmp_path / "published.nc"
+        published.write_bytes(b"mirror copy")
+        fetched = []
+        monkeypatch.setattr("jcm.data.remote.fetch",
+                            lambda path: fetched.append(path) or str(published))
+        monkeypatch.setattr(build_mirror, "SITE",
+                            dataclasses.replace(current(), ham_emissions=None))
+        build_mirror.stage_biogenic()
+        assert fetched == [f"products/{HAM_BIOGENIC_OC_PRODUCT}"]
+        assert (build_dir / HAM_BIOGENIC_OC_PRODUCT).read_bytes() == b"mirror copy"
+
+
 def test_stage_bundles_writes_emis_biogenic_oc(monkeypatch):
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -112,7 +173,7 @@ def test_stage_bundles_writes_emis_biogenic_oc(monkeypatch):
         monkeypatch.setattr(build_mirror, "_want", lambda product: product == "emissions")
         monkeypatch.setattr(
             "jcm.data.mirror.emissions.load_biogenic_oc",
-            lambda: _synthetic_biogenic_oc())
+            _tier_a_biogenic(build_dir))
 
         build_mirror.stage_bundles()
 
@@ -139,7 +200,7 @@ def test_stage_bundles_omits_biogenic_oc_when_not_wanted(monkeypatch):
         monkeypatch.setattr(build_mirror, "_grids", lambda transient=False: {_TEST_GRID: 8})
         monkeypatch.setattr(build_mirror, "_want", lambda product: False)
 
-        def _boom():
+        def _boom(path):
             raise AssertionError("load_biogenic_oc must not be called")
 
         monkeypatch.setattr("jcm.data.mirror.emissions.load_biogenic_oc", _boom)
@@ -175,7 +236,7 @@ def test_stage_amip_writes_emis_biogenic_oc(monkeypatch):
                             build_dir / "staged_coverage.json")
         monkeypatch.setattr(
             "jcm.data.mirror.emissions.load_biogenic_oc",
-            lambda: _synthetic_biogenic_oc())
+            _tier_a_biogenic(build_dir))
 
         build_mirror.stage_amip()
 

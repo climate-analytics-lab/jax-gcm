@@ -80,6 +80,11 @@ class HamLutOpticsTerm(JamOpticsTerm):
 
         """
         super().__init__(**kwargs)
+        # The spec names its nucleation class by name or short; resolve it to
+        # the short the per-mode inputs carry (a name the spec lacks raises).
+        nucleation = self._spec.nucleation_mode
+        self._nucleation_short = (None if nucleation is None
+                                  else self._spec.mode(nucleation).short)
         if tables is not None:
             self.table_source = "explicit"
         else:
@@ -135,7 +140,7 @@ class HamLutOpticsTerm(JamOpticsTerm):
         (``mo_ham_rad.f90:1110-1124``) without this method doing it itself.
         """
         zeros = jnp.zeros_like(inputs.r_wet)
-        if inputs.mode.short == self._spec.nucleation_mode:
+        if inputs.mode.short == self._nucleation_short:
             return zeros, zeros, zeros
         tables = self._ham_tables
         fine = abs(inputs.mode.geom_std_dev - 1.59) <= abs(inputs.mode.geom_std_dev - 2.00)

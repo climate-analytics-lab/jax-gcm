@@ -140,6 +140,10 @@ INERT_IN_HARNESS = frozenset({
 #: below fails if a term is in neither set.
 NOT_AUDITED = frozenset({
     "AnthropogenicEmissions", "AqueousSulfur", "ArgActivation",
+    # Inherits SlinnDryDeposition's explicit (nlev, ncols) host contract
+    # and requires the upstream modal population; tested in column/grid
+    # integrations rather than this inert generic layout harness.
+    "CAMDryDeposition",
     "CloudBorneCarryStore", "CloudBorneExchange", "CloudsatCosp",
     "ConvectiveTracerTransport",
     "DmsEmissions", "DustEmissions", "Echam1MMicrophysics",

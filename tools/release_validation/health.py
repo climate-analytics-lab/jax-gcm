@@ -21,6 +21,15 @@ Exit code 0 = all checks pass. ``--json FILE`` also writes every printed
 gate, reported value and aerosol statistic as JSON, for dashboards that must
 score a run with exactly these definitions.
 
+``--last-n`` scopes the gates above and the JAM block's drift/ledger/mean
+statistics, but NOT its annual-budget statistic (``dust_emission_tg_per_yr``):
+that one reads the whole run directory's trailing year regardless, because
+the band it is scored against is drawn on a full year and a ``--last-n``
+short of one measures the season rather than the year (#1010; see
+``aerosol_stats.collect_windows``). ``health.json``'s ``aerosol_stats``
+records each annual statistic's own ``*_window_days`` beside it, since it can
+differ from the drift/ledger window.
+
 Cloud cover
 -----------
 ``cloud_cover`` scores ECHAM's own total cover ``aclcov``
@@ -99,7 +108,7 @@ for _p in (str(_REPO), str(_TOOLS)):
 from jcm.analysis import (  # noqa: E402
     area_weights, global_mean, total_cloud_cover)
 from aerosol_stats import (  # noqa: E402
-    _AOD_KEYS, BURDEN_RANGES, anchor_gates, chunk_day, collect, format_table,
+    _AOD_KEYS, BURDEN_RANGES, anchor_gates, collect_windows, format_table,
     is_jam_run, positive_int,
     missing_jam_diagnostics, physics_gates, run_files, summarize,
     timestep_seconds, unscored_gates)
@@ -261,19 +270,20 @@ def main():
     # Same discovery as aerosol_stats.run_files, so the two cannot disagree
     # about which files are chunks (``run.snapshot_interval`` writes a
     # ``_day<N>_snapshots.nc`` stream that a ``*_day*.nc`` glob also matches).
-    files = run_files(a.run_dir)
-    if not files:
+    all_files = run_files(a.run_dir)
+    if not all_files:
         print(f"FAIL  no chunk files in {a.run_dir}")
         report["overall"] = "FAIL"
         _write_json(a.json, report)
         return 1
-    # The label of the chunk before a ``--last-n`` slice is the retained
-    # window's start; ``chunk_centres`` needs it to place the first node.
-    window_start = None
-    if a.last_n:
-        if a.last_n < len(files):
-            window_start = chunk_day(files[-a.last_n - 1])
-        files = files[-a.last_n:]
+    # The --last-n slice: the settled window the gates below (NaN scan, TOA,
+    # precip, cloud cover, near-surface T) score, and the one the aerosol
+    # block's drift/ledger/mean statistics score too. Its annual-budget
+    # statistic (dust_emission_tg_per_yr) needs more than this slice offers
+    # when it is short of a year, so it is resolved separately from
+    # ``all_files`` by collect_windows() in the JAM block below (#1010).
+    files = (all_files[-a.last_n:] if a.last_n and a.last_n < len(all_files)
+             else all_files)
     ds = xr.open_mfdataset(files, combine="by_coords")
     # A run resumed across the introduction of ``clouds.total_cloud_cover`` has
     # chunks with and without it, and ``open_mfdataset`` fills the missing
@@ -403,11 +413,19 @@ def main():
         for namespace in missing_jam_diagnostics(ds):
             print(f"NOTE  no {namespace}.* diagnostics saved; the aerosol "
                   "statistics that read them are absent from the report")
-        days, series = collect(files)
+        # (days, series, window_start) is the --last-n request above; the
+        # annual-budget statistic (dust_emission_tg_per_yr) is scored on the
+        # whole run directory's trailing year instead, read from
+        # ``all_files`` regardless of --last-n (#1010) — see
+        # aerosol_stats.collect_windows and summarize()/unscored_gates().
+        request, annual = collect_windows(all_files, a.last_n)
+        days, series, window_start = request
+        annual_days, annual_series, annual_window_start = annual
         # The dynamics-conservation gate is per STEP, so it needs the run's
         # timestep; ``unscored_gates`` reports it when either is missing.
         dt = timestep_seconds(a.run_dir)
-        stats = summarize(days, series, dt, window_start)
+        stats = summarize(days, series, dt, window_start,
+                          annual_days, annual_series, annual_window_start)
         for sp in BURDEN_RANGES:
             if f"burden_{sp}_mg_m2" not in stats:
                 print(f"NOTE  no {sp} mass tracers; skipping burden")
@@ -420,13 +438,24 @@ def main():
             report["gates"].append({"name": name, "value": value,
                                     "limit": str(limit), "pass": good})
             ok = ok and good
-        unscored = unscored_gates(days, series, dt, window_start)
+        unscored = unscored_gates(days, series, dt, window_start,
+                                  annual_days, annual_series,
+                                  annual_window_start)
         for name, reason in unscored:
             print(f"UNSCORED  {name}: {reason}")
             report["unscored"][name] = reason
         if unscored:
             print(f"NOTE  {len(unscored)} aerosol gate(s) could not be "
                   "evaluated; they have passed nothing")
+        if "dust_window_days" in stats and window_start != annual_window_start:
+            # dust_emission_tg_per_yr's window_days (in ``stats``, printed
+            # below) differs from record_days (the window above): say so
+            # explicitly rather than leaving a reader to notice the two
+            # numbers in the table disagree (#1010).
+            print(f"NOTE  dust_emission_tg_per_yr is scored over the run "
+                  f"directory's whole trailing year "
+                  f"({stats['dust_window_days']:.0f} days), not the "
+                  f"--last-n window above ({stats['record_days']:.0f} days)")
         print()
         print(format_table(stats, []))
         report["aerosol_stats"] = stats

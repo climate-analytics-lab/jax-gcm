@@ -20,9 +20,13 @@ column physics through a pg2 finite-volume physics grid (see
 On the **dinosaur** backend tracer transport is **semi-Lagrangian** by default —
 departure-point transport with a Bermejo–Staniforth quasi-monotone limiter,
 cubic Lagrange interpolation in the horizontal and **4-point cubic Lagrange
-interpolation in the vertical** (reference σ, degraded to linear in the first
-and last cells; ``dycore.sl_vertical_interpolation``); the Eulerian core is
-meant for physics that carries no extra tracers.
+interpolation in the vertical** (degraded to linear in the first and last
+cells; ``dycore.sl_vertical_interpolation``). The trajectories are solved in
+the reference σ; the vertical interpolation is done in its logarithm on hybrid
+grids (log-pressure at the pure-pressure top) and in σ itself on sigma grids
+(``dycore.sl_vertical_coordinate``; see
+{doc}`../design/sl_vertical_interpolation`). The Eulerian core is meant for
+physics that carries no extra tracers.
 Every jcm extra tracer (aerosol mass/number, gases, cloud condensate) rides as
 a *nodal* tracer while ``specific_humidity`` stays modal for the implicit
 q↔Tᵥ coupling; the condensate species additionally enter the dynamics through
@@ -103,9 +107,11 @@ physics carries the moisture and condensate terms.
 Horizontal hyperdiffusion is configured by ``jcm/diffusion.py::DiffusionFilter``:
 for hybrid L47/L95 grids the resolution-aware ``DiffusionFilter.auto`` selects the
 ECHAM ``lmidatm`` level-dependent order profile (∇² near the model top grading to
-∇⁶/∇⁸ below, base timescale from ``setdyn.f90``'s ``dampth``); any other grid gets
-the uniform SPEEDY ∇²/∇⁴ profile (``DiffusionFilter.default``), with a warning for
-unrecognised hybrid grids. ECHAM's upper sponge (``uspnge``: implicit damping of
+∇⁶/∇⁸ below, base timescale from ``setdyn.f90``'s ``dampth``), which like ECHAM's
+``hdiff`` under ``lmidatm`` leaves the zonal mean (m = 0) of vorticity, divergence
+and temperature undiffused at every level (the modal humidity too, which ECHAM,
+whose humidity is a grid-point field, does not diffuse at all); any other grid gets the uniform SPEEDY ∇²/∇⁴ profile on every wavenumber
+(``DiffusionFilter.default``), with a warning for unrecognised hybrid grids. ECHAM's upper sponge (``uspnge``: implicit damping of
 the zonal anomalies of u, v and T, the zonal mean untouched) is enabled via the
 ``run`` group (``jcm/config/run/longrun.yaml``: the top level, 3 h, as ECHAM's
 lmidatm default; see {doc}`gravity_waves`). Resolutions T21–T425 are supported.
@@ -144,6 +150,19 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
   energy sink (~−11 W/m² in the dynamics alone). The fixer is proportional
   rather than ECHAM-SL's Rasch & Williamson (1990) weighting; see
   {doc}`../design/tracer_mass_conservation`.
+- `compute` — the vertical stage of the semi-Lagrangian interpolation uses
+  the log of the reference σ on hybrid grids, not σ. ECHAM has no
+  semi-Lagrangian dynamics to follow (its vertical advection is the
+  Simmons & Burridge (1981) centred difference, ``dyn.f90``), and on the
+  L47 top, whose levels are spaced geometrically, Lagrange weights in σ
+  misread vertical advection (0.44 of it at the 1 Pa level and 1.37 at the
+  4 Pa level for a profile linear in height) and amplify 2Δz structure under
+  upwelling; in log-pressure the top levels are near-uniform. See
+  {doc}`../design/sl_vertical_interpolation`.
+- `science` — ECHAM's ``hdiff`` damhih branch (a thousandfold diffusion at
+  wavenumbers whose advective Courant number exceeds one, ``mo_hdiff.f90``)
+  is not ported: it guards ECHAM's Eulerian leapfrog advection, and the
+  semi-Lagrangian transport has no such Courant limit.
 - `compute` — the dinosaur backend integrates with a two-time-level
   semi-Lagrangian semi-implicit Crank–Nicolson RK2 step rather than ECHAM's
   three-time-level leapfrog + semi-implicit (both are semi-implicit; the
@@ -151,7 +170,13 @@ separate finite-volume physics grid (pg2; Hannah et al. 2021). Both use hybrid
   backend runs float64 dynamics with a float32 physics seam (the SE core
   needs x64).
 
-**Status & known limitations.** SPEEDY physics is generalised to arbitrary
+**Status & known limitations.** The hybrid top layer uses Dinosaur's
+Simmons & Burridge limit α₁ = 1 where ECHAM uses ln 2 (``mo_hyb.f90``), which
+places the dynamics' top full level at p₃/₂/e rather than at the p₃/₂/2 the
+physics uses; switching needs a Dinosaur option (#1061). The global
+proportional mass fixer returns the quasi-monotone limiter's mass creation in
+proportion to each tracer everywhere, so it moves cloud ice and aerosol from
+smooth to patchy regions (#1062). SPEEDY physics is generalised to arbitrary
 vertical level counts; high-``nlev`` / high-truncation configurations need a
 resolution-aware timestep to stay stable (see
 {doc}`../design/speedy_variable_levels`). The ECHAM ``lmidatm`` hyperdiffusion
@@ -175,15 +200,19 @@ rely on.
 - ``jcm/config/dycore/dinosaur.yaml`` — ``advection``,
   ``sl_vertical_interpolation``, ``humidity_mass_fixer``.
 - ``jcm/dycore/pyses/dycore.py`` — ``PysesCamSEDycore``.
+- ``jcm/dycore/dinosaur/log_pressure_interpolation.py`` — the log-pressure
+  vertical interpolation (``LogPressureSemiLagrangianHybrid`` / ``…Sigma``).
 - ``jcm/diffusion.py`` — ``DiffusionFilter`` and its ``auto`` / ``echam_lmidatm``
-  / ``default`` constructors; ``_ECHAM_LMIDATM_ORDERS``.
+  / ``default`` constructors; ``_ECHAM_LMIDATM_ORDERS``; ``diffuse_zonal_mean``.
 - ``jcm/config/run/longrun.yaml`` — ECHAM upper sponge.
 
 **Validation evidence.** ``jcm/dycore/dinosaur/dycore_test.py``,
-``sharding_test.py``, ``state_bridge_test.py``;
+``sharding_test.py``, ``state_bridge_test.py``,
+``log_pressure_interpolation_test.py``;
 ``jcm/dycore/pyses/pyses_dycore_test.py``, ``physics_grid_test.py``,
 ``rrtmgp_x64_test.py``; ``jcm/dycore/base_test.py``; ``jcm/diffusion_test.py``.
-Design references: {doc}`../design/tracer_mass_conservation`,
+Design references: {doc}`../design/sl_vertical_interpolation`,
+{doc}`../design/tracer_mass_conservation`,
 {doc}`../design/pyses_cam_se_dycore`,
 {doc}`../design/speedy_variable_levels`,
 {doc}`../design/dinosaur_sl_jam_configuration`.

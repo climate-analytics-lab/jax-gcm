@@ -44,6 +44,18 @@ of numbers that never existed. Neither trigger can fail a pull request.
 hook and the sweep cannot disagree about what counts as a citation. Running
 the check locally is opt-in: `JCM_CHECK_TRACKED_GAPS=1`.
 
+**The parser has no notion of tense.** `parse_refs` matches the `#NNN` token
+itself; it does not read the words around it. Narrating a fix in place —
+"(defect, #1031, fixed here)" — does not silence the citation, because the
+regex does not know "fixed here" means the gap closed. The only fix for a
+closed-issue citation is to delete the token, not to add words saying it is
+resolved (#1047/#1050/#1051, 2026-10-13, were all exactly this: three
+register entries that already read as fixed in prose while still carrying
+the issue number). `tracked_gaps_test.py::ClosedCitationFixtureTest` pins
+this with an on-disk fixture page styled the same way, so a future change
+that made the parser tense-aware in a way that let this through would fail
+a hermetic, no-network test.
+
 The sweep reports **three** states, not two: clean, stale, and no verdict. The
 distinction is load-bearing because the sweep *acts* on a clean register by
 closing the open report, so folding "the API was unreachable" into "clean"
@@ -69,3 +81,20 @@ It is not done because it needs diff parsing inside the guard and a base ref
 that only exists in CI, and the daily sweep already reports such a typo within
 a day. If the sweep proves too slow a signal in practice, this is the thing to
 add.
+
+**Put the state check back on the pull-request gate, again.** Revisited
+2026-10-13 when #1044/#1047/#1050/#1051 (four stale citations at once) raised
+the question directly. The measured timings say the detection side already
+works: the close hook filed #1047 fifteen seconds after the PR that closed
+#823 merged, and #1050/#1051 eleven and seventeen seconds after the PR
+closing #1031/#1039 — and, live during the write-up of this very fix, the
+hook caught #831 three minutes after it closed and filed #1082 before this
+paragraph was finished. What actually elapsed between closure and the fix
+(days, in all four cases) was a human/agent not having acted on an already-
+filed, already-correct report yet — a triage-latency problem, not a
+detection one. Re-adding the check to the PR gate would not have shortened
+that gap, and would restore the exact failure #836 removed: `run_docs.yaml`'s
+`science-register-guard` job holds no `issues:` permission, enforced
+structurally by
+`tracked_gaps_test.py::RepoWiringTest.test_docs_job_does_not_grant_issue_access`,
+and this PR leaves that test, and the permission, as they were.

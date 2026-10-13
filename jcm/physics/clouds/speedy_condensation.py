@@ -10,7 +10,7 @@ import jcm.constants as c
 # alhc is SPEEDY's latent heat in J/g (q is in g/kg). cpd, p0, grav are shared
 # and read as module attributes from jcm.constants.
 from jcm.physics.speedy.physical_constants import alhc
-from jcm.physics.speedy.smoothing import smooth_min
+from jcm.physics.speedy.smoothing import surrogate_min
 
 @jit
 def get_large_scale_condensation_tendencies(
@@ -76,13 +76,13 @@ def get_large_scale_condensation_tendencies(
         negative_dqa_mask[1:], dqa[1:] * rtlsc, 0.0).astype(dqlsc.dtype))
     # The grid-point-storm heating cap is a hard minimum: once a column
     # saturates it, every parameter's gradient through the heating is
-    # exactly zero. cap_smoothing > 0 (a fraction of the cap) rounds the
-    # corner with the hyperbolic smooth minimum so a residual gradient
-    # survives saturation; 0 keeps the hard cap.
+    # exactly zero. The value is the hard cap; cap_smoothing > 0 (a
+    # fraction of the cap) gives it the derivative of the hyperbolic smooth
+    # minimum, so a residual gradient survives saturation.
     cap = dqmax[1:, jnp.newaxis, jnp.newaxis] * psa2
     dtlsc = dtlsc.at[1:].set(jnp.where(
         negative_dqa_mask[1:],
-        tfact * smooth_min(-dqlsc[1:], cap, parameters.condensation.cap_smoothing * cap),
+        tfact * surrogate_min(-dqlsc[1:], cap, parameters.condensation.cap_smoothing * cap),
         0.,
     ).astype(dtlsc.dtype))
 

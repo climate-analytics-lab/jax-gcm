@@ -77,6 +77,8 @@ if TYPE_CHECKING:
     # Only the annotations of ``echam_physics`` name these: the JAM package is
     # imported in the JAM branch of the factory, not for every composition.
     from jcm.physics.aerosol.jam.activation.arg_term import ArgParameters
+    from jcm.physics.aerosol.jam.activation.ham_activation_term import (
+        HamActivationParameters)
     from jcm.physics.aerosol.jam.chemistry.aqueous import (
         AqueousSulfurParameters)
     from jcm.physics.aerosol.jam.chemistry.oxidants import OxidantParameters
@@ -187,7 +189,7 @@ def echam_physics(
     oxidants: OxidantParameters | Mapping[str, Any] | None = None,
     sulfur_gas: SulfurGasParameters | Mapping[str, Any] | None = None,
     aqueous: AqueousSulfurParameters | Mapping[str, Any] | None = None,
-    activation: ArgParameters | Mapping[str, Any] | None = None,
+    activation: ArgParameters | HamActivationParameters | Mapping[str, Any] | None = None,
     cloud_borne_exchange: (
         CloudBorneExchangeParameters | Mapping[str, Any] | None) = None,
     sedimentation: SedParameters | Mapping[str, Any] | None = None,
@@ -215,6 +217,7 @@ def echam_physics(
     jam_activation_scheme: str = "arg",
     jam_nactivpdf: int = 0,
     jam_aqueous_scheme: str = "full",
+    jam_incloud_impaction: str = "ham",
     jam_dust_preset: int = 4,
     jam_dust_nudged: bool = False,
     jam_dust_nduscale_scale: float | None = None,
@@ -452,13 +455,13 @@ def echam_physics(
         jam_wetdep_scheme: ``jam_aerosol_physics``'s ``wetdep_scheme`` --
             ``"jcm"`` (default), ``"ham_below_cloud"`` (ECHAM-HAM's own
             below-cloud Croft tables only, #1017 -- a deliberately narrower
-            ablation configuration) or ``"ham"`` (the FULL ``nwetdep=3``
-            scheme: below-cloud plus both in-cloud pathways, stratiform
-            nucleation and impaction). ``"ham_below_cloud"``/``"ham"``
-            require ``cloud_scheme="2m"`` (enforced below) and turn on the
-            2M scheme's ``"precip_cover"``/``"pfrain"``/``"pfsnow"``
-            diagnostics they read; ``"ham"`` additionally turns on
-            ``"reffl"``/``"reffi"`` for ``ic_scav_imp``.
+            ablation configuration) or ``"ham"`` (the Croft below-cloud
+            tables plus HAM's own nucleation scavenging ``ic_scav_nuc``;
+            with the default ``jam_incloud_impaction="ham"`` this is the
+            full ``nwetdep=3``). ``"ham_below_cloud"``/``"ham"`` require
+            ``cloud_scheme="2m"`` (enforced below) and turn on the 2M
+            scheme's ``"precip_cover"``/``"pfrain"``/``"pfsnow"``
+            diagnostics they read.
         jam_nucleation_activation: only consulted for ``jam_wetdep_scheme=
             "ham"`` -- ``"ham_arg"`` or ``"ham_lin_leaitch"``, forwarded to
             ``jam_aerosol_physics``'s ``nucleation_activation``. ``None``
@@ -488,6 +491,12 @@ def echam_physics(
             only.
         jam_aqueous_scheme: ``"full"`` (default, HAM port) or ``"simple"``
             (H2O2-limited) in-cloud aqueous sulfur chemistry.
+        jam_incloud_impaction: in-cloud impaction scavenging of interstitial
+            aerosol by cloud droplets and ice crystals (ECHAM-HAM
+            ``ic_scav_imp``): ``"ham"`` (default, its three r7492 lookup
+            defects corrected), ``"ham_r7492"`` (the compiled r7492 lookup,
+            for like-for-like comparison with ECHAM-HAM) or ``"none"`` (CAM's
+            form, no in-cloud impaction).
         jam_anthropogenic: include prescribed CEDS anthropogenic emissions
             (#498), the bulk in-model-speciated path; inert until CEDS forcing
             fluxes are supplied.
@@ -509,7 +518,8 @@ def echam_physics(
 
             enable_cosp: Attach the CloudSat satellite-simulator
             diagnostic (``CloudsatCosp``; requires the optional
-            jax-cosp dependency, ``pip install jcm[cosp]``). Runs
+            jax-cosp dependency: ``pip install jcm[cosp]`` after
+            installing jax-cosp from GitHub, see ``pyproject.toml``). Runs
             after the cloud microphysics and writes the
             ``cosp_*`` warm-rain / precip-cover diagnostics.
         cosp_ncolumns: Stochastic subcolumns per gridbox for the
@@ -565,16 +575,24 @@ def echam_physics(
         cosp_calipso: Also run the CALIPSO lidar simulator on the
             SAME subcolumn realization, giving the CFMIP
             ``cltcalipso``/``cllcalipso``/``clmcalipso``/
-            ``clhcalipso`` layered cloud cover.
+            ``clhcalipso`` layered cloud cover, each with a ``<name>_n``
+            time-mean-safety companion (see ``cosp_cloudsat``'s "Time-mean
+            safety" docstring section).
         cosp_modis: Also run the MODIS imager simulator on that
             realization (``cltmodis``, ``clwmodis``, ``climodis``,
             ``tauwmodis``, ``tauimodis``, ``reffclwmodis``,
             ``reffclimodis``, ``lwpmodis``, ``iwpmodis``, and the
             joint histograms ``clmodis`` / ``jpdftaure*modis`` /
-            ``lwpreffmodis`` / ``iwpreffmodis``).
+            ``lwpreffmodis`` / ``iwpreffmodis``). These are daytime-only
+            and/or in-cloud conditional means; a shared ``cosp_sunlit``
+            companion and the ``clwmodis``/``climodis`` weighting recover
+            them (see ``cosp_cloudsat``'s "Time-mean safety" docstring
+            section).
         cosp_isccp: Also run the ISCCP (ICARUS) simulator on that
             realization (``clisccp`` tau/CTP histogram and
-            ``cltisccp``); see jax-gcm#597.
+            ``cltisccp``); see jax-gcm#597. Its products are daytime-only
+            means too, sharing the same ``cosp_sunlit`` companion
+            ``cosp_modis`` uses.
         aerosol_free_interval: radiation steps between aerosol-free
             companion solves, which produce the AeroCom ``*noa`` TOA fluxes
             (rsutnoa/rlutnoa and clear-sky variants) that ERFari is
@@ -775,9 +793,14 @@ def echam_physics(
         # A mapping is applied on the class default (the JAM schemes have no
         # factory choice of their own to keep); an object is used as given and
         # ``None`` leaves the scheme to build its default.
+        # The sea-salt default depends on the scheme (Gong's calibration,
+        # Long's native scale).
+        _jam_defaults = {name: cls.default for name, cls in _jam_classes.items()}
+        _jam_defaults["seasalt"] = lambda: _jam_classes["seasalt"].default(
+            jam_seasalt_scheme)
         jam_p = {
             name: (with_field_overrides(
-                       _jam_classes[name].default(), value,
+                       _jam_defaults[name](), value,
                        scheme=name)
                    if isinstance(value, Mapping) else value)
             for name, value in _jam_args.items()}
@@ -981,6 +1004,7 @@ def echam_physics(
             activation_scheme=jam_activation_scheme,
             nactivpdf=jam_nactivpdf,
             aqueous_scheme=jam_aqueous_scheme,
+            incloud_impaction=jam_incloud_impaction,
             dust_preset=jam_dust_preset,
             dust_nudged=jam_dust_nudged,
             dust_nduscale_scale=jam_dust_nduscale_scale,

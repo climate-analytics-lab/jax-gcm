@@ -561,6 +561,21 @@ class _Conv:
 
 
 class ConvectiveTracerTransportTermTest(unittest.TestCase):
+    def test_emissions_and_mixing_are_seen_by_plume_and_scavenging(self):
+        state, diagnostics = self._setup(with_scav=True)
+        name = "m_so4_acc"
+        source = state.tracers[name] / diagnostics["_dt_seconds"]
+        empty = state.copy(tracers={name: jnp.zeros_like(source)})
+        term = ConvectiveTracerTransport((name,), csr_conv=(0.99,))
+        expected, expected_diag = term(state, diagnostics, None, None)
+        actual, actual_diag = term(empty, {**diagnostics,
+            "_tendency_run": {"tracers": {name: source}}}, None, None)
+        np.testing.assert_allclose(actual.tracers[name], expected.tracers[name],
+                                   rtol=2e-6, atol=1e-20)
+        np.testing.assert_allclose(actual_diag["_conv_scav_flux"][name],
+                                   expected_diag["_conv_scav_flux"][name], rtol=2e-6)
+        self.assertGreater(float(actual.tracers[name][2, 0]), 0.0)
+
     def _setup(self, with_conv=True, with_downdraft=False, with_scav=False,
                nlev=10, ncols=1):
         shape = (nlev, ncols)

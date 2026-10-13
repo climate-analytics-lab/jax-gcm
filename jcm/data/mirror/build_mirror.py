@@ -21,7 +21,7 @@ Stages: ``pull`` (Tier A from the published mirror), ``sso``,
 ``era5``, ``ozone``, ``emissions`` (fat-node PBS job
 recommended — see ``--help``), ``aux`` (dms/oxidants via
 ``tools/prep_jam_aux_inputs.py``), ``dust`` (the five Tegen/HAMMOZ
-dust inputs), ``bundles``, ``amip`` (yearly
+dust inputs), ``biogenic`` (HAM's AeroCom II biogenic OC, Tier A), ``bundles``, ``amip`` (yearly
 transient forcing/emissions/ozone, ``--years first,last`` — issue #610),
 ``era5-transient`` (yearly all-ERA5 forcing incl. transient land —
 issue #629), ``registry`` (the published registry at the tip, with the files
@@ -349,7 +349,8 @@ _UNRECORDED_STAGES = ("registry", "upload")
 
 #: Tier A products under ``build/`` that a full build stages into ``products/``.
 _TIER_A = ("ceds_anthro.zarr", "bb4cmip7.zarr",
-           "era5_land_climo_2005-2014_0p25.nc")
+           "era5_land_climo_2005-2014_0p25.nc",
+           "ham_biogenic_oc_aerocom2_t63_2000.nc")
 
 #: Seconds a published copy may predate a local file and still count as newer:
 #: HF commit dates are whole seconds and the two clocks differ.
@@ -546,6 +547,8 @@ def stage_era5() -> None:
 
 
 def stage_ozone() -> None:
+    import xarray as xr
+
     from jcm.data.bc.interpolate_ozone import interpolate_ozone
     from jcm.data.mirror.ozone import load_pd, load_pi, regrid_climatology
     from jcm.data.regridding import gaussian_latlon
@@ -564,6 +567,18 @@ def stage_ozone() -> None:
                     plev, out / f"ozone_fzj_cmip7_{era}_{grid}_l{nlev}.nc",
                     nlev)
             print("ozone:", era, grid, flush=True)
+    # The packaged jcm/data/bc/t63/ozone.nc (what ``forcing.ozone_file: auto``
+    # resolves at T63L47, offline) is the zonal mean of the PD T63 L47 file.
+    pd_l47 = out / "ozone_fzj_cmip7_pd2005-2014_t63_l47.nc"
+    if pd_l47.exists():
+        from jcm.data.mirror.ozone import zonal_mean_climatology
+        with xr.open_dataset(pd_l47) as ds:
+            zm = zonal_mean_climatology(ds.load(), str(pd_l47))
+        zm.to_netcdf(out / "packaged_t63_ozone.nc",
+                     encoding={"O3": {"zlib": True, "complevel": 9,
+                                      "shuffle": True}})
+        print("ozone: packaged t63 zonal mean -> copy to "
+              "jcm/data/bc/t63/ozone.nc", flush=True)
 
 
 def stage_emissions() -> None:
@@ -575,8 +590,8 @@ def stage_emissions() -> None:
     F6), on a site whose ``sites.input4mips`` resolves (Derecho/glade;
     CEDS is not on Levante, see the module docstring above)::
 
-        python -m jcm.data.mirror.build_mirror --stage emissions,bundles \
-            --products emissions
+        python -m jcm.data.mirror.build_mirror \
+            --stage emissions,biogenic,bundles --products emissions
 
     ``--stage emissions`` rewrites ``build/ceds_anthro.zarr`` and
     ``build/bb4cmip7.zarr`` (every species, since ``build_store`` skips a
@@ -642,19 +657,44 @@ def stage_dust() -> None:
         (d / "dust.nc").unlink(missing_ok=True)
 
 
+def stage_biogenic() -> None:
+    """Stage HAM's AeroCom II biogenic OC as the Tier A product (#1017 F7).
+
+    The product is the HAM file verbatim. Where the site provides an ECHAM-HAM
+    emissions tree (``sites.Site.ham_emissions``, or ``JCM_HAM_EMISSIONS_DIR``)
+    it is copied from there; elsewhere the published ``products/`` copy is
+    fetched at the pinned mirror revision, so every site builds its bundles
+    from the same bytes.
+    """
+    from jcm.data.mirror.emissions import (HAM_BIOGENIC_OC_PRODUCT,
+                                           HAM_BIOGENIC_OC_RELPATH)
+    from jcm.data.remote import fetch
+
+    dst = BUILD / HAM_BIOGENIC_OC_PRODUCT
+    if SITE.ham_emissions:
+        src = Path(SITE.ham_emissions) / HAM_BIOGENIC_OC_RELPATH
+        origin = str(src)
+    else:
+        src = Path(fetch(f"products/{HAM_BIOGENIC_OC_PRODUCT}"))
+        origin = f"the published mirror ({src})"
+    shutil.copy2(src, dst)
+    print(f"biogenic: {dst.name} from {origin}", flush=True)
+
+
 def stage_bundles() -> None:
     from jcm.data.mirror.bundles import (build_emissions_nc, build_forcing,
                                          build_terrain)
-    from jcm.data.mirror.emissions import load_biogenic_oc
+    from jcm.data.mirror.emissions import (HAM_BIOGENIC_OC_PRODUCT,
+                                           load_biogenic_oc)
     from jcm.data.regridding import gaussian_latlon
 
     era5 = BUILD / "era5_land_climo_2005-2014_0p25.nc"
-    # HAM's own AeroCom II biogenic-OC source (#1017 F7): a single
-    # climatology (no PI/PD split, see load_biogenic_oc's docstring) fed to
-    # every grid/era's ``build_emissions_nc`` call below. Loaded once here,
-    # not per grid/era, since it is grid-independent at its native
-    # resolution -- ``build_emissions_nc`` regrids it per call.
-    biogenic_oc = load_biogenic_oc() if _want("emissions") else None
+    # HAM's own AeroCom II biogenic-OC source (#1017 F7), the Tier A copy the
+    # ``biogenic`` stage left: one climatology (no PI/PD split, see
+    # load_biogenic_oc's docstring) that ``build_emissions_nc`` regrids for
+    # every grid and era.
+    biogenic_oc = (load_biogenic_oc(BUILD / HAM_BIOGENIC_OC_PRODUCT)
+                   if _want("emissions") else None)
     for grid, nlat in _grids().items():
         lats, lons = gaussian_latlon(nlat)
         d = UPLOAD / "bundles" / grid
@@ -721,14 +761,15 @@ def stage_amip() -> None:
     CEDS/BB slices) and ``<grid>_l{47,95}/ozone_amip/<year>.nc`` (FZJ
     monthly on model levels). Not part of ``--stage all`` — run
     explicitly with ``--stage amip --years 1950,2022``. Needs the
-    ``era5`` and ``emissions`` stage outputs in ``build/``.
+    ``era5``, ``emissions`` and ``biogenic`` stage outputs in ``build/``.
     """
     from jcm.data.bc.interpolate_ozone import interpolate_ozone
     from jcm.data.mirror.amip_yearly import (_TIME_ENC, build_emissions_year,
                                              build_forcing_year,
                                              load_ozone_year,
                                              regrid_ozone_year)
-    from jcm.data.mirror.emissions import load_biogenic_oc
+    from jcm.data.mirror.emissions import (HAM_BIOGENIC_OC_PRODUCT,
+                                           load_biogenic_oc)
     from jcm.data.regridding import gaussian_latlon
 
     first, last = _AMIP_YEARS
@@ -742,7 +783,8 @@ def stage_amip() -> None:
     # Same single HAM AeroCom-II climatology ``stage_bundles`` feeds every
     # era with (#1017 F7) -- replayed onto every AMIP year's time axis
     # below rather than sliced, since there is no transient biogenic series.
-    biogenic_oc = load_biogenic_oc() if _want("emissions") else None
+    biogenic_oc = (load_biogenic_oc(BUILD / HAM_BIOGENIC_OC_PRODUCT)
+                   if _want("emissions") else None)
     scratch = BUILD / "ozone_amip"
     scratch.mkdir(parents=True, exist_ok=True)
     for grid, nlat in _grids(transient=True).items():
@@ -1180,6 +1222,9 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
     runs (see :func:`check_sources`), so a one-shot ``--stage pull,...,bundles``
     on a fresh root is not refused up front.
     """
+    from jcm.data.mirror.emissions import (HAM_BIOGENIC_OC_PRODUCT,
+                                           HAM_BIOGENIC_OC_RELPATH)
+
     site = site or SITE
     i4m = f"{site.input4mips}/CMIP7/CMIP"
     rda = site.rda
@@ -1197,6 +1242,7 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
     ceds = ("Tier A CEDS store", str(BUILD / "ceds_anthro.zarr"))
     pcmdi = ("PCMDI AMIP SST/ice (input4MIPs)", f"{i4m}/PCMDI/PCMDI-AMIP-1-1-10")
     bb = ("Tier A BB4CMIP7 store", str(BUILD / "bb4cmip7.zarr"))
+    biogenic = ("Tier A HAM biogenic OC", str(BUILD / HAM_BIOGENIC_OC_PRODUCT))
     return {
         "pull": (),
         "sso": (("GMTED2010 DEM", str(GMTED)),
@@ -1212,12 +1258,16 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
                  f"{site.cesm_inputdata}/atm/cam/chem/ocnexch/"
                  "Csw_DMS_Lana2011_f09f09_1750_2100_20200717a.nc"), *oxid),
         "dust": tuple(dust),
+        # Without an emissions tree the stage fetches the published copy.
+        "biogenic": ((("ECHAM-HAM emissions tree (AeroCom II biogenic OC)",
+                       f"{site.ham_emissions}/{HAM_BIOGENIC_OC_RELPATH}"),)
+                     if site.ham_emissions else ()),
         "bundles": tuple(
             src for product, srcs in (
                 ("terrain", (era5_climo,
                              ("SSO statistics", str(BUILD / "sso")))),
                 ("forcing", (pcmdi, era5_climo)),
-                ("emissions", (ceds, bb)),
+                ("emissions", (ceds, bb, biogenic)),
                 ("ozone", (("ozone stage output", str(BUILD / "ozone")),)),
                 ("oxidants", (("aux stage output", str(BUILD / "aux")),)),
                 ("dms", (("aux stage output", str(BUILD / "aux")),)))
@@ -1227,7 +1277,7 @@ def _stage_sources(site: sites.Site = None) -> dict[str, tuple]:
                 ("forcing", (pcmdi, era5_climo,
                              ("CR-CMIP GHGs (input4MIPs)",
                               f"{i4m}/CR/CR-CMIP-1-0-0"))),
-                ("emissions", (ceds, bb)),
+                ("emissions", (ceds, bb, biogenic)),
                 ("ozone", (("FZJ ozone (input4MIPs)",
                             f"{i4m}/FZJ/FZJ-CMIP-ozone-1-0"),)))
             if _want(product) for src in srcs),
@@ -1336,6 +1386,7 @@ def _pulled_tier_a() -> bool:
 #: climatology arrays (``*_clim``) plus coordinates and metadata are needed.
 _TIER_A_PULL = (
     "products/era5_land_climo_2005-2014_0p25.nc",
+    "products/ham_biogenic_oc_aerocom2_t63_2000.nc",
     "products/ceds_anthro.zarr/zarr.json",
     "products/ceds_anthro.zarr/*_clim/**",
     "products/bb4cmip7.zarr/zarr.json",
@@ -1366,7 +1417,7 @@ def stage_pull() -> None:
                       revision=revision, allow_patterns=list(_TIER_A_PULL),
                       local_dir=str(stage))
     for name in ("era5_land_climo_2005-2014_0p25.nc", "ceds_anthro.zarr",
-                 "bb4cmip7.zarr"):
+                 "bb4cmip7.zarr", "ham_biogenic_oc_aerocom2_t63_2000.nc"):
         dst = BUILD / name
         if not dst.exists():
             dst.symlink_to(stage / "products" / name)
@@ -1495,7 +1546,7 @@ def stage_upload() -> None:
 
 STAGES = {"pull": stage_pull, "sso": stage_sso, "era5": stage_era5, "ozone": stage_ozone,
           "emissions": stage_emissions, "aux": stage_aux, "dust": stage_dust,
-          "bundles": stage_bundles, "amip": stage_amip,
+          "biogenic": stage_biogenic, "bundles": stage_bundles, "amip": stage_amip,
           "era5-transient": stage_era5_transient,
           "manifest": stage_manifest,
           "registry": stage_registry, "upload": stage_upload}
