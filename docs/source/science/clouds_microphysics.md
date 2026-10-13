@@ -149,6 +149,19 @@
   step-start state and the dynamics increment is zero. See
   {doc}`../design/operator_split_physics`.
 
+  **Published droplet number.** ``clouds.droplet_number`` (CF
+  ``number_concentration_of_cloud_liquid_water_particles_in_air``, m⁻³) is the
+  2M's resolved CDNC: the saved ``qnc`` tracer [kg⁻¹] times air density,
+  GRID-MEAN. This is ECHAM-HAM's own convention for the quantity —
+  ``pacdnc(:,jk) = zcdnc(:,jk)`` (``mo_cloud_micro_2m.f90:1710``), with
+  ``zcdnc`` the grid-mean ``ρ·(pxtm1 + ztmst·pxtte)`` (line 600) handed to its
+  radiation unmasked by cloud cover — not the 1M's prescribed-profile
+  convention (characteristic in-cloud, nonzero in clear sky; above). The two
+  schemes' Fortran sources differ, so the field means something different
+  depending which cloud scheme is composed; ``AerocomDiagnostics`` resolves
+  the difference into a single grid-mean/in-cloud pair for its own
+  consumers rather than reading this field.
+
 Both schemes convert a condensed/evaporated/frozen mixing-ratio increment to a
 temperature increment with ``L / cp`` where ``cp`` is the **moist** isobaric
 heat capacity ``cpd·(1 + vtmpc2·q)`` evaluated per-level at the step-start

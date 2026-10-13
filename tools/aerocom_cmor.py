@@ -76,9 +76,10 @@ NAME_MAP: dict[str, tuple[str, str, str, float, float]] = {
     "clouds.cloud_fraction": ("cl", "1", "ModelLevel", 1.0, 0.0),
     "qc": ("clw", "kg kg-1", "ModelLevel", 1.0, 0.0),
     "qi": ("cli", "kg kg-1", "ModelLevel", 1.0, 0.0),
-    # CloudData.droplet_number is zero under the 2-moment scheme, which
-    # carries qnc instead; AerocomDiagnostics publishes the resolved
-    # volumetric profile, so map that.
+    # CloudData.droplet_number's convention differs by scheme (grid-mean
+    # under 2M, in-cloud under 1M; #1053) and AerocomDiagnostics already
+    # resolves that into a single grid-mean volumetric profile for the
+    # CMOR writer, so map that rather than the raw CloudData field.
     "aerocom_cdnc3d": ("cdnc3d", "m-3", "ModelLevel", 1.0, 0.0),
     # The radii of the saved condensate (clw/cli above), in metres, which
     # AerocomDiagnostics forms with the radiation's law. ``clouds.r_eff_*``
