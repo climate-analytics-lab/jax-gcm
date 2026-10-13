@@ -150,6 +150,42 @@ class TestSpeedyNumericalEquivalence(unittest.TestCase):
         # Should produce valid (non-NaN) tendencies
         self.assertFalse(jnp.any(jnp.isnan(tend.temperature)))
 
+    def test_speedy_humidity_publishes_capped_rh_without_touching_physics_input(self):
+        """SpeedyHumidity must leave ``humidity.rh`` (a physics input read by
+        speedy_vdiff/speedy_shortwave/speedy_surface_flux) exactly as the
+        reference computes it, however extreme, while also publishing a
+        separate, sanity-capped ``relative_humidity`` diagnostic (#407 and
+        its Codex review: capping ``humidity.rh`` in place -- even scoped to
+        specific levels -- changed cloud diagnosis on some vertical grids).
+        """
+        from jcm.physics.speedy.speedy_terms import SpeedyHumidity
+
+        term = SpeedyHumidity()
+        term.cache_coords(self.coords)
+
+        state = self.state.copy(
+            temperature=self.state.temperature.at[0].set(126.0),
+            specific_humidity=jnp.full_like(
+                self.state.specific_humidity, 5e-4,
+            ),
+        )
+
+        _, diagnostics = term(state, {}, self.forcing, self.terrain)
+
+        physics_rh = diagnostics["_humidity"].rh
+        reported_rh = diagnostics["relative_humidity"]
+
+        # The physics-facing field is the raw, uncapped ratio -- the same
+        # pathological value speedy_vdiff.py etc. would read unmodified.
+        self.assertTrue(float(jnp.max(physics_rh)) > 1e4)
+        # The published diagnostic is sanity-capped.
+        self.assertTrue(float(jnp.max(reported_rh)) <= 10.0)
+        # Everywhere physics_rh is NOT pathological, the two agree exactly.
+        ordinary = physics_rh <= 10.0
+        np.testing.assert_allclose(
+            reported_rh[ordinary], physics_rh[ordinary],
+        )
+
     def test_every_output_variable_is_documented(self):
         """Every published variable carries units and a description.
 

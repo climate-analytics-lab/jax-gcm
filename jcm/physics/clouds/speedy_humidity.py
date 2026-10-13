@@ -9,43 +9,51 @@ from jcm.terrain import TerrainData
 from jcm.forcing import ForcingData
 from jcm.physics.speedy.params import Parameters
 from jcm.physics.speedy.physics_data import PhysicsData
-from jcm.physics.speedy.speedy_coords import stratosphere_mask
 from jcm.physics_interface import PhysicsState, PhysicsTendency
 
-# Numerical-sanity cap on the *reported* ``rh`` diagnostic — not a physical
-# bound. ``get_qsat`` follows the reference Fortran's ice-Tetens branch
-# (``ta < t0``) verbatim (speedy.f90's humidity.f90::get_qsat, Hatfield,
-# Kucharski & Molteni), which has no floor either: as T keeps falling, the
-# exponential drives qsat down by many more orders of magnitude than any
-# physically-resolvable specific humidity falls, so a near-zero but still
-# non-zero q divided by a near-zero qsat is unbounded. SPEEDY's top two
-# sigma layers (0.025 and 0.095, ``stratosphere_mask``) are exactly where
-# this bites — deep polar night can put the lid's temperature near
-# 125-150 K (a known, accepted characteristic of SPEEDY's crude top-level
-# radiative balance, not this function's concern) — and the formula then
-# reports RH in the hundreds of thousands of percent (#407).
-#
-# The cap is deliberately restricted to those two layers rather than
-# applied everywhere ``rh`` exceeds it. Every other SPEEDY term that reads
-# ``physics_data.humidity.rh`` already treats the stratosphere as off
-# limits for this exact reason: ``speedy_condensation.py`` only ever sets
-# ``dqlsc``/``dtlsc`` from level 1 down, ``speedy_vdiff.py``'s moisture
-# step both masks ``stratosphere_mask`` and additionally gates on
-# ``hsg > 0.5``, and ``speedy_shortwave.py::get_clouds`` excludes it from
-# its own cloud-top ``rh`` search with the same mask. So capping exactly
-# the stratosphere leaves every physics consumer's input bit-identical
-# (verified: a full T31L8 year differs from an uncapped run in no field
-# but ``humidity.rh`` itself, confined to these two levels and a handful of
-# interim ones nothing reads). A milder echo of the same mechanism persists
-# at sigma 0.2 and 0.34 (measured max ~30x and ~14x, against the top
-# layer's 1.6e6x) — capping those too would touch ``get_clouds``'s cloud-top
-# diagnosis, a physics change this fix does not make.
-#
-# 10.0 (1000 %) is the cap: real supersaturation (ice nucleation, cirrus)
-# tops out around 1.5-2, so this is generously above anything physically
-# meaningful while eliminating values that are many orders of magnitude
-# beyond that.
+# Numerical-sanity ceiling for the *public* relative-humidity diagnostic
+# (``capped_relative_humidity`` below) — not a physical bound, and not
+# applied to ``physics_data.humidity.rh`` itself (see that function's
+# docstring for why). 10.0 (1000 %) is generously above any physically
+# meaningful supersaturation (ice nucleation / cirrus tops out around
+# 1.5-2), so it only ever clips the numerical pathology this exists for.
 _RH_SANITY_MAX = 10.0
+
+
+def capped_relative_humidity(rh: jnp.ndarray) -> jnp.ndarray:
+    """Sanity-capped relative humidity for the public diagnostic (#407).
+
+    ``get_qsat`` follows the reference Fortran's ice-Tetens branch
+    verbatim and, like the reference, floors neither the saturation
+    specific humidity nor ``rh = q / qsat``: as T keeps falling the
+    exponential drives ``qsat`` down by many more orders of magnitude
+    than any physically-resolvable specific humidity falls, so a
+    near-zero but non-zero ``q`` divided by a near-zero ``qsat`` is
+    unbounded. SPEEDY's top sigma layers are exactly where this bites —
+    deep polar night can put the model lid's temperature near 125-150 K
+    (a known, accepted characteristic of SPEEDY's crude top-level
+    radiative balance, not this function's concern) — and the raw ratio
+    then reaches the hundreds of thousands of percent (measured 1.64e6 on
+    the ``speedy-t31`` release-validation year).
+
+    This is applied only to the separate ``"relative_humidity"`` output
+    diagnostic (:class:`~jcm.physics.speedy.speedy_terms.SpeedyHumidity`),
+    never to ``physics_data.humidity.rh`` itself: that field is also a
+    *physics input* — ``speedy_vdiff.py``, ``speedy_shortwave.py``'s cloud
+    diagnosis (including its fixed-sigma ``interp_to_sigma`` blends, which
+    are not confined to any one level on every SPEEDY vertical grid) and
+    ``speedy_surface_flux.py`` all read it — so capping it in place would
+    change simulated clouds and fluxes on a config where some bracketing
+    level's raw ratio exceeds the cap, not just the reported number. Two
+    Codex review rounds on #407 found exactly this when the cap was first
+    applied in place (restricting it to specific levels was still grid-
+    dependent and unsafe). Keeping the reference quantity untouched and
+    adding a distinct, always-sane public field mirrors the
+    ``relative_humidity`` / ``cover_relative_humidity`` split already used
+    for ECHAM's Sundqvist closure (:mod:`jcm.physics.diagnostics.moist_air_state`).
+    """
+    return jnp.minimum(rh, _RH_SANITY_MAX)
+
 
 @jit
 def spec_hum_to_rel_hum(
@@ -75,14 +83,7 @@ def spec_hum_to_rel_hum(
     # spec_hum_to_rel_hum logic
     map_qsat = jax.vmap(get_qsat, in_axes=(0, jnp.newaxis, 0), out_axes=0) # map over each input's z-axis and output to z-axis
     qsat = map_qsat(state.temperature, psa, physics_data.speedy_coords.fsg)
-    # ``qsat`` itself is left exactly as the reference computes it (every
-    # consumer, including the ones below, still reads the faithful value);
-    # only the reported ratio is capped, and only in the two stratospheric
-    # layers nothing else reads it in — see ``_RH_SANITY_MAX`` above for why.
-    raw_rh = state.specific_humidity / qsat
-    strat = stratosphere_mask(physics_data.speedy_coords.fsg)
-    strat = strat.reshape((-1,) + (1,) * (raw_rh.ndim - 1))
-    rh = jnp.where(strat, jnp.minimum(raw_rh, _RH_SANITY_MAX), raw_rh)
+    rh = state.specific_humidity / qsat
     humidity_out = physics_data.humidity.copy(rh=rh, qsat=qsat)
 
     physics_data = physics_data.copy(humidity=humidity_out)

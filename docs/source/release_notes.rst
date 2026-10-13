@@ -8,24 +8,33 @@ Bug fixes
 ^^^^^^^^^
 
 - **SPEEDY's top-level relative humidity spike near the poles is fixed**
-  (#407). ``get_qsat`` (``jcm/physics/clouds/speedy_humidity.py``) is a
+  (#407) **with a new public diagnostic, not by changing the physics
+  input.** ``get_qsat`` (``jcm/physics/clouds/speedy_humidity.py``) is a
   verbatim port of speedy.f90's ``humidity.f90::get_qsat`` (Hatfield,
   Kucharski & Molteni) and, like the reference, floors neither the
   saturation specific humidity nor the ``rh = q / qsat`` ratio. At the
-  model's top sigma layer (0.025) in deep polar night, where the top level's
-  temperature can fall to ~125-150 K, the ice-Tetens formula's saturation
-  value collapses many orders of magnitude faster than the residual
-  specific humidity there, so the reported ratio diverges — measured as
-  high as 1.64e6 (164 million %) on the ``speedy-t31`` release-validation
-  year, with 2% of polar top-level samples above 150%. This never reached a
-  tendency: SPEEDY's large-scale condensation (``speedy_condensation.py``,
-  which only sets ``dqlsc``/``dtlsc`` from level 1 down) and vertical
-  diffusion (``speedy_vdiff.py``'s stratosphere mask) already skip the top
-  model level(s), exactly as ``physics.f90`` does, so the spike was confined
-  to the reported diagnostic. The fix caps the *published* ``rh`` at 1000%
-  (generously above any physically meaningful supersaturation) without
-  touching ``qsat`` or any tendency; every other release-matrix statistic on
-  ``speedy-t31`` is unchanged.
+  model's top sigma layers in deep polar night, where temperature can fall
+  to ~125-150 K, the ice-Tetens formula's saturation value collapses many
+  orders of magnitude faster than the residual specific humidity there, so
+  the ratio diverges — measured as high as 1.64e6 (164 million %) on the
+  ``speedy-t31`` release-validation year, with 2% of polar top-level
+  samples above 150%.
+
+  That ratio, ``physics_data.humidity.rh``, is also a *physics input* —
+  ``speedy_vdiff.py``, ``speedy_shortwave.py``'s cloud-top diagnosis (whose
+  fixed-sigma interpolation is not confined to any one level on every
+  SPEEDY vertical grid) and ``speedy_surface_flux.py`` all read it — so
+  capping it in place, even restricted to specific levels, risks changing
+  simulated clouds and fluxes on some configuration (caught by two rounds
+  of Codex review). The fix instead leaves ``humidity.rh`` exactly as the
+  reference computes it and adds a separate ``relative_humidity``
+  diagnostic, capped at 1000% (generously above any physically meaningful
+  supersaturation), mirroring the ``relative_humidity`` /
+  ``cover_relative_humidity`` split ECHAM's Sundqvist closure already uses
+  for the identical reason. A full ``speedy-t31`` year confirms every
+  existing output field, including ``humidity.rh`` and ``humidity.qsat``
+  themselves, is bit-for-bit unchanged; ``relative_humidity`` is the only
+  new field, and it is the one to read going forward.
 
 v3.0.0 (2026-10-12)
 -------------------

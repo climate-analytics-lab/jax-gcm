@@ -294,22 +294,63 @@ class SpeedyForcing(SpeedyTermBase):
 
 
 class SpeedyHumidity(SpeedyTermBase):
-    """Converts specific humidity to relative humidity."""
+    """Converts specific humidity to relative humidity.
+
+    Publishes two humidity-ratio diagnostics with deliberately different
+    contracts:
+
+    - ``humidity.rh`` (``physics_data.humidity.rh``) is the reference
+      Fortran's own quantity, read unmodified by every other SPEEDY term
+      that needs it (``speedy_vdiff``, ``speedy_shortwave``,
+      ``speedy_surface_flux``) — it must stay bit-identical to
+      ``speedy.f90``'s ``get_qsat``/``spec_hum_to_rel_hum`` on every
+      vertical grid, including the SPEEDY-tuned 7/8-level tables and the
+      Frierson-stretch grids used at other level counts, so it is never
+      capped.
+    - ``relative_humidity`` is a separate, public, sanity-capped diagnostic
+      (:func:`~jcm.physics.clouds.speedy_humidity.capped_relative_humidity`)
+      for anyone reading the output file: at SPEEDY's coldest, driest
+      levels (deep polar night at the model lid) the raw ratio above
+      diverges to the hundreds of thousands of percent as ``qsat``
+      collapses faster than the residual specific humidity (#407). This
+      mirrors the ``relative_humidity`` / ``cover_relative_humidity`` split
+      ECHAM's Sundqvist closure already uses for the same reason — a
+      scheme-internal ratio stays faithful to its source, and a distinct,
+      always-sane name is what the output file calls "the" humidity.
+    """
 
     name: ClassVar[str] = "speedy_humidity"
     category: ClassVar[str] = "humidity"
-    provides: ClassVar[tuple[str, ...]] = ("_humidity",)
+    provides: ClassVar[tuple[str, ...]] = ("_humidity", "relative_humidity")
+    output_attrs: ClassVar[dict[str, dict[str, str]]] = {
+        "relative_humidity": {
+            "units": "1",
+            "long_name": "relative humidity",
+            "description": (
+                "Relative humidity from SPEEDY's own (ice/water-switching) "
+                "qsat, capped at 1000% so the coldest, driest top-of-model "
+                "layers never report a numerical-underflow artefact (#407). "
+                "See humidity.rh for the uncapped ratio the physics itself "
+                "reads."
+            ),
+        },
+    }
 
     def __call__(self, state, diagnostics, forcing, terrain):
         data = self._build_data(diagnostics)
         params = Parameters.default()
 
-        from jcm.physics.clouds.speedy_humidity import spec_hum_to_rel_hum
+        from jcm.physics.clouds.speedy_humidity import (
+            capped_relative_humidity, spec_hum_to_rel_hum,
+        )
         tend, data = _call_legacy_speedy(
             spec_hum_to_rel_hum, state, data, params, forcing, terrain,
         )
 
         diagnostics = _diagnostics_from_data(diagnostics, data)
+        diagnostics["relative_humidity"] = capped_relative_humidity(
+            data.humidity.rh,
+        )
         return tend, diagnostics
 
 
