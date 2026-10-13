@@ -1539,8 +1539,8 @@ scavenges interstitial aerosol by its activated fraction rather than
 carrying an explicit cloud-borne phase. The microphysics is the complete
 native ``m7`` call, through an adapter (``M7JaxMicrophysics``,
 ``jcm/physics/aerosol/jam/microphysics/m7_jax.py``) over the upstream
-``m7-jax`` package (BSD-3, the ``jcm[m7]`` extra, at the validated upstream
-commit ``8fe0fa7`` until ``m7-jax`` 0.2.0 is released) — ``calcsize``-equivalent
+``m7-jax`` package (BSD-3, the ``jcm[m7]`` extra, at a validated upstream
+commit until ``m7-jax`` 0.2.0 is released) — ``calcsize``-equivalent
 sizing, κ-Köhler hydration against
 the authentic ``lut_kappa.nc`` table, binary/ion-mediated nucleation,
 coagulation and the cloud-free modal redistribution, all in M7's own units

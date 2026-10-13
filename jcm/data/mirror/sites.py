@@ -14,6 +14,11 @@ resolves its source paths through :func:`current` instead of hard-coding them.
   ``$JCM_MIRROR_ROOT/sources/cesm_inputdata`` (same tree layout as the CESM
   inputdata server).
 
+Neither holds the ECHAM-HAM emissions tree; the two products built from it
+(the biogenic OC and the MSG dust map) are built on the UCSD devbox, which
+falls back to ``glade`` with ``JCM_HAM_EMISSIONS_DIR`` and ``JCM_MIRROR_ROOT``
+set (``docs/source/design/data_mirror.md``).
+
 A root is ``None`` where the site does not provide that source; a stage that
 needs it then fails fast in :func:`jcm.data.mirror.build_mirror.check_sources`
 naming the site and the missing source.
@@ -57,7 +62,7 @@ class Site:
     #: ECHAM-HAM emissions tree (``hammoz/T63/aerocom_II/...``): the source of
     #: the HAM biogenic-OC Tier A product and the MSG dust map. Neither site
     #: declares one; where it is absent the ``biogenic`` stage fetches the
-    #: published product and the dust stage cannot build the MSG map.
+    #: published product and the ``dust-msg`` stage cannot run.
     ham_emissions: str | None
     #: ECHAM6 input pool root (``T127/T127GR15_jan_surf.nc``) — terrain
     #: cross-checks only, never a bundle source.

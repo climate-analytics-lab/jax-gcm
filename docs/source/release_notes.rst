@@ -34,8 +34,8 @@ Dependencies
 - The ``m7`` extra depends on ``m7-jax`` by name, as ``cosp`` does on
   ``jax-cosp``, so the jcm wheel stays publishable on PyPI. m7-jax is not on
   PyPI yet, and every build of its release branch reports 0.2.0.dev0, so
-  install the validated commit first (the ``m7-jax`` line of
-  ``tools/ci/extras_preinstall.txt``), then ``pip install jcm[m7]``.
+  install the validated commit first, then ``pip install jcm[m7]``
+  (:doc:`advanced_features` gives both lines).
 
 v3.0.0 (2026-10-12)
 -------------------

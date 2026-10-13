@@ -1003,5 +1003,6 @@ class GridSelectionTest(unittest.TestCase):
         self.assertEqual(pool_built, list(POOL_DUST_PRODUCTS))
         self.assertEqual(built, ["dust_msg_sources"])
 
+
 if __name__ == "__main__":
     unittest.main()

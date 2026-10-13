@@ -127,7 +127,7 @@ HAMMOZ Consortium's BSD-3 M7 Fortran it is validated against) and is the
 `jcm[m7]` extra, pinned by version as `jcm[mam4]` pins `mam4-jax`. Until m7-jax
 0.2.0 is released every M7-JAX#1 build reports 0.2.0.dev0, so the version
 cannot select one: CI and the install instructions take the validated commit
-`8fe0fa7` from `tools/ci/extras_preinstall.txt`. Version 0.2 widens the
+from `tools/ci/extras_preinstall.txt`. Version 0.2 widens the
 package from pure sulfate to the full HAM M7 state.
 
 ### Native state (per cell)

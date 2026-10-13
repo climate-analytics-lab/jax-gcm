@@ -117,7 +117,7 @@ _MANIFEST_PRODUCTS: tuple[dict, ...] = (
      "grids": "gaussian", "levels": False, "coverage": None,
      "alignment": "climatology", "key": "dms_file", "auto": True,
      "staged": True},
-    # The six Tegen/HAMMOZ dust inputs (#802; the MSG map, #1017). They
+    # The five Tegen/HAMMOZ dust inputs (#802) and the MSG map (#1017). They
     # replace the CAM erodibility product that used to sit at
     # ``bundles/{grid}/dust.nc``; that name is retired rather than reused so
     # no warm cache can resolve a CAM geomorphic map into a scheme that

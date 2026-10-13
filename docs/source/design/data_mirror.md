@@ -261,8 +261,9 @@ verified path inventory). They run on either of two sites, whose source roots
 are declared once in `jcm/data/mirror/sites.py` (auto-detected, or
 `JCM_MIRROR_SITE`):
 
-- **NCAR Glade** holds every source except the ECHAM-HAMMOZ pool, so it can
-  rebuild Tier A and every bundle except the dust inputs.
+- **NCAR Glade** holds every source except the ECHAM-HAMMOZ pool and the
+  ECHAM-HAM emissions tree, so it can rebuild Tier A and every bundle except
+  the dust inputs and the biogenic OC (see below).
 - **DKRZ Levante** holds the CMIP7 input4MIPs tree and the ECHAM-HAMMOZ and
   ECHAM6 pools under `/pool/data`, but not the RDA ERA5 archive. It therefore
   does not rebuild Tier A: `--stage pull` fetches the published Tier A products
