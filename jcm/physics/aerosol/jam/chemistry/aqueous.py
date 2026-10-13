@@ -250,6 +250,12 @@ class AqueousSulfur(PhysicsTerm):
         "oxidants", "clouds", "air_density",
     )
     provides: ClassVar[tuple[str, ...]] = ()
+    # ``LIQUID_SHARE_KEY`` (the droplet-held share) is written by
+    # ``CloudBorneExchange``, which runs immediately before this term in
+    # the post-cloud JAM block ONLY when the population prognoses a
+    # cloud-borne phase (``spec.cloud_borne``); same-step fresh when
+    # present, and gracefully absent (``or {}``) otherwise.
+    optional_requires: ClassVar[tuple[str, ...]] = (LIQUID_SHARE_KEY,)
 
     def __init__(
         self,

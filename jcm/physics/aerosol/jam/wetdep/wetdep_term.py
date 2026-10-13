@@ -596,9 +596,12 @@ class WetScavenging(PhysicsTerm):
     # ``"_jam_activation"`` (``ArgActivation``) and ``"_conv_scav_flux"``
     # (``ConvectiveTracerTransport``, published unconditionally when that
     # term IS composed) are read defensively for configurations that
-    # compose JAM without one of those two (jax-gcm#673).
+    # compose JAM without one of those two. ``LIQUID_SHARE_KEY`` is written
+    # by ``CloudBorneExchange`` immediately before this term in the
+    # post-cloud block, only when the population prognoses a cloud-borne
+    # phase (jax-gcm#673).
     optional_requires: ClassVar[tuple[str, ...]] = (
-        "convection", "_jam_activation", "_conv_scav_flux",
+        "convection", "_jam_activation", "_conv_scav_flux", LIQUID_SHARE_KEY,
     )
 
     def __init__(
