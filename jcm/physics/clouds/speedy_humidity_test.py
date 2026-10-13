@@ -135,8 +135,8 @@ class TestHumidityUnit(unittest.TestCase):
         residual specific humidity, so the raw ratio would report millions
         of percent (measured 1.64e6 on the ``speedy-t31`` release-validation
         year). ``spec_hum_to_rel_hum`` must cap the *published* ``rh``
-        instead, leaving ``qsat`` itself -- and so every downstream
-        tendency, which only ever reads non-top levels -- untouched.
+        in this (stratospheric) layer, leaving ``qsat`` itself -- and so
+        every downstream tendency -- untouched.
         """
         from jcm.physics.clouds.speedy_humidity import _RH_SANITY_MAX
 
@@ -183,6 +183,56 @@ class TestHumidityUnit(unittest.TestCase):
         # ordinary, physically unremarkable relative humidity.
         rh_mid = physics_data.humidity.rh[self.sigma]
         self.assertTrue((rh_mid < 1.0).all())
+
+    def test_rh_cap_scoped_to_stratosphere_only(self):
+        """The cap must not touch any level ``speedy_shortwave.py``'s
+        ``get_clouds`` reads ``humidity.rh`` from for its own cloud-top
+        search (#407's Codex review): that search excludes only the
+        ``stratosphere_mask`` levels, so capping further down would change
+        cloud diagnosis, not just the reported diagnostic. Reproduce the
+        same pathology one level below the stratosphere (sigma ~0.2, still
+        cold enough that qsat collapses) and confirm the raw, uncapped
+        ratio survives even though it exceeds the sanity ceiling.
+        """
+        from jcm.physics.clouds.speedy_humidity import _RH_SANITY_MAX
+        from jcm.physics.speedy.speedy_coords import stratosphere_mask
+
+        strat = stratosphere_mask(speedy_coords.fsg)
+        # The lowest non-stratospheric level (just below the mask) is the
+        # one speedy_shortwave.py still searches over.
+        level = int(jnp.argmin(jnp.where(strat, 1, speedy_coords.fsg)))
+        self.assertFalse(bool(strat[level]))
+
+        zxy = (kx, ix, il)
+        xy = (ix, il)
+
+        temp = jnp.ones(zxy) * 273.0
+        temp = temp.at[level].set(140.0)  # cold enough to collapse qsat here too
+        qg = jnp.ones(zxy) * 5e-4
+        psa = self.pressure_standard
+
+        convection_data = ConvectionData.zeros(xy, kx)
+        physics_data = PhysicsData.zeros(xy, kx, convection=convection_data, speedy_coords=speedy_coords)
+        forcing = ForcingData.ones(xy)
+        state = PhysicsState.zeros(
+            zxy, temperature=temp, specific_humidity=qg,
+            normalized_surface_pressure=psa,
+        )
+
+        _, physics_data = spec_hum_to_rel_hum(
+            physics_data=physics_data, state=state, parameters=parameters,
+            forcing=forcing, terrain=terrain,
+        )
+
+        qsat_here = physics_data.humidity.qsat[level]
+        rh_here = physics_data.humidity.rh[level]
+        raw_ratio = qg[level] / qsat_here
+
+        # The pathology is reproduced (raw ratio is pathologically large)...
+        self.assertTrue((raw_ratio > _RH_SANITY_MAX).all())
+        # ...but this level is left exactly as the reference computes it:
+        # speedy_shortwave.py's cloud-top search still reads this value.
+        self.assertTrue(jnp.allclose(rh_here, raw_ratio))
 
     def test_rel_hum_to_spec_hum(self):
         temp = self.temp_standard
