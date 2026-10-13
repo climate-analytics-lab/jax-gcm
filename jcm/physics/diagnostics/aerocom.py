@@ -574,8 +574,15 @@ class AerocomDiagnostics(PhysicsTerm):
 
         * 2-moment (``lohmann_2m``) carries prognostic ``qnc``/``qni``
           tracers in **kg^-1** as **grid means** (they are advected
-          tracers) and leaves ``CloudData.droplet_number`` at its zero
-          carry init;
+          tracers). ``lohmann_2m/scheme.py`` now also writes the resolved
+          ``qnc*rho`` into ``CloudData.droplet_number`` (#1053, grid-mean,
+          m^-3) as the saved CF output, but this function still goes
+          straight to the tracer rather than reading that field: it needs
+          the value as it will be SAVED this step
+          (``_post_physics_tracer``), which the field — written inside the
+          cloud term, before any later term's tendency could apply — cannot
+          reflect for a (currently nonexistent) term downstream of the
+          cloud scheme that also touched ``qnc``;
         * 1-moment (``echam_1m``) writes ``CloudData.droplet_number`` in
           **m^-3** as a characteristic **in-cloud** value
           (ECHAM's prescribed profile times ``cdnc_factor``,

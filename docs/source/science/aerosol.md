@@ -1102,19 +1102,23 @@ out an 8-bin size-resolved flux; the bin-to-mode step lives outside it.
   not widened to give the calibrated year more room).
 
   **The gate is scored on the run directory's whole trailing year, not on
-  whatever window ``--last-n`` was asked to score (#1010).** The band above
-  is drawn on a full T63 year, cold-start ramp included: the calibrated
-  2351 Tg/yr anchor is itself a from-zero year's total, and the retune's
-  195-day health window (the paragraph above, and the burden table below)
-  measures a *different* statistic — a mean burden, which the dust-free
-  spin-up months genuinely bias low — not this one, which integrates a
-  whole-year flux and has no corresponding bias to correct for. Reading the
-  statistic from a ``--last-n`` slice short of a year would therefore not
-  make it more representative, only shorter; ``tools/release_validation/
+  whatever window ``--last-n`` was asked to score.** The band above is drawn
+  on a full T63 year, cold-start ramp included: the calibrated 2351 Tg/yr
+  anchor is itself a from-zero year's total, and the retune's 195-day health
+  window (the paragraph above, and the burden table below) measures a
+  *different* statistic — a mean burden, which the dust-free spin-up months
+  genuinely bias low — not this one, which integrates a whole-year flux and
+  has no corresponding bias to correct for. Reading the statistic from a
+  ``--last-n`` slice short of a year would therefore not make it more
+  representative, only shorter; ``tools/release_validation/
   aerosol_stats.py``'s ``annual_window_bounds`` reads the run directory's
   last 365 days (or the whole directory, if it holds less) for this one
   statistic regardless of ``--last-n``, while the drift, ledger and burden
-  statistics above keep reading whatever window was asked for.
+  statistics above keep reading whatever window was asked for. The reported
+  statistic set carries this window's length alongside the statistic
+  (``dust_window_days``, next to the ``record_days`` the drift/ledger window
+  used), so a reader of ``health.py``'s JSON report or its printed table can
+  tell the two windows apart rather than assuming they match.
 
   **The value is 0.485, set by the annual AeroCom dust burden in Stage 2c of
   the retune, with the Sundqvist T63 cover set in place and the cloud-borne

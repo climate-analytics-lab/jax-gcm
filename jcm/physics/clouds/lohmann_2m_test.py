@@ -2952,6 +2952,175 @@ class TestTotalCoverFollowsTheWriteBack2M:
         assert np.all(np.asarray(clouds.total_cloud_cover) < before)
 
 
+class TestDropletNumberPublishing2M:
+    """``clouds.droplet_number`` must carry the 2M's resolved CDNC (#1053).
+
+    Before this fix ``CloudData.droplet_number`` was created at zero
+    (``CloudData.zeros``) and only the 1-moment scheme filled it
+    (``echam_1m.py``'s ``cdnc_radiation``); the 2M scheme carries its number
+    as the prognostic ``qnc`` tracer instead, so this path left the
+    CF-advertised CDNC at that zero seed in every echam-2m / echam-jam /
+    echam-ham-m7 run.
+    """
+
+    NLEV, NCOLS = 8, 2
+    CLOUD = slice(5, 7)  # a warm liquid-cloud band near the surface
+
+    def _inputs(self):
+        from types import SimpleNamespace
+
+        from jcm.physics.aerosol.aerosol_types import AerosolData
+        from jcm.physics.clouds.cloud_data import CloudData
+        from jcm.physics.convection.saturation import saturation_specific_humidity
+        from jcm.physics_interface import PhysicsState
+
+        nlev, ncols = self.NLEV, self.NCOLS
+        shape = (nlev, ncols)
+        col = lambda v: jnp.asarray(v)[:, None] * jnp.ones((1, ncols))  # noqa: E731
+        pressure = col(np.linspace(2.0e4, 9.5e4, nlev))
+        temperature = col(np.linspace(230.0, 288.0, nlev))
+        humidity = 0.6 * saturation_specific_humidity(
+            temperature, pressure, phase="water")
+        rho = pressure / (287.05 * temperature)
+
+        cloudy = np.zeros(nlev, dtype=bool)
+        cloudy[self.CLOUD] = True
+        cloud_mask = col(cloudy.astype(np.float64)) > 0.0
+
+        qc = jnp.where(cloud_mask, 4.0e-4, 0.0)
+        qi = jnp.zeros(shape)
+        # ~5e7 m^-3 in the cloud band, carried per kg of air (the tracer
+        # convention): the prescribed value a maritime 1M column would use,
+        # so the two schemes' numbers are of comparable magnitude here.
+        qnc = jnp.where(cloud_mask, 5.0e7 / rho, 0.0)
+        qni = jnp.zeros(shape)
+        cover = jnp.where(cloud_mask, 0.6, 0.0)
+
+        clouds = CloudData.zeros((ncols,), nlev).copy(
+            cloud_fraction=cover, qc=qc, qi=qi)
+        state = PhysicsState.zeros(
+            shape, temperature=temperature, specific_humidity=humidity,
+            tracers={"qc": qc, "qi": qi, "qnc": qnc, "qni": qni})
+        diagnostics = {
+            "_dt_seconds": 900.0, "pressure_full": pressure, "air_density": rho,
+            "layer_thickness": jnp.full(shape, 500.0), "clouds": clouds,
+            "aerosol": AerosolData.zeros((ncols,), nlev),
+            "vertical_diffusion": SimpleNamespace(tke=jnp.full(shape, 0.1)),
+            "activated_cdnc": jnp.full(shape, 1.0e8),
+        }
+        return state, diagnostics, cloud_mask
+
+    def test_droplet_number_is_qnc_times_rho_in_cloud_zero_outside(self):
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+
+        state, diagnostics, cloud_mask = self._inputs()
+        dt = diagnostics["_dt_seconds"]
+        tendency, out = Lohmann2MMicrophysics()(state, diagnostics, None, None)
+        clouds = out["clouds"]
+
+        # The published value must be EXACTLY the tracer the host will save
+        # THIS step (step-start qnc plus this term's own tendency) times air
+        # density -- not the step-start tracer, which would date it a step
+        # behind (the trap the ``aerocom``/``cosp_cloudsat`` post-physics
+        # helpers exist to avoid).
+        qnc_saved = jnp.maximum(
+            state.tracers["qnc"] + dt * tendency.tracers["qnc"], 0.0)
+        expected = qnc_saved * diagnostics["air_density"]
+        np.testing.assert_allclose(
+            np.asarray(clouds.droplet_number), np.asarray(expected), rtol=1e-6)
+
+        # Nonzero where the liquid cloud is, and negligible (the scheme's
+        # cqtmin floor, 1e-12 m^-3) everywhere else -- the field must not be
+        # the identically-zero seed any more.
+        droplet_number = np.asarray(clouds.droplet_number)
+        in_cloud = np.asarray(cloud_mask)
+        assert np.all(droplet_number[in_cloud] > 1.0e6)
+        assert np.all(droplet_number[~in_cloud] < 1.0)
+
+    def test_droplet_number_is_grid_mean_not_in_cloud(self):
+        """Unlike the 1M field, this one is NOT divided by cloud fraction.
+
+        ECHAM-HAM hands its radiation the grid-mean number unmasked by
+        cover (``pacdnc = zcdnc``, ``mo_cloud_micro_2m.f90:1710``); dividing
+        by the 0.6 cover used here would inflate the in-cloud band's value
+        by 1/0.6, which this must not show.
+        """
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+
+        state, diagnostics, cloud_mask = self._inputs()
+        dt = diagnostics["_dt_seconds"]
+        tendency, out = Lohmann2MMicrophysics()(state, diagnostics, None, None)
+        clouds = out["clouds"]
+
+        qnc_saved = jnp.maximum(
+            state.tracers["qnc"] + dt * tendency.tracers["qnc"], 0.0)
+        grid_mean = qnc_saved * diagnostics["air_density"]
+        in_cloud_value = grid_mean / 0.6
+        droplet_number = np.asarray(clouds.droplet_number)[np.asarray(cloud_mask)]
+        np.testing.assert_allclose(
+            droplet_number, np.asarray(grid_mean)[np.asarray(cloud_mask)],
+            rtol=1e-6)
+        # Sanity: the (wrong) in-cloud form would be visibly different.
+        assert np.all(
+            np.abs(droplet_number
+                   - np.asarray(in_cloud_value)[np.asarray(cloud_mask)])
+            > 1.0)
+
+    def test_droplet_number_includes_an_upstream_qnc_tendency(self):
+        """A term upstream of the cloud scheme that also touches qnc must count.
+
+        Codex review on #1085: with no carried anchor, ``cloud_scheme_inputs``
+        gives ``inputs.provisional.tracers["qnc"]`` = ``state.tracers["qnc"]
+        + dt * diagnostics["_tendency_run"]["tracers"]["qnc"]`` -- exactly the
+        baseline the scheme's own CDNC ledger runs on (``qnc_raw`` /
+        ``tracer_tm1_cdnc``). Reconstructing the published value from
+        ``state.tracers["qnc"]`` alone, ignoring that running tendency, would
+        disagree with the saved tracer by exactly ``dt`` times it. No term in
+        the current codebase writes a ``qnc`` tendency ahead of the cloud
+        scheme (TTE-TKE and Tiedtke declare only qc/qi; JAM's tracer
+        diffusion list is built from JAM's own required tracers, never the
+        cloud scheme's) -- this pins the general case with a synthetic one
+        so a future upstream qnc-writer cannot silently go stale here.
+        """
+        from jcm.physics.clouds.lohmann_2m import Lohmann2MMicrophysics
+
+        state, diagnostics, cloud_mask = self._inputs()
+        dt = diagnostics["_dt_seconds"]
+        shape = state.temperature.shape
+        zeros = jnp.zeros(shape)
+        # A synthetic upstream term halving the cloud-band qnc this step.
+        upstream_qnc_tendency = jnp.where(
+            cloud_mask, -0.5 * state.tracers["qnc"] / dt, 0.0)
+        diagnostics = {
+            **diagnostics,
+            "_tendency_run": {
+                "temperature": zeros, "specific_humidity": zeros,
+                "tracers": {"qnc": upstream_qnc_tendency,
+                            "qni": zeros, "qc": zeros, "qi": zeros},
+            },
+        }
+
+        tendency, out = Lohmann2MMicrophysics()(state, diagnostics, None, None)
+        clouds = out["clouds"]
+
+        provisional_qnc = state.tracers["qnc"] + dt * upstream_qnc_tendency
+        qnc_saved = jnp.maximum(
+            provisional_qnc + dt * tendency.tracers["qnc"], 0.0)
+        expected = qnc_saved * diagnostics["air_density"]
+        np.testing.assert_allclose(
+            np.asarray(clouds.droplet_number), np.asarray(expected), rtol=1e-6)
+
+        # The (bug) formula that drops the upstream tendency would disagree
+        # in the cloud band, where the synthetic upstream term is nonzero.
+        buggy = jnp.maximum(
+            state.tracers["qnc"] + dt * tendency.tracers["qnc"], 0.0
+        ) * diagnostics["air_density"]
+        in_cloud = np.asarray(cloud_mask)
+        assert np.all(
+            np.abs(np.asarray(clouds.droplet_number)[in_cloud]
+                   - np.asarray(buggy)[in_cloud]) > 1.0)
+
+
 class TestSpaConfigurationHandover:
     """SPA tuning is applied post-compose, so ``replace`` must carry it."""
 
