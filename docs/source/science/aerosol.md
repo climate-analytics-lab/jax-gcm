@@ -160,13 +160,14 @@ carried here. Per-species optics are an apportionment of the mixed mode's
 extinction, not a decomposition — see
 {doc}`../design/aerosol_optics_diagnostics`.
 
-The default optics now preserve the mass response on a mode whose ``dg``
-sits on a size bound (#823): at fixed geometry and composition, doubling
-mass doubles optical depth before the existing layer cap. Size bounds still
-limit the shape of the distribution; volume normalization does not remove
-that limitation or refresh a radius that lags the microphysics update. The
-MAM4-JAX core does adjust number in ``calcsize``; the placeholder is an
-equilibrium size diagnosis without that tendency.
+The default optics preserve the mass response on a mode whose ``dg`` sits on
+a size bound: at fixed geometry and composition, doubling mass doubles
+optical depth before the existing layer cap, via the volume normalization
+described above. Size bounds still limit the shape of the distribution;
+volume normalization does not remove that limitation or refresh a radius
+that lags the microphysics update. The MAM4-JAX core does adjust number in
+``calcsize``; the placeholder is an equilibrium size diagnosis without that
+tendency.
 
 ### Cloud-droplet activation (ARG)
 
