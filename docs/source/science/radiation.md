@@ -610,6 +610,7 @@ uses civil months rather than twelve equal fractions of a nominal year.
 This changes the seasonal forcing relative to the former epoch-based 365-day
 clock, so old climate baselines are not numerically interchangeable. The
 calendar-boundary tests establish date alignment; multi-year SPEEDY and ECHAM
-climate comparisons are part of the v3.0 release validation tracked in #831.
-The clock, forcing-selection and output-labelling contracts, and how to migrate
-from the v2 clock, are described in {ref}`v3-datetime`.
+climate comparisons against this clock were part of the v3.0 release
+validation (closed with the 3.0.0 release). The clock, forcing-selection and
+output-labelling contracts, and how to migrate from the v2 clock, are
+described in {ref}`v3-datetime`.

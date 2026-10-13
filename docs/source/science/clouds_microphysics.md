@@ -367,7 +367,12 @@ soluble-aerosol number from a CCN climatology with a floor of 10⁷ kg⁻¹.
   derivative of the recurrence is finite, and the true one wherever adjacent layers
   differ; at exactly tied layers (an exactly clear column) it is a subgradient
   that leaves a cloud-free interior layer with zero sensitivity where the
-  one-sided derivative is +1 (#1013).
+  one-sided derivative is +1. This is accepted rather than fixed: gradient-
+  based calibration targets the AeroCom cloud-optical-depth-thresholded
+  cover (`clt`) that satellite retrievals see, not this online, release-gate
+  `aclcov` (maintainer decision 2026-10-05, tracked by the now-closed issue
+  1013) — a fix would be warranted only if `clouds.total_cloud_cover`
+  itself enters a loss.
 - Radiation's cover, `science` — ECHAM's radiation uses the cover only where
   the step-start grid-mean condensate it radiates is positive
   (``mo_radiation.f90`` l.428-434, ``xq = MAX(xlm1, 0)``,
