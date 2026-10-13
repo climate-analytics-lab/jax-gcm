@@ -161,6 +161,13 @@ class Mam4JaxMicrophysics(ModalMicrophysicsTerm):
 
     name: ClassVar[str] = "jam_mam4_jax_microphysics"
     requires: ClassVar[tuple[str, ...]] = ("pressure_full", "height_full")
+    # Read in ``_step`` (see its "PBL height" comment): a cross-step read
+    # of last step's TTE-TKE boundary-layer height for the nucleation
+    # path -- this term (the "core") runs in the pre-cloud aerosol block,
+    # upstream of ``TteTkeVerticalDiffusion`` in the default
+    # ``echam_physics`` order; absent on the first step -> 0, which only
+    # disables the boundary-layer-enhanced nucleation branch.
+    optional_requires: ClassVar[tuple[str, ...]] = ("vertical_diffusion",)
     spec: ClassVar[ModalAerosolSpec] = MAM4_SPEC
 
     def __init__(

@@ -55,6 +55,8 @@ from typing import Literal
 import jax
 import jax.numpy as jnp
 
+from jcm.physics.surrogate_gradient import with_surrogate_gradient
+
 
 _OverlapRule = Literal["random", "maximum_random", "exponential"]
 
@@ -125,11 +127,13 @@ def resolvable_path(path: jnp.ndarray) -> jnp.ndarray:
 # This is a one-sided clip -- the identity almost everywhere, flattening
 # everything above the threshold to the same value -- and is NOT the sub-grid
 # inhomogeneity treatment. The inhomogeneity factor (ECHAM ``zinhoml``/
-# ``zinhomi``) is a separate FIXED multiplicative reduction applied to the
-# per-gpoint optical-depth paths (see ``RadiationParameters.cloud_inhomogeneity_*``
-# and the ``in_cloud_*_lib`` scaling in ``radiation_scheme_rrtmgp``). Measured on
-# T63L47 output this clip binds in ~0.003% of cloudy cells, so it is inert in
-# practice; keep it strictly as a NaN guard (#678).
+# ``zinhomi``) is a separate FIXED multiplier (see
+# ``RadiationParameters.cloud_inhomogeneity_*``), passed to jax-rrtmgp as
+# ``cloud_tau_scale_liq``/``_ice`` in ``radiation_scheme_rrtmgp`` rather than
+# baked into the per-gpoint paths here, so the library weights ssa/asymmetry
+# by the UNSCALED per-phase τ as ECHAM does (#958). Measured on T63L47 output
+# this clip binds in ~0.003% of cloudy cells, so it is inert in practice;
+# keep it strictly as a NaN guard (#678).
 _MAX_IN_CLOUD_CONDENSATE = 1.0e-2
 
 
@@ -175,6 +179,155 @@ def effective_cloud_fraction(
     default 1e-3), so the tie must be made explicit.
     """
     return jnp.where(cloud_fraction > 2.0 * eps, cloud_fraction, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# #973: non-vanishing derivative through ECHAM's condensate mask
+# ---------------------------------------------------------------------------
+#
+# ``jcm.physics.clouds.cloud_data.condensate_masked_cover`` applies ECHAM's
+# exact rule -- cover kept only where qc or qi is positive, zeroed elsewhere
+# (``mo_radiation.f90`` l.428-434) -- to the cloud fraction BEFORE it reaches
+# this module. In a "cloudy but empty" cell (cover > 0, qc = qi = 0) that
+# masked cover's PRIMAL is exactly 0, which is correct: there is genuinely no
+# condensate to radiate. But every function below that reads it --
+# :func:`in_cloud_path`/:func:`in_cloud_condensate` (their own ``cloud_fraction
+# > 2*eps`` gate) and :func:`effective_cloud_fraction` (the identical gate) --
+# is a ``jnp.where`` whose AD rule differentiates only the SELECTED branch, and
+# at a primal of exactly 0 the selected branch is always the constant-zero one,
+# with derivative 0, regardless of how a trace of qc would change the SOURCE
+# cover that fed the mask. A plain surrogate on ``condensate_masked_cover``
+# alone cannot fix this: its surrogate function necessarily closes over
+# ``cloud_fraction`` alone (the masked cover's *downstream* consumers,
+# `in_cloud_path`/``effective_cloud_fraction``, never see ``qc``/``qi`` as
+# arguments), so differentiating it still gives zero sensitivity to qc. Fixing
+# the masked cover's own derivative therefore does nothing on its own -- the
+# fix has to be made where ``qc``/``qi`` and the RAW (unmasked) cover are both
+# still in scope, i.e. here, by taking both as explicit arguments and letting
+# the surrogate recompute the UNGATED formula directly from them (ECHAM's own
+# tie between the condensate and the cover: if a trace of condensate appeared,
+# the cell would radiate at its full diagnosed cover).
+#
+# What this does NOT reach: the ACTUAL flux. The per-g-point cloud path
+# jax-rrtmgp sees is (schematically) ``mask * in_cloud_path``, and at a
+# covered-but-empty cell BOTH factors are exactly 0 (the mask because every
+# sub-column draws clear when the masked cover's primal is 0; the path
+# because ECHAM's mask already zeroed it) -- the plain product rule gives
+# ``d(mask)*0 + 0*d(path) = 0`` regardless of what derivative either factor
+# carries on its own, so patching the functions below does not by itself
+# move the flux's derivative off zero. A combined surrogate directly on
+# that product (tried on this branch: broadcast the layer's GRID-MEAN
+# condensate path to every g-point, the optically-thin first-order McICA-
+# ensemble expectation, ``E[mask]*path = cf*(grid_mean/cf) = grid_mean``)
+# does give THAT product a non-vanishing tangent -- but measured through the
+# actual ``compute_heating_rate`` call, the flux's derivative is STILL
+# exactly 0. The reason is a SECOND, separate zero-slope point, inside
+# jax-rrtmgp 0.5.0 itself: ``rrtmgp.optics.cloud_optics`` multiplies the
+# path by ``smooth_ops.smooth_gate(path, 0, 2*EPSILON)``, a C1 smoothstep
+# ramp whose value AND first derivative are both exactly 0 at ``path = 0``
+# (by construction -- a smoothstep is flat at both ends of its ramp, not
+# just the far one). ``d(path*gate(path))/dpath|_{path=0} = gate(0) + 0 =
+# 0`` for ANY tangent reaching `path`, so no surrogate on jcm's side of the
+# library boundary can move it. Confirmed empirically: a column one ULP off
+# this exact point already has a large, finite flux derivative. Closing
+# this needs jax-rrtmgp's gate to carry a one-sided (nonzero) slope at its
+# lower edge -- an upstream change, outside jcm's RRTMGP backend; tracked
+# against #973 in jax-gcm#1093 rather than attempted here.
+#
+# ``generate_subcolumns``'s per-g-point mask (``r < cloud_fraction``) has
+# its OWN, unconditional reason to carry no cover gradient at all --
+# comparisons carry no AD tangent in JAX, full stop -- documented in the
+# module docstring; also tracked in #1093 rather than attempted here.
+
+
+def in_cloud_condensate_with_mask_gradient(
+    grid_mean: jnp.ndarray,
+    masked_cloud_fraction: jnp.ndarray,
+    raw_cloud_fraction: jnp.ndarray,
+    eps: float = 1.0e-3,
+) -> jnp.ndarray:
+    """:func:`in_cloud_condensate`, with a one-sided derivative at the mask.
+
+    The forward value is :func:`in_cloud_condensate` exactly -- ECHAM's
+    condensate mask applied, so a covered-but-empty cell's in-cloud
+    condensate is exactly 0, as it must be (there is no condensate to
+    radiate). The derivative is that of the UNGATED division, evaluated at
+    the RAW (unmasked) cover: ``grid_mean / max(raw_cloud_fraction, eps)``,
+    capped the same way, but ONLY where ``raw_cloud_fraction > 2*eps`` --
+    the same clear-cell threshold :func:`in_cloud_path` itself gates on. A
+    genuinely clear cell (``raw_cloud_fraction`` itself at or below that
+    floor, not merely masked to 0 by a missing condensate) has no diagnosed
+    cover to radiate at, so its derivative stays 0 too; without this gate
+    the division's ``1/max(raw_cf, eps)`` blows up to ``1/eps`` there (a
+    review finding on this PR: a spurious large sensitivity at exactly the
+    cells this function must leave alone). At a covered-but-empty cell
+    (``raw_cloud_fraction`` ABOVE the floor, condensate the only reason the
+    mask fired) this is the one-sided "if a trace of condensate appeared,
+    it would radiate at the diagnosed cover" sensitivity (#973) -- e.g.
+    ``d/dqc = 1/cf`` at ``cf = 0.5``, where the masked (exact) formula's own
+    derivative is 0.
+
+    Args:
+        grid_mean: grid-mean condensate [kg/kg] (any shape).
+        masked_cloud_fraction: ECHAM's condensate-masked cover (same shape),
+            e.g. ``cloud_data.condensate_masked_cover``'s output.
+        raw_cloud_fraction: the cover BEFORE that masking, i.e. the
+            diagnosed ``clouds.cloud_fraction`` (same shape).
+        eps: the clear-cell floor (``RadiationParameters.cld_frac_min``). A
+            differentiable leaf of ``RadiationParameters``, so it is passed
+            through ``with_surrogate_gradient`` as an explicit argument
+            rather than closed over -- closing over it leaks its tracer
+            past the custom-JVP boundary under ``jax.grad`` with respect to
+            the whole parameter pytree (``cld_frac_min`` included), raising
+            ``UnexpectedTracerError``.
+
+    """
+    def exact(path, masked_cf, raw_cf, e):
+        del raw_cf
+        return in_cloud_condensate(path, masked_cf, eps=e)
+
+    def surrogate(path, masked_cf, raw_cf, e):
+        del masked_cf
+        ungated = jnp.minimum(
+            path / jnp.maximum(raw_cf, e), _MAX_IN_CLOUD_CONDENSATE)
+        return jnp.where(raw_cf > 2.0 * e, ungated, 0.0)
+
+    return with_surrogate_gradient(exact, surrogate)(
+        grid_mean, masked_cloud_fraction, raw_cloud_fraction,
+        jnp.asarray(eps))
+
+
+def effective_cloud_fraction_with_mask_gradient(
+    masked_cloud_fraction: jnp.ndarray,
+    raw_cloud_fraction: jnp.ndarray,
+    eps: float = 1.0e-3,
+) -> jnp.ndarray:
+    """:func:`effective_cloud_fraction`, with the raw cover's derivative.
+
+    Forward value unchanged (ECHAM's condensate mask, then the clear-cell
+    gate). Derivative: the RAW cover's own identity, but ONLY where
+    ``raw_cloud_fraction > 2*eps`` (the same gate
+    :func:`in_cloud_condensate_with_mask_gradient` applies and for the same
+    reason: a genuinely clear cell, not merely one the condensate mask
+    zeroed, has no diagnosed cover to turn on, so its derivative is 0 too,
+    matching the exact function's own zero there) -- consistent with that
+    function's derivative, so the two stay on the same footing wherever a
+    caller differentiates both (e.g. the McICA sampler's input and the
+    in-cloud condensate feeding the same layer's optical depth). ``eps`` is
+    passed through explicitly for the same reason as in that function --
+    closing over it would leak its tracer under ``jax.grad`` with respect
+    to ``cld_frac_min``.
+    """
+    def exact(masked_cf, raw_cf, e):
+        del raw_cf
+        return effective_cloud_fraction(masked_cf, eps=e)
+
+    def surrogate(masked_cf, raw_cf, e):
+        del masked_cf
+        return jnp.where(raw_cf > 2.0 * e, raw_cf, 0.0)
+
+    return with_surrogate_gradient(exact, surrogate)(
+        masked_cloud_fraction, raw_cloud_fraction, jnp.asarray(eps))
 
 
 def _alpha_from_overlap(

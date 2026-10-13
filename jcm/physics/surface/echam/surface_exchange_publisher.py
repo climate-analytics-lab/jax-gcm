@@ -75,6 +75,16 @@ class EchamSurfaceExchange(PhysicsTerm):
     # Literal string (== SURFACE_EXCHANGE_KEY) so the requires-audit's AST
     # walk can evaluate the tuple.
     provides: ClassVar[tuple[str, ...]] = ("surface_exchange",)
+    # ``"clouds"``, ``"convection"`` and ``"radiation"`` are same-step (this
+    # term runs after the microphysics, convection and radiation terms in
+    # the default order) but composition-OPTIONAL with a documented
+    # zero-degrade fallback (class docstring: "Radiation and precipitation
+    # are read OPTIONALLY ... so a trimmed composition ... still composes
+    # and runs"), e.g. the surface+vdiff single-column boundary-layer case
+    # (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = (
+        "clouds", "convection", "radiation",
+    )
     # Tile order of the vdiff surface tiles the wind tiles are published on.
     output_attrs: ClassVar = surface_exchange_output_attrs(
         "10m", tile_names=("water", "sea_ice", "land"))

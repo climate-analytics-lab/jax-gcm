@@ -639,6 +639,19 @@ class TteTkeVerticalDiffusion(PhysicsTerm):
     carry_slots: ClassVar[dict[str, type]] = {
         "vertical_diffusion": VerticalDiffusionData,
     }
+    # ``"radiation"`` feeds the JSBACH land energy balance's surface SW/LW
+    # down (#979); it is same-step fresh in the default ``echam_physics``
+    # order (the radiation term runs before this one), read via ``.get()``
+    # only so this term still composes without a radiation term (a
+    # vdiff-only unit-test harness) and degrades its land tile to zero
+    # radiative forcing rather than failing to build. ``SURFACE_OPTICS_KEY``
+    # (the boundary-conditions term's land albedo/emissivity) is likewise
+    # same-step fresh — ``EchamBoundaryConditions`` runs first in the
+    # composition — but optional, with a computed fallback below when
+    # absent (jax-gcm#673).
+    optional_requires: ClassVar[tuple[str, ...]] = (
+        "radiation", SURFACE_OPTICS_KEY,
+    )
 
     def __init__(self, params: VDiffParameters | None = None,
                  couple_surface: bool = True,

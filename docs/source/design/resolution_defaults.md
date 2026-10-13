@@ -104,16 +104,36 @@ computed from the model's own levels in `cache_coords`.
 1. Put the reference table next to the scheme's `Parameters`.
 2. Give `default` a `truncation: int | None = 63` keyword that fills the
    table-driven fields (explicit keyword values winning) and records
-   `defaults_truncation` as a `pytree_node=False` field.
+   `defaults_truncation` as a `pytree_node=False` field (a `flax.struct.dataclass`
+   `Parameters` class, which every scheme below but `RadiationParameters` uses).
+   A `tree_math.struct` `Parameters` class has no `pytree_node=False`
+   mechanism at all (`tree_flatten` always returns every field as a leaf;
+   see `RadiationParameters` below for how it adapts this step).
 3. Give the term a `params_are_defaults: bool = False` keyword and call
    `check_defaults_grid` from its `cache_coords` when it is set.
 
 The factory and the runner then need no change. Today the cloud cover
 (`CloudParameters`), the 1M cloud scheme (`MicrophysicsParameters`: `cvtfall`,
-`csecfrl`, `clwprat`) and the 2M cloud scheme (`CloudParams2M`: `cvtfall`, the
+`csecfrl`, `clwprat`), the 2M cloud scheme (`CloudParams2M`: `cvtfall`, the
 one value ECHAM's 2M reads from `sucloud`, `mo_cloud_micro_2m.f90` l.97, 536)
-use it. ECHAM6.3 also sets these by truncation, which jcm holds fixed at
-present:
+and the RRTMGP backend's cloud-optics inhomogeneity factors
+(`RadiationParameters`: `zinhoml1`/`zinhoml2`/`zinhoml3`/`zinhomi`,
+`mo_cloud_optics.f90::setup_cloud_optics` l.114-134) use it. `RadiationParameters`
+is a `tree_math.struct`, so step 2's `pytree_node=False` field is not
+available to it; `defaults_truncation` is instead a plain (non-static) leaf,
+the same treatment the struct already gives its other non-numeric fields
+(`emulator_weights`, `sw_scaling`, `lw_scaling`). It still carries the
+truncation `default(truncation=...)` was built for, so step 3's
+`check_defaults_grid` call works unmodified from `RRTMGPRadiation.cache_coords`
+— the struct's inability to mark it static only means it is also,
+inertly, a pytree leaf (never read as a gradient target in practice, like
+`cloud_overlap`). ECHAM-HAM's own override of the ice factor for the JAM
+pairing (`zinhomi = 0.7`, `lcdnc_progn` with `ncd_activ = 2`) is defined at
+T63 only; `echam_physics()` holds it at that value at every truncation
+(the JAM composition has no other row to interpolate from or to), applied on
+top of the per-truncation table's other three factors.
+
+ECHAM6.3 also sets these by truncation, which jcm holds fixed at present:
 
 * convection (`cmfctop`, `cprcon`, `mo_echam_conv_constants.f90` l.121-137,
   and `cmftau = min(3 h, 7200 s·63/nn)`) and the subgrid-orography wake
@@ -121,13 +141,6 @@ present:
   chose is convection and gravity-wave values per truncation first and the
   Tiedtke retune after; that retune left the Tiedtke defaults unchanged
   ({doc}`jam_aerosol_retune`).
-* the ice cloud-optics inhomogeneity `zinhomi` and the deep-convective liquid
-  `zinhoml3` (`mo_cloud_optics.f90` l.115-134; #974). `RadiationParameters` is a
-  `tree_math.struct`, which has no static field to record the truncation its
-  defaults were built for (step 2 above), and ECHAM-HAM's own override of
-  `zinhomi` for the JAM pairing (0.7, `lcdnc_progn` with `ncd_activ = 2`) is
-  defined at T63 only, so the JAM composition has no row to interpolate to at
-  another truncation.
 
 Horizontal diffusion already follows ECHAM's truncation table through its own
 interpolation in `jcm/diffusion.py`.

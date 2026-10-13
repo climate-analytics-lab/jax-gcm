@@ -602,6 +602,16 @@ class SundqvistCloudFraction(PhysicsTerm):
     # terms write ``precip_*`` / TOA-flux fields on the same key so the
     # carry shape stays stable after step 1.
     carry_slots: ClassVar[dict[str, type]] = {"clouds": CloudData}
+    # ``"convection"``: a DELIBERATE one-step-lagged cross-step read (see
+    # the ``ktype``/``no_convection`` comment in ``__call__``) — this term
+    # runs before ``TiedtkeConvection`` in the default order, matching
+    # ECHAM's own ``cover``-before-``cucall`` sequencing (jax-gcm#673; the
+    # live instance the issue reports was this read's STALE comment, since
+    # fixed, not the lag itself, which is ECHAM's). ``"thermo_run"``: always
+    # same-step fresh (``MoistAirColumnState`` seeds it every step, first in
+    # the composition); read via ``.get()`` only so this term also composes
+    # without it (e.g. a reduced stack with no running-thermo view).
+    optional_requires: ClassVar[tuple[str, ...]] = ("convection", "thermo_run")
 
     def __init__(self, params: CloudParameters | None = None, *,
                  params_are_defaults: bool = False):

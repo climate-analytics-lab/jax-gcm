@@ -60,6 +60,9 @@ from jcm.physics.radiation.aerosol_free import (
     resolve_aerosol_free_interval,
 )
 from jcm.physics.radiation.band_config import RadiationBandConfig
+from jcm.physics.radiation.echam_cloud_optics_defaults import (
+    JAM_ARG_ICE_INHOMOGENEITY_T63,
+)
 from jcm.physics.radiation.radiation_types import RadiationParameters
 from jcm.physics.radiation.rrtmgp import RRTMGPRadiation
 from jcm.physics.surface.echam.surface_physics import EchamSurface
@@ -119,23 +122,35 @@ GREY_RADIATION_REJECTION = (
 )
 
 
-def default_radiation_parameters(aerosol_module: str = "macv2sp"
+def default_radiation_parameters(aerosol_module: str = "macv2sp",
+                                 truncation: int | None = 63,
                                  ) -> RadiationParameters:
     """``RadiationParameters`` the ECHAM factory uses when none are given.
+
+    The three liquid factors and the ice factor otherwise come from ECHAM's
+    per-truncation table (``RadiationParameters.default(truncation=...)``,
+    :mod:`jcm.physics.radiation.echam_cloud_optics_defaults`, #974).
 
     ECHAM-HAM re-tunes the ice-cloud inhomogeneity for its two-moment +
     Abdul-Razzak & Ghan configuration (``lcdnc_progn`` with ``ncd_activ = 2``:
     ``zinhomi = 0.7`` at T63, L31 and L47 alike;
-    ``mo_cloud_optics.f90::setup_cloud_optics``). jcm's JAM stack is exactly
-    that pairing — the 2M scheme fed by ARG activation — so it takes HAM's
-    value; every other composition keeps ECHAM6's T63 ``zinhomi = 0.8``.
+    ``mo_cloud_optics.f90::setup_cloud_optics``), a row ECHAM defines at T63
+    only. jcm's JAM stack is exactly that pairing — the 2M scheme fed by ARG
+    activation — so it takes HAM's value at EVERY truncation (there is no
+    other row to interpolate from or to; see
+    ``echam_cloud_optics_defaults``'s module docstring for why it is held
+    rather than interpolated), overriding only the table's ice factor; every
+    other composition keeps the table's ice factor (0.80 at T31/T63, 0.85 at
+    T127/T255) unmodified.
 
     Public so a caller that builds its own radiation term for
     ``echam_physics(radiation_scheme=<term>)`` can give it the same defaults
     the string route would.
     """
+    ice_override = (JAM_ARG_ICE_INHOMOGENEITY_T63
+                    if aerosol_module == "jam" else None)
     return RadiationParameters.default(
-        cloud_inhomogeneity_ice=0.7 if aerosol_module == "jam" else 0.8)
+        truncation=truncation, cloud_inhomogeneity_ice=ice_override)
 
 
 def _warn_if_shared_cloud_constants_differ(cover_params, cloud_params, cloud_scheme):
@@ -772,6 +787,10 @@ def echam_physics(
     truncation = 63 if coords is None else spectral_truncation(coords)
     clouds_are_defaults = clouds is None
     microphysics_are_defaults = microphysics is None
+    # Used below to tell RRTMGPRadiation's resolution-defaulted
+    # RadiationParameters (#974) from a user-supplied object, same
+    # ``params_are_defaults`` contract as the cloud terms.
+    radiation_are_defaults = radiation is None
     clouds_p = clouds or default_parameters(CloudParameters, truncation)
     microphysics_p = microphysics or default_parameters(
         MicrophysicsParameters, truncation)
@@ -790,8 +809,10 @@ def echam_physics(
                 "pass them to its constructor (params=...).")
         radiation_p = None
     else:
-        # An explicit ``radiation=`` wins over the factory default.
-        radiation_p = radiation or default_radiation_parameters(aerosol_module)
+        # An explicit ``radiation=`` wins over the factory default. Built for
+        # the run's truncation (#974), same as clouds_p/microphysics_p above.
+        radiation_p = radiation or default_radiation_parameters(
+            aerosol_module, truncation)
     vertical_diffusion_p = vertical_diffusion or VDiffParameters.default()
     surface_p = surface or SurfaceParameters.default()
     land_surface_p = land_surface or JsbachLandParameters.default()
@@ -900,7 +921,8 @@ def echam_physics(
         rad_term = RRTMGPRadiation(
             params=radiation_p,
             compute_cre=radiation_compute_cre,
-            aerosol_free_interval=aerosol_free_interval)
+            aerosol_free_interval=aerosol_free_interval,
+            **defaults_flag_kwargs(RRTMGPRadiation, radiation_are_defaults))
     elif radiation_scheme == "emulated":
         # "auto" (default) resolves the packaged trained checkpoint
         # (jcm/data/emulator_weights_per_band_u64.nc). The explicit "random"
