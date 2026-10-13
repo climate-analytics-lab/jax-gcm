@@ -397,6 +397,40 @@ changes through the wet sizes — the release note says so. The small
 Kelvin-dominated corner (5 nm, κ = 0.05, RH 0.98) where the two solvers
 differ by a few per cent is recorded in §9 (AER-12).
 
+### D-A7 — precision: FLOAT32 IS THE JAM PRECISION (decided 2026-10-13)
+
+Settled with Duncan Watson-Parris on 2026-10-13: **float32, jcm's working
+dtype, is the precision JAM is validated and shipped in**; float64 is a
+reference, not a requirement. What that rests on:
+
+- **The core.** The ledger closes at 1e-5 in float32 (AER-09); forward and
+  reverse mode are finite in float32 at the ten operating points of
+  AER-11; the float32 traps of §9 (floored divisors, the reverse-mode
+  overflow of small quotients, the ``1 − 10ε`` cap, the underflowing
+  third-moment limits) were found *because* the core was held to float32
+  and are fixed, not worked around with a dtype flip.
+- **The global runs.** The 30-day T63L47 modal runs in float32 and
+  float64 (§9, 2026-10-03) agree on the global burdens and lifetimes to
+  the same digits as the two cores agree with each other; the one
+  float32-only feature, the Ilo hot spot, was traced to the host's
+  transport and reproduced independently of precision.
+- **What float64 is still for.** The A/B against ``mam4_jax`` (AER-12,
+  D-A3): the adapter flips ``jax_enable_x64`` for the whole process
+  because the GPL core needs it, and dev's #1071 restores the host's
+  precision on its outputs — that is the adapter's requirement, not
+  JAM's. The finite-difference references in the gradient tests
+  (AER-07, AER-11) stay float64 by construction.
+
+Consequences: the shipped JAM configurations are validated in float32
+and say so; the 90-day T63L47 pair, the pre-industrial and the
+transient-year campaigns run in float32, the cheaper precision; a
+float64 JAM run is a ``JAX_ENABLE_X64=1`` choice of the user, as for every
+other physics module. Declined: forcing x64 for every JAM configuration
+(the adapter's behaviour — it costs the whole model's memory and
+throughput and makes JAM the one module that does not run in the working
+dtype), and validating float64 only (CI runs float32, so the shipped
+precision would be the unvalidated one).
+
 ### The BC-lifetime check (§5 item 5), measured 2026-10-02
 
 The ~21-day figure in `jam_carbon_aging.md` is a global-mean lifetime
@@ -903,4 +937,5 @@ the horizontal limiter the creation comes from. The switches used for the
 bisection are ``dycore.tracer_mass_fixer``, ``dycore.sl_monotone_tracers``
 and ``dycore.sl_horizontal_interpolation``. This is a dycore-transport finding, filed upstream with
 the evidence; it is independent of the microphysics core and of
-precision. For the core's own validation the float64 pair is the A/B.
+precision. For the core's own validation the float64 pair is the A/B;
+the precision JAM ships in is float32 (D-A7).
